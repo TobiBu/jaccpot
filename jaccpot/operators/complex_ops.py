@@ -250,6 +250,69 @@ __all__ = [
 # unchecked and fails checked, and neither behaviour comes from this module. Found by
 # running the contract tests under the hook, not the default suite -- the default
 # suite passed.
+# ---------------------------------------------------------------------------
+#
+# NINE MORE PARAMETERS, AND THE Z-TRANSLATION FAMILY DELIBERATELY LEFT OUT.
+#
+# This was scoped as "the rest of the module" and the measurement cut it down to
+# six functions, which is the intended outcome of asking section 4.1's question
+# instead of pattern-matching. `bench/annotation_pilot` perturbed all 24 remaining
+# candidates: 20 of 92 perturbations were silently accepted, and an annotation
+# closes only the ones that change RANK. Those are the nine below --
+# `coeffs -> (1, 25)`, `left -> (1, 16)`, `velocity -> (1, 3)`,
+# `coeffs -> (1, 4, 9)` and `-> (36,)`, and a rotation block flattened from
+# `(1, 1)` to `(1,)`.
+#
+# THE SEVEN `translate_along_z_*` FUNCTIONS ARE NOT HERE, and that is the finding
+# rather than an omission. Every acceptance in that family is a coefficient LENGTH
+# change -- `(25,) -> (24,)`, `(3, 25) -> (3, 24)` -- while their rank is already
+# validated, so the perturbations an annotation would catch are the ones already
+# being caught. Writing `Inexact[Array, "_"]` there would close none of the six.
+#
+# And the length is not expressible. The required extent is
+# `sh_size(order) == (order + 1) ** 2`, and `order` is a static Python int; a
+# jaxtyping axis can only reference an axis bound by another ARRAY argument, so
+# there is nothing to write. Section 4.3 already has a name for this situation --
+# "a named axis can be impossible even when the shape is known".
+#
+# THAT HOLE IS REAL AND IT IS SILENT, which is worth stating plainly here because
+# an annotation cannot be the fix. At `order=4` (`ncoeff == 25`) a 24-entry
+# multipole returns a full `(25,)` result whose values DIFFER from the correct
+# answer: the bodies slice `[:ncoeff]` and JAX clamps an out-of-range slice rather
+# than raising. Same mechanism as the `delta[2]` clamping documented above, same
+# consequence -- plausible numbers that are wrong. Closing it needs an explicit
+# `ValueError` on the static shape, which is a behaviour change and so its own PR
+# with its own test.
+#
+# Note also that the claim above -- "a too-SHORT buffer already raises a domain
+# error from the body" -- was measured on the EVALUATORS and does not hold for this
+# family. It is left as written rather than quietly broadened, because the two
+# statements are about different functions and it is the narrower one that was
+# actually tested.
+#
+# A VARIADIC CONTAINER ANNOTATION IS SAMPLED, NOT EXHAUSTIVE, and the two
+# `tuple[Inexact[Array, "_ _"], ...]` above are weaker than they look. beartype's
+# default O(1) strategy inspects roughly ONE element per call: measured on a
+# three-element tuple with a single bad element, 8/40, 11/40 and 14/40 rejections by
+# position. A FIXED-length `tuple[X, X, X]` is checked exhaustively -- 40/40 at every
+# position -- so `pallas/nearfield_mutual.py`'s three-component `a_xyz` is sound and
+# only the `...` form samples.
+#
+# What that leaves guaranteed: the argument is a tuple of rank-2 arrays, and a tuple
+# whose elements are SYSTEMATICALLY wrong is rejected every time. A single corrupted
+# element is caught only sometimes. Kept anyway -- it documents the contract, costs
+# nothing, and catches the systematic case -- but it is not a per-element guarantee,
+# and the first version of its test was flaky in the full suite for exactly that
+# reason while passing standalone.
+#
+# `_unpack_coeffs_by_ell`, `_pack_coeffs_by_ell`, `_complex_Dz` and
+# `_apply_complex_rotation_blocks_padded_batch` are also absent: the first accepts
+# only a length change (same reasoning as above) and the other three accepted
+# nothing at all, so they are already validated.
+#
+# The five `_solidfmm_*` rotscale helpers are absent for a different reason again:
+# the capture never reached them, so there is no measurement to annotate from.
+# ---------------------------------------------------------------------------
 Array = jnp.ndarray
 
 #: `jaxtyping.DTypeLike` admits anything that names a dtype -- a `numpy.dtype`, a
@@ -324,8 +387,9 @@ def enforce_conjugate_symmetry(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def enforce_conjugate_symmetry_batch(
-    coeffs: Array,
+    coeffs: Inexact[Array, "_ _"],
     *,
     order: int,
 ) -> Array:
@@ -333,7 +397,7 @@ def enforce_conjugate_symmetry_batch(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Inexact[Array, '_ _']
         Packed complex coefficients, length ``sh_size(order)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -441,9 +505,10 @@ def _require_packed_length(buffer: Array, *, name: str, order: int) -> None:
         )
 
 
+@jaxtyped(typechecker=beartype)
 def complex_dot(
-    left: Array,
-    right: Array,
+    left: Inexact[Array, "_"],
+    right: Inexact[Array, "_"],
     *,
     order: int,
     conjugate_left: bool = True,
@@ -455,9 +520,9 @@ def complex_dot(
 
     Parameters
     ----------
-    left : Array
+    left : Inexact[Array, '_']
         Left operand of the contraction.
-    right : Array
+    right : Inexact[Array, '_']
         Right operand of the contraction.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -581,8 +646,9 @@ def evaluate_local_complex_with_grad_batch(
     )(deltas)
 
 
+@jaxtyped(typechecker=beartype)
 def _lower_complex_harmonics_one_axis(
-    coeffs: Array,
+    coeffs: Inexact[Array, "_"],
     *,
     order: int,
     axis: int,
@@ -594,7 +660,7 @@ def _lower_complex_harmonics_one_axis(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Inexact[Array, '_']
         Packed complex coefficients, length ``sh_size(order)``.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -864,9 +930,10 @@ def evaluate_local_complex_derivative_tower_batch(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def contract_spatial_derivative_with_velocity(
-    packed: Array,
-    velocity: Array,
+    packed: Float[Array, "_"],
+    velocity: Float[Array, "3"],
     *,
     order: int,
 ) -> Array:
@@ -874,9 +941,9 @@ def contract_spatial_derivative_with_velocity(
 
     Parameters
     ----------
-    packed : Array
+    packed : Float[Array, '_']
         Packed coefficient array in this module's ``sh`` layout.
-    velocity : Array
+    velocity : Float[Array, '3']
         Velocity vector ``(3,)`` contracted against the derivative tensor.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2296,8 +2363,9 @@ def _unpack_coeffs_by_ell(
     return out
 
 
+@jaxtyped(typechecker=beartype)
 def _blocks_to_padded_array(
-    blocks: tuple[Array, ...],
+    blocks: tuple[Inexact[Array, "_ _"], ...],
     *,
     order: int,
     dtype: DTypeLike,
@@ -2306,7 +2374,7 @@ def _blocks_to_padded_array(
 
     Parameters
     ----------
-    blocks : tuple[Array, ...]
+    blocks : tuple[Inexact[Array, '_ _'], ...]
         Per-degree rotation blocks, one square matrix per degree.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.
@@ -2451,9 +2519,10 @@ def complex_rotation_blocks_from_z_solidfmm_batch(
     )(deltas)
 
 
+@jaxtyped(typechecker=beartype)
 def _apply_complex_rotation_blocks_batched(
-    coeffs: Array,
-    blocks: tuple[Array, ...],
+    coeffs: Inexact[Array, "_"],
+    blocks: tuple[Inexact[Array, "_ _"], ...],
     *,
     order: int,
 ) -> Array:
@@ -2461,9 +2530,9 @@ def _apply_complex_rotation_blocks_batched(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Inexact[Array, '_']
         Packed complex coefficients, length ``sh_size(order)``.
-    blocks : tuple[Array, ...]
+    blocks : tuple[Inexact[Array, '_ _'], ...]
         Per-degree rotation blocks, one square matrix per degree.
     order : int
         Expansion order ``p``. Static: it fixes every packed length and table shape.

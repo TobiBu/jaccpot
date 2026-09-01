@@ -284,6 +284,21 @@ a forward reference, so `Float[Array, "n"]` reports `undefined name 'n'` while
 rather than suppressed per line; the cost — a bare `n` in code is no longer flagged — is
 recorded there.
 
+**A VARIADIC container annotation is sampled, not exhaustive.** `tuple[X, ...]` is checked by
+beartype's default O(1) strategy, which inspects roughly ONE element per call. Measured on a
+three-element tuple with a single bad element, by position: 8/40, 11/40, 14/40 rejections. A
+FIXED-length `tuple[X, X, X]` is exhaustive -- 40/40 at every position -- so
+`pallas/nearfield_mutual.py`'s three-component `a_xyz` is a real contract and
+`operators/complex_ops.py`'s `tuple[Inexact[Array, "_ _"], ...]` is not quite one.
+
+What a variadic annotation still buys: the argument is a container of the right element type,
+and a container whose elements are *systematically* wrong is rejected every time, because
+whichever element gets sampled is bad. A single corrupted element is caught only sometimes.
+Write the fixed-length form when the arity is known. Where it is not, keep the annotation --
+it costs nothing and documents the contract -- but do not write a test that corrupts one
+element and expects a rejection: that test passes standalone and flakes in the full suite,
+which is how this was found.
+
 **Widths are wrong, families are right.** Use `Int`, never `Int32`/`Int64`: `INDEX_DTYPE` is
 selectable via `JACCPOT_INDEX_PRECISION`, and pilot 3 observed `precomputed_target_leaf_ids` as
 int32 alongside `precomputed_source_leaf_ids` as int64 *in the same call*. Likewise `Float`, not
