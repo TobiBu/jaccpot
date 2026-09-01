@@ -108,11 +108,48 @@ __all__ = [
 #     Binding the length would reject calls these functions have always taken.
 #     Same reasoning as `coefficients` in `downward/local_expansions.py`.
 #
-# What that leaves asserted is rank and dtype family, which is not nothing: a
-# too-SHORT buffer already raises a domain error from the body (`TypeError` from
-# the evaluators, `ValueError` from the rotations), so the annotation preempts no
-# message, and a 2-D `local` was reaching `evaluate_local_complex` silently before
-# it.
+# What that leaves asserted is rank and dtype family. A 2-D `local` was reaching
+# `evaluate_local_complex` silently before it, so that is not nothing.
+#
+# A TOO-SHORT BUFFER IS THE OTHER HALF, and it needs a runtime check rather than an
+# annotation, because the required length is `sh_size(order)` and `order` is a static
+# Python int: a jaxtyping axis spec can only name an axis bound by another ARRAY
+# argument, so there is nothing to write. `_require_packed_length` is that check --
+# see its docstring for the mechanism and for why it is `<` and not `!=`.
+#
+# An earlier version of this note claimed a too-short buffer "already raises a domain
+# error from the body (`TypeError` from the evaluators, `ValueError` from the
+# rotations)". That was OVER-GENERAL, and the correction is worth recording because it
+# is the difference between two indexing idioms rather than between two families.
+# Re-measured at order 4, feeding each function a 24-entry buffer where 25 were needed:
+#
+#   ALREADY RAISED, and still do, with no guard added -- everything that reaches
+#     `complex_dot`. It slices BOTH operands to `ncoeff`, so a 24-entry `local` meets a
+#     25-entry `regular` and `mul` refuses to broadcast (`TypeError`): the evaluators,
+#     the derivative towers, and the analytic-gradient variants. The rotations, and
+#     `m2m_complex` / `l2l_complex` / `m2l_complex_reference` which rotate first, raise
+#     `ValueError` from a per-`ell` block reshape.
+#
+#   SILENTLY CLAMPED, and now guarded -- everything that reads coefficients by
+#     COMPUTED SCALAR INDEX, because JAX clamps `buf[24]` to `buf[23]` where slicing
+#     would have produced a length mismatch. That is the four z-translation entry
+#     points (`translate_along_z_{m2l,m2m,l2l}_complex` and
+#     `translate_along_z_m2m_complex_solidfmm`), which the `_batch` siblings inherit
+#     through `jax.vmap`, plus one evaluator: `evaluate_local_complex_grad_order4_unrolled`
+#     indexes `local_coeffs[ridx(n, m)]` rather than contracting, so it sat on the
+#     wrong side of the split from every other evaluator and returned a wrong gradient
+#     in silence. It is env-gated (`JACCPOT_LOCAL_EVAL_ORDER4_UNROLLED`) and so never
+#     selected in a default run, which is why the earlier measurement missed it.
+#
+# `translate_along_z_m2l_complex` is in the guarded set on contract, not on damage: its
+# loop bounds (`k <= p - n`, `|m| <= n`) mean it never reads past `sh_offset(p) + p`, so
+# at order 4 a 24-entry buffer happens to give the same answer as a 25-entry one. The
+# documented input is still length `sh_size(order)`, a buffer short by more than one
+# IS read wrong, and exempting one member of a family from its own contract is how the
+# next reader concludes the contract is advisory.
+#
+# Pinned by `tests/unit/operators/test_complex_ops_packed_length_contracts.py`, both
+# directions: too short raises, and LONGER STILL WORKS.
 #
 # ---------------------------------------------------------------------------
 #
@@ -341,6 +378,67 @@ def _factorial_table_cached_impl(max_n: int, dtype_key: str) -> np.ndarray:
 def _factorial_table_cached(max_n: int, dtype: DTypeLike) -> Array:
     dtype_key = str(jnp.dtype(dtype))
     return jnp.asarray(_factorial_table_cached_impl(max_n, dtype_key), dtype=dtype)
+
+
+def _require_packed_length(buffer: Array, *, name: str, order: int) -> None:
+    """Reject a packed coefficient buffer too short for ``order``.
+
+    WHY THIS EXISTS. The z-translation bodies read individual coefficients by
+    computed index -- ``multipole[sh_offset(n) + (m + n)]`` -- and JAX **clamps** an
+    out-of-range index rather than raising. A buffer one entry short therefore
+    returns ``buffer[-1]`` wherever the last coefficient was wanted, and the caller
+    gets a wrong answer with no error at all. Measured at order 4: a 24-entry buffer
+    where 25 were required produced a silently different result from
+    :func:`translate_along_z_m2m_complex`, :func:`translate_along_z_m2m_complex_solidfmm`,
+    :func:`translate_along_z_l2l_complex` and their ``_batch`` siblings. This is the
+    same class of defect as the ``delta[2]`` clamping documented at the top of this
+    module.
+
+    WHY NOT A SHAPE ANNOTATION. The required length is ``sh_size(order)`` and
+    ``order`` is a static Python int, not an array parameter, so a jaxtyping axis
+    spec has nothing to bind to. Rank is already asserted where it matters; length
+    is not expressible.
+
+    LONGER IS NOT AN ERROR. The bodies deliberately tolerate an over-long buffer --
+    they slice or index only the first ``sh_size(order)`` entries -- and callers rely
+    on it, so this is ``<`` and not ``!=``. See the coefficient-buffer note at the
+    top of this module.
+
+    Static under ``jit``: the check reads ``buffer.shape``, never a traced value, so
+    it fires at trace time and adds nothing to the compiled graph.
+
+    Parameters
+    ----------
+    buffer : Array
+        Packed coefficient buffer to validate; only its trailing axis is inspected,
+        so this is equally correct on a tracer inside :func:`jax.vmap`.
+    name : str
+        Parameter name to quote in the message. The whole point of the guard is that
+        the failure used to be silent, so the message must say which argument.
+    order : int
+        Expansion order ``p``; fixes the required length ``sh_size(p)``.
+
+    Raises
+    ------
+    ValueError
+        If ``buffer`` is a scalar, or its trailing axis is shorter than
+        ``sh_size(order)``.
+    """
+    p = int(order)
+    required = sh_size(p)
+    if buffer.ndim == 0:
+        raise ValueError(
+            f"{name} must be an array with a trailing coefficient axis of length "
+            f"at least {required} for order {p}; got a scalar."
+        )
+    actual = buffer.shape[-1]
+    if actual < required:
+        raise ValueError(
+            f"{name} is too short for order {p}: got length {actual}, need at "
+            f"least {required} (= sh_size({p})). A longer buffer is accepted and "
+            f"sliced; a shorter one would be silently clamped by JAX indexing and "
+            f"return wrong numbers."
+        )
 
 
 def complex_dot(
@@ -988,7 +1086,8 @@ def evaluate_local_complex_grad_order4_unrolled(
     Parameters
     ----------
     local : Inexact[Array, '_']
-        Packed complex local coefficients, length ``sh_size(order)``.
+        Packed complex local coefficients, length ``sh_size(order)``. A longer
+        buffer is accepted and sliced; a shorter one raises rather than clamping.
     delta : Float[Array, '3']
         Displacement vector ``(3,)``, target centre minus source centre.
     order : int
@@ -1001,6 +1100,7 @@ def evaluate_local_complex_grad_order4_unrolled(
     Array
         The gradient ``(3,)`` from the unrolled order-4 recurrence.
     """
+    _require_packed_length(local, name="local", order=int(order))
     if int(order) != 4:
         return evaluate_local_complex_grad_analytic_preserve_dtype(
             local,
@@ -1365,7 +1465,8 @@ def translate_along_z_m2l_complex(
     Parameters
     ----------
     multipole : Array
-        Packed complex multipole coefficients, length ``sh_size(order)``.
+        Packed complex multipole coefficients, length ``sh_size(order)``. A longer
+        buffer is accepted and sliced; a shorter one raises rather than clamping.
     r : Array
         Centre separation; the z-translation distance after rotation to +z.
     order : int
@@ -1378,6 +1479,7 @@ def translate_along_z_m2l_complex(
     """
     p = int(order)
     multipole = jnp.asarray(multipole)
+    _require_packed_length(multipole, name="multipole", order=p)
     r = jnp.asarray(r).reshape(())
     dtype = multipole.real.dtype
 
@@ -1413,7 +1515,8 @@ def translate_along_z_m2m_complex(
     Parameters
     ----------
     multipole : Array
-        Packed complex multipole coefficients, length ``sh_size(order)``.
+        Packed complex multipole coefficients, length ``sh_size(order)``. A longer
+        buffer is accepted and sliced; a shorter one raises rather than clamping.
     dz : Array
         Signed translation distance along +z.
     order : int
@@ -1426,6 +1529,7 @@ def translate_along_z_m2m_complex(
     """
     p = int(order)
     multipole = jnp.asarray(multipole)
+    _require_packed_length(multipole, name="multipole", order=p)
     dz = jnp.asarray(dz).reshape(())
     dtype = multipole.real.dtype
 
@@ -1460,7 +1564,8 @@ def translate_along_z_m2m_complex_solidfmm(
     Parameters
     ----------
     multipole : Array
-        Packed complex multipole coefficients, length ``sh_size(order)``.
+        Packed complex multipole coefficients, length ``sh_size(order)``. A longer
+        buffer is accepted and sliced; a shorter one raises rather than clamping.
     dz : Array
         Signed translation distance along +z.
     order : int
@@ -1473,6 +1578,7 @@ def translate_along_z_m2m_complex_solidfmm(
     """
     p = int(order)
     multipole = jnp.asarray(multipole)
+    _require_packed_length(multipole, name="multipole", order=p)
     dz = jnp.asarray(dz).reshape(())
     dtype = multipole.real.dtype
 
@@ -1507,7 +1613,8 @@ def translate_along_z_l2l_complex(
     Parameters
     ----------
     local : Array
-        Packed complex local coefficients, length ``sh_size(order)``.
+        Packed complex local coefficients, length ``sh_size(order)``. A longer
+        buffer is accepted and sliced; a shorter one raises rather than clamping.
     dz : Array
         Signed translation distance along +z.
     order : int
@@ -1520,6 +1627,7 @@ def translate_along_z_l2l_complex(
     """
     p = int(order)
     local = jnp.asarray(local)
+    _require_packed_length(local, name="local", order=p)
     dz = jnp.asarray(dz).reshape(())
     dtype = local.real.dtype
 
@@ -2769,7 +2877,9 @@ def translate_along_z_m2l_complex_batch(
     Parameters
     ----------
     multipoles : Array
-        Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
+        Batched packed complex multipoles, shape ``(batch, sh_size(order))``. The
+        trailing axis carries the same length contract as the single-expansion
+        function this delegates to, reported under its parameter name.
     r : Array
         Centre separation; the z-translation distance after rotation to +z.
     order : int
@@ -2799,7 +2909,9 @@ def translate_along_z_m2m_complex_batch(
     Parameters
     ----------
     multipoles : Array
-        Batched packed complex multipoles, shape ``(batch, sh_size(order))``.
+        Batched packed complex multipoles, shape ``(batch, sh_size(order))``. The
+        trailing axis carries the same length contract as the single-expansion
+        function this delegates to, reported under its parameter name.
     dz : Array
         Signed translation distance along +z.
     order : int
@@ -2829,7 +2941,9 @@ def translate_along_z_l2l_complex_batch(
     Parameters
     ----------
     locals : Array
-        Batched packed complex locals, shape ``(batch, sh_size(order))``.
+        Batched packed complex locals, shape ``(batch, sh_size(order))``. The
+        trailing axis carries the same length contract as the single-expansion
+        function this delegates to, reported under its parameter name.
     dz : Array
         Signed translation distance along +z.
     order : int
