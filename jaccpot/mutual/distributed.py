@@ -1410,8 +1410,6 @@ class DistributedMutualEvaluator:
             If a real particle is missing from the assembled result, which is a
             padding or capacity bug rather than a physics one.
         """
-        import numpy as np
-
         weighted = level_weights is not None
         if weighted and rung is None:
             raise ValueError(

@@ -9,9 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
-from beartype.typing import Tuple
 from jaxtyping import Array
-from yggdrax.interactions import DualTreeRetryEvent, DualTreeTraversalConfig, MACType
 
 from jaccpot._jax_compat import Tracer
 

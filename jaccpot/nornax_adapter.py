@@ -54,7 +54,6 @@ import numpy as np
 from jax import lax
 from jaxtyping import Array, Float, Int
 
-from jaccpot._jax_compat import Tracer
 from jaccpot.mutual.force import (
     MutualCapacities,
     MutualFMMState,
