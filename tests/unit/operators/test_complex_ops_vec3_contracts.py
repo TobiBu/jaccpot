@@ -658,30 +658,12 @@ def test_a_rotation_block_tuple_must_hold_matrices():
             _blocks_to_padded_array(all_flattened, order=2, dtype=jnp.complex128)
 
 
-def test_a_short_coefficient_buffer_is_still_silently_accepted():
-    """A KNOWN, UNCLOSED hole, pinned so it is not mistaken for covered.
-
-    At `order=4` the required length is 25. A 24-entry multipole returns a full
-    `(25,)` result whose values DIFFER from the correct answer, because the body
-    slices `[:ncoeff]` and JAX clamps an out-of-range slice instead of raising.
-
-    No annotation can close this: the required extent is `(order + 1) ** 2` and
-    `order` is a static Python int, which a jaxtyping axis cannot reference. So the
-    z-translation family is deliberately left bare and this test asserts the
-    CURRENT behaviour -- including that the result is wrong, so the test fails the
-    day someone adds the `ValueError` that fixes it, and has to be updated
-    deliberately rather than silently passing on.
-    """
-    from jaccpot.operators.complex_ops import translate_along_z_m2m_complex
-
-    order = 4
-    full = jnp.arange((order + 1) ** 2, dtype=jnp.complex128) + 1.0
-    dz = jnp.asarray(0.5)
-
-    correct = translate_along_z_m2m_complex(full, dz, order=order)
-    from_short = translate_along_z_m2m_complex(full[:-1], dz, order=order)
-
-    assert from_short.shape == correct.shape, "the short call still returns full width"
-    assert not bool(
-        jnp.allclose(from_short, correct)
-    ), "a short buffer now agrees with the correct answer; has a length check landed?"
+# `test_a_short_coefficient_buffer_is_still_silently_accepted` USED TO LIVE HERE.
+# It pinned the hole this module's note described -- a coefficient buffer one entry
+# short returning wrong numbers -- and was written to FAIL the day a length check
+# landed, so that the fix could not inherit a quietly passing test. It did exactly
+# that: PR #281 added `_require_packed_length` and the pin failed with
+# `ValueError: multipole is too short for order 4: got length 24, need at least 25`.
+# Removed rather than inverted, because #281 ships
+# `test_complex_ops_packed_length_contracts.py` and duplicating 200 lines of coverage
+# buys nothing.

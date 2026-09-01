@@ -275,14 +275,15 @@ __all__ = [
 # there is nothing to write. Section 4.3 already has a name for this situation --
 # "a named axis can be impossible even when the shape is known".
 #
-# THAT HOLE IS REAL AND IT IS SILENT, which is worth stating plainly here because
-# an annotation cannot be the fix. At `order=4` (`ncoeff == 25`) a 24-entry
-# multipole returns a full `(25,)` result whose values DIFFER from the correct
-# answer: the bodies slice `[:ncoeff]` and JAX clamps an out-of-range slice rather
-# than raising. Same mechanism as the `delta[2]` clamping documented above, same
-# consequence -- plausible numbers that are wrong. Closing it needs an explicit
-# `ValueError` on the static shape, which is a behaviour change and so its own PR
-# with its own test.
+# THAT HOLE WAS REAL AND SILENT, and it is now CLOSED -- by a length check, not by
+# an annotation. At `order=4` (`ncoeff == 25`) a 24-entry multipole used to return a
+# full `(25,)` result whose values DIFFERED from the correct answer: the bodies index
+# by computed offset and JAX clamps an out-of-range index rather than raising. Same
+# mechanism as the `delta[2]` clamping documented above, same consequence -- plausible
+# numbers that are wrong. `_require_packed_length` above is the fix, added as its own
+# change because it alters behaviour. This paragraph is kept rather than deleted: it
+# records WHY the family is bare, which is still the reason, and the fix it points to
+# is the evidence that "not annotatable" did not mean "not fixable".
 #
 # Note also that the claim above -- "a too-SHORT buffer already raises a domain
 # error from the body" -- was measured on the EVALUATORS and does not hold for this
