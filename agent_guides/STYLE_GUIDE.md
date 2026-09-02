@@ -206,6 +206,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `leaves` | leaf nodes |
 | `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
 | `w` | leaf width (`max_leaf_size`) |
+| `sw` | a SOURCE-side width that genuinely differs from the target's `w` -- see below |
 | `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
@@ -231,17 +232,24 @@ and a re-measurement at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4 makes the 
 disappear. Both kernels read only `shape[1] * shape[2]` and flatten, so a table split the
 other way was accepted and returned a force wrong by rel-L2 9.9e-01.
 
-**`sw` WAS ADDED HERE AND HAS BEEN RETIRED, AND THE WAY IT WENT WRONG IS THE LESSON.** It
-named the decoupled lane's source-pool width on the strength of a measurement that a wider
-pool is "correctly ignored", so asserting equality with the target's `w` would reject a
-working configuration. The measurement was wrong in the flattering direction: it padded the
+**`sw` MEANS A SOURCE WIDTH THAT GENUINELY DIFFERS, AND THE WAY IT WAS FIRST USED IS THE
+LESSON.** Its live user is `nearfield/grad.py`'s bucketed pair kernel, where the two widths
+really are independent -- `_pair_accel_cvjp` was observed with a target width of 5 beside a
+source width of 7, in one recorded call -- so `(pairs, w, 3)` against `(pairs, sw, 3)` asserts
+something true and nothing false.
+
+It was introduced somewhere else, and wrongly. `_fast_lane.py`'s decoupled lane got it on the
+strength of a measurement that a wider source pool is "correctly ignored", so asserting
+equality with the target's `w` would reject a working configuration. The measurement was wrong in the flattering direction: it padded the
 surplus source columns and **masked them off**, where they contribute nothing either way.
 Unmasked, they are silently dropped -- a target width of 4 against a source pool padded to 8
 with real, valid extra particles returns a force identical to ignoring them, rel-L2 0.0e+00.
 A plausible wrong number, recorded as a safe configuration, by a check designed to catch
 exactly that.
 
-Two things follow, and they generalise past this axis. **A perturbation that the code masks
+That lane no longer uses `sw` -- `nearfield_leafpair_pallas_decoupled` enforces equal widths
+with a `ValueError`, so both of its sides are simply `w`. Two things follow, and they
+generalise past this axis. **A perturbation that the code masks
 off tests nothing** -- the same trap as the all-valid mask that made `srcslots` look
 interchangeable with `w` above, and it is worth building every such check so the perturbed
 value is one the code must actually read. And **an annotation is not the tool for a range
@@ -270,7 +278,7 @@ mismatch against `multipoles` with a better message than an annotation would giv
 
 None of the three is added to the flake8 `--builtins` list, because none is ever used as a
 single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
-for `srcslots`: it only ever appears beside another name.
+for `sw` and `srcslots`: both only ever appear beside another name.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
