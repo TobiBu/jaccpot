@@ -1796,9 +1796,13 @@ def _evaluate_local_expansions_for_target_particles(
         )
     if int(target_sorted_indices.shape[0]) == 0:
         zeros = jnp.zeros((0, 3), dtype=positions_sorted.dtype)
-        derivatives: Optional[PackedAccelerationDerivatives]
+        # Named apart from the `derivatives` list the main path builds below.
+        # One function scope cannot hold two declarations of one name with
+        # different types; this one is already the packed tuple, that one is the
+        # list it is packed from (audit E.4 buckets H and L).
+        empty_derivatives: Optional[PackedAccelerationDerivatives]
         if max_acc_derivative_order > 0:
-            derivatives = tuple(
+            empty_derivatives = tuple(
                 jnp.zeros(
                     (
                         0,
@@ -1810,10 +1814,14 @@ def _evaluate_local_expansions_for_target_particles(
                 for level in range(1, max_acc_derivative_order + 1)
             )
         else:
-            derivatives = None
+            empty_derivatives = None
         if return_potential:
-            return zeros, jnp.zeros((0,), dtype=positions_sorted.dtype), derivatives
-        return zeros, None, derivatives
+            return (
+                zeros,
+                jnp.zeros((0,), dtype=positions_sorted.dtype),
+                empty_derivatives,
+            )
+        return zeros, None, empty_derivatives
 
     target_leaf_nodes = leaf_nodes[target_leaf_positions]
     centers = local_data.centers[target_leaf_nodes]
@@ -2411,7 +2419,9 @@ def _evaluate_local_expansions_for_particles(
 
         derivative_outputs: Optional[PackedAccelerationDerivatives]
         if max_acc_derivative_order > 0:
-            derivative_outputs = []
+            # The accumulator is a list and the result is a tuple, so they are
+            # two locals rather than one name that changes type mid-block.
+            scattered_levels: list[Array] = []
             for level, deriv_field in enumerate(derivative_fields, start=1):
                 scattered = _scatter_rank3(
                     jnp.zeros(
@@ -2426,8 +2436,8 @@ def _evaluate_local_expansions_for_particles(
                     deriv_field,
                     valid,
                 )
-                derivative_outputs.append(scattered)
-            derivative_outputs = tuple(derivative_outputs)
+                scattered_levels.append(scattered)
+            derivative_outputs = tuple(scattered_levels)
         else:
             derivative_outputs = None
 

@@ -24,8 +24,9 @@ from typing import Callable, Union
 
 import jax
 import jax.numpy as jnp
+from beartype import beartype
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 
 from ._kernels import (
@@ -44,13 +45,69 @@ from ._schedules import _prepare_leaf_data_from_groups
 __all__ = ["compute_leaf_p2p_accelerations_target_block_pairs_only"]
 
 
+# WHAT THE SHAPES ARE, AND WHICH EQUALITIES ARE PROVEN
+#
+# Derived by execution with `bench/annotation_pilot`, three calls per function across
+# the 33 test files that reach this lane -- never from the docstrings, which
+# STYLE_GUIDE section 4.2 does not trust and which are wrong elsewhere in the package.
+# Every axis name already existed: this module adds no row to the section 4.3 table
+# and no entry to the flake8 `--builtins` list.
+#
+#   n 3                          positions
+#   leaves w / leaves w 3        the padded near-field leaf table -- positions,
+#                                masses, mask, particle indices
+#   pairs                        the edge-list variants' target/source/valid triple
+#   blocks blocksize             per-block source ids and their mask
+#   farleaves blocks blocksize   the prepacked rectangle, one block run per leaf
+#   _                            block_offsets, block_target_leaf_ids
+#
+# `leaves w` IS PROVEN, at two distinct extents: `_self_only_impl` was captured at
+# `(8, 128)` and `(16, 128)`, `_prepacked_impl` at `(5, 256)` and `(3, 2)`. Section 4.3
+# asks for two, because an equality seen at one size is one observation however many
+# calls produced it.
+#
+# THE TWO `_` ARE NOT LAZINESS, and they are where the first draft of this note was
+# wrong. `runtime/kernels/_evaluate.py` -- which supplies these arrays -- annotates the
+# same two as `Int[Array, "farleaves+1"]` and `Int[Array, "_"]`, and it has the
+# measurements: the offsets track the FAR-field leaf view, radix 3 leaves -> 4 offsets
+# against octree 5 -> 6. That view is not this signature's `leaves`, which is the
+# near-field padded table, so writing `leaves+1` here would assert an equality the
+# octree backend falsifies -- the `farleaves` mistake of section 4.3, verbatim, which
+# cost 7 tests when it was made in `_evaluate.py`. Nor can the honest spelling be used:
+# jaxtyping evaluates a symbolic axis in PARAMETER ORDER, `block_offsets` precedes the
+# leaf table, and a symbolic dim cannot be the thing that introduces its own name --
+# `AnnotationError: Cannot process symbolic axis 'leaves+1' as some axis names have not
+# been resolved`, which is how this was found rather than guessed.
+#
+# Same reasoning puts `farleaves` on the prepacked rectangle instead of `leaves`. It
+# binds freely there -- nothing else in that signature uses it -- so what is asserted
+# is that the ids and their mask agree with each other in all three axes, which is
+# measured, and nothing about the extent. That is the distinction `_evaluate.py` draws
+# for `blocks blocksize`, applied here.
+#
+# ONE THING WORTH REVISITING, recorded rather than acted on: `_evaluate.py` keeps
+# `block_target_leaf_ids` rank-only because "its length was 0 in every observation".
+# This capture saw it at 15, beside `blocks` 15 -- the first nonzero evidence for the
+# coupling its docstring claims. One observation is not two, so it stays `_`.
+#
+# THE SENTINEL HAZARD WAS CHECKED, because section 4.3 records it costing 87 tests.
+# `_evaluate.py`'s `nearfield_leaf_particle_indices` is `(leaves, w)` live and `(0, 0)`
+# absent, which is why it must stay `Int[Array, "_ _"]` there -- and it is the array
+# that becomes `leaf_particle_idx` here. It cannot arrive as the sentinel: the
+# `use_specialized_large_n` gate gives `shape[0] > 0` as a static Python check, so this
+# family is only entered once the lane is live. An all-zero `leaves` would satisfy
+# these annotations anyway, since the four leaf arrays only have to agree with each
+# other.
+
+
 @jax.jit
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_self_only_impl(
-    positions: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -66,18 +123,18 @@ def _compute_leaf_p2p_prepared_large_n_self_only_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         ``[N, 3]`` particle positions in tree order. Read only for its shape and
         dtype: the values that matter come in through ``leaf_positions``, and
         this fixes the output shape and the working dtype.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         ``[num_leaves, W, 3]`` padded leaf-major positions.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         ``[num_leaves, W]`` padded leaf-major masses.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         ``[num_leaves, W]`` occupancy; masked slots contribute exactly zero and
         are also excluded from the scatter.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         ``[num_leaves, W]`` particle index behind each slot, clipped so a masked
         slot cannot gather or scatter out of bounds.
     G : Union[float, Array]
@@ -125,15 +182,16 @@ def _compute_leaf_p2p_prepared_large_n_self_only_impl(
         "disable_chunk_cond",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
-    positions: Array,
-    target_leaf_ids: Array,
-    source_leaf_ids: Array,
-    valid_pairs: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    target_leaf_ids: Int[Array, "pairs"],
+    source_leaf_ids: Int[Array, "pairs"],
+    valid_pairs: Bool[Array, "pairs"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -157,22 +215,22 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    target_leaf_ids : Array
+    target_leaf_ids : Int[Array, 'pairs']
         Target leaf id per edge, ``[num_edges]``.
-    source_leaf_ids : Array
+    source_leaf_ids : Int[Array, 'pairs']
         Source leaf id per edge, ``[num_edges]``.
-    valid_pairs : Array
+    valid_pairs : Bool[Array, 'pairs']
         Per-edge validity ``[num_edges]``; padded edges contribute exactly zero.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
         masked slot cannot gather out of bounds. Also fixes ``W``.
     G : Union[float, Array]
@@ -390,14 +448,44 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
     return accelerations
 
 
+# `tiles`, `tbatch` AND WHY THEY ARE NOT `blocks` OR `leaves`.
+#
+# Both names are new to the STYLE_GUIDE section 4.3 table and both were added with
+# this change rather than ahead of it, because a vocabulary row nothing uses is
+# speculative documentation. Neither goes in the flake8 `--builtins` list: they only
+# ever appear inside multi-token specs, so pyflakes never sees them as bare names.
+#
+# `tbatch` IS NOT `leaves`, and the same signature proves it. `target_pos` arrives
+# `(tbatch, w, 3)` beside `leaf_positions` at `(leaves, w, 3)` -- measured 16 against
+# 5. `tbatch` is one scan step's worth of target leaves (`target_leaf_batch_size`),
+# so it is a tuning knob, not a count of anything in the tree. `w` IS shared, and
+# structurally rather than by luck: the caller builds `target_pos` as
+# `leaf_positions[safe_target_leaf_ids]`, a gather that cannot change the slot width.
+#
+# `tiles` IS NOT `blocks`. It is the sequence axis OUTSIDE the block/lane pair
+# (observed 1 and 4), so the full layout is `tiles tbatch blocks blocksize` and
+# `blocks blocksize` keeps the meaning it has in `_evaluate.py` and in the kernels
+# above.
+#
+# THE TILED LAYOUT'S LEAF AXIS IS `farleaves`, NOT `leaves`, and this is the one
+# judgement call here. `source_leaf_ids_tiles` is a reshape of the prepacked
+# rectangle, which `_evaluate.py` measures as the FAR-field leaf view (radix 3
+# leaves against octree 5). Its axis 1 did match the near-field leaf table at two
+# distinct extents -- 5 beside `(5, 256)`, and 3 beside `(3, 2)` -- and that is
+# exactly the evidence section 4.3 says not to trust: both captures ran on the radix
+# backend, which is the lane where the two views coincide. The `farleaves` incident
+# was 64 honest captures making the same mistake.
+
+
+@jaxtyped(typechecker=beartype)
 def _accumulate_target_block_tile_sequence(
-    target_pos: Array,
-    target_mask: Array,
-    tile_source_ids_seq: Array,
-    tile_source_valid_seq: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
+    target_pos: Float[Array, "tbatch w 3"],
+    target_mask: Bool[Array, "tbatch w"],
+    tile_source_ids_seq: Int[Array, "tiles tbatch blocks blocksize"],
+    tile_source_valid_seq: Bool[Array, "tiles tbatch blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
     *,
     g_const: Array,
     softening_sq: Array,
@@ -414,19 +502,23 @@ def _accumulate_target_block_tile_sequence(
 
     Parameters
     ----------
-    target_pos : Array
+    target_pos : Float[Array, 'tbatch w 3']
         Target-leaf positions for this batch ``[batch, W, 3]``.
-    target_mask : Array
+    target_mask : Bool[Array, 'tbatch w']
         Target-leaf validity ``[batch, W]``.
-    tile_source_ids_seq : Array
-        Source leaf ids per tile, ``[num_tiles, batch, lanes]``.
-    tile_source_valid_seq : Array
+    tile_source_ids_seq : Int[Array, 'tiles tbatch blocks blocksize']
+        Source leaf ids per tile, ``[num_tiles, batch, lane_block, lane]``. The
+        docstring said ``[num_tiles, batch, lanes]`` until the shape was derived by
+        execution: it is rank FOUR, and the sibling
+        :func:`_compute_target_block_pairs_from_source_tiles` had the layout right
+        all along.
+    tile_source_valid_seq : Bool[Array, 'tiles tbatch blocks blocksize']
         Per-lane validity with the same shape as ``tile_source_ids_seq``.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
     g_const : Array
@@ -603,14 +695,15 @@ def _collect_target_leaf_batch_acc(
     return target_leaf_batch_acc.reshape((-1, leaf_size, 3))[:num_leaves]
 
 
+@jaxtyped(typechecker=beartype)
 def _compute_target_block_pairs_from_source_tiles(
-    positions: Array,
-    source_leaf_ids_tiles: Array,
-    source_valid_tiles: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    source_leaf_ids_tiles: Int[Array, "tiles farleaves blocks blocksize"],
+    source_valid_tiles: Bool[Array, "tiles farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     g_const: Array,
     softening_sq: Array,
@@ -629,20 +722,20 @@ def _compute_target_block_pairs_from_source_tiles(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    source_leaf_ids_tiles : Array
+    source_leaf_ids_tiles : Int[Array, 'tiles farleaves blocks blocksize']
         Source leaf ids in the canonical tiled layout.
-    source_valid_tiles : Array
+    source_valid_tiles : Bool[Array, 'tiles farleaves blocks blocksize']
         Per-lane validity with the same shape as ``source_leaf_ids_tiles``.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
         masked slot cannot gather out of bounds. Also fixes ``W``.
     g_const : Array
@@ -745,16 +838,17 @@ def _compute_target_block_pairs_from_source_tiles(
         "target_block_batch_scan_unroll",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
-    positions: Array,
-    block_offsets: Array,
-    block_target_leaf_ids: Array,
-    block_source_leaf_ids: Array,
-    block_valid_mask: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    block_offsets: Int[Array, "_"],
+    block_target_leaf_ids: Int[Array, "_"],
+    block_source_leaf_ids: Int[Array, "blocks blocksize"],
+    block_valid_mask: Bool[Array, "blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -770,24 +864,24 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    block_offsets : Array
+    block_offsets : Int[Array, '_']
         Start offset of each target leaf's block run, ``[num_leaves + 1]``.
-    block_target_leaf_ids : Array
+    block_target_leaf_ids : Int[Array, '_']
         Target leaf id per block, ``[num_blocks]``.
-    block_source_leaf_ids : Array
+    block_source_leaf_ids : Int[Array, 'blocks blocksize']
         Source leaf ids per block, ``[num_blocks, lanes]``.
-    block_valid_mask : Array
+    block_valid_mask : Bool[Array, 'blocks blocksize']
         Per-lane validity with the same shape as ``block_source_leaf_ids``.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
         masked slot cannot gather out of bounds. Also fixes ``W``.
     G : Union[float, Array]
@@ -916,14 +1010,15 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
         "componentwise_pairs",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
-    positions: Array,
-    block_source_leaf_ids_padded: Array,
-    block_valid_mask_padded: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    block_source_leaf_ids_padded: Int[Array, "farleaves blocks blocksize"],
+    block_valid_mask_padded: Bool[Array, "farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -949,20 +1044,20 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    block_source_leaf_ids_padded : Array
+    block_source_leaf_ids_padded : Int[Array, 'farleaves blocks blocksize']
         Source leaf ids ``[num_leaves, blocks, lanes]``, padded to a rectangle.
-    block_valid_mask_padded : Array
+    block_valid_mask_padded : Bool[Array, 'farleaves blocks blocksize']
         Per-lane validity with the same shape; padded lanes contribute exactly zero.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
         masked slot cannot gather out of bounds. Also fixes ``W``.
     G : Union[float, Array]
@@ -1087,16 +1182,17 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
         "target_block_batch_scan_unroll",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl(
-    positions: Array,
-    block_offsets: Array,
-    block_target_leaf_ids: Array,
-    block_source_leaf_ids: Array,
-    block_valid_mask: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    block_offsets: Int[Array, "_"],
+    block_target_leaf_ids: Int[Array, "_"],
+    block_source_leaf_ids: Int[Array, "blocks blocksize"],
+    block_valid_mask: Bool[Array, "blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -1115,24 +1211,24 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    block_offsets : Array
+    block_offsets : Int[Array, '_']
         Start offset of each target leaf's block run, ``[num_leaves + 1]``.
-    block_target_leaf_ids : Array
+    block_target_leaf_ids : Int[Array, '_']
         Target leaf id per block, ``[num_blocks]``.
-    block_source_leaf_ids : Array
+    block_source_leaf_ids : Int[Array, 'blocks blocksize']
         Source leaf ids per block, ``[num_blocks, lanes]``.
-    block_valid_mask : Array
+    block_valid_mask : Bool[Array, 'blocks blocksize']
         Per-lane validity with the same shape as ``block_source_leaf_ids``.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
         masked slot cannot gather out of bounds. Also fixes ``W``.
     G : Union[float, Array]
@@ -1314,6 +1410,18 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
     )
 
 
+# NO `@jaxtyped` HERE, AND IT IS NOT AN OVERSIGHT -- its five siblings in this module have
+# one, so the asymmetry is the kind that gets "fixed" on sight. The body is two delegated
+# calls and nothing else: `_compute_leaf_p2p_prepared_large_n_self_only_impl` and
+# `_compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl`, both decorated, both
+# passed every array UNMODIFIED. Between them all nine array parameters are already
+# validated one frame deeper against the identical annotations -- `n 3` and the four
+# `leaves w` from the first, `blocks blocksize` and the two `_` from the second. So this is
+# STYLE_GUIDE section 4.1's own rule ("skip it when the value flows straight into
+# something that checks it"), with the checker being a sibling in the same file rather than
+# a library, and a decorator here would be the "annotate for consistency" that section
+# warns against: an extra beartype pass per call on the production forward path, which
+# section 4.4 records as UNCONDITIONAL, for a check that already runs.
 @partial(
     jax.jit,
     static_argnames=(
@@ -1430,15 +1538,16 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_target_blocks_impl(
         "disable_chunk_cond",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_accel_only_impl(
-    positions: Array,
-    target_leaf_ids: Array,
-    source_leaf_ids: Array,
-    valid_pairs: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    target_leaf_ids: Int[Array, "pairs"],
+    source_leaf_ids: Int[Array, "pairs"],
+    valid_pairs: Bool[Array, "pairs"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -1462,22 +1571,22 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    target_leaf_ids : Array
+    target_leaf_ids : Int[Array, 'pairs']
         Target leaf id per edge, ``[num_edges]``.
-    source_leaf_ids : Array
+    source_leaf_ids : Int[Array, 'pairs']
         Source leaf id per edge, ``[num_edges]``.
-    valid_pairs : Array
+    valid_pairs : Bool[Array, 'pairs']
         Per-edge validity ``[num_edges]``; padded edges contribute exactly zero.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
         masked slot cannot gather out of bounds. Also fixes ``W``.
     G : Union[float, Array]

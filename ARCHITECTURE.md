@@ -394,27 +394,65 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
 
 ### Known GPU-only failures (A100 sm_80, jax 0.10.2)
 
-These five fail on the A100 and pass on CPU. **All predate Tier 1** — they reproduce on
-`128a0e2`, before the first Tier 1 merge — so bisect against a pre-branch commit before
-attributing one to your change. Re-measured 2026-08-12, three runs per configuration:
+These fail on the A100 and pass on CPU, so a hit here is not necessarily yours — but check
+it against this table before assuming that, because the list has been stale in **both**
+directions before. Re-measured 2026-08-26, three runs per configuration, plus two whole-suite
+runs at `-n 6 --xla_python_client_mem_fraction=.12`.
 
-| test | fails (default XLA) | fails (deterministic ops) |
+`XLA_FLAGS="--xla_gpu_deterministic_ops=true"` is the fast triage lever: green under it means
+you were looking at reduction nondeterminism (§10), still red means a real discrepancy.
+`bench/gpu_gate.py` sets it by default, so the "deterministic ops" column is the one that
+decides whether the gate goes red.
+
+| test | fails (default XLA) | fails (deterministic ops) | what it is |
+|---|---|---|---|
+| `test_constructor_state_matches_the_committed_golden` | 3/3 | **3/3** | platform |
+| `test_every_matrix_case_resolves_to_a_distinct_state` | 3/3 | **3/3** | platform |
+| `test_the_state_under_test_actually_carries_target_blocks` | 3/3 | **3/3** | platform |
+| `test_potential_does_not_delegate_to_the_generic_path` | 3/3 | **3/3** | platform |
+| `test_the_far_field_term_is_load_bearing` | 3/3 | **3/3** | resource, see below |
+| `test_boundary_kick_accepts_supplied_level_weights` | 3/3 | 0/3 | assertion strength |
+| `test_compiled_dispatch_is_bit_identical[None]` | 1/3 | 0/3 | reduction order |
+| `test_compiled_dispatch_is_bit_identical[32]` | 2/3 | 0/3 | reduction order |
+
+**The two `constructor_state` rows and the two `potential_stays_on_fast_lane` rows are
+genuine platform differences.** The constructor golden resolves `use_pallas: False -> True`
+because it was generated on CPU and is being read on an A100; the fast-lane pair is the GPU
+resolving a different lane, so the state under test carries no target-block payload.
+
+**`test_the_far_field_term_is_load_bearing` is not a numerical failure at all.** It is
+`RESOURCE_EXHAUSTED` under this gate's own caps — `-n 6` at a 12% per-worker share is
+1.82 GiB in use of 4.74 GiB on a 40 GB card, and the case wants ~769 MiB more. It is listed
+so the gate is not red for everyone, but the honest fix is the caps, not the entry: raise
+`XLA_PYTHON_CLIENT_MEM_FRACTION` or drop a worker and it clears.
+
+**`test_boundary_kick_accepts_supplied_level_weights` is an assertion-strength bug, not a
+platform one**, and is the one row here that should eventually disappear rather than be
+tolerated. It is `jnp.allclose(supplied, derived, rtol=0, atol=0)` — a dispatch-identity
+check, "handing in a weight row equals deriving it", whose intent has nothing to do with
+numerics. §10's same-input control disqualifies it: calling `boundary_kick` twice with
+identical arguments differs by the same amount and in the same fraction of elements as the
+two things being compared (2..8 ULP against 2..6 ULP, ~670-770 of 1536 elements either way,
+over six draws), so no tolerance makes the comparison informative about dispatch. The fix is
+to split the claim — assert the weight rows exactly, the kicks to a bound — not to loosen it.
+
+#### Resolved since the previous revision of this table
+
+Three entries measured on 2026-08-12 were fixed two days later and are gone. They are
+recorded here so they are not re-added from a stale copy of this section, and so the next
+person to find this list wrong knows it happens:
+
+| test | was | fixed by |
 |---|---|---|
-| `test_fmm_grad_golden[clu_real_n128_p4]` | 3/3 | **3/3** |
-| `test_real_basis_tracks_complex_basis[nearfield-only-f32]` | 3/3 | 0/3 |
-| `test_solidfmm_chunked_m2l_matches_fullbatch` | 1/3 | 0/3 |
-| `test_compiled_dispatch_is_bit_identical[None]` | 1/3 | 0/3 |
-| `test_compiled_dispatch_is_bit_identical[32]` | 1/3 | 0/3 |
+| `test_fmm_grad_golden[clu_real_n128_p4]` | 3/3 default, 3/3 deterministic | `aacd3cf` — gate the gradient golden per particle, not per array element |
+| `test_real_basis_tracks_complex_basis[nearfield-only-f32]` | 3/3 default | `86163f1` — make two fp32 path-equivalence tests actually test something |
+| `test_solidfmm_chunked_m2l_matches_fullbatch` | 1/3 default | `86163f1`, as above |
 
-`XLA_FLAGS="--xla_gpu_deterministic_ops=true"` is the fast triage lever: **four of the five
-go green under it**, so still-red-with-the-flag means a real discrepancy and green-with-the-flag
-means you were looking at reduction nondeterminism (§10).
-
-The one that survives the flag is a genuine platform difference, not noise:
-`test_fmm_grad_golden[clu_real_n128_p4]` has one element of 384 sitting ~7.9e-12 relative from
-a golden that was **generated on CPU**, against `rtol=atol=1e-12`. All GPU values cluster
-~2.1e-9 below the committed value. It is not a regression and the golden has not been touched;
-whether goldens gain a platform-aware band or become explicitly CPU-only is an open decision.
+All three now pass 3/3 in isolation and did not fail in either whole-suite run. The
+`test_fmm_grad_golden` entry is the one worth noting: it was described here as "a genuine
+platform difference, not noise" and survived the determinism flag, which made it look
+permanent. It was a per-element tolerance on a 384-element array, and `aacd3cf` replaced it
+with a per-particle gate.
 
 ## 10. Kernel-consolidation invariant
 

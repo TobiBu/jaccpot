@@ -19,7 +19,7 @@ from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
 from yggdrax.tree import RadixTree
 
 from ._large_n_pipeline import evaluate_large_n_state, prepare_large_n_state
-from ._large_n_types import LargeNPreparedState
+from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import (
@@ -778,6 +778,18 @@ class StrictRunMixin(_EngineBase):
                 return jnp.asarray(prepared_in.positions_sorted)[
                     prepared_in.inverse_permutation
                 ] * jnp.asarray(0.0, dtype=state_in.dtype)
+            # `evaluate_large_n_state` takes only the large-N state. The profile
+            # guard at the top of `strict_run_v2` already admits nothing else --
+            # verified by calling the method on a non-large-N engine, which raises
+            # there and never reaches this closure -- but the parameter carries the
+            # wider union, so the requirement is stated where it is relied on.
+            if not isinstance(prepared_in, LargeNPreparedState):
+                raise RuntimeError(
+                    "strict_run_v2 reached the large-N self-evaluation with a "
+                    f"{type(prepared_in).__name__}. Only the large_n_gpu "
+                    "production profile gets this far, so this is an internal "
+                    "invariant, not a configuration error."
+                )
             return jnp.asarray(
                 evaluate_large_n_state(
                     self,
@@ -829,6 +841,15 @@ class StrictRunMixin(_EngineBase):
             if diag_mode in {"integrator_only", "eval_only"}:
                 prepared_new = prepared_in
             else:
+                # Same invariant as `_evaluate_self` above, restated at the
+                # second place that relies on it.
+                if not isinstance(prepared_in, LargeNPreparedState):
+                    raise RuntimeError(
+                        "strict_run_v2 reached the large-N refresh with a "
+                        f"{type(prepared_in).__name__}. Only the large_n_gpu "
+                        "production profile gets this far, so this is an "
+                        "internal invariant, not a configuration error."
+                    )
                 prepared_new = self._refresh_large_n_same_topology(
                     prepared_in,
                     state_position[:, 0, :],
@@ -1136,7 +1157,7 @@ class StrictRunMixin(_EngineBase):
         self._record_large_n_eval_shape_diagnostics(prepared)
 
         @jax.jit
-        def _eval(prepared_in: PreparedStateLike) -> Array:
+        def _eval(prepared_in: LargeNPreparedState) -> Array:
             return jnp.asarray(
                 evaluate_large_n_state(
                     self,
@@ -1683,22 +1704,24 @@ class StrictRunMixin(_EngineBase):
             positions_arr=positions_arr,
             masses_arr=masses_arr,
             input_dtype=input_dtype,
-            bounds=bounds,
-            leaf_size=int(leaf_size),
-            max_order=int(max_order),
-            theta_val=theta_val,
-            mac_type_val=mac_type_val,
-            refine_local_val=refine_local_val,
-            max_refine_levels_val=max_refine_levels_val,
-            aspect_threshold_val=aspect_threshold_val,
-            jit_tree_override=None,
-            allow_stateful_cache=allow_stateful_cache,
-            runtime_traversal_config=runtime_traversal_config,
-            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            upward_center_mode=upward_center_mode,
-            record_retry=record_retry,
-            collected_retries=collected_retries,
+            request=LargeNPrepareRequest(
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta_val=theta_val,
+                mac_type_val=mac_type_val,
+                refine_local_val=refine_local_val,
+                max_refine_levels_val=max_refine_levels_val,
+                aspect_threshold_val=aspect_threshold_val,
+                jit_tree_override=None,
+                allow_stateful_cache=allow_stateful_cache,
+                runtime_traversal_config=runtime_traversal_config,
+                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+                upward_center_mode=upward_center_mode,
+                record_retry=record_retry,
+                collected_retries=collected_retries,
+            ),
             tree_artifacts=tree_artifacts,
             dual_downward_artifacts=dual_downward_artifacts,
             fused_device_mode=bool(fused_device_mode),

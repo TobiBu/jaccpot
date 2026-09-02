@@ -36,8 +36,9 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+from beartype import beartype
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Float, jaxtyped
 
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 
@@ -53,6 +54,25 @@ __all__ = [
     "mutual_leafpair_block_vjp_pallas",
     "mutual_leafpair_block_cvjp",
 ]
+
+# THE SLOT AXIS IS `w`, AND THE PROSE IN THIS FILE CALLS IT `slots`.
+#
+# Same axis, two names, and the annotations use the package-wide one. These blocks
+# are `leaf_particles[la]` gathered whole (see `mutual/nearfield.py::_pallas_block`),
+# so the slot count IS the leaf width -- `w` in STYLE_GUIDE section 4.3, `max_leaf_size`
+# in the config. The prose was not rewritten to match: `slots` is what the kernel
+# calls its own tile dimension and appears in ~40 docstrings here, and renaming it
+# would be a diff about vocabulary in a change that is about contracts.
+#
+# `w` IS SHARED BY THE `a` AND `b` SIDES, WHICH IS A REAL ASSERTION AND NOT A
+# MEASURED COINCIDENCE. `_block_tile` itself broadcasts `a[:, None]` against
+# `b[None, :]` and would accept unequal widths, so the pure-jnp twin alone would
+# tolerate them. The Pallas path does not: `width` is `_next_pow2` of the *a*-side
+# slot count and both sides are padded to it, so a wider `b` gives `jnp.pad` a
+# negative width. Annotating the two sides `w` and `wb` was the alternative; it was
+# rejected because the twin exists to mirror the kernel, and a caller relying on the
+# twin accepting a shape the kernel rejects is relying on the two disagreeing.
+# Measured: one problem size, `(6, 8)` -- see the coverage note on the decorators.
 
 # Positions/forces are carried in width-4 lanes for aligned vector loads; lane 3
 # is inert. Triton wants power-of-two tile dims, which 3 is not.
@@ -106,6 +126,24 @@ def _next_pow2(n: int) -> int:
     """
     n = max(1, int(n))
     return 1 << (n - 1).bit_length()
+
+
+# BARE ON PURPOSE, and it is the permissive end of the module: `bench/annotation_pilot`
+# measures 33 of this file's 99 silent acceptances in these three helpers, including
+# `_block_tile` accepting an extra leading axis on all eleven of its arrays.
+#
+# They are still bare because they are called from inside two `pallas_call` bodies
+# (`_mutual_leafpair_kernel`, `_mutual_leafpair_vjp_kernel`) as well as from the
+# vmapped twin, so a `@jaxtyped` here executes inside a Pallas kernel trace. That is
+# the one lane this box cannot exercise -- interpret mode is not the Triton lowering,
+# and there is no GPU leg in CI -- and `jaccpot/pallas/` has carried no enforced check
+# until now. Shipping the first one into a kernel body on an argument-from-analogy
+# would be the wrong order.
+#
+# What unblocks them: a `python -m bench.gpu_gate` run on an Ampere+ card, or a
+# re-record of the two `*_pallas` entry points with `interpret=False`. Until then the
+# entry points above carry the contract, and every call into these helpers comes
+# through one of them.
 
 
 def _pair_weight_tile(
@@ -576,8 +614,36 @@ def _mutual_leafpair_vjp_kernel(
     mb_bar_ref[0, :] = mb_bar
 
 
+# FIRST ENFORCED ANNOTATIONS IN `jaccpot/pallas/`, AND THE BOUNDARY IS DELIBERATE.
+#
+# `_compat.py` records that nothing in this package carried `@jaxtyped`/`beartype`:
+# its ~68 `KernelRef` annotations are documentation, present only because pydoclint
+# will not let a parameter be *documented* until it is annotated. These five
+# functions cross that line; the three tile helpers below do NOT, and the split is
+# on one question -- does the check run inside a `pallas_call` body?
+#
+# It does not here. All five are ordinary traced Python: they run before
+# `pallas_call`, take arrays rather than `KernelRef`s, and are what
+# `mutual/nearfield.py` and `test_custom_vjp_parity.py` actually call. The check is
+# a trace-time check, so it costs one comparison per compilation and nothing per
+# step.
+#
+# COVERAGE BOUND, per STYLE_GUIDE section 4.3. `bench/annotation_pilot` measured
+# these on CPU, where every recorded call carries `interpret=True` --
+# `pallas_nearfield_mutual_supported()` requires an Ampere+ card. The shapes are
+# fixed by the BlockSpecs and not by the backend, so the compiled Triton lane sees
+# the same ones; that is an argument, not a measurement, and there is no GPU leg in
+# CI to turn it into one. `python -m bench.gpu_gate` is where it gets checked.
+
+
+@jaxtyped(typechecker=beartype)
 def _pad_inputs(
-    xa: Array, ma: Array, va_f: Array, rung_a_f: Optional[Array], width: int, dtype: Any
+    xa: Float[Array, "pairs w 3"],
+    ma: Float[Array, "pairs w"],
+    va_f: Float[Array, "pairs w"],
+    rung_a_f: Optional[Float[Array, "pairs w"]],
+    width: int,
+    dtype: Any,
 ) -> tuple[Array, Array, Array, Array]:
     """Pad a leaf block's slot axis out to the Triton tile width.
 
@@ -585,13 +651,13 @@ def _pad_inputs(
 
     Parameters
     ----------
-    xa : Array
+    xa : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` positions for one side of the pair list.
-    ma : Array
+    ma : Float[Array, 'pairs w']
         ``(pairs, slots)`` masses.
-    va_f : Array
+    va_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` validity mask, float-encoded.
-    rung_a_f : Optional[Array]
+    rung_a_f : Optional[Float[Array, 'pairs w']]
         ``(pairs, slots)`` rungs, or ``None`` to substitute zeros.
     width : int
         Padded slot width; a power of two from :func:`_next_pow2`.
@@ -617,16 +683,17 @@ def _pad_inputs(
     return xa_p, ma_p, va_p, ra_p
 
 
+@jaxtyped(typechecker=beartype)
 def mutual_leafpair_block_jax(
-    xa: Array,
-    ma: Array,
-    va_f: Array,
-    xb: Array,
-    mb: Array,
-    vb_f: Array,
-    rung_a_f: Optional[Array],
-    rung_b_f: Optional[Array],
-    level_weights: Optional[Array],
+    xa: Float[Array, "pairs w 3"],
+    ma: Float[Array, "pairs w"],
+    va_f: Float[Array, "pairs w"],
+    xb: Float[Array, "pairs w 3"],
+    mb: Float[Array, "pairs w"],
+    vb_f: Float[Array, "pairs w"],
+    rung_a_f: Optional[Float[Array, "pairs w"]],
+    rung_b_f: Optional[Float[Array, "pairs w"]],
+    level_weights: Optional[Float[Array, "levels"]],
     softening_sq: Array,
     g_value: Array,
     *,
@@ -639,24 +706,24 @@ def mutual_leafpair_block_jax(
 
     Parameters
     ----------
-    xa : Array
+    xa : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-A positions.
-    ma : Array
+    ma : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A masses.
-    va_f : Array
+    va_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
         boolean because a Pallas ref carries the working dtype.
-    xb : Array
+    xb : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-B positions.
-    mb : Array
+    mb : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B masses.
-    vb_f : Array
+    vb_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B validity mask, same encoding.
-    rung_a_f : Optional[Array]
+    rung_a_f : Optional[Float[Array, 'pairs w']]
         ``(pairs, slots)`` leaf-A rung, float-encoded, or ``None``.
-    rung_b_f : Optional[Array]
+    rung_b_f : Optional[Float[Array, 'pairs w']]
         ``(pairs, slots)`` leaf-B rung, float-encoded, or ``None``.
-    level_weights : Optional[Array]
+    level_weights : Optional[Float[Array, 'levels']]
         ``(num_levels,)`` weight per interaction level. ``None`` -- like a
         ``None`` rung -- disables level weighting, giving every pair weight one.
     softening_sq : Array
@@ -727,16 +794,17 @@ def mutual_leafpair_block_jax(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def mutual_leafpair_block_pallas(
-    xa: Array,
-    ma: Array,
-    va_f: Array,
-    xb: Array,
-    mb: Array,
-    vb_f: Array,
-    rung_a_f: Optional[Array],
-    rung_b_f: Optional[Array],
-    level_weights: Optional[Array],
+    xa: Float[Array, "pairs w 3"],
+    ma: Float[Array, "pairs w"],
+    va_f: Float[Array, "pairs w"],
+    xb: Float[Array, "pairs w 3"],
+    mb: Float[Array, "pairs w"],
+    vb_f: Float[Array, "pairs w"],
+    rung_a_f: Optional[Float[Array, "pairs w"]],
+    rung_b_f: Optional[Float[Array, "pairs w"]],
+    level_weights: Optional[Float[Array, "levels"]],
     softening_sq: Array,
     g_value: Array,
     *,
@@ -752,24 +820,24 @@ def mutual_leafpair_block_pallas(
 
     Parameters
     ----------
-    xa : Array
+    xa : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-A positions.
-    ma : Array
+    ma : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A masses.
-    va_f : Array
+    va_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
         boolean because a Pallas ref carries the working dtype.
-    xb : Array
+    xb : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-B positions.
-    mb : Array
+    mb : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B masses.
-    vb_f : Array
+    vb_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B validity mask, same encoding.
-    rung_a_f : Optional[Array]
+    rung_a_f : Optional[Float[Array, 'pairs w']]
         ``(pairs, slots)`` leaf-A rung, float-encoded, or ``None``.
-    rung_b_f : Optional[Array]
+    rung_b_f : Optional[Float[Array, 'pairs w']]
         ``(pairs, slots)`` leaf-B rung, float-encoded, or ``None``.
-    level_weights : Optional[Array]
+    level_weights : Optional[Float[Array, 'levels']]
         ``(num_levels,)`` weight per interaction level. ``None`` -- like a
         ``None`` rung -- disables level weighting, giving every pair weight one.
     softening_sq : Array
@@ -856,20 +924,21 @@ def mutual_leafpair_block_pallas(
     return f_a[:, :slots, :3], f_b[:, :slots, :3]
 
 
+@jaxtyped(typechecker=beartype)
 def mutual_leafpair_block_vjp_pallas(
-    xa: Array,
-    ma: Array,
-    va_f: Array,
-    xb: Array,
-    mb: Array,
-    vb_f: Array,
-    rung_a_f: Optional[Array],
-    rung_b_f: Optional[Array],
-    level_weights: Optional[Array],
+    xa: Float[Array, "pairs w 3"],
+    ma: Float[Array, "pairs w"],
+    va_f: Float[Array, "pairs w"],
+    xb: Float[Array, "pairs w 3"],
+    mb: Float[Array, "pairs w"],
+    vb_f: Float[Array, "pairs w"],
+    rung_a_f: Optional[Float[Array, "pairs w"]],
+    rung_b_f: Optional[Float[Array, "pairs w"]],
+    level_weights: Optional[Float[Array, "levels"]],
     softening_sq: Array,
     g_value: Array,
-    fa_bar: Array,
-    fb_bar: Array,
+    fa_bar: Float[Array, "pairs w 3"],
+    fb_bar: Float[Array, "pairs w 3"],
     *,
     exclude_diagonal: bool = False,
     emit_b: bool = True,
@@ -885,33 +954,33 @@ def mutual_leafpair_block_vjp_pallas(
 
     Parameters
     ----------
-    xa : Array
+    xa : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-A positions.
-    ma : Array
+    ma : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A masses.
-    va_f : Array
+    va_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
         boolean because a Pallas ref carries the working dtype.
-    xb : Array
+    xb : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-B positions.
-    mb : Array
+    mb : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B masses.
-    vb_f : Array
+    vb_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B validity mask, same encoding.
-    rung_a_f : Optional[Array]
+    rung_a_f : Optional[Float[Array, 'pairs w']]
         ``(pairs, slots)`` leaf-A rung, float-encoded, or ``None``.
-    rung_b_f : Optional[Array]
+    rung_b_f : Optional[Float[Array, 'pairs w']]
         ``(pairs, slots)`` leaf-B rung, float-encoded, or ``None``.
-    level_weights : Optional[Array]
+    level_weights : Optional[Float[Array, 'levels']]
         ``(num_levels,)`` weight per interaction level. ``None`` -- like a
         ``None`` rung -- disables level weighting, giving every pair weight one.
     softening_sq : Array
         Squared Plummer softening length, scalar.
     g_value : Array
         Gravitational constant, scalar.
-    fa_bar : Array
+    fa_bar : Float[Array, 'pairs w 3']
         Cotangent of ``F_a``, ``(pairs, slots, 3)``.
-    fb_bar : Array
+    fb_bar : Float[Array, 'pairs w 3']
         Cotangent of ``F_b``, same shape.
     exclude_diagonal : bool
         Drop ``i == j``, so a particle in a leaf paired with itself does not act
@@ -1035,16 +1104,17 @@ def mutual_leafpair_block_vjp_pallas(
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14))
+@jaxtyped(typechecker=beartype)
 def mutual_leafpair_block_cvjp(
-    xa: Array,
-    ma: Array,
-    va_f: Array,
-    xb: Array,
-    mb: Array,
-    vb_f: Array,
-    rung_a_f: Array,
-    rung_b_f: Array,
-    level_weights: Array,
+    xa: Float[Array, "pairs w 3"],
+    ma: Float[Array, "pairs w"],
+    va_f: Float[Array, "pairs w"],
+    xb: Float[Array, "pairs w 3"],
+    mb: Float[Array, "pairs w"],
+    vb_f: Float[Array, "pairs w"],
+    rung_a_f: Float[Array, "pairs w"],
+    rung_b_f: Float[Array, "pairs w"],
+    level_weights: Float[Array, "levels"],
     softening_sq: Array,
     g_value: Array,
     num_levels: int,
@@ -1060,24 +1130,24 @@ def mutual_leafpair_block_cvjp(
 
     Parameters
     ----------
-    xa : Array
+    xa : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-A positions.
-    ma : Array
+    ma : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A masses.
-    va_f : Array
+    va_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
         boolean because a Pallas ref carries the working dtype.
-    xb : Array
+    xb : Float[Array, 'pairs w 3']
         ``(pairs, slots, 3)`` leaf-B positions.
-    mb : Array
+    mb : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B masses.
-    vb_f : Array
+    vb_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B validity mask, same encoding.
-    rung_a_f : Array
+    rung_a_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-A rung, float-encoded.
-    rung_b_f : Array
+    rung_b_f : Float[Array, 'pairs w']
         ``(pairs, slots)`` leaf-B rung, float-encoded.
-    level_weights : Array
+    level_weights : Float[Array, 'levels']
         ``(num_levels,)`` weight per interaction level.
     softening_sq : Array
         Squared Plummer softening length, scalar.

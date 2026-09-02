@@ -21,9 +21,12 @@ checks get exercised at all.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from bench.gpu_gate import (
+    _MUST_RUN_SM80,
     _check_not_vacuous,
     _classify_failures,
     _outcomes_by_node,
@@ -46,6 +49,12 @@ tests/unit/runtime/test_split_build_default_predicate.py::test_pred_a
 tests/unit/test_large_n_config_thresholds.py::test_threshold_a
 [gw0] [ 75%] PASSED tests/unit/test_large_n_config_thresholds.py::test_threshold_a
 [gw1] [100%] FAILED tests/unit/runtime/test_split_build_default_predicate.py::test_pred_b
+[gw0] [ 76%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes[inside the band-2.5]
+[gw0] [ 80%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[True]
+[gw1] [ 84%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]
+[gw1] [ 88%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]
+[gw0] [ 92%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative
+[gw1] [ 96%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative
 =========================== short test summary info ============================
 SKIPPED [1] tests/unit/runtime/test_split_build_default_predicate.py:4: needs gpu
 ==================== 1 failed, 2 passed, 1 skipped in 1.19s ====================
@@ -63,7 +72,36 @@ VACUOUS_OUTPUT = """\
 [gw0] [ 33%] SKIPPED tests/unit/test_large_n_config_thresholds.py::test_threshold_a
 [gw1] [ 66%] SKIPPED tests/unit/runtime/test_nearfield_mode_policy.py::test_policy_a
 [gw1] [100%] SKIPPED tests/unit/runtime/test_split_build_default_predicate.py::test_pred_a
+[gw0] [ 76%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes[inside the band-2.5]
+[gw0] [ 80%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[True]
+[gw1] [ 84%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]
+[gw1] [ 88%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]
+[gw0] [ 92%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative
+[gw1] [ 96%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative
 ==================== 3 skipped in 0.8s ====================
+"""
+
+
+# The blind spot this module gained a check for: a **real GPU**, but not Ampere+.
+# Every backend-gated test runs and passes, so the original three-file assertion
+# is satisfied and the gate printed green -- while all five fused-Pallas lanes
+# self-skipped off sm_80 and asserted nothing. Note the
+# `..._in_gradient[True]` line: the interpret half runs on any card, so a check
+# keyed on the test *name* rather than the `[False]` parametrisation would find a
+# passing test here and call the run non-vacuous.
+NON_AMPERE_OUTPUT = """\
+[gw0] [ 20%] PASSED tests/unit/test_large_n_config_thresholds.py::test_threshold_a
+[gw1] [ 40%] PASSED tests/unit/runtime/test_nearfield_mode_policy.py::test_policy_a
+[gw1] [ 50%] PASSED tests/unit/runtime/test_split_build_default_predicate.py::test_pred_a
+[gw0] [ 60%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[True]
+[gw0] [ 70%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes[inside the band-2.5]
+[gw1] [ 80%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]
+[gw1] [ 85%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]
+[gw0] [ 90%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative
+[gw1] [100%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative
+=========================== short test summary info ============================
+SKIPPED [5] the fused Pallas M2L lanes require an Ampere+ (sm_80) GPU
+==================== 4 passed, 5 skipped in 61.2s ====================
 """
 
 
@@ -143,9 +181,15 @@ class TestNotVacuous:
         assert _check_not_vacuous(XDIST_OUTPUT) == []
 
     def test_all_skipped_is_reported_as_vacuous(self) -> None:
-        """A CPU fallback skips all three files and must fail the gate."""
+        """A CPU fallback empties both gated sets and must fail the gate.
+
+        Eight, not three: the three backend-gated files plus the five sm_80-gated
+        node ids. The ``[True]`` interpret half is recorded as PASSED because on
+        CPU it really does run -- and the ``[False]`` fragment still complains,
+        which is the parametrisation trap the node-id form exists to avoid.
+        """
         complaints = _check_not_vacuous(VACUOUS_OUTPUT)
-        assert len(complaints) == 3
+        assert len(complaints) == 8
         assert all("0 tests ran" in c for c in complaints)
 
     def test_moving_a_gated_file_does_not_empty_the_check(self) -> None:
@@ -156,6 +200,110 @@ class TestNotVacuous:
         """
         assert "runtime/test_nearfield_mode_policy.py" in XDIST_OUTPUT
         assert _check_not_vacuous(XDIST_OUTPUT) == []
+
+
+class TestTheNonAmpereBlindSpot:
+    """A real GPU that is not Ampere+ must not read as a validated run.
+
+    This is the case the gate missed. ``_MUST_RUN``'s three files are all
+    backend-gated, so they pass on any GPU; the fused Pallas M2L lanes are gated
+    on ``sm_80`` instead and self-skip on, say, a V100. Every check the gate had
+    was satisfied and it printed green, while the five tests
+    ``docs/handoff_g10_gpu_validation.md`` calls "the headline item" asserted
+    nothing.
+    """
+
+    def test_a_non_ampere_run_is_reported_as_vacuous(self) -> None:
+        """Backend tests green, sm_80 lanes skipped -> five complaints."""
+        complaints = _check_not_vacuous(NON_AMPERE_OUTPUT)
+        assert len(complaints) == 5, complaints
+        assert all("sm_80" in c for c in complaints)
+
+    def test_the_interpret_half_passing_does_not_excuse_the_kernel_half(self) -> None:
+        """The trap a name-keyed check would fall into.
+
+        ``test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[True]``
+        runs in interpret mode on any card and PASSES in the recorded output. A
+        fragment keyed on the test name alone would match it, count a run, and
+        declare the lane covered -- while ``[False]``, the half that reaches the
+        real Triton kernel, skipped.
+        """
+        assert "_in_gradient[True]" in NON_AMPERE_OUTPUT
+        complaints = _check_not_vacuous(NON_AMPERE_OUTPUT)
+        assert any("_in_gradient[False]" in c for c in complaints)
+
+    def test_a_full_ampere_run_leaves_nothing_to_complain_about(self) -> None:
+        """The positive control: with the lanes actually run, no complaint."""
+        assert _check_not_vacuous(XDIST_OUTPUT) == []
+
+
+class TestSm80RegistryTracksTheSuite:
+    """Every sm_80-gated test must be registered, or the blind spot reopens.
+
+    The failure mode is not that a fragment goes stale -- a fragment matching
+    nothing reports "0 tests ran", which fails loudly. It is that somebody adds a
+    *new* sm_80-gated test and does not register it, which is exactly how the
+    original five came to be unchecked. So this derives the gated set from the
+    test module's source and compares.
+    """
+
+    GATED_MODULE = "tests/unit/operators/test_transverse_degeneracy_jvp.py"
+
+    def _sm80_gated_functions(self) -> set[str]:
+        """Every test function that can skip itself off sm_80.
+
+        Returns
+        -------
+        set[str]
+            Function names whose body contains a ``pytest.skip`` mentioning
+            ``sm_80``. Read from the AST rather than by grepping, so a match
+            inside a docstring or comment cannot inflate the set.
+        """
+        import ast
+
+        tree = ast.parse(pathlib.Path(self.GATED_MODULE).read_text())
+        gated = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                target = getattr(call.func, "attr", None)
+                if target != "skip" or not call.args:
+                    continue
+                arg = call.args[0]
+                if isinstance(arg, ast.Constant) and "sm_80" in str(arg.value):
+                    gated.add(node.name)
+        return gated
+
+    def test_the_gated_module_still_exists(self) -> None:
+        """A rename would make the guard below pass by finding nothing."""
+        assert pathlib.Path(self.GATED_MODULE).is_file(), self.GATED_MODULE
+
+    def test_every_sm80_gated_test_is_registered(self) -> None:
+        """No sm_80-gated test may be missing from ``_MUST_RUN_SM80``."""
+        gated = self._sm80_gated_functions()
+        assert gated, "found no sm_80 gate at all -- the AST scan has drifted"
+        unregistered = {
+            name
+            for name in gated
+            if not any(name in fragment for fragment in _MUST_RUN_SM80)
+        }
+        assert not unregistered, (
+            f"sm_80-gated but unchecked by the GPU gate: {sorted(unregistered)}. "
+            "Add the node id (with its parametrisation) to _MUST_RUN_SM80 in "
+            "bench/gpu_gate.py, or a non-Ampere run will report green."
+        )
+
+    def test_every_registered_fragment_names_a_real_test(self) -> None:
+        """And the reverse: a fragment must correspond to a function that exists."""
+        source = pathlib.Path(self.GATED_MODULE).read_text()
+        for fragment in _MUST_RUN_SM80:
+            name = fragment.split("[")[0]
+            assert (
+                f"def {name}(" in source
+            ), f"{fragment} names no test in {self.GATED_MODULE}"
 
 
 class TestClassifyFailures:
@@ -185,9 +333,14 @@ class TestClassifyFailures:
     @pytest.mark.parametrize(
         "node",
         [
-            "tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[clu_real_n128_p4]",
-            "tests/unit/test_solidfmm.py::test_solidfmm_chunked_m2l_matches_fullbatch",
-            "tests/unit/test_dispatch.py::test_compiled_dispatch_is_bit_identical[32]",
+            "tests/characterization/test_constructor_state_golden.py"
+            "::test_constructor_state_matches_the_committed_golden",
+            "tests/unit/runtime/test_potential_stays_on_fast_lane.py"
+            "::test_potential_does_not_delegate_to_the_generic_path",
+            "tests/unit/runtime/test_fb_force_scale_estimator.py"
+            "::test_the_far_field_term_is_load_bearing",
+            "tests/unit/runtime/test_tree_geometry_compiled.py"
+            "::test_compiled_dispatch_is_bit_identical[32]",
         ],
     )
     def test_documented_gpu_failures_are_allowed(self, node: str) -> None:
@@ -195,6 +348,28 @@ class TestClassifyFailures:
         unexpected, known = _classify_failures(f"[gw0] [ 10%] FAILED {node}\n")
         assert known == [node]
         assert unexpected == []
+
+    @pytest.mark.parametrize(
+        "node",
+        [
+            "tests/characterization/test_fmm_grad_golden.py"
+            "::test_fmm_grad_golden[clu_real_n128_p4]",
+            "tests/integration/test_fmm.py::test_solidfmm_chunked_m2l_matches_fullbatch",
+            "tests/integration/test_real_basis_runtime.py"
+            "::test_real_basis_tracks_complex_basis[nearfield-only-f32]",
+        ],
+    )
+    def test_failures_fixed_upstream_are_no_longer_tolerated(self, node: str) -> None:
+        """A fixed failure must leave the tuple, or a regression reads as "known".
+
+        These three were on §9's list and were fixed on 2026-08-14 by `aacd3cf`
+        and `86163f1`. Leaving them behind is the dangerous direction: the entry
+        stays, the test regresses later, and the gate classifies the regression as
+        expected and passes. This is the assertion that makes removing them stick.
+        """
+        unexpected, known = _classify_failures(f"[gw0] [ 10%] FAILED {node}\n")
+        assert known == []
+        assert unexpected == [node]
 
     def test_errors_count_as_failures(self) -> None:
         """A collection or fixture ERROR must not be silently tolerated."""

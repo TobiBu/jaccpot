@@ -95,8 +95,10 @@ the table under the first bullet.
 > (2026-08-16): all of PR #56, PR #67 and the 38 commits that followed are in `main`, and
 > the branch was reset onto `origin/main` rather than replaying patches already upstream.
 > Of the two open items, **the N=10⁶ leaf sweep is done** — see the leaf-sweep section
-> below; leaf 1024 is the production configuration. N=10⁷ remains open behind an
-> identified one-line blocker, whose trigger is narrower than first recorded.
+> below; leaf 1024 is the production configuration *for the criterion's tail advantage*
+> (on a galaxy disc at order 4 it costs ~2× the evaluation of leaf 128 — see "What to
+> quote"). N=10⁷ remains open behind an identified one-line blocker, whose trigger is
+> narrower than first recorded.
 
 Branch **`feat/dehnen-mass-dependent-mac`**, worktree
 **`/export/home/tbuck/jaccpot-mac-wt`**, off `main`. The upward-M2M fixes are already in
@@ -107,6 +109,255 @@ the *other* checkout, so without this you silently test the wrong code).
 **Read trap 9 before running any sweep.** Every item below is one measurement away from
 being answered, and each was previously derailed by a configuration trap now recorded
 there.
+
+### 0. The multi-GPU port — **PLUMBING DONE (2026-08-30), UNMEASURED, and self-only**
+
+Branch **`feat/dehnen-error-distributed`**, worktree
+**`/export/home/tbuck/jaccpot-dehnenmgpu-wt`**, off `origin/main` (0154574).
+
+Until now this document contained **zero** mentions of multi-GPU, distributed,
+`shard_map` or mesh: the port was never attempted, let alone refuted. It now runs.
+`mac_type="dehnen_error"` reaches the distributed lane's **self walk**, decides a
+different accept mask from the geometric MAC at the same θ, and responds to `ε` with the
+sign eq (16a) says it has.
+
+**Read this before measuring anything on the mesh.**
+
+- **SELF WALK ONLY.** `build_interactions_and_neighbors` already took a `pair_policy`, so
+  the local walk was plumbing. `yggdrax/distributed/cross_walk.py` has **no `pair_policy`
+  anywhere**, so the cross walk is still geometric — and cross-domain near-field work is
+  **53 % of the total at 5 devices** (31 % at 2). A self-only port therefore cannot capture
+  more than half the available win, and because p99.99 is a **tail** statistic it may not
+  move the headline number *at all* while the other half is still chosen by θ. **Do not
+  read a null result at ndev=5 as "the criterion does not survive decomposition" until the
+  cross walk carries the policy too.** That needs a yggdrax change.
+- **eq (16b) only; eq (16a) raises.** `min_b |a_b|` is an *acceleration*, so on a mesh it
+  is a second full distributed evaluation including the halo exchange, not a read of lists
+  that already exist. eq (16b) is also the better arm (43.1× against 21.8× at N=10⁶ /
+  leaf 1024). `jaccpot/distributed/_force_scale.py` assembles `f_b` from four terms with
+  **no extra collective**: exact local near, monopole local far, and two remote terms from
+  the cross walk against the all-gathered coarse (LET) tree.
+- **The remote near term inflates by BOTH radii.** The single-GPU far term uses the target
+  radius alone, which is valid because a far pair's source is compact *by construction*. A
+  near pair's is not, and `1/r²` is not convex in the vector argument, so monopole-at-COM
+  is a bound in neither direction. Adding the source radius restores the under-estimate,
+  which is what keeps the whole estimate a **lower** bound — the safe direction per trap 6.
+- **Two self walks per call, one cross walk.** The walks that already ran are the prepass;
+  their geometric lists feed the estimate, then the self walk re-runs with the policy. The
+  prepass's overflow flags are OR-ed into the reported ones, because a truncated prepass
+  makes `f_b` *smaller*, the criterion *tighter* and the run *slower* — safe, and therefore
+  something nothing else would ever report.
+- **`force_scale_min` / `force_scale_max` are now in `DIAG_FIELDS`**, 0.0 when the criterion
+  is off. Trap 14's signature is a *constant* scale, which looks like an ordinary run; this
+  makes it readable from outside the mesh. Measured on 2 forced CPU devices, 1024/device,
+  leaf 8, θ=0.5: `[1.281e+02, 1.994e+03]`, i.e. a 15.6× spread and nowhere near 1.
+
+**Two hazards this document lists are moot, both verified rather than assumed.** The
+interaction-cache key already takes `pair_policy_identity` with no default
+(`pair_policy_cache_identity`, landed with Step 3′), *and* the distributed lane has no
+interaction cache at all — its only `_interaction_cache` import is
+`_build_treecode_artifacts_strict_streamed`, a builder with no lookup.
+
+**Four configurations raise rather than running a different criterion quietly**, because
+each would be *faster* than the correct behaviour and so invisible to any cost measurement:
+`dehnen_theta` (refuted, and it folds the criterion into `geometry.radius`, which the cross
+walk does not carry); a missing `adaptive_eps`; `local_walk="treecode"` (that walk takes no
+pair policy); and the eq (16a) force-scale modes. `dehnen_geometry_mode` is validated up
+front too — the sphere-fitting modes run a numpy host loop that cannot trace.
+
+**What is measured so far, and what it is worth.** Only CPU plumbing evidence. 2 forced
+devices, 1024/device, leaf 8, θ=0.5, order 4:
+
+| arm | self far | self near | cross far | force scale |
+|---|---|---|---|---|
+| geometric | 4 280 | 26 766 | 2 667 | — |
+| ε=1e-2 | 8 916 | **13 022** | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=3e-3 | 8 182 | 18 074 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=1e-3 | 6 426 | 23 190 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=3e-4 | 3 572 | 28 136 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=1e-4 | 1 502 | 30 868 | 2 667 | [1.28e+02, 1.99e+03] |
+| ε=1e-5 | 64 | 32 448 | 2 667 | [1.28e+02, 1.99e+03] |
+
+Strictly monotone in **both** directions with no overflow at any point, which is the
+validity gate trap 6 demands *before* any wall clock. The force scale is identical across
+every ε — correct, since `f_b` does not depend on ε, only the threshold does — and spans
+15.6× across nodes, which is what says it is not the unit-scale fallback. `cross_far` never
+moves: the self-only scope showing up exactly where it should. The criterion crosses the
+geometric arm's far count near ε ≈ 4×10⁻⁴. **This says nothing about accuracy.**
+
+**The θ-aware cap rule (PR #271) needs a criterion exception, and it now has one.**
+`_derive_walk_caps` scales every wavefront queue as `(0.4/θ)^1.5`, which is right whenever
+θ is what the walk accepts on. On the criterion's self walk it is not — `adaptive_pair_policy`
+deletes `mac_ok` outright — so a loose θ with a tight ε sizes the self queue from a knob that
+gates nothing, and that rule's own docstring says an under-provisioned queue truncates the
+walk **silently**, reading *faster* with only `self_near_pairs` as the witness. The self
+queue is therefore floored at θ=0.3, the tightest angle the law was fitted at, while the
+cross queue keeps tracking θ because the cross walk really is geometric. That is a floor,
+not a derivation: re-deriving the rule against the criterion still needs item 3 below.
+
+### 0b. The cross walk carries it too — **DONE, and it is where most of the win is**
+
+`yggdrax` PR #54 adds `pair_policy` to `dual_tree_walk_cross_impl`; jaccpot's
+`cross_policy_state` retargets the criterion's SOURCES onto the coarse (LET) tree while
+keeping the local cell's own `eps * min_b f_b` budget as the target. `mac_cross_criterion`
+(default on) keeps the self-only arm addressable, because the difference between the two
+arms is the measurement.
+
+**Three things this needed that the self walk did not**, each of which fails silently:
+
+- **A directed criterion.** `adaptive_pair_policy` symmetrises eq (16a) because the self
+  traversal emits both orientations. The cross walk emits `(target, source)` and never the
+  swap, and its two trees are DISJOINT INDEX SPACES — so the swapped call would index a
+  coarse-sized source array with a local node id, which JAX *clamps* rather than rejects.
+  `adaptive_cross_pair_policy` applies eq (16a) once, as written. It is a `functools.partial`
+  and not a field on `AdaptivePolicyState`: a bool in the state becomes a tracer the moment
+  the state crosses `jit`.
+- **A coarse source radius that bounds PARTICLES.** The coarse tree's `positions_sorted` are
+  remote leaf *centres of mass*, so every `resolve_dehnen_geometry` mode but `"runtime"`
+  would fit a radius to the COMs and under-bound the true source extent — and the criterion
+  would accept pairs whose source is far wider than it was told. **That is the cross-domain
+  far-field defect fixed in yggdrax PR #47, reachable again from here.**
+  `coarse_source_mac_geometry` takes the radius from `rct.geometry` and re-references it to
+  the expansion centre by `|c_com - c_geom| + rho_geom`.
+- **Order.** The criterion cross walk runs BEFORE the halo import, which is driven by the
+  cross NEAR list. Running it after would import the geometric arm's halo and evaluate the
+  criterion's near list against it: missing sources, every flag clear.
+
+**MEASURED, on 2 x A100, N = 1 048 576, order 4, theta 0.5, `nearfield_accum="wide"`,
+every arm with all overflow flags clear and a 65 536-particle fp64 probe.** Read at a
+matched MEDIAN (trap 9), interpolated inside an eps bracket that is interior in every case
+(`3e-5 .. 1e-4`), with the trap 3/8 guards enforced rather than assumed:
+
+**3 seeds at leaf 512 and 1024**, quoted `median [min, max]` as the record requires:
+
+| leaf | seeds | p99.99 gain | p99 gain | near-field work |
+|---|---|---|---|---|
+| 256 | 1 | 4.40x | 2.23x | 0.77x |
+| 512 | 3 | **6.58x** [5.56, 7.30] | 2.83x [2.73, 2.96] | 0.80x [0.80, 0.81] |
+| 1024 | 3 | **7.69x** [6.85, 7.88] | 2.93x [2.81, 3.18] | 0.88x [0.87, 0.88] |
+
+**This meets the accept condition at both leaf sizes** — p99.99 improved by >=5x with
+near-field work not increasing, every overflow flag clear and `self_near_pairs` monotone in
+`eps` at every point. Every seed is above 1x on every statistic.
+
+**What it does NOT establish is a leaf-size trend between 512 and 1024**: those two bands
+OVERLAP ([5.56, 7.30] against [6.85, 7.88]), so three seeds do not separate them. The
+single-GPU lane reports 2.7x -> 7.0x -> 21.8x across these three sizes with non-overlapping
+adjacent bands; here only the step from leaf 256 is clear. Do not quote a monotone
+leaf trend from this data — quote the bands.
+
+**The ablation is the point.** At leaf 256, self-only against self+cross:
+
+| arm | p99.99 gain | p99 gain | near-field work |
+|---|---|---|---|
+| self walk only | 1.87x | 1.47x | 1.06x (**more**) |
+| self + cross | 4.40x | 2.23x | 0.77x |
+
+Carrying the criterion across domains roughly **doubles** the tail gain and turns a 6 % work
+increase into a 23 % decrease. A self-only port would have measured 1.87x and looked like a
+weak result; that would have been a statement about half a port, not about the criterion.
+
+Artifacts: `bench/results/distributed_dehnen_mac/leafsweep_ndev2_1M_seed2026083{1}.json`
+and `..._seed2026090{1,2}.json`.
+
+**A truncated walk reads FASTER, and this run proved it again.** The first
+`eps=1e-3` arm at leaf 256 came back with `self_near = 827 536` and `ovf=True`; with the
+caps grown to clear the flag it is `1 293 194`. The truncated run reported 36 % LESS work
+than the correct one. Every number above is from a run with every flag clear.
+
+**AND IT GROWS WITH THE MESH, which is the port's whole premise measured rather than
+argued.** Cross-domain work is 31 % of the near field at two devices and 53 % at five, so a
+criterion that decides BOTH walks should gain more as the mesh grows. TOTAL N held fixed at
+1 048 576 so the device count is not confounded with N (1 seed at ndev=4):
+
+| leaf | ndev=2, 3 seeds | ndev=4, 1 seed |
+|---|---|---|
+| 512 | 6.58x [5.56, 7.30] | **8.80x** (work 0.74x) |
+| 1024 | 7.69x [6.85, 7.88] | **15.06x** (work 0.88x) |
+
+Both leaf sizes gain at four devices — leaf 512 lands above the entire two-device band, and
+leaf 1024 roughly doubles — with near-field work still falling. Artifact:
+`bench/results/distributed_dehnen_mac/ndevsweep_ndev4_1M_seed20260831.json`.
+
+**A jaccpot worktree always tests against the MAIN yggdrax checkout**, and no `PYTHONPATH`
+changes that: `tests/conftest.py` computes `YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"` and
+`sys.path.insert(0, ...)`, which lands ahead of anything the environment supplies. So the
+cross-domain tests SKIP in a worktree until yggdrax PR #54 is merged into
+`/export/home/tbuck/yggdrax`, and the GPU measurements above were taken by running the
+scripts directly (where `PYTHONPATH` does win) rather than under pytest.
+
+### 0c. The caps are CALIBRATED for the criterion — **DONE, and two were too SMALL**
+
+`_derive_walk_caps` was fitted against the geometric MAC and scales the queues as
+`(0.4/theta)^1.5`. Under the criterion theta gates nothing, so that rule was being driven
+by a knob that decides nothing — **in both directions**.
+
+Bisected 2026-08-31 on GPU: each cap walked down (or UP) with every other at 4x derived,
+until the walk truncated. Two witnesses per point — the buffer's own overflow flag AND the
+far/near counts against an untruncated reference — because a truncated walk reads FASTER and
+a flag is only a guard someone remembered to write. Four configurations, as coefficients on
+the structural quantity so the result extrapolates:
+
+| coefficient at floor | ndev2 l512 e1e-5 | ndev4 l512 e1e-5 | ndev2 l1024 e1e-5 | ndev2 l512 **e1e-3** | worst | shipped |
+|---|---|---|---|---|---|---|
+| self queue / wavefront | 2.00 | 2.91 | 1.46 | 2.00 | 2.91 | **3.0** |
+| self far / leaves | 0.50 | 1.00 | 0.50 | **1.00** | 1.00 | **1.25** |
+| self near / leaves | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | **1.25** |
+| cross queue / (sqrt(r)·wf) | 4.00 | 6.72 | 5.82 | 4.00 | 6.72 | **6.75** |
+| cross far / (r·leaves) | 1.00 | 0.67 | 0.50 | **1.00** | 1.00 | **1.25** |
+| cross near / (r·leaves) | 1.00 | **1.33** | 1.00 | 1.00 | 1.33 | **1.5** |
+
+Net effect: **queues 2–4x SMALLER** (the wavefront capacity sets per-iteration work in the
+traversal loop, so this is compute and not just memory) and the **far/near caps 2–4x
+LARGER**. The second half is not tuning, it is a correctness fix.
+
+**THREE THINGS THE MEASUREMENT FOUND THAT READING THE CODE WOULD NOT HAVE:**
+
+1. **`max_interactions_per_node` and `cross_max_interactions_per_node` were UNDER-provisioned
+   for the criterion.** Only `auto_scale_caps=True` was hiding it; with auto-scaling off the
+   cross far list truncates silently — faster, and wrong.
+2. **The far caps peak at LOOSE eps, not tight.** `self far` needs 0.5·leaves at eps=1e-5 and
+   1.0·leaves at eps=1e-3. Looser eps accepts far pairs higher in the tree — fewer but
+   bigger — so the per-node far list is largest in the MIDDLE of a usable grid. Calibrating
+   only at the tightest eps, which is the obvious choice because tighter means a deeper walk,
+   ships a cap that truncates at loose eps. This is trap 11's "do not read a falling far
+   count as a tightening criterion", one level out.
+3. **The linear `remote` factor on the cross near cap is not enough** — 1.33x at ndev 4. That
+   factor was never measured for the geometric MAC either (`_derive_walk_caps` says so), and
+   it is the one a five-device run leans on hardest.
+
+Coefficients are the SMALLEST keeping all 24 points at >=2x their floor, solved numerically.
+Choosing "worst observed x2" by hand looks equivalent and is not: the power-of-two rounding
+downstream compounds the coefficient, so a 2x margin picked on paper came out 4–8x.
+
+**VERIFIED with `auto_scale_caps=OFF`** — nothing may rescue an under-provisioned buffer —
+across 2 leaf sizes x 5 eps x 2 device counts: **20/20 configurations, zero flags**, including
+configurations outside the bisected set (ndev4/leaf1024 has num_leaves=256), so the
+coefficients extrapolate rather than merely fit. Artifacts:
+`bench/results/distributed_dehnen_mac/capcal_*.json`.
+
+**What is still missing before this is a paper number:** N=10^7 and 5 devices (this is 10^6
+on 2, where cross-domain work is 31 % of the near field rather than 53 %), and a matched
+WALL-CLOCK comparison rather than matched work. The seed count is now 3 at leaf 512 and
+1024, and 1 at leaf 256.
+
+**NOT DONE, in the order it should be done:**
+
+1. **Reproduce the single-GPU N=10⁶ / leaf 1024 numbers on today's `main`** before trusting
+   any new one. Not attempted here; it is a multi-hour GPU job.
+2. **Land the near-field accumulator fix (PR #273).** Without it leaf ≥1024 is
+   floor-limited rather than criterion-limited, and the criterion's advantage *grows* with
+   leaf size (2.7× → 7.0× → 21.8× across leaf 256 → 512 → 1024). Measuring the mesh port at
+   leaf 1024 in fp32 without it measures the fp32 floor.
+3. **Re-derive `_derive_walk_caps`.** It is calibrated against the geometric MAC at θ=0.4
+   and the criterion changes which pairs are near. Overflow is surfaced and
+   `auto_scale_caps` retries, so this is detectable rather than silent — but the rule needs
+   the N=10⁷ / 5-device measurement behind it.
+4. **The acceptance run**: N=10⁷ / 5 devices / leaf 512 and 1024, matched wall clock,
+   overflow flags clear and `self_near_pairs` monotone at every point (trap 6 governs this —
+   a wrong accept mask makes the run *faster*).
+5. **The cross walk**, if the self-only result is short of the bar — which, per the tail
+   argument above, is the expected outcome rather than a surprise.
 
 ### 1. The open question that decides the paper — does the benefit hold at Dehnen's ε?
 
@@ -772,10 +1023,37 @@ below ~3×10⁻⁶ at N=10⁶" — is a leaf-256 rule, not a general one.** Per 
 "distrust below ~2× that leaf's own measured floor", and the floor is what
 `bench/validation/leaf_sweep_common_target.py` reports and flags.
 
-**What to quote.** Leaf 1024 at N=10⁶ is the production configuration: eq (16b) via the
-O(N) estimator, p99.99 **43× [31, 71]** at **1.03×** work, 3 seeds, matched median 10⁻⁵.
-State the leaf size with it — item 2b's rule that the claim is meaningless without one
-applies here too, and the same criterion at leaf 256 is 5.3×.
+**What to quote.** Leaf 1024 at N=10⁶ is the production configuration **for this
+criterion's tail advantage**: eq (16b) via the O(N) estimator, p99.99 **43× [31, 71]** at
+**1.03×** work, 3 seeds, matched median 10⁻⁵. State the leaf size with it — item 2b's
+rule that the claim is meaningless without one applies here too, and the same criterion
+at leaf 256 is 5.3×.
+
+**Do not read that as a throughput recommendation, and the distinction is worth 2×.**
+Everything above measures *where the criterion helps most*, on Plummer and bulge+halo at
+p=8. On a **galaxy disc** the same leaf size costs about twice the evaluation. Measured
+independently (`bench/results/near_field/order_leaf_sweep_disc_*.json`, N=10⁶, order 4,
+fp32, large-N GPU lane, idle A100, `evaluate_median_seconds`; accuracy is `dehnen_rms`
+against a direct-sum reference):
+
+| θ | leaf 128 | leaf 1024 | ratio | rms @128 | rms @1024 |
+|---|---|---|---|---|---|
+| 0.5 | 0.612 s | 1.274 s | **2.08×** | 1.933e-4 | 1.940e-4 |
+| 0.6 | 0.484 s | 0.994 s | **2.05×** | 4.562e-4 | 3.158e-4 |
+| 0.7 | 0.431 s | 0.812 s | **1.88×** | 9.588e-4 | 7.258e-4 |
+
+At **θ=0.5 the two are at equal accuracy** (1.933e-4 against 1.940e-4, leaf 128
+marginally the better of the pair) and leaf 1024 costs 2.08× the time. At θ=0.6 and 0.7
+leaf 1024 does buy accuracy — 1.44× and 1.32× better rms — but at ~2× the evaluation,
+which is a trade to make deliberately rather than to inherit from this section. The
+curve over leaf 64/96/128/256/512/1024 at θ=0.6 is a **U with its minimum at leaf 128**
+(0.535 / 0.518 / 0.484 / 0.545 / 0.696 / 0.994 s), so it is not monotone in either
+direction and neither endpoint is a safe default.
+
+So: **leaf 1024 is where the criterion's advantage is largest; leaf 128 is what to run
+on a disc at order 4.** They are different questions measured on different problems, and
+the disc numbers do not contradict the sweep above — different distribution, different
+order, different metric.
 
 One caveat that did not exist before this sweep: **leaf 1024 is close to the largest leaf
 this measurement can reach in fp32**, so "bigger leaves keep helping" is *extrapolation
@@ -1475,6 +1753,51 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
    **constant** threshold across all nodes rather than an obviously wrong value.
    `_lane_probe.check_criterion_was_applied()` raises on it, and on a build that carried
    no `pair_policy` at all.
+16. **THE CAPS ARE A FUNCTION OF θ AND ε, so a θ- or ε-sweep with FIXED caps measures
+   the caps and not the knob.** This is the one that will bite the next distributed
+   sweep, and it bites runtime *and* accuracy at once.
+
+   Every traversal buffer is sized from `num_leaves`, `ndev` and — geometrically — θ.
+   But what the walk actually *needs* also moves with the acceptance knob, because the
+   knob is what sets how deep the walk descends:
+
+   - **Geometric arm:** the wavefront requirement scales as `θ^-1.5` (measured, PR #271).
+     A cap taken at θ=0.7 is a **2.8× under-estimate at θ=0.4**.
+   - **Criterion arm:** ε replaces θ, and the per-node *far* cap needs `0.5·num_leaves`
+     at ε=1e-5 but `1.0·num_leaves` at ε=1e-3 — a **2× swing across a usable grid**, and
+     it peaks in the MIDDLE, not at either end (looser ε accepts far pairs higher in the
+     tree: fewer but bigger). Bisected 2026-08-31, see item 0c.
+
+   So if you pass explicit caps — `--pair-queue`, `--cross-*`, a `cap_presets` entry,
+   anything that stops `resolved_for` from deriving them — and then sweep θ or ε, the
+   caps stay put while the requirement moves underneath them. At some point in the sweep
+   a buffer truncates, and truncation:
+
+   - **removes interactions, so the run gets FASTER**, and
+   - **changes the error**, usually for the worse but not always — dropping a diverged
+     contribution can make a point look *better*.
+
+   Either way the trend you plot is the cap, not the knob. A "θ improves runtime" or
+   "ε past here stops helping accuracy" reading is the classic shape of this.
+
+   **Rules:**
+
+   - **Leave the caps `None` across a knob sweep** so `resolved_for` re-derives them at
+     every point. That is what the derived rule is for.
+   - **Check the overflow flags at every point, before reading any timing or error.**
+     This is trap 6's discipline applied to the caps: nothing else in the output
+     distinguishes a truncated point from a fast one.
+   - **Never carry an explicit cap or a `cap_presets` entry across a θ or ε change.**
+     `cap_presets._key` carries `per_gpu_n`, `ndev`, θ, `leaf_size`, `mac_type` *and*
+     `adaptive_eps` for exactly this reason — every knob the requirement depends on is in
+     the key, so a preset from one point cannot be served to another. If you add a knob
+     that moves the caps, add it to the key in the same change.
+   - `auto_scale_caps=True` grows a cap and retries, which makes a sweep survive this —
+     but it also **hides** it. Two of the criterion's far caps were under-provisioned for
+     weeks of this branch's measurements and every flag read clear, because auto-scaling
+     was quietly fixing them. Use it for production runs; turn it **off** when the
+     question is whether the cap rule is right.
+
 15. **`preset="large_n_gpu"` pins `runtime_path="large_n"`.** So on the production preset
    every large-N lane decline *raises* instead of quietly falling back -- which is the
    behaviour you want, and also means the silent-decline branch is unreachable there and

@@ -1,0 +1,81 @@
+{
+  "sweep": "occupancy",
+  "level": "walk",
+  "args": {
+    "sweep": "occupancy",
+    "level": "walk",
+    "ndev": 2,
+    "per_device": 16384,
+    "leaf": 64,
+    "theta": 0.4,
+    "mac_type": "dehnen",
+    "order": 3,
+    "nearfield_backend": "baseline",
+    "seed": 9,
+    "process_block": 64,
+    "max_pair_queue": 32768,
+    "max_neighbors_per_leaf": 128,
+    "max_interactions_per_node": 512,
+    "tag": "q"
+  },
+  "jax": "0.10.2",
+  "x64": true,
+  "platform": [
+    "cpu"
+  ],
+  "host": "compgpu9",
+  "points": [
+    {
+      "n": 2048,
+      "leaf_size": 64,
+      "num_leaves": 32,
+      "total_nodes": 63,
+      "converged_pair_queue": null,
+      "pair_queue_per_leaf": null,
+      "far_pairs": 0,
+      "near_pairs": 992,
+      "max_far_per_node": 0,
+      "max_near_per_leaf": 31,
+      "overflow": false
+    },
+    {
+      "n": 8192,
+      "leaf_size": 64,
+      "num_leaves": 128,
+      "total_nodes": 255,
+      "converged_pair_queue": 4096,
+      "pair_queue_per_leaf": 32.0,
+      "far_pairs": 312,
+      "near_pairs": 15854,
+      "max_far_per_node": 21,
+      "max_near_per_leaf": 127,
+      "overflow": false
+    },
+    {
+      "n": 32768,
+      "leaf_size": 64,
+      "num_leaves": 512,
+      "total_nodes": 1023,
+      "converged_pair_queue": 32768,
+      "pair_queue_per_leaf": 64.0,
+      "far_pairs": 29850,
+      "near_pairs": 171174,
+      "max_far_per_node": 127,
+      "max_near_per_leaf": 511,
+      "overflow": false
+    },
+    {
+      "n": 131072,
+      "leaf_size": 64,
+      "num_leaves": 2048,
+      "total_nodes": 4095,
+      "converged_pair_queue": 262144,
+      "pair_queue_per_leaf": 128.0,
+      "far_pairs": 453236,
+      "near_pairs": 1415666,
+      "max_far_per_node": 496,
+      "max_near_per_leaf": 2047,
+      "overflow": false
+    }
+  ]
+}

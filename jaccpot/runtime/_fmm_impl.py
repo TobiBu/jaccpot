@@ -51,7 +51,7 @@ from __future__ import annotations
 import json
 import os
 import warnings
-from typing import Any, Literal, Mapping, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import jax
 from beartype import beartype
@@ -65,11 +65,13 @@ from yggdrax.interactions import (  # noqa: F401
 from yggdrax.tree import Tree, TreeType, available_tree_types
 
 from jaccpot.config import (
-    FMMExecutionBackend,
+    FarFieldConfig,
     FMMPreset,
     MACTypeInput,
     MemoryObjective,
-    TraversalOverrides,
+    NearFieldConfig,
+    RuntimePolicyConfig,
+    TreeConfig,
 )
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.operators.complex_ops import (  # noqa: F401
@@ -304,36 +306,8 @@ class FMMEngine(
     mac_type : MACTypeInput
         Multipole acceptance criterion, e.g. ``"bh"`` or ``"dehnen"``. Lives here
         rather than in a group because it straddles traversal and accuracy.
-    complex_rotation : str
-        Rotation backend for the complex basis; must be ``"solidfmm"`` there.
     dehnen_radius_scale : float
         Scale applied to node radii in the Dehnen MAC.
-    m2l_chunk_size : Optional[int]
-        Pairs per chunk in the chunked M2L ``lax.scan``. A memory/throughput knob;
-        it bounds peak memory rather than changing the result.
-    l2l_chunk_size : Optional[int]
-        The same for the L2L cascade.
-    max_pair_queue : Optional[int]
-        Capacity of the dual-tree pair queue.
-    pair_process_block : Optional[int]
-        Legacy override for the traversal process-block width.
-    traversal_config : Optional[Union[DualTreeTraversalConfig, TraversalOverrides, Mapping[str, int]]]
-        Traversal capacities -- see the note above for the two accepted forms and
-        why they behave differently.
-    tree_build_mode : Optional[str]
-        Which builder constructs the tree. ``None`` takes the default, ``"lbvh"``;
-        ``"fixed_depth"`` enables the refinement knobs below.
-    tree_type : str
-        Yggdrax tree family, e.g. ``"radix"`` (the production default) or
-        ``"kdtree"``.
-    target_leaf_particles : Optional[int]
-        Desired particle count per leaf for the fixed-depth builder. At least 1.
-    refine_local : Optional[bool]
-        Enable the host-side refinement pass that splits elongated leaves.
-    max_refine_levels : Optional[int]
-        Depth cap for that refinement pass.
-    aspect_threshold : Optional[float]
-        Leaf aspect ratio above which refinement splits a leaf.
     interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
         Called once per dual-tree retry, when the traversal overflows its pair
         capacity and re-runs with a larger one. Purely observational -- use it to
@@ -341,69 +315,9 @@ class FMMEngine(
     use_dense_interactions : Optional[bool]
         Materialize the interaction list densely rather than as a compact list --
         faster for small trees, quadratic in memory for large ones.
-    grouped_interactions : Optional[bool]
-        Group M2L pairs into displacement classes so one rotation block serves a
-        whole class. Requires geometric (not centre-of-mass) expansion centres,
-        because the classification quantises pair displacements onto a lattice and
-        applies one representative displacement per class.
-    retain_far_pairs_for_grad : bool
-        Keep the frozen M2L pair list on the prepared state so a gradient path can
-        re-run the downward sweep against it. Costs ~24 B/pair of steady-state
-        memory, so it is off by default (the large-N preset targets minimum memory);
-        **required** to differentiate the large-N path.
-    farfield_mode : FarFieldMode
-        Far-field interaction mode; ``"auto"`` lets the runtime choose.
-    streamed_far_pairs : Optional[bool]
-        Stream the far-pair list instead of materialising it, trading recompute for
-        peak memory.
-    mixed_order_farfield : bool
-        Allow the far field to use a lower expansion order on well-separated pairs,
-        floored by ``mixed_order_min_order``.
-    mixed_order_min_order : Optional[int]
-        Floor on the per-pair order when ``mixed_order`` is on.
-    nearfield_mode : NearFieldMode
-        Near-field interaction mode; ``"auto"`` lets the runtime choose.
     runtime_path : Literal['auto', 'large_n']
         ``"auto"`` or ``"large_n"``. Forcing ``"large_n"`` selects the memory-lean
         lane regardless of particle count.
-    execution_backend : FMMExecutionBackend
-        ``"auto"``, ``"radix"`` or ``"octree"``. ``"auto"`` may choose; an explicit
-        request is honoured or fails loudly, never silently substituted.
-    nearfield_edge_chunk_size : int
-        Pairs per chunk in the bucketed near-field kernel. A memory/throughput knob;
-        it does not change the result.
-    precompute_nearfield_scatter_schedules : bool
-        Build the near-field scatter schedules at prepare time rather than per
-        evaluation. Trades prepare-time memory for per-call throughput.
-    memory_objective : MemoryObjective
-        ``"balanced"``, ``"throughput"`` or ``"minimum_memory"``; steers the chunk-
-        size and streaming defaults.
-    memory_budget_bytes : Optional[int]
-        Advisory ceiling used when resolving those defaults.
-    enable_interaction_cache : bool
-        Reuse the process-level interaction-list cache across calls.
-    retain_traversal_result : bool
-        Keep the dual-tree walk result on the prepared state.
-    retain_interactions : bool
-        Keep the resolved M2L interaction list on the prepared state.
-    prepare_stage_memory_split_enabled : Optional[bool]
-        Split the prepare stage to lower peak memory at some throughput cost.
-    autotune_m2l_chunk : bool
-        Measure and pick the M2L chunk size at prepare time. Off by default, and
-        consequently the autotune path is thinly covered.
-    precompute_grouped_class_segments : Optional[bool]
-        Build grouped-class segment tables at prepare time.
-    grouped_schedule_budget_bytes : Optional[int]
-        Byte budget above which grouped-class precomputation is skipped.
-    nearfield_schedule_item_cap : Optional[int]
-        Item cap above which the near-field scatter schedules fall back to being
-        recomputed per evaluation.
-    upward_leaf_batch_size : Optional[int]
-        Leaves per batch in the P2M sweep.
-    host_refine_mode : str
-        Whether leaf refinement runs on the host, on device, or by policy.
-    fail_fast : bool
-        Raise instead of falling back when a requested configuration cannot run.
     preset : Optional[Union[str, FMMPreset]]
         Named configuration bundle applied before the individual keywords above. An
         enum member or its string value.
@@ -412,15 +326,67 @@ class FMMEngine(
     fixed_max_leaf_size : Optional[int]
         Pin the maximum leaf size, bypassing preset selection.
 
+    farfield : Optional[FarFieldConfig]
+        The far-field group: grouping mode, rotation, the M2L/L2L chunk sizes,
+        streamed far pairs, mixed-order settings and gradient retention.
+        ``None`` means ``FarFieldConfig()``.
+
+        Three names differ (``mode``, ``rotation``, ``mixed_order``) and one
+        **default** does: ``FarFieldConfig.rotation`` is ``None`` where this
+        constructor defaulted to ``"solidfmm"``. ``None`` means "not
+        overridden", so it is resolved at the unpack -- the same resolution the
+        facade already performs at ``solver.py:445-447``. This is the second of
+        the four groups where the field-by-field default check caught a
+        difference the names alone would not have shown.
+    tree : Optional[TreeConfig]
+        Tree construction as one group: type, build mode, leaf target, and the
+        local-refinement knobs. ``None`` means ``TreeConfig()``.
+
+        Two names differ (``mode`` for ``tree_build_mode``, ``leaf_target`` for
+        ``target_leaf_particles``) and, uniquely among the groups so far, one
+        **default** differs: ``TreeConfig.tree_type`` is ``None`` where this
+        constructor defaulted to ``"radix"``. ``None`` there means "not
+        overridden", so the default is resolved at the unpack -- the same
+        ``or "radix"`` the facade already applies. Without that, every caller
+        omitting the group would silently get ``tree_type=None``. The field-by-
+        field default check across the mapping is what caught it.
+    nearfield : Optional[NearFieldConfig]
+        The near-field trio as one group: mode, edge chunk size and whether the
+        scatter schedules are precomputed. ``None`` means ``NearFieldConfig()``,
+        whose three defaults were checked against the flat parameters this
+        replaced before the swap. Note the names differ -- the class drops the
+        redundant ``nearfield_`` prefix -- so this is a rename mapping rather
+        than the straight pass-through ``runtime_policy`` gets; the mapping is
+        stated in full where the group is unpacked. Fields are documented on
+        :class:`jaccpot.config.NearFieldConfig`.
+    runtime_policy : Optional[RuntimePolicyConfig]
+        The seventeen execution-policy knobs, as one frozen group: backend and
+        host-refine mode, ``fail_fast``, the memory objective and budget, the
+        traversal capacities and overrides, the cache/retention flags, the
+        autotune switch and the schedule budgets. ``None`` means
+        ``RuntimePolicyConfig()``, whose defaults were checked field by field
+        against the flat parameters this replaced -- all seventeen matched, so
+        omitting it is exactly the old behaviour. Each field is documented on
+        :class:`jaccpot.config.RuntimePolicyConfig`, which is the public
+        vocabulary the facade already builds; this signature used to flatten it
+        back out into seventeen keywords, and that duplication is what audit F09
+        called unreviewable.
+
     Raises
     ------
     ValueError
         If any option above is outside its documented domain. The checks are
         spread across the ``_resolve_*`` helpers, so the message names the
-        offending knob rather than pointing here.
+        offending knob rather than pointing here. ``__init__`` itself now
+        contains no ``raise`` at all -- every validation lives in a helper --
+        which is why the ``def`` line below carries ``noqa: DOC502``. The
+        section stays because it is accurate for a caller: constructing with a
+        bad value does raise. The suppression is targeted at this one class
+        rather than turning ``--skip-checking-raises`` on repo-wide, which
+        would stop the check everywhere to fix it in one place.
     """
 
-    def __init__(
+    def __init__(  # noqa: DOC502
         self: "FMMEngine",
         theta: float = 0.5,
         G: float = 1.0,
@@ -446,54 +412,85 @@ class FMMEngine(
         # fourth value, "dehnen_error", which `_base_mac_type()` maps to "dehnen"
         # before the traversal sees it. See the alias.
         mac_type: MACTypeInput = "bh",
-        complex_rotation: str = "solidfmm",  # "cached",
         dehnen_radius_scale: float = 1.0,
-        m2l_chunk_size: Optional[int] = None,
-        l2l_chunk_size: Optional[int] = None,
-        max_pair_queue: Optional[int] = None,
-        pair_process_block: Optional[int] = None,
         # DualTreeTraversalConfig (replace all four capacities), or a
         # TraversalOverrides / mapping of named capacities (merge onto the
         # preset's resolved sizing). See normalize_traversal_config_request.
-        traversal_config: Optional[
-            Union[DualTreeTraversalConfig, TraversalOverrides, Mapping[str, int]]
-        ] = None,
-        tree_build_mode: Optional[str] = None,
-        tree_type: str = "radix",
-        target_leaf_particles: Optional[int] = None,
-        refine_local: Optional[bool] = None,
-        max_refine_levels: Optional[int] = None,
-        aspect_threshold: Optional[float] = None,
         interaction_retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
         use_dense_interactions: Optional[bool] = None,
-        grouped_interactions: Optional[bool] = None,
-        retain_far_pairs_for_grad: bool = False,
-        farfield_mode: FarFieldMode = "auto",
-        streamed_far_pairs: Optional[bool] = None,
-        mixed_order_farfield: bool = False,
-        mixed_order_min_order: Optional[int] = None,
-        nearfield_mode: NearFieldMode = "auto",
         runtime_path: Literal["auto", "large_n"] = "auto",
-        execution_backend: FMMExecutionBackend = "auto",
-        nearfield_edge_chunk_size: int = 256,
-        precompute_nearfield_scatter_schedules: bool = True,
-        memory_objective: MemoryObjective = "balanced",
-        memory_budget_bytes: Optional[int] = None,
-        enable_interaction_cache: bool = True,
-        retain_traversal_result: bool = True,
-        retain_interactions: bool = True,
-        prepare_stage_memory_split_enabled: Optional[bool] = None,
-        autotune_m2l_chunk: bool = False,
-        precompute_grouped_class_segments: Optional[bool] = None,
-        grouped_schedule_budget_bytes: Optional[int] = None,
-        nearfield_schedule_item_cap: Optional[int] = None,
-        upward_leaf_batch_size: Optional[int] = None,
-        host_refine_mode: str = "auto",
-        fail_fast: bool = False,
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
+        farfield: Optional[FarFieldConfig] = None,
+        tree: Optional[TreeConfig] = None,
+        nearfield: Optional[NearFieldConfig] = None,
+        runtime_policy: Optional[RuntimePolicyConfig] = None,
     ):
+        # The seventeen execution-policy knobs arrive as one frozen group
+        # (audit F09). Unpacked into the same locals the flat parameters used,
+        # so every line below this point is untouched and the resolution order
+        # is unchanged. RuntimePolicyConfig's defaults were verified field by
+        # field against the flat defaults before the swap -- all seventeen
+        # matched, so a caller who omits the group gets exactly what it got.
+        _policy = RuntimePolicyConfig() if runtime_policy is None else runtime_policy
+        # The near-field trio arrives as one group too (audit F09). Unlike the
+        # policy group above, the names differ: NearFieldConfig drops the
+        # redundant `nearfield_` prefix inside a class already called that. The
+        # mapping below is the whole of it, and all three defaults were checked
+        # against the flat ones before the swap.
+        # The tree group. Two of its names differ (`mode` for `tree_build_mode`,
+        # `leaf_target` for `target_leaf_particles`) and one DEFAULT differs, which
+        # is the first time the field-by-field check across a mapping has caught
+        # something: TreeConfig.tree_type defaults to None where this constructor
+        # defaulted to "radix". None there means "not overridden", so the default
+        # is resolved here -- the same `or "radix"` the facade already applies at
+        # `solver.py`'s construction call. Without this line every caller who omits
+        # the group would silently get tree_type=None instead of "radix".
+        # The far-field group, last of the four (audit F09). Three names differ
+        # (`mode`, `rotation`, `mixed_order`) and, like the tree group, one
+        # DEFAULT differs: FarFieldConfig.rotation is None where this constructor
+        # defaulted to "solidfmm". Resolved here exactly as the facade already
+        # resolves it at `solver.py:445-447` -- None means "not overridden".
+        _ff = FarFieldConfig() if farfield is None else farfield
+        grouped_interactions = _ff.grouped_interactions
+        farfield_mode = _ff.mode
+        complex_rotation = "solidfmm" if _ff.rotation is None else _ff.rotation
+        m2l_chunk_size = _ff.m2l_chunk_size
+        l2l_chunk_size = _ff.l2l_chunk_size
+        streamed_far_pairs = _ff.streamed_far_pairs
+        mixed_order_farfield = _ff.mixed_order
+        mixed_order_min_order = _ff.mixed_order_min_order
+        retain_far_pairs_for_grad = _ff.retain_far_pairs_for_grad
+        _tree = TreeConfig() if tree is None else tree
+        tree_type = "radix" if _tree.tree_type is None else _tree.tree_type
+        tree_build_mode = _tree.mode
+        target_leaf_particles = _tree.leaf_target
+        refine_local = _tree.refine_local
+        max_refine_levels = _tree.max_refine_levels
+        aspect_threshold = _tree.aspect_threshold
+        _nf = NearFieldConfig() if nearfield is None else nearfield
+        nearfield_mode = _nf.mode
+        nearfield_edge_chunk_size = _nf.edge_chunk_size
+        precompute_nearfield_scatter_schedules = _nf.precompute_scatter_schedules
+        execution_backend = _policy.execution_backend
+        host_refine_mode = _policy.host_refine_mode
+        fail_fast = _policy.fail_fast
+        memory_objective = _policy.memory_objective
+        memory_budget_bytes = _policy.memory_budget_bytes
+        max_pair_queue = _policy.max_pair_queue
+        pair_process_block = _policy.pair_process_block
+        traversal_config = _policy.traversal_config
+        enable_interaction_cache = _policy.enable_interaction_cache
+        retain_traversal_result = _policy.retain_traversal_result
+        retain_interactions = _policy.retain_interactions
+        prepare_stage_memory_split_enabled = _policy.prepare_stage_memory_split_enabled
+        autotune_m2l_chunk = _policy.autotune_m2l_chunk
+        precompute_grouped_class_segments = _policy.precompute_grouped_class_segments
+        grouped_schedule_budget_bytes = _policy.grouped_schedule_budget_bytes
+        nearfield_schedule_item_cap = _policy.nearfield_schedule_item_cap
+        upward_leaf_batch_size = _policy.upward_leaf_batch_size
+
         self._validate_expansion_family(
             adaptive_order=adaptive_order,
             basis_impl=basis_impl,
@@ -520,47 +517,25 @@ class FMMEngine(
             mixed_order_min_order=mixed_order_min_order,
             streamed_far_pairs=streamed_far_pairs,
         )
-        nearfield_mode_norm = str(nearfield_mode).strip().lower()
-        if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
-            raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
-        runtime_path_norm = str(runtime_path).strip().lower()
-        if runtime_path_norm not in ("auto", "large_n"):
-            raise ValueError("runtime_path must be 'auto' or 'large_n'")
-        execution_backend_norm = str(execution_backend).strip().lower()
-        if execution_backend_norm not in ("auto", "radix", "octree"):
-            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
-        if int(nearfield_edge_chunk_size) <= 0:
-            raise ValueError("nearfield_edge_chunk_size must be positive")
-        self.nearfield_mode = nearfield_mode_norm
-        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
-        self.runtime_path = runtime_path_norm
-        self.execution_backend = execution_backend_norm
-        self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
-        self.precompute_nearfield_scatter_schedules = bool(
-            precompute_nearfield_scatter_schedules
+        self._resolve_lane_modes(
+            nearfield_mode=nearfield_mode,
+            runtime_path=runtime_path,
+            execution_backend=execution_backend,
+            nearfield_edge_chunk_size=nearfield_edge_chunk_size,
+            precompute_nearfield_scatter_schedules=(
+                precompute_nearfield_scatter_schedules
+            ),
         )
-        objective_norm = str(memory_objective).strip().lower()
-        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
-            raise ValueError(
-                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
-            )
-        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
-        self._explicit_memory_objective = objective_norm != "balanced"
-        self.memory_budget_bytes = (
-            None if memory_budget_bytes is None else int(memory_budget_bytes)
+        self._resolve_memory_and_cache_options(
+            memory_objective=memory_objective,
+            memory_budget_bytes=memory_budget_bytes,
+            enable_interaction_cache=enable_interaction_cache,
+            retain_traversal_result=retain_traversal_result,
+            retain_interactions=retain_interactions,
+            prepare_stage_memory_split_enabled=prepare_stage_memory_split_enabled,
+            fail_fast=fail_fast,
+            autotune_m2l_chunk=autotune_m2l_chunk,
         )
-        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
-            raise ValueError("memory_budget_bytes must be > 0 when provided")
-        self.enable_interaction_cache = bool(enable_interaction_cache)
-        self.retain_traversal_result = bool(retain_traversal_result)
-        self.retain_interactions = bool(retain_interactions)
-        self.prepare_stage_memory_split_enabled = (
-            None
-            if prepare_stage_memory_split_enabled is None
-            else bool(prepare_stage_memory_split_enabled)
-        )
-        self.fail_fast = bool(fail_fast)
-        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
         self._resolve_schedule_budgets(
             grouped_schedule_budget_bytes=grouped_schedule_budget_bytes,
             nearfield_schedule_item_cap=nearfield_schedule_item_cap,
@@ -910,6 +885,151 @@ class FMMEngine(
             and int(self.mixed_order_min_order) < 0
         ):
             raise ValueError("mixed_order_min_order must be >= 0")
+
+    def _resolve_lane_modes(
+        self,
+        *,
+        nearfield_mode: str,
+        runtime_path: str,
+        execution_backend: str,
+        nearfield_edge_chunk_size: int,
+        precompute_nearfield_scatter_schedules: bool,
+    ) -> None:
+        """Normalise and validate the three lane-selection strings.
+
+        Extracted verbatim from ``__init__`` (audit **F09**) and called in the
+        original position, so the resolution order is unchanged. Characterised
+        first by ``tests/unit/runtime/test_engine_config_resolution.py``.
+
+        ``_explicit_nearfield_mode`` records whether the caller named a value, so
+        the policy layer can tell "left at auto" from "asked for auto". It is
+        computed as ``!= "auto"``, which means naming ``"auto"`` reads as *not*
+        explicit -- carried over unchanged, and pinned by that test.
+
+        Parameters
+        ----------
+        nearfield_mode : str
+            Passed through from ``__init__`` unchanged.
+        runtime_path : str
+            Passed through from ``__init__`` unchanged.
+        execution_backend : str
+            Passed through from ``__init__`` unchanged.
+        nearfield_edge_chunk_size : int
+            Passed through from ``__init__`` unchanged.
+        precompute_nearfield_scatter_schedules : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If any lane string is unrecognised, or the edge chunk size is not
+            positive -- same messages as before the extraction.
+        """
+        nearfield_mode_norm = str(nearfield_mode).strip().lower()
+        if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
+            raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
+        runtime_path_norm = str(runtime_path).strip().lower()
+        if runtime_path_norm not in ("auto", "large_n"):
+            raise ValueError("runtime_path must be 'auto' or 'large_n'")
+        execution_backend_norm = str(execution_backend).strip().lower()
+        if execution_backend_norm not in ("auto", "radix", "octree"):
+            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
+        if int(nearfield_edge_chunk_size) <= 0:
+            raise ValueError("nearfield_edge_chunk_size must be positive")
+        self.nearfield_mode = nearfield_mode_norm
+        self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
+        self.runtime_path = runtime_path_norm
+        self.execution_backend = execution_backend_norm
+        self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
+        self.precompute_nearfield_scatter_schedules = bool(
+            precompute_nearfield_scatter_schedules
+        )
+
+    def _resolve_memory_and_cache_options(
+        self,
+        *,
+        memory_objective: str,
+        memory_budget_bytes: Optional[int],
+        enable_interaction_cache: bool,
+        retain_traversal_result: bool,
+        retain_interactions: bool,
+        prepare_stage_memory_split_enabled: Optional[bool],
+        fail_fast: bool,
+        autotune_m2l_chunk: bool,
+    ) -> None:
+        """Resolve the memory objective, retention flags and the strict-lane pair.
+
+        Extracted verbatim from ``__init__`` (audit **F09**), called in the
+        original position.
+
+        ``fail_fast`` and ``autotune_m2l_chunk`` are resolved **here, together,
+        and in this order** on purpose: the second reads ``self.fail_fast`` set
+        by the first, because a timing-driven chunk search inside the lane whose
+        purpose is to fail rather than adapt would be a contradiction. Splitting
+        them across two helpers, or calling them the other way round, leaves the
+        autotune silently on under ``fail_fast`` and nothing else in the
+        constructor notices. That is the "resolution order" sensitivity F09
+        flags, and it is pinned in both directions by
+        ``tests/unit/runtime/test_engine_config_resolution.py``.
+
+        Parameters
+        ----------
+        memory_objective : str
+            Passed through from ``__init__`` unchanged.
+        memory_budget_bytes : Optional[int]
+            Passed through from ``__init__`` unchanged.
+        enable_interaction_cache : bool
+            Passed through from ``__init__`` unchanged.
+        retain_traversal_result : bool
+            Passed through from ``__init__`` unchanged.
+        retain_interactions : bool
+            Passed through from ``__init__`` unchanged.
+        prepare_stage_memory_split_enabled : Optional[bool]
+            Passed through from ``__init__`` unchanged. ``None`` means "let the
+            policy decide" and stays distinct from ``False``.
+        fail_fast : bool
+            Passed through from ``__init__`` unchanged.
+        autotune_m2l_chunk : bool
+            Passed through from ``__init__`` unchanged.
+
+        Returns
+        -------
+        None
+            Mutates ``self`` in place, exactly as the inlined code did.
+
+        Raises
+        ------
+        ValueError
+            If the objective is unrecognised, or a supplied memory budget is not
+            positive -- same messages as before the extraction.
+        """
+        objective_norm = str(memory_objective).strip().lower()
+        if objective_norm not in ("balanced", "throughput", "minimum_memory"):
+            raise ValueError(
+                "memory_objective must be 'balanced', 'throughput', or 'minimum_memory'"
+            )
+        self.memory_objective: MemoryObjective = objective_norm  # type: ignore[assignment]
+        self._explicit_memory_objective = objective_norm != "balanced"
+        self.memory_budget_bytes = (
+            None if memory_budget_bytes is None else int(memory_budget_bytes)
+        )
+        if self.memory_budget_bytes is not None and self.memory_budget_bytes <= 0:
+            raise ValueError("memory_budget_bytes must be > 0 when provided")
+        self.enable_interaction_cache = bool(enable_interaction_cache)
+        self.retain_traversal_result = bool(retain_traversal_result)
+        self.retain_interactions = bool(retain_interactions)
+        self.prepare_stage_memory_split_enabled = (
+            None
+            if prepare_stage_memory_split_enabled is None
+            else bool(prepare_stage_memory_split_enabled)
+        )
+        self.fail_fast = bool(fail_fast)
+        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
 
     def _resolve_schedule_budgets(
         self,

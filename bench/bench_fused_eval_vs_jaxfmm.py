@@ -125,7 +125,14 @@ def main() -> None:
     import jax.numpy as jnp
     import numpy as np
 
-    from jaccpot import FastMultipoleMethod
+    from jaccpot import (
+        FarFieldConfig,
+        FastMultipoleMethod,
+        FMMAdvancedConfig,
+        NearFieldConfig,
+        RuntimePolicyConfig,
+        TreeConfig,
+    )
 
     try:
         from jaxfmm.fmm import eval_potential
@@ -192,15 +199,21 @@ def main() -> None:
                 solver = FastMultipoleMethod(
                     preset="large_n_gpu",
                     runtime_path="large_n",
-                    expansion_basis="solidfmm",
-                    complex_rotation="solidfmm",
+                    basis="solidfmm",
                     theta=args.theta,
-                    nearfield_mode="bucketed",
-                    nearfield_edge_chunk_size=64,
-                    grouped_interactions=False,
                     working_dtype=jnp.float32,
-                    tree_build_mode="static_radix",
-                    fixed_order=args.p,
+                    advanced=FMMAdvancedConfig(
+                        tree=TreeConfig(mode="static_radix"),
+                        farfield=FarFieldConfig(
+                            rotation="solidfmm",
+                            grouped_interactions=False,
+                        ),
+                        nearfield=NearFieldConfig(
+                            mode="bucketed",
+                            edge_chunk_size=64,
+                        ),
+                        runtime=RuntimePolicyConfig(fixed_order=args.p),
+                    ),
                     use_pallas=bool(use_pallas),
                 )
                 prepared, eval_fn = solver.strict_fused_prepared_eval_fn(

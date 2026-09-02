@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 from dataclasses import replace
-from typing import Any, Callable, Literal, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+    overload,
+)
 
 import jax
 import jax.numpy as jnp
@@ -14,9 +25,12 @@ from ._env import env_flag
 from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
 from .config import (
     Basis,
+    FarFieldConfig,
     FMMAdvancedConfig,
     FMMPreset,
     GradConfig,
+    NearFieldConfig,
+    TreeConfig,
 )
 from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FMMEngine as _RuntimeFMM
@@ -376,10 +390,11 @@ class _LegacyRuntimeOverrides(NamedTuple):
         Bucketed near-field chunk size. Legacy name:
         ``nearfield_edge_chunk_size``.
     fixed_order : Optional[int]
-        Legacy-only: there is no modern spelling, so this is ``None`` unless
-        ``fixed_order`` was passed.
+        Resolved evaluate-stage expansion order. Modern value, overridden by
+        legacy ``fixed_order``.
     fixed_max_leaf_size : Optional[int]
-        Legacy-only, as above, for ``fixed_max_leaf_size``.
+        Resolved evaluate-stage leaf-size cap. Modern value, overridden by legacy
+        ``fixed_max_leaf_size``.
     legacy_used : bool
         Threaded in and out so both poppers contribute to one warning decision.
     """
@@ -509,15 +524,21 @@ def _pop_legacy_runtime_overrides(
         nearfield_edge_chunk_size = int(legacy_nf_chunk)
         legacy_used = True
 
-    fixed_order = legacy_kwargs.pop("fixed_order", None)
+    fixed_order = advanced_cfg.runtime.fixed_order
+    legacy_fixed_order = legacy_kwargs.pop("fixed_order", None)
+    if legacy_fixed_order is not None:
+        fixed_order = legacy_fixed_order
+        legacy_used = True
     if fixed_order is not None:
         fixed_order = int(fixed_order)
-        legacy_used = True
 
-    fixed_max_leaf_size = legacy_kwargs.pop("fixed_max_leaf_size", None)
+    fixed_max_leaf_size = advanced_cfg.runtime.fixed_max_leaf_size
+    legacy_leaf_cap = legacy_kwargs.pop("fixed_max_leaf_size", None)
+    if legacy_leaf_cap is not None:
+        fixed_max_leaf_size = legacy_leaf_cap
+        legacy_used = True
     if fixed_max_leaf_size is not None:
         fixed_max_leaf_size = int(fixed_max_leaf_size)
-        legacy_used = True
 
     return _LegacyRuntimeOverrides(
         complex_rotation=complex_rotation,
@@ -766,83 +787,122 @@ class FastMultipoleMethod:
             adaptive_eps=adaptive_eps,
             dehnen_geometry_mode=dehnen_geometry_mode,
             mac_theta_max=mac_theta_max,
-            complex_rotation=runtime_overrides.complex_rotation,
-            tree_type=runtime_overrides.tree_type or "radix",
-            execution_backend=runtime_overrides.execution_backend,
-            tree_build_mode=runtime_overrides.tree_mode,
-            target_leaf_particles=runtime_overrides.target_leaf_particles,
-            refine_local=legacy_kwargs.pop(
-                "refine_local", advanced_cfg.tree.refine_local
+            farfield=FarFieldConfig(
+                rotation=runtime_overrides.complex_rotation,
+                grouped_interactions=runtime_overrides.grouped_interactions,
+                retain_far_pairs_for_grad=legacy_kwargs.pop(
+                    "retain_far_pairs_for_grad",
+                    advanced_cfg.farfield.retain_far_pairs_for_grad,
+                ),
+                mode=runtime_overrides.farfield_mode,
+                streamed_far_pairs=legacy_kwargs.pop(
+                    "streamed_far_pairs", advanced_cfg.farfield.streamed_far_pairs
+                ),
+                mixed_order=legacy_kwargs.pop(
+                    "mixed_order_farfield", advanced_cfg.farfield.mixed_order
+                ),
+                mixed_order_min_order=legacy_kwargs.pop(
+                    "mixed_order_min_order", advanced_cfg.farfield.mixed_order_min_order
+                ),
+                m2l_chunk_size=legacy_kwargs.pop(
+                    "m2l_chunk_size", advanced_cfg.farfield.m2l_chunk_size
+                ),
+                l2l_chunk_size=legacy_kwargs.pop(
+                    "l2l_chunk_size", advanced_cfg.farfield.l2l_chunk_size
+                ),
             ),
-            max_refine_levels=legacy_kwargs.pop(
-                "max_refine_levels",
-                advanced_cfg.tree.max_refine_levels,
+            tree=TreeConfig(
+                tree_type=runtime_overrides.tree_type or "radix",
+                mode=runtime_overrides.tree_mode,
+                leaf_target=runtime_overrides.target_leaf_particles,
+                refine_local=legacy_kwargs.pop(
+                    "refine_local", advanced_cfg.tree.refine_local
+                ),
+                max_refine_levels=legacy_kwargs.pop(
+                    "max_refine_levels", advanced_cfg.tree.max_refine_levels
+                ),
+                aspect_threshold=legacy_kwargs.pop(
+                    "aspect_threshold", advanced_cfg.tree.aspect_threshold
+                ),
             ),
-            aspect_threshold=legacy_kwargs.pop(
-                "aspect_threshold",
-                advanced_cfg.tree.aspect_threshold,
+            runtime_policy=dataclasses.replace(
+                advanced_cfg.runtime,
+                execution_backend=runtime_overrides.execution_backend,
+                host_refine_mode=legacy_kwargs.pop(
+                    "host_refine_mode", advanced_cfg.runtime.host_refine_mode
+                ),
+                fail_fast=bool(
+                    legacy_kwargs.pop("fail_fast", advanced_cfg.runtime.fail_fast)
+                ),
+                memory_objective=str(
+                    legacy_kwargs.pop(
+                        "memory_objective", advanced_cfg.runtime.memory_objective
+                    )
+                ),
+                memory_budget_bytes=legacy_kwargs.pop(
+                    "memory_budget_bytes", advanced_cfg.runtime.memory_budget_bytes
+                ),
+                max_pair_queue=legacy_kwargs.pop(
+                    "max_pair_queue", advanced_cfg.runtime.max_pair_queue
+                ),
+                pair_process_block=legacy_kwargs.pop(
+                    "pair_process_block", advanced_cfg.runtime.pair_process_block
+                ),
+                traversal_config=legacy_kwargs.pop(
+                    "traversal_config", traversal_config
+                ),
+                enable_interaction_cache=bool(
+                    legacy_kwargs.pop(
+                        "enable_interaction_cache",
+                        advanced_cfg.runtime.enable_interaction_cache,
+                    )
+                ),
+                retain_traversal_result=bool(
+                    legacy_kwargs.pop(
+                        "retain_traversal_result",
+                        advanced_cfg.runtime.retain_traversal_result,
+                    )
+                ),
+                retain_interactions=bool(
+                    legacy_kwargs.pop(
+                        "retain_interactions", advanced_cfg.runtime.retain_interactions
+                    )
+                ),
+                prepare_stage_memory_split_enabled=legacy_kwargs.pop(
+                    "prepare_stage_memory_split_enabled",
+                    advanced_cfg.runtime.prepare_stage_memory_split_enabled,
+                ),
+                autotune_m2l_chunk=bool(
+                    legacy_kwargs.pop(
+                        "autotune_m2l_chunk", advanced_cfg.runtime.autotune_m2l_chunk
+                    )
+                ),
+                precompute_grouped_class_segments=legacy_kwargs.pop(
+                    "precompute_grouped_class_segments",
+                    advanced_cfg.runtime.precompute_grouped_class_segments,
+                ),
+                grouped_schedule_budget_bytes=legacy_kwargs.pop(
+                    "grouped_schedule_budget_bytes",
+                    advanced_cfg.runtime.grouped_schedule_budget_bytes,
+                ),
+                nearfield_schedule_item_cap=legacy_kwargs.pop(
+                    "nearfield_schedule_item_cap",
+                    advanced_cfg.runtime.nearfield_schedule_item_cap,
+                ),
+                upward_leaf_batch_size=legacy_kwargs.pop(
+                    "upward_leaf_batch_size",
+                    advanced_cfg.runtime.upward_leaf_batch_size,
+                ),
             ),
-            grouped_interactions=runtime_overrides.grouped_interactions,
-            retain_far_pairs_for_grad=legacy_kwargs.pop(
-                "retain_far_pairs_for_grad",
-                advanced_cfg.farfield.retain_far_pairs_for_grad,
-            ),
-            farfield_mode=runtime_overrides.farfield_mode,
-            streamed_far_pairs=legacy_kwargs.pop(
-                "streamed_far_pairs",
-                advanced_cfg.farfield.streamed_far_pairs,
-            ),
-            mixed_order_farfield=legacy_kwargs.pop(
-                "mixed_order_farfield",
-                advanced_cfg.farfield.mixed_order,
-            ),
-            mixed_order_min_order=legacy_kwargs.pop(
-                "mixed_order_min_order",
-                advanced_cfg.farfield.mixed_order_min_order,
-            ),
-            m2l_chunk_size=legacy_kwargs.pop(
-                "m2l_chunk_size",
-                advanced_cfg.farfield.m2l_chunk_size,
-            ),
-            l2l_chunk_size=legacy_kwargs.pop(
-                "l2l_chunk_size",
-                advanced_cfg.farfield.l2l_chunk_size,
-            ),
-            nearfield_mode=runtime_overrides.nearfield_mode,
-            nearfield_edge_chunk_size=runtime_overrides.nearfield_edge_chunk_size,
-            precompute_nearfield_scatter_schedules=bool(
-                legacy_kwargs.pop(
-                    "precompute_nearfield_scatter_schedules",
-                    advanced_cfg.nearfield.precompute_scatter_schedules,
-                )
-            ),
-            host_refine_mode=legacy_kwargs.pop(
-                "host_refine_mode",
-                advanced_cfg.runtime.host_refine_mode,
-            ),
-            fail_fast=bool(
-                legacy_kwargs.pop(
-                    "fail_fast",
-                    advanced_cfg.runtime.fail_fast,
-                )
-            ),
-            memory_objective=str(
-                legacy_kwargs.pop(
-                    "memory_objective",
-                    advanced_cfg.runtime.memory_objective,
-                )
-            ),
-            memory_budget_bytes=legacy_kwargs.pop(
-                "memory_budget_bytes",
-                advanced_cfg.runtime.memory_budget_bytes,
-            ),
-            max_pair_queue=legacy_kwargs.pop(
-                "max_pair_queue",
-                advanced_cfg.runtime.max_pair_queue,
-            ),
-            pair_process_block=legacy_kwargs.pop(
-                "pair_process_block",
-                advanced_cfg.runtime.pair_process_block,
+            nearfield=NearFieldConfig(
+                mode=runtime_overrides.nearfield_mode,
+                edge_chunk_size=runtime_overrides.nearfield_edge_chunk_size,
+                precompute_scatter_schedules=bool(
+                    legacy_kwargs.pop(
+                        "precompute_nearfield_scatter_schedules",
+                        advanced_cfg.nearfield.precompute_scatter_schedules,
+                    )
+                ),
             ),
             dehnen_radius_scale=float(
                 legacy_kwargs.pop(
@@ -850,51 +910,6 @@ class FastMultipoleMethod:
                 )
             ),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
-            traversal_config=legacy_kwargs.pop("traversal_config", traversal_config),
-            enable_interaction_cache=bool(
-                legacy_kwargs.pop(
-                    "enable_interaction_cache",
-                    advanced_cfg.runtime.enable_interaction_cache,
-                )
-            ),
-            retain_traversal_result=bool(
-                legacy_kwargs.pop(
-                    "retain_traversal_result",
-                    advanced_cfg.runtime.retain_traversal_result,
-                )
-            ),
-            retain_interactions=bool(
-                legacy_kwargs.pop(
-                    "retain_interactions",
-                    advanced_cfg.runtime.retain_interactions,
-                )
-            ),
-            prepare_stage_memory_split_enabled=legacy_kwargs.pop(
-                "prepare_stage_memory_split_enabled",
-                advanced_cfg.runtime.prepare_stage_memory_split_enabled,
-            ),
-            autotune_m2l_chunk=bool(
-                legacy_kwargs.pop(
-                    "autotune_m2l_chunk",
-                    advanced_cfg.runtime.autotune_m2l_chunk,
-                )
-            ),
-            precompute_grouped_class_segments=legacy_kwargs.pop(
-                "precompute_grouped_class_segments",
-                advanced_cfg.runtime.precompute_grouped_class_segments,
-            ),
-            grouped_schedule_budget_bytes=legacy_kwargs.pop(
-                "grouped_schedule_budget_bytes",
-                advanced_cfg.runtime.grouped_schedule_budget_bytes,
-            ),
-            nearfield_schedule_item_cap=legacy_kwargs.pop(
-                "nearfield_schedule_item_cap",
-                advanced_cfg.runtime.nearfield_schedule_item_cap,
-            ),
-            upward_leaf_batch_size=legacy_kwargs.pop(
-                "upward_leaf_batch_size",
-                advanced_cfg.runtime.upward_leaf_batch_size,
-            ),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,
             mac_type=runtime_overrides.mac_type,
@@ -913,6 +928,71 @@ class FastMultipoleMethod:
         self.basis = basis_resolution.public_name
         self.basis_impl = basis_resolution.basis_impl
         self.advanced = advanced_cfg
+
+    # Overloads for the two shapes callers actually ask for by name. The return
+    # is keyed on `return_potential` and on whether `max_acc_derivative_order` is
+    # zero, so a caller writing `return_potential=True` can be handed
+    # `Tuple[Array, Array]` instead of a four-member union it has to narrow.
+    #
+    # The third overload is the honest fallback and is not optional: when either
+    # flag is a runtime value, no literal overload can be selected, and a
+    # `Literal[0]` overload would then declare a derivative tuple for a call that
+    # returns a bare `Array`. That is why the *internal* multi-flag producers were
+    # left alone (audit E.4) -- every one of their call sites passes runtime
+    # values. This surface is different: it is what downstream code calls, and
+    # downstream calls with literals.
+    @overload
+    def compute_accelerations(
+        self: "FastMultipoleMethod",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = ...,
+        leaf_size: int = ...,
+        max_order: int = ...,
+        return_potential: Literal[False] = ...,
+        theta: Optional[float] = ...,
+        reuse_prepared_state: bool = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Array: ...
+
+    @overload
+    def compute_accelerations(
+        self: "FastMultipoleMethod",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = ...,
+        leaf_size: int = ...,
+        max_order: int = ...,
+        return_potential: Literal[True],
+        theta: Optional[float] = ...,
+        reuse_prepared_state: bool = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Tuple[Array, Array]: ...
+
+    @overload
+    def compute_accelerations(
+        self: "FastMultipoleMethod",
+        positions: Float[Array, "n 3"],
+        masses: Float[Array, "n"],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = ...,
+        leaf_size: int = ...,
+        max_order: int = ...,
+        return_potential: bool = ...,
+        theta: Optional[float] = ...,
+        reuse_prepared_state: bool = ...,
+        max_acc_derivative_order: int = ...,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, tuple[Array, ...]],
+        Tuple[Array, Array, tuple[Array, ...]],
+    ]: ...
 
     def compute_accelerations(
         self: "FastMultipoleMethod",
@@ -1288,6 +1368,56 @@ class FastMultipoleMethod:
             masses_sorted,
             max_order=max_order,
         )
+
+    # Overloads for the two shapes callers actually ask for by name. The return
+    # is keyed on `return_potential` and on whether `max_acc_derivative_order` is
+    # zero, so a caller writing `return_potential=True` can be handed
+    # `Tuple[Array, Array]` instead of a four-member union it has to narrow.
+    #
+    # The third overload is the honest fallback and is not optional: when either
+    # flag is a runtime value, no literal overload can be selected, and a
+    # `Literal[0]` overload would then declare a derivative tuple for a call that
+    # returns a bare `Array`. That is why the *internal* multi-flag producers were
+    # left alone (audit E.4) -- every one of their call sites passes runtime
+    # values. This surface is different: it is what downstream code calls, and
+    # downstream calls with literals.
+    @overload
+    def evaluate_prepared_state(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        return_potential: Literal[False] = ...,
+        jit_traversal: Optional[bool] = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Array: ...
+
+    @overload
+    def evaluate_prepared_state(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        return_potential: Literal[True],
+        jit_traversal: Optional[bool] = ...,
+        max_acc_derivative_order: Literal[0] = ...,
+    ) -> Tuple[Array, Array]: ...
+
+    @overload
+    def evaluate_prepared_state(
+        self: "FastMultipoleMethod",
+        state: Union[FMMPreparedState, LargeNPreparedState],
+        *,
+        target_indices: Optional[Int[Array, "t"]] = ...,
+        return_potential: bool = ...,
+        jit_traversal: Optional[bool] = ...,
+        max_acc_derivative_order: int = ...,
+    ) -> Union[
+        Array,
+        Tuple[Array, Array],
+        Tuple[Array, tuple[Array, ...]],
+        Tuple[Array, Array, tuple[Array, ...]],
+    ]: ...
 
     def evaluate_prepared_state(
         self: "FastMultipoleMethod",

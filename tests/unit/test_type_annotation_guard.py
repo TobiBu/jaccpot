@@ -131,6 +131,72 @@ CONVERTED_MODULES = (
     # this guard did not hold. STYLE_GUIDE section 4 says to add a module in the
     # same PR that annotates it; that is the rule this omission broke.
     "jaccpot/runtime/kernels/_evaluate.py",
+    # Phase 1 of the rollout. Only the `delta`/`raw_*` family was unvalidated
+    # here; the `upward/solidfmm_complex_*` functions in the same phase were
+    # measured and left alone, because yggdrax and their own bodies already
+    # reject every malformed input tried (13 of 15 across the group).
+    "jaccpot/downward/local_expansions.py",
+    # Phase 1, `runtime/` half. Only the reference oracle and its sweeps facade
+    # were unvalidated: `fmm_derivatives.py`, `fmm_prepare.py` and `_fmm_impl.py`
+    # were measured and left alone, because each already rejects every malformed
+    # input tried, with a domain message an annotation would replace.
+    "jaccpot/runtime/reference.py",
+    "jaccpot/runtime/fmm_sweeps.py",
+    # Phase 2, first change. NOT a module conversion: only the eleven functions
+    # taking a single spatial `delta` (and `direction`) are shaped, because those
+    # are the ones `bench/annotation_pilot` measured accepting a length-2 vector
+    # silently. The rest of this 2400-line module is still bare and is its own
+    # work -- listing it here says the `"3"` family must not regress, not that
+    # the module is finished.
+    #
+    # The spatial-vector family IS finished now: 24 more functions carry `"3"` or
+    # `"_ 3"`, and the 13 coefficient buffers on those same signatures came with
+    # them. Still open: the solidfmm rotation internals (`re`/`im`/`B_swap`), the
+    # scalar `dz`/`r`/`angle` group and the packing helpers -- about 60 bare
+    # parameters, each its own family question.
+    #
+    # `evaluate_local_complex_with_grad_batch` keeps a bare `deltas` and gets NO
+    # `DELIBERATELY_BARE` entry, deliberately: that set is keyed on (module,
+    # parameter name), so exempting `deltas` would stop the guard checking the 11
+    # annotated ones too. It is simply not decorated, which is what keeps it out of
+    # this check -- and the reason it is not annotated is recorded at the site.
+    "jaccpot/operators/complex_ops.py",
+    # Phase 2, second change, and the FIRST enforced annotations anywhere in
+    # `jaccpot/pallas/`. Not a module conversion: the five module-level entry
+    # points carry shapes, the three tile helpers below them do not, and the split
+    # is on whether the check would execute inside a `pallas_call` body. The
+    # helpers hold 33 of the module's 99 measured silent acceptances and are the
+    # bigger prize; they wait for a GPU run, because interpret mode is not the
+    # Triton lowering and there is no GPU leg in CI. Reason recorded at the site.
+    "jaccpot/pallas/nearfield_mutual.py",
+    # Phase 2, the large-N lane. Six of the eleven functions: the `*_impl` kernels the
+    # runtime dispatches. `_collect_target_leaf_batch_acc` has NO array parameters
+    # (ints and a callable), the two tile-sequence helpers need two axis names this
+    # module does not have and are their own change, and two more were targeted and
+    # never reached by the capture -- annotating those would be deriving a shape
+    # from a docstring, which section 4.2 forbids.
+    "jaccpot/nearfield/_large_n_blocks.py",
+    # Phase 2, the radix fast lane -- and NOT a module conversion: the leaf-table
+    # family (the four `leaves w` arrays, the prepacked rectangle, `positions` and
+    # `masses`) is shaped across four functions, and three families in the same file
+    # are deliberately still bare, each for its own reason and each its own change.
+    # The `custom_vjp` triple is one: `_radix_fast_lane_prepacked_accel_cvjp` is
+    # reached by a single test at a single problem size, so no equality in it is
+    # proven at the two distinct extents section 4.3 asks for. The materialised
+    # source-particle layout is another: its middle axis was observed equal to `w` at
+    # two extents and that is a coincidence of the test payload builder, not a
+    # contract. `_radix_fast_lane_prepacked_pallas_decoupled` is the third, and the
+    # starkest -- no test reaches it at all, only `distributed/fmm.py`.
+    #
+    # All three landed in the two follow-ups and the module is finished: the only
+    # unannotated parameters left are `lax.scan` and batch-body slices, which section
+    # 4.4 forbids annotating. Both open questions resolved AGAINST the obvious answer,
+    # which is why they took their own PR -- the source-slot axis is not `w` (the
+    # equality was an artefact of the test payload builder) and the decoupled lane's
+    # source width is not the target block's `w` (a wider source pool is measurably
+    # correct, so asserting equality would reject something that works). Two axis names
+    # were added for that, `srcslots` and `sw`; see STYLE_GUIDE section 4.3.
+    "jaccpot/nearfield/_fast_lane.py",
 )
 
 # Array parameters deliberately left bare, each with its reason recorded at the
@@ -146,6 +212,38 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # `Union[float, Array]`: a scalar that legitimately accepts a Python
         # number, so `Float[Array, ""]` would break every defaulted call.
         ("jaccpot/nearfield/near_field.py", "G"),
+        # `initialize_local_expansions` already raises
+        # `ValueError("centers must have shape (num_nodes, 3)")`, and it fires on
+        # both a wrong node count and a wrong trailing dimension -- measured, not
+        # read off the docstring. Annotating would preempt that message with a
+        # generic `TypeCheckError`, which STYLE_GUIDE section 4.1 calls out as a
+        # loss rather than a gain.
+        ("jaccpot/downward/local_expansions.py", "centers"),
+        # Same `Union[float, Array]` reason as `near_field.py`'s `G` above, and
+        # here it is load-bearing for BOTH names: every one of these signatures
+        # defaults them to Python floats (`G=1.0`, `softening=0.0`), so
+        # `Float[Array, ""]` would reject the default path itself.
+        ("jaccpot/runtime/reference.py", "G"),
+        ("jaccpot/runtime/reference.py", "softening"),
+        # Scalars, and the third instance of the same reason: `Float[Array, ""]`
+        # buys nothing a scalar can get wrong, and both are reshaped to `(1,)` by
+        # the Pallas wrappers anyway, so the only shape a caller could pass that
+        # the annotation would catch is one the next line would catch too.
+        ("jaccpot/pallas/nearfield_mutual.py", "softening_sq"),
+        ("jaccpot/pallas/nearfield_mutual.py", "g_value"),
+        # Scalars again, and `G` is the `Union[float, Array]` case that would break
+        # every defaulted call -- the same entry as `near_field.py` above, which is
+        # where these two signatures got the spelling.
+        ("jaccpot/nearfield/_large_n_blocks.py", "G"),
+        ("jaccpot/nearfield/_large_n_blocks.py", "softening_sq"),
+        ("jaccpot/nearfield/_large_n_blocks.py", "g_const"),
+        # Fourth and fifth instances of the same two reasons, in the module that
+        # took its spelling from `_large_n_blocks.py` above: `G` is the
+        # `Union[float, Array]` scalar that every defaulted call passes as a Python
+        # float, and `softening_sq` was observed `[]` in every capture -- a shape
+        # annotation on a scalar asserts nothing a caller could get wrong.
+        ("jaccpot/nearfield/_fast_lane.py", "G"),
+        ("jaccpot/nearfield/_fast_lane.py", "softening_sq"),
     }
 )
 
@@ -171,7 +269,29 @@ SHAPED_FACADE_PARAMS = frozenset(
     }
 )
 
-_SHAPE_MARKERS = ("Float[", "Int[", "Bool[", "Shaped[", "Complex[", "Num[")
+# Every jaxtyping dtype FAMILY, not the six that happened to be in use when this
+# guard was written. The short list was a false-negative generator in one
+# direction and a false positive in the other: `Inexact[Array, '_']` -- the right
+# annotation for a coefficient buffer that legitimately arrives real or complex --
+# was reported as unshaped, so the guard would have rejected a correct annotation
+# and pushed the author toward a wrong one.
+#
+# Family names only, deliberately: STYLE_GUIDE section 4.4 forbids the
+# width-suffixed spellings (`Int32`, `Float64`), so `Int32[Array, "n"]` still
+# reads as unshaped here and fails. That is the intended behaviour, not an
+# oversight -- the same set `bench/annotation_census.py` classifies on.
+_SHAPE_MARKERS = (
+    "Bool[",
+    "Complex[",
+    "Float[",
+    "Inexact[",
+    "Int[",
+    "Key[",
+    "Num[",
+    "Real[",
+    "Shaped[",
+    "UInt[",
+)
 
 
 def _iter_unshaped_facade_params() -> list[tuple[str, int, str, str, str]]:
@@ -286,6 +406,45 @@ def test_converted_modules_keep_shapes_on_array_params() -> None:
         "Array parameters in converted modules must carry a jaxtyping shape "
         "(STYLE_GUIDE.md section 4). Nothing else checks these:\n" + details
     )
+
+
+def test_shape_markers_accept_families_and_still_reject_widths() -> None:
+    """Pin both edges of ``_SHAPE_MARKERS``, because it was widened.
+
+    Widening a guard's accept-list is where a silent hole gets introduced, so the
+    two directions are asserted separately: every jaxtyping dtype family must read
+    as shaped, and a bare ``Array`` or a width-suffixed spelling must not. The
+    width case is the one that matters -- ``Int32[Array, 'n']`` violates
+    STYLE_GUIDE section 4.4 and has to keep failing this guard, even though it
+    looks shaped and would satisfy a naive "contains a bracket" test.
+    """
+    families = (
+        "Bool",
+        "Complex",
+        "Float",
+        "Inexact",
+        "Int",
+        "Key",
+        "Num",
+        "Real",
+        "Shaped",
+        "UInt",
+    )
+    for family in families:
+        text = f'{family}[Array, "n 3"]'
+        assert any(
+            marker in text for marker in _SHAPE_MARKERS
+        ), f"{family} is a jaxtyping dtype family and must read as shaped"
+
+    for text in (
+        "Array",
+        "Optional[Array]",
+        "Int32[Array, 'n']",
+        "Float64[Array, '3']",
+    ):
+        assert not any(
+            marker in text for marker in _SHAPE_MARKERS
+        ), f"`{text}` must not count as a shaped annotation"
 
 
 def test_deliberately_bare_list_has_not_rotted() -> None:

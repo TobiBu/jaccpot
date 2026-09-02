@@ -1023,7 +1023,30 @@ def test_boundary_weight_table_rows_are_the_per_boundary_weights(k_max):
 
 
 def test_boundary_kick_accepts_supplied_level_weights():
-    """Handing in a weight row must equal deriving it from floor/half/dt_max."""
+    """Handing in a weight row must equal deriving it from floor/half/dt_max.
+
+    The claim is checked where it is exact -- on the WEIGHTS -- and only
+    corroborated on the resulting kicks.
+
+    This asserted ``allclose(supplied, derived, rtol=0, atol=0)`` on the kicks,
+    which was green on CPU and red on an A100. A same-input control says no
+    tolerance rescues that comparison: calling ``boundary_kick`` twice with
+    identical arguments differs as much as the two call styles differ. Measured
+    on one A100, x64, over six replications of all nine boundaries:
+
+        same-input control (A vs A)   worst abs 8.882e-16 .. 3.553e-15
+        supplied vs derived (A vs B)  worst abs 8.882e-16 .. 2.665e-15
+        elements differing            ~670-770 of 1536 in BOTH cases
+
+    Indistinguishable, and both are an exact 2/4/6/8-ULP ladder at the largest
+    element rather than a continuum. (Do not derive a bound from the RELATIVE
+    figure: its argmax sits on a near-zero element -- |x| = 9.5e-05 with a
+    one-ULP deviation -- so it spreads 79x and measures the denominator.)
+
+    What IS exact is that both call styles feed the same weight row into the
+    same machinery, so that is asserted with ``array_equal``, and the kicks then
+    only need to be close.
+    """
     n = 512
     positions, masses = _system(n)
     velocities = jnp.zeros_like(positions)
@@ -1036,19 +1059,36 @@ def test_boundary_kick_accepts_supplied_level_weights():
     table = boundary_weight_table(K_MAX, dt_max, dtype=positions.dtype)
 
     for s in range(n_sub(K_MAX) + 1):
+        active_floor = active_level_floor(s, K_MAX)
+        half = 0.5 if is_sync_boundary(s, K_MAX) else 1.0
+
+        # The exact half of the claim: the row the derived call builds from
+        # (floor, half, dt_max) IS the row the supplied call is handed. Weights
+        # are a small table built by the same arithmetic on both paths, so this
+        # is bit-exact on every platform -- unlike the kicks below.
+        assert jnp.array_equal(
+            level_weights_from_floor(
+                active_floor, K_MAX, dt_max, half=half, dtype=positions.dtype
+            ),
+            table[s],
+        ), s
+
         derived = fmm.boundary_kick(
             positions,
             velocities,
             masses,
             rung=rung,
-            active_floor=active_level_floor(s, K_MAX),
+            active_floor=active_floor,
             dt_max=dt_max,
-            half=0.5 if is_sync_boundary(s, K_MAX) else 1.0,
+            half=half,
         )
         supplied = fmm.boundary_kick(
             positions, velocities, masses, rung=rung, level_weights=table[s]
         )
-        assert jnp.allclose(supplied, derived, rtol=0, atol=0), s
+        # Corroboration only, at a bound ~1e6 above the measured ULP ladder and
+        # far below any real divergence: identical weights through identical
+        # machinery can still differ in the last bits on GPU.
+        assert jnp.allclose(supplied, derived, rtol=1e-9, atol=1e-12), s
 
 
 def test_boundary_kick_runs_under_jit_with_a_traced_boundary_index():

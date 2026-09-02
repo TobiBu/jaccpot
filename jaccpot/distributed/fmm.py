@@ -33,20 +33,26 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import inspect
 import itertools
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# `jax.shard_map` directly, with no `jax.experimental` fallback. The fallback was
+# not merely dead but wrong: `pyproject.toml` pins `jax>=0.10.2,<0.11` and the
+# floor itself exports `jax.shard_map`, so the `except ImportError` branch is
+# unreachable across the whole supported range -- and had it ever been taken it
+# would have raised, because `jax.experimental.shard_map.shard_map` takes
+# `check_rep`, not the `check_vma` passed below. A fallback that cannot run and
+# would break if it did is worse than none: `tests/distributed/` needs two cards
+# (audit F34), so nothing local would have caught it.
+from jax import shard_map
 from jax.sharding import PartitionSpec as P
-
-try:
-    from jax import shard_map
-except ImportError:  # pragma: no cover
-    from jax.experimental.shard_map import shard_map
-
 from yggdrax import build_interactions_and_neighbors
 from yggdrax.distributed import device_count
 from yggdrax.distributed import let as _yggdrax_let
@@ -60,7 +66,7 @@ from yggdrax.distributed.let import (
 from yggdrax.distributed.local_tree import sanitize_padding
 from yggdrax.distributed.partition import global_bounds
 from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
-from yggdrax.interactions import DualTreeTraversalConfig
+from yggdrax.interactions import DualTreeTraversalConfig, MACType
 from yggdrax.morton import morton_encode_impl
 from yggdrax.tree import (
     Tree,
@@ -70,6 +76,13 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.config import MACTypeInput
+from jaccpot.distributed._force_scale import (
+    DISTRIBUTED_FORCE_SCALE_MODES,
+    cross_policy_state,
+    distributed_force_scale_nodes,
+    policy_upward_view,
+)
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.nearfield._fast_lane import (
     _radix_fast_lane_prepacked_accel_cvjp,
@@ -86,6 +99,11 @@ from jaccpot.operators.complex_ops import (
     m2l_complex_reference_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size
+from jaccpot.runtime._adaptive_policy import (
+    adaptive_cross_pair_policy,
+    adaptive_pair_policy,
+    build_adaptive_policy_state,
+)
 from jaccpot.runtime._interaction_cache import (
     _build_treecode_artifacts_strict_streamed,
 )
@@ -106,7 +124,9 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 __all__ = [
+    "DERIVED_CAP_FIELDS",
     "DIAG_FIELDS",
+    "cross_walk_accepts_a_pair_policy",
     "DistributedFMMConfig",
     "DistributedFMMResult",
     "GRAD_HALO_EXCHANGES",
@@ -115,6 +135,7 @@ __all__ = [
     "make_force_evaluator",
     "partition_for_devices",
     "resolve_grad_halo_exchange",
+    "scatter_to_input_order",
 ]
 
 # Reverse-pass tiling for the differentiable fused near field. Mirrors the
@@ -122,6 +143,434 @@ __all__ = [
 # the distributed body has no GradConfig channel, so they are fixed here.
 _GRAD_NEARFIELD_REV_LEAF_BATCH = 8
 _GRAD_NEARFIELD_REV_BLOCK_TILE = 8
+
+#: The traversal capacities that are derived from per-device N when left ``None``.
+#: ``leaf_size`` is deliberately not among them: it decides the near/far split and
+#: therefore the accuracy, not just a buffer shape.
+DERIVED_CAP_FIELDS = (
+    "process_block",
+    "max_pair_queue",
+    "max_interactions_per_node",
+    "max_neighbors_per_leaf",
+    "cross_max_pair_queue",
+    "cross_max_interactions_per_node",
+    "cross_max_neighbors_per_leaf",
+)
+
+#: Floors for the two dense per-node buffers: the constants the config used to ship,
+#: kept so that the tier's own 16-to-128-particle tests exercise exactly the buffers
+#: they always did. These two DID size real buffers on the traced path, so preserving
+#: them preserves behaviour.
+_MIN_INTERACTIONS_PER_NODE = 512
+_MIN_NEIGHBORS_PER_LEAF = 128
+
+#: Floor for the two wavefronts, and deliberately NOT the 32768 the config used to
+#: ship, because that number was never what a traced walk used -- the ladder's first
+#: rung, ``max(1024, process_block * 16)``, was. Carrying 32768 down to tiny trees
+#: would not preserve behaviour, it would introduce a cost the bug had been hiding:
+#: the walk's wavefront loop evaluates the FULL capacity-length array every round
+#: (``valid_mask = wf_indices < wf_size``) and its round count is O(tree depth), so
+#: per-round work is linear in the capacity whether or not the pairs are live.
+#: Measured on a 64-particle/leaf-8 tree (15 nodes), traced, same answer (56 near
+#: pairs) at every capacity:
+#:
+#: ==============  ========  =====
+#: max_pair_queue  run time  ratio
+#: ==============  ========  =====
+#:           1024   3.64 ms   1.0x
+#:           8192   32.1 ms   8.8x
+#:          32768    105 ms  28.8x
+#: ==============  ========  =====
+#:
+#: 1024 is the ladder's own floor and it exceeds the number of distinct node pairs a
+#: tree that small has (15 nodes -> 120 pairs), so nothing is at risk below it. The
+#: ``num_leaves ** 1.5`` rule dominates this floor from 128 leaves upward, which is
+#: where the old 32768 was calibrated anyway, so the floor never decides a capacity
+#: that matters.
+_MIN_PAIR_QUEUE = 1 << 10
+
+#: ``process_block`` is a vectorisation width, not a capacity -- it stopped being one
+#: when the traced wavefront started coming from ``max_pair_queue`` (yggdrax
+#: ``_walk_inputs_are_traced``). 256 is the floor the single-device lane documents and
+#: asserts (``_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK``,
+#: ``tests/unit/test_solver_api.py``); the mesh shipped 64, chosen back when it *was*
+#: a capacity.
+_DISTRIBUTED_PROCESS_BLOCK = 256
+
+#: The wavefront scales as ``num_leaves ** 1.5``, and this is the coefficient in
+#: front of it for the SELF walk.
+#:
+#: Not a guess and not linear. The eager retry ladder converges on a capacity that
+#: fits, so asking it what it settled on measures the requirement directly, bracketed
+#: to within 2x by its own rungs (``bench/distributed_ceiling_sweep.py --sweep
+#: occupancy`` reports it as ``converged_pair_queue``). On a thin disc, leaf 64,
+#: dehnen MAC, theta=0.4:
+#:
+#: ==========  ================  ========  ==========================
+#: num_leaves  converged queue   per leaf  queue / num_leaves ** 1.5
+#: ==========  ================  ========  ==========================
+#:        128              4096        32                        2.83
+#:        512             32768        64                        2.83
+#:       2048            262144       128                        2.83
+#: ==========  ================  ========  ==========================
+#:
+#: The per-leaf column doubles for every 4x in leaves; the last column is constant
+#: to three figures over a 16x range. A LINEAR rule is therefore wrong in the
+#: dangerous direction -- it under-sizes further the bigger the problem gets.
+#:
+#: The single-GPU lane's ``_sub_million_minimum_memory_pair_queue`` is such a rule,
+#: and it corroborates this one from a completely different measurement. It is
+#: ``max(32768, N/4)``, calibrated at leaf 256, and its docstring records the
+#: boundary: *"N=131072 fits, N=262144 raises 'Pair queue capacity exceeded'"* --
+#: 512 leaves and 1024 leaves. ``2.83 * 512 ** 1.5 == 32786``, which is that rule's
+#: 32768 floor to four figures, so its floor is this curve evaluated at its own
+#: calibration point and the wall it reports one rung later is where linear falls
+#: below the curve. Two lanes, two measurements, same exponent.
+#:
+#: 4 gives ~1.4x headroom over the measured 2.83 and lands one ladder rung above the
+#: converged value at every point measured.
+_SELF_QUEUE_WAVEFRONT_COEFF = 5.25
+
+#: The same, for the CROSS walk, whose source side is a coarse tree over *every*
+#: device's leaf frontier rather than the local tree, so its wavefront is the wider
+#: of the two. ONE measured point, not three: at 32768/device, leaf 64, ndev 2 (512
+#: leaves) ``cross_max_pair_queue=32768`` overflows and 131072 clears with no flag
+#: set and a subsampled fp64 direct-sum agreement of 5.2e-4, i.e. a coefficient
+#: between 2.83 and 11.3. 16 clears the top of that bracket. The exponent is assumed
+#: to be the self walk's, on the grounds that it is the same traversal over a tree of
+#: the same shape; if that assumption breaks it breaks as an overflow flag, which is
+#: now honest.
+_CROSS_QUEUE_WAVEFRONT_COEFF = 8.25
+
+
+def cross_walk_accepts_a_pair_policy() -> bool:
+    """Whether the installed yggdrax's cross walk can carry a solver-owned policy.
+
+    ``pair_policy`` on ``dual_tree_walk_cross_impl`` is yggdrax PR #54, and jaccpot
+    depends on yggdrax by version range rather than by commit -- so an older one is a
+    perfectly ordinary install, not a broken one. Without the probe, asking for the
+    cross criterion against such an install raises ``TypeError: unexpected keyword
+    argument`` from inside a ``shard_map`` trace, several frames below anything the
+    caller wrote.
+
+    Returns
+    -------
+    bool
+        ``True`` when the cross walk takes a ``pair_policy``.
+    """
+
+    try:
+        return "pair_policy" in inspect.signature(dual_tree_walk_cross_impl).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return False
+
+
+def _round_up_pow2(value: int) -> int:
+    """Round ``value`` up to a power of two (at least 1).
+
+    Each distinct capacity is a distinct compiled shape, so rounding to a ladder
+    keeps recompiles across an N sweep to ``log2(N)`` rather than one per N. Same
+    reasoning, and the same idiom, as
+    :func:`jaccpot.runtime.fmm_constants._sub_million_minimum_memory_pair_queue`.
+
+    Parameters
+    ----------
+    value : int
+        Capacity to round.
+
+    Returns
+    -------
+    int
+        The smallest power of two that is at least ``value``, floored at 1.
+    """
+
+    return 1 << max(0, (max(1, int(value)) - 1).bit_length())
+
+
+#: Opening angle the queue coefficients above were measured at.
+_QUEUE_THETA_REF = 0.4
+
+#: Cap coefficients for the Dehnen mass-dependent MAC, MEASURED not inherited.
+#:
+#: Under ``mac_type="dehnen_error"`` theta decides nothing -- ``adaptive_pair_policy``
+#: deletes ``mac_ok`` outright in paper mode -- so the theta-scaled rule above is being
+#: driven by a knob that gates nothing, in BOTH directions: it over-provisions the
+#: queues (wasted time) and under-provisions two of the far caps (silent truncation).
+#: These replace it, and carry no theta factor at all.
+#:
+#: Bisected 2026-08-31 (``bench/results/distributed_dehnen_mac/capcal_*.json``): each
+#: cap walked down -- or UP -- with every other cap at 4x derived, until the walk
+#: truncated. Two witnesses per point, the buffer's own overflow flag AND the far/near
+#: counts against an untruncated reference, because a truncated walk reads FASTER and a
+#: flag is only a guard someone remembered to write. Four configurations, quoted as the
+#: coefficient on the structural quantity so the rule extrapolates:
+#:
+#:     coefficient at floor        ndev2      ndev4      ndev2      ndev2
+#:                                 l512       l512       l1024      l512
+#:                                 e1e-5      e1e-5      e1e-5      e1e-3    worst
+#:     self queue / wavefront       2.00       2.91       1.46       2.00      2.91
+#:     self far / leaves            0.50       1.00       0.50       1.00      1.00
+#:     self near / leaves           1.00       1.00       1.00       1.00      1.00
+#:     cross queue / (sqrt(r)*wf)   4.00       6.72       5.82       4.00      6.72
+#:     cross far / (r*leaves)       1.00       0.67       0.50       1.00      1.00
+#:     cross near / (r*leaves)      1.00       1.33       1.00       1.00      1.33
+#:
+#: Shipped values are the worst observed times ~2x, rounded by the power-of-two
+#: rounding downstream. The asymmetric margin is deliberate and is the same reasoning
+#: the geometric rule states: an OVER-provisioned buffer costs time linearly, an
+#: UNDER-provisioned one truncates the walk silently.
+#:
+#: TWO THINGS THE MEASUREMENT FOUND that reading the code would not have:
+#:
+#: * **The far caps peak at LOOSE eps, not tight.** `self far` needs 0.5*leaves at
+#:   eps=1e-5 and 1.0*leaves at eps=1e-3. Looser eps accepts far pairs higher in the
+#:   tree -- fewer but bigger -- so the per-node far list is largest in the MIDDLE of a
+#:   usable eps grid. Calibrating only at the tightest eps, which is the obvious choice
+#:   because tighter means a deeper walk, ships a cap that truncates at loose eps.
+#: * **The linear ``remote`` factor on the cross near cap is not enough.** At ndev 4 the
+#:   floor is 1.33x ``remote * num_leaves``. That factor was never measured for the
+#:   geometric MAC either -- ``_derive_walk_caps`` says so -- and it is the one a
+#:   five-device run leans on hardest.
+#: AND THEREFORE: the cap requirement is a function of EPS, not just of geometry. A
+#: theta- or eps-sweep that holds explicit caps fixed measures the CAPS and not the knob
+#: -- a buffer truncates partway through, the run gets FASTER, the error moves, and the
+#: trend is an artefact. Leave the caps ``None`` so ``resolved_for`` re-derives them at
+#: every point, check the overflow flags before reading any timing or error, and note
+#: that ``cap_presets._key`` carries ``adaptive_eps`` for exactly this reason. Trap 16
+#: in ``docs/dehnen_mass_mac_status_and_plan.md`` has the numbers.
+#:
+#: The values are the SMALLEST that keep every one of the 24 measured points at >= 2x
+#: its floor, solved numerically rather than eyeballed. Picking them by hand from the
+#: worst coefficient and doubling it looks equivalent and is not: the power-of-two
+#: rounding downstream compounds the coefficient, so a "2x margin" chosen on paper came
+#: out 4-8x in practice -- which is the over-provisioning this measurement existed to
+#: remove. The 2x is on the ROUNDED cap, where it can be checked.
+_CRITERION_SELF_QUEUE_COEFF = 3.0
+_CRITERION_CROSS_QUEUE_COEFF = 6.75
+_CRITERION_FAR_PER_NODE_COEFF = 1.25
+_CRITERION_NEAR_PER_LEAF_COEFF = 1.25
+_CRITERION_CROSS_FAR_COEFF = 1.25
+_CRITERION_CROSS_NEAR_COEFF = 1.5
+
+#: How the wavefront queue requirement grows as the MAC tightens. Measured, not
+#: assumed: at ndev 5, per-device 2 097 152, leaf 512, order 6, walking each queue
+#: down until ``self_near_pairs`` collapses gives floors in wavefront units of
+#:
+#:     theta     0.3   0.4   0.5   0.6   0.7   0.8
+#:     self       8     4     2     2     2     1
+#:     cross      -    16     8     8     4     4
+#:
+#: A ``theta ** -1.5`` law covers both with a uniform 2x margin after power-of-two
+#: rounding. That margin is deliberate: an OVER-provisioned queue costs time
+#: linearly, but an UNDER-provisioned one truncates the walk SILENTLY -- the run
+#: reads faster and only ``self_near_pairs`` witnesses it -- so the two errors are
+#: not symmetric and the safe side is known.
+_QUEUE_THETA_EXPONENT = 1.5
+
+
+def _queue_theta_scale(theta: float) -> float:
+    """Return the wavefront-queue multiplier for an opening angle.
+
+    Parameters
+    ----------
+    theta : float
+        Opening angle the walk will run at.
+
+    Returns
+    -------
+    float
+        ``(_QUEUE_THETA_REF / theta) ** _QUEUE_THETA_EXPONENT``, with theta clamped
+        away from zero so a bad value cannot produce an unbounded cap.
+    """
+
+    return (_QUEUE_THETA_REF / max(1e-3, float(theta))) ** _QUEUE_THETA_EXPONENT
+
+
+def _derive_walk_caps(
+    *,
+    per_device_n: int,
+    leaf_size: int,
+    ndev: int,
+    theta: float = _QUEUE_THETA_REF,
+    self_theta: Optional[float] = None,
+    criterion: bool = False,
+    cross_criterion: bool = False,
+) -> dict[str, int]:
+    """Size the traversal buffers from the per-device particle count.
+
+    THE LEAF COUNT IS THE VARIABLE, NOT N. Every one of these buffers is indexed by
+    node or by leaf -- ``[total_nodes, max_interactions_per_node]``,
+    ``[num_leaves, max_neighbors_per_leaf]``, a wavefront of node pairs -- so what
+    they need tracks ``num_leaves = per_device_n / leaf_size``. The shipped constants
+    were N-independent, which is what put a hard ceiling on per-device N; the
+    single-device pair-queue rule this ports is N-dependent but was measured at leaf
+    256 only, and under-sizes by 4x at leaf 64 for the same N.
+
+    Measured on a thin disc with the dehnen MAC at ``theta=0.4``, per-device N from
+    2048 to 131072 and leaf sizes 8 to 256
+    (``bench/distributed_ceiling_sweep.py --sweep occupancy``):
+
+    ==========  =================  ==================
+    num_leaves  max far per node   max near per leaf
+    ==========  =================  ==================
+            32                  0                  31
+           128                 21                 127
+           512                127                 511
+          2048                496                2047
+    ==========  =================  ==================
+
+    ``max_near_per_leaf`` is ``num_leaves - 1`` at *every* point measured, at both
+    leaf sizes: on a radix tree over a disc at least one leaf has a bounding sphere
+    wide enough to fail the MAC against every other leaf, so the worst leaf's near
+    list is complete. That is why 128 was not a small number but a wrong one -- it
+    truncates as soon as a device holds more than 128 leaves, which at the old
+    ``leaf_size=8`` is 1024 particles. ``max_far_per_node`` tracks ``num_leaves / 4``
+    across two decades and both leaf sizes, so half the leaf count leaves 2x
+    headroom.
+
+    Both therefore scale with ``num_leaves``, which makes both dense buffers
+    quadratic in per-device N at fixed leaf size. That is a real ceiling and it is
+    not papered over here: there is no upper clamp, because a clamp is exactly how a
+    capacity becomes a silent truncation. A larger ``leaf_size`` is the lever (fewer,
+    bigger leaves), which is the other half of why the default moved off 8, and
+    ``m2l_chunk`` / ``nearfield_chunk`` are the levers for the two full-batch walls
+    behind these caps (see ``bench/distributed_ceiling_ladder.py``).
+
+    AND ``ndev`` ENTERS, THROUGH THE CROSS CAPS ONLY. The coarse (LET) tree is built
+    over *every* device's leaf frontier -- ``build_coarse_frontier`` is "all leaf
+    nodes of ``tree``" -- so a local target leaf has ``(ndev - 1) * num_leaves``
+    remote coarse leaves available to be near it, and the same "worst leaf sees
+    everything" behaviour that sets the self near cap sets this one ``ndev - 1``
+    times larger. Sizing the cross caps as if ``ndev`` were 2 overflows
+    ``cross_near`` at *every* rung on 4 devices, with a 61 % force error: measured
+    at 32768, 131072, 524288 and 1048576 particles/device, leaf 256, on 4xA100.
+    The self caps are ndev-independent by construction -- the local tree is the
+    local tree.
+
+    Parameters
+    ----------
+    per_device_n : int
+        Per-device particle capacity -- the ``cap`` from
+        :func:`partition_for_devices`, which is what the local tree is built over.
+    leaf_size : int
+        Local-tree leaf size, which sets how many leaves that capacity becomes.
+    ndev : int
+        Number of devices in the mesh, which sets how large the coarse frontier the
+        cross walk traverses is.
+    theta : float
+        Opening angle both walks will run at; scales every wavefront queue by
+        :func:`_queue_theta_scale`.
+    self_theta : Optional[float]
+        Overrides ``theta`` for the SELF queue only. ``None`` (default) keeps them
+        equal. Ignored when ``criterion`` is set, since the criterion's caps carry no
+        theta factor at all.
+    criterion : bool
+        Whether the SELF walk accepts on the Dehnen criterion rather than on theta.
+        Switches its three caps onto the measured coefficients in
+        :data:`_CRITERION_SELF_QUEUE_COEFF` and friends.
+    cross_criterion : bool
+        The same for the CROSS walk. Separate from ``criterion`` because the self-only
+        ablation runs a criterion self walk against a geometric cross walk, and each
+        walk's caps must follow whichever test actually decides it.
+
+    Returns
+    -------
+    dict[str, int]
+        One entry per name in :data:`DERIVED_CAP_FIELDS`.
+    """
+
+    n = max(1, int(per_device_n))
+    num_leaves = max(1, -(-n // max(1, int(leaf_size))))
+    theta_scale = _queue_theta_scale(theta)
+    # The self walk can be running an acceptance test that theta does not gate at
+    # all -- see `resolved_for` and `_CRITERION_SELF_QUEUE_COEFF`.
+    self_theta_scale = _queue_theta_scale(
+        theta if self_theta is None else float(self_theta)
+    )
+    # Remote leaf frontiers the cross walk can see. 1 rather than 0 on a
+    # single-device mesh, so the cross caps stay at their floors instead of
+    # collapsing to nothing.
+    remote_domains = max(1, int(ndev) - 1)
+    # num_leaves ** 1.5, in integers: math.isqrt keeps the rule bit-identical on
+    # every platform, and it only ever rounds down, which the power-of-two rounding
+    # above it more than makes up for.
+    wavefront = num_leaves * math.isqrt(num_leaves)
+    if criterion:
+        far_per_node = max(
+            _MIN_INTERACTIONS_PER_NODE,
+            _round_up_pow2(int(_CRITERION_FAR_PER_NODE_COEFF * num_leaves)),
+        )
+        near_per_leaf = max(
+            _MIN_NEIGHBORS_PER_LEAF,
+            _round_up_pow2(int(_CRITERION_NEAR_PER_LEAF_COEFF * num_leaves)),
+        )
+    else:
+        far_per_node = max(_MIN_INTERACTIONS_PER_NODE, _round_up_pow2(num_leaves // 2))
+        near_per_leaf = max(_MIN_NEIGHBORS_PER_LEAF, _round_up_pow2(num_leaves))
+    return {
+        "process_block": _DISTRIBUTED_PROCESS_BLOCK,
+        "max_pair_queue": max(
+            _MIN_PAIR_QUEUE,
+            _round_up_pow2(
+                int(_CRITERION_SELF_QUEUE_COEFF * wavefront)
+                if criterion
+                else int(_SELF_QUEUE_WAVEFRONT_COEFF * self_theta_scale * wavefront)
+            ),
+        ),
+        "max_interactions_per_node": far_per_node,
+        "max_neighbors_per_leaf": near_per_leaf,
+        # The cross walk's target side is the same set of local leaves; its source
+        # side is the coarse tree over every OTHER device's frontier, which is what
+        # ``remote_domains`` carries. Same shape as the self budgets above, that many
+        # times over -- plus a wider wavefront coefficient, for which see
+        # _CROSS_QUEUE_WAVEFRONT_COEFF.
+        # sqrt(remote_domains), NOT remote_domains. Measured at theta 0.7 with
+        # per-device N fixed so only `remote` moves: floors of 524 288 / 1 048 576 /
+        # 1 048 576 at ndev 2 / 4 / 5. A linear factor predicts 2 097 152 at ndev 4
+        # and is refuted; sqrt fits all three points. The neighbour and interaction
+        # caps below keep their LINEAR factor -- that was not measured here, and
+        # `cross_max_neighbors_per_leaf` is known NOT to be over-provisioned: it
+        # overflows at a quarter of its derived value.
+        "cross_max_pair_queue": max(
+            _MIN_PAIR_QUEUE,
+            _round_up_pow2(
+                int(
+                    (
+                        _CRITERION_CROSS_QUEUE_COEFF
+                        if cross_criterion
+                        else _CROSS_QUEUE_WAVEFRONT_COEFF * theta_scale
+                    )
+                    * math.sqrt(remote_domains)
+                    * wavefront
+                )
+            ),
+        ),
+        "cross_max_interactions_per_node": max(
+            _MIN_INTERACTIONS_PER_NODE,
+            _round_up_pow2(
+                int(_CRITERION_CROSS_FAR_COEFF * remote_domains * num_leaves)
+                if cross_criterion
+                else remote_domains * (num_leaves // 2)
+            ),
+        ),
+        "cross_max_neighbors_per_leaf": max(
+            _MIN_NEIGHBORS_PER_LEAF,
+            _round_up_pow2(
+                int(_CRITERION_CROSS_NEAR_COEFF * remote_domains * num_leaves)
+                if cross_criterion
+                else remote_domains * num_leaves
+            ),
+        ),
+    }
+
+
+#: ``dehnen_geometry_mode`` values verified to survive tracing under ``shard_map``.
+#: "exact" and "tree" fit a bounding sphere per node with a numpy host loop, which
+#: ``resolve_dehnen_geometry`` refuses on tracers outright. "tree_approx" is device
+#: -side but still reads its leaf-block width off the device
+#: (``compute_leaf_ritter_sphere_geometry``), so it is left out rather than listed
+#: on the strength of being JAX code -- untested is not the same as supported.
+_TRACEABLE_DEHNEN_GEOMETRY_MODES = ("com", "runtime")
 
 # Order of the per-device diagnostic vector returned alongside the forces.
 DIAG_FIELDS = (
@@ -141,6 +590,15 @@ DIAG_FIELDS = (
     # whenever ``l2l_num_levels`` is left to its safe default. Deliberately NOT in
     # ``_OVERFLOW_FIELDS``: no capacity retry can fix a caller-supplied bound.
     "l2l_level_overflow",
+    # Range of the Dehnen criterion's per-node force scale, and 0.0/0.0 when the
+    # criterion is off. Surfaced because trap 14's failure signature is a
+    # CONSTANT scale: `build_adaptive_policy_state` substitutes `jnp.ones(...)` for
+    # a missing force scale, which runs eq (16a) against `eps * 1` instead of
+    # `eps * min_b f_b` -- a different criterion, accepting far more, running
+    # faster, and reported nowhere. A min equal to the max is that fallback, and a
+    # test can see it from outside the mesh.
+    "force_scale_min",
+    "force_scale_max",
 )
 
 
@@ -168,12 +626,22 @@ class DistributedFMMConfig:
 
     ``order`` (multipole order ``p``), ``theta`` (the MAC, for **both** the local
     self walk and the cross-domain walk), ``leaf_size``, ``softening`` and ``G`` are
-    the physics/accuracy knobs.  The ``*_cap`` fields set fixed traversal buffer
+    the physics/accuracy knobs.  The capacity fields set fixed traversal buffer
     shapes and therefore must be large enough to hold the interaction/neighbour
-    lists without truncation -- grow them (see the capacity calibrator in the
-    benchmark harness) for large N or strongly clustered distributions.  An
-    overflow shows up in the returned diagnostics as a nonzero
-    ``*_overflow`` flag.
+    lists without truncation.  An overflow shows up in the returned diagnostics as
+    a nonzero ``*_overflow`` flag.
+
+    THE TRAVERSAL CAPACITIES ARE DERIVED, NOT CONSTANTS. The seven fields in
+    :data:`DERIVED_CAP_FIELDS` default to ``None``, meaning "size me from per-device
+    N" -- :meth:`resolved_for`, which the driver calls before it builds anything.
+    They used to ship as bare constants with no N dependence at all, which put a
+    hard ceiling on per-device N that no amount of cap tuning could move: the
+    neighbour cap truncates above ``max_neighbors_per_leaf`` leaves -- 128 of them,
+    i.e. 1024 particles at the old ``leaf_size=8`` -- and behind it
+    ``cross_max_neighbors_per_leaf`` and ``cross_max_pair_queue`` wall in turn.
+    :func:`_derive_walk_caps` carries the rule and the occupancy measurement it
+    comes from. An explicitly-set value is always honoured, including a deliberately
+    tiny one, so a test that starves a cap on purpose still does.
 
     ONE THETA, NOT TWO. There used to be a separate ``theta_cross``, defaulting to
     0.1 against ``theta``'s 0.4. It was not physics: both walks apply the same MAC
@@ -191,14 +659,82 @@ class DistributedFMMConfig:
 
     order: int = 3
     theta: float = 0.4
-    leaf_size: int = 8
+    # 8 was the smallest leaf in the codebase, below the 64-1024 the single-GPU lane
+    # runs in production, and the wrong end of a quadratic: both dense traversal
+    # buffers scale with the leaf COUNT (see _derive_walk_caps), so eight-particle
+    # leaves pay ~64x the buffer of 64-particle ones for the same particles.
+    # Measured, ndev=2 on 2xA100, default caps, 131072 particles/device: leaf 64
+    # needs a 524288-pair wavefront and takes 0.583 s per force; leaf 256 needs
+    # 65536 and takes 0.190 s, at a better force error (4.1e-4 against 1.0e-3). 64 is
+    # the single-GPU production leaf and the measured minimum of the mutual lane's
+    # cost curve at N=1e6; it is the conservative end of the production range, not
+    # the fastest point at every N.
+    leaf_size: int = 64
     softening: float = 0.02
     G: float = 1.0
     rotation: str = "solidfmm"
     # dehnen bounding-SPHERE MAC extents (the correct multipole-radius bound, matching
     # the single-GPU fast lane and required for stable multi-step use). "bh" (box) is
     # cheaper but under-bounds the source radius; keep it only for single-shot use.
-    mac_type: str = "dehnen"
+    # `MACTypeInput`, not `MACType`: yggdrax's traversal declares
+    # `Literal["bh", "engblom", "dehnen"]` and raises on anything else, so every
+    # value reaching it goes through `_mac_type_for_traversal` first. The two extra
+    # literals are jaccpot-level POLICIES layered on the geometric test:
+    # "dehnen_error" (Dehnen 2014 section 5, evaluated pair-by-pair through a
+    # solver-owned pair policy) is supported here on the SELF walk; "dehnen_theta"
+    # is refuted (12-9300x worse error at 1.35-15x the work) and rejected below
+    # rather than silently translated, because folding the criterion into
+    # `geometry.radius` would leave the cross walk running a different criterion
+    # from the self walk with nothing to say so.
+    #
+    # WHAT "dehnen_error" IS WORTH, so the numbers are reachable from the knob rather
+    # than only from a PR. Measured on 2 x A100 at N=1048576, matched median, all
+    # overflow flags clear, 3 seeds at leaf 512/1024 (`median [min, max]`):
+    #
+    #     leaf   p99.99 gain          near-field work
+    #      256   4.40x                0.77x
+    #      512   6.58x [5.56, 7.30]   0.80x
+    #     1024   7.69x [6.85, 7.88]   0.88x
+    #
+    # and it GROWS with the mesh -- 8.80x / 15.06x at leaf 512 / 1024 on four devices,
+    # total N held fixed -- because cross-domain work is 31 % of the near field at two
+    # devices and 53 % at five. The self-only ablation is 1.87x at 1.06x the work, so
+    # most of the advantage lives in the CROSS walk; that is what `mac_cross_criterion`
+    # exists to measure. Full record and the trap list:
+    # `docs/dehnen_mass_mac_status_and_plan.md` (items 0, 0b, 0c); raw rows under
+    # `bench/results/distributed_dehnen_mac/`.
+    mac_type: MACTypeInput = "dehnen"
+    # Dehnen section 5 criterion knobs, read only when mac_type="dehnen_error".
+    #
+    # `adaptive_eps` is eq (16a)'s relative force-accuracy target and is MANDATORY
+    # under the criterion -- it replaces `theta` as the accuracy knob on the self
+    # walk, where the geometric MAC no longer gates acceptance at all (the pair
+    # policy discards `mac_ok` in paper mode). `theta` still gates the CROSS walk,
+    # which stays geometric; see `_force_scale.py` for the scope of this port.
+    adaptive_eps: Optional[float] = None
+    # Which force scale sits on eq (16a)'s right-hand side. Only eq (16b)'s `f_b`
+    # is available on a mesh -- see :data:`DISTRIBUTED_FORCE_SCALE_MODES` and the
+    # `_force_scale` module docstring for why eq (16a)'s `min_b |a_b|` is a second
+    # distributed evaluation rather than a read of lists that already exist.
+    mac_force_scale_mode: str = "paper_fb"
+    # eq (16a) first clause: `theta < mac_theta_max`, with 1.0 giving the paper's
+    # own `theta < 1`. Measured not to be needed (trap 4); do not lower it without
+    # a fresh reason.
+    mac_theta_max: float = 1.0
+    # Whether the criterion also decides the CROSS-domain walk, or only the local
+    # self walk. True (default) is the full port. False is the self-only ablation --
+    # worth keeping addressable, because cross-domain near-field work is 53% of the
+    # total at 5 devices, so the two arms answer different questions and the
+    # difference between them is the measurement that says how much of the
+    # criterion's advantage lives across domains.
+    mac_cross_criterion: bool = True
+    # How node centres and radii are measured for the criterion. "com" (the
+    # solver's own default) references centres and radii to the runtime's expansion
+    # centres, so the distance entering eqs (13)/(15) is exactly the M2L
+    # displacement. The sphere-fitting modes "exact" and "tree" run a numpy host
+    # loop over nodes and cannot be traced, so they are unreachable inside
+    # ``shard_map`` and rejected up front rather than at trace time.
+    dehnen_geometry_mode: str = "com"
     # Far-field expansion basis: "real" (Dehnen no-sqrt2, DEFAULT) or "solidfmm" (complex).
     # "real" is the per-device far field converged onto the single-GPU fast-lane path
     # (memory-lighter, and unlocks the fused real M2L Pallas kernel when
@@ -236,15 +772,25 @@ class DistributedFMMConfig:
     # ``auto_scale_caps`` grows them on overflow exactly like the dual-tree caps.
     treecode_near_cap: Optional[int] = None
     treecode_far_cap: Optional[int] = None
-    # self dual-tree walk capacities
-    max_interactions_per_node: int = 512
-    max_neighbors_per_leaf: int = 128
-    max_pair_queue: int = 1 << 15
-    process_block: int = 64
-    # cross-walk (local vs remote coarse tree) capacities
-    cross_max_interactions_per_node: int = 512
-    cross_max_neighbors_per_leaf: int = 128
-    cross_max_pair_queue: int = 1 << 15
+    # Self dual-tree walk capacities. ``None`` (the default) means "derive from
+    # per-device N", which :meth:`resolved_for` does and the driver calls before it
+    # builds anything -- see :func:`_derive_walk_caps` for the rule and the
+    # occupancy measurement behind it. These shipped as the bare constants 512 / 128
+    # / 32768 / 64 with no N dependence at all, which put a hard ceiling on
+    # per-device N: the neighbour cap truncates above 128 leaves, i.e. 1024
+    # particles at the old leaf_size=8. An explicit value is always honoured,
+    # including a deliberately tiny one.
+    max_interactions_per_node: Optional[int] = None
+    max_neighbors_per_leaf: Optional[int] = None
+    max_pair_queue: Optional[int] = None
+    process_block: Optional[int] = None
+    # Cross-walk (local vs remote coarse tree) capacities. Same sentinel contract as
+    # the self ones above: ``None`` means "derive from per-device N". These were the
+    # wall immediately behind the self caps -- at 32768/device and leaf 64 the self
+    # flags are clear and ``cross_near_overflow`` fires, with a 49% force error.
+    cross_max_interactions_per_node: Optional[int] = None
+    cross_max_neighbors_per_leaf: Optional[int] = None
+    cross_max_pair_queue: Optional[int] = None
     # Static length of the cross-far M2L input. The cross walk sizes its far buffer at
     # t_total * cross_max_interactions_per_node but PACKS the valid interactions into the
     # front; feeding the whole (mostly-invalid) buffer to the fused real-M2L pads it to a
@@ -265,6 +811,23 @@ class DistributedFMMConfig:
     # >200k/GPU; self-far >1.2M/GPU). Scanning fixed-size blocks bounds peak M2L memory to
     # ~block pairs regardless of the total, removing the M2L per-GPU ceiling at some
     # throughput cost. Numerics-identical (associative masked segment-sum accumulation).
+    nearfield_accum: str = "input"
+    """Per-target near-field accumulator width. See :data:`NEARFIELD_ACCUM_MODES`.
+
+    ``"input"`` (default) is byte-identical to the historical path. ``"wide"``
+    accumulates each target's near-field total in float64 while every multiply and the
+    ``rsqrt`` stay in the input dtype -- the mirror image of ``far_m2l_fp32`` above,
+    which computes narrow and accumulates wide for memory; this computes narrow and
+    accumulates wide for accuracy.
+
+    Why this knob exists, measured at 10 485 760 / 5 x A100 / leaf 512 / order 6:
+    running the near field in float64 takes rel_l2 from 4.811e-03 to 1.097e-05, a
+    **438x** recovery landing within 3 % of the full float64 floor (1.068e-05). The
+    error is not in the per-term arithmetic -- it is in one linear sum of ~1.4e6 terms
+    whose net is a small residual of a much larger total, so only the three adds per
+    pair need to widen.
+    """
+
     m2l_chunk: Optional[int] = None
     # Chunk the fused-Pallas NEAR field over blocks of this many TARGET leaves (None = one
     # full batch). The near field densifies the combined CSR into [u_leaves, S_near] tables
@@ -275,6 +838,68 @@ class DistributedFMMConfig:
     # (disjoint target blocks + scatter-add). Applies ONLY when the pallas near-field is
     # active (nearfield_backend "pallas", or "auto" on Ampere+); ignored for baseline.
     nearfield_chunk: Optional[int] = None
+    # How particles are assigned to devices: "rcb" (DEFAULT, matching
+    # partition_for_devices and DistributedMutualConfig) or "morton". RCB keeps a
+    # flattened system's near neighbours on one device where a Morton split scatters
+    # them -- a thickness-0.4 disk on 4 devices goes from 0.509 of each particle's
+    # nearest neighbours living off-device to 0.046 -- and is better in every geometry
+    # measured (#212). The field exists because the flip in #215 moves the domain
+    # assignment of every distributed run, and therefore every accuracy and timing
+    # baseline taken with one: "morton" is how you reproduce a pre-#215 number, and it
+    # is also still the cheaper of the two (one sort against log2(ndev) partial sorts)
+    # on a system known to be isotropic, where the gap narrows to ~1.2x.
+    partitioner: str = "rcb"
+
+    def resolved_for(
+        self: "DistributedFMMConfig", per_device_n: int, ndev: int
+    ) -> "DistributedFMMConfig":
+        """Return a copy with every unset traversal capacity derived from N.
+
+        Idempotent: once a field holds a number there is no sentinel left to fill,
+        so the driver can call this at its entry point and again deeper down
+        without a second N changing anything. That matters because the capacities
+        are what the retry loop grows and what :mod:`jaccpot.distributed.cap_presets`
+        records -- both need concrete numbers, and both would otherwise see
+        ``None``.
+
+        Parameters
+        ----------
+        per_device_n : int
+            Per-device particle capacity (``cap`` from
+            :func:`partition_for_devices`).
+        ndev : int
+            Number of devices in the mesh. Only the cross-walk caps depend on it,
+            and they depend on it strongly -- see :func:`_derive_walk_caps`.
+
+        Returns
+        -------
+        DistributedFMMConfig
+            A copy with no ``None`` left in :data:`DERIVED_CAP_FIELDS`.
+        """
+
+        unset = [f for f in DERIVED_CAP_FIELDS if getattr(self, f) is None]
+        if not unset:
+            return self
+        # Under the Dehnen criterion the self walk accepts on the pair policy, not on
+        # theta, so the theta-scaled self queue would be sized from a knob that gates
+        # nothing -- and under-sizing it truncates the walk SILENTLY. Floor it at the
+        # tightest angle the queue law was fitted at. The CROSS queue keeps the
+        # configured theta, because the cross walk really is geometric.
+        # Each walk's caps follow whichever test actually decides that walk. Under the
+        # criterion theta gates nothing, so its caps carry no theta factor -- see
+        # `_CRITERION_SELF_QUEUE_COEFF` for the bisection behind the coefficients, and
+        # for the two caps that turned out UNDER-provisioned rather than over.
+        criterion = str(self.mac_type) == "dehnen_error"
+        cross_criterion = criterion and bool(self.mac_cross_criterion)
+        derived = _derive_walk_caps(
+            per_device_n=int(per_device_n),
+            leaf_size=int(self.leaf_size),
+            ndev=int(ndev),
+            theta=float(self.theta),
+            criterion=criterion,
+            cross_criterion=cross_criterion,
+        )
+        return dataclasses.replace(self, **{f: derived[f] for f in unset})
 
     def with_scaled_caps(
         self: "DistributedFMMConfig", factor: float
@@ -284,8 +909,11 @@ class DistributedFMMConfig:
         Handy for the overflow-retry loop in capacity calibration.
         """
 
-        def g(v: int) -> int:
-            return int(np.ceil(v * factor))
+        def g(v: Optional[int]) -> Optional[int]:
+            # ``None`` means "still derived from per-device N", which a multiply
+            # cannot express -- leave it for :meth:`resolved_for`. The retry loop
+            # only ever sees a resolved config, so this is for direct callers.
+            return None if v is None else int(np.ceil(v * factor))
 
         return dataclasses.replace(
             self,
@@ -334,10 +962,10 @@ class DistributedFMMConfig:
         def flagged(name: str) -> bool:
             return bool(np.any(diag[:, DIAG_FIELDS.index(name)] > 0))
 
-        def g(v: int) -> int:
-            return int(np.ceil(v * factor))
+        def g(v: Optional[int]) -> Optional[int]:
+            return None if v is None else int(np.ceil(v * factor))
 
-        def maybe(name: str, value: int) -> int:
+        def maybe(name: str, value: Optional[int]) -> Optional[int]:
             return g(value) if flagged(name) else value
 
         # Under the treecode local walk the self near/far caps derive from
@@ -406,6 +1034,42 @@ class DistributedFMMResult:
         return bool(self.diagnostics.get("overflow", False))
 
 
+def _rcb_groups(idx: np.ndarray, positions: np.ndarray, k: int) -> list:
+    """Split ``idx`` into ``k`` near-equal groups by recursive median bisection.
+
+    Cuts the LONGEST axis of the current group at the position that gives each side its
+    share of the remaining devices, then recurses. The cut is placed by device share
+    rather than at the plain median so ``k`` need not be a power of two and every group
+    comes out the same size to within one particle -- which matters here because the
+    lane pads every device to the largest count, so imbalance is wasted capacity on
+    every device at once.
+
+    Parameters
+    ----------
+    idx : np.ndarray
+        Particle indices in this group.
+    positions : np.ndarray
+        ``(n, 3)`` positions, indexed by ``idx``.
+    k : int
+        Groups to split into.
+
+    Returns
+    -------
+    list
+        ``k`` arrays of indices.
+    """
+    if k == 1:
+        return [idx]
+    left_k = k // 2
+    p = positions[idx]
+    axis = int(np.argmax(p.max(0) - p.min(0)))
+    ordered = idx[np.argsort(p[:, axis], kind="stable")]
+    cut = int(round(len(idx) * left_k / k))
+    return _rcb_groups(ordered[:cut], positions, left_k) + _rcb_groups(
+        ordered[cut:], positions, k - left_k
+    )
+
+
 def partition_for_devices(
     positions: np.ndarray,
     masses: np.ndarray,
@@ -413,6 +1077,7 @@ def partition_for_devices(
     *,
     leaf_size: int,
     bounds: tuple | None = None,
+    partitioner: str = "rcb",
 ) -> dict:
     """Morton-sort particles and split into ``ndev`` contiguous SFC domains.
 
@@ -422,8 +1087,96 @@ def partition_for_devices(
     id array is threaded through so distributed forces can be scattered back to
     the input order.
 
-    Returns a dict with the flat ``(ndev*cap, ...)`` arrays ready for
-    ``shard_map`` plus ``cap``, ``counts`` and ``bounds``.
+    THE RETURNED ``gid_flat`` IS NOT A READOUT MAP for the force. It names the rows
+    of *this* layout; the per-device pipeline re-Morton-sorts its own shard and
+    returns the accelerations in that tree order, together with the ``gid``
+    permuted to match. Reassemble with the ``gid`` the evaluator returns -- what
+    :func:`distributed_fmm_accelerations` does below, and what
+    :func:`make_force_evaluator`'s contract says.
+
+    The trap is that the two orders coincide whenever ``cap == count``: the shard is
+    handed over already in Morton order, so the tree's permutation is the identity
+    and reading the output by input row is right by accident. Padding breaks it.
+    The rows go at ``positions[chunk[0]]``, the device's *first* particle in Morton
+    order and hence its smallest Morton code, so the tree build sorts them to the
+    front and displaces every real particle after the first by the padding count.
+    A caller that reused ``gid_flat`` then compares each particle's force against a
+    Morton-neighbour's -- plausible, smooth, and wrong by tens of percent, with no
+    overflow counter able to see it. Measured, and pinned in
+    ``tests/distributed/test_distributed_padded_partition.py``.
+
+    The padding note above is written for the Morton layout, and ``partitioner="rcb"``
+    changes only *where* the padding rows land, not the contract: they still go at
+    ``positions[chunk[0]]``, but that is no longer the domain's smallest Morton code, so
+    the tree build sorts them into the middle rather than the front. Which is another
+    reason the returned ``gid`` is the only readout map worth trusting -- the
+    displacement it protects against is partitioner-dependent, and the protection is
+    not.
+
+    Parameters
+    ----------
+    positions : np.ndarray
+        Particle positions ``[N, 3]`` in input order.
+    masses : np.ndarray
+        Particle masses ``[N]`` in input order.
+    ndev : int
+        Number of devices to split across.
+    leaf_size : int
+        Local-tree leaf size. ``cap`` is rounded up to a multiple of it, which is
+        where the padding comes from.
+    bounds : tuple | None
+        Global ``(min_corner, max_corner)`` box for the Morton encoding. Derived
+        from ``positions`` when ``None``, with the same relative pad the per-device
+        ``global_bounds`` applies, so the two agree on the code of every particle.
+    partitioner : str
+        How particles are assigned to devices: ``"rcb"`` (default) or ``"morton"``.
+
+        ``"morton"`` sorts by Morton code and takes contiguous runs. Compact for a
+        roughly isotropic system and poor for a flattened one, because a Morton code's
+        three most significant bits are ``(z, y, x)`` -- so its very first cut bisects
+        ALL THREE axes at once, including the thin one. For a disk centred in its box
+        that cut slices through the thickness, separating particles 0.1 apart while
+        keeping particles 20 apart together. No choice of bounds fixes it: rescaling
+        the box does not move the disk off its own centre. (Cubing the bounds was tried
+        and measured -- it moves a thickness-0.4 disk from 0.521 to 0.484 against 0.070
+        for a compact split, i.e. essentially nothing.)
+
+        ``"rcb"`` bisects the longest axis at the median and recurses, giving compact
+        boxes by construction. Measured as the fraction of each particle's 16 nearest
+        neighbours living on another device -- what the near field must import and the
+        cross walk must pair up::
+
+            geometry                ndev   morton     rcb    gain
+            disk, thickness 0.4        2    0.435   0.024   18.0x
+            disk, thickness 0.4        4    0.509   0.046   11.1x
+            disk, thickness 0.4        8    0.557   0.092    6.1x
+            disk, thickness 2.0        4    0.272   0.057    4.7x
+            ball                       4    0.148   0.124    1.2x
+            isotropic Gaussian         4    0.175   0.128    1.4x
+
+        ``"rcb"`` is the default because it is better in every case measured. It
+        did not start that way: it landed as opt-in so that flipping the default -- which
+        moves the domain assignment of every distributed run, and so every accuracy and
+        timing baseline taken with one -- could be a deliberate step with its own
+        verification rather than a side effect of adding the option.
+
+        ``"morton"`` is kept, and not only for reproducing old numbers: it is the
+        cheaper of the two (one sort against ``log2(ndev)`` partial sorts) and the gap
+        closes to ~1.2x on an isotropic system, so it remains the right choice for a
+        run that is known to be round.
+
+    Returns
+    -------
+    dict
+        The flat ``(ndev * cap, ...)`` arrays ready for ``shard_map``
+        (``pos_flat``, ``mass_flat``, ``gid_flat``) plus ``counts``, ``cap``,
+        ``bounds``, ``n`` and ``ndev``.
+
+    Raises
+    ------
+    ValueError
+        If there are fewer particles than devices, which leaves a device with no
+        real particle to pad from, or if ``partitioner`` is not a known name.
     """
 
     positions = np.asarray(positions)
@@ -442,8 +1195,20 @@ def partition_for_devices(
         span = np.where(hi > lo, hi - lo, 1.0)
         bounds = (jnp.asarray(lo - span * 1e-6), jnp.asarray(hi + span * 1e-6))
 
-    codes = np.asarray(morton_encode_impl(jnp.asarray(positions), bounds))
-    order = np.argsort(codes)
+    if partitioner == "morton":
+        order = np.argsort(
+            np.asarray(morton_encode_impl(jnp.asarray(positions), bounds))
+        )
+    elif partitioner == "rcb":
+        # Concatenated in group order, so the contiguous-chunk split below hands group
+        # d to device d -- the same downstream contract as the Morton order, which is
+        # why this is a drop-in: nothing downstream reads the GLOBAL ordering, only the
+        # per-device sets (each device re-sorts into its own tree anyway).
+        order = np.concatenate(
+            _rcb_groups(np.arange(n), np.asarray(positions), int(ndev))
+        )
+    else:
+        raise ValueError(f"partitioner must be 'morton' or 'rcb', got {partitioner!r}")
 
     pos_g = np.zeros((ndev, cap, 3), positions.dtype)
     mass_g = np.zeros((ndev, cap), masses.dtype)
@@ -468,6 +1233,86 @@ def partition_for_devices(
         "n": n,
         "ndev": ndev,
     }
+
+
+def scatter_to_input_order(
+    values: Any,
+    gid: Any,
+    n: int,
+) -> np.ndarray:
+    """Reassemble a per-device result into the original input particle order.
+
+    ``values`` is any per-row quantity the ``shard_map`` pipeline returns -- the
+    accelerations, a potential, a per-particle diagnostic -- laid out over the
+    ``(ndev * cap, ...)`` padded rows. ``gid`` is the global-id array **returned
+    beside it** by :func:`make_force_evaluator`'s callable, with ``-1`` on padding
+    rows. Every real particle must appear exactly once.
+
+    This exists because hand-rolling the scatter is how the padding defect of
+    ``docs/distributed_padding_force_defect.md`` happened: four call sites wrote the
+    same loop, and one of them reached for the ``gid_flat`` that went *in* rather
+    than the ``gid`` that came *out*. Those two arrays agree whenever no device is
+    padded, so the wrong one is right until a per-device count stops dividing
+    ``leaf_size`` -- and then it reads every particle's force off a Morton
+    neighbour, which is smooth, plausible and wrong by tens of percent. Prefer this
+    helper to writing the loop again.
+
+    Host-side NumPy, like :func:`distributed_fmm_accelerations`: not traceable, and
+    not meant to be. Take gradients through the evaluator, not through the
+    reassembly.
+
+    Parameters
+    ----------
+    values : Any
+        Per-row values in the padded per-device order, shape ``[ndev * cap, ...]``.
+        Converted with ``np.asarray``.
+    gid : Any
+        Global id per row, shape ``[ndev * cap]`` or ``[ndev * cap, 1]``; ``-1``
+        marks a padding row. Must be the array the evaluator returned.
+    n : int
+        Number of input particles, i.e. the number of rows in the result.
+
+    Returns
+    -------
+    np.ndarray
+        ``[n, ...]`` in the input particle order, float64 so a float32 force is
+        never the noisy side of a later comparison.
+
+    Raises
+    ------
+    ValueError
+        If ``values`` and ``gid`` disagree on the row count, or a global id falls
+        outside ``[0, n)``.
+    RuntimeError
+        If any input particle is missing from the result -- a padding or capacity
+        bug, and never something to paper over with a partial answer.
+    """
+
+    values_arr = np.asarray(values)
+    gid_arr = np.asarray(gid).reshape(-1).astype(np.int64)
+    if values_arr.shape[0] != gid_arr.shape[0]:
+        raise ValueError(
+            f"values has {values_arr.shape[0]} rows but gid has {gid_arr.shape[0]}; "
+            "they must be the two arrays the same evaluator call returned"
+        )
+
+    rows = np.flatnonzero(gid_arr >= 0)
+    ids = gid_arr[rows]
+    if ids.size and (ids.max() >= n or ids.min() < 0):
+        raise ValueError(
+            f"global ids out of range for n={n}: [{ids.min()}, {ids.max()}]"
+        )
+
+    out = np.zeros((n,) + values_arr.shape[1:], np.float64)
+    out[ids] = values_arr[rows]
+    seen = np.zeros(n, bool)
+    seen[ids] = True
+    if not seen.all():
+        raise RuntimeError(
+            f"{int((~seen).sum())} particles missing from the distributed result "
+            "(padding/capacity bug)"
+        )
+    return out
 
 
 def _chunked_real_m2l_accumulate(
@@ -570,6 +1415,7 @@ def _chunked_pallas_nearfield_accumulate(
     block: int,
     G: Any,
     softening_sq: jax.Array,
+    accum: str = "input",
 ) -> jax.Array:
     """Fused-Pallas near field over blocks of TARGET leaves (bounded peak memory).
 
@@ -630,6 +1476,26 @@ def _chunked_pallas_nearfield_accumulate(
     jax.Array
         Near-field accelerations in the ``concat_pos`` layout, ``[cap + halo, 3]``.
     """
+    # DIAGNOSTIC ONLY, off by default. `JACCPOT_NEARFIELD_ACCUM=wide_input` runs the
+    # whole near field in float64 while everything around it stays float32, which
+    # answers "if the near field were exact, what would rel_l2 be?" -- the measurement
+    # that decides whether widening the per-target accumulator can reach the float64
+    # accuracy floor, or whether the far field carries a floor of its own. It is not a
+    # shipping mode: it widens the pair arithmetic too, so its cost says nothing about
+    # the accumulator-only change. See docs/plan notes on the fp32 near-field floor.
+    _accum = accum
+    _orig_dtype = concat_pos.dtype
+    if _accum == "wide_input":
+        leaf_positions = leaf_positions.astype(jnp.float64)
+        leaf_masses = leaf_masses.astype(jnp.float64)
+        concat_pos = concat_pos.astype(jnp.float64)
+        softening_sq = jnp.asarray(softening_sq, jnp.float64)
+        G = jnp.asarray(G, jnp.float64)
+    elif _accum not in ("input", "wide"):
+        raise ValueError(
+            f"nearfield_accum must be one of {NEARFIELD_ACCUM_MODES}, got {_accum!r}"
+        )
+
     nblk = -(-n_lloc // block)  # ceil
     num_edges = int(src_s.shape[0])
     near0 = jnp.zeros_like(concat_pos)
@@ -683,12 +1549,20 @@ def _chunked_pallas_nearfield_accumulate(
             G=G,
             softening_sq=softening_sq,
             compute_potential=False,
+            accum="wide" if _accum == "wide" else "input",
         )
         return near + self_blk + pair_blk, None
 
     near, _ = jax.lax.scan(_body, near0, jnp.arange(nblk, dtype=INDEX_DTYPE))
-    return near
+    return near.astype(_orig_dtype)
 
+
+#: Per-target near-field accumulator widths. ``"input"`` keeps the historical path
+#: verbatim; ``"wide"`` is the shipping fix (float64 accumulator, float32 pair
+#: arithmetic); ``"wide_input"`` is a DIAGNOSTIC that runs the whole near field in
+#: float64 -- it answers "if the near field were exact, what is rel_l2?" and its cost
+#: says nothing about ``"wide"``, because float64 ``rsqrt`` is a Newton iteration.
+NEARFIELD_ACCUM_MODES = ("input", "wide", "wide_input")
 
 #: Halo-exchange implementations selectable on the gradient path, plus ``"auto"``.
 #: See :func:`_grad_halo_exchange` for what each is and :func:`resolve_grad_halo_exchange`
@@ -719,15 +1593,34 @@ def _jax_version_tuple() -> tuple[int, ...]:
 
 
 def resolve_grad_halo_exchange(method: str = "auto") -> str:
-    """Resolve the grad-path halo exchange, version-gating the ragged one.
+    """Resolve the grad-path halo exchange, gating the ragged one two ways.
 
     ``"auto"`` picks ``"native"`` (``jax.lax.ragged_all_to_all``, which sends only
-    the actual halo) on JAX >= :data:`JAX_RAGGED_GRAD_FIXED_VERSION`, and the
-    bandwidth-hungry but safe ``"buf"`` below it. That keeps a user on an affected
-    JAX from silently computing wrong forces after their first gradient, while
-    anyone on a fixed JAX gets the cheap exchange with no action required.
+    the actual halo) when BOTH conditions hold, and the bandwidth-hungry but safe
+    ``"buf"`` otherwise:
 
-    The gate is a floor, not a range: no upper bound is asserted because a
+    * **JAX >=** :data:`JAX_RAGGED_GRAD_FIXED_VERSION`. Below it, executing the
+      ragged reverse pass corrupts every later ragged exchange in the process, so
+      a forward evaluated after a gradient silently loses the whole cross-domain
+      near field. That keeps a user on an affected JAX from computing wrong
+      forces, while anyone on a fixed JAX gets the cheap exchange for free.
+    * **The default backend is not CPU.** ``ragged_all_to_all`` has no XLA:CPU
+      lowering, so there ``"native"`` is not slower-or-riskier, it is
+      ``UNIMPLEMENTED: HLO opcode 'ragged-all-to-all' is not supported by
+      XLA:CPU ThunkEmitter``.
+
+    The backend condition is not a refinement of the version one -- it was added
+    because its absence had already killed the guard. On jax 0.10.2 the version
+    gate alone resolves to ``"native"`` on every backend, which failed six tests
+    in ``tests/distributed/test_distributed_grad_correctness.py``; and since
+    ``e98340d`` CI does not collect ``tests/distributed``, CPU was the only place
+    they ran. The only reachable guard on the distributed reverse pass was
+    therefore dead, for a reason having nothing to do with the code it guards.
+
+    Only CPU is excluded, rather than "anything that is not GPU". CPU is measured
+    to have no lowering; nothing is claimed here about a backend nobody has run.
+
+    The version gate is a floor, not a range: no upper bound is asserted because a
     regression would be caught by
     ``test_native_halo_exchange_is_fixed_upstream``, which is the check this
     constant is derived from.
@@ -739,6 +1632,8 @@ def resolve_grad_halo_exchange(method: str = "auto") -> str:
         )
     if method != "auto":
         return method
+    if jax.default_backend() == "cpu":
+        return "buf"
     return "native" if _jax_version_tuple() >= JAX_RAGGED_GRAD_FIXED_VERSION else "buf"
 
 
@@ -882,7 +1777,6 @@ def _make_fn(
     G = config.G
     soft = config.softening
     rot = config.rotation
-    mac = config.mac_type
     theta = config.theta
     is_real = str(config.basis).strip().lower() == "real"
 
@@ -894,6 +1788,72 @@ def _make_fn(
         )
     use_treecode_local = lw == "treecode"
     dehnen_radius_scale = float(config.dehnen_radius_scale)
+
+    # Dehnen section 5 criterion resolution (trace-time). `mac_type="dehnen_error"`
+    # is a jaccpot-level POLICY: yggdrax's traversal only knows the three geometric
+    # literals, so `mac` below is the translated one and the criterion rides in as a
+    # `pair_policy` on the self walk. `dehnen_theta` is refuted and is refused here
+    # rather than translated -- folding the criterion into `geometry.radius` would
+    # silently leave the cross walk on a different criterion from the self walk.
+    mac_requested = str(config.mac_type)
+    if mac_requested == "dehnen_theta":
+        raise ValueError(
+            "mac_type='dehnen_theta' is not available on the distributed lane. It is "
+            "REFUTED on the single-GPU lane (12-9300x worse error at 1.35-15x the "
+            "work, pinned by tests/unit/runtime/test_refuted_dehnen_theta_mode.py) "
+            "and it folds the criterion into geometry.radius, which the cross walk "
+            "does not carry. Use mac_type='dehnen_error'."
+        )
+    uses_criterion = mac_requested == "dehnen_error"
+    # Whether the criterion also decides the cross walk. False is the self-only
+    # ablation; see the config field for why it stays addressable.
+    use_cross_criterion = uses_criterion and bool(config.mac_cross_criterion)
+    # The geometric MAC handed to both walks. Under the criterion this is the
+    # `dehnen` base test; on the self walk the pair policy discards its verdict
+    # (paper mode deletes `mac_ok`), and on the cross walk it is the whole test.
+    mac: MACType = "dehnen" if uses_criterion else mac_requested
+    if uses_criterion:
+        if config.adaptive_eps is None:
+            raise ValueError(
+                "mac_type='dehnen_error' requires adaptive_eps: eq (16a)'s relative "
+                "force-accuracy target replaces theta as the accuracy knob on the "
+                "self walk. There is no default, because a wrong one changes what "
+                "is accepted and costs LESS work, which no timing can detect."
+            )
+        if str(config.mac_force_scale_mode) not in DISTRIBUTED_FORCE_SCALE_MODES:
+            raise ValueError(
+                "mac_force_scale_mode must be one of "
+                f"{DISTRIBUTED_FORCE_SCALE_MODES} on the distributed lane; got "
+                f"{config.mac_force_scale_mode!r}"
+            )
+        if use_treecode_local:
+            raise ValueError(
+                "mac_type='dehnen_error' needs local_walk='dual_tree': the treecode "
+                "walk takes no pair policy, so it would run the geometric MAC and "
+                "report nothing -- faster, and answering a different criterion."
+            )
+        if str(config.dehnen_geometry_mode) not in _TRACEABLE_DEHNEN_GEOMETRY_MODES:
+            raise ValueError(
+                "dehnen_geometry_mode must be one of "
+                f"{_TRACEABLE_DEHNEN_GEOMETRY_MODES} on the distributed lane; got "
+                f"{config.dehnen_geometry_mode!r}. The sphere-fitting modes run a "
+                "numpy host loop over nodes, which cannot be traced inside "
+                "shard_map."
+            )
+        # LAST of the criterion checks, deliberately. This one is about the installed
+        # yggdrax rather than about the configuration, so a caller who also got a
+        # config field wrong should hear about the field first -- and the refusal
+        # tests should be able to exercise those fields without a newer yggdrax.
+        if use_cross_criterion and not cross_walk_accepts_a_pair_policy():
+            raise ValueError(
+                "mac_cross_criterion=True needs a yggdrax whose "
+                "dual_tree_walk_cross_impl accepts a pair_policy (yggdrax PR #54). "
+                "The installed one does not, so the criterion would reach the self "
+                "walk and silently leave the cross walk on the geometric MAC -- "
+                "which is FASTER and answers a different question, and is 53% of "
+                "the near-field work at five devices. Upgrade yggdrax, or pass "
+                "mac_cross_criterion=False to run the self-only arm deliberately."
+            )
 
     # Near-field backend resolution (trace-time; sm_80+ gate mirrors the single-GPU
     # lane). "auto" -> fused leafpair Pallas on Ampere+, pure-JAX baseline elsewhere.
@@ -1034,10 +1994,9 @@ def _make_fn(
         gid_sorted = gid[perm]
         # Geometry feeds the MAC only, so it always takes the frozen positions
         # (the same values as ``lp``; identical forward, no cotangent path).
-        with jax.named_scope("jc_geometry"):
-            geom = compute_tree_geometry_compiled(
-                tree, tree.positions_sorted, max_leaf_size=leaf
-            )
+        geom = compute_tree_geometry_compiled(
+            tree, tree.positions_sorted, max_leaf_size=leaf
+        )
         total_nodes = jnp.asarray(tree.node_ranges).shape[0]
         cdtype = complex_dtype_for_real(lp.dtype)
 
@@ -1046,10 +2005,9 @@ def _make_fn(
         # bytes); solidfmm runs the complex sweep. Both produce per-node multipoles
         # + COM centers with the same API.
         if is_real:
-            with jax.named_scope("jc_upward_local"):
-                up = prepare_real_upward_sweep(
-                    tree, lp, lm, max_order=p, max_leaf_size=leaf
-                )
+            up = prepare_real_upward_sweep(
+                tree, lp, lm, max_order=p, max_leaf_size=leaf
+            )
         else:
             up = prepare_solidfmm_complex_upward_sweep(
                 tree, lp, lm, max_order=p, max_leaf_size=leaf, rotation=rot
@@ -1115,20 +2073,18 @@ def _make_fn(
                 near_overflow=(near_cnt > tc_near_cap).astype(jnp.int64),
             )
         else:
-            with jax.named_scope("jc_self_walk"):
-                inter, nbr, self_res = build_interactions_and_neighbors(
-                    tree,
-                    geom,
-                    theta=theta,
-                    traversal_config=cfg,
-                    mac_type=mac,
-                    return_result=True,
-                )
+            inter, nbr, self_res = build_interactions_and_neighbors(
+                tree,
+                geom,
+                theta=theta,
+                traversal_config=cfg,
+                mac_type=mac,
+                return_result=True,
+            )
 
         # remote coarse tree over frontier (leaf COM + mass)
-        with jax.named_scope("jc_coarse_frontier"):
-            mm = compute_tree_mass_moments(tree, lp, lm)
-            fr = build_coarse_frontier(tree, mm.mass, mm.center_of_mass)
+        mm = compute_tree_mass_moments(tree, lp, lm)
+        fr = build_coarse_frontier(tree, mm.mass, mm.center_of_mass)
         if differentiable:
             # The coarse tree's topology is discrete -> build it from a frozen
             # frontier (its own Tree.from_particles has the same non-transposable
@@ -1152,14 +2108,13 @@ def _make_fn(
 
         # coarse centres (COM) + level structure (same basis as the local sweep)
         if is_real:
-            with jax.named_scope("jc_upward_coarse"):
-                upc = prepare_real_upward_sweep(
-                    rct.tree,
-                    coarse_pos_sorted,
-                    coarse_mass_sorted,
-                    max_order=p,
-                    max_leaf_size=1,
-                )
+            upc = prepare_real_upward_sweep(
+                rct.tree,
+                coarse_pos_sorted,
+                coarse_mass_sorted,
+                max_order=p,
+                max_leaf_size=1,
+            )
         else:
             upc = prepare_solidfmm_complex_upward_sweep(
                 rct.tree,
@@ -1179,8 +2134,7 @@ def _make_fn(
 
         # seed coarse leaves with the remote leaves' own multipoles. The gathered
         # array is REAL in the real basis (half the bytes of the complex packed).
-        with jax.named_scope("jc_all_gather_coarse"):
-            gpacked = jax.lax.all_gather(packed, "gpus", tiled=False)  # [ndev,N,C]
+        gpacked = jax.lax.all_gather(packed, "gpus", tiled=False)  # [ndev,N,C]
         spos = c_nr[c_leaves, 0]
         dom = rct.tag_domain[spos]
         nod = rct.tag_node_id[spos]
@@ -1196,19 +2150,18 @@ def _make_fn(
         c_loff = get_level_offsets(rct.tree)
         c_numlev = int(c_loff.shape[0] - 1)
         if is_real:
-            with jax.named_scope("jc_coarse_m2m"):
-                coarse_packed = aggregate_m2m_real_by_level(
-                    seed,
-                    c_centers,
-                    c_lc,
-                    c_rc,
-                    jnp.asarray(c_nbl, INDEX_DTYPE),
-                    jnp.asarray(c_loff, INDEX_DTYPE),
-                    order=p,
-                    num_internal=c_nint,
-                    num_levels=c_numlev,
-                    level_batch_width=max(c_nint, 1),
-                )
+            coarse_packed = aggregate_m2m_real_by_level(
+                seed,
+                c_centers,
+                c_lc,
+                c_rc,
+                jnp.asarray(c_nbl, INDEX_DTYPE),
+                jnp.asarray(c_loff, INDEX_DTYPE),
+                order=p,
+                num_internal=c_nint,
+                num_levels=c_numlev,
+                level_batch_width=max(c_nint, 1),
+            )
         else:
             coarse_packed = _aggregate_m2m_complex_by_level(
                 seed,
@@ -1227,18 +2180,203 @@ def _make_fn(
 
         # Same MAC as the self walk above: ``rct.geometry`` bounds the particles behind
         # each coarse node, so the acceptance test means the same thing on both sides.
-        with jax.named_scope("jc_cross_walk"):
-            cross = dual_tree_walk_cross_impl(
+        cross = dual_tree_walk_cross_impl(
+            tree,
+            geom,
+            rct.tree,
+            rct.geometry,
+            theta,
+            mac_type=mac,
+            max_interactions_per_node=KC,
+            max_neighbors_per_leaf=KN,
+            max_pair_queue=x_queue,
+        )
+
+        # Right-sized cross-far slice. The walk sizes `interaction_sources` at
+        # `t_total * KC` but PACKS the valid far interactions into the front
+        # [0, far_pair_count) with a -1 tail, so touching the whole buffer costs
+        # ~6 GiB at N >= 400k/GPU for interactions that are not there. Hoisted above
+        # the criterion block because the force-scale prepass reads the same array
+        # and would otherwise reintroduce exactly that allocation. `nbr.leaf_indices`
+        # is the same leaf set before and after the criterion walk -- same tree --
+        # so the cap does not move. A far volume above it is surfaced as
+        # `cross_far_overflow` below, so the slice never silently drops pairs.
+        max_far = int(jnp.asarray(cross.interaction_sources).shape[0])
+        num_tgt_leaves = int(jnp.asarray(nbr.leaf_indices).shape[0])
+        if config.cross_far_cap is not None:
+            xfar_cap = int(config.cross_far_cap)
+        else:
+            xfar_cap = max(1 << 14, KC * num_tgt_leaves)
+        xfar_cap = min(xfar_cap, max_far)
+
+        # 0.0/0.0 unless the criterion runs; see DIAG_FIELDS for why the RANGE and
+        # not just a flag.
+        fs_min = jnp.zeros((), jnp.float64)
+        fs_max = jnp.zeros((), jnp.float64)
+
+        if uses_criterion:
+            # ---- Dehnen section 5, eq (16b): the criterion's second self walk ----
+            #
+            # The walks above are the PREPASS. Their geometric far/near lists are
+            # what `f_b` is estimated from -- exactly as the single-GPU lane runs a
+            # geometric dual build and then the criterion one. The cross walk is
+            # reused rather than re-run: it is the source of the remote terms, and
+            # this port leaves it geometric (self-only scope), so one cross walk is
+            # both the prepass and the production list.
+            #
+            # `theta` is INERT for the walk below. In paper mode `adaptive_pair_policy`
+            # deletes `mac_ok`, so the geometric verdict decides nothing and
+            # `adaptive_eps` is the only accuracy knob on this walk. It is still
+            # passed because the traversal computes the verdict either way.
+            #
+            # FROZEN INPUTS, on purpose. The criterion decides the far/near split,
+            # which is part of the discrete topology, and differentiable mode is
+            # built on a fixed-topology seam -- `geom` above already takes
+            # `tree.positions_sorted` rather than `lp` for exactly this reason. In
+            # that mode `lp`/`lm` are the LIVE re-gather and `coarse_mass_sorted`
+            # is the live coarse payload, so feeding either to the acceptance test
+            # would route cotangents into the traversal's `lax.while_loop`, which
+            # is not reverse-mode differentiable. The frozen arrays hold the same
+            # values, so the forward pass is identical in both modes.
+            force_scale_nodes = distributed_force_scale_nodes(
+                tree=tree,
+                positions_sorted=tree.positions_sorted,
+                masses_sorted=tree.masses_sorted,
+                node_centers=jnp.asarray(geom.center),
+                node_radii=jnp.asarray(geom.radius),
+                self_far_sources=jnp.asarray(inter.sources),
+                self_far_targets=jnp.asarray(inter.targets),
+                self_near_offsets=jnp.asarray(nbr.offsets),
+                self_near_counts=jnp.asarray(nbr.counts),
+                self_near_indices=jnp.asarray(nbr.neighbors),
+                self_near_leaf_indices=jnp.asarray(nbr.leaf_indices),
+                coarse_tree=rct.tree,
+                coarse_masses_sorted=rct.masses_sorted,
+                coarse_centers=jnp.asarray(rct.geometry.center),
+                coarse_radii=jnp.asarray(rct.geometry.radius),
+                cross_far_sources=jnp.asarray(cross.interaction_sources)[:xfar_cap],
+                cross_far_targets=jnp.asarray(cross.interaction_targets)[:xfar_cap],
+                cross_near_counts=jnp.asarray(cross.neighbor_counts),
+                cross_near_indices=jnp.asarray(cross.neighbor_indices),
+                cross_near_leaf_indices=jnp.asarray(cross.leaf_indices),
+                max_leaf_size=leaf,
+                softening=float(soft),
+                gravitational_constant=float(G),
+                force_scale_mode=str(config.mac_force_scale_mode),
+            )
+            # `force_scale_nodes` is always a real array here, and it has to stay
+            # that way: `build_adaptive_policy_state` substitutes `jnp.ones(...)`
+            # for a `None`, which runs eq (16a) against a threshold of `eps * 1`
+            # instead of `eps * min_b f_b` -- a different criterion, accepting far
+            # more, running faster, reported nowhere (trap 14). The diagnostic
+            # below is what makes that visible from outside the mesh rather than
+            # trusted.
+            #
+            # Over the nodes that span particles: a padded leaf's scale is the
+            # reduction identity (+inf), which would swamp the max and say nothing.
+            spans = (
+                jnp.asarray(tree.node_ranges)[:, 1]
+                >= jnp.asarray(tree.node_ranges)[:, 0]
+            )
+            fs_finite = jnp.where(
+                spans & jnp.isfinite(force_scale_nodes), force_scale_nodes, jnp.nan
+            ).astype(jnp.float64)
+            fs_min = jnp.nanmin(fs_finite)
+            fs_max = jnp.nanmax(fs_finite)
+            policy_state = build_adaptive_policy_state(
+                # `policy_upward_view` freezes what it is handed; see its docstring.
+                upward=policy_upward_view(upward=up, geometry=geom, mass_moments=mm),
+                tree=tree,
+                positions_sorted=tree.positions_sorted,
+                p_gears=(int(p),),
+                force_scale_nodes=force_scale_nodes,
+                eps=jnp.asarray(
+                    float(config.adaptive_eps), dtype=up.multipoles.packed.real.dtype
+                ),
+                theta=jnp.asarray(theta, dtype=up.multipoles.packed.real.dtype),
+                # 2 = the eq (15) paper estimator. The criterion needs it regardless
+                # of any other error-model choice, so it is pinned rather than read.
+                error_model_code=2,
+                dehnen_geometry_mode=str(config.dehnen_geometry_mode),
+                gravitational_constant=float(G),
+                mac_theta_max=float(config.mac_theta_max),
+                # Static: the exact per-leaf maximum is a host read, and inside
+                # ``shard_map`` every value is abstract. The leaf capacity bounds it.
+                max_leaf_size=leaf,
+            )
+            prepass_res = self_res
+            inter, nbr, self_res = build_interactions_and_neighbors(
                 tree,
                 geom,
-                rct.tree,
-                rct.geometry,
-                theta,
+                theta=theta,
+                traversal_config=cfg,
                 mac_type=mac,
-                max_interactions_per_node=KC,
-                max_neighbors_per_leaf=KN,
-                max_pair_queue=x_queue,
+                pair_policy=adaptive_pair_policy,
+                policy_state=policy_state,
+                return_result=True,
             )
+            # The prepass walk's own overflow flags would otherwise be DISCARDED,
+            # because the diagnostics below describe the criterion walk that
+            # replaced it. A truncated prepass list drops terms from `f_b`, which
+            # makes the scale smaller, the criterion tighter and the run slower --
+            # the safe direction, and therefore one that nothing else would ever
+            # report. Fold them in so `auto_scale_caps` grows the caps and retries
+            # instead of quietly estimating from a partial list. The counts stay
+            # the criterion walk's: those describe the work actually done.
+            self_res = self_res._replace(
+                queue_overflow=self_res.queue_overflow | prepass_res.queue_overflow,
+                far_overflow=self_res.far_overflow | prepass_res.far_overflow,
+                near_overflow=self_res.near_overflow | prepass_res.near_overflow,
+            )
+
+            if use_cross_criterion:
+                # ---- and the same criterion across domains ----
+                #
+                # The cross walk above was the prepass. Re-run it against the coarse
+                # tree as SOURCE, with the criterion deciding instead of theta. This
+                # is where most of the near-field work is: 53% of the total at five
+                # devices, 31% at two.
+                #
+                # It must happen BEFORE the halo import, which is driven by the cross
+                # NEAR list -- so a criterion that moves pairs between far and near
+                # changes which remote leaves are fetched. Running it after would
+                # import the geometric arm's halo and evaluate the criterion's near
+                # list against it: missing sources, no diagnostic.
+                #
+                # `adaptive_cross_pair_policy`, NOT `adaptive_pair_policy`: the self
+                # walk's symmetrised form would index these coarse-sized source
+                # arrays with local node ids.
+                cross_state = cross_policy_state(
+                    self_state=policy_state,
+                    coarse_tree=rct.tree,
+                    coarse_multipole_packed=coarse_packed_use,
+                    coarse_masses_sorted=rct.masses_sorted,
+                    coarse_expansion_centers=c_centers,
+                    coarse_geometry_centers=rct.geometry.center,
+                    coarse_geometry_radii=rct.geometry.radius,
+                )
+                cross_prepass = cross
+                cross = dual_tree_walk_cross_impl(
+                    tree,
+                    geom,
+                    rct.tree,
+                    rct.geometry,
+                    theta,
+                    mac_type=mac,
+                    max_interactions_per_node=KC,
+                    max_neighbors_per_leaf=KN,
+                    max_pair_queue=x_queue,
+                    pair_policy=adaptive_cross_pair_policy,
+                    policy_state=cross_state,
+                )
+                # Same reasoning as the self prepass above: the prepass cross lists
+                # fed `f_b`, so a truncation there is a silently smaller force scale.
+                cross = cross._replace(
+                    queue_overflow=cross.queue_overflow | cross_prepass.queue_overflow,
+                    far_overflow=cross.far_overflow | cross_prepass.far_overflow,
+                    near_overflow=cross.near_overflow | cross_prepass.near_overflow,
+                )
+
         # The halo exchange is the one place cotangents cross devices. On the grad
         # path its implementation is pinned -- see _grad_halo_exchange for why the
         # native ragged path must not be used there.
@@ -1247,17 +2385,16 @@ def _make_fn(
             if differentiable
             else contextlib.nullcontext()
         ):
-            with jax.named_scope("jc_halo_import"):
-                halo = import_near_halo(
-                    rct,
-                    cross,
-                    lp,
-                    lm,
-                    ndev,
-                    leaf_size=leaf,
-                    max_req_leaves=max_req,
-                    max_recv_leaves=max_recv,
-                )
+            halo = import_near_halo(
+                rct,
+                cross,
+                lp,
+                lm,
+                ndev,
+                leaf_size=leaf,
+                max_req_leaves=max_req,
+                max_recv_leaves=max_recv,
+            )
 
         leaf_nodes = jnp.asarray(nbr.leaf_indices, INDEX_DTYPE)
         nr = jnp.asarray(tree.node_ranges, INDEX_DTYPE)
@@ -1398,13 +2535,6 @@ def _make_fn(
         # far cap and is ~2x tighter than the t_total*KC buffer; cross_far_cap overrides.
         # A far volume above the cap is surfaced (cross_far_overflow, below) so auto_scale
         # widens it -- so the slice never silently drops interactions.
-        max_far = int(jnp.asarray(cross.interaction_sources).shape[0])
-        num_tgt_leaves = int(jnp.asarray(nbr.leaf_indices).shape[0])
-        if config.cross_far_cap is not None:
-            xfar_cap = int(config.cross_far_cap)
-        else:
-            xfar_cap = max(1 << 14, KC * num_tgt_leaves)
-        xfar_cap = min(xfar_cap, max_far)
         x_src = jnp.asarray(cross.interaction_sources, INDEX_DTYPE)[:xfar_cap]
         x_tgt = jnp.asarray(cross.interaction_targets, INDEX_DTYPE)[:xfar_cap]
         x_valid = x_tgt >= 0
@@ -1442,8 +2572,7 @@ def _make_fn(
                 ).astype(cdtype)
             x_contribs = jnp.where(x_valid[:, None], x_contribs, 0)
             loc_full = loc_self + jax.ops.segment_sum(x_contribs, xt, int(total_nodes))
-        with jax.named_scope("jc_l2p"):
-            far_full = _l2p(loc_full)
+        far_full = _l2p(loc_full)
 
         # near: leaf particle-index groups into [local ; halo] buffer
         lranges = nr[leaf_nodes]
@@ -1489,6 +2618,7 @@ def _make_fn(
                     offsets,
                     counts,
                     src_s,
+                    accum=str(config.nearfield_accum),
                     n_lloc=int(loc_idx.shape[0]),
                     S_near=S_near,
                     block=int(config.nearfield_chunk),
@@ -1496,16 +2626,15 @@ def _make_fn(
                     softening_sq=soft2_a,
                 )
             else:
-                with jax.named_scope("jc_near_p2p_self"):
-                    self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
-                        concat_pos,
-                        leaf_positions,
-                        leaf_masses,
-                        leaf_mask_g,
-                        safe_idx,
-                        G=G,
-                        softening_sq=soft2_a,
-                    )
+                self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
+                    concat_pos,
+                    leaf_positions,
+                    leaf_masses,
+                    leaf_mask_g,
+                    safe_idx,
+                    G=G,
+                    softening_sq=soft2_a,
+                )
                 # Densify the combined CSR (offsets/src_s/counts, sorted by target) into a
                 # padded [u_leaves, S_near] source-leaf-id table + validity mask.
                 # int32 index math: e/t_of_e/rank/flat are pure [num_edges] index temporaries
@@ -1617,6 +2746,8 @@ def _make_fn(
                 self_res.far_overflow.astype(jnp.float64),
                 self_res.near_overflow.astype(jnp.float64),
                 l2l_overflow,
+                fs_min,
+                fs_max,
             ]
         )
         return accel, gid_sorted[:cap, None].astype(jnp.int64), diag[None, :]
@@ -1663,7 +2794,12 @@ def make_force_evaluator(
 
     Gradients are w.r.t. the *padded, per-device-partitioned* layout that
     :func:`partition_for_devices` produces, and ``accel`` rows are in that same
-    per-device Morton order -- map them back with the returned ``gid``.
+    per-device Morton order -- map them back with the returned ``gid``, never with
+    the ``gid_flat`` that was passed in. The two agree only while ``cap == count``;
+    once a device is padded the tree build sorts the padding rows to the front and
+    the input map is silently off by the padding count. See
+    :func:`partition_for_devices` for the mechanism and
+    ``docs/distributed_padding_force_defect.md`` for what it cost.
 
     ``l2l_num_levels`` (differentiable mode only) is the static level bound for
     the L2L cascade, whose default is safe but loose; see the note at its use
@@ -1713,6 +2849,12 @@ def make_force_evaluator(
         ``(pos_flat, mass_flat, gid_flat, counts) -> (accel, gid, diag)``, with
         ``accel`` in the padded per-device Morton order that ``gid`` maps back.
     """
+
+    # ``cap`` IS per-device N -- the padded capacity the local tree is built over --
+    # so this is the one place a direct caller's unset capacities can be sized. A
+    # no-op when they are already numbers, which is the case coming through
+    # ``distributed_fmm_accelerations``.
+    config = config.resolved_for(cap, ndev)
 
     fn = _make_fn(
         config,
@@ -1801,6 +2943,21 @@ def distributed_fmm_accelerations(
     auto_scale_caps : bool
         Retry on a traversal-buffer overflow with scaled capacities, as described
         above.
+
+        **It makes a run survive a wrong cap rule, and it also HIDES one.** A retry
+        leaves the overflow flags clear on the result, so a caller who only reads the
+        flags cannot tell a correctly-sized configuration from one that needed two
+        doublings. That is not hypothetical: two of the Dehnen criterion's far caps
+        shipped UNDER-provisioned and went unnoticed across every measurement on the
+        distributed lane, because auto-scaling was quietly fixing them and every flag
+        read clear. See :data:`_CRITERION_SELF_QUEUE_COEFF`.
+
+        So: leave it **on** for production runs, where surviving is the point. Turn it
+        **off** whenever the question is whether the derived caps are right -- a cap
+        calibration, a theta or eps sweep, or any run whose *timing* you intend to
+        quote, since a retried run has paid for the discarded attempts. ``cap_retries``
+        in the returned diagnostics is how many retries actually happened; a non-zero
+        value means the derived caps did not fit.
     cap_scale_factor : float
         Factor applied to the capacities on each retry. Default ``2.0``.
     max_cap_retries : int
@@ -1826,8 +2983,19 @@ def distributed_fmm_accelerations(
     else:
         ndev = int(np.prod(list(mesh.shape.values())))
 
-    part = partition_for_devices(positions, masses, ndev, leaf_size=config.leaf_size)
+    part = partition_for_devices(
+        positions,
+        masses,
+        ndev,
+        leaf_size=config.leaf_size,
+        partitioner=config.partitioner,
+    )
     cap = part["cap"]
+    # Before the preset seed and before the retry loop: the loop grows the caps and
+    # the preset records them, so both need numbers rather than "derive me". A
+    # preset still overrides what is derived here -- it is a measured value for this
+    # exact (per-GPU N, ndev), which the rule is only an estimate of.
+    config = config.resolved_for(cap, ndev)
     counts_dev = jnp.asarray(part["counts"], INDEX_DTYPE)
     pos_f = jnp.asarray(part["pos_flat"])
     mass_f = jnp.asarray(part["mass_flat"])
@@ -1843,7 +3011,15 @@ def distributed_fmm_accelerations(
         from . import cap_presets as _cp
 
         presets = _cp.load_presets(cap_presets_path)
-        seed = _cp.lookup(presets, per_gpu_n, ndev)
+        seed = _cp.lookup(
+            presets,
+            per_gpu_n,
+            ndev,
+            float(config.theta),
+            int(config.leaf_size),
+            str(config.mac_type),
+            float(config.adaptive_eps or 0.0),
+        )
         if seed is not None:
             config = _cp.apply_caps(config, seed)
 
@@ -1860,22 +3036,9 @@ def distributed_fmm_accelerations(
         # and OOMs on connected ICs; see with_selective_scaled_caps.
         config = config.with_selective_scaled_caps(diag_o, cap_scale_factor)
         attempt += 1
-    accel_o = np.asarray(accel_o)
-    gid_o = np.asarray(gid_o).reshape(-1).astype(np.int64)
-
-    n = part["n"]
-    accel = np.zeros((n, 3), np.float64)
-    seen = np.zeros(n, bool)
-    for row in range(accel_o.shape[0]):
-        g = gid_o[row]
-        if g >= 0:
-            accel[g] = accel_o[row]
-            seen[g] = True
-    if not seen.all():
-        raise RuntimeError(
-            f"{int((~seen).sum())} particles missing from the distributed result "
-            "(padding/capacity bug)"
-        )
+    # The evaluator's OWN gid, not ``part["gid_flat"]``: the two agree only while no
+    # device is padded. See scatter_to_input_order.
+    accel = scatter_to_input_order(accel_o, gid_o, total_n)
 
     diag = {name: diag_o[:, i] for i, name in enumerate(DIAG_FIELDS)}
     diag["overflow"] = overflow
@@ -1887,7 +3050,17 @@ def distributed_fmm_accelerations(
     if cap_presets_path is not None and not overflow:
         from . import cap_presets as _cp
 
-        _cp.record(presets, per_gpu_n, ndev, total_n, _cp.caps_of(config))
+        _cp.record(
+            presets,
+            per_gpu_n,
+            ndev,
+            total_n,
+            _cp.caps_of(config),
+            float(config.theta),
+            int(config.leaf_size),
+            str(config.mac_type),
+            float(config.adaptive_eps or 0.0),
+        )
         _cp.save_presets(cap_presets_path, presets)
 
     return DistributedFMMResult(

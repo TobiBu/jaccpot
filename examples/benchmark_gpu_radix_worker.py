@@ -355,6 +355,14 @@ def _large_n_prepared_state_report(state: Any) -> dict[str, Any]:
     radix_payload = getattr(state, "radix_fast_payload", None)
     overflow_payload = getattr(state, "radix_overflow_payload", None)
     return {
+        # Which lane the prepared state actually selected. Without these the guard
+        # named after the radix fast lane cannot tell whether the fast lane ran:
+        # `evaluate_large_n_state` takes its fast-lane branch only when BOTH of these
+        # hold (and returns from inside it), so they are the guard's non-vacuity
+        # signal, not decoration.
+        "large_n_radix_fast_lane": bool(getattr(state, "radix_fast_lane", False)),
+        "large_n_radix_payload_present": radix_payload is not None,
+        "large_n_nearfield_mode": str(getattr(state, "nearfield_mode", "")),
         "large_n_target_block_size": int(
             getattr(state, "nearfield_target_block_size", -1)
         ),

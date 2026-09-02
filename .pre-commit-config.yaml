@@ -5,7 +5,7 @@ repos:
       - id: black
 
   - repo: https://github.com/PyCQA/isort
-    rev: 9.0.0b5
+    rev: 9.0.1
     hooks:
       - id: isort
 
@@ -73,6 +73,9 @@ repos:
         #
         #     n         particles
         #     t         targets, when a call returns a subset of the particles
+        #     ct        Cartesian packed coefficients, (p+1)(p+2)(p+3)/6. NOT `C`,
+        #               which is the spherical-harmonic packing (p+1)**2; the two
+        #               agree only at p=1, which is how one symbol served both
         #     levels    block-step levels, `k_max + 1` of them
         #     internal  internal tree nodes (those with children)
         #     leaves    leaf nodes
@@ -98,7 +101,7 @@ repos:
         args:
           [
             "--select=F821,F822",
-            "--builtins=n,t,levels,internal,leaves,edges,pairs,farleaves,blocks,blocksize,_",
+            "--builtins=n,t,ct,levels,internal,leaves,edges,pairs,farleaves,blocks,blocksize,_",
           ]
         # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
         # It was `files: ^jaccpot/` when introduced, because

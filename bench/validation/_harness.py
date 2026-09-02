@@ -94,6 +94,27 @@ def make_distribution(name: str, n: int, seed: int) -> tuple[np.ndarray, np.ndar
             [np.full(n_bulge, 0.9 / n_bulge), np.full(n_halo, 0.1 / n_halo)]
         )
         return pos, mass
+    if name == "disc":
+        # A thin exponential-ish disc. Every distribution above is spheroidal, and
+        # track B's leaf/order tables are all measured on a disc -- which is exactly
+        # the discrepancy `docs/plan_2026-08_B_nearfield.md` flags against the MAC
+        # study's "leaf 1024 is the production configuration": that conclusion was
+        # reached on Plummer and bulge+halo. Reading the two on a common footing needs
+        # the disc to live beside them.
+        #
+        # `main` added this case to make_distribution in mac_error_distribution.py at
+        # the same time this branch was extracting that function into this module, so
+        # neither side of the merge carries both. Ported by hand. It is load bearing:
+        # main's own bench/validation/order_leaf_accuracy_sweep.py DEFAULTS to
+        # --distribution disc and would raise "unknown distribution" without it.
+        radius, thickness = 10.0, 0.2
+        r = radius * np.sqrt(rng.uniform(0.0, 1.0, n))
+        th = rng.uniform(0.0, 2.0 * np.pi, n)
+        pos = np.stack(
+            [r * np.cos(th), r * np.sin(th), rng.normal(scale=thickness, size=n)],
+            axis=1,
+        )
+        return pos, rng.uniform(0.5, 1.5, size=n)
     if name == "mass_spectrum":
         # Uniform positions, three decades of mass. Isolates mass-dependence
         # from spatial clustering.

@@ -102,10 +102,24 @@ dev = [
   # resolve to a different black whose style disagreed with the hook).
   "black==26.5.1",
   # Pinned to match .pre-commit-config.yaml. isort 7.0.0/8.0.1 regressed the
-  # black profile (force-wraps single-name imports); 9.0.0b1 fixes it. A
-  # floating ">=" here lets CI's `isort --check-only .` resolve to the broken
-  # 8.0.1 and disagree with pre-commit, so keep this equal to the hook rev.
-  "isort==9.0.0b1",
+  # black profile (force-wraps single-name imports); 9.0.0b1 fixed it and 9.0.1
+  # keeps it fixed. A floating ">=" here lets CI's `isort --check-only .` resolve
+  # to the broken 8.0.1 and disagree with pre-commit, so keep this equal to the
+  # hook rev.
+  #
+  # Re-verified before bumping 9.0.0b1 -> 9.0.1 (2026-09-01), because "the hook
+  # rev moved" is not evidence the regression stayed fixed. Three isolated venvs,
+  # `--profile black --line-length 88` from the repo root: `isort --check-only .`
+  # fails on 8.0.1 (1 file) and passes on both 9.0.0b1 and 9.0.1. Passing on an
+  # already-clean tree only proves idempotence, so also: 325 tracked .py files
+  # seeded from the 8.0.1-mangled state and normalised by each 9.x are
+  # byte-identical to each other and to the committed tree.
+  #
+  # If you re-test this, note that synthetic probes give a FALSE all-clear. The
+  # regression needs the "same module imported repeatedly, some imports aliased"
+  # shape that only `tests/unit/test_solver_api.py` had here; wrapping an
+  # over-length import is correct black behaviour and every version does it.
+  "isort==9.0.1",
   # Pinned to match .pre-commit-config.yaml's pydoclint rev, for the same reason as
   # black and isort above: the hook runs on every commit now, and a floating ">="
   # would let a local pydoclint disagree with it about what counts as a violation.
@@ -147,6 +161,15 @@ exclude = '''
 
 [tool.pydoclint]
 style = "numpy"
+# Read DOC noqa comments at the `def` line, not the closing-docstring line.
+# `FMMEngine.__init__` has no docstring of its own -- pydoclint checks it against
+# the CLASS docstring -- so under the "docstring" default there is nowhere to put
+# a suppression for it except the class's closing quotes, which pydoclint does
+# not read for the method. Giving `__init__` a docstring purely to host a noqa
+# would then have to document 63 parameters to satisfy DOC101/DOC103, which is
+# a worse outcome than the suppression. There were zero DOC noqas in the tree
+# when this was set, so nothing depended on the old location.
+native-mode-noqa-location = "definition"
 # `.claude` holds git worktrees -- full transient copies of this repo. Without
 # excluding them a manual run over `.` reports every violation four times over
 # (measured against the old baseline: 409 of 521 file entries, ~13k of 14.7k
@@ -190,19 +213,27 @@ include = ["jaccpot"]
 # `[tool.coverage.run].omit` excludes it and the `experimental` marker deselects
 # its tests. Listed as the package, not a glob -- see the note on `omit` below.
 exclude = ["jaccpot/experimental"]
+# Resolve the sibling `yggdrax` checkout. Relative to this file, so it is the
+# documented layout (ARCHITECTURE: "Sibling codebases ... yggdrax") rather
+# than one machine's paths, and it is the same assumption
+# `tests/conftest.py::_find_sibling_checkout` already makes.
+extraPaths = ["../yggdrax"]
 pythonVersion = "3.11"
 # Set explicitly rather than left to the default, so a pyright release that moves
 # its default mode cannot silently change what this reports.
 typeCheckingMode = "standard"
 #
-# Deliberately NOT configured: `reportMissingImports`. On a machine where
-# `yggdrax` is an editable install pointing at a sibling working tree, pyright
-# cannot resolve it and emits 98 errors (`--pythonpath` does not help). Silencing
-# the rule package-wide to work around one machine's install layout would also
-# hide a genuine missing import, which is a bad trade for cosmetic quiet.
+# `reportMissingImports` is left ON deliberately, and `extraPaths` above is what
+# makes that affordable. An earlier version of this comment said the rule had to
+# stay noisy because `yggdrax` is an editable install pyright cannot follow --
+# true, but the conclusion was wrong: those were not 100 cosmetic errors to
+# subtract, they were 100 *suppressions*. An unresolved import makes every symbol
+# from it `Unknown`, and `Unknown` is assignable to anything, so every call across
+# the jaccpot/yggdrax boundary went unchecked. Resolving it removed 125 errors and
+# switched 44 real checks back on. See audit E.5.
 #
-# There is no gate. `pyright jaccpot/` reports 408 errors, ~310 of them real, and
-# a hook at that count would need a baseline -- exactly what item 2.5 retired.
+# There is no gate. `pyright jaccpot/` reports 210 errors and a hook at that count
+# would need a baseline -- exactly what item 2.5 retired.
 
 [tool.isort]
 profile = "black"
@@ -215,6 +246,17 @@ testpaths = ["tests"]
 markers = [
     "slow: long-running / compile-heavy test (deselect with -m 'not slow')",
     "experimental: exercises experimental, non-production FMM code (octree/treecode prototypes); deselected by default, run explicitly with -m experimental",
+    # One distributed FMM evaluation is ~190 s of COMPILATION on a forced-CPU mesh,
+    # and that cost is flat in N, leaf size and expansion order (measured), so it is
+    # per-CONFIGURATION and cannot be shrunk by making the problem smaller. The
+    # Dehnen-criterion tier needs four distinct configurations, which is ~11 min on
+    # top of the ~24 min the rest of `tests/distributed` already costs -- enough to
+    # kill the 2-core hosted runner. So these run in their own CI job
+    # (`test-distributed-criterion`) with its own budget, and the standard tier
+    # deselects them. NOT marked `slow`: the tier deliberately runs slow-marked
+    # distributed tests, and reusing that marker would have stopped three
+    # pre-existing ones from running.
+    "distributed_criterion: end-to-end Dehnen-criterion run on a forced-device mesh; ~190 s of compile each, so opt-in via -m distributed_criterion",
 ]
 # `-n auto` runs the (compilation-bound) JAX test suite across all logical cores
 # via pytest-xdist. On a 72-core host this cuts wall-clock from ~25 min to ~2 min;
@@ -244,9 +286,7 @@ omit = [
   # suite fully covers. Measured:
   #
   #   octree_fmm_uvwx.py    0%    reached only under `pytest -m experimental`
-  #   treecode_far_near.py  0%    reached only from the distributed treecode lane
-  #                               (`local_walk="treecode"`), whose test skips
-  #                               below 2 devices, so CPU CI never enters it
+  #   treecode_far_near.py  0%    the stated reason was UNTRUE -- see below
   #   treecode_walk.py    100%    NOT omitted -- see below
   #
   # `treecode_walk.py` is the pure-JAX reference that
@@ -259,7 +299,22 @@ omit = [
   # is measured until someone decides otherwise -- which is the right default,
   # since the failure this replaces was a glob quietly absorbing covered code.
   "jaccpot/experimental/octree_fmm_uvwx.py",
-  "jaccpot/experimental/treecode_far_near.py",
+  # `treecode_far_near.py` used to be omitted here, on the stated grounds that it
+  # is "reached only from the distributed treecode lane (`local_walk="treecode"`),
+  # whose test skips below 2 devices, so CPU CI never enters it". Untrue on both
+  # counts, and this is the THIRD entry in this list whose reason did not survive
+  # being checked -- the two above are the others.
+  #
+  #   * There is a second caller, and it is single-device:
+  #     `_interaction_cache.py:1058`, gated by the env var
+  #     JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK, not by device count.
+  #   * The module runs on CPU in seconds. `tests/experimental/` already had three
+  #     passing CPU tests for it, deselected by the `experimental` marker, and
+  #     `tests/unit/runtime/test_treecode_production_seam.py` now exercises the
+  #     production entry on every commit (audit F35).
+  #
+  # Removed, so the one production option that reaches `experimental/` is measured
+  # like any other module rather than being invisible by assertion.
   # `jaccpot/pallas/m2l_real_fused.py` used to be omitted here too, on the stated
   # grounds that it "has no interpret path, so CPU CI structurally cannot reach
   # it". That was untrue, and it is the same failure this list already documents

@@ -124,6 +124,18 @@ Never write a docstring that restates the name. `"""Compute the multipole."""` o
 
 ## 4. Type annotations
 
+**The burn-down number has exactly one definition: `python bench/annotation_census.py`.**
+Run it before and after an annotation change and quote its output in the PR. Do not
+restate it in a table — E.1's table went stale twice that way, and F20's figure and an
+AST walk over the same tree disagreed by ~70% (3174 against 1855) because they answered
+different questions. That module writes the question down: the unit is a function
+*parameter*, one parameter counts once however many `Array`s its annotation mentions,
+`self`/`cls` is exempt, return annotations are excluded (4.4 records why they are
+unavailable here), and `jaccpot/experimental/` is out. `--reconcile` prints the ladder to
+the looser definitions, which is the part that caused the confusion.
+
+The derivation tool is its sibling, `bench/annotation_capture.py` — see 4.2.
+
 - Full annotations on public functions and on internal functions whose types are not obvious.
 - Use `TypeVar` for decorators that must preserve the wrapped signature (see
   `_precision.py`). A targeted `# type: ignore[return-value]` with an obvious reason is
@@ -174,6 +186,12 @@ Instrument the function, run the suite, tally the shapes against the live `n`/`l
 call, and annotate what you observed. A wrong shape annotation is worse than none, because the
 decorator enforces it.
 
+`bench/annotation_capture.py` is the reusable version of that instrumentation, and it reports
+its own coverage as well as the shapes: how many DISTINCT extents sit behind each axis
+equality, and which test files reached the function. Read the second list and ask which lane
+is missing from it — that is the guard that would have caught `farleaves`, and no amount of
+captured data supplies it.
+
 ### 4.3 The axis vocabulary
 
 Lowercase, shared package-wide so a reader learns it once. Every new **single-identifier** name
@@ -188,15 +206,65 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `leaves` | leaf nodes |
 | `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
 | `w` | leaf width (`max_leaf_size`) |
+| `sw` | the DECOUPLED lane's source-pool width, which is not the target block's `w` |
+| `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
 | `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
 | `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
+| `tiles` | source-block tiles in a fixed-shape tile sequence (`nearfield/_large_n_blocks.py`) |
+| `tbatch` | target leaves per scan step, i.e. `target_leaf_batch_size` |
+| `blockdim` | one solid-harmonic rotation block, square: `2*ell + 1` a side |
 | `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
 | `levels` | block-step levels, `k_max + 1` of them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
+
+**`srcslots` is not `w`, and every capture said it was.** `_fast_lane.py`'s materialised
+source-particle layout is `(leaves, srcslots, w)`, and in all three recorded calls the middle
+and trailing axes were equal -- 2 beside 2, then 256 beside 256. That is the `farleaves` trap
+again: the equality held because of how the test payload is built, not because it is a
+contract. It was settled by reading the builder rather than the capture. `_large_n_pipeline`
+writes `source_particle_ids = target_particle_ids[safe_source_leaf_ids]`, so axis 1 is the
+source LIST's length and axis 2 is a gather from the target table -- `w` by construction --
+and a re-measurement at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4 makes the equality
+disappear. Both kernels read only `shape[1] * shape[2]` and flatten, so a table split the
+other way was accepted and returned a force wrong by rel-L2 9.9e-01.
+
+**`sw` exists because the obvious choice was measurably wrong.** `nearfield_mutual.py` shares
+one `w` between its `a` and `b` sides, and gives a reason: the kernel pads both to
+`_next_pow2` of the a-side count, so a wider `b` hands `jnp.pad` a negative width. Copying
+that to `_fast_lane.py`'s decoupled lane would have been a lie -- measured through interpret
+mode, a target width of 4 against a source pool padded to 8 with the extra slots masked off
+is **bit-identical** to the equal-width result, so a wider source pool is correctly ignored
+and asserting equality would reject a configuration that works (4.2: a wrong shape annotation
+is worse than none). The two widths therefore get their own names; each still binds across
+its own group of three arrays, which is measured, and nothing false is asserted about the
+pair. The reverse direction is a defect neither name can express -- a source pool *narrower*
+than the target block is accepted and returns NaN -- and is filed rather than papered over,
+because jaxtyping cannot say `sw >= w`.
+
+**`tbatch` is not `leaves`, and `tiles` is not `blocks`.** Both distinctions are measured, and
+both looked interchangeable before the capture. `_accumulate_target_block_tile_sequence` takes
+`target_pos` as `(tbatch, w, 3)` and `leaf_positions` as `(leaves, w, 3)` in the same signature,
+observed at 16 against 5 -- `tbatch` is a *scan step's worth* of target leaves, set by
+`target_leaf_batch_size`, and is unrelated to how many leaves exist. `tiles` is the sequence
+axis over source-block tiles (observed 1 and 4) and sits *outside* `blocks blocksize`, which is
+still the block/lane pair inside each tile: the full layout is
+`tiles tbatch blocks blocksize`.
+
+**`blockdim` asserts squareness, which is the whole point of naming it.** The rotation-block
+tensors in `operators/complex_ops.py` were observed `(17, 3, 5, 5)`, `(17, 4, 7, 7)` and
+`(17, 5, 9, 9)`: the trailing pair agrees at three distinct extents, and nothing else in the
+package checks it -- a non-square block reaches a matmul and fails there with a message naming
+neither parameter. Repeating the name on both the `to_z` and `from_z` tensors also ties them to
+each other. The two leading axes stay anonymous, because `jax.vmap` already rejects a batch
+mismatch against `multipoles` with a better message than an annotation would give.
+
+None of the three is added to the flake8 `--builtins` list, because none is ever used as a
+single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
+for `sw` and `srcslots`: both only ever appear beside another name.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
@@ -260,6 +328,21 @@ a forward reference, so `Float[Array, "n"]` reports `undefined name 'n'` while
 `Float[Array, "n 3"]` is clean. The axis names are declared via `--builtins` on the flake8 hook
 rather than suppressed per line; the cost — a bare `n` in code is no longer flagged — is
 recorded there.
+
+**A VARIADIC container annotation is sampled, not exhaustive.** `tuple[X, ...]` is checked by
+beartype's default O(1) strategy, which inspects roughly ONE element per call. Measured on a
+three-element tuple with a single bad element, by position: 8/40, 11/40, 14/40 rejections. A
+FIXED-length `tuple[X, X, X]` is exhaustive -- 40/40 at every position -- so
+`pallas/nearfield_mutual.py`'s three-component `a_xyz` is a real contract and
+`operators/complex_ops.py`'s `tuple[Inexact[Array, "_ _"], ...]` is not quite one.
+
+What a variadic annotation still buys: the argument is a container of the right element type,
+and a container whose elements are *systematically* wrong is rejected every time, because
+whichever element gets sampled is bad. A single corrupted element is caught only sometimes.
+Write the fixed-length form when the arity is known. Where it is not, keep the annotation --
+it costs nothing and documents the contract -- but do not write a test that corrupts one
+element and expects a rejection: that test passes standalone and flakes in the full suite,
+which is how this was found.
 
 **Widths are wrong, families are right.** Use `Int`, never `Int32`/`Int64`: `INDEX_DTYPE` is
 selectable via `JACCPOT_INDEX_PRECISION`, and pilot 3 observed `precomputed_target_leaf_ids` as
@@ -424,6 +507,13 @@ magnitude — it said 16 raw reads outside `runtime/` (a pre-2.2 number):
 |---|---|
 | modules outside `runtime/` reading via `_env.py` | 7 — sanctioned |
 | raw `os.environ` / `os.getenv` outside `runtime/` | **2** |
+
+**This count is now enforced, because it did not hold on its own.** By 2026-08-27 there were
+three: `operators/m2l_real_rot_scale.py` had acquired a module-level `os.environ` read *after*
+G.2 decided the rule, and nothing caught it — a prose count in a guide is not a check. It was
+also the shape `_env.py` exists to prevent, a knob captured at import that silently does nothing
+when set later. Removed, and `tests/unit/test_shared_env_switches.py` now pins the set to the two
+below, so a fourth fails a test rather than aging into this table.
 
 The two raw reads are not equivalent:
 

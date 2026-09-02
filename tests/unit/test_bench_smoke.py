@@ -302,6 +302,13 @@ def test_every_paper_bench_script_is_covered() -> None:
                 "mac_end_to_end_walltime",
                 "pair_policy_far_tag_memory",
                 "per_node_theta_fidelity",
+                # Arrived from `main` with this merge -- it landed there 2026-08-28
+                # (fa8e2ab), four days after this branch's last commit, so the
+                # branch could not have listed it. Same category as the five above:
+                # it serves tracks B2/B3 of `docs/plan_2026-08_B_nearfield.md` --
+                # whether order 4->8 is free, whether leaf 128 beats leaf 1024 --
+                # which are configuration questions, not manuscript figures.
+                "order_leaf_accuracy_sweep",
             }:
                 continue
             # Runnable scripts only. A helper module with no entry point (e.g.

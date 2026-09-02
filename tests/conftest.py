@@ -1,3 +1,5 @@
+import ast
+import importlib
 import os
 import pathlib
 import sys
@@ -33,6 +35,238 @@ def _find_sibling_checkout(name: str) -> pathlib.Path | None:
 NORNAX_ROOT = _find_sibling_checkout("nornax")
 if NORNAX_ROOT is not None and str(NORNAX_ROOT) not in sys.path:
     sys.path.insert(0, str(NORNAX_ROOT))
+
+
+# --- One yggdrax, and it must carry what jaccpot imports ---------------------
+# The two `sys.path` inserts above exist because the sibling checkouts are the
+# real sources of truth, but they only decide WHICH yggdrax pytest imports. They
+# say nothing about whether that one is new enough, and until 2026-08-25 nothing
+# did: the venv held a non-editable `site-packages` copy while the inserts above
+# pointed pytest at `../yggdrax`, so pytest and every script, bench and ODISSEO
+# run imported different libraries. The script side could not even import
+# `jaccpot.mutual.distributed` --
+#
+#     ImportError: cannot import name 'halo_return_addresses' from
+#     'yggdrax.distributed.reverse_halo'
+#
+# -- while under pytest the same code collected and passed.
+#
+# WHY A VERSION FLOOR CANNOT DO THIS JOB. `pyproject.toml` declares
+# `yggdrax>=0.0.1,<0.1.0`, and yggdrax's version has never moved off 0.0.1, so
+# the floor matches every yggdrax that has ever existed. The only signal drift
+# leaves is a module-level skip, and four test modules carry hand-written symbol
+# guards that turn "your yggdrax is too old" into 11 skips reading as "not
+# applicable here" -- indistinguishable, in a CI log, from a suite that has
+# nothing to run.
+#
+# So the contract is checked against the SYMBOLS instead, and derived rather than
+# listed: every `from yggdrax... import ...` that jaccpot executes at module
+# level is a hard requirement, because the package cannot be imported without it.
+# Deriving it is the point -- a hand-maintained list goes stale the first time
+# someone adds an import. It is also more complete than one would be: the 72
+# names it finds include the private `tree_moments` helpers jaccpot imports from
+# where they are defined rather than from a re-export, which is exactly the kind
+# of edge a list written by hand omits and a vanishing re-export then breaks.
+#
+# WHERE THE LINE IS, and it is NOT "module level". The first draft of this scanned
+# only a module's own body, on the theory that a function-local import is jaccpot
+# saying it tolerates the symbol's absence. That is wrong here, and the session
+# working the block-step lane caught it: `mutual/device_topology.py:409` imports
+# `dual_tree_walk_mutual` inside the function that uses it to avoid an import
+# CYCLE, not to survive without it, and there is no handler anywhere near it.
+# Nothing tolerates its absence -- being function-local only converts a
+# collection-time ImportError into a call-time one, which is strictly worse.
+#
+# That is not hypothetical either. ODISSEO's `device_topology_available()` probed
+# only jaccpot for the block-step device lane, so against an older yggdrax the
+# `"auto"` backend -- which exists precisely to degrade safely -- still resolved to
+# `"device"` and then died with an ImportError from that line, mid force-build.
+#
+# So the line is the HANDLER, not the indentation: an import is soft only when it
+# sits in a `try` with an `except`. Nesting is irrelevant. `if TYPE_CHECKING:`
+# blocks are excluded too, since those imports never run.
+#
+# jaccpot currently has ZERO try-guarded yggdrax imports, which is the real reason
+# the module-level rule looked adequate: the category it was excluding was empty,
+# while it quietly dropped five genuinely hard names.
+#
+# The per-module `skipif` guards stay as they are. They name the yggdrax PR they
+# need, which is more actionable than this message for the case they cover, and
+# nothing here makes them wrong -- only redundant.
+#
+# `jaccpot/experimental/` is excluded for the same reason it is excluded
+# everywhere else: it is not production, and its tests are opt-in.
+_JACCPOT_PACKAGE = REPO_ROOT / "jaccpot"
+_NOT_PRODUCTION = "experimental"
+
+
+def _is_type_checking_test(test: ast.expr) -> bool:
+    """Whether an ``if`` test is the ``TYPE_CHECKING`` guard.
+
+    Parameters
+    ----------
+    test : ast.expr
+        The ``If`` node's test expression.
+
+    Returns
+    -------
+    bool
+        True for bare ``TYPE_CHECKING`` and for any dotted spelling of it, such
+        as ``typing.TYPE_CHECKING``.
+    """
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
+def _visit_for_yggdrax_imports(
+    node: ast.AST, required: dict[str, set[str]], *, guarded: bool
+) -> None:
+    """Record the unguarded ``yggdrax`` imports reachable from ``node``.
+
+    Parameters
+    ----------
+    node : ast.AST
+        Node to walk.
+    required : dict[str, set[str]]
+        Accumulator, mapping a ``yggdrax`` module to the names taken from it.
+    guarded : bool
+        Whether ``node`` sits inside the body of a ``try`` that has handlers, in
+        which case an ImportError there is caught and the import is optional.
+    """
+    if isinstance(node, ast.ImportFrom):
+        module = node.module or ""
+        if guarded or node.level:
+            return
+        if module != "yggdrax" and not module.startswith("yggdrax."):
+            return
+        required.setdefault(module, set()).update(
+            alias.name for alias in node.names if alias.name != "*"
+        )
+        return
+    if isinstance(node, ast.Try):
+        # Only the `try:` body is protected. An import in `except`, `else` or
+        # `finally` runs with no handler over it, exactly like any other.
+        for stmt in node.body:
+            _visit_for_yggdrax_imports(stmt, required, guarded=True)
+        for stmt in (*node.handlers, *node.orelse, *node.finalbody):
+            _visit_for_yggdrax_imports(stmt, required, guarded=guarded)
+        return
+    if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+        # The body never runs; the `else:` branch does.
+        for stmt in node.orelse:
+            _visit_for_yggdrax_imports(stmt, required, guarded=guarded)
+        return
+    for child in ast.iter_child_nodes(node):
+        _visit_for_yggdrax_imports(child, required, guarded=guarded)
+
+
+def _yggdrax_symbols_jaccpot_imports(
+    package_root: pathlib.Path,
+) -> dict[str, set[str]]:
+    """Collect the yggdrax names ``jaccpot`` needs in order to run.
+
+    Parameters
+    ----------
+    package_root : pathlib.Path
+        Root of the ``jaccpot`` package source tree.
+
+    Returns
+    -------
+    dict[str, set[str]]
+        Maps each imported ``yggdrax`` module to the names taken from it. Every
+        import outside a ``try`` with handlers counts, however deeply nested: a
+        function-local import without a handler is a hard dependency that merely
+        fails later. ``if TYPE_CHECKING:`` bodies are excluded, since they never
+        run.
+    """
+    required: dict[str, set[str]] = {}
+    for path in sorted(package_root.rglob("*.py")):
+        if _NOT_PRODUCTION in path.parts:
+            continue
+        try:
+            module_ast = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):  # pragma: no cover - unreadable source
+            continue
+        _visit_for_yggdrax_imports(module_ast, required, guarded=False)
+    return required
+
+
+def _missing_yggdrax_symbols(required: dict[str, set[str]]) -> list[str]:
+    """Report which of ``required`` the importable yggdrax does not provide.
+
+    Parameters
+    ----------
+    required : dict[str, set[str]]
+        Module-to-names mapping as returned by
+        :func:`_yggdrax_symbols_jaccpot_imports`.
+
+    Returns
+    -------
+    list[str]
+        Dotted names that are absent, plus any module that failed to import at
+        all, sorted. Empty when the contract holds. A name that is itself a
+        submodule (``from yggdrax.distributed import let``) counts as present
+        when it imports, since a package need not bind its submodules as
+        attributes.
+    """
+    missing: list[str] = []
+    for module_name in sorted(required):
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # noqa: BLE001 - any failure is drift
+            missing.append(f"{module_name} ({type(exc).__name__}: {exc})")
+            continue
+        for name in sorted(required[module_name]):
+            if hasattr(module, name):
+                continue
+            try:
+                importlib.import_module(f"{module_name}.{name}")
+            except Exception:  # noqa: BLE001 - not an attribute, not a submodule
+                missing.append(f"{module_name}.{name}")
+    return missing
+
+
+def pytest_configure(config):
+    """Fail the run, once and by name, if the yggdrax on the path is too old.
+
+    Parameters
+    ----------
+    config : pytest.Config
+        The active pytest configuration; unused, but required by the hook.
+
+    Raises
+    ------
+    pytest.UsageError
+        If the importable yggdrax is missing a symbol ``jaccpot`` imports
+        without a handler over it. Raised here rather than reported per test so
+        the run stops with one message naming the drift instead of a scatter of
+        skips.
+    """
+    del config
+    if not _JACCPOT_PACKAGE.is_dir():  # pragma: no cover - installed, not a checkout
+        return
+    missing = _missing_yggdrax_symbols(
+        _yggdrax_symbols_jaccpot_imports(_JACCPOT_PACKAGE)
+    )
+    if not missing:
+        return
+    try:
+        import yggdrax
+
+        where = os.path.dirname(yggdrax.__file__)
+    except Exception:  # pragma: no cover - yggdrax absent entirely
+        where = "<not importable>"
+    raise pytest.UsageError(
+        "the yggdrax on sys.path is missing "
+        f"{len(missing)} symbol(s) that jaccpot imports unguarded:\n  "
+        + "\n  ".join(missing)
+        + f"\n\nyggdrax resolves to: {where}"
+        + f"\njaccpot resolves to: {_JACCPOT_PACKAGE}"
+        + "\n\nInstall the sibling checkout over any stale copy:\n"
+        "  pip uninstall -y yggdrax && pip install -e ../yggdrax --no-deps"
+    )
+
 
 # --- Test-suite performance setup -------------------------------------------
 # The FMM correctness tests assume float64; set it once here so individual

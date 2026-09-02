@@ -181,14 +181,183 @@ memory an exact per-rung-multipole scheme (strategy B1) would need.
 no rung-mixed cells the two splits coincide and the oracle is reproduced level by
 level.
 
+### Rungs across devices
+
+`mutual/distributed.py` takes the same `rung` / `level_weights` pair, and
+`jaccpot.DistributedBlockStepFMM` exposes them in the same shape nornax consumes.
+The two halves of a cross-domain pair need different machinery, and the difference
+is where the interesting part is.
+
+**The near half is exact and per-particle, so the remote endpoint's rung has to
+travel with the remote endpoint.** It rides round B of the demand-driven halo import
+(`import_near_halo(payload_sorted=...)`, yggdrax), in the same buffer as the
+positions and masses, so it is sized by the halo rather than by the system. It could
+*not* go on the coarse frontier: that is `all_gather`-ed, so publishing `leaf_size`
+rung columns there would ship every remote particle's rung to every device —
+`O(N_total)`, which is exactly what the demand-driven import exists to avoid. The
+weight then multiplies the one tensor both sides of the tile read, so a weighted
+cross block is antisymmetric for the same reason an unweighted one is.
+
+**The far half is cell-level, so the frontier is the right channel**, one scalar per
+leaf appended to the multipole row it belongs to. The local endpoint may be an
+internal node — `accept_only_leaf_pairs` constrains the *remote* side, which has to
+be addressable — so node rungs are needed for the whole tree. `mutual/force.py`
+gets them by propagating a leaf maximum up the level schedule; the distributed lane
+has only the inclusive node ranges, so it takes the range maximum instead, as one
+prefix count per level (`k_max` is small). The two agree by construction and
+`tests/unit/mutual/test_distributed_node_rungs.py` checks that they do.
+
+The weight on the far half is applied **once, on the evaluating device, to both
+directions of the batched M2L, before either leaves**. That is a real decision and
+not the obvious one, because a far pair's `−f` is not a force on a particle: it is a
+local expansion returned to the owner's node. Applying the weight again on import
+would square it; applying it on neither side would leave the far half unweighted
+while the near half is weighted. Weighting the expansion is legal because everything
+downstream of one is linear in its coefficients — L2L re-centres, L2P evaluates — so
+scaling the coefficients scales the force by the same factor.
+
+#### Momentum is blind to all of it
+
+This is the part worth carrying away. Measured by injecting each fault into the cross
+far half and reading three criteria off a 2-device run at N = 256, leaf 4,
+θ = cross_θ = 0.5 (33 cross far pairs, 991 cross near pairs):
+
+| fault | level partition | weight linearity | momentum |
+|---|---|---|---|
+| none | 2.1e-16 | 2.9e-16 | < 4e-17 |
+| far half left **unweighted** | 3.9e-02 | 2.0e-02 | < 4e-17 |
+| far weight applied **twice** | 2.1e-16 | 9.4e-03 | < 4e-17 |
+| far ignores the **remote** rung | 2.1e-16 | 2.9e-16 | < 4e-17 |
+
+A per-level momentum residual at 1e-17 is therefore *not* evidence that the levels
+are right. Any single symmetric scalar per pair conserves momentum exactly, whatever
+that scalar is — so three distinct criteria are needed:
+
+* **the level partition** (one-hot weights must sum to the unweighted total) catches
+  a half left unweighted, and *cannot* catch squaring, because `w² == w` for 0 and 1;
+* **linearity** (`a(u) + a(1 − u) == a(1)` at fractional weights) catches squaring;
+* **a two-clump run with one rung per device**, where every cross pair provably
+  belongs to one level and clump A's level-0 force is an exact direct sum, catches an
+  assignment that is wrong yet consistent. Nothing else does.
+
+### Distributed backend
+
+`DistributedMutualConfig.backend` routes the intra-domain near field to the mutual
+Pallas kernel on sm_80+, mirroring the single-device lane — including its two
+measured decisions: the far field stays pure JAX (both Pallas M2L shapes are slower,
+see [Phase 5 outcome](#phase-5-outcome)), and every Pallas lane is reached through its
+`custom_vjp` wrapper. The cross-domain near field is pure JAX either way; it is a
+different kernel (`_tile_forces`, a local-leaf × halo-block tile) and giving it a
+Pallas lane is a new kernel, not a wiring change.
+
+### Compile once, not per force
+
+`distributed_mutual_fmm` rebuilds its mapped program on every call — `shard_map`
+wraps a fresh closure, so `jax.jit` sees a fresh cache key — which is fine for one
+force and ruinous for the `n_sub + 1` evaluations a base step asks for.
+`make_distributed_mutual_evaluator` splits the host side out: the partition, the
+padding layout, the bounds and the capacities are frozen once and the compiled
+program is held. Measured on 2 forced CPU devices at N = 128: build < 0.1 s, first
+evaluation 20.5 s, each later one ~8 s.
+
+Note what is *not* frozen. The per-device tree is rebuilt inside the mapped program
+from the positions handed in, so successive boundaries within a base step see trees
+built from their own positions — a *finer* rebuild cadence than the single-device
+lane's, not a coarser one. Every evaluation stays internally self-consistent, so its
+levels partition its own pairs and each level's momentum cancels exactly; what is
+lost is only the bit-level identity of the topology across a base step. So
+`prepare()` is called when the *partition* should change, not on a fixed cadence.
+
+The readout is a `jnp` scatter rather than a NumPy assignment, and the
+"every real particle appears exactly once" check moved to the partition, where it
+belongs — it depends only on the frozen gid layout. That is what makes a whole
+evaluation traceable, which is what lets nornax's `block_kdk_rollout` (a `lax.scan`
+over base steps) drive this lane at all. The overflow read is *attempted* rather
+than gated on `isinstance(..., Tracer)`, so it raises on every eager call and is
+skipped under trace — a traced driver gets no overflow check and must evaluate once
+eagerly first.
+
+## Topology backends: `host` and `device`
+
+`BlockStepFMM(topology_backend=...)` decides where the topology is *built*, and it
+is the difference between this lane scaling and not. **The default is `"host"`**,
+and the Usage block below shows the device path because a production run wants it.
+
+`"host"` builds the topology with the NumPy dual-tree traversal in
+`mutual/topology.py`: six device-to-host transfers, a scalar Python loop over every
+node for the centre/radius pass, a host BFS for the depths, and a NumPy wavefront
+walk. It is correct and **untraceable**, so a block-step run pays a host round trip
+per base step — measured **22 s at N = 20 000**, against 0.5 s for the whole rest of
+the base step once the force is jitted. At that point the topology build *is* the
+run.
+
+`"device"` builds the same thing in JAX with static shapes throughout
+(`mutual/device_topology.py`), so `rebuild_state` can live inside a `jax.jit` or a
+`lax.scan` and a whole rollout becomes one program. It implies `static_shapes`,
+because every device output shape comes from the capacities. The traversal is
+`yggdrax.interactions.dual_tree_walk_mutual`, verified to reproduce the host walk
+pair-for-pair, and the node radii are the exact `max_i |x_i - c_n|` the host
+computes rather than the looser bounding-sphere merge a bottom-up cascade would
+give — a looser radius changes MAC outcomes, which changes the accepted pair set,
+which changes the force.
+
+### What `freeze_template` freezes, and what stays live
+
+This is the distinction to get right, because "frozen topology" invites the wrong
+reading. `freeze_template` is host-side and runs **once**; it is idempotent, and a
+second call is deliberately a no-op, since re-freezing would change the capacities
+out from under an already-compiled program.
+
+**Frozen, once:**
+
+* the **static-radix linkage** — parent/child links and leaf bucket boundaries.
+  For a static-radix tree those buckets are `arange(0, N, leaf_size)`, so they do
+  not depend on the particle distribution at all.
+* the **capacity profile** (`MutualCapacities`), which is what makes every shape a
+  compile-time constant and lets one program serve the run.
+
+**Live, on every `rebuild_state`:**
+
+* the **Morton re-sort** of the particles;
+* the **centres of mass and radii**, recomputed from the current positions;
+* the **MAC decisions** — which pairs are far is re-decided every call. Only the
+  *number* of such pairs is bounded, by the capacities. Measured: far pairs 404 →
+  542 on a displaced system with the jit cache still at one entry.
+
+So the tree's *shape* is frozen and its *content* is not. A rollout stays physically
+honest across a base step; what it gives up is the freedom to re-refine the tree.
+
+**Cost, and the preset that removes it.** `freeze_template` is dominated by the
+capacity trial: the wavefront `queue` cannot be derived from a finished topology,
+only found by probing. Measured **31–65 s across a leaf/N sweep**, almost all of it
+climbing `2^14 → 2^20/2^21/2^22`, i.e. 6–8 full device topology builds spent
+discovering a capacity the leaf count already predicts. Seeding the ladder from the
+leaf count brought N = 10⁶ at leaf 64 from **51.05 s to 16.77 s**, and a recorded
+`mutual/cap_presets` profile removes even the remaining 2–3 probes. Pass a recorded
+profile as `caps=` to make the *first* compile reusable too.
+
+**The overflow contract.** On the device backend an overflowed capacity drops
+interactions while leaving momentum exactly conserved — so momentum cannot detect
+it. `prepare()` is the eager entry point and raises there. **A driver stepping
+through `rebuild_state` under trace gets no such check and must do it itself.**
+
 ## Usage
 
 ```python
 from jaccpot import BlockStepFMM  # or: from jaccpot.nornax_adapter import BlockStepFMM
 
-fmm = BlockStepFMM(softening=1e-2, k_max=3, theta=0.7, max_order=4, leaf_size=32)
+# leaf_size=64 is the measured optimum for this lane (a U-curve; see the note on
+# `BlockStepFMM`). topology_backend="device" is what a production run wants --
+# the default is "host", which rebuilds an untraceable host dual-tree traversal
+# every base step. See "Topology backends" above.
+fmm = BlockStepFMM(
+    softening=1e-2, k_max=3, theta=0.7, max_order=4, leaf_size=64,
+    topology_backend="device",          # implies static_shapes=True
+)
 
-# Once per base step: build the frozen topology (host operation, not traceable).
+# Once per base step: build the topology. On the device backend the first call
+# also freezes the static-radix template and the capacities (host-side, once);
+# every later build is traceable and re-decides the MAC from live positions.
 fmm.prepare(positions, masses)
 
 # Production path -- one mutual traversal per sub-step boundary.
@@ -329,6 +498,18 @@ A kernel that took `deltas` and built the rotations *on chip* would avoid the
 traffic entirely, but that is a new kernel (Wigner-d recurrences in Triton), not
 a wiring change.
 
+**Retired 2026-08-22 (`6b7cc1b`) — the operand-traffic diagnosis is right, the
+prescription is not.** Building the rotations on chip saves *arithmetic*, and the
+arithmetic is not what costs. Profiling the stage: time is ~linear in the
+coefficient count (exponent 0.91 over orders 2–6) while the arithmetic is
+quadratic, at **0.24 % of fp64 peak and 0.2 % of HBM** — neither roofline binds.
+The compiled module says why: **~121 HLO ops per coefficient, exactly linear**,
+fusions 53 → 229 over orders 2 → 6. Over that range fusions grow 4.32×, measured
+time 4.68×, flops 29.6× — **time tracks the kernel count, not the flops**. So the
+cost is rotation *construction* (p+1 unrolled degree blocks, twice, ~99 % of the
+stage), and the way to attack it is to emit fewer kernels, not to do the same
+arithmetic somewhere cheaper. See the replacement below.
+
 So `_m2l_batch` gained the fused lane exactly as specified — it is wired,
 differentiable through `m2l_real_fused_pallas_cvjp`, and exercised on every CI run
 in interpret mode — but `JACCPOT_MUTUAL_M2L=auto` resolves to pure JAX on
@@ -444,9 +625,10 @@ The composition inverts between the two sizes, and both halves matter:
 * **At N=10⁵ the M2L is 80% of the far field**, and therefore ~44% of the whole
   force. That makes it the single largest remaining target — and it is precisely
   the stage where the current Pallas kernels lose, for the operand-traffic reason
-  above. A rewritten kernel that takes `deltas` and builds the Wigner-d rotations
+  above. ~~A rewritten kernel that takes `deltas` and builds the Wigner-d rotations
   *on chip* would attack the largest block of remaining time; the existing
-  block-operand kernels cannot.
+  block-operand kernels cannot.~~ **What actually attacked it was a batched
+  rotation, not a kernel** — see [The M2L, as measured](#the-m2l-as-measured).
 
 #### 5. float32
 
@@ -532,12 +714,79 @@ float32 path.
 | full mutual suite green on GPU | **yes** — 101 passed |
 | CPU interpret tests green (the CI gate) | **yes** |
 
+#### The M2L, as measured
+
+_2026-08-22, `6b7cc1b`. This section replaces the on-chip-Wigner-d recommendation
+that stood above it._
+
+**What was built.** `_rotate_degree_batched` assembles the rotation block from its
+factors instead of calling the per-degree builder p+1 times, which is possible
+because the block is `B_U @ Dz(-ax) @ B_U @ Dz(az)`: `B_U` depends only on the
+degree and is a compile-time constant, and `Dz` is block-diagonal in |m| and can be
+built twice at full width instead of 2(p+1) times. Centred padding is load-bearing —
+within a degree the layout is `m = -ell..ell` at index `ell+m`, so m=0 sits at the
+block centre and the padded blocks become degree-independent. What remains is one
+batched contraction over a p+1 <= 7 axis.
+
+**Measured**, GPU, flag off -> on:
+
+| config | off | on | speedup |
+|---|---|---|---|
+| order 4, N=2×10⁵ | 96.67 ms | 59.60 ms | **1.62×** |
+| order 4, N=10⁶ | 547.72 ms | 334.52 ms | **1.64×** |
+| order 6, N=10⁶ | 908.57 ms | 667.96 ms | 1.36× |
+
+Fusions 108 -> 42 at order 4. Parity is exact at every order, both sides, forward
+(<= 1.5e-16) and under `jax.grad` (<= 4.2e-17). It does **2.45× more arithmetic**
+(dense padding) and still finishes 1.64× sooner, which is what un-binding a
+launch-bound stage looks like: 23.43 -> 38.37 GFLOP/s, 3.47 -> 5.68 GB/s, both
+still far from any roofline.
+
+**It is off by default** (`JACCPOT_M2L_DEGREE_BATCHED=1`), because the order-6
+falloff suggests order-dependent selection rather than a global flip, and that
+decision was left separate. The flag is read at call time, so it can be set after
+`import jaccpot` — but note it is *not* A/B-able within one process on the lanes
+that read it at import.
+
+**Two claims this retires, and one it does not reach.**
+
+* The on-chip-Wigner-d premise is wrong about the term, as set out above: the
+  arithmetic it saves runs at 0.24 % of peak.
+* "M2L is gather-latency bound" is also refuted. Each source multipole *is*
+  gathered 141.7 times, but as-built 97.09 ms, sorted-by-source 95.67 ms and
+  deliberately **shuffled** 96.41 ms are all within 1.5 % and numerically
+  identical. Shuffling the pair list costs nothing, so locality is not the lever.
+* **The Pallas M2L rejection above is now stale.** Both shapes were measured at
+  0.85× against a JAX baseline this makes 1.64× faster. That does not make them
+  wins — it means the comparison would have to be redone before either shape could
+  be argued for again.
+
+**Where this reaches, and where it does not.** The flag lives in
+`operators/m2l_real_rot_scale`, i.e. the **real** basis. The mutual lane's dual M2L
+routes its rotations through exactly those helpers (`_rotate_multipole_to_z_single`
+and `_rotate_local_from_z_single` in `mutual/farfield.py`), so it inherits the
+change; the mutual stage split above has not been re-measured with the flag on. The
+large-N single-GPU lane runs solidfmm and **does not reach it at all** — measured
+end to end at N=10⁶, order 8, the flag moves nothing (full 637.08 ms off against
+645.77 ms on, inside a 2.4–5.8 % spread).
+
+**And the end-to-end context, which is the part worth carrying away.** On the
+single-GPU large-N lane at N=10⁶, the far field is **under 1 % of the evaluation at
+order 4** — 0.7–1.2 % across leaf 256/1024, against a near field at 97.5–99.5 %.
+Three separate M2L projects have now been aimed at that 1 %. Before a fourth,
+note the one place the premise breaks: at **order 8 the far field is 10.8 %**, not
+under 1 %, and that is also where issue #248's accuracy gap lives. So "the far
+field is negligible" is an order-4 statement, and the honest version of it is that
+single-card performance lives in the near field at production order, not that the
+M2L can never matter.
+
 #### What is still open
 
-* **The M2L at scale.** It is 80% of the far field at N=10⁵ and ~44% of the whole
-  force, and no lane in the tree currently beats pure JAX on it. A kernel taking
-  `deltas` and building the Wigner-d rotations on chip is the one change that
-  would attack it; the block-operand kernels structurally cannot.
+* **The M2L at scale, on the mutual lane.** It is 80% of the far field at N=10⁵ and
+  ~44% of the whole force there, and pure JAX is still the fastest lane for it. The
+  batched rotation above is 1.64× on the stage and reaches this lane through the
+  shared rotate helpers, but it is off by default and the mutual stage split has not
+  been re-measured with it on. That measurement, not a new kernel, is the next step.
 * **The cascades at small N.** `upward` + `L2L` are 78% of the far field at N=10⁴
   and flat in N — launch-bound, one kernel per tree level. A batched-across-levels
   formulation, not a kernel, is what that needs.

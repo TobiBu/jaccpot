@@ -12,6 +12,13 @@ How it works
 ------------
 ``jaccpot/distributed/fmm.py``'s ``shard_map`` body wraps its stages in
 ``jax.named_scope("jc_<stage>")``. Those names survive into the XLA op metadata, so
+
+INERT AS OF 2026-09-02: `jaccpot/distributed/fmm.py` emits NO `jc_*` scopes.
+This branch had added eight of them, but `main` rewrote that file by +1253 lines
+and this merge took `main`'s version: no committed result depended on the
+scopes, and this tool already expected three stages (`jc_coarse_m2m`, `jc_l2p`,
+`jc_near_p2p_self`) that were never emitted anyway. Re-instrument the current
+call sites before expecting a non-empty result.
 a profiler trace can be bucketed by stage with no host callbacks and no ablation.
 ``named_scope`` is metadata only -- it does not introduce a call boundary and does
 not inhibit fusion -- so the profiled executable is the one that actually runs.

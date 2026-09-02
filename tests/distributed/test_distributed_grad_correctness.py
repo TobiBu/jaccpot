@@ -46,6 +46,18 @@ NDEV = 2
 PER = 32
 
 
+#: The tier's own problems are tens of particles per device, so they need a leaf
+#: small enough that a device holds more than one of them.
+#: ``DistributedFMMConfig.leaf_size`` now defaults to a production 64, at which
+#: 64 particles/device is a SINGLE leaf: the dual-tree walk's degenerate branch
+#: returns immediately, there are no far pairs and no near pairs, and every
+#: direct-sum comparison here stops saying anything (the vacuity guards below catch
+#: it, which is how this was found). Pinned rather than inherited, so this file's
+#: tiny-N premise is explicit rather than borrowed from a default that has now
+#: moved twice.
+_LEAF = 8
+
+
 def _clusters(ndev: int, per: int, seed: int = 4):
     """``ndev`` spatially separated clusters (engages the cross-domain path).
 
@@ -76,7 +88,9 @@ def _rel_l2(a, b) -> float:
 def setup():
     """One partitioned system + both evaluators, shared across the tests."""
     config = dataclasses.replace(
-        DistributedFMMConfig(), nearfield_backend="baseline", local_walk="dual_tree"
+        DistributedFMMConfig(leaf_size=_LEAF),
+        nearfield_backend="baseline",
+        local_walk="dual_tree",
     )
     positions, masses = _clusters(NDEV, PER)
     part = partition_for_devices(positions, masses, NDEV, leaf_size=config.leaf_size)
@@ -153,6 +167,16 @@ def test_grad_matches_direct_sum_oracle(setup):
     The direct sum is exactly differentiable, so agreement is bounded by the
     FMM's own force accuracy -- asserted against the *measured* forward error so
     the gradient can never be looser than the force it differentiates.
+
+    TWO MAPS, NOT ONE. The cotangents come back in the layout they were taken with
+    respect to -- the padded partition order -- so the input ``gid_flat`` is their
+    map. The *accelerations* do not: they come back in the per-device tree order,
+    with their own ``gid`` beside them. The two orders coincide only while no device
+    is padded, which is true of this IC and was true of every distributed IC in the
+    suite, so reusing one map for both read correctly here and silently wrong the
+    moment a per-device count stopped dividing ``leaf_size``. See
+    ``tests/distributed/test_distributed_padded_partition.py`` and
+    ``docs/distributed_padding_force_defect.md``.
     """
     config = setup["config"]
     pos, mass = setup["pos"], setup["mass"]
@@ -177,12 +201,18 @@ def test_grad_matches_direct_sum_oracle(setup):
         lambda p, m: jnp.sum(direct_accel(p, m) ** 2), argnums=(0, 1)
     )(positions0, masses0)
 
-    # forward accuracy of this configuration, as the tolerance reference
-    accel = np.asarray(setup["grad_path"](pos, mass, setup["gid"], setup["counts"])[0])
+    # forward accuracy of this configuration, as the tolerance reference. The
+    # accelerations are in the per-device TREE order, so they are reassembled with
+    # the gid the evaluator returns -- see the docstring.
+    accel, gid_out, _ = setup["grad_path"](pos, mass, setup["gid"], setup["counts"])
+    accel = np.asarray(accel)
+    gid_out = np.asarray(gid_out).reshape(-1)
+    valid_out = gid_out >= 0
     scattered = np.zeros((positions0.shape[0], 3))
-    scattered[order_map] = accel[valid]
+    scattered[gid_out[valid_out].astype(int)] = accel[valid_out]
     force_err = _rel_l2(scattered, np.asarray(direct_accel(positions0, masses0)))
 
+    # The cotangents ARE in the input layout, so these keep the input-gid map.
     fmm_gp = np.zeros_like(np.asarray(dg_pos))
     fmm_gm = np.zeros_like(np.asarray(dg_mass))
     fmm_gp[order_map] = np.asarray(g_pos)[valid]
@@ -234,7 +264,9 @@ def test_forward_survives_a_gradient(setup):
 def test_nearfield_chunk_rejected_on_grad_path():
     """The chunked near field has no autodiff rule; it must raise, not degrade."""
     config = dataclasses.replace(
-        DistributedFMMConfig(), nearfield_backend="pallas", nearfield_chunk=256
+        DistributedFMMConfig(leaf_size=_LEAF),
+        nearfield_backend="pallas",
+        nearfield_chunk=256,
     )
     with pytest.raises(NotImplementedError, match="nearfield_chunk"):
         make_force_evaluator(
@@ -242,44 +274,11 @@ def test_nearfield_chunk_rejected_on_grad_path():
         )
 
 
-def test_auto_halo_exchange_version_gate(monkeypatch):
-    """``auto`` must pick the ragged exchange only on a JAX where it is safe.
-
-    Pure resolver test -- no devices, no compile. The boundary is measured, not
-    read off a changelog: 0.9.0.1 corrupts (6/6 in the reproducer), 0.9.1 does not
-    (4/4 clean, and the tripwire below passes there).
-    """
-    import jaccpot.distributed.fmm as dfmm
-
-    cases = {
-        "0.8.0": "buf",
-        "0.9.0": "buf",
-        "0.9.0.1": "buf",  # the version the bug was found on
-        "0.9.1": "native",  # first fixed release
-        "0.10.2": "native",
-        "0.11.0": "native",
-        "1.0.0": "native",
-    }
-    for version, expected in cases.items():
-        monkeypatch.setattr(dfmm.jax, "__version__", version, raising=False)
-        assert (
-            dfmm.resolve_grad_halo_exchange("auto") == expected
-        ), f"jax {version} should resolve to {expected!r}"
-        # an explicit choice is never overridden by the gate
-        assert dfmm.resolve_grad_halo_exchange("buf") == "buf"
-        assert dfmm.resolve_grad_halo_exchange("native") == "native"
-
-    # non-numeric suffixes (dev/rc builds) must not crash the parse
-    for version in ("0.9.1.dev20260301", "0.10.0rc1", "0.9"):
-        monkeypatch.setattr(dfmm.jax, "__version__", version, raising=False)
-        assert dfmm.resolve_grad_halo_exchange("auto") in ("buf", "native")
-
-
 def test_rejects_unknown_halo_exchange():
     """Only the vetted halo-exchange implementations are selectable."""
     with pytest.raises(ValueError, match="halo_exchange"):
         make_force_evaluator(
-            DistributedFMMConfig(),
+            DistributedFMMConfig(leaf_size=_LEAF),
             NDEV,
             32,
             make_mesh(NDEV),
@@ -342,7 +341,7 @@ def test_l2l_num_levels_requires_differentiable():
     """The static L2L bound is grad-path-only; the forward resolves it exactly."""
     with pytest.raises(ValueError, match="l2l_num_levels"):
         make_force_evaluator(
-            DistributedFMMConfig(),
+            DistributedFMMConfig(leaf_size=_LEAF),
             NDEV,
             32,
             make_mesh(NDEV),

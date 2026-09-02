@@ -9,8 +9,9 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Int
 
 from .config import GradConfig
+from .runtime._fmm_impl import PreparedStateLike
 from .runtime.fmm_caches import _contains_tracer
-from .solver import FastMultipoleMethod, FMMPreparedState
+from .solver import FastMultipoleMethod
 
 
 def _extract_positions_from_state(state: Array) -> Array:
@@ -81,7 +82,11 @@ class OdisseoFMMCoupler:
     solver: FastMultipoleMethod
     leaf_size: int = 16
     max_order: int = 4
-    _prepared_state: Optional[FMMPreparedState] = None
+    # `PreparedStateLike`, not `FMMPreparedState`: `solver.prepare_state` returns
+    # the union and the large-N path returns a `LargeNPreparedState`, which the
+    # narrower annotation denied. Widening rather than narrowing, so nothing that
+    # worked stops working (audit E.5).
+    _prepared_state: Optional[PreparedStateLike] = None
     _masses: Optional[Array] = None
 
     def clear(self: "OdisseoFMMCoupler") -> None:
@@ -97,7 +102,7 @@ class OdisseoFMMCoupler:
         bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         leaf_size: Optional[int] = None,
         max_order: Optional[int] = None,
-    ) -> FMMPreparedState:
+    ) -> PreparedStateLike:
         """Prepare source tree/interactions from an ODISSEO primitive state.
 
         Overwrites the cache unconditionally -- both ``_prepared_state`` and the
@@ -126,7 +131,7 @@ class OdisseoFMMCoupler:
 
         Returns
         -------
-        FMMPreparedState
+        PreparedStateLike
             The prepared state, also stored on the instance. Returned so a
             caller can hold it directly; the two are the same object, so
             :meth:`clear` does not invalidate a reference already taken.

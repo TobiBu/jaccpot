@@ -31,32 +31,13 @@ import numpy as np
 from jax.experimental import pallas as pl
 from jaxtyping import Array
 
-from jaccpot._env import env_flag
 from jaccpot.operators.real_harmonics import (
     sh_offset,
     sh_size,
     z_m2l_translation_tables,
 )
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
-
-
-def _fused_m2l_vjp_enabled() -> bool:
-    """Whether the M2L custom_vjp reverse uses the fused Pallas VJP kernel.
-
-    Default ON: the reverse runs as a single fused Pallas launch instead of pure-JAX
-    autodiff of the twin, so the reverse pass also gets the fused speedup. Set
-    ``JACCPOT_FUSED_M2L_VJP=0`` to fall back to autodiff of the pure-jnp twin (the
-    correctness reference -- identical to round-off; useful for debugging).
-
-    Returns
-    -------
-    bool
-        True unless ``JACCPOT_FUSED_M2L_VJP`` is one of ``0``/``false``/``no``/``off``.
-        Default-on is deliberate: the pure-JAX fallback is the correctness reference,
-        not the intended path.
-    """
-    return env_flag("JACCPOT_FUSED_M2L_VJP", True)
-
+from jaccpot.pallas._flags import fused_m2l_vjp_enabled as _fused_m2l_vjp_enabled
 
 __all__ = [
     "pallas_m2l_real_fused_supported",
