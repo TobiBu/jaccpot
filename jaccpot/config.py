@@ -393,6 +393,16 @@ class RuntimePolicyConfig:
         recomputed per evaluation.
     upward_leaf_batch_size : Optional[int]
         Leaves per batch in the P2M sweep.
+    fixed_order : Optional[int]
+        Pins the expansion order used by the evaluate stage instead of inferring
+        it from the local-expansion coefficient count. Distinct from the per-call
+        ``max_order``, which sizes the upward sweep. Legacy name: ``fixed_order``.
+    fixed_max_leaf_size : Optional[int]
+        Concrete leaf-size cap for the evaluate stage. Serves two purposes: it
+        supplies ``max_leaf_size`` where a compiled path needs it concrete rather
+        than traced, and it is the bound whose violation raises
+        ``"fixed_max_leaf_size too small for prepared tree"``. Legacy name:
+        ``fixed_max_leaf_size``.
     """
 
     execution_backend: FMMExecutionBackend = "auto"
@@ -414,6 +424,8 @@ class RuntimePolicyConfig:
     grouped_schedule_budget_bytes: Optional[int] = None
     nearfield_schedule_item_cap: Optional[int] = None
     upward_leaf_batch_size: Optional[int] = None
+    fixed_order: Optional[int] = None
+    fixed_max_leaf_size: Optional[int] = None
 
 
 @dataclass(frozen=True)
