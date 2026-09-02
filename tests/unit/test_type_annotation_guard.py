@@ -244,6 +244,20 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # annotation on a scalar asserts nothing a caller could get wrong.
         ("jaccpot/nearfield/_fast_lane.py", "G"),
         ("jaccpot/nearfield/_fast_lane.py", "softening_sq"),
+        # `runtime/fmm_derivatives.py`'s five families, and the reason is the sharpest
+        # instance of section 4.1's warning in the package. These eight methods ALREADY
+        # carry `@jaxtyped`, so a shape spec would run before the body and make its own
+        # validation unreachable -- and that validation is better than the annotation:
+        # "velocities must have shape (64, 3), got (64, 2)" names the parameter,
+        # substitutes the concrete N and reports what arrived. Twelve malformations across
+        # two methods were all rejected that way; annotating one method turned six of them
+        # into a `TypeCheckError` that lists every parameter in the signature. Measured, and
+        # written up at the top of that class.
+        ("jaccpot/runtime/fmm_derivatives.py", "positions"),
+        ("jaccpot/runtime/fmm_derivatives.py", "masses"),
+        ("jaccpot/runtime/fmm_derivatives.py", "velocities"),
+        ("jaccpot/runtime/fmm_derivatives.py", "target_indices"),
+        ("jaccpot/runtime/fmm_derivatives.py", "bounds"),
     }
 )
 
