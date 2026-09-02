@@ -1410,6 +1410,18 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
     )
 
 
+# NO `@jaxtyped` HERE, AND IT IS NOT AN OVERSIGHT -- its five siblings in this module have
+# one, so the asymmetry is the kind that gets "fixed" on sight. The body is two delegated
+# calls and nothing else: `_compute_leaf_p2p_prepared_large_n_self_only_impl` and
+# `_compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl`, both decorated, both
+# passed every array UNMODIFIED. Between them all nine array parameters are already
+# validated one frame deeper against the identical annotations -- `n 3` and the four
+# `leaves w` from the first, `blocks blocksize` and the two `_` from the second. So this is
+# STYLE_GUIDE section 4.1's own rule ("skip it when the value flows straight into
+# something that checks it"), with the checker being a sibling in the same file rather than
+# a library, and a decorator here would be the "annotate for consistency" that section
+# warns against: an extra beartype pass per call on the production forward path, which
+# section 4.4 records as UNCONDITIONAL, for a check that already runs.
 @partial(
     jax.jit,
     static_argnames=(
