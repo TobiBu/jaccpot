@@ -206,7 +206,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `leaves` | leaf nodes |
 | `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
 | `w` | leaf width (`max_leaf_size`) |
-| `sw` | the DECOUPLED lane's source-pool width, which is not the target block's `w` |
+| `sw` | a SOURCE-side width that genuinely differs from the target's `w` -- see below |
 | `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
@@ -232,18 +232,32 @@ and a re-measurement at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4 makes the 
 disappear. Both kernels read only `shape[1] * shape[2]` and flatten, so a table split the
 other way was accepted and returned a force wrong by rel-L2 9.9e-01.
 
-**`sw` exists because the obvious choice was measurably wrong.** `nearfield_mutual.py` shares
-one `w` between its `a` and `b` sides, and gives a reason: the kernel pads both to
-`_next_pow2` of the a-side count, so a wider `b` hands `jnp.pad` a negative width. Copying
-that to `_fast_lane.py`'s decoupled lane would have been a lie -- measured through interpret
-mode, a target width of 4 against a source pool padded to 8 with the extra slots masked off
-is **bit-identical** to the equal-width result, so a wider source pool is correctly ignored
-and asserting equality would reject a configuration that works (4.2: a wrong shape annotation
-is worse than none). The two widths therefore get their own names; each still binds across
-its own group of three arrays, which is measured, and nothing false is asserted about the
-pair. The reverse direction is a defect neither name can express -- a source pool *narrower*
-than the target block is accepted and returns NaN -- and is filed rather than papered over,
-because jaxtyping cannot say `sw >= w`.
+**`sw` MEANS A SOURCE WIDTH THAT GENUINELY DIFFERS, AND THE WAY IT WAS FIRST USED IS THE
+LESSON.** Its live user is `nearfield/grad.py`'s bucketed pair kernel, where the two widths
+really are independent -- `_pair_accel_cvjp` was observed with a target width of 5 beside a
+source width of 7, in one recorded call -- so `(pairs, w, 3)` against `(pairs, sw, 3)` asserts
+something true and nothing false.
+
+It was introduced somewhere else, and wrongly. `_fast_lane.py`'s decoupled lane got it on the
+strength of a measurement that a wider source pool is "correctly ignored", so asserting
+equality with the target's `w` would reject a working configuration. The measurement was wrong in the flattering direction: it padded the
+surplus source columns and **masked them off**, where they contribute nothing either way.
+Unmasked, they are silently dropped -- a target width of 4 against a source pool padded to 8
+with real, valid extra particles returns a force identical to ignoring them, rel-L2 0.0e+00.
+A plausible wrong number, recorded as a safe configuration, by a check designed to catch
+exactly that.
+
+That lane no longer uses `sw` -- `nearfield_leafpair_pallas_decoupled` enforces equal widths
+with a `ValueError`, so both of its sides are simply `w`. Two things follow, and they
+generalise past this axis. **A perturbation that the code masks
+off tests nothing** -- the same trap as the all-valid mask that made `srcslots` look
+interchangeable with `w` above, and it is worth building every such check so the perturbed
+value is one the code must actually read. And **an annotation is not the tool for a range
+constraint**: the real contract was `sw == w`, `nearfield_leafpair_pallas_decoupled` now
+enforces it with a `ValueError`, and once it is a contract both sides are simply `w`. Reach
+for a shape name when two axes genuinely differ -- `grad.py`'s bucketed pair kernel takes a
+target width of 5 beside a source width of 7 and needs one -- not to encode a bound
+jaxtyping cannot express.
 
 **`tbatch` is not `leaves`, and `tiles` is not `blocks`.** Both distinctions are measured, and
 both looked interchangeable before the capture. `_accumulate_target_block_tile_sequence` takes
