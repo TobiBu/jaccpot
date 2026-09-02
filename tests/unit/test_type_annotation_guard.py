@@ -187,6 +187,15 @@ CONVERTED_MODULES = (
     # two extents and that is a coincidence of the test payload builder, not a
     # contract. `_radix_fast_lane_prepacked_pallas_decoupled` is the third, and the
     # starkest -- no test reaches it at all, only `distributed/fmm.py`.
+    #
+    # All three landed in the two follow-ups and the module is finished: the only
+    # unannotated parameters left are `lax.scan` and batch-body slices, which section
+    # 4.4 forbids annotating. Both open questions resolved AGAINST the obvious answer,
+    # which is why they took their own PR -- the source-slot axis is not `w` (the
+    # equality was an artefact of the test payload builder) and the decoupled lane's
+    # source width is not the target block's `w` (a wider source pool is measurably
+    # correct, so asserting equality would reject something that works). Two axis names
+    # were added for that, `srcslots` and `sw`; see STYLE_GUIDE section 4.3.
     "jaccpot/nearfield/_fast_lane.py",
 )
 

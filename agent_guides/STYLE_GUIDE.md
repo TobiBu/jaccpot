@@ -188,6 +188,8 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `leaves` | leaf nodes |
 | `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
 | `w` | leaf width (`max_leaf_size`) |
+| `sw` | the DECOUPLED lane's source-pool width, which is not the target block's `w` |
+| `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
@@ -200,6 +202,30 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `levels` | block-step levels, `k_max + 1` of them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
+
+**`srcslots` is not `w`, and every capture said it was.** `_fast_lane.py`'s materialised
+source-particle layout is `(leaves, srcslots, w)`, and in all three recorded calls the middle
+and trailing axes were equal -- 2 beside 2, then 256 beside 256. That is the `farleaves` trap
+again: the equality held because of how the test payload is built, not because it is a
+contract. It was settled by reading the builder rather than the capture. `_large_n_pipeline`
+writes `source_particle_ids = target_particle_ids[safe_source_leaf_ids]`, so axis 1 is the
+source LIST's length and axis 2 is a gather from the target table -- `w` by construction --
+and a re-measurement at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4 makes the equality
+disappear. Both kernels read only `shape[1] * shape[2]` and flatten, so a table split the
+other way was accepted and returned a force wrong by rel-L2 9.9e-01.
+
+**`sw` exists because the obvious choice was measurably wrong.** `nearfield_mutual.py` shares
+one `w` between its `a` and `b` sides, and gives a reason: the kernel pads both to
+`_next_pow2` of the a-side count, so a wider `b` hands `jnp.pad` a negative width. Copying
+that to `_fast_lane.py`'s decoupled lane would have been a lie -- measured through interpret
+mode, a target width of 4 against a source pool padded to 8 with the extra slots masked off
+is **bit-identical** to the equal-width result, so a wider source pool is correctly ignored
+and asserting equality would reject a configuration that works (4.2: a wrong shape annotation
+is worse than none). The two widths therefore get their own names; each still binds across
+its own group of three arrays, which is measured, and nothing false is asserted about the
+pair. The reverse direction is a defect neither name can express -- a source pool *narrower*
+than the target block is accepted and returns NaN -- and is filed rather than papered over,
+because jaxtyping cannot say `sw >= w`.
 
 **`tbatch` is not `leaves`, and `tiles` is not `blocks`.** Both distinctions are measured, and
 both looked interchangeable before the capture. `_accumulate_target_block_tile_sequence` takes
@@ -219,7 +245,8 @@ each other. The two leading axes stay anonymous, because `jax.vmap` already reje
 mismatch against `multipoles` with a better message than an annotation would give.
 
 None of the three is added to the flake8 `--builtins` list, because none is ever used as a
-single-identifier axis -- see 4.4 for why that list exists and what it costs.
+single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
+for `sw` and `srcslots`: both only ever appear beside another name.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
