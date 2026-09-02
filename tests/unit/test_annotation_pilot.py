@@ -16,6 +16,8 @@ false positives.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import pytest
 
 from bench import annotation_pilot
@@ -277,3 +279,111 @@ def test_a_strict_function_still_rejects_when_the_bad_shape_is_inside_a_containe
 
     assert tally["accepted"] == 0
     assert tally["rejected"] == 3 * len(annotation_pilot.shape_perturbations((4,)))
+
+
+# ---------------------------------------------------------------------------
+# The two kinds added for `runtime/_adaptive_policy.py`, where 11 of 21 targets were
+# UNREPLAYABLE on one argument. Both are pinned in the direction that flatters: a tree
+# rebuilt to the wrong size, or a NamedTuple whose arrays are rebuilt but never
+# perturbed, would each make the remaining work look SMALLER.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTree:
+    """A stand-in exposing only what :func:`_is_tree` keys on."""
+
+    def __init__(self, num_particles=64, leaf_size=8, num_nodes=15):
+        self.num_particles = num_particles
+        self.leaf_size = leaf_size
+        self.num_nodes = num_nodes
+        self.node_ranges = _FakeArray((num_nodes, 2), "int64")
+
+
+class _Bundle(NamedTuple):
+    """A NamedTuple holding an array, like ``TreeUpwardData``."""
+
+    multipoles: object
+    order: int
+
+
+def test_a_tree_is_described_by_its_build_inputs_not_its_array_leaves():
+    """A tree's leaves are mutually constrained, so it is rebuilt rather than synthesized.
+
+    Recording the 22 arrays and filling them with zeros would produce something that is
+    not a tree -- `node_ranges` would partition nothing -- and every function taking one
+    would fail its control, which the report counts in neither direction. So the
+    description carries what `build_tree` needs instead.
+    """
+    kind, spec, meta = annotation_pilot.describe_argument(_FakeTree())
+    assert kind == "tree"
+    assert meta == "_FakeTree"
+    assert spec["num_particles"] == 64
+    assert spec["leaf_size"] == 8
+    # The node count is carried as a CHECK on the rebuild, not as an input to it.
+    assert spec["num_nodes"] == 15
+
+
+def test_a_tree_rebuild_that_cannot_match_the_node_count_is_refused():
+    """Refusing is the honest failure, and it must not be silently papered over.
+
+    The node count is data-dependent -- the same ``(n, leaf_size)`` gave 31 nodes on one
+    distribution and 37 on another -- so a rebuild can legitimately fail to reproduce it.
+    Returning a differently sized tree anyway would replay the recorded arrays, which were
+    sized against the original, against a tree of another shape: a measurement of nothing,
+    reported as a measurement.
+    """
+    with pytest.raises(RuntimeError, match="num_nodes"):
+        annotation_pilot._build_tree_stand_in(
+            {
+                "num_particles": 64,
+                "leaf_size": 8,
+                # No radix tree over 64 particles at leaf 8 has 9999 nodes.
+                "num_nodes": 9999,
+                "dtype": "int64",
+            }
+        )
+
+
+def test_a_namedtuple_keeps_its_class_so_field_access_survives_the_rebuild():
+    """`TreeUpwardData` was matched by the plain-tuple rule and flattened.
+
+    The control then died on ``AttributeError: 'tuple' object has no attribute
+    'multipoles'``, which reads like the function's problem and was the tool's.
+    """
+    kind, spec, meta = annotation_pilot.describe_argument(
+        _Bundle(multipoles=_FakeArray((4, 9), "float64"), order=2)
+    )
+    assert kind == "namedtuple"
+    assert meta == "_Bundle"
+    assert spec["name"] == "_Bundle"
+    assert [element[0] for element in spec["fields"]] == ["array", "scalar"]
+
+
+def test_arrays_inside_a_namedtuple_are_perturbed_and_not_merely_rebuilt():
+    """The same gap the container case has, and the same reason it matters.
+
+    If `_leaves` did not walk the fields, a function taking a NamedTuple of arrays would
+    report "control OK, 0 array params" -- contributing nothing while looking measured,
+    which turns a gap the report NAMES into one it hides.
+    """
+    description = annotation_pilot.describe_argument(
+        _Bundle(multipoles=_FakeArray((4, 9), "float64"), order=2)
+    )
+    found = list(annotation_pilot._leaves(description, "array"))
+    assert [(path, shape) for path, shape, _ in found] == [((0,), (4, 9))]
+
+    # And substitution addresses that path without disturbing the sibling field.
+    swapped = annotation_pilot._substitute(
+        description, (0,), ("array", (3, 9), "float64")
+    )
+    assert swapped[1]["fields"][0] == ("array", (3, 9), "float64")
+    assert swapped[1]["fields"][1] == ("scalar", 2, "int")
+    assert swapped[1]["name"] == "_Bundle"
+
+
+def test_a_namedtuple_holding_an_opaque_field_is_still_unreplayable():
+    """Widening what can be described must not widen what counts as validated."""
+    description = annotation_pilot.describe_argument(
+        _Bundle(multipoles=object(), order=2)
+    )
+    assert not annotation_pilot.is_replayable(description)

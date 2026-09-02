@@ -42,6 +42,10 @@ Capture, by running any part of the suite with the plugin enabled::
     JACCPOT_CAPTURE_OUT=/tmp/caps.jsonl \\
       pytest -p bench.annotation_capture tests/unit tests/integration
 
+Methods are named ``Class.method`` and mix freely with plain functions::
+
+    JACCPOT_CAPTURE_TARGETS='jaccpot.runtime.fmm_derivatives:DerivativesMixin.compute_accelerations_and_jerk,DerivativesMixin.evaluate_prepared_state_with_jerk'
+
 Targets are ``module:name`` or ``module:name1,name2`` and may be repeated with ``;``.
 Then summarise::
 
@@ -54,12 +58,17 @@ was missing -- only which ones it saw.
 
 WHAT IT CANNOT SEE
 ------------------
-**Methods.** The wrapper rebinds a MODULE attribute, so a function defined inside a class
-cannot be targeted at all -- `runtime/fmm_sweeps.py`'s three diagnostic methods are the
-first real case. Where such a method delegates to a module-level function, capture the
-function and the shapes are the same; where it does not, this tool has nothing to say and
-will report no observations, which must not be read as "never called". Supporting
-`module:Class.method` is the obvious extension and is not done yet.
+**Methods are supported now** -- `module:Class.method`, one level of nesting. They were this
+tool's largest blind spot rather than an edge case: the `runtime/` mixins hold 174 of the
+burn-down's remaining parameters, `runtime/fmm_prepare.py` alone 41, and none was reachable
+while the wrapper only rebound module attributes. Patching the defining CLASS works through
+the MRO, so an `FMMEngine` call resolves to the patched `DerivativesMixin` attribute without
+the engine being touched, and `self` never appears in the record because it carries no
+`.shape`.
+
+A method on a nested class is still not resolved, deliberately: the package has no such
+shape, and guessing at one would put "no observations" back in the position of meaning
+either "never called" or "not resolved". Both of those now raise instead.
 
 The wrapper replaces the module attribute, so it observes calls that resolve the name at
 call time -- which is the normal case, including calls from inside the defining module.
@@ -124,6 +133,60 @@ def parse_targets(spec: str) -> dict[str, list[str]]:
             n.strip() for n in names.split(",") if n.strip()
         )
     return targets
+
+
+def resolve_target(module: Any, name: str) -> tuple[Any, str, Any]:
+    """Resolve ``name`` on ``module`` to the holder, attribute and object to wrap.
+
+    ``name`` is either a module-level function (``pack_tensor``) or a dotted
+    ``Class.method`` (``DerivativesMixin.compute_accelerations_and_jerk``). Methods are
+    the reason this exists: the ``runtime/`` mixins hold 174 of the burn-down's remaining
+    parameters and NONE of them was reachable, because the wrapper rebinds a module
+    attribute and a method is not one. Patching the defining CLASS works instead, and it
+    works through the MRO -- ``FMMEngine`` inherits ``DerivativesMixin``, so an engine
+    call resolves to the patched attribute without the engine being touched.
+
+    Only one level of nesting is resolved. A method on a nested class is not a shape the
+    package has, and guessing at one would make the "never called" report ambiguous again.
+
+    Parameters
+    ----------
+    module : Any
+        The imported module named by the target spec.
+    name : str
+        ``function`` or ``Class.method``.
+
+    Returns
+    -------
+    tuple
+        ``(holder, attribute, original)`` -- the object to ``setattr`` on, the attribute
+        name on it, and the unwrapped callable.
+
+    Raises
+    ------
+    ValueError
+        If ``name`` has more than one dot, or names a class attribute that is not
+        callable -- both of which would otherwise be reported as "no observations",
+        which must not be confused with "never called".
+    AttributeError
+        If the class or the attribute does not exist on the module.
+    """
+    if "." not in name:
+        return module, name, getattr(module, name)
+    parts = name.split(".")
+    if len(parts) != 2:
+        raise ValueError(
+            f"target {name!r} has {len(parts) - 1} dots; only module-level functions "
+            "and one level of Class.method are resolved"
+        )
+    class_name, attribute = parts
+    owner = getattr(module, class_name)
+    original = inspect.getattr_static(owner, attribute)
+    if isinstance(original, (staticmethod, classmethod)):
+        original = original.__func__
+    if not callable(original):
+        raise ValueError(f"target {name!r} is not callable ({type(original).__name__})")
+    return owner, attribute, original
 
 
 def _describe(value: Any) -> dict[str, Any] | None:
@@ -210,10 +273,11 @@ def _wrap(function: Callable[..., Any], label: str, sink: Any) -> Callable[..., 
     return wrapper
 
 
-def _binding_sites(
-    defining_module: Any, name: str, original: Any
-) -> list[tuple[Any, str]]:
+def _binding_sites(holder: Any, name: str, original: Any) -> list[tuple[Any, str]]:
     """Find every module-level name currently bound to the target function.
+
+    ``holder`` is a module for a plain function and a CLASS for a ``Class.method``
+    target; the class case returns a single site, for the reason given below.
 
     Patching only the defining module is not enough, and this is the failure mode
     that made the tool report "never called" for a function called on every step.
@@ -229,10 +293,10 @@ def _binding_sites(
 
     Parameters
     ----------
-    defining_module : Any
-        The module the target was imported from.
+    holder : Any
+        The module the target was imported from, or the class that defines it.
     name : str
-        The function's name in that module.
+        The function's name on that holder.
     original : Any
         The unwrapped function object.
 
@@ -241,9 +305,15 @@ def _binding_sites(
     list of tuple
         ``(module, attribute_name)`` pairs to patch, the defining module first.
     """
-    sites = [(defining_module, name)]
+    sites = [(holder, name)]
+    if not inspect.ismodule(holder):
+        # A class attribute. Subclasses that do not override it reach this one through
+        # the MRO, so there is exactly one site and the module scan below would only
+        # find the bound-method objects Python creates per access, which are not `is`
+        # this function anyway.
+        return sites
     for module in list(sys.modules.values()):
-        if module is None or module is defining_module:
+        if module is None or module is holder:
             continue
         try:
             members = vars(module)
@@ -277,9 +347,9 @@ def capture_shapes(targets: dict[str, list[str]], out_path: Path) -> Iterator[No
         for module_path, names in targets.items():
             module = importlib.import_module(module_path)
             for name in names:
-                original = getattr(module, name)
+                holder, attribute, original = resolve_target(module, name)
                 wrapper = _wrap(original, f"{module_path}:{name}", sink)
-                sites = _binding_sites(module, name, original)
+                sites = _binding_sites(holder, attribute, original)
                 for holder, attribute in sites:
                     setattr(holder, attribute, wrapper)
                     stack.callback(setattr, holder, attribute, original)
