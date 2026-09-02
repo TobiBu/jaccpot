@@ -217,6 +217,9 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `tbatch` | target leaves per scan step, i.e. `target_leaf_batch_size` |
 | `blockdim` | one solid-harmonic rotation block, square: `2*ell + 1` a side |
 | `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
+| `sh` | spherical-harmonic packed coefficients, `sh_size(p) == (p+1)**2` |
+| `degrees` | spherical-harmonic degrees of a per-degree summary, `p+1` of them |
+| `orders` | the candidate expansion orders an adaptive policy scores |
 | `levels` | block-step levels, `k_max + 1` of them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
@@ -265,6 +268,20 @@ mismatch against `multipoles` with a better message than an annotation would giv
 None of the three is added to the flake8 `--builtins` list, because none is ever used as a
 single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
 for `sw` and `srcslots`: both only ever appear beside another name.
+
+**`sh` is the axis `ct` was defined against**, and it took until
+`runtime/_adaptive_policy.py` to get a name because nothing had annotated a
+spherical-harmonic buffer before -- the note below says `C` means `sh_size(p)` *elsewhere in
+the package*, meaning in prose. `sh` is that count as an axis, lowercase like the rest, and
+named after the `sh_size` function it equals. Observed at 4, 16 and 25, i.e. p=1, 3 and 4.
+
+**`degrees` and `orders` are different axes and were observed differing**, which is the only
+reason they need separate names: `dehnen_paper_pair_error_by_order` takes `source_power` as
+`(pairs, degrees)` and `masked_binomial_by_order` as `(orders, degrees)` in the same
+signature, measured at `degrees` 3, 4, 5 against `orders` 1, 2, 3. The shared `degrees` is
+what makes the contraction between them valid, and it is exactly what the eight silent
+acceptances in that function would have broken. `orders` IS used as a single-identifier axis
+(`order_values`), so unlike `sh` and `degrees` it is in the flake8 `--builtins` list.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
