@@ -168,11 +168,25 @@ def test_a_fingerprint_holds_no_arrays():
 
 
 def test_non_numpy_arrays_are_refused():
-    """Host-side only: a tracer here means the caller is inside a trace."""
-    topology = _topology()
-    broken = dataclasses.replace(topology, far_a=[1, 2, 3])
-    with pytest.raises(TypeError, match="host-side"):
-        fingerprint_topology(broken)
+    """Host-side only: a non-NumPy input is refused, by one of two enforcers.
+
+    With ``JACCPOT_RUNTIME_TYPECHECK`` off, ``_feed_array``'s guard raises a
+    ``TypeError`` saying the facility is host-side. With it on, the package-wide
+    jaxtyping hook checks ``_digest``'s own annotation first and raises
+    ``jaxtyping.TypeCheckError`` -- a ``TypeError`` subclass -- before the guard
+    is reached. Same contract, two enforcers, so the test accepts either
+    message. It exercises the hasher directly rather than smuggling a list into
+    a ``MutualTopology`` via ``dataclasses.replace``: under the hook the
+    dataclass ``__init__`` is instrumented too, and beartype's violation there
+    is *not* a ``TypeError``, so that route asserts the wrong thing.
+    """
+    from jaccpot.mutual.identity import _digest
+
+    either_enforcer = "host-side|Type-check error"
+    with pytest.raises(TypeError, match=either_enforcer):
+        _digest([1, 2, 3])
+    with pytest.raises(TypeError, match=either_enforcer):
+        _digest(jnp.asarray([1, 2, 3]))
 
 
 def test_the_switch_counter_counts_consecutive_changes():
