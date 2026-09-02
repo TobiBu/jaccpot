@@ -61,7 +61,14 @@ def main() -> None:
     import jax
     import jax.numpy as jnp
 
-    from jaccpot import FastMultipoleMethod
+    from jaccpot import (
+        FarFieldConfig,
+        FastMultipoleMethod,
+        FMMAdvancedConfig,
+        NearFieldConfig,
+        RuntimePolicyConfig,
+        TreeConfig,
+    )
 
     cc = getattr(jax.devices()[0], "compute_capability", "n/a")
     pos = jax.random.uniform(
@@ -78,15 +85,21 @@ def main() -> None:
         solver = FastMultipoleMethod(
             preset="large_n_gpu",
             runtime_path="large_n",
-            expansion_basis="solidfmm",
-            complex_rotation="solidfmm",
+            basis="solidfmm",
             theta=0.6,
-            nearfield_mode="bucketed",
-            nearfield_edge_chunk_size=64,
-            grouped_interactions=False,
             working_dtype=jnp.float32,
-            tree_build_mode="static_radix",
-            fixed_order=4,
+            advanced=FMMAdvancedConfig(
+                tree=TreeConfig(mode="static_radix"),
+                farfield=FarFieldConfig(
+                    rotation="solidfmm",
+                    grouped_interactions=False,
+                ),
+                nearfield=NearFieldConfig(
+                    mode="bucketed",
+                    edge_chunk_size=64,
+                ),
+                runtime=RuntimePolicyConfig(fixed_order=4),
+            ),
         )
 
         def run(nsteps):
