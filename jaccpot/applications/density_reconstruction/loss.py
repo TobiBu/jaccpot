@@ -12,13 +12,14 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple
 
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 
 __all__ = ["data_misfit", "total_loss"]
 
 
 def data_misfit(
-    predicted: jnp.ndarray,
-    observed: jnp.ndarray,
+    predicted: ArrayLike,
+    observed: ArrayLike,
     *,
     scale: float = 1.0,
 ) -> jnp.ndarray:
@@ -26,10 +27,10 @@ def data_misfit(
 
     Parameters
     ----------
-    predicted : jnp.ndarray
-        ``(M, 3)`` model accelerations at the tracers.
-    observed : jnp.ndarray
-        ``(M, 3)`` observed accelerations.
+    predicted : ArrayLike
+        ``(M, 3)`` model accelerations at the tracers. NumPy or JAX.
+    observed : ArrayLike
+        ``(M, 3)`` observed accelerations. NumPy or JAX.
     scale : float
         Divides the residual before squaring, so the loss is O(1) whatever the
         field magnitude. Use a characteristic acceleration; ``1.0`` leaves the
@@ -46,8 +47,8 @@ def data_misfit(
 
 
 def total_loss(
-    predicted: jnp.ndarray,
-    observed: jnp.ndarray,
+    predicted: ArrayLike,
+    observed: ArrayLike,
     *,
     weights: Dict[str, float],
     scale: float = 1.0,
@@ -57,10 +58,10 @@ def total_loss(
 
     Parameters
     ----------
-    predicted : jnp.ndarray
-        ``(M, 3)`` model accelerations.
-    observed : jnp.ndarray
-        ``(M, 3)`` observed accelerations.
+    predicted : ArrayLike
+        ``(M, 3)`` model accelerations. NumPy or JAX.
+    observed : ArrayLike
+        ``(M, 3)`` observed accelerations. NumPy or JAX.
     weights : Dict[str, float]
         Term name to weight. ``"data"`` weights the misfit; other keys weight
         matching entries of ``extra_terms``. A weight of ``0.0`` disables a

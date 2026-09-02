@@ -35,6 +35,7 @@ from typing import Any, Dict, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.typing import ArrayLike
 
 from jaccpot import FastMultipoleMethod
 
@@ -239,14 +240,16 @@ class ForwardOperator:
         )
 
     def combined_positions(
-        self: "ForwardOperator", source_positions: jnp.ndarray
+        self: "ForwardOperator", source_positions: ArrayLike
     ) -> jnp.ndarray:
         """Append the fixed tracers to the (differentiated) sources.
 
         Parameters
         ----------
-        source_positions : jnp.ndarray
-            ``(N, 3)`` source positions; may be a tracer.
+        source_positions : ArrayLike
+            ``(N, 3)`` source positions -- NumPy or JAX, concrete or traced;
+            converted with ``jnp.asarray`` so both are accepted under the
+            runtime typecheck hook.
 
         Returns
         -------
@@ -287,7 +290,7 @@ class ForwardOperator:
         )
 
     def evaluate_at_topology(
-        self: "ForwardOperator", state: Any, source_positions: jnp.ndarray
+        self: "ForwardOperator", state: Any, source_positions: ArrayLike
     ) -> jnp.ndarray:
         """Accelerations at the tracers, at the frozen topology ``state``.
 
@@ -299,8 +302,8 @@ class ForwardOperator:
         ----------
         state : Any
             Prepared state from :meth:`prepare`.
-        source_positions : jnp.ndarray
-            ``(N, 3)`` source positions, differentiated.
+        source_positions : ArrayLike
+            ``(N, 3)`` source positions, differentiated. NumPy or JAX.
 
         Returns
         -------
