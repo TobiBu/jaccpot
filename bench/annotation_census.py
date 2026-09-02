@@ -350,7 +350,14 @@ class ModuleCensus:
         Functions carrying ``@jaxtyped``.
     vacuous_decorated : int
         Functions carrying ``@jaxtyped`` with no shaped parameter -- so the
-        decorator checks nothing about shape. Phase 1's burn-down population.
+        decorator checks nothing about shape. **Not a backlog count**, and reading
+        it as one has now been wrong twice: of the 27, ten take no array parameter
+        at all (their decorator checks ``int``/``str``/dataclass arguments, which is
+        not nothing), and eight more are ``runtime/fmm_derivatives.py`` methods whose
+        bodies already reject every malformed input measured, with a message an
+        annotation would delete rather than add to. See the note above
+        ``DerivativesMixin``. Treat this number as "where to point
+        ``bench/annotation_pilot`` next", never as work outstanding.
     jaxtyping_imports : int
         ``from jaxtyping import ...`` statements.
     width_suffixed : list of str
@@ -727,7 +734,8 @@ def _format_report(modules: list[ModuleCensus], totals: Totals, limit: int) -> s
         f"  shaped share of array parameters     {totals.shaped_fraction:6.1%}",
         "",
         f"  @jaxtyped functions                  {totals.decorated:6d}",
-        f"    of which no shaped parameter       {totals.vacuous_decorated:6d}",
+        f"    of which no shaped parameter       {totals.vacuous_decorated:6d}"
+        "   (not a backlog -- see the docstring)",
         f"  from jaxtyping import statements     {totals.jaxtyping_imports:6d}",
         "",
         f"{'bare':>6} {'shaped':>6} {'unann':>6}  module",
