@@ -925,14 +925,15 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_accel_cvjp(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    positions: Array,
-    source_leaf_ids_f: Array,
-    source_valid_f: Array,
-    leaf_mask_f: Array,
-    leaf_particle_idx_f: Array,
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
+    source_leaf_ids_f: Float[Array, "farleaves blocks blocksize"],
+    source_valid_f: Float[Array, "farleaves blocks blocksize"],
+    leaf_mask_f: Float[Array, "leaves w"],
+    leaf_particle_idx_f: Float[Array, "leaves w"],
     softening_sq: Array,
     G: Array,
     num_warps: Optional[int],
@@ -976,19 +977,19 @@ def _radix_fast_lane_prepacked_accel_cvjp(
 
     Parameters
     ----------
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``. **Differentiable.**
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``. **Differentiable.**
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; supplies the output shape.
-    source_leaf_ids_f : Array
+    source_leaf_ids_f : Float[Array, 'farleaves blocks blocksize']
         Source leaf ids, float-cast, ``[num_leaves, blocks, lanes]``.
-    source_valid_f : Array
+    source_valid_f : Float[Array, 'farleaves blocks blocksize']
         Per-lane validity, float-cast, same shape.
-    leaf_mask_f : Array
+    leaf_mask_f : Float[Array, 'leaves w']
         Padded per-leaf validity, float-cast, ``[num_leaves, W]``.
-    leaf_particle_idx_f : Array
+    leaf_particle_idx_f : Float[Array, 'leaves w']
         Particle index per padded slot, float-cast, ``[num_leaves, W]``. See
         ``_check_float_id_range`` -- an id beyond float exact-integer range would
         be silently rounded, so it is validated rather than assumed.
@@ -1039,25 +1040,83 @@ def _radix_fast_lane_prepacked_accel_cvjp(
     )
 
 
+# THE SAVED RESIDUAL, SPELLED OUT, AND WHAT THAT IS AND IS NOT WORTH.
+#
+# NUMERICS_AND_JAX section 1 says the residuals a `custom_vjp` saves must not change
+# without re-running `bench/audit_reverse_residuals.py`. A nine-tuple annotation is NOT a
+# tripwire on that, and the first draft of this comment claimed it was. Measured, by
+# re-registering `defvjp` with a `_fwd` that mutates its residual three ways:
+#
+#   swap `leaf_mask_f` with `leaf_particle_idx_f`   NOT NOTICED, before or after
+#   swap the leaf table for the rectangle          IndexError  -> TypeCheckError
+#   drop `leaf_masses`                             ValueError  -> TypeCheckError
+#
+# The two same-shaped `(leaves, w)` float entries are indistinguishable to any shape
+# annotation, and that is the mutation a refactor is most likely to make. What the
+# annotation actually buys is locality on the other two: a `TypeCheckError` naming
+# `residual` instead of an `IndexError` raised inside the analytic VJP. Worth having, not
+# worth mistaking for the audit script.
+#
+# The order is `_fwd`'s, not the primal's -- they agree here, but only because `_fwd`
+# happens to save its first nine arguments in order, which is a fact about that body and
+# not a rule. Derived by re-registering `defvjp` with recording wrappers over four
+# `(leaves, w, blocks, blocksize, n)` configurations. `bench/annotation_capture` cannot
+# see either rule and reports no observations for both: `defvjp` captured them at import,
+# so rebinding the module attribute leaves the `custom_vjp` object calling the originals
+# -- the "reference captured into a closure before the patch went on" case its own
+# docstring warns about, which must not be read as "never called".
+_LeafPairReverseResidual = Tuple[
+    Float[Array, "leaves w 3"],  # leaf_positions
+    Float[Array, "leaves w"],  # leaf_masses
+    Float[Array, "n 3"],  # positions
+    Float[Array, "farleaves blocks blocksize"],  # source_leaf_ids_f
+    Float[Array, "farleaves blocks blocksize"],  # source_valid_f
+    Float[Array, "leaves w"],  # leaf_mask_f
+    Float[Array, "leaves w"],  # leaf_particle_idx_f
+    Array,  # softening_sq -- scalar, observed `()` in every call
+    Array,  # G -- scalar, likewise
+]
+
+
+# ANNOTATED BUT NOT DECORATED, AND THE REASON IS MEASURED RATHER THAN INHERITED.
+#
+# The obvious argument for a decorator here is that `@jaxtyped` on the primal cannot run
+# in reverse mode, since `jax.grad` calls this rule and never the primal. That argument is
+# wrong FOR THIS LANE, and the distinction is worth stating because it is a property of
+# the body below rather than of `custom_vjp`: the first thing this rule does is call the
+# `custom_vjp` object again, which is an ordinary forward call, so the primal -- and its
+# decorator -- does run. Measured: stripping this decorator changes nothing, all six
+# corruptions in `tests/unit/test_nearfield_fastlane_grad_path.py` still fail identically
+# on the grad path.
+#
+# So a decorator here would be section 4.1's "annotate for consistency", at the cost of a
+# beartype pass per trace on the production grad path (section 4.4: UNCONDITIONAL). The
+# annotations stay, because they are not free: they document the 17-argument contract, and
+# the `JACCPOT_RUNTIME_TYPECHECK=1` import hook enforces them on undecorated functions,
+# which is the leg that exists to catch exactly this.
+#
+# WHAT WOULD CHANGE THE ANSWER: a `_fwd` that stops re-entering the primal -- calling
+# `_radix_fast_lane_prepacked_pallas` directly, say, to avoid the double dispatch. The
+# check would vanish silently. Decorate it then.
 def _radix_fast_lane_prepacked_accel_fwd(
-    leaf_positions,
-    leaf_masses,
-    positions,
-    source_leaf_ids_f,
-    source_valid_f,
-    leaf_mask_f,
-    leaf_particle_idx_f,
-    softening_sq,
-    G,
-    num_warps,
-    num_stages,
-    target_subtile,
-    interpret,
-    rev_leaf_batch,
-    rev_block_tile,
-    rev_skip_empty,
-    rev_tiers,
-):
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
+    source_leaf_ids_f: Float[Array, "farleaves blocks blocksize"],
+    source_valid_f: Float[Array, "farleaves blocks blocksize"],
+    leaf_mask_f: Float[Array, "leaves w"],
+    leaf_particle_idx_f: Float[Array, "leaves w"],
+    softening_sq: Array,
+    G: Array,
+    num_warps: Optional[int],
+    num_stages: int,
+    target_subtile: Optional[int],
+    interpret: bool,
+    rev_leaf_batch: int,
+    rev_block_tile: int,
+    rev_skip_empty: bool,
+    rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+) -> Tuple[Array, _LeafPairReverseResidual]:
     out = _radix_fast_lane_prepacked_accel_cvjp(
         leaf_positions,
         leaf_masses,
@@ -1091,18 +1150,21 @@ def _radix_fast_lane_prepacked_accel_fwd(
     return out, residual
 
 
+# Undecorated for the same reason as `_fwd`, plus one of its own: what a decorator here
+# would newly reject is the residual, and the table above measures that as locality rather
+# than detection. Enforced under `JACCPOT_RUNTIME_TYPECHECK=1` by the import hook.
 def _radix_fast_lane_prepacked_accel_bwd(
-    num_warps,
-    num_stages,
-    target_subtile,
-    interpret,
-    rev_leaf_batch,
-    rev_block_tile,
-    rev_skip_empty,
-    rev_tiers,
-    residual,
-    cotangent,
-):
+    num_warps: Optional[int],
+    num_stages: int,
+    target_subtile: Optional[int],
+    interpret: bool,
+    rev_leaf_batch: int,
+    rev_block_tile: int,
+    rev_skip_empty: bool,
+    rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+    residual: _LeafPairReverseResidual,
+    cotangent: Float[Array, "n 3"],
+) -> Tuple[Array, ...]:
     (
         leaf_positions,
         leaf_masses,
