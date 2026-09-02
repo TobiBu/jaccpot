@@ -78,6 +78,22 @@ __all__ = [
 #   leaves w / leaves w 3        the padded near-field leaf table -- positions, masses,
 #                                mask, particle indices
 #   farleaves blocks blocksize   the prepacked source-leaf-id rectangle and its mask
+#   leaves srcslots w            the MATERIALISED source-particle layout: one padded
+#                                neighbour-slot run per target leaf. `srcslots` is the
+#                                neighbour count, unrelated to `w` -- see below
+#   tbatch w 3 / leaves sw 3     the decoupled lane, whose whole point is that the target
+#                                block and the source pool are separate
+#
+# `srcslots` IS NOT `w`, AND EVERY EARLIER CAPTURE SAID IT WAS. The two were observed equal
+# in all three recorded calls -- 2 beside 2, and 256 beside 256 -- which is the `farleaves`
+# trap: an equality that holds because of how the test payload is built, not because it is a
+# contract. `srcslots` is the padded neighbour count per target leaf, sized by the payload's
+# `batch_tile_s`; `w` is the leaf width. Settled by reading the builder rather than the
+# capture: `_large_n_pipeline` writes
+# `source_particle_ids = target_particle_ids[safe_source_leaf_ids]`, so axis 1 is the source
+# LIST's length and axis 2 is a gather from the target table, hence `w` by construction. Then
+# re-measured at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4, where the two no longer
+# coincide and the equality no longer appears.
 #
 # Extents behind those names, pooling three captures (`tests/unit/core/test_near_field.py`,
 # `tests/unit/test_custom_vjp_parity.py`, and a forced octree run -- see below):
@@ -116,14 +132,15 @@ __all__ = [
         "target_batch_scan_unroll",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_radix_fast_lane_payload_pairs_impl(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
-    source_slot_valid_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
+    source_slot_valid_mask: Bool[Array, "leaves srcslots"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -142,19 +159,22 @@ def _compute_radix_fast_lane_payload_pairs_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    masses : Array
+    masses : Float[Array, 'n']
         Particle masses ``[N]``.
-    target_particle_ids : Array
+    target_particle_ids : Int[Array, 'leaves w']
         Target particle index per (leaf, slot), from the payload.
-    target_particle_mask : Array
+    target_particle_mask : Bool[Array, 'leaves w']
         Validity for ``target_particle_ids``, same shape.
-    source_particle_ids : Array
-        Source particle index per (leaf, slot).
-    source_particle_mask : Array
+    source_particle_ids : Int[Array, 'leaves srcslots w']
+        Source particle index per (target leaf, source slot, slot). The trailing
+        axis is ``w`` and not a third independent extent: the pipeline builds this
+        as ``target_particle_ids[safe_source_leaf_ids]``, a gather FROM the target
+        table, so it inherits that table's width by construction.
+    source_particle_mask : Bool[Array, 'leaves srcslots w']
         Validity for ``source_particle_ids``, same shape.
-    source_slot_valid_mask : Array
+    source_slot_valid_mask : Bool[Array, 'leaves srcslots']
         Per-slot-tile validity, used to skip wholly-empty source tiles.
     G : Union[float, Array]
         Gravitational constant.
@@ -403,12 +423,12 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
 # only ever sees the implementation. Audit E.4.
 @overload
 def _radix_fast_lane_pairs_pallas(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -422,12 +442,12 @@ def _radix_fast_lane_pairs_pallas(
 
 @overload
 def _radix_fast_lane_pairs_pallas(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -439,13 +459,14 @@ def _radix_fast_lane_pairs_pallas(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_pairs_pallas(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -468,17 +489,18 @@ def _radix_fast_lane_pairs_pallas(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    masses : Array
+    masses : Float[Array, 'n']
         Particle masses ``[N]``.
-    target_particle_ids : Array
+    target_particle_ids : Int[Array, 'leaves w']
         Target particle index per (leaf, slot).
-    target_particle_mask : Array
+    target_particle_mask : Bool[Array, 'leaves w']
         Validity for ``target_particle_ids``, same shape.
-    source_particle_ids : Array
-        Source particle index per (leaf, slot-tile, slot).
-    source_particle_mask : Array
+    source_particle_ids : Int[Array, 'leaves srcslots w']
+        Source particle index per (target leaf, source slot, slot); the trailing
+        axis is the target table's ``w``, which it is gathered from.
+    source_particle_mask : Bool[Array, 'leaves srcslots w']
         Validity for ``source_particle_ids``, same shape.
     G : Union[float, Array]
         Gravitational constant.
@@ -723,6 +745,28 @@ def _radix_fast_lane_prepacked_pallas(
     return pair_acc
 
 
+# THE SOURCE POOL'S WIDTH IS `sw`, NOT `w`, AND THE OBVIOUS CHOICE WAS THE WRONG ONE.
+#
+# `pallas/nearfield_mutual.py` shares one `w` between its `a` and `b` sides and gives a
+# reason: the kernel pads both to `_next_pow2` of the a-side count, so a wider `b` hands
+# `jnp.pad` a negative width. The same annotation here would be a lie, because this kernel
+# does not behave that way. Measured through the interpret path, target width 4 against a
+# source pool padded to 8 with the extra slots masked off: bit-identical to the equal-width
+# result, rel-L2 exactly 0. A wider source pool is CORRECTLY IGNORED, so asserting equality
+# would reject a configuration that works -- section 4.2's "a wrong shape annotation is
+# worse than none".
+#
+# So the two widths get their own names. Each still binds across its own group -- the three
+# source arrays must agree with each other, and the three target arrays with each other,
+# both measured at three distinct extents -- and nothing false is asserted about the pair.
+#
+# FOUND ON THE WAY, NOT FIXED HERE, because it is not something an annotation can express:
+# a source pool NARROWER than the target block is accepted and returns NaN (measured at
+# target 8 / source 4 and target 16 / source 3, both `|acc| = nan`; the reverse direction is
+# fine). jaxtyping cannot say `sw >= w`, so this stays a defect to fix in its own PR with
+# its own test rather than something these annotations catch. Production never reaches it:
+# `distributed/fmm.py` slices its target block out of the source pool, so the widths are
+# equal there by construction, and the F25 equivalence case passes the same array twice.
 # Overloads: the return shape is keyed entirely on `compute_potential`, so a caller that does
 # not set it should not be handed a union to narrow. Generated from this
 # function's own signature rather than retyped -- including whether `compute_potential`
@@ -731,15 +775,15 @@ def _radix_fast_lane_prepacked_pallas(
 # only ever sees the implementation. Audit E.4.
 @overload
 def _radix_fast_lane_prepacked_pallas_decoupled(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    target_positions: Array,
-    target_mask: Array,
-    target_particle_idx: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "tbatch blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "tbatch blocks blocksize"],
+    target_positions: Float[Array, "tbatch w 3"],
+    target_mask: Bool[Array, "tbatch w"],
+    target_particle_idx: Int[Array, "tbatch w"],
+    source_positions: Float[Array, "leaves sw 3"],
+    source_masses: Float[Array, "leaves sw"],
+    source_mask: Bool[Array, "leaves sw"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -754,15 +798,15 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 
 @overload
 def _radix_fast_lane_prepacked_pallas_decoupled(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    target_positions: Array,
-    target_mask: Array,
-    target_particle_idx: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "tbatch blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "tbatch blocks blocksize"],
+    target_positions: Float[Array, "tbatch w 3"],
+    target_mask: Bool[Array, "tbatch w"],
+    target_particle_idx: Int[Array, "tbatch w"],
+    source_positions: Float[Array, "leaves sw 3"],
+    source_masses: Float[Array, "leaves sw"],
+    source_mask: Bool[Array, "leaves sw"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -775,16 +819,17 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_pallas_decoupled(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    target_positions: Array,
-    target_mask: Array,
-    target_particle_idx: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "tbatch blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "tbatch blocks blocksize"],
+    target_positions: Float[Array, "tbatch w 3"],
+    target_mask: Bool[Array, "tbatch w"],
+    target_particle_idx: Int[Array, "tbatch w"],
+    source_positions: Float[Array, "leaves sw 3"],
+    source_masses: Float[Array, "leaves sw"],
+    source_mask: Bool[Array, "leaves sw"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -814,25 +859,27 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 
     Parameters
     ----------
-    source_leaf_ids_padded : Array
+    source_leaf_ids_padded : Int[Array, 'tbatch blocks blocksize']
         Source leaf ids ``[num_targets, max_blocks, block_size]``, referencing
         **global source rows** in ``[0, num_sources)``.
-    source_valid_mask_padded : Array
+    source_valid_mask_padded : Bool[Array, 'tbatch blocks blocksize']
         Per-lane validity with the same shape.
-    target_positions : Array
+    target_positions : Float[Array, 'tbatch w 3']
         This block's target positions ``[num_targets, W, 3]``.
-    target_mask : Array
+    target_mask : Bool[Array, 'tbatch w']
         This block's target validity ``[num_targets, W]``.
-    target_particle_idx : Array
+    target_particle_idx : Int[Array, 'tbatch w']
         **Global** particle index per target slot ``[num_targets, W]``, so
         per-block partials scatter-add and compose by ``+``.
-    source_positions : Array
-        The full source gather pool ``[num_sources, W, 3]``, resident.
-    source_masses : Array
+    source_positions : Float[Array, 'leaves sw 3']
+        The full source gather pool ``[num_sources, W, 3]``, resident. Its width is
+        ``sw``, deliberately NOT the target block's ``w`` -- see the note above the
+        function for the measurement, and for the NaN that motivates it.
+    source_masses : Float[Array, 'leaves sw']
         Source masses ``[num_sources, W]``.
-    source_mask : Array
+    source_mask : Bool[Array, 'leaves sw']
         Source validity ``[num_sources, W]``.
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; supplies the output shape only.
     G : Union[float, Array]
         Gravitational constant.
