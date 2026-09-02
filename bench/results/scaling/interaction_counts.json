@@ -1,0 +1,223 @@
+{
+  "config": {
+    "n": [
+      4096,
+      8192,
+      16384,
+      32768,
+      65536,
+      131072,
+      262144,
+      524288,
+      1048576,
+      2097152
+    ],
+    "theta": 0.6,
+    "order": 4,
+    "basis": "real",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float32",
+    "leaf_size": 32,
+    "preset": "accurate",
+    "distribution": "uniform_cube",
+    "softening": 0.001,
+    "fit_min_n": 16384,
+    "counts_from": "get_runtime_diagnostics(): recent_dual_far_pair_count (M2L) and recent_dual_neighbor_count (P2P)"
+  },
+  "meta": {
+    "git_sha": "6122658d01af1d85b2b2159e34bdc90a5d76fcd2",
+    "git_branch": "paper/jaccpot-i",
+    "git_dirty": false,
+    "jax_version": "0.10.2",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "7",
+    "argv": [
+      "--n-min-exp",
+      "12",
+      "--n-max-exp",
+      "21",
+      "--n-steps",
+      "10",
+      "--order",
+      "4",
+      "--theta",
+      "0.6",
+      "--basis",
+      "real",
+      "--preset",
+      "accurate",
+      "--leaf-size",
+      "32",
+      "--distribution",
+      "uniform_cube",
+      "--fit-min-n",
+      "16384",
+      "--softening",
+      "0.001",
+      "--seed",
+      "0",
+      "--dtype",
+      "float32",
+      "--gpu-select",
+      "least-used",
+      "--json-out",
+      "/tmp/claude-2701/-export-home-tbuck-jaccpot/ac72b95d-4670-4c6c-82b1-035f9fcf1efe/scratchpad/fig05_ext.json"
+    ]
+  },
+  "data": {
+    "records": [
+      {
+        "n": 4096,
+        "far_pairs": 2534,
+        "near_pairs": 11982,
+        "far_work": 63350,
+        "near_work": 12400640,
+        "coeffs_per_pair": 25,
+        "nodes": 255,
+        "leaves": 128,
+        "far_pairs_per_particle": 0.61865234375,
+        "near_pairs_per_particle": 2.92529296875
+      },
+      {
+        "n": 8192,
+        "far_pairs": 11186,
+        "near_pairs": 35490,
+        "far_work": 279650,
+        "near_work": 36603904,
+        "coeffs_per_pair": 25,
+        "nodes": 511,
+        "leaves": 256,
+        "far_pairs_per_particle": 1.365478515625,
+        "near_pairs_per_particle": 4.332275390625
+      },
+      {
+        "n": 16384,
+        "far_pairs": 41928,
+        "near_pairs": 92158,
+        "far_work": 1048200,
+        "near_work": 94894080,
+        "coeffs_per_pair": 25,
+        "nodes": 1023,
+        "leaves": 512,
+        "far_pairs_per_particle": 2.55908203125,
+        "near_pairs_per_particle": 5.6248779296875
+      },
+      {
+        "n": 32768,
+        "far_pairs": 126430,
+        "near_pairs": 221200,
+        "far_work": 3160750,
+        "near_work": 227557376,
+        "coeffs_per_pair": 25,
+        "nodes": 2047,
+        "leaves": 1024,
+        "far_pairs_per_particle": 3.85833740234375,
+        "near_pairs_per_particle": 6.75048828125
+      },
+      {
+        "n": 65536,
+        "far_pairs": 317110,
+        "near_pairs": 534582,
+        "far_work": 7927750,
+        "near_work": 549509120,
+        "coeffs_per_pair": 25,
+        "nodes": 4095,
+        "leaves": 2048,
+        "far_pairs_per_particle": 4.838714599609375,
+        "near_pairs_per_particle": 8.157073974609375
+      },
+      {
+        "n": 131072,
+        "far_pairs": 832566,
+        "near_pairs": 1191014,
+        "far_work": 20814150,
+        "near_work": 1223792640,
+        "coeffs_per_pair": 25,
+        "nodes": 8191,
+        "leaves": 4096,
+        "far_pairs_per_particle": 6.3519744873046875,
+        "near_pairs_per_particle": 9.086715698242188
+      },
+      {
+        "n": 262144,
+        "far_pairs": 1899884,
+        "near_pairs": 2687216,
+        "far_work": 47497100,
+        "near_work": 2760097792,
+        "coeffs_per_pair": 25,
+        "nodes": 16383,
+        "leaves": 8192,
+        "far_pairs_per_particle": 7.2474822998046875,
+        "near_pairs_per_particle": 10.25091552734375
+      },
+      {
+        "n": 524288,
+        "far_pairs": 4056962,
+        "near_pairs": 5972984,
+        "far_work": 101424050,
+        "near_work": 6133112832,
+        "coeffs_per_pair": 25,
+        "nodes": 32767,
+        "leaves": 16384,
+        "far_pairs_per_particle": 7.738040924072266,
+        "near_pairs_per_particle": 11.392562866210938
+      },
+      {
+        "n": 1048576,
+        "far_pairs": 9628530,
+        "near_pairs": 12481366,
+        "far_work": 240713250,
+        "near_work": 12814473216,
+        "coeffs_per_pair": 25,
+        "nodes": 65535,
+        "leaves": 32768,
+        "far_pairs_per_particle": 9.18248176574707,
+        "near_pairs_per_particle": 11.903158187866211
+      },
+      {
+        "n": 2097152,
+        "error": "jaccpot could not fit N=2097152 with preset=None, leaf_size=32, max_order=4, dtype=None.\nDevice: 16.75 GiB in use of 29.62 GiB.\nLargest statically-sized buffers for this configuration:\n      0.03 GiB  leaf-major particle payload (num_leaves x leaf x 4)\n           sized by: leaf_size\n      0.02 GiB  "
+      }
+    ],
+    "fits": {
+      "far_pairs": {
+        "exponent": 1.290021691209165,
+        "intercept": -1.7089854856605105,
+        "r_squared": 0.996796264034518,
+        "n_points": 7,
+        "fit_min_n": 16384,
+        "fit_max_n": 1048576
+      },
+      "near_pairs": {
+        "exponent": 1.1815727998334327,
+        "intercept": 0.028957206813565856,
+        "r_squared": 0.9992129216379181,
+        "n_points": 7,
+        "fit_min_n": 16384,
+        "fit_max_n": 1048576
+      },
+      "far_work": {
+        "exponent": 1.290021691209166,
+        "intercept": 1.5098903392076852,
+        "r_squared": 0.996796264034518,
+        "n_points": 7,
+        "fit_min_n": 16384,
+        "fit_max_n": 1048576
+      },
+      "near_work": {
+        "exponent": 1.1808878442538495,
+        "intercept": 6.972188881707177,
+        "r_squared": 0.9992211745007763,
+        "n_points": 7,
+        "fit_min_n": 16384,
+        "fit_max_n": 1048576
+      }
+    }
+  }
+}

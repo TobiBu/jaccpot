@@ -665,6 +665,26 @@ If a performance change is intentional, refresh the baseline:
 - `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate`, including analytic source-motion behavior
 - `examples/real_sh_adaptive_order.ipynb`: real-basis adaptive-order demo
 
+## Paper Branch (`paper/jaccpot-i`)
+
+This branch additionally carries the benchmarks, figure notebooks, and tests for
+the Jaccpot I methods paper. `PROJECT_PLAN.md` has the phase-by-phase breakdown;
+the manuscript itself lives in the separate `jaccpot-paper-i` repo.
+
+The pipeline has three layers, kept strictly separate:
+
+1. `bench/**/*.py` — seeded, `argparse`'d benchmark scripts that dump JSON into
+   `results/`. **No plotting logic**, and nothing a figure depends on is printed
+   rather than written. GPU scripts select a free device with `autocvd` *before*
+   importing JAX.
+2. `examples/jaccpot_paper/fig_*.ipynb` — one notebook per figure. Loads from
+   `results/**/*.json` only, **never recomputes**, writes a single PDF.
+3. `jaccpot-paper-i/figures/` — the exported PDFs, with a provenance row in that
+   repo's `figures/README.md` recording which script and notebook produced each.
+
+`results/` is gitignored apart from `.gitkeep`; the small summary JSON a figure
+actually needs is committed explicitly with `git add -f`, never bulk arrays.
+
 ## Runtime Type Checking
 
 `jaccpot` can enable package-wide runtime checking for annotated callables using

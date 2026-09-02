@@ -1,0 +1,79 @@
+{
+  "config": {
+    "n": 64,
+    "theta": 0.4,
+    "order": 3,
+    "basis": "real",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float64",
+    "ndev": 2,
+    "per_device_n": 32,
+    "leaf_size": 8,
+    "mac_type": "dehnen",
+    "nearfield_backend": "baseline",
+    "halo_exchange_requested": "auto",
+    "halo_exchange_resolved": "native",
+    "fd_step": 1e-05
+  },
+  "meta": {
+    "git_sha": "52b05544b41eef4cf2cfbc7b85c9c12afd73da1f",
+    "git_branch": "paper/jaccpot-i",
+    "git_dirty": false,
+    "jax_version": "0.10.2",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "2,4",
+    "argv": [
+      "--ndev",
+      "2"
+    ]
+  },
+  "data": {
+    "records": [
+      {
+        "check": "forward_bit_identity",
+        "bit_identical": true,
+        "rel_l2_drift": 0.0
+      },
+      {
+        "check": "fd_vs_ad",
+        "wrt": "positions",
+        "fd": -99435145.26286161,
+        "ad": -99435153.19729035,
+        "rel_err": 7.979501327817696e-08,
+        "fd_step": 1e-05,
+        "grad_norm": 102121583.66035728,
+        "all_finite": true
+      },
+      {
+        "check": "fd_vs_ad",
+        "wrt": "masses",
+        "fd": 20753.73523402959,
+        "ad": 20753.735246933822,
+        "rel_err": 6.2177872201677e-10,
+        "fd_step": 1e-05,
+        "grad_norm": 1011033.5056626481,
+        "all_finite": true
+      },
+      {
+        "check": "oracle",
+        "grad_rel_l2_positions": 3.102307731970848e-05,
+        "grad_rel_l2_masses": 0.0010657057517969657,
+        "forward_force_rel_l2": 0.0016495622621313204
+      },
+      {
+        "check": "forward_survives_gradient",
+        "forward_bit_identical": true,
+        "grad_path_bit_identical": true,
+        "forward_rel_l2_drift": 0.0,
+        "grad_path_rel_l2_drift": 0.0
+      }
+    ]
+  }
+}

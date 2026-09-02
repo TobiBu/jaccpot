@@ -1,0 +1,16 @@
+# Benchmark output is regenerable from `bench/**/*.py`, so it is not tracked by
+# default -- a rerun overwrites the same path, and bulk per-particle arrays have
+# no business in git history.
+#
+# The small summary JSON a figure actually reads IS committed, so that the
+# manuscript's numbers stay traceable to a commit. Add those explicitly:
+#
+#     git add -f results/validation/force_error_vs_order.json
+#
+# Keep that to summaries. If a file is large enough that you hesitate, it is a
+# bulk array and belongs here, not in the index.
+*
+!.gitignore
+!*/
+!.gitkeep
+!*/.gitkeep
