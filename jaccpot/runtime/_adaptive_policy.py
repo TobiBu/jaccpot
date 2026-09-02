@@ -53,7 +53,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
-from jaxtyping import Array, DTypeLike, Float, Int, jaxtyped
+from jaxtyping import Array, DTypeLike, Float, Inexact, Int, jaxtyped
 from yggdrax.tree import Tree, get_num_internal_nodes
 
 from jaccpot.upward.tree_expansions import TreeUpwardData
@@ -180,13 +180,13 @@ def _packed_total_order(multipole_packed: Array) -> int:
 
 @jaxtyped(typechecker=beartype)
 def source_power_by_degree_from_multipoles(
-    *, multipole_packed: Float[Array, "nodes sh"]
+    *, multipole_packed: Inexact[Array, "nodes sh"]
 ) -> Array:
     """Return per-node multipole power grouped by spherical-harmonic degree.
 
     Parameters
     ----------
-    multipole_packed : Float[Array, 'nodes sh']
+    multipole_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients per node.
 
     Returns
@@ -208,7 +208,7 @@ def source_power_by_degree_from_multipoles(
 
 @jaxtyped(typechecker=beartype)
 def dehnen_multipole_power_by_degree(
-    *, multipole_packed: Float[Array, "nodes sh"]
+    *, multipole_packed: Inexact[Array, "nodes sh"]
 ) -> Array:
     """Return Dehnen's exact per-degree source power ``P_n`` from packed moments.
 
@@ -232,7 +232,7 @@ def dehnen_multipole_power_by_degree(
 
     Parameters
     ----------
-    multipole_packed : Float[Array, 'nodes sh']
+    multipole_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients per node.
 
     Returns
@@ -427,14 +427,14 @@ def dehnen_paper_pair_error_by_order(
 @jaxtyped(typechecker=beartype)
 def source_error_proxy_by_order_from_multipoles(
     *,
-    multipole_packed: Float[Array, "nodes sh"],
+    multipole_packed: Inexact[Array, "nodes sh"],
     p_gears: tuple[int, ...],
 ) -> Array:
     """Compute a conservative per-node residual proxy for each candidate order.
 
     Parameters
     ----------
-    multipole_packed : Float[Array, 'nodes sh']
+    multipole_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients per node.
     p_gears : tuple[int, ...]
         Candidate expansion orders the adaptive policy may choose between.
