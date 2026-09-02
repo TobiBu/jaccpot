@@ -124,6 +124,18 @@ Never write a docstring that restates the name. `"""Compute the multipole."""` o
 
 ## 4. Type annotations
 
+**The burn-down number has exactly one definition: `python bench/annotation_census.py`.**
+Run it before and after an annotation change and quote its output in the PR. Do not
+restate it in a table — E.1's table went stale twice that way, and F20's figure and an
+AST walk over the same tree disagreed by ~70% (3174 against 1855) because they answered
+different questions. That module writes the question down: the unit is a function
+*parameter*, one parameter counts once however many `Array`s its annotation mentions,
+`self`/`cls` is exempt, return annotations are excluded (4.4 records why they are
+unavailable here), and `jaccpot/experimental/` is out. `--reconcile` prints the ladder to
+the looser definitions, which is the part that caused the confusion.
+
+The derivation tool is its sibling, `bench/annotation_capture.py` — see 4.2.
+
 - Full annotations on public functions and on internal functions whose types are not obvious.
 - Use `TypeVar` for decorators that must preserve the wrapped signature (see
   `_precision.py`). A targeted `# type: ignore[return-value]` with an obvious reason is
@@ -173,6 +185,12 @@ The docstrings are not a reliable source, and this is measured, not a slur:
 Instrument the function, run the suite, tally the shapes against the live `n`/`leaves` for each
 call, and annotate what you observed. A wrong shape annotation is worse than none, because the
 decorator enforces it.
+
+`bench/annotation_capture.py` is the reusable version of that instrumentation, and it reports
+its own coverage as well as the shapes: how many DISTINCT extents sit behind each axis
+equality, and which test files reached the function. Read the second list and ask which lane
+is missing from it — that is the guard that would have caught `farleaves`, and no amount of
+captured data supplies it.
 
 ### 4.3 The axis vocabulary
 
