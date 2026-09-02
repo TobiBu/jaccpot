@@ -1,9 +1,10 @@
 """Loss/parameter-error convergence curve for gradient-based potential
 recovery -- the paper's payoff experiment.
 
-Depends on jaccpot/applications/potential_recovery/ (this branch, Phase 4).
-Sequence this last, once N and theta operating points are known from
-Phases 1-3. Writes bench/results/payoff/recovery.json:
+DEFERRED. This targets parametric potential recovery from kinematics, which is
+out of scope for Paper I; the jaccpot/applications/potential_recovery/ package it
+was written against has been deleted rather than retargeted. Nothing here runs
+until that case is picked up in a later paper. Writes bench/results/payoff/recovery.json:
 {"iteration": [...], "loss": [...], "param_rel_error": [...]}
 """
 
@@ -30,9 +31,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    # TODO: depends on jaccpot/applications/potential_recovery/recover.py.
     raise NotImplementedError(
-        "Depends on jaccpot/applications/potential_recovery/ (see PROJECT_PLAN.md Phase 4)."
+        "Deferred: parametric potential recovery is out of scope for Paper I, and "
+        "jaccpot/applications/potential_recovery/ has been deleted."
     )
 
 

@@ -1,6 +1,7 @@
 """The distributed path's shipped basis/MAC must match what the paper claims.
 
-Phase 0 of ``PROJECT_PLAN.md`` asked which basis and MAC the distributed driver
+Phase 0 of ``PROJECT_PLAN.md`` (in the ``jaccpot-paper-i`` repo, not this one)
+asked which basis and MAC the distributed driver
 runs, because the multi-GPU numbers in the manuscript describe either the
 fast-lane path or a slower interim baseline, and the text has to say which. That
 question is settled: items 5a-5d landed, and the default is the fast-lane
@@ -40,7 +41,7 @@ _WHERE_TO_UPDATE = """
 If this default changed on purpose, update all of these in the same change:
   - docs/phase5_multigpu_pallas_foldin_plan.md   (STATUS block)
   - MULTIGPU_STATE.md                            (section 1)
-  - PROJECT_PLAN.md                              (Phase 0)
+  - the paper repo's PROJECT_PLAN.md              (Phase 0)
   - the paper repo: sections/02_method.tex, and any accuracy figure quoting
     the distributed configuration
 Otherwise this is drift, and the manuscript is now describing a configuration

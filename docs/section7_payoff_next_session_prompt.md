@@ -1,3 +1,20 @@
+> **SUPERSEDED 2026-09-02.** This prompt describes section 7 as *parametric potential
+> recovery from synthetic kinematics* — see `generate_synthetic_ifu_kinematics()` below.
+> That scope was deferred out of Paper I: section 7 is now **static density
+> reconstruction**, with masses frozen and equal and positions the only free parameters.
+> The current specification is `PROMPT_static_payoff_density_reconstruction.md` in the
+> `edda-programme` repo.
+>
+> The package this prompt is written around, `jaccpot/applications/potential_recovery/`,
+> **was deleted in the same commit that added this banner** — every entry point raised
+> `NotImplementedError` and its module names described the deferred case. Section 7's code
+> goes in a fresh `jaccpot/applications/density_reconstruction/`.
+>
+> Kept rather than deleted because it records what a session was told, and because its
+> Step 0 discipline, its provenance and figure-style requirements and its
+> instrument-before-code note all still apply. **Do not follow its scope, its module paths
+> or its Definition of done.**
+
 # Fresh-session prompt: implement section 7 (the payoff application)
 
 Hand this to a new session. It is written to be self-contained, but **Step 0 is to

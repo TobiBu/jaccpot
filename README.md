@@ -668,8 +668,11 @@ If a performance change is intentional, refresh the baseline:
 ## Paper Branch (`paper/jaccpot-i`)
 
 This branch additionally carries the benchmarks, figure notebooks, and tests for
-the Jaccpot I methods paper. `PROJECT_PLAN.md` has the phase-by-phase breakdown;
-the manuscript itself lives in the separate `jaccpot-paper-i` repo.
+the Jaccpot I methods paper. The manuscript and the phase-by-phase project plan
+both live in the separate `jaccpot-paper-i` repo -- see
+[PROJECT_PLAN.md](https://github.com/TobiBu/jaccpot-paper-i/blob/main/PROJECT_PLAN.md).
+This branch deliberately keeps no copy: the two diverged once already, with the
+branch's copy still specifying a Phase 4 scope that had been superseded.
 
 The pipeline has three layers, kept strictly separate:
 

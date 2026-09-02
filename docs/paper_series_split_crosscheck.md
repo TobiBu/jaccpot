@@ -92,7 +92,8 @@ So the natural cut is:
 
 ## THE CONFLICT: a different split is already planned
 
-`PROJECT_PLAN.md`, Phase 5, has an open checkpoint:
+[`PROJECT_PLAN.md`](https://github.com/TobiBu/jaccpot-paper-i/blob/main/PROJECT_PLAN.md) (in the `jaccpot-paper-i` repo), Phase 5, has an
+open checkpoint:
 
 > assess whether the multi-GPU section has grown large enough that it, plus the
 > differentiability section, could stand alone as a **systems paper** separate
@@ -160,7 +161,7 @@ Small and well-scoped:
 1. **Which split, or both?** Static/dynamic as proposed here, the planned
    systems/science one, or a three-way? This is the decision everything else
    waits on.
-2. **What is the Kessel Run story?** It appears in `PROJECT_PLAN.md` only as
+2. **What is the Kessel Run story?** It appears in [`PROJECT_PLAN.md`](https://github.com/TobiBu/jaccpot-paper-i/blob/main/PROJECT_PLAN.md) only as
    "standalone Kessel Run letter" with no description anywhere in the repo. It was
    omitted from §8's future work rather than guessed at. If it is dynamical it
    belongs to Paper II and strengthens the case for the split.
