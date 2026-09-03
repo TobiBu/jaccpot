@@ -75,6 +75,7 @@ __all__ = [
     "TopologyFingerprint",
     "TopologySwitchCounter",
     "diff_topologies",
+    "digest_arrays",
     "fingerprint_topology",
     "topologies_identical",
 ]
@@ -164,6 +165,16 @@ def _digest(*arrays: Union[np.ndarray, Sequence[np.ndarray]]) -> str:
             for element in sequence:
                 _feed_array(hasher, element)
     return hasher.hexdigest()
+
+
+#: Public name for the component-digest primitive. An *adapter* that fingerprints
+#: some other tree representation -- the radix ``FMMPreparedState`` the
+#: differentiable path carries, for instance -- must hash its component arrays
+#: exactly as :func:`fingerprint_topology` hashes a :class:`MutualTopology`, or
+#: the two fingerprints are not comparable and neither is a switch rate derived
+#: from them. Exposing the primitive is what keeps such an adapter from growing
+#: its own fourth copy of this hashing.
+digest_arrays = _digest
 
 
 @dataclass(frozen=True)

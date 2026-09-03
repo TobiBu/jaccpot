@@ -21,9 +21,12 @@ from jaccpot.applications.density_reconstruction.forward import (
     make_forward_operator,
 )
 from jaccpot.applications.density_reconstruction.topology import (
-    RadixTopologyFingerprint,
+    ChurnRates,
+    RadixStructure,
     SwitchLog,
+    churn_between,
     fingerprint_prepared_state,
+    radix_structure,
 )
 from jaccpot.applications.density_reconstruction.truth import (
     GroundTruth,
@@ -31,12 +34,15 @@ from jaccpot.applications.density_reconstruction.truth import (
 )
 
 __all__ = [
+    "ChurnRates",
     "ForwardOperator",
     "GroundTruth",
-    "RadixTopologyFingerprint",
+    "RadixStructure",
     "SwitchLog",
     "assert_masses_frozen_and_equal",
+    "churn_between",
     "fingerprint_prepared_state",
     "make_forward_operator",
     "make_ground_truth",
+    "radix_structure",
 ]

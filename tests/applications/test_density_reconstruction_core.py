@@ -12,9 +12,11 @@ import pytest
 from jaccpot.applications.density_reconstruction import (
     SwitchLog,
     assert_masses_frozen_and_equal,
+    churn_between,
     fingerprint_prepared_state,
     make_forward_operator,
     make_ground_truth,
+    radix_structure,
 )
 from jaccpot.applications.density_reconstruction.loss import total_loss
 from jaccpot.applications.density_reconstruction.parameterize import (
@@ -215,9 +217,93 @@ def test_topology_switch_detection():
     assert "permutation" in changed or "near_pairs" in changed
 
     summary = log.summary()
-    assert summary["switches"] == 1
-    assert summary["comparisons"] == 4
-    assert summary["switch_rate"] == pytest.approx(0.25)
-    assert summary["interaction_switches"] <= summary["switches"]
     assert summary["switch_metric"] == "radix_topology_excluding_morton_codes"
-    assert summary["events"][0]["iteration"] == 4
+    extensive = summary["extensive"]
+    assert extensive["switches"] == 1
+    assert extensive["comparisons"] == 4
+    assert extensive["switch_rate"] == pytest.approx(0.25)
+    assert extensive["interaction_switches"] <= extensive["switches"]
+    assert extensive["events"][0]["iteration"] == 4
+
+
+# 5b ----------------------------------------------------------------------------
+def test_switch_rates_are_intensive_not_extensive():
+    """The rates fig19 plots must resolve a perturbation size, not saturate.
+
+    This is D-016 encoded as a test. An extensive "did anything change?"
+    counter answers 1 for every perturbation that changes anything at all, so
+    it cannot distinguish a one-particle reshuffle from a total reordering. The
+    intensive rates must be monotone in perturbation amplitude and must stay
+    strictly inside (0, 1) in between -- otherwise section 7's own
+    instrumentation has walked into the trap the Yggdrax run walked into.
+    """
+    truth = _small_truth()
+    op = _operator(truth)
+    base = np.asarray(truth.source_positions)
+    noise = np.random.default_rng(5).standard_normal(base.shape)
+
+    reference = radix_structure(op.prepare(base))
+
+    # Identical input: every rate is exactly zero, and the far rate is None
+    # rather than 0.0 -- an empty far list is not the same statement as "no far
+    # pair moved". At this N and theta every pair is near.
+    same = churn_between(reference, radix_structure(op.prepare(base)))
+    assert same.slot_churn == 0.0
+    assert same.leaf_churn == 0.0
+    assert same.near_pair_churn == 0.0
+    assert same.mean_rank_shift_fraction == 0.0
+    assert same.far_pair_churn is None
+
+    rates = {
+        eps: churn_between(reference, radix_structure(op.prepare(base + eps * noise)))
+        for eps in (1e-9, 1e-6, 1e-3, 1e-1)
+    }
+
+    # Below the quantisation floor nothing moves at all.
+    for eps in (1e-9, 1e-6):
+        assert rates[eps].slot_churn == 0.0
+        assert rates[eps].leaf_churn == 0.0
+        assert rates[eps].near_pair_churn == 0.0
+
+    # The middle amplitude is the one that matters: partial churn, strictly
+    # between the two saturating ends. An extensive counter reads 1 here.
+    middle = rates[1e-3]
+    assert 0.0 < middle.slot_churn < 1.0
+    assert 0.0 < middle.leaf_churn < 1.0
+    assert 0.0 < middle.near_pair_churn < 1.0
+
+    # Monotone in amplitude.
+    big = rates[1e-1]
+    assert big.slot_churn > middle.slot_churn
+    assert big.leaf_churn >= middle.leaf_churn
+    assert big.near_pair_churn > middle.near_pair_churn
+
+    # Locality: the mean rank shift is a small fraction of P even when almost
+    # every slot moved. This is the "pervasive but local" reading.
+    assert big.slot_churn > 0.5
+    assert big.mean_rank_shift_fraction < 0.25
+
+    # And the summary carries them, separated from the extensive block so a
+    # figure cannot confuse the two.
+    log = SwitchLog()
+    log.observe(op.prepare(base), iteration=0)
+    log.observe(op.prepare(base + 1e-3 * noise), iteration=1)
+    summary = log.summary()
+    assert summary["intensive"]["measured"] is True
+    assert summary["intensive"]["comparisons"] == 1
+    assert 0.0 < summary["intensive"]["mean"]["near_pair_churn"] < 1.0
+    assert summary["intensive"]["per_comparison"][0]["iteration"] == 1
+    assert set(summary) == {"switch_metric", "content_key", "extensive", "intensive"}
+
+
+def test_churn_refuses_mismatched_particle_counts():
+    """A rate computed across a changing N is not a rate; it raises."""
+    truth = _small_truth()
+    smaller = _small_truth(n=96, m=24, seed=1)
+    left = radix_structure(_operator(truth).prepare(truth.source_positions))
+    right = radix_structure(_operator(smaller).prepare(smaller.source_positions))
+    with pytest.raises(ValueError, match="different particle counts"):
+        churn_between(left, right)
+
+    with pytest.raises(ValueError, match="intensive_every"):
+        SwitchLog(intensive_every=0)
