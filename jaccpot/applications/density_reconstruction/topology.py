@@ -457,10 +457,21 @@ def _spans_to_indices(starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
 
 
 #: Default number of particles whose exact near-field source set is retained.
-#: The cost is O(SAMPLE x partners) and independent of N, so this is a fixed
-#: budget rather than a fraction: 4096 samples at leaf 256 with ~27 neighbour
-#: leaves is a few times 1e7 ids, which is affordable at every N in the sweep.
-NEAR_SET_SAMPLE = 4096
+#: MEASURED, because the first guess of 4096 was unusable. This configuration's
+#: near field is enormous -- a particle at N=32768, leaf 64, theta 0.5 sums
+#: directly against ~29000 sources, 84% of the whole system, falling to ~20% at
+#: N=262144 -- so the cost per rebuild comparison is dominated by it:
+#:
+#:     sample   N=32768                     N=262144
+#:     128      0.6 s build + 0.8 s diff    3.7 s + 3.9 s,    52 MiB
+#:     512      2.4 s + 3.2 s               8.4 s + 10.4 s,  219 MiB
+#:     4096     19.6 s + 25.5 s,  919 MiB   50.4 s + 64.3 s, 1677 MiB
+#:
+#: At 4096 that is 45 s and 114 s per comparison, which over 40 rebuilds and 21
+#: fits does not finish. 128 keeps a fit's instrumentation to seconds, and a
+#: mean over 128 particles is a precise enough estimate of a churn *rate* --
+#: a population mean of numbers in [0, 1], not a tail statistic.
+NEAR_SET_SAMPLE = 128
 
 
 def _sampled_near_sets(
@@ -868,21 +879,33 @@ class SwitchLog:
         1 measures every rebuild; a larger value samples the path, trading
         resolution for host work at large ``N``. Recorded in the summary, so a
         figure cannot mistake a sampled rate for a complete one.
+    near_set_sample : int
+        Particles to retain exact near-field source sets for, feeding
+        ``near_set_churn``. ``0`` disables that one rate and leaves the others.
+        See :data:`NEAR_SET_SAMPLE` for the measured cost -- it dominates the
+        instrumentation, which is why it is a knob and not a constant.
 
     Raises
     ------
     ValueError
-        If ``intensive_every`` is below 1.
+        If ``intensive_every`` is below 1, or ``near_set_sample`` is negative.
     """
 
     def __init__(
-        self: "SwitchLog", *, intensive: bool = True, intensive_every: int = 1
+        self: "SwitchLog",
+        *,
+        intensive: bool = True,
+        intensive_every: int = 1,
+        near_set_sample: int = NEAR_SET_SAMPLE,
     ) -> None:
         if int(intensive_every) < 1:
             raise ValueError(f"intensive_every must be >= 1, got {intensive_every!r}")
+        if int(near_set_sample) < 0:
+            raise ValueError(f"near_set_sample must be >= 0, got {near_set_sample!r}")
         self._counter = TopologySwitchCounter()
         self._intensive = bool(intensive)
         self._intensive_every = int(intensive_every)
+        self._near_set_sample = int(near_set_sample)
         self._previous_structure: Optional[RadixStructure] = None
         self._previous_index: Optional[int] = None
         self._events: List[Dict[str, Any]] = []
@@ -923,7 +946,7 @@ class SwitchLog:
                 }
             )
         if self._intensive and observation % self._intensive_every == 0:
-            structure = radix_structure(state)
+            structure = radix_structure(state, near_set_sample=self._near_set_sample)
             if self._previous_structure is not None:
                 record = churn_between(self._previous_structure, structure).as_record()
                 record["iteration"] = index
@@ -1038,6 +1061,7 @@ class SwitchLog:
             "intensive": {
                 "measured": self._intensive,
                 "every": self._intensive_every,
+                "near_set_sample": self._near_set_sample,
                 "comparisons": len(self._churn),
                 "mean": self.mean_churn(),
                 "per_comparison": self.churn(),

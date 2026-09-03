@@ -152,6 +152,11 @@ class FitConfig:
         Instrument the rebuilds. Off only when host memory is the constraint.
     intensive_every : int
         Sampling stride for the intensive churn rates.
+    near_set_sample : int
+        Particles to retain near-field source sets for, feeding
+        ``near_set_churn``. That one rate dominates the instrumentation cost --
+        45 s per comparison at N=32768 with the original 4096-particle default
+        -- so it is exposed here rather than buried. ``0`` disables it.
     history_every : int
         Record a history row every ``n`` iterations. The final iteration is
         always recorded.
@@ -168,6 +173,7 @@ class FitConfig:
     jit_within_epoch: bool = False
     track_switches: bool = True
     intensive_every: int = 1
+    near_set_sample: int = 128
     history_every: int = 1
     seed: int = 0
 
@@ -367,7 +373,10 @@ def run_fit(
     from optax import apply_updates
 
     switch_log = (
-        SwitchLog(intensive_every=int(config.intensive_every))
+        SwitchLog(
+            intensive_every=int(config.intensive_every),
+            near_set_sample=int(config.near_set_sample),
+        )
         if config.track_switches
         else None
     )

@@ -1219,6 +1219,545 @@ work come apart.\
 """
 
 
+# --------------------------------------------------------------------------- #
+# figure 16 -- gradient cost vs free-parameter count (section 7 headline)
+# --------------------------------------------------------------------------- #
+
+FIG16 = """\
+art = jsonio.read_result("density_reconstruction/gradient_cost_vs_nparams.json")
+cfg, data = art["config"], art["data"]
+recs = [r for r in data["records"] if not r.get("failed")]
+if not recs:
+    raise SystemExit("gradient_cost_vs_nparams.json has no successful rows")
+failed = [r for r in data["records"] if r.get("failed")]
+
+# LATENCY-BOUND ROWS ARE NOT PLOTTED AS RATIOS. Below the point where the FMM
+# becomes compute bound, a wall-clock ratio between the forward and the gradient
+# reports which graph XLA fused into fewer kernels -- it came out BELOW ONE in
+# the leaf-64 sweep, which is arithmetically impossible for a reverse pass. Such
+# rows still carry the cost-flat-in-P statement, so they stay in the left panel
+# and are excluded only from the ratio annotation.
+compute_bound = [r for r in recs if not r.get("latency_bound")]
+
+pos = sorted((r for r in recs if r["parameterization"] == "positions"),
+             key=lambda r: r["num_free_parameters"])
+par = sorted((r for r in recs if r["parameterization"] == "parametric"),
+             key=lambda r: r["N"])
+
+fig, axes = style.figure(width=style.TWO_COL, height=2.9, ncols=2)
+
+# -- left: wall-clock against free-parameter count ------------------------- #
+ax = axes[0]
+P = [r["num_free_parameters"] for r in pos]
+ax.plot(P, [r["forward_seconds"] for r in pos], marker=style.MARKERS[0],
+        color=style.ENTITY["forward"], label="forward only")
+ax.plot(P, [r["forward_backward_seconds"] for r in pos], marker=style.MARKERS[1],
+        color=style.ENTITY["forward_backward"], label="forward + backward")
+
+# The parametric arm at P = 7 is the same operator with a 450000x narrower
+# pytree. It is drawn as points, not a curve: it is one parameter count.
+if par:
+    ax.scatter([r["num_free_parameters"] for r in par],
+               [r["forward_backward_seconds"] for r in par],
+               marker=style.MARKERS[3], s=18, zorder=5,
+               facecolor="none", edgecolor=style.INK,
+               label="parametric (P = %d), same N" % par[0]["num_free_parameters"])
+
+# Finite differences, EXTRAPOLATED as (P + 1) forward evaluations from this
+# run's own measured forward. Never measured; the label says so.
+fd_P = np.array([1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 3e7])
+ref = data["annotations"]["reference_forward_seconds"]
+ax.plot(fd_P, (fd_P + 1.0) * ref, linestyle=":", color=style.INK_MUTED,
+        label="finite differences, extrapolated")
+
+ax.set_xscale("log"); ax.set_yscale("log")
+ax.set_xlabel("free parameters $P$")
+ax.set_ylabel("wall-clock per evaluation [s]")
+
+# The annotation that IS the argument, in human units.
+years = data["annotations"]["finite_difference_at"]["10000000"]["years"]
+ax.annotate("$10^7$ parameters:\\n%.1f yr by finite\\ndifferences" % years,
+            xy=(1e7, (1e7 + 1) * ref), xytext=(3e3, (1e7 + 1) * ref * 0.06),
+            fontsize=6.0, color=style.INK,
+            arrowprops={"arrowstyle": "->", "color": style.INK_MUTED, "lw": 0.6})
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.6})
+
+# -- right: the reverse-pass multiple, and memory -------------------------- #
+ax = axes[1]
+Ns = [r["N"] for r in compute_bound if r["parameterization"] == "positions"]
+ratios = [r["backward_over_forward"] for r in compute_bound
+          if r["parameterization"] == "positions"]
+flops = [r["backward_over_forward_flops"] for r in compute_bound
+         if r["parameterization"] == "positions"]
+ax.plot(Ns, ratios, marker=style.MARKERS[0], color=style.ENTITY["forward_backward"],
+        label="wall-clock")
+if any(f is not None for f in flops):
+    ax.plot([n for n, f in zip(Ns, flops) if f is not None],
+            [f for f in flops if f is not None],
+            marker=style.MARKERS[2], linestyle="--", color=style.INK_MUTED,
+            label="XLA flop count")
+ax.axhline(3.0, color=style.GRID, lw=0.8, zorder=0)
+ax.text(Ns[0], 3.15, "3x", fontsize=5.6, color=style.INK_MUTED)
+ax.set_xscale("log"); ax.set_yscale("log")
+ax.set_xlabel("$N$")
+ax.set_ylabel("(forward + backward) / forward")
+
+memory = [(r["N"], r.get("forward_backward_temp_bytes"))
+          for r in pos if r.get("forward_backward_temp_bytes")]
+if memory:
+    twin = ax.twinx()
+    twin.plot([m[0] for m in memory], [m[1] / 2**30 for m in memory],
+              marker=style.MARKERS[4], linestyle="-.", color=style.CATEGORICAL[0],
+              lw=0.9)
+    twin.set_yscale("log")
+    twin.set_ylabel("gradient temp memory [GiB]", color=style.CATEGORICAL[0])
+    twin.tick_params(axis="y", colors=style.CATEGORICAL[0])
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.6})
+
+ceiling = ""
+if failed:
+    ceiling = "   single-device ceiling: N=%d failed (%s)" % (
+        failed[0]["N"], failed[0].get("error_type", "?"))
+    print("ceiling:", failed[0]["N"], failed[0].get("error_type"))
+
+fig.tight_layout()
+style.footer(fig, "%s, %s, order %d, theta %.2f, leaf %d, M=%d, mode=%s%s" % (
+    art["meta"]["device_kind"], cfg["precision"], cfg["order"], cfg["theta"],
+    cfg["leaf_size"], cfg["M"], cfg.get("mode", "?"), ceiling))
+style.save(fig, str(FIG_DIR / "fig_16_gradient_cost_vs_nparams.pdf"))
+"""
+
+FIG16_CAPTION = r"""
+Cost of a reverse-mode gradient against the number of free source positions.
+**Left:** wall-clock for one forward evaluation and for one
+forward-plus-backward, against free-parameter count $P$. Both are flat in $P$ --
+the open diamonds are the 7-parameter parametric model evaluated through the
+*same* operator at the same $N$, and they land on the high-dimensional points,
+so a change of $P$ by a factor of $4.5\times10^{5}$ changes the cost by about
+1%. The dotted line is finite differences, **extrapolated** as $(P+1)$ forward
+evaluations from this run's own measured forward time; it was not measured, and
+one-sided rather than central differences are assumed so the baseline is not
+inflated. **Right:** the reverse-pass multiple against $N$, by wall-clock and by
+XLA's flop count, with the gradient's peak temporary memory on the second axis.
+The multiple is close to 3 up to $N\sim10^{4}$ and grows to roughly 13 at
+$N=10^{6}$: bounded, and independent of $P$, but *not* a small constant across
+this range. Points at which the pipeline is launch-latency rather than compute
+bound are excluded from the right panel -- there a wall-clock ratio measures
+kernel fusion and not differentiation -- but retained on the left, where the
+statement is about $P$. The single-device ceiling in the footer is measured, by
+running until it failed.
+"""
+
+
+# --------------------------------------------------------------------------- #
+# figure 17 -- reconstruction quality
+# --------------------------------------------------------------------------- #
+
+FIG17 = """\
+art = jsonio.read_result("density_reconstruction/reconstruction_runs.json")
+cfg, recs = art["config"], art["data"]["records"]
+recs = [r for r in recs if not r.get("failed")]
+if not recs:
+    raise SystemExit("reconstruction_runs.json has no successful rows")
+
+def pick(**want):
+    for r in recs:
+        if all(r.get(k) == v for k, v in want.items()):
+            return r
+    return None
+
+ref = dict(initial_guess="perturbed_truth", noise_fraction=cfg["noise_fractions"][0],
+           softening=cfg["softenings"][0], perturber="lmc_like", regularized=True)
+high = pick(parameterization="positions", **ref)
+low = pick(parameterization="parametric", **ref)
+unreg = pick(parameterization="positions", **{**ref, "regularized": False})
+if high is None:
+    raise SystemExit("no reference high-dimensional run in the artifact")
+
+fig, axes = style.figure(width=style.TWO_COL, height=5.0, ncols=2, nrows=2)
+
+# (a) enclosed mass: truth vs parametric vs high-dimensional -------------- #
+ax = axes[0][0]
+prof = high["profile_truth"]
+ax.plot(prof["radius"], prof["enclosed_mass"], color=style.INK, lw=1.3, label="truth")
+ax.plot(high["profile_initial"]["radius"], high["profile_initial"]["enclosed_mass"],
+        color=style.GRID, lw=1.0, label="initial guess")
+if low is not None:
+    ax.plot(low["profile_reconstructed"]["radius"],
+            low["profile_reconstructed"]["enclosed_mass"],
+            marker=style.MARKERS[1], ms=2.4, color=style.CATEGORICAL[0],
+            label="parametric (P=%d)" % low["num_free_parameters"])
+ax.plot(high["profile_reconstructed"]["radius"],
+        high["profile_reconstructed"]["enclosed_mass"],
+        marker=style.MARKERS[0], ms=2.4, color=style.ENTITY["positions"],
+        label="positions (P=%d)" % high["num_free_parameters"])
+ax.set_xscale("log"); ax.set_yscale("log")
+ax.set_xlabel("$r$"); ax.set_ylabel("enclosed mass $M(<r)$")
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.6})
+
+# (b) field residual before/after, and the noise floor -------------------- #
+ax = axes[0][1]
+labels, before, after, floors = [], [], [], []
+for label, run in (("parametric", low), ("positions", high), ("unregularised", unreg)):
+    if run is None:
+        continue
+    labels.append(label)
+    before.append(run["field_residual_before"]["rel_l2"])
+    after.append(run["field_residual_after"]["rel_l2"])
+    floors.append(run["field_residual_after"].get("noise_floor_rel_l2"))
+x = np.arange(len(labels))
+ax.bar(x - 0.18, before, width=0.34, color=style.GRID, label="before")
+ax.bar(x + 0.18, after, width=0.34, color=style.ENTITY["positions"], label="after")
+for i, floor in enumerate(floors):
+    if floor:
+        ax.plot([i - 0.4, i + 0.4], [floor, floor], color=style.CATEGORICAL[2],
+                lw=1.0, ls="--", label="noise floor" if i == 0 else None)
+ax.set_yscale("log"); ax.set_xticks(x); ax.set_xticklabels(labels, fontsize=5.8)
+ax.set_ylabel("field residual, relative $L_2$")
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper right", "fontsize": 5.6})
+
+# (c) shell density, truth vs reconstruction ------------------------------- #
+ax = axes[1][0]
+ax.plot(prof["radius"], prof["shell_density"], color=style.INK, lw=1.3, label="truth")
+ax.plot(high["profile_reconstructed"]["radius"],
+        high["profile_reconstructed"]["shell_density"],
+        marker=style.MARKERS[0], ms=2.4, color=style.ENTITY["positions"],
+        label="reconstruction")
+if unreg is not None:
+    ax.plot(unreg["profile_reconstructed"]["radius"],
+            unreg["profile_reconstructed"]["shell_density"],
+            marker=style.MARKERS[2], ms=2.4, ls="--", color=style.CATEGORICAL[2],
+            label="unregularised")
+ax.set_xscale("log"); ax.set_yscale("log")
+ax.set_xlabel("$r$"); ax.set_ylabel(r"shell density $\\rho(r)$")
+style.finish(ax, legend=True, legend_kwargs={"loc": "lower left", "fontsize": 5.6})
+
+# (d) the degeneracy, stated as numbers ----------------------------------- #
+# Panel (d) is the unregularised run. What it must show is that the FIELD can be
+# fitted while the DENSITY is not recovered -- so it plots both, per run, rather
+# than a picture of particles that would invite the eye to judge by clumpiness.
+ax = axes[1][1]
+rows = [(l, r) for l, r in (("parametric", low), ("positions", high),
+                            ("unregularised", unreg)) if r is not None]
+fx = [r["field_residual_after"]["rel_l2"] for _, r in rows]
+dx = [r["density_after"]["grid_rel_l2"] for _, r in rows]
+for i, (label, _) in enumerate(rows):
+    ax.scatter(fx[i], dx[i], marker=style.MARKERS[i], s=26,
+               color=style.CATEGORICAL[i % len(style.CATEGORICAL)], label=label)
+lim = [min(fx + dx) * 0.6, max(fx + dx) * 1.6]
+ax.plot(lim, lim, color=style.GRID, lw=0.8, zorder=0)
+ax.set_xscale("log"); ax.set_yscale("log")
+ax.set_xlabel("field residual (primary)")
+ax.set_ylabel("density disagreement (secondary)")
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.6})
+
+fig.tight_layout()
+style.footer(fig, "%s, N=%d, M=%d, %d iterations, softening %g, noise %g" % (
+    art["meta"]["device_kind"], high["N"], high["M"], high["iterations"],
+    high["softening"], high["noise_fraction"]))
+style.save(fig, str(FIG_DIR / "fig_17_reconstruction_quality.pdf"))
+"""
+
+FIG17_CAPTION = r"""
+Reconstruction quality. **(a)** Enclosed-mass profile: truth, the initial guess,
+the parametric fit and the high-dimensional fit. **(b)** Field-space residual
+before and after each fit, with the noise floor marked -- a residual at the
+floor has extracted everything the data holds, and driving it lower is fitting
+the noise realisation. **(c)** Shell density, including the deliberately
+unregularised run. **(d)** The degeneracy stated quantitatively: field residual
+against density disagreement, with the diagonal drawn. Points below the diagonal
+have fitted the field better than they have recovered the density. This is the
+section's central caveat and not an artefact -- recovering discrete source
+positions from external field samples is strongly ill-posed and has continuous
+degeneracies, so a small field residual is *not* evidence that the mass
+distribution has been recovered. Per-particle position error is not shown: the
+sources are equal-mass and therefore interchangeable, which makes it close to
+meaningless.
+"""
+
+
+# --------------------------------------------------------------------------- #
+# figure 18 -- convergence and the initial-guess sweep
+# --------------------------------------------------------------------------- #
+
+FIG18 = """\
+art = jsonio.read_result("density_reconstruction/reconstruction_runs.json")
+cfg, recs = art["config"], art["data"]["records"]
+recs = [r for r in recs if not r.get("failed")]
+if not recs:
+    raise SystemExit("reconstruction_runs.json has no successful rows")
+
+fig, axes = style.figure(width=style.TWO_COL, height=2.9, ncols=2)
+
+# -- left: loss against iteration, one curve per initial guess ------------- #
+ax = axes[0]
+guesses = [g for g in cfg["initial_guesses"]]
+for i, guess in enumerate(guesses):
+    sel = [r for r in recs if r["parameterization"] == "positions"
+           and r["initial_guess"] == guess and r["regularized"]]
+    if not sel:
+        continue
+    run = sel[0]
+    trace = run["loss_trace"]
+    ax.plot([t["iteration"] for t in trace], [t["loss"] for t in trace],
+            color=style.CATEGORICAL[i % len(style.CATEGORICAL)],
+            label=guess.replace("_", " "))
+ax.set_yscale("log")
+ax.set_xlabel("iteration"); ax.set_ylabel("loss (field residual + penalties)")
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper right", "fontsize": 5.6})
+
+# -- right: the divergence -- field improves, density saturates ------------ #
+# This is fig18's content. Plotted as the RATIO of each metric to its own
+# starting value, so two quantities in different units share an axis honestly.
+ax = axes[1]
+for i, kind in enumerate(("parametric", "positions")):
+    sel = sorted((r for r in recs if r["parameterization"] == kind and r["regularized"]),
+                 key=lambda r: r["num_free_parameters"])
+    if not sel:
+        continue
+    field_gain = [r["field_residual_after"]["rel_l2"] / r["field_residual_before"]["rel_l2"]
+                  for r in sel]
+    dens_gain = [r["density_after"]["grid_rel_l2"] / r["density_before"]["grid_rel_l2"]
+                 for r in sel]
+    ax.scatter(field_gain, dens_gain, marker=style.MARKERS[i], s=24,
+               color=style.CATEGORICAL[i % len(style.CATEGORICAL)], label=kind)
+ax.plot([1e-3, 2.0], [1e-3, 2.0], color=style.GRID, lw=0.8, zorder=0)
+ax.axhline(1.0, color=style.GRID, lw=0.6, zorder=0)
+ax.set_xscale("log"); ax.set_yscale("log")
+ax.set_xlabel("field residual, after / before")
+ax.set_ylabel("density disagreement, after / before")
+style.finish(ax, legend=True, legend_kwargs={"loc": "lower right", "fontsize": 5.6})
+
+fig.tight_layout()
+style.footer(fig, "%s, %d runs, N in %s, %d iterations" % (
+    art["meta"]["device_kind"], len(recs), cfg["n"], cfg["iterations"]))
+style.save(fig, str(FIG_DIR / "fig_18_convergence_and_degeneracy.pdf"))
+"""
+
+FIG18_CAPTION = r"""
+Convergence, and the sensitivity to where the fit starts. **Left:** loss against
+iteration for the high-dimensional fit from each of the four initial guesses --
+a small perturbation of truth, an isotropised truth, a structurally wrong smooth
+analytic model, and a naive uniform sphere. The loss is non-convex in the
+positions, so the spread between these curves is a result in its own right and
+not a nuisance. **Right:** the divergence that states the degeneracy
+quantitatively. Each point is one run, plotting how much the field residual
+improved against how much the density disagreement improved, each relative to
+its own starting value. Points to the right of the diagonal improved the field
+by more than they improved the density; points near the horizontal line at one
+did not recover the density at all despite fitting the field. The
+high-dimensional arm has vastly more freedom to move mass around at fixed field
+than the parametric arm, and this is where that shows.
+"""
+
+
+# --------------------------------------------------------------------------- #
+# figure 19 -- topology switching (the honest methods figure)
+# --------------------------------------------------------------------------- #
+
+FIG19 = """\
+art = jsonio.read_result("density_reconstruction/topology_switching.json")
+cfg, recs = art["config"], art["data"]["records"]
+recs = [r for r in recs if not r.get("failed")]
+if not recs:
+    raise SystemExit("topology_switching.json has no successful rows")
+
+def rate(r, name):
+    return (r.get("switch_summary") or {}).get("intensive", {}).get("mean", {}).get(name)
+
+fig, axes = style.figure(width=style.TWO_COL, height=5.0, ncols=2, nrows=2)
+
+# (a) THE METRIC PANEL: intensive rates resolve, the extensive one saturates. #
+ax = axes[0][0]
+base_lr = min(r["learning_rate"] for r in recs)
+sel = sorted((r for r in recs if r["learning_rate"] == base_lr
+              and r["rebuild_cadence"] == 1), key=lambda r: r["N"])
+Ns = [r["N"] for r in sel]
+for i, (name, label) in enumerate((
+        ("near_set_churn", "near-field source set (intensive)"),
+        ("near_pair_churn", "near leaf-pair set"),
+        ("leaf_churn", "leaf membership"),
+        ("slot_churn", "Morton slot"))):
+    values = [rate(r, name) for r in sel]
+    if all(v is None for v in values):
+        continue
+    ax.plot(Ns, [v if v is not None else np.nan for v in values],
+            marker=style.MARKERS[i % len(style.MARKERS)],
+            color=style.CATEGORICAL[i % len(style.CATEGORICAL)], label=label)
+ax.plot(Ns, [(r["switch_summary"] or {}).get("extensive", {}).get("switch_rate")
+             for r in sel], marker="x", ls=":", color=style.INK,
+        label="extensive 'anything changed?'")
+ax.set_xscale("log"); ax.set_ylim(-0.04, 1.10)
+ax.set_xlabel("$N$"); ax.set_ylabel("churn per rebuild")
+style.finish(ax, legend=True, legend_kwargs={"loc": "lower right", "fontsize": 5.2})
+
+# (b) cadence: how stale may the interaction list be? --------------------- #
+ax = axes[0][1]
+for i, n in enumerate(sorted({r["N"] for r in recs})):
+    sel = sorted((r for r in recs if r["N"] == n and r["learning_rate"] == base_lr),
+                 key=lambda r: r["rebuild_cadence"])
+    if len(sel) < 2:
+        continue
+    ks = [r["rebuild_cadence"] for r in sel]
+    ax.plot(ks, [rate(r, "near_set_churn") for r in sel],
+            marker=style.MARKERS[i % len(style.MARKERS)],
+            color=style.CATEGORICAL[i % len(style.CATEGORICAL)],
+            label="N=%d, interaction set" % n)
+    base = sel[0]["final_loss"]
+    ax.plot(ks, [r["final_loss"] / base for r in sel], marker="x", ls="--",
+            color=style.CATEGORICAL[i % len(style.CATEGORICAL)],
+            label="N=%d, final loss / loss(k=1)" % n)
+ax.set_xscale("log", base=2)
+ax.set_xlabel("rebuild cadence $k$"); ax.set_ylabel("churn, and relative final loss")
+style.finish(ax, legend=True, legend_kwargs={"loc": "center left", "fontsize": 5.2})
+
+# (c) loss continuity across a switch, against the progress a step makes --- #
+ax = axes[1][0]
+pts = [(r["N"], r["rebuild_cadence"], r["loss_continuity"]["median_relative_jump"],
+        r["loss_continuity"]["max_relative_jump"])
+       for r in recs if r.get("loss_continuity")
+       and r["loss_continuity"].get("median_relative_jump") is not None]
+if pts:
+    for i, n in enumerate(sorted({p[0] for p in pts})):
+        sub = sorted((p for p in pts if p[0] == n), key=lambda p: p[1])
+        ax.plot([p[1] for p in sub], [p[2] for p in sub],
+                marker=style.MARKERS[i % len(style.MARKERS)],
+                color=style.CATEGORICAL[i % len(style.CATEGORICAL)],
+                label="N=%d, median" % n)
+        ax.plot([p[1] for p in sub], [p[3] for p in sub], marker="x", ls=":",
+                color=style.CATEGORICAL[i % len(style.CATEGORICAL)],
+                label="N=%d, max" % n)
+ax.set_xscale("log", base=2); ax.set_yscale("log")
+ax.set_xlabel("rebuild cadence $k$")
+ax.set_ylabel("loss jump at a rebuild, relative")
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.2})
+
+# (d) FD vs autodiff: pinned within an epoch, crossed over a switch -------- #
+ax = axes[1][1]
+fd = [r for r in recs if r.get("fd_agreement")]
+if fd:
+    x = np.arange(len(fd))
+    ax.plot(x, [r["fd_agreement"]["pinned_median_rel"] for r in fd],
+            marker=style.MARKERS[0], color=style.ENTITY["positions"],
+            label="pinned within one epoch")
+    ax.plot(x, [r["fd_agreement"]["crossed_median_rel"] for r in fd],
+            marker=style.MARKERS[2], ls="--", color=style.CATEGORICAL[2],
+            label="crossing a switch")
+    ax.set_xticks(x)
+    ax.set_xticklabels(["%d/k%d" % (r["N"], r["rebuild_cadence"]) for r in fd],
+                       rotation=60, fontsize=4.6)
+ax.set_yscale("log")
+ax.set_ylabel("|FD $-$ autodiff| / |autodiff|")
+style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.2})
+
+fig.tight_layout()
+style.footer(fig, "%s, leaf %d, order %d, theta %.2f, %d iterations, lr %g" % (
+    art["meta"]["device_kind"], cfg["leaf_size"], cfg["order"], cfg["theta"],
+    cfg["iterations"], base_lr))
+style.save(fig, str(FIG_DIR / "fig_19_topology_switching.pdf"))
+"""
+
+FIG19_CAPTION = r"""
+What a per-iteration tree rebuild does to a gradient descent -- the section's
+second substantive result, and the first high-dimensional evidence that
+per-iteration rebuilds do not obstruct convergence for an inference objective
+through an FMM. **(a)** Why the rate is reported per particle. The extensive
+"did the discrete structure change at all?" counter reads exactly one at every
+$N$ and carries no information; the intensive rates resolve the structure. The
+top curve to read is the near-field *source set* churn -- the fraction of the
+sources reaching a given particle by direct summation that changed -- which is
+the interaction-list question, and which the leaf-pair and Morton-slot rates
+both overstate badly. **(b)** Cadence: the interaction list becomes almost
+entirely stale as $k$ grows while the final loss does not move, so $k>1$ is
+usable, and it is this measurement rather than any appeal to ordering stability
+that says so. **(c)** The loss discontinuity at a rebuild boundary, measured at
+*fixed positions* under the outgoing and incoming topologies so it isolates the
+topology change from the optimiser's step. **(d)** Finite differences against
+autodiff, pinned within one topology epoch and crossing a switch. Within an
+epoch they agree to $\sim10^{-9}$, which is the fixed-topology contract of
+Sect.~2 measured rather than argued; a finite difference that straddles a switch
+legitimately disagrees, and by how much is what this panel reports. The pinned
+arm pins the interaction-list selection as well as the tree -- pinning only the
+tree leaves a residual that reads as a gradient bug and is not one. Cited
+alongside, and not confirmed by, the low-dimensional Yggdrax precedent.
+"""
+
+
+# --------------------------------------------------------------------------- #
+# figure 20 -- multi-GPU reconstruction scaling
+# --------------------------------------------------------------------------- #
+
+FIG20 = """\
+art = jsonio.read_result("density_reconstruction/multigpu_scaling.json")
+cfg, data = art["config"], art["data"]
+recs = [r for r in data["records"] if not r.get("failed") and not r.get("skipped")]
+ceiling = data.get("ceiling", [])
+if not recs:
+    raise SystemExit("multigpu_scaling.json has no successful rows")
+
+fig, axes = style.figure(width=style.TWO_COL, height=2.9, ncols=2)
+
+# -- left: strong scaling at fixed parameter count ------------------------- #
+ax = axes[0]
+sel = sorted(recs, key=lambda r: r["num_devices"])
+ndev = [r["num_devices"] for r in sel]
+wall = [r["timing"]["wall_seconds"] for r in sel]
+ax.plot(ndev, wall, marker=style.MARKERS[0], color=style.ENTITY["gpu"],
+        label="measured")
+ax.plot(ndev, [wall[0] * ndev[0] / d for d in ndev], ls=":",
+        color=style.INK_MUTED, label="ideal")
+ax.set_xscale("log", base=2); ax.set_yscale("log")
+ax.set_xlabel("devices"); ax.set_ylabel("fit wall-clock [s]")
+style.finish(ax, legend=True, legend_kwargs={"loc": "lower left", "fontsize": 5.6})
+
+# -- right: the ceiling, measured by running until it broke ---------------- #
+ax = axes[1]
+if ceiling:
+    ok, bad = {}, {}
+    for r in ceiling:
+        target = bad if r.get("failed") else ok
+        target.setdefault(r["num_devices"], []).append(r["num_free_parameters"])
+    devices = sorted(set(ok) | set(bad))
+    largest = [max(ok.get(d, [0])) for d in devices]
+    ax.plot(devices, largest, marker=style.MARKERS[1], color=style.ENTITY["gpu"],
+            label="largest $P$ that ran")
+    for d in devices:
+        for p in bad.get(d, []):
+            ax.scatter([d], [p], marker="x", s=26, color=style.CATEGORICAL[2],
+                       label="out of memory" if d == devices[0] else None)
+    ax.set_xscale("log", base=2)
+    ax.set_xlabel("devices")
+else:
+    ax.text(0.5, 0.5, "no ceiling ladder in this artifact", ha="center",
+            va="center", fontsize=6, color=style.INK_MUTED,
+            transform=ax.transAxes)
+    ax.set_xlabel("devices")
+ax.set_yscale("log"); ax.set_ylabel("free parameters $P$")
+style.finish(ax, legend=bool(ceiling), legend_kwargs={"loc": "upper left",
+                                                      "fontsize": 5.6})
+
+fig.tight_layout()
+style.footer(fig, "%s, %s sharding, N=%d, %d iterations, leaf %d" % (
+    art["meta"]["device_kind"], cfg.get("sharding_mode", "?"), cfg["n"][0],
+    cfg["iterations"], cfg["leaf_size"]))
+style.save(fig, str(FIG_DIR / "fig_20_multigpu_reconstruction_scaling.pdf"))
+"""
+
+FIG20_CAPTION = r"""
+The reconstruction across multiple devices. **Left:** wall-clock for the same
+fit on an increasing device count, at fixed parameter count, against ideal
+scaling -- to be read against the strong- and weak-scaling figures of Sect.~5.
+**Right:** the largest free-parameter count that ran, per device count, with the
+configurations that exhausted memory marked. The ceiling is measured by climbing
+a ladder until it broke, not inferred from a memory model. This is *parameter*
+sharding: the optimisation's parameter array is distributed across the mesh, so
+the parameter count is bounded by aggregate device memory rather than by one
+device's. It is not the distributed force evaluation of Sect.~5, which partitions
+the sources and exchanges halos; the two are not interchangeable and each run's
+artifact records which it used.
+"""
+
+
 SPECS = [
     (
         "fig_01_force_error_vs_order",
@@ -1316,6 +1855,46 @@ SPECS = [
         "`bench/differentiability/grad_correctness.py`. No computation here.",
         FIG13,
         FIG13_CAPTION,
+    ),
+    (
+        "fig_16_gradient_cost_vs_nparams",
+        "Figure 16 -- gradient cost vs free-parameter count",
+        "Loads `bench/results/density_reconstruction/gradient_cost_vs_nparams.json`, "
+        "produced by `bench/payoff_static/gradient_cost_vs_nparams.py`. No computation here.",
+        FIG16,
+        FIG16_CAPTION,
+    ),
+    (
+        "fig_17_reconstruction_quality",
+        "Figure 17 -- reconstruction quality",
+        "Loads `bench/results/density_reconstruction/reconstruction_runs.json`, "
+        "produced by `bench/payoff_static/reconstruction_runs.py`. No computation here.",
+        FIG17,
+        FIG17_CAPTION,
+    ),
+    (
+        "fig_18_convergence_and_degeneracy",
+        "Figure 18 -- convergence and degeneracy",
+        "Loads `bench/results/density_reconstruction/reconstruction_runs.json`, "
+        "produced by `bench/payoff_static/reconstruction_runs.py`. No computation here.",
+        FIG18,
+        FIG18_CAPTION,
+    ),
+    (
+        "fig_19_topology_switching",
+        "Figure 19 -- topology switching under a per-iteration rebuild",
+        "Loads `bench/results/density_reconstruction/topology_switching.json`, "
+        "produced by `bench/payoff_static/topology_switching.py`. No computation here.",
+        FIG19,
+        FIG19_CAPTION,
+    ),
+    (
+        "fig_20_multigpu_reconstruction_scaling",
+        "Figure 20 -- multi-GPU reconstruction scaling",
+        "Loads `bench/results/density_reconstruction/multigpu_scaling.json`, "
+        "produced by `bench/payoff_static/multigpu_scaling.py`. No computation here.",
+        FIG20,
+        FIG20_CAPTION,
     ),
 ]
 

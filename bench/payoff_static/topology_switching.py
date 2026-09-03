@@ -96,6 +96,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--fd-samples", type=int, default=6, help="FD directions to sample")
     p.add_argument("--fd-eps", type=float, default=1.0e-6, help="FD step")
     p.add_argument(
+        "--near-set-sample",
+        type=int,
+        default=128,
+        help=(
+            "Particles to retain near-field source sets for; feeds the "
+            "non-saturating near_set_churn rate and dominates the "
+            "instrumentation cost (0 disables it)"
+        ),
+    )
+    p.add_argument(
         "--intensive-every",
         type=int,
         default=1,
@@ -363,6 +373,7 @@ def _run_cadence(
                 regularization=Regularization.none(),
                 history_every=1,
                 intensive_every=int(args.intensive_every),
+                near_set_sample=int(args.near_set_sample),
                 seed=int(args.seed),
             ),
         )
@@ -523,6 +534,7 @@ def main() -> int:
             "cadences": cadences,
             "learning_rates": rates,
             "intensive_every": int(args.intensive_every),
+            "near_set_sample": int(args.near_set_sample),
         },
         meta=runmeta.run_meta(),
         data={"records": records},
