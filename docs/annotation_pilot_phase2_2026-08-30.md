@@ -194,6 +194,16 @@ three fixes in #303 — without which the numbers below are not obtainable at al
 
 `→` is before and after the annotations that closed them.
 
+**One caveat on the `_fast_lane` row, and it is mine.** That recording was taken before the
+fourth fix on #303, which stopped the pilot replacing a `jax.custom_vjp` *object* with a
+plain wrapper and thereby stripping its reverse rule. `nearfield/_fast_lane.py` owns
+`_radix_fast_lane_prepacked_accel_cvjp`, so during that run its custom rule was gone. The
+four acceptances found are real -- the perturbations are forward calls, and a shape
+rejection does not depend on the VJP -- but the **coverage** figure (6 of 18 targeted) was
+taken with one lane's dispatch altered, so read it as a lower bound. That fix is also what
+the `1 failed` in the recording run was: `test_prepacked_cvjp_saves_the_documented_nine_entry_residual`,
+which noticed only because it asserts the object's identity on purpose.
+
 **Items 4 and 6 are effectively done.** `complex_ops` fell 32% → 5% and `_fast_lane`
 26% → 2%, which is what the delta/direction family (#279) and the fast-lane PRs
 (#285/#289/#290) were for. Neither is worth another PR on this evidence.
