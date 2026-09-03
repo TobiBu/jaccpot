@@ -55,11 +55,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.typing import ArrayLike
 
 __all__ = [
+    "LEAF_CHUNK",
     "LeafBlocks",
     "Regularization",
     "data_misfit",
@@ -178,10 +180,61 @@ def leaf_blocks_from_state(
     )
 
 
+#: Leaves processed per chunk inside :func:`_within_leaf_nearest_distances`.
+#: The pairwise block is ``(chunk, S, S, 3)``, so peak memory is bounded by this
+#: rather than by ``N``. MEASURED: unchunked at N=1048576 and leaf 256 the
+#: single ``f64[4112, 256, 256, 3]`` block is 6.5 GB and was the binding
+#: constraint on the largest fit that would run -- and it was being paid by runs
+#: whose regularisation weight is ZERO, since the terms are deliberately
+#: evaluated so an unregularised run still reports what it is not paying for.
+#: 128 leaves at S=256 is ~200 MB.
+LEAF_CHUNK = 128
+
+
+def _nearest_within_chunk(
+    gathered: jnp.ndarray, valid: jnp.ndarray, leaf_size: int
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Nearest-neighbour squared distance within each leaf of one chunk.
+
+    Parameters
+    ----------
+    gathered : jnp.ndarray
+        ``(chunk, S, 3)`` positions of each leaf's members.
+    valid : jnp.ndarray
+        ``(chunk, S)`` validity mask.
+    leaf_size : int
+        ``S``, the padded block width.
+
+    Returns
+    -------
+    Tuple[jnp.ndarray, jnp.ndarray]
+        ``(chunk, S)`` nearest squared distances (``inf`` where no neighbour
+        exists) and the ``(chunk, S)`` mask of entries that had one.
+    """
+    delta = gathered[:, :, None, :] - gathered[:, None, :, :]
+    sq = jnp.sum(delta**2, axis=-1)
+
+    pair_valid = valid[:, :, None] & valid[:, None, :]
+    eye = jnp.eye(leaf_size, dtype=bool)[None, :, :]
+    pair_valid = pair_valid & ~eye
+
+    # Masked-out pairs go to +inf so the min ignores them.
+    sq = jnp.where(pair_valid, sq, jnp.asarray(jnp.inf, dtype=sq.dtype))
+    nearest_sq = jnp.min(sq, axis=-1)
+    return nearest_sq, jnp.isfinite(nearest_sq) & valid
+
+
 def _within_leaf_nearest_distances(
-    positions: ArrayLike, blocks: LeafBlocks
+    positions: ArrayLike, blocks: LeafBlocks, *, leaf_chunk: int = LEAF_CHUNK
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Nearest-neighbour distance of each particle within its own leaf.
+
+    Chunked over leaves, so peak memory is set by ``leaf_chunk`` and not by
+    ``N``. ``jax.lax.map`` runs the chunks as a scan, which keeps one chunk's
+    ``(chunk, S, S, 3)`` block live at a time; the reverse pass stores only the
+    ``(chunk, S)`` outputs, so the gradient is bounded too. Semantics are
+    identical to the unchunked form -- each leaf's neighbours are exactly its
+    own members either way, since a leaf never spans a chunk boundary.
 
     Parameters
     ----------
@@ -189,6 +242,8 @@ def _within_leaf_nearest_distances(
         ``(N, 3)`` source positions, differentiated.
     blocks : LeafBlocks
         The frozen leaf partition.
+    leaf_chunk : int
+        Leaves per chunk. Smaller trades speed for memory.
 
     Returns
     -------
@@ -199,21 +254,38 @@ def _within_leaf_nearest_distances(
     """
     x = jnp.asarray(positions, dtype=jnp.float64)
     gathered = x[blocks.indices]  # (L, S, 3)
-    delta = gathered[:, :, None, :] - gathered[:, None, :, :]  # (L, S, S, 3)
-    sq = jnp.sum(delta**2, axis=-1)
+    valid = blocks.valid
+    num_leaves = int(blocks.num_leaves)
+    size = int(blocks.leaf_size)
 
-    pair_valid = blocks.valid[:, :, None] & blocks.valid[:, None, :]
-    eye = jnp.eye(blocks.leaf_size, dtype=bool)[None, :, :]
-    pair_valid = pair_valid & ~eye
+    if num_leaves == 0 or size == 0:
+        empty = jnp.zeros((num_leaves, size), dtype=x.dtype)
+        return empty + 1.0, jnp.zeros((num_leaves, size), dtype=bool)
 
-    # Masked-out pairs go to +inf so the min ignores them. Guard the sqrt at
-    # zero: two coincident particles give an exactly-zero squared distance,
-    # whose gradient is NaN. The guard is a floor on the *argument*, not a
-    # clip on the result, so the penalty still pushes them apart.
-    big = jnp.asarray(jnp.inf, dtype=sq.dtype)
-    sq = jnp.where(pair_valid, sq, big)
-    nearest_sq = jnp.min(sq, axis=-1)
-    has_neighbour = jnp.isfinite(nearest_sq) & blocks.valid
+    chunk = max(int(leaf_chunk), 1)
+    if num_leaves <= chunk:
+        nearest_sq, has_neighbour = _nearest_within_chunk(gathered, valid, size)
+    else:
+        # Pad the leaf axis up to a whole number of chunks. Padding leaves are
+        # all-invalid, so they contribute no pair and no cotangent.
+        chunks = -(-num_leaves // chunk)
+        pad = chunks * chunk - num_leaves
+        gathered_padded = jnp.pad(gathered, ((0, pad), (0, 0), (0, 0)))
+        valid_padded = jnp.pad(valid, ((0, pad), (0, 0)), constant_values=False)
+        shaped = gathered_padded.reshape(chunks, chunk, size, 3)
+        mask = valid_padded.reshape(chunks, chunk, size)
+
+        nearest_sq, has_neighbour = jax.lax.map(
+            lambda pair: _nearest_within_chunk(pair[0], pair[1], size),
+            (shaped, mask),
+        )
+        nearest_sq = nearest_sq.reshape(chunks * chunk, size)[:num_leaves]
+        has_neighbour = has_neighbour.reshape(chunks * chunk, size)[:num_leaves]
+
+    # Guard the sqrt at zero: two coincident particles give an exactly-zero
+    # squared distance, whose gradient is NaN. The guard is a floor on the
+    # *argument*, not a clip on the result, so the penalty still pushes them
+    # apart.
     nearest_sq = jnp.where(has_neighbour, nearest_sq, 1.0)
     return jnp.sqrt(nearest_sq + 1.0e-300), has_neighbour
 
