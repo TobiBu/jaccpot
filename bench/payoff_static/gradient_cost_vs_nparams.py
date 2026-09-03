@@ -299,6 +299,7 @@ def _measure_one(
 
         want_jit = str(args.mode) == "jit"
         mode = "jit" if want_jit else "eager"
+        jit_error: Optional[str] = None
         forward_call = jax.jit(forward_fn) if want_jit else forward_fn
         gradient_call = (
             jax.jit(jax.grad(objective)) if want_jit else jax.grad(objective)
@@ -311,9 +312,14 @@ def _measure_one(
                 jax.block_until_ready(forward_call(params))
                 jax.block_until_ready(gradient_call(params))
             except Exception as exc:
+                # Record the MESSAGE, not just the type. The first version of
+                # this printed only the exception class, and at N=1048576 that
+                # threw away the one line that said what the ceiling actually
+                # was -- leaving a bare "JaxRuntimeError" to be guessed at.
+                jit_error = f"{type(exc).__name__}: {exc}"
                 print(
-                    f"    N={n} {kind}: jit unavailable "
-                    f"({type(exc).__name__}); falling back to eager",
+                    f"    N={n} {kind}: jit unavailable, falling back to "
+                    f"eager -- {jit_error[:400]}",
                     flush=True,
                 )
                 mode = "eager"
@@ -366,6 +372,7 @@ def _measure_one(
             "finite_difference_is_extrapolated": True,
             "autodiff_speedup_over_fd": (fd_seconds / grad_min if grad_min else None),
             "mode": mode,
+            "jit_error": jit_error,
             "forward_cost_analysis": forward_cost,
             "forward_backward_cost_analysis": gradient_cost,
             "backward_over_forward_flops": flop_ratio,
@@ -432,7 +439,7 @@ def main() -> int:
                     "M": int(args.tracers),
                     "failed": True,
                     "error_type": type(exc).__name__,
-                    "error": str(exc)[:500],
+                    "error": str(exc)[:2000],
                 }
             )
             break
