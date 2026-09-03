@@ -275,8 +275,18 @@ def _within_leaf_nearest_distances(
         shaped = gathered_padded.reshape(chunks, chunk, size, 3)
         mask = valid_padded.reshape(chunks, chunk, size)
 
+        # jax.checkpoint is what actually bounds the memory. lax.map is a
+        # scan, which keeps the FORWARD to one chunk -- but a scan's reverse
+        # pass stores every iteration's residuals, so without remat the
+        # backward pass materialises the pairwise block for all chunks at once.
+        # Measured: at N=1048576, leaf 256, the unremated scan allocated
+        # f64[33, 128, 256, 256, 3] = 6.6 GB, which is the whole saving undone
+        # and was still the fig20 ceiling. With remat the scan carries only each
+        # chunk's (chunk, S, 3) input and (chunk, S) output, and recomputes the
+        # block on the way back -- the classic memory-for-flops trade, and the
+        # flops here are cheap next to the FMM's own.
         nearest_sq, has_neighbour = jax.lax.map(
-            lambda pair: _nearest_within_chunk(pair[0], pair[1], size),
+            jax.checkpoint(lambda pair: _nearest_within_chunk(pair[0], pair[1], size)),
             (shaped, mask),
         )
         nearest_sq = nearest_sq.reshape(chunks * chunk, size)[:num_leaves]
