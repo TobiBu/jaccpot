@@ -791,6 +791,52 @@ class BlockStepFMM:
             # low-level concretization failure into the actionable instruction.
             raise RuntimeError(self._NO_TOPOLOGY_UNDER_TRACE) from exc
 
+    def _state_for(
+        self,
+        topology: Optional[MutualFMMState],
+        positions: Array,
+        masses: Array,
+    ) -> MutualFMMState:
+        """The state a force method evaluates against: explicit if given, else cached.
+
+        This is the whole of the explicit-topology contract nornax's
+        ``MutualForceModel`` documents -- *if given, use it; if ``None``, use
+        what the model holds*. The explicit form is what lets the topology be a
+        traced value in a driver's scan carry, rebuilt by :meth:`rebuild_state`
+        at base-step boundaries, instead of a host-side cache that a
+        ``lax.scan`` cannot refresh.
+
+        Parameters
+        ----------
+        topology : Optional[MutualFMMState]
+            The caller's state, or ``None``.
+        positions : Array
+            ``(n, 3)`` positions, used only to validate or build the cached state.
+        masses : Array
+            ``(n,)`` masses, likewise.
+
+        Returns
+        -------
+        MutualFMMState
+            ``topology`` itself when given, else :meth:`_require_state`'s answer.
+
+        Raises
+        ------
+        ValueError
+            If an explicit ``topology`` was built for a different particle count
+            than ``positions`` has -- evaluating against it would index the wrong
+            particles, silently.
+        """
+        if topology is None:
+            return self._require_state(positions, masses)
+        n = int(jnp.asarray(positions).shape[0])
+        if topology.num_particles != n:
+            raise ValueError(
+                f"the explicit topology was built for {topology.num_particles} "
+                f"particles but positions has {n}"
+            )
+        return topology
+
     def _validate_rung(self, rung: Array) -> Array:
         """Reject rungs outside ``[0, k_max]`` when the bound can be read.
 
@@ -858,6 +904,7 @@ class BlockStepFMM:
         rung: Int[Array, "n"],
         level: int,
         args: object = None,
+        topology: Optional[MutualFMMState] = None,
     ) -> Array:
         """Return the level-``k`` antisymmetric acceleration for every particle.
 
@@ -883,6 +930,12 @@ class BlockStepFMM:
             Interaction level to isolate. Must lie in ``[0, k_max]``.
         args : object
             Ignored; present because the ``MutualForceModel`` contract passes it.
+        topology : Optional[MutualFMMState]
+            An explicit state to evaluate against, as a driver that carries the
+            topology through a ``lax.scan`` hands it over (nornax's
+            ``block_kdk_rollout(..., rebuild_fn=self.rebuild_state)``). ``None``
+            -- the default, and what every pre-existing caller passes -- reads
+            the state :meth:`prepare` cached on the instance instead.
 
         Returns
         -------
@@ -895,7 +948,7 @@ class BlockStepFMM:
             If ``level`` is outside ``[0, k_max]``, or the rungs are out of range.
         """
         del args
-        state = self._require_state(positions, masses)
+        state = self._state_for(topology, positions, masses)
         rung = self._validate_rung(rung)
         if not 0 <= int(level) <= self.k_max:
             raise ValueError(
@@ -917,6 +970,7 @@ class BlockStepFMM:
         *,
         rung: Optional[Int[Array, "n"]] = None,
         args: object = None,
+        topology: Optional[MutualFMMState] = None,
     ) -> Array:
         """Return the full acceleration in a single traversal.
 
@@ -934,6 +988,9 @@ class BlockStepFMM:
             assignment. Accepted so the signature matches the level-aware methods.
         args : object
             Ignored; present for the ``MutualForceModel`` contract.
+        topology : Optional[MutualFMMState]
+            An explicit state to evaluate against; ``None`` reads the cached one.
+            See :meth:`level_accelerations`.
 
         Returns
         -------
@@ -941,7 +998,7 @@ class BlockStepFMM:
             ``(n, 3)`` full accelerations.
         """
         del args, rung
-        state = self._require_state(positions, masses)
+        state = self._state_for(topology, positions, masses)
         return mutual_weighted_accelerations(state, positions, masses)
 
     # -- fused boundary primitive ------------------------------------------
@@ -958,6 +1015,7 @@ class BlockStepFMM:
         half: Any = 1.0,
         level_weights: Optional[Float[Array, "levels"]] = None,
         args: object = None,
+        topology: Optional[MutualFMMState] = None,
     ) -> Array:
         """Apply one sub-step boundary's kick in a single mutual traversal.
 
@@ -1003,6 +1061,10 @@ class BlockStepFMM:
             keeping the runtime win.
         args : object
             Unused; present for the ``MutualForceModel`` protocol's signature.
+        topology : Optional[MutualFMMState]
+            An explicit state to kick against; ``None`` reads the cached one. A
+            driver that rebuilds inside its scan passes the *same* state for
+            every boundary of a base step -- see :meth:`level_accelerations`.
 
         Returns
         -------
@@ -1016,7 +1078,7 @@ class BlockStepFMM:
             are given, or ``level_weights`` has the wrong length for ``k_max``.
         """
         del args
-        state = self._require_state(positions, masses)
+        state = self._state_for(topology, positions, masses)
         rung = self._validate_rung(rung)
         if level_weights is None:
             if dt_max is None or active_floor is None:
@@ -1530,6 +1592,37 @@ class DistributedBlockStepFMM:
             )
         return jnp.asarray(got.accelerations)
 
+    @staticmethod
+    def _refuse_topology(topology: object) -> None:
+        """Refuse an explicit topology: this lane has no traceable rebuild yet.
+
+        nornax's ``MutualForceModel`` lets an integrator hand a frozen topology
+        over explicitly, as a traced value rebuilt inside its scan. The
+        single-device :class:`BlockStepFMM` honours that with
+        :meth:`BlockStepFMM.rebuild_state`; the distributed lane's topology is the
+        partition plus each device's tree, built on the host by :meth:`prepare`,
+        and there is nothing an explicit ``MutualFMMState`` could stand in for.
+        Accepting the keyword keeps the signature contract; refusing a value
+        keeps a caller from believing a rebuild happened when it did not.
+
+        Parameters
+        ----------
+        topology : object
+            Whatever the caller passed; only ``None`` is acceptable.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``topology`` is not ``None``.
+        """
+        if topology is not None:
+            raise NotImplementedError(
+                "DistributedBlockStepFMM has no traceable topology rebuild; it "
+                "evaluates against the state built by prepare(). Drive it without "
+                "rebuild_fn, or use the single-device BlockStepFMM(topology_"
+                "backend='device') whose rebuild_state is traceable."
+            )
+
     def _validate_rung(self, rung: Array) -> Array:
         """Reject rungs outside ``[0, k_max]``.
 
@@ -1561,6 +1654,7 @@ class DistributedBlockStepFMM:
         rung: Int[Array, "n"],
         level: int,
         args: object = None,
+        topology: object = None,
     ) -> Array:
         """Return the level-``k`` antisymmetric acceleration for every particle.
 
@@ -1583,6 +1677,9 @@ class DistributedBlockStepFMM:
             Interaction level to isolate. Must lie in ``[0, k_max]``.
         args : object
             Ignored; present because the ``MutualForceModel`` contract passes it.
+        topology : object
+            Accepted for nornax's explicit-topology contract; must be ``None``.
+            See :meth:`_refuse_topology`.
 
         Returns
         -------
@@ -1595,6 +1692,7 @@ class DistributedBlockStepFMM:
             If ``level`` is outside ``[0, k_max]``.
         """
         del args
+        self._refuse_topology(topology)
         if not 0 <= int(level) <= self.k_max:
             raise ValueError(
                 f"level must lie in [0, k_max={self.k_max}]; got {level!r}"
@@ -1613,6 +1711,7 @@ class DistributedBlockStepFMM:
         *,
         rung: Optional[Int[Array, "n"]] = None,
         args: object = None,
+        topology: object = None,
     ) -> Array:
         """Return the full acceleration in a single traversal.
 
@@ -1627,6 +1726,9 @@ class DistributedBlockStepFMM:
             Accepted so the signature matches the level-aware methods.
         args : object
             Ignored; present for the ``MutualForceModel`` contract.
+        topology : object
+            Accepted for nornax's explicit-topology contract; must be ``None``.
+            See :meth:`_refuse_topology`.
 
         Returns
         -------
@@ -1634,6 +1736,7 @@ class DistributedBlockStepFMM:
             ``(n, 3)`` full accelerations.
         """
         del args, rung
+        self._refuse_topology(topology)
         return self._weighted(positions, masses, None, None)
 
     # -- fused boundary primitive ------------------------------------------
@@ -1680,6 +1783,7 @@ class DistributedBlockStepFMM:
         half: Any = 1.0,
         level_weights: Optional[Float[Array, "levels"]] = None,
         args: object = None,
+        topology: object = None,
     ) -> Array:
         """Apply one sub-step boundary's kick in a single traversal of the mesh.
 
@@ -1716,6 +1820,9 @@ class DistributedBlockStepFMM:
             over ``active_floor``/``dt_max``/``half``, which are then ignored.
         args : object
             Unused; present for the ``MutualForceModel`` protocol's signature.
+        topology : object
+            Accepted for nornax's explicit-topology contract; must be ``None``.
+            See :meth:`_refuse_topology`.
 
         Returns
         -------
@@ -1729,6 +1836,7 @@ class DistributedBlockStepFMM:
             given, or ``level_weights`` has the wrong length for ``k_max``.
         """
         del args
+        self._refuse_topology(topology)
         dtype = jnp.asarray(positions).dtype
         if level_weights is None:
             if dt_max is None or active_floor is None:
