@@ -38,7 +38,8 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array
+from beartype import beartype
+from jaxtyping import Array, Float, Inexact, Int, jaxtyped
 from yggdrax.grouped_interactions import (
     GroupedInteractionBuffers,
 )
@@ -244,12 +245,59 @@ def _m2l_cached_kernel_dispatch(
     )
 
 
+# THE TWO AXES THIS MODULE NEEDED, AND WHY IT IS NOT A WHOLE-MODULE PASS.
+#
+# `bench/annotation_pilot.py` re-recorded on 2026-09-03 puts this module last on rate --
+# 23 silent acceptances of 286 perturbations, 8%, on 18 measured functions -- which is the
+# August verdict confirmed: it is mostly validated already and converting all 92 bare
+# parameters would be effort spent where nothing is wrong. But the 23 are NOT spread
+# evenly, and where they sit is the argument for the two axes below.
+#
+#     _rotation_blocks_for_grouped_classes           5   class_keys accepted ALL FOUR
+#                                                        perturbations; class_deltas the
+#                                                        misalignment against it
+#     _accumulate_solidfmm_m2l_grouped_class_major   4   locals_coeffs, all four
+#     _pair_class_ids_from_offsets                   3
+#     _accumulate_solidfmm_m2l_grouped_chunked_scan  2
+#     _chunk_segment_scatter_add                     2
+#     _m2l_chunk_contributions                       2
+#
+# `classes` is G.11 expressed as a shape. The module docstring records G.11 as a 60x
+# accuracy gap between two of the four accumulators, caused by `pair_grouped` gathering
+# rotations with class ids from the WRONG ORDERING. Here `num_classes` is read from
+# `class_deltas` while `class_keys` is the cache identity, so a `class_keys` of a different
+# length keys the rotation cache on a different class count than the blocks it returns --
+# and nothing downstream can tell. Eight recorded calls, class axis shared in every one, at
+# three distinct extents: 7, 774 and 2487. The trailing 5 is a literal because the key width
+# was 5 in all eight, across three problem sizes and two orders; if yggdrax ever changes the
+# key layout this should fail loudly rather than mis-key a cache silently.
+#
+# `nodes` and `sh` tie the three arrays every batching takes. This is the family the module
+# docstring says not to unify -- four batchings of one sum -- so the annotation is the same
+# on all of them, which is what makes them comparable. Evidence is the strongest in the
+# module: ~50 recorded calls across the family share the leading axis of `locals_coeffs`,
+# `multip_packed` and `centers` at EIGHT distinct extents (5, 8, 13, 63, 127, 255, 511,
+# 1023), and the two packed arrays share the trailing axis at five (4, 9, 16, 25, 81).
+#
+# `Inexact` and not `Float` on the packed pair: `basis_mode="complex"` is a live lane and
+# passes complex coefficients. Narrowing to `Float` is the mistake #293 made one module
+# over, where a real-basis-only recording cost 27 CI failures.
+#
+# `class_offsets` in `_pair_class_ids_from_offsets` stays rank-only. It is
+# `(num_classes + 1,)` and `classes` is bound by nothing else in that signature -- and even
+# if it were, the parameter precedes anything that could bind it, which jaxtyping cannot
+# evaluate. Rank alone still closes the extra-leading-axis case, which is what the pilot
+# found; the length case is left open and named here rather than annotated wrongly.
+#
+# The decorators go INSIDE `jax.jit` on the jitted accumulators, per the house order, so
+# beartype runs once per trace rather than per call on the production M2L path.
+@jaxtyped(typechecker=beartype)
 def _rotation_blocks_for_grouped_classes(
     *,
     order: int,
     rotation: str,
-    class_keys: Array,
-    class_deltas: Array,
+    class_keys: Int[Array, "classes 5"],
+    class_deltas: Float[Array, "classes 3"],
     dtype: jnp.dtype,
     basis_mode: str = "complex",
 ) -> tuple[Array, Array]:
@@ -266,9 +314,9 @@ def _rotation_blocks_for_grouped_classes(
     rotation : str
         Rotation convention for the complex path. Ignored when ``basis_mode`` is
         ``"real"``.
-    class_keys : Array
+    class_keys : Int[Array, 'classes 5']
         Displacement-class keys, used as the cache identity.
-    class_deltas : Array
+    class_deltas : Float[Array, 'classes 3']
         One representative displacement per class ``[C, 3]``. Its length is the
         class count.
     dtype : jnp.dtype
@@ -410,7 +458,10 @@ def _chunk_segment_scatter_add(
     return local_accum.at[safe_targets].add(reduced)
 
 
-def _pair_class_ids_from_offsets(class_offsets: Array, pair_indices: Array) -> Array:
+@jaxtyped(typechecker=beartype)
+def _pair_class_ids_from_offsets(
+    class_offsets: Int[Array, "_"], pair_indices: Int[Array, "_"]
+) -> Array:
     """Class id of each pair, addressed in the class-sorted pair order.
 
     ``class_sources`` / ``class_targets`` are stored sorted by class, so the
@@ -423,9 +474,9 @@ def _pair_class_ids_from_offsets(class_offsets: Array, pair_indices: Array) -> A
 
     Parameters
     ----------
-    class_offsets : Array
+    class_offsets : Int[Array, '_']
         CSR class boundaries, shape ``(num_classes + 1,)``, strictly increasing.
-    pair_indices : Array
+    pair_indices : Int[Array, '_']
         Indices into the class-sorted pair arrays.
 
     Returns
@@ -443,10 +494,11 @@ def _pair_class_ids_from_offsets(class_offsets: Array, pair_indices: Array) -> A
     static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
     donate_argnums=(0,),
 )
+@jaxtyped(typechecker=beartype)
 def _accumulate_solidfmm_m2l_grouped_chunked_scan(
-    locals_coeffs: Array,
-    multip_packed: Array,
-    centers: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     src_sorted: Array,
     tgt_sorted: Array,
     class_offsets: Array,
@@ -469,12 +521,12 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator. Donated -- do not use the argument after
         the call.
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres; the pair displacement is the difference of two rows.
     src_sorted : Array
         Source node index per pair, in class-sorted order.
@@ -546,10 +598,11 @@ def _accumulate_solidfmm_m2l_grouped_chunked_scan(
     static_argnames=("order", "total_nodes", "basis_mode"),
     donate_argnums=(0,),
 )
+@jaxtyped(typechecker=beartype)
 def _accumulate_solidfmm_m2l_grouped_fullbatch(
-    locals_coeffs: Array,
-    multip_packed: Array,
-    centers: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     src_sorted: Array,
     tgt_sorted: Array,
     class_offsets: Array,
@@ -570,11 +623,11 @@ def _accumulate_solidfmm_m2l_grouped_fullbatch(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres.
     src_sorted : Array
         Source node index per pair, class-sorted.
@@ -703,10 +756,11 @@ def _build_grouped_class_segments(
     static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
     donate_argnums=(0,),
 )
+@jaxtyped(typechecker=beartype)
 def _accumulate_solidfmm_m2l_class_major_chunked_scan(
-    locals_coeffs: Array,
-    multip_packed: Array,
-    centers: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     src_sorted: Array,
     tgt_sorted: Array,
     segment_starts: Array,
@@ -729,11 +783,11 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres.
     src_sorted : Array
         Source node index per pair, class-sorted.
@@ -825,10 +879,11 @@ def _accumulate_solidfmm_m2l_class_major_chunked_scan(
     return local_accum
 
 
+@jaxtyped(typechecker=beartype)
 def _accumulate_solidfmm_m2l_grouped_class_major(
-    locals_coeffs: Array,
-    multip_packed: Array,
-    centers: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     grouped: GroupedInteractionBuffers,
     grouped_segment_starts: Optional[Array],
     grouped_segment_lengths: Optional[Array],
@@ -853,11 +908,11 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres.
     grouped : GroupedInteractionBuffers
         Grouped pair buffers: class-sorted sources and targets, class offsets,
@@ -958,10 +1013,11 @@ def _accumulate_solidfmm_m2l_grouped_class_major(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def _accumulate_solidfmm_m2l_grouped(
-    locals_coeffs: Array,
-    multip_packed: Array,
-    centers: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     grouped: GroupedInteractionBuffers,
     *,
     order: int,
@@ -988,12 +1044,12 @@ def _accumulate_solidfmm_m2l_grouped(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node. Its dtype is what the
         rotation blocks are built in.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres.
     grouped : GroupedInteractionBuffers
         Grouped pair buffers.
@@ -1480,9 +1536,10 @@ def _apply_m2l(
     return _apply_complex_m2l(src_mult, deltas, order=order, rotation=rotation)
 
 
+@jaxtyped(typechecker=beartype)
 def _m2l_chunk_contributions(
-    multip_packed: Array,
-    centers: Array,
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     src_idx: Array,
     tgt_idx: Array,
     valid: Array,
@@ -1518,10 +1575,10 @@ def _m2l_chunk_contributions(
 
     Parameters
     ----------
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node. Loop-invariant, so hoisted
         out of the scan and counted once.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres. Loop-invariant on the same terms; the pair displacement is
         formed here rather than passed in, which is what keeps the guard inside
         the rematerialized region.
@@ -1570,10 +1627,11 @@ def _m2l_chunk_contributions(
     static_argnames=("order", "basis_mode", "rotation", "m2l_impl", "total_nodes"),
     donate_argnums=(0,),
 )
+@jaxtyped(typechecker=beartype)
 def _accumulate_m2l_fullbatch(
-    locals_coeffs: Array,
-    multip_packed: Array,
-    centers: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     src: Array,
     tgt: Array,
     active_pair_count: Array,
@@ -1597,11 +1655,11 @@ def _accumulate_m2l_fullbatch(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres.
     src : Array
         Source node index per pair. Negative entries are treated as padding.
@@ -1664,10 +1722,11 @@ def _accumulate_m2l_fullbatch(
     ),
     donate_argnums=(0,),
 )
+@jaxtyped(typechecker=beartype)
 def _accumulate_m2l_chunked_scan(
-    locals_coeffs: Array,
-    multip_packed: Array,
-    centers: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multip_packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
     src: Array,
     tgt: Array,
     active_pair_count: Array,
@@ -1692,11 +1751,11 @@ def _accumulate_m2l_chunked_scan(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Array
+    multip_packed : Inexact[Array, 'nodes sh']
         Packed multipole coefficients for every node.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Node centres.
     src : Array
         Source node index per pair; negative entries are padding.
