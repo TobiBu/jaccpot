@@ -69,10 +69,140 @@ from jaccpot.mutual.force import (
 )
 from jaccpot.mutual.topology import build_mutual_topology_from_tree
 
-__all__ = ["BlockStepFMM", "DistributedBlockStepFMM"]
+__all__ = [
+    "BlockStepFMM",
+    "DistributedBlockStepFMM",
+    "assert_far_field_is_exercised",
+    "raise_on_overflow",
+]
 
 _SUPPORTED_BASES = ("real",)
 _SUPPORTED_BACKENDS = ("jax", "pallas")
+
+
+# --------------------------------------------------------------------------
+# guards -- the failure modes no correctness test can see
+# --------------------------------------------------------------------------
+#
+# Both came from ODISSEO's block-step lane (EDDA decision D-012 moves them here,
+# next to the objects they inspect). Each protects against a way the mutual FMM
+# can be *silently* wrong: every correctness assertion downstream passes, and the
+# number it reports means nothing.
+
+
+def assert_far_field_is_exercised(force_or_state: Any, *, require: bool = True) -> int:
+    """Return the prepared topology's far-pair count, raising when it is zero.
+
+    A configuration with no far pairs makes the FMM a direct sum: every
+    far-field accuracy assertion downstream passes at 1e-16 while testing nothing
+    of the multipole machinery. That is not hypothetical -- it has produced a
+    flattering ``0.0e+00`` in this programme before, and the cross-repo test
+    file's own single-blob system at N = 256 has *no* far pairs at any ``theta``
+    it uses. Any caller trusting a far-field number should call this first.
+
+    The count is the **occupancy**, ``num_far_pairs``, never ``far_a.shape[0]``:
+    once the pair lists are capacity-padded the shape is the allocated width and
+    is nonzero even for a topology with no far pairs at all -- which would make
+    this guard silently stop guarding, the exact failure it exists to prevent.
+
+    Parameters
+    ----------
+    force_or_state : Any
+        A :class:`BlockStepFMM` -- its cached :attr:`~BlockStepFMM.state` is read
+        -- or a :class:`~jaccpot.mutual.force.MutualFMMState` directly (the
+        topology a nornax rollout carries as ``final.topology``, say).
+    require : bool
+        With ``True`` (the default) a zero count raises; with ``False`` it is
+        returned, for a caller that only wants the number.
+
+    Returns
+    -------
+    int
+        The number of canonical far pairs the topology holds.
+
+    Raises
+    ------
+    RuntimeError
+        If a model was passed that has not been prepared, or if the count is
+        zero and ``require`` is set.
+    """
+    state = force_or_state
+    if isinstance(force_or_state, BlockStepFMM):
+        state = force_or_state.state
+        if state is None:
+            raise RuntimeError(
+                "call force.prepare(positions, masses) first: there is no topology "
+                "to count far pairs in"
+            )
+    num_far = int(getattr(state, "num_far_pairs", state.far_a.shape[0]))
+    if require and num_far == 0:
+        raise RuntimeError(
+            "the prepared topology has no far pairs, so this FMM is a direct sum "
+            "and any far-field accuracy number it produces is vacuous. The mutual "
+            "MAC accepts a pair when theta * |c_B - c_A| > R_A + R_B, so *raise* "
+            "theta, lower leaf_size, use more particles, or use a system with "
+            "well-separated clumps."
+        )
+    return num_far
+
+
+def raise_on_overflow(state: Any, force: Any) -> None:
+    """Turn a device topology's overflow flag into an exception naming the cap.
+
+    A device topology that exceeded a capacity dropped interactions, and that is
+    invisible in the force: a dropped canonical pair loses *both* of its halves,
+    so momentum stays exactly conserved and every momentum assertion passes.
+    Hence a raise, not a report.
+
+    :meth:`BlockStepFMM.prepare` calls this on the state it builds. A driver
+    that rebuilds *inside* a scan -- nornax's ``block_kdk_rollout(...,
+    rebuild_fn=force.rebuild_state)`` -- cannot raise under the trace; it calls
+    this on the carried topology *after* the rollout (``final.topology``), or on
+    a record reduced over the per-step flags. Only the object's
+    ``topology_overflow`` and ``overflow_causes`` are read, so any object carrying
+    those two -- a :class:`~jaccpot.mutual.force.MutualFMMState` or a reduction
+    of several -- is accepted.
+
+    Parameters
+    ----------
+    state : Any
+        The object carrying ``topology_overflow`` (bool-like) and
+        ``overflow_causes`` (a bitmask over
+        :data:`~jaccpot.mutual.force.OVERFLOW_CAUSES`).
+    force : Any
+        The model whose ``capacities`` profile the message quotes; anything
+        without a readable ``capacities`` is described as "unknown profile".
+
+    Raises
+    ------
+    RuntimeError
+        If the flag is set and concrete. Under a trace (a tracer flag) the
+        function returns silently -- there is nothing it could raise on.
+    """
+    try:
+        overflowed = bool(state.topology_overflow)
+    except jax.errors.JAXTypeError:  # traced caller: nothing concrete to read
+        return
+    if not overflowed:
+        return
+    from jaccpot.mutual.force import OVERFLOW_CAUSES
+
+    bits = int(state.overflow_causes)
+    blamed = [name for index, name in enumerate(OVERFLOW_CAUSES) if bits & (1 << index)]
+    caps = getattr(force, "capacities", None)
+    profile = (
+        f"far={caps.far}, near={caps.near}, depth={caps.depth}, width={caps.width}"
+        if caps is not None
+        else "unknown profile"
+    )
+    raise RuntimeError(
+        "the device topology overflowed its capacity profile: "
+        f"{', '.join(blamed) or 'unknown'} exceeded. Profile was {profile}. "
+        "Interactions were dropped, and that is invisible in the force -- a "
+        "dropped canonical pair loses both halves, so momentum stays exact -- "
+        "hence the raise. Rebuild with larger caps, or pass caps=None to resolve "
+        "them from this configuration."
+    )
 
 
 class BlockStepFMM:
@@ -285,12 +415,12 @@ class BlockStepFMM:
             The freshly built state, also cached on ``self`` so the force methods
             can find it.
 
-        Raises
-        ------
-        RuntimeError
-            On the device backend, if the built topology overflowed its capacity
-            profile. Overflow drops interactions while leaving momentum exactly
-            conserved, so it is raised here rather than reported.
+        Notes
+        -----
+        On the device backend the built state is passed through
+        :func:`raise_on_overflow`, which raises ``RuntimeError`` if the topology
+        overflowed its capacity profile: overflow drops interactions while
+        leaving momentum exactly conserved, so it is raised rather than reported.
         """
         from jaccpot import FastMultipoleMethod
 
@@ -301,31 +431,9 @@ class BlockStepFMM:
             self._state = self.rebuild_state(positions, masses)
             # prepare() is the eager entry point, so this is the one place the
             # overflow flag can be turned into an exception. A driver stepping
-            # through rebuild_state under trace must check it itself.
-            try:
-                overflowed = bool(self._state.topology_overflow)
-            except jax.errors.JAXTypeError:  # pragma: no cover - traced caller
-                overflowed = False
-            if overflowed:
-                from jaccpot.mutual.force import OVERFLOW_CAUSES
-
-                bits = int(self._state.overflow_causes)
-                blamed = [
-                    name
-                    for index, name in enumerate(OVERFLOW_CAUSES)
-                    if bits & (1 << index)
-                ]
-                raise RuntimeError(
-                    "the device topology overflowed its capacity profile: "
-                    f"{', '.join(blamed) or 'unknown'} exceeded. Profile was "
-                    f"far={self._caps.far}, near={self._caps.near}, "
-                    f"depth={self._caps.depth}, width={self._caps.width}. "
-                    "Interactions were dropped, and that is invisible in the "
-                    "force -- a dropped canonical pair loses both halves, so "
-                    "momentum stays exact -- hence the raise. Rebuild with larger "
-                    "caps, or pass caps=None to resolve them from this "
-                    "configuration."
-                )
+            # through rebuild_state under trace checks the carried state after
+            # its scan with the same function (see :func:`raise_on_overflow`).
+            raise_on_overflow(self._state, self)
             return self._state
 
         if self._solver is None:

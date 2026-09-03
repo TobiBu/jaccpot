@@ -948,3 +948,36 @@ def test_the_adapter_passes_nornax_conformance_kit(backend):
         "explicit topology: total",
     } <= names
     assert sum(name.endswith(": kick") for name in names) == 2**k_max + 1
+
+
+def test_the_carried_topology_can_be_checked_for_overflow_after_the_rollout():
+    """The overflow check the B4 hook allows: on ``final.topology``, after the scan.
+
+    ``raise_on_overflow`` cannot fire under the trace, so a driver that rebuilds
+    inside ``block_kdk_rollout`` checks the carried topology afterwards -- the
+    pattern ODISSEO's deletion (B5 step 2) will use for its last base step. On a
+    healthy system it is silent and the far field is exercised.
+    """
+    _requires_topology_hook()
+    from jaccpot.nornax_adapter import assert_far_field_is_exercised, raise_on_overflow
+
+    k_max = 2
+    positions, velocities, masses = _two_clumps(seed=29)
+    fmm = _device_fmm(k_max)
+    fmm.prepare(positions, masses)
+    assert assert_far_field_is_exercised(fmm) > 0
+    state = initialize_block_state(positions, velocities, masses, fmm, k_max=k_max)
+    final = block_kdk_rollout(
+        state,
+        2.0e-3,
+        fmm,
+        k_max=k_max,
+        n_base=2,
+        eta=0.1,
+        eps=SOFTENING,
+        checkpoint=False,
+        rebuild_fn=fmm.rebuild_state,
+        rebuild_every=1,
+    )
+    raise_on_overflow(final.topology, fmm)
+    assert assert_far_field_is_exercised(final.topology) > 0
