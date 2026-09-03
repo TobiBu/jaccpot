@@ -544,3 +544,23 @@ def test_two_component_positions_are_rejected_by_the_tiled_path():
     """`positions` is `n 3` here too."""
     with pytest.raises(TypeCheckError):
         _call_from_tiles(positions=jnp.zeros((N, 2)))
+
+
+def test_block_target_leaf_ids_must_agree_with_the_block_table():
+    """The other half of `test_block_ids_and_their_mask_must_agree`.
+
+    `block_target_leaf_ids` was rank-only, so a short one was accepted and JAX's clamp
+    gave the surplus blocks the last leaf's id. It is one axis with
+    `block_source_leaf_ids` by construction -- `_large_n_nearfield.py` builds the ids from
+    `jnp.arange(total_blocks)` and the table as `(total_blocks, k)` -- and the pilot
+    measured the equality in all four recorded calls at two distinct extents.
+
+    Its sibling `block_offsets` stays rank-only on purpose; that is the test above.
+    """
+    table = _leaf_table()
+    # Non-vacuity: the matched call still works.
+    _call_target_blocks(**table)
+
+    short = jnp.zeros((BLOCKS - 1,), dtype=jnp.int32)
+    with pytest.raises(TypeCheckError):
+        _call_target_blocks(**table, block_target_leaf_ids=short)
