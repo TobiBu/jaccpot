@@ -53,7 +53,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
-from jaxtyping import Array, DTypeLike, Float, Inexact, Int, jaxtyped
+from jaxtyping import Array, Bool, DTypeLike, Float, Inexact, Int, jaxtyped
 from yggdrax.tree import Tree, get_num_internal_nodes
 
 from jaccpot.upward.tree_expansions import TreeUpwardData
@@ -1351,8 +1351,9 @@ def compute_smallest_enclosing_sphere_geometry(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_enclosing_sphere_geometry(
-    *, tree: Tree, positions_sorted: Array
+    *, tree: Tree, positions_sorted: Float[Array, "n 3"]
 ) -> tuple[Array, Array]:
     """Return exact SES centres and radii for leaf nodes only.
 
@@ -1360,7 +1361,7 @@ def compute_leaf_enclosing_sphere_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
 
     Returns
@@ -1395,16 +1396,17 @@ def compute_leaf_enclosing_sphere_geometry(
 
 
 @jax.jit
+@jaxtyped(typechecker=beartype)
 def _batched_ritter_leaf_spheres(
-    leaf_points: Array, leaf_valid: Array
+    leaf_points: Float[Array, "leaves w 3"], leaf_valid: Bool[Array, "leaves w"]
 ) -> tuple[Array, Array]:
     """Return approximate bounding spheres for padded leaf particle blocks.
 
     Parameters
     ----------
-    leaf_points : Array
+    leaf_points : Float[Array, 'leaves w 3']
         Padded per-leaf point block, shape ``(num_leaves, cap, 3)``.
-    leaf_valid : Array
+    leaf_valid : Bool[Array, 'leaves w']
         See the module docstring.
 
     Returns
@@ -1476,8 +1478,9 @@ def _batched_ritter_leaf_spheres(
     return centers, radii
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_ritter_sphere_geometry(
-    *, tree: Tree, positions_sorted: Array
+    *, tree: Tree, positions_sorted: Float[Array, "n 3"]
 ) -> tuple[Array, Array]:
     """Return fast approximate leaf spheres using a batched JAX Ritter pass.
 
@@ -1485,7 +1488,7 @@ def compute_leaf_ritter_sphere_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
 
     Returns
@@ -1519,11 +1522,12 @@ def compute_leaf_ritter_sphere_geometry(
     return centers, radii
 
 
+@jaxtyped(typechecker=beartype)
 def compute_center_referenced_radius_geometry(
     *,
     tree: Tree,
-    positions_sorted: Array,
-    centers: Array,
+    positions_sorted: Float[Array, "n 3"],
+    centers: Float[Array, "nodes 3"],
     max_leaf_size: Optional[int] = None,
 ) -> Array:
     """Return per-node radii measured about ``centers``, not about a fitted sphere.
@@ -1544,9 +1548,9 @@ def compute_center_referenced_radius_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Reference centre per node.
     max_leaf_size : Optional[int]
         Static upper bound on particles per leaf, used as the gathered block width.
@@ -1668,8 +1672,9 @@ def merge_bounding_spheres(
     return center, radius
 
 
+@jaxtyped(typechecker=beartype)
 def compute_tree_merged_sphere_geometry(
-    *, tree: Tree, positions_sorted: Array, leaf_mode: str = "exact"
+    *, tree: Tree, positions_sorted: Float[Array, "n 3"], leaf_mode: str = "exact"
 ) -> tuple[Array, Array]:
     """Return node spheres from leaf spheres and JAX upward merges.
 
@@ -1677,7 +1682,7 @@ def compute_tree_merged_sphere_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
     leaf_mode : str
         See the module docstring.
