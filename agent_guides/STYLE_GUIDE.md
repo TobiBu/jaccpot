@@ -283,6 +283,13 @@ None of the three is added to the flake8 `--builtins` list, because none is ever
 single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
 for `sw` and `srcslots`: both only ever appear beside another name.
 
+**That "never alone" claim expires the moment someone annotates a 1-D array with the axis,
+and it has now expired twice.** `nodes` and `degrees` were both in this table and out of the
+`--builtins` list on exactly that reasoning until `runtime/_adaptive_policy.py` needed
+`node_radii: Float[Array, "nodes"]` and `masked_binomial: Float[Array, "degrees"]`. Both are
+in the list now. The lesson is not to predict which names will stay paired: if flake8 reports
+F821 on an axis name, add it and move on -- the prediction is the fragile part, not the list.
+
 **`sh` is the axis `ct` was defined against**, and it took until
 `runtime/_adaptive_policy.py` to get a name because nothing had annotated a
 spherical-harmonic buffer before -- the note below says `C` means `sh_size(p)` *elsewhere in
@@ -297,7 +304,9 @@ reason they need separate names: `dehnen_paper_pair_error_by_order` takes `sourc
 signature, measured at `degrees` 3, 4, 5 against `orders` 1, 2, 3. The shared `degrees` is
 what makes the contraction between them valid, and it is exactly what the eight silent
 acceptances in that function would have broken. `orders` IS used as a single-identifier axis
-(`order_values`), so unlike `sh` and `degrees` it is in the flake8 `--builtins` list.
+(`order_values`), so it is in the flake8 `--builtins` list -- and `degrees` joined it later,
+for `masked_binomial` in the same module; `sh` is still the only one of the three that has
+never appeared alone.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
