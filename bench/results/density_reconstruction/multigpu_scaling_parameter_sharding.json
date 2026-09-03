@@ -1,0 +1,1413 @@
+{
+  "config": {
+    "n": [
+      262144
+    ],
+    "theta": 0.5,
+    "order": 4,
+    "basis": "solidfmm",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float64",
+    "M": 4096,
+    "leaf_size": 256,
+    "softening": 0.01,
+    "iterations": 10,
+    "device_counts": [
+      1,
+      2,
+      4
+    ],
+    "ceiling_ladder": [
+      1048576,
+      2097152
+    ],
+    "sharding_mode": "parameter_sharding"
+  },
+  "meta": {
+    "git_sha": "7470554c83344f57740d716ef97e712fec4f092f",
+    "git_branch": "feat/density-reconstruction-payoff",
+    "git_dirty": true,
+    "jax_version": "0.10.2",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "0,2,4,6"
+  },
+  "data": {
+    "records": [
+      {
+        "N": 262144,
+        "M": 4096,
+        "num_free_parameters": 786432,
+        "num_devices": 1,
+        "devices": [
+          "cuda:0"
+        ],
+        "sharding_mode": "parameter_sharding",
+        "iterations": 10,
+        "initial_loss": 0.004662037310259326,
+        "final_loss": 0.000608562517229271,
+        "field_residual_after": {
+          "rel_l2": 0.01961093964890719,
+          "rms": 0.005601982882522727,
+          "max_abs": 0.2969434710325005,
+          "mean_abs": 0.0015289849365012409,
+          "observed_rms": 0.2856560156124337,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 950.2106676129624,
+          "totals_seconds": {
+            "prepare": 132.08944364544004,
+            "gradient": 754.9796051476151,
+            "update": 1.3452679365873337
+          },
+          "first_iteration_seconds": {
+            "prepare": 22.328516754321754,
+            "gradient": 337.93109291791916,
+            "update": 0.580536087974906
+          },
+          "mean_later_gradient_seconds": 46.338723581077325,
+          "mean_later_prepare_seconds": 12.195658543457588,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2856560156124337
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 10,
+            "comparisons": 9,
+            "switches": 9,
+            "interaction_switches": 9,
+            "switch_rate": 1.0,
+            "unique_topologies": 10,
+            "changed_components": {
+              "permutation": 9,
+              "tree_shape": 9,
+              "node_ranges": 9,
+              "far_pairs": 9,
+              "near_pairs": 9
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 2,
+            "near_set_sample": 128,
+            "comparisons": 4,
+            "mean": {
+              "slot_churn": 0.9640164888822116,
+              "mean_rank_shift_fraction": 0.002092708744240936,
+              "leaf_churn": 0.9800480769230768,
+              "near_source_count_churn": 0.9202411358173077,
+              "near_set_churn": 0.16678806014035624,
+              "near_pair_churn": 0.9997363479565967,
+              "far_pair_churn": 0.9999067840590161
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9560509314903847,
+                "mean_rank_shift_fraction": 0.0031241786832640157,
+                "leaf_churn": 0.9778846153846154,
+                "near_source_count_churn": 0.9340670072115385,
+                "near_set_churn": 0.1922546152313928,
+                "near_pair_churn": 0.9996831117009939,
+                "far_pair_churn": 0.9999145810199026,
+                "iteration": 2,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9684307391826923,
+                "mean_rank_shift_fraction": 0.0026864807140192337,
+                "leaf_churn": 0.9769230769230769,
+                "near_source_count_churn": 0.9214993990384616,
+                "near_set_churn": 0.1830783256108718,
+                "near_pair_churn": 0.9996565142782721,
+                "far_pair_churn": 0.9998374159982658,
+                "iteration": 4,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9723407451923077,
+                "mean_rank_shift_fraction": 0.0017724992819791714,
+                "leaf_churn": 0.9836538461538461,
+                "near_source_count_churn": 0.9350510817307692,
+                "near_set_churn": 0.2156898459205216,
+                "near_pair_churn": 0.9998184747015195,
+                "far_pair_churn": 0.9999534024013296,
+                "iteration": 6,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.9592435396634615,
+                "mean_rank_shift_fraction": 0.0007876762977013221,
+                "leaf_churn": 0.9817307692307692,
+                "near_source_count_churn": 0.8903470552884616,
+                "near_set_churn": 0.07612945379863878,
+                "near_pair_churn": 0.9997872911456014,
+                "far_pair_churn": 0.9999217368165667,
+                "iteration": 8,
+                "previous_iteration": 6
+              }
+            ]
+          }
+        }
+      },
+      {
+        "N": 262144,
+        "M": 4096,
+        "num_free_parameters": 786432,
+        "num_devices": 2,
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "sharding_mode": "parameter_sharding",
+        "iterations": 10,
+        "initial_loss": 0.004662037310259326,
+        "final_loss": 0.000608562517229271,
+        "field_residual_after": {
+          "rel_l2": 0.01961093964890723,
+          "rms": 0.005601982882522739,
+          "max_abs": 0.2969434710325012,
+          "mean_abs": 0.0015289849365012422,
+          "observed_rms": 0.2856560156124337,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 796.1008515814319,
+          "totals_seconds": {
+            "prepare": 20.977516784332693,
+            "gradient": 703.8391754524782,
+            "update": 1.7665154002606869
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.9394614193588495,
+            "gradient": 263.1190054034814,
+            "update": 1.0283740973100066
+          },
+          "mean_later_gradient_seconds": 48.968907783221866,
+          "mean_later_prepare_seconds": 2.1153394849970937,
+          "path": "eager",
+          "num_devices": 2,
+          "loss_scale": 0.2856560156124337
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 10,
+            "comparisons": 9,
+            "switches": 9,
+            "interaction_switches": 9,
+            "switch_rate": 1.0,
+            "unique_topologies": 10,
+            "changed_components": {
+              "permutation": 9,
+              "tree_shape": 9,
+              "node_ranges": 9,
+              "far_pairs": 9,
+              "near_pairs": 9
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 2,
+            "near_set_sample": 128,
+            "comparisons": 4,
+            "mean": {
+              "slot_churn": 0.9640164888822116,
+              "mean_rank_shift_fraction": 0.002092708744240936,
+              "leaf_churn": 0.9800480769230768,
+              "near_source_count_churn": 0.9202411358173077,
+              "near_set_churn": 0.16678806014035624,
+              "near_pair_churn": 0.9997363479565967,
+              "far_pair_churn": 0.9999067840590161
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9560509314903847,
+                "mean_rank_shift_fraction": 0.0031241786832640157,
+                "leaf_churn": 0.9778846153846154,
+                "near_source_count_churn": 0.9340670072115385,
+                "near_set_churn": 0.1922546152313928,
+                "near_pair_churn": 0.9996831117009939,
+                "far_pair_churn": 0.9999145810199026,
+                "iteration": 2,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9684307391826923,
+                "mean_rank_shift_fraction": 0.0026864807140192337,
+                "leaf_churn": 0.9769230769230769,
+                "near_source_count_churn": 0.9214993990384616,
+                "near_set_churn": 0.1830783256108718,
+                "near_pair_churn": 0.9996565142782721,
+                "far_pair_churn": 0.9998374159982658,
+                "iteration": 4,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9723407451923077,
+                "mean_rank_shift_fraction": 0.0017724992819791714,
+                "leaf_churn": 0.9836538461538461,
+                "near_source_count_churn": 0.9350510817307692,
+                "near_set_churn": 0.2156898459205216,
+                "near_pair_churn": 0.9998184747015195,
+                "far_pair_churn": 0.9999534024013296,
+                "iteration": 6,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.9592435396634615,
+                "mean_rank_shift_fraction": 0.0007876762977013221,
+                "leaf_churn": 0.9817307692307692,
+                "near_source_count_churn": 0.8903470552884616,
+                "near_set_churn": 0.07612945379863878,
+                "near_pair_churn": 0.9997872911456014,
+                "far_pair_churn": 0.9999217368165667,
+                "iteration": 8,
+                "previous_iteration": 6
+              }
+            ]
+          }
+        }
+      },
+      {
+        "N": 262144,
+        "M": 4096,
+        "num_free_parameters": 786432,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "parameter_sharding",
+        "iterations": 10,
+        "initial_loss": 0.004662037310259326,
+        "final_loss": 0.0006085625172292718,
+        "field_residual_after": {
+          "rel_l2": 0.01961093964890722,
+          "rms": 0.0056019828825227365,
+          "max_abs": 0.2969434710325008,
+          "mean_abs": 0.0015289849365012415,
+          "observed_rms": 0.2856560156124337,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 825.0175508782268,
+          "totals_seconds": {
+            "prepare": 21.694853397086263,
+            "gradient": 732.7486712764949,
+            "update": 2.016410824842751
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.9274070551618934,
+            "gradient": 265.7091049803421,
+            "update": 1.3377699665725231
+          },
+          "mean_later_gradient_seconds": 51.89328514401697,
+          "mean_later_prepare_seconds": 2.1963829268804855,
+          "path": "eager",
+          "num_devices": 4,
+          "loss_scale": 0.2856560156124337
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 10,
+            "comparisons": 9,
+            "switches": 9,
+            "interaction_switches": 9,
+            "switch_rate": 1.0,
+            "unique_topologies": 10,
+            "changed_components": {
+              "permutation": 9,
+              "tree_shape": 9,
+              "node_ranges": 9,
+              "far_pairs": 9,
+              "near_pairs": 9
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 2,
+            "near_set_sample": 128,
+            "comparisons": 4,
+            "mean": {
+              "slot_churn": 0.9640164888822116,
+              "mean_rank_shift_fraction": 0.002092708744240936,
+              "leaf_churn": 0.9800480769230768,
+              "near_source_count_churn": 0.9202411358173077,
+              "near_set_churn": 0.16678806014035624,
+              "near_pair_churn": 0.9997363479565967,
+              "far_pair_churn": 0.9999067840590161
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9560509314903847,
+                "mean_rank_shift_fraction": 0.0031241786832640157,
+                "leaf_churn": 0.9778846153846154,
+                "near_source_count_churn": 0.9340670072115385,
+                "near_set_churn": 0.1922546152313928,
+                "near_pair_churn": 0.9996831117009939,
+                "far_pair_churn": 0.9999145810199026,
+                "iteration": 2,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9684307391826923,
+                "mean_rank_shift_fraction": 0.0026864807140192337,
+                "leaf_churn": 0.9769230769230769,
+                "near_source_count_churn": 0.9214993990384616,
+                "near_set_churn": 0.1830783256108718,
+                "near_pair_churn": 0.9996565142782721,
+                "far_pair_churn": 0.9998374159982658,
+                "iteration": 4,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9723407451923077,
+                "mean_rank_shift_fraction": 0.0017724992819791714,
+                "leaf_churn": 0.9836538461538461,
+                "near_source_count_churn": 0.9350510817307692,
+                "near_set_churn": 0.2156898459205216,
+                "near_pair_churn": 0.9998184747015195,
+                "far_pair_churn": 0.9999534024013296,
+                "iteration": 6,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.9592435396634615,
+                "mean_rank_shift_fraction": 0.0007876762977013221,
+                "leaf_churn": 0.9817307692307692,
+                "near_source_count_churn": 0.8903470552884616,
+                "near_set_churn": 0.07612945379863878,
+                "near_pair_churn": 0.9997872911456014,
+                "far_pair_churn": 0.9999217368165667,
+                "iteration": 8,
+                "previous_iteration": 6
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "ceiling": [
+      {
+        "N": 1048576,
+        "M": 4096,
+        "num_free_parameters": 3145728,
+        "num_devices": 1,
+        "devices": [
+          "cuda:0"
+        ],
+        "sharding_mode": "parameter_sharding",
+        "iterations": 10,
+        "initial_loss": 0.004234756396892932,
+        "final_loss": 0.0005131423904473365,
+        "field_residual_after": {
+          "rel_l2": 0.017304742585659214,
+          "rms": 0.004943161207620927,
+          "max_abs": 0.2928252131518998,
+          "mean_abs": 0.0009506501989595625,
+          "observed_rms": 0.28565355324715563,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 1766.469410023652,
+          "totals_seconds": {
+            "prepare": 168.20153626333922,
+            "gradient": 1458.5919341798872,
+            "update": 4.374001492746174
+          },
+          "first_iteration_seconds": {
+            "prepare": 24.27008688263595,
+            "gradient": 331.4372648252174,
+            "update": 0.5879102116450667
+          },
+          "mean_later_gradient_seconds": 125.23940770607442,
+          "mean_later_prepare_seconds": 15.992383264522585,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.28565355324715563
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 10,
+            "comparisons": 9,
+            "switches": 9,
+            "interaction_switches": 9,
+            "switch_rate": 1.0,
+            "unique_topologies": 10,
+            "changed_components": {
+              "permutation": 9,
+              "tree_shape": 9,
+              "node_ranges": 9,
+              "far_pairs": 9,
+              "near_pairs": 9
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 2,
+            "near_set_sample": 128,
+            "comparisons": 4,
+            "mean": {
+              "slot_churn": 0.9721753309672909,
+              "mean_rank_shift_fraction": 0.0009187790018728615,
+              "leaf_churn": 0.9787208171206225,
+              "near_source_count_churn": 0.9737152218354815,
+              "near_set_churn": 0.2795832225588326,
+              "near_pair_churn": 0.9994056121288781,
+              "far_pair_churn": 0.9998810772757772
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9746255243798638,
+                "mean_rank_shift_fraction": 0.0014263655888895116,
+                "leaf_churn": 0.9803015564202334,
+                "near_source_count_churn": 0.9742787876945526,
+                "near_set_churn": 0.27975779649379495,
+                "near_pair_churn": 0.9994867087782352,
+                "far_pair_churn": 0.999891353530499,
+                "iteration": 2,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9696325161113813,
+                "mean_rank_shift_fraction": 0.001251707748579191,
+                "leaf_churn": 0.9751945525291829,
+                "near_source_count_churn": 0.9722876641536965,
+                "near_set_churn": 0.2708251954259163,
+                "near_pair_churn": 0.9992246679019999,
+                "far_pair_churn": 0.9998380604117874,
+                "iteration": 4,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9728348431420234,
+                "mean_rank_shift_fraction": 0.0007316959705805298,
+                "leaf_churn": 0.9803015564202334,
+                "near_source_count_churn": 0.9770137326726653,
+                "near_set_churn": 0.2884053430897011,
+                "near_pair_churn": 0.9994852346139247,
+                "far_pair_churn": 0.9999025971945429,
+                "iteration": 6,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.971608440235895,
+                "mean_rank_shift_fraction": 0.0002653466994422132,
+                "leaf_churn": 0.9790856031128404,
+                "near_source_count_churn": 0.9712807028210116,
+                "near_set_churn": 0.27934455522591795,
+                "near_pair_churn": 0.9994258372213528,
+                "far_pair_churn": 0.9998922979662797,
+                "iteration": 8,
+                "previous_iteration": 6
+              }
+            ]
+          }
+        },
+        "arm": "ceiling"
+      },
+      {
+        "arm": "ceiling",
+        "num_devices": 1,
+        "N": 2097152,
+        "num_free_parameters": 6291456,
+        "failed": true,
+        "error_type": "JaxRuntimeError",
+        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.27GiB. [executable_name='jit_add'] [tf-allocator-allocation-error='']"
+      },
+      {
+        "N": 1048576,
+        "M": 4096,
+        "num_free_parameters": 3145728,
+        "num_devices": 2,
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "sharding_mode": "parameter_sharding",
+        "iterations": 10,
+        "initial_loss": 0.0042347563968929336,
+        "final_loss": 0.00051314239044734,
+        "field_residual_after": {
+          "rel_l2": 0.017304742585659207,
+          "rms": 0.0049431612076209245,
+          "max_abs": 0.2928252131518995,
+          "mean_abs": 0.0009506501989595626,
+          "observed_rms": 0.28565355324715563,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 1766.8192625306547,
+          "totals_seconds": {
+            "prepare": 40.43577695265412,
+            "gradient": 1580.7242561038584,
+            "update": 5.488337356597185
+          },
+          "first_iteration_seconds": {
+            "prepare": 4.130546337924898,
+            "gradient": 344.0163611713797,
+            "update": 1.044998062774539
+          },
+          "mean_later_gradient_seconds": 137.41198832583098,
+          "mean_later_prepare_seconds": 4.033914512747692,
+          "path": "eager",
+          "num_devices": 2,
+          "loss_scale": 0.28565355324715563
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 10,
+            "comparisons": 9,
+            "switches": 9,
+            "interaction_switches": 9,
+            "switch_rate": 1.0,
+            "unique_topologies": 10,
+            "changed_components": {
+              "permutation": 9,
+              "tree_shape": 9,
+              "node_ranges": 9,
+              "far_pairs": 9,
+              "near_pairs": 9
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 2,
+            "near_set_sample": 128,
+            "comparisons": 4,
+            "mean": {
+              "slot_churn": 0.9721753309672909,
+              "mean_rank_shift_fraction": 0.0009187790018728615,
+              "leaf_churn": 0.9787208171206225,
+              "near_source_count_churn": 0.9737152218354815,
+              "near_set_churn": 0.2795832225588326,
+              "near_pair_churn": 0.9994056121288781,
+              "far_pair_churn": 0.9998810772757772
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9746255243798638,
+                "mean_rank_shift_fraction": 0.0014263655888895116,
+                "leaf_churn": 0.9803015564202334,
+                "near_source_count_churn": 0.9742787876945526,
+                "near_set_churn": 0.27975779649379495,
+                "near_pair_churn": 0.9994867087782352,
+                "far_pair_churn": 0.999891353530499,
+                "iteration": 2,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9696325161113813,
+                "mean_rank_shift_fraction": 0.001251707748579191,
+                "leaf_churn": 0.9751945525291829,
+                "near_source_count_churn": 0.9722876641536965,
+                "near_set_churn": 0.2708251954259163,
+                "near_pair_churn": 0.9992246679019999,
+                "far_pair_churn": 0.9998380604117874,
+                "iteration": 4,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9728348431420234,
+                "mean_rank_shift_fraction": 0.0007316959705805298,
+                "leaf_churn": 0.9803015564202334,
+                "near_source_count_churn": 0.9770137326726653,
+                "near_set_churn": 0.2884053430897011,
+                "near_pair_churn": 0.9994852346139247,
+                "far_pair_churn": 0.9999025971945429,
+                "iteration": 6,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.971608440235895,
+                "mean_rank_shift_fraction": 0.0002653466994422132,
+                "leaf_churn": 0.9790856031128404,
+                "near_source_count_churn": 0.9712807028210116,
+                "near_set_churn": 0.27934455522591795,
+                "near_pair_churn": 0.9994258372213528,
+                "far_pair_churn": 0.9998922979662797,
+                "iteration": 8,
+                "previous_iteration": 6
+              }
+            ]
+          }
+        },
+        "arm": "ceiling"
+      },
+      {
+        "arm": "ceiling",
+        "num_devices": 2,
+        "N": 2097152,
+        "num_free_parameters": 6291456,
+        "failed": true,
+        "error_type": "JaxRuntimeError",
+        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.27GiB. [executable_name='jit_add'] [tf-allocator-allocation-error='']"
+      },
+      {
+        "N": 1048576,
+        "M": 4096,
+        "num_free_parameters": 3145728,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "parameter_sharding",
+        "iterations": 10,
+        "initial_loss": 0.00423475639689293,
+        "final_loss": 0.0005131423904473362,
+        "field_residual_after": {
+          "rel_l2": 0.017304742585659234,
+          "rms": 0.004943161207620933,
+          "max_abs": 0.29282521315190013,
+          "mean_abs": 0.0009506501989595628,
+          "observed_rms": 0.28565355324715563,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 1824.8378057302907,
+          "totals_seconds": {
+            "prepare": 42.16634082514793,
+            "gradient": 1612.2190603939816,
+            "update": 4.987969800829887
+          },
+          "first_iteration_seconds": {
+            "prepare": 4.00637530721724,
+            "gradient": 433.4118961133063,
+            "update": 1.2615700457245111
+          },
+          "mean_later_gradient_seconds": 130.97857380896392,
+          "mean_later_prepare_seconds": 4.239996168658966,
+          "path": "eager",
+          "num_devices": 4,
+          "loss_scale": 0.28565355324715563
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 10,
+            "comparisons": 9,
+            "switches": 9,
+            "interaction_switches": 9,
+            "switch_rate": 1.0,
+            "unique_topologies": 10,
+            "changed_components": {
+              "permutation": 9,
+              "tree_shape": 9,
+              "node_ranges": 9,
+              "far_pairs": 9,
+              "near_pairs": 9
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 2,
+            "near_set_sample": 128,
+            "comparisons": 4,
+            "mean": {
+              "slot_churn": 0.9721753309672909,
+              "mean_rank_shift_fraction": 0.0009187790018728615,
+              "leaf_churn": 0.9787208171206225,
+              "near_source_count_churn": 0.9737152218354815,
+              "near_set_churn": 0.2795832225588326,
+              "near_pair_churn": 0.9994056121288781,
+              "far_pair_churn": 0.9998810772757772
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9746255243798638,
+                "mean_rank_shift_fraction": 0.0014263655888895116,
+                "leaf_churn": 0.9803015564202334,
+                "near_source_count_churn": 0.9742787876945526,
+                "near_set_churn": 0.27975779649379495,
+                "near_pair_churn": 0.9994867087782352,
+                "far_pair_churn": 0.999891353530499,
+                "iteration": 2,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9696325161113813,
+                "mean_rank_shift_fraction": 0.001251707748579191,
+                "leaf_churn": 0.9751945525291829,
+                "near_source_count_churn": 0.9722876641536965,
+                "near_set_churn": 0.2708251954259163,
+                "near_pair_churn": 0.9992246679019999,
+                "far_pair_churn": 0.9998380604117874,
+                "iteration": 4,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9728348431420234,
+                "mean_rank_shift_fraction": 0.0007316959705805298,
+                "leaf_churn": 0.9803015564202334,
+                "near_source_count_churn": 0.9770137326726653,
+                "near_set_churn": 0.2884053430897011,
+                "near_pair_churn": 0.9994852346139247,
+                "far_pair_churn": 0.9999025971945429,
+                "iteration": 6,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.971608440235895,
+                "mean_rank_shift_fraction": 0.0002653466994422132,
+                "leaf_churn": 0.9790856031128404,
+                "near_source_count_churn": 0.9712807028210116,
+                "near_set_churn": 0.27934455522591795,
+                "near_pair_churn": 0.9994258372213528,
+                "far_pair_churn": 0.9998922979662797,
+                "iteration": 8,
+                "previous_iteration": 6
+              }
+            ]
+          }
+        },
+        "arm": "ceiling"
+      },
+      {
+        "arm": "ceiling",
+        "num_devices": 4,
+        "N": 2097152,
+        "num_free_parameters": 6291456,
+        "failed": true,
+        "error_type": "JaxRuntimeError",
+        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.27GiB. [tf-allocator-allocation-error=''] [executable_name='jit_add']"
+      }
+    ]
+  }
+}

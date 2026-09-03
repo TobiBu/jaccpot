@@ -1657,7 +1657,7 @@ if fd:
     if any(v is not None for v in delta):
         ax.plot(x, [v if v is not None else np.nan for v in delta],
                 marker=style.MARKERS[2], ls="--", color=style.CATEGORICAL[2],
-                label=r"$|\nabla_B - \nabla_A| / |\nabla_A|$ across a rebuild")
+                label="gradient change across a rebuild")
     ax.set_xticks(x)
     ax.set_xticklabels(["%d/k%d" % (r["N"], r["rebuild_cadence"]) for r in fd],
                        rotation=60, fontsize=4.6)
