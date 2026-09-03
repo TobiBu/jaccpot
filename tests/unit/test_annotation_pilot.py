@@ -16,6 +16,8 @@ false positives.
 
 from __future__ import annotations
 
+import pickle
+from pathlib import Path
 from typing import NamedTuple
 
 import pytest
@@ -430,3 +432,45 @@ def test_the_replay_prefers_a_replayable_recording_over_the_first_one():
     assert annotation_pilot._first_replayable([usable, opaque]) is usable
     # None replayable: unchanged, so the report still names a real call's opaque args.
     assert annotation_pilot._first_replayable([opaque]) is opaque
+
+
+def test_each_xdist_worker_writes_its_own_shard():
+    """Workers used to write the same path, so the last one to finish won.
+
+    Measured on `pallas/nearfield_mutual.py` at `-n 4`: 7 of 12 targeted functions
+    survived in the file and the other 5 read as lanes that never ran.
+    """
+
+    class _Config:
+        def __init__(self, worker: str | None) -> None:
+            if worker is not None:
+                self.workerinput = {"workerid": worker}
+
+    out = Path("/tmp/pilot.pkl")
+    assert annotation_pilot._worker_output(out, _Config(None)) == out
+    assert annotation_pilot._worker_output(out, _Config("gw3")) == Path(
+        "/tmp/pilot.gw3.pkl"
+    )
+
+
+def test_the_replay_merges_every_worker_shard(tmp_path):
+    """And merging is what makes the shards add up to one recording again."""
+
+    a = ({"x": ("array", (2,), "float32")}, True)
+    b = ({"y": ("array", (3,), "float32")}, True)
+    with (tmp_path / "p.gw0.pkl").open("wb") as handle:
+        pickle.dump({"m:one": [a]}, handle)
+    with (tmp_path / "p.gw1.pkl").open("wb") as handle:
+        pickle.dump({"m:two": [b]}, handle)
+
+    merged = annotation_pilot._load_recordings(tmp_path / "p.pkl")
+    assert sorted(merged) == ["m:one", "m:two"]
+
+    # A shard for a function another shard also saw is concatenated, not dropped --
+    # which is what gives `_first_replayable` something to choose between.
+    with (tmp_path / "p.gw2.pkl").open("wb") as handle:
+        pickle.dump({"m:one": [b]}, handle)
+    assert len(annotation_pilot._load_recordings(tmp_path / "p.pkl")["m:one"]) == 2
+
+    with pytest.raises(FileNotFoundError):
+        annotation_pilot._load_recordings(tmp_path / "absent.pkl")

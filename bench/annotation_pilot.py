@@ -146,6 +146,9 @@ Then replay::
 
     python -m bench.annotation_pilot replay /tmp/pilot.pkl
 
+Under `pytest-xdist` each worker writes its own shard -- `/tmp/pilot.gw0.pkl` and friends --
+and the replay merges every shard beside the path you name, so pass the same path either way.
+
 The report ranks modules by the fraction of perturbations **silently accepted**, which is
 section 4.1's predictor -- and which is not the same ordering as bare-parameter count.
 """
@@ -407,6 +410,66 @@ def _format_path(name: str, path: tuple[int, ...]) -> str:
     return name + "".join(f"[{index}]" for index in path)
 
 
+def _worker_output(out: Path, config: Any) -> Path:
+    """Return a per-xdist-worker path, so workers do not overwrite each other.
+
+    `_recorded` is per process. Every worker used to write the SAME `PILOT_OUT` on
+    unconfigure, so the surviving file was whichever worker finished last and every other
+    worker's functions were silently gone. Measured on `pallas/nearfield_mutual.py` at
+    `-n 4`: 7 of 12 targeted functions in the file, the other 5 recorded by workers whose
+    write was clobbered -- which reads exactly like "that lane never ran".
+
+    Parameters
+    ----------
+    out : Path
+        The path the user asked for.
+    config : Any
+        The pytest config; carries `workerinput` only inside an xdist worker.
+
+    Returns
+    -------
+    Path
+        `out` under a single process, else `out` with the worker id folded into the stem.
+    """
+
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    if not worker:
+        return out
+    return out.with_name(f"{out.stem}.{worker}{out.suffix}")
+
+
+def _load_recordings(path: Path) -> dict[str, list[Any]]:
+    """Load a recording, merging every per-worker shard beside it.
+
+    Parameters
+    ----------
+    path : Path
+        The path passed to `replay`, as given to `PILOT_OUT`.
+
+    Returns
+    -------
+    dict
+        Label to list of recordings, concatenated across shards in shard order.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither the path nor any shard beside it exists.
+    """
+
+    shards = sorted(path.parent.glob(f"{path.stem}.*{path.suffix}"))
+    files = ([path] if path.exists() else []) + [s for s in shards if s != path]
+    if not files:
+        raise FileNotFoundError(path)
+
+    merged: dict[str, list[Any]] = {}
+    for file in files:
+        with file.open("rb") as handle:
+            for label, entries in pickle.load(handle).items():
+                merged.setdefault(label, []).extend(entries)
+    return merged
+
+
 def _first_replayable(
     entries: list[tuple[dict[str, Any], bool]],
 ) -> tuple[dict[str, Any], bool]:
@@ -566,7 +629,9 @@ def pytest_unconfigure(config: Any) -> None:
     for holder, attribute, original in _installed:
         setattr(holder, attribute, original)
     if _recorded:
-        out = Path(os.environ.get(_OUT_ENV, "annotation_pilot.pkl"))
+        out = _worker_output(
+            Path(os.environ.get(_OUT_ENV, "annotation_pilot.pkl")), config
+        )
         with out.open("wb") as handle:
             pickle.dump(_recorded, handle)
         print(f"\nannotation_pilot: recorded {len(_recorded)} functions -> {out}")
@@ -843,11 +908,11 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("path", type=Path, help="the pickle the plugin wrote")
     args = parser.parse_args(argv)
 
-    if not args.path.exists():
+    try:
+        recorded = _load_recordings(args.path)
+    except FileNotFoundError:
         print(f"{args.path} does not exist -- was the recording run?", file=sys.stderr)
         return 1
-    with args.path.open("rb") as handle:
-        recorded = pickle.load(handle)
     report, _ = replay(recorded)
     print(report)
     return 0
