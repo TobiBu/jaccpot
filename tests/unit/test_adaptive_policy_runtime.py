@@ -172,6 +172,45 @@ def test_source_power_by_degree_matches_flat_tail_proxy():
     assert np.allclose(np.asarray(proxy_from_power), np.asarray(proxy_from_packed))
 
 
+def test_source_power_by_degree_accepts_the_complex_basis():
+    """The complex basis is a live lane and hands these functions `c64`/`c128`.
+
+    `dehnen_multipole_power_by_degree` already has its basis-invariance test; this
+    covers the two entry points that did not, `source_power_by_degree_from_multipoles`
+    and the `..._from_multipoles` proxy above it, whose annotations were derived from a
+    pilot recording taken entirely on the real basis.
+    """
+
+    packed = jnp.asarray(
+        [
+            [1.0 + 0.0j, 2.0 - 1.0j, 3.0, 4.0 + 2.0j],
+            [0.5, 0.25 + 0.25j, 0.75, 1.25 - 0.5j],
+        ],
+        dtype=jnp.complex64,
+    )
+    degree_power = source_power_by_degree_from_multipoles(multipole_packed=packed)
+
+    # Per-degree power is sum |M|^2 over the degree's slice -- real for either basis.
+    magnitudes_sq = np.abs(np.asarray(packed)) ** 2
+    expected = np.stack(
+        [magnitudes_sq[:, 0:1].sum(axis=1), magnitudes_sq[:, 1:4].sum(axis=1)],
+        axis=1,
+    )
+    assert degree_power.shape == (2, 2)
+    assert not np.iscomplexobj(np.asarray(degree_power))
+    assert np.allclose(np.asarray(degree_power), expected)
+
+    proxy_from_packed = source_error_proxy_by_order_from_multipoles(
+        multipole_packed=packed,
+        p_gears=(0, 1),
+    )
+    proxy_from_power = source_error_proxy_by_order_from_degree_power(
+        degree_power=degree_power,
+        p_gears=(0, 1),
+    )
+    assert np.allclose(np.asarray(proxy_from_power), np.asarray(proxy_from_packed))
+
+
 def test_dehnen_like_pair_error_is_monotone_in_opening():
     degree_power = jnp.asarray([[1.0, 4.0, 9.0]], dtype=jnp.float32)
     small = dehnen_like_pair_error_by_order_from_degree_power(

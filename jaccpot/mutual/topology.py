@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
 import numpy as np
+from jax.typing import ArrayLike
 
 __all__ = [
     "MutualTopology",
@@ -554,8 +555,8 @@ def build_mutual_topology_from_tree(
 
 
 def build_mutual_topology(
-    positions: np.ndarray,
-    masses: np.ndarray,
+    positions: ArrayLike,
+    masses: ArrayLike,
     *,
     theta: float = 0.6,
     order: int = 4,
@@ -571,10 +572,14 @@ def build_mutual_topology(
 
     Parameters
     ----------
-    positions : np.ndarray
-        ``(n, 3)`` particle positions.
-    masses : np.ndarray
-        ``(n,)`` particle masses.
+    positions : ArrayLike
+        ``(n, 3)`` particle positions. Forwarded unchanged to
+        :meth:`jaccpot.FastMultipoleMethod.prepare_state`, whose annotation is
+        a JAX array, so NumPy and JAX are both accepted here -- annotating this
+        ``np.ndarray`` while forwarding to a JAX-annotated call left no input
+        that satisfied both under ``JACCPOT_RUNTIME_TYPECHECK=1``.
+    masses : ArrayLike
+        ``(n,)`` particle masses. Same forwarding as ``positions``.
     theta : float
         Opening angle of the mutual MAC.
     order : int
