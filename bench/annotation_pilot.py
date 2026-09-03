@@ -90,6 +90,24 @@ accepted, 44%, against 41% on the half that was measurable all along.
 All four widen what can be measured; none widens what counts as validated. A container
 holding one un-describable element is still UNREPLAYABLE, checked recursively.
 
+A THIRD THING THAT KEEPS IT HONEST: ONLY CALLS THAT RETURNED
+-----------------------------------------------------------
+A description is committed **after** the call returns, not before it. The suite is full of
+calls that raise on purpose -- every shape-contract test is one -- and the description of a
+deliberately malformed call is not a valid control. Recording it made the *better-annotated*
+modules the harder ones to measure, which is exactly backwards.
+
+Measured on `pallas/nearfield_mutual.py`: all four annotated entry points came back
+INCONCLUSIVE, their controls failing the very contracts the module had just been given,
+because the one recorded description per function had been taken from
+`test_nearfield_mutual_shape_contracts.py` -- `ma` at `(1, 3, 4)` from the extra-leading-axis
+case, and a `b` side one slot narrower than the `a` side from the mismatched-widths case. The
+2026-08-30 pass measured those same functions fine, because the contracts and their negative
+tests did not exist yet.
+
+Relatedly, the replay now takes the first **replayable** recording rather than the first one,
+which is what makes `PILOT_MAX_PER_FN` above 1 worth setting.
+
 **An existing recording does not benefit.** The description is frozen in the pickle, so a
 pass recorded before this change still reports its trees and NamedTuples as opaque --
 verified, an old recording replays to the identical 33/81 and 11 unreplayable. Re-record to
@@ -112,6 +130,10 @@ WHAT IT DOES NOT MEASURE
   `runtime/` mixins can have their shapes derived by capture but not their section 4.1
   question answered here. Anyone wanting that needs a real engine fixture, which is a
   different tool: it would have to build one, not describe one.
+* **`custom_vjp` / `custom_jvp` objects.** REFUSED, not measured, and loudly: replacing
+  one with a plain wrapper strips its rule, so every gradient through that name would be
+  the autodiff of the primal instead. `defvjp` captures the rules at import, so no wrapper
+  installed afterwards can intercept them anyway.
 * **Lanes that never ran.** Same limitation as `bench/annotation_capture.py`: a function
   reached only through one backend is recorded only as that backend called it. Read the
   recorded function count against the targeted count before trusting a per-module rate.
@@ -127,6 +149,9 @@ Record, during any part of the suite::
 Then replay::
 
     python -m bench.annotation_pilot replay /tmp/pilot.pkl
+
+Under `pytest-xdist` each worker writes its own shard -- `/tmp/pilot.gw0.pkl` and friends --
+and the replay merges every shard beside the path you name, so pass the same path either way.
 
 The report ranks modules by the fraction of perturbations **silently accepted**, which is
 section 4.1's predictor -- and which is not the same ordering as bare-parameter count.
@@ -389,6 +414,128 @@ def _format_path(name: str, path: tuple[int, ...]) -> str:
     return name + "".join(f"[{index}]" for index in path)
 
 
+def _is_custom_differentiation_object(target: Any) -> bool:
+    """Say whether a target is a ``custom_vjp`` / ``custom_jvp`` object rather than a function.
+
+    Wrapping one CORRUPTS THE RUN, silently. ``_wrap`` returns a plain function, and
+    ``functools.wraps`` copies ``__name__`` and ``__doc__`` but not ``defvjp``, so rebinding
+    the module attribute replaces the ``custom_vjp`` object with something that has no
+    custom rule at all -- every gradient taken through that name for the rest of the session
+    is the autodiff of the primal, not the hand-written rule, and nothing says so.
+
+    Measured 2026-09-03: recording `nearfield/_fast_lane.py` broke
+    ``test_prepacked_cvjp_saves_the_documented_nine_entry_residual`` with
+    ``AttributeError: 'function' object has no attribute 'defvjp'`` -- which was the lucky
+    outcome, because a test asserted the object's identity. The unlucky outcome is a
+    reverse-mode measurement that silently answers a different question.
+
+    Refusing is right rather than temporary: ``defvjp`` captures the rules at import, so
+    even a wrapper that forwarded the attributes could not intercept the rule calls -- the
+    same limitation `bench/annotation_capture.py` records for methods. Duck-typed rather
+    than `isinstance`, to avoid importing `jax` here for a predicate.
+
+    Parameters
+    ----------
+    target : Any
+        The object bound to the requested name.
+
+    Returns
+    -------
+    bool
+        True when it carries a custom differentiation rule setter.
+    """
+
+    return hasattr(target, "defvjp") or hasattr(target, "defjvp")
+
+
+def _worker_output(out: Path, config: Any) -> Path:
+    """Return a per-xdist-worker path, so workers do not overwrite each other.
+
+    `_recorded` is per process. Every worker used to write the SAME `PILOT_OUT` on
+    unconfigure, so the surviving file was whichever worker finished last and every other
+    worker's functions were silently gone. Measured on `pallas/nearfield_mutual.py` at
+    `-n 4`: 7 of 12 targeted functions in the file, the other 5 recorded by workers whose
+    write was clobbered -- which reads exactly like "that lane never ran".
+
+    Parameters
+    ----------
+    out : Path
+        The path the user asked for.
+    config : Any
+        The pytest config; carries `workerinput` only inside an xdist worker.
+
+    Returns
+    -------
+    Path
+        `out` under a single process, else `out` with the worker id folded into the stem.
+    """
+
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    if not worker:
+        return out
+    return out.with_name(f"{out.stem}.{worker}{out.suffix}")
+
+
+def _load_recordings(path: Path) -> dict[str, list[Any]]:
+    """Load a recording, merging every per-worker shard beside it.
+
+    Parameters
+    ----------
+    path : Path
+        The path passed to `replay`, as given to `PILOT_OUT`.
+
+    Returns
+    -------
+    dict
+        Label to list of recordings, concatenated across shards in shard order.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither the path nor any shard beside it exists.
+    """
+
+    shards = sorted(path.parent.glob(f"{path.stem}.*{path.suffix}"))
+    files = ([path] if path.exists() else []) + [s for s in shards if s != path]
+    if not files:
+        raise FileNotFoundError(path)
+
+    merged: dict[str, list[Any]] = {}
+    for file in files:
+        with file.open("rb") as handle:
+            for label, entries in pickle.load(handle).items():
+                merged.setdefault(label, []).extend(entries)
+    return merged
+
+
+def _first_replayable(
+    entries: list[tuple[dict[str, Any], bool]],
+) -> tuple[dict[str, Any], bool]:
+    """Return the first recording that can be replayed, else the first one.
+
+    Only the first recording was ever used, which made ``PILOT_MAX_PER_FN`` above 1
+    pointless: a function whose first observed call carried an opaque argument was
+    UNREPLAYABLE even when a later, fully describable call had been recorded beside it.
+    Falling back to ``entries[0]`` keeps the report identical when none is replayable,
+    so the UNREPLAYABLE path still names the opaque arguments of a real call.
+
+    Parameters
+    ----------
+    entries : list of (dict, bool)
+        The recordings for one function, in the order they were observed.
+
+    Returns
+    -------
+    tuple of (dict, bool)
+        The chosen description and its replayable flag.
+    """
+
+    for entry in entries:
+        if entry[1]:
+            return entry
+    return entries[0]
+
+
 def _wrap(function: Any, label: str, limit: int) -> Any:
     """Wrap a function so the first ``limit`` calls record their argument shapes.
 
@@ -410,6 +557,7 @@ def _wrap(function: Any, label: str, limit: int) -> Any:
 
     @wraps(function)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        snapshot: dict[str, Any] | None = None
         if len(_recorded.get(label, [])) < limit:
             try:
                 bound = signature.bind(*args, **kwargs)
@@ -418,13 +566,24 @@ def _wrap(function: Any, label: str, limit: int) -> Any:
                     name: describe_argument(value)
                     for name, value in bound.arguments.items()
                 }
-                replayable = all(is_replayable(d) for d in snapshot.values())
-                _recorded.setdefault(label, []).append((snapshot, replayable))
             except TypeError:
                 # A call that does not match the signature is about to raise on
                 # its own. Record nothing and let the real error surface.
-                pass
-        return function(*args, **kwargs)
+                snapshot = None
+
+        # Call FIRST, and commit the description only if the call returned. A call
+        # that raises is not a valid control, and the suite is full of calls that
+        # raise on purpose: a shape-contract test's deliberately malformed block
+        # would otherwise be recorded as this function's one description and turn
+        # every later replay of it INCONCLUSIVE. Measured on
+        # `pallas/nearfield_mutual.py`, where four annotated entry points came back
+        # inconclusive against descriptions taken from
+        # `test_nearfield_mutual_shape_contracts.py`'s negative cases.
+        result = function(*args, **kwargs)
+        if snapshot is not None and len(_recorded.get(label, [])) < limit:
+            replayable = all(is_replayable(d) for d in snapshot.values())
+            _recorded.setdefault(label, []).append((snapshot, replayable))
+        return result
 
     return wrapper
 
@@ -477,6 +636,7 @@ def pytest_configure(config: Any) -> None:
         return
     limit = int(os.environ.get(_MAX_ENV, "1"))
     missing: list[str] = []
+    refused: list[str] = []
     for group in spec.split(";"):
         if not group.strip():
             continue
@@ -487,6 +647,9 @@ def pytest_configure(config: Any) -> None:
             if original is None:
                 missing.append(f"{module_path}:{name}")
                 continue
+            if _is_custom_differentiation_object(original):
+                refused.append(f"{module_path}:{name}")
+                continue
             wrapper = _wrap(original, f"{module_path}:{name}", limit)
             for holder, attribute in _binding_sites(module, name, original):
                 setattr(holder, attribute, wrapper)
@@ -495,6 +658,9 @@ def pytest_configure(config: Any) -> None:
     if missing:
         # Loud, because a typo'd target otherwise reads as "already validated".
         print(f"annotation_pilot: MISSING TARGETS {missing}")
+    if refused:
+        # Also loud, and for a worse reason: see `_is_custom_differentiation_object`.
+        print(f"annotation_pilot: REFUSED (custom_vjp/custom_jvp objects) {refused}")
 
 
 def pytest_unconfigure(config: Any) -> None:
@@ -508,7 +674,9 @@ def pytest_unconfigure(config: Any) -> None:
     for holder, attribute, original in _installed:
         setattr(holder, attribute, original)
     if _recorded:
-        out = Path(os.environ.get(_OUT_ENV, "annotation_pilot.pkl"))
+        out = _worker_output(
+            Path(os.environ.get(_OUT_ENV, "annotation_pilot.pkl")), config
+        )
         with out.open("wb") as handle:
             pickle.dump(_recorded, handle)
         print(f"\nannotation_pilot: recorded {len(_recorded)} functions -> {out}")
@@ -672,7 +840,7 @@ def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
         per.setdefault(label.rsplit(":", 1)[0], Counter())[key] += 1
 
     for label in sorted(recorded):
-        snapshot, replayable = recorded[label][0]
+        snapshot, replayable = _first_replayable(recorded[label])
         module_path, function_name = label.rsplit(":", 1)
         function = getattr(importlib.import_module(module_path), function_name)
 
@@ -785,11 +953,11 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("path", type=Path, help="the pickle the plugin wrote")
     args = parser.parse_args(argv)
 
-    if not args.path.exists():
+    try:
+        recorded = _load_recordings(args.path)
+    except FileNotFoundError:
         print(f"{args.path} does not exist -- was the recording run?", file=sys.stderr)
         return 1
-    with args.path.open("rb") as handle:
-        recorded = pickle.load(handle)
     report, _ = replay(recorded)
     print(report)
     return 0

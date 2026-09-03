@@ -16,6 +16,8 @@ false positives.
 
 from __future__ import annotations
 
+import pickle
+from pathlib import Path
 from typing import NamedTuple
 
 import pytest
@@ -387,3 +389,119 @@ def test_a_namedtuple_holding_an_opaque_field_is_still_unreplayable():
         _Bundle(multipoles=object(), order=2)
     )
     assert not annotation_pilot.is_replayable(description)
+
+
+def test_a_call_that_raises_is_not_recorded_as_the_control():
+    """A shape-contract test's malformed call must not become the description.
+
+    Recording before the call meant the description of a deliberately bad call was kept,
+    and every later replay of that function reported INCONCLUSIVE against it. Measured on
+    `pallas/nearfield_mutual.py`, where four annotated entry points went inconclusive
+    against `test_nearfield_mutual_shape_contracts.py`'s negative cases.
+    """
+
+    def strict(block: _FakeArray) -> int:
+        if len(block.shape) != 2:
+            raise ValueError("block must be 2-D")
+        return 0
+
+    recorded: dict = {}
+    original = annotation_pilot._recorded
+    annotation_pilot._recorded = recorded
+    try:
+        wrapped = annotation_pilot._wrap(strict, "m:strict", 1)
+
+        with pytest.raises(ValueError):
+            wrapped(_FakeArray((1, 2, 3)))
+        assert recorded == {}, "the description of a failed call was recorded"
+
+        # Non-vacuity: a call that returns is still recorded, and it is this one.
+        wrapped(_FakeArray((2, 3)))
+        assert [desc["block"][1] for desc, _ in recorded["m:strict"]] == [(2, 3)]
+    finally:
+        annotation_pilot._recorded = original
+
+
+def test_the_replay_prefers_a_replayable_recording_over_the_first_one():
+    """`PILOT_MAX_PER_FN` above 1 was pointless while only ``[0]`` was ever used."""
+
+    opaque = ({"a": ("opaque", "Thing")}, False)
+    usable = ({"a": ("array", (2, 3), "float32")}, True)
+
+    assert annotation_pilot._first_replayable([opaque, usable]) is usable
+    assert annotation_pilot._first_replayable([usable, opaque]) is usable
+    # None replayable: unchanged, so the report still names a real call's opaque args.
+    assert annotation_pilot._first_replayable([opaque]) is opaque
+
+
+def test_each_xdist_worker_writes_its_own_shard():
+    """Workers used to write the same path, so the last one to finish won.
+
+    Measured on `pallas/nearfield_mutual.py` at `-n 4`: 7 of 12 targeted functions
+    survived in the file and the other 5 read as lanes that never ran.
+    """
+
+    class _Config:
+        def __init__(self, worker: str | None) -> None:
+            if worker is not None:
+                self.workerinput = {"workerid": worker}
+
+    out = Path("/tmp/pilot.pkl")
+    assert annotation_pilot._worker_output(out, _Config(None)) == out
+    assert annotation_pilot._worker_output(out, _Config("gw3")) == Path(
+        "/tmp/pilot.gw3.pkl"
+    )
+
+
+def test_the_replay_merges_every_worker_shard(tmp_path):
+    """And merging is what makes the shards add up to one recording again."""
+
+    a = ({"x": ("array", (2,), "float32")}, True)
+    b = ({"y": ("array", (3,), "float32")}, True)
+    with (tmp_path / "p.gw0.pkl").open("wb") as handle:
+        pickle.dump({"m:one": [a]}, handle)
+    with (tmp_path / "p.gw1.pkl").open("wb") as handle:
+        pickle.dump({"m:two": [b]}, handle)
+
+    merged = annotation_pilot._load_recordings(tmp_path / "p.pkl")
+    assert sorted(merged) == ["m:one", "m:two"]
+
+    # A shard for a function another shard also saw is concatenated, not dropped --
+    # which is what gives `_first_replayable` something to choose between.
+    with (tmp_path / "p.gw2.pkl").open("wb") as handle:
+        pickle.dump({"m:one": [b]}, handle)
+    assert len(annotation_pilot._load_recordings(tmp_path / "p.pkl")["m:one"]) == 2
+
+    with pytest.raises(FileNotFoundError):
+        annotation_pilot._load_recordings(tmp_path / "absent.pkl")
+
+
+def test_a_custom_vjp_object_is_refused_rather_than_wrapped():
+    """Wrapping one strips its rule, so every later gradient is the wrong one.
+
+    Measured 2026-09-03: recording `nearfield/_fast_lane.py` replaced a `custom_vjp`
+    object with a plain function and broke
+    `test_prepacked_cvjp_saves_the_documented_nine_entry_residual` with
+    `AttributeError: 'function' object has no attribute 'defvjp'`. That was the lucky
+    outcome -- a test happened to assert the object's identity.
+    """
+
+    class _FakeCustomVJP:
+        """A stand-in carrying the attribute the predicate keys on."""
+
+        def defvjp(self, fwd, bwd):  # pragma: no cover - never called
+            """Accept rules like `jax.custom_vjp` does."""
+
+    def plain(x):  # pragma: no cover - never called
+        """A plain function, which must still be wrapped."""
+
+    assert annotation_pilot._is_custom_differentiation_object(_FakeCustomVJP())
+    assert not annotation_pilot._is_custom_differentiation_object(plain)
+
+    class _FakeCustomJVP:
+        """The forward-mode sibling."""
+
+        def defjvp(self, rule):  # pragma: no cover - never called
+            """Accept a rule like `jax.custom_jvp` does."""
+
+    assert annotation_pilot._is_custom_differentiation_object(_FakeCustomJVP())
