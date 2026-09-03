@@ -90,6 +90,24 @@ accepted, 44%, against 41% on the half that was measurable all along.
 All four widen what can be measured; none widens what counts as validated. A container
 holding one un-describable element is still UNREPLAYABLE, checked recursively.
 
+A THIRD THING THAT KEEPS IT HONEST: ONLY CALLS THAT RETURNED
+-----------------------------------------------------------
+A description is committed **after** the call returns, not before it. The suite is full of
+calls that raise on purpose -- every shape-contract test is one -- and the description of a
+deliberately malformed call is not a valid control. Recording it made the *better-annotated*
+modules the harder ones to measure, which is exactly backwards.
+
+Measured on `pallas/nearfield_mutual.py`: all four annotated entry points came back
+INCONCLUSIVE, their controls failing the very contracts the module had just been given,
+because the one recorded description per function had been taken from
+`test_nearfield_mutual_shape_contracts.py` -- `ma` at `(1, 3, 4)` from the extra-leading-axis
+case, and a `b` side one slot narrower than the `a` side from the mismatched-widths case. The
+2026-08-30 pass measured those same functions fine, because the contracts and their negative
+tests did not exist yet.
+
+Relatedly, the replay now takes the first **replayable** recording rather than the first one,
+which is what makes `PILOT_MAX_PER_FN` above 1 worth setting.
+
 **An existing recording does not benefit.** The description is frozen in the pickle, so a
 pass recorded before this change still reports its trees and NamedTuples as opaque --
 verified, an old recording replays to the identical 33/81 and 11 unreplayable. Re-record to
@@ -389,6 +407,34 @@ def _format_path(name: str, path: tuple[int, ...]) -> str:
     return name + "".join(f"[{index}]" for index in path)
 
 
+def _first_replayable(
+    entries: list[tuple[dict[str, Any], bool]],
+) -> tuple[dict[str, Any], bool]:
+    """Return the first recording that can be replayed, else the first one.
+
+    Only the first recording was ever used, which made ``PILOT_MAX_PER_FN`` above 1
+    pointless: a function whose first observed call carried an opaque argument was
+    UNREPLAYABLE even when a later, fully describable call had been recorded beside it.
+    Falling back to ``entries[0]`` keeps the report identical when none is replayable,
+    so the UNREPLAYABLE path still names the opaque arguments of a real call.
+
+    Parameters
+    ----------
+    entries : list of (dict, bool)
+        The recordings for one function, in the order they were observed.
+
+    Returns
+    -------
+    tuple of (dict, bool)
+        The chosen description and its replayable flag.
+    """
+
+    for entry in entries:
+        if entry[1]:
+            return entry
+    return entries[0]
+
+
 def _wrap(function: Any, label: str, limit: int) -> Any:
     """Wrap a function so the first ``limit`` calls record their argument shapes.
 
@@ -410,6 +456,7 @@ def _wrap(function: Any, label: str, limit: int) -> Any:
 
     @wraps(function)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        snapshot: dict[str, Any] | None = None
         if len(_recorded.get(label, [])) < limit:
             try:
                 bound = signature.bind(*args, **kwargs)
@@ -418,13 +465,24 @@ def _wrap(function: Any, label: str, limit: int) -> Any:
                     name: describe_argument(value)
                     for name, value in bound.arguments.items()
                 }
-                replayable = all(is_replayable(d) for d in snapshot.values())
-                _recorded.setdefault(label, []).append((snapshot, replayable))
             except TypeError:
                 # A call that does not match the signature is about to raise on
                 # its own. Record nothing and let the real error surface.
-                pass
-        return function(*args, **kwargs)
+                snapshot = None
+
+        # Call FIRST, and commit the description only if the call returned. A call
+        # that raises is not a valid control, and the suite is full of calls that
+        # raise on purpose: a shape-contract test's deliberately malformed block
+        # would otherwise be recorded as this function's one description and turn
+        # every later replay of it INCONCLUSIVE. Measured on
+        # `pallas/nearfield_mutual.py`, where four annotated entry points came back
+        # inconclusive against descriptions taken from
+        # `test_nearfield_mutual_shape_contracts.py`'s negative cases.
+        result = function(*args, **kwargs)
+        if snapshot is not None and len(_recorded.get(label, [])) < limit:
+            replayable = all(is_replayable(d) for d in snapshot.values())
+            _recorded.setdefault(label, []).append((snapshot, replayable))
+        return result
 
     return wrapper
 
@@ -672,7 +730,7 @@ def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
         per.setdefault(label.rsplit(":", 1)[0], Counter())[key] += 1
 
     for label in sorted(recorded):
-        snapshot, replayable = recorded[label][0]
+        snapshot, replayable = _first_replayable(recorded[label])
         module_path, function_name = label.rsplit(":", 1)
         function = getattr(importlib.import_module(module_path), function_name)
 

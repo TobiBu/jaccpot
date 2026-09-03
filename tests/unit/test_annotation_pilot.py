@@ -387,3 +387,46 @@ def test_a_namedtuple_holding_an_opaque_field_is_still_unreplayable():
         _Bundle(multipoles=object(), order=2)
     )
     assert not annotation_pilot.is_replayable(description)
+
+
+def test_a_call_that_raises_is_not_recorded_as_the_control():
+    """A shape-contract test's malformed call must not become the description.
+
+    Recording before the call meant the description of a deliberately bad call was kept,
+    and every later replay of that function reported INCONCLUSIVE against it. Measured on
+    `pallas/nearfield_mutual.py`, where four annotated entry points went inconclusive
+    against `test_nearfield_mutual_shape_contracts.py`'s negative cases.
+    """
+
+    def strict(block: _FakeArray) -> int:
+        if len(block.shape) != 2:
+            raise ValueError("block must be 2-D")
+        return 0
+
+    recorded: dict = {}
+    original = annotation_pilot._recorded
+    annotation_pilot._recorded = recorded
+    try:
+        wrapped = annotation_pilot._wrap(strict, "m:strict", 1)
+
+        with pytest.raises(ValueError):
+            wrapped(_FakeArray((1, 2, 3)))
+        assert recorded == {}, "the description of a failed call was recorded"
+
+        # Non-vacuity: a call that returns is still recorded, and it is this one.
+        wrapped(_FakeArray((2, 3)))
+        assert [desc["block"][1] for desc, _ in recorded["m:strict"]] == [(2, 3)]
+    finally:
+        annotation_pilot._recorded = original
+
+
+def test_the_replay_prefers_a_replayable_recording_over_the_first_one():
+    """`PILOT_MAX_PER_FN` above 1 was pointless while only ``[0]`` was ever used."""
+
+    opaque = ({"a": ("opaque", "Thing")}, False)
+    usable = ({"a": ("array", (2, 3), "float32")}, True)
+
+    assert annotation_pilot._first_replayable([opaque, usable]) is usable
+    assert annotation_pilot._first_replayable([usable, opaque]) is usable
+    # None replayable: unchanged, so the report still names a real call's opaque args.
+    assert annotation_pilot._first_replayable([opaque]) is opaque
