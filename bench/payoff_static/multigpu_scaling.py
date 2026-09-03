@@ -305,9 +305,25 @@ def main() -> int:
     -------
     int
         Process exit status.
+
+    Raises
+    ------
+    SystemExit
+        If distributed mode is asked for several device counts in one process,
+        which deadlocks in the collective rendezvous.
     """
     args = _parse_args()
     device_counts = [int(v) for v in str(args.device_counts).split(",") if v]
+    if str(args.mode) == "distributed" and len(device_counts) > 1:
+        raise SystemExit(
+            "distributed mode takes ONE device count per process. Asking one "
+            "process for several DEADLOCKS in the collective rendezvous once a "
+            "clique of a different size has been formed -- measured here as 59 "
+            "minutes of idle GPUs on 'Acquire clique: devices=4' after a "
+            "2-device fit had completed. Run once per count with its own "
+            "--json-out and merge. Parameter sharding has no collectives and "
+            "takes several counts in one process happily."
+        )
     # One selection for the whole mesh: claiming devices one at a time races
     # another process onto the same card and then reports a scaling number
     # measured against a competitor.
@@ -326,8 +342,49 @@ def main() -> int:
     strong_n = int(str(args.n).split(",")[0])
     ladder = [int(v) for v in str(args.ceiling_ladder).split(",") if v]
 
+    out = args.json_out or DEFAULT_OUT
+    config_record = {
+        "n": [strong_n],
+        "theta": float(args.theta),
+        "order": int(args.order),
+        "basis": "solidfmm",
+        "seed": int(args.seed),
+        "device": runmeta.device_label(),
+        "precision": str(args.dtype),
+        "M": int(args.tracers),
+        "leaf_size": int(args.leaf_size),
+        "softening": float(args.softening),
+        "iterations": int(args.iterations),
+        "device_counts": device_counts,
+        "ceiling_ladder": ladder,
+        "ceiling_iterations": int(args.ceiling_iterations),
+        "caps": _parse_caps(args.caps),
+        "sharding_mode": str(args.mode),
+        "mode": str(args.mode),
+    }
     records: List[Dict[str, Any]] = []
     ceiling: List[Dict[str, Any]] = []
+
+    def flush() -> Any:
+        """Write the results JSON as it currently stands.
+
+        Returns
+        -------
+        Any
+            The path written.
+
+        Notes
+        -----
+        After every point. A distributed gradient costs ~150 s at N=65536, so a
+        run stopped or deadlocked partway would otherwise leave nothing behind
+        -- which is exactly what the clique deadlock did, twice.
+        """
+        return jsonio.write_result(
+            out,
+            config=config_record,
+            meta=runmeta.run_meta(),
+            data={"records": records, "ceiling": ceiling},
+        )
 
     for count in device_counts:
         if count > len(available):
@@ -343,15 +400,16 @@ def main() -> int:
                     "reason": f"only {len(available)} devices visible",
                 }
             )
+            flush()
             continue
         if str(args.mode) == "distributed" and count < 2:
             # Upstream limitation, not a configuration error: the distributed
             # evaluator's per-device tree build asserts "Need at least one
             # particle" inside yggdrax when there is a single domain. The path
             # exists for cross-device halos and is not built for ndev=1. The
-            # single-device number belongs to the radix operator, which is a
-            # DIFFERENT code path -- run --mode parameter_sharding for it, and
-            # do not put the two on one strong-scaling curve without saying so.
+            # single-device number belongs to the radix operator, a DIFFERENT
+            # code path -- run --mode parameter_sharding for it, and do not put
+            # the two on one strong-scaling curve without saying so.
             print(
                 f"  ndev={count}: SKIPPED in distributed mode -- the "
                 "distributed evaluator requires at least 2 devices "
@@ -372,7 +430,9 @@ def main() -> int:
                     ),
                 }
             )
+            flush()
             continue
+
         devices = list(available[:count])
         try:
             record = _fit_once(n=strong_n, devices=devices, args=args)
@@ -380,7 +440,8 @@ def main() -> int:
             print(
                 f"  ndev={count}: P={record['num_free_parameters']:>9} "
                 f"wall {record['timing']['wall_seconds']:8.2f}s  "
-                f"mean grad {record['timing']['mean_later_gradient_seconds']*1e3:8.2f} ms  "
+                f"mean grad "
+                f"{record['timing']['mean_later_gradient_seconds']*1e3:8.2f} ms  "
                 f"loss {record['initial_loss']:.3e}->{record['final_loss']:.3e}",
                 flush=True,
             )
@@ -395,11 +456,10 @@ def main() -> int:
                     "error": str(exc)[:500],
                 }
             )
+        flush()
 
         # The ceiling arm: climb the ladder until it breaks, and record where.
         for n in ladder:
-            if count > len(available):
-                break
             try:
                 point = _fit_once(
                     n=n,
@@ -414,6 +474,7 @@ def main() -> int:
                     f"P={point['num_free_parameters']:>10}: OK",
                     flush=True,
                 )
+                flush()
             except Exception as exc:
                 print(
                     f"    ceiling ndev={count} N={n:>10}: FAILED "
@@ -431,34 +492,10 @@ def main() -> int:
                         "error": str(exc)[:500],
                     }
                 )
+                flush()
                 break
 
-    out = args.json_out or DEFAULT_OUT
-    written = jsonio.write_result(
-        out,
-        config={
-            "n": [strong_n],
-            "theta": float(args.theta),
-            "order": int(args.order),
-            "basis": "solidfmm",
-            "seed": int(args.seed),
-            "device": runmeta.device_label(),
-            "precision": str(args.dtype),
-            "M": int(args.tracers),
-            "leaf_size": int(args.leaf_size),
-            "softening": float(args.softening),
-            "iterations": int(args.iterations),
-            "device_counts": device_counts,
-            "ceiling_ladder": ladder,
-            "ceiling_iterations": int(args.ceiling_iterations),
-            "caps": _parse_caps(args.caps),
-            "sharding_mode": str(args.mode),
-            "mode": str(args.mode),
-        },
-        meta=runmeta.run_meta(),
-        data={"records": records, "ceiling": ceiling},
-    )
-    print(f"wrote {written}")
+    print(f"wrote {flush()}")
     return 0
 
 
