@@ -872,3 +872,79 @@ def test_the_rollout_with_rebuild_every_one_matches_odisseos_jitted_lane():
     ):
         rel = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
         assert rel < 1e-12, f"{name}: {rel:.3e}"
+
+
+# --- nornax's conformance kit, run against the adapter ---------------------------------
+#
+# ``nornax.conformance.check_mutual_force_model`` is the runnable form of the
+# ``MutualForceModel`` / ``FusedMutualForceModel`` contract (EDDA D-007): per-level
+# momentum residual, levels partition the total, fused kick == per-level map at every
+# boundary, explicit-topology parity, and the oracle match. The tests above check
+# pieces of this by hand; this runs the whole kit, so a future contract addition
+# lands here without a new hand-written test.
+
+
+def _conformance_kit():
+    """The kit, or a skip on a nornax that predates it."""
+    try:
+        from nornax.conformance import check_mutual_force_model
+    except ImportError:  # pragma: no cover - depends on the installed nornax
+        pytest.skip("installed nornax has no conformance kit")
+    return check_mutual_force_model
+
+
+@pytest.mark.parametrize("backend", ["host", "device"])
+def test_the_adapter_passes_nornax_conformance_kit(backend):
+    """Every check in nornax's kit, on both topology backends, non-vacuously.
+
+    The system is the two-clump one with far pairs (asserted first: the kit
+    cannot know whether an FMM configuration is a direct sum in disguise). The
+    prepared state is passed as ``topology=``, so the explicit-topology contract
+    from B4 is checked bit for bit against the implicit call. The oracle
+    tolerance is set from the FMM's own accuracy at ``theta = 0.6``, order 4:
+    measured 2.0e-5 relative L2 on this system (host backend, 15 far pairs),
+    so 2e-3 is two orders of margin. Everything else is at the kit's round-off
+    defaults; measured, the per-level momentum residuals were ~1e-17 and the
+    fused-kick parities ~2.5e-16.
+    """
+    check = _conformance_kit()
+    k_max = 2
+    positions, velocities, masses = _two_clumps(seed=27)
+    fmm = BlockStepFMM(
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.6,
+        max_order=4,
+        leaf_size=16,
+        topology_backend=backend,
+    )
+    state = fmm.prepare(positions, masses)
+    assert int(state.num_far_pairs) > 0, "no far pairs: the oracle check is vacuous"
+    rung = jnp.asarray(
+        np.random.default_rng(28).integers(0, k_max + 1, positions.shape[0]),
+        dtype=jnp.int32,
+    )
+
+    report = check(
+        fmm,
+        positions,
+        masses,
+        k_max=k_max,
+        rung=rung,
+        dt_max=2.0e-3,
+        topology=state,
+        oracle=MutualDirectSumGravity(G=1.0, softening=SOFTENING),
+        oracle_tolerance=2.0e-3,
+        require_fused=True,
+    )
+    assert report.passed, report.summary()
+    assert report.fused_selected and report.scanned_boundaries
+    # The kit ran the checks this backend is about, not a subset of them.
+    names = {c.name for c in report.checks}
+    assert {
+        "partition",
+        "total_accelerations",
+        "oracle",
+        "explicit topology: total",
+    } <= names
+    assert sum(name.endswith(": kick") for name in names) == 2**k_max + 1
