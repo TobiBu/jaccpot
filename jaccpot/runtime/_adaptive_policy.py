@@ -717,19 +717,23 @@ def _particle_leaf_ids(*, tree: Tree, num_particles: int, max_leaf_size: int) ->
     return leaf_ids.at[safe_idx].max(payload)
 
 
+@jaxtyped(typechecker=beartype)
 def estimate_particle_force_scale(
     *,
     tree: Tree,
-    positions_sorted: Array,
-    masses_sorted: Array,
-    node_centers: Array,
-    node_radii: Array,
-    interaction_sources: Array,
-    interaction_targets: Array,
-    neighbor_offsets: Array,
-    neighbor_counts: Array,
-    neighbor_leaf_indices: Array,
-    neighbor_indices: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
+    node_centers: Float[Array, "nodes 3"],
+    node_radii: Float[Array, "nodes"],
+    interaction_sources: Int[Array, "pairs"],
+    interaction_targets: Int[Array, "pairs"],
+    # `_` and not `leaves+1`: the same parameter-order constraint
+    # `_near_field_force_scale` records below -- this parameter precedes the two that
+    # bind `leaves`, and jaxtyping evaluates a symbolic axis in parameter order.
+    neighbor_offsets: Int[Array, "_"],
+    neighbor_counts: Int[Array, "leaves"],
+    neighbor_leaf_indices: Int[Array, "leaves"],
+    neighbor_indices: Int[Array, "edges"],
     max_leaf_size: int,
     softening: float = 0.0,
     gravitational_constant: float = 1.0,
@@ -786,26 +790,26 @@ def estimate_particle_force_scale(
     ----------
     tree : Tree
         Tree being evaluated.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         ``(n, 3)`` positions in sorted order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         ``(n,)`` masses in sorted order.
-    node_centers : Array
+    node_centers : Float[Array, 'nodes 3']
         ``(num_nodes, 3)`` node centres used by the far term.
-    node_radii : Array
+    node_radii : Float[Array, 'nodes']
         ``(num_nodes,)`` node radii; the target radius is what
         ``far_center_inflation`` scales.
-    interaction_sources : Array
+    interaction_sources : Int[Array, 'pairs']
         Source node of each far pair.
-    interaction_targets : Array
+    interaction_targets : Int[Array, 'pairs']
         Target node of each far pair.
-    neighbor_offsets : Array
+    neighbor_offsets : Int[Array, '_']
         CSR offsets into the near-field neighbour list.
-    neighbor_counts : Array
+    neighbor_counts : Int[Array, 'leaves']
         Per-leaf neighbour counts.
-    neighbor_leaf_indices : Array
+    neighbor_leaf_indices : Int[Array, 'leaves']
         Node index of each leaf, for the near term.
-    neighbor_indices : Array
+    neighbor_indices : Int[Array, 'edges']
         Flat neighbour entries the offsets index into.
     max_leaf_size : int
         Leaf capacity.
@@ -1018,14 +1022,15 @@ def _near_field_force_scale(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def _far_field_force_scale_by_node(
     *,
     tree: Tree,
-    masses: Array,
-    node_centers: Array,
-    node_radii: Array,
-    interaction_sources: Array,
-    interaction_targets: Array,
+    masses: Float[Array, "n"],
+    node_centers: Float[Array, "nodes 3"],
+    node_radii: Float[Array, "nodes"],
+    interaction_sources: Int[Array, "pairs"],
+    interaction_targets: Int[Array, "pairs"],
     g: Array,
     eps_sq: Array,
     inflation: Array,
@@ -1040,15 +1045,15 @@ def _far_field_force_scale_by_node(
     ----------
     tree : Tree
         Tree supplying the parent chain the accumulation walks.
-    masses : Array
+    masses : Float[Array, 'n']
         ``(num_nodes,)`` spanned node mass, from :func:`node_span_mass`.
-    node_centers : Array
+    node_centers : Float[Array, 'nodes 3']
         ``(num_nodes, 3)`` node centres.
-    node_radii : Array
+    node_radii : Float[Array, 'nodes']
         ``(num_nodes,)`` node radii; the target's is what ``inflation`` scales.
-    interaction_sources : Array
+    interaction_sources : Int[Array, 'pairs']
         Source node of each far pair.
-    interaction_targets : Array
+    interaction_targets : Int[Array, 'pairs']
         Target node of each far pair.
     g : Array
         ``G`` as an array.
@@ -2059,11 +2064,59 @@ def per_node_mac_radius(
     return rho_floored * (jnp.asarray(theta_global, dtype=dtype) / theta)
 
 
+# WHY THESE TWO CARRY ONE ANNOTATION AND NOT NINE, AND WHY THE MODULE'S 34% IS NOT 34%
+# OF CLOSABLE WORK.
+#
+# The re-recorded pilot (2026-09-03) puts this module top of the Phase 2 order by absolute
+# count: 78 silent acceptances of 230 perturbations across 26 measured functions. That is
+# up from August's 29% and it is NOT decay -- the earlier pass measured 9 functions and
+# gave up on 4, so the module simply has ~2.9x more measurable surface now that the pilot
+# can describe trees and no longer loses xdist shards.
+#
+# But 33 of the 78 are in these two functions, and 28 of those 33 are inside `upward`:
+#
+#     build_adaptive_policy_state   14 in upward, 4 on positions_sorted
+#     resolve_dehnen_geometry       14 in upward, 1 on positions_sorted
+#
+# `upward` is a `TreeUpwardData`, a NamedTuple of three NamedTuples, and the pilot perturbs
+# container leaves BY PATH -- `upward[1][1]` is `mass_moments`' second field. Those leaves
+# CANNOT BE CONSTRAINED by any annotation this toolchain supports, and that was measured
+# rather than assumed:
+#
+#     class Inner(NamedTuple):
+#         centers: Float[Array, "nodes 3"]
+#         radii: Float[Array, "nodes"]
+#     class Outer(NamedTuple):
+#         geom: Inner
+#     @jaxtyped(typechecker=beartype)
+#     def consume(bundle: Outer, extra: Float[Array, "nodes"]) -> int: ...
+#
+#     radii one entry short   ACCEPTED
+#     centers 2-component     ACCEPTED
+#     extra disagreeing on `nodes` against the container   ACCEPTED
+#
+# beartype validates a NamedTuple parameter by type, not by field, and jaxtyping's axis memo
+# is not shared with the container's contents. Annotating `TreeUpwardData`'s fields would
+# therefore change nothing here, and 4.4 rules out the other route (returns are effectively
+# unavailable, so constraining `prepare_upward_sweep`'s return is not open either).
+#
+# So `positions_sorted` is the whole of what an annotation can do at these two sites. It
+# closes three of its four acceptances -- the trailing axis, the extra leading axis and the
+# flattening. The fourth, a leading axis one shorter, stays: `n` occurs ONCE in each
+# signature, so it binds freely and asserts nothing about length (4.4). The relation that
+# would catch it runs through `tree`, which is an opaque yggdrax object here.
+#
+# Read together with the force-scale pair below (7 closed) that is 10 of 78, and the
+# remaining 43 plain-parameter acceptances are spread one and two at a time over 23
+# functions, nearly all of them single-occurrence axes where the same limit applies. The
+# rate is real; the CLOSABLE fraction of it is much smaller, and saying so here is cheaper
+# than rediscovering it per slice.
+@jaxtyped(typechecker=beartype)
 def resolve_dehnen_geometry(
     *,
     geometry_mode: Literal["com", "exact", "tree", "tree_approx", "runtime"],
     tree: Tree,
-    positions_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
     upward: TreeUpwardData,
     dtype: DTypeLike,
     max_leaf_size: Optional[int] = None,
@@ -2084,7 +2137,7 @@ def resolve_dehnen_geometry(
         Which MAC geometry to build: com, aabb or an enclosing sphere.
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
     upward : TreeUpwardData
         Upward-sweep artifacts supplying the multipoles and geometry.
@@ -2187,11 +2240,12 @@ def _dehnen_binomial_matrix(
     return jnp.asarray(rows, dtype=dtype)
 
 
+@jaxtyped(typechecker=beartype)
 def build_adaptive_policy_state(
     *,
     upward: TreeUpwardData,
     tree: Tree,
-    positions_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
     p_gears: tuple[int, ...],
     force_scale_nodes: Optional[Array],
     eps: Array,
@@ -2210,7 +2264,7 @@ def build_adaptive_policy_state(
         Upward-sweep artifacts supplying the multipoles and geometry.
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
     p_gears : tuple[int, ...]
         Candidate expansion orders the adaptive policy may choose between.
