@@ -1324,7 +1324,7 @@ fig.tight_layout()
 style.footer(fig, "%s, %s, order %d, theta %.2f, leaf %d, M=%d, mode=%s%s" % (
     art["meta"]["device_kind"], cfg["precision"], cfg["order"], cfg["theta"],
     cfg["leaf_size"], cfg["M"], cfg.get("mode", "?"), ceiling))
-style.save(fig, str(FIG_DIR / "fig_16_gradient_cost_vs_nparams.pdf"))
+style.save(fig, str(FIG_DIR / "fig16_gradient_cost_vs_nparams.pdf"))
 """
 
 FIG16_CAPTION = r"""
@@ -1455,7 +1455,7 @@ fig.tight_layout()
 style.footer(fig, "%s, N=%d, M=%d, %d iterations, softening %g, noise %g" % (
     art["meta"]["device_kind"], high["N"], high["M"], high["iterations"],
     high["softening"], high["noise_fraction"]))
-style.save(fig, str(FIG_DIR / "fig_17_reconstruction_quality.pdf"))
+style.save(fig, str(FIG_DIR / "fig17_reconstruction_quality.pdf"))
 """
 
 FIG17_CAPTION = r"""
@@ -1531,7 +1531,7 @@ style.finish(ax, legend=True, legend_kwargs={"loc": "lower right", "fontsize": 5
 fig.tight_layout()
 style.footer(fig, "%s, %d runs, N in %s, %d iterations" % (
     art["meta"]["device_kind"], len(recs), cfg["n"], cfg["iterations"]))
-style.save(fig, str(FIG_DIR / "fig_18_convergence_and_degeneracy.pdf"))
+style.save(fig, str(FIG_DIR / "fig18_convergence_and_degeneracy.pdf"))
 """
 
 FIG18_CAPTION = r"""
@@ -1654,7 +1654,7 @@ fig.tight_layout()
 style.footer(fig, "%s, leaf %d, order %d, theta %.2f, %d iterations, lr %g" % (
     art["meta"]["device_kind"], cfg["leaf_size"], cfg["order"], cfg["theta"],
     cfg["iterations"], base_lr))
-style.save(fig, str(FIG_DIR / "fig_19_topology_switching.pdf"))
+style.save(fig, str(FIG_DIR / "fig19_topology_switching.pdf"))
 """
 
 FIG19_CAPTION = r"""
@@ -1740,7 +1740,7 @@ fig.tight_layout()
 style.footer(fig, "%s, %s sharding, N=%d, %d iterations, leaf %d" % (
     art["meta"]["device_kind"], cfg.get("sharding_mode", "?"), cfg["n"][0],
     cfg["iterations"], cfg["leaf_size"]))
-style.save(fig, str(FIG_DIR / "fig_20_multigpu_reconstruction_scaling.pdf"))
+style.save(fig, str(FIG_DIR / "fig20_multigpu_reconstruction_scaling.pdf"))
 """
 
 FIG20_CAPTION = r"""

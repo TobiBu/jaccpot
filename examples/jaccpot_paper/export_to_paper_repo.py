@@ -99,6 +99,36 @@ FIGURES = [
         "fig_13_grad_correctness.ipynb",
         "differentiability/grad_correctness.json",
     ),
+    (
+        "fig16_gradient_cost_vs_nparams",
+        "16",
+        "fig_16_gradient_cost_vs_nparams.ipynb",
+        "density_reconstruction/gradient_cost_vs_nparams.json",
+    ),
+    (
+        "fig17_reconstruction_quality",
+        "17",
+        "fig_17_reconstruction_quality.ipynb",
+        "density_reconstruction/reconstruction_runs.json",
+    ),
+    (
+        "fig18_convergence_and_degeneracy",
+        "18",
+        "fig_18_convergence_and_degeneracy.ipynb",
+        "density_reconstruction/reconstruction_runs.json",
+    ),
+    (
+        "fig19_topology_switching",
+        "19",
+        "fig_19_topology_switching.ipynb",
+        "density_reconstruction/topology_switching.json",
+    ),
+    (
+        "fig20_multigpu_reconstruction_scaling",
+        "20",
+        "fig_20_multigpu_reconstruction_scaling.ipynb",
+        "density_reconstruction/multigpu_scaling.json",
+    ),
 ]
 
 HEADER = """# Figure provenance
