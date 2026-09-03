@@ -2075,22 +2075,13 @@ def _interaction_cache_key(
         hasher.update(str(topology_key).encode("utf8"))
     else:
         try:
-            morton_codes = np.asarray(
-                jax.device_get(tree.morton_codes),
-                dtype=np.uint64,
+            morton_codes, node_ranges, bounds_min, bounds_max = jax.device_get(
+                (tree.morton_codes, tree.node_ranges, tree.bounds_min, tree.bounds_max)
             )
-            node_ranges = np.asarray(
-                jax.device_get(tree.node_ranges),
-                dtype=np.int64,
-            )
-            bounds_min = np.asarray(
-                jax.device_get(tree.bounds_min),
-                dtype=np.float64,
-            )
-            bounds_max = np.asarray(
-                jax.device_get(tree.bounds_max),
-                dtype=np.float64,
-            )
+            morton_codes = np.asarray(morton_codes, dtype=np.uint64)
+            node_ranges = np.asarray(node_ranges, dtype=np.int64)
+            bounds_min = np.asarray(bounds_min, dtype=np.float64)
+            bounds_max = np.asarray(bounds_max, dtype=np.float64)
         except Exception:
             return None
 

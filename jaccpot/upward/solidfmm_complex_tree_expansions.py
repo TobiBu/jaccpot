@@ -21,7 +21,7 @@ from jaxtyping import Array, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
 from yggdrax.geometry import TreeGeometry
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
-from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments
+from yggdrax.tree_moments import TreeMassMoments, compute_tree_mass_moments, compute_tree_mass_moments_jit
 
 from jaccpot._env import env_flag
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
@@ -846,7 +846,12 @@ def prepare_solidfmm_complex_upward_sweep(
     _record_stage("geometry", stage_t0, geometry)
     _upward_diag("geometry done")
     stage_t0 = time.perf_counter()
-    mass_moments = compute_tree_mass_moments(
+    #mass_moments = compute_tree_mass_moments(
+    #    tree,
+    #    positions_sorted,
+    #    masses_sorted,
+    #)
+    mass_moments = compute_tree_mass_moments_jit(
         tree,
         positions_sorted,
         masses_sorted,

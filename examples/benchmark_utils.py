@@ -42,6 +42,7 @@ def time_callable(
     *args: Any,
     warmup: int = 1,
     runs: int = 5,
+    jax_trace_label: Optional[str] = None,
     **kwargs: Any,
 ) -> TimingResult:
     """Measure execution time for ``fn`` with optional warmup passes."""
@@ -54,13 +55,20 @@ def time_callable(
     for _ in range(warmup):
         _block_until_ready(fn(*args, **kwargs))
 
+    trace_ctx = (
+        jax.profiler.TraceAnnotation(jax_trace_label)
+        if jax_trace_label
+        else contextlib.nullcontext()
+    )
+
     samples = []
     result: Any = None
     for _ in range(runs):
-        start = time.perf_counter()
-        result = fn(*args, **kwargs)
-        result = _block_until_ready(result)
-        end = time.perf_counter()
+        with trace_ctx:
+            start = time.perf_counter()
+            result = fn(*args, **kwargs)
+            result = _block_until_ready(result)
+            end = time.perf_counter()
         samples.append(end - start)
 
     wall_times = tuple(samples)

@@ -496,6 +496,12 @@ def run_worker_case(
         "--config-json",
         json.dumps(payload),
     ]
+    trace_dir = (
+        OUTPUT_DIR
+        / "jax_traces"
+        / f"N{num_particles}_{_traversal_cfg_label(traversal_cfg)}_m2l{m2l_chunk_size}_nf{nearfield_edge_chunk_size}"
+    )
+    cmd += ["--jax-trace-dir", str(trace_dir)]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -800,6 +806,7 @@ def main() -> None:
     print(f"Starting N-ladder production sweep run_id={ladder_run_id}")
 
     sweep_rows: list[dict[str, Any]] = []
+    print(f"-> OUTPUT_DIR is {OUTPUT_DIR}")
     for num_particles in ARGS.particle_counts:
         guidance = traversal_guidance_for_num_particles(int(num_particles))
         preferred_label = _traversal_cfg_label(guidance["recommended"])
