@@ -49,9 +49,20 @@ compare a jitted row against an eager one**, exactly as fig12 must not.
 
 Timing follows the shared protocol in ``bench/scaling/_timing`` -- warm up, then
 the minimum over repeats, blocked on device -- so this figure's statistic
-matches every other timing figure in the paper. Peak device memory is read from
-JAX's own allocator stats, and the first evaluation is excluded from every timing
-because it carries a one-time XLA compile measured in tens of seconds.
+matches every other timing figure in the paper.
+
+**Compile is measured, recorded separately, and excluded from every reported
+evaluation cost.** The first call of each arm is timed on its own into
+``*_compile_seconds``; the timed region then adds three more untimed warmups and
+takes the minimum of seven, so no reported per-evaluation number contains a
+compile. That the exclusion works is visible in the artifact itself: at
+N=1048576 the gradient's mean over seven repeats is 1.0008 times its minimum,
+with a standard deviation of 0.034 s on a 62 s measurement, which one
+compile-bearing call among seven could not produce. Compile is kept because it
+is a real cost -- it is why ``fit.py`` runs the eager path by default, since
+``differentiable_step_fn`` captures the prepared state as a constant and
+recompiles at every rebuild -- but it is one-time per topology, and folding it
+into a per-evaluation number would misreport both.
 
 Usage
 -----
@@ -71,6 +82,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import sys
+import time
 from typing import Any, Dict, List, Optional
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -328,13 +340,29 @@ def _measure_one(
         gradient_call = (
             jax.jit(jax.grad(objective)) if want_jit else jax.grad(objective)
         )
+        forward_compile_seconds: Optional[float] = None
+        gradient_compile_seconds: Optional[float] = None
         if want_jit:
             # Trip the jit limitation here, in the untimed region, rather than
             # inside a timed repeat. A fallback is a result about the pipeline,
             # not a failure of the measurement.
+            #
+            # This first call is also where the XLA compile is paid, so it is
+            # timed and recorded SEPARATELY. Compile is a real cost -- it is why
+            # fit.py runs the eager path by default, since
+            # differentiable_step_fn captures the prepared state as a constant
+            # and so recompiles at every rebuild -- but it is a ONE-TIME cost
+            # per topology, and folding it into a per-evaluation number would
+            # misreport both. The timed region below adds three more untimed
+            # warmups and takes the minimum of seven, so nothing it reports
+            # includes a compile.
             try:
+                started = time.perf_counter()
                 jax.block_until_ready(forward_call(params))
+                forward_compile_seconds = time.perf_counter() - started
+                started = time.perf_counter()
                 jax.block_until_ready(gradient_call(params))
+                gradient_compile_seconds = time.perf_counter() - started
             except Exception as exc:
                 # Record the MESSAGE, not just the type. The first version of
                 # this printed only the exception class, and at N=1048576 that
@@ -401,6 +429,14 @@ def _measure_one(
             "autodiff_speedup_over_fd": (fd_seconds / grad_min if grad_min else None),
             "mode": mode,
             "jit_error": jit_error,
+            # One-time per topology, and excluded from every number above.
+            "forward_compile_seconds": forward_compile_seconds,
+            "forward_backward_compile_seconds": gradient_compile_seconds,
+            "compile_over_evaluation": (
+                gradient_compile_seconds / grad_min
+                if gradient_compile_seconds and grad_min
+                else None
+            ),
             "forward_cost_analysis": forward_cost,
             "forward_backward_cost_analysis": gradient_cost,
             "backward_over_forward_flops": flop_ratio,
@@ -416,12 +452,17 @@ def _measure_one(
         }
         records.append(record)
         flop_note = f"  flops x{flop_ratio:.2f}" if flop_ratio else ""
+        compile_note = (
+            f"  compile {gradient_compile_seconds:.1f} s"
+            if gradient_compile_seconds
+            else ""
+        )
         latency_note = "  [LATENCY-BOUND]" if record["latency_bound"] else ""
         print(
             f"  N={n:>9} {kind:>10}: P={num_free:>9}  "
             f"fwd {forward_min*1e3:9.3f} ms  fwd+bwd {grad_min*1e3:9.3f} ms  "
-            f"ratio {record['backward_over_forward']:.2f}x{flop_note}{latency_note}  "
-            f"FD(extrap) {fd_seconds:.3e} s",
+            f"ratio {record['backward_over_forward']:.2f}x{flop_note}{latency_note}"
+            f"{compile_note}  FD(extrap) {fd_seconds:.3e} s",
             flush=True,
         )
         del parameterization, params

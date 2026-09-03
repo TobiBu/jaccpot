@@ -1607,6 +1607,14 @@ for i, n in enumerate(sorted({r["N"] for r in recs})):
     ax.plot(ks, [r["final_loss"] / base for r in sel], marker="x", ls="--",
             color=style.CATEGORICAL[i % len(style.CATEGORICAL)],
             label="N=%d, final loss / loss(k=1)" % n)
+    # The loss jump at a rebuild, in units of what one step achieves. Below one
+    # means switching costs less than a step gains -- which is the claim.
+    ratios = [(r.get("loss_continuity") or {}).get("jump_over_step_improvement")
+              for r in sel]
+    if any(v is not None for v in ratios):
+        ax.plot(ks, [v if v is not None else np.nan for v in ratios], marker="+",
+                ls=":", color=style.CATEGORICAL[i % len(style.CATEGORICAL)],
+                label="N=%d, jump / step improvement" % n)
 ax.set_xscale("log", base=2)
 ax.set_xlabel("rebuild cadence $k$"); ax.set_ylabel("churn, and relative final loss")
 style.finish(ax, legend=True, legend_kwargs={"loc": "center left", "fontsize": 5.2})
@@ -1632,22 +1640,29 @@ ax.set_xlabel("rebuild cadence $k$")
 ax.set_ylabel("loss jump at a rebuild, relative")
 style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.2})
 
-# (d) FD vs autodiff: pinned within an epoch, crossed over a switch -------- #
+# (d) the contract, and how far the gradient moves across a rebuild -------- #
+# NOT a finite difference straddling the switch: that divides a topology-induced
+# loss offset by 2*eps, diverges as eps -> 0, and read 5e3 in the first version
+# of this figure. The artifact keeps its eps-scaling demonstration; what belongs
+# on a plot is the gradient difference, which is bounded and comparable to the
+# Yggdrax exactness result.
 ax = axes[1][1]
 fd = [r for r in recs if r.get("fd_agreement")]
 if fd:
     x = np.arange(len(fd))
     ax.plot(x, [r["fd_agreement"]["pinned_median_rel"] for r in fd],
             marker=style.MARKERS[0], color=style.ENTITY["positions"],
-            label="pinned within one epoch")
-    ax.plot(x, [r["fd_agreement"]["crossed_median_rel"] for r in fd],
-            marker=style.MARKERS[2], ls="--", color=style.CATEGORICAL[2],
-            label="crossing a switch")
+            label="FD vs autodiff, pinned epoch")
+    delta = [r["fd_agreement"].get("gradient_delta_rel_across_rebuild") for r in fd]
+    if any(v is not None for v in delta):
+        ax.plot(x, [v if v is not None else np.nan for v in delta],
+                marker=style.MARKERS[2], ls="--", color=style.CATEGORICAL[2],
+                label=r"$|\nabla_B - \nabla_A| / |\nabla_A|$ across a rebuild")
     ax.set_xticks(x)
     ax.set_xticklabels(["%d/k%d" % (r["N"], r["rebuild_cadence"]) for r in fd],
                        rotation=60, fontsize=4.6)
 ax.set_yscale("log")
-ax.set_ylabel("|FD $-$ autodiff| / |autodiff|")
+ax.set_ylabel("relative difference")
 style.finish(ax, legend=True, legend_kwargs={"loc": "upper left", "fontsize": 5.2})
 
 fig.tight_layout()
@@ -1673,13 +1688,16 @@ usable, and it is this measurement rather than any appeal to ordering stability
 that says so. **(c)** The loss discontinuity at a rebuild boundary, measured at
 *fixed positions* under the outgoing and incoming topologies so it isolates the
 topology change from the optimiser's step. **(d)** Finite differences against
-autodiff, pinned within one topology epoch and crossing a switch. Within an
-epoch they agree to $\sim10^{-9}$, which is the fixed-topology contract of
-Sect.~2 measured rather than argued; a finite difference that straddles a switch
-legitimately disagrees, and by how much is what this panel reports. The pinned
-arm pins the interaction-list selection as well as the tree -- pinning only the
-tree leaves a residual that reads as a gradient bug and is not one. Cited
-alongside, and not confirmed by, the low-dimensional Yggdrax precedent.
+autodiff within one topology epoch, where they agree to $\sim10^{-9}$ -- the
+fixed-topology contract of Sect.~2 measured rather than argued -- beside the
+relative change in the *gradient itself* when the topology is rebuilt at the
+same positions. The pinned arm pins the interaction-list selection as well as
+the tree; pinning only the tree leaves a residual that reads as a gradient bug
+and is not one. A finite difference whose two evaluations straddle a switch is
+deliberately not plotted: it divides a topology-induced loss offset by the step
+size, so it diverges as the step shrinks and reports the step rather than the
+pipeline. Cited alongside, and not confirmed by, the low-dimensional Yggdrax
+precedent.
 """
 
 

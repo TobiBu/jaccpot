@@ -27,14 +27,19 @@ and it is reported relative to the step's own loss decrease. A jump far smaller
 than the progress made per step is the statement that the switching does not
 obstruct the descent.
 
-**3. FD-vs-autodiff agreement within a topology epoch against across a switch.**
-Within an epoch the two must agree to FD precision -- that is the section 2
-contract. Across a switch they legitimately disagree, and quantifying that
-disagreement is the honest form of the claim. **The pinned arm pins the
-interaction-list selection as well as the tree** (D-016): pinning only the tree
-leaves a residual that reads as a gradient bug and is not one. Passing one
-prepared state to both arms pins both, because the state carries the tree, the
-M2L list and the near-field CSR together.
+**3. FD-vs-autodiff within a topology epoch, and how far the gradient moves
+across a rebuild.** Within an epoch the two must agree to FD precision -- the
+section 2 contract, measured. **The pinned arm pins the interaction-list
+selection as well as the tree** (D-016): pinning only the tree leaves a residual
+that reads as a gradient bug and is not one. Passing one prepared state to both
+arms pins both, since the state carries the tree, the M2L list and the
+near-field CSR together. Across a rebuild the question is asked of the
+*gradient* -- ``|grad_B - grad_A| / |grad_A|`` at the same positions, which is
+directly comparable to the Yggdrax exactness result -- and **not** of a finite
+difference whose two evaluations straddle the switch. That last quantity was
+what the first version of this script reported, and it was meaningless: see
+:func:`_fd_agreement` for the measurement that shows it tracks ``eps`` rather
+than the pipeline.
 
 **4. The effect of cadence k on the final residual.** Whether ``k > 1`` is
 usable is an open question that only the interaction-list rate can answer, and
@@ -173,7 +178,37 @@ def _fd_agreement(
     other_state: Any,
     args: argparse.Namespace,
 ) -> Dict[str, Any]:
-    """Directional FD-vs-autodiff agreement, within one epoch and across a switch.
+    """Autodiff against finite differences, and against a rebuilt topology.
+
+    Two questions, and the second one replaces a measurement that did not mean
+    anything.
+
+    **Within one topology epoch**, a directional finite difference of the
+    frozen-topology map must agree with ``jax.grad`` of the same map. That is
+    the fixed-topology contract of section 2, measured. Both arms use ONE
+    prepared state, which pins the tree **and** the M2L/near-field interaction
+    lists together -- D-016 is explicit that pinning only the tree leaves a
+    residual that reads as a gradient bug.
+
+    **Across a switch**, the useful question is how much the *gradient* moves
+    when the topology is rebuilt at the same positions:
+    ``|grad_B - grad_A| / |grad_A|``. This is directly comparable to the
+    Yggdrax exactness result -- there, differentiating through the rebuild was
+    bit-identical to the frozen-ordering gradient -- and it is bounded and
+    interpretable.
+
+    What this deliberately does **not** report is a finite difference whose two
+    evaluations straddle the switch. The first version of this script did, and
+    the number was nonsense: at N=32768 it came out at a relative error of
+    5.0e3, which a reader would read as autodiff being wrong by a factor of
+    5000. It is not a derivative at all. The two topologies assign slightly
+    different losses to the same configuration -- a relative offset of ~1.3e-3,
+    which the loss-continuity arm measures properly -- and dividing that offset
+    by ``2 * eps`` with ``eps = 1e-6`` inflates it by 5e5. The quantity
+    therefore diverges as ``eps -> 0`` and measures the step size, not the
+    pipeline. ``crossed_eps_scaling`` below demonstrates that rather than
+    asserting it: the same quantity is evaluated at ``eps`` and ``10 * eps``,
+    and a ~10x ratio is the signature of an offset divided by a step.
 
     Parameters
     ----------
@@ -184,20 +219,17 @@ def _fd_agreement(
     positions : Any
         ``(N, 3)`` positions to differentiate at.
     state : Any
-        The epoch's prepared state. Both FD arms and the autodiff arm use this
-        one object, which pins the tree **and** the interaction-list selection
-        together -- D-016's requirement.
+        The epoch's prepared state; pins tree and interaction lists together.
     other_state : Any
-        A state rebuilt from perturbed positions, standing in for the topology
-        on the far side of a switch.
+        A state rebuilt from later positions -- the far side of a switch.
     args : argparse.Namespace
         Supplies ``fd_samples`` and ``fd_eps``.
 
     Returns
     -------
     Dict[str, Any]
-        Worst and median relative disagreement for the pinned arm and the
-        crossed arm, and the ratio between them.
+        The pinned FD-vs-autodiff agreement, the across-rebuild gradient
+        difference, and the eps-scaling demonstration.
     """
     import jax
     import jax.numpy as jnp
@@ -211,39 +243,45 @@ def _fd_agreement(
 
     x = jnp.asarray(positions)
     gradient = jax.grad(lambda p: loss_at(state, p))(x)
+    gradient_other = jax.grad(lambda p: loss_at(other_state, p))(x)
+
+    # The across-rebuild question, asked of the gradient itself.
+    norm = float(jnp.linalg.norm(gradient))
+    delta = float(jnp.linalg.norm(gradient_other - gradient))
+    cosine = float(
+        jnp.sum(gradient * gradient_other)
+        / (jnp.linalg.norm(gradient) * jnp.linalg.norm(gradient_other) + 1.0e-300)
+    )
 
     rng = np.random.default_rng(int(args.seed) + 17)
     eps = float(args.fd_eps)
     pinned: List[float] = []
-    crossed: List[float] = []
+    crossed_small: List[float] = []
+    crossed_large: List[float] = []
     for _ in range(int(args.fd_samples)):
         raw = rng.standard_normal(np.shape(positions))
         direction = jnp.asarray(raw / np.linalg.norm(raw))
         analytic = float(jnp.sum(gradient * direction))
+        scale = abs(analytic) + 1.0e-300
 
         # Pinned: both evaluations at the SAME state, so the finite difference
         # perturbs the very function autodiff differentiated.
         plus = float(loss_at(state, x + eps * direction))
         minus = float(loss_at(state, x - eps * direction))
-        fd_pinned = (plus - minus) / (2.0 * eps)
+        pinned.append(abs((plus - minus) / (2.0 * eps) - analytic) / scale)
 
-        # Crossed: the two sides use different topologies, which is what an FD
-        # step that straddles a switch boundary actually samples.
-        plus_other = float(loss_at(other_state, x + eps * direction))
-        fd_crossed = (plus_other - minus) / (2.0 * eps)
+        # The straddling quantity, at two step sizes, purely to show that it
+        # scales like 1/eps and is therefore not a derivative.
+        for step, sink in ((eps, crossed_small), (10.0 * eps, crossed_large)):
+            ahead = float(loss_at(other_state, x + step * direction))
+            behind = float(loss_at(state, x - step * direction))
+            sink.append(abs((ahead - behind) / (2.0 * step) - analytic) / scale)
 
-        scale = abs(analytic) + 1.0e-300
-        pinned.append(abs(fd_pinned - analytic) / scale)
-        crossed.append(abs(fd_crossed - analytic) / scale)
-
+    small = float(np.median(crossed_small))
+    large = float(np.median(crossed_large))
     return {
         "pinned_worst_rel": float(np.max(pinned)),
         "pinned_median_rel": float(np.median(pinned)),
-        "crossed_worst_rel": float(np.max(crossed)),
-        "crossed_median_rel": float(np.median(crossed)),
-        "crossed_over_pinned_median": float(
-            np.median(crossed) / (np.median(pinned) + 1.0e-300)
-        ),
         "fd_eps": eps,
         "fd_samples": int(args.fd_samples),
         "pinned_note": (
@@ -252,6 +290,25 @@ def _fd_agreement(
             "lists together (D-016). Pinning only the tree leaves a residual "
             "that reads as a gradient bug and is not one."
         ),
+        # The meaningful across-rebuild numbers.
+        "gradient_norm": norm,
+        "gradient_delta_across_rebuild": delta,
+        "gradient_delta_rel_across_rebuild": delta / (norm + 1.0e-300),
+        "gradient_cosine_across_rebuild": cosine,
+        "crossed_eps_scaling": {
+            "median_rel_at_eps": small,
+            "median_rel_at_10eps": large,
+            "ratio": small / (large + 1.0e-300),
+            "note": (
+                "A finite difference straddling a switch is NOT reported as an "
+                "error, because it is not a derivative: it divides the "
+                "topology-induced loss offset by 2*eps and so diverges as eps "
+                "-> 0. A ratio near 10 here is that signature -- the quantity "
+                "tracks the step size, not the pipeline. Use "
+                "gradient_delta_rel_across_rebuild for the across-rebuild "
+                "question and the loss_continuity arm for the offset itself."
+            ),
+        },
     }
 
 
@@ -450,12 +507,18 @@ def _run_cadence(
 
     intensive = (result.switch_summary or {}).get("intensive", {}).get("mean", {})
     extensive = (result.switch_summary or {}).get("extensive", {})
+    continuity = record.get("loss_continuity") or {}
+    agreement = record.get("fd_agreement") or {}
+    near_set = intensive.get("near_set_churn")
     print(
         f"  N={n:>8} k={cadence:>3} lr={learning_rate:<8g} "
         f"loss {result.initial_loss:.3e}->{result.final_loss:.3e} | "
-        f"EXT switch_rate {extensive.get('switch_rate')} | "
-        f"INT slot {intensive.get('slot_churn')} leaf {intensive.get('leaf_churn')} "
-        f"nearpair {intensive.get('near_pair_churn')}",
+        f"EXT {extensive.get('switch_rate')} | "
+        f"near_SET {'n/a' if near_set is None else round(near_set, 5)} "
+        f"nearpair {round(intensive.get('near_pair_churn') or 0.0, 4)} "
+        f"leaf {round(intensive.get('leaf_churn') or 0.0, 4)} | "
+        f"jump/step {continuity.get('jump_over_step_improvement')} | "
+        f"grad delta {agreement.get('gradient_delta_rel_across_rebuild')}",
         flush=True,
     )
     return record
