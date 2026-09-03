@@ -288,6 +288,56 @@ def _resolve_loss_scale(observed: np.ndarray, configured: Optional[float]) -> fl
     return rms if rms > 0.0 else 1.0
 
 
+def _shard_parameters(params: Any, devices: Sequence[Any]) -> Any:
+    """Place a parameter pytree across a 1-D device mesh.
+
+    Parameters
+    ----------
+    params : Any
+        Parameter pytree of JAX arrays.
+    devices : Sequence[Any]
+        Two or more devices to shard the leading axis over.
+
+    Returns
+    -------
+    Any
+        The pytree with every leaf whose leading axis divides the device count
+        sharded across the mesh, and every other leaf replicated. A 0-d leaf --
+        each of the parametric model's scalars -- has no axis to split and is
+        replicated; that is correct rather than a fallback, since splitting 7
+        numbers across 4 devices would be nonsense.
+
+    Notes
+    -----
+    Uses ``yggdrax.distributed.make_mesh`` with ``NamedSharding``, which is what
+    ``jaccpot/distributed/fmm.py`` and ``jaccpot/mutual/distributed.py`` already
+    use, so this section's mesh is built the same way as section 5's.
+
+    The first version of this called ``jax.sharding.PositionalSharding``, which
+    **does not exist in jax 0.10.2** -- it was removed, and pyproject's pin is
+    load-bearing, so it is not coming back. That went unnoticed because a
+    single-device run skips this branch entirely: the multi-GPU path was never
+    executed until fig20 first ran on more than one device, and then failed at
+    every device count with an ``AttributeError``. It is now exercised by
+    ``tests/applications`` on four forced host devices, which needs no GPU.
+    """
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+    from yggdrax.distributed import make_mesh
+
+    count = len(devices)
+    mesh = make_mesh(count, devices=list(devices))
+    sharded = NamedSharding(mesh, P(mesh.axis_names[0]))
+    replicated = NamedSharding(mesh, P())
+
+    def place(leaf: Any) -> Any:
+        array = jnp.asarray(leaf)
+        divisible = array.ndim >= 1 and array.shape[0] % count == 0
+        return jax.device_put(array, sharded if divisible else replicated)
+
+    return jax.tree_util.tree_map(place, params)
+
+
 def run_fit(
     *,
     operator: ForwardOperator,
@@ -354,17 +404,7 @@ def run_fit(
 
     params = jax.tree_util.tree_map(lambda leaf: jnp.asarray(leaf), initial_params)
     if devices is not None and len(devices) > 1:
-        sharding = jax.sharding.PositionalSharding(tuple(devices))
-        params = jax.tree_util.tree_map(
-            lambda leaf: (
-                jax.device_put(
-                    leaf, sharding.reshape((len(devices),) + (1,) * (leaf.ndim - 1))
-                )
-                if leaf.ndim >= 1
-                else leaf
-            ),
-            params,
-        )
+        params = _shard_parameters(params, devices)
 
     optimizer = make_optimizer(config.optimizer, config.learning_rate)
     opt_state = optimizer.init(params)
