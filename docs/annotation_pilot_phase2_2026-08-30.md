@@ -1,6 +1,7 @@
 # Phase 2 module ordering, measured — 2026-08-30
 
-**[current]** The rollout plan orders Phase 2's modules by **bare-parameter count**. This
+**[measured 2026-08-30, status maintained to 2026-09-03 — see "Where the order stands"]**
+The rollout plan orders Phase 2's modules by **bare-parameter count**. This
 records what happens when they are ordered by STYLE_GUIDE §4.1's own predictor instead —
 how much of each module is *already validated* — and the two orderings disagree.
 
@@ -97,6 +98,52 @@ so it binds nothing that could break another lane.
 5. `runtime/_adaptive_policy.py`.
 6. `nearfield/_fast_lane.py`.
 7. `runtime/kernels/_m2l.py` — **last**, and possibly not worth a PR: 8%.
+
+## Where the order stands — 2026-09-03
+
+Three of the seven are done. Counts are `bench/annotation_census.py` on `cb07ad5`, which is
+the only definition of the burn-down; the package moved 387 -> 551 shaped and 1709 -> 1544
+bare over these PRs, 18.5% -> 26.3%.
+
+| # | module | bare / shaped / unann | status |
+|---|---|---|---|
+| 1 | `operators/complex_ops.py`, the family | 27 / 70 / 0 | **done** — #279, 26 parameters now `Float[Array, "3"]` |
+| 2 | `pallas/nearfield_mutual.py` | 54 / 42 / 0 | open — the next one |
+| 3 | `nearfield/_large_n_blocks.py` | 41 / 60 / 12 | open |
+| 4 | `operators/complex_ops.py`, remainder | 27 / 70 / 0 | open |
+| 5 | `runtime/_adaptive_policy.py` | 75 / 24 / 0 | **done** — #293 |
+| 6 | `nearfield/_fast_lane.py` | 30 / 101 / 3 | **done** — #285, #289, #290 |
+| 7 | `runtime/kernels/_m2l.py` | 92 / 0 / 5 | open, and this document's advice is still to skip it |
+
+**Item 2's blocker was tooling and the tooling now exists.** "Widen the capture first" was
+this document's own precondition, and #294 gave `annotation_pilot.py` a `Tree` stand-in that
+rebuilds a real tree and *raises* rather than guessing when it cannot reproduce the recorded
+`num_nodes`, plus a `namedtuple` kind and `Class.method` resolution in
+`annotation_capture.py`. Whether those close this module's three unreplayable functions is a
+re-run, not an assumption — do that before annotating, because the 42% rests on 5 functions.
+
+**Item 7 is the one open disagreement with the size-ordered plan**, and it is unresolved
+rather than decided: `_m2l` is now the largest module in the package by bare count (92) and
+first on the size-ordered list, against 8% measured here. Whoever picks it up owns that call.
+
+**Two findings came out of executing items 5 and 6**, both of which sharpen §4.1 rather than
+this ordering:
+
+* `nearfield/grad.py` was recommended on a structural argument and the measurement did not
+  support it — every corruption there was already caught or harmless. It shipped shapes with
+  no decorators (#292), and the site note records the table.
+* Item 5's `multipole_packed` was annotated `Float` from this recording, which was taken
+  entirely on the **real** basis; the complex basis passes `c64`/`c128` and CI failed 27
+  times. Capture coverage bounds the *dtype* as much as the shape — STYLE_GUIDE §4.3 now
+  carries both halves. A pilot replay measures the lanes in the recording and nothing else,
+  which is also what the last bullet of the next section says.
+
+Modules outside the top six still have **no §4.1 evidence at all** — `runtime/kernels/_evaluate.py`
+(72/23), `pallas/m2l_complex_fused.py` (64/0/19), `pallas/nearfield_fused_leaf.py` (58/0/48),
+`nearfield/_kernels.py` (53), `runtime/_octree_fmm.py` (49), `nearfield/near_field.py`
+(48/15/19), `pallas/m2l_real_fused.py` (41/0/17). Ranking them needs a pilot run first.
+`runtime/fmm_prepare.py` (39/2) is not open work: #296 annotated the two the measurement
+supported and records at class level why the rest are left alone.
 
 ## What this does not say
 
