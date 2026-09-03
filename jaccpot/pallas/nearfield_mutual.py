@@ -146,8 +146,42 @@ def _next_pow2(n: int) -> int:
 # through one of them.
 
 
+# `slots` is the tile width the three helpers below share, and it is deliberately not the
+# entry points' `w`. `_pad_inputs` rounds the slot count up to a power of two before the
+# kernel sees it, so inside a tile the width is the PADDED one: measured at 8 where the
+# contract's `w` was 4. Naming both `w` would assert an equality that does not hold, which
+# is why `sw` exists in STYLE_GUIDE 4.3 for the same reason one lane over.
+#
+# What these three annotations are FOR, measured with `bench/annotation_pilot.py` on a
+# re-record of this module (213 perturbations, 8 functions measured, 2 inconclusive):
+#
+#     _block_tile          12 array params   10 accepted
+#     _block_vjp_tiles     18 array params   16 accepted
+#     _pair_weight_tile     3 array params    5 accepted
+#     the four entry points and `_pad_inputs`  0 accepted, except one -- see below
+#
+# All 31 acceptances are here, in the internals; fb2d0a1's boundary contract rejects
+# everything thrown at it. 26 of the 31 are `extra leading axis`, which neither call site
+# can deliver -- a Pallas ref slice and a `vmap` example are both rank-fixed. The five that
+# matter are on `_pair_weight_tile`, where a rung array SHORTER than the tile is accepted:
+# that is the "length mismatch between arrays that must agree" mode, and #297 is the
+# precedent for it being reachable through a lane's internals even when the boundary is
+# contracted -- there a BlockSpec read the target width from a source table and dropped
+# real particles in silence.
+#
+# The one entry-point acceptance is NOT a gap a shape can close. `level_weights` shortened
+# by one is accepted by `mutual_leafpair_block_jax` because `levels` binds only to that
+# parameter, so it asserts nothing (4.4). A short table is a legitimate input; what makes
+# it dangerous is that rungs INDEX it, and an out-of-range rung clamps. That is a
+# value-length relation, not a shape one, and it is left as a finding rather than
+# annotated away.
+#
+@jaxtyped(typechecker=beartype)
 def _pair_weight_tile(
-    rung_a_f: Array, rung_b_f: Array, level_weights: Array, num_levels: int
+    rung_a_f: Float[Array, "slots"],
+    rung_b_f: Float[Array, "slots"],
+    level_weights: Float[Array, "levels"],
+    num_levels: int,
 ) -> Array:
     """``level_weights[max(rung_i, rung_j)]`` as an ``(S, S)`` tile.
 
@@ -165,11 +199,11 @@ def _pair_weight_tile(
 
     Parameters
     ----------
-    rung_a_f : Array
+    rung_a_f : Float[Array, 'slots']
         ``(S,)`` leaf-A rung, float-encoded.
-    rung_b_f : Array
+    rung_b_f : Float[Array, 'slots']
         ``(S,)`` leaf-B rung, float-encoded.
-    level_weights : Array
+    level_weights : Float[Array, 'levels']
         ``(num_levels,)`` weight per interaction level, read whole.
     num_levels : int
         Number of levels, i.e. the ``K`` of the masked reduction. Static.
@@ -189,14 +223,15 @@ def _pair_weight_tile(
     return jnp.sum(table * hit.astype(table.dtype), axis=0)
 
 
+@jaxtyped(typechecker=beartype)
 def _block_tile(
-    a_xyz: tuple[Array, Array, Array],
-    ma: Array,
-    va_f: Array,
-    b_xyz: tuple[Array, Array, Array],
-    mb: Array,
-    vb_f: Array,
-    weight: Optional[Array],
+    a_xyz: tuple[Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]],
+    ma: Float[Array, "slots"],
+    va_f: Float[Array, "slots"],
+    b_xyz: tuple[Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]],
+    mb: Float[Array, "slots"],
+    vb_f: Float[Array, "slots"],
+    weight: Optional[Float[Array, "slots slots"]],
     softening_sq: Array,
     g_value: Array,
     *,
@@ -216,20 +251,20 @@ def _block_tile(
 
     Parameters
     ----------
-    a_xyz : tuple[Array, Array, Array]
+    a_xyz : tuple[Float[Array, 'slots'], Float[Array, 'slots'], Float[Array, 'slots']]
         Leaf-A coordinates as three separate ``(S,)`` component vectors.
-    ma : Array
+    ma : Float[Array, 'slots']
         ``(S,)`` leaf-A masses.
-    va_f : Array
+    va_f : Float[Array, 'slots']
         ``(S,)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
         boolean because a Pallas ref carries the working dtype.
-    b_xyz : tuple[Array, Array, Array]
+    b_xyz : tuple[Float[Array, 'slots'], Float[Array, 'slots'], Float[Array, 'slots']]
         Leaf-B coordinates, same layout as ``a_xyz``.
-    mb : Array
+    mb : Float[Array, 'slots']
         ``(S,)`` leaf-B masses.
-    vb_f : Array
+    vb_f : Float[Array, 'slots']
         ``(S,)`` leaf-B validity mask, same encoding.
-    weight : Optional[Array]
+    weight : Optional[Float[Array, 'slots slots']]
         ``(S, S)`` level weight from :func:`_pair_weight_tile`, or ``None`` for
         unit weights.
     softening_sq : Array
@@ -375,18 +410,23 @@ def _mutual_leafpair_kernel(
         fb_ref[0, :, 3] = zero
 
 
+@jaxtyped(typechecker=beartype)
 def _block_vjp_tiles(
-    a_xyz: tuple[Array, Array, Array],
-    ma: Array,
-    va_f: Array,
-    b_xyz: tuple[Array, Array, Array],
-    mb: Array,
-    vb_f: Array,
-    weight: Optional[Array],
+    a_xyz: tuple[Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]],
+    ma: Float[Array, "slots"],
+    va_f: Float[Array, "slots"],
+    b_xyz: tuple[Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]],
+    mb: Float[Array, "slots"],
+    vb_f: Float[Array, "slots"],
+    weight: Optional[Float[Array, "slots slots"]],
     softening_sq: Array,
     g_value: Array,
-    fa_bar_xyz: tuple[Array, Array, Array],
-    fb_bar_xyz: tuple[Array, Array, Array],
+    fa_bar_xyz: tuple[
+        Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]
+    ],
+    fb_bar_xyz: tuple[
+        Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]
+    ],
     *,
     exclude_diagonal: bool,
 ) -> tuple[tuple[Array, Array, Array], Array, tuple[Array, Array, Array], Array]:
@@ -418,28 +458,28 @@ def _block_vjp_tiles(
 
     Parameters
     ----------
-    a_xyz : tuple[Array, Array, Array]
+    a_xyz : tuple[Float[Array, 'slots'], Float[Array, 'slots'], Float[Array, 'slots']]
         Leaf-A coordinates as three ``(S,)`` component vectors.
-    ma : Array
+    ma : Float[Array, 'slots']
         ``(S,)`` leaf-A masses.
-    va_f : Array
+    va_f : Float[Array, 'slots']
         ``(S,)`` leaf-A validity mask, float-encoded and tested ``> 0.5`` -- float rather than
         boolean because a Pallas ref carries the working dtype.
-    b_xyz : tuple[Array, Array, Array]
+    b_xyz : tuple[Float[Array, 'slots'], Float[Array, 'slots'], Float[Array, 'slots']]
         Leaf-B coordinates, same layout.
-    mb : Array
+    mb : Float[Array, 'slots']
         ``(S,)`` leaf-B masses.
-    vb_f : Array
+    vb_f : Float[Array, 'slots']
         ``(S,)`` leaf-B validity mask, same encoding.
-    weight : Optional[Array]
+    weight : Optional[Float[Array, 'slots slots']]
         ``(S, S)`` level weight, or ``None`` for unit weights.
     softening_sq : Array
         Squared Plummer softening length, scalar.
     g_value : Array
         Gravitational constant, scalar.
-    fa_bar_xyz : tuple[Array, Array, Array]
+    fa_bar_xyz : tuple[Float[Array, 'slots'], Float[Array, 'slots'], Float[Array, 'slots']]
         Cotangent of the leaf-A force, as three ``(S,)`` components.
-    fb_bar_xyz : tuple[Array, Array, Array]
+    fb_bar_xyz : tuple[Float[Array, 'slots'], Float[Array, 'slots'], Float[Array, 'slots']]
         Cotangent of the leaf-B force, same layout. Both endpoints feed each
         pair, which is the structural difference from the gather-shaped rule.
     exclude_diagonal : bool
