@@ -321,3 +321,34 @@ def test_an_unknown_cross_cap_name_is_refused():
     """A misspelt capacity would silently keep the heuristic default."""
     with pytest.raises(ValueError, match="unknown cross_caps keys"):
         _model(cross_caps={"near_capacity": 10})
+
+
+def test_the_distributed_model_passes_nornax_conformance_kit(prepared):
+    """nornax's whole contract kit on the distributed force, one call.
+
+    ``DistributedBlockStepFMM`` has no explicit topology (it refuses one), so the
+    kit is run without ``topology=``; the oracle is nornax's dense direct sum at
+    the far-field accuracy of ``theta = 0.5``, order 4. The per-level and fused
+    checks are at the kit's round-off defaults, and the momentum ones are the
+    GLOBAL sums this module is about.
+    """
+    try:
+        from nornax.conformance import check_mutual_force_model
+    except ImportError:  # pragma: no cover - depends on the installed nornax
+        pytest.skip("installed nornax has no conformance kit")
+    from nornax.forces.mutual_direct import MutualDirectSumGravity
+
+    fmm, pos, _vel, mass, rung = prepared
+    report = check_mutual_force_model(
+        fmm,
+        pos,
+        mass,
+        k_max=K_MAX,
+        rung=rung,
+        dt_max=2.0e-3,
+        oracle=MutualDirectSumGravity(G=1.0, softening=SOFT),
+        oracle_tolerance=2.0e-3,
+        require_fused=True,
+    )
+    assert report.passed, report.summary()
+    assert report.fused_selected
