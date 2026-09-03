@@ -115,12 +115,18 @@ bare over these PRs, 18.5% -> 26.3%.
 | 6 | `nearfield/_fast_lane.py` | 30 / 101 / 3 | **done** — #285, #289, #290 |
 | 7 | `runtime/kernels/_m2l.py` | 92 / 0 / 5 | open, and this document's advice is still to skip it |
 
-**Item 2's blocker was tooling and the tooling now exists.** "Widen the capture first" was
-this document's own precondition, and #294 gave `annotation_pilot.py` a `Tree` stand-in that
-rebuilds a real tree and *raises* rather than guessing when it cannot reproduce the recorded
-`num_nodes`, plus a `namedtuple` kind and `Class.method` resolution in
-`annotation_capture.py`. Whether those close this module's three unreplayable functions is a
-re-run, not an assumption — do that before annotating, because the 42% rests on 5 functions.
+**Item 2's blocker was tooling, and the tooling landed for this module specifically.**
+"Widen the capture first" was this document's own precondition. `5c6bc71` closed it: the
+three UNREPLAYABLE functions were `_block_tile` and `_block_vjp_tiles`, whose positions are
+`tuple[Array, Array, Array]` and fell through to opaque, and `_pad_inputs`, which takes the
+working `dtype`. Both kinds are now described, and arrays inside a container are perturbed
+by path rather than merely rebuilt. (#294's `Tree` and `namedtuple` kinds were for item 5,
+where they turned 11 UNREPLAYABLE into 11 measured.)
+
+**What is still outstanding is a re-record, not a code change.** The description is frozen
+in the pickle, so the 2026-08-30 recording still reports those three as opaque however much
+the tool now understands — an old recording replays to the identical numbers, verified.
+Re-record before annotating, because the 42% rests on 5 of 8 functions.
 
 **Item 7 is the one open disagreement with the size-ordered plan**, and it is unresolved
 rather than decided: `_m2l` is now the largest module in the package by bare count (92) and
