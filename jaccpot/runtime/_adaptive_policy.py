@@ -491,11 +491,23 @@ def compute_node_force_scale_from_sorted_acc(
     )
 
 
-@jaxtyped(typechecker=beartype)
+# NOT annotated, and NOT decorated -- 4.1, with the body as the thing that already
+# validates. `magnitudes_sorted` has an explicit `ndim != 1` check below that names the
+# parameter and prints the offending shape, which is a better message than
+# `Float[Array, "n"]` would produce, and `test_scalar_reduction_rejects_vector_input` pins
+# it by matching "must be 1-D". Annotating it made that check UNREACHABLE and turned a
+# passing test red -- the same shape as the `Literal` contradiction the audit records for
+# `_fmm_impl.__init__`, where an annotation renders live validation dead code.
+#
+# And it would have bought nothing: the pilot's one acceptance here is
+# `magnitudes_sorted[512] -> [511]`, a LENGTH change, which `n` cannot reject because it
+# occurs once in this signature. So the annotation closes no hole and deletes a better
+# error. Its sibling `compute_node_force_scale_from_sorted_acc` has no such body check,
+# which is why that one IS annotated.
 def compute_node_force_scale_from_sorted_magnitudes(
     *,
     tree: Tree,
-    magnitudes_sorted: Float[Array, "n"],
+    magnitudes_sorted: Array,
     reduction: str = "max",
     max_leaf_size: Optional[int] = None,
 ) -> Array:
@@ -509,7 +521,7 @@ def compute_node_force_scale_from_sorted_magnitudes(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    magnitudes_sorted : Float[Array, 'n']
+    magnitudes_sorted : Array
         Per-particle scalar magnitudes in tree order.
     reduction : str
         How to reduce per-particle values onto a node: ``min``, ``mean`` or ``max``.
