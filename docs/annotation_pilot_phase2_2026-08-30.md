@@ -1,6 +1,7 @@
 # Phase 2 module ordering, measured — 2026-08-30
 
-**[measured 2026-08-30, status maintained to 2026-09-03 — see "Where the order stands"]**
+**[measured 2026-08-30; every module re-recorded 2026-09-03 — read "The whole list,
+re-recorded" at the bottom first, because five of the six rates below have moved]**
 The rollout plan orders Phase 2's modules by **bare-parameter count**. This
 records what happens when they are ordered by STYLE_GUIDE §4.1's own predictor instead —
 how much of each module is *already validated* — and the two orderings disagree.
@@ -172,3 +173,77 @@ supported and records at class level why the rest are left alone.
 * A lane that never ran cannot be measured. `tests/perf`, `tests/distributed` and the GPU-only
   Pallas paths are all absent from this recording, which is why `nearfield_mutual` and
   `_fast_lane` have the weakest coverage of the six.
+
+---
+
+## The whole list, re-recorded — 2026-09-03
+
+Items 2 and 3 each came in far below the table at the top of this document, both times
+because the module had been annotated *after* that recording. So the remaining four were
+re-recorded together on `main`, same test scope (`tests/unit tests/integration`), with the
+three fixes in #303 — without which the numbers below are not obtainable at all.
+
+| module | item | tested | accepted | rate | ok/inc/unrep | was |
+|---|---|---|---|---|---|---|
+| `runtime/_adaptive_policy.py` | 5 | 230 | **78** | **34%** | 26/0/0 | 29% on 9/0/4 |
+| `runtime/kernels/_m2l.py` | 7 | 286 | 23 | 8% | 18/0/0 | 8% on 14/0/4 |
+| `pallas/nearfield_mutual.py` | 2 | 213 | 32 → 1 | 15% → 0% | 8/2/0 | 42% on 5/0/3 |
+| `nearfield/_large_n_blocks.py` | 3 | 212 | 11 → 9 | 5% | 8/0/1 | 27% on 8/0/0 |
+| `operators/complex_ops.py` | 4 | 202 | 11 | 5% | 47/6/1 | 32% on 27/4/1 |
+| `nearfield/_fast_lane.py` | 6 | 160 | 4 | 2% | 6/0/2 | 26% on 5/0/2 |
+
+`→` is before and after the annotations that closed them.
+
+**One caveat on the `_fast_lane` row, and it is mine.** That recording was taken before the
+fourth fix on #303, which stopped the pilot replacing a `jax.custom_vjp` *object* with a
+plain wrapper and thereby stripping its reverse rule. `nearfield/_fast_lane.py` owns
+`_radix_fast_lane_prepacked_accel_cvjp`, so during that run its custom rule was gone. The
+four acceptances found are real -- the perturbations are forward calls, and a shape
+rejection does not depend on the VJP -- but the **coverage** figure (6 of 18 targeted) was
+taken with one lane's dispatch altered, so read it as a lower bound. That fix is also what
+the `1 failed` in the recording run was: `test_prepacked_cvjp_saves_the_documented_nine_entry_residual`,
+which noticed only because it asserts the object's identity on purpose.
+
+**Items 4 and 6 are effectively done.** `complex_ops` fell 32% → 5% and `_fast_lane`
+26% → 2%, which is what the delta/direction family (#279) and the fast-lane PRs
+(#285/#289/#290) were for. Neither is worth another PR on this evidence.
+
+**Item 5 is now the top of the list, and it is not a regression.** `_adaptive_policy` reads
+*worse* than in August — 34% against 29% — and the reason is coverage, not decay. The
+original pass measured **9** of its functions and gave up on 4; this one measures **26**,
+because #294 taught the pilot about trees and #303 stopped the xdist shards clobbering each
+other. #293 closed the holes that were visible then; the module simply has ~2.9x more
+measurable surface than the tool could show. 33 of the 78 acceptances sit in two functions
+#293 never saw:
+
+```
+build_adaptive_policy_state    18
+resolve_dehnen_geometry        15
+```
+
+The remaining 45 are spread two or three at a time over ~18 more, which is a different shape
+of work from a family fix — a module pass, and at 75 bare parameters it needs a split.
+
+**Item 7 stays last on rate and gains a target anyway.** `_m2l` is confirmed at 8%, now on
+18 measured functions rather than 14, so the August verdict holds: it is mostly validated
+and a whole-module conversion would be Pilot 1 again. But *where* its 23 acceptances sit is
+new information, and it is not spread evenly:
+
+```
+_rotation_blocks_for_grouped_classes           5   class_keys accepts ALL FOUR
+                                                   perturbations; class_deltas the
+                                                   misalignment against it
+_accumulate_solidfmm_m2l_grouped_class_major   4   locals_coeffs, all four
+_pair_class_ids_from_offsets                   3   class_offsets and pair_indices
+_accumulate_solidfmm_m2l_grouped_chunked_scan  2
+_chunk_segment_scatter_add                     2
+_m2l_chunk_contributions                       2
+```
+
+**That is the G.11 neighbourhood.** This module's own docstring records G.11 as a 60x
+accuracy gap between two of the four accumulators, caused by `pair_grouped` *gathering
+rotations with class ids from the wrong ordering* — and the two functions accepting most
+freely are the rotation-blocks-by-class helper and the class-major accumulator. A
+`class_keys` / `class_deltas` pair that no longer agree on their class axis is that defect
+expressed as a shape. So the useful PR here is the class/rotation family, ~12 of the 23,
+and not the other 80 parameters.
