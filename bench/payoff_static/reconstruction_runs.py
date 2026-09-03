@@ -292,15 +292,17 @@ def _run_case(case: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
 
     regularization = Regularization() if case["regularized"] else Regularization.none()
 
-    # The secondary diagnostic, sampled along the path: this is what makes
-    # fig18's divergence visible rather than inferred.
-    trace: List[Dict[str, Any]] = []
+    # A heartbeat, so a long GPU run has a progress trace rather than a silent
+    # hour. The per-iteration data itself comes from result.history below.
     stride = max(int(args.diagnostics_every), 1)
 
     def progress(row: Dict[str, Any]) -> None:
-        if row["iteration"] % stride and not row.get("_final"):
-            return
-        trace.append({"iteration": row["iteration"], "loss": row["loss"]})
+        if row["iteration"] % stride == 0:
+            print(
+                f"      iter {row['iteration']:>5} loss {row['loss']:.6e} "
+                f"|g|/param {row['gradient']['rms_per_parameter']:.3e}",
+                flush=True,
+            )
 
     result = run_fit(
         operator=operator,

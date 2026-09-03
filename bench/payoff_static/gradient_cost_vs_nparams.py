@@ -170,6 +170,47 @@ def _reset_peak_memory() -> None:
         pass
 
 
+def _cost_analysis(fn: Any, argument: Any) -> Optional[Dict[str, float]]:
+    """Return XLA's FLOP and byte counts for a compiled callable.
+
+    Wall-clock alone cannot carry this figure's claim, because at small ``N``
+    the FMM is **launch-latency bound**: measured on an idle A100 at N=4096,
+    the compiled forward does 3.66e7 flops -- microseconds of arithmetic at
+    fp64 peak -- and takes 60 ms, which is essentially all kernel-launch and
+    dispatch overhead. In that regime a wall-clock ratio between two graphs
+    reports which one XLA fused into fewer kernels, not what the reverse pass
+    costs, and it can come out *below one*.
+
+    FLOPs and bytes are hardware- and launch-independent, so they answer the
+    "small constant multiple" question at every ``N``. Both are recorded.
+
+    Parameters
+    ----------
+    fn : Any
+        A ``jax.jit``-wrapped callable.
+    argument : Any
+        One example argument, for lowering.
+
+    Returns
+    -------
+    Optional[Dict[str, float]]
+        ``flops`` and ``bytes_accessed``, or ``None`` if the backend offers no
+        cost analysis (or the callable is not jitted).
+    """
+    try:
+        analysis = fn.lower(argument).compile().cost_analysis()
+    except Exception:  # pragma: no cover - backend dependent
+        return None
+    if isinstance(analysis, list):
+        analysis = analysis[0] if analysis else None
+    if not analysis:
+        return None
+    return {
+        "flops": float(analysis.get("flops", float("nan"))),
+        "bytes_accessed": float(analysis.get("bytes accessed", float("nan"))),
+    }
+
+
 def _measure_one(
     *,
     n: int,
@@ -295,6 +336,12 @@ def _measure_one(
         )
         grad_peak = _peak_memory_bytes()
 
+        forward_cost = _cost_analysis(forward_call, params) if mode == "jit" else None
+        gradient_cost = _cost_analysis(gradient_call, params) if mode == "jit" else None
+        flop_ratio = None
+        if forward_cost and gradient_cost and forward_cost["flops"]:
+            flop_ratio = gradient_cost["flops"] / forward_cost["flops"]
+
         num_free = int(parameterization.num_free)
         # One-sided finite differences need P + 1 forward evaluations; central
         # would need 2P. The cheaper baseline is the honest one to compare to.
@@ -319,11 +366,26 @@ def _measure_one(
             "finite_difference_is_extrapolated": True,
             "autodiff_speedup_over_fd": (fd_seconds / grad_min if grad_min else None),
             "mode": mode,
+            "forward_cost_analysis": forward_cost,
+            "forward_backward_cost_analysis": gradient_cost,
+            "backward_over_forward_flops": flop_ratio,
+            # A wall-clock ratio at or below 1 is arithmetically impossible for
+            # a reverse pass over the same forward graph, so it is the marker
+            # that this point is launch-latency bound rather than compute
+            # bound. Such a point still carries the figure's OTHER claim --
+            # cost flat in P -- but its ratio must not be quoted as the
+            # reverse-pass overhead, and the notebook must not plot it as one.
+            "latency_bound": bool(
+                grad_min <= forward_min * 1.05 if forward_min else False
+            ),
         }
         records.append(record)
+        flop_note = f"  flops x{flop_ratio:.2f}" if flop_ratio else ""
+        latency_note = "  [LATENCY-BOUND]" if record["latency_bound"] else ""
         print(
-            f"  N={n:>9} {kind:>10}: P={num_free:>9}  fwd {forward_min*1e3:9.3f} ms  "
-            f"fwd+bwd {grad_min*1e3:9.3f} ms  ratio {record['backward_over_forward']:.2f}x  "
+            f"  N={n:>9} {kind:>10}: P={num_free:>9}  "
+            f"fwd {forward_min*1e3:9.3f} ms  fwd+bwd {grad_min*1e3:9.3f} ms  "
+            f"ratio {record['backward_over_forward']:.2f}x{flop_note}{latency_note}  "
             f"FD(extrap) {fd_seconds:.3e} s",
             flush=True,
         )
