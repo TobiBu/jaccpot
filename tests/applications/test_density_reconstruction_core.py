@@ -296,6 +296,52 @@ def test_switch_rates_are_intensive_not_extensive():
     assert set(summary) == {"switch_metric", "content_key", "extensive", "intensive"}
 
 
+def test_near_set_churn_does_not_saturate():
+    """The interaction-list rate fig19 plots must resolve, not pin at 1.
+
+    ``near_pair_churn`` is an exact-set identity over node contents, so one
+    particle crossing a node boundary invalidates every pair that node appears
+    in and the rate saturates. ``near_set_churn`` asks the per-particle
+    question instead -- did the set of sources reaching *this* particle change
+    -- and does not.
+
+    The all-near regime is the sharpest case and the one asserted here: with
+    every leaf a neighbour of every other, each particle's direct-summation
+    source set is every other particle and **cannot** change, however violently
+    the tree is reordered. The correct answer is exactly zero, and
+    ``near_pair_churn`` does not give it.
+    """
+    truth = _small_truth()
+    op = _operator(truth)
+    base = np.asarray(truth.source_positions)
+    noise = np.random.default_rng(5).standard_normal(base.shape)
+
+    reference = radix_structure(op.prepare(base))
+    # At this N every leaf neighbours every other, so the near-field reach is
+    # the whole particle set bar the particle itself.
+    partners = np.diff(reference.sample_offsets)
+    assert np.all(partners == reference.num_particles - 1)
+
+    big = churn_between(reference, radix_structure(op.prepare(base + 1e-1 * noise)))
+    # The ordering was torn up ...
+    assert big.slot_churn > 0.5
+    assert big.leaf_churn > 0.5
+    # ... the pair-key rate saturated ...
+    assert big.near_pair_churn == 1.0
+    # ... and the set of sources reaching each particle did not move at all.
+    assert big.near_set_churn == 0.0
+
+    # The sample is id-based, so it is the same particles across rebuilds --
+    # which is what makes the sets comparable rather than merely equinumerous.
+    other = radix_structure(op.prepare(base + 1e-3 * noise))
+    assert np.array_equal(reference.sample_ids, other.sample_ids)
+
+    # Turning the sample off yields None rather than a fabricated zero.
+    without = radix_structure(op.prepare(base), near_set_sample=0)
+    assert without.sample_ids.size == 0
+    assert churn_between(without, without).near_set_churn is None
+
+
 def test_churn_refuses_mismatched_particle_counts():
     """A rate computed across a changing N is not a rate; it raises."""
     truth = _small_truth()

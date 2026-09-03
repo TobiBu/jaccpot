@@ -42,10 +42,60 @@ particles, or a fraction of interacting pairs:
     direct summation changed.
 ``near_pair_churn`` / ``far_pair_churn``
     Jaccard distance between the content-canonicalised near leaf-pair and far
-    node-pair sets. **These two are the interaction-list rates** -- the ones
-    D-016 says section 7 must measure for itself, because every Yggdrax rate,
-    its ``leaf_change_fraction`` included, is permutation-derived and is not an
-    interaction-list change.
+    node-pair sets. Interaction-list rates -- the kind D-016 says section 7 must
+    measure for itself, because every Yggdrax rate, its ``leaf_change_fraction``
+    included, is permutation-derived and is not an interaction-list change.
+    **But they saturate**, for a second-order version of the same reason the
+    extensive counter does: a node's content key is an *exact set* identity, so
+    one particle crossing a node boundary changes that node's key and every
+    pair it appears in. Measured at N=32768 over a converging descent,
+    ``near_pair_churn`` runs 0.987-1.000 and ``far_pair_churn`` is **exactly
+    1.000 at every cadence** -- true, and useless as a curve.
+``near_set_churn``
+    **The interaction-list rate fig19 should plot.** For each of a fixed sample
+    of particles, the Jaccard distance between the *set of source particles
+    that reach it by direct summation* before and after the rebuild, averaged
+    over the sample. This is a per-particle question, so one particle moving
+    perturbs a few sample members' sets by one element each instead of
+    invalidating every pair key, and it does not saturate. The sample is
+    deterministic and id-based (evenly spaced particle ids), so the same
+    particles are compared at every rebuild, and its cost is
+    O(sample x partners) -- independent of ``N``.
+
+    Measured at N=32768, leaf 64 (544 leaves, 21676 far pairs), against
+    perturbation amplitude, this is the whole argument for the metric:
+
+    ======= ========== =========== ========== ======= =======
+    eps     near_set   near_pair   far_pair   leaf    slot
+    ======= ========== =========== ========== ======= =======
+    0        0.000      0.000       0.000      0.000   0.000
+    1e-6     0.000      0.000       0.000      0.000   0.001
+    1e-4     0.018      0.927       0.941      0.642   0.611
+    1e-3     0.070      0.999       0.999      0.947   0.929
+    1e-2     0.129      1.000       1.000      0.996   0.987
+    1e-1     0.191      1.000       1.000      1.000   0.999
+    ======= ========== =========== ========== ======= =======
+
+    Every other column is pinned at or near 1 across three decades;
+    ``near_set_churn`` resolves a clean monotone 0.018 -> 0.191. And the
+    physical reading it gives is the one section 7 wants: a perturbation that
+    reorders essentially every particle (slot churn 0.999) changes only **19%
+    of the average particle's direct-summation source set**. The interaction
+    structure is far more stable than any permutation-derived rate, or any
+    exact-set-identity rate, makes it look.
+
+    The clearest demonstration that the pair-key rates mislead is the all-near
+    regime. At N=2048, leaf 64, every leaf is a neighbour of every other, so
+    every particle's near-field source set is "all other particles" and cannot
+    change: ``near_set_churn`` is exactly 0.000 at every amplitude, correctly,
+    while ``near_pair_churn`` climbs to 1.000. The leaf labels and groupings
+    moved; which sources reach which targets did not.
+
+    **Leaf size decides whether there is a far field to measure at all.** At
+    N=32768 the far list holds 21676 pairs at leaf 64 and is EMPTY at leaf 256
+    (136 leaves, all mutually near), which makes ``far_pair_churn`` ``None``
+    and ``near_set_churn`` identically zero. fig19 therefore runs at leaf 64,
+    even though fig16's timing sweep is far better served by 256.
 
 The extensive answer is still reported, under ``extensive``, because it is the
 core facility's contract and because the contrast between it and the intensive
@@ -94,6 +144,7 @@ from jaccpot.mutual.identity import (
 
 __all__ = [
     "COMPONENTS",
+    "NEAR_SET_SAMPLE",
     "ChurnRates",
     "RadixStructure",
     "SwitchLog",
@@ -286,6 +337,15 @@ class RadixStructure:
     near_source_count : np.ndarray
         ``(P,)`` int64 number of source particles that reach each particle by
         direct summation.
+    sample_ids : np.ndarray
+        ``(S,)`` int64 particle ids the near-field sets were taken for. Evenly
+        spaced and therefore identical across rebuilds, which is what makes the
+        sets comparable.
+    sample_offsets : np.ndarray
+        ``(S + 1,)`` int64 CSR offsets into :attr:`sample_neighbors`.
+    sample_neighbors : np.ndarray
+        Concatenated, per-sample-sorted source particle ids reaching each
+        sampled particle by direct summation.
     near_pair_keys : np.ndarray
         ``(n_near,)`` uint64, sorted and unique: the content-canonicalised near
         leaf-pair set.
@@ -299,6 +359,9 @@ class RadixStructure:
     slot_of_particle: np.ndarray
     leaf_key_of_particle: np.ndarray
     near_source_count: np.ndarray
+    sample_ids: np.ndarray
+    sample_offsets: np.ndarray
+    sample_neighbors: np.ndarray
     near_pair_keys: np.ndarray
     far_pair_keys: np.ndarray
 
@@ -393,19 +456,106 @@ def _spans_to_indices(starts: np.ndarray, stops: np.ndarray) -> np.ndarray:
     return starts.astype(np.int64)[span_of_index] + within
 
 
-def radix_structure(state: Any) -> RadixStructure:
+#: Default number of particles whose exact near-field source set is retained.
+#: The cost is O(SAMPLE x partners) and independent of N, so this is a fixed
+#: budget rather than a fraction: 4096 samples at leaf 256 with ~27 neighbour
+#: leaves is a few times 1e7 ids, which is affordable at every N in the sweep.
+NEAR_SET_SAMPLE = 4096
+
+
+def _sampled_near_sets(
+    *,
+    sample_ids: np.ndarray,
+    leaf_of_particle: np.ndarray,
+    leaf_nodes: np.ndarray,
+    leaf_starts: np.ndarray,
+    leaf_sizes: np.ndarray,
+    particle_indices: np.ndarray,
+    offsets: np.ndarray,
+    neighbors: np.ndarray,
+    size_of_node: np.ndarray,
+    start_of_node: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Exact near-field source sets for a sample of particles, as a CSR.
+
+    Parameters
+    ----------
+    sample_ids : np.ndarray
+        ``(S,)`` particle ids to take sets for.
+    leaf_of_particle : np.ndarray
+        ``(P,)`` leaf rank of each particle, ``-1`` outside every leaf.
+    leaf_nodes : np.ndarray
+        ``(L,)`` node id of each leaf.
+    leaf_starts : np.ndarray
+        ``(L,)`` sorted-order start of each leaf.
+    leaf_sizes : np.ndarray
+        ``(L,)`` particle count of each leaf.
+    particle_indices : np.ndarray
+        ``(P,)`` sorted-slot to original-id map.
+    offsets : np.ndarray
+        ``(L + 1,)`` neighbour CSR offsets.
+    neighbors : np.ndarray
+        Neighbour leaf node ids.
+    size_of_node : np.ndarray
+        ``(num_nodes,)`` particle count per node, zero for non-leaves.
+    start_of_node : np.ndarray
+        ``(num_nodes,)`` sorted-order start per node.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        ``(sample_offsets, sample_neighbors)``: a CSR whose row ``i`` holds the
+        sorted original ids of every source reaching ``sample_ids[i]`` by direct
+        summation -- its own leaf's members and every neighbour leaf's -- with
+        the particle itself removed. A particle outside every leaf gets an empty
+        row.
+    """
+    rows: List[np.ndarray] = []
+    for particle in sample_ids:
+        leaf = int(leaf_of_particle[particle])
+        if leaf < 0:
+            rows.append(np.zeros((0,), dtype=np.int64))
+            continue
+        node = int(leaf_nodes[leaf])
+        own = particle_indices[
+            int(leaf_starts[leaf]) : int(leaf_starts[leaf]) + int(leaf_sizes[leaf])
+        ]
+        blocks = [own]
+        for neighbour in neighbors[int(offsets[leaf]) : int(offsets[leaf + 1])]:
+            start = int(start_of_node[neighbour])
+            count = int(size_of_node[neighbour])
+            if count:
+                blocks.append(particle_indices[start : start + count])
+        del node
+        members = np.concatenate(blocks) if blocks else np.zeros((0,), dtype=np.int64)
+        members = members[members != particle]
+        rows.append(np.unique(members))
+    lengths = np.array([r.size for r in rows], dtype=np.int64)
+    sample_offsets = np.concatenate([np.zeros(1, dtype=np.int64), np.cumsum(lengths)])
+    sample_neighbors = np.concatenate(rows) if rows else np.zeros((0,), dtype=np.int64)
+    return sample_offsets, sample_neighbors
+
+
+def radix_structure(
+    state: Any, *, near_set_sample: int = NEAR_SET_SAMPLE
+) -> RadixStructure:
     """Extract the rebuild-invariant structure the intensive rates compare.
 
     Parameters
     ----------
     state : Any
         An ``FMMPreparedState`` from the radix backend.
+    near_set_sample : int
+        How many particles to retain exact near-field source sets for, feeding
+        ``near_set_churn``. ``0`` skips it. Capped at the particle count.
 
     Returns
     -------
     RadixStructure
         Host-side per-particle and per-pair structure. O(P) work and O(P)
-        memory, with no Python loop over particles or pairs.
+        memory for the per-particle arrays, with no Python loop over particles
+        or pairs; the sampled near-field sets add O(sample x partners), which
+        does not grow with ``N``.
     """
     tree = state.tree
     topo = tree.topology
@@ -482,11 +632,40 @@ def radix_structure(state: Any) -> RadixStructure:
             node_keys[_host(far.targets).astype(np.int64)],
         )
 
+    # Evenly spaced ids rather than a random draw: the sample must be the SAME
+    # particles at every rebuild for the sets to be comparable, and an id-based
+    # rule needs no seed to be carried alongside.
+    budget = min(int(near_set_sample), num_particles)
+    if budget > 0:
+        sample_ids = np.unique(
+            np.linspace(0, num_particles - 1, budget).astype(np.int64)
+        )
+        start_of_node = node_ranges[:, 0].astype(np.int64)
+        sample_offsets, sample_neighbors = _sampled_near_sets(
+            sample_ids=sample_ids,
+            leaf_of_particle=leaf_of_particle,
+            leaf_nodes=leaf_nodes,
+            leaf_starts=leaf_starts,
+            leaf_sizes=leaf_sizes,
+            particle_indices=particle_indices,
+            offsets=offsets,
+            neighbors=neighbors,
+            size_of_node=size_of_node,
+            start_of_node=start_of_node,
+        )
+    else:
+        sample_ids = np.zeros((0,), dtype=np.int64)
+        sample_offsets = np.zeros((1,), dtype=np.int64)
+        sample_neighbors = np.zeros((0,), dtype=np.int64)
+
     return RadixStructure(
         num_particles=num_particles,
         slot_of_particle=slot_of_particle,
         leaf_key_of_particle=leaf_key_of_particle,
         near_source_count=near_source_count,
+        sample_ids=sample_ids,
+        sample_offsets=sample_offsets,
+        sample_neighbors=sample_neighbors,
         near_pair_keys=near_pair_keys,
         far_pair_keys=far_pair_keys,
     )
@@ -511,9 +690,13 @@ class ChurnRates:
         Fraction of particles whose leaf changed content.
     near_source_count_churn : float
         Fraction of particles whose direct-summation source count changed.
+    near_set_churn : Optional[float]
+        Mean per-particle Jaccard distance between the sets of sources reaching
+        a sampled particle by direct summation. The interaction-list rate that
+        does **not** saturate; ``None`` when no sample was taken.
     near_pair_churn : float
         Jaccard distance between the near leaf-pair sets: ``|symmetric
-        difference| / |union|``.
+        difference| / |union|``. Saturates -- see the module docstring.
     far_pair_churn : Optional[float]
         The same for the far node-pair set, or ``None`` when both rebuilds had
         an empty far list -- which is what a small ``N`` at a tight ``theta``
@@ -524,6 +707,7 @@ class ChurnRates:
     mean_rank_shift_fraction: float
     leaf_churn: float
     near_source_count_churn: float
+    near_set_churn: Optional[float]
     near_pair_churn: float
     far_pair_churn: Optional[float]
 
@@ -540,6 +724,7 @@ class ChurnRates:
             "mean_rank_shift_fraction": self.mean_rank_shift_fraction,
             "leaf_churn": self.leaf_churn,
             "near_source_count_churn": self.near_source_count_churn,
+            "near_set_churn": self.near_set_churn,
             "near_pair_churn": self.near_pair_churn,
             "far_pair_churn": self.far_pair_churn,
         }
@@ -567,6 +752,50 @@ def _jaccard_distance(left: np.ndarray, right: np.ndarray) -> Optional[float]:
     union = int(np.union1d(left, right).size)
     intersection = int(np.intersect1d(left, right, assume_unique=True).size)
     return 0.0 if union == 0 else (union - intersection) / union
+
+
+def _mean_near_set_jaccard(
+    previous: RadixStructure, current: RadixStructure
+) -> Optional[float]:
+    """Mean per-particle Jaccard distance between near-field source sets.
+
+    Parameters
+    ----------
+    previous : RadixStructure
+        Structure from the earlier rebuild.
+    current : RadixStructure
+        Structure from the later rebuild.
+
+    Returns
+    -------
+    Optional[float]
+        Mean over sampled particles of ``|symmetric difference| / |union|``
+        between the sets of sources reaching that particle by direct summation.
+        ``None`` when either rebuild kept no sample, or the two samples are not
+        the same particles -- comparing different particles' neighbourhoods
+        would not be a churn.
+
+        Unlike the pair-key rates this does not saturate: one particle crossing
+        a node boundary perturbs a few sample members' sets by one element each,
+        instead of changing a node's exact-set key and invalidating every pair
+        it appears in.
+    """
+    if previous.sample_ids.size == 0 or current.sample_ids.size == 0:
+        return None
+    if not np.array_equal(previous.sample_ids, current.sample_ids):
+        return None
+    distances: List[float] = []
+    for index in range(previous.sample_ids.size):
+        left = previous.sample_neighbors[
+            previous.sample_offsets[index] : previous.sample_offsets[index + 1]
+        ]
+        right = current.sample_neighbors[
+            current.sample_offsets[index] : current.sample_offsets[index + 1]
+        ]
+        distance = _jaccard_distance(left, right)
+        if distance is not None:
+            distances.append(distance)
+    return float(np.mean(distances)) if distances else None
 
 
 def churn_between(previous: RadixStructure, current: RadixStructure) -> ChurnRates:
@@ -605,6 +834,7 @@ def churn_between(previous: RadixStructure, current: RadixStructure) -> ChurnRat
     )
     near_churn = _jaccard_distance(previous.near_pair_keys, current.near_pair_keys)
     return ChurnRates(
+        near_set_churn=_mean_near_set_jaccard(previous, current),
         slot_churn=float(
             np.mean(previous.slot_of_particle != current.slot_of_particle)
         ),
@@ -777,6 +1007,7 @@ class SwitchLog:
             "mean_rank_shift_fraction",
             "leaf_churn",
             "near_source_count_churn",
+            "near_set_churn",
             "near_pair_churn",
             "far_pair_churn",
         )
