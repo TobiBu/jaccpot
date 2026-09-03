@@ -198,17 +198,41 @@ def _cost_analysis(fn: Any, argument: Any) -> Optional[Dict[str, float]]:
         cost analysis (or the callable is not jitted).
     """
     try:
-        analysis = fn.lower(argument).compile().cost_analysis()
+        compiled = fn.lower(argument).compile()
+        analysis = compiled.cost_analysis()
     except Exception:  # pragma: no cover - backend dependent
         return None
     if isinstance(analysis, list):
         analysis = analysis[0] if analysis else None
     if not analysis:
         return None
-    return {
+    record = {
         "flops": float(analysis.get("flops", float("nan"))),
         "bytes_accessed": float(analysis.get("bytes accessed", float("nan"))),
     }
+    # Per-executable memory, which is what fig16's memory panel needs. The
+    # allocator's `peak_bytes_in_use` is a process-wide high-water mark that
+    # `clear_memory_stats` does not reliably reset, and it reported the forward
+    # and the gradient as using IDENTICAL memory at every N -- 0.51/0.51,
+    # 1.45/1.45 GiB -- which cannot be right when the compiled temp sizes for
+    # the same two graphs differ by 14x (2.41 GiB against 33.84 GiB at
+    # N=1048576, leaf 64). This is the trustworthy source: it is deterministic,
+    # attributed to one executable, and split into the parts that scale
+    # differently.
+    try:
+        memory = compiled.memory_analysis()
+    except Exception:  # pragma: no cover - backend dependent
+        return record
+    for key, attribute in (
+        ("temp_bytes", "temp_size_in_bytes"),
+        ("argument_bytes", "argument_size_in_bytes"),
+        ("output_bytes", "output_size_in_bytes"),
+        ("alias_bytes", "alias_size_in_bytes"),
+    ):
+        value = getattr(memory, attribute, None)
+        if value is not None:
+            record[key] = float(value)
+    return record
 
 
 def _measure_one(
@@ -365,8 +389,12 @@ def _measure_one(
             "forward_backward_seconds_mean": grad_mean,
             "forward_backward_seconds_stdev": grad_sd,
             "backward_over_forward": grad_min / forward_min if forward_min else None,
-            "forward_peak_bytes": forward_peak,
-            "forward_backward_peak_bytes": grad_peak,
+            # Allocator high-water marks, kept but NOT the panel's source: see
+            # _cost_analysis for why they are unusable here.
+            "forward_allocator_peak_bytes": forward_peak,
+            "forward_backward_allocator_peak_bytes": grad_peak,
+            "forward_temp_bytes": (forward_cost or {}).get("temp_bytes"),
+            "forward_backward_temp_bytes": (gradient_cost or {}).get("temp_bytes"),
             "finite_difference_extrapolated_seconds": fd_seconds,
             "finite_difference_method": "one_sided_(P+1)_forward_evaluations",
             "finite_difference_is_extrapolated": True,
