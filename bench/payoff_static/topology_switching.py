@@ -546,7 +546,52 @@ def main() -> int:
         flush=True,
     )
 
+    out = args.json_out or DEFAULT_OUT
+    config_record = {
+        "n": n_list,
+        "theta": float(args.theta),
+        "order": int(args.order),
+        "basis": "solidfmm",
+        "seed": int(args.seed),
+        "device": runmeta.device_label(),
+        "precision": str(args.dtype),
+        "M": int(args.tracers),
+        "leaf_size": int(args.leaf_size),
+        "softening": float(args.softening),
+        "iterations": int(args.iterations),
+        "cadences": cadences,
+        "learning_rates": rates,
+        "intensive_every": int(args.intensive_every),
+        "near_set_sample": int(args.near_set_sample),
+    }
     records: List[Dict[str, Any]] = []
+
+    def flush() -> Any:
+        """Write the results JSON as it currently stands.
+
+        Returns
+        -------
+        Any
+            The path written.
+
+        Notes
+        -----
+        Called after EVERY point rather than once at the end. This sweep runs
+        for hours -- 28 fits, on the leaf-64 configuration it needs for a
+        non-empty far field, which is ~10x slower per evaluation than fig16's
+        leaf 256 -- and a run stopped, pre-empted, or killed by an
+        out-of-memory partway used to leave nothing behind at all. Overwriting
+        the same path is already the contract (``jsonio.write_result`` is
+        documented idempotent), so the cost is rewriting a small JSON per point
+        and the benefit is that a partial sweep is still a usable artifact.
+        """
+        return jsonio.write_result(
+            out,
+            config=config_record,
+            meta=runmeta.run_meta(),
+            data={"records": records},
+        )
+
     for n in n_list:
         for cadence in cadences:
             # The step-size axis only needs sweeping at one cadence: it is a
@@ -578,31 +623,9 @@ def main() -> int:
                             "error": str(exc)[:500],
                         }
                     )
+                flush()
 
-    out = args.json_out or DEFAULT_OUT
-    written = jsonio.write_result(
-        out,
-        config={
-            "n": n_list,
-            "theta": float(args.theta),
-            "order": int(args.order),
-            "basis": "solidfmm",
-            "seed": int(args.seed),
-            "device": runmeta.device_label(),
-            "precision": str(args.dtype),
-            "M": int(args.tracers),
-            "leaf_size": int(args.leaf_size),
-            "softening": float(args.softening),
-            "iterations": int(args.iterations),
-            "cadences": cadences,
-            "learning_rates": rates,
-            "intensive_every": int(args.intensive_every),
-            "near_set_sample": int(args.near_set_sample),
-        },
-        meta=runmeta.run_meta(),
-        data={"records": records},
-    )
-    print(f"wrote {written}")
+    print(f"wrote {flush()}")
     return 0
 
 

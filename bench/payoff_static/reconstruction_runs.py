@@ -412,15 +412,55 @@ def main() -> int:
     cases = _case_list(args)
     print(f"reconstruction_runs: {len(cases)} cases", flush=True)
 
+    out = args.json_out or DEFAULT_OUT
+    config_record = {
+        "n": [int(v) for v in str(args.n).split(",") if v],
+        "theta": float(args.theta),
+        "order": int(args.order),
+        "basis": "solidfmm",
+        "seed": int(args.seed),
+        "device": runmeta.device_label(),
+        "precision": str(args.dtype),
+        "M": int(args.tracers),
+        "leaf_size": int(args.leaf_size),
+        "iterations": int(args.iterations),
+        "rebuild_cadence": int(args.rebuild_cadence),
+        "softenings": [float(v) for v in str(args.softenings).split(",") if v],
+        "noise_fractions": [
+            float(v) for v in str(args.noise_fractions).split(",") if v
+        ],
+        "initial_guesses": list(INITIAL_GUESSES),
+        "cases": str(args.cases),
+    }
     records: List[Dict[str, Any]] = []
+
+    def flush() -> Any:
+        """Write the results JSON as it currently stands.
+
+        Returns
+        -------
+        Any
+            The path written.
+
+        Notes
+        -----
+        Called after every case. This sweep is 18 gradient-descent fits and
+        runs for hours; a run stopped or killed partway used to leave nothing
+        behind. ``jsonio.write_result`` is documented idempotent, so the cost is
+        rewriting one JSON per case.
+        """
+        return jsonio.write_result(
+            out,
+            config=config_record,
+            meta=runmeta.run_meta(),
+            data={"records": records},
+        )
+
     for case in cases:
         try:
             records.append(_run_case(case, args))
         except Exception as exc:  # pragma: no cover - OOM or divergence
-            print(
-                f"  {case}: FAILED ({type(exc).__name__}: {exc})",
-                flush=True,
-            )
+            print(f"  {case}: FAILED ({type(exc).__name__}: {exc})", flush=True)
             records.append(
                 {
                     **case,
@@ -429,33 +469,9 @@ def main() -> int:
                     "error": str(exc)[:500],
                 }
             )
+        flush()
 
-    out = args.json_out or DEFAULT_OUT
-    written = jsonio.write_result(
-        out,
-        config={
-            "n": [int(v) for v in str(args.n).split(",") if v],
-            "theta": float(args.theta),
-            "order": int(args.order),
-            "basis": "solidfmm",
-            "seed": int(args.seed),
-            "device": runmeta.device_label(),
-            "precision": str(args.dtype),
-            "M": int(args.tracers),
-            "leaf_size": int(args.leaf_size),
-            "iterations": int(args.iterations),
-            "rebuild_cadence": int(args.rebuild_cadence),
-            "softenings": [float(v) for v in str(args.softenings).split(",") if v],
-            "noise_fractions": [
-                float(v) for v in str(args.noise_fractions).split(",") if v
-            ],
-            "initial_guesses": list(INITIAL_GUESSES),
-            "cases": str(args.cases),
-        },
-        meta=runmeta.run_meta(),
-        data={"records": records},
-    )
-    print(f"wrote {written}")
+    print(f"wrote {flush()}")
     return 0
 
 
