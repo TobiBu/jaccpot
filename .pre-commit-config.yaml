@@ -101,7 +101,7 @@ repos:
         args:
           [
             "--select=F821,F822",
-            "--builtins=n,t,ct,levels,internal,leaves,edges,pairs,farleaves,blocks,blocksize,orders,_",
+            "--builtins=n,t,ct,levels,internal,leaves,edges,pairs,farleaves,blocks,blocksize,orders,slots,_",
           ]
         # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
         # It was `files: ^jaccpot/` when introduced, because
