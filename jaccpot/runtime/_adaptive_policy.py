@@ -173,7 +173,8 @@ def adaptive_policy_tolerance(
     return jnp.asarray(float(theta) ** (max(int(v) for v in p_gears) + 2), dtype=dtype)
 
 
-def _packed_total_order(multipole_packed: Array) -> int:
+@jaxtyped(typechecker=beartype)
+def _packed_total_order(multipole_packed: Inexact[Array, "nodes sh"]) -> int:
     packed = jnp.asarray(multipole_packed)
     return int(round(np.sqrt(int(packed.shape[1])) - 1))
 
@@ -454,10 +455,11 @@ def source_error_proxy_by_order_from_multipoles(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def compute_node_force_scale_from_sorted_acc(
     *,
     tree: Tree,
-    accelerations_sorted: Array,
+    accelerations_sorted: Float[Array, "n 3"],
     reduction: str = "max",
 ) -> Array:
     """Estimate per-node force scales from sorted per-particle accelerations.
@@ -471,7 +473,7 @@ def compute_node_force_scale_from_sorted_acc(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    accelerations_sorted : Array
+    accelerations_sorted : Float[Array, 'n 3']
         Per-particle accelerations in tree order.
     reduction : str
         How to reduce per-particle values onto a node: ``min``, ``mean`` or ``max``.
@@ -489,10 +491,11 @@ def compute_node_force_scale_from_sorted_acc(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def compute_node_force_scale_from_sorted_magnitudes(
     *,
     tree: Tree,
-    magnitudes_sorted: Array,
+    magnitudes_sorted: Float[Array, "n"],
     reduction: str = "max",
     max_leaf_size: Optional[int] = None,
 ) -> Array:
@@ -506,7 +509,7 @@ def compute_node_force_scale_from_sorted_magnitudes(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    magnitudes_sorted : Array
+    magnitudes_sorted : Float[Array, 'n']
         Per-particle scalar magnitudes in tree order.
     reduction : str
         How to reduce per-particle values onto a node: ``min``, ``mean`` or ``max``.
@@ -639,7 +642,8 @@ def compute_node_force_scale_from_sorted_magnitudes(
     return jnp.where(finite, scales, fallback)
 
 
-def node_span_mass(*, tree: Tree, masses_sorted: Array) -> Array:
+@jaxtyped(typechecker=beartype)
+def node_span_mass(*, tree: Tree, masses_sorted: Float[Array, "n"]) -> Array:
     """Total mass spanned by every node, from a prefix sum over sorted masses.
 
     Deliberately independent of the upward pass: this is the *reference* node mass,
@@ -655,7 +659,7 @@ def node_span_mass(*, tree: Tree, masses_sorted: Array) -> Array:
     ----------
     tree : Tree
         Tree supplying ``node_ranges``.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         ``(n,)`` masses in the tree's sorted order.
 
     Returns
@@ -1098,7 +1102,10 @@ def _far_field_force_scale_by_node(
     return accumulate_own_down_parent_chain(tree=tree, own=own)
 
 
-def accumulate_own_down_parent_chain(*, tree: Tree, own: Array) -> Array:
+@jaxtyped(typechecker=beartype)
+def accumulate_own_down_parent_chain(
+    *, tree: Tree, own: Float[Array, "nodes"]
+) -> Array:
     """Push each node's own contribution down onto all of its descendants.
 
     Turns ``own[U]`` -- what ``U``'s own list contributes -- into
@@ -1115,7 +1122,7 @@ def accumulate_own_down_parent_chain(*, tree: Tree, own: Array) -> Array:
     ----------
     tree : Tree
         Tree supplying the parent chain the accumulation walks.
-    own : Array
+    own : Float[Array, 'nodes']
         ``(num_nodes,)`` per-node own contribution.
 
     Returns
@@ -1778,13 +1785,14 @@ _EFFECTIVE_THETA_FLOOR = 1e-3
 _EFFECTIVE_THETA_RADIUS_FLOOR_FRAC = 1e-9
 
 
+@jaxtyped(typechecker=beartype)
 def per_node_effective_theta(
     *,
-    source_power: Array,
-    radius_bound: Array,
-    force_scale: Array,
-    masked_binomial: Array,
-    exponent: Array,
+    source_power: Float[Array, "nodes degrees"],
+    radius_bound: Float[Array, "nodes"],
+    force_scale: Float[Array, "nodes"],
+    masked_binomial: Float[Array, "degrees"],
+    exponent: Int[Array, "degrees"],
     order: int,
     eps: float,
     gravitational_constant: float = 1.0,
@@ -1839,15 +1847,15 @@ def per_node_effective_theta(
 
     Parameters
     ----------
-    source_power : Array
+    source_power : Float[Array, 'nodes degrees']
         Dehnen per-degree power ``P_n``, shape ``(num_nodes, total_p + 1)``.
-    radius_bound : Array
+    radius_bound : Float[Array, 'nodes']
         Per-node radius about the expansion centre, shape ``(num_nodes,)``.
-    force_scale : Array
+    force_scale : Float[Array, 'nodes']
         Per-node force scale on the criterion's right-hand side, ``(num_nodes,)``.
-    masked_binomial : Array
+    masked_binomial : Float[Array, 'degrees']
         ``C(p, n)`` for ``n <= p`` else 0, for the chosen order: ``(total_p + 1,)``.
-    exponent : Array
+    exponent : Int[Array, 'degrees']
         ``max(p - n, 0)`` for the chosen order, shape ``(total_p + 1,)``.
     order : int
         Expansion order ``p`` these weights correspond to.
@@ -2018,10 +2026,11 @@ def per_node_conservative_extent(
     return extents, lam_safe
 
 
+@jaxtyped(typechecker=beartype)
 def per_node_mac_radius(
     *,
-    radius_bound: Array,
-    theta_nodes: Array,
+    radius_bound: Float[Array, "nodes"],
+    theta_nodes: Float[Array, "nodes"],
     theta_global: float,
     radius_floor_frac: float = _EFFECTIVE_THETA_RADIUS_FLOOR_FRAC,
 ) -> Array:
@@ -2042,9 +2051,9 @@ def per_node_mac_radius(
 
     Parameters
     ----------
-    radius_bound : Array
+    radius_bound : Float[Array, 'nodes']
         See the module docstring.
-    theta_nodes : Array
+    theta_nodes : Float[Array, 'nodes']
         See the module docstring.
     theta_global : float
         See the module docstring.
