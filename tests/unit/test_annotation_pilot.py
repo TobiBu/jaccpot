@@ -474,3 +474,34 @@ def test_the_replay_merges_every_worker_shard(tmp_path):
 
     with pytest.raises(FileNotFoundError):
         annotation_pilot._load_recordings(tmp_path / "absent.pkl")
+
+
+def test_a_custom_vjp_object_is_refused_rather_than_wrapped():
+    """Wrapping one strips its rule, so every later gradient is the wrong one.
+
+    Measured 2026-09-03: recording `nearfield/_fast_lane.py` replaced a `custom_vjp`
+    object with a plain function and broke
+    `test_prepacked_cvjp_saves_the_documented_nine_entry_residual` with
+    `AttributeError: 'function' object has no attribute 'defvjp'`. That was the lucky
+    outcome -- a test happened to assert the object's identity.
+    """
+
+    class _FakeCustomVJP:
+        """A stand-in carrying the attribute the predicate keys on."""
+
+        def defvjp(self, fwd, bwd):  # pragma: no cover - never called
+            """Accept rules like `jax.custom_vjp` does."""
+
+    def plain(x):  # pragma: no cover - never called
+        """A plain function, which must still be wrapped."""
+
+    assert annotation_pilot._is_custom_differentiation_object(_FakeCustomVJP())
+    assert not annotation_pilot._is_custom_differentiation_object(plain)
+
+    class _FakeCustomJVP:
+        """The forward-mode sibling."""
+
+        def defjvp(self, rule):  # pragma: no cover - never called
+            """Accept a rule like `jax.custom_jvp` does."""
+
+    assert annotation_pilot._is_custom_differentiation_object(_FakeCustomJVP())

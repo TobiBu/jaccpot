@@ -130,6 +130,10 @@ WHAT IT DOES NOT MEASURE
   `runtime/` mixins can have their shapes derived by capture but not their section 4.1
   question answered here. Anyone wanting that needs a real engine fixture, which is a
   different tool: it would have to build one, not describe one.
+* **`custom_vjp` / `custom_jvp` objects.** REFUSED, not measured, and loudly: replacing
+  one with a plain wrapper strips its rule, so every gradient through that name would be
+  the autodiff of the primal instead. `defvjp` captures the rules at import, so no wrapper
+  installed afterwards can intercept them anyway.
 * **Lanes that never ran.** Same limitation as `bench/annotation_capture.py`: a function
   reached only through one backend is recorded only as that backend called it. Read the
   recorded function count against the targeted count before trusting a per-module rate.
@@ -410,6 +414,40 @@ def _format_path(name: str, path: tuple[int, ...]) -> str:
     return name + "".join(f"[{index}]" for index in path)
 
 
+def _is_custom_differentiation_object(target: Any) -> bool:
+    """Say whether a target is a ``custom_vjp`` / ``custom_jvp`` object rather than a function.
+
+    Wrapping one CORRUPTS THE RUN, silently. ``_wrap`` returns a plain function, and
+    ``functools.wraps`` copies ``__name__`` and ``__doc__`` but not ``defvjp``, so rebinding
+    the module attribute replaces the ``custom_vjp`` object with something that has no
+    custom rule at all -- every gradient taken through that name for the rest of the session
+    is the autodiff of the primal, not the hand-written rule, and nothing says so.
+
+    Measured 2026-09-03: recording `nearfield/_fast_lane.py` broke
+    ``test_prepacked_cvjp_saves_the_documented_nine_entry_residual`` with
+    ``AttributeError: 'function' object has no attribute 'defvjp'`` -- which was the lucky
+    outcome, because a test asserted the object's identity. The unlucky outcome is a
+    reverse-mode measurement that silently answers a different question.
+
+    Refusing is right rather than temporary: ``defvjp`` captures the rules at import, so
+    even a wrapper that forwarded the attributes could not intercept the rule calls -- the
+    same limitation `bench/annotation_capture.py` records for methods. Duck-typed rather
+    than `isinstance`, to avoid importing `jax` here for a predicate.
+
+    Parameters
+    ----------
+    target : Any
+        The object bound to the requested name.
+
+    Returns
+    -------
+    bool
+        True when it carries a custom differentiation rule setter.
+    """
+
+    return hasattr(target, "defvjp") or hasattr(target, "defjvp")
+
+
 def _worker_output(out: Path, config: Any) -> Path:
     """Return a per-xdist-worker path, so workers do not overwrite each other.
 
@@ -598,6 +636,7 @@ def pytest_configure(config: Any) -> None:
         return
     limit = int(os.environ.get(_MAX_ENV, "1"))
     missing: list[str] = []
+    refused: list[str] = []
     for group in spec.split(";"):
         if not group.strip():
             continue
@@ -608,6 +647,9 @@ def pytest_configure(config: Any) -> None:
             if original is None:
                 missing.append(f"{module_path}:{name}")
                 continue
+            if _is_custom_differentiation_object(original):
+                refused.append(f"{module_path}:{name}")
+                continue
             wrapper = _wrap(original, f"{module_path}:{name}", limit)
             for holder, attribute in _binding_sites(module, name, original):
                 setattr(holder, attribute, wrapper)
@@ -616,6 +658,9 @@ def pytest_configure(config: Any) -> None:
     if missing:
         # Loud, because a typo'd target otherwise reads as "already validated".
         print(f"annotation_pilot: MISSING TARGETS {missing}")
+    if refused:
+        # Also loud, and for a worse reason: see `_is_custom_differentiation_object`.
+        print(f"annotation_pilot: REFUSED (custom_vjp/custom_jvp objects) {refused}")
 
 
 def pytest_unconfigure(config: Any) -> None:
