@@ -486,3 +486,389 @@ def test_jaccpot_base_step_matches_nornax_fused_base_step():
     ):
         error = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
         assert error < 1e-10, f"{name}: {error}"
+
+
+# --- the explicit-topology hook (nornax block_kdk_rollout(rebuild_fn=...)) -----------
+#
+# nornax's rollout can carry a topology in its scan and rebuild it at base-step
+# boundaries only, handing it to the force model as the explicit ``topology=``
+# keyword. The adapter's half of that contract is ``rebuild_state`` (traceable,
+# device backend) plus accepting the keyword on the three protocol methods. The
+# tests below are the cross-repo half: the topology the model sees is frozen for a
+# whole segment of ``rebuild_every`` base steps, and with ``rebuild_every = 1`` the
+# rollout is the same map as ODISSEO's own scan-with-rebuild lane.
+
+
+def _requires_topology_hook():
+    """Skip when the installed nornax predates ``block_kdk_rollout(rebuild_fn=...)``."""
+    import inspect
+
+    if "rebuild_fn" not in inspect.signature(block_kdk_rollout).parameters:
+        pytest.skip("installed nornax has no topology hook on block_kdk_rollout")
+
+
+def _two_clumps(n=256, seed=25, separation=8.0, sigma=0.6):
+    """Two well-separated Gaussian clumps, so the mutual MAC accepts far pairs.
+
+    The single Gaussian blob ``_system`` builds has **no far pairs** at N = 256 for
+    any ``theta`` this file uses (measured: 0 far, 120 near at ``theta = 0.9``), so
+    on it the FMM is a direct sum and a "topology" claim is vacuous. Two clumps
+    put a genuinely separated node pair in the tree at ODISSEO's production
+    ``theta = 0.6``: 15 far pairs, 96 near, for this seed. Masses are unequal for
+    the reason ODISSEO's own test bench gives: equal masses make a target-centric
+    gather accidentally antisymmetric.
+    """
+    rng = np.random.default_rng(seed)
+    half = n // 2
+    centres = ([-separation / 2.0, 0.0, 0.0], [separation / 2.0, 0.0, 0.0])
+    positions = np.concatenate([rng.normal(c, sigma, (half, 3)) for c in centres])
+    velocities = rng.normal(0.0, 0.05, (n, 3))
+    masses = rng.uniform(0.5, 1.5, n)
+    return (
+        jnp.asarray(positions, dtype=jnp.float64),
+        jnp.asarray(velocities, dtype=jnp.float64),
+        jnp.asarray(masses, dtype=jnp.float64),
+    )
+
+
+def _device_fmm(k_max, *, theta=0.6, leaf_size=16):
+    """A device-topology adapter: ``rebuild_state`` is traceable only on this backend."""
+    return BlockStepFMM(
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=theta,
+        max_order=4,
+        leaf_size=leaf_size,
+        topology_backend="device",
+    )
+
+
+def _topology_arrays(state):
+    """The discrete structure of a device ``MutualFMMState``, as host arrays.
+
+    ``fingerprint_topology`` (jaccpot.mutual.identity) digests a host-side
+    ``MutualTopology``; the rollout carries the *device* state ``rebuild_state``
+    returns, which has no ``MutualTopology`` behind it. So the comparison here is
+    on the state's own index arrays -- the same six components the fingerprint
+    covers, minus the tree shape, which the static-radix template fixes.
+    """
+    return {
+        name: np.asarray(getattr(state, name))
+        for name in (
+            "forward_permutation",
+            "inverse_permutation",
+            "leaf_particles",
+            "near_a",
+            "near_b",
+            "far_a",
+            "far_b",
+            "num_near_pairs",
+            "num_far_pairs",
+        )
+    }
+
+
+def _same_topology(a, b):
+    return all(np.array_equal(a[k], b[k]) for k in a)
+
+
+class _RecordingTopology:
+    """Delegate to an adapter and record, per traced call, which topology arrived.
+
+    Recorded at trace time: within one traced base step every boundary kick and
+    the end-of-step total must receive the *same* carried object, and none may
+    receive ``None`` once the rollout carries one.
+    """
+
+    traced_boundary_weights = True
+
+    def __init__(self, fmm):
+        self._fmm = fmm
+        self.k_max = fmm.k_max
+        self.seen = []
+
+    def level_accelerations(
+        self, positions, masses, *, rung, level, args=None, topology=None
+    ):
+        self.seen.append(("level_accelerations", id(topology), topology is None))
+        return self._fmm.level_accelerations(
+            positions, masses, rung=rung, level=level, args=args, topology=topology
+        )
+
+    def total_accelerations(
+        self, positions, masses, *, rung=None, args=None, topology=None
+    ):
+        self.seen.append(("total_accelerations", id(topology), topology is None))
+        return self._fmm.total_accelerations(
+            positions, masses, rung=rung, args=args, topology=topology
+        )
+
+    def boundary_kick(
+        self,
+        positions,
+        velocities,
+        masses,
+        *,
+        rung,
+        level_weights=None,
+        args=None,
+        topology=None,
+        **static,
+    ):
+        self.seen.append(("boundary_kick", id(topology), topology is None))
+        return self._fmm.boundary_kick(
+            positions,
+            velocities,
+            masses,
+            rung=rung,
+            level_weights=level_weights,
+            args=args,
+            topology=topology,
+            **static,
+        )
+
+
+def test_the_adapter_evaluates_against_an_explicit_topology():
+    """``topology=`` selects the state; ``None`` falls back to the cached one.
+
+    The explicit call must reproduce the cached call bit for bit when handed the
+    very state ``prepare`` cached, on all three protocol methods, and a state
+    built for a different particle count is refused rather than indexed.
+    """
+    n, k_max = 256, 2
+    positions, velocities, masses = _system(n, seed=21)
+    rung = jnp.asarray(
+        np.random.default_rng(22).integers(0, k_max + 1, n), dtype=jnp.int32
+    )
+    fmm = _device_fmm(k_max)
+    cached = fmm.prepare(positions, masses)
+    weights = jnp.asarray([1.0e-3, 5.0e-4, 2.5e-4])
+
+    for explicit, implicit in (
+        (
+            fmm.level_accelerations(
+                positions, masses, rung=rung, level=1, topology=cached
+            ),
+            fmm.level_accelerations(positions, masses, rung=rung, level=1),
+        ),
+        (
+            fmm.total_accelerations(positions, masses, topology=cached),
+            fmm.total_accelerations(positions, masses),
+        ),
+        (
+            fmm.boundary_kick(
+                positions,
+                velocities,
+                masses,
+                rung=rung,
+                level_weights=weights,
+                topology=cached,
+            ),
+            fmm.boundary_kick(
+                positions, velocities, masses, rung=rung, level_weights=weights
+            ),
+        ),
+    ):
+        assert np.array_equal(np.asarray(explicit), np.asarray(implicit))
+
+    # The explicit state is used, not merely accepted: a state rebuilt at displaced
+    # positions gives a different (FMM-tolerance) answer for the same arguments.
+    moved = fmm.rebuild_state(positions + 0.5, masses)
+    a_cached = fmm.total_accelerations(positions, masses, topology=cached)
+    a_moved = fmm.total_accelerations(positions, masses, topology=moved)
+    assert not np.array_equal(np.asarray(a_cached), np.asarray(a_moved))
+
+    with pytest.raises(ValueError, match="particles"):
+        fmm.total_accelerations(positions[:-1], masses[:-1], topology=cached)
+
+
+def test_the_frozen_topology_is_identical_across_a_segment_and_rebuilt_after_it():
+    """Test 3 of the B4 plan: one topology per segment of ``rebuild_every`` base steps.
+
+    With ``rebuild_every = 2`` the rollout is run for ``n_base = 1, 2, 3, 4``; the
+    carried topology after 1 and 2 steps is the seed built at entry, bit for bit,
+    and after 3 and 4 steps it is the one rebuilt before step 2 -- different from
+    the seed, since the particles have moved. The rebuild count is taken at
+    runtime with ``jax.debug.callback`` and must be ``ceil(n_base / 2)``. Inside a
+    traced base step every fused call receives the same carried object, and none
+    receives ``None``.
+    """
+    _requires_topology_hook()
+    k_max, every, dt_max = 2, 2, 2.0e-2
+    positions, velocities, masses = _two_clumps(seed=23)
+    velocities = 10.0 * velocities  # move far enough per step to change pairs
+    fmm = _device_fmm(k_max)
+    seed = fmm.prepare(positions, masses)
+    assert int(seed.num_far_pairs) > 0, "no far pairs: the topology claim is vacuous"
+    recorder = _RecordingTopology(fmm)
+    state = initialize_block_state(positions, velocities, masses, fmm, k_max=k_max)
+    calls = []
+
+    def rebuild_fn(p, m):
+        jax.debug.callback(lambda: calls.append(1), ordered=True)
+        return fmm.rebuild_state(p, m)
+
+    seen_topologies = {}
+    for n_base in (1, 2, 3, 4):
+        calls.clear()
+        recorder.seen.clear()
+        final = block_kdk_rollout(
+            state,
+            dt_max,
+            recorder,
+            k_max=k_max,
+            n_base=n_base,
+            eta=0.1,
+            eps=SOFTENING,
+            checkpoint=False,
+            rebuild_fn=rebuild_fn,
+            rebuild_every=every,
+        )
+        jax.block_until_ready(final)
+        jax.effects_barrier()
+        assert len(calls) == -(-n_base // every), n_base
+        assert bool(jnp.all(jnp.isfinite(final.positions)))
+        seen_topologies[n_base] = _topology_arrays(final.topology)
+        # One traced base step, one object: the boundary kicks and the end-of-step
+        # total all see the carried topology, never the cached fallback.
+        assert recorder.seen, "the recorder saw no calls"
+        assert not any(is_none for _, _, is_none in recorder.seen)
+        assert len({obj for _, obj, _ in recorder.seen}) == 1
+        assert {name for name, _, _ in recorder.seen} == {
+            "boundary_kick",
+            "total_accelerations",
+        }
+
+    assert _same_topology(seen_topologies[1], seen_topologies[2])
+    assert _same_topology(seen_topologies[3], seen_topologies[4])
+    assert not _same_topology(seen_topologies[2], seen_topologies[3])
+
+
+def _odisseo_jitted_lane(
+    fmm, positions, velocities, masses, *, dt_max, k_max, eta, eps, n_base
+):
+    """ODISSEO's ``integrate_blockstep_jitted`` base step, transcribed.
+
+    ``odisseo/blockstep_coupling.py::integrate_blockstep_jitted`` (jaccpot-integration
+    branch, d373b68) walks the boundaries itself because nornax had no place for a
+    per-base-step topology. Its ``base_step`` is reproduced here verbatim in
+    structure -- rebuild, full acceleration on the fresh topology, rung assignment,
+    scanned boundary kicks off the weight table -- so that the rollout below has an
+    oracle that does not depend on importing ODISSEO. ``freeze_template`` has been
+    called by the caller, as ODISSEO does host-side before its scan.
+    """
+    steps = n_sub(k_max)
+    dt_max = jnp.asarray(dt_max, dtype=positions.dtype)
+    dt_min = dt_max / steps
+    # nornax's dt_max-free table, as ODISSEO imports it (jaccpot's own takes dt_max).
+    table = jnp.asarray(nornax_boundary_weight_table(k_max), dtype=positions.dtype)
+    zero = jnp.asarray(0.0, dtype=positions.dtype)
+
+    def base_step(carry, _):
+        positions, velocities, mass = carry
+        topology = fmm.rebuild_state(positions, mass)
+        acc = fmm.weighted_accelerations(topology, positions, mass)
+        rung = assign_rungs(acc, dt_max=dt_max, k_max=k_max, eta=eta, eps=eps)
+
+        def boundary(inner, s):
+            pos, vel = inner
+            vel = vel + fmm.weighted_accelerations(
+                topology, pos, mass, rung=rung, level_weights=dt_max * table[s]
+            )
+            pos = pos + jnp.where(s < steps, dt_min, zero) * vel
+            return (pos, vel), None
+
+        (positions, velocities), _ = jax.lax.scan(
+            boundary, (positions, velocities), jnp.arange(steps + 1, dtype=jnp.int32)
+        )
+        return (positions, velocities, mass), jnp.bincount(rung, length=k_max + 1)
+
+    (p, v, _), histograms = jax.jit(
+        lambda p0, v0, m: jax.lax.scan(base_step, (p0, v0, m), xs=None, length=n_base)
+    )(positions, velocities, masses)
+    return p, v, histograms
+
+
+def test_the_rollout_with_rebuild_every_one_matches_odisseos_jitted_lane():
+    """Test 5 of the B4 plan: the hook reproduces ODISSEO's scan-with-rebuild lane.
+
+    Same adapter, same template, same ``assign_rungs``, same weight table; the
+    only structural difference is *which acceleration assigns the rungs*. ODISSEO
+    evaluates it on the freshly rebuilt topology; nornax's base step reuses the
+    end-of-step ``acc`` cached by the previous base step, which was evaluated on
+    the previous topology at the same positions. The two differ at FMM tolerance,
+    so a particle within that of a rung threshold could land on different rungs.
+    The rung histograms are therefore asserted equal exactly (as ODISSEO's own
+    lane-parity test does), and given equal rungs the kicks are the same
+    ``weighted_accelerations`` calls on the same topology, so the trajectories
+    must agree to round-off.
+
+    Tolerance: 1e-12 relative on positions and velocities, and it was set after
+    measuring, not to fit: against the *real* ``integrate_blockstep_jitted``
+    (ODISSEO ``jaccpot-integration`` at d373b68, its own two-clump IC, N = 256,
+    ``k_max = 2``, ``theta = 0.6``, four base steps, 2026-09-03) the two lanes
+    were **bit-identical** in positions and velocities, with rung histogram
+    ``[229, 23, 4]`` on both sides. 1e-12 is therefore not a fit to the observed
+    difference (which is zero) but the level at which a disagreement would stop
+    being round-off and start being a different topology or a different rung --
+    FMM tolerance on this system is ~1e-4 -- with four orders of margin to spare.
+    On this test's own two-clump system the transcribed oracle and the rollout
+    were likewise bit-identical, with the schedule live: rung histogram
+    ``[8, 234, 14]`` for three base steps and ``[8, 233, 15]`` at the fourth, on
+    both sides.
+    """
+    _requires_topology_hook()
+    # dt_max and eta were chosen by measuring the rung occupancy on this IC:
+    # [8, 234, 14] over rungs 0..2, so all three levels are live and the two
+    # lanes' rung assignments are genuinely compared rather than trivially equal.
+    n, k_max, dt_max, eta, n_base = 256, 2, 2.5e-3, 0.15, 4
+    positions, velocities, masses = _two_clumps(seed=25)
+    fmm = _device_fmm(k_max)
+    seed = fmm.prepare(positions, masses)  # freezes the template, as ODISSEO does
+    assert int(seed.num_far_pairs) > 0, "no far pairs: the topology claim is vacuous"
+
+    p_o, v_o, hist_o = _odisseo_jitted_lane(
+        fmm,
+        positions,
+        velocities,
+        masses,
+        dt_max=dt_max,
+        k_max=k_max,
+        eta=eta,
+        eps=SOFTENING,
+        n_base=n_base,
+    )
+
+    state = initialize_block_state(positions, velocities, masses, fmm, k_max=k_max)
+    final = jax.jit(
+        lambda s: block_kdk_rollout(
+            s,
+            dt_max,
+            fmm,
+            k_max=k_max,
+            n_base=n_base,
+            eta=eta,
+            eps=SOFTENING,
+            checkpoint=False,
+            rebuild_fn=fmm.rebuild_state,
+            rebuild_every=1,
+        )
+    )(state)
+
+    # The schedules must agree exactly; the final rung is the last one assigned.
+    assert np.array_equal(
+        np.asarray(jnp.bincount(final.rung, length=k_max + 1)), np.asarray(hist_o[-1])
+    )
+    assert (
+        int(np.asarray(hist_o[-1]).max()) < n
+    ), "the block scheme collapsed to one rung"
+    assert (
+        int(np.count_nonzero(np.asarray(hist_o[-1]))) == k_max + 1
+    ), "a level is empty"
+
+    for got, want, name in (
+        (final.positions, p_o, "positions"),
+        (final.velocities, v_o, "velocities"),
+    ):
+        rel = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
+        assert rel < 1e-12, f"{name}: {rel:.3e}"

@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import jax.numpy as jnp
 from jax import lax
+from jax.typing import ArrayLike
 from jaxtyping import Array
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime
@@ -160,7 +161,7 @@ def node_centers_and_radii(
     return centers, radii
 
 
-def node_depths(parent: Array, root: Array, *, depth_cap: int) -> Array:
+def node_depths(parent: Array, root: ArrayLike, *, depth_cap: int) -> Array:
     """Depth of every node, root at 0, unreachable nodes at -1.
 
     A fixed-point iteration rather than the host's BFS: ``depth`` is relaxed
@@ -174,8 +175,10 @@ def node_depths(parent: Array, root: Array, *, depth_cap: int) -> Array:
     ----------
     parent : Array
         ``(num_nodes,)`` parent index, negative at the root.
-    root : Array
-        Index of the root node.
+    root : ArrayLike
+        Index of the root node. A Python ``int`` is accepted -- ``freeze_template``
+        passes one -- which is why this is not annotated ``Array``: under the
+        ``JACCPOT_RUNTIME_TYPECHECK`` hook that annotation rejected the call.
     depth_cap : int
         Number of relaxation sweeps; must be at least the true depth.
 
