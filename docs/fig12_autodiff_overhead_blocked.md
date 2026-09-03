@@ -1,9 +1,14 @@
 # Figure 12 (autodiff overhead): DELIVERED on the real basis 2026-08-22
 
 **Status 2026-08-22: delivered for the real basis over N=256..65536. The complex
-basis is unusable above N=2048 for a reason not yet identified.** The original
-2026-08-01 analysis below is kept verbatim, because its diagnosis was right and
-its route 1 is what worked.
+basis is unusable above N=2048.** The original 2026-08-01 analysis below is kept
+verbatim, because its diagnosis was right and its route 1 is what worked.
+
+**Status 2026-09-04: the complex-basis cause is identified — see "Why the
+complex ratio goes below one" below.** It is not a fourth thing to rule out: the
+forward is launch-bound, so the wall-clock ratio stops measuring
+differentiation. Found while building section 7's fig16, which hit the same
+signature at a different setting.
 
 ## What unblocked it
 
@@ -64,6 +69,72 @@ delivered on it and the complex arm is reported as a limitation. Note that
 a performance question, not an accuracy one.
 
 ---
+
+## Why the complex ratio goes below one (2026-09-04)
+
+The missing measurement was XLA's own cost analysis. The three hypotheses above
+are all about *which code runs*; the answer is that at these N almost none of the
+wall-clock is arithmetic at all, so the ratio is not measuring the reverse pass.
+
+Reproduced on an idle A100, this document's configuration (p=4, theta 0.5, leaf
+32, Plummer, fp64, `preset="fast"`), one prepared state per row, both arms
+jitted, minimum of 10 timed calls after 3 warmups:
+
+| basis   |     N | fwd ms | grad ms | wall ratio | flop ratio | fwd Gflop | fwd Gflop/s |
+|---------|------:|-------:|--------:|-----------:|-----------:|----------:|------------:|
+| real    |  1024 |   1.30 |    3.46 |       2.66 |       3.59 |    0.0078 |        5.99 |
+| real    |  4096 |   7.82 |   17.78 |       2.27 |       3.31 |    0.0112 |        1.44 |
+| real    | 16384 |  77.10 |  251.52 |       3.26 |       3.67 |    0.0706 |        0.92 |
+| complex |  1024 |   1.31 |    3.29 |       2.52 |       4.95 |    0.0075 |        5.77 |
+| complex |  4096 |  10.62 |   17.26 |       1.63 |       7.76 |    0.0094 |        0.89 |
+| complex | 16384 | 279.25 |  250.47 |   **0.90** |  **11.25** |    0.0477 |    **0.17** |
+
+Three things settle it.
+
+**The forward is not doing arithmetic.** Complex at N=16384 achieves 0.17
+Gflop/s against an A100's ~9700 Gflop/s fp64 peak — about 0.002% of it. A graph
+running four decades below peak is bound by kernel launch and dispatch, and a
+wall-clock ratio between two such graphs reports which one XLA fused into fewer
+kernels, not what differentiating cost.
+
+**The flop ratio never goes below one, and rises exactly where the wall ratio
+falls.** Complex goes 4.95 → 7.76 → 11.25 as the wall ratio goes 2.52 → 1.63 →
+0.90. The reverse pass is doing steadily *more* arithmetic relative to the
+forward while appearing to get cheaper. Only overhead can do that.
+
+**The complex forward does FEWER flops than the real one and takes 3.6x as
+long** — 0.0477 against 0.0706 Gflop, 279 ms against 77 ms at N=16384. That is
+not a slower algorithm, it is the same work in more launches, and it is the
+sharper form of the observation already recorded above ("its forward at those N
+costs ~2.5x the real basis, and the ratio is depressed exactly where that
+happens").
+
+So the sub-unity ratios are a measurement artifact, as this document already
+said, and the artifact is **launch-bound forwards**, not anything about
+differentiation or about the complex basis's numerics. The basis is
+bit-identical to solidfmm, so this was never an accuracy question.
+
+**What follows for the figure.** Nothing changes about what fig12 reports: the
+real basis is the production path and is unaffected. What changes is that the
+limitation now has a cause and a test. A ratio row is only meaningful where the
+point is compute-bound, and the cheap way to know is to record the flop count
+beside the wall-clock — cost analysis is static, needs no quiet machine, and
+cannot be fooled by fusion. `bench/payoff_static/gradient_cost_vs_nparams.py`
+does exactly that for section 7's fig16 and flags any row whose gradient time is
+within 5% of its forward as `latency_bound`. Doing the same in
+`autodiff_overhead.py` would let fig12 keep the complex arm and mark it, rather
+than reporting it as unexplained.
+
+**What this does not establish.** These rows come from a reproduction of the
+configuration, not from re-running `autodiff_overhead.py` itself, so the
+absolute milliseconds are not the committed artifact's. The identification rests
+on the flop counts and the achieved throughput, which are properties of the
+compiled graphs rather than of the harness.
+
+The same signature appeared in section 7's fig16 at leaf 64, where ratios of
+0.62–1.03 across N=1024..65536 turned into 2.55–3.13 at leaf 256 with forwards
+10x faster — same cause, different knob. That is the other half of the evidence
+that this is about launch overhead and not about the complex basis.
 
 ## Original analysis, 2026-08-01 (kept: the diagnosis was correct)
 
