@@ -623,7 +623,8 @@ Genuine configurable features and the documented environment gates are **not** c
 3. [ ] Every substantial function has a NumPy-style docstring including shapes, units,
        static arguments, differentiability, accuracy regime, and stated equivalences.
 4. [ ] `pydoclint --style numpy` clean (`pre-commit run --all-files`).
-5. [ ] `jaxtyping` annotations on array arguments; no bare `# type: ignore`.
+5. [ ] `jaxtyping` annotations on array arguments **that nothing else already
+       validates** (4.1 -- not "annotate every array"); no bare `# type: ignore`.
 6. [ ] Comments explain *why*; anything that looks wrong but is right is flagged at the site.
 7. [ ] Long units split with dashed section dividers; module seams in §8 respected.
 8. [ ] Descriptive names; standard symbols and established `p2m`/`m2l`-style shorthand kept.
@@ -632,3 +633,25 @@ Genuine configurable features and the documented environment gates are **not** c
 11. [ ] `black --check .` and `isort --check-only .` pass — and formatting was left to them.
 12. [ ] `NUMERICS_AND_JAX.md` checklist also passed if operators, sweeps, Pallas, or
         distributed code was touched.
+13. [ ] **No annotation added made an existing check unreachable.** For every parameter
+        you annotated, grep its own function for a `raise` naming it. A decorator runs
+        before the body, so `Float[Array, "n"]` on a parameter whose body already does
+        `if x.ndim != 1: raise ValueError(...)` deletes that error and everything it said
+        -- and the annotation is usually the worse of the two, because the body's message
+        names the parameter and prints the offending shape.
+
+        This is invisible unless a test pins the body's message. Measured
+        2026-09-03 in `runtime/_adaptive_policy.py`:
+        `compute_node_force_scale_from_sorted_magnitudes` was annotated, its
+        `ValueError("magnitudes_sorted must be 1-D ...; got shape (64, 3)")` became dead
+        code, and `test_scalar_reduction_rejects_vector_input` went red for matching
+        `"must be 1-D"`. The annotation closed nothing: the only hole the pilot found
+        there was a LENGTH change, which a single-occurrence axis cannot reject either.
+        Zero holes closed, one good error deleted, one test red -- so the parameter went
+        back to bare `Array`.
+
+        Same shape as the `Literal` contradiction the audit records for
+        `_fmm_impl.__init__`, where `Literal["auto", ...]` makes both the normalisation
+        and the `ValueError` below it unreachable for any caller who honours the type.
+        When the two disagree, decide which one should do the rejecting and delete the
+        other -- do not leave a check that cannot fire.
