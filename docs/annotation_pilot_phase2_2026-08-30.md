@@ -1,6 +1,7 @@
 # Phase 2 module ordering, measured — 2026-08-30
 
-**[current]** The rollout plan orders Phase 2's modules by **bare-parameter count**. This
+**[measured 2026-08-30, status maintained to 2026-09-03 — see "Where the order stands"]**
+The rollout plan orders Phase 2's modules by **bare-parameter count**. This
 records what happens when they are ordered by STYLE_GUIDE §4.1's own predictor instead —
 how much of each module is *already validated* — and the two orderings disagree.
 
@@ -97,6 +98,69 @@ so it binds nothing that could break another lane.
 5. `runtime/_adaptive_policy.py`.
 6. `nearfield/_fast_lane.py`.
 7. `runtime/kernels/_m2l.py` — **last**, and possibly not worth a PR: 8%.
+
+## Where the order stands — 2026-09-03
+
+Three of the seven are done. Counts are `bench/annotation_census.py` on `cb07ad5`, which is
+the only definition of the burn-down; the package moved 387 -> 551 shaped and 1709 -> 1544
+bare over these PRs, 18.5% -> 26.3%.
+
+| # | module | bare / shaped / unann | status |
+|---|---|---|---|
+| 1 | `operators/complex_ops.py`, the family | 27 / 70 / 0 | **done** — #279, 26 parameters now `Float[Array, "3"]` |
+| 2 | `pallas/nearfield_mutual.py` | 54 / 42 / 0 | **part done** — `fb2d0a1`; the entry points are contracted, the internals are not |
+| 3 | `nearfield/_large_n_blocks.py` | 41 / 60 / 12 | open |
+| 4 | `operators/complex_ops.py`, remainder | 27 / 70 / 0 | open |
+| 5 | `runtime/_adaptive_policy.py` | 75 / 24 / 0 | **done** — #293 |
+| 6 | `nearfield/_fast_lane.py` | 30 / 101 / 3 | **done** — #285, #289, #290 |
+| 7 | `runtime/kernels/_m2l.py` | 92 / 0 / 5 | open, and this document's advice is still to skip it |
+
+**Item 2's blocker was tooling, and the tooling landed for this module specifically.**
+"Widen the capture first" was this document's own precondition. `5c6bc71` closed it: the
+three UNREPLAYABLE functions were `_block_tile` and `_block_vjp_tiles`, whose positions are
+`tuple[Array, Array, Array]` and fell through to opaque, and `_pad_inputs`, which takes the
+working `dtype`. Both kinds are now described, and arrays inside a container are perturbed
+by path rather than merely rebuilt. (#294's `Tree` and `namedtuple` kinds were for item 5,
+where they turned 11 UNREPLAYABLE into 11 measured.)
+
+**What is still outstanding is a re-record, not a code change.** The description is frozen
+in the pickle, so the 2026-08-30 recording still reports those three as opaque however much
+the tool now understands — an old recording replays to the identical numbers, verified.
+Re-record before annotating, because the 42% rests on 5 of 8 functions.
+
+**And the 42% no longer describes what is left of item 2.** `fb2d0a1` gave the four public
+entry points -- `mutual_leafpair_block_jax`, `_pallas`, `_vjp_pallas`, `_cvjp` -- plus
+`_pad_inputs` a shape contract, 42 shaped parameters, with `tests/unit/pallas/test_nearfield_mutual_shape_contracts.py`
+pinning the rejections; that landed after this recording was taken. The 54 bare parameters
+left are the internal tile helpers and the reverse rule: `_pair_weight_tile` (3),
+`_block_tile` (6), `_block_vjp_tiles` (6), `_mutual_leafpair_block_cvjp_fwd` (11), the
+`one` closure inside the twin (8), and the scalar pair (`G`, `softening_sq`) on each entry
+point, which is the same family `_fast_lane` measured and left bare. So item 2 is a
+*different and smaller* piece of work than this document describes, and the re-record is
+what sizes it.
+
+**Item 7 is the one open disagreement with the size-ordered plan**, and it is unresolved
+rather than decided: `_m2l` is now the largest module in the package by bare count (92) and
+first on the size-ordered list, against 8% measured here. Whoever picks it up owns that call.
+
+**Two findings came out of executing items 5 and 6**, both of which sharpen §4.1 rather than
+this ordering:
+
+* `nearfield/grad.py` was recommended on a structural argument and the measurement did not
+  support it — every corruption there was already caught or harmless. It shipped shapes with
+  no decorators (#292), and the site note records the table.
+* Item 5's `multipole_packed` was annotated `Float` from this recording, which was taken
+  entirely on the **real** basis; the complex basis passes `c64`/`c128` and CI failed 27
+  times. Capture coverage bounds the *dtype* as much as the shape — STYLE_GUIDE §4.3 now
+  carries both halves. A pilot replay measures the lanes in the recording and nothing else,
+  which is also what the last bullet of the next section says.
+
+Modules outside the top six still have **no §4.1 evidence at all** — `runtime/kernels/_evaluate.py`
+(72/23), `pallas/m2l_complex_fused.py` (64/0/19), `pallas/nearfield_fused_leaf.py` (58/0/48),
+`nearfield/_kernels.py` (53), `runtime/_octree_fmm.py` (49), `nearfield/near_field.py`
+(48/15/19), `pallas/m2l_real_fused.py` (41/0/17). Ranking them needs a pilot run first.
+`runtime/fmm_prepare.py` (39/2) is not open work: #296 annotated the two the measurement
+supported and records at class level why the rest are left alone.
 
 ## What this does not say
 
