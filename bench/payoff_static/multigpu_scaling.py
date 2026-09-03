@@ -94,6 +94,28 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--caps",
+        default="",
+        help=(
+            "Comma-separated DistributedFMMConfig cap overrides, e.g. "
+            "'max_pair_queue=2000000,process_block=512'. They default to "
+            "auto-sizing from N, and the auto-sized values are what set the "
+            "distributed path's memory ceiling, so a ceiling reported without "
+            "these is a statement about the defaults"
+        ),
+    )
+    p.add_argument(
+        "--ceiling-iterations",
+        type=int,
+        default=1,
+        help=(
+            "Gradient steps per ceiling rung. The ceiling is a MEMORY question "
+            "-- does one forward-plus-backward fit -- so one step answers it, "
+            "and the distributed path costs ~134 s per gradient at N=65536, "
+            "which makes a full fit per rung unaffordable"
+        ),
+    )
+    p.add_argument(
         "--ceiling-ladder",
         default="",
         help=(
@@ -105,11 +127,47 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _parse_caps(text: str) -> Dict[str, int]:
+    """Parse ``name=value`` cap overrides from the command line.
+
+    Parameters
+    ----------
+    text : str
+        Comma-separated ``name=value`` pairs, or empty.
+
+    Returns
+    -------
+    Dict[str, int]
+        Field name to integer value; empty when nothing was given.
+
+    Raises
+    ------
+    ValueError
+        If an entry is not ``name=value`` with an integer value. Silently
+        ignoring a malformed cap would report a ceiling measured at settings
+        nobody chose.
+    """
+    caps: Dict[str, int] = {}
+    for entry in str(text).split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ValueError(f"cap override {entry!r} is not name=value")
+        name, _, value = entry.partition("=")
+        try:
+            caps[name.strip()] = int(value)
+        except ValueError as exc:
+            raise ValueError(f"cap override {entry!r} has a non-integer value") from exc
+    return caps
+
+
 def _fit_once(
     *,
     n: int,
     devices: List[Any],
     args: argparse.Namespace,
+    iterations: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Run one instrumented fit at one ``N`` on one device set.
 
@@ -121,6 +179,9 @@ def _fit_once(
         Devices to shard the parameters over.
     args : argparse.Namespace
         Parsed command line.
+    iterations : Optional[int]
+        Override the step count. The ceiling arm passes 1: whether a parameter
+        count fits is a memory question, and one gradient answers it.
 
     Returns
     -------
@@ -169,6 +230,7 @@ def _fit_once(
             theta=float(args.theta),
             leaf_size=int(args.leaf_size),
             devices=list(devices),
+            caps=_parse_caps(args.caps),
         )
     else:
         operator = make_forward_operator(
@@ -195,7 +257,7 @@ def _fit_once(
         parameterization=parameterization,
         initial_params=parameterization.pack(start),
         config=FitConfig(
-            num_iterations=int(args.iterations),
+            num_iterations=int(args.iterations if iterations is None else iterations),
             learning_rate=float(args.learning_rate),
             rebuild_cadence=1,
             regularization=Regularization.none(),
@@ -227,7 +289,7 @@ def _fit_once(
         "sharding_mode": operator.record().get("sharding_mode", str(args.mode)),
         "mode": str(args.mode),
         "operator": operator.record(),
-        "iterations": int(args.iterations),
+        "iterations": int(args.iterations if iterations is None else iterations),
         "initial_loss": result.initial_loss,
         "final_loss": result.final_loss,
         "field_residual_after": after,
@@ -339,7 +401,12 @@ def main() -> int:
             if count > len(available):
                 break
             try:
-                point = _fit_once(n=n, devices=devices, args=args)
+                point = _fit_once(
+                    n=n,
+                    devices=devices,
+                    args=args,
+                    iterations=int(args.ceiling_iterations),
+                )
                 point["arm"] = "ceiling"
                 ceiling.append(point)
                 print(
@@ -383,6 +450,8 @@ def main() -> int:
             "iterations": int(args.iterations),
             "device_counts": device_counts,
             "ceiling_ladder": ladder,
+            "ceiling_iterations": int(args.ceiling_iterations),
+            "caps": _parse_caps(args.caps),
             "sharding_mode": str(args.mode),
             "mode": str(args.mode),
         },

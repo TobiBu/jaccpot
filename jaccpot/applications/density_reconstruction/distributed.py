@@ -455,6 +455,7 @@ def make_distributed_forward_operator(
     nearfield_backend: Optional[str] = None,
     partitioner: str = "rcb",
     devices: Optional[Sequence[Any]] = None,
+    caps: Optional[Dict[str, int]] = None,
 ) -> DistributedForwardOperator:
     """Configure the distributed observation operator and its mesh.
 
@@ -489,6 +490,20 @@ def make_distributed_forward_operator(
         ``partition_for_devices`` domain decomposition.
     devices : Optional[Sequence[Any]]
         Explicit device list; defaults to the first ``num_devices`` JAX sees.
+    caps : Optional[Dict[str, int]]
+        Overrides for ``DistributedFMMConfig``'s buffer caps --
+        ``max_pair_queue``, ``max_interactions_per_node``,
+        ``max_neighbors_per_leaf``, ``process_block`` and the ``cross_*``
+        variants. They all default to ``None``, meaning auto-sized from ``N``,
+        and the auto-sized values are what set the memory ceiling this path
+        hits. Exposed so a ceiling can be reported at *tuned* caps rather than
+        only at the defaults -- a number measured at whatever the defaults
+        happened to choose is a statement about the defaults.
+
+        A cap that is too small does not fail loudly: it silently drops
+        interactions and returns a wrong force. Check
+        :attr:`DistributedPartition.diagnostics`'s ``overflowed`` flag, which
+        every run records, before believing a force from tightened caps.
 
     Returns
     -------
@@ -498,9 +513,10 @@ def make_distributed_forward_operator(
     Raises
     ------
     ValueError
-        If ``tracer_positions`` is not ``(M, 3)``, or fewer devices are visible
+        If ``tracer_positions`` is not ``(M, 3)``, if fewer devices are visible
         than requested -- a scaling point taken on a different device count is
-        not the point that was asked for.
+        not the point that was asked for -- or if ``caps`` names a field
+        ``DistributedFMMConfig`` does not have.
     """
     import jax
     from yggdrax.distributed import make_mesh
@@ -534,6 +550,15 @@ def make_distributed_forward_operator(
         overrides["mac_type"] = mac_type
     if nearfield_backend is not None:
         overrides["nearfield_backend"] = nearfield_backend
+    if caps:
+        known = {f.name for f in dataclasses.fields(DistributedFMMConfig)}
+        unknown = sorted(set(caps) - known)
+        if unknown:
+            raise ValueError(
+                f"unknown DistributedFMMConfig cap(s) {unknown}; known fields "
+                f"include {sorted(n for n in known if 'cap' in n or 'max_' in n)}"
+            )
+        overrides.update({name: int(value) for name, value in caps.items()})
     config = dataclasses.replace(DistributedFMMConfig(), **overrides)
 
     return DistributedForwardOperator(
