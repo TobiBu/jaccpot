@@ -108,7 +108,7 @@ bare over these PRs, 18.5% -> 26.3%.
 | # | module | bare / shaped / unann | status |
 |---|---|---|---|
 | 1 | `operators/complex_ops.py`, the family | 27 / 70 / 0 | **done** — #279, 26 parameters now `Float[Array, "3"]` |
-| 2 | `pallas/nearfield_mutual.py` | 54 / 42 / 0 | **part done** — `fb2d0a1`; the entry points are contracted, the internals are not |
+| 2 | `pallas/nearfield_mutual.py` | 54 / 42 / 0 | **done** — `fb2d0a1` (entry points) and #305 (internals); re-measured at 15%, then 0% |
 | 3 | `nearfield/_large_n_blocks.py` | 41 / 60 / 12 | open |
 | 4 | `operators/complex_ops.py`, remainder | 27 / 70 / 0 | open |
 | 5 | `runtime/_adaptive_policy.py` | 75 / 24 / 0 | **done** — #293 |
@@ -138,6 +138,30 @@ left are the internal tile helpers and the reverse rule: `_pair_weight_tile` (3)
 point, which is the same family `_fast_lane` measured and left bare. So item 2 is a
 *different and smaller* piece of work than this document describes, and the re-record is
 what sizes it.
+
+**Re-recorded 2026-09-03, and it sized it: 15%, not 42%.** 213 perturbations, 8 functions
+measured, 2 inconclusive, 0 unreplayable — 32 accepted, of which **31 are in three internal
+tile helpers** and the boundary rejects everything else. #305 annotates those three and the
+same recording then replays to 212/213 rejected. What is left in this module is two things,
+neither of them annotation work:
+
+* `_mutual_leafpair_kernel` and `_mutual_leafpair_vjp_kernel` are INCONCLUSIVE for a
+  **permanent** reason, not a fixable one: a Pallas ref is not an array, so
+  `fa_ref[0, :, 0] = ...` cannot be replayed outside a kernel. They are the honest limit of
+  this method, and the same will be true of every `pallas/` module below.
+* `mutual_leafpair_block_jax` accepts a `level_weights` one entry short, and no shape can
+  reject it — `levels` binds only to that parameter, so it asserts nothing (§4.4), and a
+  shorter table is a legitimate input. The hazard is that rungs *index* the table and an
+  out-of-range rung clamps. A value-length relation; left as a finding.
+
+**The re-record was only possible after #303**, which fixes three ways this tool was
+reporting plausible-looking wrong answers: it recorded calls that raised (so the
+better-annotated a module was, the less measurable it became), the replay only ever used
+`recorded[label][0]`, and under `-n > 1` every worker wrote the same file so the survivor
+was whichever finished last. The third one matters for the table above: **these per-module
+rates were recorded before that fix**, so if the 2026-08-30 pass used `-n > 1` its
+ok/inc/unrep columns are a lower bound of unknown tightness. Re-record before ranking off
+them. `nearfield_mutual` went from 5 measured functions to 8 on the same test scope.
 
 **Item 7 is the one open disagreement with the size-ordered plan**, and it is unresolved
 rather than decided: `_m2l` is now the largest module in the package by bare count (92) and
