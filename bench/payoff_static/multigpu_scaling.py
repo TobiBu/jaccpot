@@ -82,6 +82,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--leaf-size", type=int, default=64, help="Leaf size")
     p.add_argument("--softening", type=float, default=1.0e-2, help="Plummer softening")
     p.add_argument(
+        "--mode",
+        choices=("distributed", "parameter_sharding"),
+        default="distributed",
+        help=(
+            "Which multi-device path to measure. 'distributed' partitions the "
+            "SOURCES across devices via jaccpot.distributed (section 5's path) "
+            "and is the one that supports the claim; 'parameter_sharding' "
+            "shards only the parameter array and is kept because its failure "
+            "to help is a measured result"
+        ),
+    )
+    p.add_argument(
         "--ceiling-ladder",
         default="",
         help=(
@@ -142,15 +154,32 @@ def _fit_once(
         generating_leaf_size=int(args.leaf_size),
     )
     truth = make_ground_truth(config)
-    operator = make_forward_operator(
-        tracer_positions=truth.tracer_positions,
-        source_mass=truth.source_mass,
-        num_sources=int(n),
-        softening=float(args.softening),
-        order=int(args.order),
-        theta=float(args.theta),
-        leaf_size=int(args.leaf_size),
-    )
+    if str(args.mode) == "distributed":
+        from jaccpot.applications.density_reconstruction.distributed import (
+            make_distributed_forward_operator,
+        )
+
+        operator = make_distributed_forward_operator(
+            tracer_positions=truth.tracer_positions,
+            source_mass=truth.source_mass,
+            num_sources=int(n),
+            num_devices=len(devices),
+            softening=float(args.softening),
+            order=int(args.order),
+            theta=float(args.theta),
+            leaf_size=int(args.leaf_size),
+            devices=list(devices),
+        )
+    else:
+        operator = make_forward_operator(
+            tracer_positions=truth.tracer_positions,
+            source_mass=truth.source_mass,
+            num_sources=int(n),
+            softening=float(args.softening),
+            order=int(args.order),
+            theta=float(args.theta),
+            leaf_size=int(args.leaf_size),
+        )
     parameterization = make_parameterization("positions", config=config)
     start = initial_positions(
         truth.source_positions,
@@ -159,6 +188,7 @@ def _fit_once(
         perturbation=0.05,
     )
 
+    distributed = str(args.mode) == "distributed"
     result = run_fit(
         operator=operator,
         observed=truth.observed_accelerations,
@@ -174,8 +204,14 @@ def _fit_once(
             # about wall-clock, so it is sampled rather than measured every step.
             intensive_every=max(int(args.iterations) // 4, 1),
             seed=int(args.seed),
+            # The distributed operator exposes no radix prepared state, so the
+            # switch instrumentation has nothing to fingerprint.
+            track_switches=not distributed,
         ),
-        devices=devices,
+        # Parameter sharding is what `devices` does; the distributed operator
+        # already owns its mesh, and handing it `devices` too would shard the
+        # parameters on top of a partitioned force, mixing the two modes.
+        devices=None if distributed else devices,
     )
     after = field_residual(
         operator.evaluate(result.positions),
@@ -188,8 +224,9 @@ def _fit_once(
         "num_free_parameters": int(parameterization.num_free),
         "num_devices": len(devices),
         "devices": [str(d) for d in devices],
-        # Named so nobody reads this as jaccpot's distributed force evaluation.
-        "sharding_mode": "parameter_sharding",
+        "sharding_mode": operator.record().get("sharding_mode", str(args.mode)),
+        "mode": str(args.mode),
+        "operator": operator.record(),
         "iterations": int(args.iterations),
         "initial_loss": result.initial_loss,
         "final_loss": result.final_loss,
@@ -242,6 +279,35 @@ def main() -> int:
                     "num_devices": count,
                     "skipped": True,
                     "reason": f"only {len(available)} devices visible",
+                }
+            )
+            continue
+        if str(args.mode) == "distributed" and count < 2:
+            # Upstream limitation, not a configuration error: the distributed
+            # evaluator's per-device tree build asserts "Need at least one
+            # particle" inside yggdrax when there is a single domain. The path
+            # exists for cross-device halos and is not built for ndev=1. The
+            # single-device number belongs to the radix operator, which is a
+            # DIFFERENT code path -- run --mode parameter_sharding for it, and
+            # do not put the two on one strong-scaling curve without saying so.
+            print(
+                f"  ndev={count}: SKIPPED in distributed mode -- the "
+                "distributed evaluator requires at least 2 devices "
+                "(yggdrax build_tree asserts on a single domain)",
+                flush=True,
+            )
+            records.append(
+                {
+                    "num_devices": count,
+                    "skipped": True,
+                    "mode": str(args.mode),
+                    "reason": (
+                        "distributed force evaluation requires ndev >= 2; "
+                        "yggdrax's per-device build_tree asserts 'Need at "
+                        "least one particle' with a single domain. The "
+                        "single-device baseline is the radix operator, a "
+                        "different code path."
+                    ),
                 }
             )
             continue
@@ -317,7 +383,8 @@ def main() -> int:
             "iterations": int(args.iterations),
             "device_counts": device_counts,
             "ceiling_ladder": ladder,
-            "sharding_mode": "parameter_sharding",
+            "sharding_mode": str(args.mode),
+            "mode": str(args.mode),
         },
         meta=runmeta.run_meta(),
         data={"records": records, "ceiling": ceiling},

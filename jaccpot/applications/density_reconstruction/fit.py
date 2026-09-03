@@ -288,6 +288,30 @@ def _resolve_loss_scale(observed: np.ndarray, configured: Optional[float]) -> fl
     return rms if rms > 0.0 else 1.0
 
 
+def _operator_lacks_leaf_blocks(operator: Any) -> bool:
+    """Whether an operator can evaluate the leaf-based regularisers.
+
+    Parameters
+    ----------
+    operator : Any
+        A forward operator.
+
+    Returns
+    -------
+    bool
+        True when the operator declares a ``leaf_blocks`` hook that returns
+        ``None`` -- the distributed operator, whose per-device trees have no
+        counterpart to the radix leaf partition the penalties are built on.
+    """
+    hook = getattr(operator, "leaf_blocks", None)
+    if hook is None:
+        return False
+    try:
+        return hook(None) is None
+    except Exception:  # pragma: no cover - an operator that needs a real state
+        return False
+
+
 def _shard_parameters(params: Any, devices: Sequence[Any]) -> Any:
     """Place a parameter pytree across a 1-D device mesh.
 
@@ -391,6 +415,18 @@ def run_fit(
         raise ValueError(
             f"rebuild_cadence must be >= 1, got {config.rebuild_cadence!r}"
         )
+    # An operator that exposes no leaf partition cannot evaluate the
+    # regularisers. Refuse rather than drop them: fig17(d) exists to show what
+    # dropping them does, so a fit that silently became unregularised while
+    # being asked for weights would be the one result this section must not
+    # produce by accident.
+    if config.regularization.enabled and _operator_lacks_leaf_blocks(operator):
+        raise ValueError(
+            "this operator exposes no leaf partition, so the regularisers "
+            f"cannot be evaluated, but weights are non-zero: "
+            f"{config.regularization.as_record()}. Pass "
+            "Regularization.none() to run deliberately unregularised."
+        )
 
     observed_host = np.asarray(observed, dtype=np.float64)
     scale = _resolve_loss_scale(observed_host, config.loss_scale)
@@ -449,11 +485,18 @@ def run_fit(
         def objective(p: Any) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
             positions = parameterization.to_positions(p)
             predicted = operator.evaluate_at_topology(current_state, positions)
-            extra = regularization_terms(
-                positions,
-                current_blocks,
-                softening=operator.softening,
-                regularization=config.regularization,
+            # An operator with no leaf partition -- the distributed one -- has
+            # no regularisers. The guard above has already refused a non-zero
+            # weight, so this is an unregularised fit that asked to be one.
+            extra = (
+                {}
+                if current_blocks is None
+                else regularization_terms(
+                    positions,
+                    current_blocks,
+                    softening=operator.softening,
+                    regularization=config.regularization,
+                )
             )
             return total_loss(
                 predicted,
@@ -475,7 +518,11 @@ def run_fit(
                 jax.device_get(parameterization.to_positions(params)), dtype=np.float64
             )
             state = operator.prepare(positions_host)
-            blocks = leaf_blocks_from_state(state, num_sources=operator.num_sources)
+            blocks = (
+                operator.leaf_blocks(state)
+                if hasattr(operator, "leaf_blocks")
+                else leaf_blocks_from_state(state, num_sources=operator.num_sources)
+            )
             elapsed = time.perf_counter() - t0
             totals["prepare"] += elapsed
             if iteration == 0:

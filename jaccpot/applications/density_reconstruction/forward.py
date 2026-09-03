@@ -376,6 +376,28 @@ class ForwardOperator:
             self.prepare(source_positions), jnp.asarray(source_positions)
         )
 
+    def leaf_blocks(self: "ForwardOperator", state: Any) -> Any:
+        """Return the frozen leaf partition the regularisers are built on.
+
+        Parameters
+        ----------
+        state : Any
+            Prepared state from :meth:`prepare`.
+
+        Returns
+        -------
+        Any
+            A :class:`~jaccpot.applications.density_reconstruction.loss.LeafBlocks`.
+            Exists so this operator and the distributed one are
+            interchangeable to ``run_fit``: the distributed path has no leaf
+            partition and returns ``None`` here instead.
+        """
+        from jaccpot.applications.density_reconstruction.loss import (
+            leaf_blocks_from_state,
+        )
+
+        return leaf_blocks_from_state(state, num_sources=self.num_sources)
+
     def record(self: "ForwardOperator") -> Dict[str, Any]:
         """Return the operator configuration for a results JSON.
 
@@ -392,6 +414,9 @@ class ForwardOperator:
             "leaf_size": int(self.leaf_size),
             "theta": None if self.theta is None else float(self.theta),
             "mac_type": self.mac_type,
+            # Named so it can never be confused with the distributed force
+            # evaluation, whose wall-clock is not comparable with this one's.
+            "sharding_mode": "single_device_or_parameter_sharding",
         }
 
 
