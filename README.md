@@ -224,6 +224,29 @@ Example:
   characterization anchor for cartesian carries a 0.35 tolerance. See
   `docs/dehnen_mass_mac_status_and_plan.md`.
 
+## Multi-GPU: the JAX floor is a correctness floor
+
+`jaccpot` pins `jax>=0.10.2`. If you import it from a checkout on an older JAX
+anyway, know what you are giving up on the distributed path: **on jax < 0.9.1 the
+halo exchange (`jax.lax.ragged_all_to_all`) silently returns its fill value once its
+buffers move**, and input donation alone — any leapfrog loop — moves them. The
+cross-domain near field then disappears from every force evaluation after the
+first: rel-L2 **0.45** against an fp64 direct sum on a 17.8M-particle disc across
+4×A100, with angular momentum, energy, centre of mass and every overflow flag
+looking healthy. Measured in pure JAX (`bench/repro_jax_ragged_all_to_all_forward.py`,
+jax 0.9.0): 36/40 calls corrupt under donation, 3/40 under allocator churn, **0/40
+with identical buffers** — a run-it-twice reproducibility check cannot see it. Fixed
+in the 0.9.1 GPU plugin (XLA `4e0cc7e356`); verified clean on 0.9.1 and 0.10.2.
+
+Since 2026-09-04 `halo_exchange="auto"` gates the **forward** as well as the gradient
+path: below 0.9.1 (and on CPU) it resolves to the `all_gather` exchange (`"buf"`,
+identical forces, more bandwidth). Two cautions. A venv built with
+`--system-site-packages` can load an *older* `jax_plugins.xla_cuda12` than `pip list`
+reports — check `jax_plugins.xla_cuda12.__file__`. And any multi-device result taken
+on an affected JAX before this gate is unverified unless a step *after the first*
+was compared with a direct sum. See `docs/differentiable_fmm_distributed_audit.md`
+("Addendum: the forward is affected too").
+
 ## Reproducibility on a GPU
 
 **GPU results are reproducible to a few ulps, not to the bit.** The near field

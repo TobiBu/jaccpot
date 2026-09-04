@@ -126,3 +126,50 @@ def test_the_two_halo_exchange_gates_are_independent(monkeypatch):
         assert (
             dfmm.resolve_grad_halo_exchange("auto") == expected
         ), f"jax {version} on {backend} should resolve to {expected!r}"
+
+
+def test_halo_exchange_context_pins_the_forward_too(monkeypatch):
+    """The rebind is what the FORWARD trace sees, not only the gradient's.
+
+    Until 2026-09-04 the call site read ``_grad_halo_exchange(halo_exchange) if
+    differentiable else nullcontext()``: on jax 0.9.0 a forward-only, donating
+    leapfrog kept the native exchange and lost the whole cross-domain near field on
+    most steps after the first (rel-L2 0.45 vs an fp64 direct sum, 17.8M particles on
+    4xA100) with every invariant looking healthy. Pure resolver + rebind check.
+    """
+    import functools
+
+    monkeypatch.setattr(dfmm.jax, "__version__", "0.9.0", raising=False)
+    monkeypatch.setattr(dfmm.jax, "default_backend", lambda: "gpu")
+    original = dfmm._yggdrax_let.ragged_all_to_all_exchange
+    with dfmm._halo_exchange("auto"):
+        bound = dfmm._yggdrax_let.ragged_all_to_all_exchange
+        assert isinstance(bound, functools.partial)
+        assert bound.keywords["method"] == "buf"
+    assert dfmm._yggdrax_let.ragged_all_to_all_exchange is original
+    # the old names are the same objects
+    assert dfmm.resolve_grad_halo_exchange is dfmm.resolve_halo_exchange
+    assert dfmm._grad_halo_exchange is dfmm._halo_exchange
+    assert dfmm.HALO_EXCHANGES == dfmm.GRAD_HALO_EXCHANGES
+    assert dfmm.JAX_RAGGED_FIXED_VERSION == dfmm.JAX_RAGGED_GRAD_FIXED_VERSION
+
+
+def test_forward_call_site_is_not_conditional_on_differentiable():
+    """Regression guard on the SHAPE of the bug: no ``if differentiable`` around the halo.
+
+    Source-level on purpose. A device test that could catch this needs >= 2 GPUs and
+    an affected JAX, neither of which CI has; the gate itself is tested above, so
+    what remains to guard is that the forward path actually goes through it.
+    """
+    import inspect
+
+    src = inspect.getsource(dfmm)
+    i = src.index("halo = import_near_halo(")
+    # The statement that opens the block the halo import sits in -- the last
+    # non-comment, non-blank line before it -- must be the unconditional pin.
+    preceding = [
+        ln.strip()
+        for ln in src[:i].splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    assert preceding[-1] == "with _halo_exchange(halo_exchange):", preceding[-3:]
