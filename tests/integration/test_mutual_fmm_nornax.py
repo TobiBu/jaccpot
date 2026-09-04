@@ -981,3 +981,215 @@ def test_the_carried_topology_can_be_checked_for_overflow_after_the_rollout():
     )
     raise_on_overflow(final.topology, fmm)
     assert assert_far_field_is_exercised(final.topology) > 0
+
+
+# --- multi-step gradients through the FMM ------------------------------------------------
+#
+# nornax's own gradient tests run on its direct sum; the FMM version lived only in
+# ODISSEO (`tests/test_blockstep_fmm.py::test_rollout_gradient_matches_finite_
+# differences`), with no CI. Ported here, and extended to the two things that did
+# not exist when it was written: the checkpointed multi-step rollout, and a rollout
+# that REBUILDS the topology inside its scan (the B4 hook).
+
+
+def _rollout_gradient_system(seed):
+    """Two clumps with far pairs, a frozen multi-rung schedule, and a prepared host model."""
+    k_max = 2
+    positions, velocities, masses = _two_clumps(seed=seed)
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=k_max, theta=0.6, max_order=4, leaf_size=16
+    )
+    fmm.prepare(positions, masses)
+    assert int(fmm.state.num_far_pairs) > 0, "no far pairs: a direct sum in disguise"
+    assert fused_boundary_model(fmm, k_max) is fmm
+    rung = jnp.asarray(
+        np.random.default_rng(seed + 1).integers(0, k_max + 1, positions.shape[0]),
+        dtype=jnp.int32,
+    )
+    return fmm, positions, velocities, masses, rung, k_max
+
+
+def _frozen_state(positions, velocities, masses, rung):
+    return BlockStepState(
+        positions=positions,
+        velocities=velocities,
+        masses=masses,
+        acc=jnp.zeros_like(positions),
+        rung=rung,
+        base_index=jnp.asarray(0, dtype=jnp.int32),
+    )
+
+
+def _directional_fd(fn, x, seed, h=1.0e-3):
+    """Central difference of scalar ``fn`` along one random unit direction, and that direction."""
+    direction = jnp.asarray(
+        np.random.default_rng(seed).normal(size=x.shape), jnp.float64
+    )
+    direction = direction / jnp.linalg.norm(direction)
+    fd = float((fn(x + h * direction) - fn(x - h * direction)) / (2.0 * h))
+    return fd, direction
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_rollout_gradient_matches_finite_differences_through_the_fmm(checkpoint):
+    """``d(summary)/d(v0)`` through a frozen-topology, frozen-rung, multi-step FMM rollout.
+
+    ODISSEO's test, ported: both sides must see the *same* frozen plan, so the
+    topology is prepared once outside the differentiated function and
+    ``reassign_rungs=False`` holds the schedule -- the same treatment nornax gives
+    its own schedule with ``stop_gradient``. What is new is that the rollout is
+    nornax's ``block_kdk_rollout`` over three base steps rather than two hand-
+    written ``advance_base_step`` calls, on both sides of its ``checkpoint``
+    switch: the remat must not change the gradient of the FMM path either.
+
+    Tolerance: 1e-6 relative to the finite difference, along one random direction
+    (a full Jacobian would be 768 rollouts). The step is h = 1e-3, chosen by
+    measuring: the summary is of order 4e3, so at ODISSEO's h = 1e-6 the central
+    difference's *round-off* is 1e-7 absolute -- 1.5e-5 relative to a gradient of
+    6.5e-3 -- and dominates. Measured |AD - FD| / |FD| on this system: 1.5e-5 at
+    h = 1e-6, 1.4e-6 at 1e-5, 3.9e-8 at 1e-4, 3.1e-8 at 1e-3, with the FD values at
+    1e-4 and 1e-3 agreeing to 2e-10 absolute (truncation is not biting yet). So
+    1e-6 is thirty times the disagreement at the chosen step, and the disagreement
+    is the finite difference's, not the gradient's.
+    """
+    fmm, positions, velocities, masses, rung, k_max = _rollout_gradient_system(31)
+    dt_max = 2.0e-3
+
+    def summary(v0):
+        final = block_kdk_rollout(
+            _frozen_state(positions, v0, masses, rung),
+            dt_max,
+            fmm,
+            k_max=k_max,
+            n_base=3,
+            checkpoint=checkpoint,
+            reassign_rungs=False,
+        )
+        return jnp.sum(final.positions**2)
+
+    grad = jax.grad(summary)(velocities)
+    assert bool(jnp.all(jnp.isfinite(grad)))
+    assert float(jnp.linalg.norm(grad)) > 0.0
+    fd, direction = _directional_fd(summary, velocities, seed=13)
+    ad = float(jnp.sum(grad * direction))
+    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"AD {ad:.10e} vs FD {fd:.10e}"
+
+
+def test_checkpointed_and_plain_fmm_rollout_gradients_agree():
+    """Remat bounds memory; it must not move the FMM gradient by more than round-off.
+
+    Measured: the two gradients are bit-identical on this system (relative L2
+    difference exactly 0.0); the tolerance below leaves room for a backend whose
+    remat re-associates a reduction.
+    """
+    fmm, positions, velocities, masses, rung, k_max = _rollout_gradient_system(33)
+
+    def summary(v0, checkpoint):
+        final = block_kdk_rollout(
+            _frozen_state(positions, v0, masses, rung),
+            2.0e-3,
+            fmm,
+            k_max=k_max,
+            n_base=2,
+            checkpoint=checkpoint,
+            reassign_rungs=False,
+        )
+        return jnp.sum(final.positions**2) + jnp.sum(final.velocities**2)
+
+    g_plain = jax.grad(lambda v: summary(v, False))(velocities)
+    g_remat = jax.grad(lambda v: summary(v, True))(velocities)
+    rel = float(jnp.linalg.norm(g_plain - g_remat) / jnp.linalg.norm(g_plain))
+    assert rel < 1.0e-12, f"remat moved the gradient by {rel:.3e}"
+
+
+def test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan():
+    """AD through a rollout that rebuilds its tree at every base step, against FD.
+
+    The B4 hook: ``rebuild_fn=fmm.rebuild_state`` inside the scan, topology
+    severed from the gradient. The AD result is therefore the fixed-topology
+    gradient on every segment, and a central difference agrees with it exactly
+    when the perturbed runs build the *same* topologies -- so the test first
+    checks that the carried topology after the +h and -h rollouts is identical
+    in every index array (permutation, leaf particles, pair lists). If it were
+    not, the FD would differ at FMM tolerance for a reason that is not a gradient
+    error; the test would then report that, not a tolerance.
+
+    Tolerance: 1e-6 relative to the finite difference at h = 1e-3, as for the
+    frozen-topology case and for the same reason. Measured |AD - FD| / |FD| here:
+    2.5e-5 at h = 1e-6, 4.2e-7 at 1e-5, 2.0e-7 at 1e-4, 1.3e-8 at 1e-3 -- the
+    round-off curve of a summary of order 4e3, and eighty times below the
+    tolerance at the chosen step. ``checkpoint`` is left on: the rebuild sits
+    outside the remat by construction (B4), so the backward pass stores the
+    per-step topology instead of recomputing a traversal.
+    """
+    k_max, dt_max = 2, 2.0e-3
+    positions, velocities, masses = _two_clumps(seed=35)
+    fmm = _device_fmm(k_max)
+    fmm.prepare(positions, masses)
+    assert int(fmm.state.num_far_pairs) > 0
+    rung = jnp.asarray(
+        np.random.default_rng(36).integers(0, k_max + 1, positions.shape[0]),
+        dtype=jnp.int32,
+    )
+
+    def rollout(v0):
+        return block_kdk_rollout(
+            _frozen_state(positions, v0, masses, rung),
+            dt_max,
+            fmm,
+            k_max=k_max,
+            n_base=3,
+            reassign_rungs=False,
+            rebuild_fn=fmm.rebuild_state,
+            rebuild_every=1,
+        )
+
+    def summary(v0):
+        return jnp.sum(rollout(v0).positions ** 2)
+
+    grad = jax.grad(summary)(velocities)
+    assert bool(jnp.all(jnp.isfinite(grad)))
+    fd, direction = _directional_fd(summary, velocities, seed=37)
+    ad = float(jnp.sum(grad * direction))
+
+    # The perturbed runs must have built the same discrete structure, or FD is not
+    # measuring a derivative of the same map.
+    h = 1.0e-3
+    plus = _topology_arrays(rollout(velocities + h * direction).topology)
+    minus = _topology_arrays(rollout(velocities - h * direction).topology)
+    assert _same_topology(plus, minus), "the FD perturbation crossed a topology change"
+
+    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"AD {ad:.10e} vs FD {fd:.10e}"
+
+
+def test_dt_max_gradient_is_exact_through_the_fmm_rollout():
+    """``d/d(dt_max)`` of a multi-step FMM rollout matches finite differences.
+
+    nornax keeps ``dt_max`` traced by scaling it *into* the boundary weight table
+    rather than baking it in, precisely so a loss can be differentiated with
+    respect to the timestep; the adapter's ``boundary_kick`` must carry that
+    through its weighted traversal. ODISSEO pins this for a single boundary kick
+    on the pure-JAX backend; this is the multi-step form. (ODISSEO also pins that
+    the Pallas near field *drops* most of this gradient -- a known upstream defect
+    in ``jaccpot/pallas/nearfield_mutual.py``'s reverse rule; that is pinned in
+    ``test_mutual_fmm.py``, which needs no nornax.) Measured here: |AD - FD| / |FD|
+    of 8.6e-8 at h = 1e-7, against a tolerance of 1e-6.
+    """
+    fmm, positions, velocities, masses, rung, k_max = _rollout_gradient_system(39)
+
+    def loss(dt_max):
+        final = block_kdk_rollout(
+            _frozen_state(positions, velocities, masses, rung),
+            dt_max,
+            fmm,
+            k_max=k_max,
+            n_base=2,
+            reassign_rungs=False,
+        )
+        return jnp.sum(final.positions**2) + jnp.sum(final.velocities**2)
+
+    dt0, h = jnp.asarray(2.0e-3, jnp.float64), 1.0e-7
+    ad = float(jax.grad(loss)(dt0))
+    fd = float((loss(dt0 + h) - loss(dt0 - h)) / (2.0 * h))
+    assert abs(fd) > 0.0
+    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"AD {ad:.10e} vs FD {fd:.10e}"

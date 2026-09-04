@@ -1202,3 +1202,90 @@ def test_scanned_base_step_traces_one_boundary_kick_not_two_to_the_k():
 # ---------------------------------------------------------------------------
 # static shapes: one compiled program for a whole run
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# d/d(dt_max) through the fused boundary kick -- and the Pallas defect, pinned
+# ---------------------------------------------------------------------------
+#
+# Ported from ODISSEO's `tests/test_blockstep_fmm.py` (which has no CI). nornax
+# keeps `dt_max` traced by scaling it *into* the boundary weight table, so a loss
+# can be differentiated with respect to the timestep; the adapter's
+# `boundary_kick` has to carry that cotangent through its weighted traversal.
+
+
+def _dt_max_gradient(backend, interpret, *, seed=23):
+    """Return ``(AD, FD)`` for ``d/d(dt_max)`` of one boundary kick on ``backend``."""
+    n, k_max = 256, 2
+    positions, masses = _system(n, seed=seed)
+    velocities = jnp.asarray(
+        np.random.default_rng(seed + 1).normal(0.0, 0.05, (n, 3)), dtype=jnp.float64
+    )
+    rung = _rungs(n, k_max=k_max, seed=seed + 2)
+    fmm = BlockStepFMM(
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=1.0,
+        max_order=4,
+        leaf_size=8,
+        backend=backend,
+        pallas_interpret=interpret,
+    )
+    state = fmm.prepare(positions, masses)
+    assert int(state.num_far_pairs) > 0, "no far pairs: the kick is a direct sum"
+    assert (
+        int(state.num_near_pairs) > 0
+    ), "no near pairs: the defect below is untestable"
+
+    def loss(dt_max):
+        kicked = fmm.boundary_kick(
+            positions, velocities, masses, rung=rung, active_floor=0, dt_max=dt_max
+        )
+        return jnp.sum(kicked**2)
+
+    dt0, h = jnp.asarray(2.0e-3, jnp.float64), 1.0e-7
+    return float(jax.grad(loss)(dt0)), float(
+        (loss(dt0 + h) - loss(dt0 - h)) / (2.0 * h)
+    )
+
+
+def test_the_dt_max_gradient_is_exact_on_the_pure_jax_backend():
+    """``d/d(dt_max)`` of a boundary kick matches finite differences on the default backend.
+
+    Measured |AD - FD| / |FD| on this system: 5.3e-12, against a tolerance of 1e-6.
+    """
+    ad, fd = _dt_max_gradient("jax", False)
+    assert abs(fd) > 1.0e-6, "the finite-difference reference is degenerate here"
+    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"AD {ad:.10e} vs FD {fd:.10e}"
+
+
+def test_the_pallas_backend_drops_most_of_the_dt_max_gradient():
+    """KNOWN DEFECT, pinned so it cannot be relied on or change silently.
+
+    ``jaccpot/pallas/nearfield_mutual.py`` returns ``jnp.zeros_like(level_weights)``
+    from its reverse rule, on the stated grounds that the level table is "discrete
+    or frozen". It is neither: ``level_weights[k] == half * dt_max / 2**k`` is a
+    smooth function of ``dt_max``, and the forward force is *linear* in it. So the
+    near field's entire contribution to ``d/d(dt_max)`` is dropped and only the far
+    field's survives -- measured here AD/FD = 0.056 (ODISSEO measured 0.0090 at its
+    own configuration), so eighteen times too small, not a missing higher-order
+    term. The same reverse rule zeroes ``softening_sq`` and ``g_value``,
+    so ``d/d(softening)`` and ``d/d(G)`` are lost through the near field too.
+
+    Run in interpret mode so the real kernel logic executes on CPU (without it the
+    Pallas path silently falls back to pure JAX and this test would compare pure
+    JAX with itself). It asserts the *discrepancy*, so it fails the moment upstream
+    fixes it -- at which point delete it and parametrize the exactness test above
+    over both backends. Fixing it properly means reducing ``f_geometric . Fbar``
+    per level inside the reverse kernel, which has the tile in registers and could
+    emit a ``(k_max + 1,)`` cotangent.
+    """
+    ad, fd = _dt_max_gradient("pallas", True)
+    assert abs(fd) > 1.0e-6, "the finite-difference reference is degenerate here"
+    ratio = ad / fd
+    assert ratio < 0.5, (
+        f"the Pallas dt_max gradient is no longer badly wrong (ratio {ratio:.4f}). "
+        "If upstream fixed the level_weights cotangent, delete this test and "
+        "parametrize test_the_dt_max_gradient_is_exact_on_the_pure_jax_backend "
+        "over both backends instead."
+    )
