@@ -65,6 +65,7 @@ from jaccpot.applications.density_reconstruction.forward import (
 from jaccpot.applications.density_reconstruction.loss import (
     LeafBlocks,
     Regularization,
+    data_misfit,
     leaf_blocks_from_state,
     regularization_terms,
     total_loss,
@@ -442,6 +443,32 @@ def run_fit(
     if devices is not None and len(devices) > 1:
         params = _shard_parameters(params, devices)
 
+    # Resolve data-relative regularisation weights ONCE, before the loop, from
+    # one concrete forward at the starting parameters. Doing it here rather than
+    # inside the objective keeps the weights constant for the whole fit -- a
+    # weight that drifted with the current misfit would change the problem every
+    # step -- and costs one extra forward evaluation.
+    regularization = config.regularization
+    initial_data_misfit: Optional[float] = None
+    if config.regularization.relative_to_data and config.regularization.enabled:
+        probe_state = operator.prepare(
+            np.asarray(
+                jax.device_get(parameterization.to_positions(params)),
+                dtype=np.float64,
+            )
+        )
+        initial_data_misfit = float(
+            data_misfit(
+                operator.evaluate_at_topology(
+                    probe_state, parameterization.to_positions(params)
+                ),
+                observed_device,
+                scale=scale,
+            )
+        )
+        regularization = config.regularization.resolved(initial_data_misfit)
+        del probe_state
+
     optimizer = make_optimizer(config.optimizer, config.learning_rate)
     opt_state = optimizer.init(params)
     # Imported here rather than at module scope: optax lives under the
@@ -501,7 +528,7 @@ def run_fit(
             return total_loss(
                 predicted,
                 observed_device,
-                weights=config.regularization.weights(),
+                weights=regularization.weights(),
                 scale=scale,
                 extra_terms=extra,
             )
@@ -593,6 +620,19 @@ def run_fit(
         "num_devices": len(devices) if devices is not None else 1,
         "loss_scale": scale,
     }
+    # Both forms go in the record: the fractions that were asked for, and the
+    # absolute weights they resolved to. Without the pair, a reader cannot tell
+    # a weight of 3e-4 from a fraction of 1.0 at a data misfit of 3e-4.
+    weights_record = {
+        "requested": config.regularization.as_record(),
+        "resolved": regularization.as_record(),
+        "initial_data_misfit": initial_data_misfit,
+        "relative_to_data_applied": bool(
+            config.regularization.relative_to_data
+            and config.regularization.enabled
+            and initial_data_misfit is not None
+        ),
+    }
 
     return FitResult(
         params=params,
@@ -603,6 +643,7 @@ def run_fit(
             **config.as_record(),
             **parameterization.record(),
             **operator.record(),
+            "regularization_weights": weights_record,
         },
         timing=timing,
     )

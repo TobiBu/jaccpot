@@ -400,19 +400,96 @@ class Regularization:
     A weight of ``0.0`` disables a term but still reports its value, which is
     how the unregularised run stays comparable to the regularised ones.
 
+    **Weights are relative to the data term by default.**
+    ``softening_floor = 1.0`` means "at full violation this penalty is worth as
+    much as the data misfit was at the start", not "multiply by 1.0". The
+    absolute weight is resolved once, at iteration 0, as ``fraction x initial
+    data misfit``, and both the fraction and the resolved weight go in the
+    results JSON.
+
+    This is not a preference. With absolute weights the same number means
+    wildly different things across a sweep, because the data misfit is
+    normalised by the observed field's rms and stays O(1e-3) while the floor
+    penalty grows with particle density AND with softening length. Measured at
+    iteration 0 across one sweep at N=16384, weight 1.0, as a ratio of weighted
+    penalty to data term:
+
+    ==================================  ======  =========  ======
+    case                                data    penalty    ratio
+    ==================================  ======  =========  ======
+    parametric, softening 0.03          2.8e-3    9.2e-2     32.7
+    positions, softening 0.03           4.3e-3    8.1e-2     18.8
+    parametric, perturbed truth         5.2e-3    1.6e-2      3.1
+    positions, smooth_wrong             4.0e-2    1.1e-2      0.28
+    positions, uniform_sphere           1.0e+0    2.1e-3      0.00
+    ==================================  ======  =========  ======
+
+    A range of 0.00 to 32.7 for one nominal weight. In the worst cells the
+    optimiser correctly minimised the total by BUYING PENALTY REDUCTION WITH
+    FIELD MISFIT: at N=131072 the total fell 5.164e-02 -> 4.775e-02 while the
+    data term ROSE 3.065e-03 -> 3.914e-03 and the floor penalty fell 4.584e-02
+    -> 4.114e-02, so the field residual got worse by 13% in a converging fit.
+    That was first misread as the optimiser diverging and blamed on the step
+    size; halving the step size changed 6.756e-02 to 6.249e-02 and did not
+    address the cause.
+
+    Both penalties are dimensionless and O(1) at full violation by
+    construction -- a mean squared shortfall in units of the floor, and a
+    variance of log spacing -- so scaling their weight by the data term's
+    magnitude puts their maximum contribution at ``fraction x data(0)``
+    whatever N, softening or starting point.
+
+    Set ``relative_to_data=False`` to get the old absolute behaviour, which is
+    what the unit tests want when they need a penalty to dominate on purpose.
+
     Attributes
     ----------
     softening_floor : float
-        Weight on :func:`softening_floor_penalty`.
+        Weight on :func:`softening_floor_penalty`. A fraction of the initial
+        data misfit unless ``relative_to_data`` is false.
     spacing_smoothness : float
-        Weight on :func:`spacing_smoothness_penalty`.
+        Weight on :func:`spacing_smoothness_penalty`, likewise.
     floor_fraction : float
         Passed to :func:`softening_floor_penalty`; not a weight.
+    relative_to_data : bool
+        Whether the two weights above are fractions of the initial data misfit
+        (default) or absolute multipliers.
     """
 
     softening_floor: float = 1.0
     spacing_smoothness: float = 1.0e-2
     floor_fraction: float = 1.0
+    relative_to_data: bool = True
+
+    def resolved(
+        self: "Regularization", initial_data_misfit: float
+    ) -> "Regularization":
+        """Return a copy with absolute weights, resolved against the data term.
+
+        Parameters
+        ----------
+        initial_data_misfit : float
+            The data misfit at the starting parameters.
+
+        Returns
+        -------
+        Regularization
+            ``self`` unchanged when ``relative_to_data`` is false or the misfit
+            is not positive -- a zero or non-finite scale would silently
+            disable every penalty, so the absolute weights are kept instead and
+            the caller can see ``relative_to_data`` was not applied. Otherwise
+            a copy whose weights are multiplied by the misfit and whose
+            ``relative_to_data`` is false, so resolving twice is a no-op.
+        """
+        scale = float(initial_data_misfit)
+        if not self.relative_to_data or not np.isfinite(scale) or scale <= 0.0:
+            return self
+        return Regularization(
+            softening_floor=self.softening_floor * scale,
+            spacing_smoothness=self.spacing_smoothness * scale,
+            floor_fraction=self.floor_fraction,
+            relative_to_data=False,
+        )
 
     @classmethod
     def none(cls: type["Regularization"]) -> "Regularization":
@@ -425,7 +502,7 @@ class Regularization:
             fig17(d) needs to show what the degeneracy does, which means
             knowing the penalty values along a run that was not paying them.
         """
-        return cls(softening_floor=0.0, spacing_smoothness=0.0)
+        return cls(softening_floor=0.0, spacing_smoothness=0.0, relative_to_data=False)
 
     @property
     def enabled(self: "Regularization") -> bool:

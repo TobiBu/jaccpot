@@ -22,27 +22,41 @@ their own right:
 * **perturber** -- with and without the LMC-like overdensity, which is the
   localised non-axisymmetric feature fig17(b) shows the residual map around.
 
-Two settings that are measurements, not preferences
---------------------------------------------------
+Two settings that are measurements, and one diagnosis that was wrong
+--------------------------------------------------------------------
 ``--iterations`` defaults to 240 and the parametric arm's step size to 1e-2,
-both changed from a first sweep at 120 and 2e-2 which produced two bad cells:
+both changed from a first sweep at 120 and 2e-2. Checked at N=512 on CPU before
+spending GPU time: lr 1e-2 over 240 iterations reaches a field residual of
+2.096e-03 where lr 2e-2 over 120 reaches 1.288e-02 at softening 0.01, and
+1.404e-03 against 6.891e-03 at softening 0.03. Strictly better in both, so these
+are the better settings on their own merits.
 
-* the parametric arm **diverged** at softening 0.03 (field residual 5.298e-02 ->
-  1.089e-01) and at N=131072 (5.536e-02 -> 6.756e-02) -- a step size too large
-  for those landscapes;
-* ``uniform_sphere`` with free positions barely moved in 120 iterations
-  (9.985e-01 -> 9.913e-01), which is indistinguishable from "not run long
-  enough" and so says nothing about the initial-guess sensitivity section 2
-  wants.
+**But they were chosen for the wrong reason, and the record should say so.** The
+first sweep produced two cells where the field residual got WORSE -- the
+parametric arm at softening 0.03 (5.298e-02 -> 1.089e-01) and at N=131072
+(5.536e-02 -> 6.756e-02) -- and I attributed that to the step size being too
+large. It was not. The cause was the REGULARISER DOMINATING THE OBJECTIVE. With
+absolute weights, the penalty-to-data ratio at iteration 0 ranged from 0.00 to
+32.7 across a single sweep, because the data misfit is normalised by the
+observed field's rms while the floor penalty grows with both particle density
+and softening length. At N=131072 the ratio was 15:1, and the trace shows the
+optimiser doing exactly what it was told: the total fell 5.164e-02 -> 4.775e-02
+while the data term ROSE 3.065e-03 -> 3.914e-03 and the floor penalty fell
+4.584e-02 -> 4.114e-02. Halving the step size moved that cell from 6.756e-02 to
+6.249e-02 and left it worse than its 5.536e-02 start, which is what a fix
+addressing the wrong cause looks like.
 
-Checked at N=512 on CPU before committing GPU time to it: lr 1e-2 over 240
-iterations reaches a field residual of 2.096e-03 where lr 2e-2 over 120 reaches
-1.288e-02 at softening 0.01, and 1.404e-03 against 6.891e-03 at softening 0.03.
-Strictly better in both, so the lower rate is not a workaround for the
-divergence but the better setting anyway. **The divergence itself did not
-reproduce at N=512**, so whether 1e-2 cures it at N=16384 is what the sweep
-answers -- and if it does not, that is a result to report rather than a knob to
-keep turning.
+The actual fix is in
+:class:`~jaccpot.applications.density_reconstruction.loss.Regularization`:
+weights are now fractions of the initial data misfit, resolved once at
+iteration 0, so the same number means the same thing in every cell. Every run
+records the requested fractions, the resolved absolute weights and the initial
+misfit, so the balance is inspectable rather than inferred.
+
+The other bad cell was real and remains the reason for 240 iterations:
+``uniform_sphere`` with free positions moved only 9.985e-01 -> 9.913e-01 in 120
+iterations, which cannot be distinguished from not having run long enough and so
+says nothing about the initial-guess sensitivity section 2 asks for.
 
 What the records are built to show
 ----------------------------------
