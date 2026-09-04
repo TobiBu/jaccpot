@@ -54,7 +54,6 @@ _configure_worker_environment()
 
 import jax
 import jax.numpy as jnp
-import jax.profiler
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -211,7 +210,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--autotune-cache", default=None)
     parser.add_argument("--emit-ready-marker", action="store_true")
     parser.add_argument("--config-json", required=True)
-    parser.add_argument("--jax-trace-dir", default=None)
     return parser.parse_args()
 
 
@@ -1908,7 +1906,6 @@ def _run_sweep_case(
     cfg: dict[str, Any],
     fmm_kwargs: dict[str, Any],
     autotune_cache_path: Optional[str] = None,
-    jax_trace_dir: Optional[str] = None,
 ) -> dict[str, Any]:
     jaccpot_symbols = _load_jaccpot_symbols()
     FastMultipoleMethod = jaccpot_symbols["FastMultipoleMethod"]
@@ -1946,31 +1943,23 @@ def _run_sweep_case(
     )
     _emit_ready_marker()
 
-    trace_ctx = (
-        jax.profiler.trace(jax_trace_dir, create_perfetto_link=False)
-        if jax_trace_dir
-        else contextlib.nullcontext()
+    prepare_once_timing = bench_utils.time_callable(
+        fmm.prepare_state,
+        positions,
+        masses,
+        leaf_size=int(leaf_size),
+        max_order=int(max_order),
+        warmup=int(warmup),
+        runs=int(runs),
     )
-    with trace_ctx:
-        prepare_once_timing = bench_utils.time_callable(
-            fmm.prepare_state,
-            positions,
-            masses,
-            leaf_size=int(leaf_size),
-            max_order=int(max_order),
-            warmup=int(warmup),
-            runs=int(runs),
-            jax_trace_label="prepare_state",
-        )
-        prepared_state = prepare_once_timing.result
-        eval_timing = bench_utils.time_callable(
-            fmm.evaluate_prepared_state,
-            prepared_state,
-            warmup=int(warmup),
-            runs=int(runs),
-            jax_trace_label="evaluate_prepared_state",
-            **_evaluate_prepared_kwargs(fmm),
-        )
+    prepared_state = prepare_once_timing.result
+    eval_timing = bench_utils.time_callable(
+        fmm.evaluate_prepared_state,
+        prepared_state,
+        warmup=int(warmup),
+        runs=int(runs),
+        **_evaluate_prepared_kwargs(fmm),
+    )
 
     if benchmark_scope == "steady_eval":
         full_mean = float(eval_timing.mean)
@@ -2723,7 +2712,6 @@ def main() -> None:
                 cfg=cfg,
                 fmm_kwargs=fmm_kwargs,
                 autotune_cache_path=autotune_cache_path,
-                jax_trace_dir=args.jax_trace_dir,
             )
         elif args.mode == "audit":
             row = _run_audit_case(
