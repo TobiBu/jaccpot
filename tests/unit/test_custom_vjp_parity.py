@@ -575,7 +575,12 @@ def test_mutual_nearfield_pallas_custom_vjp_matches_twin(
     xa, ma, va, xb, mb, vb, ra, rb, lw, soft, g = _mutual_pair_case()
     num_levels = int(lw.shape[0])
 
-    def f_custom(xa_, ma_, xb_, mb_):
+    # Differentiated with respect to the positions, the masses AND the three
+    # parameters the force is smooth in -- the level-weight table (which is
+    # `half * dt_max / 2**k`, so this is the dt_max gradient of a block-step kick),
+    # the squared softening and G. The reverse rule used to return zeros for those
+    # three; jaccpot#316 pinned the resulting d/d(dt_max) at 0.056 of the truth.
+    def f_custom(xa_, ma_, xb_, mb_, lw_, soft_, g_):
         return mutual_leafpair_block_cvjp(
             xa_,
             ma_,
@@ -585,16 +590,16 @@ def test_mutual_nearfield_pallas_custom_vjp_matches_twin(
             vb,
             ra,
             rb,
-            lw,
-            soft,
-            g,
+            lw_,
+            soft_,
+            g_,
             num_levels,
             exclude_diagonal,
             emit_b,
             interpret,
         )
 
-    def f_ref(xa_, ma_, xb_, mb_):
+    def f_ref(xa_, ma_, xb_, mb_, lw_, soft_, g_):
         return mutual_leafpair_block_jax(
             xa_,
             ma_,
@@ -604,16 +609,87 @@ def test_mutual_nearfield_pallas_custom_vjp_matches_twin(
             vb,
             ra,
             rb,
-            lw,
-            soft,
-            g,
+            lw_,
+            soft_,
+            g_,
             exclude_diagonal=exclude_diagonal,
             emit_b=emit_b,
         )
 
     tol = 1.0e-10 if interpret else 1.0e-8
     try:
-        assert_vjp_matches(f_custom, f_ref, (xa, ma, xb, mb), rtol=tol, atol=tol)
+        assert_vjp_matches(
+            f_custom, f_ref, (xa, ma, xb, mb, lw, soft, g), rtol=tol, atol=tol
+        )
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_mutual_nearfield_pallas_parameter_cotangents_without_level_weighting(
+    interpret,
+):
+    """With weighting off (``num_levels = 0``) softening and G still get cotangents.
+
+    The one-entry placeholder table the caller substitutes for ``None`` is never
+    read by the forward, so its cotangent must be exactly zero -- and the other
+    two must still match the twin.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_mutual_supported():
+        pytest.skip("mutual near-field Pallas kernel requires an Ampere+ (sm_80) GPU")
+
+    xa, ma, va, xb, mb, vb, ra, rb, _lw, soft, g = _mutual_pair_case(seed=3)
+    placeholder = jnp.ones((1,), dtype=xa.dtype)
+
+    def f_custom(xa_, soft_, g_):
+        return mutual_leafpair_block_cvjp(
+            xa_,
+            ma,
+            va,
+            xb,
+            mb,
+            vb,
+            ra,
+            rb,
+            placeholder,
+            soft_,
+            g_,
+            0,
+            False,
+            True,
+            interpret,
+        )
+
+    def f_ref(xa_, soft_, g_):
+        return mutual_leafpair_block_jax(
+            xa_,
+            ma,
+            va,
+            xb,
+            mb,
+            vb,
+            ra,
+            rb,
+            None,
+            soft_,
+            g_,
+            exclude_diagonal=False,
+            emit_b=True,
+        )
+
+    tol = 1.0e-10 if interpret else 1.0e-8
+    try:
+        assert_vjp_matches(f_custom, f_ref, (xa, soft, g), rtol=tol, atol=tol)
+        out, vjp = jax.vjp(
+            lambda lw_: mutual_leafpair_block_cvjp(
+                xa, ma, va, xb, mb, vb, ra, rb, lw_, soft, g, 0, False, True, interpret
+            ),
+            placeholder,
+        )
+        (lw_bar,) = vjp(jax.tree.map(jnp.ones_like, out))
+        assert float(jnp.abs(lw_bar).max()) == 0.0
     except Exception as exc:  # pragma: no cover - GPU/runtime dependent
         _nf_skip_if_needed(interpret, exc)
 

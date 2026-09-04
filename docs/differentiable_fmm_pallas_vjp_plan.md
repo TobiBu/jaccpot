@@ -208,3 +208,22 @@ Commit only when its parity test + golden + gradient-correctness are green.
 - **`LargeNPreparedState`** differentiability is a separate effort (seam support); keep rejected.
 - **Real-M2L gate lacks the sm_80 check** — a real-M2L custom_vjp could route to Pallas on
   pre-Ampere; guard or match the complex gate.
+
+## 8. Post-mortem (2026-09-04): "return zero cotangents" is for discrete args only
+
+Item 2 above says non-differentiated array arguments get `jnp.zeros_like` cotangents. The
+mutual near-field reverse (`jaccpot/pallas/nearfield_mutual.py`) applied that to
+`level_weights`, `softening_sq` and `g_value` on the grounds that the level table is
+"discrete or frozen". It is neither: `level_weights[k] == half * dt_max / 2**k` is smooth in
+the block-step `dt_max`, the force is linear in it, and nornax deliberately keeps `dt_max`
+traced so a loss can be differentiated with respect to the timestep. The result was a
+`d/d(dt_max)` through the Pallas near field at **0.056** of the true value (only the far
+field's share survived), and `d/d(softening)`, `d/d(G)` dropped entirely; pinned by
+jaccpot#316, fixed in the PR that adds this section.
+
+The rule, restated: zero cotangents are for **masks, indices and rungs** -- things the forward
+compares or gathers with. Anything the forward *multiplies by* is a parameter the reverse
+must produce a cotangent for, and the analytic reverse already has every tile it needs:
+`Gbar = sum w p dot`, `wbar[k] = sum_{level k} G p dot`, `softbar = 1/2 sum radial`, one
+reduction each, contracted against the same one-hot level ladder the forward uses.
+`test_custom_vjp_parity.py` now differentiates the mutual kernel with respect to all three.
