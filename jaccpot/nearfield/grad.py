@@ -417,11 +417,13 @@ def _leafpair_accel_analytic_vjp(
     skip_empty_tiles: bool = True,
     occupancy_sort: bool = False,
     tiers: Optional[Tuple[Tuple[Any, int], ...]] = None,
-) -> Tuple[Array, Array]:
+    parameter_cotangents: bool = False,
+) -> Tuple[Array, ...]:
     """Analytic reverse of the leaf-pair near field in **O(N) memory**.
 
     Returns ``(leaf_positions_bar, leaf_masses_bar)`` for a particle-order output
-    ``cotangent``.
+    ``cotangent`` -- and, with ``parameter_cotangents``, the scalar cotangents of
+    ``softening_sq`` and ``G`` appended: ``(..., softening_sq_bar, G_bar)``.
 
     Why hand-written rather than ``jax.vjp`` of a pure-JAX twin: a ``bwd`` rule is
     never itself differentiated, so everything it computes is a *transient* bounded
@@ -487,18 +489,31 @@ def _leafpair_accel_analytic_vjp(
         target leaves sharing a slot width, so a low-occupancy leaf does not pay
         the global maximum. ``None`` runs untiered.
 
+    parameter_cotangents : bool
+        Also accumulate and return the cotangents of ``softening_sq`` and ``G``:
+        two scalar accumulators in the scan carry, one masked reduction each per
+        tile over terms the position rule already forms. With the forward
+        ``a_t = -G sum_s m_s diff r^-3``, ``Gbar = -sum m r^-3 (c . diff)`` and
+        ``softbar = (3/2) G sum m r^-5 (c . diff)``. Off by default so the two
+        existing callers keep their two-tuple.
+
     Returns
     -------
-    Tuple[Array, Array]
-        ``(leaf_positions_bar, leaf_masses_bar)`` in the leaf-major layout;
-        both are zero-shaped-like their primal when the tables are empty.
+    Tuple[Array, ...]
+        ``(leaf_positions_bar, leaf_masses_bar)`` in the leaf-major layout, both
+        zero-shaped-like their primal when the tables are empty; with
+        ``parameter_cotangents`` also ``softening_sq_bar`` and ``G_bar`` as 0-d
+        arrays.
     """
     dtype = leaf_positions.dtype
     num_leaves = int(leaf_positions.shape[0])
     width = int(leaf_positions.shape[1])
     num_slots = int(source_leaf_ids.shape[1]) * int(source_leaf_ids.shape[2])
     if num_leaves == 0 or width == 0 or num_slots == 0:
-        return jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses)
+        empty = (jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses))
+        if parameter_cotangents:
+            return empty + (jnp.zeros((), dtype), jnp.zeros((), dtype))
+        return empty
 
     # Normalise the scalars to arrays. A caller whose ``G``/``softening_sq`` are
     # Python constants inside a jitted region hands them over as JAX host-side
@@ -543,14 +558,15 @@ def _leafpair_accel_analytic_vjp(
     slot_offsets = jnp.arange(tile, dtype=INDEX_DTYPE)
 
     def _pass(
-        carry: Tuple[Array, Array], tier_leaves: Array, tier_slots: int
-    ) -> Tuple[Array, Array]:
+        carry: Tuple[Array, Array, Array, Array], tier_leaves: Array, tier_slots: int
+    ) -> Tuple[Array, Array, Array, Array]:
         """One occupancy tier: ``tier_leaves`` targets against ``tier_slots`` slots.
 
         Parameters
         ----------
-        carry : Tuple[Array, Array]
-            ``(pos_bar, mass_bar)`` accumulators threaded across tiers.
+        carry : Tuple[Array, Array, Array, Array]
+            ``(pos_bar, mass_bar, soft_bar, g_bar)`` accumulators threaded across
+            tiers; the two scalars only move when ``parameter_cotangents``.
         tier_leaves : Array
             Global leaf ids in this tier, in Morton order. Ids are never
             renumbered -- only the visiting order changes.
@@ -560,17 +576,17 @@ def _leafpair_accel_analytic_vjp(
 
         Returns
         -------
-        Tuple[Array, Array]
-            The updated ``(pos_bar, mass_bar)`` accumulators.
+        Tuple[Array, Array, Array, Array]
+            The updated ``(pos_bar, mass_bar, soft_bar, g_bar)`` accumulators.
         """
         tier_count = int(tier_leaves.shape[0])
         leaf_starts = jnp.arange(0, tier_count, batch, dtype=INDEX_DTYPE)
         slot_starts = jnp.arange(0, tier_slots, tile, dtype=INDEX_DTYPE)
 
         def leaf_body(
-            carry: Tuple[Array, Array], leaf_start: Array
-        ) -> Tuple[Tuple[Array, Array], None]:
-            pos_bar, mass_bar = carry
+            carry: Tuple[Array, Array, Array, Array], leaf_start: Array
+        ) -> Tuple[Tuple[Array, Array, Array, Array], None]:
+            pos_bar, mass_bar, soft_bar, g_bar = carry
             pos_in_tier = leaf_start + leaf_offsets
             tgt_in_range = pos_in_tier < tier_count
             # Target leaf ids stay GLOBAL: only the visiting order changes.
@@ -583,9 +599,9 @@ def _leafpair_accel_analytic_vjp(
             )
 
             def slot_body(
-                inner: Tuple[Array, Array, Array], slot_start: Array
-            ) -> Tuple[Tuple[Array, Array, Array], None]:
-                pos_acc, mass_acc, tgt_acc = inner
+                inner: Tuple[Array, Array, Array, Array, Array], slot_start: Array
+            ) -> Tuple[Tuple[Array, Array, Array, Array, Array], None]:
+                pos_acc, mass_acc, tgt_acc, soft_acc, g_acc = inner
                 sl = slot_start + slot_offsets
                 sl_in_range = sl < tier_slots
                 safe_sl = jnp.where(sl_in_range, sl, 0)
@@ -596,9 +612,9 @@ def _leafpair_accel_analytic_vjp(
                 safe_src = jnp.where(valid_slot, src_leaf, 0)
 
                 def _apply(
-                    acc_in: Tuple[Array, Array, Array],
-                ) -> Tuple[Array, Array, Array]:
-                    pos_in, mass_in, tgt_in = acc_in
+                    acc_in: Tuple[Array, Array, Array, Array, Array],
+                ) -> Tuple[Array, Array, Array, Array, Array]:
+                    pos_in, mass_in, tgt_in, soft_in, g_in = acc_in
                     src_pos = leaf_positions[safe_src]  # (B, T, W, 3)
                     src_mass = leaf_masses[safe_src]  # (B, T, W)
                     src_mask = leaf_mask[safe_src] & valid_slot[..., None]
@@ -635,10 +651,19 @@ def _leafpair_accel_analytic_vjp(
                         valid_slot[..., None], src_mass_contrib, 0.0
                     )
 
+                    if parameter_cotangents:
+                        # Masked pairs have inv_dist3 == inv_dist5 == 0, so no extra
+                        # masking; `m * cd` is the product the mass cotangent reduces.
+                        m_cd = src_mass[:, :, None, :] * cd  # (B, T, Wt, Ws)
+                        g_in = g_in - jnp.sum(m_cd * inv_dist3)
+                        soft_in = soft_in + 1.5 * G * jnp.sum(m_cd * inv_dist5)
+
                     return (
                         pos_in.at[safe_src].add(src_contrib),
                         mass_in.at[safe_src].add(src_mass_contrib),
                         tgt_in + tgt_contrib,
+                        soft_in,
+                        g_in,
                     )
 
                 # Skip whole tiles that carry no valid source slot. Every term above is
@@ -657,18 +682,23 @@ def _leafpair_accel_analytic_vjp(
                     )
                 return _apply(inner), None
 
-            (pos_bar, mass_bar, tgt_total), _ = lax.scan(
+            (pos_bar, mass_bar, tgt_total, soft_bar, g_bar), _ = lax.scan(
                 slot_body,
-                (pos_bar, mass_bar, jnp.zeros_like(tgt_pos)),
+                (pos_bar, mass_bar, jnp.zeros_like(tgt_pos), soft_bar, g_bar),
                 slot_starts,
             )
             tgt_total = jnp.where(tgt_in_range[:, None, None], tgt_total, 0.0)
             pos_bar = pos_bar.at[safe_tgt].add(tgt_total)
-            return (pos_bar, mass_bar), None
+            return (pos_bar, mass_bar, soft_bar, g_bar), None
 
         return lax.scan(leaf_body, carry, leaf_starts)[0]
 
-    carry = (jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses))
+    carry = (
+        jnp.zeros_like(leaf_positions),
+        jnp.zeros_like(leaf_masses),
+        jnp.zeros((), dtype),
+        jnp.zeros((), dtype),
+    )
     if tiers is None:
         carry = _pass(carry, jnp.arange(num_leaves, dtype=INDEX_DTYPE), num_slots)
     else:
@@ -682,7 +712,9 @@ def _leafpair_accel_analytic_vjp(
                 jnp.asarray(tier_leaves, dtype=INDEX_DTYPE),
                 int(tier_slots),
             )
-    positions_bar, masses_bar = carry
+    positions_bar, masses_bar, softening_bar, g_bar = carry
+    if parameter_cotangents:
+        return positions_bar, masses_bar, softening_bar, g_bar
     return positions_bar, masses_bar
 
 
@@ -811,8 +843,9 @@ def _pair_accel_cvjp(
     """Accel-only batched near-field pair kernel with an analytic reverse rule.
 
     All arguments are float arrays (masks as 0/1 floats), so the reverse returns
-    ordinary zero cotangents for the non-differentiated inputs (masks, softening,
-    G) -- no closure over tracers (which ``custom_vjp`` forbids). The forward is
+    ordinary zero cotangents for the masks -- no closure over tracers (which
+    ``custom_vjp`` forbids) -- and analytic cotangents for ``softening_sq`` and
+    ``G``, which the force is smooth in. The forward is
     byte-identical to the accel output of :func:`_pair_contributions_batched`; the
     reverse is the analytic symmetric near-field tidal tensor
     ``J = -G Σ_s m_s (I/r³ − 3 r rᵀ/r⁵)`` contracted with the output cotangent
@@ -932,15 +965,28 @@ def _pair_accel_cvjp_bwd(
     target_positions_bar = -G * jnp.sum(pair, axis=2)  # sum over sources
     source_positions_bar = G * jnp.sum(pair, axis=1)  # sum over targets (3rd law)
     source_masses_bar = -G * jnp.sum(inv_dist3 * cd, axis=1)  # sum over targets
-    # Zero cotangents for the non-differentiated inputs (masks, softening, G).
+    # The two scalar parameters the force is smooth in. The forward is
+    # a_t = -G sum_s m_s diff_ts r^-3 with r^2 = |diff|^2 + softening_sq, so
+    #   Gbar    = sum_ts (a_t / G) . c_t          = -sum_ts m_s r^-3 (c_t . diff)
+    #   softbar = sum_ts d a_t / d(soft) . c_t    = (3/2) G sum_ts m_s r^-5 (c_t . diff)
+    # -- one masked reduction each over tiles the position rule already formed.
+    # Until 2026-09-04 both were returned as zeros on the grounds that they are
+    # "non-differentiated inputs"; they are inputs the forward multiplies by, and a
+    # zero here silently drops the near field's whole share of d/d(softening) and
+    # d/dG (the same defect jaccpot#319 fixed in the mutual Pallas kernel).
+    m_cd = source_masses[:, None, :] * cd  # (B, Wt, Ws)
+    G_bar = -jnp.sum(m_cd * inv_dist3)
+    softening_bar = 1.5 * G * jnp.sum(m_cd * inv_dist5)
+    # Masks are discrete and get zero cotangents; they travel as floats so the zero
+    # is an ordinary float zero rather than a float0.
     return (
         target_positions_bar,
         source_positions_bar,
         source_masses_bar,
         jnp.zeros_like(target_mask_f),
         jnp.zeros_like(source_mask_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        jnp.reshape(softening_bar.astype(softening_sq.dtype), jnp.shape(softening_sq)),
+        jnp.reshape(G_bar.astype(G.dtype), jnp.shape(G)),
     )
 
 
