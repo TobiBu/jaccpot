@@ -149,7 +149,26 @@ def seed_sequence(seed: int, *labels: str) -> int:
 
 
 def git_meta() -> dict[str, Any]:
-    """Return the commit the measurement was taken at, and whether it was dirty."""
+    """Return the commit the measurement was taken at, and whether it was dirty.
+
+    Reports dirtiness twice, because the two answers mean different things and
+    only one of them bears on whether a number is trustworthy.
+
+    ``git_dirty`` is the whole working tree, as before. ``git_dirty_sources``
+    excludes ``bench/results/``, and it is the one to judge an artifact by: what
+    matters is whether the recorded sha describes the CODE that ran, and a
+    rewritten results JSON says nothing about that.
+
+    The distinction is not academic. The committed figure artifacts are tracked
+    files under ``bench/results/``, and several benches now rewrite theirs after
+    every point so that an interrupted multi-hour sweep still leaves something
+    usable. The consequence is that any two benches running CONCURRENTLY see
+    each other's output as a dirty tree, and both record ``git_dirty: true``
+    from a perfectly clean checkout -- which is exactly what happened to the
+    section-7 figures, and it made every one of them look unfit for the
+    manuscript when the code behind them was pinned and clean. Serialising the
+    runs to avoid it would cost about ten hours of GPU for no gain in accuracy.
+    """
 
     def run(*cmd: str) -> str:
         try:
@@ -159,12 +178,45 @@ def git_meta() -> dict[str, Any]:
         except OSError:  # pragma: no cover
             return ""
 
+    porcelain = run("git", "status", "--porcelain")
+
+    def paths_of(line: str) -> list[str]:
+        """Return the path(s) one porcelain line refers to.
+
+        Parameters
+        ----------
+        line : str
+            One line of ``git status --porcelain`` output.
+
+        Returns
+        -------
+        list[str]
+            The path, or both paths of a rename. The two status characters are
+            followed by a space, but staged and unstaged entries pad
+            differently, so this strips rather than slicing at a fixed column
+            -- slicing at 3 silently ate the first character of every staged
+            path and produced "ench/results/...".
+        """
+        body = line[2:].strip()
+        return [part.strip().strip('"') for part in body.split(" -> ") if part.strip()]
+
+    source_changes = [
+        line
+        for line in porcelain.splitlines()
+        if paths_of(line)
+        and not all(path.startswith("bench/results/") for path in paths_of(line))
+    ]
     return {
         "git_sha": run("git", "rev-parse", "HEAD"),
         "git_branch": run("git", "rev-parse", "--abbrev-ref", "HEAD"),
-        # A dirty tree means the recorded sha does not fully describe the code
-        # that ran. Figures for the manuscript should be regenerated clean.
-        "git_dirty": bool(run("git", "status", "--porcelain")),
+        # The whole tree, kept for continuity with artifacts already committed.
+        "git_dirty": bool(porcelain),
+        # The tree EXCLUDING bench/results/. This is the one that says whether
+        # the recorded sha describes the code that produced the number.
+        "git_dirty_sources": bool(source_changes),
+        "git_dirty_source_paths": sorted(
+            {path for line in source_changes for path in paths_of(line)}
+        )[:20],
     }
 
 
