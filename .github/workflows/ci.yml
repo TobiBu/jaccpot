@@ -588,8 +588,6 @@ jobs:
   test-cross-repo-nornax:
     name: test-cross-repo-nornax
     runs-on: ubuntu-latest
-    # MEASURED: 12 tests in 137 s on a fast workstation, single device. 25 is ~10x that,
-    # which is generous for a job whose whole point is to fail fast.
     # Measured on ubuntu-latest: the adapter suite step took 13 min up to jaccpot#312
     # and 22 min once #316 added the multi-step FMM gradient tests (five FMM rollouts
     # differentiated, plus their finite differences). At 25 the job was cancelled
