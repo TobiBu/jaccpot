@@ -2483,11 +2483,49 @@ def _evaluate_local_expansions_for_particles(
     return gradients, potentials_flat, None
 
 
+# THE THREE SCATTER HELPERS SHARE ONE CONTRACT, AND IT IS THE ONE THING IN THIS MODULE
+# WORTH ANNOTATING FIRST.
+#
+# `bench/annotation_pilot.py` recorded this module on 2026-09-04: 164 silent acceptances of
+# 299 perturbations, 55%, on 13 measured functions. But 108 of the 164 are LEAVES INSIDE
+# CONTAINERS -- `neighbor_list`, `locals_data`, `nearfield_interop`, `local_data` -- and no
+# annotation this toolchain supports can reach them, which was measured for
+# `runtime/_adaptive_policy.py` and is recorded above `resolve_dehnen_geometry` there:
+# beartype validates a NamedTuple parameter by TYPE, not by field. So the closable surface
+# here is 58, and 24 of those 58 are these three functions.
+#
+# They are near-duplicates -- scalar, vector and rank-3 payloads of the same masked
+# scatter-add -- and the contract is uniform across 25 recorded calls:
+#
+#     base            indices    values         mask
+#     (512, 3)        (64, 8)    (64, 8, 3)     (64, 8)
+#     (4096, 3)       (128, 32)  (128, 32, 3)   (128, 32)
+#     (192,)          (6, 32)    (6, 32)        (6, 32)
+#     (1280,)         (5, 256)   (5, 256)       (5, 256)
+#     (128, 3, 3)     (8, 16)    (8, 16, 3, 3)  (8, 16)
+#     (20, 3, 3)      (2, 12)    (2, 12, 3, 3)  (2, 12)
+#
+# `indices`, `mask` and `values` agree on BOTH leading axes in every one, across fifteen
+# distinct extent pairs. That is the "length mismatch between arrays that must agree" mode
+# the pilot names as dominant, and here it is the mask: `jnp.where(flat_mask[:, None],
+# flat_values, zero)` broadcasts a mask of the wrong length rather than refusing it, so a
+# disagreement scatters the wrong slots into the accumulator and the result is a plausible
+# wrong force.
+#
+# `base` keeps an unconstrained `n` on purpose. Its length is `leaves * w` -- 512 = 64 * 8,
+# 192 = 6 * 32, 128 = 8 * 16 in the table above -- and jaxtyping cannot bind a product
+# before its factors are bound, quite apart from `base` preceding them in the signature.
+# Same trade as `block_offsets` in `nearfield/_large_n_blocks.py`, for the same reason.
+#
+# The rank is NOT constrained beyond this. These bodies `reshape(-1)` deliberately, and the
+# docstrings say "flattened before use", so a caller that pre-flattens is legitimate; every
+# recorded call passes the 2-D form, and pinning `leaves w` asserts only what all 25 show.
+@jaxtyped(typechecker=beartype)
 def _scatter_vectors(
-    base: Array,
-    indices: Array,
-    values: Array,
-    mask: Array,
+    base: Float[Array, "n 3"],
+    indices: Int[Array, "leaves w"],
+    values: Float[Array, "leaves w 3"],
+    mask: Bool[Array, "leaves w"],
 ) -> Array:
     """Scatter-add vector values into a flat particle buffer with masking.
 
@@ -2497,13 +2535,13 @@ def _scatter_vectors(
 
     Parameters
     ----------
-    base : Array
+    base : Float[Array, 'n 3']
         Destination buffer ``[N, 3]``, added into rather than overwritten.
-    indices : Array
+    indices : Int[Array, 'leaves w']
         Destination particle index per slot; flattened before use.
-    values : Array
+    values : Float[Array, 'leaves w 3']
         Values to add, ``[..., 3]``.
-    mask : Array
+    mask : Bool[Array, 'leaves w']
         Validity mask over the slots.
 
     Returns
@@ -2522,11 +2560,12 @@ def _scatter_vectors(
     return base.at[flat_idx].add(masked)
 
 
+@jaxtyped(typechecker=beartype)
 def _scatter_scalars(
-    base: Array,
-    indices: Array,
-    values: Array,
-    mask: Array,
+    base: Float[Array, "n"],
+    indices: Int[Array, "leaves w"],
+    values: Float[Array, "leaves w"],
+    mask: Bool[Array, "leaves w"],
 ) -> Array:
     """Scatter-add scalar values into a flat particle buffer with masking.
 
@@ -2534,14 +2573,14 @@ def _scatter_scalars(
 
     Parameters
     ----------
-    base : Array
+    base : Float[Array, 'n']
         Destination buffer ``[N]``, added into rather than overwritten.
-    indices : Array
+    indices : Int[Array, 'leaves w']
         Destination particle index per slot.
-    values : Array
+    values : Float[Array, 'leaves w']
         Values to add. Tolerates ``None`` as well as empty, since the potential
         is optional upstream.
-    mask : Array
+    mask : Bool[Array, 'leaves w']
         Validity mask over the slots.
 
     Returns
@@ -2559,11 +2598,12 @@ def _scatter_scalars(
     return base.at[flat_idx].add(masked)
 
 
+@jaxtyped(typechecker=beartype)
 def _scatter_rank3(
-    base: Array,
-    indices: Array,
-    values: Array,
-    mask: Array,
+    base: Float[Array, "n 3 3"],
+    indices: Int[Array, "leaves w"],
+    values: Float[Array, "leaves w 3 3"],
+    mask: Bool[Array, "leaves w"],
 ) -> Array:
     """Scatter-add rank-3 values into a particle-major buffer.
 
@@ -2573,13 +2613,13 @@ def _scatter_rank3(
 
     Parameters
     ----------
-    base : Array
+    base : Float[Array, 'n 3 3']
         Destination buffer ``[N, 3, C]``, added into rather than overwritten.
-    indices : Array
+    indices : Int[Array, 'leaves w']
         Destination particle index per slot.
-    values : Array
+    values : Float[Array, 'leaves w 3 3']
         Values to add, ``[..., 3, C]``.
-    mask : Array
+    mask : Bool[Array, 'leaves w']
         Validity mask over the slots.
 
     Returns
