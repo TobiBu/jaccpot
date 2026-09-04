@@ -225,6 +225,25 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # `Float[Array, ""]` would reject the default path itself.
         ("jaccpot/runtime/reference.py", "G"),
         ("jaccpot/runtime/reference.py", "softening"),
+        # `_evaluate`'s second slice decorated seven functions, which brought their
+        # OTHER array parameters under this guard. These four cannot be shaped
+        # honestly, for two distinct reasons.
+        #
+        # `G` is the `Union[float, Array]` scalar case above, third occurrence.
+        ("jaccpot/runtime/kernels/_evaluate.py", "G"),
+        # The other three were NEVER OBSERVED AS ARRAYS. All three are `Optional`
+        # and every one of the recorded calls in the 2026-09-04 pilot pass supplied
+        # `None`: `_prepare_tree_evaluation_inputs` recorded 12 calls with only
+        # `positions_sorted` and `masses_sorted` present, and
+        # `_compute_targeted_nearfield` 4 with no `velocities_sorted`. STYLE_GUIDE
+        # section 4.2 says shapes come from execution and never from the docstring, so
+        # there is nothing to derive them from -- and `farfield_node_ranges` is
+        # exactly where guessing would hurt, because the far-field leaf view is a
+        # DIFFERENT axis from `leaves` (see `farleaves` in 4.3, which differs on the
+        # octree backend and broke 7 tests when they were conflated).
+        ("jaccpot/runtime/kernels/_evaluate.py", "farfield_leaf_nodes"),
+        ("jaccpot/runtime/kernels/_evaluate.py", "farfield_node_ranges"),
+        ("jaccpot/runtime/kernels/_evaluate.py", "velocities_sorted"),
         # Scalars, and the third instance of the same reason: `Float[Array, ""]`
         # buys nothing a scalar can get wrong, and both are reshaped to `(1,)` by
         # the Pallas wrappers anyway, so the only shape a caller could pass that
