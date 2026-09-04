@@ -5,6 +5,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from jaxtyping import TypeCheckError
 from yggdrax.tree import Tree
 
 from jaccpot.runtime._adaptive_policy import (
@@ -507,3 +509,97 @@ def test_leaf_ritter_sphere_contains_leaf_points():
         pts = np.asarray(positions_sorted[start : end + 1])
         d = np.linalg.norm(pts - np.asarray(centers[node_idx])[None, :], axis=1)
         assert np.all(d <= float(radii[node_idx]) + 1e-5)
+
+
+# The force-scale pair, whose `nodes` axis the re-recorded pilot found unconstrained.
+# `node_centers` and `node_radii` are one axis: 5 acceptances on `_far_field_force_scale_by_node`
+# and 5 on `estimate_particle_force_scale`, and a `node_radii` that disagrees with
+# `node_centers` silently rescales every node's far-field contribution.
+
+
+def _real_tree(n: int = 64, leaf_size: int = 8):
+    """Build a real yggdrax tree, because zeros are not a tree.
+
+    Parameters
+    ----------
+    n : int
+        Particle count.
+    leaf_size : int
+        Maximum leaf occupancy.
+
+    Returns
+    -------
+    tuple
+        `(tree, positions_sorted, masses_sorted)`.
+    """
+    from yggdrax.tree import build_tree
+
+    key = jax.random.PRNGKey(0)
+    positions = jax.random.uniform(key, (n, 3), dtype=jnp.float64) * 2.0 - 1.0
+    masses = jnp.ones((n,), dtype=jnp.float64)
+    bounds = (jnp.full((3,), -1.0), jnp.full((3,), 1.0))
+    tree, positions_sorted, masses_sorted, _ = build_tree(
+        positions, masses, bounds, leaf_size=leaf_size, return_reordered=True
+    )
+    return tree, positions_sorted, masses_sorted
+
+
+def _far_field_args():
+    """Build one valid `_far_field_force_scale_by_node` call.
+
+    Returns
+    -------
+    dict
+        Keyword arguments, with `node_centers` and `node_radii` agreeing on `nodes`.
+    """
+    from jaccpot.runtime._adaptive_policy import _far_field_force_scale_by_node
+
+    tree, _, masses_sorted = _real_tree()
+    nodes = int(tree.num_nodes)
+    return _far_field_force_scale_by_node, {
+        "tree": tree,
+        "masses": masses_sorted,
+        "node_centers": jnp.zeros((nodes, 3), dtype=jnp.float64),
+        "node_radii": jnp.ones((nodes,), dtype=jnp.float64),
+        "interaction_sources": jnp.zeros((2,), dtype=jnp.int32),
+        "interaction_targets": jnp.ones((2,), dtype=jnp.int32),
+        "g": jnp.asarray(1.0),
+        "eps_sq": jnp.asarray(0.0),
+        "inflation": jnp.asarray(1.0),
+    }
+
+
+def test_the_far_field_force_scale_still_runs_on_a_real_tree():
+    """The control. Every rejection below is worthless without it."""
+    fn, args = _far_field_args()
+    out = fn(**args)
+    assert out.shape == (int(args["node_centers"].shape[0]),)
+
+
+def test_node_radii_that_disagree_with_node_centers_are_rejected():
+    """One axis, not two: a short `node_radii` rescales every node's far field."""
+    fn, args = _far_field_args()
+    args["node_radii"] = args["node_radii"][:-1]
+    with pytest.raises(TypeCheckError):
+        fn(**args)
+
+
+def test_a_two_component_node_centre_is_rejected():
+    """The spatial literal the centre-to-centre displacement depends on."""
+    fn, args = _far_field_args()
+    args["node_centers"] = args["node_centers"][:, :-1]
+    with pytest.raises(TypeCheckError):
+        fn(**args)
+
+
+def test_a_batched_mass_vector_is_rejected():
+    """`masses` is `n`; its LENGTH stays free because `n` occurs once here, but rank does not.
+
+    That distinction is the point of the note above `resolve_dehnen_geometry`: a
+    single-occurrence axis asserts nothing about length, so the leading-axis acceptance the
+    pilot reports on `masses` is not closable on this parameter -- only its rank is.
+    """
+    fn, args = _far_field_args()
+    args["masses"] = args["masses"][None]
+    with pytest.raises(TypeCheckError):
+        fn(**args)
