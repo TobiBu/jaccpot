@@ -1234,21 +1234,28 @@ def _radix_fast_lane_prepacked_accel_bwd(
     # are tile-bounded transients and the memory is O(N) -- which is what makes
     # galaxy-scale gradients reachable. ``jax.vjp`` of the twin remains the
     # correctness oracle in tests/unit/test_custom_vjp_parity.py.
-    leaf_positions_bar, leaf_masses_bar = _leafpair_accel_analytic_vjp(
-        leaf_positions,
-        leaf_masses,
-        leaf_mask_f > 0.5,
-        jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
-        jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
-        source_valid_f > 0.5,
-        cotangent,
-        softening_sq=softening_sq,
-        G=G,
-        leaf_batch=int(rev_leaf_batch),
-        slot_tile=int(rev_block_tile),
-        skip_empty_tiles=bool(rev_skip_empty),
-        tiers=rev_tiers,
+    leaf_positions_bar, leaf_masses_bar, softening_bar, g_bar = (
+        _leafpair_accel_analytic_vjp(
+            leaf_positions,
+            leaf_masses,
+            leaf_mask_f > 0.5,
+            jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
+            jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
+            source_valid_f > 0.5,
+            cotangent,
+            softening_sq=softening_sq,
+            G=G,
+            leaf_batch=int(rev_leaf_batch),
+            slot_tile=int(rev_block_tile),
+            skip_empty_tiles=bool(rev_skip_empty),
+            tiers=rev_tiers,
+            parameter_cotangents=True,
+        )
     )
+    # `positions` only supplies the output shape (the forward gathers from
+    # `leaf_positions`) and the id/mask tables are discrete: zeros. softening_sq
+    # and G are parameters the forward multiplies by and get their analytic
+    # cotangents -- zeros here (until 2026-09-04) dropped the near field's share.
     return (
         leaf_positions_bar,
         leaf_masses_bar,
@@ -1257,8 +1264,11 @@ def _radix_fast_lane_prepacked_accel_bwd(
         jnp.zeros_like(source_valid_f),
         jnp.zeros_like(leaf_mask_f),
         jnp.zeros_like(leaf_particle_idx_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        jnp.reshape(
+            softening_bar.astype(jnp.asarray(softening_sq).dtype),
+            jnp.shape(softening_sq),
+        ),
+        jnp.reshape(g_bar.astype(jnp.asarray(G).dtype), jnp.shape(G)),
     )
 
 

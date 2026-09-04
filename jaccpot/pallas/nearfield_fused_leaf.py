@@ -1323,21 +1323,27 @@ def _nearfield_fused_leaf_cvjp_bwd(
     target_mask = target_mask_f > 0.5
     source_mask = source_mask_f > 0.5
 
-    def _twin(tp, sp, sm):
+    # softening_sq and G are differentiated through the twin too: the force is
+    # smooth in both, and returning zeros for them (as this rule did until
+    # 2026-09-04) silently dropped the near field's share of d/d(softening) and
+    # d/dG. Only the masks are discrete.
+    def _twin(tp, sp, sm, soft, g):
         return nearfield_fused_leaf_jax(
-            tp, target_mask, sp, sm, source_mask, softening_sq=softening_sq, G=G
+            tp, target_mask, sp, sm, source_mask, softening_sq=soft, G=g
         )
 
-    _, vjp_fn = jax.vjp(_twin, target_positions, source_positions, source_masses)
-    tp_bar, sp_bar, sm_bar = vjp_fn(cotangent)
+    _, vjp_fn = jax.vjp(
+        _twin, target_positions, source_positions, source_masses, softening_sq, G
+    )
+    tp_bar, sp_bar, sm_bar, soft_bar, g_bar = vjp_fn(cotangent)
     return (
         tp_bar,
         jnp.zeros_like(target_mask_f),
         sp_bar,
         sm_bar,
         jnp.zeros_like(source_mask_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        soft_bar,
+        g_bar,
     )
 
 
@@ -1467,27 +1473,29 @@ def _nearfield_leafpair_cvjp_bwd(
     source_leaf_ids = jnp.round(source_leaf_ids_f).astype(jnp.int32)
     source_valid = source_valid_f > 0.5
 
-    def _twin(lp, lm):
+    # softening_sq and G differentiated through the twin as well (see the
+    # pairs-lane rule above for why zeros here were a defect).
+    def _twin(lp, lm, soft, g):
         return nearfield_leafpair_jax(
             lp,
             lm,
             leaf_mask,
             source_leaf_ids,
             source_valid,
-            softening_sq=softening_sq,
-            G=G,
+            softening_sq=soft,
+            G=g,
         )
 
-    _, vjp_fn = jax.vjp(_twin, leaf_positions, leaf_masses)
-    lp_bar, lm_bar = vjp_fn(cotangent)
+    _, vjp_fn = jax.vjp(_twin, leaf_positions, leaf_masses, softening_sq, G)
+    lp_bar, lm_bar, soft_bar, g_bar = vjp_fn(cotangent)
     return (
         lp_bar,
         lm_bar,
         jnp.zeros_like(leaf_mask_f),
         jnp.zeros_like(source_leaf_ids_f),
         jnp.zeros_like(source_valid_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        soft_bar,
+        g_bar,
     )
 
 
