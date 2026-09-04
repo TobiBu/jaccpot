@@ -22,6 +22,28 @@ their own right:
 * **perturber** -- with and without the LMC-like overdensity, which is the
   localised non-axisymmetric feature fig17(b) shows the residual map around.
 
+Two settings that are measurements, not preferences
+--------------------------------------------------
+``--iterations`` defaults to 240 and the parametric arm's step size to 1e-2,
+both changed from a first sweep at 120 and 2e-2 which produced two bad cells:
+
+* the parametric arm **diverged** at softening 0.03 (field residual 5.298e-02 ->
+  1.089e-01) and at N=131072 (5.536e-02 -> 6.756e-02) -- a step size too large
+  for those landscapes;
+* ``uniform_sphere`` with free positions barely moved in 120 iterations
+  (9.985e-01 -> 9.913e-01), which is indistinguishable from "not run long
+  enough" and so says nothing about the initial-guess sensitivity section 2
+  wants.
+
+Checked at N=512 on CPU before committing GPU time to it: lr 1e-2 over 240
+iterations reaches a field residual of 2.096e-03 where lr 2e-2 over 120 reaches
+1.288e-02 at softening 0.01, and 1.404e-03 against 6.891e-03 at softening 0.03.
+Strictly better in both, so the lower rate is not a workaround for the
+divergence but the better setting anyway. **The divergence itself did not
+reproduce at N=512**, so whether 1e-2 cures it at N=16384 is what the sweep
+answers -- and if it does not, that is a result to report rather than a knob to
+keep turning.
+
 What the records are built to show
 ----------------------------------
 fig18's content is a **divergence**: the field residual keeps falling while the
@@ -84,13 +106,17 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--n", default="16384,131072", help="Source counts N")
     p.add_argument("--tracers", type=int, default=8192, help="Tracer count M")
-    p.add_argument("--iterations", type=int, default=200, help="Gradient steps")
+    p.add_argument("--iterations", type=int, default=240, help="Gradient steps")
     p.add_argument("--learning-rate", type=float, default=2.0e-3, help="Step size")
     p.add_argument(
         "--parametric-learning-rate",
         type=float,
-        default=2.0e-2,
-        help="Step size for the parametric arm, whose parameters are log scales",
+        default=1.0e-2,
+        help=(
+            "Step size for the parametric arm, whose parameters are log "
+            "scales. Lowered from 2e-2, which diverged at softening 0.03 and "
+            "at N=131072; see the module docstring"
+        ),
     )
     p.add_argument("--order", type=int, default=4, help="Expansion order")
     p.add_argument("--theta", type=float, default=0.5, help="MAC parameter")
