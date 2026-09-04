@@ -85,6 +85,16 @@ def _parse_args() -> argparse.Namespace:
         Parsed arguments.
     """
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument(
+        "--merge-from",
+        default="",
+        help=(
+            "Comma-separated result JSONs to concatenate into --json-out and "
+            "exit, measuring nothing. These sweeps are host-bound and "
+            "single-threaded, so wall-clock is cut by running disjoint slices "
+            "as separate processes and stitching them here"
+        ),
+    )
     p.add_argument("--n", default="4096,32768,262144", help="Source counts N")
     p.add_argument("--tracers", type=int, default=2048, help="Tracer count M")
     p.add_argument("--iterations", type=int, default=60, help="Gradient steps per fit")
@@ -524,6 +534,79 @@ def _run_cadence(
     return record
 
 
+def _merge_runs(args: argparse.Namespace) -> int:
+    """Concatenate sharded result files into one artifact.
+
+    These sweeps are host-bound and single-threaded -- measured at load average
+    22 on 64 cores with the GPU at 0-19% -- so wall-clock is cut by running
+    disjoint slices of the sweep as separate PROCESSES rather than by any
+    change to the numerics. Each slice writes its own JSON; this stitches them
+    back into the single artifact a figure reads, and measures nothing.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command line; ``merge_from`` names the inputs and ``json_out``
+        the destination.
+
+    Returns
+    -------
+    int
+        Process exit status.
+
+    Raises
+    ------
+    SystemExit
+        If an input is missing, or if the inputs disagree on a configuration
+        axis that would make them incomparable. Stitching slices measured at
+        different accuracy settings produces a curve over two problems.
+    """
+    sources = [v.strip() for v in str(args.merge_from).split(",") if v.strip()]
+    records: List[Dict[str, Any]] = []
+    merged_config: Optional[Dict[str, Any]] = None
+    metas: List[Dict[str, Any]] = []
+    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M")
+
+    for source in sources:
+        path = source if source.startswith("/") else str(jsonio.results_path(source))
+        try:
+            artifact = jsonio.read_result(path)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"merge input not found: {path}") from exc
+        config = dict(artifact["config"])
+        if merged_config is None:
+            merged_config = config
+        else:
+            clashes = {
+                key: (merged_config.get(key), config.get(key))
+                for key in pinned
+                if merged_config.get(key) != config.get(key)
+            }
+            if clashes:
+                raise SystemExit(
+                    f"refusing to merge {path}: inputs disagree on {clashes}"
+                )
+        records.extend(artifact["data"].get("records", []))
+        metas.append(dict(artifact.get("meta", {})))
+
+    if merged_config is None:
+        raise SystemExit("--merge-from named no readable inputs")
+    merged_config["n"] = sorted({r["N"] for r in records if "N" in r})
+    merged_config["merged_from"] = sources
+
+    out = args.json_out or DEFAULT_OUT
+    written = jsonio.write_result(
+        out,
+        config=merged_config,
+        # Each slice's provenance is kept: they are separate processes, and one
+        # sha over them would claim more than is true.
+        meta={**runmeta.run_meta(), "merged_source_meta": metas},
+        data={"records": records},
+    )
+    print(f"merged {len(sources)} slice(s) -> {written}")
+    return 0
+
+
 def main() -> int:
     """Run the sweep and write the results JSON.
 
@@ -533,6 +616,8 @@ def main() -> int:
         Process exit status.
     """
     args = _parse_args()
+    if str(args.merge_from).strip():
+        return _merge_runs(args)
     runmeta.select_gpu(args.gpu_select)
     runmeta.enable_x64(args.dtype)
 

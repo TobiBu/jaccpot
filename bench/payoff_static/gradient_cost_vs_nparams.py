@@ -493,10 +493,85 @@ def main() -> int:
         flush=True,
     )
 
+    out = args.json_out or DEFAULT_OUT
+    config_record = {
+        "n": n_list,
+        "theta": float(args.theta),
+        "order": int(args.order),
+        "basis": str(args.basis),
+        "seed": int(args.seed),
+        "device": runmeta.device_label(),
+        "precision": str(args.dtype),
+        "M": int(args.tracers),
+        "leaf_size": int(args.leaf_size),
+        "softening": float(args.softening),
+        "preset": str(args.preset),
+        "repeats": int(args.repeats),
+        "warmup": int(args.warmup),
+        "mode": str(args.mode),
+    }
     records: List[Dict[str, Any]] = []
+
+    def flush() -> Any:
+        """Write the results JSON as it currently stands.
+
+        Returns
+        -------
+        Any
+            The path written.
+
+        Notes
+        -----
+        After every N. This was the one bench script left without per-point
+        writes, and it showed: the N=4194304 point spends ~20 minutes of XLA
+        autotuning before failing with an out-of-memory, and until it did the
+        whole artifact -- including six N of good measurements -- stayed
+        unwritten.
+        """
+        usable = [r for r in records if not r.get("failed")]
+        forward_reference = min(
+            (
+                r["forward_seconds"]
+                for r in usable
+                if r["parameterization"] == "positions"
+            ),
+            default=None,
+        )
+        annotations = None
+        if usable:
+            largest = max(
+                (r for r in usable if r["parameterization"] == "positions"),
+                key=lambda r: r["N"],
+            )
+            annotations = {
+                "reference_N": largest["N"],
+                "reference_forward_seconds": largest["forward_seconds"],
+                "reference_forward_backward_seconds": largest[
+                    "forward_backward_seconds"
+                ],
+                "finite_difference_at": {
+                    str(p): {
+                        "seconds": (p + 1) * largest["forward_seconds"],
+                        "years": (p + 1) * largest["forward_seconds"] / 31_557_600.0,
+                    }
+                    for p in ANNOTATE_AT
+                },
+            }
+        return jsonio.write_result(
+            out,
+            config=config_record,
+            meta=runmeta.run_meta(),
+            data={
+                "records": records,
+                "annotations": annotations,
+                "min_forward_seconds": forward_reference,
+            },
+        )
+
     for n in n_list:
         try:
             records.extend(_measure_one(n=n, args=args, timing=timing))
+            flush()
         except Exception as exc:  # pragma: no cover - OOM at the top of the sweep
             # An out-of-memory at the largest N is a result, not a crash: it is
             # where the single-device ceiling is, and fig16's memory panel needs
@@ -511,62 +586,10 @@ def main() -> int:
                     "error": str(exc)[:2000],
                 }
             )
+            flush()
             break
 
-    # The annotation the figure's argument rests on, computed here so the
-    # notebook cannot derive it differently.
-    usable = [r for r in records if not r.get("failed")]
-    forward_reference = min(
-        (r["forward_seconds"] for r in usable if r["parameterization"] == "positions"),
-        default=None,
-    )
-    annotations = None
-    if usable:
-        largest = max(
-            (r for r in usable if r["parameterization"] == "positions"),
-            key=lambda r: r["N"],
-        )
-        annotations = {
-            "reference_N": largest["N"],
-            "reference_forward_seconds": largest["forward_seconds"],
-            "reference_forward_backward_seconds": largest["forward_backward_seconds"],
-            "finite_difference_at": {
-                str(p): {
-                    "seconds": (p + 1) * largest["forward_seconds"],
-                    "years": (p + 1) * largest["forward_seconds"] / 31_557_600.0,
-                }
-                for p in ANNOTATE_AT
-            },
-        }
-
-    payload = {
-        "records": records,
-        "annotations": annotations,
-        "min_forward_seconds": forward_reference,
-    }
-    out = args.json_out or DEFAULT_OUT
-    written = jsonio.write_result(
-        out,
-        config={
-            "n": n_list,
-            "theta": float(args.theta),
-            "order": int(args.order),
-            "basis": str(args.basis),
-            "seed": int(args.seed),
-            "device": runmeta.device_label(),
-            "precision": str(args.dtype),
-            "M": int(args.tracers),
-            "leaf_size": int(args.leaf_size),
-            "softening": float(args.softening),
-            "preset": str(args.preset),
-            "repeats": int(args.repeats),
-            "warmup": int(args.warmup),
-            "mode": str(args.mode),
-        },
-        meta=runmeta.run_meta(),
-        data=payload,
-    )
-    print(f"wrote {written}")
+    print(f"wrote {flush()}")
     return 0
 
 
