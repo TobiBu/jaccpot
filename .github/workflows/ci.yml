@@ -431,11 +431,31 @@ jobs:
     # longest leg near 30 min and make a 45-50 cap meaningful again. That is a
     # bigger change than unblocking the queue, so it is written down here rather
     # than done silently alongside it.
+    #
+    # 75 -> SPLIT BY PATH, 2026-09-04, which is what the paragraph above prescribed
+    # ("another split by path, not a bigger number") rather than a fourth cap bump.
+    # It was forced by a failure the cap could not explain: `test-smoke (3.11)` began
+    # dying at 15-18 minutes -- nowhere near 75 -- with the step `cancelled`, the job
+    # `failure`, ZERO test failures, and no disk, memory or runner message. Every run
+    # stopped at exactly 41% with an identical skip pattern, on `main` as well as on
+    # PR branches, first appearing on #312's merge and never on any run before it.
+    # `fail-fast: false` rules out a sibling, and there is no `concurrency` block, so
+    # nothing was superseding it either.
+    #
+    # The split is the diagnostic as much as the fix: three shards mean the next
+    # occurrence names its third instead of the whole suite. `timeout-minutes` stays
+    # 75 deliberately -- it was never the binding constraint, and lowering it now
+    # would confuse a cap failure with whatever this is.
     timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+        # The three-way split the note above prescribes. `runtime` is carved out
+        # because `test-full` already treats it as its own shard and it is the
+        # heaviest third; `rest` is everything outside `tests/unit`, which is
+        # `tests/integration` plus the collected-and-skipped tiers.
+        shard: ["runtime", "unit", "rest"]
     env:
       JAX_ENABLE_X64: "1"
       JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
@@ -454,21 +474,34 @@ jobs:
           # Keyed per Python version as well as per source hash: the matrix legs
           # compile with different interpreters, and the existing keys' note about
           # disjoint sets overwriting each other applies between them too.
-          key: jax-compile-smoke-py${{ matrix.python-version }}-${{ hashFiles('jaccpot/**/*.py') }}
+          # The shard is in the key for the reason the note below gives about disjoint
+          # sets: three shards compile three different subsets, so one key per
+          # (version, source) would have them overwriting each other every run.
+          key: jax-compile-smoke-py${{ matrix.python-version }}-${{ matrix.shard }}-${{ hashFiles('jaccpot/**/*.py') }}
           # The prefix fallback is what makes a library change only PARTIALLY cold
           # instead of fully: without it, any edit under jaccpot/ would put this job
           # back to a 28-minute cold run, and a cancelled job never saves a cache --
           # so one over-budget run would keep the next one cold indefinitely.
           restore-keys: |
-            jax-compile-smoke-py${{ matrix.python-version }}-
+            jax-compile-smoke-py${{ matrix.python-version }}-${{ matrix.shard }}-
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip
           pip install git+https://github.com/TobiBu/yggdrax.git
           pip install -e ".[dev]"
       - name: Smoke tests (fast subset)
-        # Override the default addopts marker to also drop `slow`.
-        run: pytest -n 2 -m "not slow and not experimental"
+        # Override the default addopts marker to also drop `slow`. The three shards
+        # partition the collection exactly once between them: `runtime` takes
+        # tests/unit/runtime, `unit` takes the rest of tests/unit, and `rest` takes
+        # everything outside tests/unit. `tests/perf` is already excluded by the
+        # addopts in pyproject.toml, so it is in none of them.
+        run: |
+          case "${{ matrix.shard }}" in
+            runtime) paths=(tests/unit/runtime) ;;
+            unit)    paths=(tests/unit --ignore=tests/unit/runtime) ;;
+            rest)    paths=(--ignore=tests/unit) ;;
+          esac
+          pytest -n 2 -m "not slow and not experimental" "${paths[@]}"
 
   test-distributed-mutual:
     # The ONLY job that runs the distributed mutual FMM, because it is the only
