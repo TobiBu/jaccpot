@@ -1,0 +1,4394 @@
+{
+  "config": {
+    "n": [
+      131072
+    ],
+    "theta": 0.5,
+    "order": 4,
+    "basis": "solidfmm",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float64",
+    "M": 2048,
+    "leaf_size": 64,
+    "softening": 0.01,
+    "iterations": 24,
+    "cadences": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "learning_rates": [
+      0.0005,
+      0.002,
+      0.008
+    ],
+    "intensive_every": 1,
+    "near_set_sample": 128
+  },
+  "meta": {
+    "git_sha": "e8f576ec3f008cc1413d5cfd278e9b1d132e88af",
+    "git_branch": "feat/density-reconstruction-payoff",
+    "git_dirty": false,
+    "git_dirty_sources": false,
+    "git_dirty_source_paths": [],
+    "jax_version": "0.10.2",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "4"
+  },
+  "data": {
+    "records": [
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "rebuild_cadence": 1,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.00873243321272448,
+        "final_loss": 0.0001350773812518685,
+        "loss_ratio": 0.015468470008455406,
+        "field_residual_before": {
+          "rel_l2": 0.09344748906591598,
+          "rms": 0.0273351037227322,
+          "max_abs": 1.1849167756451402,
+          "mean_abs": 0.004134972857640291,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.011992430711686932,
+          "rms": 0.0035080058401612915,
+          "max_abs": 0.047837162660684725,
+          "mean_abs": 0.0017814793174372279,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 24,
+            "comparisons": 23,
+            "switches": 23,
+            "interaction_switches": 23,
+            "switch_rate": 1.0,
+            "unique_topologies": 24,
+            "changed_components": {
+              "permutation": 23,
+              "tree_shape": 23,
+              "node_ranges": 23,
+              "far_pairs": 23,
+              "near_pairs": 23
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 10,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 11,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 12,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 13,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 14,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 15,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 16,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 17,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 18,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 19,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 20,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 21,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 22,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 23,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 23,
+            "mean": {
+              "slot_churn": 0.8681235629180601,
+              "mean_rank_shift_fraction": 0.00025394216919730434,
+              "leaf_churn": 0.8984531772575252,
+              "near_source_count_churn": 0.9362392872073578,
+              "near_set_churn": 0.13858813650491647,
+              "near_pair_churn": 0.9911336259103368,
+              "far_pair_churn": 0.9943709100623188
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9325796274038461,
+                "mean_rank_shift_fraction": 0.000513849653435882,
+                "leaf_churn": 0.9519230769230769,
+                "near_source_count_churn": 0.9619215745192308,
+                "near_set_churn": 0.22308569563231792,
+                "near_pair_churn": 0.9980270781505581,
+                "far_pair_churn": 0.9989449294165236,
+                "iteration": 1,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9508713942307693,
+                "mean_rank_shift_fraction": 0.0004731741459411982,
+                "leaf_churn": 0.9716346153846154,
+                "near_source_count_churn": 0.9584885817307692,
+                "near_set_churn": 0.19012359881575883,
+                "near_pair_churn": 0.9993427785387093,
+                "far_pair_churn": 0.999719840869614,
+                "iteration": 2,
+                "previous_iteration": 1
+              },
+              {
+                "slot_churn": 0.9460862379807692,
+                "mean_rank_shift_fraction": 0.00045044791768993856,
+                "leaf_churn": 0.9639423076923077,
+                "near_source_count_churn": 0.9591271033653846,
+                "near_set_churn": 0.21082253751726426,
+                "near_pair_churn": 0.9987572280987757,
+                "far_pair_churn": 0.9997030661241673,
+                "iteration": 3,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9105018028846154,
+                "mean_rank_shift_fraction": 0.00043046815860906294,
+                "leaf_churn": 0.9225961538461539,
+                "near_source_count_churn": 0.9596905048076924,
+                "near_set_churn": 0.2101974799086672,
+                "near_pair_churn": 0.9943698239481517,
+                "far_pair_churn": 0.9971040366449314,
+                "iteration": 4,
+                "previous_iteration": 3
+              },
+              {
+                "slot_churn": 0.9218674879807692,
+                "mean_rank_shift_fraction": 0.00043175838402742463,
+                "leaf_churn": 0.9389423076923077,
+                "near_source_count_churn": 0.9572791466346153,
+                "near_set_churn": 0.19848677177228685,
+                "near_pair_churn": 0.9970924344450508,
+                "far_pair_churn": 0.9986640480273805,
+                "iteration": 5,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.8820988581730769,
+                "mean_rank_shift_fraction": 0.0004583140943177353,
+                "leaf_churn": 0.9067307692307692,
+                "near_source_count_churn": 0.9489408052884616,
+                "near_set_churn": 0.19689567637147862,
+                "near_pair_churn": 0.9930528642938499,
+                "far_pair_churn": 0.9957019357263672,
+                "iteration": 6,
+                "previous_iteration": 5
+              },
+              {
+                "slot_churn": 0.882421875,
+                "mean_rank_shift_fraction": 0.00034346371712769275,
+                "leaf_churn": 0.9004807692307693,
+                "near_source_count_churn": 0.9543194110576924,
+                "near_set_churn": 0.17555036190060097,
+                "near_pair_churn": 0.9915954235725776,
+                "far_pair_churn": 0.9943393135240692,
+                "iteration": 7,
+                "previous_iteration": 6
+              },
+              {
+                "slot_churn": 0.9172100360576924,
+                "mean_rank_shift_fraction": 0.0003306020928557808,
+                "leaf_churn": 0.9471153846153846,
+                "near_source_count_churn": 0.9534329927884615,
+                "near_set_churn": 0.157761702525879,
+                "near_pair_churn": 0.9979870416574299,
+                "far_pair_churn": 0.9988889077529338,
+                "iteration": 8,
+                "previous_iteration": 7
+              },
+              {
+                "slot_churn": 0.8769456129807692,
+                "mean_rank_shift_fraction": 0.0003050790594879692,
+                "leaf_churn": 0.9057692307692308,
+                "near_source_count_churn": 0.9476637620192307,
+                "near_set_churn": 0.14784563636563797,
+                "near_pair_churn": 0.9926557325265168,
+                "far_pair_churn": 0.9958455782106825,
+                "iteration": 9,
+                "previous_iteration": 8
+              },
+              {
+                "slot_churn": 0.8669320913461539,
+                "mean_rank_shift_fraction": 0.000298952068802873,
+                "leaf_churn": 0.9048076923076923,
+                "near_source_count_churn": 0.9476862980769231,
+                "near_set_churn": 0.16618670997461082,
+                "near_pair_churn": 0.992731547988366,
+                "far_pair_churn": 0.995857775422927,
+                "iteration": 10,
+                "previous_iteration": 9
+              },
+              {
+                "slot_churn": 0.7859600360576923,
+                "mean_rank_shift_fraction": 0.00019949884809685882,
+                "leaf_churn": 0.8346153846153846,
+                "near_source_count_churn": 0.9138446514423076,
+                "near_set_churn": 0.06990775702209101,
+                "near_pair_churn": 0.9777871469163683,
+                "far_pair_churn": 0.9856686923112247,
+                "iteration": 11,
+                "previous_iteration": 10
+              },
+              {
+                "slot_churn": 0.8708909254807692,
+                "mean_rank_shift_fraction": 0.000225433485042414,
+                "leaf_churn": 0.9052884615384615,
+                "near_source_count_churn": 0.9396033653846154,
+                "near_set_churn": 0.11139055711777163,
+                "near_pair_churn": 0.9935634283278544,
+                "far_pair_churn": 0.996490834964804,
+                "iteration": 12,
+                "previous_iteration": 11
+              },
+              {
+                "slot_churn": 0.9010667067307693,
+                "mean_rank_shift_fraction": 0.00021423655854174373,
+                "leaf_churn": 0.9274038461538462,
+                "near_source_count_churn": 0.9414438100961539,
+                "near_set_churn": 0.1378534066714482,
+                "near_pair_churn": 0.996195259716493,
+                "far_pair_churn": 0.9981250213065761,
+                "iteration": 13,
+                "previous_iteration": 12
+              },
+              {
+                "slot_churn": 0.8595552884615385,
+                "mean_rank_shift_fraction": 8.83517744978504e-05,
+                "leaf_churn": 0.9004807692307693,
+                "near_source_count_churn": 0.9074368990384616,
+                "near_set_churn": 0.09663754841315184,
+                "near_pair_churn": 0.9941345220834436,
+                "far_pair_churn": 0.9967506153710184,
+                "iteration": 14,
+                "previous_iteration": 13
+              },
+              {
+                "slot_churn": 0.8086237980769231,
+                "mean_rank_shift_fraction": 9.526540541789941e-05,
+                "leaf_churn": 0.8461538461538461,
+                "near_source_count_churn": 0.90791015625,
+                "near_set_churn": 0.0990542754522519,
+                "near_pair_churn": 0.9849835190314454,
+                "far_pair_churn": 0.9900272992563306,
+                "iteration": 15,
+                "previous_iteration": 14
+              },
+              {
+                "slot_churn": 0.8249699519230769,
+                "mean_rank_shift_fraction": 7.818944355439858e-05,
+                "leaf_churn": 0.8701923076923077,
+                "near_source_count_churn": 0.9045147235576924,
+                "near_set_churn": 0.06614496161833566,
+                "near_pair_churn": 0.990360710678456,
+                "far_pair_churn": 0.993433210323762,
+                "iteration": 16,
+                "previous_iteration": 15
+              },
+              {
+                "slot_churn": 0.8778019831730769,
+                "mean_rank_shift_fraction": 0.00010414890989044009,
+                "leaf_churn": 0.9105769230769231,
+                "near_source_count_churn": 0.9272010216346154,
+                "near_set_churn": 0.1148860402542558,
+                "near_pair_churn": 0.9945529844082057,
+                "far_pair_churn": 0.9963666884477592,
+                "iteration": 17,
+                "previous_iteration": 16
+              },
+              {
+                "slot_churn": 0.7506685697115385,
+                "mean_rank_shift_fraction": 0.00012424976868036935,
+                "leaf_churn": 0.8,
+                "near_source_count_churn": 0.9206730769230769,
+                "near_set_churn": 0.1087976636909496,
+                "near_pair_churn": 0.971611521399245,
+                "far_pair_churn": 0.9803298719490842,
+                "iteration": 18,
+                "previous_iteration": 17
+              },
+              {
+                "slot_churn": 0.8732647235576924,
+                "mean_rank_shift_fraction": 0.00015283325014735116,
+                "leaf_churn": 0.9100961538461538,
+                "near_source_count_churn": 0.9143329326923076,
+                "near_set_churn": 0.08448407402275912,
+                "near_pair_churn": 0.994420425839942,
+                "far_pair_churn": 0.9968438950623322,
+                "iteration": 19,
+                "previous_iteration": 18
+              },
+              {
+                "slot_churn": 0.8884915865384615,
+                "mean_rank_shift_fraction": 0.00014997267864159578,
+                "leaf_churn": 0.9173076923076923,
+                "near_source_count_churn": 0.9349984975961538,
+                "near_set_churn": 0.1253998362893085,
+                "near_pair_churn": 0.9953618299036264,
+                "far_pair_churn": 0.9979362441512898,
+                "iteration": 20,
+                "previous_iteration": 19
+              },
+              {
+                "slot_churn": 0.8161207932692308,
+                "mean_rank_shift_fraction": 0.00015479511057836772,
+                "leaf_churn": 0.8480769230769231,
+                "near_source_count_churn": 0.9273212139423077,
+                "near_set_churn": 0.11057473446547472,
+                "near_pair_churn": 0.9845022018045279,
+                "far_pair_churn": 0.9891126114587755,
+                "iteration": 21,
+                "previous_iteration": 20
+              },
+              {
+                "slot_churn": 0.7869591346153846,
+                "mean_rank_shift_fraction": 9.470584124503051e-05,
+                "leaf_churn": 0.8163461538461538,
+                "near_source_count_churn": 0.9113957331730769,
+                "near_set_churn": 0.08932403148850529,
+                "near_pair_churn": 0.9772731147381575,
+                "far_pair_churn": 0.9834067159243371,
+                "iteration": 22,
+                "previous_iteration": 21
+              },
+              {
+                "slot_churn": 0.8349534254807692,
+                "mean_rank_shift_fraction": 0.00012287952490812223,
+                "leaf_churn": 0.8639423076923077,
+                "near_source_count_churn": 0.93427734375,
+                "near_set_churn": 0.09611608232227287,
+                "near_pair_churn": 0.9857147778699948,
+                "far_pair_churn": 0.9912697991864438,
+                "iteration": 23,
+                "previous_iteration": 22
+              }
+            ]
+          }
+        },
+        "timing": {
+          "wall_seconds": 2346.9679388375953,
+          "totals_seconds": {
+            "prepare": 307.8327455688268,
+            "gradient": 1894.1062508523464,
+            "update": 6.67852932587266
+          },
+          "first_iteration_seconds": {
+            "prepare": 26.125472348183393,
+            "gradient": 170.68483015336096,
+            "update": 0.6085989130660892
+          },
+          "mean_later_gradient_seconds": 74.9313661173472,
+          "mean_later_prepare_seconds": 12.248142313941017,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2925183329800396
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.00873243321272448,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001804035799686534
+          },
+          {
+            "iteration": 1,
+            "loss": 0.006733699119207473,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00015248453106784097
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004986921863622181,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00012702836567954326
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0035426589719366503,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00010391755349803651
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002362479002230958,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.231073793494773e-05
+          },
+          {
+            "iteration": 5,
+            "loss": 0.001439308857073625,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.20200990227743e-05
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0007990851277047256,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.205717612061909e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.00042547587690024364,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.3451139840736575e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.00024528165627345124,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.636676751687244e-06
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0002680205252763346,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.2622473856926969e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0004064854727645984,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.7312638040923323e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0005988189939469446,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.973620270976022e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0007924955525985789,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.8758493281511974e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0009345517388805991,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.4278810460020795e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0009909135898936877,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.6376335474941836e-05
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0009816189344600433,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.5990454065516514e-05
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008747680353618111,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.197179888773561e-05
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007392748064179592,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.647893211928846e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0005836102522380568,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.954325054295817e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.00043497524349443023,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.169368445446424e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0003143271201973692,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.3371337496453158e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.00021573967636365462,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.507712967017658e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.00016239404129930353,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.2316200389372026e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 0.0001350773812518685,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.4676363402938491e-06
+          }
+        ],
+        "loss_continuity": {
+          "boundaries": [
+            {
+              "boundary": 1,
+              "loss_outgoing_topology": 0.0005749880820957395,
+              "loss_incoming_topology": 0.0005761822650622322,
+              "absolute_jump": 1.1941829664926943e-06,
+              "relative_jump": 0.002076882988844027
+            },
+            {
+              "boundary": 2,
+              "loss_outgoing_topology": 0.00042761271089312135,
+              "loss_incoming_topology": 0.00042671581907692665,
+              "absolute_jump": -8.968918161946903e-07,
+              "relative_jump": 0.002097439560020146
+            },
+            {
+              "boundary": 3,
+              "loss_outgoing_topology": 0.0003019321317264538,
+              "loss_incoming_topology": 0.00030313461214372453,
+              "absolute_jump": 1.2024804172707502e-06,
+              "relative_jump": 0.00398261824733573
+            },
+            {
+              "boundary": 4,
+              "loss_outgoing_topology": 0.000201984097859058,
+              "loss_incoming_topology": 0.00020215018202767652,
+              "absolute_jump": 1.6608416861851123e-07,
+              "relative_jump": 0.0008222635859898372
+            },
+            {
+              "boundary": 5,
+              "loss_outgoing_topology": 0.00012458374846911971,
+              "loss_incoming_topology": 0.00012315730517677468,
+              "absolute_jump": -1.4264432923450341e-06,
+              "relative_jump": 0.011449673893048766
+            },
+            {
+              "boundary": 6,
+              "loss_outgoing_topology": 6.837029487502446e-05,
+              "loss_incoming_topology": 6.837529724860038e-05,
+              "absolute_jump": 5.0023735759154725e-09,
+              "relative_jump": 7.316589148927058e-05
+            },
+            {
+              "boundary": 7,
+              "loss_outgoing_topology": 3.5396694183439496e-05,
+              "loss_incoming_topology": 3.640668377689186e-05,
+              "absolute_jump": 1.009989593452366e-06,
+              "relative_jump": 0.028533444061702634
+            },
+            {
+              "boundary": 8,
+              "loss_outgoing_topology": 2.21909426240151e-05,
+              "loss_incoming_topology": 2.0988009382053676e-05,
+              "absolute_jump": -1.2029332419614245e-06,
+              "relative_jump": 0.05420829850912267
+            },
+            {
+              "boundary": 9,
+              "loss_outgoing_topology": 2.2277382702372265e-05,
+              "loss_incoming_topology": 2.2933705620494474e-05,
+              "absolute_jump": 6.563229181222094e-07,
+              "relative_jump": 0.02946140158791271
+            },
+            {
+              "boundary": 10,
+              "loss_outgoing_topology": 3.51694122401897e-05,
+              "loss_incoming_topology": 3.478173233851935e-05,
+              "absolute_jump": -3.876799016703524e-07,
+              "relative_jump": 0.011023212416024764
+            },
+            {
+              "boundary": 11,
+              "loss_outgoing_topology": 5.176551097911551e-05,
+              "loss_incoming_topology": 5.1239129962083306e-05,
+              "absolute_jump": -5.263810170322031e-07,
+              "relative_jump": 0.01016856604090257
+            },
+            {
+              "boundary": 12,
+              "loss_outgoing_topology": 6.767476642920499e-05,
+              "loss_incoming_topology": 6.781144723937962e-05,
+              "absolute_jump": 1.36680810174634e-07,
+              "relative_jump": 0.0020196716942882495
+            },
+            {
+              "boundary": 13,
+              "loss_outgoing_topology": 7.955598011428923e-05,
+              "loss_incoming_topology": 7.996676539795366e-05,
+              "absolute_jump": 4.1078528366443427e-07,
+              "relative_jump": 0.005163474613401843
+            },
+            {
+              "boundary": 14,
+              "loss_outgoing_topology": 8.493222931781019e-05,
+              "loss_incoming_topology": 8.478947850183885e-05,
+              "absolute_jump": -1.4275081597133897e-07,
+              "relative_jump": 0.0016807614390666216
+            },
+            {
+              "boundary": 15,
+              "loss_outgoing_topology": 8.278813719766135e-05,
+              "loss_incoming_topology": 8.399416295151133e-05,
+              "absolute_jump": 1.206025753849982e-06,
+              "relative_jump": 0.014567615538570791
+            },
+            {
+              "boundary": 16,
+              "loss_outgoing_topology": 7.610464668066037e-05,
+              "loss_incoming_topology": 7.485125472581663e-05,
+              "absolute_jump": -1.2533919548437405e-06,
+              "relative_jump": 0.016469322301738653
+            },
+            {
+              "boundary": 17,
+              "loss_outgoing_topology": 6.325210314236413e-05,
+              "loss_incoming_topology": 6.325750897457328e-05,
+              "absolute_jump": 5.4058322091578076e-09,
+              "relative_jump": 8.546486109704016e-05
+            },
+            {
+              "boundary": 18,
+              "loss_outgoing_topology": 5.006160599581467e-05,
+              "loss_incoming_topology": 4.9937763938529114e-05,
+              "absolute_jump": -1.238420572855585e-07,
+              "relative_jump": 0.0024737931359196134
+            },
+            {
+              "boundary": 19,
+              "loss_outgoing_topology": 3.711547095174591e-05,
+              "loss_incoming_topology": 3.7219515842001876e-05,
+              "absolute_jump": 1.0404489025596592e-07,
+              "relative_jump": 0.0028032754963889703
+            },
+            {
+              "boundary": 20,
+              "loss_outgoing_topology": 2.629076176198415e-05,
+              "loss_incoming_topology": 2.6896020876430922e-05,
+              "absolute_jump": 6.052591144467723e-07,
+              "relative_jump": 0.023021741246081476
+            },
+            {
+              "boundary": 21,
+              "loss_outgoing_topology": 1.882029799625723e-05,
+              "loss_incoming_topology": 1.846019152183825e-05,
+              "absolute_jump": -3.601064744189795e-07,
+              "relative_jump": 0.019133941157073783
+            },
+            {
+              "boundary": 22,
+              "loss_outgoing_topology": 1.3610057722817457e-05,
+              "loss_incoming_topology": 1.3895566893023724e-05,
+              "absolute_jump": 2.85509170206267e-07,
+              "relative_jump": 0.020977807443652997
+            },
+            {
+              "boundary": 23,
+              "loss_outgoing_topology": 1.209806482153716e-05,
+              "loss_incoming_topology": 1.1558162922125979e-05,
+              "absolute_jump": -5.399018994111819e-07,
+              "relative_jump": 0.044627128997526966
+            }
+          ],
+          "max_relative_jump": 0.05420829850912267,
+          "median_relative_jump": 0.01016856604090257,
+          "median_step_improvement": 0.00014863500874362653,
+          "jump_over_step_improvement": 0.5974119056602637
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 8.242056679419823e-06,
+          "pinned_median_rel": 3.359837150273927e-06,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.009679811977807906,
+          "gradient_delta_across_rebuild": 1.2438624097250247e-05,
+          "gradient_delta_rel_across_rebuild": 0.0012850067879177033,
+          "gradient_cosine_across_rebuild": 0.9999992335427927,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 152276.18833793246,
+            "median_rel_at_10eps": 15227.61976607593,
+            "ratio": 9.999999387768609,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "rebuild_cadence": 1,
+        "learning_rate": 0.002,
+        "iterations": 24,
+        "initial_loss": 0.00873243321272448,
+        "final_loss": 7.58946674275482e-05,
+        "loss_ratio": 0.008691124865055726,
+        "field_residual_before": {
+          "rel_l2": 0.09344748906591595,
+          "rms": 0.0273351037227322,
+          "max_abs": 1.18491677564514,
+          "mean_abs": 0.00413497285764029,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.0067377768057953515,
+          "rms": 0.001970923239222833,
+          "max_abs": 0.024475872531556926,
+          "mean_abs": 0.0009148820135144481,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 24,
+            "comparisons": 23,
+            "switches": 23,
+            "interaction_switches": 23,
+            "switch_rate": 1.0,
+            "unique_topologies": 24,
+            "changed_components": {
+              "permutation": 23,
+              "tree_shape": 23,
+              "node_ranges": 23,
+              "far_pairs": 23,
+              "near_pairs": 23
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 10,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 11,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 12,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 13,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 14,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 15,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 16,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 17,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 18,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 19,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 20,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 21,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 22,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 23,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 23,
+            "mean": {
+              "slot_churn": 0.9263541231187291,
+              "mean_rank_shift_fraction": 0.0005516239693270939,
+              "leaf_churn": 0.9525710702341137,
+              "near_source_count_churn": 0.9582165159908027,
+              "near_set_churn": 0.2031188342614584,
+              "near_pair_churn": 0.9979016573114119,
+              "far_pair_churn": 0.9989014213876096
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9603966346153846,
+                "mean_rank_shift_fraction": 0.0018847470029571352,
+                "leaf_churn": 0.9754807692307692,
+                "near_source_count_churn": 0.9718975360576924,
+                "near_set_churn": 0.29290880846796774,
+                "near_pair_churn": 0.9994886172284421,
+                "far_pair_churn": 0.9998174019653511,
+                "iteration": 1,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9610727163461539,
+                "mean_rank_shift_fraction": 0.0015819675964716623,
+                "leaf_churn": 0.9711538461538461,
+                "near_source_count_churn": 0.96904296875,
+                "near_set_churn": 0.2448960523134341,
+                "near_pair_churn": 0.9993132647135204,
+                "far_pair_churn": 0.9997117664784414,
+                "iteration": 2,
+                "previous_iteration": 1
+              },
+              {
+                "slot_churn": 0.9572115384615385,
+                "mean_rank_shift_fraction": 0.0013021991662019808,
+                "leaf_churn": 0.979326923076923,
+                "near_source_count_churn": 0.9632737379807692,
+                "near_set_churn": 0.25272591180107573,
+                "near_pair_churn": 0.9995917000389181,
+                "far_pair_churn": 0.9998028380060726,
+                "iteration": 3,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9335186298076923,
+                "mean_rank_shift_fraction": 0.000745217137082794,
+                "leaf_churn": 0.9716346153846154,
+                "near_source_count_churn": 0.9605694110576923,
+                "near_set_churn": 0.1425306942327629,
+                "near_pair_churn": 0.9993382976484497,
+                "far_pair_churn": 0.9997193323853005,
+                "iteration": 4,
+                "previous_iteration": 3
+              },
+              {
+                "slot_churn": 0.9293719951923077,
+                "mean_rank_shift_fraction": 0.00041579703607502776,
+                "leaf_churn": 0.9538461538461539,
+                "near_source_count_churn": 0.9686373197115384,
+                "near_set_churn": 0.24419455924045738,
+                "near_pair_churn": 0.9982176923984206,
+                "far_pair_churn": 0.9991003535125409,
+                "iteration": 5,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.9165865384615385,
+                "mean_rank_shift_fraction": 0.0005004232733912721,
+                "leaf_churn": 0.9475961538461538,
+                "near_source_count_churn": 0.9642052283653846,
+                "near_set_churn": 0.2180567684354068,
+                "near_pair_churn": 0.997757353514863,
+                "far_pair_churn": 0.9988743914678874,
+                "iteration": 6,
+                "previous_iteration": 5
+              },
+              {
+                "slot_churn": 0.9474008413461539,
+                "mean_rank_shift_fraction": 0.0006102885861368574,
+                "leaf_churn": 0.9677884615384615,
+                "near_source_count_churn": 0.9601111778846154,
+                "near_set_churn": 0.21638653224018795,
+                "near_pair_churn": 0.9991368132432911,
+                "far_pair_churn": 0.9995377587474946,
+                "iteration": 7,
+                "previous_iteration": 6
+              },
+              {
+                "slot_churn": 0.9482421875,
+                "mean_rank_shift_fraction": 0.0006170157709065274,
+                "leaf_churn": 0.9682692307692308,
+                "near_source_count_churn": 0.9650991586538461,
+                "near_set_churn": 0.24221396639433623,
+                "near_pair_churn": 0.9990094600595937,
+                "far_pair_churn": 0.9996827446691774,
+                "iteration": 8,
+                "previous_iteration": 7
+              },
+              {
+                "slot_churn": 0.9359825721153846,
+                "mean_rank_shift_fraction": 0.0005348820658125116,
+                "leaf_churn": 0.9596153846153846,
+                "near_source_count_churn": 0.9577524038461539,
+                "near_set_churn": 0.24353015735293282,
+                "near_pair_churn": 0.9986545407540538,
+                "far_pair_churn": 0.9993035078222885,
+                "iteration": 9,
+                "previous_iteration": 8
+              },
+              {
+                "slot_churn": 0.9266376201923077,
+                "mean_rank_shift_fraction": 0.00033029962573531116,
+                "leaf_churn": 0.9548076923076924,
+                "near_source_count_churn": 0.9544546274038461,
+                "near_set_churn": 0.2086170071675103,
+                "near_pair_churn": 0.9982702521800029,
+                "far_pair_churn": 0.9992911501514103,
+                "iteration": 10,
+                "previous_iteration": 9
+              },
+              {
+                "slot_churn": 0.8837665264423077,
+                "mean_rank_shift_fraction": 0.0002438997799122827,
+                "leaf_churn": 0.9254807692307693,
+                "near_source_count_churn": 0.9300631009615384,
+                "near_set_churn": 0.11382998726869945,
+                "near_pair_churn": 0.996443534847787,
+                "far_pair_churn": 0.9977894711097984,
+                "iteration": 11,
+                "previous_iteration": 10
+              },
+              {
+                "slot_churn": 0.9079552283653847,
+                "mean_rank_shift_fraction": 0.0002537319928231324,
+                "leaf_churn": 0.9432692307692307,
+                "near_source_count_churn": 0.940264423076923,
+                "near_set_churn": 0.14222372967230204,
+                "near_pair_churn": 0.9970789696368051,
+                "far_pair_churn": 0.9987567147794113,
+                "iteration": 12,
+                "previous_iteration": 11
+              },
+              {
+                "slot_churn": 0.920703125,
+                "mean_rank_shift_fraction": 0.00033188532090046,
+                "leaf_churn": 0.9466346153846154,
+                "near_source_count_churn": 0.9623422475961538,
+                "near_set_churn": 0.17278673941250292,
+                "near_pair_churn": 0.9976780715609508,
+                "far_pair_churn": 0.9986150666272967,
+                "iteration": 13,
+                "previous_iteration": 12
+              },
+              {
+                "slot_churn": 0.9222430889423077,
+                "mean_rank_shift_fraction": 0.0004907492914143398,
+                "leaf_churn": 0.9447115384615384,
+                "near_source_count_churn": 0.9628305288461538,
+                "near_set_churn": 0.2323129514122333,
+                "near_pair_churn": 0.9973600506910418,
+                "far_pair_churn": 0.998566569577682,
+                "iteration": 14,
+                "previous_iteration": 13
+              },
+              {
+                "slot_churn": 0.9625075120192308,
+                "mean_rank_shift_fraction": 0.00046261849488027,
+                "leaf_churn": 0.9735576923076923,
+                "near_source_count_churn": 0.9619891826923077,
+                "near_set_churn": 0.20723032817466544,
+                "near_pair_churn": 0.9993276852183199,
+                "far_pair_churn": 0.9998835586759285,
+                "iteration": 15,
+                "previous_iteration": 14
+              },
+              {
+                "slot_churn": 0.9104867788461538,
+                "mean_rank_shift_fraction": 0.0004652606806106116,
+                "leaf_churn": 0.9576923076923077,
+                "near_source_count_churn": 0.9577899639423076,
+                "near_set_churn": 0.1969096843603802,
+                "near_pair_churn": 0.9987021317016558,
+                "far_pair_churn": 0.9991253416037569,
+                "iteration": 16,
+                "previous_iteration": 15
+              },
+              {
+                "slot_churn": 0.8959885817307692,
+                "mean_rank_shift_fraction": 0.0004170943717279378,
+                "leaf_churn": 0.9173076923076923,
+                "near_source_count_churn": 0.9607872596153846,
+                "near_set_churn": 0.22708027641093712,
+                "near_pair_churn": 0.9936637800825697,
+                "far_pair_churn": 0.9967184332086199,
+                "iteration": 17,
+                "previous_iteration": 16
+              },
+              {
+                "slot_churn": 0.9292743389423077,
+                "mean_rank_shift_fraction": 0.0003547353575215537,
+                "leaf_churn": 0.9605769230769231,
+                "near_source_count_churn": 0.9526517427884615,
+                "near_set_churn": 0.18673351724619572,
+                "near_pair_churn": 0.9987449709551316,
+                "far_pair_churn": 0.9993363814794194,
+                "iteration": 18,
+                "previous_iteration": 17
+              },
+              {
+                "slot_churn": 0.8973332331730769,
+                "mean_rank_shift_fraction": 0.00025528732841536845,
+                "leaf_churn": 0.9360576923076923,
+                "near_source_count_churn": 0.9456280048076923,
+                "near_set_churn": 0.1273690859883505,
+                "near_pair_churn": 0.9967352821103682,
+                "far_pair_churn": 0.9984282616351269,
+                "iteration": 19,
+                "previous_iteration": 18
+              },
+              {
+                "slot_churn": 0.9059119591346154,
+                "mean_rank_shift_fraction": 0.0002119060945228712,
+                "leaf_churn": 0.9307692307692308,
+                "near_source_count_churn": 0.9605769230769231,
+                "near_set_churn": 0.17863719941686013,
+                "near_pair_churn": 0.9962766010992772,
+                "far_pair_churn": 0.998299446158421,
+                "iteration": 20,
+                "previous_iteration": 19
+              },
+              {
+                "slot_churn": 0.9364933894230769,
+                "mean_rank_shift_fraction": 0.00018629627114922337,
+                "leaf_churn": 0.95625,
+                "near_source_count_churn": 0.9510817307692307,
+                "near_set_churn": 0.16824492463079999,
+                "near_pair_churn": 0.9987870401590423,
+                "far_pair_churn": 0.9994382782382603,
+                "iteration": 21,
+                "previous_iteration": 20
+              },
+              {
+                "slot_churn": 0.8803560697115385,
+                "mean_rank_shift_fraction": 0.0002266716816016203,
+                "leaf_churn": 0.9096153846153846,
+                "near_source_count_churn": 0.9564603365384615,
+                "near_set_churn": 0.19212021331674045,
+                "near_pair_churn": 0.9936512422438265,
+                "far_pair_churn": 0.9956327475457981,
+                "iteration": 22,
+                "previous_iteration": 21
+              },
+              {
+                "slot_churn": 0.9367037259615385,
+                "mean_rank_shift_fraction": 0.0002643773682724089,
+                "leaf_churn": 0.9576923076923077,
+                "near_source_count_churn": 0.9614708533653846,
+                "near_set_churn": 0.22019409305680301,
+                "near_pair_churn": 0.9985107660761492,
+                "far_pair_churn": 0.9993011760695415,
+                "iteration": 23,
+                "previous_iteration": 22
+              }
+            ]
+          }
+        },
+        "timing": {
+          "wall_seconds": 2160.5036226846278,
+          "totals_seconds": {
+            "prepare": 268.91967158485204,
+            "gradient": 1752.4361340217292,
+            "update": 6.621087541803718
+          },
+          "first_iteration_seconds": {
+            "prepare": 2.569568836130202,
+            "gradient": 61.37486454937607,
+            "update": 0.23342269752174616
+          },
+          "mean_later_gradient_seconds": 73.5244030205371,
+          "mean_later_prepare_seconds": 11.580439249944428,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2925183329800396
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.00873243321272448,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001804035799686534
+          },
+          {
+            "iteration": 1,
+            "loss": 0.002332607801750137,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.99574918806578e-05
+          },
+          {
+            "iteration": 2,
+            "loss": 0.000253384304038001,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.5165273535292314e-06
+          },
+          {
+            "iteration": 3,
+            "loss": 0.00141924209919685,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.844405088598344e-05
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002463463447005878,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 9.353728881262573e-05
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0020020797671730034,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.056894004804732e-05
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0009940636035658565,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.001235265100899e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.00028636392211211424,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.8214854005908775e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.00015458600106177782,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.839029745852926e-06
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0004058430839754099,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.1611213363461912e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0007182586378846996,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.871601676655534e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0008691416540306477,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.0227532627364028e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0007988034547502848,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.779687839591279e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0005779338106629907,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.2515863011366997e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.00032186327882664735,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.5424155055907424e-05
+          },
+          {
+            "iteration": 15,
+            "loss": 0.00013617868274139205,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.240460592265467e-06
+          },
+          {
+            "iteration": 16,
+            "loss": 7.976801693834267e-05,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.4533356715751987e-06
+          },
+          {
+            "iteration": 17,
+            "loss": 0.00014278937229044654,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.486478805599191e-06
+          },
+          {
+            "iteration": 18,
+            "loss": 0.00026282661785453904,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.3793426217351631e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.00033608341318236705,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.654516524082987e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0003396448044776042,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.6518305124084483e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.0002727457752322017,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.4108676533600986e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0001668798382852919,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 9.924708279394824e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 7.58946674275482e-05,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.043655366262403e-06
+          }
+        ],
+        "loss_continuity": {
+          "boundaries": [
+            {
+              "boundary": 1,
+              "loss_outgoing_topology": 0.00019816434934964654,
+              "loss_incoming_topology": 0.00019959419375904818,
+              "absolute_jump": 1.4298444094016434e-06,
+              "relative_jump": 0.0072154472491860145
+            },
+            {
+              "boundary": 2,
+              "loss_outgoing_topology": 2.2068476939381204e-05,
+              "loss_incoming_topology": 2.1681328441805367e-05,
+              "absolute_jump": -3.8714849757583684e-07,
+              "relative_jump": 0.017543054676554058
+            },
+            {
+              "boundary": 3,
+              "loss_outgoing_topology": 0.00012165517851538149,
+              "loss_incoming_topology": 0.00012144025340460476,
+              "absolute_jump": -2.149251107767293e-07,
+              "relative_jump": 0.0017666745748069837
+            },
+            {
+              "boundary": 4,
+              "loss_outgoing_topology": 0.00021030596364871607,
+              "loss_incoming_topology": 0.00021079111550219046,
+              "absolute_jump": 4.85151853474395e-07,
+              "relative_jump": 0.00230688585838092
+            },
+            {
+              "boundary": 5,
+              "loss_outgoing_topology": 0.00017164576258062509,
+              "loss_incoming_topology": 0.00017131190964480997,
+              "absolute_jump": -3.3385293581511457e-07,
+              "relative_jump": 0.0019450112300808933
+            },
+            {
+              "boundary": 6,
+              "loss_outgoing_topology": 8.464520527362886e-05,
+              "loss_incoming_topology": 8.505901564338259e-05,
+              "absolute_jump": 4.138103697537204e-07,
+              "relative_jump": 0.004888763260907853
+            },
+            {
+              "boundary": 7,
+              "loss_outgoing_topology": 2.4909114252480406e-05,
+              "loss_incoming_topology": 2.4503294601330736e-05,
+              "absolute_jump": -4.0581965114967053e-07,
+              "relative_jump": 0.016292014522726744
+            },
+            {
+              "boundary": 8,
+              "loss_outgoing_topology": 1.3202950060440336e-05,
+              "loss_incoming_topology": 1.3227456508209842e-05,
+              "absolute_jump": 2.4506447769506273e-08,
+              "relative_jump": 0.0018561342470675792
+            },
+            {
+              "boundary": 9,
+              "loss_outgoing_topology": 3.487718335606775e-05,
+              "loss_incoming_topology": 3.4726765072971535e-05,
+              "absolute_jump": -1.5041828309621258e-07,
+              "relative_jump": 0.004312799045741852
+            },
+            {
+              "boundary": 10,
+              "loss_outgoing_topology": 6.140460081748162e-05,
+              "loss_incoming_topology": 6.145921900437211e-05,
+              "absolute_jump": 5.4618186890495034e-08,
+              "relative_jump": 0.0008894803673236399
+            },
+            {
+              "boundary": 11,
+              "loss_outgoing_topology": 7.408976644510573e-05,
+              "loss_incoming_topology": 7.436982229438451e-05,
+              "absolute_jump": 2.8005584927877835e-07,
+              "relative_jump": 0.003779953193485582
+            },
+            {
+              "boundary": 12,
+              "loss_outgoing_topology": 6.838950029482483e-05,
+              "loss_incoming_topology": 6.835119534591346e-05,
+              "absolute_jump": -3.8304948911366656e-08,
+              "relative_jump": 0.00056009985079925
+            },
+            {
+              "boundary": 13,
+              "loss_outgoing_topology": 4.9426989805270004e-05,
+              "loss_incoming_topology": 4.945204800345181e-05,
+              "absolute_jump": 2.505819818180902e-08,
+              "relative_jump": 0.0005069739889184444
+            },
+            {
+              "boundary": 14,
+              "loss_outgoing_topology": 2.7502690677810966e-05,
+              "loss_incoming_topology": 2.7540867174433726e-05,
+              "absolute_jump": 3.8176496622759147e-08,
+              "relative_jump": 0.0013881004251543923
+            },
+            {
+              "boundary": 15,
+              "loss_outgoing_topology": 1.159340204954415e-05,
+              "loss_incoming_topology": 1.165239795929007e-05,
+              "absolute_jump": 5.899590974592016e-08,
+              "relative_jump": 0.0050887487118796045
+            },
+            {
+              "boundary": 16,
+              "loss_outgoing_topology": 6.681304908041924e-06,
+              "loss_incoming_topology": 6.82550792148642e-06,
+              "absolute_jump": 1.4420301344449584e-07,
+              "relative_jump": 0.02158306130751891
+            },
+            {
+              "boundary": 17,
+              "loss_outgoing_topology": 1.2033381593876968e-05,
+              "loss_incoming_topology": 1.2218054667522325e-05,
+              "absolute_jump": 1.846730736453571e-07,
+              "relative_jump": 0.015346731274550923
+            },
+            {
+              "boundary": 18,
+              "loss_outgoing_topology": 2.1888701673167467e-05,
+              "loss_incoming_topology": 2.2489278673309266e-05,
+              "absolute_jump": 6.005770001417995e-07,
+              "relative_jump": 0.027437762600512033
+            },
+            {
+              "boundary": 19,
+              "loss_outgoing_topology": 2.952858158667932e-05,
+              "loss_incoming_topology": 2.8757641057186636e-05,
+              "absolute_jump": -7.709405294926848e-07,
+              "relative_jump": 0.02610828180925781
+            },
+            {
+              "boundary": 20,
+              "loss_outgoing_topology": 2.8958560525887125e-05,
+              "loss_incoming_topology": 2.9062378537572192e-05,
+              "absolute_jump": 1.0381801168506667e-07,
+              "relative_jump": 0.003585054291364376
+            },
+            {
+              "boundary": 21,
+              "loss_outgoing_topology": 2.2760294105956584e-05,
+              "loss_incoming_topology": 2.3338030965948544e-05,
+              "absolute_jump": 5.777368599919598e-07,
+              "relative_jump": 0.02538354106069133
+            },
+            {
+              "boundary": 22,
+              "loss_outgoing_topology": 1.430501149784292e-05,
+              "loss_incoming_topology": 1.4279402972159422e-05,
+              "absolute_jump": -2.5608525683497698e-08,
+              "relative_jump": 0.0017901786158899108
+            },
+            {
+              "boundary": 23,
+              "loss_outgoing_topology": 7.014623507881204e-06,
+              "loss_incoming_topology": 6.494077120228725e-06,
+              "absolute_jump": -5.20546387652479e-07,
+              "relative_jump": 0.07420874221797145
+            }
+          ],
+          "max_relative_jump": 0.07420874221797145,
+          "median_relative_jump": 0.004312799045741852,
+          "median_step_improvement": 0.0001856845960852553,
+          "jump_over_step_improvement": 0.2028236613097987
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 8.242056681039963e-06,
+          "pinned_median_rel": 3.39317914174945e-06,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.009679811977807904,
+          "gradient_delta_across_rebuild": 2.5471760397480842e-05,
+          "gradient_delta_rel_across_rebuild": 0.002631431318694807,
+          "gradient_cosine_across_rebuild": 0.9999965382632126,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 137258.22940850718,
+            "median_rel_at_10eps": 13725.82787638958,
+            "ratio": 9.999996404195866,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "rebuild_cadence": 1,
+        "learning_rate": 0.008,
+        "iterations": 24,
+        "initial_loss": 0.008732433212724475,
+        "final_loss": 4.877230030545345e-05,
+        "loss_ratio": 0.005585190188959572,
+        "field_residual_before": {
+          "rel_l2": 0.09344748906591595,
+          "rms": 0.027335103722732196,
+          "max_abs": 1.18491677564514,
+          "mean_abs": 0.004134972857640289,
+          "observed_rms": 0.29251833298003965,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.010444866534806948,
+          "rms": 0.0030553149469607324,
+          "max_abs": 0.11455464572200397,
+          "mean_abs": 0.0007876960833871926,
+          "observed_rms": 0.29251833298003965,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 24,
+            "comparisons": 23,
+            "switches": 23,
+            "interaction_switches": 23,
+            "switch_rate": 1.0,
+            "unique_topologies": 24,
+            "changed_components": {
+              "permutation": 23,
+              "tree_shape": 23,
+              "node_ranges": 23,
+              "far_pairs": 23,
+              "near_pairs": 23
+            },
+            "events": [
+              {
+                "iteration": 1,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 3,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 5,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 7,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 9,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 10,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 11,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 12,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 13,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 14,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 15,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 16,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 17,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 18,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 19,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 20,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 21,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 22,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 23,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 23,
+            "mean": {
+              "slot_churn": 0.9550810644857858,
+              "mean_rank_shift_fraction": 0.0013765741970964162,
+              "leaf_churn": 0.9765677257525082,
+              "near_source_count_churn": 0.965408131270903,
+              "near_set_churn": 0.2383234576605468,
+              "near_pair_churn": 0.9994098840844284,
+              "far_pair_churn": 0.99974591764554
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9807316706730769,
+                "mean_rank_shift_fraction": 0.006912253678903072,
+                "leaf_churn": 0.9913461538461539,
+                "near_source_count_churn": 0.9774564302884615,
+                "near_set_churn": 0.33896382050305224,
+                "near_pair_churn": 0.9999342107304782,
+                "far_pair_churn": 0.9999830421929082,
+                "iteration": 1,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9584660456730769,
+                "mean_rank_shift_fraction": 0.0022733570979191708,
+                "leaf_churn": 0.9774038461538461,
+                "near_source_count_churn": 0.9704852764423076,
+                "near_set_churn": 0.26082502967884225,
+                "near_pair_churn": 0.9994979531937901,
+                "far_pair_churn": 0.9998006045819562,
+                "iteration": 2,
+                "previous_iteration": 1
+              },
+              {
+                "slot_churn": 0.9775315504807692,
+                "mean_rank_shift_fraction": 0.002332435698198849,
+                "leaf_churn": 0.9855769230769231,
+                "near_source_count_churn": 0.9682692307692308,
+                "near_set_churn": 0.24645934013004803,
+                "near_pair_churn": 0.9998068520636826,
+                "far_pair_churn": 0.9999440422741965,
+                "iteration": 3,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9712590144230769,
+                "mean_rank_shift_fraction": 0.0012866551777314858,
+                "leaf_churn": 0.9913461538461539,
+                "near_source_count_churn": 0.9636192908653847,
+                "near_set_churn": 0.22164503337865082,
+                "near_pair_churn": 0.9999228415875061,
+                "far_pair_churn": 0.999973744125248,
+                "iteration": 4,
+                "previous_iteration": 3
+              },
+              {
+                "slot_churn": 0.9691105769230769,
+                "mean_rank_shift_fraction": 0.0012282386192908655,
+                "leaf_churn": 0.9826923076923076,
+                "near_source_count_churn": 0.9684344951923077,
+                "near_set_churn": 0.26918574674780493,
+                "near_pair_churn": 0.9996978763144413,
+                "far_pair_churn": 0.9998460865631693,
+                "iteration": 5,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.9740159254807692,
+                "mean_rank_shift_fraction": 0.0016441649939181536,
+                "leaf_churn": 0.9913461538461539,
+                "near_source_count_churn": 0.9716120793269231,
+                "near_set_churn": 0.2364326299910111,
+                "near_pair_churn": 0.9999111668855173,
+                "far_pair_churn": 0.9999944006032416,
+                "iteration": 6,
+                "previous_iteration": 5
+              },
+              {
+                "slot_churn": 0.9606295072115385,
+                "mean_rank_shift_fraction": 0.00182209398619522,
+                "leaf_churn": 0.9831730769230769,
+                "near_source_count_churn": 0.9714993990384615,
+                "near_set_churn": 0.24578173122264702,
+                "near_pair_churn": 0.9997152321802757,
+                "far_pair_churn": 0.9999476829136132,
+                "iteration": 7,
+                "previous_iteration": 6
+              },
+              {
+                "slot_churn": 0.9476412259615384,
+                "mean_rank_shift_fraction": 0.001535029100948537,
+                "leaf_churn": 0.9764423076923077,
+                "near_source_count_churn": 0.9709885817307692,
+                "near_set_churn": 0.25423440709183265,
+                "near_pair_churn": 0.9994685317324293,
+                "far_pair_churn": 0.9998559012240812,
+                "iteration": 8,
+                "previous_iteration": 7
+              },
+              {
+                "slot_churn": 0.9632061298076923,
+                "mean_rank_shift_fraction": 0.001233515429073537,
+                "leaf_churn": 0.9802884615384615,
+                "near_source_count_churn": 0.9706505408653846,
+                "near_set_churn": 0.2579966456354407,
+                "near_pair_churn": 0.9996574790331373,
+                "far_pair_churn": 0.9998423584692437,
+                "iteration": 9,
+                "previous_iteration": 8
+              },
+              {
+                "slot_churn": 0.9459510216346154,
+                "mean_rank_shift_fraction": 0.0010508913119163738,
+                "leaf_churn": 0.9716346153846154,
+                "near_source_count_churn": 0.9493915264423077,
+                "near_set_churn": 0.177489218880073,
+                "near_pair_churn": 0.9992881074926214,
+                "far_pair_churn": 0.9996812655830953,
+                "iteration": 10,
+                "previous_iteration": 9
+              },
+              {
+                "slot_churn": 0.9620943509615385,
+                "mean_rank_shift_fraction": 0.0011280966087205877,
+                "leaf_churn": 0.9759615384615384,
+                "near_source_count_churn": 0.9735952524038461,
+                "near_set_churn": 0.2500983201944407,
+                "near_pair_churn": 0.9994844882966942,
+                "far_pair_churn": 0.9997431413062775,
+                "iteration": 11,
+                "previous_iteration": 10
+              },
+              {
+                "slot_churn": 0.9378530649038461,
+                "mean_rank_shift_fraction": 0.001033294835739587,
+                "leaf_churn": 0.9557692307692308,
+                "near_source_count_churn": 0.9575045072115385,
+                "near_set_churn": 0.1834952311819983,
+                "near_pair_churn": 0.9982787358444964,
+                "far_pair_churn": 0.999251602217081,
+                "iteration": 12,
+                "previous_iteration": 11
+              },
+              {
+                "slot_churn": 0.9676231971153846,
+                "mean_rank_shift_fraction": 0.0008664483290452224,
+                "leaf_churn": 0.9875,
+                "near_source_count_churn": 0.9693209134615385,
+                "near_set_churn": 0.2734370152642736,
+                "near_pair_churn": 0.9998353877404077,
+                "far_pair_churn": 0.9999622679953363,
+                "iteration": 13,
+                "previous_iteration": 12
+              },
+              {
+                "slot_churn": 0.949872295673077,
+                "mean_rank_shift_fraction": 0.0007118334572696121,
+                "leaf_churn": 0.9745192307692307,
+                "near_source_count_churn": 0.9567533052884616,
+                "near_set_churn": 0.23189136337210642,
+                "near_pair_churn": 0.9992628461843605,
+                "far_pair_churn": 0.9998801861607527,
+                "iteration": 14,
+                "previous_iteration": 13
+              },
+              {
+                "slot_churn": 0.9692608173076923,
+                "mean_rank_shift_fraction": 0.0006348539950579581,
+                "leaf_churn": 0.9860576923076924,
+                "near_source_count_churn": 0.9683293269230769,
+                "near_set_churn": 0.24700834355546047,
+                "near_pair_churn": 0.999797787760301,
+                "far_pair_churn": 0.9999811048736199,
+                "iteration": 15,
+                "previous_iteration": 14
+              },
+              {
+                "slot_churn": 0.9546724759615385,
+                "mean_rank_shift_fraction": 0.0008643720276962371,
+                "leaf_churn": 0.9831730769230769,
+                "near_source_count_churn": 0.9642503004807692,
+                "near_set_churn": 0.21734123539633407,
+                "near_pair_churn": 0.9997060080743907,
+                "far_pair_churn": 0.9999223573078817,
+                "iteration": 16,
+                "previous_iteration": 15
+              },
+              {
+                "slot_churn": 0.9399188701923077,
+                "mean_rank_shift_fraction": 0.0009256233125043338,
+                "leaf_churn": 0.9711538461538461,
+                "near_source_count_churn": 0.9682767427884615,
+                "near_set_churn": 0.23097797990837593,
+                "near_pair_churn": 0.9993262650260629,
+                "far_pair_churn": 0.9997141260946821,
+                "iteration": 17,
+                "previous_iteration": 16
+              },
+              {
+                "slot_churn": 0.9412109375,
+                "mean_rank_shift_fraction": 0.0008508604376979128,
+                "leaf_churn": 0.9774038461538461,
+                "near_source_count_churn": 0.9556941105769231,
+                "near_set_churn": 0.17822433195911638,
+                "near_pair_churn": 0.9995909929251969,
+                "far_pair_churn": 0.9998663123945121,
+                "iteration": 18,
+                "previous_iteration": 17
+              },
+              {
+                "slot_churn": 0.9221228966346153,
+                "mean_rank_shift_fraction": 0.000706908773388383,
+                "leaf_churn": 0.9625,
+                "near_source_count_churn": 0.9534104567307692,
+                "near_set_churn": 0.17360978471017408,
+                "near_pair_churn": 0.99882115566295,
+                "far_pair_churn": 0.9994746834968068,
+                "iteration": 19,
+                "previous_iteration": 18
+              },
+              {
+                "slot_churn": 0.9314453125,
+                "mean_rank_shift_fraction": 0.0005635013241739669,
+                "leaf_churn": 0.9625,
+                "near_source_count_churn": 0.9607872596153846,
+                "near_set_churn": 0.21792686831978597,
+                "near_pair_churn": 0.9988779332599282,
+                "far_pair_churn": 0.999421072219361,
+                "iteration": 20,
+                "previous_iteration": 19
+              },
+              {
+                "slot_churn": 0.9605694110576923,
+                "mean_rank_shift_fraction": 0.0006820616637461285,
+                "leaf_churn": 0.96875,
+                "near_source_count_churn": 0.9614483173076923,
+                "near_set_churn": 0.2175792387990651,
+                "near_pair_churn": 0.9992190047671796,
+                "far_pair_churn": 0.9995002068432353,
+                "iteration": 21,
+                "previous_iteration": 20
+              },
+              {
+                "slot_churn": 0.9566105769230769,
+                "mean_rank_shift_fraction": 0.0007150958134577825,
+                "leaf_churn": 0.9716346153846154,
+                "near_source_count_churn": 0.9714317908653847,
+                "near_set_churn": 0.29959896399003194,
+                "near_pair_churn": 0.9993289106194022,
+                "far_pair_churn": 0.9996808044483394,
+                "iteration": 22,
+                "previous_iteration": 21
+              },
+              {
+                "slot_churn": 0.9250676081730769,
+                "mean_rank_shift_fraction": 0.0006596208606245955,
+                "leaf_churn": 0.9528846153846153,
+                "near_source_count_churn": 0.9611778846153847,
+                "near_set_churn": 0.25123724628201066,
+                "near_pair_churn": 0.9979975665666085,
+                "far_pair_churn": 0.9988891119587767,
+                "iteration": 23,
+                "previous_iteration": 22
+              }
+            ]
+          }
+        },
+        "timing": {
+          "wall_seconds": 2060.4164645476267,
+          "totals_seconds": {
+            "prepare": 279.2658120179549,
+            "gradient": 1657.8772675003856,
+            "update": 6.50173250772059
+          },
+          "first_iteration_seconds": {
+            "prepare": 2.5727649182081223,
+            "gradient": 54.20814463309944,
+            "update": 0.223413597792387
+          },
+          "mean_later_gradient_seconds": 69.7247444724907,
+          "mean_later_prepare_seconds": 12.030132482597685,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29251833298003965
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.008732433212724475,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001804035799686533
+          },
+          {
+            "iteration": 1,
+            "loss": 0.008285530249024542,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0002099281478246574
+          },
+          {
+            "iteration": 2,
+            "loss": 0.0009143623654506079,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.715616157802205e-05
+          },
+          {
+            "iteration": 3,
+            "loss": 0.000794386564635994,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.119085331663329e-05
+          },
+          {
+            "iteration": 4,
+            "loss": 0.0020366048794793245,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.533930825262849e-05
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0016027887551621463,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.8546934672812287e-05
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0005256336757847408,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.878521896707192e-06
+          },
+          {
+            "iteration": 7,
+            "loss": 0.00013396698929618012,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.9253935771907875e-06
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0006014255021398395,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.0215921717907427e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0009633758414435167,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.3139584463365194e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0006743778424146941,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.0151115243707411e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.00020748571800408,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.24694649477834e-06
+          },
+          {
+            "iteration": 12,
+            "loss": 0.00010614780811853315,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.7537331620476817e-06
+          },
+          {
+            "iteration": 13,
+            "loss": 0.00032193877255026147,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.458348731316828e-06
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0005092610749664703,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.986291298376363e-06
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0005036516242914416,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.46627760812267e-06
+          },
+          {
+            "iteration": 16,
+            "loss": 0.00022932514416200796,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.313364111094131e-06
+          },
+          {
+            "iteration": 17,
+            "loss": 7.054787731492022e-05,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.1934996005377373e-06
+          },
+          {
+            "iteration": 18,
+            "loss": 0.00010069708234152181,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.280605283503727e-06
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0002384563627262916,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.630452282069345e-06
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0003195223272078409,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.2025719690014825e-06
+          },
+          {
+            "iteration": 21,
+            "loss": 0.00019020509409880032,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.94760930380026e-06
+          },
+          {
+            "iteration": 22,
+            "loss": 6.661023443973449e-05,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.6163382989066017e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 4.877230030545345e-05,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.960764887559174e-07
+          }
+        ],
+        "loss_continuity": {
+          "boundaries": [
+            {
+              "boundary": 1,
+              "loss_outgoing_topology": 0.0007083740667758496,
+              "loss_incoming_topology": 0.0007089677607523513,
+              "absolute_jump": 5.936939765017113e-07,
+              "relative_jump": 0.000838108005850493
+            },
+            {
+              "boundary": 2,
+              "loss_outgoing_topology": 7.763793605385392e-05,
+              "loss_incoming_topology": 7.823922178379105e-05,
+              "absolute_jump": 6.012857299371232e-07,
+              "relative_jump": 0.0077447413017270135
+            },
+            {
+              "boundary": 3,
+              "loss_outgoing_topology": 6.772798185143332e-05,
+              "loss_incoming_topology": 6.797325541935459e-05,
+              "absolute_jump": 2.4527356792126813e-07,
+              "relative_jump": 0.0036214510046865865
+            },
+            {
+              "boundary": 4,
+              "loss_outgoing_topology": 0.0001731084099498323,
+              "loss_incoming_topology": 0.00017426611907086554,
+              "absolute_jump": 1.1577091210332447e-06,
+              "relative_jump": 0.0066877693658485724
+            },
+            {
+              "boundary": 5,
+              "loss_outgoing_topology": 0.00013768806137316367,
+              "loss_incoming_topology": 0.00013714578555067554,
+              "absolute_jump": -5.422758224881362e-07,
+              "relative_jump": 0.003938437487462725
+            },
+            {
+              "boundary": 6,
+              "loss_outgoing_topology": 4.46611251262405e-05,
+              "loss_incoming_topology": 4.4976883663059146e-05,
+              "absolute_jump": 3.157585368186429e-07,
+              "relative_jump": 0.007070098120593921
+            },
+            {
+              "boundary": 7,
+              "loss_outgoing_topology": 1.0342516706511078e-05,
+              "loss_incoming_topology": 1.1463150041269707e-05,
+              "absolute_jump": 1.1206333347586297e-06,
+              "relative_jump": 0.10835209326305859
+            },
+            {
+              "boundary": 8,
+              "loss_outgoing_topology": 5.112886156083777e-05,
+              "loss_incoming_topology": 5.1462160983799373e-05,
+              "absolute_jump": 3.332994229616023e-07,
+              "relative_jump": 0.0065188117393345886
+            },
+            {
+              "boundary": 9,
+              "loss_outgoing_topology": 8.298543591321391e-05,
+              "loss_incoming_topology": 8.243315666508274e-05,
+              "absolute_jump": -5.52279248131174e-07,
+              "relative_jump": 0.006655134627583894
+            },
+            {
+              "boundary": 10,
+              "loss_outgoing_topology": 5.7367170748017e-05,
+              "loss_incoming_topology": 5.770447206973097e-05,
+              "absolute_jump": 3.373013217139727e-07,
+              "relative_jump": 0.005879692467239761
+            },
+            {
+              "boundary": 11,
+              "loss_outgoing_topology": 1.771059110729666e-05,
+              "loss_incoming_topology": 1.7753925272165135e-05,
+              "absolute_jump": 4.3334164868474655e-08,
+              "relative_jump": 0.0024467938199206254
+            },
+            {
+              "boundary": 12,
+              "loss_outgoing_topology": 9.028649774429616e-06,
+              "loss_incoming_topology": 9.082746857321122e-06,
+              "absolute_jump": 5.409708289150667e-08,
+              "relative_jump": 0.005991713516756081
+            },
+            {
+              "boundary": 13,
+              "loss_outgoing_topology": 2.7230763781760547e-05,
+              "loss_incoming_topology": 2.754732694400467e-05,
+              "absolute_jump": 3.165631622441247e-07,
+              "relative_jump": 0.011625203199631222
+            },
+            {
+              "boundary": 14,
+              "loss_outgoing_topology": 4.301939711494306e-05,
+              "loss_incoming_topology": 4.357592973603837e-05,
+              "absolute_jump": 5.565326210953125e-07,
+              "relative_jump": 0.012936783367937936
+            },
+            {
+              "boundary": 15,
+              "loss_outgoing_topology": 3.838603224196296e-05,
+              "loss_incoming_topology": 4.309594600963842e-05,
+              "absolute_jump": 4.709913767675463e-06,
+              "relative_jump": 0.12269863522197184
+            },
+            {
+              "boundary": 16,
+              "loss_outgoing_topology": 2.359507457957096e-05,
+              "loss_incoming_topology": 1.9622658907061477e-05,
+              "absolute_jump": -3.972415672509483e-06,
+              "relative_jump": 0.16835783498429252
+            },
+            {
+              "boundary": 17,
+              "loss_outgoing_topology": 5.77272430044039e-06,
+              "loss_incoming_topology": 6.03656846363923e-06,
+              "absolute_jump": 2.6384416319884027e-07,
+              "relative_jump": 0.04570531164613424
+            },
+            {
+              "boundary": 18,
+              "loss_outgoing_topology": 8.85470353693905e-06,
+              "loss_incoming_topology": 8.616344740322301e-06,
+              "absolute_jump": -2.383587966167494e-07,
+              "relative_jump": 0.026918890691528082
+            },
+            {
+              "boundary": 19,
+              "loss_outgoing_topology": 2.0289830879029812e-05,
+              "loss_incoming_topology": 2.0403989658852872e-05,
+              "absolute_jump": 1.1415877982305956e-07,
+              "relative_jump": 0.005626403714436393
+            },
+            {
+              "boundary": 20,
+              "loss_outgoing_topology": 2.4097434941292305e-05,
+              "loss_incoming_topology": 2.734055902548814e-05,
+              "absolute_jump": 3.2431240841958357e-06,
+              "relative_jump": 0.1345837883615804
+            },
+            {
+              "boundary": 21,
+              "loss_outgoing_topology": 1.814276547563932e-05,
+              "loss_incoming_topology": 1.62752745562413e-05,
+              "absolute_jump": -1.8674909193980192e-06,
+              "relative_jump": 0.10293309043241171
+            },
+            {
+              "boundary": 22,
+              "loss_outgoing_topology": 5.835883223432028e-06,
+              "loss_incoming_topology": 5.699636273669695e-06,
+              "absolute_jump": -1.3624694976233263e-07,
+              "relative_jump": 0.02334641468069114
+            },
+            {
+              "boundary": 23,
+              "loss_outgoing_topology": 3.996683933623676e-06,
+              "loss_incoming_topology": 4.173298207241414e-06,
+              "absolute_jump": 1.766142736177383e-07,
+              "relative_jump": 0.044190202815864735
+            }
+          ],
+          "max_relative_jump": 0.16835783498429252,
+          "median_relative_jump": 0.0077447413017270135,
+          "median_step_improvement": 0.00021579096443172832,
+          "jump_over_step_improvement": 0.31340717321163275
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 8.212431495784252e-06,
+          "pinned_median_rel": 3.3908526349869055e-06,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.009679811977807904,
+          "gradient_delta_across_rebuild": 1.4324805430660682e-05,
+          "gradient_delta_rel_across_rebuild": 0.0014798640163158094,
+          "gradient_cosine_across_rebuild": 0.9999989336333929,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 91438.61383188772,
+            "median_rel_at_10eps": 9143.865164840048,
+            "ratio": 9.99999586427489,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "rebuild_cadence": 2,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.00873243321272448,
+        "final_loss": 0.00013941385285607083,
+        "loss_ratio": 0.015965063741102962,
+        "field_residual_before": {
+          "rel_l2": 0.09344748906591595,
+          "rms": 0.0273351037227322,
+          "max_abs": 1.1849167756451402,
+          "mean_abs": 0.00413497285764029,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.012196888877278052,
+          "rms": 0.0035678136019241633,
+          "max_abs": 0.04825480010793267,
+          "mean_abs": 0.001795524289000942,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 12,
+            "comparisons": 11,
+            "switches": 11,
+            "interaction_switches": 11,
+            "switch_rate": 1.0,
+            "unique_topologies": 12,
+            "changed_components": {
+              "permutation": 11,
+              "tree_shape": 11,
+              "node_ranges": 11,
+              "far_pairs": 11,
+              "near_pairs": 11
+            },
+            "events": [
+              {
+                "iteration": 2,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 6,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 10,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 12,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 14,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 16,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 18,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 20,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 22,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 11,
+            "mean": {
+              "slot_churn": 0.9093224158653846,
+              "mean_rank_shift_fraction": 0.0005116866544217689,
+              "leaf_churn": 0.9357954545454544,
+              "near_source_count_churn": 0.952467356861888,
+              "near_set_churn": 0.18293507384989807,
+              "near_pair_churn": 0.9962807081949298,
+              "far_pair_churn": 0.9978705183495277
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.92958984375,
+                "mean_rank_shift_fraction": 0.0009814683361166327,
+                "leaf_churn": 0.95,
+                "near_source_count_churn": 0.9583082932692307,
+                "near_set_churn": 0.19839361378066345,
+                "near_pair_churn": 0.9979100381911588,
+                "far_pair_churn": 0.9985961654727834,
+                "iteration": 2,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9659780649038462,
+                "mean_rank_shift_fraction": 0.0008664064576639932,
+                "leaf_churn": 0.9745192307692307,
+                "near_source_count_churn": 0.96494140625,
+                "near_set_churn": 0.23914979726668129,
+                "near_pair_churn": 0.9994668789232442,
+                "far_pair_churn": 0.9997665239868808,
+                "iteration": 4,
+                "previous_iteration": 2
+              },
+              {
+                "slot_churn": 0.9200646033653846,
+                "mean_rank_shift_fraction": 0.0008985423477443718,
+                "leaf_churn": 0.9326923076923077,
+                "near_source_count_churn": 0.9611478365384616,
+                "near_set_churn": 0.2140688386957555,
+                "near_pair_churn": 0.9962218393164612,
+                "far_pair_churn": 0.9979284145984753,
+                "iteration": 6,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.9389573317307692,
+                "mean_rank_shift_fraction": 0.0006585536482771473,
+                "leaf_churn": 0.9653846153846154,
+                "near_source_count_churn": 0.9666165865384615,
+                "near_set_churn": 0.24769757336506415,
+                "near_pair_churn": 0.9989738675388793,
+                "far_pair_churn": 0.9994057123083375,
+                "iteration": 8,
+                "previous_iteration": 6
+              },
+              {
+                "slot_churn": 0.93671875,
+                "mean_rank_shift_fraction": 0.0006044734300240963,
+                "leaf_churn": 0.9586538461538462,
+                "near_source_count_churn": 0.9704927884615384,
+                "near_set_churn": 0.22962164502950538,
+                "near_pair_churn": 0.9982652541408866,
+                "far_pair_churn": 0.999403775586397,
+                "iteration": 10,
+                "previous_iteration": 8
+              },
+              {
+                "slot_churn": 0.8731670673076923,
+                "mean_rank_shift_fraction": 0.0003959196417994753,
+                "leaf_churn": 0.9120192307692307,
+                "near_source_count_churn": 0.9448993389423077,
+                "near_set_churn": 0.14754954113711707,
+                "near_pair_churn": 0.9933180592536717,
+                "far_pair_churn": 0.9959599005050125,
+                "iteration": 12,
+                "previous_iteration": 10
+              },
+              {
+                "slot_churn": 0.9201397235576924,
+                "mean_rank_shift_fraction": 0.0002881420293503259,
+                "leaf_churn": 0.95,
+                "near_source_count_churn": 0.9456881009615384,
+                "near_set_churn": 0.1281223783277374,
+                "near_pair_churn": 0.9982600864575595,
+                "far_pair_churn": 0.9991845548651118,
+                "iteration": 14,
+                "previous_iteration": 12
+              },
+              {
+                "slot_churn": 0.8740159254807692,
+                "mean_rank_shift_fraction": 0.0001580889549481093,
+                "leaf_churn": 0.9048076923076923,
+                "near_source_count_churn": 0.9348707932692307,
+                "near_set_churn": 0.11878301051860994,
+                "near_pair_churn": 0.9943399434552842,
+                "far_pair_churn": 0.9966111661885609,
+                "iteration": 16,
+                "previous_iteration": 14
+              },
+              {
+                "slot_churn": 0.8631009615384615,
+                "mean_rank_shift_fraction": 0.00023644475541876618,
+                "leaf_churn": 0.9081730769230769,
+                "near_source_count_churn": 0.9457181490384615,
+                "near_set_churn": 0.1651904550786008,
+                "near_pair_churn": 0.9942183987737881,
+                "far_pair_churn": 0.9966115876916583,
+                "iteration": 18,
+                "previous_iteration": 16
+              },
+              {
+                "slot_churn": 0.9196364182692308,
+                "mean_rank_shift_fraction": 0.0002894410579162236,
+                "leaf_churn": 0.94375,
+                "near_source_count_churn": 0.9444561298076923,
+                "near_set_churn": 0.16440748240623385,
+                "near_pair_churn": 0.9975138823695299,
+                "far_pair_churn": 0.9986351864592597,
+                "iteration": 20,
+                "previous_iteration": 18
+              },
+              {
+                "slot_churn": 0.8611778846153846,
+                "mean_rank_shift_fraction": 0.0002510725393803162,
+                "leaf_churn": 0.89375,
+                "near_source_count_churn": 0.9400015024038462,
+                "near_set_churn": 0.15930147674290995,
+                "near_pair_churn": 0.9905995417237643,
+                "far_pair_churn": 0.9944727141823254,
+                "iteration": 22,
+                "previous_iteration": 20
+              }
+            ]
+          }
+        },
+        "timing": {
+          "wall_seconds": 1664.4943453976884,
+          "totals_seconds": {
+            "prepare": 134.51750566344708,
+            "gradient": 1463.554955502972,
+            "update": 6.124241278506815
+          },
+          "first_iteration_seconds": {
+            "prepare": 2.476854285225272,
+            "gradient": 54.26005970407277,
+            "update": 0.2316661886870861
+          },
+          "mean_later_gradient_seconds": 61.27369112169127,
+          "mean_later_prepare_seconds": 12.003695579838347,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2925183329800396
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.00873243321272448,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001804035799686534
+          },
+          {
+            "iteration": 1,
+            "loss": 0.006719742999282861,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015242453347703074
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004984036737778036,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00012702975039794207
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0035256862236564676,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00010383430168595551
+          },
+          {
+            "iteration": 4,
+            "loss": 0.0023634789958052473,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.230333587021398e-05
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0014571515546719456,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 6.195675490647587e-05
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0007963859836581355,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.206164396052168e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.0004109531887442887,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.3121268084979672e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0002461680165374442,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.6516829527408595e-06
+          },
+          {
+            "iteration": 9,
+            "loss": 0.00026098034066083815,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.2172915521935125e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0004004409300787455,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.7286204206798246e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0005990671501225301,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.972046508966436e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0007892213323053588,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.8770910436662545e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0009267920097395177,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.4302220905173036e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0010077195939538473,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.697568011318883e-05
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0009834972042015698,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.601523109234284e-05
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008732803014090576,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.191971280618772e-05
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007374897699218934,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.643188988737647e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0005834680689131606,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.948904319635367e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0004336454679606872,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.160789750690444e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.00031145870194230997,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.3301194750038124e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.00021746761521658357,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.4994417877927212e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0001601414574281138,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.180358899229651e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 0.00013941385285607083,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.470877289211568e-06
+          }
+        ],
+        "loss_continuity": {
+          "boundaries": [
+            {
+              "boundary": 1,
+              "loss_outgoing_topology": 0.00042649169800235414,
+              "loss_incoming_topology": 0.00042646894758557554,
+              "absolute_jump": -2.2750416778596644e-08,
+              "relative_jump": 5.334316443944254e-05
+            },
+            {
+              "boundary": 2,
+              "loss_outgoing_topology": 0.00020062451630966,
+              "loss_incoming_topology": 0.0002022357484529773,
+              "absolute_jump": 1.6112321433172868e-06,
+              "relative_jump": 0.00803108300498221
+            },
+            {
+              "boundary": 3,
+              "loss_outgoing_topology": 6.991691601967867e-05,
+              "loss_incoming_topology": 6.814433965709531e-05,
+              "absolute_jump": -1.7725763625833611e-06,
+              "relative_jump": 0.02535261083432878
+            },
+            {
+              "boundary": 4,
+              "loss_outgoing_topology": 2.1253767702583546e-05,
+              "loss_incoming_topology": 2.106385254871847e-05,
+              "absolute_jump": -1.8991515386507717e-07,
+              "relative_jump": 0.008935599396900891
+            },
+            {
+              "boundary": 5,
+              "loss_outgoing_topology": 3.428120945170651e-05,
+              "loss_incoming_topology": 3.426451910485037e-05,
+              "absolute_jump": -1.6690346856138244e-08,
+              "relative_jump": 0.00048686575307824804
+            },
+            {
+              "boundary": 6,
+              "loss_outgoing_topology": 6.771749006479647e-05,
+              "loss_incoming_topology": 6.753128211298137e-05,
+              "absolute_jump": -1.8620795181509785e-07,
+              "relative_jump": 0.0027497763375004306
+            },
+            {
+              "boundary": 7,
+              "loss_outgoing_topology": 8.428707054859907e-05,
+              "loss_incoming_topology": 8.622751743327938e-05,
+              "absolute_jump": 1.9404468846803143e-06,
+              "relative_jump": 0.023021880723229932
+            },
+            {
+              "boundary": 8,
+              "loss_outgoing_topology": 7.620975141468582e-05,
+              "loss_incoming_topology": 7.472395383168235e-05,
+              "absolute_jump": -1.4857975830034708e-06,
+              "relative_jump": 0.019496160995443868
+            },
+            {
+              "boundary": 9,
+              "loss_outgoing_topology": 4.989696138746456e-05,
+              "loss_incoming_topology": 4.992559774150391e-05,
+              "absolute_jump": 2.8636354039348472e-08,
+              "relative_jump": 0.0005739097781321546
+            },
+            {
+              "boundary": 10,
+              "loss_outgoing_topology": 2.6199523906733708e-05,
+              "loss_incoming_topology": 2.665057900293949e-05,
+              "absolute_jump": 4.5105509620578196e-07,
+              "relative_jump": 0.017216156209993318
+            },
+            {
+              "boundary": 11,
+              "loss_outgoing_topology": 1.3788571858080552e-05,
+              "loss_incoming_topology": 1.3702820104940662e-05,
+              "absolute_jump": -8.575175313988992e-08,
+              "relative_jump": 0.00621904530958633
+            }
+          ],
+          "max_relative_jump": 0.02535261083432878,
+          "median_relative_jump": 0.00803108300498221,
+          "median_step_improvement": 0.00014982260095247342,
+          "jump_over_step_improvement": 0.46809290134470855
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 8.22724408632907e-06,
+          "pinned_median_rel": 3.401375997613187e-06,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.009679811977807906,
+          "gradient_delta_across_rebuild": 1.05643350089649e-05,
+          "gradient_delta_rel_across_rebuild": 0.0010913781211024415,
+          "gradient_cosine_across_rebuild": 0.999999405087615,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 3063.5170445280055,
+            "median_rel_at_10eps": 306.3494539583911,
+            "ratio": 10.000073461675234,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "rebuild_cadence": 4,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.008732433212724475,
+        "final_loss": 0.00014044326427822989,
+        "loss_ratio": 0.01608294742793828,
+        "field_residual_before": {
+          "rel_l2": 0.09344748906591595,
+          "rms": 0.0273351037227322,
+          "max_abs": 1.1849167756451402,
+          "mean_abs": 0.004134972857640288,
+          "observed_rms": 0.29251833298003965,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.011971496134422293,
+          "rms": 0.003501882092518198,
+          "max_abs": 0.047410687293233195,
+          "mean_abs": 0.0017805542463182383,
+          "observed_rms": 0.29251833298003965,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 6,
+            "comparisons": 5,
+            "switches": 5,
+            "interaction_switches": 5,
+            "switch_rate": 1.0,
+            "unique_topologies": 6,
+            "changed_components": {
+              "permutation": 5,
+              "tree_shape": 5,
+              "node_ranges": 5,
+              "far_pairs": 5,
+              "near_pairs": 5
+            },
+            "events": [
+              {
+                "iteration": 4,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 12,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 16,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 20,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 5,
+            "mean": {
+              "slot_churn": 0.9472521033653847,
+              "mean_rank_shift_fraction": 0.001066132900982919,
+              "leaf_churn": 0.9678846153846153,
+              "near_source_count_churn": 0.9639618389423076,
+              "near_set_churn": 0.2274948721875202,
+              "near_pair_churn": 0.9989780508024022,
+              "far_pair_churn": 0.9995281578072153
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9623647836538461,
+                "mean_rank_shift_fraction": 0.0018417535589996881,
+                "leaf_churn": 0.9769230769230769,
+                "near_source_count_churn": 0.975390625,
+                "near_set_churn": 0.27773749289504124,
+                "near_pair_churn": 0.9995408665910739,
+                "far_pair_churn": 0.9998576007012703,
+                "iteration": 4,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9640850360576924,
+                "mean_rank_shift_fraction": 0.0015270703784107456,
+                "leaf_churn": 0.9798076923076923,
+                "near_source_count_churn": 0.9731520432692308,
+                "near_set_churn": 0.2582513369631795,
+                "near_pair_churn": 0.9995987573786795,
+                "far_pair_churn": 0.9998936787344412,
+                "iteration": 8,
+                "previous_iteration": 4
+              },
+              {
+                "slot_churn": 0.9525390625,
+                "mean_rank_shift_fraction": 0.0009984154108713364,
+                "leaf_churn": 0.9701923076923077,
+                "near_source_count_churn": 0.967119891826923,
+                "near_set_churn": 0.24427857871952363,
+                "near_pair_churn": 0.9991786820175492,
+                "far_pair_churn": 0.9996159063946856,
+                "iteration": 12,
+                "previous_iteration": 8
+              },
+              {
+                "slot_churn": 0.9275240384615384,
+                "mean_rank_shift_fraction": 0.00043345298992811574,
+                "leaf_churn": 0.9653846153846154,
+                "near_source_count_churn": 0.9426457331730769,
+                "near_set_churn": 0.13402073102020973,
+                "near_pair_churn": 0.9989770945543988,
+                "far_pair_churn": 0.9996267172420814,
+                "iteration": 16,
+                "previous_iteration": 12
+              },
+              {
+                "slot_churn": 0.9297475961538462,
+                "mean_rank_shift_fraction": 0.0005299721667047083,
+                "leaf_churn": 0.9471153846153846,
+                "near_source_count_churn": 0.9615009014423077,
+                "near_set_churn": 0.22318622133964697,
+                "near_pair_churn": 0.9975948534703094,
+                "far_pair_churn": 0.9986468859635971,
+                "iteration": 20,
+                "previous_iteration": 16
+              }
+            ]
+          }
+        },
+        "timing": {
+          "wall_seconds": 1438.4771931916475,
+          "totals_seconds": {
+            "prepare": 62.67513656523079,
+            "gradient": 1341.310912645422,
+            "update": 5.738679820671678
+          },
+          "first_iteration_seconds": {
+            "prepare": 2.566189178265631,
+            "gradient": 49.587352686561644,
+            "update": 0.22762290574610233
+          },
+          "mean_later_gradient_seconds": 56.16189391125479,
+          "mean_later_prepare_seconds": 12.021789477393032,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29251833298003965
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.008732433212724475,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00018040357996865333
+          },
+          {
+            "iteration": 1,
+            "loss": 0.006719742999282858,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0001524245334770307
+          },
+          {
+            "iteration": 2,
+            "loss": 0.00498430261625211,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012703672941222858
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0035260242659641465,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00010384163302855354
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002364324570598317,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.23042823449631e-05
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0014579298428845395,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 6.195748548775547e-05
+          },
+          {
+            "iteration": 6,
+            "loss": 0.000817802327754597,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.239285293485125e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.00042808071047011184,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.3449829035484443e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0002460981294207287,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.624871506023887e-06
+          },
+          {
+            "iteration": 9,
+            "loss": 0.00026133368577238434,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.2223649721396274e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0004016022336968477,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.7297227669582937e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.000600302960185385,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.974549881996929e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0007907437402059281,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.885869715704671e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0009288756170293493,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.439692427707166e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0009874132761621755,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.65028401443067e-05
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0009641236862662491,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.557019537268177e-05
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008806041654496173,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.211371972938853e-05
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007449605551778011,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.6650224790255734e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0005901480244066276,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.971870298900929e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0004394342509081248,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.183536665090295e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0003137581450900035,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.348741144675667e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.00021883744563767636,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.5161873976233042e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0001617141959053413,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 7.291816201342785e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 0.00014044326427822989,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.455624960432825e-06
+          }
+        ],
+        "loss_continuity": {
+          "boundaries": [
+            {
+              "boundary": 1,
+              "loss_outgoing_topology": 0.00020065977506125625,
+              "loss_incoming_topology": 0.00020230810173026598,
+              "absolute_jump": 1.6483266690097223e-06,
+              "relative_jump": 0.00821453461963929
+            },
+            {
+              "boundary": 2,
+              "loss_outgoing_topology": 2.2380721048910283e-05,
+              "loss_incoming_topology": 2.105787251954059e-05,
+              "absolute_jump": -1.3228485293696914e-06,
+              "relative_jump": 0.05910660905333525
+            },
+            {
+              "boundary": 3,
+              "loss_outgoing_topology": 6.784620883374722e-05,
+              "loss_incoming_topology": 6.766154995194629e-05,
+              "absolute_jump": -1.8465888180093607e-07,
+              "relative_jump": 0.002721727344462692
+            },
+            {
+              "boundary": 4,
+              "loss_outgoing_topology": 7.471329819311934e-05,
+              "loss_incoming_topology": 7.535063472389225e-05,
+              "absolute_jump": 6.373365307729082e-07,
+              "relative_jump": 0.008530429604720665
+            },
+            {
+              "boundary": 5,
+              "loss_outgoing_topology": 2.6599229823275384e-05,
+              "loss_incoming_topology": 2.6847335397569712e-05,
+              "absolute_jump": 2.4810557429432733e-07,
+              "relative_jump": 0.009327547299028375
+            }
+          ],
+          "max_relative_jump": 0.05910660905333525,
+          "median_relative_jump": 0.008530429604720665,
+          "median_step_improvement": 0.00015071377349850284,
+          "jump_over_step_improvement": 0.49425745948701116
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 8.286494452905867e-06,
+          "pinned_median_rel": 3.3493137953444324e-06,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.009679811977807906,
+          "gradient_delta_across_rebuild": 1.7784728986119832e-05,
+          "gradient_delta_rel_across_rebuild": 0.0018373010784603452,
+          "gradient_cosine_across_rebuild": 0.999998312434152,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 178403.1005819831,
+            "median_rel_at_10eps": 17840.312282430303,
+            "ratio": 9.999998753255012,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "rebuild_cadence": 8,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.008732433212724475,
+        "final_loss": 0.00013482287560506815,
+        "loss_ratio": 0.015439325136619522,
+        "field_residual_before": {
+          "rel_l2": 0.09344748906591598,
+          "rms": 0.027335103722732203,
+          "max_abs": 1.1849167756451402,
+          "mean_abs": 0.004134972857640289,
+          "observed_rms": 0.29251833298003965,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.012090558215276286,
+          "rms": 0.003536709933930742,
+          "max_abs": 0.0475462095811942,
+          "mean_abs": 0.0017922428694195102,
+          "observed_rms": 0.29251833298003965,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 3,
+            "comparisons": 2,
+            "switches": 2,
+            "interaction_switches": 2,
+            "switch_rate": 1.0,
+            "unique_topologies": 3,
+            "changed_components": {
+              "permutation": 2,
+              "tree_shape": 2,
+              "node_ranges": 2,
+              "far_pairs": 2,
+              "near_pairs": 2
+            },
+            "events": [
+              {
+                "iteration": 8,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              },
+              {
+                "iteration": 16,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 2,
+            "mean": {
+              "slot_churn": 0.9597393329326922,
+              "mean_rank_shift_fraction": 0.0023515187212701377,
+              "leaf_churn": 0.9826923076923078,
+              "near_source_count_churn": 0.9753230168269231,
+              "near_set_churn": 0.27436795142711384,
+              "near_pair_churn": 0.9996585386348055,
+              "far_pair_churn": 0.9998853722660636
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9778019831730769,
+                "mean_rank_shift_fraction": 0.003318414180236455,
+                "leaf_churn": 0.9913461538461539,
+                "near_source_count_churn": 0.97900390625,
+                "near_set_churn": 0.2999084406792196,
+                "near_pair_churn": 0.9999298817954689,
+                "far_pair_churn": 0.9999793801678455,
+                "iteration": 8,
+                "previous_iteration": 0
+              },
+              {
+                "slot_churn": 0.9416766826923076,
+                "mean_rank_shift_fraction": 0.0013846232623038208,
+                "leaf_churn": 0.9740384615384615,
+                "near_source_count_churn": 0.9716421274038461,
+                "near_set_churn": 0.24882746217500806,
+                "near_pair_churn": 0.999387195474142,
+                "far_pair_churn": 0.9997913643642816,
+                "iteration": 16,
+                "previous_iteration": 8
+              }
+            ]
+          }
+        },
+        "timing": {
+          "wall_seconds": 1340.255724937655,
+          "totals_seconds": {
+            "prepare": 26.47189826797694,
+            "gradient": 1295.0720172617584,
+            "update": 5.640702890232205
+          },
+          "first_iteration_seconds": {
+            "prepare": 2.446211305446923,
+            "gradient": 49.59061569161713,
+            "update": 0.22829110268503428
+          },
+          "mean_later_gradient_seconds": 54.151365285658315,
+          "mean_later_prepare_seconds": 12.012843481265008,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29251833298003965
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.008732433212724475,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00018040357996865333
+          },
+          {
+            "iteration": 1,
+            "loss": 0.006719742999282853,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015242453347703063
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004984302616252112,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012703672941222858
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0035260242659641474,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00010384163302855356
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002345060985944111,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 8.230745218553489e-05
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0014386611687407958,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 6.195969250309349e-05
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0007988007754412301,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.2393916288678245e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.00040955179512051784,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.3448982832934778e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.00024848318546940673,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.6335601425634796e-06
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0002637406607389549,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.2234260103814474e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.00040397512643653496,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.73039138123127e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0006026047148724055,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.975062952602979e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0007951102943636419,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.886537522016741e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0009329919052425995,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.440244138770932e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.000991373565410981,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.650715693855929e-05
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0009679985313469578,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.5573290160370176e-05
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008783412800552157,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.211192078191794e-05
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007427167018211388,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.664755043554899e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0005878888727905733,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.971525496914683e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0004371476577703677,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.183122585697941e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.00030854595139844133,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.3492151342336868e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.00021343099204980577,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.5165148815320714e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.00015617323686564787,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 7.293336531897747e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 0.00013482287560506815,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.4505034962024378e-06
+          }
+        ],
+        "loss_continuity": {
+          "boundaries": [
+            {
+              "boundary": 1,
+              "loss_outgoing_topology": 2.0847840683673912e-05,
+              "loss_incoming_topology": 2.126195455114013e-05,
+              "absolute_jump": 4.1411386746621667e-07,
+              "relative_jump": 0.01986363354121907
+            },
+            {
+              "boundary": 2,
+              "loss_outgoing_topology": 7.504177164625202e-05,
+              "loss_incoming_topology": 7.515700646562874e-05,
+              "absolute_jump": 1.1523481937671999e-07,
+              "relative_jump": 0.0015356089928145428
+            }
+          ],
+          "max_relative_jump": 0.01986363354121907,
+          "median_relative_jump": 0.010699621267016807,
+          "median_step_improvement": 0.00015074121502020555,
+          "jump_over_step_improvement": 0.619828678594283
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 8.212431494858456e-06,
+          "pinned_median_rel": 3.424194631964596e-06,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.009679811977807906,
+          "gradient_delta_across_rebuild": 1.1960318611250773e-05,
+          "gradient_delta_rel_across_rebuild": 0.001235594104376324,
+          "gradient_cosine_across_rebuild": 0.9999992676624353,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 77543.66821293678,
+            "median_rel_at_10eps": 7754.368966559865,
+            "ratio": 9.999997233474193,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "rebuild_cadence": 16,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.00873243321272448,
+        "final_loss": 0.00013375507050816189,
+        "loss_ratio": 0.015317044774331679,
+        "field_residual_before": {
+          "rel_l2": 0.09344748906591595,
+          "rms": 0.027335103722732196,
+          "max_abs": 1.18491677564514,
+          "mean_abs": 0.004134972857640288,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.011992502098228065,
+          "rms": 0.0035080267220333012,
+          "max_abs": 0.04785476027466317,
+          "mean_abs": 0.0017893348640403831,
+          "observed_rms": 0.2925183329800396,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 2,
+            "comparisons": 1,
+            "switches": 1,
+            "interaction_switches": 1,
+            "switch_rate": 1.0,
+            "unique_topologies": 2,
+            "changed_components": {
+              "permutation": 1,
+              "tree_shape": 1,
+              "node_ranges": 1,
+              "far_pairs": 1,
+              "near_pairs": 1
+            },
+            "events": [
+              {
+                "iteration": 16,
+                "changed": [
+                  "permutation",
+                  "tree_shape",
+                  "node_ranges",
+                  "far_pairs",
+                  "near_pairs"
+                ],
+                "interaction_lists_changed": true
+              }
+            ]
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 1,
+            "mean": {
+              "slot_churn": 0.9796724759615385,
+              "mean_rank_shift_fraction": 0.004583693509976539,
+              "leaf_churn": 0.9836538461538461,
+              "near_source_count_churn": 0.9692232572115385,
+              "near_set_churn": 0.2773486162254279,
+              "near_pair_churn": 0.9997181719744278,
+              "far_pair_churn": 0.9999458252771785
+            },
+            "per_comparison": [
+              {
+                "slot_churn": 0.9796724759615385,
+                "mean_rank_shift_fraction": 0.004583693509976539,
+                "leaf_churn": 0.9836538461538461,
+                "near_source_count_churn": 0.9692232572115385,
+                "near_set_churn": 0.2773486162254279,
+                "near_pair_churn": 0.9997181719744278,
+                "far_pair_churn": 0.9999458252771785,
+                "iteration": 16,
+                "previous_iteration": 0
+              }
+            ]
+          }
+        },
+        "timing": {
+          "wall_seconds": 1299.6414365740493,
+          "totals_seconds": {
+            "prepare": 16.907120645977557,
+            "gradient": 1268.5636822022498,
+            "update": 5.683731289580464
+          },
+          "first_iteration_seconds": {
+            "prepare": 2.4892630064859986,
+            "gradient": 52.39844777435064,
+            "update": 0.23167639132589102
+          },
+          "mean_later_gradient_seconds": 52.876749322952136,
+          "mean_later_prepare_seconds": 14.417857639491558,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2925183329800396
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.00873243321272448,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001804035799686534
+          },
+          {
+            "iteration": 1,
+            "loss": 0.006719742999282861,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015242453347703072
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004984302616252111,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012703672941222864
+          },
+          {
+            "iteration": 3,
+            "loss": 0.00352602426596415,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00010384163302855363
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002345060985944116,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 8.230745218553497e-05
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0014386611687407977,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 6.195969250309352e-05
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0007988007754412307,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.239391628867827e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.000409551795120518,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.3448982832934744e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.00024364353948636404,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.573004117592145e-06
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0002593694144576567,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.227458731543327e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.00040000504627027536,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.734687644081864e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0005988696854556656,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.9789835895885293e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0007914190330501529,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.8898240734593614e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0009291906040320426,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.44279976050188e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0009873733053840043,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.652556565152734e-05
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0009637715839262203,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.5585348474009045e-05
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008750938742852399,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.206166965392416e-05
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007395332508397006,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.659475560424458e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0005849312242682156,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.9662405771286066e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0004345317724694006,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 3.178038798424156e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.00030633771121672555,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.344501385584192e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.0002116460615663379,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.5123004359599622e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0001547809923436908,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 7.257060604790405e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 0.00013375507050816189,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.444784756055408e-06
+          }
+        ],
+        "loss_continuity": {
+          "boundaries": [
+            {
+              "boundary": 1,
+              "loss_outgoing_topology": 7.466212935945312e-05,
+              "loss_incoming_topology": 7.487913577687408e-05,
+              "absolute_jump": 2.170064174209581e-07,
+              "relative_jump": 0.00290651256912595
+            }
+          ],
+          "max_relative_jump": 0.00290651256912595,
+          "median_relative_jump": 0.00290651256912595,
+          "median_step_improvement": 0.00015039945179881495,
+          "jump_over_step_improvement": 0.16875677795546715
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 8.212431496478597e-06,
+          "pinned_median_rel": 3.3680340015216645e-06,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.009679811977807904,
+          "gradient_delta_across_rebuild": 1.3346849646623995e-05,
+          "gradient_delta_rel_across_rebuild": 0.0013788335638360747,
+          "gradient_cosine_across_rebuild": 0.9999990794661892,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 41488.5067970465,
+            "median_rel_at_10eps": 4148.852861775961,
+            "ratio": 9.999994740543029,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      }
+    ]
+  }
+}
