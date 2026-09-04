@@ -1,0 +1,389 @@
+{
+  "config": {
+    "n": [
+      65536
+    ],
+    "theta": 0.5,
+    "order": 4,
+    "basis": "solidfmm",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float64",
+    "M": 2048,
+    "leaf_size": 256,
+    "softening": 0.01,
+    "iterations": 4,
+    "device_counts": [
+      2,
+      4
+    ],
+    "ceiling_ladder": [
+      131072,
+      262144,
+      524288
+    ],
+    "ceiling_iterations": 1,
+    "caps": {},
+    "sharding_mode": "distributed",
+    "mode": "distributed",
+    "merged_from": [
+      "density_reconstruction/multigpu_scaling_distributed_ndev2.json",
+      "density_reconstruction/multigpu_scaling_distributed_ndev4.json"
+    ]
+  },
+  "meta": {
+    "git_sha": "19033d7ea645ba61651a002b3a23379825f4359c",
+    "git_branch": "feat/density-reconstruction-payoff",
+    "git_dirty": true,
+    "jax_version": "0.10.2",
+    "jax_backend": "cpu",
+    "devices": [
+      "cpu:0"
+    ],
+    "device_kind": "cpu",
+    "jax_enable_x64": false,
+    "cuda_visible_devices": null,
+    "merged_source_meta": [
+      {
+        "git_sha": "efbcaaab8e7a134d08d52706e1f838de2b6449c1",
+        "git_branch": "feat/density-reconstruction-payoff",
+        "git_dirty": true,
+        "jax_version": "0.10.2",
+        "jax_backend": "gpu",
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "device_kind": "NVIDIA A100-PCIE-40GB",
+        "jax_enable_x64": true,
+        "cuda_visible_devices": "0,2,4,6"
+      },
+      {
+        "git_sha": "bd6258ebec8e15a21f115458ace5dd23f1816486",
+        "git_branch": "feat/density-reconstruction-payoff",
+        "git_dirty": true,
+        "jax_version": "0.10.2",
+        "jax_backend": "gpu",
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "device_kind": "NVIDIA A100-PCIE-40GB",
+        "jax_enable_x64": true,
+        "cuda_visible_devices": "0,2,4,6"
+      }
+    ]
+  },
+  "data": {
+    "records": [
+      {
+        "N": 65536,
+        "M": 2048,
+        "num_free_parameters": 196608,
+        "num_devices": 2,
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 65536,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 2,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 4,
+        "initial_loss": 0.008469280767116344,
+        "final_loss": 0.0006681073824779912,
+        "field_residual_after": {
+          "rel_l2": 0.021487056984998927,
+          "rms": 0.00621022813230306,
+          "max_abs": 0.10670744159349897,
+          "mean_abs": 0.002905344930355107,
+          "observed_rms": 0.28902181143926314,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 724.6965886494145,
+          "totals_seconds": {
+            "prepare": 178.54915475472808,
+            "gradient": 541.1562711624429,
+            "update": 0.8965241322293878
+          },
+          "first_iteration_seconds": {
+            "prepare": 48.18126317579299,
+            "gradient": 143.4715867685154,
+            "update": 0.8078329181298614
+          },
+          "mean_later_gradient_seconds": 132.5615614646425,
+          "mean_later_prepare_seconds": 43.45596385964503,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.28902181143926314
+        },
+        "switch_summary": null
+      },
+      {
+        "N": 65536,
+        "M": 2048,
+        "num_free_parameters": 196608,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 65536,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 4,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 4,
+        "initial_loss": 0.008469272782861845,
+        "final_loss": 0.0006680334269588046,
+        "field_residual_after": {
+          "rel_l2": 0.02148620394086533,
+          "rms": 0.00620998158394233,
+          "max_abs": 0.10670779577700856,
+          "mean_abs": 0.00290555224052239,
+          "observed_rms": 0.28902181143926314,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 676.6566953323781,
+          "totals_seconds": {
+            "prepare": 165.94549218937755,
+            "gradient": 505.2847839137539,
+            "update": 0.8970359517261386
+          },
+          "first_iteration_seconds": {
+            "prepare": 44.35542297642678,
+            "gradient": 132.12170729413629,
+            "update": 0.7993200989440084
+          },
+          "mean_later_gradient_seconds": 124.38769220653921,
+          "mean_later_prepare_seconds": 40.53002307098359,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.28902181143926314
+        },
+        "switch_summary": null
+      }
+    ],
+    "ceiling": [
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "num_devices": 2,
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 131072,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 2,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 1,
+        "initial_loss": 0.008728210552323418,
+        "final_loss": 0.008728210552323418,
+        "field_residual_after": {
+          "rel_l2": 0.07051789695281992,
+          "rms": 0.020626959803346976,
+          "max_abs": 0.8838883135799112,
+          "mean_abs": 0.0035677239155435226,
+          "observed_rms": 0.29250673509375164,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 183.63494396209717,
+          "totals_seconds": {
+            "prepare": 46.97501803282648,
+            "gradient": 135.73060920648277,
+            "update": 0.9201835887506604
+          },
+          "first_iteration_seconds": {
+            "prepare": 46.97501803282648,
+            "gradient": 135.73060920648277,
+            "update": 0.9201835887506604
+          },
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29250673509375164
+        },
+        "switch_summary": null,
+        "arm": "ceiling"
+      },
+      {
+        "arm": "ceiling",
+        "num_devices": 2,
+        "N": 262144,
+        "num_free_parameters": 786432,
+        "failed": true,
+        "error_type": "JaxRuntimeError",
+        "error": "INTERNAL: Failed to get configs for: 26 out of 476 instructions. See logs for all failures. Example failure: \nAutotuning failed for HLO: %custom-call.412 = (c128[4750848,9]{1,0}, s8[4194304]{0}) custom-call(%bitcast.1458.0, %param.3000), custom_call_target=\"__cublas$lt$matmul\", metadata={op_name=\"jit(evaluate)/shard_map/jit(_accumulate_m2l_fullbatch)/jit(_m2l_complex_batch_kernel)/jit(m2l_complex_reference_batch)/vmap(jvp())/dot_general\" stack_frame_id=918}, backend_config={\"operation_queue_id\":"
+      },
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 131072,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 4,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 1,
+        "initial_loss": 0.008726085616482818,
+        "final_loss": 0.008726085616482818,
+        "field_residual_after": {
+          "rel_l2": 0.07051422273482374,
+          "rms": 0.02062588506983689,
+          "max_abs": 0.8839753982718319,
+          "mean_abs": 0.00356541277773194,
+          "observed_rms": 0.29250673509375164,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 185.56832170579582,
+          "totals_seconds": {
+            "prepare": 46.03705459088087,
+            "gradient": 138.7028253581375,
+            "update": 0.8202588828280568
+          },
+          "first_iteration_seconds": {
+            "prepare": 46.03705459088087,
+            "gradient": 138.7028253581375,
+            "update": 0.8202588828280568
+          },
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29250673509375164
+        },
+        "switch_summary": null,
+        "arm": "ceiling"
+      },
+      {
+        "N": 262144,
+        "M": 2048,
+        "num_free_parameters": 786432,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 262144,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 4,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 1,
+        "initial_loss": 0.006726597381224539,
+        "final_loss": 0.006726597381224539,
+        "field_residual_after": {
+          "rel_l2": 0.05858035948291896,
+          "rms": 0.016991812130027147,
+          "max_abs": 0.7374807106174619,
+          "mean_abs": 0.0027647634133269312,
+          "observed_rms": 0.29005988150314566,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 190.51659732870758,
+          "totals_seconds": {
+            "prepare": 49.849799113348126,
+            "gradient": 139.62412985228002,
+            "update": 1.028147212229669
+          },
+          "first_iteration_seconds": {
+            "prepare": 49.849799113348126,
+            "gradient": 139.62412985228002,
+            "update": 1.028147212229669
+          },
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29005988150314566
+        },
+        "switch_summary": null,
+        "arm": "ceiling"
+      },
+      {
+        "arm": "ceiling",
+        "num_devices": 4,
+        "N": 524288,
+        "num_free_parameters": 1572864,
+        "failed": true,
+        "error_type": "JaxRuntimeError",
+        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 3.17GiB. [tf-allocator-allocation-error=''] [executable_name='jit_add']"
+      }
+    ]
+  }
+}

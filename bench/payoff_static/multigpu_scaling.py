@@ -25,8 +25,27 @@ from one is not comparable with the other, and because "runs on 8 GPUs" would
 otherwise be ambiguous between them.
 
 An OOM is a data point, not a crash. Every failure is recorded with its device
-count, parameter count and exception type, and the sweep continues -- the whole
-figure is about where the ceiling is.
+count, parameter count and exception type, the JSON is rewritten after every
+point, and the sweep continues -- the whole figure is about where the ceiling
+is.
+
+One device count per process, in distributed mode
+-------------------------------------------------
+Asking one process for several counts **deadlocks**. After a 2-device clique has
+been formed, acquiring a 4-device one hangs in the collective rendezvous
+(``Acquire clique: devices=4``) with every GPU idle and no timeout -- measured
+here as 59 minutes of nothing. So more than one ``--device-counts`` entry is
+refused in distributed mode; run the script once per count and merge::
+
+    for n in 2 4; do
+        python -m bench.payoff_static.multigpu_scaling --mode distributed \\
+            --device-counts $n --json-out density_reconstruction/mg_$n.json
+    done
+    python -m bench.payoff_static.multigpu_scaling --merge-from \\
+        density_reconstruction/mg_2.json,density_reconstruction/mg_4.json
+
+Parameter sharding has no collectives to deadlock on and takes several counts in
+one process happily.
 
 Usage
 -----
@@ -91,6 +110,16 @@ def _parse_args() -> argparse.Namespace:
             "and is the one that supports the claim; 'parameter_sharding' "
             "shards only the parameter array and is kept because its failure "
             "to help is a measured result"
+        ),
+    )
+    p.add_argument(
+        "--merge-from",
+        default="",
+        help=(
+            "Comma-separated result JSONs to concatenate into --json-out and "
+            "exit, measuring nothing. This is how the per-device-count runs "
+            "that distributed mode forces become the one artifact a figure "
+            "reads"
         ),
     )
     p.add_argument(
@@ -298,6 +327,84 @@ def _fit_once(
     }
 
 
+def _merge_device_count_runs(args: argparse.Namespace) -> int:
+    """Concatenate per-device-count result files into one artifact.
+
+    Distributed mode forces one device count per process -- the collective
+    rendezvous deadlocks otherwise -- so the single artifact a figure reads has
+    to be assembled afterwards. This does that and measures nothing.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command line; ``merge_from`` names the inputs and ``json_out``
+        the destination.
+
+    Returns
+    -------
+    int
+        Process exit status.
+
+    Raises
+    ------
+    SystemExit
+        If an input is missing, or if the inputs disagree on a configuration
+        axis that would make them incomparable. Merging a leaf-256 run with a
+        leaf-64 one yields a scaling curve over two different problems, which
+        is worse than no curve.
+    """
+    sources = [v.strip() for v in str(args.merge_from).split(",") if v.strip()]
+    records: List[Dict[str, Any]] = []
+    ceiling: List[Dict[str, Any]] = []
+    merged_config: Optional[Dict[str, Any]] = None
+    metas: List[Dict[str, Any]] = []
+    pinned = ("theta", "order", "basis", "leaf_size", "softening", "M", "mode")
+
+    for source in sources:
+        path = source if source.startswith("/") else str(jsonio.results_path(source))
+        try:
+            artifact = jsonio.read_result(path)
+        except FileNotFoundError as exc:
+            raise SystemExit(f"merge input not found: {path}") from exc
+        config = dict(artifact["config"])
+        if merged_config is None:
+            merged_config = config
+        else:
+            clashes = {
+                key: (merged_config.get(key), config.get(key))
+                for key in pinned
+                if merged_config.get(key) != config.get(key)
+            }
+            if clashes:
+                raise SystemExit(
+                    f"refusing to merge {path}: inputs disagree on {clashes}. "
+                    "A scaling curve assembled from different configurations is "
+                    "not a scaling curve."
+                )
+        records.extend(artifact["data"].get("records", []))
+        ceiling.extend(artifact["data"].get("ceiling", []))
+        metas.append(dict(artifact.get("meta", {})))
+
+    if merged_config is None:
+        raise SystemExit("--merge-from named no readable inputs")
+    merged_config["device_counts"] = sorted(
+        {r["num_devices"] for r in records if "num_devices" in r}
+    )
+    merged_config["merged_from"] = sources
+
+    out = args.json_out or DEFAULT_OUT
+    written = jsonio.write_result(
+        out,
+        config=merged_config,
+        # Every input's provenance is kept. They are separate runs, possibly at
+        # different commits, and collapsing them onto one sha would be a lie.
+        meta={**runmeta.run_meta(), "merged_source_meta": metas},
+        data={"records": records, "ceiling": ceiling},
+    )
+    print(f"merged {len(sources)} run(s) -> {written}")
+    return 0
+
+
 def main() -> int:
     """Run the sweep and write the results JSON.
 
@@ -313,6 +420,8 @@ def main() -> int:
         which deadlocks in the collective rendezvous.
     """
     args = _parse_args()
+    if str(args.merge_from).strip():
+        return _merge_device_count_runs(args)
     device_counts = [int(v) for v in str(args.device_counts).split(",") if v]
     if str(args.mode) == "distributed" and len(device_counts) > 1:
         raise SystemExit(
