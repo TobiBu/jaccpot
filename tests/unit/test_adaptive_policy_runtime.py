@@ -603,3 +603,78 @@ def test_a_batched_mass_vector_is_rejected():
     args["masses"] = args["masses"][None]
     with pytest.raises(TypeCheckError):
         fn(**args)
+
+
+# Slices 2 and 3. Every function below was bare and indicted by the re-record, and these
+# three carry a real cross-parameter equality rather than rank protection alone.
+
+NODES, LEAVES, W, DEGREES = 5, 4, 8, 3
+
+
+def test_a_leaf_mask_that_disagrees_with_its_points_is_rejected():
+    """`leaf_points` and `leaf_valid` are one `leaves w`, observed at (64, 8) and (32, 16).
+
+    A mask that disagrees with its points silently includes padding slots in a bounding
+    sphere, which inflates the node radius the MAC then trusts.
+    """
+    from jaccpot.runtime._adaptive_policy import _batched_ritter_leaf_spheres
+
+    points = jnp.zeros((LEAVES, W, 3), dtype=jnp.float64)
+    valid = jnp.ones((LEAVES, W), dtype=bool)
+    centers, radii = _batched_ritter_leaf_spheres(points, valid)
+    assert centers.shape == (LEAVES, 3) and radii.shape == (LEAVES,)
+
+    with pytest.raises(TypeCheckError):
+        _batched_ritter_leaf_spheres(points, valid[:, :-1])
+    with pytest.raises(TypeCheckError):
+        _batched_ritter_leaf_spheres(points, valid[:-1])
+
+
+def test_theta_nodes_must_agree_with_the_radius_it_rescales():
+    """The equality is structural, not a coincidence of one observed extent.
+
+    `fmm_policy.py` calls `per_node_effective_theta(radius_bound=...)` and then
+    `per_node_mac_radius(radius_bound=<the same array>, theta_nodes=<that return>)`, so
+    the two share a length by construction. Only one extent (511) was ever recorded, so
+    the call site is the evidence rather than the sample.
+    """
+    from jaccpot.runtime._adaptive_policy import per_node_mac_radius
+
+    radius = jnp.ones((NODES,), dtype=jnp.float64)
+    theta = jnp.full((NODES,), 0.5, dtype=jnp.float64)
+    assert per_node_mac_radius(
+        radius_bound=radius, theta_nodes=theta, theta_global=0.5
+    ).shape == (NODES,)
+
+    with pytest.raises(TypeCheckError):
+        per_node_mac_radius(
+            radius_bound=radius, theta_nodes=theta[:-1], theta_global=0.5
+        )
+
+
+def test_the_per_order_tables_must_agree_with_the_power_on_degrees():
+    """`masked_binomial` and `exponent` are a row of an `(orders, degrees)` table.
+
+    `fmm_policy.py` passes `dehnen_binomial_masked_by_order[0]` and
+    `dehnen_exponent_by_order[0]`, whose length is therefore `source_power`'s trailing
+    axis. Getting that wrong contracts the error model against the wrong degree count.
+    """
+    from jaccpot.runtime._adaptive_policy import per_node_effective_theta
+
+    kwargs = {
+        "source_power": jnp.ones((NODES, DEGREES), dtype=jnp.float64),
+        "radius_bound": jnp.ones((NODES,), dtype=jnp.float64),
+        "force_scale": jnp.ones((NODES,), dtype=jnp.float64),
+        "masked_binomial": jnp.ones((DEGREES,), dtype=jnp.float64),
+        "exponent": jnp.arange(DEGREES, dtype=jnp.int32),
+        "order": 2,
+        "eps": 1e-3,
+    }
+    assert per_node_effective_theta(**kwargs).shape == (NODES,)
+
+    short = dict(kwargs, masked_binomial=kwargs["masked_binomial"][:-1])
+    with pytest.raises(TypeCheckError):
+        per_node_effective_theta(**short)
+
+    with pytest.raises(TypeCheckError):
+        per_node_effective_theta(**dict(kwargs, exponent=kwargs["exponent"][:-1]))
