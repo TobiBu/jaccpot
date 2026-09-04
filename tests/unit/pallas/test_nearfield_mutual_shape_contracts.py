@@ -118,7 +118,8 @@ def _call_vjp_pallas(**kwargs):
     Returns
     -------
     tuple
-        The four cotangent blocks.
+        The four cotangent blocks, then the level-weight, softening and G
+        cotangents.
     """
     shape = kwargs["xa"].shape
     return mutual_leafpair_block_vjp_pallas(
@@ -369,10 +370,13 @@ def test_the_reverse_tile_checks_its_cotangents():
     vec = args["ma"]
     args["fa_bar_xyz"] = (vec, vec, vec)
     args["fb_bar_xyz"] = (vec, vec, vec)
-    # Non-vacuity: the matched call works and returns the documented structure.
-    dxa, dma, dxb, dmb = _block_vjp_tiles(**args)
+    # Non-vacuity: the matched call works and returns the documented structure --
+    # the four block cotangents, then the level-weight (None here: `_tile_args`
+    # passes no level ladder), softening and G cotangents.
+    dxa, dma, dxb, dmb, dlw, dsoft, dg = _block_vjp_tiles(**args)
     assert dma.shape == dmb.shape == (SLOTS,)
     assert len(dxa) == len(dxb) == 3
+    assert dsoft.shape == dg.shape == ()
 
     args["fb_bar_xyz"] = (vec[None], vec, vec)
     with pytest.raises(TypeCheckError):

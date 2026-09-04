@@ -1249,43 +1249,25 @@ def _dt_max_gradient(backend, interpret, *, seed=23):
     )
 
 
-def test_the_dt_max_gradient_is_exact_on_the_pure_jax_backend():
-    """``d/d(dt_max)`` of a boundary kick matches finite differences on the default backend.
+@pytest.mark.parametrize(
+    "backend,interpret", [("jax", False), ("pallas", True)], ids=["jax", "pallas"]
+)
+def test_the_dt_max_gradient_is_exact_on_both_backends(backend, interpret):
+    """``d/d(dt_max)`` of a boundary kick matches finite differences on both backends.
 
-    Measured |AD - FD| / |FD| on this system: 5.3e-12, against a tolerance of 1e-6.
+    nornax keeps ``dt_max`` traced by scaling it *into* the boundary weight table,
+    so a loss can be differentiated with respect to the timestep; each backend's
+    ``boundary_kick`` has to carry that cotangent through its weighted traversal.
+    The Pallas near field used to return ``zeros_like(level_weights)`` from its
+    reverse rule, dropping the near field's whole share of this gradient (measured
+    AD/FD = 0.056 on this system, 0.0090 at ODISSEO's configuration, until the
+    reverse kernel emitted the level-weight, softening and G cotangents). Pallas
+    runs in interpret mode so the real kernel logic executes on CPU; without it the
+    Pallas path silently falls back to pure JAX and the case would be vacuous.
+
+    Measured |AD - FD| / |FD|: 5.3e-12 on pure JAX, 1.4e-12 on Pallas (interpret
+    mode) once the cotangents were emitted. Tolerance 1e-6.
     """
-    ad, fd = _dt_max_gradient("jax", False)
+    ad, fd = _dt_max_gradient(backend, interpret)
     assert abs(fd) > 1.0e-6, "the finite-difference reference is degenerate here"
-    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"AD {ad:.10e} vs FD {fd:.10e}"
-
-
-def test_the_pallas_backend_drops_most_of_the_dt_max_gradient():
-    """KNOWN DEFECT, pinned so it cannot be relied on or change silently.
-
-    ``jaccpot/pallas/nearfield_mutual.py`` returns ``jnp.zeros_like(level_weights)``
-    from its reverse rule, on the stated grounds that the level table is "discrete
-    or frozen". It is neither: ``level_weights[k] == half * dt_max / 2**k`` is a
-    smooth function of ``dt_max``, and the forward force is *linear* in it. So the
-    near field's entire contribution to ``d/d(dt_max)`` is dropped and only the far
-    field's survives -- measured here AD/FD = 0.056 (ODISSEO measured 0.0090 at its
-    own configuration), so eighteen times too small, not a missing higher-order
-    term. The same reverse rule zeroes ``softening_sq`` and ``g_value``,
-    so ``d/d(softening)`` and ``d/d(G)`` are lost through the near field too.
-
-    Run in interpret mode so the real kernel logic executes on CPU (without it the
-    Pallas path silently falls back to pure JAX and this test would compare pure
-    JAX with itself). It asserts the *discrepancy*, so it fails the moment upstream
-    fixes it -- at which point delete it and parametrize the exactness test above
-    over both backends. Fixing it properly means reducing ``f_geometric . Fbar``
-    per level inside the reverse kernel, which has the tile in registers and could
-    emit a ``(k_max + 1,)`` cotangent.
-    """
-    ad, fd = _dt_max_gradient("pallas", True)
-    assert abs(fd) > 1.0e-6, "the finite-difference reference is degenerate here"
-    ratio = ad / fd
-    assert ratio < 0.5, (
-        f"the Pallas dt_max gradient is no longer badly wrong (ratio {ratio:.4f}). "
-        "If upstream fixed the level_weights cotangent, delete this test and "
-        "parametrize test_the_dt_max_gradient_is_exact_on_the_pure_jax_backend "
-        "over both backends instead."
-    )
+    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"{backend}: AD {ad:.10e} vs FD {fd:.10e}"
