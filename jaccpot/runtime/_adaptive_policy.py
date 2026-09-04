@@ -53,7 +53,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
-from jaxtyping import Array, DTypeLike, Float, Inexact, Int, jaxtyped
+from jaxtyping import Array, Bool, DTypeLike, Float, Inexact, Int, jaxtyped
 from yggdrax.tree import Tree, get_num_internal_nodes
 
 from jaccpot.upward.tree_expansions import TreeUpwardData
@@ -173,7 +173,8 @@ def adaptive_policy_tolerance(
     return jnp.asarray(float(theta) ** (max(int(v) for v in p_gears) + 2), dtype=dtype)
 
 
-def _packed_total_order(multipole_packed: Array) -> int:
+@jaxtyped(typechecker=beartype)
+def _packed_total_order(multipole_packed: Inexact[Array, "nodes sh"]) -> int:
     packed = jnp.asarray(multipole_packed)
     return int(round(np.sqrt(int(packed.shape[1])) - 1))
 
@@ -454,10 +455,11 @@ def source_error_proxy_by_order_from_multipoles(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def compute_node_force_scale_from_sorted_acc(
     *,
     tree: Tree,
-    accelerations_sorted: Array,
+    accelerations_sorted: Float[Array, "n 3"],
     reduction: str = "max",
 ) -> Array:
     """Estimate per-node force scales from sorted per-particle accelerations.
@@ -471,7 +473,7 @@ def compute_node_force_scale_from_sorted_acc(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    accelerations_sorted : Array
+    accelerations_sorted : Float[Array, 'n 3']
         Per-particle accelerations in tree order.
     reduction : str
         How to reduce per-particle values onto a node: ``min``, ``mean`` or ``max``.
@@ -489,6 +491,19 @@ def compute_node_force_scale_from_sorted_acc(
     )
 
 
+# NOT annotated, and NOT decorated -- 4.1, with the body as the thing that already
+# validates. `magnitudes_sorted` has an explicit `ndim != 1` check below that names the
+# parameter and prints the offending shape, which is a better message than
+# `Float[Array, "n"]` would produce, and `test_scalar_reduction_rejects_vector_input` pins
+# it by matching "must be 1-D". Annotating it made that check UNREACHABLE and turned a
+# passing test red -- the same shape as the `Literal` contradiction the audit records for
+# `_fmm_impl.__init__`, where an annotation renders live validation dead code.
+#
+# And it would have bought nothing: the pilot's one acceptance here is
+# `magnitudes_sorted[512] -> [511]`, a LENGTH change, which `n` cannot reject because it
+# occurs once in this signature. So the annotation closes no hole and deletes a better
+# error. Its sibling `compute_node_force_scale_from_sorted_acc` has no such body check,
+# which is why that one IS annotated.
 def compute_node_force_scale_from_sorted_magnitudes(
     *,
     tree: Tree,
@@ -639,7 +654,8 @@ def compute_node_force_scale_from_sorted_magnitudes(
     return jnp.where(finite, scales, fallback)
 
 
-def node_span_mass(*, tree: Tree, masses_sorted: Array) -> Array:
+@jaxtyped(typechecker=beartype)
+def node_span_mass(*, tree: Tree, masses_sorted: Float[Array, "n"]) -> Array:
     """Total mass spanned by every node, from a prefix sum over sorted masses.
 
     Deliberately independent of the upward pass: this is the *reference* node mass,
@@ -655,7 +671,7 @@ def node_span_mass(*, tree: Tree, masses_sorted: Array) -> Array:
     ----------
     tree : Tree
         Tree supplying ``node_ranges``.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         ``(n,)`` masses in the tree's sorted order.
 
     Returns
@@ -1098,7 +1114,10 @@ def _far_field_force_scale_by_node(
     return accumulate_own_down_parent_chain(tree=tree, own=own)
 
 
-def accumulate_own_down_parent_chain(*, tree: Tree, own: Array) -> Array:
+@jaxtyped(typechecker=beartype)
+def accumulate_own_down_parent_chain(
+    *, tree: Tree, own: Float[Array, "nodes"]
+) -> Array:
     """Push each node's own contribution down onto all of its descendants.
 
     Turns ``own[U]`` -- what ``U``'s own list contributes -- into
@@ -1115,7 +1134,7 @@ def accumulate_own_down_parent_chain(*, tree: Tree, own: Array) -> Array:
     ----------
     tree : Tree
         Tree supplying the parent chain the accumulation walks.
-    own : Array
+    own : Float[Array, 'nodes']
         ``(num_nodes,)`` per-node own contribution.
 
     Returns
@@ -1351,8 +1370,9 @@ def compute_smallest_enclosing_sphere_geometry(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_enclosing_sphere_geometry(
-    *, tree: Tree, positions_sorted: Array
+    *, tree: Tree, positions_sorted: Float[Array, "n 3"]
 ) -> tuple[Array, Array]:
     """Return exact SES centres and radii for leaf nodes only.
 
@@ -1360,7 +1380,7 @@ def compute_leaf_enclosing_sphere_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
 
     Returns
@@ -1395,16 +1415,17 @@ def compute_leaf_enclosing_sphere_geometry(
 
 
 @jax.jit
+@jaxtyped(typechecker=beartype)
 def _batched_ritter_leaf_spheres(
-    leaf_points: Array, leaf_valid: Array
+    leaf_points: Float[Array, "leaves w 3"], leaf_valid: Bool[Array, "leaves w"]
 ) -> tuple[Array, Array]:
     """Return approximate bounding spheres for padded leaf particle blocks.
 
     Parameters
     ----------
-    leaf_points : Array
+    leaf_points : Float[Array, 'leaves w 3']
         Padded per-leaf point block, shape ``(num_leaves, cap, 3)``.
-    leaf_valid : Array
+    leaf_valid : Bool[Array, 'leaves w']
         See the module docstring.
 
     Returns
@@ -1476,8 +1497,9 @@ def _batched_ritter_leaf_spheres(
     return centers, radii
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_ritter_sphere_geometry(
-    *, tree: Tree, positions_sorted: Array
+    *, tree: Tree, positions_sorted: Float[Array, "n 3"]
 ) -> tuple[Array, Array]:
     """Return fast approximate leaf spheres using a batched JAX Ritter pass.
 
@@ -1485,7 +1507,7 @@ def compute_leaf_ritter_sphere_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
 
     Returns
@@ -1519,11 +1541,12 @@ def compute_leaf_ritter_sphere_geometry(
     return centers, radii
 
 
+@jaxtyped(typechecker=beartype)
 def compute_center_referenced_radius_geometry(
     *,
     tree: Tree,
-    positions_sorted: Array,
-    centers: Array,
+    positions_sorted: Float[Array, "n 3"],
+    centers: Float[Array, "nodes 3"],
     max_leaf_size: Optional[int] = None,
 ) -> Array:
     """Return per-node radii measured about ``centers``, not about a fitted sphere.
@@ -1544,9 +1567,9 @@ def compute_center_referenced_radius_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Reference centre per node.
     max_leaf_size : Optional[int]
         Static upper bound on particles per leaf, used as the gathered block width.
@@ -1668,8 +1691,9 @@ def merge_bounding_spheres(
     return center, radius
 
 
+@jaxtyped(typechecker=beartype)
 def compute_tree_merged_sphere_geometry(
-    *, tree: Tree, positions_sorted: Array, leaf_mode: str = "exact"
+    *, tree: Tree, positions_sorted: Float[Array, "n 3"], leaf_mode: str = "exact"
 ) -> tuple[Array, Array]:
     """Return node spheres from leaf spheres and JAX upward merges.
 
@@ -1677,7 +1701,7 @@ def compute_tree_merged_sphere_geometry(
     ----------
     tree : Tree
         The tree whose nodes are being summarised.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
     leaf_mode : str
         See the module docstring.
@@ -1773,13 +1797,14 @@ _EFFECTIVE_THETA_FLOOR = 1e-3
 _EFFECTIVE_THETA_RADIUS_FLOOR_FRAC = 1e-9
 
 
+@jaxtyped(typechecker=beartype)
 def per_node_effective_theta(
     *,
-    source_power: Array,
-    radius_bound: Array,
-    force_scale: Array,
-    masked_binomial: Array,
-    exponent: Array,
+    source_power: Float[Array, "nodes degrees"],
+    radius_bound: Float[Array, "nodes"],
+    force_scale: Float[Array, "nodes"],
+    masked_binomial: Float[Array, "degrees"],
+    exponent: Int[Array, "degrees"],
     order: int,
     eps: float,
     gravitational_constant: float = 1.0,
@@ -1834,15 +1859,15 @@ def per_node_effective_theta(
 
     Parameters
     ----------
-    source_power : Array
+    source_power : Float[Array, 'nodes degrees']
         Dehnen per-degree power ``P_n``, shape ``(num_nodes, total_p + 1)``.
-    radius_bound : Array
+    radius_bound : Float[Array, 'nodes']
         Per-node radius about the expansion centre, shape ``(num_nodes,)``.
-    force_scale : Array
+    force_scale : Float[Array, 'nodes']
         Per-node force scale on the criterion's right-hand side, ``(num_nodes,)``.
-    masked_binomial : Array
+    masked_binomial : Float[Array, 'degrees']
         ``C(p, n)`` for ``n <= p`` else 0, for the chosen order: ``(total_p + 1,)``.
-    exponent : Array
+    exponent : Int[Array, 'degrees']
         ``max(p - n, 0)`` for the chosen order, shape ``(total_p + 1,)``.
     order : int
         Expansion order ``p`` these weights correspond to.
@@ -2013,10 +2038,11 @@ def per_node_conservative_extent(
     return extents, lam_safe
 
 
+@jaxtyped(typechecker=beartype)
 def per_node_mac_radius(
     *,
-    radius_bound: Array,
-    theta_nodes: Array,
+    radius_bound: Float[Array, "nodes"],
+    theta_nodes: Float[Array, "nodes"],
     theta_global: float,
     radius_floor_frac: float = _EFFECTIVE_THETA_RADIUS_FLOOR_FRAC,
 ) -> Array:
@@ -2037,9 +2063,9 @@ def per_node_mac_radius(
 
     Parameters
     ----------
-    radius_bound : Array
+    radius_bound : Float[Array, 'nodes']
         See the module docstring.
-    theta_nodes : Array
+    theta_nodes : Float[Array, 'nodes']
         See the module docstring.
     theta_global : float
         See the module docstring.
