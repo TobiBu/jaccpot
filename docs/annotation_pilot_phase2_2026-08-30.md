@@ -1,7 +1,8 @@
 # Phase 2 module ordering, measured — 2026-08-30
 
-**[measured 2026-08-30; every module re-recorded 2026-09-03 — read "The whole list,
-re-recorded" at the bottom first, because five of the six rates below have moved]**
+**[measured 2026-08-30; all six re-recorded 2026-09-03 and closed; nine further modules
+recorded 2026-09-04 and they hold 595 of the package's remaining acceptances — read the
+last two sections first, this table is history]**
 The rollout plan orders Phase 2's modules by **bare-parameter count**. This
 records what happens when they are ordered by STYLE_GUIDE §4.1's own predictor instead —
 how much of each module is *already validated* — and the two orderings disagree.
@@ -247,3 +248,90 @@ freely are the rotation-blocks-by-class helper and the class-major accumulator. 
 `class_keys` / `class_deltas` pair that no longer agree on their class axis is that defect
 expressed as a shape. So the useful PR here is the class/rotation family, ~12 of the 23,
 and not the other 80 parameters.
+
+---
+
+## The nine modules this document never covered — recorded 2026-09-04
+
+Every item above is now closed or declined on evidence, so the same method was pointed at
+the modules the 2026-08-30 pass never touched. It only ever covered six; these are the next
+nine by bare count. 84 targets, `PILOT_MAX_PER_FN=3`, same scope (`tests/unit` +
+`tests/integration`), so the rates are comparable with everything above.
+
+**595 silently accepted of 1238 perturbations — 48%.** That is higher than any module in the
+original order, and it is not a coverage artefact: eight of the nine measured almost
+everything targeted.
+
+| module | bare/shaped | tested | accepted | rate | ok/inc/unrep |
+|---|---|---|---|---|---|
+| `runtime/_octree_fmm.py` | 49 / 0 | 208 | **137** | **66%** | 9/0/0 |
+| `nearfield/near_field.py` | 48 / 15 | 93 | 56 | 60% | 3/1/0 |
+| `runtime/kernels/_evaluate.py` | 72 / 23 | 299 | **164** | 55% | 13/0/2 |
+| `distributed/_force_scale.py` | 40 / 0 | 126 | 62 | 49% | 5/0/0 |
+| `downward/local_expansions.py` | 54 / 9 | 132 | 53 | 40% | 13/0/0 |
+| `pallas/m2l_real_fused.py` | 41 / 0 | 86 | 33 | 38% | 8/0/2 |
+| `nearfield/_kernels.py` | 53 / 0 | 64 | 23 | 36% | 4/0/0 |
+| `pallas/m2l_complex_fused.py` | 64 / 0 | 122 | 36 | 30% | 8/0/2 |
+| `pallas/nearfield_fused_leaf.py` | 58 / 0 | 108 | 31 | 29% | 5/0/0 |
+
+Where the acceptances concentrate:
+
+```
+46  _octree_fmm       build_octree_interaction_plan_from_octree_pairs
+43  _evaluate         _prepare_tree_evaluation_inputs
+38  _force_scale      cross_policy_state
+31  _octree_fmm       compute_octree_center_of_mass
+29  _evaluate         _evaluate_tree_compiled_impl
+28  _octree_fmm       prepare_octree_solidfmm_complex_multipoles
+23  near_field        compute_leaf_p2p_accelerations_large_n_accel_only   <- public
+23  _evaluate         _resolve_evaluation_node_views
+19  _evaluate         _build_target_nearfield_source_index_matrix
+18  near_field        compute_leaf_p2p_accelerations                      <- public
+```
+
+**Read the coverage column before the rate, as this document has always said.**
+`near_field`'s 60% rests on **3** measured functions of 4 targeted, which is the weakest
+number in the table; `_octree_fmm`'s 66% and `_force_scale`'s 49% rest on full coverage.
+Ranking by absolute count rather than rate promotes `_evaluate` (164) over `_octree_fmm`
+(137), and those two are the only ones where the choice matters.
+
+### Three predictions, made before the run and all three wrong
+
+Recorded because the errors are systematic, not incidental:
+
+1. **`runtime/_octree_fmm.py` would record nothing**, since the octree tests live in
+   `tests/experimental/` and `addopts` carries `-m "not experimental"`. It recorded **9 of
+   9** — `tests/unit/test_octree_fmm_scaffolding.py` and the integration suite reach that
+   backend on the default marker.
+2. **`distributed/_force_scale.py` would record nothing**, since `tests/distributed/` skips
+   below two devices. It recorded **5 of 5**: the force-scale computation itself is not
+   device-gated, only its callers are.
+3. **The three `pallas/` modules would report kernel bodies INCONCLUSIVE**, as
+   `nearfield_mutual`'s two did. They came back 8/0/2, 8/0/2 and 5/0/0 — one inconclusive
+   in the whole run, across all nine modules.
+
+The common thread is that all three predicted *absence of measurement* from a marker or a
+device gate, and in each case the code was reachable by a path the reasoning had not
+enumerated. The lesson is the one this document already draws for `farleaves` and for the
+dtype half in 4.3, arrived at a third way: do not predict coverage, record and read it.
+
+### What this means for the order
+
+The six modules the original table ranked hold, after all the work above, well under a
+hundred acceptances between them. These nine hold **595**. So the Phase 2 ordering was not
+merely mis-ranked internally — it was scoped to the wrong third of the package, and the
+`--builtins` list and axis vocabulary those PRs built are now the cheap part of doing these.
+
+Two things to settle before annotating any of them, neither of which is a measurement:
+
+* `runtime/_octree_fmm.py` and `distributed/_force_scale.py` are the two highest-rate
+  modules and the two whose test coverage this recording just showed to be wider than
+  assumed. Both are lanes with GPU-only or multi-device production paths that this scope
+  cannot see, so an axis equality observed here is bounded by the CPU single-device lane —
+  the `farleaves` bound, again.
+* `near_field.py`'s two public entry points carry 41 of its 56. Those are `__all__` surface,
+  so the annotation is a contract change, not an internal one.
+
+`compute_leaf_p2p_accelerations_target_block_pairs_only` in `_large_n_blocks.py` remains
+unmeasurable for a different reason: it is public, exported, and has no direct test at all,
+so the pilot never records it. It needs a fixture first.
