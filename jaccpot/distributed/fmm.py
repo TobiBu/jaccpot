@@ -53,6 +53,7 @@ import numpy as np
 # (audit F34), so nothing local would have caught it.
 from jax import shard_map
 from jax.sharding import PartitionSpec as P
+from jax.typing import ArrayLike
 from yggdrax import build_interactions_and_neighbors
 from yggdrax.distributed import device_count
 from yggdrax.distributed import let as _yggdrax_let
@@ -1071,8 +1072,8 @@ def _rcb_groups(idx: np.ndarray, positions: np.ndarray, k: int) -> list:
 
 
 def partition_for_devices(
-    positions: np.ndarray,
-    masses: np.ndarray,
+    positions: ArrayLike,
+    masses: ArrayLike,
     ndev: int,
     *,
     leaf_size: int,
@@ -1115,9 +1116,9 @@ def partition_for_devices(
 
     Parameters
     ----------
-    positions : np.ndarray
-        Particle positions ``[N, 3]`` in input order.
-    masses : np.ndarray
+    positions : ArrayLike
+        Particle positions ``[N, 3]`` in input order; NumPy or JAX, read on the host.
+    masses : ArrayLike
         Particle masses ``[N]`` in input order.
     ndev : int
         Number of devices to split across.

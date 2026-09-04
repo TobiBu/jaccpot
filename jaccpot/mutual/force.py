@@ -47,6 +47,7 @@ from typing import Any, Literal, NamedTuple, Optional, overload
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaccpot._jax_compat import Tracer
@@ -746,11 +747,11 @@ def active_level_floor(s: int, k_max: int) -> int:
 
 
 def level_weights_from_floor(
-    active_floor: int,
+    active_floor: ArrayLike,
     k_max: int,
-    dt_max: float,
+    dt_max: ArrayLike,
     *,
-    half: float = 1.0,
+    half: ArrayLike = 1.0,
     dtype: Any = jnp.float64,
 ) -> Array:
     """Return kick weights for the levels at or above ``active_floor``.
@@ -758,7 +759,9 @@ def level_weights_from_floor(
     Level ``k`` is kicked with ``half * dt_max / 2**k``; levels below the floor
     are not active at this boundary and get zero.
 
-    ``active_floor``, ``half`` and ``dt_max`` may be **tracers**. That is what lets
+    ``active_floor``, ``half`` and ``dt_max`` may be **tracers** (hence
+    ``ArrayLike``, not ``float`` -- a ``float`` annotation rejected a ``jax.grad``
+    with respect to ``dt_max`` under the runtime typecheck hook). That is what lets
     a caller drive the boundaries with ``lax.scan`` instead of unrolling them: with
     static-only weights an integrator has to emit one traced boundary kick per
     boundary, so its graph grows like ``2**k_max``. The concrete path is kept
@@ -769,13 +772,13 @@ def level_weights_from_floor(
 
     Parameters
     ----------
-    active_floor : int
+    active_floor : ArrayLike
         Smallest level to kick; may be a tracer.
     k_max : int
         Finest rung in the hierarchy. Always static -- it sets the output shape.
-    dt_max : float
+    dt_max : ArrayLike
         Base-step size, the time step of level ``0``. May be a tracer.
-    half : float
+    half : ArrayLike
         Overall scale, ``0.5`` at a synchronized boundary and ``1.0`` inside.
         May be a tracer. Default ``1.0``.
     dtype : Any
