@@ -2505,6 +2505,15 @@ def _evaluate_local_expansions_for_particles(
 #     (128, 3, 3)     (8, 16)    (8, 16, 3, 3)  (8, 16)
 #     (20, 3, 3)      (2, 12)    (2, 12, 3, 3)  (2, 12)
 #
+# `comps` in `_scatter_rank3` is NOT the literal 3 the recording shows, and getting that
+# wrong broke two tests before this comment was written. The trailing width is
+# `len(component_lift_index_map_3d(level))` -- the independent components of the lifted
+# derivative at that order -- so it is 3 at level 1 and 6 at level 2, and the k3 lane passes
+# `base` as `f32[12, 3, 6]`. Every recorded call happened to be level 1, which is the
+# capture-coverage bound 4.3 states, in the shape dimension this time. Naming the axis is
+# strictly better than the literal anyway: it ties `base` and `values` to the SAME component
+# count, which is the disagreement that would actually corrupt a derivative scatter.
+#
 # `indices`, `mask` and `values` agree on BOTH leading axes in every one, across fifteen
 # distinct extent pairs. That is the "length mismatch between arrays that must agree" mode
 # the pilot names as dominant, and here it is the mask: `jnp.where(flat_mask[:, None],
@@ -2600,9 +2609,9 @@ def _scatter_scalars(
 
 @jaxtyped(typechecker=beartype)
 def _scatter_rank3(
-    base: Float[Array, "n 3 3"],
+    base: Float[Array, "n 3 comps"],
     indices: Int[Array, "leaves w"],
-    values: Float[Array, "leaves w 3 3"],
+    values: Float[Array, "leaves w 3 comps"],
     mask: Bool[Array, "leaves w"],
 ) -> Array:
     """Scatter-add rank-3 values into a particle-major buffer.
@@ -2613,11 +2622,11 @@ def _scatter_rank3(
 
     Parameters
     ----------
-    base : Float[Array, 'n 3 3']
+    base : Float[Array, 'n 3 comps']
         Destination buffer ``[N, 3, C]``, added into rather than overwritten.
     indices : Int[Array, 'leaves w']
         Destination particle index per slot.
-    values : Float[Array, 'leaves w 3 3']
+    values : Float[Array, 'leaves w 3 comps']
         Values to add, ``[..., 3, C]``.
     mask : Bool[Array, 'leaves w']
         Validity mask over the slots.

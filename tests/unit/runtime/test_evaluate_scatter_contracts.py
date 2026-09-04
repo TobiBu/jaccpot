@@ -58,7 +58,7 @@ def _common():
 CASES = [
     ("vectors", _scatter_vectors, (N, 3), (LEAVES, W, 3)),
     ("scalars", _scatter_scalars, (N,), (LEAVES, W)),
-    ("rank3", _scatter_rank3, (N, 3, 3), (LEAVES, W, 3, 3)),
+    ("rank3", _scatter_rank3, (N, 3, 6), (LEAVES, W, 3, 6)),
 ]
 IDS = [name for name, _, _, _ in CASES]
 
@@ -119,6 +119,37 @@ def test_the_payload_rank_is_what_separates_the_three():
             jnp.zeros((N, 3), dtype=_dtype()),
             indices,
             jnp.ones((LEAVES, W), dtype=_dtype()),
+            mask,
+        )
+
+
+def test_the_derivative_component_count_is_shared_not_fixed():
+    """`_scatter_rank3`'s trailing width is the lifted-derivative component count.
+
+    It is 3 at level 1 and 6 at level 2 -- `len(component_lift_index_map_3d(level))` -- so
+    the annotation names the axis rather than pinning 3, which is what the recording alone
+    would have suggested. Pinning it broke
+    `test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum`, whose lane
+    passes `base` as `f32[12, 3, 6]`.
+
+    Naming it also buys the constraint that matters: `base` and `values` must agree on the
+    component count, or the scatter mixes derivative components.
+    """
+    indices, mask = _common()
+    for comps in (3, 6, 10):
+        out = _scatter_rank3(
+            jnp.zeros((N, 3, comps), dtype=_dtype()),
+            indices,
+            jnp.ones((LEAVES, W, 3, comps), dtype=_dtype()),
+            mask,
+        )
+        assert out.shape == (N, 3, comps)
+
+    with pytest.raises(TypeCheckError):
+        _scatter_rank3(
+            jnp.zeros((N, 3, 6), dtype=_dtype()),
+            indices,
+            jnp.ones((LEAVES, W, 3, 3), dtype=_dtype()),
             mask,
         )
 
