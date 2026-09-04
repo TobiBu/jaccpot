@@ -1,0 +1,88 @@
+[
+  {
+    "N": 131072,
+    "caps": {},
+    "label": "auto-sized (the default)",
+    "ran": true,
+    "overflowed": false,
+    "gradient_finite": true,
+    "seconds": 174.62978443317115
+  },
+  {
+    "N": 131072,
+    "caps": {
+      "max_pair_queue": 4000000
+    },
+    "label": "max_pair_queue=4e6",
+    "ran": true,
+    "overflowed": false,
+    "gradient_finite": true,
+    "seconds": 160.24482784606516
+  },
+  {
+    "N": 131072,
+    "caps": {
+      "max_pair_queue": 1000000
+    },
+    "label": "max_pair_queue=1e6",
+    "ran": true,
+    "overflowed": false,
+    "gradient_finite": true,
+    "seconds": 161.36385274399072
+  },
+  {
+    "N": 131072,
+    "caps": {
+      "max_pair_queue": 1000000,
+      "max_interactions_per_node": 512
+    },
+    "label": "pair_queue=1e6 + interactions=512",
+    "ran": true,
+    "overflowed": false,
+    "gradient_finite": true,
+    "seconds": 163.84354321286082
+  },
+  {
+    "N": 262144,
+    "caps": {},
+    "label": "auto-sized (the default)",
+    "ran": false,
+    "error_type": "JaxRuntimeError",
+    "error": "INTERNAL: Failed to get configs for: 26 out of 483 instructions. See logs for all failures. Example failure: \nAutotuning failed for HLO: %custom-call.412 = (c128[4750848,9]{1,0}, s8[4194304]{0}) custom-call(%bitcast.1458.0, %param.3000), custom_call_target=\"__cublas$lt$matmul\", metadata={op_name=\"ji",
+    "seconds": 616.625262719579
+  },
+  {
+    "N": 262144,
+    "caps": {
+      "max_pair_queue": 4000000
+    },
+    "label": "max_pair_queue=4e6",
+    "ran": false,
+    "error_type": "JaxRuntimeError",
+    "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 3.35GiB. [executable_name='jit_evaluate'] [tf-allocator-allocation-error='']",
+    "seconds": 52.11150538176298
+  },
+  {
+    "N": 262144,
+    "caps": {
+      "max_pair_queue": 1000000
+    },
+    "label": "max_pair_queue=1e6",
+    "ran": false,
+    "error_type": "JaxRuntimeError",
+    "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 3.35GiB. [executable_name='jit_evaluate'] [tf-allocator-allocation-error='']",
+    "seconds": 51.08755941130221
+  },
+  {
+    "N": 262144,
+    "caps": {
+      "max_pair_queue": 1000000,
+      "max_interactions_per_node": 512
+    },
+    "label": "pair_queue=1e6 + interactions=512",
+    "ran": false,
+    "error_type": "JaxRuntimeError",
+    "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 3.35GiB. [executable_name='jit_evaluate'] [tf-allocator-allocation-error='']",
+    "seconds": 51.25351532921195
+  }
+]

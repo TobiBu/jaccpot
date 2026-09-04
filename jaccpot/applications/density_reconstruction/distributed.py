@@ -56,6 +56,32 @@ attempt appeared to disagree by exactly 2.000, which is the signature of a sign
 convention, and it was the hand-rolled oracle in the probe that had the sign
 backwards, not the operator. Using jaccpot's own direct sum settled it.)
 
+The ceiling is the path's, not the defaults'
+-------------------------------------------
+The ceiling this path reaches is well below the single-device radix operator's
+-- P=393216 at two devices and P=786432 at four, against P=3145728 on one
+device -- and it doubles with device count, which is the claim. Since every
+buffer cap in ``DistributedFMMConfig`` auto-sizes from ``N``, the obvious
+suspicion was that the number describes a default rather than the method.
+Measured, and it does not (``bench/payoff_static/distributed_caps_probe.py``):
+
+======== =================================== ==========================
+N        caps                                two devices
+======== =================================== ==========================
+131072   auto-sized                          OK, no overflow
+131072   max_pair_queue=4e6                  OK, no overflow
+131072   max_pair_queue=1e6                  OK, no overflow
+131072   pair_queue=1e6, interactions=512    OK, no overflow
+262144   auto-sized                          out of memory (617 s)
+262144   max_pair_queue=4e6                  out of memory (52 s)
+262144   max_pair_queue=1e6                  out of memory (51 s)
+262144   pair_queue=1e6, interactions=512    out of memory (51 s)
+======== =================================== ==========================
+
+Tightening the pair queue by orders of magnitude changes how long the failure
+takes, not whether it happens, and the failing allocation is 3.35 GiB in every
+tightened case. So the ceiling stands as a property of this path.
+
 What this operator does not offer
 ---------------------------------
 No leaf blocks, so no regularisers. The penalties in
