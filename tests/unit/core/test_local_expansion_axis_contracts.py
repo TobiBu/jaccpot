@@ -102,29 +102,60 @@ def _level_kwargs():
     }
 
 
-def test_the_csr_offsets_are_one_longer_than_the_nodes():
-    """`offsets` is `nodes+1`, and it is expressible here.
+def test_the_csr_offsets_length_is_deliberately_free():
+    """`offsets` is rank-only, and the distributed lane is why.
 
-    Unlike `_large_n_blocks.py`'s `block_offsets` and `_adaptive_policy`'s
-    `neighbor_offsets`, this parameter comes AFTER `coeffs` in the signature, so `nodes`
-    is already bound when jaxtyping evaluates the expression. The symbolic form works
-    where those two had to settle for a rank-only `_`.
+    It is `nodes+1` in every call the pilot recorded -- (8,) against 7 nodes, (32,)
+    against 31 -- so the symbolic form looked safe and was used. CI disagreed:
+    `tests/distributed/test_distributed_m2l_mechanism.py` passes `offsets` at 9 against 9
+    target nodes, so the relation is not stable across lanes and the annotation had to go
+    back to `_`. Both lengths are asserted here so the next reader does not "restore" it.
     """
     kwargs = _level_kwargs()
-    _accumulate_level(**kwargs, order=ORDER, chunk_size=2)
+    for length in (NODES, NODES + 1):
+        _accumulate_level(
+            **dict(kwargs, offsets=jnp.zeros((length,), dtype=jnp.int64)),
+            order=ORDER,
+            chunk_size=2,
+        )
 
+    # Rank is still constrained, which is what the annotation buys on this parameter.
     with pytest.raises(TypeCheckError):
         _accumulate_level(
-            **dict(kwargs, offsets=jnp.zeros((NODES,), dtype=jnp.int64)),
+            **dict(kwargs, offsets=jnp.zeros((NODES, 1), dtype=jnp.int64)),
+            order=ORDER,
+            chunk_size=2,
+        )
+
+
+def test_the_target_and_source_node_sets_are_different_axes():
+    """The distributed lane makes them differ, and the single-device recording could not.
+
+    Every recorded call had `coeffs` and `component_matrix` on equal extents -- (7, 7),
+    (31, 31) -- so one `nodes` axis looked right. `tests/distributed` passes `coeffs` at 9
+    against `component_matrix` at 11, because the source side is a remote tree. A source
+    set of a different size must go through.
+    """
+    kwargs = _level_kwargs()
+    wider = {
+        "component_matrix": _f(NODES + 2, CT),
+        "centers_source": _f(NODES + 2, 3),
+    }
+    _accumulate_level(**dict(kwargs, **wider), order=ORDER, chunk_size=2)
+
+    # The two source-side arrays still have to agree with each other.
+    with pytest.raises(TypeCheckError):
+        _accumulate_level(
+            **dict(kwargs, component_matrix=_f(NODES + 2, CT)),
             order=ORDER,
             chunk_size=2,
         )
 
 
 def test_the_level_node_arrays_share_one_axis():
-    """`coeffs`, `component_matrix`, both centre arrays and `counts` are all per-node."""
+    """`coeffs`, `centers_target` and `counts` are the target side of one level."""
     kwargs = _level_kwargs()
-    for name in ("component_matrix", "centers_target", "centers_source", "counts"):
+    for name in ("centers_target", "counts"):
         with pytest.raises(TypeCheckError):
             _accumulate_level(
                 **dict(kwargs, **{name: kwargs[name][:-1]}), order=ORDER, chunk_size=2

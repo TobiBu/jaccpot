@@ -202,6 +202,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `n` | particles |
 | `t` | targets, when a call returns a subset of the particles |
 | `nodes` | tree nodes |
+| `targets`, `sources` | the target and source node sets of one M2L level, which the DISTRIBUTED lane makes different |
 | `internal` | internal nodes, i.e. those with children |
 | `leaves` | leaf nodes |
 | `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
@@ -320,6 +321,21 @@ annotation enforced. The shapes had been derived from 64 captured calls -- throu
 `test_near_field.py` and `tests/integration/`, neither of which enters that backend. **Capture
 coverage bounds annotation validity:** an axis equality observed in every call you recorded is
 only as strong as the lanes you recorded.
+
+**`targets` and `sources` are the same lesson a third time, and the cheapest to have
+avoided.** `downward/local_expansions.py`'s `_accumulate_level` takes `coeffs` and
+`component_matrix` on what looks like one node axis: every recorded call had them equal, at
+(7, 7) and (31, 31). The DISTRIBUTED lane passes `coeffs` at 9 nodes against
+`component_matrix` at 11, because the source side is a remote tree. Annotating them as one
+`nodes` broke `tests/distributed/test_distributed_m2l_mechanism.py` in CI -- two tests, on
+both smoke shards and the distributed tier.
+
+The pilot recording is taken over `tests/unit` + `tests/integration`. `tests/distributed`
+is NOT in that scope and cannot be, since every file in it skips below two devices. So for
+any module the distributed lane reaches, an axis equality the recording shows is a
+single-device equality, full stop. `offsets` in the same signature makes the point twice
+over: it is `nodes+1` in every recorded call and plain `nodes` in the distributed one, so
+even the symbolic form had to go back to a rank-only `_`.
 
 **And the same bound applies to the dtype, which is the easier half to forget.**
 `runtime/_adaptive_policy.py`'s `multipole_packed` was annotated `Float[Array, "nodes sh"]`

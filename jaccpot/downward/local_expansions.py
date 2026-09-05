@@ -739,13 +739,13 @@ def _translate_components_batch(
 @partial(jax.jit, static_argnames=("order", "chunk_size"))
 @jaxtyped(typechecker=beartype)
 def _accumulate_level(
-    coeffs: Float[Array, "nodes ct"],
-    component_matrix: Float[Array, "nodes ct"],
-    centers_target: Float[Array, "nodes 3"],
-    centers_source: Float[Array, "nodes 3"],
+    coeffs: Float[Array, "targets ct"],
+    component_matrix: Float[Array, "sources ct"],
+    centers_target: Float[Array, "targets 3"],
+    centers_source: Float[Array, "sources 3"],
     sources: Int[Array, "edges"],
-    offsets: Int[Array, "nodes+1"],
-    counts: Int[Array, "nodes"],
+    offsets: Int[Array, "_"],
+    counts: Int[Array, "targets"],
     *,
     order: int,
     chunk_size: int,
@@ -765,21 +765,21 @@ def _accumulate_level(
 
     Parameters
     ----------
-    coeffs : Float[Array, 'nodes ct']
+    coeffs : Float[Array, 'targets ct']
         Local-expansion coefficients to accumulate into,
         ``[num_targets, num_components]``. Returned updated.
-    component_matrix : Float[Array, 'nodes ct']
+    component_matrix : Float[Array, 'sources ct']
         Per-source-node packed multipole components,
         ``[num_source_nodes, num_components]``.
-    centers_target : Float[Array, 'nodes 3']
+    centers_target : Float[Array, 'targets 3']
         Target node centres ``[num_targets, 3]``.
-    centers_source : Float[Array, 'nodes 3']
+    centers_source : Float[Array, 'sources 3']
         Source node centres ``[num_source_nodes, 3]``.
     sources : Int[Array, 'edges']
         Flat source-node index per interaction pair, ``[num_pairs]``.
-    offsets : Int[Array, 'nodes+1']
+    offsets : Int[Array, '_']
         Start offset into ``sources`` for each target, ``[num_targets]``.
-    counts : Int[Array, 'nodes']
+    counts : Int[Array, 'targets']
         Number of sources for each target, ``[num_targets]``.
     order : int
         Expansion order ``p``. Static under ``jit``.
@@ -854,13 +854,13 @@ def _accumulate_level(
 @partial(jax.jit, static_argnames=("order",))
 @jaxtyped(typechecker=beartype)
 def _accumulate_dense_m2l_impl(
-    coeffs: Float[Array, "nodes ct"],
-    component_matrix: Float[Array, "nodes ct"],
+    coeffs: Float[Array, "targets ct"],
+    component_matrix: Float[Array, "sources ct"],
     node_indices: Int[Array, "pairs 2"],
     sources: Int[Array, "pairs 2 1"],
     mask: Bool[Array, "pairs 2 1"],
-    centers_target: Float[Array, "nodes 3"],
-    centers_source: Float[Array, "nodes 3"],
+    centers_target: Float[Array, "targets 3"],
+    centers_source: Float[Array, "sources 3"],
     *,
     order: int,
 ) -> Array:
@@ -879,10 +879,10 @@ def _accumulate_dense_m2l_impl(
 
     Parameters
     ----------
-    coeffs : Float[Array, 'nodes ct']
+    coeffs : Float[Array, 'targets ct']
         Local-expansion coefficients to accumulate into,
         ``[num_nodes, num_components]``. Returned updated.
-    component_matrix : Float[Array, 'nodes ct']
+    component_matrix : Float[Array, 'sources ct']
         Per-source-node packed multipole components,
         ``[num_source_nodes, num_components]``.
     node_indices : Int[Array, 'pairs 2']
@@ -892,9 +892,9 @@ def _accumulate_dense_m2l_impl(
     mask : Bool[Array, 'pairs 2 1']
         Validity mask with the same shape as ``sources``; ``False`` slots
         contribute nothing.
-    centers_target : Float[Array, 'nodes 3']
+    centers_target : Float[Array, 'targets 3']
         Node centres used for the target side, ``[num_nodes, 3]``.
-    centers_source : Float[Array, 'nodes 3']
+    centers_source : Float[Array, 'sources 3']
         Node centres used for the source side, ``[num_source_nodes, 3]``.
     order : int
         Expansion order ``p``. Static under ``jit``.
