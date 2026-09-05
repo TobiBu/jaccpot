@@ -22,9 +22,42 @@ rather than documenting them:
 
 Tracers are realised as **zero-mass particles** appended to the source set. A
 zero-mass particle exerts no force and receives the full acceleration from the
-sources, so slicing its rows out with ``target_indices`` gives the field at the
+sources, so taking its rows out of a full evaluation gives the field at the
 tracer positions. Verified against a sources-only direct sum to 1.6e-15 relative
 L2 before this module was written.
+
+Why the tracer rows are taken by a SLICE and not by ``target_indices``
+----------------------------------------------------------------------
+They are appended, so they occupy the contiguous block ``[N, N + M)`` and a
+slice suffices. That is not a stylistic preference -- passing
+``target_indices`` makes the operator unusable at the scale this section is
+about. Measured at N=262144, M=4096, leaf 256, fp64 on an A100:
+
+===================================  ==========  ==========
+forward-only evaluation              eager       jitted
+===================================  ==========  ==========
+``target_indices`` gather            OUT OF      15.86 s
+                                     MEMORY
+full evaluation + contiguous slice   5.35 s      15.67 s
+===================================  ==========  ==========
+
+The ``target_indices`` path builds a dense ``f64[M, N + M, 3]`` all-pairs
+displacement array and reduces it -- 26 GB at this N. Under ``jax.jit`` XLA
+fuses the reduction into its producer and never allocates it, which is why the
+jitted column is fine and why the timing figure was never affected. Eagerly it
+must be materialised, and it is fatal. Since the fit driver runs the eager path
+by default (:mod:`~jaccpot.applications.density_reconstruction.fit` explains
+why), every fit and every forward-only diagnostic above N ~ 1e5 hit this.
+
+The two forms agree to **1.3e-16 relative L2** -- float64 round-off from a
+different reduction order, not a change of what is computed -- and the jitted
+cost is the same to 1%, so the full evaluation of ``N + M`` particles instead of
+``M`` targets is free in practice: the FMM's sweeps compute every particle's
+field regardless.
+
+:attr:`ForwardOperator.tracer_indices` is kept, because it is the honest
+description of which rows are tracers and is useful to a caller, but it is no
+longer on the evaluation path.
 """
 
 from __future__ import annotations
@@ -309,13 +342,22 @@ class ForwardOperator:
         -------
         jnp.ndarray
             ``(M, 3)`` accelerations at the tracer positions.
+
+        Notes
+        -----
+        Evaluates every particle and slices the contiguous tracer block rather
+        than passing ``target_indices``. The module docstring has the
+        measurement: the ``target_indices`` path materialises a dense
+        ``f64[M, N + M, 3]`` array eagerly and runs out of memory at N=262144,
+        while the slice does not, the two agree to 1.3e-16, and the jitted cost
+        is identical.
         """
-        return self.fmm.differentiable_accelerations(
+        accelerations = self.fmm.differentiable_accelerations(
             state,
             self.combined_positions(source_positions),
             self.masses(),
-            target_indices=self.tracer_indices,
         )
+        return accelerations[self.num_sources :]
 
     def evaluate(self: "ForwardOperator", source_positions: Any) -> jnp.ndarray:
         """Rebuild the topology from ``source_positions`` and evaluate.
@@ -334,6 +376,28 @@ class ForwardOperator:
             self.prepare(source_positions), jnp.asarray(source_positions)
         )
 
+    def leaf_blocks(self: "ForwardOperator", state: Any) -> Any:
+        """Return the frozen leaf partition the regularisers are built on.
+
+        Parameters
+        ----------
+        state : Any
+            Prepared state from :meth:`prepare`.
+
+        Returns
+        -------
+        Any
+            A :class:`~jaccpot.applications.density_reconstruction.loss.LeafBlocks`.
+            Exists so this operator and the distributed one are
+            interchangeable to ``run_fit``: the distributed path has no leaf
+            partition and returns ``None`` here instead.
+        """
+        from jaccpot.applications.density_reconstruction.loss import (
+            leaf_blocks_from_state,
+        )
+
+        return leaf_blocks_from_state(state, num_sources=self.num_sources)
+
     def record(self: "ForwardOperator") -> Dict[str, Any]:
         """Return the operator configuration for a results JSON.
 
@@ -350,6 +414,9 @@ class ForwardOperator:
             "leaf_size": int(self.leaf_size),
             "theta": None if self.theta is None else float(self.theta),
             "mac_type": self.mac_type,
+            # Named so it can never be confused with the distributed force
+            # evaluation, whose wall-clock is not comparable with this one's.
+            "sharding_mode": "single_device_or_parameter_sharding",
         }
 
 

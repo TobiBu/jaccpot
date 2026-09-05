@@ -15,15 +15,37 @@ with recovered-density agreement secondary and per-particle position error an
 explicitly degenerate tertiary diagnostic.
 """
 
+from jaccpot.applications.density_reconstruction.diagnostics import (
+    density_agreement,
+    field_residual,
+    moment_drift,
+    position_error,
+)
 from jaccpot.applications.density_reconstruction.forward import (
     ForwardOperator,
     assert_masses_frozen_and_equal,
     make_forward_operator,
 )
+from jaccpot.applications.density_reconstruction.loss import (
+    Regularization,
+    data_misfit,
+    leaf_blocks_from_state,
+    regularization_terms,
+    total_loss,
+)
+from jaccpot.applications.density_reconstruction.parameterize import (
+    ParametricParameterization,
+    PositionsParameterization,
+    initial_positions,
+    make_parameterization,
+)
 from jaccpot.applications.density_reconstruction.topology import (
-    RadixTopologyFingerprint,
+    ChurnRates,
+    RadixStructure,
     SwitchLog,
+    churn_between,
     fingerprint_prepared_state,
+    radix_structure,
 )
 from jaccpot.applications.density_reconstruction.truth import (
     GroundTruth,
@@ -31,12 +53,28 @@ from jaccpot.applications.density_reconstruction.truth import (
 )
 
 __all__ = [
+    "ChurnRates",
     "ForwardOperator",
     "GroundTruth",
-    "RadixTopologyFingerprint",
+    "ParametricParameterization",
+    "PositionsParameterization",
+    "RadixStructure",
+    "Regularization",
     "SwitchLog",
     "assert_masses_frozen_and_equal",
+    "churn_between",
+    "data_misfit",
+    "density_agreement",
+    "field_residual",
     "fingerprint_prepared_state",
+    "initial_positions",
+    "leaf_blocks_from_state",
     "make_forward_operator",
     "make_ground_truth",
+    "make_parameterization",
+    "moment_drift",
+    "position_error",
+    "radix_structure",
+    "regularization_terms",
+    "total_loss",
 ]

@@ -206,7 +206,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `leaves` | leaf nodes |
 | `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
 | `w` | leaf width (`max_leaf_size`) |
-| `sw` | the DECOUPLED lane's source-pool width, which is not the target block's `w` |
+| `sw` | a SOURCE-side width that genuinely differs from the target's `w` -- see below |
 | `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
@@ -217,6 +217,9 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `tbatch` | target leaves per scan step, i.e. `target_leaf_batch_size` |
 | `blockdim` | one solid-harmonic rotation block, square: `2*ell + 1` a side |
 | `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
+| `sh` | spherical-harmonic packed coefficients, `sh_size(p) == (p+1)**2` |
+| `degrees` | spherical-harmonic degrees of a per-degree summary, `p+1` of them |
+| `orders` | the candidate expansion orders an adaptive policy scores |
 | `levels` | block-step levels, `k_max + 1` of them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
@@ -232,18 +235,32 @@ and a re-measurement at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4 makes the 
 disappear. Both kernels read only `shape[1] * shape[2]` and flatten, so a table split the
 other way was accepted and returned a force wrong by rel-L2 9.9e-01.
 
-**`sw` exists because the obvious choice was measurably wrong.** `nearfield_mutual.py` shares
-one `w` between its `a` and `b` sides, and gives a reason: the kernel pads both to
-`_next_pow2` of the a-side count, so a wider `b` hands `jnp.pad` a negative width. Copying
-that to `_fast_lane.py`'s decoupled lane would have been a lie -- measured through interpret
-mode, a target width of 4 against a source pool padded to 8 with the extra slots masked off
-is **bit-identical** to the equal-width result, so a wider source pool is correctly ignored
-and asserting equality would reject a configuration that works (4.2: a wrong shape annotation
-is worse than none). The two widths therefore get their own names; each still binds across
-its own group of three arrays, which is measured, and nothing false is asserted about the
-pair. The reverse direction is a defect neither name can express -- a source pool *narrower*
-than the target block is accepted and returns NaN -- and is filed rather than papered over,
-because jaxtyping cannot say `sw >= w`.
+**`sw` MEANS A SOURCE WIDTH THAT GENUINELY DIFFERS, AND THE WAY IT WAS FIRST USED IS THE
+LESSON.** Its live user is `nearfield/grad.py`'s bucketed pair kernel, where the two widths
+really are independent -- `_pair_accel_cvjp` was observed with a target width of 5 beside a
+source width of 7, in one recorded call -- so `(pairs, w, 3)` against `(pairs, sw, 3)` asserts
+something true and nothing false.
+
+It was introduced somewhere else, and wrongly. `_fast_lane.py`'s decoupled lane got it on the
+strength of a measurement that a wider source pool is "correctly ignored", so asserting
+equality with the target's `w` would reject a working configuration. The measurement was wrong in the flattering direction: it padded the
+surplus source columns and **masked them off**, where they contribute nothing either way.
+Unmasked, they are silently dropped -- a target width of 4 against a source pool padded to 8
+with real, valid extra particles returns a force identical to ignoring them, rel-L2 0.0e+00.
+A plausible wrong number, recorded as a safe configuration, by a check designed to catch
+exactly that.
+
+That lane no longer uses `sw` -- `nearfield_leafpair_pallas_decoupled` enforces equal widths
+with a `ValueError`, so both of its sides are simply `w`. Two things follow, and they
+generalise past this axis. **A perturbation that the code masks
+off tests nothing** -- the same trap as the all-valid mask that made `srcslots` look
+interchangeable with `w` above, and it is worth building every such check so the perturbed
+value is one the code must actually read. And **an annotation is not the tool for a range
+constraint**: the real contract was `sw == w`, `nearfield_leafpair_pallas_decoupled` now
+enforces it with a `ValueError`, and once it is a contract both sides are simply `w`. Reach
+for a shape name when two axes genuinely differ -- `grad.py`'s bucketed pair kernel takes a
+target width of 5 beside a source width of 7 and needs one -- not to encode a bound
+jaxtyping cannot express.
 
 **`tbatch` is not `leaves`, and `tiles` is not `blocks`.** Both distinctions are measured, and
 both looked interchangeable before the capture. `_accumulate_target_block_tile_sequence` takes
@@ -266,6 +283,22 @@ None of the three is added to the flake8 `--builtins` list, because none is ever
 single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
 for `sw` and `srcslots`: both only ever appear beside another name.
 
+**`sh` is the axis `ct` was defined against**, and it took until
+`runtime/_adaptive_policy.py` to get a name because nothing had annotated a
+spherical-harmonic buffer before -- the note below says `C` means `sh_size(p)` *elsewhere in
+the package*, meaning in prose. `sh` is that count as an axis, lowercase like the rest, and
+named after the `sh_size` function it equals. Observed at 4, 16 and 25, i.e. p=1, 3 and 4. It
+carries `Inexact`, not `Float`: the complex basis is a live lane and a packed buffer on it is
+`c64`/`c128`, which is the subject of the dtype half of the capture-coverage note below.
+
+**`degrees` and `orders` are different axes and were observed differing**, which is the only
+reason they need separate names: `dehnen_paper_pair_error_by_order` takes `source_power` as
+`(pairs, degrees)` and `masked_binomial_by_order` as `(orders, degrees)` in the same
+signature, measured at `degrees` 3, 4, 5 against `orders` 1, 2, 3. The shared `degrees` is
+what makes the contraction between them valid, and it is exactly what the eight silent
+acceptances in that function would have broken. `orders` IS used as a single-identifier axis
+(`order_values`), so unlike `sh` and `degrees` it is in the flake8 `--builtins` list.
+
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
 `(p+1)(p+2)(p+3)/6`. The two agree only at p=1, which is how one symbol served both for so long.
@@ -278,6 +311,17 @@ annotation enforced. The shapes had been derived from 64 captured calls -- throu
 `test_near_field.py` and `tests/integration/`, neither of which enters that backend. **Capture
 coverage bounds annotation validity:** an axis equality observed in every call you recorded is
 only as strong as the lanes you recorded.
+
+**And the same bound applies to the dtype, which is the easier half to forget.**
+`runtime/_adaptive_policy.py`'s `multipole_packed` was annotated `Float[Array, "nodes sh"]`
+from a pilot recording taken entirely on the real basis. The complex basis hands the same
+parameter `c128[31,9]`, `c128[1,25]`, `c128[255,25]` and `c64[15,16]`, so the annotation
+rejected a supported lane and 27 tests failed in CI -- including
+`test_dehnen_power_is_basis_invariant`, whose whole point is that both bases agree, and the
+function's own docstring, which sums over the *complex* moments and branches on
+`jnp.iscomplexobj`. Two habits close this: read the body for a dtype branch before choosing
+between `Float` and `Inexact`, and check the *recording's provenance* -- a pilot replay is a
+measurement of the lanes in the recording and says nothing about the lanes outside it.
 
 **A named axis can be impossible even when the shape is known**, and this is the sharper case.
 `runtime/kernels/_evaluate.py`'s `nearfield_leaf_particle_indices` is measurably `(leaves, w)`

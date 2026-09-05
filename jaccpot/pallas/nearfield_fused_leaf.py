@@ -1076,6 +1076,38 @@ def nearfield_leafpair_pallas_decoupled(
     num_sources = int(source_positions.shape[0])
     num_source_slots = int(source_leaf_ids.shape[1])
 
+    # THE SOURCE POOL MUST BE EXACTLY AS WIDE AS THE TARGET BLOCK, and until this check
+    # existed neither violation said anything. The source gather tables' `BlockSpec`
+    # below is built from `leaf_width` -- the TARGET width -- so the kernel reads exactly
+    # that many columns from the source tables however many they have. Measured, interpret
+    # mode, float64:
+    #
+    #   source narrower   an out-of-bounds read; `|acc| = nan` at target 8 / source 4 and
+    #                     at target 16 / source 3
+    #   source wider      the surplus columns are NEVER READ, so real and valid source
+    #                     particles are dropped: target 4 against a source pool padded to
+    #                     8 with unmasked extra particles returns a force identical to
+    #                     ignoring them, rel-L2 0.0e+00
+    #
+    # The second is the worse one by this package's own ordering -- a plausible wrong
+    # number beats a NaN for damage -- and it was first recorded the wrong way round, as
+    # "a wider source pool is correctly ignored". That measurement had the surplus MASKED
+    # OFF, where it contributes nothing either way; unmasked, it is silently dropped.
+    #
+    # Equal widths is what the docstring already specifies (both tables are `W`) and what
+    # production passes: `distributed/fmm.py` slices its target block out of the source
+    # pool, and the F25 equivalence case passes the same array twice. So this rejects
+    # rather than pads: padding would invent a supported configuration, and section 9
+    # prefers refusing a request to quietly substituting one we can serve.
+    if int(source_positions.shape[1]) != leaf_width:
+        raise ValueError(
+            "source_positions must have the same leaf width as target_positions; got "
+            f"source width {int(source_positions.shape[1])} against target width "
+            f"{leaf_width}. The kernel reads exactly the target width from the source "
+            "gather tables, so a narrower pool reads out of bounds and a wider one "
+            "silently drops the surplus columns."
+        )
+
     if num_targets == 0 or leaf_width == 0 or num_source_slots == 0 or num_sources == 0:
         return jnp.zeros((num_targets, leaf_width, _OUT_WIDTH), dtype=dtype)
 

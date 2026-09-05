@@ -19,6 +19,7 @@ import datetime
 import json
 import pathlib
 import shutil
+import subprocess
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -99,6 +100,36 @@ FIGURES = [
         "fig_13_grad_correctness.ipynb",
         "differentiability/grad_correctness.json",
     ),
+    (
+        "fig16_gradient_cost_vs_nparams",
+        "16",
+        "fig_16_gradient_cost_vs_nparams.ipynb",
+        "density_reconstruction/gradient_cost_vs_nparams.json",
+    ),
+    (
+        "fig17_reconstruction_quality",
+        "17",
+        "fig_17_reconstruction_quality.ipynb",
+        "density_reconstruction/reconstruction_runs.json",
+    ),
+    (
+        "fig18_convergence_and_degeneracy",
+        "18",
+        "fig_18_convergence_and_degeneracy.ipynb",
+        "density_reconstruction/reconstruction_runs.json",
+    ),
+    (
+        "fig19_topology_switching",
+        "19",
+        "fig_19_topology_switching.ipynb",
+        "density_reconstruction/topology_switching.json",
+    ),
+    (
+        "fig20_multigpu_reconstruction_scaling",
+        "20",
+        "fig_20_multigpu_reconstruction_scaling.ipynb",
+        "density_reconstruction/multigpu_scaling.json",
+    ),
 ]
 
 HEADER = """# Figure provenance
@@ -122,6 +153,15 @@ traceable only to someone's recollection.
 Every row's `Measured at` is the commit the *benchmark* ran on, and `Dirty` flags
 a working tree that had uncommitted changes when it ran -- a dirty run is not
 fully described by its commit and should be regenerated before submission.
+
+`Dirty` counts changes to **source**, not to `bench/results/`. Several benches
+rewrite their own tracked artifact after every measured point, so that a sweep
+interrupted after hours still leaves something usable; the side effect is that
+two sweeps running at once each see the other's output as a dirty tree. Marking
+a figure unfit because a *different* figure's data was being written would say
+nothing about whether this row's commit describes the code that produced it.
+Artifacts written before `git_dirty_sources` existed fall back to the
+whole-tree flag.
 
 """
 
@@ -147,6 +187,118 @@ def _config_summary(config: dict) -> str:
     return "<br>".join(parts) if parts else "-"
 
 
+def _existing_dates(readme: pathlib.Path) -> dict[str, tuple[str, str]]:
+    """Read ``{figure label: (sha, date)}`` out of a table already written.
+
+    Parameters
+    ----------
+    readme : pathlib.Path
+        An existing ``figures/README.md``, or a path that does not exist.
+
+    Returns
+    -------
+    dict[str, tuple[str, str]]
+        Label to the commit and date its row records. Empty when there is no
+        table yet or it cannot be parsed -- a malformed row is skipped rather
+        than guessed at.
+    """
+    if not readme.exists():
+        return {}
+    out: dict[str, tuple[str, str]] = {}
+    for line in readme.read_text().splitlines():
+        if not line.startswith("| "):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 9 or not cells[0].isdigit():
+            continue
+        out[cells[0]] = (cells[4].strip("`"), cells[8])
+    return out
+
+
+def _commit_date(sha: str) -> str:
+    """Return the commit date of ``sha``, or an empty string.
+
+    Parameters
+    ----------
+    sha : str
+        A commit hash recorded in an artifact.
+
+    Returns
+    -------
+    str
+        ``YYYY-MM-DD``, or ``""`` when the commit is unknown to this checkout.
+
+    Notes
+    -----
+    A weaker source than a timestamp the run wrote down -- a measurement can be
+    taken long after the commit it ran at -- but far better than the artifact
+    file's mtime, which in a fresh worktree is the checkout time and therefore
+    identical for every figure. This is stable across checkouts, which is the
+    property the table needs.
+    """
+    if not sha or sha == "?":
+        return ""
+    try:
+        out = subprocess.run(
+            ["git", "show", "-s", "--format=%cs", sha],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:  # pragma: no cover
+        return ""
+    line = out.stdout.strip().splitlines()
+    return line[0] if line and out.returncode == 0 else ""
+
+
+def _measurement_date(
+    meta: dict,
+    art_path: pathlib.Path,
+    previous: tuple[str, str] | None,
+    sha: str,
+) -> str:
+    """Return the date a measurement was taken, most trustworthy source first.
+
+    Parameters
+    ----------
+    meta : dict
+        The artifact's ``meta`` block.
+    art_path : pathlib.Path
+        The artifact, used only for the last-resort mtime.
+    previous : tuple[str, str] | None
+        The ``(sha, date)`` the existing table records for this figure, if any.
+    sha : str
+        The commit this artifact records.
+
+    Returns
+    -------
+    str
+        ``YYYY-MM-DD``.
+
+    Notes
+    -----
+    The mtime is the WEAKEST source and used to be the only one. It is the
+    checkout time in a fresh worktree, so exporting from a different checkout
+    rewrote every figure's date to the day that tree was created -- observed
+    here as thirteen rows moving from 2026-08-16/22 to 2026-09-03 with nothing
+    else about them changing. Preferred instead: the timestamp the run wrote
+    into the artifact, and failing that the date already in the table for the
+    SAME commit, which is a record of when that artifact was actually measured.
+    """
+    recorded = str(meta.get("measured_at", ""))
+    if recorded:
+        return recorded[:10]
+    if previous and previous[0] == sha and previous[1]:
+        return previous[1]
+    committed = _commit_date(sha)
+    if committed:
+        return committed
+    return datetime.datetime.fromtimestamp(art_path.stat().st_mtime).strftime(
+        "%Y-%m-%d"
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -163,6 +315,7 @@ def main() -> int:
         return 1
 
     pdf_src = REPO_ROOT / "bench" / "results" / "figures"
+    previous_dates = _existing_dates(figures_dir / "README.md")
     rows: list[str] = []
     copied = missing = 0
 
@@ -190,11 +343,20 @@ def main() -> int:
         copied += 1
 
         sha = str(meta.get("git_sha", ""))[:12] or "?"
-        dirty = "**yes**" if meta.get("git_dirty") else "no"
+        # Prefer git_dirty_sources, which is what this column has always MEANT:
+        # the header says a dirty run "is not fully described by its commit",
+        # and a rewritten results JSON does not affect that. Several benches now
+        # rewrite their tracked artifact after every point, so two sweeps
+        # running side by side each see the other's output and both set
+        # git_dirty -- which would flag every section-7 figure as unfit from a
+        # clean checkout. Artifacts written before that field existed fall back
+        # to the old flag.
+        if "git_dirty_sources" in meta:
+            dirty = "**yes**" if meta.get("git_dirty_sources") else "no"
+        else:
+            dirty = "**yes**" if meta.get("git_dirty") else "no"
         device = str(config.get("device", "?"))
-        date = datetime.datetime.fromtimestamp(art_path.stat().st_mtime).strftime(
-            "%Y-%m-%d"
-        )
+        date = _measurement_date(meta, art_path, previous_dates.get(label), sha)
         rows.append(
             f"| {label} | `{stem}.pdf` | `examples/jaccpot_paper/{notebook}` "
             f"| `bench/results/{artifact}` | `{sha}` | {dirty} | {device} "

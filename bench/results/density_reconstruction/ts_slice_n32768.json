@@ -1,0 +1,1803 @@
+{
+  "config": {
+    "n": [
+      32768
+    ],
+    "theta": 0.5,
+    "order": 4,
+    "basis": "solidfmm",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float64",
+    "M": 2048,
+    "leaf_size": 64,
+    "softening": 0.01,
+    "iterations": 24,
+    "cadences": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "learning_rates": [
+      0.0005,
+      0.002,
+      0.008
+    ],
+    "intensive_every": 1,
+    "near_set_sample": 128,
+    "merged_from": [
+      "density_reconstruction/ts_slice_n32768.json"
+    ]
+  },
+  "meta": {
+    "git_sha": "e8f576ec3f008cc1413d5cfd278e9b1d132e88af",
+    "git_branch": "feat/density-reconstruction-payoff",
+    "git_dirty": false,
+    "git_dirty_sources": false,
+    "git_dirty_source_paths": [],
+    "jax_version": "0.10.2",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "0"
+  },
+  "data": {
+    "records": [
+      {
+        "N": 32768,
+        "M": 2048,
+        "num_free_parameters": 98304,
+        "rebuild_cadence": 1,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.007218327060726172,
+        "final_loss": 0.0005368326829432082,
+        "loss_ratio": 0.07437078957865927,
+        "field_residual_before": {
+          "rel_l2": 0.08496073834852293,
+          "rms": 0.024861149922063733,
+          "max_abs": 0.9505706997914153,
+          "mean_abs": 0.00554960227423818,
+          "observed_rms": 0.2926192780961861,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.023640447987043893,
+          "rms": 0.006917650823839221,
+          "max_abs": 0.1381806689021931,
+          "mean_abs": 0.0028026719117794007,
+          "observed_rms": 0.2926192780961861,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 24,
+            "comparisons": 23,
+            "switches": 23,
+            "interaction_switches": 23,
+            "switch_rate": 1.0,
+            "unique_topologies": 24,
+            "changed_components": {
+              "permutation": 23,
+              "tree_shape": 23,
+              "node_ranges": 23,
+              "far_pairs": 23,
+              "near_pairs": 23
+            }
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 23,
+            "mean": {
+              "slot_churn": 0.8380766963714833,
+              "mean_rank_shift_fraction": 0.00046370824656307883,
+              "leaf_churn": 0.8743606138107418,
+              "near_source_count_churn": 0.7613828224904091,
+              "near_set_churn": 0.05473487240123314,
+              "near_pair_churn": 0.9900810198694563,
+              "far_pair_churn": 0.9940465967132986
+            }
+          }
+        },
+        "timing": {
+          "wall_seconds": 2203.890017354861,
+          "totals_seconds": {
+            "prepare": 282.2848340664059,
+            "gradient": 1882.9780808184296,
+            "update": 1.200010604225099
+          },
+          "first_iteration_seconds": {
+            "prepare": 22.012717936187983,
+            "gradient": 162.615276128985,
+            "update": 0.5687443753704429
+          },
+          "mean_later_gradient_seconds": 74.79838281258455,
+          "mean_later_prepare_seconds": 11.316178962183388,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2926192780961861
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.007218327060726172,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00057591308572789
+          },
+          {
+            "iteration": 1,
+            "loss": 0.0055231804125157645,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0004759106588109882
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004103370429198805,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0003808903580264417
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0029648620672714523,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0002916646985807775
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002109397751684422,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00020650876299000605
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0015242754592396063,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00012684122393364071
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0012010558712944937,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.8257676483640936e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.001083184924298504,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.067942521754326e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.001117841769535275,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.50564375572467e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.001236497065595603,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00012692717138055803
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0013391748578707738,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00015634816260960149
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0014033143160446565,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00017225132086367984
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0014031634769160269,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00017580819803343647
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0013199703171658706,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001690301527897385
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0011920581246279963,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00015434124491638663
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0010390385309726096,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00013393817192352672
+          },
+          {
+            "iteration": 16,
+            "loss": 0.000879808871964184,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00010972527130497111
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007393551419703869,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.328719301775921e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0006276815028585708,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.600954850946545e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0005517611112443916,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.9702910950885008e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.000513244468431498,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.10174127476098e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.0005052851360140686,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.4038436182119902e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0005166012433678341,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.2470675471084595e-05
+          },
+          {
+            "iteration": 23,
+            "loss": 0.0005368326829432082,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.744832884e-05
+          }
+        ],
+        "loss_continuity": {
+          "max_relative_jump": 0.008626467830931479,
+          "median_relative_jump": 0.0009035963671984341,
+          "median_step_improvement": 0.00011787094699598983,
+          "jump_over_step_improvement": 0.05533555363345155
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 1.457401650723159e-07,
+          "pinned_median_rel": 2.63440770874769e-08,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.015461385567629356,
+          "gradient_delta_across_rebuild": 1.414745736828877e-05,
+          "gradient_delta_rel_across_rebuild": 0.0009150187288459138,
+          "gradient_cosine_across_rebuild": 0.9999995856531828,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 5033.954792630268,
+            "median_rel_at_10eps": 503.39530719654476,
+            "ratio": 10.000003418118515,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 32768,
+        "M": 2048,
+        "num_free_parameters": 98304,
+        "rebuild_cadence": 1,
+        "learning_rate": 0.002,
+        "iterations": 24,
+        "initial_loss": 0.007218327060726138,
+        "final_loss": 0.00017189620616431912,
+        "loss_ratio": 0.023813856689811307,
+        "field_residual_before": {
+          "rel_l2": 0.08496073834852269,
+          "rms": 0.024861149922063664,
+          "max_abs": 0.9505706997914115,
+          "mean_abs": 0.0055496022742381815,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.014534887522717681,
+          "rms": 0.004253188294106911,
+          "max_abs": 0.12074112545187042,
+          "mean_abs": 0.0014107993921062142,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 24,
+            "comparisons": 23,
+            "switches": 23,
+            "interaction_switches": 23,
+            "switch_rate": 1.0,
+            "unique_topologies": 24,
+            "changed_components": {
+              "permutation": 23,
+              "tree_shape": 23,
+              "node_ranges": 23,
+              "far_pairs": 23,
+              "near_pairs": 23
+            }
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 23,
+            "mean": {
+              "slot_churn": 0.9018692055626599,
+              "mean_rank_shift_fraction": 0.0009951968111991164,
+              "leaf_churn": 0.9397378516624038,
+              "near_source_count_churn": 0.788361922554348,
+              "near_set_churn": 0.07641237542495807,
+              "near_pair_churn": 0.9975848956861596,
+              "far_pair_churn": 0.998806978629677
+            }
+          }
+        },
+        "timing": {
+          "wall_seconds": 2138.192104955204,
+          "totals_seconds": {
+            "prepare": 276.10284511744976,
+            "gradient": 1821.5473579308018,
+            "update": 0.6067995131015778
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.607558447867632,
+            "gradient": 58.73449613433331,
+            "update": 0.05101378168910742
+          },
+          "mean_later_gradient_seconds": 76.64403746941167,
+          "mean_later_prepare_seconds": 11.93457768128618,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29261927809618604
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.007218327060726138,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0005759130857278872
+          },
+          {
+            "iteration": 1,
+            "loss": 0.0020870630140348307,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00020358597000672292
+          },
+          {
+            "iteration": 2,
+            "loss": 0.001256053888490849,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00011678895589863993
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0022913537252419484,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00028750635286344493
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002192672987501697,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0002839281321671642
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0013348874912743444,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00018544691045388825
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0006596334125348208,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.132184206293463e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.0005029743067914943,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.9282224209929748e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0006996155114773582,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.71119414643372e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0009384244024828326,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00010045232288546964
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0009997584705605303,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00010313531829289785
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0008550081871880966,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 9.096621557704387e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0005957230470465574,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.824277885598523e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.00035525205441230574,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.891371667114061e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0002342967062893357,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.319665640466723e-06
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0002544435103827524,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.5273290068270845e-05
+          },
+          {
+            "iteration": 16,
+            "loss": 0.00035644419046281515,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.8745203352552714e-05
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0004434457337933459,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.163121639339208e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.00045064762052446675,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.237408551276657e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.00037413633127894683,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.2454277385698594e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.00026656071798132104,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.552099705774285e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.00018073592791131984,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.7222361955725502e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.00015028203680279124,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.204648573919105e-06
+          },
+          {
+            "iteration": 23,
+            "loss": 0.00017189620616431912,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.935894322335485e-05
+          }
+        ],
+        "loss_continuity": {
+          "max_relative_jump": 0.010437042336025536,
+          "median_relative_jump": 0.00227561885745736,
+          "median_step_improvement": 0.00012095534812297002,
+          "jump_over_step_improvement": 0.13580351289620857
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 7.419406207553867e-08,
+          "pinned_median_rel": 2.4701750488719622e-08,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.015461385567629316,
+          "gradient_delta_across_rebuild": 1.718664952007021e-05,
+          "gradient_delta_rel_across_rebuild": 0.001111585339159576,
+          "gradient_cosine_across_rebuild": 0.9999993836917725,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 7573.489658310864,
+            "median_rel_at_10eps": 757.3483928207229,
+            "ratio": 10.00000756600752,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 32768,
+        "M": 2048,
+        "num_free_parameters": 98304,
+        "rebuild_cadence": 1,
+        "learning_rate": 0.008,
+        "iterations": 24,
+        "initial_loss": 0.00721832706072616,
+        "final_loss": 0.0004000354224325904,
+        "loss_ratio": 0.055419409382143875,
+        "field_residual_before": {
+          "rel_l2": 0.08496073834852261,
+          "rms": 0.024861149922063643,
+          "max_abs": 0.9505706997914102,
+          "mean_abs": 0.0055496022742381815,
+          "observed_rms": 0.2926192780961861,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.018956251378351233,
+          "rms": 0.00554696459374297,
+          "max_abs": 0.23512845054304446,
+          "mean_abs": 0.0010613828042048963,
+          "observed_rms": 0.2926192780961861,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 24,
+            "comparisons": 23,
+            "switches": 23,
+            "interaction_switches": 23,
+            "switch_rate": 1.0,
+            "unique_topologies": 24,
+            "changed_components": {
+              "permutation": 23,
+              "tree_shape": 23,
+              "node_ranges": 23,
+              "far_pairs": 23,
+              "near_pairs": 23
+            }
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 23,
+            "mean": {
+              "slot_churn": 0.9342056625639384,
+              "mean_rank_shift_fraction": 0.002544687944586983,
+              "leaf_churn": 0.9711476982097185,
+              "near_source_count_churn": 0.8347960957480819,
+              "near_set_churn": 0.10648209660456537,
+              "near_pair_churn": 0.9993530502455227,
+              "far_pair_churn": 0.999793683033433
+            }
+          }
+        },
+        "timing": {
+          "wall_seconds": 2079.937730831094,
+          "totals_seconds": {
+            "prepare": 289.5924954172224,
+            "gradient": 1751.0407471768558,
+            "update": 0.6187709923833609
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.7776851849630475,
+            "gradient": 56.893518321216106,
+            "update": 0.058923810720443726
+          },
+          "mean_later_gradient_seconds": 73.65857516763651,
+          "mean_later_prepare_seconds": 12.51368740140258,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2926192780961861
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.00721832706072616,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0005759130857278887
+          },
+          {
+            "iteration": 1,
+            "loss": 0.013270954195716375,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.000949796315991781
+          },
+          {
+            "iteration": 2,
+            "loss": 0.0014285353104843542,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00011787843904630648
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0022217350092351477,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00011443710314168386
+          },
+          {
+            "iteration": 4,
+            "loss": 0.0043156328110312515,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001331635145571963
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0039031289081509868,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.000110917374047743
+          },
+          {
+            "iteration": 6,
+            "loss": 0.002049326456152511,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.277021906433221e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.0005588376172314613,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.8800806337147706e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.00042833486415170543,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.8588641244737032e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0012752836822407202,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 6.084996776336501e-05
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0018171206836226756,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 7.09967380539735e-05
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0014404566287352608,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.919945956794103e-05
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0006623945650646977,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.520083141274722e-05
+          },
+          {
+            "iteration": 13,
+            "loss": 0.00019889505135667912,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.4914593433054338e-05
+          },
+          {
+            "iteration": 14,
+            "loss": 0.00025347252214141314,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.8869345437520888e-05
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0005817526572187259,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.9000745065243402e-05
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008364455131137789,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.3197328584285466e-05
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0008238256088824665,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 3.166609191657621e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0005641039457196501,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.4972798754272526e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.00025742745466672475,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.548245047858095e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 8.691757731593975e-05,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 9.120312000481932e-06
+          },
+          {
+            "iteration": 21,
+            "loss": 0.00012854608035403706,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.2448409074034084e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0002916861622700088,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.8985876409168527e-05
+          },
+          {
+            "iteration": 23,
+            "loss": 0.0004000354224325904,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 2.2123331882484797e-05
+          }
+        ],
+        "loss_continuity": {
+          "max_relative_jump": 0.016226971190353854,
+          "median_relative_jump": 0.0011180910767776319,
+          "median_step_improvement": 0.0003766640548874148,
+          "jump_over_step_improvement": 0.02142691072094146
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 4.4677923536219564e-07,
+          "pinned_median_rel": 2.2758247814634212e-08,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.01546138556762927,
+          "gradient_delta_across_rebuild": 1.734735907534629e-05,
+          "gradient_delta_rel_across_rebuild": 0.0011219795922860622,
+          "gradient_cosine_across_rebuild": 0.9999993709166352,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 3850.9932203244107,
+            "median_rel_at_10eps": 385.09846401791935,
+            "ratio": 10.000022280393248,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 32768,
+        "M": 2048,
+        "num_free_parameters": 98304,
+        "rebuild_cadence": 2,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.007218327060726134,
+        "final_loss": 0.0005373249606849843,
+        "loss_ratio": 0.07443898789353715,
+        "field_residual_before": {
+          "rel_l2": 0.08496073834852266,
+          "rms": 0.024861149922063654,
+          "max_abs": 0.9505706997914108,
+          "mean_abs": 0.0055496022742381815,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.023649714421991045,
+          "rms": 0.006920362361343978,
+          "max_abs": 0.13817181295894573,
+          "mean_abs": 0.0028069325190677756,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 12,
+            "comparisons": 11,
+            "switches": 11,
+            "interaction_switches": 11,
+            "switch_rate": 1.0,
+            "unique_topologies": 12,
+            "changed_components": {
+              "permutation": 11,
+              "tree_shape": 11,
+              "node_ranges": 11,
+              "far_pairs": 11,
+              "near_pairs": 11
+            }
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 11,
+            "mean": {
+              "slot_churn": 0.8951683656417111,
+              "mean_rank_shift_fraction": 0.0009311585727822449,
+              "leaf_churn": 0.9314839572192515,
+              "near_source_count_churn": 0.7987184575534758,
+              "near_set_churn": 0.07704127974454701,
+              "near_pair_churn": 0.9971939450004697,
+              "far_pair_churn": 0.9988836829357358
+            }
+          }
+        },
+        "timing": {
+          "wall_seconds": 1557.2649547467008,
+          "totals_seconds": {
+            "prepare": 135.207068933174,
+            "gradient": 1401.800371479243,
+            "update": 1.134586381725967
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.895724686793983,
+            "gradient": 48.51277354359627,
+            "update": 0.055927667766809464
+          },
+          "mean_later_gradient_seconds": 58.838591214593336,
+          "mean_later_prepare_seconds": 12.119213113307275,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29261927809618604
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.007218327060726134,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0005759130857278871
+          },
+          {
+            "iteration": 1,
+            "loss": 0.005519379444213839,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0004758628883801969
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004103345439463814,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0003808881255450562
+          },
+          {
+            "iteration": 3,
+            "loss": 0.002964816873673717,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00029164219470918015
+          },
+          {
+            "iteration": 4,
+            "loss": 0.0021093689639963805,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00020651542449892375
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0015262441009198898,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012686872617374633
+          },
+          {
+            "iteration": 6,
+            "loss": 0.001200542510745549,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.8300407914801716e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.001083347361473741,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.076686022308757e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0011242375369296378,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.503889436474946e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.001235173715195041,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012680804800419392
+          },
+          {
+            "iteration": 10,
+            "loss": 0.00133934927730578,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00015632000041463398
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0014040442081089224,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00017225282634153073
+          },
+          {
+            "iteration": 12,
+            "loss": 0.001410057222819339,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001758039860163727
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0013336857051355607,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00016903938237523632
+          },
+          {
+            "iteration": 14,
+            "loss": 0.001192208487014632,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00015434391631193077
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0010377017499183766,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00013394820817688008
+          },
+          {
+            "iteration": 16,
+            "loss": 0.000880118402113263,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00010973323199357722
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007390132540312144,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 8.328739530640991e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0006291352978957658,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 5.603417307883187e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0005542296523628166,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.9696095302171914e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0005132804696490103,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.103198024110689e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.000504302305424307,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.4025088391646963e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0005165117674640591,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 4.247893575769081e-05
+          },
+          {
+            "iteration": 23,
+            "loss": 0.0005373249606849843,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.7475448374377904e-05
+          }
+        ],
+        "loss_continuity": {
+          "max_relative_jump": 0.011386917715645128,
+          "median_relative_jump": 0.003697888775807343,
+          "median_step_improvement": 0.00011093617826540315,
+          "jump_over_step_improvement": 0.24061195396605795
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 1.2939185487236945e-07,
+          "pinned_median_rel": 2.1316432497375096e-08,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.015461385567629302,
+          "gradient_delta_across_rebuild": 3.1607561932772426e-05,
+          "gradient_delta_rel_across_rebuild": 0.0020442903900506518,
+          "gradient_cosine_across_rebuild": 0.9999979160010454,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 4583.825893794424,
+            "median_rel_at_10eps": 458.3815903330458,
+            "ratio": 10.000021795081166,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 32768,
+        "M": 2048,
+        "num_free_parameters": 98304,
+        "rebuild_cadence": 4,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.00721832706072613,
+        "final_loss": 0.000536411679563426,
+        "loss_ratio": 0.07431246534698659,
+        "field_residual_before": {
+          "rel_l2": 0.08496073834852269,
+          "rms": 0.024861149922063664,
+          "max_abs": 0.9505706997914115,
+          "mean_abs": 0.0055496022742381815,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.023637611811083294,
+          "rms": 0.006916820904077076,
+          "max_abs": 0.13818180900212482,
+          "mean_abs": 0.002806162379829192,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 6,
+            "comparisons": 5,
+            "switches": 5,
+            "interaction_switches": 5,
+            "switch_rate": 1.0,
+            "unique_topologies": 6,
+            "changed_components": {
+              "permutation": 5,
+              "tree_shape": 5,
+              "node_ranges": 5,
+              "far_pairs": 5,
+              "near_pairs": 5
+            }
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 5,
+            "mean": {
+              "slot_churn": 0.9386029411764707,
+              "mean_rank_shift_fraction": 0.0019006118642417615,
+              "leaf_churn": 0.9643382352941178,
+              "near_source_count_churn": 0.8185317095588236,
+              "near_set_churn": 0.09174543561887069,
+              "near_pair_churn": 0.9992854922240643,
+              "far_pair_churn": 0.999734002386349
+            }
+          }
+        },
+        "timing": {
+          "wall_seconds": 1403.0441495636478,
+          "totals_seconds": {
+            "prepare": 64.3916723774746,
+            "gradient": 1327.3583487803116,
+            "update": 1.4385108444839716
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.5693307686597109,
+            "gradient": 43.76543565746397,
+            "update": 0.06917739100754261
+          },
+          "mean_later_gradient_seconds": 55.808387527080335,
+          "mean_later_prepare_seconds": 12.564468321762979,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29261927809618604
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.00721832706072613,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0005759130857278876
+          },
+          {
+            "iteration": 1,
+            "loss": 0.005519379444213866,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.000475862888380199
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004100149563541903,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0003808610828157915
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0029619695022498568,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0002916286878449737
+          },
+          {
+            "iteration": 4,
+            "loss": 0.0021087538783246935,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00020649383082911468
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0015255567940447435,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012681806524840345
+          },
+          {
+            "iteration": 6,
+            "loss": 0.001195388040336275,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.8248565328105206e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.0010779862700733651,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.06985347323451e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0011099899937294863,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.505198839129758e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0012213285709945466,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012684702458563604
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0013357071298212217,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0001562711588310431
+          },
+          {
+            "iteration": 11,
+            "loss": 0.0014010306283428337,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.000172205373136572
+          },
+          {
+            "iteration": 12,
+            "loss": 0.001395846965059652,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00017583410221001095
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0013196345333452537,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00016906243121637477
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0011920321636220085,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015436550464438615
+          },
+          {
+            "iteration": 15,
+            "loss": 0.001037310235486112,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00013396549841695676
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008794474853307001,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0001097374518124946
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007382400045351945,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 8.328531507625817e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0006270249533706784,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.6030502035969624e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.000552144030171137,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.968028976135645e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0005129124730628141,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 1.1015166907823946e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.0005040413502883561,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.400625503898636e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0005155659579053889,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.2449708447455485e-05
+          },
+          {
+            "iteration": 23,
+            "loss": 0.000536411679563426,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.74525536116631e-05
+          }
+        ],
+        "loss_continuity": {
+          "max_relative_jump": 0.002192932742679956,
+          "median_relative_jump": 0.0009083602046361389,
+          "median_step_improvement": 0.00011437855882667509,
+          "jump_over_step_improvement": 0.057325788270752326
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 2.5699270031146077e-07,
+          "pinned_median_rel": 2.4817379016211802e-08,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.015461385567629257,
+          "gradient_delta_across_rebuild": 1.519630318688841e-05,
+          "gradient_delta_rel_across_rebuild": 0.0009828551988706731,
+          "gradient_cosine_across_rebuild": 0.9999995183233295,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 6513.480482290532,
+            "median_rel_at_10eps": 651.3476167722974,
+            "ratio": 10.000006624062861,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 32768,
+        "M": 2048,
+        "num_free_parameters": 98304,
+        "rebuild_cadence": 8,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.0072183270607261586,
+        "final_loss": 0.0005367894720917438,
+        "loss_ratio": 0.07436480330911234,
+        "field_residual_before": {
+          "rel_l2": 0.08496073834852275,
+          "rms": 0.024861149922063685,
+          "max_abs": 0.9505706997914126,
+          "mean_abs": 0.00554960227423818,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.023638657410444696,
+          "rms": 0.006917126866607386,
+          "max_abs": 0.13818945741921454,
+          "mean_abs": 0.002808064290830121,
+          "observed_rms": 0.29261927809618604,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 3,
+            "comparisons": 2,
+            "switches": 2,
+            "interaction_switches": 2,
+            "switch_rate": 1.0,
+            "unique_topologies": 3,
+            "changed_components": {
+              "permutation": 2,
+              "tree_shape": 2,
+              "node_ranges": 2,
+              "far_pairs": 2,
+              "near_pairs": 2
+            }
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 2,
+            "mean": {
+              "slot_churn": 0.9454991957720589,
+              "mean_rank_shift_fraction": 0.0039321996761440825,
+              "leaf_churn": 0.9806985294117647,
+              "near_source_count_churn": 0.8352768841911764,
+              "near_set_churn": 0.11410854914463858,
+              "near_pair_churn": 0.9997805568884146,
+              "far_pair_churn": 1.0
+            }
+          }
+        },
+        "timing": {
+          "wall_seconds": 1330.4815558083355,
+          "totals_seconds": {
+            "prepare": 28.426966763101518,
+            "gradient": 1295.6299227094278,
+            "update": 1.5124465664848685
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.675152468495071,
+            "gradient": 53.17901534959674,
+            "update": 0.043609561398625374
+          },
+          "mean_later_gradient_seconds": 54.01960466781874,
+          "mean_later_prepare_seconds": 13.375907147303224,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29261927809618604
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.0072183270607261586,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0005759130857278888
+          },
+          {
+            "iteration": 1,
+            "loss": 0.00551937944421387,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00047586288838019923
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004100149563541928,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00038086108281579407
+          },
+          {
+            "iteration": 3,
+            "loss": 0.002961969502249864,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0002916286878449747
+          },
+          {
+            "iteration": 4,
+            "loss": 0.002104969977850542,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0002064637764318969
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0015222656358242176,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012678084345539296
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0011926126648704593,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.81946923965723e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.001075718255280432,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.066395752982029e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0011113399137908158,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 8.511385015845471e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0012225881451972593,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0001268965720974217
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0013368122321920923,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015630507803002182
+          },
+          {
+            "iteration": 11,
+            "loss": 0.001401940795333424,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00017222432972347157
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0013952845251713607,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00017574958012136108
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0013193247328558999,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00016897931840971833
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0011920144051860112,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015428888124851428
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0010375861879241542,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0001338975826048276
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008792233365108365,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00010970154152844647
+          },
+          {
+            "iteration": 17,
+            "loss": 0.0007380471568742863,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 8.325102510097091e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0006268678671649264,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.599453175708987e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.0005520284266774746,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.9636417912358137e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0005131464783890058,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.0882248084865554e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.0005043015273181859,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.3968676086737855e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.0005158783754021775,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.243376623115502e-05
+          },
+          {
+            "iteration": 23,
+            "loss": 0.0005367894720917438,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.743826222761368e-05
+          }
+        ],
+        "loss_continuity": {
+          "max_relative_jump": 0.0008931453178312272,
+          "median_relative_jump": 0.0007655008290965613,
+          "median_step_improvement": 0.000114224086994833,
+          "jump_over_step_improvement": 0.048375395199490405
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 1.1419372938618504e-07,
+          "pinned_median_rel": 1.496871428872071e-08,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.015461385567629342,
+          "gradient_delta_across_rebuild": 1.1182599381356362e-05,
+          "gradient_delta_rel_across_rebuild": 0.0007232598483779331,
+          "gradient_cosine_across_rebuild": 0.9999997384973663,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 373.87579660378003,
+            "median_rel_at_10eps": 37.387660810013095,
+            "ratio": 9.999978295075612,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      },
+      {
+        "N": 32768,
+        "M": 2048,
+        "num_free_parameters": 98304,
+        "rebuild_cadence": 16,
+        "learning_rate": 0.0005,
+        "iterations": 24,
+        "initial_loss": 0.007218327060726143,
+        "final_loss": 0.0005367236724958223,
+        "loss_ratio": 0.07435568767949806,
+        "field_residual_before": {
+          "rel_l2": 0.08496073834852275,
+          "rms": 0.024861149922063685,
+          "max_abs": 0.9505706997914126,
+          "mean_abs": 0.0055496022742381815,
+          "observed_rms": 0.2926192780961861,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "field_residual_after": {
+          "rel_l2": 0.023636427113090514,
+          "rms": 0.006916474238605665,
+          "max_abs": 0.1381936834571517,
+          "mean_abs": 0.0028046461096156994,
+          "observed_rms": 0.2926192780961861,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "switch_summary": {
+          "switch_metric": "radix_topology_excluding_morton_codes",
+          "content_key": "additive_multiset_splitmix64",
+          "extensive": {
+            "observations": 2,
+            "comparisons": 1,
+            "switches": 1,
+            "interaction_switches": 1,
+            "switch_rate": 1.0,
+            "unique_topologies": 2,
+            "changed_components": {
+              "permutation": 1,
+              "tree_shape": 1,
+              "node_ranges": 1,
+              "far_pairs": 1,
+              "near_pairs": 1
+            }
+          },
+          "intensive": {
+            "measured": true,
+            "every": 1,
+            "near_set_sample": 128,
+            "comparisons": 1,
+            "mean": {
+              "slot_churn": 0.9721966911764706,
+              "mean_rank_shift_fraction": 0.00760659709521231,
+              "leaf_churn": 0.9926470588235294,
+              "near_source_count_churn": 0.8453010110294118,
+              "near_set_churn": 0.1236702115605793,
+              "near_pair_churn": 0.999976206810404,
+              "far_pair_churn": 1.0
+            }
+          }
+        },
+        "timing": {
+          "wall_seconds": 1277.8326354669407,
+          "totals_seconds": {
+            "prepare": 14.959361142478883,
+            "gradient": 1257.8568702396005,
+            "update": 1.7086043767631054
+          },
+          "first_iteration_seconds": {
+            "prepare": 1.6962305717170238,
+            "gradient": 56.843349852599204,
+            "update": 0.06593776680529118
+          },
+          "mean_later_gradient_seconds": 52.21797914726093,
+          "mean_later_prepare_seconds": 13.26313057076186,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2926192780961861
+        },
+        "loss_trace": [
+          {
+            "iteration": 0,
+            "loss": 0.007218327060726143,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.0005759130857278882
+          },
+          {
+            "iteration": 1,
+            "loss": 0.005519379444213849,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0004758628883801979
+          },
+          {
+            "iteration": 2,
+            "loss": 0.004100149563541919,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0003808610828157937
+          },
+          {
+            "iteration": 3,
+            "loss": 0.0029619695022498585,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.0002916286878449742
+          },
+          {
+            "iteration": 4,
+            "loss": 0.0021049699778505344,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00020646377643189522
+          },
+          {
+            "iteration": 5,
+            "loss": 0.0015222656358242163,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012678084345539293
+          },
+          {
+            "iteration": 6,
+            "loss": 0.0011926126648704564,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.8194692396570884e-05
+          },
+          {
+            "iteration": 7,
+            "loss": 0.001075718255280432,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.0663957529820455e-05
+          },
+          {
+            "iteration": 8,
+            "loss": 0.0011106314904528291,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 8.512361955990268e-05
+          },
+          {
+            "iteration": 9,
+            "loss": 0.0012217826646383346,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00012690372659807407
+          },
+          {
+            "iteration": 10,
+            "loss": 0.0013359180794630184,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015631102657047367
+          },
+          {
+            "iteration": 11,
+            "loss": 0.001400963981482116,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00017222932672689343
+          },
+          {
+            "iteration": 12,
+            "loss": 0.0013942308971006438,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00017575375532422096
+          },
+          {
+            "iteration": 13,
+            "loss": 0.0013182008707906625,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00016898294964520818
+          },
+          {
+            "iteration": 14,
+            "loss": 0.0011908277049433045,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00015429235159066063
+          },
+          {
+            "iteration": 15,
+            "loss": 0.0010363443067439226,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 0.00013390122092017532
+          },
+          {
+            "iteration": 16,
+            "loss": 0.0008790492689020201,
+            "rebuilt": true,
+            "gradient_rms_per_parameter": 0.00010970534222748986
+          },
+          {
+            "iteration": 17,
+            "loss": 0.000737906883909361,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 8.325523929250912e-05
+          },
+          {
+            "iteration": 18,
+            "loss": 0.0006267602359242962,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.599538564934034e-05
+          },
+          {
+            "iteration": 19,
+            "loss": 0.000551948725621375,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.963127263361247e-05
+          },
+          {
+            "iteration": 20,
+            "loss": 0.0005130869232942074,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 1.0882485849442663e-05
+          },
+          {
+            "iteration": 21,
+            "loss": 0.0005042517574579741,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 2.3990244730598995e-05
+          },
+          {
+            "iteration": 22,
+            "loss": 0.000515826444992452,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 4.246138276587916e-05
+          },
+          {
+            "iteration": 23,
+            "loss": 0.0005367236724958223,
+            "rebuilt": false,
+            "gradient_rms_per_parameter": 5.746756645917052e-05
+          }
+        ],
+        "loss_continuity": {
+          "max_relative_jump": 0.00037549849689641886,
+          "median_relative_jump": 0.00037549849689641886,
+          "median_step_improvement": 0.00011413541482468374,
+          "jump_over_step_improvement": 0.023747852194455125
+        },
+        "fd_agreement": {
+          "pinned_worst_rel": 1.4085360980230652e-07,
+          "pinned_median_rel": 9.98383467913313e-09,
+          "fd_eps": 1e-06,
+          "fd_samples": 6,
+          "pinned_note": "Both FD evaluations and the autodiff gradient use one prepared state, which pins the tree AND the M2L/near-field interaction lists together (D-016). Pinning only the tree leaves a residual that reads as a gradient bug and is not one.",
+          "gradient_norm": 0.015461385567629313,
+          "gradient_delta_across_rebuild": 1.310137555603288e-05,
+          "gradient_delta_rel_across_rebuild": 0.0008473610271683891,
+          "gradient_cosine_across_rebuild": 0.9999996416540156,
+          "crossed_eps_scaling": {
+            "median_rel_at_eps": 4118.316914911968,
+            "median_rel_at_10eps": 411.8317874943831,
+            "ratio": 9.999997668873815,
+            "note": "A finite difference straddling a switch is NOT reported as an error, because it is not a derivative: it divides the topology-induced loss offset by 2*eps and so diverges as eps -> 0. A ratio near 10 here is that signature -- the quantity tracks the step size, not the pipeline. Use gradient_delta_rel_across_rebuild for the across-rebuild question and the loss_continuity arm for the offset itself."
+          }
+        }
+      }
+    ]
+  }
+}

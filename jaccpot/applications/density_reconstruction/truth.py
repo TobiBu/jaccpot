@@ -26,9 +26,12 @@ import numpy as np
 __all__ = [
     "GroundTruth",
     "TruthConfig",
+    "UnitTemplate",
+    "component_counts",
     "make_ground_truth",
     "sample_composite",
     "sample_tracers",
+    "sample_unit_template",
 ]
 
 PerturberMode = Literal["none", "lmc_like"]
@@ -202,6 +205,31 @@ def _isotropic_directions(rng: np.random.Generator, n: int) -> np.ndarray:
     return np.stack([sin_t * np.cos(phi), sin_t * np.sin(phi), cos_t], axis=1)
 
 
+def component_counts(config: TruthConfig) -> Tuple[int, int, int, int]:
+    """Return the per-component particle counts a config implies.
+
+    Parameters
+    ----------
+    config : TruthConfig
+        Generating configuration.
+
+    Returns
+    -------
+    Tuple[int, int, int, int]
+        Bulge, disc, halo and perturber counts, summing to
+        ``config.num_particles``. Shared by the sampler and the template so the
+        two cannot disagree about the block layout.
+    """
+    n = int(config.num_particles)
+    n_pert = (
+        int(round(n * config.perturber_fraction)) if config.perturber != "none" else 0
+    )
+    n_body = n - n_pert
+    n_bulge = int(round(n_body * config.bulge_fraction))
+    n_disc = int(round(n_body * config.disc_fraction))
+    return n_bulge, n_disc, n_body - n_bulge - n_disc, n_pert
+
+
 def sample_composite(config: TruthConfig) -> np.ndarray:
     """Realise the composite as equal-mass particle positions.
 
@@ -219,13 +247,7 @@ def sample_composite(config: TruthConfig) -> np.ndarray:
     """
     rng = np.random.default_rng(config.seed)
     n = int(config.num_particles)
-    n_pert = (
-        int(round(n * config.perturber_fraction)) if config.perturber != "none" else 0
-    )
-    n_body = n - n_pert
-    n_bulge = int(round(n_body * config.bulge_fraction))
-    n_disc = int(round(n_body * config.disc_fraction))
-    n_halo = n_body - n_bulge - n_disc
+    n_bulge, n_disc, n_halo, n_pert = component_counts(config)
 
     bulge = _hernquist_radii(rng, n_bulge, config.bulge_scale)[:, None] * (
         _isotropic_directions(rng, n_bulge)
@@ -254,6 +276,129 @@ def sample_composite(config: TruthConfig) -> np.ndarray:
     positions = np.concatenate(parts, axis=0).astype(np.float64)
     assert positions.shape == (n, 3)
     return positions
+
+
+@dataclass(frozen=True)
+class UnitTemplate:
+    """The scale-free draws behind one realisation.
+
+    Every radial distribution in the composite is a **scale parameter times a
+    unit-space draw** -- Hernquist ``a f(u)``, exponential ``h E(1)``, Laplace
+    ``z0 L(0, 1)``, truncated NFW ``r_s g(u)``, Plummer ``a h(u)``. Splitting
+    the draw from the scale is what makes the ``parametric`` parameterisation
+    possible: hold the unit draws fixed as constants and the map from scale
+    lengths to particle positions is smooth and exactly differentiable, which
+    is the standard reparameterisation.
+
+    This is drawn from the **same seed and the same RNG order** as
+    :func:`sample_composite`, so the two agree to floating-point rounding: the
+    truth's bulge radii are ``bulge_scale * bulge_unit_radii`` up to about one
+    ulp. They are not bit-identical, and deliberately so --
+    :func:`sample_composite` is left exactly as it was rather than being
+    reassociated to factor the scale out, because a seeded realisation that
+    shifts under a refactor is a realisation nobody can reproduce from an older
+    results file. ``tests/applications`` pins both the digests and the
+    agreement.
+
+    Attributes
+    ----------
+    counts : Tuple[int, int, int, int]
+        Particle counts per component: bulge, disc, halo, perturber.
+    bulge_unit_radii : np.ndarray
+        ``(n_bulge,)`` Hernquist radii at unit scale.
+    bulge_directions : np.ndarray
+        ``(n_bulge, 3)`` unit vectors.
+    disc_unit_radii : np.ndarray
+        ``(n_disc,)`` standard-exponential radii.
+    disc_phi : np.ndarray
+        ``(n_disc,)`` azimuths.
+    disc_unit_heights : np.ndarray
+        ``(n_disc,)`` standard-Laplace heights.
+    halo_unit_radii : np.ndarray
+        ``(n_halo,)`` truncated-NFW radii at unit scale.
+    halo_directions : np.ndarray
+        ``(n_halo, 3)`` unit vectors.
+    perturber_unit_radii : np.ndarray
+        ``(n_pert,)`` Plummer radii at unit scale; empty when absent.
+    perturber_directions : np.ndarray
+        ``(n_pert, 3)`` unit vectors; empty when absent.
+    """
+
+    counts: Tuple[int, int, int, int]
+    bulge_unit_radii: np.ndarray
+    bulge_directions: np.ndarray
+    disc_unit_radii: np.ndarray
+    disc_phi: np.ndarray
+    disc_unit_heights: np.ndarray
+    halo_unit_radii: np.ndarray
+    halo_directions: np.ndarray
+    perturber_unit_radii: np.ndarray
+    perturber_directions: np.ndarray
+
+    @property
+    def num_particles(self: "UnitTemplate") -> int:
+        """Return the total particle count.
+
+        Returns
+        -------
+        int
+            Sum of the four component counts.
+        """
+        return int(sum(self.counts))
+
+
+def sample_unit_template(config: TruthConfig) -> UnitTemplate:
+    """Draw the scale-free deviates behind a realisation.
+
+    Parameters
+    ----------
+    config : TruthConfig
+        Generating configuration. Only the counts, the seed, the perturber mode
+        and ``halo_truncation`` are used -- ``halo_truncation`` is expressed in
+        units of the halo scale, so it shapes the unit draw rather than
+        rescaling it, and is therefore not one of the parametric model's free
+        parameters.
+
+    Returns
+    -------
+    UnitTemplate
+        The unit draws, in the RNG order :func:`sample_composite` uses.
+    """
+    rng = np.random.default_rng(config.seed)
+    n_bulge, n_disc, n_halo, n_pert = component_counts(config)
+
+    # The stream order below mirrors sample_composite exactly; that is what
+    # makes the unit draws correspond to the truth's own draws.
+    bulge_unit_radii = _hernquist_radii(rng, n_bulge, 1.0)
+    bulge_directions = _isotropic_directions(rng, n_bulge)
+
+    disc_unit_radii = rng.exponential(1.0, size=n_disc)
+    disc_phi = rng.uniform(0.0, 2.0 * np.pi, size=n_disc)
+    disc_unit_heights = rng.laplace(0.0, 1.0, size=n_disc)
+
+    halo_unit_radii = _nfw_radii(rng, n_halo, 1.0, config.halo_truncation)
+    halo_directions = _isotropic_directions(rng, n_halo)
+
+    if n_pert > 0:
+        u = rng.uniform(0.02, 1.0, size=n_pert)
+        perturber_unit_radii = 1.0 / np.sqrt(u ** (-2.0 / 3.0) - 1.0)
+        perturber_directions = _isotropic_directions(rng, n_pert)
+    else:
+        perturber_unit_radii = np.zeros((0,), dtype=np.float64)
+        perturber_directions = np.zeros((0, 3), dtype=np.float64)
+
+    return UnitTemplate(
+        counts=(n_bulge, n_disc, n_halo, n_pert),
+        bulge_unit_radii=bulge_unit_radii,
+        bulge_directions=bulge_directions,
+        disc_unit_radii=disc_unit_radii,
+        disc_phi=disc_phi,
+        disc_unit_heights=disc_unit_heights,
+        halo_unit_radii=halo_unit_radii,
+        halo_directions=halo_directions,
+        perturber_unit_radii=perturber_unit_radii,
+        perturber_directions=perturber_directions,
+    )
 
 
 def sample_tracers(
