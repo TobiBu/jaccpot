@@ -18,6 +18,7 @@ Usage in a bench script::
 
 from __future__ import annotations
 
+import datetime
 import os
 import pathlib
 import subprocess
@@ -236,6 +237,14 @@ def run_meta(extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         meta["jax_version"] = f"unavailable: {exc}"
 
     meta["cuda_visible_devices"] = os.environ.get("CUDA_VISIBLE_DEVICES")
+    # When the measurement happened, recorded by the run itself. The export's
+    # provenance table used to take this from the artifact file's mtime, which
+    # is the CHECKOUT time in a fresh worktree -- so exporting from a different
+    # checkout silently rewrote every figure's date to the day the tree was
+    # created. A date the run writes down cannot drift that way.
+    meta["measured_at"] = (
+        datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    )
     if extra:
         meta.update(extra)
     return meta
