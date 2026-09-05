@@ -136,6 +136,9 @@ __all__ = [
     "make_force_evaluator",
     "partition_for_devices",
     "resolve_grad_halo_exchange",
+    "resolve_halo_exchange",
+    "HALO_EXCHANGES",
+    "JAX_RAGGED_FIXED_VERSION",
     "scatter_to_input_order",
 ]
 
@@ -1580,6 +1583,10 @@ GRAD_HALO_EXCHANGES = ("auto", "buf", "native")
 #: ``test_native_halo_exchange_is_fixed_upstream`` fails (drift 4.194e-01), while on
 #: 0.9.1 the reproducer is 4/4 CLEAN and that test passes.
 JAX_RAGGED_GRAD_FIXED_VERSION = (0, 9, 1)
+#: The same boundary under the name that says what it guards since 2026-09-04: the
+#: FORWARD halo exchange as well as the reverse pass. See :func:`resolve_halo_exchange`.
+JAX_RAGGED_FIXED_VERSION = JAX_RAGGED_GRAD_FIXED_VERSION
+HALO_EXCHANGES = GRAD_HALO_EXCHANGES
 
 
 def _jax_version_tuple() -> tuple[int, ...]:
@@ -1593,8 +1600,24 @@ def _jax_version_tuple() -> tuple[int, ...]:
     return tuple(parts)
 
 
-def resolve_grad_halo_exchange(method: str = "auto") -> str:
-    """Resolve the grad-path halo exchange, gating the ragged one two ways.
+def resolve_halo_exchange(method: str = "auto") -> str:
+    """Resolve the halo exchange -- FORWARD and gradient path -- gating the ragged one two ways.
+
+    **Until 2026-09-04 this gated only the reverse pass**, on the belief that
+    executing a gradient was the trigger. It is not. The mechanism (XLA:GPU's
+    ``RaggedAllToAllStartThunk`` caches peer output-buffer addresses on its first
+    execution and keeps writing to them) fires on ANY buffer movement, and **input
+    donation alone is enough**: a forward-only leapfrog that donates its state lost
+    the whole cross-domain near field on most steps after the first -- rel-L2 0.45
+    against an fp64 direct sum on a 17.8M-particle disc on 4xA100 -- while
+    momentum, energy, COM and every overflow flag looked healthy. Pure JAX on
+    jax 0.9.0 (``bench/repro_jax_ragged_all_to_all_forward.py``, no jaccpot, no
+    yggdrax): 36/40 calls corrupt under donation, 3/40 under allocator churn alone,
+    **0/40 with identical buffers** -- so a repeat-the-same-input reproducibility
+    check passes on a broken build; only a moving-input probe against a direct sum
+    sees it. Clean on 0.9.1 and 0.10.2. The resolved method is therefore applied to
+    the forward trace too, and ``"auto"`` on an affected JAX means ``"buf"`` for
+    everything.
 
     ``"auto"`` picks ``"native"`` (``jax.lax.ragged_all_to_all``, which sends only
     the actual halo) when BOTH conditions hold, and the bandwidth-hungry but safe
@@ -1638,9 +1661,20 @@ def resolve_grad_halo_exchange(method: str = "auto") -> str:
     return "native" if _jax_version_tuple() >= JAX_RAGGED_GRAD_FIXED_VERSION else "buf"
 
 
+#: The name the gate was born with. Kept so existing callers and tests keep working;
+#: it resolves for the forward path too now.
+resolve_grad_halo_exchange = resolve_halo_exchange
+
+
 @contextlib.contextmanager
-def _grad_halo_exchange(method: str) -> Iterator[None]:
+def _halo_exchange(method: str) -> Iterator[None]:
     """Pin the ragged halo exchange's implementation inside this block.
+
+    **Applied to the forward as well as the gradient path since 2026-09-04.** The
+    paragraphs below were written when the reverse pass was believed to be the only
+    trigger; the mechanism they describe fires on any buffer movement, and a
+    donating forward loop moves buffers every call. Measurement and consequences:
+    :func:`resolve_halo_exchange`.
 
     The gradient path must NOT use ``"native"``
     (:func:`jax.lax.ragged_all_to_all`), yggdrax's default on GPU. It is
@@ -1669,7 +1703,9 @@ def _grad_halo_exchange(method: str) -> Iterator[None]:
     corruption-free: forward bit-identical before and after a gradient, FD-vs-AD
     1.9e-6. It costs bandwidth -- every device gathers every other device's whole
     send buffer, O(ndev^2 x block) rather than the ragged O(actual halo) -- which
-    is why the forward keeps the native path and only the gradient path is pinned.
+    was the reason the forward kept the native path while only the gradient path
+    was pinned. That reasoning was wrong (see above): both are pinned now, and on a
+    fixed JAX ``"auto"`` still resolves to the cheap native exchange for both.
 
     ``"native"`` is **verified fixed on JAX >= 0.9.1** and is what ``"auto"``
     selects there; see :func:`resolve_grad_halo_exchange`. Below that it is kept
@@ -1689,7 +1725,7 @@ def _grad_halo_exchange(method: str) -> Iterator[None]:
     it cannot leak into a concurrent forward evaluation.
     """
 
-    resolved = resolve_grad_halo_exchange(method)
+    resolved = resolve_halo_exchange(method)
     original = _yggdrax_let.ragged_all_to_all_exchange
     _yggdrax_let.ragged_all_to_all_exchange = functools.partial(
         original, method=resolved
@@ -1698,6 +1734,9 @@ def _grad_halo_exchange(method: str) -> Iterator[None]:
         yield
     finally:
         _yggdrax_let.ragged_all_to_all_exchange = original
+
+
+_grad_halo_exchange = _halo_exchange  # the pre-2026-09-04 name; same object
 
 
 def _live_coarse_payload(
@@ -2378,14 +2417,15 @@ def _make_fn(
                     near_overflow=cross.near_overflow | cross_prepass.near_overflow,
                 )
 
-        # The halo exchange is the one place cotangents cross devices. On the grad
-        # path its implementation is pinned -- see _grad_halo_exchange for why the
-        # native ragged path must not be used there.
-        with (
-            _grad_halo_exchange(halo_exchange)
-            if differentiable
-            else contextlib.nullcontext()
-        ):
+        # The halo exchange is the one place particle data crosses devices, and its
+        # implementation is pinned on BOTH paths: on jax < 0.9.1 the native
+        # ragged_all_to_all keeps its fill value once buffers move, and a donating
+        # forward loop moves them every call -- see _halo_exchange and
+        # resolve_halo_exchange. Until 2026-09-04 this read
+        # `_grad_halo_exchange(halo_exchange) if differentiable else nullcontext()`,
+        # which is how every forward-only rollout on an affected JAX lost its
+        # cross-domain near field with no guard tripping.
+        with _halo_exchange(halo_exchange):
             halo = import_near_halo(
                 rct,
                 cross,
@@ -2808,13 +2848,14 @@ def make_force_evaluator(
     ``l2l_level_overflow`` in the diagnostics -- check that flag whenever you
     override it.
 
-    ``halo_exchange`` (differentiable mode only) selects the ragged halo
-    exchange's implementation. The default ``"auto"`` uses the cheap
-    ``jax.lax.ragged_all_to_all`` on JAX >= 0.9.1, where its reverse pass is
-    verified safe, and the bandwidth-hungry ``all_gather`` fallback below that,
-    where executing a gradient corrupts every later exchange. Force one with
-    ``"native"`` / ``"buf"``. See :func:`resolve_grad_halo_exchange` and
-    :func:`_grad_halo_exchange`.
+    ``halo_exchange`` selects the halo exchange's implementation, on the forward
+    and on the gradient path alike. The default ``"auto"`` uses the cheap
+    ``jax.lax.ragged_all_to_all`` on JAX >= 0.9.1, where it is verified safe, and
+    the bandwidth-hungry ``all_gather`` fallback below that, where the native
+    collective keeps its fill value once buffers move -- a gradient OR a donating
+    forward loop is enough -- and the cross-domain near field silently vanishes.
+    Force one with ``"native"`` / ``"buf"``. See :func:`resolve_halo_exchange` and
+    :func:`_halo_exchange`.
 
     Parameters
     ----------
@@ -2840,9 +2881,9 @@ def make_force_evaluator(
         as ``l2l_level_overflow`` in the diagnostics -- check that flag whenever
         you override it.
     halo_exchange : str
-        Ragged halo-exchange implementation (differentiable mode only):
-        ``"auto"``, ``"native"`` or ``"buf"``. See above -- the fallback's reverse
-        pass corrupts every later exchange below JAX 0.9.1.
+        Halo-exchange implementation, forward and gradient path: ``"auto"``,
+        ``"native"`` or ``"buf"``. See above -- below JAX 0.9.1 the native
+        collective silently drops the cross-domain near field once buffers move.
 
     Returns
     -------
