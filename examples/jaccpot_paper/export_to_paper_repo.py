@@ -153,6 +153,15 @@ Every row's `Measured at` is the commit the *benchmark* ran on, and `Dirty` flag
 a working tree that had uncommitted changes when it ran -- a dirty run is not
 fully described by its commit and should be regenerated before submission.
 
+`Dirty` counts changes to **source**, not to `bench/results/`. Several benches
+rewrite their own tracked artifact after every measured point, so that a sweep
+interrupted after hours still leaves something usable; the side effect is that
+two sweeps running at once each see the other's output as a dirty tree. Marking
+a figure unfit because a *different* figure's data was being written would say
+nothing about whether this row's commit describes the code that produced it.
+Artifacts written before `git_dirty_sources` existed fall back to the
+whole-tree flag.
+
 """
 
 TABLE_HEADER = (
@@ -220,7 +229,18 @@ def main() -> int:
         copied += 1
 
         sha = str(meta.get("git_sha", ""))[:12] or "?"
-        dirty = "**yes**" if meta.get("git_dirty") else "no"
+        # Prefer git_dirty_sources, which is what this column has always MEANT:
+        # the header says a dirty run "is not fully described by its commit",
+        # and a rewritten results JSON does not affect that. Several benches now
+        # rewrite their tracked artifact after every point, so two sweeps
+        # running side by side each see the other's output and both set
+        # git_dirty -- which would flag every section-7 figure as unfit from a
+        # clean checkout. Artifacts written before that field existed fall back
+        # to the old flag.
+        if "git_dirty_sources" in meta:
+            dirty = "**yes**" if meta.get("git_dirty_sources") else "no"
+        else:
+            dirty = "**yes**" if meta.get("git_dirty") else "no"
         device = str(config.get("device", "?"))
         date = datetime.datetime.fromtimestamp(art_path.stat().st_mtime).strftime(
             "%Y-%m-%d"
