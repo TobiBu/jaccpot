@@ -169,3 +169,109 @@ def test_base_keeps_a_free_length_and_that_is_deliberate():
     # The rank IS checked, which is what the annotation buys on this parameter.
     with pytest.raises(TypeCheckError):
         _scatter_vectors(jnp.zeros((N,), dtype=_dtype()), indices, values, mask)
+
+
+# ---------------------------------------------------------------------------
+# The second slice: the target/leaf/node axes, and the Cartesian pack.
+#
+# What these pin is the three-way distinction the recordings forced. `leaves`,
+# `nodes` and `n` are NOT interchangeable -- `_map_targets_to_leaf_positions` was
+# recorded at (32, 63, 16) and (4, 7, 5), i.e. `nodes == 2 * leaves - 1` for the
+# radix tree -- and `t` is a fourth, the target subset. Collapsing any pair would
+# assert something false, so each gets a test that fails if they are ever merged.
+# ---------------------------------------------------------------------------
+
+TARGETS, NODES = 5, 2 * LEAVES - 1
+
+
+def test_the_target_index_pair_must_agree():
+    """`target_leaf_positions` and `target_sorted_indices` share `t` in every recording.
+
+    `nearfield_interop` is a required keyword and beartype checks it by type, so a
+    minimally-populated instance is enough to reach the axis check -- its contents are
+    irrelevant to a rejection that fires on the signature.
+    """
+    from jaccpot.runtime.kernels._evaluate import (
+        _build_target_nearfield_source_index_matrix,
+    )
+    from jaccpot.runtime.kernels._shared import NearfieldInteropData
+
+    idx = jnp.zeros((TARGETS,), dtype=jnp.int64)
+    interop = NearfieldInteropData(
+        leaf_nodes=jnp.zeros((LEAVES,), dtype=jnp.int64),
+        node_ranges=jnp.zeros((NODES, 2), dtype=jnp.int64),
+        offsets=jnp.zeros((LEAVES + 1,), dtype=jnp.int64),
+        neighbors=jnp.zeros((LEAVES,), dtype=jnp.int64),
+        counts=jnp.zeros((LEAVES,), dtype=jnp.int64),
+        particle_order_node_ranges=jnp.zeros((NODES, 2), dtype=jnp.int64),
+        particle_order_leaf_indices=jnp.zeros((LEAVES,), dtype=jnp.int64),
+        particle_order_to_native_leaf=jnp.zeros((LEAVES,), dtype=jnp.int64),
+    )
+
+    with pytest.raises(TypeCheckError):
+        _build_target_nearfield_source_index_matrix(
+            target_sorted_indices=idx,
+            target_leaf_positions=idx[:-1],
+            nearfield_interop=interop,
+        )
+
+
+def test_leaves_nodes_and_targets_are_three_different_axes():
+    """`nodes == 2 * leaves - 1`, so naming them alike would assert something false."""
+    from jaccpot.runtime.kernels._evaluate import _map_targets_to_leaf_positions
+
+    leaf_nodes = jnp.zeros((LEAVES,), dtype=jnp.int64)
+    node_ranges = jnp.zeros((NODES, 2), dtype=jnp.int64)
+    targets = jnp.zeros((TARGETS,), dtype=jnp.int64)
+
+    # The control: three genuinely different extents go through.
+    try:
+        _map_targets_to_leaf_positions(
+            leaf_nodes=leaf_nodes,
+            node_ranges=node_ranges,
+            target_sorted_indices=targets,
+        )
+    except TypeCheckError:  # pragma: no cover
+        pytest.fail("three distinct extents must be accepted")
+    except Exception:
+        pass
+
+    # And a `node_ranges` whose trailing axis is not the (start, end) pair.
+    with pytest.raises(TypeCheckError):
+        _map_targets_to_leaf_positions(
+            leaf_nodes=leaf_nodes,
+            node_ranges=node_ranges[:, :1],
+            target_sorted_indices=targets,
+        )
+
+
+def test_the_cartesian_pack_is_ct_and_is_shared_with_its_offsets():
+    """`coeffs`' trailing axis is `ct`, and `offsets` shares the two leading ones.
+
+    Recorded at 10 and 20, which is `(p+1)(p+2)(p+3)/6` at p=2 and p=3 -- the
+    CARTESIAN packing, not the spherical `sh`. STYLE_GUIDE 4.3's "`ct` is not `C`" note
+    is about exactly this pair of counts agreeing only at p=1.
+    """
+    from jaccpot.runtime.kernels._evaluate import (
+        _evaluate_local_cartesian_with_grad_batch,
+    )
+
+    for ct in (10, 20):
+        coeffs = jnp.zeros((LEAVES, W, ct), dtype=_dtype())
+        offsets = jnp.zeros((LEAVES, W, 3), dtype=_dtype())
+        try:
+            _evaluate_local_cartesian_with_grad_batch(coeffs, offsets, order=2)
+        except TypeCheckError:  # pragma: no cover
+            pytest.fail(f"ct={ct} must be accepted; the axis is named, not pinned")
+        except Exception:
+            pass
+
+    coeffs = jnp.zeros((LEAVES, W, 10), dtype=_dtype())
+    with pytest.raises(TypeCheckError):
+        _evaluate_local_cartesian_with_grad_batch(
+            coeffs, jnp.zeros((LEAVES, W - 1, 3), dtype=_dtype()), order=2
+        )
+    with pytest.raises(TypeCheckError):
+        _evaluate_local_cartesian_with_grad_batch(
+            coeffs, jnp.zeros((LEAVES, W, 2), dtype=_dtype()), order=2
+        )

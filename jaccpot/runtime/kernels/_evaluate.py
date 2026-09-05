@@ -84,9 +84,10 @@ __all__: list[str] = []
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def _evaluate_local_cartesian_with_grad_batch(
-    coeffs: Array,
-    offsets: Array,
+    coeffs: Float[Array, "leaves w ct"],
+    offsets: Float[Array, "leaves w 3"],
     *,
     order: int,
 ) -> tuple[Array, Array]:
@@ -94,9 +95,9 @@ def _evaluate_local_cartesian_with_grad_batch(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Float[Array, 'leaves w ct']
         Local coefficients, ``[..., total_coefficients(order)]``.
-    offsets : Array
+    offsets : Float[Array, 'leaves w 3']
         Evaluation points relative to each expansion centre, ``[..., 3]``, with
         leading shape matching ``coeffs``.
     order : int
@@ -137,12 +138,13 @@ def _evaluate_local_cartesian_with_grad_batch(
     return gradients, potentials
 
 
-def _infer_bounds(positions: Array) -> tuple[Array, Array]:
+@jaxtyped(typechecker=beartype)
+def _infer_bounds(positions: Float[Array, "n 3"]) -> tuple[Array, Array]:
     """Infer generous bounds for tree construction from particle positions.
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``.
 
     Returns
@@ -599,10 +601,11 @@ def _build_nearfield_interop_data(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def _prepare_tree_evaluation_inputs(
     tree: Tree,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     locals_or_downward: Union[LocalExpansionData, TreeDownwardData],
     neighbor_list: NodeNeighborList,
     *,
@@ -618,9 +621,9 @@ def _prepare_tree_evaluation_inputs(
     ----------
     tree : Tree
         Built tree.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Morton-sorted particle positions ``[N, 3]``.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Morton-sorted particle masses ``[N]``.
     locals_or_downward : Union[LocalExpansionData, TreeDownwardData]
         Either the locals themselves or the downward result carrying them;
@@ -1379,11 +1382,12 @@ def _evaluate_prepared_tree(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def _map_targets_to_leaf_positions(
     *,
-    target_sorted_indices: Array,
-    leaf_nodes: Array,
-    node_ranges: Array,
+    target_sorted_indices: Int[Array, "t"],
+    leaf_nodes: Int[Array, "leaves"],
+    node_ranges: Int[Array, "nodes 2"],
 ) -> Array:
     """Map sorted particle indices to positions in the leaf-node array.
 
@@ -1393,11 +1397,11 @@ def _map_targets_to_leaf_positions(
 
     Parameters
     ----------
-    target_sorted_indices : Array
+    target_sorted_indices : Int[Array, 't']
         Target particle indices, in Morton-sorted order.
-    leaf_nodes : Array
+    leaf_nodes : Int[Array, 'leaves']
         Leaf node ids.
-    node_ranges : Array
+    node_ranges : Int[Array, 'nodes 2']
         Per-node ``[start, end]`` particle ranges, inclusive of ``end``.
 
     Returns
@@ -1427,10 +1431,11 @@ def _map_targets_to_leaf_positions(
     return leaf_pos.astype(INDEX_DTYPE)
 
 
+@jaxtyped(typechecker=beartype)
 def _build_target_nearfield_source_index_matrix(
     *,
-    target_sorted_indices: Array,
-    target_leaf_positions: Array,
+    target_sorted_indices: Int[Array, "t"],
+    target_leaf_positions: Int[Array, "t"],
     nearfield_interop: NearfieldInteropData,
 ) -> tuple[Array, Array]:
     """Build padded source-index lists for each target particle near-field eval.
@@ -1444,9 +1449,9 @@ def _build_target_nearfield_source_index_matrix(
 
     Parameters
     ----------
-    target_sorted_indices : Array
+    target_sorted_indices : Int[Array, 't']
         Target particle indices, in Morton-sorted order.
-    target_leaf_positions : Array
+    target_leaf_positions : Int[Array, 't']
         Each target's position in the leaf array, from
         :func:`_map_targets_to_leaf_positions`.
     nearfield_interop : NearfieldInteropData
@@ -1560,13 +1565,14 @@ def _build_target_nearfield_source_index_matrix(
     return padded, unique_mask
 
 
+@jaxtyped(typechecker=beartype)
 def _compute_targeted_nearfield(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
-    target_sorted_indices: Array,
-    source_indices: Array,
-    source_mask: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
+    target_sorted_indices: Int[Array, "t"],
+    source_indices: Int[Array, "t srcslots"],
+    source_mask: Bool[Array, "t srcslots"],
     G: Union[float, Array],
     softening: float,
     return_potential: bool,
@@ -1583,15 +1589,15 @@ def _compute_targeted_nearfield(
 
     Parameters
     ----------
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Morton-sorted particle positions ``[N, 3]``. All particles are sources.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Morton-sorted particle masses ``[N]``.
-    target_sorted_indices : Array
+    target_sorted_indices : Int[Array, 't']
         Target particle indices ``[T]``, in the same order.
-    source_indices : Array
+    source_indices : Int[Array, 't srcslots']
         Padded per-target source indices ``[T, S]``.
-    source_mask : Array
+    source_mask : Bool[Array, 't srcslots']
         Validity mask for the padding, ``[T, S]``.
     G : Union[float, Array]
         Gravitational constant. Accepts an array so it can be traced.
@@ -1738,13 +1744,14 @@ def _compute_targeted_nearfield(
     return near_acc, near_pot, near_jerk, near_snap, near_crackle
 
 
+@jaxtyped(typechecker=beartype)
 def _evaluate_local_expansions_for_target_particles(
     *,
     local_data: LocalExpansionData,
-    positions_sorted: Array,
-    target_sorted_indices: Array,
-    target_leaf_positions: Array,
-    leaf_nodes: Array,
+    positions_sorted: Float[Array, "n 3"],
+    target_sorted_indices: Int[Array, "t"],
+    target_leaf_positions: Int[Array, "t"],
+    leaf_nodes: Int[Array, "leaves"],
     order: int,
     expansion_basis: ExpansionBasis,
     return_potential: bool,
@@ -1760,13 +1767,13 @@ def _evaluate_local_expansions_for_target_particles(
     ----------
     local_data : LocalExpansionData
         Local expansions, indexed by node.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Morton-sorted particle positions ``[N, 3]``.
-    target_sorted_indices : Array
+    target_sorted_indices : Int[Array, 't']
         Target particle indices ``[T]``, in the same order.
-    target_leaf_positions : Array
+    target_leaf_positions : Int[Array, 't']
         Each target's position in ``leaf_nodes``.
-    leaf_nodes : Array
+    leaf_nodes : Int[Array, 'leaves']
         Leaf node ids.
     order : int
         Expansion order ``p``.
@@ -2103,12 +2110,13 @@ def _evaluate_prepared_tree_targets(
         "max_acc_derivative_order",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _evaluate_local_expansions_for_particles(
     local_data: LocalExpansionData,
-    positions: Array,
+    positions: Float[Array, "n 3"],
     *,
-    leaf_nodes: Array,
-    node_ranges: Array,
+    leaf_nodes: Int[Array, "leaves"],
+    node_ranges: Int[Array, "nodes 2"],
     max_leaf_size: int,
     order: int,
     expansion_basis: ExpansionBasis,
@@ -2126,11 +2134,11 @@ def _evaluate_local_expansions_for_particles(
     ----------
     local_data : LocalExpansionData
         Local expansions, indexed by node.
-    positions : Array
+    positions : Float[Array, 'n 3']
         Morton-sorted particle positions ``[N, 3]``.
-    leaf_nodes : Array
+    leaf_nodes : Int[Array, 'leaves']
         Leaf node ids.
-    node_ranges : Array
+    node_ranges : Int[Array, 'nodes 2']
         Per-node ``[start, end]`` particle ranges, inclusive of ``end``.
     max_leaf_size : int
         Padded leaf width. Static: it sets the block shape.
