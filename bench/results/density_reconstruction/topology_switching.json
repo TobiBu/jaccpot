@@ -38,23 +38,26 @@
     ]
   },
   "meta": {
-    "git_sha": "d06b55f99efdba409507ecd57fb608c66cafc4ae",
+    "git_sha": "e8f576ec3f008cc1413d5cfd278e9b1d132e88af",
     "git_branch": "feat/density-reconstruction-payoff",
-    "git_dirty": true,
-    "git_dirty_sources": true,
-    "git_dirty_source_paths": [
-      "bench/payoff_static/reconstruction_runs.py",
-      "bench/payoff_static/topology_switching.py"
-    ],
+    "git_dirty": false,
+    "git_dirty_sources": false,
+    "git_dirty_source_paths": [],
     "jax_version": "0.10.2",
-    "jax_backend": "cpu",
+    "jax_backend": "gpu",
     "devices": [
-      "cpu:0"
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3",
+      "cuda:4",
+      "cuda:5",
+      "cuda:6",
+      "cuda:7"
     ],
-    "device_kind": "cpu",
+    "device_kind": "NVIDIA A100-PCIE-40GB",
     "jax_enable_x64": false,
     "cuda_visible_devices": null,
-    "measured_at": "2026-09-05T19:48:26+02:00",
     "merged_source_meta": [
       {
         "git_sha": "e8f576ec3f008cc1413d5cfd278e9b1d132e88af",
@@ -116,7 +119,9 @@
         "jax_enable_x64": true,
         "cuda_visible_devices": "5"
       }
-    ]
+    ],
+    "merged_at": "2026-09-05T19:55:55+02:00",
+    "merged_sha": "3443666bd32d6f10b7a697a5a5a5559d66256d0d"
   },
   "data": {
     "records": [

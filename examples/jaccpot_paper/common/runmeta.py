@@ -250,6 +250,94 @@ def run_meta(extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     return meta
 
 
+def commit_date(sha: str) -> str:
+    """Return the ISO author-committer date of ``sha``, or ``""`` if unknown.
+
+    Used to order artifact provenance when the artifacts predate the
+    ``measured_at`` field: a commit date is not when the number was measured,
+    but it bounds it from below and it is the only ordering available.
+
+    Parameters
+    ----------
+    sha : str
+        A commit-ish resolvable in this repository.
+
+    Returns
+    -------
+    str
+        ISO-8601 committer date, or the empty string.
+    """
+    if not sha:
+        return ""
+    try:
+        done = subprocess.run(
+            ["git", "show", "-s", "--format=%cI", sha],
+            capture_output=True,
+            text=True,
+            cwd=_REPO_ROOT,
+            check=False,
+        )
+    except OSError:  # pragma: no cover
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def merged_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return provenance for an artifact merged from per-slice artifacts.
+
+    A merge is bookkeeping, not a measurement, so the merged artifact must not
+    advertise the sha it was merged AT -- that commit ran no benchmark, and
+    stamping it over the slices' shas is how a provenance table came to name a
+    commit that measured nothing. The merge-time state is kept under
+    ``merged_at`` / ``merged_sha``, and the measurement fields are carried up
+    from the slices.
+
+    Where slices disagree the newest measurement wins, ordered by
+    ``measured_at`` and falling back to the commit date of each slice's sha for
+    artifacts written before ``measured_at`` existed. Dirtiness is OR-ed: one
+    dirty slice makes the merged result dirty.
+
+    Parameters
+    ----------
+    metas : list of dict
+        The ``meta`` block of each source artifact, in any order.
+
+    Returns
+    -------
+    dict
+        Provenance for the merged artifact.
+    """
+    now = run_meta()
+    out: dict[str, Any] = {
+        **now,
+        "merged_source_meta": metas,
+        "merged_at": now.get("measured_at"),
+        "merged_sha": now.get("git_sha"),
+    }
+    out.pop("measured_at", None)
+    indexed = [(i, m) for i, m in enumerate(metas) if m.get("git_sha")]
+    if not indexed:
+        return out
+    order = {
+        i: (m.get("measured_at") or commit_date(str(m.get("git_sha"))))
+        for i, m in indexed
+    }
+    newest = max(indexed, key=lambda pair: order[pair[0]])[1]
+    shas = [str(m.get("git_sha")) for _, m in indexed]
+    out["git_sha"] = str(newest.get("git_sha"))
+    out["git_branch"] = newest.get("git_branch", out.get("git_branch"))
+    out["git_dirty"] = any(m.get("git_dirty") for m in metas)
+    out["git_dirty_sources"] = any(m.get("git_dirty_sources") for m in metas)
+    out["git_dirty_source_paths"] = sorted(
+        {p for m in metas for p in (m.get("git_dirty_source_paths") or [])}
+    )[:20]
+    if newest.get("measured_at"):
+        out["measured_at"] = newest["measured_at"]
+    if len(set(shas)) > 1:
+        out["measured_shas"] = sorted(set(shas))
+    return out
+
+
 def device_label() -> str:
     """Return a short device label (e.g. ``NVIDIA A100-PCIE-40GB``) for the JSON."""
 

@@ -120,10 +120,14 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument(
         "--merge-from",
-        default="",
+        action="append",
+        default=[],
         help=(
-            "Comma-separated result JSONs to concatenate into --json-out and "
-            "exit, measuring nothing. These sweeps are host-bound and "
+            "Result JSONs to concatenate into --json-out and exit, measuring "
+            "nothing. Repeatable, and each value may itself be a "
+            "comma-separated list -- it used to be comma-only, and a repeated "
+            "flag then silently kept just the last one and wrote a merge of "
+            "one slice over a complete artifact. These sweeps are host-bound and "
             "single-threaded, so wall-clock is cut by running disjoint slices "
             "as separate processes and stitching them here"
         ),
@@ -540,7 +544,7 @@ def _merge_runs(args: argparse.Namespace) -> int:
         axis that would make them incomparable. Stitching slices measured at
         different accuracy settings produces a curve over two problems.
     """
-    sources = [v.strip() for v in str(args.merge_from).split(",") if v.strip()]
+    sources = _merge_sources(args.merge_from)
     records: List[Dict[str, Any]] = []
     merged_config: Optional[Dict[str, Any]] = None
     metas: List[Dict[str, Any]] = []
@@ -574,16 +578,47 @@ def _merge_runs(args: argparse.Namespace) -> int:
     merged_config["merged_from"] = sources
 
     out = args.json_out or DEFAULT_OUT
+    # Carry the MEASUREMENT provenance forward rather than stamping the merge
+    # over it. run_meta() here describes the process doing the stitching, which
+    # measured nothing; using it made the provenance table name a commit that
+    # did no work -- observed as figures 17, 18 and 19 all reporting the merge
+    # commit instead of the runs'. When every slice agrees on a commit that is
+    # the artifact's commit; when they disagree the newest is used, because that
+    # is when the artifact became complete, and the full set is recorded beside
+    # it so the spread is visible rather than hidden.
+    merged = runmeta.merged_meta(metas)
+
     written = jsonio.write_result(
         out,
         config=merged_config,
-        # Each slice's provenance is kept: they are separate processes, and one
-        # sha over them would claim more than is true.
-        meta={**runmeta.run_meta(), "merged_source_meta": metas},
+        meta=merged,
         data={"records": records},
     )
     print(f"merged {len(sources)} slice(s) -> {written}")
     return 0
+
+
+def _merge_sources(raw: object) -> List[str]:
+    """Return the merge inputs named on the command line, in order.
+
+    Parameters
+    ----------
+    raw : object
+        The ``--merge-from`` value: a list of occurrences, each possibly a
+        comma-separated list, or a bare string from an older invocation.
+
+    Returns
+    -------
+    list of str
+        Non-empty paths, duplicates preserved so a repeat is visible.
+    """
+    values = raw if isinstance(raw, (list, tuple)) else [raw]
+    return [
+        part.strip()
+        for value in values
+        for part in str(value).split(",")
+        if part.strip()
+    ]
 
 
 def main() -> int:
@@ -595,7 +630,7 @@ def main() -> int:
         Process exit status.
     """
     args = _parse_args()
-    if str(args.merge_from).strip():
+    if _merge_sources(args.merge_from):
         return _merge_runs(args)
     runmeta.select_gpu(args.gpu_select)
     runmeta.enable_x64(args.dtype)

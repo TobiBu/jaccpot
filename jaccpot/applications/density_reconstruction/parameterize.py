@@ -40,6 +40,7 @@ from jaccpot.applications.density_reconstruction.truth import (
     UnitTemplate,
     sample_unit_template,
 )
+from jaccpot.operators._precision import highest_matmul_precision
 
 __all__ = [
     "PARAMETRIC_NAMES",
@@ -190,6 +191,7 @@ class PositionsParameterization:
         }
 
 
+@highest_matmul_precision
 def _rotation(tilt_x: jnp.ndarray, tilt_y: jnp.ndarray) -> jnp.ndarray:
     """Build ``Rx(tilt_x) @ Ry(tilt_y)`` as a differentiable 3x3 matrix.
 
@@ -358,6 +360,7 @@ class ParametricParameterization:
             name: jnp.asarray(values[name], dtype=jnp.float64) for name in self.names
         }
 
+    @highest_matmul_precision
     def to_positions(
         self: "ParametricParameterization", params: Dict[str, jnp.ndarray]
     ) -> jnp.ndarray:

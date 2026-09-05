@@ -140,3 +140,62 @@ def test_a_source_change_is_source_dirty(tmp_path):
     assert any(
         p.endswith("jaccpot/__init__.py") for p in meta["git_dirty_source_paths"]
     ), meta["git_dirty_source_paths"]
+
+
+def test_merged_meta_does_not_stamp_the_merge_commit_as_the_measurement():
+    """A merge measures nothing, so it must not overwrite the slices' sha.
+
+    Stamping the merge-time commit over the slices is how figures 17, 18 and 19
+    came to name a commit that ran no benchmark. The merge-time state is still
+    recorded, under ``merged_sha`` / ``merged_at``, where it cannot be mistaken
+    for provenance.
+    """
+    metas = [
+        {
+            "git_sha": "a" * 40,
+            "git_branch": "old",
+            "git_dirty": False,
+            "git_dirty_sources": False,
+            "measured_at": "2026-09-04T10:00:00+02:00",
+        },
+        {
+            "git_sha": "b" * 40,
+            "git_branch": "new",
+            "git_dirty": True,
+            "git_dirty_sources": False,
+            "measured_at": "2026-09-05T10:00:00+02:00",
+        },
+    ]
+    merged = runmeta.merged_meta(metas)
+
+    assert merged["git_sha"] == "b" * 40, "the newest measurement must win"
+    assert merged["git_branch"] == "new"
+    assert merged["measured_at"] == "2026-09-05T10:00:00+02:00"
+    assert merged["measured_shas"] == sorted({"a" * 40, "b" * 40})
+    # Dirtiness is OR-ed: one dirty slice taints the merged artifact.
+    assert merged["git_dirty"] is True
+    assert merged["git_dirty_sources"] is False
+    # The merge's own commit is kept, but never as the measurement's.
+    assert merged["merged_sha"] != merged["git_sha"] or merged["merged_sha"] is None
+    assert merged["merged_source_meta"] == metas
+
+
+def test_merged_meta_orders_by_commit_date_when_measured_at_is_absent():
+    """Artifacts predating ``measured_at`` still order, by their commit dates.
+
+    Without a fallback the tie-break degenerates to argument order, so which
+    sha a merged artifact advertised depended on the order of ``--merge-from``.
+    """
+    head = runmeta.git_meta()["git_sha"]
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD~1"], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    if not parent or not runmeta.commit_date(parent):
+        return  # shallow clone; nothing to order against
+
+    older = {"git_sha": parent, "git_dirty": False, "git_dirty_sources": False}
+    newer = {"git_sha": head, "git_dirty": False, "git_dirty_sources": False}
+    for metas in ([older, newer], [newer, older]):
+        assert (
+            runmeta.merged_meta(metas)["git_sha"] == head
+        ), "the merged sha must not depend on --merge-from order"

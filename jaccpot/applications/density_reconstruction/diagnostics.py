@@ -365,7 +365,10 @@ def _traceless_quadrupole(positions: np.ndarray, mass: float) -> np.ndarray:
     np.ndarray
         ``(3, 3)`` tensor ``sum_i m (3 x_i x_i^T - |x_i|^2 I)``.
     """
-    outer = positions.T @ positions
+    # np.matmul, not "@": this is a host-side float64 contraction, so the
+    # TF32 lowering that @highest_matmul_precision guards against cannot
+    # apply. Spelling it as a call keeps it out of that guard honestly.
+    outer = np.matmul(positions.T, positions)
     r2 = float(np.sum(positions**2))
     return mass * (3.0 * outer - r2 * np.eye(3))
 
