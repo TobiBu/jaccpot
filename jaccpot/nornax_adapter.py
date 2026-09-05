@@ -33,6 +33,20 @@ keeping and losing the individual-timestep advantage.
 contract and is what a stock nornax integrator drives today. It is correct at any
 N but pays one traversal per active level.
 
+Whole base steps belong to nornax
+---------------------------------
+Both classes here also carry an ``advance_base_step``, and **neither is a
+production driver**. Nothing in ``jaccpot`` and nothing in ODISSEO calls them;
+every caller is a test. They exist as jaccpot-side oracles, so the cross-repo
+equivalence tests can check nornax's base step against an independent
+implementation without jaccpot importing nornax and making the graph cyclic.
+
+The canonical base step is ``nornax.solvers.leapfrog_kdk.advance_base_step``, and
+it is the only one carrying the rebuild and multiple-shooting interfaces
+(``checkpoint_substeps``, and the per-base-step ``topology`` on
+``BlockStepState``). A change to how a base step works belongs there and should
+not be mirrored here.
+
 Topology lifetime
 -----------------
 The discrete topology is frozen, host-side, and severed from the gradient --
@@ -1277,6 +1291,26 @@ class BlockStepFMM:
     ) -> Tuple[Array, Array, Array]:
         """Run one full base step on the fused path, at one traversal per boundary.
 
+        **Reference implementation, not a production driver.** Nothing in
+        ``jaccpot`` and nothing in ODISSEO calls this method -- every caller is
+        under ``tests/integration/``. The production path is nornax's
+        :func:`nornax.solvers.leapfrog_kdk.advance_base_step`, which drives this
+        model through the ``MutualForceModel`` / ``FusedMutualForceModel``
+        protocols -- this class satisfies both, and nornax picks the fused
+        boundary path automatically -- and additionally offers
+        ``checkpoint_substeps`` and the per-base-step ``topology`` carried on
+        ``BlockStepState``, neither of which exists here.
+
+        This method exists so ``test_jaccpot_base_step_matches_nornax_fused_base_step``
+        (``tests/integration/test_mutual_fmm_nornax.py``) has a
+        jaccpot-side oracle to compare against *without* jaccpot importing nornax,
+        which would cost the acyclic dependency graph (``Jaccpot -> Yggdrax``,
+        ``Nornax`` standalone) that this module's docstring exists to defend.
+
+        **Prefer nornax's for anything new**, multiple-shooting work especially:
+        the rebuild and shooting interfaces live on nornax's side and are not
+        mirrored here.
+
         The recursively-symmetric palindrome of Farr & Bertschinger (2007): a kick
         at every boundary ``s = 0 .. n_sub`` (half at the synchronized ends, full
         inside) with a drift of ``dt_min`` between consecutive boundaries. The
@@ -2023,6 +2057,26 @@ class DistributedBlockStepFMM:
         dt_max: float,
     ) -> Tuple[Array, Array, Array]:
         """Run one full base step, at one traversal of the mesh per boundary.
+
+        **Reference implementation, not a production driver.** Nothing in
+        ``jaccpot`` and nothing in ODISSEO calls this method -- every caller is
+        under ``tests/integration/``. The production path is nornax's
+        :func:`nornax.solvers.leapfrog_kdk.advance_base_step`, which drives this
+        model through the ``MutualForceModel`` / ``FusedMutualForceModel``
+        protocols -- this class satisfies both, and nornax picks the fused
+        boundary path automatically -- and additionally offers
+        ``checkpoint_substeps`` and the per-base-step ``topology`` carried on
+        ``BlockStepState``, neither of which exists here.
+
+        This method exists so ``test_the_models_own_base_step_matches_nornax_advance_base_step``
+        (``tests/integration/test_mutual_distributed_nornax.py``) has a
+        jaccpot-side oracle to compare against *without* jaccpot importing nornax,
+        which would cost the acyclic dependency graph (``Jaccpot -> Yggdrax``,
+        ``Nornax`` standalone) that this module's docstring exists to defend.
+
+        **Prefer nornax's for anything new**, multiple-shooting work especially:
+        the rebuild and shooting interfaces live on nornax's side and are not
+        mirrored here.
 
         The recursively-symmetric palindrome of Farr & Bertschinger (2007): a kick at
         every boundary ``s = 0 .. n_sub`` (half at the synchronized ends, full inside)
