@@ -1762,17 +1762,29 @@ style.save(fig, str(FIG_DIR / "fig20_multigpu_reconstruction_scaling.pdf"))
 """
 
 FIG20_CAPTION = r"""
-The reconstruction across multiple devices. **Left:** wall-clock for the same
-fit on an increasing device count, at fixed parameter count, against ideal
-scaling -- to be read against the strong- and weak-scaling figures of Sect.~5.
-**Right:** the largest free-parameter count that ran, per device count, with the
-configurations that exhausted memory marked. The ceiling is measured by climbing
-a ladder until it broke, not inferred from a memory model. This is *parameter*
-sharding: the optimisation's parameter array is distributed across the mesh, so
-the parameter count is bounded by aggregate device memory rather than by one
-device's. It is not the distributed force evaluation of Sect.~5, which partitions
-the sources and exchanges halos; the two are not interchangeable and each run's
-artifact records which it used.
+The reconstruction across multiple devices, for the **distributed force
+evaluation** of Sect.~5 -- sources partitioned across the mesh, halos exchanged.
+**Left:** wall-clock for the same fit on an increasing device count, at fixed
+parameter count, against ideal scaling. **Right:** the largest free-parameter
+count that ran, per device count, with the configurations that failed marked.
+The ceiling is measured by climbing a ladder until it broke, not inferred from a
+memory model: it doubles from $P = 393\,216$ on two devices to $786\,432$ on
+four, so for this path the parameter count is bounded by aggregate device memory
+rather than by one device's. Two caveats the ladder itself supplies. The
+two-device failure at $786\,432$ is a cuBLAS autotuning error rather than an
+out-of-memory, so that rung bounds the ceiling without locating it in memory;
+and tightening the interaction caps does not move it, which is why it is
+attributed to the path and not to the defaults.
+
+The *other* multi-GPU mechanism, **parameter sharding** -- the optimisation's
+parameter array distributed across the mesh while the force evaluation stays on
+one device -- is not plotted here and does **not** behave this way. Its ceiling
+is pinned at $P = 3\,145\,728$ on one, two and four devices alike, all three
+failing at $6\,291\,456$, while the gradient goes $46.4 \to 48.1 \to 48.5$~s:
+more devices buy neither capacity nor speed. It reaches a higher parameter count
+than the distributed path does, but it reaches it on a single device. The two
+are not interchangeable, no statement about "multi-GPU" holds of both, and each
+run's artifact records which it used.
 """
 
 
