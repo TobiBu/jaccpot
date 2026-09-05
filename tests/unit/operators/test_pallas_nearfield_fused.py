@@ -371,3 +371,107 @@ def test_fast_lane_decoupled_wrapper_reproduces_the_coupled_wrapper():
     # a target/source confusion produce a different number rather than the same one.
     assert float(jnp.max(jnp.abs(coupled))) > 0.0
     np.testing.assert_array_equal(np.asarray(decoupled), np.asarray(coupled))
+
+
+# ---------------------------------------------------------------------------
+# The decoupled kernel's width contract, which was enforced by nothing and whose two
+# violations fail in OPPOSITE and equally quiet ways.
+#
+# The source gather tables' `BlockSpec` is built from `leaf_width` -- the TARGET width --
+# so the kernel reads exactly that many columns from the source tables however many they
+# have. Measured on the parent commit:
+#
+#   source narrower than target   out-of-bounds read, |acc| = nan
+#   source wider than target      the surplus columns are NEVER READ, so real valid
+#                                 source particles are dropped and the force is wrong
+#                                 by rel-L2 0.0e+00 against the narrow answer -- i.e.
+#                                 silently identical to ignoring them
+#
+# The second is the dangerous one and it was previously recorded the wrong way round: the
+# note in `_fast_lane.py` said a wider pool is "correctly ignored", which was measured
+# with the surplus MASKED OFF, where it contributes nothing either way. Unmasked, it is a
+# wrong number that looks plausible.
+# ---------------------------------------------------------------------------
+
+
+def _decoupled_width_case(*, target_width, source_width, seed=17):
+    """Build a decoupled call with independently chosen target and source widths.
+
+    Every source slot is VALID -- that is the point. Masking the surplus off is what made
+    the original measurement read as harmless.
+
+    Parameters
+    ----------
+    target_width : int
+        Columns in the target block.
+    source_width : int
+        Columns in the source gather pool.
+    seed : int
+        RNG seed.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for :func:`nearfield_leafpair_pallas_decoupled`.
+    """
+    rng = np.random.default_rng(seed)
+    targets, sources, slots = 3, 4, 2
+    return dict(
+        target_positions=jnp.asarray(
+            rng.uniform(-1.0, 1.0, size=(targets, target_width, 3)), jnp.float64
+        ),
+        target_mask=jnp.ones((targets, target_width), dtype=bool),
+        source_positions=jnp.asarray(
+            rng.uniform(-1.0, 1.0, size=(sources, source_width, 3)), jnp.float64
+        ),
+        source_masses=jnp.asarray(
+            np.abs(rng.standard_normal((sources, source_width))) + 0.5, jnp.float64
+        ),
+        source_mask=jnp.ones((sources, source_width), dtype=bool),
+        source_leaf_ids=jnp.asarray(
+            rng.integers(0, sources, size=(targets, slots)), jnp.int32
+        ),
+        source_valid=jnp.ones((targets, slots), dtype=bool),
+    )
+
+
+@pytest.mark.parametrize(
+    "target_width,source_width",
+    [(8, 4), (16, 3), (4, 8), (4, 16)],
+    ids=["narrower-8-4", "narrower-16-3", "wider-4-8", "wider-4-16"],
+)
+def test_decoupled_rejects_a_source_pool_of_a_different_width(
+    target_width, source_width
+):
+    """Unequal widths must raise, naming the parameter, in BOTH directions.
+
+    Narrower reads out of bounds and returns NaN; wider drops the surplus columns and
+    returns a plausible wrong number. Neither is a configuration the kernel supports --
+    its own docstring gives both tables the width ``W`` -- and neither said so.
+    """
+    case = _decoupled_width_case(target_width=target_width, source_width=source_width)
+    with pytest.raises(ValueError, match="source_positions"):
+        nearfield_leafpair_pallas_decoupled(
+            **case,
+            softening_sq=jnp.asarray(1e-2**2, dtype=jnp.float64),
+            G=jnp.asarray(1.0, dtype=jnp.float64),
+            interpret=True,
+        )
+
+
+def test_decoupled_equal_widths_are_untouched_and_finite():
+    """The supported configuration must be unaffected, which is what makes the fix safe.
+
+    Production only ever passes equal widths -- ``distributed/fmm.py`` slices its target
+    block out of the source pool -- so this is the path that must not move.
+    """
+    case = _decoupled_width_case(target_width=8, source_width=8)
+    out = nearfield_leafpair_pallas_decoupled(
+        **case,
+        softening_sq=jnp.asarray(1e-2**2, dtype=jnp.float64),
+        G=jnp.asarray(1.0, dtype=jnp.float64),
+        interpret=True,
+    )
+    assert bool(jnp.all(jnp.isfinite(out)))
+    # Non-vacuity: a kernel returning zeros would satisfy "finite" trivially.
+    assert float(jnp.max(jnp.abs(out))) > 0.0

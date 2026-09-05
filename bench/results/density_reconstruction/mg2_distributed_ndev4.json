@@ -1,0 +1,235 @@
+{
+  "config": {
+    "n": [
+      65536
+    ],
+    "theta": 0.5,
+    "order": 4,
+    "basis": "solidfmm",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float64",
+    "M": 2048,
+    "leaf_size": 256,
+    "softening": 0.01,
+    "iterations": 4,
+    "device_counts": [
+      4
+    ],
+    "ceiling_ladder": [
+      131072,
+      262144,
+      524288
+    ],
+    "ceiling_iterations": 1,
+    "caps": {},
+    "sharding_mode": "distributed",
+    "mode": "distributed"
+  },
+  "meta": {
+    "git_sha": "7f4ebde18028eeded15d2eb61096a5a297da7132",
+    "git_branch": "feat/density-reconstruction-payoff",
+    "git_dirty": false,
+    "git_dirty_sources": false,
+    "git_dirty_source_paths": [],
+    "jax_version": "0.10.2",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "4,5,6,7"
+  },
+  "data": {
+    "records": [
+      {
+        "N": 65536,
+        "M": 2048,
+        "num_free_parameters": 196608,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 65536,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 4,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 4,
+        "initial_loss": 0.008469272782861845,
+        "final_loss": 0.0006680334269588022,
+        "field_residual_after": {
+          "rel_l2": 0.02148620394086528,
+          "rms": 0.006209981583942319,
+          "max_abs": 0.10670779577700824,
+          "mean_abs": 0.0029055522405223863,
+          "observed_rms": 0.28902181143926314,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 678.8070640470833,
+          "totals_seconds": {
+            "prepare": 166.1344543825835,
+            "gradient": 507.00446183793247,
+            "update": 0.9522039871662855
+          },
+          "first_iteration_seconds": {
+            "prepare": 45.84009979479015,
+            "gradient": 135.94071401562542,
+            "update": 0.8260855646803975
+          },
+          "mean_later_gradient_seconds": 123.68791594076902,
+          "mean_later_prepare_seconds": 40.098118195931114,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.28902181143926314
+        },
+        "switch_summary": null
+      }
+    ],
+    "ceiling": [
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 131072,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 4,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 1,
+        "initial_loss": 0.008726085616482816,
+        "final_loss": 0.008726085616482816,
+        "field_residual_after": {
+          "rel_l2": 0.07051422273482374,
+          "rms": 0.02062588506983689,
+          "max_abs": 0.8839753982718319,
+          "mean_abs": 0.00356541277773194,
+          "observed_rms": 0.29250673509375164,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 193.89398850873113,
+          "totals_seconds": {
+            "prepare": 48.516861259937286,
+            "gradient": 144.46799916028976,
+            "update": 0.9003989975899458
+          },
+          "first_iteration_seconds": {
+            "prepare": 48.516861259937286,
+            "gradient": 144.46799916028976,
+            "update": 0.9003989975899458
+          },
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29250673509375164
+        },
+        "switch_summary": null,
+        "arm": "ceiling"
+      },
+      {
+        "N": 262144,
+        "M": 2048,
+        "num_free_parameters": 786432,
+        "num_devices": 4,
+        "devices": [
+          "cuda:0",
+          "cuda:1",
+          "cuda:2",
+          "cuda:3"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 262144,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 4,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 1,
+        "initial_loss": 0.00672659738122454,
+        "final_loss": 0.00672659738122454,
+        "field_residual_after": {
+          "rel_l2": 0.05858035948291896,
+          "rms": 0.016991812130027147,
+          "max_abs": 0.7374807106174619,
+          "mean_abs": 0.0027647634133269312,
+          "observed_rms": 0.29005988150314566,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 192.09046444948763,
+          "totals_seconds": {
+            "prepare": 50.9366563949734,
+            "gradient": 140.1183848734945,
+            "update": 1.0262066749855876
+          },
+          "first_iteration_seconds": {
+            "prepare": 50.9366563949734,
+            "gradient": 140.1183848734945,
+            "update": 1.0262066749855876
+          },
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29005988150314566
+        },
+        "switch_summary": null,
+        "arm": "ceiling"
+      },
+      {
+        "arm": "ceiling",
+        "num_devices": 4,
+        "N": 524288,
+        "num_free_parameters": 1572864,
+        "failed": true,
+        "error_type": "JaxRuntimeError",
+        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 3.17GiB. [tf-allocator-allocation-error=''] [executable_name='jit_add']"
+      }
+    ]
+  }
+}

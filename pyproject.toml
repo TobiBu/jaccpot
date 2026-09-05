@@ -138,6 +138,14 @@ dev = [
   "build>=1.2.2",
   "twine>=5.1.1",
 ]
+# Only jaccpot/applications/ and bench/payoff_static/ need these: the section-7
+# density-reconstruction case study runs a gradient-descent fit, and optax is the
+# standard JAX optimiser library. Deliberately NOT a core dependency -- the FMM
+# itself takes no optimiser, and `pip install jaccpot` should not pull one in for
+# the sake of one application subpackage.
+applications = [
+  "optax>=0.2.4",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

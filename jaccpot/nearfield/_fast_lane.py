@@ -745,28 +745,31 @@ def _radix_fast_lane_prepacked_pallas(
     return pair_acc
 
 
-# THE SOURCE POOL'S WIDTH IS `sw`, NOT `w`, AND THE OBVIOUS CHOICE WAS THE WRONG ONE.
+# THE SOURCE POOL'S WIDTH IS `w`, THE SAME AS THE TARGET BLOCK'S -- CORRECTED, AND THE
+# CORRECTION IS THE INTERESTING PART.
 #
-# `pallas/nearfield_mutual.py` shares one `w` between its `a` and `b` sides and gives a
-# reason: the kernel pads both to `_next_pow2` of the a-side count, so a wider `b` hands
-# `jnp.pad` a negative width. The same annotation here would be a lie, because this kernel
-# does not behave that way. Measured through the interpret path, target width 4 against a
-# source pool padded to 8 with the extra slots masked off: bit-identical to the equal-width
-# result, rel-L2 exactly 0. A wider source pool is CORRECTLY IGNORED, so asserting equality
-# would reject a configuration that works -- section 4.2's "a wrong shape annotation is
-# worse than none".
+# This note previously gave the source pool its own axis name, `sw`, on the strength of a
+# measurement that a wider pool is "correctly ignored". That measurement was wrong, and
+# wrong in the flattering direction: it padded the surplus source columns and MASKED THEM
+# OFF, where they contribute nothing either way. Unmasked, they are silently dropped --
+# target width 4 against a source pool padded to 8 with real, valid extra particles returns
+# a force identical to ignoring them, rel-L2 0.0e+00. A plausible wrong number, which
+# CLAUDE.md ranks as the worst thing this library can produce, recorded here as a safe
+# configuration.
 #
-# So the two widths get their own names. Each still binds across its own group -- the three
-# source arrays must agree with each other, and the three target arrays with each other,
-# both measured at three distinct extents -- and nothing false is asserted about the pair.
+# The cause is one line in the kernel: the source gather tables' `BlockSpec` is built from
+# `leaf_width`, the TARGET width, so exactly that many columns are read from the source
+# tables however many they have. Hence both violations, in opposite directions:
 #
-# FOUND ON THE WAY, NOT FIXED HERE, because it is not something an annotation can express:
-# a source pool NARROWER than the target block is accepted and returns NaN (measured at
-# target 8 / source 4 and target 16 / source 3, both `|acc| = nan`; the reverse direction is
-# fine). jaxtyping cannot say `sw >= w`, so this stays a defect to fix in its own PR with
-# its own test rather than something these annotations catch. Production never reaches it:
-# `distributed/fmm.py` slices its target block out of the source pool, so the widths are
-# equal there by construction, and the F25 equivalence case passes the same array twice.
+#   source narrower   out-of-bounds read, `|acc| = nan`
+#   source wider      surplus columns never read, force silently wrong
+#
+# `nearfield_leafpair_pallas_decoupled` now REJECTS an unequal width with a `ValueError`
+# naming `source_positions`, so equality is a contract rather than an assumption -- which
+# is what makes `w` on both sides the honest annotation, and what retires `sw` here.
+# Production was never affected: `distributed/fmm.py` slices its target block out of the
+# source pool, so the widths are equal by construction, and the F25 equivalence case passes
+# the same array twice.
 # Overloads: the return shape is keyed entirely on `compute_potential`, so a caller that does
 # not set it should not be handed a union to narrow. Generated from this
 # function's own signature rather than retyped -- including whether `compute_potential`
@@ -780,9 +783,9 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     target_positions: Float[Array, "tbatch w 3"],
     target_mask: Bool[Array, "tbatch w"],
     target_particle_idx: Int[Array, "tbatch w"],
-    source_positions: Float[Array, "leaves sw 3"],
-    source_masses: Float[Array, "leaves sw"],
-    source_mask: Bool[Array, "leaves sw"],
+    source_positions: Float[Array, "leaves w 3"],
+    source_masses: Float[Array, "leaves w"],
+    source_mask: Bool[Array, "leaves w"],
     positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
@@ -803,9 +806,9 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     target_positions: Float[Array, "tbatch w 3"],
     target_mask: Bool[Array, "tbatch w"],
     target_particle_idx: Int[Array, "tbatch w"],
-    source_positions: Float[Array, "leaves sw 3"],
-    source_masses: Float[Array, "leaves sw"],
-    source_mask: Bool[Array, "leaves sw"],
+    source_positions: Float[Array, "leaves w 3"],
+    source_masses: Float[Array, "leaves w"],
+    source_mask: Bool[Array, "leaves w"],
     positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
@@ -826,9 +829,9 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     target_positions: Float[Array, "tbatch w 3"],
     target_mask: Bool[Array, "tbatch w"],
     target_particle_idx: Int[Array, "tbatch w"],
-    source_positions: Float[Array, "leaves sw 3"],
-    source_masses: Float[Array, "leaves sw"],
-    source_mask: Bool[Array, "leaves sw"],
+    source_positions: Float[Array, "leaves w 3"],
+    source_masses: Float[Array, "leaves w"],
+    source_mask: Bool[Array, "leaves w"],
     positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
@@ -871,13 +874,13 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     target_particle_idx : Int[Array, 'tbatch w']
         **Global** particle index per target slot ``[num_targets, W]``, so
         per-block partials scatter-add and compose by ``+``.
-    source_positions : Float[Array, 'leaves sw 3']
-        The full source gather pool ``[num_sources, W, 3]``, resident. Its width is
-        ``sw``, deliberately NOT the target block's ``w`` -- see the note above the
-        function for the measurement, and for the NaN that motivates it.
-    source_masses : Float[Array, 'leaves sw']
+    source_positions : Float[Array, 'leaves w 3']
+        The full source gather pool ``[num_sources, W, 3]``, resident. Its width is the
+        target block's ``w`` and the kernel now enforces that -- see the note above the
+        function.
+    source_masses : Float[Array, 'leaves w']
         Source masses ``[num_sources, W]``.
-    source_mask : Bool[Array, 'leaves sw']
+    source_mask : Bool[Array, 'leaves w']
         Source validity ``[num_sources, W]``.
     positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; supplies the output shape only.

@@ -1,0 +1,173 @@
+{
+  "config": {
+    "n": [
+      65536
+    ],
+    "theta": 0.5,
+    "order": 4,
+    "basis": "solidfmm",
+    "seed": 0,
+    "device": "NVIDIA A100-PCIE-40GB",
+    "precision": "float64",
+    "M": 2048,
+    "leaf_size": 256,
+    "softening": 0.01,
+    "iterations": 4,
+    "device_counts": [
+      2
+    ],
+    "ceiling_ladder": [
+      131072,
+      262144,
+      524288
+    ],
+    "ceiling_iterations": 1,
+    "caps": {},
+    "sharding_mode": "distributed",
+    "mode": "distributed"
+  },
+  "meta": {
+    "git_sha": "7f4ebde18028eeded15d2eb61096a5a297da7132",
+    "git_branch": "feat/density-reconstruction-payoff",
+    "git_dirty": false,
+    "git_dirty_sources": false,
+    "git_dirty_source_paths": [],
+    "jax_version": "0.10.2",
+    "jax_backend": "gpu",
+    "devices": [
+      "cuda:0",
+      "cuda:1",
+      "cuda:2",
+      "cuda:3"
+    ],
+    "device_kind": "NVIDIA A100-PCIE-40GB",
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "4,5,6,7"
+  },
+  "data": {
+    "records": [
+      {
+        "N": 65536,
+        "M": 2048,
+        "num_free_parameters": 196608,
+        "num_devices": 2,
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 65536,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 2,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 4,
+        "initial_loss": 0.008469280767116333,
+        "final_loss": 0.0006681073824779932,
+        "field_residual_after": {
+          "rel_l2": 0.021487056984998996,
+          "rms": 0.00621022813230308,
+          "max_abs": 0.1067074415934992,
+          "mean_abs": 0.0029053449303551126,
+          "observed_rms": 0.2890218114392631,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 732.2996050268412,
+          "totals_seconds": {
+            "prepare": 177.46415990870446,
+            "gradient": 550.2112477086484,
+            "update": 0.9396406086161733
+          },
+          "first_iteration_seconds": {
+            "prepare": 46.5033367453143,
+            "gradient": 143.22693625837564,
+            "update": 0.8369332924485207
+          },
+          "mean_later_gradient_seconds": 135.66143715009093,
+          "mean_later_prepare_seconds": 43.65360772113005,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.2890218114392631
+        },
+        "switch_summary": null
+      }
+    ],
+    "ceiling": [
+      {
+        "N": 131072,
+        "M": 2048,
+        "num_free_parameters": 393216,
+        "num_devices": 2,
+        "devices": [
+          "cuda:0",
+          "cuda:1"
+        ],
+        "sharding_mode": "distributed_force_evaluation",
+        "mode": "distributed",
+        "operator": {
+          "N": 131072,
+          "M": 2048,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "num_devices": 2,
+          "partitioner": "rcb",
+          "sharding_mode": "distributed_force_evaluation"
+        },
+        "iterations": 1,
+        "initial_loss": 0.008728210552323418,
+        "final_loss": 0.008728210552323418,
+        "field_residual_after": {
+          "rel_l2": 0.07051789695281992,
+          "rms": 0.020626959803346976,
+          "max_abs": 0.8838883135799112,
+          "mean_abs": 0.003567723915543522,
+          "observed_rms": 0.29250673509375164,
+          "noise_floor_rel_l2": 0.0,
+          "residual_over_noise_floor": Infinity
+        },
+        "timing": {
+          "wall_seconds": 177.9977296506986,
+          "totals_seconds": {
+            "prepare": 45.89489611238241,
+            "gradient": 131.15980375465006,
+            "update": 0.9262326620519161
+          },
+          "first_iteration_seconds": {
+            "prepare": 45.89489611238241,
+            "gradient": 131.15980375465006,
+            "update": 0.9262326620519161
+          },
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
+          "path": "eager",
+          "num_devices": 1,
+          "loss_scale": 0.29250673509375164
+        },
+        "switch_summary": null,
+        "arm": "ceiling"
+      },
+      {
+        "arm": "ceiling",
+        "num_devices": 2,
+        "N": 262144,
+        "num_free_parameters": 786432,
+        "failed": true,
+        "error_type": "JaxRuntimeError",
+        "error": "INTERNAL: Failed to get configs for: 26 out of 483 instructions. See logs for all failures. Example failure: \nAutotuning failed for HLO: %custom-call.412 = (c128[4750848,9]{1,0}, s8[4194304]{0}) custom-call(%bitcast.1458.0, %param.3000), custom_call_target=\"__cublas$lt$matmul\", metadata={op_name=\"jit(evaluate)/shard_map/jit(_accumulate_m2l_fullbatch)/jit(_m2l_complex_batch_kernel)/jit(m2l_complex_reference_batch)/vmap(jvp())/dot_general\" stack_frame_id=918}, backend_config={\"operation_queue_id\":"
+      }
+    ]
+  }
+}

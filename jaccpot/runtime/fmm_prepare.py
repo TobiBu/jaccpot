@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Bool, Int, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
@@ -222,6 +222,61 @@ class _DualDownwardPlan(NamedTuple):
     use_compact_streamed_pairs: bool
     use_dense_interactions_for_prepare: bool
     use_paper_fixed_policy: bool
+
+
+# WHY ONLY TWO OF THIS MODULE'S 41 BARE PARAMETERS ARE SHAPED.
+#
+# `test_type_annotation_guard.py` already records that `fmm_prepare.py` "was measured and
+# left alone, because each already rejects every malformed input tried, with a domain
+# message an annotation would replace". That was Phase 1, and Phase 1 measured the PUBLIC
+# entry. The other 39 parameters are on private helpers it could not reach, so the verdict
+# was re-measured per family -- and it holds, for three different reasons:
+#
+#   positions / masses / positions_arr / masses_arr / pos_sorted   (15 parameters)
+#       Six malformations -- wrong spatial dimension, rank 1, extra leading axis, extra
+#       trailing axis on masses, masses shorter, masses longer -- are all rejected by
+#       `prepare_state` with a DOMAIN ValueError naming the parameter:
+#       "positions must have shape (N, 3)", "masses must have shape (N,)". Every helper
+#       below receives the arrays AFTER that gate, so annotating them would replace the
+#       best error in the module with a generic `TypeCheckError` (section 4.1 calls that a
+#       loss, and `local_expansions.py`'s `centers` is the same entry in DELIBERATELY_BARE).
+#
+#   bounds                                                          (5 parameters)
+#       Rejected already, and not by us: a short, long or rank-2 bound raises a
+#       `TypeCheckError` from YGGDRAX's own annotation. Section 4.1's "flows straight into
+#       a library that checks it", literally.
+#
+#   force_scale_nodes / supplied_force_scale                        (3 parameters)
+#       NOT measured, and not claimed as safe. A malformed one is rejected, but by a config
+#       gate -- "force_scale_nodes was supplied but this solver has no adaptive
+#       force-scale" -- which fires before any shape is looked at. Measuring the shape
+#       question needs a solver built with an adaptive force-scale MAC, which is its own
+#       setup and its own change.
+#
+#   the grouped-segment family, sorted_codes, far_pairs_by_gear,
+#   target_indices, the topology-reuse family                       (16 parameters)
+#       Never exercised: `None` in all 194 captured calls across three test files. Not
+#       "fine" -- unmeasured, for the same reason as the tree-taking half of
+#       `_adaptive_policy`, and it needs a run that enters the grouped far-field and the
+#       topology-reuse lanes.
+#
+#   target_leaf_ids / valid_pairs                                   (2 parameters)
+#       The one measured gap, and it is the family section 4.1 predicts -- this helper
+#       BUILDS a `precomputed_*` schedule. All five malformations were accepted:
+#
+#           valid_pairs one element short      3 of 3 built, output IDENTICAL (harmless)
+#           valid_pairs (pairs, 1)             schedule SILENTLY DROPPED, 0 of 3
+#           target_leaf_ids one element short  3 of 3 built, output DIFFERENT
+#           target_leaf_ids (1, pairs)         schedule SILENTLY DROPPED, 0 of 3
+#           valid_pairs float, not bool        3 of 3 built, output IDENTICAL (harmless)
+#
+#       The method is `_safe` by design -- it swallows failures and returns `None` -- so
+#       two of those five lose the bucketed schedule entirely and fall back to the
+#       unscheduled path: a silent PERFORMANCE regression rather than a wrong number. The
+#       third is the sharp one: a length-mismatched `target_leaf_ids` builds a DIFFERENT
+#       schedule and says nothing. Shaping both against a shared `pairs` catches all three;
+#       the cost is rejecting the float mask, which works today and is the one thing this
+#       change makes stricter.
 
 
 class PrepareMixin(_EngineBase):
@@ -2909,12 +2964,13 @@ class PrepareMixin(_EngineBase):
         except Exception:
             return None, None, None
 
+    @jaxtyped(typechecker=beartype)
     def _prepare_bucketed_scatter_schedules_safe(
         self,
         *,
         nearfield_interop: NearfieldInteropData,
-        target_leaf_ids: Array,
-        valid_pairs: Array,
+        target_leaf_ids: Int[Array, "pairs"],
+        valid_pairs: Bool[Array, "pairs"],
         leaf_cap: int,
         edge_chunk_size: int,
     ) -> tuple[Optional[Array], Optional[Array], Optional[Array]]:
@@ -2924,10 +2980,15 @@ class PrepareMixin(_EngineBase):
         ----------
         nearfield_interop : NearfieldInteropData
             Near-field interop payload shared with the evaluate path.
-        target_leaf_ids : Array
-            Leaf id per target particle.
-        valid_pairs : Array
-            Mask marking which candidate leaf pairs are real.
+        target_leaf_ids : Int[Array, 'pairs']
+            Target leaf id per candidate leaf PAIR -- not per particle, which is what
+            this line said until the shapes were measured: the two axes were observed at
+            4032, 15936, 16130, 23760, 33036 and 55550 against particle counts of 512 to
+            4096.
+        valid_pairs : Bool[Array, 'pairs']
+            Mask marking which candidate leaf pairs are real. Shares ``pairs`` with
+            ``target_leaf_ids``, observed agreeing at all six extents, and that agreement
+            is the thing worth asserting -- see the note at the top of the class.
         leaf_cap : int
             Resolved upper bound on particles per leaf.
         edge_chunk_size : int

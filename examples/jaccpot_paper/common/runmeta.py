@@ -18,6 +18,7 @@ Usage in a bench script::
 
 from __future__ import annotations
 
+import datetime
 import os
 import pathlib
 import subprocess
@@ -149,7 +150,26 @@ def seed_sequence(seed: int, *labels: str) -> int:
 
 
 def git_meta() -> dict[str, Any]:
-    """Return the commit the measurement was taken at, and whether it was dirty."""
+    """Return the commit the measurement was taken at, and whether it was dirty.
+
+    Reports dirtiness twice, because the two answers mean different things and
+    only one of them bears on whether a number is trustworthy.
+
+    ``git_dirty`` is the whole working tree, as before. ``git_dirty_sources``
+    excludes ``bench/results/``, and it is the one to judge an artifact by: what
+    matters is whether the recorded sha describes the CODE that ran, and a
+    rewritten results JSON says nothing about that.
+
+    The distinction is not academic. The committed figure artifacts are tracked
+    files under ``bench/results/``, and several benches now rewrite theirs after
+    every point so that an interrupted multi-hour sweep still leaves something
+    usable. The consequence is that any two benches running CONCURRENTLY see
+    each other's output as a dirty tree, and both record ``git_dirty: true``
+    from a perfectly clean checkout -- which is exactly what happened to the
+    section-7 figures, and it made every one of them look unfit for the
+    manuscript when the code behind them was pinned and clean. Serialising the
+    runs to avoid it would cost about ten hours of GPU for no gain in accuracy.
+    """
 
     def run(*cmd: str) -> str:
         try:
@@ -159,12 +179,45 @@ def git_meta() -> dict[str, Any]:
         except OSError:  # pragma: no cover
             return ""
 
+    porcelain = run("git", "status", "--porcelain")
+
+    def paths_of(line: str) -> list[str]:
+        """Return the path(s) one porcelain line refers to.
+
+        Parameters
+        ----------
+        line : str
+            One line of ``git status --porcelain`` output.
+
+        Returns
+        -------
+        list[str]
+            The path, or both paths of a rename. The two status characters are
+            followed by a space, but staged and unstaged entries pad
+            differently, so this strips rather than slicing at a fixed column
+            -- slicing at 3 silently ate the first character of every staged
+            path and produced "ench/results/...".
+        """
+        body = line[2:].strip()
+        return [part.strip().strip('"') for part in body.split(" -> ") if part.strip()]
+
+    source_changes = [
+        line
+        for line in porcelain.splitlines()
+        if paths_of(line)
+        and not all(path.startswith("bench/results/") for path in paths_of(line))
+    ]
     return {
         "git_sha": run("git", "rev-parse", "HEAD"),
         "git_branch": run("git", "rev-parse", "--abbrev-ref", "HEAD"),
-        # A dirty tree means the recorded sha does not fully describe the code
-        # that ran. Figures for the manuscript should be regenerated clean.
-        "git_dirty": bool(run("git", "status", "--porcelain")),
+        # The whole tree, kept for continuity with artifacts already committed.
+        "git_dirty": bool(porcelain),
+        # The tree EXCLUDING bench/results/. This is the one that says whether
+        # the recorded sha describes the code that produced the number.
+        "git_dirty_sources": bool(source_changes),
+        "git_dirty_source_paths": sorted(
+            {path for line in source_changes for path in paths_of(line)}
+        )[:20],
     }
 
 
@@ -184,9 +237,120 @@ def run_meta(extra: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         meta["jax_version"] = f"unavailable: {exc}"
 
     meta["cuda_visible_devices"] = os.environ.get("CUDA_VISIBLE_DEVICES")
+    # When the measurement happened, recorded by the run itself. The export's
+    # provenance table used to take this from the artifact file's mtime, which
+    # is the CHECKOUT time in a fresh worktree -- so exporting from a different
+    # checkout silently rewrote every figure's date to the day the tree was
+    # created. A date the run writes down cannot drift that way.
+    meta["measured_at"] = (
+        datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    )
     if extra:
         meta.update(extra)
     return meta
+
+
+def commit_date(sha: str) -> str:
+    """Return the ISO author-committer date of ``sha``, or ``""`` if unknown.
+
+    Used to order artifact provenance when the artifacts predate the
+    ``measured_at`` field: a commit date is not when the number was measured,
+    but it bounds it from below and it is the only ordering available.
+
+    Parameters
+    ----------
+    sha : str
+        A commit-ish resolvable in this repository.
+
+    Returns
+    -------
+    str
+        ISO-8601 committer date, or the empty string.
+    """
+    if not sha:
+        return ""
+    try:
+        done = subprocess.run(
+            ["git", "show", "-s", "--format=%cI", sha],
+            capture_output=True,
+            text=True,
+            cwd=_REPO_ROOT,
+            check=False,
+        )
+    except OSError:  # pragma: no cover
+        return ""
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def merged_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return provenance for an artifact merged from per-slice artifacts.
+
+    A merge is bookkeeping, not a measurement, so nothing about the machine or
+    the checkout that ran the merge may appear as provenance. The merged meta
+    is therefore the NEWEST SLICE's meta -- its commit, its device, its JAX --
+    with the merge's own state recorded separately under ``merged_*``, where it
+    cannot be mistaken for the measurement's.
+
+    Building it the other way round, from the merge-time ``run_meta()`` with a
+    few fields patched back, is what put a commit that ran no benchmark on
+    three figures and labelled three A100 runs ``cpu``: every field nobody
+    thought to patch silently described the merge instead.
+
+    Newest is by ``measured_at``, falling back to the commit date of each
+    slice's sha for artifacts written before ``measured_at`` existed -- without
+    that fallback the tie-break degenerates to argument order. Dirtiness is
+    OR-ed, because one dirty slice taints the whole artifact, and any field the
+    slices disagree on is listed under ``merged_disagreements`` so the spread
+    is visible rather than hidden behind the winner.
+
+    Parameters
+    ----------
+    metas : list of dict
+        The ``meta`` block of each source artifact, in any order.
+
+    Returns
+    -------
+    dict
+        Provenance for the merged artifact.
+    """
+    now = run_meta()
+    merge_record: dict[str, Any] = {
+        "merged_source_meta": metas,
+        "merged_at": now.get("measured_at"),
+        "merged_sha": now.get("git_sha"),
+        "merged_on": now.get("device_kind"),
+    }
+    indexed = [(i, m) for i, m in enumerate(metas) if m.get("git_sha")]
+    if not indexed:
+        return {**now, **merge_record}
+
+    order = {
+        i: (m.get("measured_at") or commit_date(str(m.get("git_sha"))))
+        for i, m in indexed
+    }
+    newest = max(indexed, key=lambda pair: order[pair[0]])[1]
+
+    out: dict[str, Any] = {**newest, **merge_record}
+    out["git_dirty"] = any(m.get("git_dirty") for m in metas)
+    out["git_dirty_sources"] = any(m.get("git_dirty_sources") for m in metas)
+    out["git_dirty_source_paths"] = sorted(
+        {p for m in metas for p in (m.get("git_dirty_source_paths") or [])}
+    )[:20]
+
+    # Anything the slices do not agree on. A merged curve whose points came
+    # from two devices or two commits is still usable, but only if that is on
+    # the record rather than hidden behind whichever slice happened to win.
+    disagreements: dict[str, list[Any]] = {}
+    for key in ("git_sha", "device_kind", "jax_version", "jax_backend"):
+        seen = sorted({str(m[key]) for m in metas if m.get(key) is not None})
+        if len(seen) > 1:
+            disagreements[key] = seen
+    if disagreements:
+        out["merged_disagreements"] = disagreements
+        out["measured_shas"] = disagreements.get(
+            "git_sha", sorted({str(m["git_sha"]) for _, m in indexed})
+        )
+    return out
 
 
 def device_label() -> str:
