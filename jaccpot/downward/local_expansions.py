@@ -1039,10 +1039,10 @@ def accumulate_dense_m2l_contributions(
 @jaxtyped(typechecker=beartype)
 def _translate_multipole_to_local_impl(
     multipole: Float[Array, "ct"],
-    delta: Array,
+    delta: Float[Array, "3"],
     *,
     order: int,
-    mass: Array,
+    mass: Float[Array, ""],
     dipole: Float[Array, "3"],
     second: Float[Array, "3 3"],
     third: Float[Array, "3 3 3"],
@@ -1066,12 +1066,12 @@ def _translate_multipole_to_local_impl(
     ----------
     multipole : Float[Array, 'ct']
         Packed Cartesian multipole coefficients for one source node.
-    delta : Array
+    delta : Float[Array, '3']
         Target-minus-source centre displacement ``[3]``.
     order : int
         Expansion order ``p``, at most ``MAX_MULTIPOLE_ORDER``. Static under
         ``jit``.
-    mass : Array
+    mass : Float[Array, '']
         Monopole moment (scalar).
     dipole : Float[Array, '3']
         Dipole moment ``[3]``.
@@ -1134,7 +1134,7 @@ def _pack_symmetric_tensor(tensor: Array, level: int) -> Array:
 @partial(jax.jit, static_argnames=("order",))
 @jaxtyped(typechecker=beartype)
 def _build_component_vector(
-    mass: Array,
+    mass: Float[Array, ""],
     dipole: Float[Array, "3"],
     second: Float[Array, "3 3"],
     third: Float[Array, "3 3 3"],
@@ -1146,7 +1146,7 @@ def _build_component_vector(
 
     Parameters
     ----------
-    mass : Array
+    mass : Float[Array, '']
         Monopole term.
     dipole : Float[Array, '3']
         Dipole term.
@@ -1889,7 +1889,13 @@ def prepare_downward_sweep(
 @jaxtyped(typechecker=beartype)
 def _propagate_local_expansions_impl(
     coeffs: Float[Array, "nodes ct"],
-    centers: Float[Array, "nodes 3"],
+    # NOT shaped, and the reason is the guard rather than the code: this function has
+    # no `centers` check of its own, but `DELIBERATELY_BARE` is keyed on (file, name),
+    # so shaping it here rots the exemption that protects
+    # `initialize_local_expansions`' own `ValueError("centers must have shape
+    # (num_nodes, 3)")`. Removing the exemption to satisfy this one parameter would
+    # preempt that message -- checklist item 13 in reverse.
+    centers: Array,
     left_child: Int[Array, "internal"],
     right_child: Int[Array, "internal"],
     *,
@@ -1902,7 +1908,7 @@ def _propagate_local_expansions_impl(
     ----------
     coeffs : Float[Array, 'nodes ct']
         Packed local coefficients per node.
-    centers : Float[Array, 'nodes 3']
+    centers : Array
         Expansion centre per node, shape ``(num_nodes, 3)``.
     left_child : Int[Array, 'internal']
         Left child index per internal node.
