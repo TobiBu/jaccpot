@@ -11,7 +11,7 @@ import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jax import lax
-from jaxtyping import Array, Float, jaxtyped
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import (
@@ -737,14 +737,15 @@ def _translate_components_batch(
 
 
 @partial(jax.jit, static_argnames=("order", "chunk_size"))
+@jaxtyped(typechecker=beartype)
 def _accumulate_level(
-    coeffs: Array,
-    component_matrix: Array,
-    centers_target: Array,
-    centers_source: Array,
-    sources: Array,
-    offsets: Array,
-    counts: Array,
+    coeffs: Float[Array, "nodes ct"],
+    component_matrix: Float[Array, "nodes ct"],
+    centers_target: Float[Array, "nodes 3"],
+    centers_source: Float[Array, "nodes 3"],
+    sources: Int[Array, "edges"],
+    offsets: Int[Array, "nodes+1"],
+    counts: Int[Array, "nodes"],
     *,
     order: int,
     chunk_size: int,
@@ -764,21 +765,21 @@ def _accumulate_level(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Float[Array, 'nodes ct']
         Local-expansion coefficients to accumulate into,
         ``[num_targets, num_components]``. Returned updated.
-    component_matrix : Array
+    component_matrix : Float[Array, 'nodes ct']
         Per-source-node packed multipole components,
         ``[num_source_nodes, num_components]``.
-    centers_target : Array
+    centers_target : Float[Array, 'nodes 3']
         Target node centres ``[num_targets, 3]``.
-    centers_source : Array
+    centers_source : Float[Array, 'nodes 3']
         Source node centres ``[num_source_nodes, 3]``.
-    sources : Array
+    sources : Int[Array, 'edges']
         Flat source-node index per interaction pair, ``[num_pairs]``.
-    offsets : Array
+    offsets : Int[Array, 'nodes+1']
         Start offset into ``sources`` for each target, ``[num_targets]``.
-    counts : Array
+    counts : Int[Array, 'nodes']
         Number of sources for each target, ``[num_targets]``.
     order : int
         Expansion order ``p``. Static under ``jit``.
@@ -851,14 +852,15 @@ def _accumulate_level(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def _accumulate_dense_m2l_impl(
-    coeffs: Array,
-    component_matrix: Array,
-    node_indices: Array,
-    sources: Array,
-    mask: Array,
-    centers_target: Array,
-    centers_source: Array,
+    coeffs: Float[Array, "nodes ct"],
+    component_matrix: Float[Array, "nodes ct"],
+    node_indices: Int[Array, "pairs 2"],
+    sources: Int[Array, "pairs 2 1"],
+    mask: Bool[Array, "pairs 2 1"],
+    centers_target: Float[Array, "nodes 3"],
+    centers_source: Float[Array, "nodes 3"],
     *,
     order: int,
 ) -> Array:
@@ -877,22 +879,22 @@ def _accumulate_dense_m2l_impl(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Float[Array, 'nodes ct']
         Local-expansion coefficients to accumulate into,
         ``[num_nodes, num_components]``. Returned updated.
-    component_matrix : Array
+    component_matrix : Float[Array, 'nodes ct']
         Per-source-node packed multipole components,
         ``[num_source_nodes, num_components]``.
-    node_indices : Array
+    node_indices : Int[Array, 'pairs 2']
         Target node index per slot, ``[levels, slots_per_level]``.
-    sources : Array
+    sources : Int[Array, 'pairs 2 1']
         Source node indices, ``[levels, slots_per_level, pairs_per_slot]``.
-    mask : Array
+    mask : Bool[Array, 'pairs 2 1']
         Validity mask with the same shape as ``sources``; ``False`` slots
         contribute nothing.
-    centers_target : Array
+    centers_target : Float[Array, 'nodes 3']
         Node centres used for the target side, ``[num_nodes, 3]``.
-    centers_source : Array
+    centers_source : Float[Array, 'nodes 3']
         Node centres used for the source side, ``[num_source_nodes, 3]``.
     order : int
         Expansion order ``p``. Static under ``jit``.
@@ -1034,16 +1036,17 @@ def accumulate_dense_m2l_contributions(
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def _translate_multipole_to_local_impl(
-    multipole: Array,
+    multipole: Float[Array, "ct"],
     delta: Array,
     *,
     order: int,
     mass: Array,
-    dipole: Array,
-    second: Array,
-    third: Array,
-    fourth: Array,
+    dipole: Float[Array, "3"],
+    second: Float[Array, "3 3"],
+    third: Float[Array, "3 3 3"],
+    fourth: Float[Array, "3 3 3 3"],
 ) -> Array:
     """Low-level Cartesian multipole-to-local translation implementation.
 
@@ -1061,7 +1064,7 @@ def _translate_multipole_to_local_impl(
 
     Parameters
     ----------
-    multipole : Array
+    multipole : Float[Array, 'ct']
         Packed Cartesian multipole coefficients for one source node.
     delta : Array
         Target-minus-source centre displacement ``[3]``.
@@ -1070,13 +1073,13 @@ def _translate_multipole_to_local_impl(
         ``jit``.
     mass : Array
         Monopole moment (scalar).
-    dipole : Array
+    dipole : Float[Array, '3']
         Dipole moment ``[3]``.
-    second : Array
+    second : Float[Array, '3 3']
         Second central moment, packed symmetric.
-    third : Array
+    third : Float[Array, '3 3 3']
         Third central moment, packed symmetric.
-    fourth : Array
+    fourth : Float[Array, '3 3 3 3']
         Fourth central moment, packed symmetric.
 
     Returns
@@ -1129,12 +1132,13 @@ def _pack_symmetric_tensor(tensor: Array, level: int) -> Array:
 
 
 @partial(jax.jit, static_argnames=("order",))
+@jaxtyped(typechecker=beartype)
 def _build_component_vector(
     mass: Array,
-    dipole: Array,
-    second: Array,
-    third: Array,
-    fourth: Array,
+    dipole: Float[Array, "3"],
+    second: Float[Array, "3 3"],
+    third: Float[Array, "3 3 3"],
+    fourth: Float[Array, "3 3 3 3"],
     *,
     order: int,
 ) -> Array:
@@ -1144,13 +1148,13 @@ def _build_component_vector(
     ----------
     mass : Array
         Monopole term.
-    dipole : Array
+    dipole : Float[Array, '3']
         Dipole term.
-    second : Array
+    second : Float[Array, '3 3']
         Second moment.
-    third : Array
+    third : Float[Array, '3 3 3']
         Third moment.
-    fourth : Array
+    fourth : Float[Array, '3 3 3 3']
         Fourth moment.
     order : int
         Expansion order ``p``.
@@ -1882,11 +1886,12 @@ def prepare_downward_sweep(
 
 
 @partial(jax.jit, static_argnames=("order", "num_internal"))
+@jaxtyped(typechecker=beartype)
 def _propagate_local_expansions_impl(
-    coeffs: Array,
-    centers: Array,
-    left_child: Array,
-    right_child: Array,
+    coeffs: Float[Array, "nodes ct"],
+    centers: Float[Array, "nodes 3"],
+    left_child: Int[Array, "internal"],
+    right_child: Int[Array, "internal"],
     *,
     order: int,
     num_internal: int,
@@ -1895,13 +1900,13 @@ def _propagate_local_expansions_impl(
 
     Parameters
     ----------
-    coeffs : Array
+    coeffs : Float[Array, 'nodes ct']
         Packed local coefficients per node.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Expansion centre per node, shape ``(num_nodes, 3)``.
-    left_child : Array
+    left_child : Int[Array, 'internal']
         Left child index per internal node.
-    right_child : Array
+    right_child : Int[Array, 'internal']
         Right child index per internal node.
     order : int
         Expansion order ``p``.
