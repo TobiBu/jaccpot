@@ -7,7 +7,8 @@ from typing import NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array
+from beartype import beartype
+from jaxtyping import Array, Bool, Float, Inexact, Int, jaxtyped
 from yggdrax.interactions import CompactTaggedOctreeFarPairs, NodeInteractionList
 
 from jaccpot.operators.complex_harmonics import p2m_complex_batch
@@ -466,13 +467,14 @@ def build_octree_downward_plan(
 
 
 @partial(jax.jit, static_argnames=("order", "chunk_size"))
+@jaxtyped(typechecker=beartype)
 def _accumulate_octree_m2l_complex_chunked(
-    locals_coeffs: Array,
-    multipoles: Array,
-    centers: Array,
-    target_nodes: Array,
-    source_nodes: Array,
-    valid_interactions: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    multipoles: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
+    target_nodes: Int[Array, "pairs"],
+    source_nodes: Int[Array, "pairs"],
+    valid_interactions: Bool[Array, "pairs"],
     *,
     order: int,
     chunk_size: int,
@@ -481,18 +483,18 @@ def _accumulate_octree_m2l_complex_chunked(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficient accumulator ``[nodes, (p+1)^2]``.
-    multipoles : Array
+    multipoles : Inexact[Array, 'nodes sh']
         Packed multipole coefficients, same layout.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Expansion centre per node; the pair displacement is the difference of two
         rows.
-    target_nodes : Array
+    target_nodes : Int[Array, 'pairs']
         Target node id per pair.
-    source_nodes : Array
+    source_nodes : Int[Array, 'pairs']
         Source node id per pair.
-    valid_interactions : Array
+    valid_interactions : Bool[Array, 'pairs']
         Which pair slots are real; invalid lanes contribute zero.
     order : int
         Expansion order ``p``. Static.
@@ -710,12 +712,13 @@ def _topological_level_partition(
     jax.jit,
     static_argnames=("order", "num_levels", "level_batch_width"),
 )
+@jaxtyped(typechecker=beartype)
 def _propagate_octree_l2l_complex_by_level(
-    locals_coeffs: Array,
-    centers: Array,
-    children: Array,
-    nodes_by_level: Array,
-    level_offsets: Array,
+    locals_coeffs: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
+    children: Int[Array, "nodes 8"],
+    nodes_by_level: Int[Array, "nodes"],
+    level_offsets: Int[Array, "_"],
     *,
     order: int,
     num_levels: int,
@@ -725,17 +728,17 @@ def _propagate_octree_l2l_complex_by_level(
 
     Parameters
     ----------
-    locals_coeffs : Array
+    locals_coeffs : Inexact[Array, 'nodes sh']
         Local coefficients ``[nodes, (p+1)^2]``, advanced in place down the tree.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Expansion centre per node; the parent-to-child shift is the difference.
-    children : Array
+    children : Int[Array, 'nodes 8']
         Child node ids per node, padded.
-    nodes_by_level : Array
+    nodes_by_level : Int[Array, 'nodes']
         Node ids grouped by level. Must be a *topological* partition -- see
         :func:`_topological_level_partition` for why the octree's own depths will
         not do.
-    level_offsets : Array
+    level_offsets : Int[Array, '_']
         CSR boundaries into ``nodes_by_level``.
     order : int
         Expansion order ``p``. Static.
@@ -984,13 +987,14 @@ def compute_octree_center_of_mass(
     jax.jit,
     static_argnames=("order", "max_leaf_size"),
 )
+@jaxtyped(typechecker=beartype)
 def _p2m_octree_leaves_complex(
-    leaf_nodes: Array,
-    leaf_mask: Array,
-    node_ranges: Array,
-    positions_sorted: Array,
-    masses_sorted: Array,
-    centers: Array,
+    leaf_nodes: Int[Array, "leaves"],
+    leaf_mask: Bool[Array, "leaves"],
+    node_ranges: Int[Array, "nodes 2"],
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
+    centers: Float[Array, "nodes 3"],
     *,
     order: int,
     max_leaf_size: int,
@@ -999,18 +1003,18 @@ def _p2m_octree_leaves_complex(
 
     Parameters
     ----------
-    leaf_nodes : Array
+    leaf_nodes : Int[Array, 'leaves']
         Leaf node ids to fill, padded to a fixed length.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves']
         Which entries of ``leaf_nodes`` are real. Padding contributes nothing, so
         non-leaf slots come back zero.
-    node_ranges : Array
+    node_ranges : Int[Array, 'nodes 2']
         Per-node ``[start, end]`` particle ranges.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions ``[N, 3]`` in Morton order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Particle masses ``[N]`` in the same order.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Expansion centre per node.
     order : int
         Expansion order ``p``. Static.
@@ -1064,12 +1068,13 @@ def _p2m_octree_leaves_complex(
     jax.jit,
     static_argnames=("order", "num_levels", "level_batch_width"),
 )
+@jaxtyped(typechecker=beartype)
 def _aggregate_octree_m2m_complex_by_level(
-    packed: Array,
-    centers: Array,
-    children: Array,
-    nodes_by_level: Array,
-    level_offsets: Array,
+    packed: Inexact[Array, "nodes sh"],
+    centers: Float[Array, "nodes 3"],
+    children: Int[Array, "nodes 8"],
+    nodes_by_level: Int[Array, "nodes"],
+    level_offsets: Int[Array, "_"],
     *,
     order: int,
     num_levels: int,
@@ -1084,16 +1089,16 @@ def _aggregate_octree_m2m_complex_by_level(
 
     Parameters
     ----------
-    packed : Array
+    packed : Inexact[Array, 'nodes sh']
         Multipole coefficients ``[nodes, (p+1)^2]``, leaf entries already filled
         by P2M.
-    centers : Array
+    centers : Float[Array, 'nodes 3']
         Expansion centre per node; the child-to-parent shift is the difference.
-    children : Array
+    children : Int[Array, 'nodes 8']
         Child node ids per node, padded.
-    nodes_by_level : Array
+    nodes_by_level : Int[Array, 'nodes']
         Node ids grouped by topological level.
-    level_offsets : Array
+    level_offsets : Int[Array, '_']
         CSR boundaries into ``nodes_by_level``.
     order : int
         Expansion order ``p``. Static.
