@@ -1696,8 +1696,10 @@ the tree; pinning only the tree leaves a residual that reads as a gradient bug
 and is not one. A finite difference whose two evaluations straddle a switch is
 deliberately not plotted: it divides a topology-induced loss offset by the step
 size, so it diverges as the step shrinks and reports the step rather than the
-pipeline. Cited alongside, and not confirmed by, the low-dimensional Yggdrax
-precedent.
+pipeline. Cited alongside, and not confirmed by, the Yggdrax rebuild
+precedent, whose objective is geometric and whose operator is a tree ordering
+rather than an FMM with an acceptance criterion -- so its rates and these
+measure different things, and its curve is deliberately not plotted here.
 """
 
 
