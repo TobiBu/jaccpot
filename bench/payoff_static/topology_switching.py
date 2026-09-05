@@ -534,6 +534,52 @@ def _run_cadence(
     return record
 
 
+def _slim_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop per-comparison bulk that fig19 never reads.
+
+    fig19 plots the churn MEANS against N and against cadence, the loss-jump
+    summary and the FD agreement. The per-comparison churn list and the event
+    list behind those means are diagnostic detail, and
+    ``bench/results/.gitignore`` asks that only what a figure reads be
+    committed. The loss trace is kept but thinned to the fields a trace panel
+    would need.
+
+    Parameters
+    ----------
+    record : Dict[str, Any]
+        One fit's record.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A copy with the bulk removed, applied both on completion and at merge
+        so sharded and single-shot runs agree.
+    """
+    slim = dict(record)
+    summary = slim.get("switch_summary")
+    if isinstance(summary, dict):
+        slim["switch_summary"] = {
+            "switch_metric": summary.get("switch_metric"),
+            "content_key": summary.get("content_key"),
+            "extensive": {
+                k: v
+                for k, v in (summary.get("extensive") or {}).items()
+                if k != "events"
+            },
+            "intensive": {
+                k: v
+                for k, v in (summary.get("intensive") or {}).items()
+                if k != "per_comparison"
+            },
+        }
+    continuity = slim.get("loss_continuity")
+    if isinstance(continuity, dict):
+        slim["loss_continuity"] = {
+            k: v for k, v in continuity.items() if k != "boundaries"
+        }
+    return slim
+
+
 def _merge_runs(args: argparse.Namespace) -> int:
     """Concatenate sharded result files into one artifact.
 
@@ -586,7 +632,7 @@ def _merge_runs(args: argparse.Namespace) -> int:
                 raise SystemExit(
                     f"refusing to merge {path}: inputs disagree on {clashes}"
                 )
-        records.extend(artifact["data"].get("records", []))
+        records.extend(_slim_record(r) for r in artifact["data"].get("records", []))
         metas.append(dict(artifact.get("meta", {})))
 
     if merged_config is None:
@@ -685,11 +731,13 @@ def main() -> int:
             for learning_rate in rates if cadence == 1 else rates[:1]:
                 try:
                     records.append(
-                        _run_cadence(
-                            n=n,
-                            cadence=cadence,
-                            learning_rate=learning_rate,
-                            args=args,
+                        _slim_record(
+                            _run_cadence(
+                                n=n,
+                                cadence=cadence,
+                                learning_rate=learning_rate,
+                                args=args,
+                            )
                         )
                     )
                 except Exception as exc:  # pragma: no cover - OOM at large N

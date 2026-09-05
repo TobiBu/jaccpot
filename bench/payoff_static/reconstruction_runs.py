@@ -447,6 +447,72 @@ def _run_case(case: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     return record
 
 
+def _slim_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop per-iteration bulk that no figure reads.
+
+    The committed artifact is a figure's input, and
+    ``bench/results/.gitignore`` is explicit that only the small summary a
+    figure actually reads belongs in the index -- "if a file is large enough
+    that you hesitate, it is a bulk array". The first version of this sweep
+    ignored that: 5.2 MB for 18 cases, against 2.5 MB for all 183 result JSONs
+    the repository already tracks and 185 kB for the largest single one.
+
+    Three things go, none of them read by fig17 or fig18:
+
+    * ``switch_summary``'s per-comparison churn records and event list -- 82 kB
+      per case, half the file, and this sweep is not the switching figure;
+      fig19 has its own artifact. The churn *means* stay, since they are small
+      and say whether a fit's topology was moving.
+    * the per-iteration loss ``components`` and gradient norms. fig18 plots
+      iteration against loss; the components matter while diagnosing a fit, not
+      afterwards.
+    * ``profile_truth`` inside ``density_before``/``density_after``, which is a
+      verbatim copy of the top-level ``profile_truth``.
+
+    Parameters
+    ----------
+    record : Dict[str, Any]
+        One case's record.
+
+    Returns
+    -------
+    Dict[str, Any]
+        A copy with the bulk removed. Applied both when a case finishes and
+        when slices are merged, so a single-shot run and a sharded one produce
+        the same artifact.
+    """
+    slim = dict(record)
+    summary = slim.get("switch_summary")
+    if isinstance(summary, dict):
+        extensive = {
+            k: v for k, v in (summary.get("extensive") or {}).items() if k != "events"
+        }
+        intensive = {
+            k: v
+            for k, v in (summary.get("intensive") or {}).items()
+            if k != "per_comparison"
+        }
+        slim["switch_summary"] = {
+            "switch_metric": summary.get("switch_metric"),
+            "content_key": summary.get("content_key"),
+            "extensive": extensive,
+            "intensive": intensive,
+        }
+    slim["loss_trace"] = [
+        {
+            "iteration": row["iteration"],
+            "loss": row["loss"],
+            "rebuilt": row.get("rebuilt"),
+        }
+        for row in slim.get("loss_trace", [])
+    ]
+    for key in ("density_before", "density_after"):
+        block = slim.get(key)
+        if isinstance(block, dict):
+            slim[key] = {k: v for k, v in block.items() if not k.startswith("profile_")}
+    return slim
+
+
 def _merge_runs(args: argparse.Namespace) -> int:
     """Concatenate sharded result files into one artifact.
 
@@ -499,7 +565,7 @@ def _merge_runs(args: argparse.Namespace) -> int:
                 raise SystemExit(
                     f"refusing to merge {path}: inputs disagree on {clashes}"
                 )
-        records.extend(artifact["data"].get("records", []))
+        records.extend(_slim_record(r) for r in artifact["data"].get("records", []))
         metas.append(dict(artifact.get("meta", {})))
 
     if merged_config is None:
@@ -583,7 +649,7 @@ def main() -> int:
 
     for case in cases:
         try:
-            records.append(_run_case(case, args))
+            records.append(_slim_record(_run_case(case, args)))
         except Exception as exc:  # pragma: no cover - OOM or divergence
             print(f"  {case}: FAILED ({type(exc).__name__}: {exc})", flush=True)
             records.append(
