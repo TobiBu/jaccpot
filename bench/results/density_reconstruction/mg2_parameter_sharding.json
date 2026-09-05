@@ -22,12 +22,17 @@
       1048576,
       2097152
     ],
-    "sharding_mode": "parameter_sharding"
+    "ceiling_iterations": 1,
+    "caps": {},
+    "sharding_mode": "parameter_sharding",
+    "mode": "parameter_sharding"
   },
   "meta": {
-    "git_sha": "7470554c83344f57740d716ef97e712fec4f092f",
+    "git_sha": "7f4ebde18028eeded15d2eb61096a5a297da7132",
     "git_branch": "feat/density-reconstruction-payoff",
-    "git_dirty": true,
+    "git_dirty": false,
+    "git_dirty_sources": false,
+    "git_dirty_source_paths": [],
     "jax_version": "0.10.2",
     "jax_backend": "gpu",
     "devices": [
@@ -38,7 +43,7 @@
     ],
     "device_kind": "NVIDIA A100-PCIE-40GB",
     "jax_enable_x64": true,
-    "cuda_visible_devices": "0,2,4,6"
+    "cuda_visible_devices": "4,5,6,7"
   },
   "data": {
     "records": [
@@ -50,33 +55,44 @@
         "devices": [
           "cuda:0"
         ],
-        "sharding_mode": "parameter_sharding",
+        "sharding_mode": "single_device_or_parameter_sharding",
+        "mode": "parameter_sharding",
+        "operator": {
+          "N": 262144,
+          "M": 4096,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "sharding_mode": "single_device_or_parameter_sharding"
+        },
         "iterations": 10,
         "initial_loss": 0.004662037310259326,
-        "final_loss": 0.000608562517229271,
+        "final_loss": 0.0006085625172292705,
         "field_residual_after": {
-          "rel_l2": 0.01961093964890719,
-          "rms": 0.005601982882522727,
-          "max_abs": 0.2969434710325005,
+          "rel_l2": 0.019610939648907224,
+          "rms": 0.0056019828825227365,
+          "max_abs": 0.29694347103250146,
           "mean_abs": 0.0015289849365012409,
           "observed_rms": 0.2856560156124337,
           "noise_floor_rel_l2": 0.0,
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 950.2106676129624,
+          "wall_seconds": 937.3904792936519,
           "totals_seconds": {
-            "prepare": 132.08944364544004,
-            "gradient": 754.9796051476151,
-            "update": 1.3452679365873337
+            "prepare": 130.5659934375435,
+            "gradient": 743.2129740500823,
+            "update": 1.3841230552643538
           },
           "first_iteration_seconds": {
-            "prepare": 22.328516754321754,
-            "gradient": 337.93109291791916,
-            "update": 0.580536087974906
+            "prepare": 21.41409189812839,
+            "gradient": 325.81860228814185,
+            "update": 0.596344324760139
           },
-          "mean_later_gradient_seconds": 46.338723581077325,
-          "mean_later_prepare_seconds": 12.195658543457588,
+          "mean_later_gradient_seconds": 46.37715241799338,
+          "mean_later_prepare_seconds": 12.127989059935013,
           "path": "eager",
           "num_devices": 1,
           "loss_scale": 0.2856560156124337
@@ -272,33 +288,44 @@
           "cuda:0",
           "cuda:1"
         ],
-        "sharding_mode": "parameter_sharding",
+        "sharding_mode": "single_device_or_parameter_sharding",
+        "mode": "parameter_sharding",
+        "operator": {
+          "N": 262144,
+          "M": 4096,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "sharding_mode": "single_device_or_parameter_sharding"
+        },
         "iterations": 10,
-        "initial_loss": 0.004662037310259326,
-        "final_loss": 0.000608562517229271,
+        "initial_loss": 0.004662037310259325,
+        "final_loss": 0.0006085625172292725,
         "field_residual_after": {
-          "rel_l2": 0.01961093964890723,
-          "rms": 0.005601982882522739,
+          "rel_l2": 0.019610939648907238,
+          "rms": 0.00560198288252274,
           "max_abs": 0.2969434710325012,
-          "mean_abs": 0.0015289849365012422,
+          "mean_abs": 0.0015289849365012417,
           "observed_rms": 0.2856560156124337,
           "noise_floor_rel_l2": 0.0,
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 796.1008515814319,
+          "wall_seconds": 786.4463751120493,
           "totals_seconds": {
-            "prepare": 20.977516784332693,
-            "gradient": 703.8391754524782,
-            "update": 1.7665154002606869
+            "prepare": 20.415014968253672,
+            "gradient": 691.8510620621964,
+            "update": 1.7084372788667679
           },
           "first_iteration_seconds": {
-            "prepare": 1.9394614193588495,
-            "gradient": 263.1190054034814,
-            "update": 1.0283740973100066
+            "prepare": 1.817524871788919,
+            "gradient": 258.6033758474514,
+            "update": 0.9925167476758361
           },
-          "mean_later_gradient_seconds": 48.968907783221866,
-          "mean_later_prepare_seconds": 2.1153394849970937,
+          "mean_later_gradient_seconds": 48.13863180163834,
+          "mean_later_prepare_seconds": 2.0663877884960837,
           "path": "eager",
           "num_devices": 2,
           "loss_scale": 0.2856560156124337
@@ -496,33 +523,44 @@
           "cuda:2",
           "cuda:3"
         ],
-        "sharding_mode": "parameter_sharding",
+        "sharding_mode": "single_device_or_parameter_sharding",
+        "mode": "parameter_sharding",
+        "operator": {
+          "N": 262144,
+          "M": 4096,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "sharding_mode": "single_device_or_parameter_sharding"
+        },
         "iterations": 10,
         "initial_loss": 0.004662037310259326,
-        "final_loss": 0.0006085625172292718,
+        "final_loss": 0.0006085625172292734,
         "field_residual_after": {
-          "rel_l2": 0.01961093964890722,
-          "rms": 0.0056019828825227365,
-          "max_abs": 0.2969434710325008,
-          "mean_abs": 0.0015289849365012415,
+          "rel_l2": 0.01961093964890721,
+          "rms": 0.005601982882522733,
+          "max_abs": 0.2969434710325007,
+          "mean_abs": 0.0015289849365012417,
           "observed_rms": 0.2856560156124337,
           "noise_floor_rel_l2": 0.0,
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 825.0175508782268,
+          "wall_seconds": 785.4672912629321,
           "totals_seconds": {
-            "prepare": 21.694853397086263,
-            "gradient": 732.7486712764949,
-            "update": 2.016410824842751
+            "prepare": 21.11968588270247,
+            "gradient": 694.9549246532843,
+            "update": 1.7254661284387112
           },
           "first_iteration_seconds": {
-            "prepare": 1.9274070551618934,
-            "gradient": 265.7091049803421,
-            "update": 1.3377699665725231
+            "prepare": 1.9961217744275928,
+            "gradient": 258.3858471782878,
+            "update": 1.0269652558490634
           },
-          "mean_later_gradient_seconds": 51.89328514401697,
-          "mean_later_prepare_seconds": 2.1963829268804855,
+          "mean_later_gradient_seconds": 48.507675274999606,
+          "mean_later_prepare_seconds": 2.1248404564749865,
           "path": "eager",
           "num_devices": 4,
           "loss_scale": 0.2856560156124337
@@ -719,33 +757,44 @@
         "devices": [
           "cuda:0"
         ],
-        "sharding_mode": "parameter_sharding",
-        "iterations": 10,
-        "initial_loss": 0.004234756396892932,
-        "final_loss": 0.0005131423904473365,
+        "sharding_mode": "single_device_or_parameter_sharding",
+        "mode": "parameter_sharding",
+        "operator": {
+          "N": 1048576,
+          "M": 4096,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "sharding_mode": "single_device_or_parameter_sharding"
+        },
+        "iterations": 1,
+        "initial_loss": 0.004234756396892929,
+        "final_loss": 0.004234756396892929,
         "field_residual_after": {
-          "rel_l2": 0.017304742585659214,
-          "rms": 0.004943161207620927,
-          "max_abs": 0.2928252131518998,
-          "mean_abs": 0.0009506501989595625,
+          "rel_l2": 0.04604914310542134,
+          "rms": 0.01315410135205037,
+          "max_abs": 0.7834538482643018,
+          "mean_abs": 0.0017910274700714763,
           "observed_rms": 0.28565355324715563,
           "noise_floor_rel_l2": 0.0,
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 1766.469410023652,
+          "wall_seconds": 375.0279743494466,
           "totals_seconds": {
-            "prepare": 168.20153626333922,
-            "gradient": 1458.5919341798872,
-            "update": 4.374001492746174
+            "prepare": 24.264007825404406,
+            "gradient": 338.5140974596143,
+            "update": 0.5731141641736031
           },
           "first_iteration_seconds": {
-            "prepare": 24.27008688263595,
-            "gradient": 331.4372648252174,
-            "update": 0.5879102116450667
+            "prepare": 24.264007825404406,
+            "gradient": 338.5140974596143,
+            "update": 0.5731141641736031
           },
-          "mean_later_gradient_seconds": 125.23940770607442,
-          "mean_later_prepare_seconds": 15.992383264522585,
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
           "path": "eager",
           "num_devices": 1,
           "loss_scale": 0.28565355324715563
@@ -754,181 +803,30 @@
           "switch_metric": "radix_topology_excluding_morton_codes",
           "content_key": "additive_multiset_splitmix64",
           "extensive": {
-            "observations": 10,
-            "comparisons": 9,
-            "switches": 9,
-            "interaction_switches": 9,
-            "switch_rate": 1.0,
-            "unique_topologies": 10,
-            "changed_components": {
-              "permutation": 9,
-              "tree_shape": 9,
-              "node_ranges": 9,
-              "far_pairs": 9,
-              "near_pairs": 9
-            },
-            "events": [
-              {
-                "iteration": 1,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 2,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 3,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 4,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 5,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 6,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 7,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 8,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 9,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              }
-            ]
+            "observations": 1,
+            "comparisons": 0,
+            "switches": 0,
+            "interaction_switches": 0,
+            "switch_rate": 0.0,
+            "unique_topologies": 1,
+            "changed_components": {},
+            "events": []
           },
           "intensive": {
             "measured": true,
             "every": 2,
             "near_set_sample": 128,
-            "comparisons": 4,
+            "comparisons": 0,
             "mean": {
-              "slot_churn": 0.9721753309672909,
-              "mean_rank_shift_fraction": 0.0009187790018728615,
-              "leaf_churn": 0.9787208171206225,
-              "near_source_count_churn": 0.9737152218354815,
-              "near_set_churn": 0.2795832225588326,
-              "near_pair_churn": 0.9994056121288781,
-              "far_pair_churn": 0.9998810772757772
+              "slot_churn": null,
+              "mean_rank_shift_fraction": null,
+              "leaf_churn": null,
+              "near_source_count_churn": null,
+              "near_set_churn": null,
+              "near_pair_churn": null,
+              "far_pair_churn": null
             },
-            "per_comparison": [
-              {
-                "slot_churn": 0.9746255243798638,
-                "mean_rank_shift_fraction": 0.0014263655888895116,
-                "leaf_churn": 0.9803015564202334,
-                "near_source_count_churn": 0.9742787876945526,
-                "near_set_churn": 0.27975779649379495,
-                "near_pair_churn": 0.9994867087782352,
-                "far_pair_churn": 0.999891353530499,
-                "iteration": 2,
-                "previous_iteration": 0
-              },
-              {
-                "slot_churn": 0.9696325161113813,
-                "mean_rank_shift_fraction": 0.001251707748579191,
-                "leaf_churn": 0.9751945525291829,
-                "near_source_count_churn": 0.9722876641536965,
-                "near_set_churn": 0.2708251954259163,
-                "near_pair_churn": 0.9992246679019999,
-                "far_pair_churn": 0.9998380604117874,
-                "iteration": 4,
-                "previous_iteration": 2
-              },
-              {
-                "slot_churn": 0.9728348431420234,
-                "mean_rank_shift_fraction": 0.0007316959705805298,
-                "leaf_churn": 0.9803015564202334,
-                "near_source_count_churn": 0.9770137326726653,
-                "near_set_churn": 0.2884053430897011,
-                "near_pair_churn": 0.9994852346139247,
-                "far_pair_churn": 0.9999025971945429,
-                "iteration": 6,
-                "previous_iteration": 4
-              },
-              {
-                "slot_churn": 0.971608440235895,
-                "mean_rank_shift_fraction": 0.0002653466994422132,
-                "leaf_churn": 0.9790856031128404,
-                "near_source_count_churn": 0.9712807028210116,
-                "near_set_churn": 0.27934455522591795,
-                "near_pair_churn": 0.9994258372213528,
-                "far_pair_churn": 0.9998922979662797,
-                "iteration": 8,
-                "previous_iteration": 6
-              }
-            ]
+            "per_comparison": []
           }
         },
         "arm": "ceiling"
@@ -951,33 +849,44 @@
           "cuda:0",
           "cuda:1"
         ],
-        "sharding_mode": "parameter_sharding",
-        "iterations": 10,
-        "initial_loss": 0.0042347563968929336,
-        "final_loss": 0.00051314239044734,
+        "sharding_mode": "single_device_or_parameter_sharding",
+        "mode": "parameter_sharding",
+        "operator": {
+          "N": 1048576,
+          "M": 4096,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "sharding_mode": "single_device_or_parameter_sharding"
+        },
+        "iterations": 1,
+        "initial_loss": 0.004234756396892932,
+        "final_loss": 0.004234756396892932,
         "field_residual_after": {
-          "rel_l2": 0.017304742585659207,
-          "rms": 0.0049431612076209245,
-          "max_abs": 0.2928252131518995,
-          "mean_abs": 0.0009506501989595626,
+          "rel_l2": 0.046049143105421374,
+          "rms": 0.013154101352050378,
+          "max_abs": 0.7834538482643024,
+          "mean_abs": 0.0017910274700714763,
           "observed_rms": 0.28565355324715563,
           "noise_floor_rel_l2": 0.0,
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 1766.8192625306547,
+          "wall_seconds": 359.2860451769084,
           "totals_seconds": {
-            "prepare": 40.43577695265412,
-            "gradient": 1580.7242561038584,
-            "update": 5.488337356597185
+            "prepare": 3.8852938944473863,
+            "gradient": 341.33556920848787,
+            "update": 1.0403085015714169
           },
           "first_iteration_seconds": {
-            "prepare": 4.130546337924898,
-            "gradient": 344.0163611713797,
-            "update": 1.044998062774539
+            "prepare": 3.8852938944473863,
+            "gradient": 341.33556920848787,
+            "update": 1.0403085015714169
           },
-          "mean_later_gradient_seconds": 137.41198832583098,
-          "mean_later_prepare_seconds": 4.033914512747692,
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
           "path": "eager",
           "num_devices": 2,
           "loss_scale": 0.28565355324715563
@@ -986,181 +895,30 @@
           "switch_metric": "radix_topology_excluding_morton_codes",
           "content_key": "additive_multiset_splitmix64",
           "extensive": {
-            "observations": 10,
-            "comparisons": 9,
-            "switches": 9,
-            "interaction_switches": 9,
-            "switch_rate": 1.0,
-            "unique_topologies": 10,
-            "changed_components": {
-              "permutation": 9,
-              "tree_shape": 9,
-              "node_ranges": 9,
-              "far_pairs": 9,
-              "near_pairs": 9
-            },
-            "events": [
-              {
-                "iteration": 1,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 2,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 3,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 4,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 5,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 6,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 7,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 8,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 9,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              }
-            ]
+            "observations": 1,
+            "comparisons": 0,
+            "switches": 0,
+            "interaction_switches": 0,
+            "switch_rate": 0.0,
+            "unique_topologies": 1,
+            "changed_components": {},
+            "events": []
           },
           "intensive": {
             "measured": true,
             "every": 2,
             "near_set_sample": 128,
-            "comparisons": 4,
+            "comparisons": 0,
             "mean": {
-              "slot_churn": 0.9721753309672909,
-              "mean_rank_shift_fraction": 0.0009187790018728615,
-              "leaf_churn": 0.9787208171206225,
-              "near_source_count_churn": 0.9737152218354815,
-              "near_set_churn": 0.2795832225588326,
-              "near_pair_churn": 0.9994056121288781,
-              "far_pair_churn": 0.9998810772757772
+              "slot_churn": null,
+              "mean_rank_shift_fraction": null,
+              "leaf_churn": null,
+              "near_source_count_churn": null,
+              "near_set_churn": null,
+              "near_pair_churn": null,
+              "far_pair_churn": null
             },
-            "per_comparison": [
-              {
-                "slot_churn": 0.9746255243798638,
-                "mean_rank_shift_fraction": 0.0014263655888895116,
-                "leaf_churn": 0.9803015564202334,
-                "near_source_count_churn": 0.9742787876945526,
-                "near_set_churn": 0.27975779649379495,
-                "near_pair_churn": 0.9994867087782352,
-                "far_pair_churn": 0.999891353530499,
-                "iteration": 2,
-                "previous_iteration": 0
-              },
-              {
-                "slot_churn": 0.9696325161113813,
-                "mean_rank_shift_fraction": 0.001251707748579191,
-                "leaf_churn": 0.9751945525291829,
-                "near_source_count_churn": 0.9722876641536965,
-                "near_set_churn": 0.2708251954259163,
-                "near_pair_churn": 0.9992246679019999,
-                "far_pair_churn": 0.9998380604117874,
-                "iteration": 4,
-                "previous_iteration": 2
-              },
-              {
-                "slot_churn": 0.9728348431420234,
-                "mean_rank_shift_fraction": 0.0007316959705805298,
-                "leaf_churn": 0.9803015564202334,
-                "near_source_count_churn": 0.9770137326726653,
-                "near_set_churn": 0.2884053430897011,
-                "near_pair_churn": 0.9994852346139247,
-                "far_pair_churn": 0.9999025971945429,
-                "iteration": 6,
-                "previous_iteration": 4
-              },
-              {
-                "slot_churn": 0.971608440235895,
-                "mean_rank_shift_fraction": 0.0002653466994422132,
-                "leaf_churn": 0.9790856031128404,
-                "near_source_count_churn": 0.9712807028210116,
-                "near_set_churn": 0.27934455522591795,
-                "near_pair_churn": 0.9994258372213528,
-                "far_pair_churn": 0.9998922979662797,
-                "iteration": 8,
-                "previous_iteration": 6
-              }
-            ]
+            "per_comparison": []
           }
         },
         "arm": "ceiling"
@@ -1172,7 +930,7 @@
         "num_free_parameters": 6291456,
         "failed": true,
         "error_type": "JaxRuntimeError",
-        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.27GiB. [executable_name='jit_add'] [tf-allocator-allocation-error='']"
+        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.27GiB. [tf-allocator-allocation-error=''] [executable_name='jit_add']"
       },
       {
         "N": 1048576,
@@ -1185,33 +943,44 @@
           "cuda:2",
           "cuda:3"
         ],
-        "sharding_mode": "parameter_sharding",
-        "iterations": 10,
-        "initial_loss": 0.00423475639689293,
-        "final_loss": 0.0005131423904473362,
+        "sharding_mode": "single_device_or_parameter_sharding",
+        "mode": "parameter_sharding",
+        "operator": {
+          "N": 1048576,
+          "M": 4096,
+          "softening": 0.01,
+          "order": 4,
+          "leaf_size": 256,
+          "theta": 0.5,
+          "mac_type": null,
+          "sharding_mode": "single_device_or_parameter_sharding"
+        },
+        "iterations": 1,
+        "initial_loss": 0.004234756396892935,
+        "final_loss": 0.004234756396892935,
         "field_residual_after": {
-          "rel_l2": 0.017304742585659234,
-          "rms": 0.004943161207620933,
-          "max_abs": 0.29282521315190013,
-          "mean_abs": 0.0009506501989595628,
+          "rel_l2": 0.04604914310542139,
+          "rms": 0.013154101352050382,
+          "max_abs": 0.7834538482643024,
+          "mean_abs": 0.001791027470071475,
           "observed_rms": 0.28565355324715563,
           "noise_floor_rel_l2": 0.0,
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 1824.8378057302907,
+          "wall_seconds": 371.9578279266134,
           "totals_seconds": {
-            "prepare": 42.16634082514793,
-            "gradient": 1612.2190603939816,
-            "update": 4.987969800829887
+            "prepare": 3.960725144483149,
+            "gradient": 354.5597470737994,
+            "update": 1.2496477626264095
           },
           "first_iteration_seconds": {
-            "prepare": 4.00637530721724,
-            "gradient": 433.4118961133063,
-            "update": 1.2615700457245111
+            "prepare": 3.960725144483149,
+            "gradient": 354.5597470737994,
+            "update": 1.2496477626264095
           },
-          "mean_later_gradient_seconds": 130.97857380896392,
-          "mean_later_prepare_seconds": 4.239996168658966,
+          "mean_later_gradient_seconds": 0.0,
+          "mean_later_prepare_seconds": 0.0,
           "path": "eager",
           "num_devices": 4,
           "loss_scale": 0.28565355324715563
@@ -1220,181 +989,30 @@
           "switch_metric": "radix_topology_excluding_morton_codes",
           "content_key": "additive_multiset_splitmix64",
           "extensive": {
-            "observations": 10,
-            "comparisons": 9,
-            "switches": 9,
-            "interaction_switches": 9,
-            "switch_rate": 1.0,
-            "unique_topologies": 10,
-            "changed_components": {
-              "permutation": 9,
-              "tree_shape": 9,
-              "node_ranges": 9,
-              "far_pairs": 9,
-              "near_pairs": 9
-            },
-            "events": [
-              {
-                "iteration": 1,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 2,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 3,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 4,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 5,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 6,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 7,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 8,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              },
-              {
-                "iteration": 9,
-                "changed": [
-                  "permutation",
-                  "tree_shape",
-                  "node_ranges",
-                  "far_pairs",
-                  "near_pairs"
-                ],
-                "interaction_lists_changed": true
-              }
-            ]
+            "observations": 1,
+            "comparisons": 0,
+            "switches": 0,
+            "interaction_switches": 0,
+            "switch_rate": 0.0,
+            "unique_topologies": 1,
+            "changed_components": {},
+            "events": []
           },
           "intensive": {
             "measured": true,
             "every": 2,
             "near_set_sample": 128,
-            "comparisons": 4,
+            "comparisons": 0,
             "mean": {
-              "slot_churn": 0.9721753309672909,
-              "mean_rank_shift_fraction": 0.0009187790018728615,
-              "leaf_churn": 0.9787208171206225,
-              "near_source_count_churn": 0.9737152218354815,
-              "near_set_churn": 0.2795832225588326,
-              "near_pair_churn": 0.9994056121288781,
-              "far_pair_churn": 0.9998810772757772
+              "slot_churn": null,
+              "mean_rank_shift_fraction": null,
+              "leaf_churn": null,
+              "near_source_count_churn": null,
+              "near_set_churn": null,
+              "near_pair_churn": null,
+              "far_pair_churn": null
             },
-            "per_comparison": [
-              {
-                "slot_churn": 0.9746255243798638,
-                "mean_rank_shift_fraction": 0.0014263655888895116,
-                "leaf_churn": 0.9803015564202334,
-                "near_source_count_churn": 0.9742787876945526,
-                "near_set_churn": 0.27975779649379495,
-                "near_pair_churn": 0.9994867087782352,
-                "far_pair_churn": 0.999891353530499,
-                "iteration": 2,
-                "previous_iteration": 0
-              },
-              {
-                "slot_churn": 0.9696325161113813,
-                "mean_rank_shift_fraction": 0.001251707748579191,
-                "leaf_churn": 0.9751945525291829,
-                "near_source_count_churn": 0.9722876641536965,
-                "near_set_churn": 0.2708251954259163,
-                "near_pair_churn": 0.9992246679019999,
-                "far_pair_churn": 0.9998380604117874,
-                "iteration": 4,
-                "previous_iteration": 2
-              },
-              {
-                "slot_churn": 0.9728348431420234,
-                "mean_rank_shift_fraction": 0.0007316959705805298,
-                "leaf_churn": 0.9803015564202334,
-                "near_source_count_churn": 0.9770137326726653,
-                "near_set_churn": 0.2884053430897011,
-                "near_pair_churn": 0.9994852346139247,
-                "far_pair_churn": 0.9999025971945429,
-                "iteration": 6,
-                "previous_iteration": 4
-              },
-              {
-                "slot_churn": 0.971608440235895,
-                "mean_rank_shift_fraction": 0.0002653466994422132,
-                "leaf_churn": 0.9790856031128404,
-                "near_source_count_churn": 0.9712807028210116,
-                "near_set_churn": 0.27934455522591795,
-                "near_pair_churn": 0.9994258372213528,
-                "far_pair_churn": 0.9998922979662797,
-                "iteration": 8,
-                "previous_iteration": 6
-              }
-            ]
+            "per_comparison": []
           }
         },
         "arm": "ceiling"
@@ -1406,7 +1024,7 @@
         "num_free_parameters": 6291456,
         "failed": true,
         "error_type": "JaxRuntimeError",
-        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.27GiB. [tf-allocator-allocation-error=''] [executable_name='jit_add']"
+        "error": "RESOURCE_EXHAUSTED: Out of memory while trying to allocate 8.27GiB. [executable_name='jit_add'] [tf-allocator-allocation-error='']"
       }
     ]
   }

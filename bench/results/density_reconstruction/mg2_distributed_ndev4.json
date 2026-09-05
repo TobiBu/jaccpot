@@ -27,9 +27,11 @@
     "mode": "distributed"
   },
   "meta": {
-    "git_sha": "bd6258ebec8e15a21f115458ace5dd23f1816486",
+    "git_sha": "7f4ebde18028eeded15d2eb61096a5a297da7132",
     "git_branch": "feat/density-reconstruction-payoff",
-    "git_dirty": true,
+    "git_dirty": false,
+    "git_dirty_sources": false,
+    "git_dirty_source_paths": [],
     "jax_version": "0.10.2",
     "jax_backend": "gpu",
     "devices": [
@@ -40,7 +42,7 @@
     ],
     "device_kind": "NVIDIA A100-PCIE-40GB",
     "jax_enable_x64": true,
-    "cuda_visible_devices": "0,2,4,6"
+    "cuda_visible_devices": "4,5,6,7"
   },
   "data": {
     "records": [
@@ -71,30 +73,30 @@
         },
         "iterations": 4,
         "initial_loss": 0.008469272782861845,
-        "final_loss": 0.0006680334269588046,
+        "final_loss": 0.0006680334269588022,
         "field_residual_after": {
-          "rel_l2": 0.02148620394086533,
-          "rms": 0.00620998158394233,
-          "max_abs": 0.10670779577700856,
-          "mean_abs": 0.00290555224052239,
+          "rel_l2": 0.02148620394086528,
+          "rms": 0.006209981583942319,
+          "max_abs": 0.10670779577700824,
+          "mean_abs": 0.0029055522405223863,
           "observed_rms": 0.28902181143926314,
           "noise_floor_rel_l2": 0.0,
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 676.6566953323781,
+          "wall_seconds": 678.8070640470833,
           "totals_seconds": {
-            "prepare": 165.94549218937755,
-            "gradient": 505.2847839137539,
-            "update": 0.8970359517261386
+            "prepare": 166.1344543825835,
+            "gradient": 507.00446183793247,
+            "update": 0.9522039871662855
           },
           "first_iteration_seconds": {
-            "prepare": 44.35542297642678,
-            "gradient": 132.12170729413629,
-            "update": 0.7993200989440084
+            "prepare": 45.84009979479015,
+            "gradient": 135.94071401562542,
+            "update": 0.8260855646803975
           },
-          "mean_later_gradient_seconds": 124.38769220653921,
-          "mean_later_prepare_seconds": 40.53002307098359,
+          "mean_later_gradient_seconds": 123.68791594076902,
+          "mean_later_prepare_seconds": 40.098118195931114,
           "path": "eager",
           "num_devices": 1,
           "loss_scale": 0.28902181143926314
@@ -129,8 +131,8 @@
           "sharding_mode": "distributed_force_evaluation"
         },
         "iterations": 1,
-        "initial_loss": 0.008726085616482818,
-        "final_loss": 0.008726085616482818,
+        "initial_loss": 0.008726085616482816,
+        "final_loss": 0.008726085616482816,
         "field_residual_after": {
           "rel_l2": 0.07051422273482374,
           "rms": 0.02062588506983689,
@@ -141,16 +143,16 @@
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 185.56832170579582,
+          "wall_seconds": 193.89398850873113,
           "totals_seconds": {
-            "prepare": 46.03705459088087,
-            "gradient": 138.7028253581375,
-            "update": 0.8202588828280568
+            "prepare": 48.516861259937286,
+            "gradient": 144.46799916028976,
+            "update": 0.9003989975899458
           },
           "first_iteration_seconds": {
-            "prepare": 46.03705459088087,
-            "gradient": 138.7028253581375,
-            "update": 0.8202588828280568
+            "prepare": 48.516861259937286,
+            "gradient": 144.46799916028976,
+            "update": 0.9003989975899458
           },
           "mean_later_gradient_seconds": 0.0,
           "mean_later_prepare_seconds": 0.0,
@@ -187,8 +189,8 @@
           "sharding_mode": "distributed_force_evaluation"
         },
         "iterations": 1,
-        "initial_loss": 0.006726597381224539,
-        "final_loss": 0.006726597381224539,
+        "initial_loss": 0.00672659738122454,
+        "final_loss": 0.00672659738122454,
         "field_residual_after": {
           "rel_l2": 0.05858035948291896,
           "rms": 0.016991812130027147,
@@ -199,16 +201,16 @@
           "residual_over_noise_floor": Infinity
         },
         "timing": {
-          "wall_seconds": 190.51659732870758,
+          "wall_seconds": 192.09046444948763,
           "totals_seconds": {
-            "prepare": 49.849799113348126,
-            "gradient": 139.62412985228002,
-            "update": 1.028147212229669
+            "prepare": 50.9366563949734,
+            "gradient": 140.1183848734945,
+            "update": 1.0262066749855876
           },
           "first_iteration_seconds": {
-            "prepare": 49.849799113348126,
-            "gradient": 139.62412985228002,
-            "update": 1.028147212229669
+            "prepare": 50.9366563949734,
+            "gradient": 140.1183848734945,
+            "update": 1.0262066749855876
           },
           "mean_later_gradient_seconds": 0.0,
           "mean_later_prepare_seconds": 0.0,
