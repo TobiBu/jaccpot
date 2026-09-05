@@ -453,9 +453,9 @@ def distributed_force_scale_nodes(
     coarse_radii: Float[Array, "coarse"],
     cross_far_sources: Array,
     cross_far_targets: Array,
-    cross_near_counts: Int[Array, "leaves"],
+    cross_near_counts: Int[Array, "crossleaves"],
     cross_near_indices: Int[Array, "_"],
-    cross_near_leaf_indices: Int[Array, "leaves"],
+    cross_near_leaf_indices: Int[Array, "crossleaves"],
     max_leaf_size: int,
     softening: float,
     gravitational_constant: float,
@@ -511,11 +511,11 @@ def distributed_force_scale_nodes(
         Coarse source node of each cross far pair.
     cross_far_targets : Array
         Local target node of each cross far pair.
-    cross_near_counts : Int[Array, 'leaves']
+    cross_near_counts : Int[Array, 'crossleaves']
         Coarse near neighbours per local target leaf.
     cross_near_indices : Int[Array, '_']
         Flat cross near neighbour entries, coarse node ids.
-    cross_near_leaf_indices : Int[Array, 'leaves']
+    cross_near_leaf_indices : Int[Array, 'crossleaves']
         Node index of each local target leaf in the cross near list.
     max_leaf_size : int
         Leaf capacity.
