@@ -46,18 +46,11 @@
     "jax_version": "0.10.2",
     "jax_backend": "gpu",
     "devices": [
-      "cuda:0",
-      "cuda:1",
-      "cuda:2",
-      "cuda:3",
-      "cuda:4",
-      "cuda:5",
-      "cuda:6",
-      "cuda:7"
+      "cuda:0"
     ],
     "device_kind": "NVIDIA A100-PCIE-40GB",
-    "jax_enable_x64": false,
-    "cuda_visible_devices": null,
+    "jax_enable_x64": true,
+    "cuda_visible_devices": "0",
     "merged_source_meta": [
       {
         "git_sha": "e8f576ec3f008cc1413d5cfd278e9b1d132e88af",
@@ -120,8 +113,9 @@
         "cuda_visible_devices": "5"
       }
     ],
-    "merged_at": "2026-09-05T19:55:55+02:00",
-    "merged_sha": "3443666bd32d6f10b7a697a5a5a5559d66256d0d"
+    "merged_at": "2026-09-05T21:00:23+02:00",
+    "merged_sha": "df535c4ca2a79baf50a4ac296fa208c09b0aebb8",
+    "merged_on": "cpu"
   },
   "data": {
     "records": [

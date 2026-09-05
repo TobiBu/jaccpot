@@ -157,6 +157,8 @@ def test_merged_meta_does_not_stamp_the_merge_commit_as_the_measurement():
             "git_dirty": False,
             "git_dirty_sources": False,
             "measured_at": "2026-09-04T10:00:00+02:00",
+            "device_kind": "NVIDIA A100-PCIE-40GB",
+            "jax_version": "0.10.2",
         },
         {
             "git_sha": "b" * 40,
@@ -164,12 +166,18 @@ def test_merged_meta_does_not_stamp_the_merge_commit_as_the_measurement():
             "git_dirty": True,
             "git_dirty_sources": False,
             "measured_at": "2026-09-05T10:00:00+02:00",
+            "device_kind": "NVIDIA A100-PCIE-40GB",
+            "jax_version": "0.10.2",
         },
     ]
     merged = runmeta.merged_meta(metas)
 
     assert merged["git_sha"] == "b" * 40, "the newest measurement must win"
     assert merged["git_branch"] == "new"
+    # The device is the measurement's, never the merge host's. Merging on a
+    # login node relabelled three A100 figures "cpu" before this was pinned.
+    assert merged["device_kind"] == "NVIDIA A100-PCIE-40GB"
+    assert merged["jax_version"] == "0.10.2"
     assert merged["measured_at"] == "2026-09-05T10:00:00+02:00"
     assert merged["measured_shas"] == sorted({"a" * 40, "b" * 40})
     # Dirtiness is OR-ed: one dirty slice taints the merged artifact.
@@ -199,3 +207,31 @@ def test_merged_meta_orders_by_commit_date_when_measured_at_is_absent():
         assert (
             runmeta.merged_meta(metas)["git_sha"] == head
         ), "the merged sha must not depend on --merge-from order"
+
+
+def test_merged_meta_records_disagreement_rather_than_hiding_it():
+    """Slices from two devices stay usable, but the split must be on record."""
+    metas = [
+        {
+            "git_sha": "a" * 40,
+            "git_dirty": False,
+            "git_dirty_sources": False,
+            "measured_at": "2026-09-04T10:00:00+02:00",
+            "device_kind": "NVIDIA A100-PCIE-40GB",
+        },
+        {
+            "git_sha": "a" * 40,
+            "git_dirty": False,
+            "git_dirty_sources": False,
+            "measured_at": "2026-09-05T10:00:00+02:00",
+            "device_kind": "NVIDIA H100",
+        },
+    ]
+    merged = runmeta.merged_meta(metas)
+    assert merged["device_kind"] == "NVIDIA H100", "the newest slice wins"
+    assert merged["merged_disagreements"]["device_kind"] == [
+        "NVIDIA A100-PCIE-40GB",
+        "NVIDIA H100",
+    ]
+    # One commit throughout, so the sha is not a disagreement.
+    assert "git_sha" not in merged["merged_disagreements"]

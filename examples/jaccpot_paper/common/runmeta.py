@@ -285,17 +285,23 @@ def commit_date(sha: str) -> str:
 def merged_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
     """Return provenance for an artifact merged from per-slice artifacts.
 
-    A merge is bookkeeping, not a measurement, so the merged artifact must not
-    advertise the sha it was merged AT -- that commit ran no benchmark, and
-    stamping it over the slices' shas is how a provenance table came to name a
-    commit that measured nothing. The merge-time state is kept under
-    ``merged_at`` / ``merged_sha``, and the measurement fields are carried up
-    from the slices.
+    A merge is bookkeeping, not a measurement, so nothing about the machine or
+    the checkout that ran the merge may appear as provenance. The merged meta
+    is therefore the NEWEST SLICE's meta -- its commit, its device, its JAX --
+    with the merge's own state recorded separately under ``merged_*``, where it
+    cannot be mistaken for the measurement's.
 
-    Where slices disagree the newest measurement wins, ordered by
-    ``measured_at`` and falling back to the commit date of each slice's sha for
-    artifacts written before ``measured_at`` existed. Dirtiness is OR-ed: one
-    dirty slice makes the merged result dirty.
+    Building it the other way round, from the merge-time ``run_meta()`` with a
+    few fields patched back, is what put a commit that ran no benchmark on
+    three figures and labelled three A100 runs ``cpu``: every field nobody
+    thought to patch silently described the merge instead.
+
+    Newest is by ``measured_at``, falling back to the commit date of each
+    slice's sha for artifacts written before ``measured_at`` existed -- without
+    that fallback the tie-break degenerates to argument order. Dirtiness is
+    OR-ed, because one dirty slice taints the whole artifact, and any field the
+    slices disagree on is listed under ``merged_disagreements`` so the spread
+    is visible rather than hidden behind the winner.
 
     Parameters
     ----------
@@ -308,33 +314,42 @@ def merged_meta(metas: list[dict[str, Any]]) -> dict[str, Any]:
         Provenance for the merged artifact.
     """
     now = run_meta()
-    out: dict[str, Any] = {
-        **now,
+    merge_record: dict[str, Any] = {
         "merged_source_meta": metas,
         "merged_at": now.get("measured_at"),
         "merged_sha": now.get("git_sha"),
+        "merged_on": now.get("device_kind"),
     }
-    out.pop("measured_at", None)
     indexed = [(i, m) for i, m in enumerate(metas) if m.get("git_sha")]
     if not indexed:
-        return out
+        return {**now, **merge_record}
+
     order = {
         i: (m.get("measured_at") or commit_date(str(m.get("git_sha"))))
         for i, m in indexed
     }
     newest = max(indexed, key=lambda pair: order[pair[0]])[1]
-    shas = [str(m.get("git_sha")) for _, m in indexed]
-    out["git_sha"] = str(newest.get("git_sha"))
-    out["git_branch"] = newest.get("git_branch", out.get("git_branch"))
+
+    out: dict[str, Any] = {**newest, **merge_record}
     out["git_dirty"] = any(m.get("git_dirty") for m in metas)
     out["git_dirty_sources"] = any(m.get("git_dirty_sources") for m in metas)
     out["git_dirty_source_paths"] = sorted(
         {p for m in metas for p in (m.get("git_dirty_source_paths") or [])}
     )[:20]
-    if newest.get("measured_at"):
-        out["measured_at"] = newest["measured_at"]
-    if len(set(shas)) > 1:
-        out["measured_shas"] = sorted(set(shas))
+
+    # Anything the slices do not agree on. A merged curve whose points came
+    # from two devices or two commits is still usable, but only if that is on
+    # the record rather than hidden behind whichever slice happened to win.
+    disagreements: dict[str, list[Any]] = {}
+    for key in ("git_sha", "device_kind", "jax_version", "jax_backend"):
+        seen = sorted({str(m[key]) for m in metas if m.get(key) is not None})
+        if len(seen) > 1:
+            disagreements[key] = seen
+    if disagreements:
+        out["merged_disagreements"] = disagreements
+        out["measured_shas"] = disagreements.get(
+            "git_sha", sorted({str(m["git_sha"]) for _, m in indexed})
+        )
     return out
 
 
