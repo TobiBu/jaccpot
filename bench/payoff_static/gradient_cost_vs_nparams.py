@@ -465,8 +465,17 @@ def _measure_one(
             f"{compile_note}  FD(extrap) {fd_seconds:.3e} s",
             flush=True,
         )
-        del parameterization, params
-    del state
+        # Rebound to None rather than deleted, and that is not a style
+        # preference. `forward_fn` and `objective` close over `parameterization`
+        # and `state`, and the timing lambdas close over `params`; `del` unbinds
+        # those names while the closures are still alive, so any later call
+        # would raise NameError rather than returning a wrong number. Pyflakes
+        # reports exactly that as F821. Rebinding drops the reference -- which
+        # is the whole point here, since this sweep runs until the device is
+        # exhausted and must not hold a prepared state across N -- without
+        # leaving a closure pointing at an unbound name.
+        parameterization = params = None
+    state = None
     return records
 
 

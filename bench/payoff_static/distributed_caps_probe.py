@@ -34,11 +34,41 @@ force. So every attempt reports the evaluator's overflow flag, and a run that
 overflowed is a failure however well it fits in memory.
 """
 
+import argparse
 import json
 import os
 import sys
 import time
 import traceback
+
+_p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+_p.add_argument("--n", default="131072,262144", help="Source counts to try")
+_p.add_argument("--tracers", type=int, default=2048, help="Tracer count M")
+_p.add_argument("--leaf-size", type=int, default=256, help="Leaf occupancy")
+_p.add_argument("--device-count", type=int, default=2, help="Devices in the mesh")
+_p.add_argument(
+    "--json-out",
+    default="",
+    help="Output path; defaults to the committed artifact location",
+)
+_p.add_argument(
+    "--host-devices",
+    type=int,
+    default=0,
+    help=(
+        "Force this many CPU devices instead of using the real ones. Only for "
+        "the CI smoke test -- it makes the probe runnable without a GPU, and "
+        "must be set before JAX initialises, which is why the CLI is parsed "
+        "above the jax import rather than in a main()"
+    ),
+)
+_args = _p.parse_args()
+if _args.host_devices:
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["XLA_FLAGS"] = (
+        os.environ.get("XLA_FLAGS", "")
+        + " --xla_force_host_platform_device_count=%d" % _args.host_devices
+    )
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -62,7 +92,7 @@ from jaccpot.applications.density_reconstruction.truth import (
 
 print("devices:", [str(d) for d in jax.devices()], flush=True)
 
-NDEV, M, LEAF = 2, 2048, 256
+NDEV, M, LEAF = _args.device_count, _args.tracers, _args.leaf_size
 results = []
 
 
@@ -138,16 +168,44 @@ LADDER = [
         "pair_queue=1e6 + interactions=512",
     ),
 ]
-for n in (131072, 262144):
+for n in [int(v) for v in str(_args.n).split(",") if v.strip()]:
     for caps, label in LADDER:
         attempt(n, dict(caps), label)
 
 out = str(
-    REPO_ROOT
+    _pathlib.Path(_args.json_out).expanduser()
+    if _args.json_out
+    else REPO_ROOT
     / "bench"
     / "results"
     / "density_reconstruction"
     / "distributed_caps_probe.json"
 )
-json.dump(results, open(out, "w"), indent=2)
+# Written as the same {config, meta, data} envelope every other artifact in
+# this directory uses. The COMMITTED distributed_caps_probe.json predates this
+# and is a bare list with no provenance block: it is the record of a two-A100
+# run whose configuration is in this module's docstring, and it is not
+# regenerated here because nothing reads it as a figure source and re-running it
+# costs two devices for half an hour. Runs from now on carry their provenance.
+sys.path.insert(0, str(REPO_ROOT / "examples" / "jaccpot_paper"))
+from common import runmeta  # noqa: E402
+
+payload = {
+    "config": {
+        "n": [int(v) for v in str(_args.n).split(",") if v.strip()],
+        "theta": 0.5,
+        "order": 4,
+        "basis": "solidfmm",
+        "seed": 0,
+        "device": runmeta.device_label(),
+        "precision": "float64",
+        "M": M,
+        "leaf_size": LEAF,
+        "device_count": NDEV,
+        "ladder": [label for _, label in LADDER],
+    },
+    "meta": runmeta.run_meta(),
+    "data": {"attempts": results},
+}
+json.dump(payload, open(out, "w"), indent=2)
 print("wrote", out, flush=True)
