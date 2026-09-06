@@ -952,8 +952,23 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     traversal_config: Optional[DualTreeTraversalConfig],
     pair_policy: Optional[PairPolicy],
     policy_state: Optional[AdaptivePolicyState],
+    capacity_report: Optional[Callable[[dict], None]] = None,
+    max_neighbors_per_leaf_override: Optional[int] = None,
+    compact_far_pair_capacity_override: Optional[int] = None,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
+
+    ``capacity_report`` receives, after a successful build, the capacities the
+    walk actually ran with plus (eager only) what it observed: the queue the
+    yggdrax ladder settled on, the compact far-pair cap, the far-pair count, the
+    longest neighbour row and the total edge count.  The fused traced refresh
+    cannot grow capacities -- under ``jit`` the overflow flags are tracers and
+    yggdrax returns the truncated result -- so it must be told what the eager
+    prepare needed.  ``max_neighbors_per_leaf_override`` and
+    ``compact_far_pair_capacity_override`` are how it is told: each only ever
+    RAISES the corresponding capacity.  (Found 2026-09-06: at N=200k / leaf 256
+    the preset cap of 256 neighbours per leaf against rows of 781 cut 85 % of the
+    near field out of every step after the first, with no diagnostic firing.)
 
     This path intentionally avoids generic split-builder host branching and
     callback plumbing. It is valid only for streamed compact far-pairs with no
@@ -987,6 +1002,14 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         MAC alone.
     policy_state : Optional[AdaptivePolicyState]
         State the pair policy reads. Meaningless without ``pair_policy``.
+    capacity_report : Optional[Callable[[dict], None]]
+        Called once after a successful build with the capacities the walk ran
+        with (queue, far-pair cap, neighbour cap) and, eagerly, what it observed
+        (far-pair count, longest neighbour row, total edges). ``None`` skips it.
+    max_neighbors_per_leaf_override : Optional[int]
+        Floor for the per-leaf neighbour cap; only ever raises it.
+    compact_far_pair_capacity_override : Optional[int]
+        Floor for the compact far-pair cap; only ever raises it.
 
     Returns
     -------
@@ -1021,6 +1044,10 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         process_block_resolved = (
             None if pair_process_block is None else int(pair_process_block)
         )
+    if max_neighbors_per_leaf_override is not None:
+        max_neighbors_per_leaf = max(
+            int(max_neighbors_per_leaf), int(max_neighbors_per_leaf_override)
+        )
 
     flat_compact_enabled = os.environ.get(
         "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1"
@@ -1033,6 +1060,10 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         if compact_far_pair_capacity <= 0:
             raise ValueError(
                 "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP must be positive"
+            )
+        if compact_far_pair_capacity_override is not None:
+            compact_far_pair_capacity = max(
+                int(compact_far_pair_capacity), int(compact_far_pair_capacity_override)
             )
 
     # Opt-in: build far/near from the device-resident per-leaf treecode walk
@@ -1081,6 +1112,20 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     attempt_queue = max_pair_queue_resolved
     attempt_far_cap = compact_far_pair_capacity
     grew: list[str] = []
+    # The eager yggdrax ladder may settle on a LARGER queue than requested; the
+    # "success" event is the only place that number is reported, and the traced
+    # refresh needs it (see ``capacity_report``).
+    ladder_success: dict = {}
+
+    def _capture_ladder(event: DualTreeRetryEvent) -> None:
+        if str(event.status) == "success":
+            ladder_success.update(
+                queue_capacity=int(event.queue_capacity),
+                interaction_capacity=int(event.interaction_capacity),
+                far_pair_count=int(event.far_pair_count),
+                near_pair_count=int(event.near_pair_count),
+            )
+
     for attempt in range(_STRICT_STREAMED_RETRY_ATTEMPTS):
         try:
             (
@@ -1097,7 +1142,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 max_pair_queue=attempt_queue,
                 process_block=process_block_resolved,
                 traversal_config=None,
-                retry_logger=None,
+                retry_logger=_capture_ladder,
                 timing_callback=None,
                 compact_far_pair_capacity=attempt_far_cap,
                 pair_policy=pair_policy,
@@ -1145,6 +1190,48 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 attempt_far_cap = grown
     else:  # pragma: no cover - the loop always breaks or raises
         raise RuntimeError("strict streamed dual-tree walk did not run")
+    if capacity_report is not None:
+        counts_arr = getattr(neighbor_list, "counts", None)
+        offsets_arr = getattr(neighbor_list, "offsets", None)
+        fp_count = getattr(compact_far_pairs, "far_pair_count", None)
+        traced = isinstance(counts_arr, Tracer) or isinstance(fp_count, Tracer)
+        report = dict(
+            traced=bool(traced),
+            max_pair_queue_requested=(
+                None if attempt_queue is None else int(attempt_queue)
+            ),
+            queue_capacity=int(
+                ladder_success.get(
+                    "queue_capacity",
+                    (
+                        _STRICT_STREAMED_QUEUE_FLOOR
+                        if attempt_queue is None
+                        else int(attempt_queue)
+                    ),
+                )
+            ),
+            compact_far_pair_capacity=(
+                None if attempt_far_cap is None else int(attempt_far_cap)
+            ),
+            max_neighbors_per_leaf_used=int(max_neighbors_per_leaf),
+            grew=list(grew),
+        )
+        if not traced:
+            try:
+                report["far_pair_count"] = (
+                    int(fp_count)
+                    if fp_count is not None
+                    else int(compact_far_pairs.sources.shape[0])
+                )
+                report["max_neighbors_observed"] = (
+                    int(jnp.max(counts_arr)) if int(counts_arr.shape[0]) else 0
+                )
+                report["total_neighbors"] = (
+                    int(offsets_arr[-1]) if int(offsets_arr.shape[0]) else 0
+                )
+            except Exception:  # pragma: no cover - diagnostics only
+                pass
+        capacity_report(report)
     return _DualTreeArtifacts(
         interactions=None,
         neighbor_list=neighbor_list,
@@ -2169,6 +2256,9 @@ def _build_dual_tree_artifacts(
     jit_traversal: bool = True,
     timing_callback: Optional[Callable[[str, float], None]] = None,
     planner_hint: Optional[_RefreshDualPlannerHint] = None,
+    strict_capacity_report: Optional[Callable[[dict], None]] = None,
+    strict_max_neighbors_per_leaf_override: Optional[int] = None,
+    strict_compact_far_pair_capacity_override: Optional[int] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree.
 
@@ -2240,6 +2330,12 @@ def _build_dual_tree_artifacts(
     planner_hint : Optional[_RefreshDualPlannerHint]
         Hint from a previous refresh, letting the planner skip work whose answer
         is already known.
+    strict_capacity_report : Optional[Callable[[dict], None]]
+        Forwarded to the strict streamed builder as ``capacity_report``.
+    strict_max_neighbors_per_leaf_override : Optional[int]
+        Forwarded to the strict streamed builder; only ever raises the cap.
+    strict_compact_far_pair_capacity_override : Optional[int]
+        Forwarded to the strict streamed builder; only ever raises the cap.
 
     Returns
     -------
@@ -2316,6 +2412,13 @@ def _build_dual_tree_artifacts(
                     traversal_config=traversal_config,
                     pair_policy=pair_policy,
                     policy_state=policy_state,
+                    capacity_report=strict_capacity_report,
+                    max_neighbors_per_leaf_override=(
+                        strict_max_neighbors_per_leaf_override
+                    ),
+                    compact_far_pair_capacity_override=(
+                        strict_compact_far_pair_capacity_override
+                    ),
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(

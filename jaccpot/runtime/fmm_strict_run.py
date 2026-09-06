@@ -819,20 +819,40 @@ class StrictRunMixin(_EngineBase):
         def _static_target_block_capacity_ok(
             prepared_in: PreparedStateLike,
         ) -> Array:
+            offsets = jnp.asarray(prepared_in.neighbor_list.offsets)
+            counts = offsets[1:] - offsets[:-1]
+            ok = jnp.asarray(True)
             padded = getattr(
                 prepared_in,
                 "nearfield_target_block_source_leaf_ids_padded",
                 None,
             )
-            if padded is None:
-                return jnp.asarray(True)
-            padded_arr = jnp.asarray(padded)
-            if padded_arr.ndim != 3 or int(padded_arr.shape[1]) == 0:
-                return jnp.asarray(True)
-            offsets = jnp.asarray(prepared_in.neighbor_list.offsets)
-            counts = offsets[1:] - offsets[:-1]
-            capacity = int(padded_arr.shape[1]) * int(padded_arr.shape[2])
-            return jnp.all(counts <= jnp.asarray(capacity, dtype=counts.dtype))
+            if padded is not None:
+                padded_arr = jnp.asarray(padded)
+                if padded_arr.ndim == 3 and int(padded_arr.shape[1]) > 0:
+                    capacity = int(padded_arr.shape[1]) * int(padded_arr.shape[2])
+                    ok = ok & jnp.all(
+                        counts <= jnp.asarray(capacity, dtype=counts.dtype)
+                    )
+            # Traversal-capacity saturation guard.  The traced refresh walk runs
+            # with fixed caps and yggdrax cannot raise on overflow under jit; a
+            # neighbour row that fills its cap, or a far-pair list that fills
+            # its buffer, means entries were dropped and the force is wrong.
+            # The caps are host constants recorded while the refresh traced
+            # (``_strict_fused_traced_caps``), so this is a static comparison.
+            traced_caps = getattr(self, "_strict_fused_traced_caps", None)
+            if isinstance(traced_caps, dict):
+                nbr_cap = traced_caps.get("max_neighbors_per_leaf_used")
+                if nbr_cap is not None and int(counts.shape[0]) > 0:
+                    ok = ok & (
+                        jnp.max(counts) < jnp.asarray(int(nbr_cap), counts.dtype)
+                    )
+                far_cap = traced_caps.get("compact_far_pair_capacity")
+                far_pairs = getattr(prepared_in, "compact_far_pairs", None)
+                far_count = getattr(far_pairs, "far_pair_count", None)
+                if far_cap is not None and far_count is not None:
+                    ok = ok & (jnp.asarray(far_count) < jnp.asarray(int(far_cap)))
+            return ok
 
         def _refresh_and_evaluate_endpoint(
             prepared_in: PreparedStateLike,
@@ -1017,11 +1037,17 @@ class StrictRunMixin(_EngineBase):
                         "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
                         "32",
                     )
+                    traced_caps = getattr(self, "_strict_fused_traced_caps", None) or {}
                     raise RuntimeError(
-                        "fused payload static target-block cap exceeded during "
-                        "compiled velocity-Verlet scan: max_blocks_per_leaf="
-                        f"{max_blocks}. Increase "
-                        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF."
+                        "a fixed capacity saturated inside the compiled velocity-Verlet "
+                        "scan, so the refreshed interaction lists are truncated and the "
+                        "forces from that step on are wrong. Checked: static target-block "
+                        f"cap (max_blocks_per_leaf={max_blocks}), traced neighbour cap "
+                        f"({traced_caps.get('max_neighbors_per_leaf_used')} per leaf) and "
+                        f"compact far-pair cap ({traced_caps.get('compact_far_pair_capacity')}). "
+                        "Raise JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF, pass "
+                        "jaccpot.TraversalOverrides(max_neighbors_per_leaf=...), or raise "
+                        "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
                     )
             except Exception as exc:
                 if bool(
