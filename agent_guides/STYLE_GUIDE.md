@@ -282,13 +282,15 @@ mismatch against `multipoles` with a better message than an annotation would giv
 
 None of the three is added to the flake8 `--builtins` list, because none is ever used as a
 single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
-for `sw` and `srcslots`: both only ever appear beside another name.
+for `srcslots`: it only ever appears beside another name.
 
 **That "never alone" claim expires the moment someone annotates a 1-D array with the axis,
-and it has now expired twice.** `nodes` and `degrees` were both in this table and out of the
+and it has now expired four times.** `nodes` and `degrees` were both in this table and out of the
 `--builtins` list on exactly that reasoning until `runtime/_adaptive_policy.py` needed
-`node_radii: Float[Array, "nodes"]` and `masked_binomial: Float[Array, "degrees"]`. Both are
-in the list now. The lesson is not to predict which names will stay paired: if flake8 reports
+`node_radii: Float[Array, "nodes"]` and `masked_binomial: Float[Array, "degrees"]`. Then
+`nearfield/_kernels.py` needed `target_mask: Bool[Array, "w"]` and
+`source_mask: Bool[Array, "sw"]`, so `w` and `sw` went the same way. All four are in the
+list now. The lesson is not to predict which names will stay paired: if flake8 reports
 F821 on an axis name, add it and move on -- the prediction is the fragile part, not the list.
 
 **`sh` is the axis `ct` was defined against**, and it took until

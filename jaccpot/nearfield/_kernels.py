@@ -26,9 +26,10 @@ from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
+from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, jaxtyped
 
 from jaccpot.runtime.grad_options import analytic_p2p_vjp_enabled
 
@@ -44,9 +45,9 @@ __all__: list[str] = []
 # would be a wrong annotation rather than a wide one. Audit E.4 bucket F.
 @overload
 def _self_contributions(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    mask: Array,
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
     G: Array,
@@ -56,9 +57,9 @@ def _self_contributions(
 
 @overload
 def _self_contributions(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    mask: Array,
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
     G: Array,
@@ -68,9 +69,9 @@ def _self_contributions(
 
 @overload
 def _self_contributions(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    mask: Array,
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
     G: Array,
@@ -78,10 +79,11 @@ def _self_contributions(
 ) -> Tuple[Array, Optional[Array]]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def _self_contributions(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    mask: Array,
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
     G: Array,
@@ -97,13 +99,13 @@ def _self_contributions(
 
     Parameters
     ----------
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         ``[num_leaves, W, 3]`` positions, leaf-major and slot-padded to the leaf
         capacity ``W``. Padded slots must be excluded by ``mask``; their
         coordinate values are otherwise unconstrained and never read.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         ``[num_leaves, W]`` masses under the same padding.
-    mask : Array
+    mask : Bool[Array, 'leaves w']
         ``[num_leaves, W]`` boolean occupancy. Load-bearing twice over: it gates
         the pair block, and it zeroes the output rows for padded targets. A mask
         that admits a padded slot contributes a spurious body at whatever
@@ -182,12 +184,13 @@ def _self_contributions(
     return accels, None
 
 
+@jaxtyped(typechecker=beartype)
 def _pair_contributions(
-    target_positions: Array,
-    target_mask: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
+    target_positions: Float[Array, "w 3"],
+    target_mask: Bool[Array, "w"],
+    source_positions: Float[Array, "sw 3"],
+    source_masses: Float[Array, "sw"],
+    source_mask: Bool[Array, "sw"],
     *,
     softening_sq: Union[float, Array],
     G: Array,
@@ -205,15 +208,15 @@ def _pair_contributions(
 
     Parameters
     ----------
-    target_positions : Array
+    target_positions : Float[Array, 'w 3']
         Padded target-leaf positions ``[W, 3]``.
-    target_mask : Array
+    target_mask : Bool[Array, 'w']
         Padded target-leaf validity ``[W]``; ``False`` slots produce zero output.
-    source_positions : Array
+    source_positions : Float[Array, 'sw 3']
         Padded source-leaf positions ``[W, 3]``.
-    source_masses : Array
+    source_masses : Float[Array, 'sw']
         Padded source-leaf masses ``[W]``.
-    source_mask : Array
+    source_mask : Bool[Array, 'sw']
         Padded source-leaf validity, same shape as ``source_masses``; masked
         sources are zeroed **before** the sum, so they contribute exactly ``0``
         rather than ``0 * inf``.
@@ -289,12 +292,13 @@ def _pair_contributions(
 
 
 @partial(jax.jit, static_argnames=("compute_potential",))
+@jaxtyped(typechecker=beartype)
 def _pair_contributions_batched(
-    target_positions: Array,
-    target_mask: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
+    target_positions: Float[Array, "pairs w 3"],
+    target_mask: Bool[Array, "pairs w"],
+    source_positions: Float[Array, "pairs sw 3"],
+    source_masses: Float[Array, "pairs sw"],
+    source_mask: Bool[Array, "pairs sw"],
     *,
     softening_sq: Union[float, Array],
     G: Array,
@@ -316,15 +320,15 @@ def _pair_contributions_batched(
 
     Parameters
     ----------
-    target_positions : Array
+    target_positions : Float[Array, 'pairs w 3']
         Padded target-leaf positions ``[num_pairs, W, 3]``.
-    target_mask : Array
+    target_mask : Bool[Array, 'pairs w']
         Padded target-leaf validity ``[num_pairs, W]``; ``False`` slots produce zero output.
-    source_positions : Array
+    source_positions : Float[Array, 'pairs sw 3']
         Padded source-leaf positions ``[num_pairs, W, 3]``.
-    source_masses : Array
+    source_masses : Float[Array, 'pairs sw']
         Padded source-leaf masses ``[num_pairs, W]``.
-    source_mask : Array
+    source_mask : Bool[Array, 'pairs sw']
         Padded source-leaf validity, same shape as ``source_masses``; masked
         sources are zeroed **before** the sum, so they contribute exactly ``0``
         rather than ``0 * inf``.
@@ -379,12 +383,13 @@ def _pair_contributions_batched(
 
 
 @partial(jax.jit, static_argnames=("compute_potential",))
+@jaxtyped(typechecker=beartype)
 def _pair_contributions_batched_componentwise(
-    target_positions: Array,
-    target_mask: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
+    target_positions: Float[Array, "pairs w 3"],
+    target_mask: Bool[Array, "pairs w"],
+    source_positions: Float[Array, "pairs sw 3"],
+    source_masses: Float[Array, "pairs sw"],
+    source_mask: Bool[Array, "pairs sw"],
     *,
     softening_sq: Union[float, Array],
     G: Array,
@@ -401,15 +406,15 @@ def _pair_contributions_batched_componentwise(
 
     Parameters
     ----------
-    target_positions : Array
+    target_positions : Float[Array, 'pairs w 3']
         Padded target-leaf positions ``[num_pairs, W, 3]``.
-    target_mask : Array
+    target_mask : Bool[Array, 'pairs w']
         Padded target-leaf validity ``[num_pairs, W]``; ``False`` slots produce zero output.
-    source_positions : Array
+    source_positions : Float[Array, 'pairs sw 3']
         Padded source-leaf positions ``[num_pairs, W, 3]``.
-    source_masses : Array
+    source_masses : Float[Array, 'pairs sw']
         Padded source-leaf masses ``[num_pairs, W]``.
-    source_mask : Array
+    source_mask : Bool[Array, 'pairs sw']
         Padded source-leaf validity, same shape as ``source_masses``; masked
         sources are zeroed **before** the sum, so they contribute exactly ``0``
         rather than ``0 * inf``.
