@@ -244,6 +244,30 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         ("jaccpot/runtime/kernels/_evaluate.py", "farfield_leaf_nodes"),
         ("jaccpot/runtime/kernels/_evaluate.py", "farfield_node_ranges"),
         ("jaccpot/runtime/kernels/_evaluate.py", "velocities_sorted"),
+        # `nearfield/near_field.py`: decorating the prepared-leaf kernel and the public
+        # large-N entry brought their other array parameters under this guard. Two groups.
+        #
+        # `softening_sq` is the scalar family, as everywhere else in this package.
+        ("jaccpot/nearfield/near_field.py", "softening_sq"),
+        # The six target-BLOCK `precomputed_*` tables were `None` in EVERY recorded call -- five
+        # recordings of `compute_leaf_p2p_accelerations_large_n_accel_only`, none of which
+        # supplied one. 4.2 says shapes come from execution and never from the docstring,
+        # so there is nothing to derive them from. `leaf_particle_indices` and
+        # `leaf_particle_mask` WERE observed, at (3, 2) and (5, 256), and are annotated
+        # rather than exempted -- as are the three pair-level ones, which this file
+        # already shapes as `Optional[Int[Array, 'pairs']]` a few hundred lines up.
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_leaf_ids"),
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_source_leaf_ids"),
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_valid_mask"),
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_offsets"),
+        (
+            "jaccpot/nearfield/near_field.py",
+            "precomputed_target_block_source_leaf_ids_padded",
+        ),
+        (
+            "jaccpot/nearfield/near_field.py",
+            "precomputed_target_block_valid_mask_padded",
+        ),
         # Scalars, and the third instance of the same reason: `Float[Array, ""]`
         # buys nothing a scalar can get wrong, and both are reshaped to `(1,)` by
         # the Pallas wrappers anyway, so the only shape a caller could pass that
