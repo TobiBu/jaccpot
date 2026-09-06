@@ -213,6 +213,8 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `pairs` | entries of a precomputed leaf-pair schedule |
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
 | `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
+| `crossleaves` | the CROSS-domain near view in `distributed/_force_scale.py`, which is not `leaves` either: it degenerates to length 1 when a rank has no cross neighbours |
+| `coarse` | the remote coarse (LET) tree's nodes, which are a different tree from the local `nodes` |
 | `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
 | `tiles` | source-block tiles in a fixed-shape tile sequence (`nearfield/_large_n_blocks.py`) |
 | `tbatch` | target leaves per scan step, i.e. `target_leaf_batch_size` |
