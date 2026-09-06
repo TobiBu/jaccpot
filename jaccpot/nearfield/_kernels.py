@@ -21,6 +21,7 @@ unchanged.
 
 from __future__ import annotations
 
+import os
 from functools import partial
 from typing import Any, Literal, Optional, Union, overload
 
@@ -164,6 +165,51 @@ def _self_contributions(
     # Note this term is NOT covered by ``_pair_accel_cvjp``: that rule handles
     # cross-leaf pair blocks, while intra-leaf self interaction is computed here.
     _compute_single_remat = jax.checkpoint(compute_single)
+
+    # Batch the scan: one leaf per step is 5 launches of ~2 us each per leaf
+    # (7.5 ms at N=200k/leaf 256, 15 ms at leaf 128 where the GPU sits 41 %
+    # idle -- measured 2026-09-06). Vmapping ``batch`` leaves per step cuts the
+    # launch count by ``batch`` for ``batch * W^2 * 3`` words of live
+    # intermediates (25 MB at 32 x 256), so the remat argument above still
+    # holds per step. 1 restores the historical one-leaf-per-step scan.
+    batch = int(os.environ.get("JACCPOT_NEARFIELD_SELF_BATCH", "32") or "1")
+    num_leaves = int(leaf_positions.shape[0])
+    if batch > 1 and num_leaves > 0:
+        pad = (-num_leaves) % batch
+        if pad:
+            leaf_positions_b = jnp.pad(leaf_positions, ((0, pad), (0, 0), (0, 0)))
+            leaf_masses_b = jnp.pad(leaf_masses, ((0, pad), (0, 0)))
+            mask_b = jnp.pad(mask, ((0, pad), (0, 0)))
+        else:
+            leaf_positions_b, leaf_masses_b, mask_b = leaf_positions, leaf_masses, mask
+        n_steps = (num_leaves + pad) // batch
+        leaf_positions_b = leaf_positions_b.reshape(
+            (n_steps, batch) + tuple(leaf_positions.shape[1:])
+        )
+        leaf_masses_b = leaf_masses_b.reshape(
+            (n_steps, batch) + tuple(leaf_masses.shape[1:])
+        )
+        mask_b = mask_b.reshape((n_steps, batch) + tuple(mask.shape[1:]))
+        _compute_batch = jax.vmap(_compute_single_remat)
+
+        def scan_step_batched(
+            carry: Any, args: tuple[Array, Array, Array]
+        ) -> tuple[Any, tuple[Array, Array]]:
+            accel_b, pot_b = _compute_batch(args)
+            return carry, (accel_b, pot_b)
+
+        _, (accels_b, potentials_b) = lax.scan(
+            scan_step_batched, None, (leaf_positions_b, leaf_masses_b, mask_b)
+        )
+        accels = accels_b.reshape((n_steps * batch,) + tuple(accels_b.shape[2:]))[
+            :num_leaves
+        ]
+        potentials = potentials_b.reshape(
+            (n_steps * batch,) + tuple(potentials_b.shape[2:])
+        )[:num_leaves]
+        if compute_potential:
+            return accels, potentials
+        return accels, None
 
     def scan_step(
         carry: Any, args: tuple[Array, Array, Array]

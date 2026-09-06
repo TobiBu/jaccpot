@@ -654,6 +654,11 @@ def _radix_fast_lane_prepacked_pallas(
     )
     source_valid_flat = source_valid_mask_padded.reshape((num_leaves, num_source_slots))
 
+    # Source-chunk grid axis (see nearfield_leafpair_pallas): 64 slots per program
+    # by default; 0 restores the single-pass grid. The longest neighbour row of a
+    # centrally concentrated distribution is num_leaves-1, and one serial warp
+    # over it bounded the whole kernel from below (19 ms at 200k, 38 at 400k).
+    source_chunk = _env_int("JACCPOT_NEARFIELD_LEAFPAIR_SOURCE_CHUNK", 64)
     out = nearfield_leafpair_pallas(
         leaf_positions,
         leaf_masses,
@@ -666,6 +671,7 @@ def _radix_fast_lane_prepacked_pallas(
         num_stages=num_stages,
         target_subtile=target_subtile,
         interpret=interpret,
+        source_chunk=(None if source_chunk <= 0 else int(source_chunk)),
     )
 
     pair_acc = _scatter_contributions(

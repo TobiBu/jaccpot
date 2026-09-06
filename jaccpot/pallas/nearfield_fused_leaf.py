@@ -671,8 +671,13 @@ def _nearfield_leafpair_kernel(
     num_source_slots: int,
     leaf_width: int,
     accum_dtype: Any = None,
+    out_dtype: Any = None,
 ) -> None:
     """Leaf-pair near-field update for one target subtile (vector of Bt targets).
+
+    ``out_dtype`` (chunked grid only) writes the accumulator without the final
+    downcast when it equals ``accum_dtype``, so per-chunk partials keep the wide
+    precision until the caller's reduce.
 
     The production lane. Sources arrive as leaf *ids* and are gathered inside the
     kernel from the full particle tables, which is what avoids materialising the dense
@@ -730,6 +735,11 @@ def _nearfield_leafpair_kernel(
         float32 partial per SOURCE LEAF and only the outer per-leaf add is wide, which
         cuts the wide adds by ``leaf_width`` (512x at the production leaf) while still
         removing the dominant ``sqrt(N)`` term.
+
+    out_dtype : Any
+        Dtype of ``out_ref``. ``None`` means the input dtype (one final downcast
+        of the wide accumulator). The chunked grid passes ``accum_dtype`` so each
+        chunk's partial keeps the wide precision until the caller's reduce.
 
     Returns
     -------
@@ -791,7 +801,8 @@ def _nearfield_leafpair_kernel(
         return lax.cond(slot_valid, _apply, lambda acc: acc, acc)
 
     acc_x, acc_y, acc_z, acc_p = lax.fori_loop(0, num_source_slots, _slot_body, acc0)
-    if wide:
+    target_out_dtype = zero.dtype if out_dtype is None else out_dtype
+    if wide and target_out_dtype != accum_dtype:
         # One downcast, on the FINAL value rather than on the sum being accumulated:
         # it costs one eps of the result (~6e-8), which is 170x below the 1.1e-05
         # target, and it keeps every dtype outside this kernel unchanged.
@@ -799,11 +810,12 @@ def _nearfield_leafpair_kernel(
         acc_y = acc_y.astype(zero.dtype)
         acc_z = acc_z.astype(zero.dtype)
         acc_p = acc_p.astype(zero.dtype)
+    zero_out = jnp.zeros_like(acc_x)
 
-    out_ref[0, :, 0] = jnp.where(tvalid, acc_x, zero)
-    out_ref[0, :, 1] = jnp.where(tvalid, acc_y, zero)
-    out_ref[0, :, 2] = jnp.where(tvalid, acc_z, zero)
-    out_ref[0, :, 3] = jnp.where(tvalid, acc_p, zero)
+    out_ref[0, :, 0] = jnp.where(tvalid, acc_x, zero_out)
+    out_ref[0, :, 1] = jnp.where(tvalid, acc_y, zero_out)
+    out_ref[0, :, 2] = jnp.where(tvalid, acc_z, zero_out)
+    out_ref[0, :, 3] = jnp.where(tvalid, acc_p, zero_out)
 
 
 def nearfield_leafpair_pallas(
@@ -820,8 +832,23 @@ def nearfield_leafpair_pallas(
     target_subtile: int | None = None,
     interpret: bool = False,
     accum: str = "input",
+    source_chunk: int | None = None,
 ) -> Array:
     """Leaf-pair near-field update with Pallas.
+
+    ``source_chunk`` splits each target's ``S`` source slots across
+    ``ceil(S / source_chunk)`` programs that each write a partial sum, reduced
+    afterwards.  Why (measured 2026-09-06, N=200k Plummer, leaf 256, A100): the
+    grid is one single-warp program per (leaf, subtile) looping over that
+    leaf's whole neighbour row, and in a centrally concentrated distribution
+    the longest row is ``num_leaves - 1`` (a halo leaf so extended that the
+    mutual MAC makes it near to every leaf).  That one warp serially sums all N
+    sources at ~100 ns per lane-step -- 19 ms at 200k, 38 ms at 400k, theta- and
+    order-independent -- and the kernel's wall time is bounded below by it:
+    truncating rows 781 -> 150 slots removed 18 ms while dropping 21 % of the
+    entries.  With chunk 64 the longest program is 64 x W lane-steps and the
+    ~100k programs balance.  ``None`` (or ``>= S``) keeps the historical single
+    pass, bit-for-bit.
 
     See :func:`nearfield_leafpair_jax` for the argument/return contract. Source
     leaves are gathered by id from ``leaf_positions`` inside the kernel; invalid
@@ -864,6 +891,10 @@ def nearfield_leafpair_pallas(
         :func:`_nearfield_leafpair_kernel` for why widening only the accumulator is
         the whole fix: measured 439x in force accuracy for 1.8 % in time on the
         distributed lane at 10^7 particles.
+
+    source_chunk : int | None
+        Source slots per program on the chunked grid (see above). ``None`` or a
+        value of at least ``S`` keeps the single-pass grid.
 
     Returns
     -------
@@ -922,40 +953,114 @@ def nearfield_leafpair_pallas(
 
     accum_dtype = _resolve_accum_dtype(accum, dtype)
 
-    def _kernel(*refs):
+    chunk = None
+    if source_chunk is not None and 0 < int(source_chunk) < num_source_slots:
+        chunk = int(source_chunk)
+    if chunk is None:
+
+        def _kernel(*refs):
+            return _nearfield_leafpair_kernel(
+                *refs,
+                num_source_slots=num_source_slots,
+                leaf_width=leaf_width,
+                accum_dtype=accum_dtype,
+            )
+
+        kernel = pl.pallas_call(
+            _kernel,
+            out_shape=jax.ShapeDtypeStruct((num_leaves, width_pad, _OUT_WIDTH), dtype),
+            in_specs=[
+                pl.BlockSpec((1, bt, _POS_WIDTH), lambda leaf, sub: (leaf, sub, 0)),
+                pl.BlockSpec((1, bt), lambda leaf, sub: (leaf, sub)),
+                # Full gather tables (indexed by data-dependent source leaf id).
+                pl.BlockSpec(
+                    (num_leaves, leaf_width, _POS_WIDTH), lambda leaf, sub: (0, 0, 0)
+                ),
+                pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub: (0, 0)),
+                pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub: (0, 0)),
+                pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
+                pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
+                pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+                pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+            ],
+            out_specs=pl.BlockSpec(
+                (1, bt, _OUT_WIDTH), lambda leaf, sub: (leaf, sub, 0)
+            ),
+            grid=(num_leaves, n_sub),
+            compiler_params=plgpu.CompilerParams(
+                num_warps=int(num_warps), num_stages=int(num_stages)
+            ),
+            interpret=bool(interpret),
+            name=f"nearfield_leafpair_t{bt}_s{num_source_slots}_w{leaf_width}_a{accum}",
+        )
+        out = kernel(
+            target_positions_padded,
+            target_mask_padded,
+            leaf_positions_padded,
+            leaf_masses,
+            leaf_mask,
+            source_leaf_ids,
+            source_valid,
+            softening_sq_arr,
+            g_arr,
+        )
+        if pad_t:
+            out = out[:, :leaf_width, :]
+        return out
+
+    # Chunked grid: (leaf, subtile, source chunk). Each program sums its chunk of
+    # source slots into a partial; the partials are reduced below. The reduce is
+    # over at most ceil(S / chunk) terms per target, so it costs nothing against
+    # the sums inside the programs; with the wide accumulator the partials are
+    # emitted in the wide dtype so nothing is lost before the reduce.
+    n_chunks = (num_source_slots + chunk - 1) // chunk
+    slots_pad = n_chunks * chunk - num_source_slots
+    if slots_pad:
+        source_leaf_ids = jnp.pad(source_leaf_ids, ((0, 0), (0, slots_pad)))
+        source_valid = jnp.pad(source_valid, ((0, 0), (0, slots_pad)))
+    partial_dtype = accum_dtype if accum_dtype is not None else dtype
+
+    def _kernel_chunk(*refs):
         return _nearfield_leafpair_kernel(
             *refs,
-            num_source_slots=num_source_slots,
+            num_source_slots=chunk,
             leaf_width=leaf_width,
             accum_dtype=accum_dtype,
+            out_dtype=partial_dtype,
         )
 
     kernel = pl.pallas_call(
-        _kernel,
-        out_shape=jax.ShapeDtypeStruct((num_leaves, width_pad, _OUT_WIDTH), dtype),
+        _kernel_chunk,
+        out_shape=jax.ShapeDtypeStruct(
+            (num_leaves, n_chunks, width_pad, _OUT_WIDTH), partial_dtype
+        ),
         in_specs=[
-            pl.BlockSpec((1, bt, _POS_WIDTH), lambda leaf, sub: (leaf, sub, 0)),
-            pl.BlockSpec((1, bt), lambda leaf, sub: (leaf, sub)),
-            # Full gather tables (indexed by data-dependent source leaf id).
+            pl.BlockSpec((1, bt, _POS_WIDTH), lambda leaf, sub, c: (leaf, sub, 0)),
+            pl.BlockSpec((1, bt), lambda leaf, sub, c: (leaf, sub)),
             pl.BlockSpec(
-                (num_leaves, leaf_width, _POS_WIDTH), lambda leaf, sub: (0, 0, 0)
+                (num_leaves, leaf_width, _POS_WIDTH), lambda leaf, sub, c: (0, 0, 0)
             ),
-            pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub: (0, 0)),
-            pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub: (0, 0)),
-            pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
-            pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
-            pl.BlockSpec((1,), lambda leaf, sub: (0,)),
-            pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+            pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub, c: (0, 0)),
+            pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub, c: (0, 0)),
+            pl.BlockSpec((1, chunk), lambda leaf, sub, c: (leaf, c)),
+            pl.BlockSpec((1, chunk), lambda leaf, sub, c: (leaf, c)),
+            pl.BlockSpec((1,), lambda leaf, sub, c: (0,)),
+            pl.BlockSpec((1,), lambda leaf, sub, c: (0,)),
         ],
-        out_specs=pl.BlockSpec((1, bt, _OUT_WIDTH), lambda leaf, sub: (leaf, sub, 0)),
-        grid=(num_leaves, n_sub),
+        out_specs=pl.BlockSpec(
+            (1, None, bt, _OUT_WIDTH), lambda leaf, sub, c: (leaf, c, sub, 0)
+        ),
+        grid=(num_leaves, n_sub, n_chunks),
         compiler_params=plgpu.CompilerParams(
             num_warps=int(num_warps), num_stages=int(num_stages)
         ),
         interpret=bool(interpret),
-        name=f"nearfield_leafpair_t{bt}_s{num_source_slots}_w{leaf_width}_a{accum}",
+        name=(
+            f"nearfield_leafpair_t{bt}_s{num_source_slots}_c{chunk}"
+            f"_w{leaf_width}_a{accum}"
+        ),
     )
-    out = kernel(
+    partials = kernel(
         target_positions_padded,
         target_mask_padded,
         leaf_positions_padded,
@@ -966,6 +1071,7 @@ def nearfield_leafpair_pallas(
         softening_sq_arr,
         g_arr,
     )
+    out = jnp.sum(partials, axis=1).astype(dtype)
     if pad_t:
         out = out[:, :leaf_width, :]
     return out
