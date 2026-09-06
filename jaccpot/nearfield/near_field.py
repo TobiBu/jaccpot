@@ -1294,11 +1294,11 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
     edge_chunk_size: int = 256,
-    precomputed_target_leaf_ids: Optional[Array] = None,
-    precomputed_source_leaf_ids: Optional[Array] = None,
-    precomputed_valid_pairs: Optional[Array] = None,
-    leaf_particle_indices: Array,
-    leaf_particle_mask: Optional[Array] = None,
+    precomputed_target_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_source_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_valid_pairs: Optional[Bool[Array, "pairs"]] = None,
+    leaf_particle_indices: Int[Array, "leaves w"],
+    leaf_particle_mask: Optional[Bool[Array, "leaves w"]] = None,
     precomputed_target_block_leaf_ids: Optional[Array] = None,
     precomputed_target_block_source_leaf_ids: Optional[Array] = None,
     precomputed_target_block_valid_mask: Optional[Array] = None,
@@ -1350,19 +1350,19 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
         Python float, not a tracer. Default ``0.0``.
     edge_chunk_size : int
         Edge-chunk width for the edge-list path. Default ``256``.
-    precomputed_target_leaf_ids : Optional[Array]
+    precomputed_target_leaf_ids : Optional[Int[Array, 'pairs']]
         Per-edge target leaf ids; derived from ``neighbor_list`` when ``None``.
-    precomputed_source_leaf_ids : Optional[Array]
+    precomputed_source_leaf_ids : Optional[Int[Array, 'pairs']]
         Per-edge source leaf ids. **Must be positionally aligned with**
         ``neighbors`` -- see the warning on
         :func:`~jaccpot.nearfield._schedules.prepare_leaf_neighbor_pairs`: a
         source-sorted vector has the identical shape and produces wrong forces
         silently.
-    precomputed_valid_pairs : Optional[Array]
+    precomputed_valid_pairs : Optional[Bool[Array, 'pairs']]
         Per-edge validity, same convention.
-    leaf_particle_indices : Array
+    leaf_particle_indices : Int[Array, 'leaves w']
         Explicit per-leaf particle membership ``[num_leaves, W]``. Required.
-    leaf_particle_mask : Optional[Array]
+    leaf_particle_mask : Optional[Bool[Array, 'leaves w']]
         Validity for that table; derived when ``None``.
     precomputed_target_block_leaf_ids : Optional[Array]
         Target leaf id per block, for the target-owned paths.
