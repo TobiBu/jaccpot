@@ -13,6 +13,7 @@ the engine class is dissolved.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import replace as dataclass_replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Callable, Literal, NamedTuple, Optional, Union
 
@@ -33,6 +34,7 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
+from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
@@ -729,6 +731,7 @@ def _build_tree_with_config(
         mass_sorted = built_tree.masses_sorted
         inverse = built_tree.inverse_permutation
         workspace_out = built_tree.workspace if tree_type == "radix" else None
+    tree = _restore_static_leaf_size(tree)
     if pos_sorted is None or mass_sorted is None or inverse is None:
         raise ValueError(
             "Tree.from_particles must return reordered arrays for FMM runtime."
@@ -760,6 +763,69 @@ def _build_tree_with_config(
         max_leaf_size=int(max_leaf_size),
         cache_leaf_parameter=int(cache_leaf_parameter),
     )
+
+
+def _restore_static_leaf_size(tree: Tree) -> Tree:
+    """Return ``tree`` with a Python-``int`` ``topology.leaf_size``.
+
+    Yggdrax registers its Morton trees as pytrees with ``topology.leaf_size`` in
+    the *aux* data rather than among the children -- correct, because the leaf
+    size is static to a build and every ``int(...)`` of it downstream would
+    otherwise trip on a tracer. Aux data is the treedef, and the treedef is part
+    of every ``jax.jit`` cache key, so it must be hashable and cheaply
+    comparable. A JAX array is neither.
+
+    The octree build path puts one there anyway, and not through anything
+    Jaccpot controls: ``OctreeTree.from_particles`` dispatches its adaptive mode
+    to ``yggdrax.tree._build_octree_jit_result``, a ``jax.jit`` whose *result*
+    object carries the topology's fields as ordinary children. The static
+    ``leaf_size=8`` handed in therefore comes back out of that jit boundary as
+    ``Array(8, dtype=int64, weak_type=True)``, and yggdrax's flatten then files
+    that array as aux. The radix and kd-tree paths return the tree itself, whose
+    flatten keeps ``leaf_size`` in aux across the boundary, so they are unaffected
+    -- octree is the only shape of this defect.
+
+    The bill arrives at a jit cache lookup taken *inside* a trace. Two prepared
+    states built the same way hold two distinct ``Array(8)`` objects, so the
+    treedef comparison falls past the identity fast path into ``Array.__eq__``,
+    which -- with an outer trace live -- stages a ``bool[]`` tracer rather than
+    returning a bool. JAX turns that into ``ValueError: Exception raised while
+    checking equality of metadata fields of pytree``, whose real cause is a
+    ``TracerBoolConversionError`` several frames down.
+
+    Two *independently built* octree states are the whole precondition, which is
+    why the failure reads as flaky: one state reused holds the same array object
+    on both sides and the identity check hides it, so whether the suite trips
+    depends on which tests xdist happens to put in one worker. It first showed
+    up on a single smoke shard, with the other Python leg green on identical
+    code.
+
+    Normalising here rather than at each consumer is deliberate: this is the one
+    place the FMM runtime obtains a tree, so one coercion covers every jitted
+    entry point that later sees the prepared state.
+
+    Parameters
+    ----------
+    tree : Tree
+        Freshly built tree, possibly carrying an array-valued ``leaf_size``.
+
+    Returns
+    -------
+    Tree
+        ``tree`` unchanged when its leaf size is already static, and a copy with
+        a Python ``int`` leaf size otherwise. A *traced* leaf size is left alone:
+        it cannot be concretised, and a tree built under a trace has no static
+        leaf size to restore. So is a topology that is not a ``NamedTuple``,
+        which has no ``_replace`` to rebuild it with.
+    """
+
+    topology = getattr(tree, "topology", None)
+    leaf_size = getattr(topology, "leaf_size", None)
+    if leaf_size is None or isinstance(leaf_size, (int, np.integer)):
+        return tree
+    if isinstance(leaf_size, Tracer) or not hasattr(topology, "_replace"):
+        return tree
+    return dataclass_replace(tree, topology=topology._replace(leaf_size=int(leaf_size)))
 
 
 @lru_cache(maxsize=16)
