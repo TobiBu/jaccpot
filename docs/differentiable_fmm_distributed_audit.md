@@ -323,6 +323,65 @@ quietly loses a term.
 
 ---
 
+## Addendum (2026-09-04): the forward is affected too — donation is enough
+
+Everything above attributes the corruption to *executing a gradient*. That was the
+only trigger observed at the time, and it led to a gate on the gradient path alone,
+with the forward left on the native exchange ("the forward keeps the native path").
+That conclusion was wrong, and it cost every forward-only multi-GPU rollout on an
+affected JAX its cross-domain near field.
+
+**The trigger is any buffer movement.** The mechanism (`RaggedAllToAllStartThunk`
+caches peer output addresses on first execution) fires whenever the allocator moves
+the exchange's buffers. Input donation — what every leapfrog does to its state — is
+sufficient. Pure JAX, jax 0.9.0, 2×A100, `jit(shard_map(ragged_all_to_all))`, 40 calls,
+one configuration per process (`bench/repro_jax_ragged_all_to_all_forward.py`):
+
+| forward-only configuration | jax 0.9.0 | jax 0.9.1 | jax 0.10.2 |
+| --- | --- | --- | --- |
+| `donate_argnums`, fresh input each call | **CORRUPT 36/40** (first call clean) | clean 0/40 | clean 0/40 |
+| donation + varying-size live allocations across the call | **CORRUPT 35/40** | clean | clean |
+| allocations only, no donation | **CORRUPT 3/40** (intermittent) | clean | clean |
+| identical buffers, nothing moves | clean 0/40 | clean | clean |
+
+The last row is why the defect survived: a reproducibility test that evaluates the
+same inputs twice reuses the same buffers and passes on a broken build.
+
+**In the full pipeline.** A 17.8M-particle disc+bulge on 4×A100, KDK leapfrog with
+donated state, 256 random targets probed against an fp64 direct sum over all sources
+at *every* step:
+
+| step | 0.9.0, native (default then) | 0.9.0, `halo_exchange="buf"` | 0.10.2, native |
+| --- | --- | --- | --- |
+| 0 | 2.88e-3 | 2.8766e-3 | 2.8766e-3 |
+| 1 | **0.45–0.50** | 4.1650e-3 | 4.1650e-3 |
+| 2 | **0.45–0.50** | 2.5335e-3 | 2.5335e-3 |
+| 3 | 2.7e-3 | 2.7110e-3 | 2.7110e-3 |
+| 4 | — | 3.1450e-3 | 3.1450e-3 |
+
+The good/bad/bad/good pattern was address-dependent and deterministic per process
+layout, which made it look like a step-indexed algorithmic fault. Angular momentum,
+kinetic energy, centre of mass and every overflow flag were healthy throughout (the
+dropped pairs are mutual, so momentum-like invariants survive); the per-step dL/L
+was 1.45e-7 on the broken exchange and 1.5e-9 on a correct one — the "healthy"
+number was itself the defect, 100× too quiet to notice. Stale-address writes are
+also the likely source of an intermittent NaN seen once in 10 steps on the same box.
+The `buf` exchange cost nothing measurable at 4 devices (153.4 vs 154.4 s/step).
+
+**Attribution.** jax 0.9.0 with NCCL 2.29→2.31 and NVSHMEM 3.5→3.7 still corrupts;
+the fix is in the XLA:GPU plugin. A venv built with `--system-site-packages` on top of
+an older environment loads the *older* `jax_plugins.xla_cuda12` (namespace-package
+resolution) while `pip list` reports the new version — it reproduced the corruption
+under a nominal 0.9.1 for an hour. Check `jax_plugins.xla_cuda12.__file__`.
+
+**What changed.** `resolve_halo_exchange` (the resolver formerly named
+`resolve_grad_halo_exchange`; the old name is an alias) now governs the forward trace
+too — `_halo_exchange` wraps `import_near_halo` unconditionally instead of
+`if differentiable`. `tests/distributed/test_forward_halo_donation.py` does what a
+leapfrog does and compares every step with a direct sum; the opt-in variant with
+`"native"` forced is the forward counterpart of
+`test_native_halo_exchange_is_fixed_upstream`.
+
 ## What is verified
 
 2×A100-PCIE-40GB, N=64 (32/device), `order=3`, `theta=0.4`, `leaf_size=8`, real

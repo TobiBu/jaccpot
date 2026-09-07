@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot import FastMultipoleMethod
 from jaccpot.nearfield._fast_lane import (
@@ -612,3 +613,213 @@ def test_fast_lane_rejects_potentials():
             max_leaf_size=int(state.max_leaf_size),
             return_potential=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# The `custom_vjp` boundary's own contract: the `*_f` float-cast convention and
+# the saved residual. Both are checked here rather than in `test_custom_vjp_parity.py`,
+# which asks whether the reverse is *right*; these ask whether a caller who gets the
+# boundary wrong is told so.
+# ---------------------------------------------------------------------------
+
+
+def _prepacked_cvjp_case(*, num_leaves=4, width=8, blocks=2, lanes=3, num_particles=40):
+    """A minimal well-formed argument set for ``_radix_fast_lane_prepacked_accel_cvjp``.
+
+    Deliberately built so no two axes coincide: ``leaves`` 4, ``w`` 8, ``blocks`` 2,
+    ``blocksize`` 3 and ``n`` 40 are pairwise distinct, so a swapped pair of arguments
+    cannot satisfy the annotation by accident.
+
+    Parameters
+    ----------
+    num_leaves : int
+        Padded leaf-table rows.
+    width : int
+        Leaf width ``w``.
+    blocks : int
+        Source-block count in the prepacked rectangle.
+    lanes : int
+        Lanes per source block, i.e. ``blocksize``.
+    num_particles : int
+        Particle count ``n``.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for :func:`_call_prepacked_cvjp`, with the four ``*_f``
+        tables already float-cast the way the shipped callers cast them.
+    """
+    rng = np.random.default_rng(3)
+    dtype = jnp.float64
+    positions = jnp.asarray(
+        rng.uniform(-1.0, 1.0, size=(num_particles, 3)), dtype=dtype
+    )
+    leaf_particle_idx = jnp.asarray(
+        rng.integers(0, num_particles, size=(num_leaves, width)), dtype=INDEX_DTYPE
+    )
+    source_leaf_ids = jnp.asarray(
+        rng.integers(0, num_leaves, size=(num_leaves, blocks, lanes)),
+        dtype=INDEX_DTYPE,
+    )
+    return dict(
+        leaf_positions=positions[leaf_particle_idx],
+        leaf_masses=jnp.asarray(
+            np.abs(rng.standard_normal((num_leaves, width))) + 0.5, dtype=dtype
+        ),
+        positions=positions,
+        source_leaf_ids_f=source_leaf_ids.astype(dtype),
+        source_valid_f=jnp.ones((num_leaves, blocks, lanes), dtype=dtype),
+        leaf_mask_f=jnp.ones((num_leaves, width), dtype=dtype),
+        leaf_particle_idx_f=leaf_particle_idx.astype(dtype),
+        # The unfloat-cast originals, so a test can substitute one back in.
+        _source_leaf_ids=source_leaf_ids,
+        _source_valid=jnp.ones((num_leaves, blocks, lanes), dtype=bool),
+        _leaf_mask=jnp.ones((num_leaves, width), dtype=bool),
+        _leaf_particle_idx=leaf_particle_idx,
+    )
+
+
+def _call_prepacked_cvjp(case, **overrides):
+    """Invoke the prepacked-lane ``custom_vjp`` primal on ``case``, positionally.
+
+    Positional because it is a ``jax.custom_vjp`` primal whose ``nondiff_argnums``
+    forbid keywords for everything from ``num_warps`` on.
+
+    Parameters
+    ----------
+    case : dict
+        From :func:`_prepacked_cvjp_case`.
+    **overrides : Array
+        Arguments to replace, by parameter name.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[n, 3]``.
+    """
+    from jaccpot.nearfield import _fast_lane as fl
+
+    args = {**case, **overrides}
+    dtype = jnp.float64
+    return fl._radix_fast_lane_prepacked_accel_cvjp(
+        args["leaf_positions"],
+        args["leaf_masses"],
+        args["positions"],
+        args["source_leaf_ids_f"],
+        args["source_valid_f"],
+        args["leaf_mask_f"],
+        args["leaf_particle_idx_f"],
+        jnp.asarray(1e-2**2, dtype=dtype),
+        jnp.asarray(1.0, dtype=dtype),
+        None,  # num_warps
+        1,  # num_stages
+        None,  # target_subtile
+        True,  # interpret: the only way to reach the Pallas kernel on CPU
+        2,  # rev_leaf_batch
+        2,  # rev_block_tile
+        True,  # rev_skip_empty
+        None,  # rev_tiers
+    )
+
+
+@pytest.mark.parametrize(
+    "parameter,original_key",
+    [
+        ("source_leaf_ids_f", "_source_leaf_ids"),
+        ("source_valid_f", "_source_valid"),
+        ("leaf_mask_f", "_leaf_mask"),
+        ("leaf_particle_idx_f", "_leaf_particle_idx"),
+    ],
+)
+def test_prepacked_cvjp_rejects_an_unfloat_cast_table(parameter, original_key):
+    """The ``*_f`` suffix is a contract, and it was enforced by nothing.
+
+    The four id/mask tables are cast to float to cross the ``custom_vjp`` boundary
+    without acquiring a tangent. Pass the integer or boolean original instead and the
+    body is perfectly happy: ``jnp.round(...).astype(INDEX_DTYPE)`` on an integer array
+    and ``bool_array > 0.5`` both work, so all four were **accepted silently** and
+    returned a number -- measured on the parent commit, on the forward and the reverse
+    path alike. The ``Float[...]`` annotation on the primal is what rejects them.
+
+    Asserted on both paths deliberately. Under ``jax.grad`` the ``custom_vjp``
+    machinery calls ``_fwd``, not the primal, so a check on the primal reaching the
+    reverse pass is not automatic -- it happens here only because this lane's ``_fwd``
+    re-enters the primal itself, which is a property of that body and not of
+    ``custom_vjp``.
+    """
+    from jaxtyping import TypeCheckError
+
+    case = _prepacked_cvjp_case()
+
+    # Non-vacuity: the well-formed case must reach the kernel and return a real force,
+    # or a rejection below would prove nothing.
+    good = _call_prepacked_cvjp(case)
+    assert float(jnp.max(jnp.abs(good))) > 0.0
+
+    bad = {parameter: case[original_key]}
+    with pytest.raises(TypeCheckError):
+        _call_prepacked_cvjp(case, **bad)
+
+    def loss(leaf_positions):
+        return jnp.sum(
+            _call_prepacked_cvjp(case, leaf_positions=leaf_positions, **bad) ** 2
+        )
+
+    with pytest.raises(TypeCheckError):
+        jax.grad(loss)(case["leaf_positions"])
+
+
+def test_prepacked_cvjp_saves_the_documented_nine_entry_residual():
+    """The reverse pass's saved residual, pinned as a contract rather than a comment.
+
+    NUMERICS_AND_JAX section 1 forbids changing a ``custom_vjp``'s residuals without
+    re-running ``bench/audit_reverse_residuals.py``. Nothing asserted what they were, so
+    a refactor could add, drop or reorder an entry and only a downstream ``IndexError``
+    would notice -- and only for the mutations that happen to change a shape.
+
+    Observed by re-registering ``defvjp`` with a recording wrapper, which is the only
+    way to see either rule: ``defvjp`` captured them at import, so rebinding the module
+    attribute (what ``bench/annotation_capture`` does) leaves the ``custom_vjp`` object
+    calling the originals.
+    """
+    from jaccpot.nearfield import _fast_lane as fl
+
+    case = _prepacked_cvjp_case()
+    seen: list[tuple] = []
+
+    original_fwd = fl._radix_fast_lane_prepacked_accel_fwd
+    original_bwd = fl._radix_fast_lane_prepacked_accel_bwd
+
+    def recording_fwd(*args):
+        out, residual = original_fwd(*args)
+        seen.append(residual)
+        return out, residual
+
+    try:
+        fl._radix_fast_lane_prepacked_accel_cvjp.defvjp(recording_fwd, original_bwd)
+        jax.grad(
+            lambda leaf_positions: jnp.sum(
+                _call_prepacked_cvjp(case, leaf_positions=leaf_positions) ** 2
+            )
+        )(case["leaf_positions"])
+    finally:
+        fl._radix_fast_lane_prepacked_accel_cvjp.defvjp(original_fwd, original_bwd)
+
+    assert len(seen) == 1, "the forward rule ran once per reverse pass"
+    residual = seen[0]
+    expected = (
+        case["leaf_positions"].shape,
+        case["leaf_masses"].shape,
+        case["positions"].shape,
+        case["source_leaf_ids_f"].shape,
+        case["source_valid_f"].shape,
+        case["leaf_mask_f"].shape,
+        case["leaf_particle_idx_f"].shape,
+        (),
+        (),
+    )
+    assert len(residual) == len(expected), (
+        f"the residual is a {len(expected)}-entry tuple; got {len(residual)}. "
+        "Re-run bench/audit_reverse_residuals.py before changing it."
+    )
+    assert tuple(tuple(r.shape) for r in residual) == expected

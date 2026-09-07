@@ -27,8 +27,9 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+from beartype import beartype
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
 from jaccpot.pallas._compat import KernelRef
 
@@ -286,12 +287,47 @@ def _nearfield_fused_leaf_kernel(
     out_ref[0, :, 3] = jnp.where(tvalid, acc_p, zero)
 
 
+# WHY EVERY `*_positions` HERE STAYS BARE WHILE THE ARRAYS BESIDE IT DO NOT.
+#
+# The bodies below already validate the position arrays, and better than an annotation
+# would: `target_positions must have shape (num_leaves, W_t, 3)` names the parameter and
+# says what was wanted. A decorator runs BEFORE the body, so shaping them would replace
+# those messages with a generic `TypeCheckError` and make the checks dead code -- the trap
+# STYLE_GUIDE checklist item 13 exists for, and the one that cost
+# `compute_node_force_scale_from_sorted_magnitudes` an annotation in #310.
+#
+# What those checks do NOT cover is everything else: they test rank and the trailing 3 of
+# the positions, and say nothing about the masks, masses, ids and validity arrays that must
+# agree with them slot for slot. That is precisely where this module's real defect lived --
+# #297, where the DECOUPLED lane's source pool had a different width from the target block
+# and the kernel read the surplus out of bounds, silently. The annotations below are those
+# parallel arrays.
+#
+# The axes come from the 2026-09-04 recording, and two of them are kept apart deliberately:
+#
+#   nearfield_leafpair_pallas       leaf_mask/leaf_masses (4, 8)  source_leaf_ids (4, 3)
+#                                   -> `leaves w` and `leaves srcslots`, second axis free
+#   ..._pallas_decoupled            source_mask (4, 8) beside target_mask (3, 8)
+#                                   -> `srcleaves` is NOT `leaves`; the decoupled lane's
+#                                      whole point is a separate source pool, and the
+#                                      recording shows the two leading extents differing
+#
+# The decoupled source side uses `sw`, NOT the target's `w`, and that correction came from a
+# test failure rather than from reading the code. #297's own `ValueError` -- "source_positions
+# must have the same leaf width as target_positions ... a narrower pool reads out of bounds
+# and a wider one silently drops the surplus columns" -- is the better message for a width
+# mismatch, and it fires on `source_positions`, which stays bare. Tying `source_masses` and
+# `source_mask` to `w` made them fail FIRST on a consistently-narrow pool, preempting it:
+# checklist item 13 one step removed, through a sibling rather than the parameter itself.
+# `sw` ties them to each other and leaves #297's guard in front. 4.3 already defines `sw` as
+# exactly this: the decoupled lane's source-pool width, which is not the target block's `w`.
+@jaxtyped(typechecker=beartype)
 def nearfield_fused_leaf_pallas(
     target_positions: Array,
-    target_mask: Array,
+    target_mask: Bool[Array, "leaves w"],
     source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
+    source_masses: Float[Array, "srcleaves srcslots"],
+    source_mask: Bool[Array, "srcleaves srcslots"],
     *,
     softening_sq: Array,
     G: Array,
@@ -315,13 +351,13 @@ def nearfield_fused_leaf_pallas(
     ----------
     target_positions : Array
         Target coordinates per leaf, shape ``(num_leaves, W_t, 3)``.
-    target_mask : Array
+    target_mask : Bool[Array, 'leaves w']
         Which target slots hold real particles, shape ``(num_leaves, W_t)``.
     source_positions : Array
         Source coordinates per leaf-slot, shape ``(num_leaves, K, 3)``.
-    source_masses : Array
+    source_masses : Float[Array, 'srcleaves srcslots']
         Source masses, shape ``(num_leaves, K)``.
-    source_mask : Array
+    source_mask : Bool[Array, 'srcleaves srcslots']
         Which source slots are real, shape ``(num_leaves, K)``.
     softening_sq : Array
         Scalar squared softening length -- squared by the caller, not here.
@@ -542,12 +578,13 @@ def nearfield_fused_leaf_backend(*, prefer_pallas: bool = True) -> str:
 
 
 @jax.jit
+@jaxtyped(typechecker=beartype)
 def nearfield_leafpair_jax(
     leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    source_leaf_ids: Array,
-    source_valid: Array,
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    source_leaf_ids: Int[Array, "leaves srcslots"],
+    source_valid: Bool[Array, "leaves srcslots"],
     *,
     softening_sq: Array,
     G: Array,
@@ -564,15 +601,15 @@ def nearfield_leafpair_jax(
     leaf_positions : Array
         ``[num_leaves, W, 3]`` leaf-major particle positions. Targets and sources
         are drawn from this same table.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         ``[num_leaves, W]`` per-particle masses, aligned with ``leaf_positions``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         ``[num_leaves, W]`` per-particle validity.
-    source_leaf_ids : Array
+    source_leaf_ids : Int[Array, 'leaves srcslots']
         ``[num_leaves, S]`` neighbour source-leaf ids for each target leaf.
         Entries where ``source_valid`` is false are never read, so they may hold
         anything -- they are clamped to 0 before the gather.
-    source_valid : Array
+    source_valid : Bool[Array, 'leaves srcslots']
         ``[num_leaves, S]`` validity of each source slot.
     softening_sq : Array
         Scalar *squared* Plummer softening, added to every squared separation.
@@ -806,12 +843,13 @@ def _nearfield_leafpair_kernel(
     out_ref[0, :, 3] = jnp.where(tvalid, acc_p, zero)
 
 
+@jaxtyped(typechecker=beartype)
 def nearfield_leafpair_pallas(
     leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    source_leaf_ids: Array,
-    source_valid: Array,
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    source_leaf_ids: Int[Array, "leaves srcslots"],
+    source_valid: Bool[Array, "leaves srcslots"],
     *,
     softening_sq: Array,
     G: Array,
@@ -834,13 +872,13 @@ def nearfield_leafpair_pallas(
         Particle coordinates per leaf, shape ``(num_leaves, W, 3)``. Serves as BOTH
         the target rows and the source gather table -- see
         :func:`nearfield_leafpair_pallas_decoupled` to separate them.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Particle masses, shape ``(num_leaves, W)``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Which particle slots are real, shape ``(num_leaves, W)``.
-    source_leaf_ids : Array
+    source_leaf_ids : Int[Array, 'leaves srcslots']
         Source leaf id per target leaf and slot, shape ``(num_leaves, S)``.
-    source_valid : Array
+    source_valid : Bool[Array, 'leaves srcslots']
         Which slots hold a real source leaf, shape ``(num_leaves, S)``.
     softening_sq : Array
         Scalar squared softening length.
@@ -971,14 +1009,15 @@ def nearfield_leafpair_pallas(
     return out
 
 
+@jaxtyped(typechecker=beartype)
 def nearfield_leafpair_pallas_decoupled(
     target_positions: Array,
-    target_mask: Array,
+    target_mask: Bool[Array, "leaves w"],
     source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
-    source_leaf_ids: Array,
-    source_valid: Array,
+    source_masses: Float[Array, "srcleaves sw"],
+    source_mask: Bool[Array, "srcleaves sw"],
+    source_leaf_ids: Int[Array, "leaves srcslots"],
+    source_valid: Bool[Array, "leaves srcslots"],
     *,
     softening_sq: Array,
     G: Array,
@@ -1003,17 +1042,17 @@ def nearfield_leafpair_pallas_decoupled(
     ----------
     target_positions : Array
         Target coordinates, shape ``(num_targets, W, 3)``.
-    target_mask : Array
+    target_mask : Bool[Array, 'leaves w']
         Which target slots are real, shape ``(num_targets, W)``.
     source_positions : Array
         Source gather table, shape ``(num_sources, W, 3)``.
-    source_masses : Array
+    source_masses : Float[Array, 'srcleaves sw']
         Source masses, shape ``(num_sources, W)``.
-    source_mask : Array
+    source_mask : Bool[Array, 'srcleaves sw']
         Which source slots are real, shape ``(num_sources, W)``.
-    source_leaf_ids : Array
+    source_leaf_ids : Int[Array, 'leaves srcslots']
         Source row ids in ``[0, num_sources)``, shape ``(num_targets, S)``.
-    source_valid : Array
+    source_valid : Bool[Array, 'leaves srcslots']
         Which slots are real, shape ``(num_targets, S)``.
     softening_sq : Array
         Scalar squared softening length.
@@ -1075,6 +1114,38 @@ def nearfield_leafpair_pallas_decoupled(
     leaf_width = int(target_positions.shape[1])
     num_sources = int(source_positions.shape[0])
     num_source_slots = int(source_leaf_ids.shape[1])
+
+    # THE SOURCE POOL MUST BE EXACTLY AS WIDE AS THE TARGET BLOCK, and until this check
+    # existed neither violation said anything. The source gather tables' `BlockSpec`
+    # below is built from `leaf_width` -- the TARGET width -- so the kernel reads exactly
+    # that many columns from the source tables however many they have. Measured, interpret
+    # mode, float64:
+    #
+    #   source narrower   an out-of-bounds read; `|acc| = nan` at target 8 / source 4 and
+    #                     at target 16 / source 3
+    #   source wider      the surplus columns are NEVER READ, so real and valid source
+    #                     particles are dropped: target 4 against a source pool padded to
+    #                     8 with unmasked extra particles returns a force identical to
+    #                     ignoring them, rel-L2 0.0e+00
+    #
+    # The second is the worse one by this package's own ordering -- a plausible wrong
+    # number beats a NaN for damage -- and it was first recorded the wrong way round, as
+    # "a wider source pool is correctly ignored". That measurement had the surplus MASKED
+    # OFF, where it contributes nothing either way; unmasked, it is silently dropped.
+    #
+    # Equal widths is what the docstring already specifies (both tables are `W`) and what
+    # production passes: `distributed/fmm.py` slices its target block out of the source
+    # pool, and the F25 equivalence case passes the same array twice. So this rejects
+    # rather than pads: padding would invent a supported configuration, and section 9
+    # prefers refusing a request to quietly substituting one we can serve.
+    if int(source_positions.shape[1]) != leaf_width:
+        raise ValueError(
+            "source_positions must have the same leaf width as target_positions; got "
+            f"source width {int(source_positions.shape[1])} against target width "
+            f"{leaf_width}. The kernel reads exactly the target width from the source "
+            "gather tables, so a narrower pool reads out of bounds and a wider one "
+            "silently drops the surplus columns."
+        )
 
     if num_targets == 0 or leaf_width == 0 or num_source_slots == 0 or num_sources == 0:
         return jnp.zeros((num_targets, leaf_width, _OUT_WIDTH), dtype=dtype)
@@ -1291,21 +1362,27 @@ def _nearfield_fused_leaf_cvjp_bwd(
     target_mask = target_mask_f > 0.5
     source_mask = source_mask_f > 0.5
 
-    def _twin(tp, sp, sm):
+    # softening_sq and G are differentiated through the twin too: the force is
+    # smooth in both, and returning zeros for them (as this rule did until
+    # 2026-09-04) silently dropped the near field's share of d/d(softening) and
+    # d/dG. Only the masks are discrete.
+    def _twin(tp, sp, sm, soft, g):
         return nearfield_fused_leaf_jax(
-            tp, target_mask, sp, sm, source_mask, softening_sq=softening_sq, G=G
+            tp, target_mask, sp, sm, source_mask, softening_sq=soft, G=g
         )
 
-    _, vjp_fn = jax.vjp(_twin, target_positions, source_positions, source_masses)
-    tp_bar, sp_bar, sm_bar = vjp_fn(cotangent)
+    _, vjp_fn = jax.vjp(
+        _twin, target_positions, source_positions, source_masses, softening_sq, G
+    )
+    tp_bar, sp_bar, sm_bar, soft_bar, g_bar = vjp_fn(cotangent)
     return (
         tp_bar,
         jnp.zeros_like(target_mask_f),
         sp_bar,
         sm_bar,
         jnp.zeros_like(source_mask_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        soft_bar,
+        g_bar,
     )
 
 
@@ -1435,27 +1512,29 @@ def _nearfield_leafpair_cvjp_bwd(
     source_leaf_ids = jnp.round(source_leaf_ids_f).astype(jnp.int32)
     source_valid = source_valid_f > 0.5
 
-    def _twin(lp, lm):
+    # softening_sq and G differentiated through the twin as well (see the
+    # pairs-lane rule above for why zeros here were a defect).
+    def _twin(lp, lm, soft, g):
         return nearfield_leafpair_jax(
             lp,
             lm,
             leaf_mask,
             source_leaf_ids,
             source_valid,
-            softening_sq=softening_sq,
-            G=G,
+            softening_sq=soft,
+            G=g,
         )
 
-    _, vjp_fn = jax.vjp(_twin, leaf_positions, leaf_masses)
-    lp_bar, lm_bar = vjp_fn(cotangent)
+    _, vjp_fn = jax.vjp(_twin, leaf_positions, leaf_masses, softening_sq, G)
+    lp_bar, lm_bar, soft_bar, g_bar = vjp_fn(cotangent)
     return (
         lp_bar,
         lm_bar,
         jnp.zeros_like(leaf_mask_f),
         jnp.zeros_like(source_leaf_ids_f),
         jnp.zeros_like(source_valid_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        soft_bar,
+        g_bar,
     )
 
 

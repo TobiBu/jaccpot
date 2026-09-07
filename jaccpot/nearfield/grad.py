@@ -44,9 +44,10 @@ from typing import Any, Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot._env import env_float, env_int
@@ -55,6 +56,50 @@ __all__ = [
     "build_leafpair_reverse_tiers",
     "clear_leafpair_reverse_tier_cache",
 ]
+
+
+# SHAPES BUT NO `@jaxtyped`, AND THAT IS THE MEASUREMENT RATHER THAN AN OMISSION.
+#
+# This module was picked as the next annotation target on a structural argument: it holds
+# the reverse rule that receives `_fast_lane.py`'s `custom_vjp` residual, and nothing
+# checked it. The argument was good and the prediction was wrong. Every malformed input
+# tried is either already rejected by JAX or already harmless, which is STYLE_GUIDE
+# section 4.1's "skip it when the value flows straight into something that checks it" --
+# the E.3 pilots' finding that the payoff varies by an order of magnitude, landing near
+# zero here:
+#
+#   _pair_accel_cvjp, boolean masks instead of the `_f` floats   accepted, SAME force,
+#                                                                and under `jax.grad` the
+#                                                                gradient is identical to
+#                                                                rel-L2 0
+#   _pair_accel_cvjp, target and source masks swapped            already ValueError
+#   _pair_accel_masked_accels, target/source arrays swapped      already ValueError
+#   analytic vjp, cotangent leaf-major instead of particle order already ValueError
+#   analytic vjp, leaf_mask or source_valid as int 0/1           accepted, SAME result
+#   analytic vjp, source ids re-split (leaves, 3, 2) for (2, 3)  accepted, SAME result --
+#                                                                and NOT caught by these
+#                                                                annotations either, since
+#                                                                `blocks`/`blocksize` bind
+#                                                                freely
+#
+# So a decorator here would buy error LOCALITY on the rows that already raise, and would
+# newly REJECT the rows that currently work -- section 4.1 calls replacing a working call
+# or a domain error with a generic `TypeCheckError` a loss, not a gain. It would also put a
+# beartype pass on the hottest path in the library: this module is ~91% of the reverse by
+# the profile in the docstring above, and `_pair_accel_masked_accels` is traced per
+# edge-chunk scan.
+#
+# The annotations stay because they are not free. They document the contract in the place a
+# reader checks it, they pin the one distinction the docstrings make but nothing enforced --
+# `w` is the TARGET width and `sw` the SOURCE width, observed differing at 5 against 7 --
+# and the `JACCPOT_RUNTIME_TYPECHECK=1` import hook enforces them on undecorated functions,
+# which is the leg that exists to catch signature-level mistakes and where turning a working
+# call into an error costs nothing.
+#
+# WHAT WOULD CHANGE THE ANSWER: a caller that reaches these rules without going through the
+# gathers that currently do the validating -- a fused Pallas near-field `custom_vjp` reusing
+# `_pair_accel_cvjp_bwd`, which the primal's docstring already anticipates. Decorate then,
+# and re-run the table above first.
 
 _FLOAT32_EXACT_INT_LIMIT = 2**24
 
@@ -162,7 +207,12 @@ def build_leafpair_reverse_tiers(
     ----------
     source_valid : Any
         Padded per-slot validity mask of the frozen payload. Pulled to the host
-        and histogrammed, so it must be concrete.
+        and histogrammed, so it must be concrete. ``Any`` rather than
+        ``Bool[Array, ...]``, and measured rather than assumed: this is a **public**
+        entry point that accepts a numpy array as readily as a JAX one (both
+        verified), so an ``Array`` annotation would reject a working call. What it
+        really requires is *concreteness* rather than any dtype or shape -- it pulls
+        the mask to the host -- and no jaxtyping annotation expresses that.
     slot_tile : int
         Slot-tile width the reverse pass will scan with; tier widths are rounded
         against it.
@@ -352,13 +402,13 @@ def _leafpair_reverse_tiers_cached(
 
 
 def _leafpair_accel_analytic_vjp(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    source_leaf_ids: Array,
-    source_valid: Array,
-    cotangent: Array,
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
+    source_leaf_ids: Int[Array, "farleaves blocks blocksize"],
+    source_valid: Bool[Array, "farleaves blocks blocksize"],
+    cotangent: Float[Array, "n 3"],
     *,
     softening_sq: Array,
     G: Array,
@@ -367,11 +417,13 @@ def _leafpair_accel_analytic_vjp(
     skip_empty_tiles: bool = True,
     occupancy_sort: bool = False,
     tiers: Optional[Tuple[Tuple[Any, int], ...]] = None,
-) -> Tuple[Array, Array]:
+    parameter_cotangents: bool = False,
+) -> Tuple[Array, ...]:
     """Analytic reverse of the leaf-pair near field in **O(N) memory**.
 
     Returns ``(leaf_positions_bar, leaf_masses_bar)`` for a particle-order output
-    ``cotangent``.
+    ``cotangent`` -- and, with ``parameter_cotangents``, the scalar cotangents of
+    ``softening_sq`` and ``G`` appended: ``(..., softening_sq_bar, G_bar)``.
 
     Why hand-written rather than ``jax.vjp`` of a pure-JAX twin: a ``bwd`` rule is
     never itself differentiated, so everything it computes is a *transient* bounded
@@ -394,22 +446,25 @@ def _leafpair_accel_analytic_vjp(
 
     Parameters
     ----------
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``; masked slots contribute
         exactly zero.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``, clipped so a
         masked slot cannot gather out of bounds.
-    source_leaf_ids : Array
+    source_leaf_ids : Int[Array, 'farleaves blocks blocksize']
         Source leaf id per (target leaf, block, slot); reshaped to
-        ``[num_leaves, num_slots]`` here.
-    source_valid : Array
+        ``[num_leaves, num_slots]`` here. ``farleaves`` rather than ``leaves`` for
+        the reason ``_large_n_blocks.py`` records: this rectangle tracks the
+        far-field leaf view, which the octree backend separates from the
+        near-field leaf table.
+    source_valid : Bool[Array, 'farleaves blocks blocksize']
         Validity mask with the same shape as ``source_leaf_ids``.
-    cotangent : Array
+    cotangent : Float[Array, 'n 3']
         Output cotangent in **particle order** ``[N, 3]``; gathered leaf-major and
         masked exactly as the forward masks its output.
     softening_sq : Array
@@ -434,18 +489,31 @@ def _leafpair_accel_analytic_vjp(
         target leaves sharing a slot width, so a low-occupancy leaf does not pay
         the global maximum. ``None`` runs untiered.
 
+    parameter_cotangents : bool
+        Also accumulate and return the cotangents of ``softening_sq`` and ``G``:
+        two scalar accumulators in the scan carry, one masked reduction each per
+        tile over terms the position rule already forms. With the forward
+        ``a_t = -G sum_s m_s diff r^-3``, ``Gbar = -sum m r^-3 (c . diff)`` and
+        ``softbar = (3/2) G sum m r^-5 (c . diff)``. Off by default so the two
+        existing callers keep their two-tuple.
+
     Returns
     -------
-    Tuple[Array, Array]
-        ``(leaf_positions_bar, leaf_masses_bar)`` in the leaf-major layout;
-        both are zero-shaped-like their primal when the tables are empty.
+    Tuple[Array, ...]
+        ``(leaf_positions_bar, leaf_masses_bar)`` in the leaf-major layout, both
+        zero-shaped-like their primal when the tables are empty; with
+        ``parameter_cotangents`` also ``softening_sq_bar`` and ``G_bar`` as 0-d
+        arrays.
     """
     dtype = leaf_positions.dtype
     num_leaves = int(leaf_positions.shape[0])
     width = int(leaf_positions.shape[1])
     num_slots = int(source_leaf_ids.shape[1]) * int(source_leaf_ids.shape[2])
     if num_leaves == 0 or width == 0 or num_slots == 0:
-        return jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses)
+        empty = (jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses))
+        if parameter_cotangents:
+            return empty + (jnp.zeros((), dtype), jnp.zeros((), dtype))
+        return empty
 
     # Normalise the scalars to arrays. A caller whose ``G``/``softening_sq`` are
     # Python constants inside a jitted region hands them over as JAX host-side
@@ -490,14 +558,15 @@ def _leafpair_accel_analytic_vjp(
     slot_offsets = jnp.arange(tile, dtype=INDEX_DTYPE)
 
     def _pass(
-        carry: Tuple[Array, Array], tier_leaves: Array, tier_slots: int
-    ) -> Tuple[Array, Array]:
+        carry: Tuple[Array, Array, Array, Array], tier_leaves: Array, tier_slots: int
+    ) -> Tuple[Array, Array, Array, Array]:
         """One occupancy tier: ``tier_leaves`` targets against ``tier_slots`` slots.
 
         Parameters
         ----------
-        carry : Tuple[Array, Array]
-            ``(pos_bar, mass_bar)`` accumulators threaded across tiers.
+        carry : Tuple[Array, Array, Array, Array]
+            ``(pos_bar, mass_bar, soft_bar, g_bar)`` accumulators threaded across
+            tiers; the two scalars only move when ``parameter_cotangents``.
         tier_leaves : Array
             Global leaf ids in this tier, in Morton order. Ids are never
             renumbered -- only the visiting order changes.
@@ -507,17 +576,17 @@ def _leafpair_accel_analytic_vjp(
 
         Returns
         -------
-        Tuple[Array, Array]
-            The updated ``(pos_bar, mass_bar)`` accumulators.
+        Tuple[Array, Array, Array, Array]
+            The updated ``(pos_bar, mass_bar, soft_bar, g_bar)`` accumulators.
         """
         tier_count = int(tier_leaves.shape[0])
         leaf_starts = jnp.arange(0, tier_count, batch, dtype=INDEX_DTYPE)
         slot_starts = jnp.arange(0, tier_slots, tile, dtype=INDEX_DTYPE)
 
         def leaf_body(
-            carry: Tuple[Array, Array], leaf_start: Array
-        ) -> Tuple[Tuple[Array, Array], None]:
-            pos_bar, mass_bar = carry
+            carry: Tuple[Array, Array, Array, Array], leaf_start: Array
+        ) -> Tuple[Tuple[Array, Array, Array, Array], None]:
+            pos_bar, mass_bar, soft_bar, g_bar = carry
             pos_in_tier = leaf_start + leaf_offsets
             tgt_in_range = pos_in_tier < tier_count
             # Target leaf ids stay GLOBAL: only the visiting order changes.
@@ -530,9 +599,9 @@ def _leafpair_accel_analytic_vjp(
             )
 
             def slot_body(
-                inner: Tuple[Array, Array, Array], slot_start: Array
-            ) -> Tuple[Tuple[Array, Array, Array], None]:
-                pos_acc, mass_acc, tgt_acc = inner
+                inner: Tuple[Array, Array, Array, Array, Array], slot_start: Array
+            ) -> Tuple[Tuple[Array, Array, Array, Array, Array], None]:
+                pos_acc, mass_acc, tgt_acc, soft_acc, g_acc = inner
                 sl = slot_start + slot_offsets
                 sl_in_range = sl < tier_slots
                 safe_sl = jnp.where(sl_in_range, sl, 0)
@@ -543,9 +612,9 @@ def _leafpair_accel_analytic_vjp(
                 safe_src = jnp.where(valid_slot, src_leaf, 0)
 
                 def _apply(
-                    acc_in: Tuple[Array, Array, Array],
-                ) -> Tuple[Array, Array, Array]:
-                    pos_in, mass_in, tgt_in = acc_in
+                    acc_in: Tuple[Array, Array, Array, Array, Array],
+                ) -> Tuple[Array, Array, Array, Array, Array]:
+                    pos_in, mass_in, tgt_in, soft_in, g_in = acc_in
                     src_pos = leaf_positions[safe_src]  # (B, T, W, 3)
                     src_mass = leaf_masses[safe_src]  # (B, T, W)
                     src_mask = leaf_mask[safe_src] & valid_slot[..., None]
@@ -582,10 +651,19 @@ def _leafpair_accel_analytic_vjp(
                         valid_slot[..., None], src_mass_contrib, 0.0
                     )
 
+                    if parameter_cotangents:
+                        # Masked pairs have inv_dist3 == inv_dist5 == 0, so no extra
+                        # masking; `m * cd` is the product the mass cotangent reduces.
+                        m_cd = src_mass[:, :, None, :] * cd  # (B, T, Wt, Ws)
+                        g_in = g_in - jnp.sum(m_cd * inv_dist3)
+                        soft_in = soft_in + 1.5 * G * jnp.sum(m_cd * inv_dist5)
+
                     return (
                         pos_in.at[safe_src].add(src_contrib),
                         mass_in.at[safe_src].add(src_mass_contrib),
                         tgt_in + tgt_contrib,
+                        soft_in,
+                        g_in,
                     )
 
                 # Skip whole tiles that carry no valid source slot. Every term above is
@@ -604,18 +682,23 @@ def _leafpair_accel_analytic_vjp(
                     )
                 return _apply(inner), None
 
-            (pos_bar, mass_bar, tgt_total), _ = lax.scan(
+            (pos_bar, mass_bar, tgt_total, soft_bar, g_bar), _ = lax.scan(
                 slot_body,
-                (pos_bar, mass_bar, jnp.zeros_like(tgt_pos)),
+                (pos_bar, mass_bar, jnp.zeros_like(tgt_pos), soft_bar, g_bar),
                 slot_starts,
             )
             tgt_total = jnp.where(tgt_in_range[:, None, None], tgt_total, 0.0)
             pos_bar = pos_bar.at[safe_tgt].add(tgt_total)
-            return (pos_bar, mass_bar), None
+            return (pos_bar, mass_bar, soft_bar, g_bar), None
 
         return lax.scan(leaf_body, carry, leaf_starts)[0]
 
-    carry = (jnp.zeros_like(leaf_positions), jnp.zeros_like(leaf_masses))
+    carry = (
+        jnp.zeros_like(leaf_positions),
+        jnp.zeros_like(leaf_masses),
+        jnp.zeros((), dtype),
+        jnp.zeros((), dtype),
+    )
     if tiers is None:
         carry = _pass(carry, jnp.arange(num_leaves, dtype=INDEX_DTYPE), num_slots)
     else:
@@ -629,16 +712,18 @@ def _leafpair_accel_analytic_vjp(
                 jnp.asarray(tier_leaves, dtype=INDEX_DTYPE),
                 int(tier_slots),
             )
-    positions_bar, masses_bar = carry
+    positions_bar, masses_bar, softening_bar, g_bar = carry
+    if parameter_cotangents:
+        return positions_bar, masses_bar, softening_bar, g_bar
     return positions_bar, masses_bar
 
 
 def _pair_accel_masked_accels(
-    target_positions: Array,
-    source_positions: Array,
-    source_masses: Array,
-    target_mask: Array,
-    source_mask: Array,
+    target_positions: Float[Array, "pairs w 3"],
+    source_positions: Float[Array, "pairs sw 3"],
+    source_masses: Float[Array, "pairs sw"],
+    target_mask: Bool[Array, "pairs w"],
+    source_mask: Bool[Array, "pairs sw"],
     softening_sq: Union[float, Array],
     G: Array,
 ) -> Array:
@@ -647,15 +732,16 @@ def _pair_accel_masked_accels(
 
     Parameters
     ----------
-    target_positions : Array
+    target_positions : Float[Array, 'pairs w 3']
         ``(B, Wt, 3)`` target positions.
-    source_positions : Array
-        ``(B, Ws, 3)`` source positions.
-    source_masses : Array
+    source_positions : Float[Array, 'pairs sw 3']
+        ``(B, Ws, 3)`` source positions. ``sw`` is not ``w``: the two widths
+        were observed differing, 5 against 7.
+    source_masses : Float[Array, 'pairs sw']
         ``(B, Ws)`` source masses.
-    target_mask : Array
+    target_mask : Bool[Array, 'pairs w']
         ``(B, Wt)`` boolean target validity.
-    source_mask : Array
+    source_mask : Bool[Array, 'pairs sw']
         ``(B, Ws)`` boolean source validity.
     softening_sq : Union[float, Array]
         Squared Plummer softening length.
@@ -679,10 +765,10 @@ def _pair_accel_masked_accels(
 
 
 def _pair_accel_pair_terms(
-    target_positions: Array,
-    source_positions: Array,
-    target_mask: Array,
-    source_mask: Array,
+    target_positions: Float[Array, "pairs w 3"],
+    source_positions: Float[Array, "pairs sw 3"],
+    target_mask: Bool[Array, "pairs w"],
+    source_mask: Bool[Array, "pairs sw"],
     softening_sq: Union[float, Array],
 ) -> Tuple[Array, Array, Array]:
     """``(diff, inv_dist3, inv_dist5)`` exactly as :func:`_pair_accel_masked_accels`
@@ -695,13 +781,14 @@ def _pair_accel_pair_terms(
 
     Parameters
     ----------
-    target_positions : Array
+    target_positions : Float[Array, 'pairs w 3']
         ``(B, Wt, 3)`` target positions.
-    source_positions : Array
-        ``(B, Ws, 3)`` source positions.
-    target_mask : Array
+    source_positions : Float[Array, 'pairs sw 3']
+        ``(B, Ws, 3)`` source positions. ``sw`` is not ``w``: the two widths
+        were observed differing, 5 against 7.
+    target_mask : Bool[Array, 'pairs w']
         ``(B, Wt)`` boolean target validity.
-    source_mask : Array
+    source_mask : Bool[Array, 'pairs sw']
         ``(B, Ws)`` boolean source validity.
     softening_sq : Union[float, Array]
         Squared Plummer softening length.
@@ -722,21 +809,43 @@ def _pair_accel_pair_terms(
     return diff, inv_dist3, inv_dist5
 
 
+# The residual `_pair_accel_cvjp_fwd` saves, spelled out. Seven entries and no pair
+# intermediates: the O(B*Wt*Ws) terms are rematerialized in the reverse instead, which is
+# the decision the comment inside `_fwd` measures at 52.14 GiB. So the annotation's job here
+# is to make that shape of the residual explicit -- if a future change "optimises" by saving
+# `diff` or `inv_dist3`, the tuple no longer matches and `_bwd` says so.
+#
+# What it does NOT catch, measured the same way as `_fast_lane.py`'s: the two float mask
+# entries have the same shape as nothing else only because `w != sw`; where a caller has
+# equal widths they become interchangeable and a swap passes. NUMERICS_AND_JAX section 1's
+# rule stands -- re-run `bench/audit_reverse_residuals.py`, do not lean on this.
+_PairAccelReverseResidual = Tuple[
+    Float[Array, "pairs w 3"],  # target_positions
+    Float[Array, "pairs sw 3"],  # source_positions
+    Float[Array, "pairs sw"],  # source_masses
+    Float[Array, "pairs w"],  # target_mask_f
+    Float[Array, "pairs sw"],  # source_mask_f
+    Array,  # softening_sq -- scalar, observed `()` in every call
+    Array,  # G -- scalar, likewise
+]
+
+
 @jax.custom_vjp
 def _pair_accel_cvjp(
-    target_positions: Array,
-    source_positions: Array,
-    source_masses: Array,
-    target_mask_f: Array,
-    source_mask_f: Array,
+    target_positions: Float[Array, "pairs w 3"],
+    source_positions: Float[Array, "pairs sw 3"],
+    source_masses: Float[Array, "pairs sw"],
+    target_mask_f: Float[Array, "pairs w"],
+    source_mask_f: Float[Array, "pairs sw"],
     softening_sq: Array,
     G: Array,
 ) -> Array:
     """Accel-only batched near-field pair kernel with an analytic reverse rule.
 
     All arguments are float arrays (masks as 0/1 floats), so the reverse returns
-    ordinary zero cotangents for the non-differentiated inputs (masks, softening,
-    G) -- no closure over tracers (which ``custom_vjp`` forbids). The forward is
+    ordinary zero cotangents for the masks -- no closure over tracers (which
+    ``custom_vjp`` forbids) -- and analytic cotangents for ``softening_sq`` and
+    ``G``, which the force is smooth in. The forward is
     byte-identical to the accel output of :func:`_pair_contributions_batched`; the
     reverse is the analytic symmetric near-field tidal tensor
     ``J = -G Σ_s m_s (I/r³ − 3 r rᵀ/r⁵)`` contracted with the output cotangent
@@ -746,15 +855,16 @@ def _pair_accel_cvjp(
 
     Parameters
     ----------
-    target_positions : Array
+    target_positions : Float[Array, 'pairs w 3']
         ``(B, Wt, 3)`` target positions.
-    source_positions : Array
-        ``(B, Ws, 3)`` source positions.
-    source_masses : Array
+    source_positions : Float[Array, 'pairs sw 3']
+        ``(B, Ws, 3)`` source positions. ``sw`` is not ``w``: the two widths
+        were observed differing, 5 against 7.
+    source_masses : Float[Array, 'pairs sw']
         ``(B, Ws)`` source masses.
-    target_mask_f : Array
+    target_mask_f : Float[Array, 'pairs w']
         ``(B, Wt)`` target validity as 0/1 floats, thresholded at ``0.5``.
-    source_mask_f : Array
+    source_mask_f : Float[Array, 'pairs sw']
         ``(B, Ws)`` source validity, same encoding.
     softening_sq : Array
         Squared Plummer softening length.
@@ -780,14 +890,14 @@ def _pair_accel_cvjp(
 
 
 def _pair_accel_cvjp_fwd(
-    target_positions: Array,
-    source_positions: Array,
-    source_masses: Array,
-    target_mask_f: Array,
-    source_mask_f: Array,
+    target_positions: Float[Array, "pairs w 3"],
+    source_positions: Float[Array, "pairs sw 3"],
+    source_masses: Float[Array, "pairs sw"],
+    target_mask_f: Float[Array, "pairs w"],
+    source_mask_f: Float[Array, "pairs sw"],
     softening_sq: Array,
     G: Array,
-) -> Tuple[Array, Tuple[Array, ...]]:
+) -> Tuple[Array, _PairAccelReverseResidual]:
     # The residual carries only the O(B*W) INPUTS; the O(B*Wt*Ws) pair
     # intermediates are rematerialized in the reverse pass. Storing
     # (diff, inv_dist3, inv_dist5) instead cost 5 doubles per particle PAIR, and
@@ -821,7 +931,8 @@ def _pair_accel_cvjp_fwd(
 
 
 def _pair_accel_cvjp_bwd(
-    residual: Tuple[Array, ...], cotangent: Array
+    residual: _PairAccelReverseResidual,
+    cotangent: Float[Array, "pairs w 3"],
 ) -> Tuple[Array, ...]:
     (
         target_positions,
@@ -854,15 +965,28 @@ def _pair_accel_cvjp_bwd(
     target_positions_bar = -G * jnp.sum(pair, axis=2)  # sum over sources
     source_positions_bar = G * jnp.sum(pair, axis=1)  # sum over targets (3rd law)
     source_masses_bar = -G * jnp.sum(inv_dist3 * cd, axis=1)  # sum over targets
-    # Zero cotangents for the non-differentiated inputs (masks, softening, G).
+    # The two scalar parameters the force is smooth in. The forward is
+    # a_t = -G sum_s m_s diff_ts r^-3 with r^2 = |diff|^2 + softening_sq, so
+    #   Gbar    = sum_ts (a_t / G) . c_t          = -sum_ts m_s r^-3 (c_t . diff)
+    #   softbar = sum_ts d a_t / d(soft) . c_t    = (3/2) G sum_ts m_s r^-5 (c_t . diff)
+    # -- one masked reduction each over tiles the position rule already formed.
+    # Until 2026-09-04 both were returned as zeros on the grounds that they are
+    # "non-differentiated inputs"; they are inputs the forward multiplies by, and a
+    # zero here silently drops the near field's whole share of d/d(softening) and
+    # d/dG (the same defect jaccpot#319 fixed in the mutual Pallas kernel).
+    m_cd = source_masses[:, None, :] * cd  # (B, Wt, Ws)
+    G_bar = -jnp.sum(m_cd * inv_dist3)
+    softening_bar = 1.5 * G * jnp.sum(m_cd * inv_dist5)
+    # Masks are discrete and get zero cotangents; they travel as floats so the zero
+    # is an ordinary float zero rather than a float0.
     return (
         target_positions_bar,
         source_positions_bar,
         source_masses_bar,
         jnp.zeros_like(target_mask_f),
         jnp.zeros_like(source_mask_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        jnp.reshape(softening_bar.astype(softening_sq.dtype), jnp.shape(softening_sq)),
+        jnp.reshape(G_bar.astype(G.dtype), jnp.shape(G)),
     )
 
 

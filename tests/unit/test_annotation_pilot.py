@@ -16,6 +16,10 @@ false positives.
 
 from __future__ import annotations
 
+import pickle
+from pathlib import Path
+from typing import NamedTuple
+
 import pytest
 
 from bench import annotation_pilot
@@ -277,3 +281,227 @@ def test_a_strict_function_still_rejects_when_the_bad_shape_is_inside_a_containe
 
     assert tally["accepted"] == 0
     assert tally["rejected"] == 3 * len(annotation_pilot.shape_perturbations((4,)))
+
+
+# ---------------------------------------------------------------------------
+# The two kinds added for `runtime/_adaptive_policy.py`, where 11 of 21 targets were
+# UNREPLAYABLE on one argument. Both are pinned in the direction that flatters: a tree
+# rebuilt to the wrong size, or a NamedTuple whose arrays are rebuilt but never
+# perturbed, would each make the remaining work look SMALLER.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTree:
+    """A stand-in exposing only what :func:`_is_tree` keys on."""
+
+    def __init__(self, num_particles=64, leaf_size=8, num_nodes=15):
+        self.num_particles = num_particles
+        self.leaf_size = leaf_size
+        self.num_nodes = num_nodes
+        self.node_ranges = _FakeArray((num_nodes, 2), "int64")
+
+
+class _Bundle(NamedTuple):
+    """A NamedTuple holding an array, like ``TreeUpwardData``."""
+
+    multipoles: object
+    order: int
+
+
+def test_a_tree_is_described_by_its_build_inputs_not_its_array_leaves():
+    """A tree's leaves are mutually constrained, so it is rebuilt rather than synthesized.
+
+    Recording the 22 arrays and filling them with zeros would produce something that is
+    not a tree -- `node_ranges` would partition nothing -- and every function taking one
+    would fail its control, which the report counts in neither direction. So the
+    description carries what `build_tree` needs instead.
+    """
+    kind, spec, meta = annotation_pilot.describe_argument(_FakeTree())
+    assert kind == "tree"
+    assert meta == "_FakeTree"
+    assert spec["num_particles"] == 64
+    assert spec["leaf_size"] == 8
+    # The node count is carried as a CHECK on the rebuild, not as an input to it.
+    assert spec["num_nodes"] == 15
+
+
+def test_a_tree_rebuild_that_cannot_match_the_node_count_is_refused():
+    """Refusing is the honest failure, and it must not be silently papered over.
+
+    The node count is data-dependent -- the same ``(n, leaf_size)`` gave 31 nodes on one
+    distribution and 37 on another -- so a rebuild can legitimately fail to reproduce it.
+    Returning a differently sized tree anyway would replay the recorded arrays, which were
+    sized against the original, against a tree of another shape: a measurement of nothing,
+    reported as a measurement.
+    """
+    with pytest.raises(RuntimeError, match="num_nodes"):
+        annotation_pilot._build_tree_stand_in(
+            {
+                "num_particles": 64,
+                "leaf_size": 8,
+                # No radix tree over 64 particles at leaf 8 has 9999 nodes.
+                "num_nodes": 9999,
+                "dtype": "int64",
+            }
+        )
+
+
+def test_a_namedtuple_keeps_its_class_so_field_access_survives_the_rebuild():
+    """`TreeUpwardData` was matched by the plain-tuple rule and flattened.
+
+    The control then died on ``AttributeError: 'tuple' object has no attribute
+    'multipoles'``, which reads like the function's problem and was the tool's.
+    """
+    kind, spec, meta = annotation_pilot.describe_argument(
+        _Bundle(multipoles=_FakeArray((4, 9), "float64"), order=2)
+    )
+    assert kind == "namedtuple"
+    assert meta == "_Bundle"
+    assert spec["name"] == "_Bundle"
+    assert [element[0] for element in spec["fields"]] == ["array", "scalar"]
+
+
+def test_arrays_inside_a_namedtuple_are_perturbed_and_not_merely_rebuilt():
+    """The same gap the container case has, and the same reason it matters.
+
+    If `_leaves` did not walk the fields, a function taking a NamedTuple of arrays would
+    report "control OK, 0 array params" -- contributing nothing while looking measured,
+    which turns a gap the report NAMES into one it hides.
+    """
+    description = annotation_pilot.describe_argument(
+        _Bundle(multipoles=_FakeArray((4, 9), "float64"), order=2)
+    )
+    found = list(annotation_pilot._leaves(description, "array"))
+    assert [(path, shape) for path, shape, _ in found] == [((0,), (4, 9))]
+
+    # And substitution addresses that path without disturbing the sibling field.
+    swapped = annotation_pilot._substitute(
+        description, (0,), ("array", (3, 9), "float64")
+    )
+    assert swapped[1]["fields"][0] == ("array", (3, 9), "float64")
+    assert swapped[1]["fields"][1] == ("scalar", 2, "int")
+    assert swapped[1]["name"] == "_Bundle"
+
+
+def test_a_namedtuple_holding_an_opaque_field_is_still_unreplayable():
+    """Widening what can be described must not widen what counts as validated."""
+    description = annotation_pilot.describe_argument(
+        _Bundle(multipoles=object(), order=2)
+    )
+    assert not annotation_pilot.is_replayable(description)
+
+
+def test_a_call_that_raises_is_not_recorded_as_the_control():
+    """A shape-contract test's malformed call must not become the description.
+
+    Recording before the call meant the description of a deliberately bad call was kept,
+    and every later replay of that function reported INCONCLUSIVE against it. Measured on
+    `pallas/nearfield_mutual.py`, where four annotated entry points went inconclusive
+    against `test_nearfield_mutual_shape_contracts.py`'s negative cases.
+    """
+
+    def strict(block: _FakeArray) -> int:
+        if len(block.shape) != 2:
+            raise ValueError("block must be 2-D")
+        return 0
+
+    recorded: dict = {}
+    original = annotation_pilot._recorded
+    annotation_pilot._recorded = recorded
+    try:
+        wrapped = annotation_pilot._wrap(strict, "m:strict", 1)
+
+        with pytest.raises(ValueError):
+            wrapped(_FakeArray((1, 2, 3)))
+        assert recorded == {}, "the description of a failed call was recorded"
+
+        # Non-vacuity: a call that returns is still recorded, and it is this one.
+        wrapped(_FakeArray((2, 3)))
+        assert [desc["block"][1] for desc, _ in recorded["m:strict"]] == [(2, 3)]
+    finally:
+        annotation_pilot._recorded = original
+
+
+def test_the_replay_prefers_a_replayable_recording_over_the_first_one():
+    """`PILOT_MAX_PER_FN` above 1 was pointless while only ``[0]`` was ever used."""
+
+    opaque = ({"a": ("opaque", "Thing")}, False)
+    usable = ({"a": ("array", (2, 3), "float32")}, True)
+
+    assert annotation_pilot._first_replayable([opaque, usable]) is usable
+    assert annotation_pilot._first_replayable([usable, opaque]) is usable
+    # None replayable: unchanged, so the report still names a real call's opaque args.
+    assert annotation_pilot._first_replayable([opaque]) is opaque
+
+
+def test_each_xdist_worker_writes_its_own_shard():
+    """Workers used to write the same path, so the last one to finish won.
+
+    Measured on `pallas/nearfield_mutual.py` at `-n 4`: 7 of 12 targeted functions
+    survived in the file and the other 5 read as lanes that never ran.
+    """
+
+    class _Config:
+        def __init__(self, worker: str | None) -> None:
+            if worker is not None:
+                self.workerinput = {"workerid": worker}
+
+    out = Path("/tmp/pilot.pkl")
+    assert annotation_pilot._worker_output(out, _Config(None)) == out
+    assert annotation_pilot._worker_output(out, _Config("gw3")) == Path(
+        "/tmp/pilot.gw3.pkl"
+    )
+
+
+def test_the_replay_merges_every_worker_shard(tmp_path):
+    """And merging is what makes the shards add up to one recording again."""
+
+    a = ({"x": ("array", (2,), "float32")}, True)
+    b = ({"y": ("array", (3,), "float32")}, True)
+    with (tmp_path / "p.gw0.pkl").open("wb") as handle:
+        pickle.dump({"m:one": [a]}, handle)
+    with (tmp_path / "p.gw1.pkl").open("wb") as handle:
+        pickle.dump({"m:two": [b]}, handle)
+
+    merged = annotation_pilot._load_recordings(tmp_path / "p.pkl")
+    assert sorted(merged) == ["m:one", "m:two"]
+
+    # A shard for a function another shard also saw is concatenated, not dropped --
+    # which is what gives `_first_replayable` something to choose between.
+    with (tmp_path / "p.gw2.pkl").open("wb") as handle:
+        pickle.dump({"m:one": [b]}, handle)
+    assert len(annotation_pilot._load_recordings(tmp_path / "p.pkl")["m:one"]) == 2
+
+    with pytest.raises(FileNotFoundError):
+        annotation_pilot._load_recordings(tmp_path / "absent.pkl")
+
+
+def test_a_custom_vjp_object_is_refused_rather_than_wrapped():
+    """Wrapping one strips its rule, so every later gradient is the wrong one.
+
+    Measured 2026-09-03: recording `nearfield/_fast_lane.py` replaced a `custom_vjp`
+    object with a plain function and broke
+    `test_prepacked_cvjp_saves_the_documented_nine_entry_residual` with
+    `AttributeError: 'function' object has no attribute 'defvjp'`. That was the lucky
+    outcome -- a test happened to assert the object's identity.
+    """
+
+    class _FakeCustomVJP:
+        """A stand-in carrying the attribute the predicate keys on."""
+
+        def defvjp(self, fwd, bwd):  # pragma: no cover - never called
+            """Accept rules like `jax.custom_vjp` does."""
+
+    def plain(x):  # pragma: no cover - never called
+        """A plain function, which must still be wrapped."""
+
+    assert annotation_pilot._is_custom_differentiation_object(_FakeCustomVJP())
+    assert not annotation_pilot._is_custom_differentiation_object(plain)
+
+    class _FakeCustomJVP:
+        """The forward-mode sibling."""
+
+        def defjvp(self, rule):  # pragma: no cover - never called
+            """Accept a rule like `jax.custom_jvp` does."""
+
+    assert annotation_pilot._is_custom_differentiation_object(_FakeCustomJVP())

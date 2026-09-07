@@ -1202,3 +1202,72 @@ def test_scanned_base_step_traces_one_boundary_kick_not_two_to_the_k():
 # ---------------------------------------------------------------------------
 # static shapes: one compiled program for a whole run
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# d/d(dt_max) through the fused boundary kick -- and the Pallas defect, pinned
+# ---------------------------------------------------------------------------
+#
+# Ported from ODISSEO's `tests/test_blockstep_fmm.py` (which has no CI). nornax
+# keeps `dt_max` traced by scaling it *into* the boundary weight table, so a loss
+# can be differentiated with respect to the timestep; the adapter's
+# `boundary_kick` has to carry that cotangent through its weighted traversal.
+
+
+def _dt_max_gradient(backend, interpret, *, seed=23):
+    """Return ``(AD, FD)`` for ``d/d(dt_max)`` of one boundary kick on ``backend``."""
+    n, k_max = 256, 2
+    positions, masses = _system(n, seed=seed)
+    velocities = jnp.asarray(
+        np.random.default_rng(seed + 1).normal(0.0, 0.05, (n, 3)), dtype=jnp.float64
+    )
+    rung = _rungs(n, k_max=k_max, seed=seed + 2)
+    fmm = BlockStepFMM(
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=1.0,
+        max_order=4,
+        leaf_size=8,
+        backend=backend,
+        pallas_interpret=interpret,
+    )
+    state = fmm.prepare(positions, masses)
+    assert int(state.num_far_pairs) > 0, "no far pairs: the kick is a direct sum"
+    assert (
+        int(state.num_near_pairs) > 0
+    ), "no near pairs: the defect below is untestable"
+
+    def loss(dt_max):
+        kicked = fmm.boundary_kick(
+            positions, velocities, masses, rung=rung, active_floor=0, dt_max=dt_max
+        )
+        return jnp.sum(kicked**2)
+
+    dt0, h = jnp.asarray(2.0e-3, jnp.float64), 1.0e-7
+    return float(jax.grad(loss)(dt0)), float(
+        (loss(dt0 + h) - loss(dt0 - h)) / (2.0 * h)
+    )
+
+
+@pytest.mark.parametrize(
+    "backend,interpret", [("jax", False), ("pallas", True)], ids=["jax", "pallas"]
+)
+def test_the_dt_max_gradient_is_exact_on_both_backends(backend, interpret):
+    """``d/d(dt_max)`` of a boundary kick matches finite differences on both backends.
+
+    nornax keeps ``dt_max`` traced by scaling it *into* the boundary weight table,
+    so a loss can be differentiated with respect to the timestep; each backend's
+    ``boundary_kick`` has to carry that cotangent through its weighted traversal.
+    The Pallas near field used to return ``zeros_like(level_weights)`` from its
+    reverse rule, dropping the near field's whole share of this gradient (measured
+    AD/FD = 0.056 on this system, 0.0090 at ODISSEO's configuration, until the
+    reverse kernel emitted the level-weight, softening and G cotangents). Pallas
+    runs in interpret mode so the real kernel logic executes on CPU; without it the
+    Pallas path silently falls back to pure JAX and the case would be vacuous.
+
+    Measured |AD - FD| / |FD|: 5.3e-12 on pure JAX, 1.4e-12 on Pallas (interpret
+    mode) once the cotangents were emitted. Tolerance 1e-6.
+    """
+    ad, fd = _dt_max_gradient(backend, interpret)
+    assert abs(fd) > 1.0e-6, "the finite-difference reference is degenerate here"
+    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"{backend}: AD {ad:.10e} vs FD {fd:.10e}"

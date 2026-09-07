@@ -375,20 +375,21 @@ def _compute_leaf_p2p_impl(
         "use_precomputed_scatter",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_from_prepared_leaf_data_impl(
-    offsets: Array,
-    neighbors: Array,
-    positions: Array,
-    target_leaf_ids: Array,
-    source_leaf_ids: Array,
-    valid_pairs: Array,
-    precomputed_chunk_sort_indices: Array,
-    precomputed_chunk_group_ids: Array,
-    precomputed_chunk_unique_indices: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    offsets: Int[Array, "_"],
+    neighbors: Int[Array, "edges"],
+    positions: Float[Array, "n 3"],
+    target_leaf_ids: Int[Array, "edges"],
+    source_leaf_ids: Int[Array, "edges"],
+    valid_pairs: Bool[Array, "edges"],
+    precomputed_chunk_sort_indices: Int[Array, "chunks chunkflat"],
+    precomputed_chunk_group_ids: Int[Array, "chunks chunkflat"],
+    precomputed_chunk_unique_indices: Int[Array, "chunks chunkflat"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -418,33 +419,33 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
 
     Parameters
     ----------
-    offsets : Array
+    offsets : Int[Array, '_']
         CSR row offsets into ``neighbors``, ``[num_leaves + 1]``.
-    neighbors : Array
+    neighbors : Int[Array, 'edges']
         Flat leaf-neighbour edge list, ``[num_edges]``. Its length alone selects
         whether any pair work happens.
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    target_leaf_ids : Array
+    target_leaf_ids : Int[Array, 'edges']
         Per-edge target leaf index, ``[num_edges]``.
-    source_leaf_ids : Array
+    source_leaf_ids : Int[Array, 'edges']
         Per-edge source leaf index, ``[num_edges]``.
-    valid_pairs : Array
+    valid_pairs : Bool[Array, 'edges']
         Per-edge validity ``[num_edges]``; padded edges contribute exactly zero.
-    precomputed_chunk_sort_indices : Array
+    precomputed_chunk_sort_indices : Int[Array, 'chunks chunkflat']
         Scatter-schedule sort permutation, or an empty array when
         ``use_precomputed_scatter`` is ``False``.
-    precomputed_chunk_group_ids : Array
+    precomputed_chunk_group_ids : Int[Array, 'chunks chunkflat']
         Scatter-schedule group ids, same convention.
-    precomputed_chunk_unique_indices : Array
+    precomputed_chunk_unique_indices : Int[Array, 'chunks chunkflat']
         Scatter-schedule unique-target indices, same convention.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index per padded slot ``[num_leaves, W]``; its second axis is
         where ``max_leaf_size`` comes from.
     G : Union[float, Array]
@@ -1283,20 +1284,21 @@ def compute_leaf_p2p_accelerations(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_p2p_accelerations_large_n_accel_only(
     tree: Tree,
     neighbor_list: NodeNeighborList,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     *,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
     edge_chunk_size: int = 256,
-    precomputed_target_leaf_ids: Optional[Array] = None,
-    precomputed_source_leaf_ids: Optional[Array] = None,
-    precomputed_valid_pairs: Optional[Array] = None,
-    leaf_particle_indices: Array,
-    leaf_particle_mask: Optional[Array] = None,
+    precomputed_target_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_source_leaf_ids: Optional[Int[Array, "pairs"]] = None,
+    precomputed_valid_pairs: Optional[Bool[Array, "pairs"]] = None,
+    leaf_particle_indices: Int[Array, "leaves w"],
+    leaf_particle_mask: Optional[Bool[Array, "leaves w"]] = None,
     precomputed_target_block_leaf_ids: Optional[Array] = None,
     precomputed_target_block_source_leaf_ids: Optional[Array] = None,
     precomputed_target_block_valid_mask: Optional[Array] = None,
@@ -1337,9 +1339,9 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
         Radix tree; supplies ``node_ranges`` and the leaf list.
     neighbor_list : NodeNeighborList
         Leaf-neighbour CSR metadata.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions ``[N, 3]`` in Morton order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Particle masses ``[N]`` in the same order.
     G : Union[float, Array]
         Gravitational constant. Default ``1.0``.
@@ -1348,19 +1350,19 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
         Python float, not a tracer. Default ``0.0``.
     edge_chunk_size : int
         Edge-chunk width for the edge-list path. Default ``256``.
-    precomputed_target_leaf_ids : Optional[Array]
+    precomputed_target_leaf_ids : Optional[Int[Array, 'pairs']]
         Per-edge target leaf ids; derived from ``neighbor_list`` when ``None``.
-    precomputed_source_leaf_ids : Optional[Array]
+    precomputed_source_leaf_ids : Optional[Int[Array, 'pairs']]
         Per-edge source leaf ids. **Must be positionally aligned with**
         ``neighbors`` -- see the warning on
         :func:`~jaccpot.nearfield._schedules.prepare_leaf_neighbor_pairs`: a
         source-sorted vector has the identical shape and produces wrong forces
         silently.
-    precomputed_valid_pairs : Optional[Array]
+    precomputed_valid_pairs : Optional[Bool[Array, 'pairs']]
         Per-edge validity, same convention.
-    leaf_particle_indices : Array
+    leaf_particle_indices : Int[Array, 'leaves w']
         Explicit per-leaf particle membership ``[num_leaves, W]``. Required.
-    leaf_particle_mask : Optional[Array]
+    leaf_particle_mask : Optional[Bool[Array, 'leaves w']]
         Validity for that table; derived when ``None``.
     precomputed_target_block_leaf_ids : Optional[Array]
         Target leaf id per block, for the target-owned paths.

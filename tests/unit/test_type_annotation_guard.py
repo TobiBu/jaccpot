@@ -148,6 +148,18 @@ CONVERTED_MODULES = (
     # silently. The rest of this 2400-line module is still bare and is its own
     # work -- listing it here says the `"3"` family must not regress, not that
     # the module is finished.
+    #
+    # The spatial-vector family IS finished now: 24 more functions carry `"3"` or
+    # `"_ 3"`, and the 13 coefficient buffers on those same signatures came with
+    # them. Still open: the solidfmm rotation internals (`re`/`im`/`B_swap`), the
+    # scalar `dz`/`r`/`angle` group and the packing helpers -- about 60 bare
+    # parameters, each its own family question.
+    #
+    # `evaluate_local_complex_with_grad_batch` keeps a bare `deltas` and gets NO
+    # `DELIBERATELY_BARE` entry, deliberately: that set is keyed on (module,
+    # parameter name), so exempting `deltas` would stop the guard checking the 11
+    # annotated ones too. It is simply not decorated, which is what keeps it out of
+    # this check -- and the reason it is not annotated is recorded at the site.
     "jaccpot/operators/complex_ops.py",
     # Phase 2, second change, and the FIRST enforced annotations anywhere in
     # `jaccpot/pallas/`. Not a module conversion: the five module-level entry
@@ -164,6 +176,27 @@ CONVERTED_MODULES = (
     # never reached by the capture -- annotating those would be deriving a shape
     # from a docstring, which section 4.2 forbids.
     "jaccpot/nearfield/_large_n_blocks.py",
+    # Phase 2, the radix fast lane -- and NOT a module conversion: the leaf-table
+    # family (the four `leaves w` arrays, the prepacked rectangle, `positions` and
+    # `masses`) is shaped across four functions, and three families in the same file
+    # are deliberately still bare, each for its own reason and each its own change.
+    # The `custom_vjp` triple is one: `_radix_fast_lane_prepacked_accel_cvjp` is
+    # reached by a single test at a single problem size, so no equality in it is
+    # proven at the two distinct extents section 4.3 asks for. The materialised
+    # source-particle layout is another: its middle axis was observed equal to `w` at
+    # two extents and that is a coincidence of the test payload builder, not a
+    # contract. `_radix_fast_lane_prepacked_pallas_decoupled` is the third, and the
+    # starkest -- no test reaches it at all, only `distributed/fmm.py`.
+    #
+    # All three landed in the two follow-ups and the module is finished: the only
+    # unannotated parameters left are `lax.scan` and batch-body slices, which section
+    # 4.4 forbids annotating. Both open questions resolved AGAINST the obvious answer,
+    # which is why they took their own PR -- the source-slot axis is not `w` (the
+    # equality was an artefact of the test payload builder) and the decoupled lane's
+    # source width is not the target block's `w` (a wider source pool is measurably
+    # correct, so asserting equality would reject something that works). Two axis names
+    # were added for that, `srcslots` and `sw`; see STYLE_GUIDE section 4.3.
+    "jaccpot/nearfield/_fast_lane.py",
 )
 
 # Array parameters deliberately left bare, each with its reason recorded at the
@@ -192,6 +225,49 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         # `Float[Array, ""]` would reject the default path itself.
         ("jaccpot/runtime/reference.py", "G"),
         ("jaccpot/runtime/reference.py", "softening"),
+        # `_evaluate`'s second slice decorated seven functions, which brought their
+        # OTHER array parameters under this guard. These four cannot be shaped
+        # honestly, for two distinct reasons.
+        #
+        # `G` is the `Union[float, Array]` scalar case above, third occurrence.
+        ("jaccpot/runtime/kernels/_evaluate.py", "G"),
+        # The other three were NEVER OBSERVED AS ARRAYS. All three are `Optional`
+        # and every one of the recorded calls in the 2026-09-04 pilot pass supplied
+        # `None`: `_prepare_tree_evaluation_inputs` recorded 12 calls with only
+        # `positions_sorted` and `masses_sorted` present, and
+        # `_compute_targeted_nearfield` 4 with no `velocities_sorted`. STYLE_GUIDE
+        # section 4.2 says shapes come from execution and never from the docstring, so
+        # there is nothing to derive them from -- and `farfield_node_ranges` is
+        # exactly where guessing would hurt, because the far-field leaf view is a
+        # DIFFERENT axis from `leaves` (see `farleaves` in 4.3, which differs on the
+        # octree backend and broke 7 tests when they were conflated).
+        ("jaccpot/runtime/kernels/_evaluate.py", "farfield_leaf_nodes"),
+        ("jaccpot/runtime/kernels/_evaluate.py", "farfield_node_ranges"),
+        ("jaccpot/runtime/kernels/_evaluate.py", "velocities_sorted"),
+        # `nearfield/near_field.py`: decorating the prepared-leaf kernel and the public
+        # large-N entry brought their other array parameters under this guard. Two groups.
+        #
+        # `softening_sq` is the scalar family, as everywhere else in this package.
+        ("jaccpot/nearfield/near_field.py", "softening_sq"),
+        # The six target-BLOCK `precomputed_*` tables were `None` in EVERY recorded call -- five
+        # recordings of `compute_leaf_p2p_accelerations_large_n_accel_only`, none of which
+        # supplied one. 4.2 says shapes come from execution and never from the docstring,
+        # so there is nothing to derive them from. `leaf_particle_indices` and
+        # `leaf_particle_mask` WERE observed, at (3, 2) and (5, 256), and are annotated
+        # rather than exempted -- as are the three pair-level ones, which this file
+        # already shapes as `Optional[Int[Array, 'pairs']]` a few hundred lines up.
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_leaf_ids"),
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_source_leaf_ids"),
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_valid_mask"),
+        ("jaccpot/nearfield/near_field.py", "precomputed_target_block_offsets"),
+        (
+            "jaccpot/nearfield/near_field.py",
+            "precomputed_target_block_source_leaf_ids_padded",
+        ),
+        (
+            "jaccpot/nearfield/near_field.py",
+            "precomputed_target_block_valid_mask_padded",
+        ),
         # Scalars, and the third instance of the same reason: `Float[Array, ""]`
         # buys nothing a scalar can get wrong, and both are reshaped to `(1,)` by
         # the Pallas wrappers anyway, so the only shape a caller could pass that
@@ -204,6 +280,27 @@ DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
         ("jaccpot/nearfield/_large_n_blocks.py", "G"),
         ("jaccpot/nearfield/_large_n_blocks.py", "softening_sq"),
         ("jaccpot/nearfield/_large_n_blocks.py", "g_const"),
+        # Fourth and fifth instances of the same two reasons, in the module that
+        # took its spelling from `_large_n_blocks.py` above: `G` is the
+        # `Union[float, Array]` scalar that every defaulted call passes as a Python
+        # float, and `softening_sq` was observed `[]` in every capture -- a shape
+        # annotation on a scalar asserts nothing a caller could get wrong.
+        ("jaccpot/nearfield/_fast_lane.py", "G"),
+        ("jaccpot/nearfield/_fast_lane.py", "softening_sq"),
+        # `runtime/fmm_derivatives.py`'s five families, and the reason is the sharpest
+        # instance of section 4.1's warning in the package. These eight methods ALREADY
+        # carry `@jaxtyped`, so a shape spec would run before the body and make its own
+        # validation unreachable -- and that validation is better than the annotation:
+        # "velocities must have shape (64, 3), got (64, 2)" names the parameter,
+        # substitutes the concrete N and reports what arrived. Twelve malformations across
+        # two methods were all rejected that way; annotating one method turned six of them
+        # into a `TypeCheckError` that lists every parameter in the signature. Measured, and
+        # written up at the top of that class.
+        ("jaccpot/runtime/fmm_derivatives.py", "positions"),
+        ("jaccpot/runtime/fmm_derivatives.py", "masses"),
+        ("jaccpot/runtime/fmm_derivatives.py", "velocities"),
+        ("jaccpot/runtime/fmm_derivatives.py", "target_indices"),
+        ("jaccpot/runtime/fmm_derivatives.py", "bounds"),
     }
 )
 

@@ -56,7 +56,8 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array
+from beartype import beartype
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
 from jaccpot.runtime._adaptive_policy import (
     AdaptivePolicyState,
@@ -144,11 +145,12 @@ def policy_upward_view(*, upward: Any, geometry: Any, mass_moments: Any) -> Any:
     )
 
 
+@jaxtyped(typechecker=beartype)
 def coarse_source_mac_geometry(
     *,
-    expansion_centers: Array,
-    geometry_centers: Array,
-    geometry_radii: Array,
+    expansion_centers: Float[Array, "nodes 3"],
+    geometry_centers: Float[Array, "nodes 3"],
+    geometry_radii: Float[Array, "nodes"],
 ) -> tuple[Array, Array]:
     """MAC centres and radii for coarse (LET) nodes acting as criterion sources.
 
@@ -172,11 +174,11 @@ def coarse_source_mac_geometry(
 
     Parameters
     ----------
-    expansion_centers : Array
+    expansion_centers : Float[Array, 'nodes 3']
         ``(num_coarse_nodes, 3)`` multipole/COM centres -- what the M2L expands about.
-    geometry_centers : Array
+    geometry_centers : Float[Array, 'nodes 3']
         ``(num_coarse_nodes, 3)`` centres of the particle-bounding coarse geometry.
-    geometry_radii : Array
+    geometry_radii : Float[Array, 'nodes']
         ``(num_coarse_nodes,)`` radii of that geometry, bounding PARTICLES.
 
     Returns
@@ -288,11 +290,12 @@ def cross_policy_state(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def flatten_neighbor_csr(
     *,
-    counts: Array,
-    indices: Array,
-    leaf_indices: Array,
+    counts: Int[Array, "leaves"],
+    indices: Int[Array, "edges"],
+    leaf_indices: Int[Array, "leaves"],
 ) -> tuple[Array, Array, Array]:
     """Expand a per-leaf neighbour CSR into flat ``(source, target)`` pair arrays.
 
@@ -304,11 +307,11 @@ def flatten_neighbor_csr(
 
     Parameters
     ----------
-    counts : Array
+    counts : Int[Array, 'leaves']
         ``(num_leaves,)`` neighbours per target leaf.
-    indices : Array
+    indices : Int[Array, 'edges']
         Flat neighbour entries, source node ids, fixed capacity with a padded tail.
-    leaf_indices : Array
+    leaf_indices : Int[Array, 'leaves']
         ``(num_leaves,)`` node index of each target leaf.
 
     Returns
@@ -335,16 +338,17 @@ def flatten_neighbor_csr(
     return sources, targets, valid & (sources >= 0) & (targets >= 0)
 
 
+@jaxtyped(typechecker=beartype)
 def cross_force_scale_own(
     *,
-    source_masses: Array,
-    source_centers: Array,
-    source_radii: Optional[Array],
-    target_centers: Array,
-    target_radii: Array,
-    pair_sources: Array,
-    pair_targets: Array,
-    pair_valid: Optional[Array],
+    source_masses: Float[Array, "sources"],
+    source_centers: Float[Array, "sources 3"],
+    source_radii: Optional[Float[Array, "sources"]],
+    target_centers: Float[Array, "targets 3"],
+    target_radii: Float[Array, "targets"],
+    pair_sources: Int[Array, "pairs"],
+    pair_targets: Int[Array, "pairs"],
+    pair_valid: Optional[Bool[Array, "pairs"]],
     num_target_nodes: int,
     g: Array,
     eps_sq: Array,
@@ -361,24 +365,24 @@ def cross_force_scale_own(
 
     Parameters
     ----------
-    source_masses : Array
+    source_masses : Float[Array, 'sources']
         ``(num_source_nodes,)`` mass spanned by each coarse node.
-    source_centers : Array
+    source_centers : Float[Array, 'sources 3']
         ``(num_source_nodes, 3)`` coarse node centres.
-    source_radii : Optional[Array]
+    source_radii : Optional[Float[Array, 'sources']]
         ``(num_source_nodes,)`` coarse node radii, added to the reach so every term
         stays an under-estimate. ``None`` reproduces the single-GPU far-field
         convention (target radius only), which is what a *far* pair wants because it
         has already passed the opening criterion.
-    target_centers : Array
+    target_centers : Float[Array, 'targets 3']
         ``(num_target_nodes, 3)`` local node centres.
-    target_radii : Array
+    target_radii : Float[Array, 'targets']
         ``(num_target_nodes,)`` local node radii, scaled by ``inflation``.
-    pair_sources : Array
+    pair_sources : Int[Array, 'pairs']
         Source (coarse) node of each pair.
-    pair_targets : Array
+    pair_targets : Int[Array, 'pairs']
         Target (local) node of each pair.
-    pair_valid : Optional[Array]
+    pair_valid : Optional[Bool[Array, 'pairs']]
         Which slots hold a real pair. ``None`` derives it from non-negative ids.
     num_target_nodes : int
         Segment count for the scatter; the local tree's node count.
@@ -429,28 +433,29 @@ def cross_force_scale_own(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def distributed_force_scale_nodes(
     *,
     tree: Any,
-    positions_sorted: Array,
-    masses_sorted: Array,
-    node_centers: Array,
-    node_radii: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
+    node_centers: Float[Array, "nodes 3"],
+    node_radii: Float[Array, "nodes"],
     self_far_sources: Array,
     self_far_targets: Array,
-    self_near_offsets: Array,
-    self_near_counts: Array,
-    self_near_indices: Array,
-    self_near_leaf_indices: Array,
+    self_near_offsets: Int[Array, "_"],
+    self_near_counts: Int[Array, "leaves"],
+    self_near_indices: Int[Array, "_"],
+    self_near_leaf_indices: Int[Array, "leaves"],
     coarse_tree: Any,
-    coarse_masses_sorted: Array,
-    coarse_centers: Array,
-    coarse_radii: Array,
+    coarse_masses_sorted: Float[Array, "_"],
+    coarse_centers: Float[Array, "coarse 3"],
+    coarse_radii: Float[Array, "coarse"],
     cross_far_sources: Array,
     cross_far_targets: Array,
-    cross_near_counts: Array,
-    cross_near_indices: Array,
-    cross_near_leaf_indices: Array,
+    cross_near_counts: Int[Array, "crossleaves"],
+    cross_near_indices: Int[Array, "_"],
+    cross_near_leaf_indices: Int[Array, "crossleaves"],
     max_leaf_size: int,
     softening: float,
     gravitational_constant: float,
@@ -473,44 +478,44 @@ def distributed_force_scale_nodes(
     ----------
     tree : Any
         The device's local tree.
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         ``(n, 3)`` local positions in tree order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         ``(n,)`` local masses in tree order.
-    node_centers : Array
+    node_centers : Float[Array, 'nodes 3']
         ``(num_nodes, 3)`` local node centres.
-    node_radii : Array
+    node_radii : Float[Array, 'nodes']
         ``(num_nodes,)`` local node radii.
     self_far_sources : Array
         Source node of each local far pair.
     self_far_targets : Array
         Target node of each local far pair.
-    self_near_offsets : Array
+    self_near_offsets : Int[Array, '_']
         CSR offsets into ``self_near_indices``, taken from the walk rather than
         rebuilt, so this cannot disagree with the list it indexes.
-    self_near_counts : Array
+    self_near_counts : Int[Array, 'leaves']
         Neighbours per local target leaf.
-    self_near_indices : Array
+    self_near_indices : Int[Array, '_']
         Flat local near neighbour entries.
-    self_near_leaf_indices : Array
+    self_near_leaf_indices : Int[Array, 'leaves']
         Node index of each local target leaf.
     coarse_tree : Any
         The all-gathered coarse (LET) tree over every device's leaf frontier.
-    coarse_masses_sorted : Array
+    coarse_masses_sorted : Float[Array, '_']
         Coarse-tree masses in its own sorted order.
-    coarse_centers : Array
+    coarse_centers : Float[Array, 'coarse 3']
         ``(num_coarse_nodes, 3)`` coarse node centres.
-    coarse_radii : Array
+    coarse_radii : Float[Array, 'coarse']
         ``(num_coarse_nodes,)`` coarse node radii.
     cross_far_sources : Array
         Coarse source node of each cross far pair.
     cross_far_targets : Array
         Local target node of each cross far pair.
-    cross_near_counts : Array
+    cross_near_counts : Int[Array, 'crossleaves']
         Coarse near neighbours per local target leaf.
-    cross_near_indices : Array
+    cross_near_indices : Int[Array, '_']
         Flat cross near neighbour entries, coarse node ids.
-    cross_near_leaf_indices : Array
+    cross_near_leaf_indices : Int[Array, 'crossleaves']
         Node index of each local target leaf in the cross near list.
     max_leaf_size : int
         Leaf capacity.

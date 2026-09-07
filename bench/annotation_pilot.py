@@ -61,8 +61,57 @@ reasons that had nothing to do with the code being hard to describe:
 * **Dtype objects.** `_pad_inputs` takes the working `dtype`. It is not an array and not a
   scalar, and it rebuilds from its name.
 
-Both widen what can be measured; neither widens what counts as validated. A container
+Then two more since the `runtime/_adaptive_policy.py` pass, where 11 of 21 targets came back
+UNREPLAYABLE on the same argument and left ~60 of that module's ~99 array parameters
+unmeasured -- half a module reported as neither validated nor not:
+
+* **Trees.** `yggdrax`'s tree is described by what `build_tree` NEEDS -- `num_particles`,
+  `leaf_size` -- and rebuilt for real, not synthesized. Its 22 array leaves are mutually
+  constrained (`node_ranges` partitions the particles, `parent`/`left_child` form the
+  topology), so zeros are not a tree and every function taking one failed the control.
+  `num_nodes` rides along as a CHECK and not an input, because the node count is
+  data-dependent: the same `(n, leaf_size)` gave 31 nodes on one distribution and 37 on
+  another. A rebuild that cannot reproduce the recorded count is REFUSED, which surfaces as
+  INCONCLUSIVE rather than as a replay against a tree of the wrong size -- arrays recorded
+  beside the tree were sized against the original, so that would quietly answer a different
+  question.
+* **NamedTuples.** `TreeUpwardData` was matched by the plain-tuple rule and rebuilt as a
+  bare tuple, so the control died on `AttributeError: 'tuple' object has no attribute
+  'multipoles'` -- which reads like the function's problem and was the tool's. The class is
+  now remembered and restored, and `_leaves`/`_substitute` walk the fields, so an array
+  inside one is perturbed by path (`upward[2][3]`) like any other. Without that last part it
+  would report "control OK, 0 array params" -- the same invisible gap the container note
+  above warns about.
+
+Measured effect on `_adaptive_policy`: 11 UNREPLAYABLE and 0 measured became **11 measured,
+0 unreplayable, 0 inconclusive** -- and 46 of 104 perturbations on that half are silently
+accepted, 44%, against 41% on the half that was measurable all along.
+
+All four widen what can be measured; none widens what counts as validated. A container
 holding one un-describable element is still UNREPLAYABLE, checked recursively.
+
+A THIRD THING THAT KEEPS IT HONEST: ONLY CALLS THAT RETURNED
+-----------------------------------------------------------
+A description is committed **after** the call returns, not before it. The suite is full of
+calls that raise on purpose -- every shape-contract test is one -- and the description of a
+deliberately malformed call is not a valid control. Recording it made the *better-annotated*
+modules the harder ones to measure, which is exactly backwards.
+
+Measured on `pallas/nearfield_mutual.py`: all four annotated entry points came back
+INCONCLUSIVE, their controls failing the very contracts the module had just been given,
+because the one recorded description per function had been taken from
+`test_nearfield_mutual_shape_contracts.py` -- `ma` at `(1, 3, 4)` from the extra-leading-axis
+case, and a `b` side one slot narrower than the `a` side from the mismatched-widths case. The
+2026-08-30 pass measured those same functions fine, because the contracts and their negative
+tests did not exist yet.
+
+Relatedly, the replay now takes the first **replayable** recording rather than the first one,
+which is what makes `PILOT_MAX_PER_FN` above 1 worth setting.
+
+**An existing recording does not benefit.** The description is frozen in the pickle, so a
+pass recorded before this change still reports its trees and NamedTuples as opaque --
+verified, an old recording replays to the identical 33/81 and 11 unreplayable. Re-record to
+pick the new kinds up.
 
 WHAT IT DOES NOT MEASURE
 ------------------------
@@ -73,6 +122,18 @@ WHAT IT DOES NOT MEASURE
   rejected, and it is -- but it names neither parameter, and replacing it with a shape
   annotation is still an improvement. The tool measures whether anything complains, not
   how well.
+* **Methods.** `bench/annotation_capture.py` gained `module:Class.method` support in the
+  same change that added the two kinds above; this tool did NOT, and the asymmetry is
+  principled rather than unfinished. Capture only OBSERVES a call, so patching the class
+  is enough. The pilot has to MAKE one, which needs a `self` -- and `self` is an
+  `FMMEngine`, precisely the kind of object `describe_argument` reports as opaque. So the
+  `runtime/` mixins can have their shapes derived by capture but not their section 4.1
+  question answered here. Anyone wanting that needs a real engine fixture, which is a
+  different tool: it would have to build one, not describe one.
+* **`custom_vjp` / `custom_jvp` objects.** REFUSED, not measured, and loudly: replacing
+  one with a plain wrapper strips its rule, so every gradient through that name would be
+  the autodiff of the primal instead. `defvjp` captures the rules at import, so no wrapper
+  installed afterwards can intercept them anyway.
 * **Lanes that never ran.** Same limitation as `bench/annotation_capture.py`: a function
   reached only through one backend is recorded only as that backend called it. Read the
   recorded function count against the targeted count before trusting a per-module rate.
@@ -88,6 +149,9 @@ Record, during any part of the suite::
 Then replay::
 
     python -m bench.annotation_pilot replay /tmp/pilot.pkl
+
+Under `pytest-xdist` each worker writes its own shard -- `/tmp/pilot.gw0.pkl` and friends --
+and the replay merges every shard beside the path you name, so pass the same path either way.
 
 The report ranks modules by the fraction of perturbations **silently accepted**, which is
 section 4.1's predictor -- and which is not the same ordering as bare-parameter count.
@@ -125,6 +189,31 @@ _recorded: dict[str, list] = {}
 _installed: list[tuple[Any, str, Any]] = []
 
 
+def _is_tree(value: Any) -> bool:
+    """Is this a yggdrax tree, duck-typed rather than by class?
+
+    Duck-typed on purpose: the value handed to `runtime/_adaptive_policy` is a
+    `RadixTree`, the annotation says `Tree`, and `Tree.__getattr__` forwards to a
+    topology -- so an `isinstance` check would have to name all three and would go stale
+    when a fourth arrives. What the rebuild actually needs is these four attributes.
+
+    Parameters
+    ----------
+    value : Any
+        The argument.
+
+    Returns
+    -------
+    bool
+        True if the value exposes the particle count, leaf size, node count and node
+        ranges a rebuild needs.
+    """
+    return all(
+        hasattr(value, attribute)
+        for attribute in ("num_particles", "leaf_size", "num_nodes", "node_ranges")
+    )
+
+
 def describe_argument(value: Any) -> tuple[str, Any, str]:
     """Describe one argument well enough to rebuild an equivalent for replay.
 
@@ -154,6 +243,23 @@ def describe_argument(value: Any) -> tuple[str, Any, str]:
     that reason, and sequences before it too -- ``np.dtype((np.int32, 3))`` is
     also a valid dtype spec.
     """
+    if _is_tree(value):
+        # A tree is described by what `build_tree` needs to make an equivalent one, not
+        # by its 22 array leaves. `num_particles` and `leaf_size` are static aux data on
+        # the pytree, so they survive tracing as plain ints -- which is the only reason
+        # this is possible at all. `num_nodes` rides along as a CHECK, not an input: the
+        # replay refuses a rebuild whose node count differs, because the arrays recorded
+        # beside the tree were sized against the original.
+        return (
+            "tree",
+            {
+                "num_particles": int(value.num_particles),
+                "leaf_size": int(value.leaf_size),
+                "num_nodes": int(value.num_nodes),
+                "dtype": str(value.node_ranges.dtype),
+            },
+            type(value).__name__,
+        )
     if hasattr(value, "shape") and hasattr(value, "dtype"):
         try:
             return ("array", tuple(int(d) for d in value.shape), str(value.dtype))
@@ -163,6 +269,22 @@ def describe_argument(value: Any) -> tuple[str, Any, str]:
             # `shape` and `dtype` as descriptors, and they are a legitimate dtype
             # spelling. Fall through rather than concluding opaque here.
             pass
+    if isinstance(value, tuple) and hasattr(value, "_fields"):
+        # A NamedTuple, described element by element like any container but REMEMBERING
+        # its class. Flattening it to a bare tuple is what made `build_adaptive_policy_state`
+        # and `resolve_dehnen_geometry` INCONCLUSIVE: the control died on
+        # `AttributeError: 'tuple' object has no attribute 'multipoles'`, which reads like
+        # the function's problem and is the tool's.
+        cls = type(value)
+        return (
+            "namedtuple",
+            {
+                "module": cls.__module__,
+                "name": cls.__name__,
+                "fields": [describe_argument(v) for v in value],
+            },
+            cls.__name__,
+        )
     if isinstance(value, (int, float, bool, str, type(None))):
         return ("scalar", value, type(value).__name__)
     if isinstance(value, tuple) and all(
@@ -204,6 +326,8 @@ def is_replayable(description: tuple[str, Any, str]) -> bool:
         return False
     if kind == "container":
         return all(is_replayable(element) for element in value)
+    if kind == "namedtuple":
+        return all(is_replayable(element) for element in value["fields"])
     return True
 
 
@@ -230,6 +354,9 @@ def _leaves(
     kind, value, meta = description
     if kind == "container":
         for index, element in enumerate(value):
+            yield from _leaves(element, wanted, prefix + (index,))
+    elif kind == "namedtuple":
+        for index, element in enumerate(value["fields"]):
             yield from _leaves(element, wanted, prefix + (index,))
     elif kind == wanted:
         yield prefix, value, meta
@@ -260,6 +387,10 @@ def _substitute(
     if not path:
         return replacement
     kind, value, meta = description
+    if kind == "namedtuple":
+        fields = list(value["fields"])
+        fields[path[0]] = _substitute(fields[path[0]], path[1:], replacement)
+        return (kind, {**value, "fields": fields}, meta)
     elements = list(value)
     elements[path[0]] = _substitute(elements[path[0]], path[1:], replacement)
     return (kind, elements, meta)
@@ -283,6 +414,128 @@ def _format_path(name: str, path: tuple[int, ...]) -> str:
     return name + "".join(f"[{index}]" for index in path)
 
 
+def _is_custom_differentiation_object(target: Any) -> bool:
+    """Say whether a target is a ``custom_vjp`` / ``custom_jvp`` object rather than a function.
+
+    Wrapping one CORRUPTS THE RUN, silently. ``_wrap`` returns a plain function, and
+    ``functools.wraps`` copies ``__name__`` and ``__doc__`` but not ``defvjp``, so rebinding
+    the module attribute replaces the ``custom_vjp`` object with something that has no
+    custom rule at all -- every gradient taken through that name for the rest of the session
+    is the autodiff of the primal, not the hand-written rule, and nothing says so.
+
+    Measured 2026-09-03: recording `nearfield/_fast_lane.py` broke
+    ``test_prepacked_cvjp_saves_the_documented_nine_entry_residual`` with
+    ``AttributeError: 'function' object has no attribute 'defvjp'`` -- which was the lucky
+    outcome, because a test asserted the object's identity. The unlucky outcome is a
+    reverse-mode measurement that silently answers a different question.
+
+    Refusing is right rather than temporary: ``defvjp`` captures the rules at import, so
+    even a wrapper that forwarded the attributes could not intercept the rule calls -- the
+    same limitation `bench/annotation_capture.py` records for methods. Duck-typed rather
+    than `isinstance`, to avoid importing `jax` here for a predicate.
+
+    Parameters
+    ----------
+    target : Any
+        The object bound to the requested name.
+
+    Returns
+    -------
+    bool
+        True when it carries a custom differentiation rule setter.
+    """
+
+    return hasattr(target, "defvjp") or hasattr(target, "defjvp")
+
+
+def _worker_output(out: Path, config: Any) -> Path:
+    """Return a per-xdist-worker path, so workers do not overwrite each other.
+
+    `_recorded` is per process. Every worker used to write the SAME `PILOT_OUT` on
+    unconfigure, so the surviving file was whichever worker finished last and every other
+    worker's functions were silently gone. Measured on `pallas/nearfield_mutual.py` at
+    `-n 4`: 7 of 12 targeted functions in the file, the other 5 recorded by workers whose
+    write was clobbered -- which reads exactly like "that lane never ran".
+
+    Parameters
+    ----------
+    out : Path
+        The path the user asked for.
+    config : Any
+        The pytest config; carries `workerinput` only inside an xdist worker.
+
+    Returns
+    -------
+    Path
+        `out` under a single process, else `out` with the worker id folded into the stem.
+    """
+
+    worker = getattr(config, "workerinput", {}).get("workerid")
+    if not worker:
+        return out
+    return out.with_name(f"{out.stem}.{worker}{out.suffix}")
+
+
+def _load_recordings(path: Path) -> dict[str, list[Any]]:
+    """Load a recording, merging every per-worker shard beside it.
+
+    Parameters
+    ----------
+    path : Path
+        The path passed to `replay`, as given to `PILOT_OUT`.
+
+    Returns
+    -------
+    dict
+        Label to list of recordings, concatenated across shards in shard order.
+
+    Raises
+    ------
+    FileNotFoundError
+        If neither the path nor any shard beside it exists.
+    """
+
+    shards = sorted(path.parent.glob(f"{path.stem}.*{path.suffix}"))
+    files = ([path] if path.exists() else []) + [s for s in shards if s != path]
+    if not files:
+        raise FileNotFoundError(path)
+
+    merged: dict[str, list[Any]] = {}
+    for file in files:
+        with file.open("rb") as handle:
+            for label, entries in pickle.load(handle).items():
+                merged.setdefault(label, []).extend(entries)
+    return merged
+
+
+def _first_replayable(
+    entries: list[tuple[dict[str, Any], bool]],
+) -> tuple[dict[str, Any], bool]:
+    """Return the first recording that can be replayed, else the first one.
+
+    Only the first recording was ever used, which made ``PILOT_MAX_PER_FN`` above 1
+    pointless: a function whose first observed call carried an opaque argument was
+    UNREPLAYABLE even when a later, fully describable call had been recorded beside it.
+    Falling back to ``entries[0]`` keeps the report identical when none is replayable,
+    so the UNREPLAYABLE path still names the opaque arguments of a real call.
+
+    Parameters
+    ----------
+    entries : list of (dict, bool)
+        The recordings for one function, in the order they were observed.
+
+    Returns
+    -------
+    tuple of (dict, bool)
+        The chosen description and its replayable flag.
+    """
+
+    for entry in entries:
+        if entry[1]:
+            return entry
+    return entries[0]
+
+
 def _wrap(function: Any, label: str, limit: int) -> Any:
     """Wrap a function so the first ``limit`` calls record their argument shapes.
 
@@ -304,6 +557,7 @@ def _wrap(function: Any, label: str, limit: int) -> Any:
 
     @wraps(function)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        snapshot: dict[str, Any] | None = None
         if len(_recorded.get(label, [])) < limit:
             try:
                 bound = signature.bind(*args, **kwargs)
@@ -312,13 +566,24 @@ def _wrap(function: Any, label: str, limit: int) -> Any:
                     name: describe_argument(value)
                     for name, value in bound.arguments.items()
                 }
-                replayable = all(is_replayable(d) for d in snapshot.values())
-                _recorded.setdefault(label, []).append((snapshot, replayable))
             except TypeError:
                 # A call that does not match the signature is about to raise on
                 # its own. Record nothing and let the real error surface.
-                pass
-        return function(*args, **kwargs)
+                snapshot = None
+
+        # Call FIRST, and commit the description only if the call returned. A call
+        # that raises is not a valid control, and the suite is full of calls that
+        # raise on purpose: a shape-contract test's deliberately malformed block
+        # would otherwise be recorded as this function's one description and turn
+        # every later replay of it INCONCLUSIVE. Measured on
+        # `pallas/nearfield_mutual.py`, where four annotated entry points came back
+        # inconclusive against descriptions taken from
+        # `test_nearfield_mutual_shape_contracts.py`'s negative cases.
+        result = function(*args, **kwargs)
+        if snapshot is not None and len(_recorded.get(label, [])) < limit:
+            replayable = all(is_replayable(d) for d in snapshot.values())
+            _recorded.setdefault(label, []).append((snapshot, replayable))
+        return result
 
     return wrapper
 
@@ -371,6 +636,7 @@ def pytest_configure(config: Any) -> None:
         return
     limit = int(os.environ.get(_MAX_ENV, "1"))
     missing: list[str] = []
+    refused: list[str] = []
     for group in spec.split(";"):
         if not group.strip():
             continue
@@ -381,6 +647,9 @@ def pytest_configure(config: Any) -> None:
             if original is None:
                 missing.append(f"{module_path}:{name}")
                 continue
+            if _is_custom_differentiation_object(original):
+                refused.append(f"{module_path}:{name}")
+                continue
             wrapper = _wrap(original, f"{module_path}:{name}", limit)
             for holder, attribute in _binding_sites(module, name, original):
                 setattr(holder, attribute, wrapper)
@@ -389,6 +658,9 @@ def pytest_configure(config: Any) -> None:
     if missing:
         # Loud, because a typo'd target otherwise reads as "already validated".
         print(f"annotation_pilot: MISSING TARGETS {missing}")
+    if refused:
+        # Also loud, and for a worse reason: see `_is_custom_differentiation_object`.
+        print(f"annotation_pilot: REFUSED (custom_vjp/custom_jvp objects) {refused}")
 
 
 def pytest_unconfigure(config: Any) -> None:
@@ -402,7 +674,9 @@ def pytest_unconfigure(config: Any) -> None:
     for holder, attribute, original in _installed:
         setattr(holder, attribute, original)
     if _recorded:
-        out = Path(os.environ.get(_OUT_ENV, "annotation_pilot.pkl"))
+        out = _worker_output(
+            Path(os.environ.get(_OUT_ENV, "annotation_pilot.pkl")), config
+        )
         with out.open("wb") as handle:
             pickle.dump(_recorded, handle)
         print(f"\nannotation_pilot: recorded {len(_recorded)} functions -> {out}")
@@ -449,6 +723,67 @@ def shape_perturbations(shape: tuple[int, ...]) -> list[tuple[str, tuple[int, ..
     return out
 
 
+def _build_tree_stand_in(spec: dict[str, Any]) -> Any:
+    """Rebuild a REAL tree matching a recorded spec, or refuse.
+
+    A real build, not a synthesized stand-in, and that is the whole point. A tree's 22
+    array leaves are mutually constrained -- `node_ranges` partitions the particles,
+    `parent`/`left_child` form the topology -- so zeros are not a tree and every function
+    taking one would have failed the control. Building over deterministic random
+    positions gives arrays that are actually consistent.
+
+    The node count is DATA-dependent, not a function of ``(n, leaf_size)`` alone: the same
+    pair gave 31 nodes on one distribution and 37 on another during the
+    `_adaptive_policy` pass. So the rebuild is checked against the recorded count and
+    REFUSED on a mismatch, which the replay reports as INCONCLUSIVE. Refusing is the
+    honest failure: replaying against a tree of the wrong size would compare arrays that
+    were sized against the original and quietly answer the wrong question.
+
+    Parameters
+    ----------
+    spec : dict
+        ``num_particles``, ``leaf_size``, ``num_nodes`` and ``dtype``, as recorded by
+        :func:`describe_argument`.
+
+    Returns
+    -------
+    Any
+        A freshly built tree with the recorded particle count, leaf size and node count.
+
+    Raises
+    ------
+    RuntimeError
+        If no seed reproduces the recorded node count, so the caller reports
+        INCONCLUSIVE rather than replaying against a differently shaped tree.
+    """
+    import jax.numpy as jnp
+    from yggdrax.tree import build_tree
+
+    n = int(spec["num_particles"])
+    leaf_size = int(spec["leaf_size"])
+    want_nodes = int(spec["num_nodes"])
+    dtype = jnp.dtype(spec.get("dtype", "float64"))
+    float_dtype = jnp.float64 if dtype.itemsize >= 8 else jnp.float32
+
+    # A few seeds, because the node count is data-dependent and a single uniform draw is
+    # not guaranteed to reproduce a clustered original's. Deterministic, so a replay is
+    # reproducible.
+    for seed in range(8):
+        rng = np.random.default_rng(seed)
+        positions = jnp.asarray(rng.uniform(-1.0, 1.0, size=(n, 3)), float_dtype)
+        masses = jnp.asarray(np.abs(rng.standard_normal(n)) + 0.5, float_dtype)
+        tree, _, _, _ = build_tree(
+            positions, masses, return_reordered=True, leaf_size=leaf_size
+        )
+        if int(tree.num_nodes) == want_nodes:
+            return tree
+    raise RuntimeError(
+        f"no rebuild over 8 seeds reproduced num_nodes={want_nodes} at "
+        f"num_particles={n}, leaf_size={leaf_size}; the node count is data-dependent "
+        "and the recorded tree's distribution is not recoverable from the record"
+    )
+
+
 def _build(kind: str, value: Any, meta: str) -> Any:
     """Rebuild one argument from its description.
 
@@ -469,6 +804,11 @@ def _build(kind: str, value: Any, meta: str) -> Any:
     """
     import jax.numpy as jnp
 
+    if kind == "tree":
+        return _build_tree_stand_in(value)
+    if kind == "namedtuple":
+        cls = getattr(importlib.import_module(value["module"]), value["name"])
+        return cls(*(_build(*element) for element in value["fields"]))
     if kind == "array":
         return jnp.zeros(value, dtype=jnp.dtype(meta))
     if kind == "container":
@@ -500,7 +840,7 @@ def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
         per.setdefault(label.rsplit(":", 1)[0], Counter())[key] += 1
 
     for label in sorted(recorded):
-        snapshot, replayable = recorded[label][0]
+        snapshot, replayable = _first_replayable(recorded[label])
         module_path, function_name = label.rsplit(":", 1)
         function = getattr(importlib.import_module(module_path), function_name)
 
@@ -517,8 +857,11 @@ def replay(recorded: dict[str, list]) -> tuple[str, Counter]:
             bump(label, "unreplayable")
             continue
 
-        base = {name: _build(*desc) for name, desc in snapshot.items()}
+        # Inside the try, not before it. A rebuild can now FAIL -- `_build_tree_stand_in`
+        # refuses a tree whose node count it cannot reproduce -- and a refusal is an
+        # inconclusive replay, not a crashed report.
         try:
+            base = {name: _build(*desc) for name, desc in snapshot.items()}
             function(**base)
         except (
             Exception
@@ -610,11 +953,11 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("path", type=Path, help="the pickle the plugin wrote")
     args = parser.parse_args(argv)
 
-    if not args.path.exists():
+    try:
+        recorded = _load_recordings(args.path)
+    except FileNotFoundError:
         print(f"{args.path} does not exist -- was the recording run?", file=sys.stderr)
         return 1
-    with args.path.open("rb") as handle:
-        recorded = pickle.load(handle)
     report, _ = replay(recorded)
     print(report)
     return 0

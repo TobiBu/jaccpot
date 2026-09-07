@@ -11,7 +11,7 @@ from jaxtyping import Array, Float, Int
 from .config import GradConfig
 from .runtime._fmm_impl import PreparedStateLike
 from .runtime.fmm_caches import _contains_tracer
-from .solver import FastMultipoleMethod, FMMPreparedState
+from .solver import FastMultipoleMethod
 
 
 def _extract_positions_from_state(state: Array) -> Array:

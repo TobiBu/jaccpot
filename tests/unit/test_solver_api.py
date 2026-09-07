@@ -788,6 +788,109 @@ def test_octree_execution_backend_prepared_state_jit_targets_match_eager(
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
 
 
+def _pytree_metadata_holding_arrays(value):
+    """Return ``(path, node type, metadata)`` for every array in pytree metadata.
+
+    Metadata (a pytree node's aux data) is the treedef, and the treedef is part
+    of every ``jax.jit`` cache key -- so it has to be hashable and cheaply
+    comparable, which a JAX array is not. This walks the structure rather than
+    the leaves, because that is where the offending value hides: it is invisible
+    to ``jax.tree.leaves`` by construction.
+
+    Parameters
+    ----------
+    value : Any
+        Any pytree.
+
+    Returns
+    -------
+    list
+        One ``(path, node type name, repr of the metadata)`` triple per node
+        whose metadata reaches a JAX array. Empty when the structure is clean.
+    """
+
+    def _reaches_array(meta, depth=0):
+        if isinstance(meta, jax.Array) or isinstance(meta, np.ndarray):
+            return True
+        if depth > 4:
+            return False
+        if isinstance(meta, (tuple, list, set, frozenset)):
+            return any(_reaches_array(item, depth + 1) for item in meta)
+        if isinstance(meta, dict):
+            return any(_reaches_array(item, depth + 1) for item in meta.values())
+        return False
+
+    def _walk(treedef, path):
+        found = []
+        node_data = treedef.node_data()
+        if node_data is not None and _reaches_array(node_data[1]):
+            found.append((path, node_data[0].__name__, repr(node_data[1])[:200]))
+        for index, child in enumerate(treedef.children()):
+            found.extend(_walk(child, f"{path}.{index}"))
+        return found
+
+    return _walk(jax.tree_util.tree_structure(value), "state")
+
+
+def test_octree_execution_backend_prepared_state_metadata_holds_no_arrays(
+    octree_backend_prepared_state,
+):
+    """The prepared state's treedef must not carry a JAX array anywhere.
+
+    The octree build path used to leak one: yggdrax dispatches the adaptive
+    build to a jitted helper whose result object carries the topology's fields
+    as ordinary children, so the static ``leaf_size=8`` came back out as
+    ``Array(8, dtype=int64, weak_type=True)`` -- and yggdrax's tree flatten files
+    ``leaf_size`` as *aux*. Two independently prepared states then held two
+    distinct ``Array(8)`` objects, and comparing their treedefs under an
+    enclosing trace staged a ``bool[]`` tracer instead of returning a bool.
+
+    Asserted on the structure rather than by provoking the failure, so it does
+    not depend on which other tests warmed which jit cache first.
+    """
+
+    _, state = octree_backend_prepared_state
+
+    assert _pytree_metadata_holding_arrays(state) == []
+
+
+def test_octree_execution_backend_two_prepared_states_are_jittable(
+    octree_backend_prepared_state,
+):
+    """A second, independently built octree state must still trace.
+
+    The direct form of the failure the test above pins structurally: the first
+    ``jax.jit`` fills the evaluation kernel's cache with a treedef whose
+    metadata holds one ``Array(8)``, and the second's lookup compares that
+    against a *different* ``Array(8)`` object -- past the identity fast path,
+    into ``Array.__eq__``, with a trace live. It surfaced in CI as ``ValueError:
+    Exception raised while checking equality of metadata fields of pytree``.
+
+    Both states are built here rather than shared, because one state reused
+    twice holds the same array object in both treedefs and the identity check
+    hides the defect. Each state gets its own ``jax.jit`` wrapper for the same
+    reason in the other direction: one shared wrapper turns the second call into
+    an outer cache hit, which never re-enters the evaluation kernel and so never
+    performs the comparison this is about.
+    """
+
+    fmm, first_state = octree_backend_prepared_state
+    positions, masses = _sample_problem(n=40)
+    second_state = fmm.prepare_state(positions, masses, leaf_size=8, max_order=3)
+    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
+
+    def evaluate(state, indices):
+        return jax.jit(
+            lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
+        )(state, indices)
+
+    first_acc = evaluate(first_state, target_indices)
+    second_acc = evaluate(second_state, target_indices)
+
+    assert first_acc.shape == (target_indices.shape[0], 3)
+    assert np.allclose(np.asarray(first_acc), np.asarray(second_acc))
+
+
 def test_octree_execution_backend_prepared_state_eager_matches_compiled(
     octree_backend_prepared_state,
 ):

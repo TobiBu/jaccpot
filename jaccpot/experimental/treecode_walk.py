@@ -25,6 +25,11 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 
+__all__ = [
+    "TreecodeLeafLists",
+    "treecode_leaf_walk",
+]
+
 _SENTINEL = -1
 
 

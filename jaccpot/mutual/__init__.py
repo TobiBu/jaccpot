@@ -70,6 +70,14 @@ from jaccpot.mutual.force import (
     mutual_weighted_accelerations,
     n_sub,
 )
+from jaccpot.mutual.identity import (
+    TopologyDiff,
+    TopologyFingerprint,
+    TopologySwitchCounter,
+    diff_topologies,
+    fingerprint_topology,
+    topologies_identical,
+)
 from jaccpot.mutual.nearfield import mutual_near_field_forces
 from jaccpot.mutual.topology import (
     MutualTopology,
@@ -81,6 +89,12 @@ __all__ = [
     "MutualTopology",
     "build_mutual_topology",
     "build_mutual_topology_from_tree",
+    "TopologyDiff",
+    "TopologyFingerprint",
+    "TopologySwitchCounter",
+    "diff_topologies",
+    "fingerprint_topology",
+    "topologies_identical",
     "MutualFMMState",
     "build_mutual_state",
     "mutual_near_field_forces",
