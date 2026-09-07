@@ -1218,3 +1218,143 @@ def test_softening_must_be_concrete(accel_only_case):
                 max_leaf_size=2,
             )
         )(jnp.asarray(1e-2))
+
+
+# ---------------------------------------------------------------------------
+# The materialised source-particle layout's axis contract.
+#
+# `source_particle_ids` is `(leaves, srcslots, w)`: axis 1 is the padded neighbour count,
+# axis 2 is the leaf width. Both kernels only ever read `shape[1] * shape[2]` and flatten,
+# so a table split the other way is accepted and returns a number. With every slot valid
+# that number is even correct -- a reduction over a set does not care about the order --
+# which is why the cases below use RAGGED occupancy, where the slot axis carries meaning.
+# Measured against the correct force on the parent commit: the re-split table is wrong by
+# rel-L2 9.9e-01 and the transposed validity mask by 5.0e-01, both silently.
+# ---------------------------------------------------------------------------
+
+
+def _payload_pairs_case(*, leaves=4, width=8, srcslots=3, num_particles=40, seed=29):
+    """A materialised pairs payload with ragged leaf and neighbour occupancy.
+
+    Built the way ``runtime/_large_n_pipeline`` builds it -- source tables are a gather
+    from the target table, ``target_particle_ids[source_leaf_ids]`` -- so the trailing
+    axis is the target width by construction rather than by coincidence.
+
+    Parameters
+    ----------
+    leaves : int
+        Target leaves.
+    width : int
+        Leaf width ``w``.
+    srcslots : int
+        Padded neighbour count per target leaf; deliberately not equal to ``width``.
+    num_particles : int
+        Particle count.
+    seed : int
+        RNG seed.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for :func:`_run_payload_pairs`.
+    """
+    rng = np.random.default_rng(seed)
+    dtype = jnp.float64
+    positions = jnp.asarray(rng.uniform(-1.0, 1.0, size=(num_particles, 3)), dtype)
+    masses = jnp.asarray(np.abs(rng.standard_normal(num_particles)) + 0.5, dtype)
+    target_particle_ids = jnp.asarray(
+        rng.integers(0, num_particles, size=(leaves, width)), INDEX_DTYPE
+    )
+    occupancy = jnp.asarray(rng.integers(1, width + 1, size=leaves))
+    target_particle_mask = jnp.arange(width)[None, :] < occupancy[:, None]
+    source_leaf_ids = jnp.asarray(
+        rng.integers(0, leaves, size=(leaves, srcslots)), INDEX_DTYPE
+    )
+    neighbours = jnp.asarray(rng.integers(1, srcslots + 1, size=leaves))
+    source_particle_mask = target_particle_mask[source_leaf_ids] & (
+        jnp.arange(srcslots)[None, :, None] < neighbours[:, None, None]
+    )
+    return dict(
+        positions=positions,
+        masses=masses,
+        target_particle_ids=target_particle_ids,
+        target_particle_mask=target_particle_mask,
+        source_particle_ids=target_particle_ids[source_leaf_ids],
+        source_particle_mask=source_particle_mask,
+        source_slot_valid_mask=jnp.any(source_particle_mask, axis=-1),
+    )
+
+
+def _run_payload_pairs(case, **overrides):
+    """Run the pure-JAX payload pair kernel on ``case``, with ``overrides`` substituted.
+
+    Parameters
+    ----------
+    case : dict
+        From :func:`_payload_pairs_case`.
+    **overrides : Array
+        Arguments to replace, by parameter name.
+
+    Returns
+    -------
+    Array
+        Per-particle accelerations ``[n, 3]``.
+    """
+    from jaccpot.nearfield._fast_lane import (
+        _compute_radix_fast_lane_payload_pairs_impl,
+    )
+
+    args = {**case, **overrides}
+    return _compute_radix_fast_lane_payload_pairs_impl(
+        args["positions"],
+        args["masses"],
+        args["target_particle_ids"],
+        args["target_particle_mask"],
+        args["source_particle_ids"],
+        args["source_particle_mask"],
+        args["source_slot_valid_mask"],
+        G=1.0,
+        softening_sq=jnp.asarray(1e-2**2, dtype=jnp.float64),
+        target_leaf_batch_size=2,
+        source_slot_tile_size=2,
+        source_slot_scan_unroll=1,
+        target_batch_scan_unroll=1,
+    )
+
+
+def test_payload_pairs_rejects_a_source_table_split_the_wrong_way():
+    """``(leaves, srcslots, w)`` transposed to ``(leaves, w, srcslots)`` must not be taken.
+
+    The kernel reads ``shape[1] * shape[2]`` and flattens, so the transposed table has the
+    right element count and is accepted. With ragged occupancy the flattened order no
+    longer matches the mask, and the force comes back wrong by rel-L2 9.9e-01 -- measured
+    on the parent commit, where it was returned without complaint.
+    """
+    case = _payload_pairs_case()
+
+    # Non-vacuity: the well-formed case must produce a real force.
+    assert float(jnp.max(jnp.abs(_run_payload_pairs(case)))) > 0.0
+
+    with pytest.raises(TypeCheckError):
+        _run_payload_pairs(
+            case,
+            source_particle_ids=jnp.transpose(case["source_particle_ids"], (0, 2, 1)),
+            source_particle_mask=jnp.transpose(case["source_particle_mask"], (0, 2, 1)),
+        )
+
+
+def test_payload_pairs_rejects_a_transposed_slot_validity_mask():
+    """``source_slot_valid_mask`` is ``(leaves, srcslots)``, and the transpose is not it.
+
+    Square only when the neighbour count happens to equal the leaf count, so the
+    transpose is normally a different shape -- but the kernel indexes it by leaf and JAX
+    clamps an out-of-range gather, so it was accepted and skipped the wrong source tiles:
+    wrong by rel-L2 5.0e-01 on the parent commit.
+    """
+    case = _payload_pairs_case()
+    transposed = jnp.transpose(
+        jnp.pad(case["source_slot_valid_mask"], ((0, 0), (0, 1))), (1, 0)
+    )
+
+    with pytest.raises(TypeCheckError):
+        _run_payload_pairs(case, source_slot_valid_mask=transposed)

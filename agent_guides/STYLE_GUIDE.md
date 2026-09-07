@@ -124,6 +124,18 @@ Never write a docstring that restates the name. `"""Compute the multipole."""` o
 
 ## 4. Type annotations
 
+**The burn-down number has exactly one definition: `python bench/annotation_census.py`.**
+Run it before and after an annotation change and quote its output in the PR. Do not
+restate it in a table — E.1's table went stale twice that way, and F20's figure and an
+AST walk over the same tree disagreed by ~70% (3174 against 1855) because they answered
+different questions. That module writes the question down: the unit is a function
+*parameter*, one parameter counts once however many `Array`s its annotation mentions,
+`self`/`cls` is exempt, return annotations are excluded (4.4 records why they are
+unavailable here), and `jaccpot/experimental/` is out. `--reconcile` prints the ladder to
+the looser definitions, which is the part that caused the confusion.
+
+The derivation tool is its sibling, `bench/annotation_capture.py` — see 4.2.
+
 - Full annotations on public functions and on internal functions whose types are not obvious.
 - Use `TypeVar` for decorators that must preserve the wrapped signature (see
   `_precision.py`). A targeted `# type: ignore[return-value]` with an obvious reason is
@@ -174,6 +186,12 @@ Instrument the function, run the suite, tally the shapes against the live `n`/`l
 call, and annotate what you observed. A wrong shape annotation is worse than none, because the
 decorator enforces it.
 
+`bench/annotation_capture.py` is the reusable version of that instrumentation, and it reports
+its own coverage as well as the shapes: how many DISTINCT extents sit behind each axis
+equality, and which test files reached the function. Read the second list and ask which lane
+is missing from it — that is the guard that would have caught `farleaves`, and no amount of
+captured data supplies it.
+
 ### 4.3 The axis vocabulary
 
 Lowercase, shared package-wide so a reader learns it once. Every new **single-identifier** name
@@ -184,19 +202,116 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `n` | particles |
 | `t` | targets, when a call returns a subset of the particles |
 | `nodes` | tree nodes |
+| `targets`, `sources` | the target and source node sets of one M2L level, which the DISTRIBUTED lane makes different |
 | `internal` | internal nodes, i.e. those with children |
 | `leaves` | leaf nodes |
 | `leaves+1` | CSR-style offsets over leaves; symbolic expressions are legal |
 | `w` | leaf width (`max_leaf_size`) |
+| `sw` | a SOURCE-side width that genuinely differs from the target's `w` -- see below |
+| `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
 | `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
+| `crossleaves` | the CROSS-domain near view in `distributed/_force_scale.py`, which is not `leaves` either: it degenerates to length 1 when a rank has no cross neighbours |
+| `coarse` | the remote coarse (LET) tree's nodes, which are a different tree from the local `nodes` |
 | `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
+| `tiles` | source-block tiles in a fixed-shape tile sequence (`nearfield/_large_n_blocks.py`) |
+| `tbatch` | target leaves per scan step, i.e. `target_leaf_batch_size` |
+| `blockdim` | one solid-harmonic rotation block, square: `2*ell + 1` a side |
 | `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
+| `sh` | spherical-harmonic packed coefficients, `sh_size(p) == (p+1)**2` |
+| `degrees` | spherical-harmonic degrees of a per-degree summary, `p+1` of them |
+| `orders` | the candidate expansion orders an adaptive policy scores |
 | `levels` | block-step levels, `k_max + 1` of them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
+
+**`srcslots` is not `w`, and every capture said it was.** `_fast_lane.py`'s materialised
+source-particle layout is `(leaves, srcslots, w)`, and in all three recorded calls the middle
+and trailing axes were equal -- 2 beside 2, then 256 beside 256. That is the `farleaves` trap
+again: the equality held because of how the test payload is built, not because it is a
+contract. It was settled by reading the builder rather than the capture. `_large_n_pipeline`
+writes `source_particle_ids = target_particle_ids[safe_source_leaf_ids]`, so axis 1 is the
+source LIST's length and axis 2 is a gather from the target table -- `w` by construction --
+and a re-measurement at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4 makes the equality
+disappear. Both kernels read only `shape[1] * shape[2]` and flatten, so a table split the
+other way was accepted and returned a force wrong by rel-L2 9.9e-01.
+
+**`sw` MEANS A SOURCE WIDTH THAT GENUINELY DIFFERS, AND THE WAY IT WAS FIRST USED IS THE
+LESSON.** Its live user is `nearfield/grad.py`'s bucketed pair kernel, where the two widths
+really are independent -- `_pair_accel_cvjp` was observed with a target width of 5 beside a
+source width of 7, in one recorded call -- so `(pairs, w, 3)` against `(pairs, sw, 3)` asserts
+something true and nothing false.
+
+It was introduced somewhere else, and wrongly. `_fast_lane.py`'s decoupled lane got it on the
+strength of a measurement that a wider source pool is "correctly ignored", so asserting
+equality with the target's `w` would reject a working configuration. The measurement was wrong in the flattering direction: it padded the
+surplus source columns and **masked them off**, where they contribute nothing either way.
+Unmasked, they are silently dropped -- a target width of 4 against a source pool padded to 8
+with real, valid extra particles returns a force identical to ignoring them, rel-L2 0.0e+00.
+A plausible wrong number, recorded as a safe configuration, by a check designed to catch
+exactly that.
+
+That lane no longer uses `sw` -- `nearfield_leafpair_pallas_decoupled` enforces equal widths
+with a `ValueError`, so both of its sides are simply `w`. Two things follow, and they
+generalise past this axis. **A perturbation that the code masks
+off tests nothing** -- the same trap as the all-valid mask that made `srcslots` look
+interchangeable with `w` above, and it is worth building every such check so the perturbed
+value is one the code must actually read. And **an annotation is not the tool for a range
+constraint**: the real contract was `sw == w`, `nearfield_leafpair_pallas_decoupled` now
+enforces it with a `ValueError`, and once it is a contract both sides are simply `w`. Reach
+for a shape name when two axes genuinely differ -- `grad.py`'s bucketed pair kernel takes a
+target width of 5 beside a source width of 7 and needs one -- not to encode a bound
+jaxtyping cannot express.
+
+**`tbatch` is not `leaves`, and `tiles` is not `blocks`.** Both distinctions are measured, and
+both looked interchangeable before the capture. `_accumulate_target_block_tile_sequence` takes
+`target_pos` as `(tbatch, w, 3)` and `leaf_positions` as `(leaves, w, 3)` in the same signature,
+observed at 16 against 5 -- `tbatch` is a *scan step's worth* of target leaves, set by
+`target_leaf_batch_size`, and is unrelated to how many leaves exist. `tiles` is the sequence
+axis over source-block tiles (observed 1 and 4) and sits *outside* `blocks blocksize`, which is
+still the block/lane pair inside each tile: the full layout is
+`tiles tbatch blocks blocksize`.
+
+**`blockdim` asserts squareness, which is the whole point of naming it.** The rotation-block
+tensors in `operators/complex_ops.py` were observed `(17, 3, 5, 5)`, `(17, 4, 7, 7)` and
+`(17, 5, 9, 9)`: the trailing pair agrees at three distinct extents, and nothing else in the
+package checks it -- a non-square block reaches a matmul and fails there with a message naming
+neither parameter. Repeating the name on both the `to_z` and `from_z` tensors also ties them to
+each other. The two leading axes stay anonymous, because `jax.vmap` already rejects a batch
+mismatch against `multipoles` with a better message than an annotation would give.
+
+None of the three is added to the flake8 `--builtins` list, because none is ever used as a
+single-identifier axis -- see 4.4 for why that list exists and what it costs. The same goes
+for `srcslots`: it only ever appears beside another name.
+
+**That "never alone" claim expires the moment someone annotates a 1-D array with the axis,
+and it has now expired four times.** `nodes` and `degrees` were both in this table and out of the
+`--builtins` list on exactly that reasoning until `runtime/_adaptive_policy.py` needed
+`node_radii: Float[Array, "nodes"]` and `masked_binomial: Float[Array, "degrees"]`. Then
+`nearfield/_kernels.py` needed `target_mask: Bool[Array, "w"]` and
+`source_mask: Bool[Array, "sw"]`, so `w` and `sw` went the same way. All four are in the
+list now. The lesson is not to predict which names will stay paired: if flake8 reports
+F821 on an axis name, add it and move on -- the prediction is the fragile part, not the list.
+
+**`sh` is the axis `ct` was defined against**, and it took until
+`runtime/_adaptive_policy.py` to get a name because nothing had annotated a
+spherical-harmonic buffer before -- the note below says `C` means `sh_size(p)` *elsewhere in
+the package*, meaning in prose. `sh` is that count as an axis, lowercase like the rest, and
+named after the `sh_size` function it equals. Observed at 4, 16 and 25, i.e. p=1, 3 and 4. It
+carries `Inexact`, not `Float`: the complex basis is a live lane and a packed buffer on it is
+`c64`/`c128`, which is the subject of the dtype half of the capture-coverage note below.
+
+**`degrees` and `orders` are different axes and were observed differing**, which is the only
+reason they need separate names: `dehnen_paper_pair_error_by_order` takes `source_power` as
+`(pairs, degrees)` and `masked_binomial_by_order` as `(orders, degrees)` in the same
+signature, measured at `degrees` 3, 4, 5 against `orders` 1, 2, 3. The shared `degrees` is
+what makes the contraction between them valid, and it is exactly what the eight silent
+acceptances in that function would have broken. `orders` IS used as a single-identifier axis
+(`order_values`), so it is in the flake8 `--builtins` list -- and `degrees` joined it later,
+for `masked_binomial` in the same module; `sh` is still the only one of the three that has
+never appeared alone.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
 spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
@@ -210,6 +325,32 @@ annotation enforced. The shapes had been derived from 64 captured calls -- throu
 `test_near_field.py` and `tests/integration/`, neither of which enters that backend. **Capture
 coverage bounds annotation validity:** an axis equality observed in every call you recorded is
 only as strong as the lanes you recorded.
+
+**`targets` and `sources` are the same lesson a third time, and the cheapest to have
+avoided.** `downward/local_expansions.py`'s `_accumulate_level` takes `coeffs` and
+`component_matrix` on what looks like one node axis: every recorded call had them equal, at
+(7, 7) and (31, 31). The DISTRIBUTED lane passes `coeffs` at 9 nodes against
+`component_matrix` at 11, because the source side is a remote tree. Annotating them as one
+`nodes` broke `tests/distributed/test_distributed_m2l_mechanism.py` in CI -- two tests, on
+both smoke shards and the distributed tier.
+
+The pilot recording is taken over `tests/unit` + `tests/integration`. `tests/distributed`
+is NOT in that scope and cannot be, since every file in it skips below two devices. So for
+any module the distributed lane reaches, an axis equality the recording shows is a
+single-device equality, full stop. `offsets` in the same signature makes the point twice
+over: it is `nodes+1` in every recorded call and plain `nodes` in the distributed one, so
+even the symbolic form had to go back to a rank-only `_`.
+
+**And the same bound applies to the dtype, which is the easier half to forget.**
+`runtime/_adaptive_policy.py`'s `multipole_packed` was annotated `Float[Array, "nodes sh"]`
+from a pilot recording taken entirely on the real basis. The complex basis hands the same
+parameter `c128[31,9]`, `c128[1,25]`, `c128[255,25]` and `c64[15,16]`, so the annotation
+rejected a supported lane and 27 tests failed in CI -- including
+`test_dehnen_power_is_basis_invariant`, whose whole point is that both bases agree, and the
+function's own docstring, which sums over the *complex* moments and branches on
+`jnp.iscomplexobj`. Two habits close this: read the body for a dtype branch before choosing
+between `Float` and `Inexact`, and check the *recording's provenance* -- a pilot replay is a
+measurement of the lanes in the recording and says nothing about the lanes outside it.
 
 **A named axis can be impossible even when the shape is known**, and this is the sharper case.
 `runtime/kernels/_evaluate.py`'s `nearfield_leaf_particle_indices` is measurably `(leaves, w)`
@@ -260,6 +401,21 @@ a forward reference, so `Float[Array, "n"]` reports `undefined name 'n'` while
 `Float[Array, "n 3"]` is clean. The axis names are declared via `--builtins` on the flake8 hook
 rather than suppressed per line; the cost — a bare `n` in code is no longer flagged — is
 recorded there.
+
+**A VARIADIC container annotation is sampled, not exhaustive.** `tuple[X, ...]` is checked by
+beartype's default O(1) strategy, which inspects roughly ONE element per call. Measured on a
+three-element tuple with a single bad element, by position: 8/40, 11/40, 14/40 rejections. A
+FIXED-length `tuple[X, X, X]` is exhaustive -- 40/40 at every position -- so
+`pallas/nearfield_mutual.py`'s three-component `a_xyz` is a real contract and
+`operators/complex_ops.py`'s `tuple[Inexact[Array, "_ _"], ...]` is not quite one.
+
+What a variadic annotation still buys: the argument is a container of the right element type,
+and a container whose elements are *systematically* wrong is rejected every time, because
+whichever element gets sampled is bad. A single corrupted element is caught only sometimes.
+Write the fixed-length form when the arity is known. Where it is not, keep the annotation --
+it costs nothing and documents the contract -- but do not write a test that corrupts one
+element and expects a rejection: that test passes standalone and flakes in the full suite,
+which is how this was found.
 
 **Widths are wrong, families are right.** Use `Int`, never `Int32`/`Int64`: `INDEX_DTYPE` is
 selectable via `JACCPOT_INDEX_PRECISION`, and pilot 3 observed `precomputed_target_leaf_ids` as
@@ -487,7 +643,8 @@ Genuine configurable features and the documented environment gates are **not** c
 3. [ ] Every substantial function has a NumPy-style docstring including shapes, units,
        static arguments, differentiability, accuracy regime, and stated equivalences.
 4. [ ] `pydoclint --style numpy` clean (`pre-commit run --all-files`).
-5. [ ] `jaxtyping` annotations on array arguments; no bare `# type: ignore`.
+5. [ ] `jaxtyping` annotations on array arguments **that nothing else already
+       validates** (4.1 -- not "annotate every array"); no bare `# type: ignore`.
 6. [ ] Comments explain *why*; anything that looks wrong but is right is flagged at the site.
 7. [ ] Long units split with dashed section dividers; module seams in §8 respected.
 8. [ ] Descriptive names; standard symbols and established `p2m`/`m2l`-style shorthand kept.
@@ -496,3 +653,25 @@ Genuine configurable features and the documented environment gates are **not** c
 11. [ ] `black --check .` and `isort --check-only .` pass — and formatting was left to them.
 12. [ ] `NUMERICS_AND_JAX.md` checklist also passed if operators, sweeps, Pallas, or
         distributed code was touched.
+13. [ ] **No annotation added made an existing check unreachable.** For every parameter
+        you annotated, grep its own function for a `raise` naming it. A decorator runs
+        before the body, so `Float[Array, "n"]` on a parameter whose body already does
+        `if x.ndim != 1: raise ValueError(...)` deletes that error and everything it said
+        -- and the annotation is usually the worse of the two, because the body's message
+        names the parameter and prints the offending shape.
+
+        This is invisible unless a test pins the body's message. Measured
+        2026-09-03 in `runtime/_adaptive_policy.py`:
+        `compute_node_force_scale_from_sorted_magnitudes` was annotated, its
+        `ValueError("magnitudes_sorted must be 1-D ...; got shape (64, 3)")` became dead
+        code, and `test_scalar_reduction_rejects_vector_input` went red for matching
+        `"must be 1-D"`. The annotation closed nothing: the only hole the pilot found
+        there was a LENGTH change, which a single-occurrence axis cannot reject either.
+        Zero holes closed, one good error deleted, one test red -- so the parameter went
+        back to bare `Array`.
+
+        Same shape as the `Literal` contradiction the audit records for
+        `_fmm_impl.__init__`, where `Literal["auto", ...]` makes both the normalisation
+        and the `ValueError` below it unreachable for any caller who honours the type.
+        When the two disagree, decide which one should do the rejecting and delete the
+        other -- do not leave a check that cannot fire.

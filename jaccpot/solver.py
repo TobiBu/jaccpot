@@ -390,10 +390,11 @@ class _LegacyRuntimeOverrides(NamedTuple):
         Bucketed near-field chunk size. Legacy name:
         ``nearfield_edge_chunk_size``.
     fixed_order : Optional[int]
-        Legacy-only: there is no modern spelling, so this is ``None`` unless
-        ``fixed_order`` was passed.
+        Resolved evaluate-stage expansion order. Modern value, overridden by
+        legacy ``fixed_order``.
     fixed_max_leaf_size : Optional[int]
-        Legacy-only, as above, for ``fixed_max_leaf_size``.
+        Resolved evaluate-stage leaf-size cap. Modern value, overridden by legacy
+        ``fixed_max_leaf_size``.
     legacy_used : bool
         Threaded in and out so both poppers contribute to one warning decision.
     """
@@ -523,15 +524,21 @@ def _pop_legacy_runtime_overrides(
         nearfield_edge_chunk_size = int(legacy_nf_chunk)
         legacy_used = True
 
-    fixed_order = legacy_kwargs.pop("fixed_order", None)
+    fixed_order = advanced_cfg.runtime.fixed_order
+    legacy_fixed_order = legacy_kwargs.pop("fixed_order", None)
+    if legacy_fixed_order is not None:
+        fixed_order = legacy_fixed_order
+        legacy_used = True
     if fixed_order is not None:
         fixed_order = int(fixed_order)
-        legacy_used = True
 
-    fixed_max_leaf_size = legacy_kwargs.pop("fixed_max_leaf_size", None)
+    fixed_max_leaf_size = advanced_cfg.runtime.fixed_max_leaf_size
+    legacy_leaf_cap = legacy_kwargs.pop("fixed_max_leaf_size", None)
+    if legacy_leaf_cap is not None:
+        fixed_max_leaf_size = legacy_leaf_cap
+        legacy_used = True
     if fixed_max_leaf_size is not None:
         fixed_max_leaf_size = int(fixed_max_leaf_size)
-        legacy_used = True
 
     return _LegacyRuntimeOverrides(
         complex_rotation=complex_rotation,

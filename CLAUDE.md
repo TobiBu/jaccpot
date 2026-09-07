@@ -78,7 +78,15 @@ isort --check-only .
 pre-commit run --all-files                     # includes pydoclint (numpy style)
 JAX_ENABLE_X64=1 pytest -q                     # xdist -n auto; use -n 0 for pdb / -x
 JAX_ENABLE_X64=1 pytest -q tests/characterization   # golden reference — must not move
+python bench/annotation_census.py              # jaxtyping burn-down; quote it, don't retype it
 ```
+
+`bench/annotation_census.py` is the **only** definition of the jaxtyping burn-down number
+(STYLE_GUIDE §4). Run it before and after any annotation change and quote its output. Do
+not restate its numbers in a table anywhere: E.1's hand-maintained table went stale twice,
+and F20's row disagreed with an AST walk over the same tree by ~70% because the two were
+answering different questions and nobody had written the question down. `--reconcile`
+prints the ladder between the definitions; `--json` is for scripts.
 
 pydoclint runs with `skip-checking-short-docstrings = false`, so a one-line summary over
 undocumented parameters **is** a violation. There is **no baseline** — the Tier 2.5

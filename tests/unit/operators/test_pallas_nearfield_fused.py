@@ -259,3 +259,219 @@ def test_gpu_matches_jax_reference():
         tp, tmask, sp, sm, smask, softening_sq=soft, G=G, interpret=False
     )
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-5, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# The `nearfield/_fast_lane` WRAPPERS around the two leaf-pair kernels.
+#
+# `test_leafpair_decoupled_same_array_reproduces_the_coupled_kernel` above pins F25 at
+# the kernel level. It does not reach `_radix_fast_lane_prepacked_pallas_decoupled`, and
+# that wrapper is what `distributed/fmm.py` actually calls -- it had no test at all, which
+# is why its shapes had to be derived by probe rather than by capture. The wrapper adds the
+# scatter back to particle order, which is exactly where a target/source mix-up would land.
+# ---------------------------------------------------------------------------
+
+
+def _fast_lane_prepacked_inputs(seed=31, L=5, W=8, B=2, S=3, N=48):
+    """A prepacked leaf table with RAGGED occupancy, plus its source-leaf rectangle.
+
+    Ragged on purpose: with every slot valid, a target/source confusion returns the same
+    number and any comparison below is vacuous.
+
+    Parameters
+    ----------
+    seed : int
+        RNG seed.
+    L : int
+        Leaves.
+    W : int
+        Leaf width.
+    B : int
+        Source blocks per leaf.
+    S : int
+        Lanes per source block.
+    N : int
+        Particles.
+
+    Returns
+    -------
+    dict
+        Arrays keyed by the wrappers' parameter names, plus ``positions``.
+    """
+    rng = np.random.default_rng(seed)
+    dtype = jnp.float64
+    positions = jnp.asarray(rng.uniform(-1.0, 1.0, size=(N, 3)), dtype)
+    leaf_particle_idx = jnp.asarray(rng.integers(0, N, size=(L, W)), jnp.int32)
+    occupancy = jnp.asarray(rng.integers(1, W + 1, size=L))
+    return dict(
+        positions=positions,
+        leaf_positions=positions[leaf_particle_idx],
+        leaf_masses=jnp.asarray(np.abs(rng.standard_normal((L, W))) + 0.5, dtype),
+        leaf_mask=jnp.arange(W)[None, :] < occupancy[:, None],
+        leaf_particle_idx=leaf_particle_idx,
+        source_leaf_ids=jnp.asarray(rng.integers(0, L, size=(L, B, S)), jnp.int32),
+        source_valid=jnp.ones((L, B, S), dtype=bool),
+    )
+
+
+def test_fast_lane_decoupled_wrapper_reproduces_the_coupled_wrapper():
+    """F25 at the layer ``distributed/fmm.py`` calls, which nothing asserted.
+
+    The decoupled kernel's docstring claims that passing the same array as both target
+    and source reproduces the coupled kernel bit-for-bit, and the kernel-level test above
+    pins that. The claim that matters for the distributed near field is one layer up: it
+    is ``_radix_fast_lane_prepacked_pallas_decoupled`` that ``distributed/fmm.py``
+    invokes, and that wrapper also does the scatter back to particle order from
+    ``target_particle_idx`` -- so it is where a target/source mix-up would actually show.
+
+    Bit-for-bit (``array_equal``) rather than to a tolerance, because the claim is
+    bit-for-bit: with the same array on both sides the kernel does the same arithmetic in
+    the same order.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 so bit-equality is a meaningful assertion")
+
+    from jaccpot.nearfield._fast_lane import (
+        _radix_fast_lane_prepacked_pallas,
+        _radix_fast_lane_prepacked_pallas_decoupled,
+    )
+
+    case = _fast_lane_prepacked_inputs()
+    common = dict(
+        G=1.0,
+        softening_sq=jnp.asarray(1e-2**2, dtype=jnp.float64),
+        compute_potential=False,
+        interpret=True,
+    )
+
+    coupled = _radix_fast_lane_prepacked_pallas(
+        case["source_leaf_ids"],
+        case["source_valid"],
+        case["leaf_positions"],
+        case["leaf_masses"],
+        case["leaf_mask"],
+        case["leaf_particle_idx"],
+        case["positions"],
+        **common,
+    )
+    decoupled = _radix_fast_lane_prepacked_pallas_decoupled(
+        case["source_leaf_ids"],
+        case["source_valid"],
+        case["leaf_positions"],
+        case["leaf_mask"],
+        case["leaf_particle_idx"],
+        case["leaf_positions"],
+        case["leaf_masses"],
+        case["leaf_mask"],
+        case["positions"],
+        **common,
+    )
+
+    # Non-vacuity: zeros would satisfy bit-equality trivially, and the ragged mask makes
+    # a target/source confusion produce a different number rather than the same one.
+    assert float(jnp.max(jnp.abs(coupled))) > 0.0
+    np.testing.assert_array_equal(np.asarray(decoupled), np.asarray(coupled))
+
+
+# ---------------------------------------------------------------------------
+# The decoupled kernel's width contract, which was enforced by nothing and whose two
+# violations fail in OPPOSITE and equally quiet ways.
+#
+# The source gather tables' `BlockSpec` is built from `leaf_width` -- the TARGET width --
+# so the kernel reads exactly that many columns from the source tables however many they
+# have. Measured on the parent commit:
+#
+#   source narrower than target   out-of-bounds read, |acc| = nan
+#   source wider than target      the surplus columns are NEVER READ, so real valid
+#                                 source particles are dropped and the force is wrong
+#                                 by rel-L2 0.0e+00 against the narrow answer -- i.e.
+#                                 silently identical to ignoring them
+#
+# The second is the dangerous one and it was previously recorded the wrong way round: the
+# note in `_fast_lane.py` said a wider pool is "correctly ignored", which was measured
+# with the surplus MASKED OFF, where it contributes nothing either way. Unmasked, it is a
+# wrong number that looks plausible.
+# ---------------------------------------------------------------------------
+
+
+def _decoupled_width_case(*, target_width, source_width, seed=17):
+    """Build a decoupled call with independently chosen target and source widths.
+
+    Every source slot is VALID -- that is the point. Masking the surplus off is what made
+    the original measurement read as harmless.
+
+    Parameters
+    ----------
+    target_width : int
+        Columns in the target block.
+    source_width : int
+        Columns in the source gather pool.
+    seed : int
+        RNG seed.
+
+    Returns
+    -------
+    dict
+        Keyword arguments for :func:`nearfield_leafpair_pallas_decoupled`.
+    """
+    rng = np.random.default_rng(seed)
+    targets, sources, slots = 3, 4, 2
+    return dict(
+        target_positions=jnp.asarray(
+            rng.uniform(-1.0, 1.0, size=(targets, target_width, 3)), jnp.float64
+        ),
+        target_mask=jnp.ones((targets, target_width), dtype=bool),
+        source_positions=jnp.asarray(
+            rng.uniform(-1.0, 1.0, size=(sources, source_width, 3)), jnp.float64
+        ),
+        source_masses=jnp.asarray(
+            np.abs(rng.standard_normal((sources, source_width))) + 0.5, jnp.float64
+        ),
+        source_mask=jnp.ones((sources, source_width), dtype=bool),
+        source_leaf_ids=jnp.asarray(
+            rng.integers(0, sources, size=(targets, slots)), jnp.int32
+        ),
+        source_valid=jnp.ones((targets, slots), dtype=bool),
+    )
+
+
+@pytest.mark.parametrize(
+    "target_width,source_width",
+    [(8, 4), (16, 3), (4, 8), (4, 16)],
+    ids=["narrower-8-4", "narrower-16-3", "wider-4-8", "wider-4-16"],
+)
+def test_decoupled_rejects_a_source_pool_of_a_different_width(
+    target_width, source_width
+):
+    """Unequal widths must raise, naming the parameter, in BOTH directions.
+
+    Narrower reads out of bounds and returns NaN; wider drops the surplus columns and
+    returns a plausible wrong number. Neither is a configuration the kernel supports --
+    its own docstring gives both tables the width ``W`` -- and neither said so.
+    """
+    case = _decoupled_width_case(target_width=target_width, source_width=source_width)
+    with pytest.raises(ValueError, match="source_positions"):
+        nearfield_leafpair_pallas_decoupled(
+            **case,
+            softening_sq=jnp.asarray(1e-2**2, dtype=jnp.float64),
+            G=jnp.asarray(1.0, dtype=jnp.float64),
+            interpret=True,
+        )
+
+
+def test_decoupled_equal_widths_are_untouched_and_finite():
+    """The supported configuration must be unaffected, which is what makes the fix safe.
+
+    Production only ever passes equal widths -- ``distributed/fmm.py`` slices its target
+    block out of the source pool -- so this is the path that must not move.
+    """
+    case = _decoupled_width_case(target_width=8, source_width=8)
+    out = nearfield_leafpair_pallas_decoupled(
+        **case,
+        softening_sq=jnp.asarray(1e-2**2, dtype=jnp.float64),
+        G=jnp.asarray(1.0, dtype=jnp.float64),
+        interpret=True,
+    )
+    assert bool(jnp.all(jnp.isfinite(out)))
+    # Non-vacuity: a kernel returning zeros would satisfy "finite" trivially.
+    assert float(jnp.max(jnp.abs(out))) > 0.0

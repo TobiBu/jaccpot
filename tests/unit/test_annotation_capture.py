@@ -28,6 +28,8 @@ import pytest
 
 pytest.importorskip("yggdrax")
 
+import pathlib
+
 from bench import annotation_capture  # noqa: E402
 
 
@@ -216,3 +218,115 @@ class _FakeArray:
     def __init__(self, shape: tuple[int, ...], dtype: str) -> None:
         self.shape = shape
         self.dtype = dtype
+
+
+# ---------------------------------------------------------------------------
+# Method targets. They were the tool's largest blind spot rather than an edge case: the
+# `runtime/` mixins hold 174 of the burn-down's remaining parameters, and while only
+# module attributes were rebound, every one of them reported no observations -- which is
+# indistinguishable from "never called".
+# ---------------------------------------------------------------------------
+
+
+class _Mixin:
+    """A stand-in for the `runtime/` mixins: defines the method, never instantiated."""
+
+    def measure(self, values):
+        """Return the argument unchanged.
+
+        Parameters
+        ----------
+        values : object
+            Anything.
+
+        Returns
+        -------
+        object
+            ``values``.
+        """
+        return values
+
+
+class _Engine(_Mixin):
+    """A stand-in for `FMMEngine`: inherits the method and does not override it."""
+
+
+def _make_class_module(request):
+    """Register a throwaway module exposing ``_Mixin`` and ``_Engine``.
+
+    Parameters
+    ----------
+    request : pytest.FixtureRequest
+        Used to deregister the synthetic module.
+
+    Returns
+    -------
+    types.ModuleType
+        The registered module.
+    """
+    module = _make_module("_cap_methods", _Mixin=_Mixin, _Engine=_Engine)
+    request.addfinalizer(lambda: sys.modules.pop("_cap_methods", None))
+    return module
+
+
+def test_a_method_target_resolves_to_the_defining_class(request):
+    """``Class.method`` names the class as the holder, not the module."""
+    module = _make_class_module(request)
+    holder, attribute, original = annotation_capture.resolve_target(
+        module, "_Mixin.measure"
+    )
+    assert holder is _Mixin
+    assert attribute == "measure"
+    assert original is _Mixin.__dict__["measure"]
+
+
+def test_patching_the_mixin_observes_a_call_made_through_a_subclass(request, tmp_path):
+    """The reason patching the CLASS is enough, and the reason it is the right level.
+
+    `FMMEngine` inherits `DerivativesMixin` without overriding, so a call on an engine
+    resolves through the MRO to the patched attribute. Patching every subclass would be
+    both unnecessary and fragile.
+    """
+    module = _make_class_module(request)
+    out = tmp_path / "caps.jsonl"
+    with annotation_capture.capture_shapes({"_cap_methods": ["_Mixin.measure"]}, out):
+        _Engine().measure(_FakeArray((4, 3), "float64"))
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["function"] == "_cap_methods:_Mixin.measure"
+    # `self` carries no `.shape`, so it is dropped without needing an exemption.
+    assert list(records[0]["parameters"]) == ["values"]
+    assert records[0]["parameters"]["values"]["shape"] == [4, 3]
+
+
+def test_the_method_binding_is_restored_afterwards(request):
+    """A leaked wrapper would make every later test record into a closed file."""
+    module = _make_class_module(request)
+    original = _Mixin.__dict__["measure"]
+    with annotation_capture.capture_shapes(
+        {"_cap_methods": ["_Mixin.measure"]}, pathlib.Path("/dev/null")
+    ):
+        assert _Mixin.__dict__["measure"] is not original
+    assert _Mixin.__dict__["measure"] is original
+
+
+@pytest.mark.parametrize(
+    "target,match",
+    [("_Mixin.inner.measure", "dots"), ("_Mixin.NOT_CALLABLE", "not callable")],
+)
+def test_an_unresolvable_method_target_raises_rather_than_recording_nothing(
+    request, target, match
+):
+    """The whole point: "no observations" must keep meaning "never called".
+
+    A typo'd or too-deeply-nested target that silently recorded nothing would read as
+    "this lane is not exercised", which is the conclusion the tool exists to make
+    trustworthy.
+    """
+    module = _make_class_module(request)
+    _Mixin.NOT_CALLABLE = 3
+    try:
+        with pytest.raises(ValueError, match=match):
+            annotation_capture.resolve_target(module, target)
+    finally:
+        del _Mixin.NOT_CALLABLE

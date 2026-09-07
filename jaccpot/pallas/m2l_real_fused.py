@@ -28,8 +28,9 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from beartype import beartype
 from jax.experimental import pallas as pl
-from jaxtyping import Array
+from jaxtyping import Array, Float, jaxtyped
 
 from jaccpot.operators.real_harmonics import (
     sh_offset,
@@ -374,8 +375,12 @@ def _pair_pad_dims(order):
     return (t["C"], t["Cp"], t["p"] + 1, t["Bp"], t["md"], t["mdp"])
 
 
+@jaxtyped(typechecker=beartype)
 def _pad_pair_inputs(
-    mult: Array, bto: Array, bfr: Array, dims: tuple[int, ...]
+    mult: Float[Array, "pairs sh"],
+    bto: Float[Array, "pairs degrees blockdim blockdim"],
+    bfr: Float[Array, "pairs degrees blockdim blockdim"],
+    dims: tuple[int, ...],
 ) -> tuple[Array, Array, Array]:
     C, Cp, B, Bp, md, mdp = dims
     mpad = ((0, 0), (0, Cp - C))
@@ -383,11 +388,12 @@ def _pad_pair_inputs(
     return jnp.pad(mult, mpad), jnp.pad(bto, bpad), jnp.pad(bfr, bpad)
 
 
+@jaxtyped(typechecker=beartype)
 def m2l_real_fused_jax(
-    multipoles: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    r: Array,
+    multipoles: Float[Array, "pairs sh"],
+    blocks_to_z: Float[Array, "pairs degrees blockdim blockdim"],
+    blocks_from_z: Float[Array, "pairs degrees blockdim blockdim"],
+    r: Float[Array, "pairs"],
     *,
     order: int,
 ) -> Array:
@@ -395,13 +401,13 @@ def m2l_real_fused_jax(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Float[Array, 'pairs sh']
         Source multipole coefficients, shape ``(N, C)``, real.
-    blocks_to_z : Array
+    blocks_to_z : Float[Array, 'pairs degrees blockdim blockdim']
         Rotation blocks aligning each pair axis to +z, shape ``(N, p+1, md, md)``.
-    blocks_from_z : Array
+    blocks_from_z : Float[Array, 'pairs degrees blockdim blockdim']
         Rotation blocks back from +z, same shape.
-    r : Array
+    r : Float[Array, 'pairs']
         Per-pair centre separation, shape ``(N,)``.
     order : int
         Expansion order, which fixes the tables and the padded widths.
@@ -471,11 +477,12 @@ def _m2l_real_fused_kernel(
 _TABLE_KEYS = ("Ppack", "Uunpack", "Zsign", "Zfact", "Zexp")
 
 
+@jaxtyped(typechecker=beartype)
 def m2l_real_fused_pallas(
-    multipoles: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    r: Array,
+    multipoles: Float[Array, "pairs sh"],
+    blocks_to_z: Float[Array, "pairs degrees blockdim blockdim"],
+    blocks_from_z: Float[Array, "pairs degrees blockdim blockdim"],
+    r: Float[Array, "pairs"],
     *,
     order: int,
     interpret: bool = False,
@@ -489,13 +496,13 @@ def m2l_real_fused_pallas(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Float[Array, 'pairs sh']
         Source multipole coefficients, shape ``(N, C)``, real.
-    blocks_to_z : Array
+    blocks_to_z : Float[Array, 'pairs degrees blockdim blockdim']
         Per-pair rotation blocks aligning to +z, shape ``(N, p+1, md, md)``.
-    blocks_from_z : Array
+    blocks_from_z : Float[Array, 'pairs degrees blockdim blockdim']
         Per-pair rotation blocks back from +z, same shape.
-    r : Array
+    r : Float[Array, 'pairs']
         Per-pair centre separation, shape ``(N,)``.
     order : int
         Expansion order. Static: it fixes the padded tile widths and the tables.
@@ -600,12 +607,13 @@ def _m2l_real_fused_vjp_kernel(
     r_bar_ref[0] = rb
 
 
+@jaxtyped(typechecker=beartype)
 def m2l_real_fused_vjp_pallas(
-    multipoles: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    r: Array,
-    out_bar: Array,
+    multipoles: Float[Array, "pairs sh"],
+    blocks_to_z: Float[Array, "pairs degrees blockdim blockdim"],
+    blocks_from_z: Float[Array, "pairs degrees blockdim blockdim"],
+    r: Float[Array, "pairs"],
+    out_bar: Float[Array, "pairs sh"],
     *,
     order: int,
     interpret: bool = False,
@@ -620,15 +628,15 @@ def m2l_real_fused_vjp_pallas(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Float[Array, 'pairs sh']
         Primal source multipoles, shape ``(N, C)``.
-    blocks_to_z : Array
+    blocks_to_z : Float[Array, 'pairs degrees blockdim blockdim']
         Primal rotation-to-z blocks, shape ``(N, p+1, md, md)``.
-    blocks_from_z : Array
+    blocks_from_z : Float[Array, 'pairs degrees blockdim blockdim']
         Primal rotation-from-z blocks, same shape.
-    r : Array
+    r : Float[Array, 'pairs']
         Primal per-pair separation, shape ``(N,)``.
-    out_bar : Array
+    out_bar : Float[Array, 'pairs sh']
         Cotangent of the forward output, shape ``(N, C)``.
     order : int
         Expansion order. Static.

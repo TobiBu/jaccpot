@@ -121,13 +121,17 @@ def test_p2p_analytic_custom_vjp_matches_autodiff(seed):
     softening_sq = jnp.asarray(1e-2**2, dtype=jnp.float64)
     G = jnp.asarray(1.5, dtype=jnp.float64)
 
-    def f_custom(tp, sp, sm):
-        return _pair_accel_cvjp(tp, sp, sm, tmask_f, smask_f, softening_sq, G)
+    # Differentiated with respect to softening_sq and G as well: the rule
+    # returned zeros for both until 2026-09-04, dropping the near field's share of
+    # d/d(softening) and d/dG (the defect family jaccpot#319 fixed in the mutual
+    # Pallas kernel).
+    def f_custom(tp, sp, sm, soft, g):
+        return _pair_accel_cvjp(tp, sp, sm, tmask_f, smask_f, soft, g)
 
-    def f_ref(tp, sp, sm):
-        return _pair_accel_masked_accels(tp, sp, sm, tmask, smask, softening_sq, G)
+    def f_ref(tp, sp, sm, soft, g):
+        return _pair_accel_masked_accels(tp, sp, sm, tmask, smask, soft, g)
 
-    assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass))
+    assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass, softening_sq, G))
 
 
 # --------------------------------------------------------------------------
@@ -361,18 +365,20 @@ def test_nearfield_fused_leaf_pallas_custom_vjp_matches_twin(interpret):
     soft = jnp.asarray(1e-2, dtype=jnp.float64)
     G = jnp.asarray(1.5, dtype=jnp.float64)
 
-    def f_custom(tp, sp, sm):
+    def f_custom(tp, sp, sm, soft_, g_):
         return nearfield_fused_leaf_pallas_cvjp(
-            tp, tmask_f, sp, sm, smask_f, soft, G, None, 1, None, interpret
+            tp, tmask_f, sp, sm, smask_f, soft_, g_, None, 1, None, interpret
         )
 
-    def f_ref(tp, sp, sm):
+    def f_ref(tp, sp, sm, soft_, g_):
         return nearfield_fused_leaf_jax(
-            tp, tmask, sp, sm, smask, softening_sq=soft, G=G
+            tp, tmask, sp, sm, smask, softening_sq=soft_, G=g_
         )
 
     try:
-        assert_vjp_matches(f_custom, f_ref, (tpos, spos, smass), rtol=tol, atol=tol)
+        assert_vjp_matches(
+            f_custom, f_ref, (tpos, spos, smass, soft, G), rtol=tol, atol=tol
+        )
     except Exception as exc:  # pragma: no cover - GPU/runtime dependent
         _nf_skip_if_needed(interpret, exc)
 
@@ -404,19 +410,19 @@ def test_nearfield_leafpair_pallas_custom_vjp_matches_twin(interpret):
     soft = jnp.asarray(1e-2, dtype=jnp.float64)
     G = jnp.asarray(1.5, dtype=jnp.float64)
 
-    def f_custom(lp, lm):
+    def f_custom(lp, lm, soft_, g_):
         return nearfield_leafpair_pallas_cvjp(
-            lp, lm, leaf_mask_f, ids_f, valid_f, soft, G, None, 1, None, interpret
+            lp, lm, leaf_mask_f, ids_f, valid_f, soft_, g_, None, 1, None, interpret
         )
 
-    def f_ref(lp, lm):
+    def f_ref(lp, lm, soft_, g_):
         return nearfield_leafpair_jax(
-            lp, lm, leaf_mask, source_leaf_ids, source_valid, softening_sq=soft, G=G
+            lp, lm, leaf_mask, source_leaf_ids, source_valid, softening_sq=soft_, G=g_
         )
 
     try:
         assert_vjp_matches(
-            f_custom, f_ref, (leaf_positions, leaf_masses), rtol=tol, atol=tol
+            f_custom, f_ref, (leaf_positions, leaf_masses, soft, G), rtol=tol, atol=tol
         )
     except Exception as exc:  # pragma: no cover - GPU/runtime dependent
         _nf_skip_if_needed(interpret, exc)
@@ -471,7 +477,9 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
     soft = jnp.asarray(1e-2, dtype=dtype)
     G = jnp.asarray(1.0, dtype=dtype)
 
-    def f_custom(leaf_pos, leaf_mass):
+    # softening_sq and G are primals too: the analytic reverse returned zeros for
+    # both until 2026-09-04, dropping the near field's share of their gradients.
+    def f_custom(leaf_pos, leaf_mass, soft_, g_):
         return fast_lane._radix_fast_lane_prepacked_accel_cvjp(
             leaf_pos,
             leaf_mass,
@@ -480,8 +488,8 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
             source_valid.astype(dtype),
             leaf_mask.astype(dtype),
             leaf_particle_idx.astype(dtype),
-            soft,
-            G,
+            soft_,
+            g_,
             # nondiff args, positional because custom_vjp requires it:
             None,  # num_warps
             1,  # num_stages
@@ -493,7 +501,7 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
             None,  # rev_tiers (single full-width reverse pass)
         )
 
-    def f_ref(leaf_pos, leaf_mass):
+    def f_ref(leaf_pos, leaf_mass, soft_, g_):
         return nf._compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
             positions,
             source_leaf_ids,
@@ -502,8 +510,8 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
             leaf_mass,
             leaf_mask,
             leaf_particle_idx,
-            G=G,
-            softening_sq=soft,
+            G=g_,
+            softening_sq=soft_,
             target_leaf_batch_size=2,
             target_block_tile_size=2,
             target_block_tile_scan_unroll=1,
@@ -515,7 +523,11 @@ def test_radix_fast_lane_prepacked_accel_cvjp_matches_tiled_twin(interpret):
 
     try:
         assert_vjp_matches(
-            f_custom, f_ref, (leaf_positions, leaf_masses), rtol=1e-9, atol=1e-9
+            f_custom,
+            f_ref,
+            (leaf_positions, leaf_masses, soft, G),
+            rtol=1e-9,
+            atol=1e-9,
         )
     except Exception as exc:  # pragma: no cover - GPU/runtime dependent
         _nf_skip_if_needed(interpret, exc)
@@ -575,7 +587,12 @@ def test_mutual_nearfield_pallas_custom_vjp_matches_twin(
     xa, ma, va, xb, mb, vb, ra, rb, lw, soft, g = _mutual_pair_case()
     num_levels = int(lw.shape[0])
 
-    def f_custom(xa_, ma_, xb_, mb_):
+    # Differentiated with respect to the positions, the masses AND the three
+    # parameters the force is smooth in -- the level-weight table (which is
+    # `half * dt_max / 2**k`, so this is the dt_max gradient of a block-step kick),
+    # the squared softening and G. The reverse rule used to return zeros for those
+    # three; jaccpot#316 pinned the resulting d/d(dt_max) at 0.056 of the truth.
+    def f_custom(xa_, ma_, xb_, mb_, lw_, soft_, g_):
         return mutual_leafpair_block_cvjp(
             xa_,
             ma_,
@@ -585,16 +602,16 @@ def test_mutual_nearfield_pallas_custom_vjp_matches_twin(
             vb,
             ra,
             rb,
-            lw,
-            soft,
-            g,
+            lw_,
+            soft_,
+            g_,
             num_levels,
             exclude_diagonal,
             emit_b,
             interpret,
         )
 
-    def f_ref(xa_, ma_, xb_, mb_):
+    def f_ref(xa_, ma_, xb_, mb_, lw_, soft_, g_):
         return mutual_leafpair_block_jax(
             xa_,
             ma_,
@@ -604,16 +621,87 @@ def test_mutual_nearfield_pallas_custom_vjp_matches_twin(
             vb,
             ra,
             rb,
-            lw,
-            soft,
-            g,
+            lw_,
+            soft_,
+            g_,
             exclude_diagonal=exclude_diagonal,
             emit_b=emit_b,
         )
 
     tol = 1.0e-10 if interpret else 1.0e-8
     try:
-        assert_vjp_matches(f_custom, f_ref, (xa, ma, xb, mb), rtol=tol, atol=tol)
+        assert_vjp_matches(
+            f_custom, f_ref, (xa, ma, xb, mb, lw, soft, g), rtol=tol, atol=tol
+        )
+    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
+        _nf_skip_if_needed(interpret, exc)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+def test_mutual_nearfield_pallas_parameter_cotangents_without_level_weighting(
+    interpret,
+):
+    """With weighting off (``num_levels = 0``) softening and G still get cotangents.
+
+    The one-entry placeholder table the caller substitutes for ``None`` is never
+    read by the forward, so its cotangent must be exactly zero -- and the other
+    two must still match the twin.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires x64 for a tight tolerance")
+    if not interpret and not pallas_nearfield_mutual_supported():
+        pytest.skip("mutual near-field Pallas kernel requires an Ampere+ (sm_80) GPU")
+
+    xa, ma, va, xb, mb, vb, ra, rb, _lw, soft, g = _mutual_pair_case(seed=3)
+    placeholder = jnp.ones((1,), dtype=xa.dtype)
+
+    def f_custom(xa_, soft_, g_):
+        return mutual_leafpair_block_cvjp(
+            xa_,
+            ma,
+            va,
+            xb,
+            mb,
+            vb,
+            ra,
+            rb,
+            placeholder,
+            soft_,
+            g_,
+            0,
+            False,
+            True,
+            interpret,
+        )
+
+    def f_ref(xa_, soft_, g_):
+        return mutual_leafpair_block_jax(
+            xa_,
+            ma,
+            va,
+            xb,
+            mb,
+            vb,
+            ra,
+            rb,
+            None,
+            soft_,
+            g_,
+            exclude_diagonal=False,
+            emit_b=True,
+        )
+
+    tol = 1.0e-10 if interpret else 1.0e-8
+    try:
+        assert_vjp_matches(f_custom, f_ref, (xa, soft, g), rtol=tol, atol=tol)
+        out, vjp = jax.vjp(
+            lambda lw_: mutual_leafpair_block_cvjp(
+                xa, ma, va, xb, mb, vb, ra, rb, lw_, soft, g, 0, False, True, interpret
+            ),
+            placeholder,
+        )
+        (lw_bar,) = vjp(jax.tree.map(jnp.ones_like, out))
+        assert float(jnp.abs(lw_bar).max()) == 0.0
     except Exception as exc:  # pragma: no cover - GPU/runtime dependent
         _nf_skip_if_needed(interpret, exc)
 

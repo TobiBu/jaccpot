@@ -51,7 +51,7 @@ from __future__ import annotations
 import json
 import os
 import warnings
-from typing import Any, Literal, Mapping, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 import jax
 from beartype import beartype
@@ -66,13 +66,11 @@ from yggdrax.tree import Tree, TreeType, available_tree_types
 
 from jaccpot.config import (
     FarFieldConfig,
-    FMMExecutionBackend,
     FMMPreset,
     MACTypeInput,
     MemoryObjective,
     NearFieldConfig,
     RuntimePolicyConfig,
-    TraversalOverrides,
     TreeConfig,
 )
 from jaccpot.downward.local_expansions import LocalExpansionData

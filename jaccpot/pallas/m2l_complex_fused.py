@@ -29,8 +29,9 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
+from beartype import beartype
 from jax.experimental import pallas as pl
-from jaxtyping import Array
+from jaxtyping import Array, Float, Inexact, jaxtyped
 
 from jaccpot.operators.real_harmonics import sh_offset, sh_size
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
@@ -544,13 +545,14 @@ def _tables_to_jnp(order, real_dtype):
     )
 
 
+@jaxtyped(typechecker=beartype)
 def _pad_pair_inputs(
-    mr: Array,
-    mi: Array,
-    bto_r: Array,
-    bto_i: Array,
-    bfr_r: Array,
-    bfr_i: Array,
+    mr: Float[Array, "pairs sh"],
+    mi: Float[Array, "pairs sh"],
+    bto_r: Float[Array, "pairs degrees blockdim blockdim"],
+    bto_i: Float[Array, "pairs degrees blockdim blockdim"],
+    bfr_r: Float[Array, "pairs degrees blockdim blockdim"],
+    bfr_i: Float[Array, "pairs degrees blockdim blockdim"],
     dims: tuple[int, ...],
 ) -> tuple[Array, Array, Array, Array, Array, Array]:
     """Zero-pad multipoles and rotation blocks to the tables' power-of-2 extents.
@@ -561,17 +563,17 @@ def _pad_pair_inputs(
 
     Parameters
     ----------
-    mr : Array
+    mr : Float[Array, 'pairs sh']
         Real part of the multipoles, shape ``(N, C)``.
-    mi : Array
+    mi : Float[Array, 'pairs sh']
         Imaginary part, same shape.
-    bto_r : Array
+    bto_r : Float[Array, 'pairs degrees blockdim blockdim']
         Real part of the rotation-to-z blocks, shape ``(N, p+1, md, md)``.
-    bto_i : Array
+    bto_i : Float[Array, 'pairs degrees blockdim blockdim']
         Imaginary part, same shape.
-    bfr_r : Array
+    bfr_r : Float[Array, 'pairs degrees blockdim blockdim']
         Real part of the rotation-from-z blocks, same shape.
-    bfr_i : Array
+    bfr_i : Float[Array, 'pairs degrees blockdim blockdim']
         Imaginary part, same shape.
     dims : tuple[int, ...]
         ``(C, Cp, B, Bp, md, mdp)`` from :func:`_pair_pad_dims`.
@@ -599,11 +601,12 @@ def _pair_pad_dims(order):
     return (t["C"], t["Cp"], t["p"] + 1, t["Bp"], t["md"], t["mdp"])
 
 
+@jaxtyped(typechecker=beartype)
 def m2l_complex_fused_jax(
-    multipoles: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    r: Array,
+    multipoles: Inexact[Array, "pairs sh"],
+    blocks_to_z: Inexact[Array, "pairs degrees blockdim blockdim"],
+    blocks_from_z: Inexact[Array, "pairs degrees blockdim blockdim"],
+    r: Float[Array, "pairs"],
     *,
     order: int,
 ) -> Array:
@@ -611,14 +614,14 @@ def m2l_complex_fused_jax(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Inexact[Array, 'pairs sh']
         Source multipole coefficients, shape ``(N, C)``, COMPLEX.
-    blocks_to_z : Array
+    blocks_to_z : Inexact[Array, 'pairs degrees blockdim blockdim']
         Complex rotation blocks aligning each pair axis to +z, shape
         ``(N, p+1, md, md)``.
-    blocks_from_z : Array
+    blocks_from_z : Inexact[Array, 'pairs degrees blockdim blockdim']
         Complex rotation blocks back from +z, same shape.
-    r : Array
+    r : Float[Array, 'pairs']
         Per-pair centre separation, shape ``(N,)``.
     order : int
         Expansion order, fixing the tables and padded widths.
@@ -739,11 +742,12 @@ def _m2l_complex_fused_kernel(
     out_i_ref[0, :] = or_i
 
 
+@jaxtyped(typechecker=beartype)
 def m2l_complex_fused_pallas(
-    multipoles: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    r: Array,
+    multipoles: Inexact[Array, "pairs sh"],
+    blocks_to_z: Inexact[Array, "pairs degrees blockdim blockdim"],
+    blocks_from_z: Inexact[Array, "pairs degrees blockdim blockdim"],
+    r: Float[Array, "pairs"],
     *,
     order: int,
     interpret: bool = False,
@@ -763,14 +767,14 @@ def m2l_complex_fused_pallas(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Inexact[Array, 'pairs sh']
         Complex source multipole coefficients, shape ``(N, C)``.
-    blocks_to_z : Array
+    blocks_to_z : Inexact[Array, 'pairs degrees blockdim blockdim']
         Complex rotation blocks aligning each pair axis to +z, shape
         ``(N, p+1, md, md)``.
-    blocks_from_z : Array
+    blocks_from_z : Inexact[Array, 'pairs degrees blockdim blockdim']
         Complex rotation blocks back from +z, same shape.
-    r : Array
+    r : Float[Array, 'pairs']
         Per-pair centre separation, shape ``(N,)``.
     order : int
         Expansion order. Static: it fixes the tables and the padded tile widths.
@@ -921,12 +925,13 @@ def _m2l_complex_fused_vjp_kernel(
     r_bar_ref[0] = rb
 
 
+@jaxtyped(typechecker=beartype)
 def m2l_complex_fused_vjp_pallas(
-    multipoles: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    r: Array,
-    out_bar: Array,
+    multipoles: Inexact[Array, "pairs sh"],
+    blocks_to_z: Inexact[Array, "pairs degrees blockdim blockdim"],
+    blocks_from_z: Inexact[Array, "pairs degrees blockdim blockdim"],
+    r: Float[Array, "pairs"],
+    out_bar: Inexact[Array, "pairs sh"],
     *,
     order: int,
     interpret: bool = False,
@@ -943,16 +948,16 @@ def m2l_complex_fused_vjp_pallas(
 
     Parameters
     ----------
-    multipoles : Array
+    multipoles : Inexact[Array, 'pairs sh']
         Complex source multipole coefficients, shape ``(N, C)``.
-    blocks_to_z : Array
+    blocks_to_z : Inexact[Array, 'pairs degrees blockdim blockdim']
         Complex rotation blocks aligning each pair axis to +z, shape
         ``(N, p+1, md, md)``.
-    blocks_from_z : Array
+    blocks_from_z : Inexact[Array, 'pairs degrees blockdim blockdim']
         Complex rotation blocks back from +z, same shape.
-    r : Array
+    r : Float[Array, 'pairs']
         Per-pair centre separation, shape ``(N,)``.
-    out_bar : Array
+    out_bar : Inexact[Array, 'pairs sh']
         Cotangent of the forward output, shape ``(N, C)``, complex.
     order : int
         Expansion order. Static: it fixes the tables and the padded tile widths.

@@ -55,6 +55,48 @@ __all__ = [
 ]
 
 
+# WHY THE EIGHT `@jaxtyped` DECORATORS BELOW CARRY NO SHAPES, AND WHY THAT IS NOT A
+# BACKLOG ENTRY.
+#
+# These eight are the largest block of the 27 functions `bench/annotation_census.py`
+# reports as "@jaxtyped functions, of which no shaped parameter", and the natural reading
+# of that line -- a decorator doing nothing, so finish the job -- is wrong here. Measured
+# on the ENGINE methods, not the `solver.py` facade (the facade already annotates these
+# names, so a call through it would prove nothing about the mixin):
+#
+#     velocities (n, 2) / (n,) / shorter than positions / (1, n, 3)   ValueError, all four
+#     positions (n, 2)                                               ValueError
+#     masses (n, 1)                                                  ValueError
+#     target_indices as float / (t, 1)                               ValueError
+#
+# Twelve malformations across two methods, every one rejected, and rejected BETTER than an
+# annotation manages:
+#
+#     velocities must have shape (64, 3), got (64, 2)
+#
+# It names the parameter, substitutes the concrete N, and reports what arrived. Shaping
+# these does not add a check -- it DELETES that message, and the deletion is certain rather
+# than a trade, because the decorator is already present and unconditional (section 4.4), so
+# a shape spec runs BEFORE the body and makes the `ValueError` unreachable for shape errors.
+# Demonstrated rather than argued: annotating `compute_accelerations_and_jerk` alone turned
+# six of the rows above into `TypeCheckError`, whose message lists every parameter in the
+# signature instead of the offending one.
+#
+# WHAT THE DECORATOR IS ACTUALLY DOING, since "vacuous" is the other half of the misreading:
+# the two entry points take 17 parameters each, and beartype checks the fifteen non-array
+# ones -- the `Literal` modes, the flags, the orders. That is not nothing; it is simply not
+# shapes.
+#
+# The five parameter families have `DELIBERATELY_BARE` entries in
+# `tests/unit/test_type_annotation_guard.py`, so this decision is asserted rather than
+# remembered: shaping one of them fails that guard and sends the next reader here.
+#
+# WHAT WOULD CHANGE THE ANSWER: a caller reaching these methods without passing through the
+# body's own validation -- a new entry point that forwards straight to
+# `_evaluate_target_nearfield_jerk`, say, whose four array parameters are checked by the
+# public methods above rather than by itself. Re-measure then; the table above is the method.
+
+
 class DerivativesMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def compute_accelerations_and_jerk(

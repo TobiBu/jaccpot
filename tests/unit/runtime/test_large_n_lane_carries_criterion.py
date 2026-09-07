@@ -63,7 +63,7 @@ def _large_n_solver(mac_type: str, *, runtime_path: str = "auto"):
         theta=0.6,
         adaptive_eps=EPS,
         preset="large_n_gpu",
-        expansion_basis="solidfmm",
+        basis="solidfmm",
         runtime_path=runtime_path,
         advanced=advanced,
     )

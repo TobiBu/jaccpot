@@ -33,6 +33,20 @@ keeping and losing the individual-timestep advantage.
 contract and is what a stock nornax integrator drives today. It is correct at any
 N but pays one traversal per active level.
 
+Whole base steps belong to nornax
+---------------------------------
+Both classes here also carry an ``advance_base_step``, and **neither is a
+production driver**. Nothing in ``jaccpot`` and nothing in ODISSEO calls them;
+every caller is a test. They exist as jaccpot-side oracles, so the cross-repo
+equivalence tests can check nornax's base step against an independent
+implementation without jaccpot importing nornax and making the graph cyclic.
+
+The canonical base step is ``nornax.solvers.leapfrog_kdk.advance_base_step``, and
+it is the only one carrying the rebuild and multiple-shooting interfaces
+(``checkpoint_substeps``, and the per-base-step ``topology`` on
+``BlockStepState``). A change to how a base step works belongs there and should
+not be mirrored here.
+
 Topology lifetime
 -----------------
 The discrete topology is frozen, host-side, and severed from the gradient --
@@ -54,7 +68,6 @@ import numpy as np
 from jax import lax
 from jaxtyping import Array, Float, Int
 
-from jaccpot._jax_compat import Tracer
 from jaccpot.mutual.force import (
     MutualCapacities,
     MutualFMMState,
@@ -70,10 +83,140 @@ from jaccpot.mutual.force import (
 )
 from jaccpot.mutual.topology import build_mutual_topology_from_tree
 
-__all__ = ["BlockStepFMM", "DistributedBlockStepFMM"]
+__all__ = [
+    "BlockStepFMM",
+    "DistributedBlockStepFMM",
+    "assert_far_field_is_exercised",
+    "raise_on_overflow",
+]
 
 _SUPPORTED_BASES = ("real",)
 _SUPPORTED_BACKENDS = ("jax", "pallas")
+
+
+# --------------------------------------------------------------------------
+# guards -- the failure modes no correctness test can see
+# --------------------------------------------------------------------------
+#
+# Both came from ODISSEO's block-step lane (EDDA decision D-012 moves them here,
+# next to the objects they inspect). Each protects against a way the mutual FMM
+# can be *silently* wrong: every correctness assertion downstream passes, and the
+# number it reports means nothing.
+
+
+def assert_far_field_is_exercised(force_or_state: Any, *, require: bool = True) -> int:
+    """Return the prepared topology's far-pair count, raising when it is zero.
+
+    A configuration with no far pairs makes the FMM a direct sum: every
+    far-field accuracy assertion downstream passes at 1e-16 while testing nothing
+    of the multipole machinery. That is not hypothetical -- it has produced a
+    flattering ``0.0e+00`` in this programme before, and the cross-repo test
+    file's own single-blob system at N = 256 has *no* far pairs at any ``theta``
+    it uses. Any caller trusting a far-field number should call this first.
+
+    The count is the **occupancy**, ``num_far_pairs``, never ``far_a.shape[0]``:
+    once the pair lists are capacity-padded the shape is the allocated width and
+    is nonzero even for a topology with no far pairs at all -- which would make
+    this guard silently stop guarding, the exact failure it exists to prevent.
+
+    Parameters
+    ----------
+    force_or_state : Any
+        A :class:`BlockStepFMM` -- its cached :attr:`~BlockStepFMM.state` is read
+        -- or a :class:`~jaccpot.mutual.force.MutualFMMState` directly (the
+        topology a nornax rollout carries as ``final.topology``, say).
+    require : bool
+        With ``True`` (the default) a zero count raises; with ``False`` it is
+        returned, for a caller that only wants the number.
+
+    Returns
+    -------
+    int
+        The number of canonical far pairs the topology holds.
+
+    Raises
+    ------
+    RuntimeError
+        If a model was passed that has not been prepared, or if the count is
+        zero and ``require`` is set.
+    """
+    state = force_or_state
+    if isinstance(force_or_state, BlockStepFMM):
+        state = force_or_state.state
+        if state is None:
+            raise RuntimeError(
+                "call force.prepare(positions, masses) first: there is no topology "
+                "to count far pairs in"
+            )
+    num_far = int(getattr(state, "num_far_pairs", state.far_a.shape[0]))
+    if require and num_far == 0:
+        raise RuntimeError(
+            "the prepared topology has no far pairs, so this FMM is a direct sum "
+            "and any far-field accuracy number it produces is vacuous. The mutual "
+            "MAC accepts a pair when theta * |c_B - c_A| > R_A + R_B, so *raise* "
+            "theta, lower leaf_size, use more particles, or use a system with "
+            "well-separated clumps."
+        )
+    return num_far
+
+
+def raise_on_overflow(state: Any, force: Any) -> None:
+    """Turn a device topology's overflow flag into an exception naming the cap.
+
+    A device topology that exceeded a capacity dropped interactions, and that is
+    invisible in the force: a dropped canonical pair loses *both* of its halves,
+    so momentum stays exactly conserved and every momentum assertion passes.
+    Hence a raise, not a report.
+
+    :meth:`BlockStepFMM.prepare` calls this on the state it builds. A driver
+    that rebuilds *inside* a scan -- nornax's ``block_kdk_rollout(...,
+    rebuild_fn=force.rebuild_state)`` -- cannot raise under the trace; it calls
+    this on the carried topology *after* the rollout (``final.topology``), or on
+    a record reduced over the per-step flags. Only the object's
+    ``topology_overflow`` and ``overflow_causes`` are read, so any object carrying
+    those two -- a :class:`~jaccpot.mutual.force.MutualFMMState` or a reduction
+    of several -- is accepted.
+
+    Parameters
+    ----------
+    state : Any
+        The object carrying ``topology_overflow`` (bool-like) and
+        ``overflow_causes`` (a bitmask over
+        :data:`~jaccpot.mutual.force.OVERFLOW_CAUSES`).
+    force : Any
+        The model whose ``capacities`` profile the message quotes; anything
+        without a readable ``capacities`` is described as "unknown profile".
+
+    Raises
+    ------
+    RuntimeError
+        If the flag is set and concrete. Under a trace (a tracer flag) the
+        function returns silently -- there is nothing it could raise on.
+    """
+    try:
+        overflowed = bool(state.topology_overflow)
+    except jax.errors.JAXTypeError:  # traced caller: nothing concrete to read
+        return
+    if not overflowed:
+        return
+    from jaccpot.mutual.force import OVERFLOW_CAUSES
+
+    bits = int(state.overflow_causes)
+    blamed = [name for index, name in enumerate(OVERFLOW_CAUSES) if bits & (1 << index)]
+    caps = getattr(force, "capacities", None)
+    profile = (
+        f"far={caps.far}, near={caps.near}, depth={caps.depth}, width={caps.width}"
+        if caps is not None
+        else "unknown profile"
+    )
+    raise RuntimeError(
+        "the device topology overflowed its capacity profile: "
+        f"{', '.join(blamed) or 'unknown'} exceeded. Profile was {profile}. "
+        "Interactions were dropped, and that is invisible in the force -- a "
+        "dropped canonical pair loses both halves, so momentum stays exact -- "
+        "hence the raise. Rebuild with larger caps, or pass caps=None to resolve "
+        "them from this configuration."
+    )
 
 
 class BlockStepFMM:
@@ -286,12 +429,12 @@ class BlockStepFMM:
             The freshly built state, also cached on ``self`` so the force methods
             can find it.
 
-        Raises
-        ------
-        RuntimeError
-            On the device backend, if the built topology overflowed its capacity
-            profile. Overflow drops interactions while leaving momentum exactly
-            conserved, so it is raised here rather than reported.
+        Notes
+        -----
+        On the device backend the built state is passed through
+        :func:`raise_on_overflow`, which raises ``RuntimeError`` if the topology
+        overflowed its capacity profile: overflow drops interactions while
+        leaving momentum exactly conserved, so it is raised rather than reported.
         """
         from jaccpot import FastMultipoleMethod
 
@@ -302,31 +445,9 @@ class BlockStepFMM:
             self._state = self.rebuild_state(positions, masses)
             # prepare() is the eager entry point, so this is the one place the
             # overflow flag can be turned into an exception. A driver stepping
-            # through rebuild_state under trace must check it itself.
-            try:
-                overflowed = bool(self._state.topology_overflow)
-            except jax.errors.JAXTypeError:  # pragma: no cover - traced caller
-                overflowed = False
-            if overflowed:
-                from jaccpot.mutual.force import OVERFLOW_CAUSES
-
-                bits = int(self._state.overflow_causes)
-                blamed = [
-                    name
-                    for index, name in enumerate(OVERFLOW_CAUSES)
-                    if bits & (1 << index)
-                ]
-                raise RuntimeError(
-                    "the device topology overflowed its capacity profile: "
-                    f"{', '.join(blamed) or 'unknown'} exceeded. Profile was "
-                    f"far={self._caps.far}, near={self._caps.near}, "
-                    f"depth={self._caps.depth}, width={self._caps.width}. "
-                    "Interactions were dropped, and that is invisible in the "
-                    "force -- a dropped canonical pair loses both halves, so "
-                    "momentum stays exact -- hence the raise. Rebuild with larger "
-                    "caps, or pass caps=None to resolve them from this "
-                    "configuration."
-                )
+            # through rebuild_state under trace checks the carried state after
+            # its scan with the same function (see :func:`raise_on_overflow`).
+            raise_on_overflow(self._state, self)
             return self._state
 
         if self._solver is None:
@@ -792,6 +913,52 @@ class BlockStepFMM:
             # low-level concretization failure into the actionable instruction.
             raise RuntimeError(self._NO_TOPOLOGY_UNDER_TRACE) from exc
 
+    def _state_for(
+        self,
+        topology: Optional[MutualFMMState],
+        positions: Array,
+        masses: Array,
+    ) -> MutualFMMState:
+        """The state a force method evaluates against: explicit if given, else cached.
+
+        This is the whole of the explicit-topology contract nornax's
+        ``MutualForceModel`` documents -- *if given, use it; if ``None``, use
+        what the model holds*. The explicit form is what lets the topology be a
+        traced value in a driver's scan carry, rebuilt by :meth:`rebuild_state`
+        at base-step boundaries, instead of a host-side cache that a
+        ``lax.scan`` cannot refresh.
+
+        Parameters
+        ----------
+        topology : Optional[MutualFMMState]
+            The caller's state, or ``None``.
+        positions : Array
+            ``(n, 3)`` positions, used only to validate or build the cached state.
+        masses : Array
+            ``(n,)`` masses, likewise.
+
+        Returns
+        -------
+        MutualFMMState
+            ``topology`` itself when given, else :meth:`_require_state`'s answer.
+
+        Raises
+        ------
+        ValueError
+            If an explicit ``topology`` was built for a different particle count
+            than ``positions`` has -- evaluating against it would index the wrong
+            particles, silently.
+        """
+        if topology is None:
+            return self._require_state(positions, masses)
+        n = int(jnp.asarray(positions).shape[0])
+        if topology.num_particles != n:
+            raise ValueError(
+                f"the explicit topology was built for {topology.num_particles} "
+                f"particles but positions has {n}"
+            )
+        return topology
+
     def _validate_rung(self, rung: Array) -> Array:
         """Reject rungs outside ``[0, k_max]`` when the bound can be read.
 
@@ -859,6 +1026,7 @@ class BlockStepFMM:
         rung: Int[Array, "n"],
         level: int,
         args: object = None,
+        topology: Optional[MutualFMMState] = None,
     ) -> Array:
         """Return the level-``k`` antisymmetric acceleration for every particle.
 
@@ -884,6 +1052,12 @@ class BlockStepFMM:
             Interaction level to isolate. Must lie in ``[0, k_max]``.
         args : object
             Ignored; present because the ``MutualForceModel`` contract passes it.
+        topology : Optional[MutualFMMState]
+            An explicit state to evaluate against, as a driver that carries the
+            topology through a ``lax.scan`` hands it over (nornax's
+            ``block_kdk_rollout(..., rebuild_fn=self.rebuild_state)``). ``None``
+            -- the default, and what every pre-existing caller passes -- reads
+            the state :meth:`prepare` cached on the instance instead.
 
         Returns
         -------
@@ -896,7 +1070,7 @@ class BlockStepFMM:
             If ``level`` is outside ``[0, k_max]``, or the rungs are out of range.
         """
         del args
-        state = self._require_state(positions, masses)
+        state = self._state_for(topology, positions, masses)
         rung = self._validate_rung(rung)
         if not 0 <= int(level) <= self.k_max:
             raise ValueError(
@@ -918,6 +1092,7 @@ class BlockStepFMM:
         *,
         rung: Optional[Int[Array, "n"]] = None,
         args: object = None,
+        topology: Optional[MutualFMMState] = None,
     ) -> Array:
         """Return the full acceleration in a single traversal.
 
@@ -935,6 +1110,9 @@ class BlockStepFMM:
             assignment. Accepted so the signature matches the level-aware methods.
         args : object
             Ignored; present for the ``MutualForceModel`` contract.
+        topology : Optional[MutualFMMState]
+            An explicit state to evaluate against; ``None`` reads the cached one.
+            See :meth:`level_accelerations`.
 
         Returns
         -------
@@ -942,7 +1120,7 @@ class BlockStepFMM:
             ``(n, 3)`` full accelerations.
         """
         del args, rung
-        state = self._require_state(positions, masses)
+        state = self._state_for(topology, positions, masses)
         return mutual_weighted_accelerations(state, positions, masses)
 
     # -- fused boundary primitive ------------------------------------------
@@ -959,6 +1137,7 @@ class BlockStepFMM:
         half: Any = 1.0,
         level_weights: Optional[Float[Array, "levels"]] = None,
         args: object = None,
+        topology: Optional[MutualFMMState] = None,
     ) -> Array:
         """Apply one sub-step boundary's kick in a single mutual traversal.
 
@@ -1004,6 +1183,10 @@ class BlockStepFMM:
             keeping the runtime win.
         args : object
             Unused; present for the ``MutualForceModel`` protocol's signature.
+        topology : Optional[MutualFMMState]
+            An explicit state to kick against; ``None`` reads the cached one. A
+            driver that rebuilds inside its scan passes the *same* state for
+            every boundary of a base step -- see :meth:`level_accelerations`.
 
         Returns
         -------
@@ -1017,7 +1200,7 @@ class BlockStepFMM:
             are given, or ``level_weights`` has the wrong length for ``k_max``.
         """
         del args
-        state = self._require_state(positions, masses)
+        state = self._state_for(topology, positions, masses)
         rung = self._validate_rung(rung)
         if level_weights is None:
             if dt_max is None or active_floor is None:
@@ -1107,6 +1290,26 @@ class BlockStepFMM:
         scan_boundaries: bool = False,
     ) -> Tuple[Array, Array, Array]:
         """Run one full base step on the fused path, at one traversal per boundary.
+
+        **Reference implementation, not a production driver.** Nothing in
+        ``jaccpot`` and nothing in ODISSEO calls this method -- every caller is
+        under ``tests/integration/``. The production path is nornax's
+        :func:`nornax.solvers.leapfrog_kdk.advance_base_step`, which drives this
+        model through the ``MutualForceModel`` / ``FusedMutualForceModel``
+        protocols -- this class satisfies both, and nornax picks the fused
+        boundary path automatically -- and additionally offers
+        ``checkpoint_substeps`` and the per-base-step ``topology`` carried on
+        ``BlockStepState``, neither of which exists here.
+
+        This method exists so ``test_jaccpot_base_step_matches_nornax_fused_base_step``
+        (``tests/integration/test_mutual_fmm_nornax.py``) has a
+        jaccpot-side oracle to compare against *without* jaccpot importing nornax,
+        which would cost the acyclic dependency graph (``Jaccpot -> Yggdrax``,
+        ``Nornax`` standalone) that this module's docstring exists to defend.
+
+        **Prefer nornax's for anything new**, multiple-shooting work especially:
+        the rebuild and shooting interfaces live on nornax's side and are not
+        mirrored here.
 
         The recursively-symmetric palindrome of Farr & Bertschinger (2007): a kick
         at every boundary ``s = 0 .. n_sub`` (half at the synchronized ends, full
@@ -1531,6 +1734,37 @@ class DistributedBlockStepFMM:
             )
         return jnp.asarray(got.accelerations)
 
+    @staticmethod
+    def _refuse_topology(topology: object) -> None:
+        """Refuse an explicit topology: this lane has no traceable rebuild yet.
+
+        nornax's ``MutualForceModel`` lets an integrator hand a frozen topology
+        over explicitly, as a traced value rebuilt inside its scan. The
+        single-device :class:`BlockStepFMM` honours that with
+        :meth:`BlockStepFMM.rebuild_state`; the distributed lane's topology is the
+        partition plus each device's tree, built on the host by :meth:`prepare`,
+        and there is nothing an explicit ``MutualFMMState`` could stand in for.
+        Accepting the keyword keeps the signature contract; refusing a value
+        keeps a caller from believing a rebuild happened when it did not.
+
+        Parameters
+        ----------
+        topology : object
+            Whatever the caller passed; only ``None`` is acceptable.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``topology`` is not ``None``.
+        """
+        if topology is not None:
+            raise NotImplementedError(
+                "DistributedBlockStepFMM has no traceable topology rebuild; it "
+                "evaluates against the state built by prepare(). Drive it without "
+                "rebuild_fn, or use the single-device BlockStepFMM(topology_"
+                "backend='device') whose rebuild_state is traceable."
+            )
+
     def _validate_rung(self, rung: Array) -> Array:
         """Reject rungs outside ``[0, k_max]``.
 
@@ -1562,6 +1796,7 @@ class DistributedBlockStepFMM:
         rung: Int[Array, "n"],
         level: int,
         args: object = None,
+        topology: object = None,
     ) -> Array:
         """Return the level-``k`` antisymmetric acceleration for every particle.
 
@@ -1584,6 +1819,9 @@ class DistributedBlockStepFMM:
             Interaction level to isolate. Must lie in ``[0, k_max]``.
         args : object
             Ignored; present because the ``MutualForceModel`` contract passes it.
+        topology : object
+            Accepted for nornax's explicit-topology contract; must be ``None``.
+            See :meth:`_refuse_topology`.
 
         Returns
         -------
@@ -1596,6 +1834,7 @@ class DistributedBlockStepFMM:
             If ``level`` is outside ``[0, k_max]``.
         """
         del args
+        self._refuse_topology(topology)
         if not 0 <= int(level) <= self.k_max:
             raise ValueError(
                 f"level must lie in [0, k_max={self.k_max}]; got {level!r}"
@@ -1614,6 +1853,7 @@ class DistributedBlockStepFMM:
         *,
         rung: Optional[Int[Array, "n"]] = None,
         args: object = None,
+        topology: object = None,
     ) -> Array:
         """Return the full acceleration in a single traversal.
 
@@ -1628,6 +1868,9 @@ class DistributedBlockStepFMM:
             Accepted so the signature matches the level-aware methods.
         args : object
             Ignored; present for the ``MutualForceModel`` contract.
+        topology : object
+            Accepted for nornax's explicit-topology contract; must be ``None``.
+            See :meth:`_refuse_topology`.
 
         Returns
         -------
@@ -1635,6 +1878,7 @@ class DistributedBlockStepFMM:
             ``(n, 3)`` full accelerations.
         """
         del args, rung
+        self._refuse_topology(topology)
         return self._weighted(positions, masses, None, None)
 
     # -- fused boundary primitive ------------------------------------------
@@ -1681,6 +1925,7 @@ class DistributedBlockStepFMM:
         half: Any = 1.0,
         level_weights: Optional[Float[Array, "levels"]] = None,
         args: object = None,
+        topology: object = None,
     ) -> Array:
         """Apply one sub-step boundary's kick in a single traversal of the mesh.
 
@@ -1717,6 +1962,9 @@ class DistributedBlockStepFMM:
             over ``active_floor``/``dt_max``/``half``, which are then ignored.
         args : object
             Unused; present for the ``MutualForceModel`` protocol's signature.
+        topology : object
+            Accepted for nornax's explicit-topology contract; must be ``None``.
+            See :meth:`_refuse_topology`.
 
         Returns
         -------
@@ -1730,6 +1978,7 @@ class DistributedBlockStepFMM:
             given, or ``level_weights`` has the wrong length for ``k_max``.
         """
         del args
+        self._refuse_topology(topology)
         dtype = jnp.asarray(positions).dtype
         if level_weights is None:
             if dt_max is None or active_floor is None:
@@ -1808,6 +2057,26 @@ class DistributedBlockStepFMM:
         dt_max: float,
     ) -> Tuple[Array, Array, Array]:
         """Run one full base step, at one traversal of the mesh per boundary.
+
+        **Reference implementation, not a production driver.** Nothing in
+        ``jaccpot`` and nothing in ODISSEO calls this method -- every caller is
+        under ``tests/integration/``. The production path is nornax's
+        :func:`nornax.solvers.leapfrog_kdk.advance_base_step`, which drives this
+        model through the ``MutualForceModel`` / ``FusedMutualForceModel``
+        protocols -- this class satisfies both, and nornax picks the fused
+        boundary path automatically -- and additionally offers
+        ``checkpoint_substeps`` and the per-base-step ``topology`` carried on
+        ``BlockStepState``, neither of which exists here.
+
+        This method exists so ``test_the_models_own_base_step_matches_nornax_advance_base_step``
+        (``tests/integration/test_mutual_distributed_nornax.py``) has a
+        jaccpot-side oracle to compare against *without* jaccpot importing nornax,
+        which would cost the acyclic dependency graph (``Jaccpot -> Yggdrax``,
+        ``Nornax`` standalone) that this module's docstring exists to defend.
+
+        **Prefer nornax's for anything new**, multiple-shooting work especially:
+        the rebuild and shooting interfaces live on nornax's side and are not
+        mirrored here.
 
         The recursively-symmetric palindrome of Farr & Bertschinger (2007): a kick at
         every boundary ``s = 0 .. n_sub`` (half at the synchronized ends, full inside)

@@ -33,9 +33,10 @@ from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
+from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
-from jaxtyping import Array
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot.runtime.grad_options import LeafPairReverseOptions
@@ -66,6 +67,62 @@ __all__ = [
 ]
 
 
+# WHAT THE SHAPES ARE, AND WHAT THE CAPTURE COULD NOT SEE
+#
+# Derived by execution with `bench/annotation_capture` (STYLE_GUIDE section 4.2), never
+# from the docstrings -- which are wrong here too: `RadixFastNearfieldPayload` documents
+# `source_leaf_ids` as "per (target leaf, slot tile)", two axes, and every consumer in
+# this file reads `shape[2]`.
+#
+#   n 3 / n                      positions and masses, in particle order
+#   leaves w / leaves w 3        the padded near-field leaf table -- positions, masses,
+#                                mask, particle indices
+#   farleaves blocks blocksize   the prepacked source-leaf-id rectangle and its mask
+#   leaves srcslots w            the MATERIALISED source-particle layout: one padded
+#                                neighbour-slot run per target leaf. `srcslots` is the
+#                                neighbour count, unrelated to `w` -- see below
+#   tbatch w 3 / leaves sw 3     the decoupled lane, whose whole point is that the target
+#                                block and the source pool are separate
+#
+# `srcslots` IS NOT `w`, AND EVERY EARLIER CAPTURE SAID IT WAS. The two were observed equal
+# in all three recorded calls -- 2 beside 2, and 256 beside 256 -- which is the `farleaves`
+# trap: an equality that holds because of how the test payload is built, not because it is a
+# contract. `srcslots` is the padded neighbour count per target leaf, sized by the payload's
+# `batch_tile_s`; `w` is the leaf width. Settled by reading the builder rather than the
+# capture: `_large_n_pipeline` writes
+# `source_particle_ids = target_particle_ids[safe_source_leaf_ids]`, so axis 1 is the source
+# LIST's length and axis 2 is a gather from the target table, hence `w` by construction. Then
+# re-measured at `srcslots` 2, 3 and 5 against `w` 16, 8 and 4, where the two no longer
+# coincide and the equality no longer appears.
+#
+# Extents behind those names, pooling three captures (`tests/unit/core/test_near_field.py`,
+# `tests/unit/test_custom_vjp_parity.py`, and a forced octree run -- see below):
+# `leaves` at 3, 6, 512, 528, 4096 and 4120; `w` at 2, 8, 32 and 64; `blocks` at 1 and 2;
+# `blocksize` at 2, 3, 26, 27 and 54; `n` at 6, 48, 512 and 1500. Section 4.3 asks for two
+# distinct extents per equality, because an equality seen at one problem size is one
+# observation however many calls produced it.
+#
+# `farleaves`, NOT `leaves`, ON THE PREPACKED RECTANGLE, and the reason is inherited
+# rather than rediscovered. `_large_n_blocks.py` takes the SAME two arrays as
+# `block_source_leaf_ids_padded`/`block_valid_mask_padded` and names their leading axis
+# `farleaves`, because that rectangle tracks the FAR-field leaf view, which the octree
+# backend separates from the near-field leaf table (the section 4.3 incident, 5 against
+# 3). Here the two were observed equal at six distinct extents -- including four from the
+# octree lane -- and that is exactly the evidence section 4.3 says not to promote: the
+# `farleaves` mistake was 64 honest captures agreeing. `farleaves` binds freely, since
+# nothing else in these signatures uses it, so what is asserted is that the ids and their
+# mask agree with each other in all three axes. That is measured, and it is all that is.
+#
+# THE OCTREE LANE IS UNREACHABLE FROM ANY TEST, which is worth stating rather than
+# leaving as an absence. `_radix_fast_lane_prepacked_pallas` is called from
+# `experimental/octree_fmm_uvwx.py`, but `_octree_near_field`'s `pallas_interpret` knob is
+# never plumbed out to `octree_fmm_accelerations`, so on CPU that call site always falls
+# through to the pure-JAX branch and on GPU there is no CI leg. The extents above come
+# from calling `_octree_near_field(..., use_pallas=True, pallas_interpret=True)` directly;
+# all three of its `near_mode` branches build `src_ids_3d` and `unit_pidx` with the same
+# leading axis, which is why the octree lane cannot falsify these annotations.
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -75,14 +132,15 @@ __all__ = [
         "target_batch_scan_unroll",
     ),
 )
+@jaxtyped(typechecker=beartype)
 def _compute_radix_fast_lane_payload_pairs_impl(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
-    source_slot_valid_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
+    source_slot_valid_mask: Bool[Array, "leaves srcslots"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -101,19 +159,22 @@ def _compute_radix_fast_lane_payload_pairs_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    masses : Array
+    masses : Float[Array, 'n']
         Particle masses ``[N]``.
-    target_particle_ids : Array
+    target_particle_ids : Int[Array, 'leaves w']
         Target particle index per (leaf, slot), from the payload.
-    target_particle_mask : Array
+    target_particle_mask : Bool[Array, 'leaves w']
         Validity for ``target_particle_ids``, same shape.
-    source_particle_ids : Array
-        Source particle index per (leaf, slot).
-    source_particle_mask : Array
+    source_particle_ids : Int[Array, 'leaves srcslots w']
+        Source particle index per (target leaf, source slot, slot). The trailing
+        axis is ``w`` and not a third independent extent: the pipeline builds this
+        as ``target_particle_ids[safe_source_leaf_ids]``, a gather FROM the target
+        table, so it inherits that table's width by construction.
+    source_particle_mask : Bool[Array, 'leaves srcslots w']
         Validity for ``source_particle_ids``, same shape.
-    source_slot_valid_mask : Array
+    source_slot_valid_mask : Bool[Array, 'leaves srcslots']
         Per-slot-tile validity, used to skip wholly-empty source tiles.
     G : Union[float, Array]
         Gravitational constant.
@@ -277,12 +338,13 @@ def _compute_radix_fast_lane_payload_pairs_impl(
     )
 
 
+@jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
-    positions: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
+    positions: Float[Array, "n 3"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -300,17 +362,17 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         ``[N, 3]`` particle positions in tree order. Read for shape and dtype
         only -- the values used come in leaf-major through ``leaf_positions``.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         ``[num_leaves, W, 3]`` padded leaf-major positions.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         ``[num_leaves, W]`` padded leaf-major masses.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         ``[num_leaves, W]`` occupancy; masked slots contribute exactly zero to
         both outputs and are skipped by both scatters.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         ``[num_leaves, W]`` particle index behind each slot, clipped so a masked
         slot cannot address out of bounds.
     G : Union[float, Array]
@@ -361,12 +423,12 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
 # only ever sees the implementation. Audit E.4.
 @overload
 def _radix_fast_lane_pairs_pallas(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -380,12 +442,12 @@ def _radix_fast_lane_pairs_pallas(
 
 @overload
 def _radix_fast_lane_pairs_pallas(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -397,13 +459,14 @@ def _radix_fast_lane_pairs_pallas(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_pairs_pallas(
-    positions: Array,
-    masses: Array,
-    target_particle_ids: Array,
-    target_particle_mask: Array,
-    source_particle_ids: Array,
-    source_particle_mask: Array,
+    positions: Float[Array, "n 3"],
+    masses: Float[Array, "n"],
+    target_particle_ids: Int[Array, "leaves w"],
+    target_particle_mask: Bool[Array, "leaves w"],
+    source_particle_ids: Int[Array, "leaves srcslots w"],
+    source_particle_mask: Bool[Array, "leaves srcslots w"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -426,17 +489,18 @@ def _radix_fast_lane_pairs_pallas(
 
     Parameters
     ----------
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; also fixes the output shape.
-    masses : Array
+    masses : Float[Array, 'n']
         Particle masses ``[N]``.
-    target_particle_ids : Array
+    target_particle_ids : Int[Array, 'leaves w']
         Target particle index per (leaf, slot).
-    target_particle_mask : Array
+    target_particle_mask : Bool[Array, 'leaves w']
         Validity for ``target_particle_ids``, same shape.
-    source_particle_ids : Array
-        Source particle index per (leaf, slot-tile, slot).
-    source_particle_mask : Array
+    source_particle_ids : Int[Array, 'leaves srcslots w']
+        Source particle index per (target leaf, source slot, slot); the trailing
+        axis is the target table's ``w``, which it is gathered from.
+    source_particle_mask : Bool[Array, 'leaves srcslots w']
         Validity for ``source_particle_ids``, same shape.
     G : Union[float, Array]
         Gravitational constant.
@@ -526,13 +590,13 @@ def _radix_fast_lane_pairs_pallas(
 # only ever sees the implementation. Audit E.4.
 @overload
 def _radix_fast_lane_prepacked_pallas(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "farleaves blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -546,13 +610,13 @@ def _radix_fast_lane_prepacked_pallas(
 
 @overload
 def _radix_fast_lane_prepacked_pallas(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "farleaves blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -564,14 +628,15 @@ def _radix_fast_lane_prepacked_pallas(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_pallas(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    leaf_positions: Array,
-    leaf_masses: Array,
-    leaf_mask: Array,
-    leaf_particle_idx: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "farleaves blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "farleaves blocks blocksize"],
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    leaf_mask: Bool[Array, "leaves w"],
+    leaf_particle_idx: Int[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -595,20 +660,20 @@ def _radix_fast_lane_prepacked_pallas(
 
     Parameters
     ----------
-    source_leaf_ids_padded : Array
+    source_leaf_ids_padded : Int[Array, 'farleaves blocks blocksize']
         Source leaf ids ``[num_leaves, max_blocks, block_size]``, padded to a
         rectangle.
-    source_valid_mask_padded : Array
+    source_valid_mask_padded : Bool[Array, 'farleaves blocks blocksize']
         Per-lane validity with the same shape; padded lanes contribute exactly zero.
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``.
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``.
-    leaf_mask : Array
+    leaf_mask : Bool[Array, 'leaves w']
         Padded per-leaf validity ``[num_leaves, W]``.
-    leaf_particle_idx : Array
+    leaf_particle_idx : Int[Array, 'leaves w']
         Particle index behind each padded slot ``[num_leaves, W]``.
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; fixes the output shape.
     G : Union[float, Array]
         Gravitational constant.
@@ -686,6 +751,31 @@ def _radix_fast_lane_prepacked_pallas(
     return pair_acc
 
 
+# THE SOURCE POOL'S WIDTH IS `w`, THE SAME AS THE TARGET BLOCK'S -- CORRECTED, AND THE
+# CORRECTION IS THE INTERESTING PART.
+#
+# This note previously gave the source pool its own axis name, `sw`, on the strength of a
+# measurement that a wider pool is "correctly ignored". That measurement was wrong, and
+# wrong in the flattering direction: it padded the surplus source columns and MASKED THEM
+# OFF, where they contribute nothing either way. Unmasked, they are silently dropped --
+# target width 4 against a source pool padded to 8 with real, valid extra particles returns
+# a force identical to ignoring them, rel-L2 0.0e+00. A plausible wrong number, which
+# CLAUDE.md ranks as the worst thing this library can produce, recorded here as a safe
+# configuration.
+#
+# The cause is one line in the kernel: the source gather tables' `BlockSpec` is built from
+# `leaf_width`, the TARGET width, so exactly that many columns are read from the source
+# tables however many they have. Hence both violations, in opposite directions:
+#
+#   source narrower   out-of-bounds read, `|acc| = nan`
+#   source wider      surplus columns never read, force silently wrong
+#
+# `nearfield_leafpair_pallas_decoupled` now REJECTS an unequal width with a `ValueError`
+# naming `source_positions`, so equality is a contract rather than an assumption -- which
+# is what makes `w` on both sides the honest annotation, and what retires `sw` here.
+# Production was never affected: `distributed/fmm.py` slices its target block out of the
+# source pool, so the widths are equal by construction, and the F25 equivalence case passes
+# the same array twice.
 # Overloads: the return shape is keyed entirely on `compute_potential`, so a caller that does
 # not set it should not be handed a union to narrow. Generated from this
 # function's own signature rather than retyped -- including whether `compute_potential`
@@ -694,15 +784,15 @@ def _radix_fast_lane_prepacked_pallas(
 # only ever sees the implementation. Audit E.4.
 @overload
 def _radix_fast_lane_prepacked_pallas_decoupled(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    target_positions: Array,
-    target_mask: Array,
-    target_particle_idx: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "tbatch blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "tbatch blocks blocksize"],
+    target_positions: Float[Array, "tbatch w 3"],
+    target_mask: Bool[Array, "tbatch w"],
+    target_particle_idx: Int[Array, "tbatch w"],
+    source_positions: Float[Array, "leaves w 3"],
+    source_masses: Float[Array, "leaves w"],
+    source_mask: Bool[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -717,15 +807,15 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 
 @overload
 def _radix_fast_lane_prepacked_pallas_decoupled(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    target_positions: Array,
-    target_mask: Array,
-    target_particle_idx: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "tbatch blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "tbatch blocks blocksize"],
+    target_positions: Float[Array, "tbatch w 3"],
+    target_mask: Bool[Array, "tbatch w"],
+    target_particle_idx: Int[Array, "tbatch w"],
+    source_positions: Float[Array, "leaves w 3"],
+    source_masses: Float[Array, "leaves w"],
+    source_mask: Bool[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -738,16 +828,17 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_pallas_decoupled(
-    source_leaf_ids_padded: Array,
-    source_valid_mask_padded: Array,
-    target_positions: Array,
-    target_mask: Array,
-    target_particle_idx: Array,
-    source_positions: Array,
-    source_masses: Array,
-    source_mask: Array,
-    positions: Array,
+    source_leaf_ids_padded: Int[Array, "tbatch blocks blocksize"],
+    source_valid_mask_padded: Bool[Array, "tbatch blocks blocksize"],
+    target_positions: Float[Array, "tbatch w 3"],
+    target_mask: Bool[Array, "tbatch w"],
+    target_particle_idx: Int[Array, "tbatch w"],
+    source_positions: Float[Array, "leaves w 3"],
+    source_masses: Float[Array, "leaves w"],
+    source_mask: Bool[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
     *,
     G: Union[float, Array],
     softening_sq: Array,
@@ -777,25 +868,27 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 
     Parameters
     ----------
-    source_leaf_ids_padded : Array
+    source_leaf_ids_padded : Int[Array, 'tbatch blocks blocksize']
         Source leaf ids ``[num_targets, max_blocks, block_size]``, referencing
         **global source rows** in ``[0, num_sources)``.
-    source_valid_mask_padded : Array
+    source_valid_mask_padded : Bool[Array, 'tbatch blocks blocksize']
         Per-lane validity with the same shape.
-    target_positions : Array
+    target_positions : Float[Array, 'tbatch w 3']
         This block's target positions ``[num_targets, W, 3]``.
-    target_mask : Array
+    target_mask : Bool[Array, 'tbatch w']
         This block's target validity ``[num_targets, W]``.
-    target_particle_idx : Array
+    target_particle_idx : Int[Array, 'tbatch w']
         **Global** particle index per target slot ``[num_targets, W]``, so
         per-block partials scatter-add and compose by ``+``.
-    source_positions : Array
-        The full source gather pool ``[num_sources, W, 3]``, resident.
-    source_masses : Array
+    source_positions : Float[Array, 'leaves w 3']
+        The full source gather pool ``[num_sources, W, 3]``, resident. Its width is the
+        target block's ``w`` and the kernel now enforces that -- see the note above the
+        function.
+    source_masses : Float[Array, 'leaves w']
         Source masses ``[num_sources, W]``.
-    source_mask : Array
+    source_mask : Bool[Array, 'leaves w']
         Source validity ``[num_sources, W]``.
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; supplies the output shape only.
     G : Union[float, Array]
         Gravitational constant.
@@ -888,14 +981,15 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
+@jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_accel_cvjp(
-    leaf_positions: Array,
-    leaf_masses: Array,
-    positions: Array,
-    source_leaf_ids_f: Array,
-    source_valid_f: Array,
-    leaf_mask_f: Array,
-    leaf_particle_idx_f: Array,
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
+    source_leaf_ids_f: Float[Array, "farleaves blocks blocksize"],
+    source_valid_f: Float[Array, "farleaves blocks blocksize"],
+    leaf_mask_f: Float[Array, "leaves w"],
+    leaf_particle_idx_f: Float[Array, "leaves w"],
     softening_sq: Array,
     G: Array,
     num_warps: Optional[int],
@@ -939,19 +1033,19 @@ def _radix_fast_lane_prepacked_accel_cvjp(
 
     Parameters
     ----------
-    leaf_positions : Array
+    leaf_positions : Float[Array, 'leaves w 3']
         Padded per-leaf positions ``[num_leaves, W, 3]``. **Differentiable.**
-    leaf_masses : Array
+    leaf_masses : Float[Array, 'leaves w']
         Padded per-leaf masses ``[num_leaves, W]``. **Differentiable.**
-    positions : Array
+    positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``; supplies the output shape.
-    source_leaf_ids_f : Array
+    source_leaf_ids_f : Float[Array, 'farleaves blocks blocksize']
         Source leaf ids, float-cast, ``[num_leaves, blocks, lanes]``.
-    source_valid_f : Array
+    source_valid_f : Float[Array, 'farleaves blocks blocksize']
         Per-lane validity, float-cast, same shape.
-    leaf_mask_f : Array
+    leaf_mask_f : Float[Array, 'leaves w']
         Padded per-leaf validity, float-cast, ``[num_leaves, W]``.
-    leaf_particle_idx_f : Array
+    leaf_particle_idx_f : Float[Array, 'leaves w']
         Particle index per padded slot, float-cast, ``[num_leaves, W]``. See
         ``_check_float_id_range`` -- an id beyond float exact-integer range would
         be silently rounded, so it is validated rather than assumed.
@@ -1002,25 +1096,83 @@ def _radix_fast_lane_prepacked_accel_cvjp(
     )
 
 
+# THE SAVED RESIDUAL, SPELLED OUT, AND WHAT THAT IS AND IS NOT WORTH.
+#
+# NUMERICS_AND_JAX section 1 says the residuals a `custom_vjp` saves must not change
+# without re-running `bench/audit_reverse_residuals.py`. A nine-tuple annotation is NOT a
+# tripwire on that, and the first draft of this comment claimed it was. Measured, by
+# re-registering `defvjp` with a `_fwd` that mutates its residual three ways:
+#
+#   swap `leaf_mask_f` with `leaf_particle_idx_f`   NOT NOTICED, before or after
+#   swap the leaf table for the rectangle          IndexError  -> TypeCheckError
+#   drop `leaf_masses`                             ValueError  -> TypeCheckError
+#
+# The two same-shaped `(leaves, w)` float entries are indistinguishable to any shape
+# annotation, and that is the mutation a refactor is most likely to make. What the
+# annotation actually buys is locality on the other two: a `TypeCheckError` naming
+# `residual` instead of an `IndexError` raised inside the analytic VJP. Worth having, not
+# worth mistaking for the audit script.
+#
+# The order is `_fwd`'s, not the primal's -- they agree here, but only because `_fwd`
+# happens to save its first nine arguments in order, which is a fact about that body and
+# not a rule. Derived by re-registering `defvjp` with recording wrappers over four
+# `(leaves, w, blocks, blocksize, n)` configurations. `bench/annotation_capture` cannot
+# see either rule and reports no observations for both: `defvjp` captured them at import,
+# so rebinding the module attribute leaves the `custom_vjp` object calling the originals
+# -- the "reference captured into a closure before the patch went on" case its own
+# docstring warns about, which must not be read as "never called".
+_LeafPairReverseResidual = Tuple[
+    Float[Array, "leaves w 3"],  # leaf_positions
+    Float[Array, "leaves w"],  # leaf_masses
+    Float[Array, "n 3"],  # positions
+    Float[Array, "farleaves blocks blocksize"],  # source_leaf_ids_f
+    Float[Array, "farleaves blocks blocksize"],  # source_valid_f
+    Float[Array, "leaves w"],  # leaf_mask_f
+    Float[Array, "leaves w"],  # leaf_particle_idx_f
+    Array,  # softening_sq -- scalar, observed `()` in every call
+    Array,  # G -- scalar, likewise
+]
+
+
+# ANNOTATED BUT NOT DECORATED, AND THE REASON IS MEASURED RATHER THAN INHERITED.
+#
+# The obvious argument for a decorator here is that `@jaxtyped` on the primal cannot run
+# in reverse mode, since `jax.grad` calls this rule and never the primal. That argument is
+# wrong FOR THIS LANE, and the distinction is worth stating because it is a property of
+# the body below rather than of `custom_vjp`: the first thing this rule does is call the
+# `custom_vjp` object again, which is an ordinary forward call, so the primal -- and its
+# decorator -- does run. Measured: stripping this decorator changes nothing, all six
+# corruptions in `tests/unit/test_nearfield_fastlane_grad_path.py` still fail identically
+# on the grad path.
+#
+# So a decorator here would be section 4.1's "annotate for consistency", at the cost of a
+# beartype pass per trace on the production grad path (section 4.4: UNCONDITIONAL). The
+# annotations stay, because they are not free: they document the 17-argument contract, and
+# the `JACCPOT_RUNTIME_TYPECHECK=1` import hook enforces them on undecorated functions,
+# which is the leg that exists to catch exactly this.
+#
+# WHAT WOULD CHANGE THE ANSWER: a `_fwd` that stops re-entering the primal -- calling
+# `_radix_fast_lane_prepacked_pallas` directly, say, to avoid the double dispatch. The
+# check would vanish silently. Decorate it then.
 def _radix_fast_lane_prepacked_accel_fwd(
-    leaf_positions,
-    leaf_masses,
-    positions,
-    source_leaf_ids_f,
-    source_valid_f,
-    leaf_mask_f,
-    leaf_particle_idx_f,
-    softening_sq,
-    G,
-    num_warps,
-    num_stages,
-    target_subtile,
-    interpret,
-    rev_leaf_batch,
-    rev_block_tile,
-    rev_skip_empty,
-    rev_tiers,
-):
+    leaf_positions: Float[Array, "leaves w 3"],
+    leaf_masses: Float[Array, "leaves w"],
+    positions: Float[Array, "n 3"],
+    source_leaf_ids_f: Float[Array, "farleaves blocks blocksize"],
+    source_valid_f: Float[Array, "farleaves blocks blocksize"],
+    leaf_mask_f: Float[Array, "leaves w"],
+    leaf_particle_idx_f: Float[Array, "leaves w"],
+    softening_sq: Array,
+    G: Array,
+    num_warps: Optional[int],
+    num_stages: int,
+    target_subtile: Optional[int],
+    interpret: bool,
+    rev_leaf_batch: int,
+    rev_block_tile: int,
+    rev_skip_empty: bool,
+    rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+) -> Tuple[Array, _LeafPairReverseResidual]:
     out = _radix_fast_lane_prepacked_accel_cvjp(
         leaf_positions,
         leaf_masses,
@@ -1054,18 +1206,21 @@ def _radix_fast_lane_prepacked_accel_fwd(
     return out, residual
 
 
+# Undecorated for the same reason as `_fwd`, plus one of its own: what a decorator here
+# would newly reject is the residual, and the table above measures that as locality rather
+# than detection. Enforced under `JACCPOT_RUNTIME_TYPECHECK=1` by the import hook.
 def _radix_fast_lane_prepacked_accel_bwd(
-    num_warps,
-    num_stages,
-    target_subtile,
-    interpret,
-    rev_leaf_batch,
-    rev_block_tile,
-    rev_skip_empty,
-    rev_tiers,
-    residual,
-    cotangent,
-):
+    num_warps: Optional[int],
+    num_stages: int,
+    target_subtile: Optional[int],
+    interpret: bool,
+    rev_leaf_batch: int,
+    rev_block_tile: int,
+    rev_skip_empty: bool,
+    rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+    residual: _LeafPairReverseResidual,
+    cotangent: Float[Array, "n 3"],
+) -> Tuple[Array, ...]:
     (
         leaf_positions,
         leaf_masses,
@@ -1085,21 +1240,28 @@ def _radix_fast_lane_prepacked_accel_bwd(
     # are tile-bounded transients and the memory is O(N) -- which is what makes
     # galaxy-scale gradients reachable. ``jax.vjp`` of the twin remains the
     # correctness oracle in tests/unit/test_custom_vjp_parity.py.
-    leaf_positions_bar, leaf_masses_bar = _leafpair_accel_analytic_vjp(
-        leaf_positions,
-        leaf_masses,
-        leaf_mask_f > 0.5,
-        jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
-        jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
-        source_valid_f > 0.5,
-        cotangent,
-        softening_sq=softening_sq,
-        G=G,
-        leaf_batch=int(rev_leaf_batch),
-        slot_tile=int(rev_block_tile),
-        skip_empty_tiles=bool(rev_skip_empty),
-        tiers=rev_tiers,
+    leaf_positions_bar, leaf_masses_bar, softening_bar, g_bar = (
+        _leafpair_accel_analytic_vjp(
+            leaf_positions,
+            leaf_masses,
+            leaf_mask_f > 0.5,
+            jnp.round(leaf_particle_idx_f).astype(INDEX_DTYPE),
+            jnp.round(source_leaf_ids_f).astype(INDEX_DTYPE),
+            source_valid_f > 0.5,
+            cotangent,
+            softening_sq=softening_sq,
+            G=G,
+            leaf_batch=int(rev_leaf_batch),
+            slot_tile=int(rev_block_tile),
+            skip_empty_tiles=bool(rev_skip_empty),
+            tiers=rev_tiers,
+            parameter_cotangents=True,
+        )
     )
+    # `positions` only supplies the output shape (the forward gathers from
+    # `leaf_positions`) and the id/mask tables are discrete: zeros. softening_sq
+    # and G are parameters the forward multiplies by and get their analytic
+    # cotangents -- zeros here (until 2026-09-04) dropped the near field's share.
     return (
         leaf_positions_bar,
         leaf_masses_bar,
@@ -1108,8 +1270,11 @@ def _radix_fast_lane_prepacked_accel_bwd(
         jnp.zeros_like(source_valid_f),
         jnp.zeros_like(leaf_mask_f),
         jnp.zeros_like(leaf_particle_idx_f),
-        jnp.zeros_like(softening_sq),
-        jnp.zeros_like(G),
+        jnp.reshape(
+            softening_bar.astype(jnp.asarray(softening_sq).dtype),
+            jnp.shape(softening_sq),
+        ),
+        jnp.reshape(g_bar.astype(jnp.asarray(G).dtype), jnp.shape(G)),
     )
 
 
@@ -1127,8 +1292,8 @@ _radix_fast_lane_prepacked_accel_cvjp.defvjp(
 @overload
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
@@ -1142,8 +1307,8 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 @overload
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
@@ -1154,10 +1319,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 ) -> Tuple[Array, Array]: ...
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_p2p_accelerations_radix_fast_lane(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
@@ -1182,9 +1348,9 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 
     Parameters
     ----------
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         Particle positions ``[N, 3]`` in Morton order.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         Particle masses ``[N]`` in the same order.
     payload : Any
         The prepacked radix fast-lane payload
@@ -1502,10 +1668,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     return self_acc + pair_acc
 
 
+@jaxtyped(typechecker=beartype)
 def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     *,
-    positions_sorted: Array,
-    masses_sorted: Array,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
@@ -1522,9 +1689,9 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
 
     Parameters
     ----------
-    positions_sorted : Array
+    positions_sorted : Float[Array, 'n 3']
         ``[N, 3]`` positions in tree order. Also fixes the output shape.
-    masses_sorted : Array
+    masses_sorted : Float[Array, 'n']
         ``[N]`` masses under the same permutation.
     payload : Any
         A ``RadixFastNearfieldPayload``. Deliberately untyped, to keep this

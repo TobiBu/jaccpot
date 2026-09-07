@@ -13,7 +13,7 @@ import math
 
 import jax.numpy as jnp
 from beartype import beartype
-from jaxtyping import Array, jaxtyped
+from jaxtyping import Array, Inexact, jaxtyped
 
 from .dtypes import INDEX_DTYPE
 
@@ -73,7 +73,7 @@ def multi_index_factorial(combo: tuple[int, int, int]) -> int:
 
 
 @jaxtyped(typechecker=beartype)
-def multi_power(vec: Array, combo: tuple[int, int, int]) -> Array:
+def multi_power(vec: Inexact[Array, "3"], combo: tuple[int, int, int]) -> Array:
     """Return ``vec[0]^i * vec[1]^j * vec[2]^k`` for ``combo = (i, j, k)``.
 
     Zero exponents are skipped rather than raised to the power of zero, which
@@ -81,9 +81,15 @@ def multi_power(vec: Array, combo: tuple[int, int, int]) -> Array:
 
     Parameters
     ----------
-    vec : Array
+    vec : Inexact[Array, '3']
         Length-3 vector. Traced values are fine; ``combo`` drives Python-level
-        branching, ``vec`` does not.
+        branching, ``vec`` does not. The length is now enforced, because it could
+        not be caught any other way: the body indexes ``vec[0..2]`` and JAX CLAMPS
+        an out-of-bounds index, so a 2-vector silently produced a monomial from
+        ``vec[-1]`` -- ``multi_power([2, 3], (1, 1, 1))`` returned ``18.0`` where
+        ``[2, 3, 5]`` gives ``30.0``. ``Inexact`` and not ``Float`` deliberately:
+        ``jnp.array(1.0, dtype=vec.dtype)`` accommodates complex, and every measured
+        corruption was a shape rather than a dtype.
     combo : tuple[int, int, int]
         Exponents, static under ``jit``.
 
@@ -326,6 +332,47 @@ LOCAL_COMBO_INV_FACTORIAL: dict[tuple[int, int, int], float] = {
     for combos in LOCAL_LEVEL_COMBOS.values()
     for combo in combos
 }
+
+
+# THE EIGHT `@jaxtyped` DECORATORS IN THIS FILE, MEASURED -- ONE PARAMETER NEEDED A SHAPE.
+#
+# This file holds 8 of the 27 functions `bench/annotation_census.py` counts as carrying
+# `@jaxtyped` with no shaped parameter, and the audit's F41 row flags that as "an eighth of
+# the rollout's Phase 1 backlog ... on code production does not call". Measured with
+# `bench/annotation_pilot` over `tests/unit/operators/test_multipole_utils.py`: 2 of 8
+# perturbations silently accepted, and both belong to one parameter.
+#
+#     multi_power     vec          2 of 2 ACCEPTED -- annotated, see below
+#     pack_tensor     tensor       0 accepted -- already validated
+#     unpack_tensor   data         0 accepted -- already validated
+#     level_size, level_offset, total_coefficients, triangular_index,
+#     triangular_indices           no array parameter at all; their decorator checks the
+#                                  `int` arguments, which is not nothing, just not shapes
+#
+# `vec` could not have been caught any other way, which is what makes it worth the
+# annotation even here. The body indexes `vec[0..2]` and JAX CLAMPS an out-of-bounds index,
+# so every violation is a valid gather afterwards and no body-level check can fire:
+#
+#     multi_power([2, 3],        (1,1,1))  ->  18.0          (correct: 30.0)
+#     multi_power([2, 3, 5, 7],  (1,1,1))  ->  30.0          (surplus ignored)
+#     multi_power([[2, 3, 5]],   (1,1,1))  ->  [8, 27, 125]  a VECTOR, not a scalar
+#     multi_power([[2],[3],[5]], (1,1,1))  ->  [30.0]        likewise
+#
+# THE SAME HOLE IS IN `yggdrax.multipole_utils`, AND THAT IS THE COPY PRODUCTION IMPORTS.
+# Verified: yggdrax's `multi_power` returns the identical wrong numbers for all four. So this
+# annotation protects THIS module's public surface -- it is in `__all__` -- and does not fix
+# the live path, which is a yggdrax-side change and is reported there rather than worked
+# around here.
+#
+# F41'S PREMISE IS SHARPER THAN RECORDED, re-measured while doing this. It says "production
+# imports yggdrax's"; in fact BOTH copies are imported by production, for overlapping names:
+# `runtime/kernels/_evaluate.py` and `runtime/fmm_prepare.py` take `MAX_MULTIPOLE_ORDER`,
+# `level_offset` and `total_coefficients` from HERE, while `downward/local_expansions.py` and
+# `upward/tree_expansions.py` take an overlapping set including `multi_power` from yggdrax.
+# And it is 5 names with zero production references, not 6: `level_size`,
+# `triangular_index`, `triangular_indices`, `pack_tensor`, `unpack_tensor`. Deduplicating is
+# still a decision rather than a task -- the split import is the reason it is not obvious --
+# but the shape of the decision is now measured.
 
 
 __all__ = [

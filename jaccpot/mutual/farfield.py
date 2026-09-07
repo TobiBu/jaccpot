@@ -39,6 +39,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
+from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from jaccpot.operators.dtypes import squared_radius_floor
@@ -329,8 +330,8 @@ def snap_capacity(
 
 
 def dense_level_schedule(
-    level_nodes: Tuple[Array, ...],
-    level_parents: Tuple[Array, ...],
+    level_nodes: Tuple[ArrayLike, ...],
+    level_parents: Tuple[ArrayLike, ...],
     *,
     depth_cap: Optional[int] = None,
     width_cap: Optional[int] = None,
@@ -349,9 +350,9 @@ def dense_level_schedule(
 
     Parameters
     ----------
-    level_nodes : Tuple[Array, ...]
+    level_nodes : Tuple[ArrayLike, ...]
         Ragged per-level node indices, shallowest first.
-    level_parents : Tuple[Array, ...]
+    level_parents : Tuple[ArrayLike, ...]
         Parent of each entry of ``level_nodes``.
     depth_cap : Optional[int]
         Rows to emit; ``None`` sizes it from the schedule itself.

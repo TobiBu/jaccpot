@@ -1,16 +1,33 @@
 # Refactor and code-hygiene audit — 2026-08
 
 Scope: `jaccpot/` excluding `jaccpot/experimental/`, plus `tests/`, repository root, and
-`pyproject.toml`. Baseline commit `32857c4` (`main`, clean tree). No production code was
-modified in producing this document, and none has been modified since.
+`pyproject.toml`. Baseline commit `32857c4` (`main`, clean tree) — the state the findings
+below were *filed* against, not the state of the tree: 344 commits have touched `jaccpot/`
+since, most of them closing rows in this document. No production code was modified in
+producing it.
 
 ---
 
-## State as of 2026-08-18
+## State — filed 2026-08-18, maintained to 2026-08-29
 
 A reader should not have to work through 1,900 lines to find out where this stands. This
 section is the summary; everything below is the evidence, and where the two disagree the
 evidence wins.
+
+**Read the dates inline, not the heading.** This section is *amended*, not re-snapshotted:
+individual claims carry their own measurement date (`2026-08-27`, `2026-08-29`, ...) and
+that date is what the claim is good as of. Two consequences worth stating rather than
+leaving to be discovered:
+
+* **A count in this document is a historical measurement, not the current one.** Anything
+  about the jaxtyping burn-down — the bare-parameter totals, the per-module rows, the
+  shape-vacuous `@jaxtyped` count in F41 — should be read against
+  `python bench/annotation_census.py`, which is the single definition (STYLE_GUIDE §4).
+  Where the two disagree, the counter wins and the row is stale; that is the failure mode
+  this document already records twice, in E.1 and F20.
+* **Closure is recorded in the Tier tables and in section G, not in the F-table.** The
+  reconciliation immediately below says so, and it is the single most load-bearing thing
+  on this page for anyone using it as a status source.
 
 **Done.** Tier 0 (all 21 items), Tier 1 (all ten), and Tier 2 items 2.1-2.6. The docstring
 programme that ran through 0.20, 1.10 and 2.5 is **finished**: `jaccpot/` measures **0**
