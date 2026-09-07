@@ -356,10 +356,19 @@ together on `main` at `4f3abe2`, 36 module-level targets, `PILOT_MAX_PER_FN=3`, 
 **474 perturbations, 20 accepted — 4%**, against the 48% these nine modules opened at. The
 three are not 152 parameters of backlog; they are essentially closed.
 
-### One finding, not twenty
+### Where the 20 sit
 
-**17 of the 20 are in Pallas entry points, and every one is a leading- or trailing-extent
-mismatch.** The mechanism is structural, not incidental: a `pallas_call` derives its grid
+```
+ 9  Pallas ENTRY points  nearfield_fused_leaf_pallas 4, leafpair_pallas_decoupled 3,
+                         leafpair_pallas 1, m2l_complex_fused_pallas 1
+ 8  broadcast helpers    _matvec 3, _matvec_T 3, _block_matmul 2
+ 2  the chunked scatter  _chunk_segment_scatter_add
+ 1  a pure-JAX twin      nearfield_leafpair_jax
+```
+
+Two of those groups have a mechanism, and they are different mechanisms.
+
+**THE PALLAS CLAMP — the 9 entry-point acceptances.** A `pallas_call` derives its grid
 from ONE array's shape and indexes every other operand with the same block index, so a
 short operand is read out of bounds and **JAX clamps** rather than raising. Verified in
 `nearfield_fused_leaf_pallas`, where `num_leaves` and `tile_t` both come from
@@ -376,8 +385,15 @@ broadcasting fails. So the Pallas lane is strictly weaker at shape validation th
 `_m2l.py`'s docstring requires it to equal — `nearfield_fused_leaf_jax` accepted **zero** of
 its 21 perturbations while its `_pallas` twin accepted 4.
 
-The other 3 follow a corollary worth stating on its own: **an annotated axis only bites when
-a SECOND parameter binds the same name.** `target_mask: Bool[Array, "leaves w"]` beside a
+**THE BROADCAST — the 8 helper acceptances.** Covered in #336: a reduction written as
+`jnp.sum(mat * vec[None, :], axis=1)` accepts a length-1 operand and spreads it, and a
+rank change (an extra leading axis, or a flattened operand) changes which axis is reduced
+rather than raising. Arithmetic objects to a *mismatched* length but not to a broadcastable
+one, which is why these eight sit in the three helpers that reduce by hand and not in the
+nine `src_mult`/`deltas` functions that reduce by matmul -- all of which accepted zero.
+
+A corollary that spans both groups: **an annotated axis only bites when a SECOND parameter
+binds the same name.** `target_mask: Bool[Array, "leaves w"]` beside a
 BARE `target_positions` binds `leaves`/`w` alone, so there is nothing for it to disagree
 with. Same for `multipoles`' `sh` in `m2l_complex_fused_pallas`. Half-annotating a family is
 worse than it looks: it reads as covered and validates nothing.
@@ -419,13 +435,26 @@ stay consistent. `_m2l_one`/`_m2l_one_vjp` stay UNREPLAYABLE (opaque `t`) and so
 but every reduction in them goes through the helpers #336 annotates, so they are
 transitively protected without being decorated.
 
-**The remaining 17 need a maintainer decision, not a measurement.** They all reduce to
-giving the Pallas entry points' position arrays their named axes so the masks have something
-to agree with — but each of those five parameters raises a documented `ValueError` in its own
-body, and checklist item 13 plus `DELIBERATELY_BARE`'s first entry set the policy: changing
-which exception a caller sees is a behaviour change. Unlike #310's case this is not a pure
-swap — the guard checks rank and trailing width but **never the leading extent**, while the
-docstring promises `ValueError` "if the input shapes are mutually inconsistent", which the
-body does not actually check. So the options are (a) annotate and let the `ValueError` become
-unreachable, or (b) leave the annotations off and strengthen the body guard to check the
-leading extent, as its own fix PR with its own test. Not decided here.
+**The remaining 9 are not an annotation job at all — decided 2026-09-07.** Eight are the
+Pallas entry points in `pallas/nearfield_fused_leaf.py` and one is its `leafpair_jax` twin.
+Annotating the position arrays would give the masks something to agree with, but each of
+those parameters raises a documented `ValueError` in its own body, and checklist item 13
+plus `DELIBERATELY_BARE`'s first entry set the policy: changing which exception a caller
+sees is a behaviour change.
+
+Unlike #310's case this was not a pure exception swap, which is what made it a real choice.
+The guard checks `ndim != 3 or shape[-1] != 3` and **never the leading extent**, while the
+docstring promises `ValueError` "if the input shapes are mutually inconsistent" — a
+consistency the body does not actually check. So the docstring over-promises and the
+annotation would have delivered it, under a different exception type.
+
+**Resolved in favour of the guard.** The body check is strengthened to verify what its own
+docstring already promises, the `ValueError` stays reachable and stays the exception callers
+see, and no annotation is added. That keeps the Raises contract intact and fixes the defect
+in the same place the contract is documented. It is a `fix:` PR with its own test, not part
+of the annotation burn-down, and the census does not move for it.
+
+The general rule this settles, for the next module that hits it: where a bare parameter's
+own body already documents a `ValueError` over its shape, an annotation is the WRONG
+instrument even when it would close something real. Strengthen the guard; the census is not
+the objective.
