@@ -835,10 +835,15 @@ class StrictRunMixin(_EngineBase):
                         counts <= jnp.asarray(capacity, dtype=counts.dtype)
                     )
             # Traversal-capacity saturation guard.  The traced refresh walk runs
-            # with fixed caps and yggdrax cannot raise on overflow under jit; a
-            # neighbour row that fills its cap, or a far-pair list that fills
-            # its buffer, means entries were dropped and the force is wrong.
-            # The caps are host constants recorded while the refresh traced
+            # with fixed caps, and a neighbour row that fills its cap -- or a
+            # far-pair list that fills its buffer -- means entries were dropped
+            # and the force is wrong.  The neighbour cap is the one that fails
+            # SILENTLY: yggdrax's near-overflow flag is a tracer under jit and
+            # nothing reads it, which is the defect this guard exists for.  The
+            # far-pair cap already raises through a debug callback in
+            # ``_raw_to_compact_far_pairs``, so its arm here is a second, cheap
+            # line of defence rather than the only one.  Both caps are host
+            # constants recorded while the refresh traced
             # (``_strict_fused_traced_caps``), so this is a static comparison.
             traced_caps = getattr(self, "_strict_fused_traced_caps", None)
             if isinstance(traced_caps, dict):

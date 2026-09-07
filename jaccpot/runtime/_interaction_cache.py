@@ -954,7 +954,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     policy_state: Optional[AdaptivePolicyState],
     capacity_report: Optional[Callable[[dict], None]] = None,
     max_neighbors_per_leaf_override: Optional[int] = None,
-    compact_far_pair_capacity_override: Optional[int] = None,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
@@ -964,11 +963,17 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     longest neighbour row and the total edge count.  The fused traced refresh
     cannot grow capacities -- under ``jit`` the overflow flags are tracers and
     yggdrax returns the truncated result -- so it must be told what the eager
-    prepare needed.  ``max_neighbors_per_leaf_override`` and
-    ``compact_far_pair_capacity_override`` are how it is told: each only ever
-    RAISES the corresponding capacity.  (Found 2026-09-06: at N=200k / leaf 256
-    the preset cap of 256 neighbours per leaf against rows of 781 cut 85 % of the
-    near field out of every step after the first, with no diagnostic firing.)
+    prepare needed.  ``max_neighbors_per_leaf_override`` is how it is told, and it
+    only ever RAISES the cap.  (Found 2026-09-06: at N=200k / leaf 256 the preset
+    cap of 256 neighbours per leaf against rows of 781 cut 85 % of the near field
+    out of every step after the first, with no diagnostic firing.)
+
+    Only the neighbour cap is carried over, because it is the only one that fails
+    SILENTLY: the compact far-pair cap is checked under tracing too
+    (``_raw_to_compact_far_pairs`` raises through a debug callback), so a
+    too-small one is already loud, and raising a cap the caller named in
+    ``JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP`` would turn a deliberate
+    memory bound into a no-op.
 
     This path intentionally avoids generic split-builder host branching and
     callback plumbing. It is valid only for streamed compact far-pairs with no
@@ -1008,8 +1013,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         (far-pair count, longest neighbour row, total edges). ``None`` skips it.
     max_neighbors_per_leaf_override : Optional[int]
         Floor for the per-leaf neighbour cap; only ever raises it.
-    compact_far_pair_capacity_override : Optional[int]
-        Floor for the compact far-pair cap; only ever raises it.
 
     Returns
     -------
@@ -1060,10 +1063,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         if compact_far_pair_capacity <= 0:
             raise ValueError(
                 "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP must be positive"
-            )
-        if compact_far_pair_capacity_override is not None:
-            compact_far_pair_capacity = max(
-                int(compact_far_pair_capacity), int(compact_far_pair_capacity_override)
             )
 
     # Opt-in: build far/near from the device-resident per-leaf treecode walk
@@ -2258,7 +2257,6 @@ def _build_dual_tree_artifacts(
     planner_hint: Optional[_RefreshDualPlannerHint] = None,
     strict_capacity_report: Optional[Callable[[dict], None]] = None,
     strict_max_neighbors_per_leaf_override: Optional[int] = None,
-    strict_compact_far_pair_capacity_override: Optional[int] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree.
 
@@ -2333,8 +2331,6 @@ def _build_dual_tree_artifacts(
     strict_capacity_report : Optional[Callable[[dict], None]]
         Forwarded to the strict streamed builder as ``capacity_report``.
     strict_max_neighbors_per_leaf_override : Optional[int]
-        Forwarded to the strict streamed builder; only ever raises the cap.
-    strict_compact_far_pair_capacity_override : Optional[int]
         Forwarded to the strict streamed builder; only ever raises the cap.
 
     Returns
@@ -2415,9 +2411,6 @@ def _build_dual_tree_artifacts(
                     capacity_report=strict_capacity_report,
                     max_neighbors_per_leaf_override=(
                         strict_max_neighbors_per_leaf_override
-                    ),
-                    compact_far_pair_capacity_override=(
-                        strict_compact_far_pair_capacity_override
                     ),
                 )
                 if strict_streamed_split
