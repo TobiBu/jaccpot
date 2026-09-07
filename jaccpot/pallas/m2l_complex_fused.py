@@ -234,8 +234,12 @@ def m2l_complex_fused_tables(order: int) -> dict:
 # --------------------------------------------------------------------------
 
 
+@jaxtyped(typechecker=beartype)
 def _block_matmul(
-    block_r: Array, block_i: Array, vec_r: Array, vec_i: Array
+    block_r: Float[Array, "degrees blockdim blockdim"],
+    block_i: Float[Array, "degrees blockdim blockdim"],
+    vec_r: Float[Array, "degrees blockdim"],
+    vec_i: Float[Array, "degrees blockdim"],
 ) -> tuple[Array, Array]:
     """Complex block-diagonal matmul: out[b,i] = sum_j block[b,i,j] vec[b,j].
 
@@ -245,13 +249,13 @@ def _block_matmul(
 
     Parameters
     ----------
-    block_r : Array
+    block_r : Float[Array, 'degrees blockdim blockdim']
         Real part of the per-degree rotation blocks, shape ``(Bp, mdp, mdp)``.
-    block_i : Array
+    block_i : Float[Array, 'degrees blockdim blockdim']
         Imaginary part, same shape.
-    vec_r : Array
+    vec_r : Float[Array, 'degrees blockdim']
         Real part of the packed coefficients, shape ``(Bp, mdp)``.
-    vec_i : Array
+    vec_i : Float[Array, 'degrees blockdim']
         Imaginary part, same shape.
 
     Returns
@@ -269,15 +273,17 @@ def _block_matmul(
     return out_r, out_i
 
 
-def _matvec(mat: Array, vec: Array) -> Array:
+@jaxtyped(typechecker=beartype)
+def _matvec(mat: Float[Array, "rows cols"], vec: Float[Array, "cols"]) -> Array:
     """out[i] = sum_j mat[i,j] * vec[j]  (gather-free; Triton-GPU friendly).
 
     Parameters
     ----------
-    mat : Array
+    mat : Float[Array, 'rows cols']
         Dense operator, shape ``(rows, cols)``.
-    vec : Array
-        Vector, shape ``(cols,)``.
+    vec : Float[Array, 'cols']
+        Vector, shape ``(cols,)``. Reduced against ``mat``'s SECOND axis, which is
+        what distinguishes this from :func:`_matvec_T`.
 
     Returns
     -------
@@ -361,16 +367,19 @@ def _m2l_one(
     )
 
 
-def _matvec_T(mat: Array, vec: Array) -> Array:
+@jaxtyped(typechecker=beartype)
+def _matvec_T(mat: Float[Array, "rows cols"], vec: Float[Array, "rows"]) -> Array:
     """out[j] = sum_i mat[i,j] * vec[i]  ==  (mat^T @ vec); the adjoint of _matvec.
 
     Parameters
     ----------
-    mat : Array
+    mat : Float[Array, 'rows cols']
         The SAME operand :func:`_matvec` takes, shape ``(rows, cols)`` -- reducing the
         other axis avoids materialising a transpose, which keeps Triton happy.
-    vec : Array
-        Cotangent, shape ``(rows,)``.
+    vec : Float[Array, 'rows']
+        Cotangent, shape ``(rows,)``. `rows` and not `cols`: that ONE difference from
+        :func:`_matvec` is the whole content of the adjoint, so the two axis names are
+        what stop the pair being swapped on a non-square operator.
 
     Returns
     -------

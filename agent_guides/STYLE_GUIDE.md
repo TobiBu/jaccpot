@@ -224,6 +224,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `degrees` | spherical-harmonic degrees of a per-degree summary, `p+1` of them |
 | `orders` | the candidate expansion orders an adaptive policy scores |
 | `levels` | block-step levels, `k_max + 1` of them |
+| `rows`, `cols` | a generic dense operator's output and input extents, in the two `m2l_complex_fused.py` matvec helpers ONLY. Not a tree or particle quantity: one helper is applied to three different operators at four extents, so the pair names a **relation between two arguments** rather than a width. `_matvec` reduces against `cols`, its adjoint `_matvec_T` against `rows`, and that single swap is the whole difference between them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
 
