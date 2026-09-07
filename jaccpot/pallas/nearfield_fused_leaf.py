@@ -95,6 +95,50 @@ def _resolve_subtile(target_subtile: int | None, leaf_width: int) -> int:
 _POS_WIDTH = 4
 
 
+# Why a shape disagreement between these operands is a WRONG NUMBER and not an error,
+# stated once and quoted into every message below. Measured 2026-09-07 by
+# `bench/annotation_pilot.py`: 9 of the 20 silent acceptances in that pass were this,
+# all of them in this file.
+_WHY_MUTUAL = (
+    "The grid is derived from ONE array's shape and every other operand is indexed "
+    "with the same block index, so an operand that disagrees is read OUT OF BOUNDS -- "
+    "and JAX clamps an out-of-bounds index rather than raising, which turns a shape "
+    "mistake into a plausible wrong answer instead of an error."
+)
+
+
+def _require_shape(
+    name: str,
+    array: Array,
+    expected: tuple[int, ...],
+    because: str = _WHY_MUTUAL,
+) -> None:
+    """Refuse an operand whose shape disagrees with the one the grid was derived from.
+
+    Parameters
+    ----------
+    name : str
+        Parameter name, so the message names the argument the caller passed.
+    array : Array
+        The operand to check.
+    expected : tuple[int, ...]
+        The shape implied by the arrays the grid dimensions were read from.
+    because : str
+        Why a disagreement matters, appended to the message. Defaults to
+        ``_WHY_MUTUAL``, which is the reason for every caller in this module.
+
+    Raises
+    ------
+    ValueError
+        If ``array``'s shape is not ``expected``.
+    """
+    got = tuple(int(d) for d in array.shape)
+    if got != tuple(expected):
+        raise ValueError(
+            f"{name} must have shape {tuple(expected)}, got {got}. {because}"
+        )
+
+
 def pallas_nearfield_fused_supported() -> bool:
     """Return whether the active accelerator can run the fused leaf kernel.
 
@@ -408,6 +452,16 @@ def nearfield_fused_leaf_pallas(
     tile_t = int(target_positions.shape[1])
     num_sources = int(source_positions.shape[1])
 
+    # The ndim/trailing checks above are not enough: they never look at the LEADING
+    # extent, so `target_mask` and the source tables could disagree with the grid and
+    # be clamped into it. The annotations do not close this either -- `target_mask`
+    # carries `leaves w` with a BARE `target_positions` beside it, so those axis names
+    # are bound by one parameter and have nothing to disagree with.
+    _require_shape("target_mask", target_mask, (num_leaves, tile_t))
+    _require_shape("source_positions", source_positions, (num_leaves, num_sources, 3))
+    _require_shape("source_masses", source_masses, (num_leaves, num_sources))
+    _require_shape("source_mask", source_mask, (num_leaves, num_sources))
+
     if num_leaves == 0 or tile_t == 0 or num_sources == 0:
         return jnp.zeros((num_leaves, tile_t, _OUT_WIDTH), dtype=dtype)
 
@@ -616,6 +670,12 @@ def nearfield_leafpair_jax(
     G : Array
         Scalar gravitational constant, applied as a plain multiplier.
 
+    Raises
+    ------
+    ValueError
+        If ``leaf_positions`` is not ``[num_leaves, W, 3]``, or if any other operand
+        disagrees with it on ``num_leaves`` or ``W``.
+
     Returns
     -------
     Array
@@ -640,6 +700,26 @@ def nearfield_leafpair_jax(
     (``tests/unit/operators/test_pallas_nearfield_fused.py`` draws sources from
     ``x != i``); it is a precondition, not a check.
     """
+    # The reference lane had no shape check at all, and it needs one for a reason the
+    # Pallas twins do not share: a `leaf_positions` of trailing width 2 makes `accels`
+    # two-wide, and the final `concatenate` with the potential then returns a 3-wide
+    # result where 4 is the contract -- an acceleration missing a component, at the
+    # right rank. Measured on `main`: (3, 2, 2, 3) in gave (3, 2, 3) out, silently.
+    if leaf_positions.ndim != 3 or leaf_positions.shape[-1] != 3:
+        raise ValueError(
+            "leaf_positions must have shape (num_leaves, W, 3), got "
+            f"{tuple(int(d) for d in leaf_positions.shape)}. A trailing width other "
+            "than 3 propagates into the accelerations and is then concatenated with "
+            "the potential, so the result keeps its rank and loses a component."
+        )
+    num_leaves = int(leaf_positions.shape[0])
+    leaf_width = int(leaf_positions.shape[1])
+    num_source_slots = int(source_leaf_ids.shape[1])
+    _require_shape("leaf_masses", leaf_masses, (num_leaves, leaf_width))
+    _require_shape("leaf_mask", leaf_mask, (num_leaves, leaf_width))
+    _require_shape("source_leaf_ids", source_leaf_ids, (num_leaves, num_source_slots))
+    _require_shape("source_valid", source_valid, (num_leaves, num_source_slots))
+
     safe_sids = jnp.where(source_valid, source_leaf_ids, 0)
     src_pos = leaf_positions[safe_sids]  # (L, S, W, 3)
     src_mass = leaf_masses[safe_sids]  # (L, S, W)
@@ -967,6 +1047,13 @@ def nearfield_leafpair_pallas(
     leaf_width = int(leaf_positions.shape[1])
     num_source_slots = int(source_leaf_ids.shape[1])
 
+    # `leaf_positions` is the table the grid comes from AND the gather target, so a
+    # disagreement here is read twice over. See `_WHY_MUTUAL`.
+    _require_shape("leaf_masses", leaf_masses, (num_leaves, leaf_width))
+    _require_shape("leaf_mask", leaf_mask, (num_leaves, leaf_width))
+    _require_shape("source_leaf_ids", source_leaf_ids, (num_leaves, num_source_slots))
+    _require_shape("source_valid", source_valid, (num_leaves, num_source_slots))
+
     if num_leaves == 0 or leaf_width == 0 or num_source_slots == 0:
         return jnp.zeros((num_leaves, leaf_width, _OUT_WIDTH), dtype=dtype)
 
@@ -1221,6 +1308,17 @@ def nearfield_leafpair_pallas_decoupled(
     num_sources = int(source_positions.shape[0])
     num_source_slots = int(source_leaf_ids.shape[1])
 
+    # The TARGET side, checked here. `num_targets` and `num_sources` are deliberately
+    # independent in this variant -- that separation is the decoupled form's whole
+    # point -- so each operand is checked against the one it belongs to rather than
+    # against a single leaf count. The source side is checked BELOW, after the
+    # width guard, so that #297's specific message keeps priority over this generic
+    # one; `test_the_decoupled_source_pool_is_its_own_leading_axis` asserts that
+    # ordering and caught it when these four sat here.
+    _require_shape("target_mask", target_mask, (num_targets, leaf_width))
+    _require_shape("source_leaf_ids", source_leaf_ids, (num_targets, num_source_slots))
+    _require_shape("source_valid", source_valid, (num_targets, num_source_slots))
+
     # THE SOURCE POOL MUST BE EXACTLY AS WIDE AS THE TARGET BLOCK, and until this check
     # existed neither violation said anything. The source gather tables' `BlockSpec`
     # below is built from `leaf_width` -- the TARGET width -- so the kernel reads exactly
@@ -1252,6 +1350,11 @@ def nearfield_leafpair_pallas_decoupled(
             "gather tables, so a narrower pool reads out of bounds and a wider one "
             "silently drops the surplus columns."
         )
+
+    # Now the source tables, against the POOL and not the target block: the width is
+    # settled by the check above, the leaf count is the pool's own.
+    _require_shape("source_masses", source_masses, (num_sources, leaf_width))
+    _require_shape("source_mask", source_mask, (num_sources, leaf_width))
 
     if num_targets == 0 or leaf_width == 0 or num_source_slots == 0 or num_sources == 0:
         return jnp.zeros((num_targets, leaf_width, _OUT_WIDTH), dtype=dtype)
