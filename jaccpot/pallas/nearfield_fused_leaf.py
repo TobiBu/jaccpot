@@ -631,7 +631,7 @@ def nearfield_fused_leaf_backend(*, prefer_pallas: bool = True) -> str:
 # ---------------------------------------------------------------------------
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=("include_self",))
 @jaxtyped(typechecker=beartype)
 def nearfield_leafpair_jax(
     leaf_positions: Array,
@@ -642,6 +642,7 @@ def nearfield_leafpair_jax(
     *,
     softening_sq: Array,
     G: Array,
+    include_self: bool = False,
 ) -> Array:
     """Reference leaf-pair near-field update in pure JAX (dense; test-scale only).
 
@@ -669,6 +670,11 @@ def nearfield_leafpair_jax(
         Scalar *squared* Plummer softening, added to every squared separation.
     G : Array
         Scalar gravitational constant, applied as a plain multiplier.
+    include_self : bool
+        Also add each leaf's intra-leaf term with the diagonal removed (the
+        dense form of ``_self_contributions``), matching
+        :func:`nearfield_leafpair_pallas` with ``include_self=True``. Default
+        False keeps the historical cross-leaf-only reference.
 
     Raises
     ------
@@ -734,8 +740,18 @@ def nearfield_leafpair_jax(
     inv_dist3 = inv_r * inv_r * inv_r
     weighted = inv_dist3 * src_mass[:, None, :, :]
     accels = -G * jnp.sum(weighted[..., None] * diff, axis=(2, 3))  # (L, W_t, 3)
-    accels = jnp.where(leaf_mask[..., None], accels, 0.0)
     potentials = -G * jnp.sum(inv_r * src_mass[:, None, :, :], axis=(2, 3))
+    if include_self:
+        width = int(leaf_positions.shape[1])
+        identity = jnp.eye(width, dtype=bool)
+        diff_s = leaf_positions[:, :, None, :] - leaf_positions[:, None, :, :]
+        dist_sq_s = jnp.sum(diff_s * diff_s, axis=-1) + softening_sq  # (L, W, W)
+        mask_s = leaf_mask[:, :, None] & leaf_mask[:, None, :] & (~identity)
+        inv_r_s = jnp.where(mask_s, lax.rsqrt(jnp.where(mask_s, dist_sq_s, 1.0)), 0.0)
+        weighted_s = inv_r_s * inv_r_s * inv_r_s * leaf_masses[:, None, :]
+        accels = accels - G * jnp.sum(weighted_s[..., None] * diff_s, axis=2)
+        potentials = potentials - G * jnp.sum(inv_r_s * leaf_masses[:, None, :], axis=2)
+    accels = jnp.where(leaf_mask[..., None], accels, 0.0)
     potentials = jnp.where(leaf_mask, potentials, 0.0)
     return jnp.concatenate([accels, potentials[..., None]], axis=-1)
 
@@ -789,6 +805,8 @@ def _nearfield_leafpair_kernel(
     leaf_width: int,
     accum_dtype: Any = None,
     out_dtype: Any = None,
+    include_self: bool = False,
+    self_on_first_chunk_only: bool = False,
 ) -> None:
     """Leaf-pair near-field update for one target subtile (vector of Bt targets).
 
@@ -857,6 +875,22 @@ def _nearfield_leafpair_kernel(
         Dtype of ``out_ref``. ``None`` means the input dtype (one final downcast
         of the wide accumulator). The chunked grid passes ``accum_dtype`` so each
         chunk's partial keeps the wide precision until the caller's reduce.
+    include_self : bool
+        Also sum the program's OWN leaf (``pl.program_id(0)``) against this
+        target subtile, diagonal removed -- the intra-leaf term that
+        ``jaccpot.nearfield._kernels._self_contributions`` otherwise computes as
+        a ``lax.scan`` over leaves. Folding it here costs one more unconditional
+        leaf pass per program and removes that scan's per-leaf launches, which
+        is what makes small leaves affordable (plan "small leaves", Phase 1).
+        The diagonal is masked BEFORE ``rsqrt``: at ``softening_sq == 0`` the
+        self pair is ``rsqrt(0) * 0 = NaN``, and even softened it would add a
+        spurious ``-G m_i / eps`` to the potential lane. The cross-leaf slots
+        are untouched, so with this off the kernel is byte-identical to before.
+        Static.
+    self_on_first_chunk_only : bool
+        On the chunked grid (a third grid axis over source chunks) run the self
+        pass on chunk 0 only; otherwise it would be counted ``n_chunks`` times.
+        Static; the single-pass grid leaves it False.
 
     Returns
     -------
@@ -879,45 +913,75 @@ def _nearfield_leafpair_kernel(
         else (zero, zero, zero, zero)
     )
 
+    def _leaf_pass(sid, acc, exclude_lane=None):
+        # One source leaf ``sid`` summed into ``acc``; ``exclude_lane`` is the
+        # ``(Bt,)`` vector of the targets' own slot indices for the self pass
+        # (diagonal out), ``None`` for a cross-leaf slot -- that path is the
+        # historical loop verbatim, op for op.
+        def _lane_body(j, acc):
+            acc_x, acc_y, acc_z, acc_p = acc
+            sx = src_table_pos_ref[sid, j, 0]
+            sy = src_table_pos_ref[sid, j, 1]
+            sz = src_table_pos_ref[sid, j, 2]
+            sm = src_table_mass_ref[sid, j]
+            lane_valid = src_table_mask_ref[sid, j]
+            dx = tx - sx
+            dy = ty - sy
+            dz = tz - sz
+            dist_sq = dx * dx + dy * dy + dz * dz + soft
+            active = tvalid & lane_valid
+            if exclude_lane is not None:
+                active = active & (exclude_lane != j)
+            safe_dist_sq = jnp.where(active, dist_sq, 1.0)
+            inv_r = lax.rsqrt(safe_dist_sq)
+            inv_r = jnp.where(active, inv_r, 0.0)
+            inv_dist3 = inv_r * inv_r * inv_r
+            scale = -g_value * inv_dist3 * sm
+            acc_x = acc_x + scale * dx
+            acc_y = acc_y + scale * dy
+            acc_z = acc_z + scale * dz
+            acc_p = acc_p - g_value * inv_r * sm
+            return (acc_x, acc_y, acc_z, acc_p)
+
+        if not wide:
+            return lax.fori_loop(0, leaf_width, _lane_body, acc)
+        # Two-level: this leaf's contribution accumulates in the narrow input
+        # dtype (leaf_width terms, so its own round-off is negligible), and only
+        # the per-leaf total is added into the wide running accumulator.
+        part = lax.fori_loop(0, leaf_width, _lane_body, (zero, zero, zero, zero))
+        return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
+
     def _slot_body(s, acc):
         sid = source_leaf_ids_ref[0, s]
         slot_valid = source_valid_ref[0, s]
+        return lax.cond(
+            slot_valid, lambda acc: _leaf_pass(sid, acc), lambda acc: acc, acc
+        )
 
-        def _apply(acc):
-            def _lane_body(j, acc):
-                acc_x, acc_y, acc_z, acc_p = acc
-                sx = src_table_pos_ref[sid, j, 0]
-                sy = src_table_pos_ref[sid, j, 1]
-                sz = src_table_pos_ref[sid, j, 2]
-                sm = src_table_mass_ref[sid, j]
-                lane_valid = src_table_mask_ref[sid, j]
-                dx = tx - sx
-                dy = ty - sy
-                dz = tz - sz
-                dist_sq = dx * dx + dy * dy + dz * dz + soft
-                active = tvalid & lane_valid
-                safe_dist_sq = jnp.where(active, dist_sq, 1.0)
-                inv_r = lax.rsqrt(safe_dist_sq)
-                inv_r = jnp.where(active, inv_r, 0.0)
-                inv_dist3 = inv_r * inv_r * inv_r
-                scale = -g_value * inv_dist3 * sm
-                acc_x = acc_x + scale * dx
-                acc_y = acc_y + scale * dy
-                acc_z = acc_z + scale * dz
-                acc_p = acc_p - g_value * inv_r * sm
-                return (acc_x, acc_y, acc_z, acc_p)
+    acc = lax.fori_loop(0, num_source_slots, _slot_body, acc0)
 
-            if not wide:
-                return lax.fori_loop(0, leaf_width, _lane_body, acc)
-            # Two-level: this leaf's contribution accumulates in the narrow input
-            # dtype (leaf_width terms, so its own round-off is negligible), and only
-            # the per-leaf total is added into the wide running accumulator.
-            part = lax.fori_loop(0, leaf_width, _lane_body, (zero, zero, zero, zero))
-            return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
+    if include_self:
+        # The self-leaf block, one extra unconditional pass rather than an extra
+        # source slot: the payload builders and their capacity checks stay
+        # untouched, and a leaf is never in its own source row (a precondition
+        # of the twin, asserted by the audit probe), so nothing is double
+        # counted. The target lane's slot index within the leaf is what the
+        # diagonal mask compares against the source lane ``j``.
+        bt = int(tx.shape[0])
+        lane_idx = pl.program_id(1) * bt + lax.broadcasted_iota(
+            jnp.int32, (bt,), 0
+        )
+        own_leaf = pl.program_id(0)
 
-        return lax.cond(slot_valid, _apply, lambda acc: acc, acc)
+        def _self_pass(acc):
+            return _leaf_pass(own_leaf, acc, exclude_lane=lane_idx)
 
-    acc_x, acc_y, acc_z, acc_p = lax.fori_loop(0, num_source_slots, _slot_body, acc0)
+        if self_on_first_chunk_only:
+            acc = lax.cond(pl.program_id(2) == 0, _self_pass, lambda acc: acc, acc)
+        else:
+            acc = _self_pass(acc)
+
+    acc_x, acc_y, acc_z, acc_p = acc
     target_out_dtype = zero.dtype if out_dtype is None else out_dtype
     if wide and target_out_dtype != accum_dtype:
         # One downcast, on the FINAL value rather than on the sum being accumulated:
@@ -951,6 +1015,7 @@ def nearfield_leafpair_pallas(
     interpret: bool = False,
     accum: str = "input",
     source_chunk: int | None = None,
+    include_self: bool = False,
 ) -> Array:
     """Leaf-pair near-field update with Pallas.
 
@@ -1013,6 +1078,16 @@ def nearfield_leafpair_pallas(
     source_chunk : int | None
         Source slots per program on the chunked grid (see above). ``None`` or a
         value of at least ``S`` keeps the single-pass grid.
+    include_self : bool
+        Also add each leaf's intra-leaf (self) term, diagonal removed, inside the
+        kernel -- see :func:`_nearfield_leafpair_kernel`. The result then equals
+        this kernel with it off plus
+        ``jaccpot.nearfield._kernels._self_contributions`` to float32 summation
+        order. Requires that no leaf appears in its own ``source_leaf_ids`` row
+        (the same precondition the twin documents), or the self term is counted
+        twice. Default False: byte-identical to the historical kernel; the
+        kernel name gains ``_self`` when set so the two never alias in the
+        compilation cache.
 
     Returns
     -------
@@ -1039,6 +1114,8 @@ def nearfield_leafpair_pallas(
     source_valid = jnp.asarray(source_valid, dtype=bool)
     softening_sq_arr = jnp.asarray([softening_sq], dtype=dtype)
     g_arr = jnp.asarray([G], dtype=dtype)
+    include_self = bool(include_self)
+    self_tag = "_self" if include_self else ""
 
     if leaf_positions.ndim != 3 or leaf_positions.shape[-1] != 3:
         raise ValueError("leaf_positions must have shape (num_leaves, W, 3)")
@@ -1089,6 +1166,7 @@ def nearfield_leafpair_pallas(
                 num_source_slots=num_source_slots,
                 leaf_width=leaf_width,
                 accum_dtype=accum_dtype,
+                include_self=include_self,
             )
 
         kernel = pl.pallas_call(
@@ -1116,7 +1194,10 @@ def nearfield_leafpair_pallas(
                 num_warps=int(num_warps), num_stages=int(num_stages)
             ),
             interpret=bool(interpret),
-            name=f"nearfield_leafpair_t{bt}_s{num_source_slots}_w{leaf_width}_a{accum}",
+            name=(
+                f"nearfield_leafpair_t{bt}_s{num_source_slots}_w{leaf_width}"
+                f"_a{accum}{self_tag}"
+            ),
         )
         out = kernel(
             target_positions_padded,
@@ -1152,6 +1233,9 @@ def nearfield_leafpair_pallas(
             leaf_width=leaf_width,
             accum_dtype=accum_dtype,
             out_dtype=partial_dtype,
+            include_self=include_self,
+            # counted once, on chunk 0, not n_chunks times
+            self_on_first_chunk_only=True,
         )
 
     kernel = pl.pallas_call(
@@ -1182,7 +1266,7 @@ def nearfield_leafpair_pallas(
         interpret=bool(interpret),
         name=(
             f"nearfield_leafpair_t{bt}_s{num_source_slots}_c{chunk}"
-            f"_w{leaf_width}_a{accum}"
+            f"_w{leaf_width}_a{accum}{self_tag}"
         ),
     )
     partials = kernel(

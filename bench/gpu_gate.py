@@ -91,6 +91,10 @@ _MUST_RUN_SM80 = (
     "test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]",
     "test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative",
     "test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative",
+    # The near-field leaf-pair kernel had NO gate entry before the self-fold
+    # (plan "small leaves", Phase 1); its Triton lowering is what this checks.
+    "test_leafpair_include_self_gpu_matches_reference[None]",
+    "test_leafpair_include_self_gpu_matches_reference[3]",
 )
 
 # Measured on an A100 sm_80 / jax 0.10.2 and documented in ARCHITECTURE.md §9,
