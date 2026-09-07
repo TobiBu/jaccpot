@@ -21,7 +21,6 @@ unchanged.
 
 from __future__ import annotations
 
-import os
 from functools import partial
 from typing import Any, Literal, Optional, Union, overload
 
@@ -32,6 +31,7 @@ from beartype.typing import Tuple
 from jax import lax
 from jaxtyping import Array, Bool, Float, jaxtyped
 
+from jaccpot._env import env_int
 from jaccpot.runtime.grad_options import analytic_p2p_vjp_enabled
 
 from .grad import _pair_accel_cvjp
@@ -174,7 +174,7 @@ def _self_contributions(
     # launch count by ``batch`` for ``batch * W^2 * 3`` words of live
     # intermediates (25 MB at 32 x 256), so the remat argument above still
     # holds per step. 1 restores the historical one-leaf-per-step scan.
-    batch = int(os.environ.get("JACCPOT_NEARFIELD_SELF_BATCH", "32") or "1")
+    batch = env_int("JACCPOT_NEARFIELD_SELF_BATCH", 32, minimum=1)
     num_leaves = int(leaf_positions.shape[0])
     if batch > 1 and num_leaves > 0:
         pad = (-num_leaves) % batch
