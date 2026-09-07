@@ -402,13 +402,29 @@ def _chunk_segment_scatter_add(
     """Reduce one fixed-width chunk by target index and scatter-add into locals.
 
     Sorts the chunk by target so that contributions to the same target become a
-    contiguous segment, reduces within segments, then scatters once. Invalid
-    slots are given the maximum index so they sort to the end and fall outside
-    the scatter.
+    contiguous segment, reduces within segments with a segmented prefix scan,
+    then scatters the one total per segment. Invalid slots are given the
+    maximum index so they sort to the end and fall outside the scatter.
 
     The sort makes the summation order a deterministic function of the target
     indices rather than of the pair order, which is what keeps the four
     accumulators agreeing to reassociation.
+
+    Why a segmented ``associative_scan`` and an out-of-bounds sink, not
+    ``segment_sum`` and index 0 (measured 2026-09-07, N=200k Plummer, A100,
+    ``strict_run_v2``): this function ran once per 4096-pair chunk, and at leaf
+    64 (992k far pairs, 243 chunks per step) its scatter fusions cost 169 ms of
+    a 410 ms step -- 686 us per launch for a 4096 x 25 reduction. Both scatters
+    in the old body were pathological for XLA's atomic-add lowering: the
+    ``segment_sum`` sent every pair of a target to the SAME group row (up to a
+    few hundred duplicates per address, serialised), and the final
+    ``.at[safe_targets].add`` sent every slot that was not a segment head --
+    ~3800 of 4096 -- to node 0 with a zero value, another serialised address.
+    The segmented scan reduces within segments with no scatter at all, and the
+    non-head slots now carry an index one past the end of ``local_accum``,
+    which ``mode="drop"`` discards without a write. Each in-bounds index is
+    then unique within the chunk (one segment head per target), so the final
+    scatter needs no atomics either.
 
     Parameters
     ----------
@@ -434,28 +450,29 @@ def _chunk_segment_scatter_add(
     tgt_sorted = tgt_chunk[sort_idx]
     contribs_sorted = contribs[sort_idx]
     valid_sorted = valid[sort_idx]
-
     contribs_sorted = jnp.where(valid_sorted[:, None], contribs_sorted, 0)
-    new_group = jnp.concatenate(
-        (
-            jnp.asarray([True], dtype=bool),
-            sorted_keys[1:] != sorted_keys[:-1],
-        ),
-        axis=0,
-    )
-    group_ids = jnp.cumsum(new_group.astype(INDEX_DTYPE)) - jnp.asarray(
-        1,
-        dtype=INDEX_DTYPE,
-    )
-    reduced = jax.ops.segment_sum(contribs_sorted, group_ids, chunk_size)
 
-    unique_targets = jnp.zeros((chunk_size,), dtype=INDEX_DTYPE)
-    unique_targets = unique_targets.at[group_ids].set(tgt_sorted)
-    unique_valid = jnp.zeros((chunk_size,), dtype=bool)
-    unique_valid = unique_valid.at[group_ids].set(valid_sorted)
-    safe_targets = jnp.where(unique_valid, unique_targets, 0)
-    reduced = jnp.where(unique_valid[:, None], reduced, 0)
-    return local_accum.at[safe_targets].add(reduced)
+    boundary = sorted_keys[1:] != sorted_keys[:-1]
+    new_group = jnp.concatenate((jnp.ones((1,), dtype=bool), boundary), axis=0)
+    is_last = jnp.concatenate((boundary, jnp.ones((1,), dtype=bool)), axis=0)
+
+    def _segmented_add(a: tuple[Array, Array], b: tuple[Array, Array]):
+        # Prefix sums that restart at every segment head: the right operand
+        # replaces the running sum when it starts a segment, else it adds.
+        va, fa = a
+        vb, fb = b
+        return jnp.where(fb[..., None], vb, va + vb), fa | fb
+
+    segment_prefix, _ = jax.lax.associative_scan(
+        _segmented_add, (contribs_sorted, new_group), axis=0
+    )
+    take = is_last & valid_sorted
+    sink = jnp.asarray(local_accum.shape[0], dtype=INDEX_DTYPE)  # out of bounds
+    rows_tgt = jnp.where(take, tgt_sorted, sink)
+    rows_val = jnp.where(take[:, None], segment_prefix, 0)
+    return local_accum.at[rows_tgt].add(
+        rows_val, mode="drop", indices_are_sorted=True, unique_indices=True
+    )
 
 
 @jaxtyped(typechecker=beartype)
