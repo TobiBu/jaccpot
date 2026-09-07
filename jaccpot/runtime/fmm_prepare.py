@@ -1464,10 +1464,20 @@ class PrepareMixin(_EngineBase):
                 max_leaf_size=int(tree_artifacts.leaf_cap),
             )
         )
+        (
+            runtime_traversal_config,
+            strict_nbr_override,
+            _strict_capacity_report,
+        ) = self._strict_fused_capacity_handoff(
+            runtime_traversal_config=runtime_traversal_config,
+            suppress_host_side_effects=suppress_host_side_effects,
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
             geometry_factory=geometry_factory,
+            strict_capacity_report=_strict_capacity_report,
+            strict_max_neighbors_per_leaf_override=strict_nbr_override,
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
@@ -3323,6 +3333,99 @@ class PrepareMixin(_EngineBase):
             p_gears=p_gears,
         )
 
+    def _strict_fused_capacity_handoff(
+        self,
+        *,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+        suppress_host_side_effects: bool,
+    ) -> tuple[
+        Optional[DualTreeTraversalConfig],
+        Optional[int],
+        Callable[[dict], None],
+    ]:
+        """Carry the eager walk's validated capacities into the traced refresh.
+
+        Eagerly, yggdrax's retry ladder grows the pair queue and the per-leaf
+        neighbour cap until the walk fits, so the eager state is exact whatever
+        the preset caps say.  Under the fused velocity-Verlet scan the SAME walk
+        runs traced: the overflow flags are tracers, the ladder has one attempt,
+        and yggdrax returns the truncated result.  Measured 2026-09-06 at
+        N=200k, leaf 256: the preset caps (queue 65536, 256 neighbours per leaf)
+        against rows of up to 781 cut the near field to 15 % from step 2 on --
+        relative force error ~60 % at theta 0.6, 5.8 % at theta 1.0 -- with no
+        diagnostic.
+
+        So the eager pass records what it needed (``_strict_fused_validated_caps``,
+        via the returned report callback) and the traced pass raises its caps to
+        cover that with headroom: the neighbour cap to 1.5x the observed longest
+        row (next power of two), the queue to 2x the ladder's answer.  The queue
+        cannot be verified after the fact -- its overflow flag never leaves the
+        trace -- hence the larger margin; the neighbour cap IS re-checked inside
+        the scan by ``strict_run_v2`` from ``_strict_fused_traced_caps``, which
+        the same callback records on the traced build.
+
+        The compact far-pair cap is deliberately NOT carried over.  It is checked
+        under tracing already (``_raw_to_compact_far_pairs`` raises through a
+        debug callback), so a too-small one fails loudly instead of truncating
+        silently, and it is set explicitly by
+        ``JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP`` -- widening a cap the
+        caller named would make a deliberate memory bound a no-op.
+
+        Parameters
+        ----------
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Capacities resolved for this build; widened (never shrunk) on the
+            traced path when the eager pass recorded a larger validated queue.
+        suppress_host_side_effects : bool
+            ``True`` on the traced hot path (the refresh inside the compiled
+            scan); selects which of the two attributes the report lands in.
+
+        Returns
+        -------
+        Optional[DualTreeTraversalConfig]
+            The traversal config to build with.
+        Optional[int]
+            ``max_neighbors_per_leaf`` floor for the strict streamed builder.
+        Callable[[dict], None]
+            Report callback that stores the builder's capacities on the engine.
+        """
+
+        def _pow2_ceil(value: int) -> int:
+            value = max(1, int(value))
+            return 1 << (value - 1).bit_length()
+
+        nbr_override: Optional[int] = None
+        validated = getattr(self, "_strict_fused_validated_caps", None)
+        if bool(suppress_host_side_effects) and isinstance(validated, dict):
+            observed_rows = validated.get("max_neighbors_observed")
+            if observed_rows is not None:
+                nbr_override = _pow2_ceil(int(1.5 * int(observed_rows)) + 1)
+            validated_queue = validated.get("queue_capacity")
+            if validated_queue is not None and runtime_traversal_config is not None:
+                widened_queue = max(
+                    int(runtime_traversal_config.max_pair_queue),
+                    _pow2_ceil(2 * int(validated_queue)),
+                )
+                if widened_queue != int(runtime_traversal_config.max_pair_queue):
+                    runtime_traversal_config = DualTreeTraversalConfig(
+                        max_pair_queue=int(widened_queue),
+                        process_block=int(runtime_traversal_config.process_block),
+                        max_interactions_per_node=int(
+                            runtime_traversal_config.max_interactions_per_node
+                        ),
+                        max_neighbors_per_leaf=int(
+                            runtime_traversal_config.max_neighbors_per_leaf
+                        ),
+                    )
+
+        def _report(report: dict) -> None:
+            if bool(report.get("traced")):
+                self._strict_fused_traced_caps = dict(report)
+            else:
+                self._strict_fused_validated_caps = dict(report)
+
+        return runtime_traversal_config, nbr_override, _report
+
     def _prepare_state_dual_and_downward_strict_streamed_fast(
         self,
         *,
@@ -3385,10 +3488,20 @@ class PrepareMixin(_EngineBase):
                 max_leaf_size=int(tree_artifacts.leaf_cap),
             )
         )
+        (
+            runtime_traversal_config,
+            strict_nbr_override,
+            _strict_capacity_report,
+        ) = self._strict_fused_capacity_handoff(
+            runtime_traversal_config=runtime_traversal_config,
+            suppress_host_side_effects=suppress_host_side_effects,
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             tree_artifacts.upward.geometry,
             geometry_factory=geometry_factory,
+            strict_capacity_report=_strict_capacity_report,
+            strict_max_neighbors_per_leaf_override=strict_nbr_override,
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
