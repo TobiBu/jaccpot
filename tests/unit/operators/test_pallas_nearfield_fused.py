@@ -475,3 +475,141 @@ def test_decoupled_equal_widths_are_untouched_and_finite():
     assert bool(jnp.all(jnp.isfinite(out)))
     # Non-vacuity: a kernel returning zeros would satisfy "finite" trivially.
     assert float(jnp.max(jnp.abs(out))) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# include_self: the self-leaf block folded into the leaf-pair kernel (plan
+# "small leaves", Phase 1). Reference = the kernel with the fold OFF plus the
+# scan it replaces (``_self_contributions``), so the test pins the fold to the
+# code it retires rather than to a re-derivation.
+# ---------------------------------------------------------------------------
+
+
+def _self_scan_reference(lp, lm, lmask, *, soft, G):
+    from jaccpot.nearfield._kernels import _self_contributions
+
+    acc, pot = _self_contributions(
+        lp, lm, lmask, softening_sq=soft, G=G, compute_potential=True
+    )
+    return np.concatenate([np.asarray(acc), np.asarray(pot)[..., None]], axis=-1)
+
+
+@pytest.mark.parametrize("source_chunk", [None, 2])
+def test_leafpair_include_self_interpret_equals_pairs_plus_self_scan(source_chunk):
+    """Fold on == fold off + ``_self_contributions``, to float32 summation order.
+
+    ``source_chunk=2`` exercises the chunked grid, where the self pass must run
+    on chunk 0 only -- counted ``n_chunks`` times it would be off by a factor
+    ``ceil(S / chunk)`` on the self term, which this catches.
+    """
+    lp, lm, lmask, sids, svalid = _leafpair_inputs(seed=11, L=6, W=8, S=5)
+    soft = jnp.float32(0.03**2)
+    G = jnp.float32(1.2)
+    common = dict(softening_sq=soft, G=G, interpret=True, source_chunk=source_chunk)
+    pairs_only = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, include_self=False, **common
+    )
+    folded = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, include_self=True, **common
+    )
+    expected = np.asarray(pairs_only) + _self_scan_reference(lp, lm, lmask, soft=soft, G=G)
+    # non-vacuity: the self term must actually be present
+    assert not np.allclose(np.asarray(folded), np.asarray(pairs_only), atol=1e-6)
+    assert np.allclose(np.asarray(folded), expected, rtol=1e-5, atol=1e-6)
+    # and the dense twin agrees with both
+    twin = nearfield_leafpair_jax(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, include_self=True
+    )
+    assert np.allclose(np.asarray(twin), expected, rtol=1e-5, atol=1e-6)
+
+
+def test_leafpair_include_self_interpret_subtile_lane_index():
+    """With several target subtiles per leaf the diagonal mask must use the
+    lane's index WITHIN THE LEAF (``program_id(1) * Bt + iota``), not within
+    the subtile -- a wrong offset excludes the wrong source lane and keeps the
+    true self pair, which at softening 0 is a NaN."""
+    lp, lm, lmask, sids, svalid = _leafpair_inputs(seed=12, L=5, W=8, S=4)
+    soft = jnp.float32(0.0)
+    G = jnp.float32(1.0)
+    folded = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
+        interpret=True, include_self=True, target_subtile=4,
+    )
+    pairs_only = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
+        interpret=True, include_self=False, target_subtile=4,
+    )
+    expected = np.asarray(pairs_only) + _self_scan_reference(lp, lm, lmask, soft=soft, G=G)
+    assert np.all(np.isfinite(np.asarray(folded)))
+    assert np.allclose(np.asarray(folded), expected, rtol=1e-5, atol=1e-6)
+
+
+def test_leafpair_include_self_softening_zero_has_no_nan_and_matches_potential():
+    """At ``softening_sq == 0`` the self pair is ``rsqrt(0) * 0``; the diagonal
+    must be masked BEFORE the rsqrt (acceleration finite) and contribute nothing
+    to the potential lane."""
+    lp, lm, lmask, sids, svalid = _leafpair_inputs(seed=13, L=4, W=8, S=3)
+    soft = jnp.float32(0.0)
+    G = jnp.float32(0.7)
+    folded = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, interpret=True, include_self=True
+    )
+    got = np.asarray(folded)
+    assert np.all(np.isfinite(got))
+    pairs_only = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, interpret=True, include_self=False
+    )
+    expected = np.asarray(pairs_only) + _self_scan_reference(lp, lm, lmask, soft=soft, G=G)
+    assert np.allclose(got[..., 3], expected[..., 3], rtol=1e-5, atol=1e-6)
+    assert np.allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_leafpair_include_self_wide_accumulator_interpret():
+    """The wide (two-level float64) accumulator takes the self block through the
+    same per-leaf partial."""
+    lp, lm, lmask, sids, svalid = _leafpair_inputs(seed=14, L=5, W=8, S=4)
+    soft = jnp.float32(0.02**2)
+    G = jnp.float32(1.0)
+    folded = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
+        interpret=True, include_self=True, accum="wide", source_chunk=2,
+    )
+    ref = nearfield_leafpair_jax(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, include_self=True
+    )
+    assert np.allclose(np.asarray(folded), np.asarray(ref), rtol=1e-5, atol=1e-6)
+
+
+def test_leafpair_include_self_off_is_the_historical_kernel():
+    """Default off: byte-identical to the cross-leaf-only kernel (the twin's
+    reference), so nothing outside the fold moved."""
+    lp, lm, lmask, sids, svalid = _leafpair_inputs(seed=15)
+    soft = jnp.float32(0.05**2)
+    G = jnp.float32(1.3)
+    ref = nearfield_leafpair_jax(lp, lm, lmask, sids, svalid, softening_sq=soft, G=G)
+    got = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, interpret=True
+    )
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.skipif(
+    not pallas_nearfield_fused_supported(),
+    reason="leaf-pair near-field Pallas kernel requires an Ampere+ (sm_80+) GPU",
+)
+@pytest.mark.parametrize("source_chunk", [None, 3])
+def test_leafpair_include_self_gpu_matches_reference(source_chunk):
+    """The Triton lowering of the self pass (program_id-indexed gather, iota mask,
+    chunk-0 gate) against the interpret-validated reference."""
+    lp, lm, lmask, sids, svalid = _leafpair_inputs(seed=16, L=10, W=16, S=6)
+    soft = jnp.float32(0.02**2)
+    G = jnp.float32(1.1)
+    ref = nearfield_leafpair_jax(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, include_self=True
+    )
+    got = nearfield_leafpair_pallas(
+        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
+        target_subtile=8, interpret=False, include_self=True, source_chunk=source_chunk,
+    )
+    assert np.all(np.isfinite(np.asarray(got)))
+    assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-5, atol=1e-5)

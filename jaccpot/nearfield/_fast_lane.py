@@ -605,6 +605,7 @@ def _radix_fast_lane_prepacked_pallas(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    include_self: bool = ...,
 ) -> Array: ...
 
 
@@ -625,6 +626,7 @@ def _radix_fast_lane_prepacked_pallas(
     num_stages: int = ...,
     target_subtile: Optional[int] = ...,
     interpret: bool = ...,
+    include_self: bool = ...,
 ) -> Tuple[Array, Array]: ...
 
 
@@ -645,6 +647,7 @@ def _radix_fast_lane_prepacked_pallas(
     num_stages: int = 1,
     target_subtile: Optional[int] = None,
     interpret: bool = False,
+    include_self: bool = False,
 ) -> Union[Array, Tuple[Array, Array]]:
     """Fused Pallas leaf-pair path over the compact prepacked source-leaf layout.
 
@@ -652,7 +655,8 @@ def _radix_fast_lane_prepacked_pallas(
     used by the production fused near-field lane. Source leaves are gathered by
     id inside the kernel (no dense per-particle source materialization), then the
     leaf-major result is scattered to particle order.  The intra-leaf self term
-    is handled separately by the caller, matching the pure-JAX path.
+    is handled separately by the caller, matching the pure-JAX path, unless
+    ``include_self`` folds it into the kernel.
 
     This is the forward half of the production differentiable near field: it is
     what :func:`_radix_fast_lane_prepacked_accel_cvjp` calls as its primal. Needs
@@ -691,6 +695,12 @@ def _radix_fast_lane_prepacked_pallas(
     interpret : bool
         Run through Pallas' reference interpreter rather than Triton; the shipped
         callers hardcode ``False``.
+    include_self : bool
+        Fold the intra-leaf self term into the kernel (one extra leaf pass per
+        program, diagonal masked) instead of leaving it to the caller's
+        ``_self_contributions`` scan. See
+        :func:`jaccpot.pallas.nearfield_fused_leaf.nearfield_leafpair_pallas`.
+        Default False.
 
     Returns
     -------
@@ -737,6 +747,7 @@ def _radix_fast_lane_prepacked_pallas(
         target_subtile=target_subtile,
         interpret=interpret,
         source_chunk=(None if source_chunk <= 0 else int(source_chunk)),
+        include_self=bool(include_self),
     )
 
     pair_acc = _scatter_contributions(
@@ -1422,6 +1433,17 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     )
     pallas_pairs = pallas_available and has_materialized_sources
     pallas_prepacked = pallas_available and has_prepacked_sources
+    # Fold the self-leaf term into the prepacked Pallas kernel (plan "small
+    # leaves", Phase 1). The scan it replaces launches ~5 fusions per leaf batch,
+    # which is what made leaf 64 slower than leaf 256 with 3x fewer pair
+    # evaluations. Forward lane only: the differentiable prepacked lane keeps
+    # ``self_acc + cvjp(...)`` so its gradient path is byte-identical
+    # (JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF=0 restores the scan everywhere).
+    fold_self = (
+        pallas_prepacked
+        and not (differentiable and not want_potential)
+        and _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True)
+    )
 
     # Potential is only implemented on the fused Pallas paths; otherwise the
     # caller falls back to the generic W x W path (preserving prior behavior).
@@ -1454,7 +1476,32 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
     self_acc = jnp.zeros_like(positions)
     self_pot = jnp.zeros(positions.shape[:1], dtype=dtype)
-    if diag_mode != "pairs_only":
+    pallas_num_warps = _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0)
+    pallas_num_stages = max(1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1))
+    pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
+    if fold_self and diag_mode == "self_only":
+        # The folded lane's self term alone: the kernel with every source slot
+        # invalid and the self pass on, so the diag mode measures the pass that
+        # replaced the scan rather than the scan itself.
+        source_leaf_ids_padded = jnp.asarray(payload.source_leaf_ids, dtype=INDEX_DTYPE)
+        return _radix_fast_lane_prepacked_pallas(
+            source_leaf_ids_padded,
+            jnp.zeros(source_leaf_ids_padded.shape, dtype=bool),
+            leaf_positions,
+            leaf_masses,
+            leaf_mask,
+            leaf_particle_idx,
+            positions,
+            G=G,
+            softening_sq=softening_sq,
+            compute_potential=want_potential,
+            num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
+            num_stages=pallas_num_stages,
+            target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
+            interpret=pallas_interpret,
+            include_self=True,
+        )
+    if diag_mode != "pairs_only" and not fold_self:
         if want_potential:
             (
                 self_acc,
@@ -1484,9 +1531,6 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         return self_acc
 
     if pallas_pairs:
-        pallas_num_warps = _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0)
-        pallas_num_stages = max(1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1))
-        pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
         pairs_result = _radix_fast_lane_pairs_pallas(
             positions,
             masses,
@@ -1520,11 +1564,6 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         )
 
         if pallas_prepacked:
-            pallas_num_warps = _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0)
-            pallas_num_stages = max(
-                1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1)
-            )
-            pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
             if differentiable and not want_potential:
                 # Differentiable prepacked lane: the SAME Pallas forward wrapped in
                 # a custom_vjp whose reverse is autodiff of this lane's own tiled
@@ -1585,12 +1624,15 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 num_stages=pallas_num_stages,
                 target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
                 interpret=pallas_interpret,
+                include_self=bool(fold_self),
             )
             # Branch on the value, not on `want_potential`. Both say the same thing --
             # the callee returns a pair exactly when the flag is set -- but the flag is
             # a runtime bool, so it selects the fallback overload and leaves the result
             # a union that cannot be added to an Array. `isinstance` narrows it, and a
             # JAX array is never a tuple, so the discriminator is exact.
+            # With ``fold_self`` the self term is already inside ``prepacked_result``
+            # and ``self_acc`` / ``self_pot`` are the zeros initialised above.
             if isinstance(prepacked_result, tuple):
                 pair_acc, pair_pot = prepacked_result
                 return self_acc + pair_acc, self_pot + pair_pot
