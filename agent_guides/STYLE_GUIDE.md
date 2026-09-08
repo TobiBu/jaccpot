@@ -211,7 +211,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
-| `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
+| `chunks`, `chunkflat` | the 2-D chunked scatter schedule. `chunkflat` also stands alone, for the arrays of ONE chunk in `_m2l.py:_chunk_segment_scatter_add`, where it is the fixed `chunk_size` width shared by the contributions, their target indices and their validity mask |
 | `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
 | `crossleaves` | the CROSS-domain near view in `distributed/_force_scale.py`, which is not `leaves` either: it degenerates to length 1 when a rank has no cross neighbours |
 | `coarse` | the remote coarse (LET) tree's nodes, which are a different tree from the local `nodes` |

@@ -39,7 +39,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
-from jaxtyping import Array, Float, Inexact, Int, jaxtyped
+from jaxtyping import Array, Bool, Float, Inexact, Int, jaxtyped
 from yggdrax.grouped_interactions import (
     GroupedInteractionBuffers,
 )
@@ -391,11 +391,12 @@ def _rotation_blocks_for_grouped_classes(
     return blocks_to, blocks_from
 
 
+@jaxtyped(typechecker=beartype)
 def _chunk_segment_scatter_add(
-    local_accum: Array,
-    contribs: Array,
-    tgt_chunk: Array,
-    valid: Array,
+    local_accum: Inexact[Array, "nodes sh"],
+    contribs: Inexact[Array, "chunkflat sh"],
+    tgt_chunk: Int[Array, "chunkflat"],
+    valid: Bool[Array, "chunkflat"],
     *,
     chunk_size: int,
 ) -> Array:
@@ -412,13 +413,17 @@ def _chunk_segment_scatter_add(
 
     Parameters
     ----------
-    local_accum : Array
-        Local coefficient accumulator to add into.
-    contribs : Array
-        Per-pair M2L contributions for this chunk.
-    tgt_chunk : Array
+    local_accum : Inexact[Array, 'nodes sh']
+        Local coefficient accumulator to add into. `nodes` is bound by this parameter
+        alone -- nothing else in the signature carries it, and the recording shows it
+        varying over 7, 15, 31, 127, 255, 511 and 1023 against an unchanged
+        `contribs` -- so it is deliberately NOT cross-checked against anything.
+    contribs : Inexact[Array, 'chunkflat sh']
+        Per-pair M2L contributions for this chunk. Shares `sh` with `local_accum`,
+        which is the coefficient count the two are added along.
+    tgt_chunk : Int[Array, 'chunkflat']
         Target node index per pair in the chunk.
-    valid : Array
+    valid : Bool[Array, 'chunkflat']
         Validity mask; the tail chunk is padded.
     chunk_size : int
         Fixed chunk width. Static -- it is what makes every chunk the same shape.
