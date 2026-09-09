@@ -102,6 +102,10 @@ def main() -> None:
             rows = {}
             for db in ("0", "1"):
                 os.environ["JACCPOT_M2L_DEGREE_BATCHED"] = db
+                # the knob is read at trace time and the cascade's inner jits are
+                # cached across variants -- without this the second variant reuses
+                # the first's trace (measured: bit-identical output and time)
+                jax.clear_caches()
                 fn = jax.jit(pure)
                 out_p, t_p, med_p = timed(fn, mult, centers, src_p, tgt_p)
                 rows[db] = (out_p, t_p, med_p)
