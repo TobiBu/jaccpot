@@ -968,9 +968,7 @@ def _nearfield_leafpair_kernel(
         # counted. The target lane's slot index within the leaf is what the
         # diagonal mask compares against the source lane ``j``.
         bt = int(tx.shape[0])
-        lane_idx = pl.program_id(1) * bt + lax.broadcasted_iota(
-            jnp.int32, (bt,), 0
-        )
+        lane_idx = pl.program_id(1) * bt + lax.broadcasted_iota(jnp.int32, (bt,), 0)
         own_leaf = pl.program_id(0)
 
         def _self_pass(acc):

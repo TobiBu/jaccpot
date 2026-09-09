@@ -512,7 +512,9 @@ def test_leafpair_include_self_interpret_equals_pairs_plus_self_scan(source_chun
     folded = nearfield_leafpair_pallas(
         lp, lm, lmask, sids, svalid, include_self=True, **common
     )
-    expected = np.asarray(pairs_only) + _self_scan_reference(lp, lm, lmask, soft=soft, G=G)
+    expected = np.asarray(pairs_only) + _self_scan_reference(
+        lp, lm, lmask, soft=soft, G=G
+    )
     # non-vacuity: the self term must actually be present
     assert not np.allclose(np.asarray(folded), np.asarray(pairs_only), atol=1e-6)
     assert np.allclose(np.asarray(folded), expected, rtol=1e-5, atol=1e-6)
@@ -532,14 +534,32 @@ def test_leafpair_include_self_interpret_subtile_lane_index():
     soft = jnp.float32(0.0)
     G = jnp.float32(1.0)
     folded = nearfield_leafpair_pallas(
-        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
-        interpret=True, include_self=True, target_subtile=4,
+        lp,
+        lm,
+        lmask,
+        sids,
+        svalid,
+        softening_sq=soft,
+        G=G,
+        interpret=True,
+        include_self=True,
+        target_subtile=4,
     )
     pairs_only = nearfield_leafpair_pallas(
-        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
-        interpret=True, include_self=False, target_subtile=4,
+        lp,
+        lm,
+        lmask,
+        sids,
+        svalid,
+        softening_sq=soft,
+        G=G,
+        interpret=True,
+        include_self=False,
+        target_subtile=4,
     )
-    expected = np.asarray(pairs_only) + _self_scan_reference(lp, lm, lmask, soft=soft, G=G)
+    expected = np.asarray(pairs_only) + _self_scan_reference(
+        lp, lm, lmask, soft=soft, G=G
+    )
     assert np.all(np.isfinite(np.asarray(folded)))
     assert np.allclose(np.asarray(folded), expected, rtol=1e-5, atol=1e-6)
 
@@ -552,14 +572,32 @@ def test_leafpair_include_self_softening_zero_has_no_nan_and_matches_potential()
     soft = jnp.float32(0.0)
     G = jnp.float32(0.7)
     folded = nearfield_leafpair_pallas(
-        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, interpret=True, include_self=True
+        lp,
+        lm,
+        lmask,
+        sids,
+        svalid,
+        softening_sq=soft,
+        G=G,
+        interpret=True,
+        include_self=True,
     )
     got = np.asarray(folded)
     assert np.all(np.isfinite(got))
     pairs_only = nearfield_leafpair_pallas(
-        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, interpret=True, include_self=False
+        lp,
+        lm,
+        lmask,
+        sids,
+        svalid,
+        softening_sq=soft,
+        G=G,
+        interpret=True,
+        include_self=False,
     )
-    expected = np.asarray(pairs_only) + _self_scan_reference(lp, lm, lmask, soft=soft, G=G)
+    expected = np.asarray(pairs_only) + _self_scan_reference(
+        lp, lm, lmask, soft=soft, G=G
+    )
     assert np.allclose(got[..., 3], expected[..., 3], rtol=1e-5, atol=1e-6)
     assert np.allclose(got, expected, rtol=1e-5, atol=1e-6)
 
@@ -571,8 +609,17 @@ def test_leafpair_include_self_wide_accumulator_interpret():
     soft = jnp.float32(0.02**2)
     G = jnp.float32(1.0)
     folded = nearfield_leafpair_pallas(
-        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
-        interpret=True, include_self=True, accum="wide", source_chunk=2,
+        lp,
+        lm,
+        lmask,
+        sids,
+        svalid,
+        softening_sq=soft,
+        G=G,
+        interpret=True,
+        include_self=True,
+        accum="wide",
+        source_chunk=2,
     )
     ref = nearfield_leafpair_jax(
         lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, include_self=True
@@ -608,8 +655,17 @@ def test_leafpair_include_self_gpu_matches_reference(source_chunk):
         lp, lm, lmask, sids, svalid, softening_sq=soft, G=G, include_self=True
     )
     got = nearfield_leafpair_pallas(
-        lp, lm, lmask, sids, svalid, softening_sq=soft, G=G,
-        target_subtile=8, interpret=False, include_self=True, source_chunk=source_chunk,
+        lp,
+        lm,
+        lmask,
+        sids,
+        svalid,
+        softening_sq=soft,
+        G=G,
+        target_subtile=8,
+        interpret=False,
+        include_self=True,
+        source_chunk=source_chunk,
     )
     assert np.all(np.isfinite(np.asarray(got)))
     assert np.allclose(np.asarray(got), np.asarray(ref), rtol=1e-5, atol=1e-5)
