@@ -28,7 +28,8 @@ occupies columns ``p-l .. p+l`` of a width ``2p+1`` row, so ``m`` sits at column
   :func:`jaccpot.operators.real_harmonics.z_m2l_translation_tables`, the single
   source of truth, as the SEPARABLE dense form
   ``Z = Zsf * outer(rinv^(n+1), rinv^k)`` so the radius enters through two
-  ``(Cp,)`` power vectors, not ``Cp^2`` transcendental calls.
+  ``(Cp,)`` power vectors (``exp(deg * log rinv)``, the form the fused kernel
+  lowers), not ``Cp^2`` transcendental calls.
 * z -> world local block = transpose of the multipole block
   (:func:`jaccpot.operators.real_rotations.real_rotation_from_z_axis_local`):
   ``Dz(-az) B_l^T Dz(ax) B_l^T``.
@@ -84,8 +85,8 @@ _TABLE_KEYS = (
     "Apat",
     "mabs",
     "Zsf",
-    "PowOut",
-    "PowSrc",
+    "DegOut",
+    "DegSrc",
 )
 
 
@@ -119,7 +120,7 @@ def m2l_real_csr_tables(order: int) -> dict:
     dict
         NumPy float64 arrays (cast to the working dtype by the caller) plus the
         shape scalars: ``C = (p+1)^2``, ``Cp`` (pow2 >= C), ``W = 2p+1``,
-        ``Wp`` (pow2 >= W), ``Bp`` (pow2 >= p+1), ``K`` (pow2 >= p+2) radius powers.
+        ``Wp`` (pow2 >= W), ``Bp`` (pow2 >= p+1).
 
         ``Ppack [Bp*Wp, Cp]`` / ``Uunpack [Cp, Bp*Wp]``: one-hot pack/unpack
         between the packed coefficient vector and the centred ``(Bp, Wp)`` rows.
@@ -127,8 +128,9 @@ def m2l_real_csr_tables(order: int) -> dict:
         per-degree transpose. ``Apat [Wp, Wp]``: the Dz sine pattern.
         ``mabs [Wp]``: ``|m|`` per column (0 on padded columns).
         ``Zsf [Cp, Cp]``: ``sign(m) (n+k)!`` on the valid (out, src) entries.
-        ``PowOut [Cp, K]`` / ``PowSrc [Cp, K]``: one-hot selectors of the radius
-        power ``rinv^(n+1)`` per output lane and ``rinv^k`` per source lane.
+        ``DegOut [Cp]`` / ``DegSrc [Cp]``: the radius exponents ``n+1`` per
+        output lane and ``k`` per source lane (0 on padded lanes, where ``Zsf``
+        is zero anyway).
     """
     p = int(order)
     if p < 0:
@@ -138,7 +140,6 @@ def m2l_real_csr_tables(order: int) -> dict:
     Cp = _next_pow2(C)
     Wp = _next_pow2(W)
     Bp = _next_pow2(p + 1)
-    K = _next_pow2(p + 2)  # radius powers 0..p+1, padded to a pow2 width for Triton
 
     Ppack = np.zeros((Bp * Wp, Cp), dtype=np.float64)
     for ell in range(p + 1):
@@ -178,15 +179,14 @@ def m2l_real_csr_tables(order: int) -> dict:
                 Zsf[out, s] = float(sign[out]) * float(fact[int(fact_index[out, k])])
                 # r^-(n+k+1) = rinv^(n+1) * rinv^k with n = deg(out), k = deg(s)
                 assert int(r_exponent[out, k]) == deg_of[out] + 1 + deg_of[s]
-    PowOut = np.zeros((Cp, K), dtype=np.float64)
-    PowSrc = np.zeros((Cp, K), dtype=np.float64)
-    for i in range(C):
-        PowOut[i, deg_of[i] + 1] = 1.0
-        PowSrc[i, deg_of[i]] = 1.0
+    DegOut = np.zeros((Cp,), dtype=np.float64)
+    DegSrc = np.zeros((Cp,), dtype=np.float64)
+    DegOut[:C] = deg_of + 1
+    DegSrc[:C] = deg_of
     return dict(
-        p=p, C=C, Cp=Cp, W=W, Wp=Wp, Bp=Bp, K=K,
+        p=p, C=C, Cp=Cp, W=W, Wp=Wp, Bp=Bp,
         Ppack=Ppack, Uunpack=Uunpack, Bstack=Bstack, BstackT=BstackT,
-        Apat=Apat, mabs=mabs, Zsf=Zsf, PowOut=PowOut, PowSrc=PowSrc,
+        Apat=Apat, mabs=mabs, Zsf=Zsf, DegOut=DegOut, DegSrc=DegSrc,
     )
 
 
@@ -213,14 +213,6 @@ def _dz(rows: Array, cosv: Array, sinv: Array, apat: Array) -> Array:
     """``Dz(t)`` on every degree row at once: ``cos(|m|t) v + A (sin(|m|t) v)``."""
     sv = rows * sinv[None, :]
     return rows * cosv[None, :] + jnp.sum(apat[None, :, :] * sv[:, None, :], axis=-1)
-
-
-def _radius_powers(rinv: Array, k: int) -> Array:
-    """``[1, rinv, rinv^2, ..., rinv^(k-1)]`` by repeated multiplication (exact integer powers)."""
-    pw = [jnp.ones_like(rinv)]
-    for _ in range(1, k):
-        pw.append(pw[-1] * rinv)
-    return jnp.stack(pw)
 
 
 def _m2l_pair(mult: Array, delta3: tuple, t: dict[str, Array], *, bp: int, wp: int) -> Array:
@@ -268,10 +260,10 @@ def _m2l_pair(mult: Array, delta3: tuple, t: dict[str, Array], *, bp: int, wp: i
     rows = _bapply(t["Bstack"], rows)
     mrf = _matvec(t["Uunpack"], rows.reshape(bp * wp))
 
-    # z-core, separable radius powers
-    pw = _radius_powers(rinv, int(t["PowOut"].shape[1]))
-    rinv_out = jnp.sum(t["PowOut"] * pw[None, :], axis=1)
-    rinv_src = jnp.sum(t["PowSrc"] * pw[None, :], axis=1)
+    # z-core, separable radius powers: r^-(n+k+1) = rinv^(n+1) * rinv^k
+    log_rinv = jnp.log(rinv)
+    rinv_out = jnp.exp(t["DegOut"] * log_rinv)
+    rinv_src = jnp.exp(t["DegSrc"] * log_rinv)
     lz = rinv_out * _matvec(t["Zsf"], rinv_src * mrf)
 
     # z -> world (local) = transpose of the multipole block: Dz(-az) B^T Dz(ax) B^T
