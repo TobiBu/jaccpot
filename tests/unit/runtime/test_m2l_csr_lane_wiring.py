@@ -59,13 +59,19 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
     def solve():
         # the default (non-strict) runtime: CPU-friendly, real basis, same downward
         solver = FastMultipoleMethod(
-            basis="real", theta=0.6,
-            G=1.0, softening=1e-3, working_dtype=jnp.float32,
+            basis="real",
+            theta=0.6,
+            G=1.0,
+            softening=1e-3,
+            working_dtype=jnp.float32,
             advanced=FMMAdvancedConfig(
                 tree=TreeConfig(mode="static_radix", leaf_target=32),
-                farfield=FarFieldConfig(mode="auto"), nearfield=NearFieldConfig(mode="auto"),
-                mac_type="dehnen"),
-            fixed_order=3)
+                farfield=FarFieldConfig(mode="auto"),
+                nearfield=NearFieldConfig(mode="auto"),
+                mac_type="dehnen",
+            ),
+            fixed_order=3,
+        )
         acc = solver.compute_accelerations(
             jnp.asarray(pos), jnp.asarray(mass), leaf_size=32, max_order=3, theta=0.6
         )

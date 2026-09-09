@@ -162,7 +162,8 @@ def m2l_real_csr_tables(order: int) -> dict:
     with jax.ensure_compile_time_eval():
         for ell in range(p + 1):
             b = np.asarray(
-                compute_real_B_matrix_multipole(ell, dtype=jnp.float64), dtype=np.float64
+                compute_real_B_matrix_multipole(ell, dtype=jnp.float64),
+                dtype=np.float64,
             )
             Bstack[ell, p - ell : p + ell + 1, p - ell : p + ell + 1] = b
     BstackT = np.swapaxes(Bstack, -1, -2).copy()
@@ -201,9 +202,21 @@ def m2l_real_csr_tables(order: int) -> dict:
     degn[: p + 1] = np.arange(p + 1) + 1
     degk[: p + 1] = np.arange(p + 1)
     return dict(
-        p=p, C=C, W=W, Wp=Wp, Bp=Bp, idx=idx, mask=mask,
-        Bstack=Bstack, BstackT=BstackT, Apat=Apat, mabs=mabs, signm=signm,
-        Zf=Zf, degn=degn, degk=degk,
+        p=p,
+        C=C,
+        W=W,
+        Wp=Wp,
+        Bp=Bp,
+        idx=idx,
+        mask=mask,
+        Bstack=Bstack,
+        BstackT=BstackT,
+        Apat=Apat,
+        mabs=mabs,
+        signm=signm,
+        Zf=Zf,
+        degn=degn,
+        degk=degk,
     )
 
 
@@ -394,7 +407,9 @@ def csr_by_target(
     P = int(src.shape[0])
     valid = (src >= 0) & (tgt >= 0)
     if active_pair_count is not None:
-        valid = valid & (jnp.arange(P, dtype=jnp.int32) < jnp.asarray(active_pair_count, jnp.int32))
+        valid = valid & (
+            jnp.arange(P, dtype=jnp.int32) < jnp.asarray(active_pair_count, jnp.int32)
+        )
     key = jnp.where(valid, tgt, jnp.asarray(total_nodes, jnp.int32))
     perm = jnp.argsort(key, stable=True)
     src_sorted = jnp.where(valid[perm], src[perm], 0)
@@ -441,7 +456,10 @@ def m2l_real_csr_jax(
     tgt = jnp.asarray(targets, jnp.int32)
     valid = (src >= 0) & (tgt >= 0)
     if active_pair_count is not None:
-        valid = valid & (jnp.arange(src.shape[0], dtype=jnp.int32) < jnp.asarray(active_pair_count, jnp.int32))
+        valid = valid & (
+            jnp.arange(src.shape[0], dtype=jnp.int32)
+            < jnp.asarray(active_pair_count, jnp.int32)
+        )
     s = jnp.where(valid, src, 0)
     tt = jnp.where(valid, tgt, 0)
     deltas = centers[tt] - centers[s]

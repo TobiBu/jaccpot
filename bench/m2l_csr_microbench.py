@@ -79,7 +79,9 @@ def main() -> None:
             src_j, tgt_j = jnp.asarray(src), jnp.asarray(tgt)
             counts = np.bincount(tgt, minlength=n)
 
-            csr = jax.jit(lambda m, c, s, t: m2l_real_csr_pallas(m, c, s, t, order=order))
+            csr = jax.jit(
+                lambda m, c, s, t: m2l_real_csr_pallas(m, c, s, t, order=order)
+            )
             out_k, t_k, med_k = timed(csr, mult, centers, src_j, tgt_j)
 
             chunk = int(args.chunk)
@@ -94,9 +96,21 @@ def main() -> None:
                     valid = idx < P
                     sc = s[idx]
                     tc = t[idx]
-                    contrib = m2l_rot_scale_real_batch(m[sc], c[tc] - c[sc], order=order)
-                    return _chunk_segment_scatter_add(acc, contrib, tc, valid, chunk_size=chunk), None
-                acc, _ = lax.scan(body, jnp.zeros((n, C), jnp.float32), jnp.arange(n_chunks, dtype=jnp.int32))
+                    contrib = m2l_rot_scale_real_batch(
+                        m[sc], c[tc] - c[sc], order=order
+                    )
+                    return (
+                        _chunk_segment_scatter_add(
+                            acc, contrib, tc, valid, chunk_size=chunk
+                        ),
+                        None,
+                    )
+
+                acc, _ = lax.scan(
+                    body,
+                    jnp.zeros((n, C), jnp.float32),
+                    jnp.arange(n_chunks, dtype=jnp.int32),
+                )
                 return acc
 
             rows = {}
@@ -112,18 +126,40 @@ def main() -> None:
                 del fn
             ref = np.asarray(rows["0"][0], np.float64)
             assert np.all(np.isfinite(ref)), "pure-JAX reference has non-finite rows"
-            assert np.all(np.isfinite(np.asarray(out_k))), "CSR kernel produced non-finite rows"
-            rel = float(np.linalg.norm(np.asarray(out_k, np.float64) - ref) / np.linalg.norm(ref))
-            rel_db = float(np.linalg.norm(np.asarray(rows["1"][0], np.float64) - ref) / np.linalg.norm(ref))
-            row = dict(order=order, pairs=P, nodes=n, longest_row=int(counts.max()),
-                       csr_ns_per_pair=1e9 * t_k / P, csr_ms=1e3 * t_k, csr_median_ms=1e3 * med_k,
-                       pure_ns_per_pair=1e9 * rows["0"][1] / P, pure_ms=1e3 * rows["0"][1],
-                       pure_db_ns_per_pair=1e9 * rows["1"][1] / P, pure_db_ms=1e3 * rows["1"][1],
-                       rel_l2_csr_vs_pure=rel, rel_l2_db_vs_pure=rel_db, chunk=chunk)
+            assert np.all(
+                np.isfinite(np.asarray(out_k))
+            ), "CSR kernel produced non-finite rows"
+            rel = float(
+                np.linalg.norm(np.asarray(out_k, np.float64) - ref)
+                / np.linalg.norm(ref)
+            )
+            rel_db = float(
+                np.linalg.norm(np.asarray(rows["1"][0], np.float64) - ref)
+                / np.linalg.norm(ref)
+            )
+            row = dict(
+                order=order,
+                pairs=P,
+                nodes=n,
+                longest_row=int(counts.max()),
+                csr_ns_per_pair=1e9 * t_k / P,
+                csr_ms=1e3 * t_k,
+                csr_median_ms=1e3 * med_k,
+                pure_ns_per_pair=1e9 * rows["0"][1] / P,
+                pure_ms=1e3 * rows["0"][1],
+                pure_db_ns_per_pair=1e9 * rows["1"][1] / P,
+                pure_db_ms=1e3 * rows["1"][1],
+                rel_l2_csr_vs_pure=rel,
+                rel_l2_db_vs_pure=rel_db,
+                chunk=chunk,
+            )
             results.append(row)
-            print(f"p={order} pairs={P/1e6:.0f}M longest_row={counts.max()}: CSR {row['csr_ns_per_pair']:.1f} ns/pair "
-                  f"({row['csr_ms']:.1f} ms) | pure-JAX {row['pure_ns_per_pair']:.1f} ns/pair | degree-batched "
-                  f"{row['pure_db_ns_per_pair']:.1f} ns/pair | rel-L2 csr {rel:.2e}, db {rel_db:.2e}", flush=True)
+            print(
+                f"p={order} pairs={P/1e6:.0f}M longest_row={counts.max()}: CSR {row['csr_ns_per_pair']:.1f} ns/pair "
+                f"({row['csr_ms']:.1f} ms) | pure-JAX {row['pure_ns_per_pair']:.1f} ns/pair | degree-batched "
+                f"{row['pure_db_ns_per_pair']:.1f} ns/pair | rel-L2 csr {rel:.2e}, db {rel_db:.2e}",
+                flush=True,
+            )
     if args.out:
         with open(args.out, "w") as fh:
             json.dump(results, fh, indent=2)

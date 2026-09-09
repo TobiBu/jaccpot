@@ -61,14 +61,18 @@ def _reference(mult, centers, src, tgt, order, active=None):
         valid &= np.arange(src.shape[0]) < active
     s, t = src[valid], tgt[valid]
     deltas = centers[t] - centers[s]
-    contrib = np.asarray(m2l_rot_scale_real_batch(jnp.asarray(mult[s]), jnp.asarray(deltas), order=order))
+    contrib = np.asarray(
+        m2l_rot_scale_real_batch(jnp.asarray(mult[s]), jnp.asarray(deltas), order=order)
+    )
     out = np.zeros_like(mult, dtype=np.float64)
     np.add.at(out, t, contrib.astype(np.float64))
     return out
 
 
 def _relerr(a, ref):
-    return float(np.linalg.norm(np.asarray(a, np.float64) - ref) / (np.linalg.norm(ref) + 1e-30))
+    return float(
+        np.linalg.norm(np.asarray(a, np.float64) - ref) / (np.linalg.norm(ref) + 1e-30)
+    )
 
 
 def test_csr_by_target_partitions_the_live_pairs():
@@ -108,8 +112,12 @@ def test_csr_pallas_interpret_matches_rot_scale_f64(order):
     mult, centers, src, tgt = _case(order, np.float64, seed=order)
     ref = _reference(mult, centers, src, tgt, order)
     got = m2l_real_csr_pallas(
-        jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src), jnp.asarray(tgt),
-        order=order, interpret=True,
+        jnp.asarray(mult),
+        jnp.asarray(centers),
+        jnp.asarray(src),
+        jnp.asarray(tgt),
+        order=order,
+        interpret=True,
     )
     assert got.shape == mult.shape
     assert _relerr(got, ref) < 1e-10
@@ -122,11 +130,19 @@ def test_csr_pallas_interpret_matches_twin_and_rot_scale_f32(order):
     mult, centers, src, tgt = _case(order, np.float32, seed=10 + order)
     ref = _reference(mult, centers, src, tgt, order)
     got = m2l_real_csr_pallas(
-        jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src), jnp.asarray(tgt),
-        order=order, interpret=True,
+        jnp.asarray(mult),
+        jnp.asarray(centers),
+        jnp.asarray(src),
+        jnp.asarray(tgt),
+        order=order,
+        interpret=True,
     )
     twin = m2l_real_csr_jax(
-        jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src), jnp.asarray(tgt), order=order
+        jnp.asarray(mult),
+        jnp.asarray(centers),
+        jnp.asarray(src),
+        jnp.asarray(tgt),
+        order=order,
     )
     assert _relerr(got, ref) < 3e-4
     assert _relerr(got, np.asarray(twin, np.float64)) < 1e-5
@@ -140,8 +156,13 @@ def test_csr_pallas_interpret_active_pair_count_truncates():
     active = 23
     ref = _reference(mult, centers, src, tgt, order, active=active)
     got = m2l_real_csr_pallas(
-        jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src), jnp.asarray(tgt),
-        order=order, active_pair_count=jnp.asarray(active, jnp.int32), interpret=True,
+        jnp.asarray(mult),
+        jnp.asarray(centers),
+        jnp.asarray(src),
+        jnp.asarray(tgt),
+        order=order,
+        active_pair_count=jnp.asarray(active, jnp.int32),
+        interpret=True,
     )
     assert _relerr(got, ref) < 1e-10
 
@@ -153,10 +174,16 @@ def test_csr_pallas_interpret_on_axis_deltas_are_exact():
     order = 4
     mult, centers, src, tgt = _case(order, np.float64, seed=8, on_axis=True)
     ref = _reference(mult, centers, src, tgt, order)
-    got = np.asarray(m2l_real_csr_pallas(
-        jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src), jnp.asarray(tgt),
-        order=order, interpret=True,
-    ))
+    got = np.asarray(
+        m2l_real_csr_pallas(
+            jnp.asarray(mult),
+            jnp.asarray(centers),
+            jnp.asarray(src),
+            jnp.asarray(tgt),
+            order=order,
+            interpret=True,
+        )
+    )
     assert np.all(np.isfinite(got))
     assert _relerr(got, ref) < 1e-10
 
@@ -165,10 +192,18 @@ def test_csr_pallas_under_jit_with_traced_active_count():
     """The wrapper (sort + CSR + pallas_call) must trace: caps are static, counts traced."""
     order = 3
     mult, centers, src, tgt = _case(order, np.float32, seed=11)
-    fn = jax.jit(lambda m, c, s, t, a: m2l_real_csr_pallas(m, c, s, t, order=order,
-                                                           active_pair_count=a, interpret=True))
-    got = fn(jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src), jnp.asarray(tgt),
-             jnp.asarray(40, jnp.int32))
+    fn = jax.jit(
+        lambda m, c, s, t, a: m2l_real_csr_pallas(
+            m, c, s, t, order=order, active_pair_count=a, interpret=True
+        )
+    )
+    got = fn(
+        jnp.asarray(mult),
+        jnp.asarray(centers),
+        jnp.asarray(src),
+        jnp.asarray(tgt),
+        jnp.asarray(40, jnp.int32),
+    )
     ref = _reference(mult, centers, src, tgt, order)
     assert _relerr(got, ref) < 3e-4
 
@@ -183,8 +218,12 @@ def test_csr_pallas_gpu_matches_rot_scale(order):
     mult, centers, src, tgt = _case(order, np.float32, n=40, pairs=400, seed=20 + order)
     ref = _reference(mult, centers, src, tgt, order)
     got = m2l_real_csr_pallas(
-        jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src), jnp.asarray(tgt),
-        order=order, interpret=False,
+        jnp.asarray(mult),
+        jnp.asarray(centers),
+        jnp.asarray(src),
+        jnp.asarray(tgt),
+        order=order,
+        interpret=False,
     )
     assert np.all(np.isfinite(np.asarray(got)))
     assert _relerr(got, ref) < 3e-4
@@ -196,15 +235,27 @@ def test_csr_pallas_gpu_matches_rot_scale(order):
 def test_csr_pallas_rejects_a_coefficient_count_of_another_order():
     mult, centers, src, tgt = _case(3, np.float32, seed=30)
     with pytest.raises(ValueError, match="coefficients"):
-        m2l_real_csr_pallas(jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src),
-                            jnp.asarray(tgt), order=4, interpret=True)
+        m2l_real_csr_pallas(
+            jnp.asarray(mult),
+            jnp.asarray(centers),
+            jnp.asarray(src),
+            jnp.asarray(tgt),
+            order=4,
+            interpret=True,
+        )
 
 
 def test_csr_pallas_rejects_misaligned_centers():
     mult, centers, src, tgt = _case(3, np.float32, seed=31)
     with pytest.raises(ValueError, match="centers"):
-        m2l_real_csr_pallas(jnp.asarray(mult), jnp.asarray(centers[:-1]), jnp.asarray(src),
-                            jnp.asarray(tgt), order=3, interpret=True)
+        m2l_real_csr_pallas(
+            jnp.asarray(mult),
+            jnp.asarray(centers[:-1]),
+            jnp.asarray(src),
+            jnp.asarray(tgt),
+            order=3,
+            interpret=True,
+        )
 
 
 def test_pack_unpack_centred_round_trip():
@@ -212,7 +263,11 @@ def test_pack_unpack_centred_round_trip():
 
     for order in (2, 4, 6):
         c = sh_size(order)
-        x = jnp.asarray(np.random.default_rng(order).standard_normal((5, c)).astype(np.float32))
+        x = jnp.asarray(
+            np.random.default_rng(order).standard_normal((5, c)).astype(np.float32)
+        )
         rows = pack_centred(x, order=order)
         assert rows.shape[1] & (rows.shape[1] - 1) == 0  # pow2 row width
-        np.testing.assert_array_equal(np.asarray(unpack_centred(rows, order=order)), np.asarray(x))
+        np.testing.assert_array_equal(
+            np.asarray(unpack_centred(rows, order=order)), np.asarray(x)
+        )
