@@ -188,3 +188,31 @@ def test_csr_pallas_gpu_matches_rot_scale(order):
     )
     assert np.all(np.isfinite(np.asarray(got)))
     assert _relerr(got, ref) < 3e-4
+
+
+# ---------------------------------------------------------------- axis contracts
+
+
+def test_csr_pallas_rejects_a_coefficient_count_of_another_order():
+    mult, centers, src, tgt = _case(3, np.float32, seed=30)
+    with pytest.raises(ValueError, match="coefficients"):
+        m2l_real_csr_pallas(jnp.asarray(mult), jnp.asarray(centers), jnp.asarray(src),
+                            jnp.asarray(tgt), order=4, interpret=True)
+
+
+def test_csr_pallas_rejects_misaligned_centers():
+    mult, centers, src, tgt = _case(3, np.float32, seed=31)
+    with pytest.raises(ValueError, match="centers"):
+        m2l_real_csr_pallas(jnp.asarray(mult), jnp.asarray(centers[:-1]), jnp.asarray(src),
+                            jnp.asarray(tgt), order=3, interpret=True)
+
+
+def test_pack_unpack_centred_round_trip():
+    from jaccpot.pallas.m2l_real_csr import pack_centred, unpack_centred
+
+    for order in (2, 4, 6):
+        c = sh_size(order)
+        x = jnp.asarray(np.random.default_rng(order).standard_normal((5, c)).astype(np.float32))
+        rows = pack_centred(x, order=order)
+        assert rows.shape[1] & (rows.shape[1] - 1) == 0  # pow2 row width
+        np.testing.assert_array_equal(np.asarray(unpack_centred(rows, order=order)), np.asarray(x))
