@@ -69,9 +69,13 @@ def main() -> None:
             # random well-separated pairs: reject |delta| < 0.3 (the MAC would too)
             src = rng.integers(0, n, P).astype(np.int32)
             tgt = rng.integers(0, n, P).astype(np.int32)
-            d = np.asarray(centers)[tgt] - np.asarray(centers)[src]
-            bad = np.linalg.norm(d, axis=1) < 0.3
-            src = np.where(bad, (src + 1) % n, src).astype(np.int32)
+            cn = np.asarray(centers)
+            for _ in range(50):  # resample until every pair is well separated
+                bad = np.linalg.norm(cn[tgt] - cn[src], axis=1) < 0.3
+                if not bad.any():
+                    break
+                src = np.where(bad, rng.integers(0, n, P), src).astype(np.int32)
+            assert not bad.any()
             src_j, tgt_j = jnp.asarray(src), jnp.asarray(tgt)
             counts = np.bincount(tgt, minlength=n)
 
@@ -103,6 +107,8 @@ def main() -> None:
                 rows[db] = (out_p, t_p, med_p)
                 del fn
             ref = np.asarray(rows["0"][0], np.float64)
+            assert np.all(np.isfinite(ref)), "pure-JAX reference has non-finite rows"
+            assert np.all(np.isfinite(np.asarray(out_k))), "CSR kernel produced non-finite rows"
             rel = float(np.linalg.norm(np.asarray(out_k, np.float64) - ref) / np.linalg.norm(ref))
             rel_db = float(np.linalg.norm(np.asarray(rows["1"][0], np.float64) - ref) / np.linalg.norm(ref))
             row = dict(order=order, pairs=P, nodes=n, longest_row=int(counts.max()),

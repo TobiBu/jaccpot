@@ -95,6 +95,11 @@ _MUST_RUN_SM80 = (
     # (plan "small leaves", Phase 1); its Triton lowering is what this checks.
     "test_leafpair_include_self_gpu_matches_reference[None]",
     "test_leafpair_include_self_gpu_matches_reference[3]",
+    # The target-tiled CSR M2L kernel (plan "small leaves", Phase 2): dynamic-trip
+    # loop, row gathers by id, atan2 and pow2 tiles all lower only on sm_80.
+    "test_csr_pallas_gpu_matches_rot_scale[2]",
+    "test_csr_pallas_gpu_matches_rot_scale[4]",
+    "test_csr_pallas_gpu_matches_rot_scale[6]",
 )
 
 # Measured on an A100 sm_80 / jax 0.10.2 and documented in ARCHITECTURE.md §9,
