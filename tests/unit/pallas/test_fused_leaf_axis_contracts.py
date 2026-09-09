@@ -5,10 +5,17 @@ their rank and trailing 3 and say so by name -- `target_positions must have shap
 (num_leaves, W_t, 3)` -- and a decorator would run first and replace that with a generic
 `TypeCheckError`. `test_the_position_checks_still_fire` is the guard on that decision.
 
-What the bodies do not check is the masks, masses, ids and validity arrays that have to
+The bodies did not use to check the masks, masses, ids and validity arrays that have to
 agree with those positions slot for slot, and that is exactly where this module's real
 defect lived: #297, where the decoupled lane's source pool had a different width from the
 target block and the kernel read the surplus out of bounds, silently.
+
+They check it NOW. The 2026-09-07 pilot re-recording found nine more of the same kind in
+this file, and they were closed by strengthening those bodies rather than by annotating --
+see `test_fused_leaf_shape_guards.py`, which owns that half. The decision, and why an
+annotation was the wrong instrument even though it would have worked, is in
+`docs/annotation_pilot_phase2_2026-08-30.md`. The two files divide as: annotations here,
+body guards there.
 """
 
 from __future__ import annotations

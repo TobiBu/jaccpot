@@ -676,3 +676,19 @@ Genuine configurable features and the documented environment gates are **not** c
         and the `ValueError` below it unreachable for any caller who honours the type.
         When the two disagree, decide which one should do the rejecting and delete the
         other -- do not leave a check that cannot fire.
+
+        **And when the annotation WOULD close something real, the guard is still the
+        answer.** Settled 2026-09-07 on `pallas/nearfield_fused_leaf.py`, which is the
+        harder version of this: those position parameters' bodies checked
+        `ndim != 3 or shape[-1] != 3` and never the leading extent, so an annotation
+        would have caught nine real silent acceptances *and* made the documented
+        `ValueError` unreachable. It was not the #310 case of closing nothing. The
+        resolution was to strengthen the body -- the check now verifies the mutual
+        consistency its own docstring already promised -- because the Raises contract is
+        public and the census is not the objective. An annotation is the wrong instrument
+        wherever the parameter's own body documents a `ValueError` over its shape, even
+        when it would work.
+
+        That PR then made the same mistake one level down, which is worth knowing about:
+        a generic shape check placed *before* an existing specific one made THAT message
+        unreachable and turned five tests red. Ordering is part of the check.
