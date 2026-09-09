@@ -211,7 +211,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `srcslots` | padded neighbour count per target leaf in the materialised source-particle layout |
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
-| `chunks`, `chunkflat` | the 2-D chunked scatter schedule |
+| `chunks`, `chunkflat` | the 2-D chunked scatter schedule. `chunkflat` also stands alone, for the arrays of ONE chunk in `_m2l.py:_chunk_segment_scatter_add`, where it is the fixed `chunk_size` width shared by the contributions, their target indices and their validity mask |
 | `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
 | `crossleaves` | the CROSS-domain near view in `distributed/_force_scale.py`, which is not `leaves` either: it degenerates to length 1 when a rank has no cross neighbours |
 | `coarse` | the remote coarse (LET) tree's nodes, which are a different tree from the local `nodes` |
@@ -224,6 +224,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `degrees` | spherical-harmonic degrees of a per-degree summary, `p+1` of them |
 | `orders` | the candidate expansion orders an adaptive policy scores |
 | `levels` | block-step levels, `k_max + 1` of them |
+| `rows`, `cols` | a generic dense operator's output and input extents, in the two `m2l_complex_fused.py` matvec helpers ONLY. Not a tree or particle quantity: one helper is applied to three different operators at four extents, so the pair names a **relation between two arguments** rather than a width. `_matvec` reduces against `cols`, its adjoint `_matvec_T` against `rows`, and that single swap is the whole difference between them |
 | `2`, `3` | literals -- the `(start, end)` pair and the spatial dimension |
 | `_` | anonymous: deliberately unnamed, see below |
 
@@ -675,3 +676,19 @@ Genuine configurable features and the documented environment gates are **not** c
         and the `ValueError` below it unreachable for any caller who honours the type.
         When the two disagree, decide which one should do the rejecting and delete the
         other -- do not leave a check that cannot fire.
+
+        **And when the annotation WOULD close something real, the guard is still the
+        answer.** Settled 2026-09-07 on `pallas/nearfield_fused_leaf.py`, which is the
+        harder version of this: those position parameters' bodies checked
+        `ndim != 3 or shape[-1] != 3` and never the leading extent, so an annotation
+        would have caught nine real silent acceptances *and* made the documented
+        `ValueError` unreachable. It was not the #310 case of closing nothing. The
+        resolution was to strengthen the body -- the check now verifies the mutual
+        consistency its own docstring already promised -- because the Raises contract is
+        public and the census is not the objective. An annotation is the wrong instrument
+        wherever the parameter's own body documents a `ValueError` over its shape, even
+        when it would work.
+
+        That PR then made the same mistake one level down, which is worth knowing about:
+        a generic shape check placed *before* an existing specific one made THAT message
+        unreachable and turned five tests red. Ordering is part of the check.

@@ -335,3 +335,126 @@ Two things to settle before annotating any of them, neither of which is a measur
 `compute_leaf_p2p_accelerations_target_block_pairs_only` in `_large_n_blocks.py` remains
 unmeasurable for a different reason: it is public, exported, and has no direct test at all,
 so the pilot never records it. It needs a fixture first.
+
+---
+
+## The three pallas/kernel modules, re-recorded — 2026-09-07
+
+The table above put `pallas/m2l_complex_fused.py` at 30%, `pallas/nearfield_fused_leaf.py`
+at 29% and `runtime/kernels/_m2l.py` at 8%. All three were measured **before** the PRs that
+annotated them (`19f1539`, `575c13a`, `cbc99f1`), which is the staleness this document has
+now been caught by three times — items 2 and 3 in August, and these three. Re-recorded
+together on `main` at `4f3abe2`, 36 module-level targets, `PILOT_MAX_PER_FN=3`, same scope,
+1870 passed / 94 skipped, replayed across all four xdist shards:
+
+| module | tested | accepted | rate | was | ok/inc/unrep |
+|---|---|---|---|---|---|
+| `pallas/nearfield_fused_leaf.py` | 108 | 9 | **8%** | 29% | 5/0/0 |
+| `pallas/m2l_complex_fused.py` | 122 | 9 | **7%** | 30% | 8/0/2 |
+| `runtime/kernels/_m2l.py` | 244 | 2 | **1%** | 8% | 15/0/0 |
+
+**474 perturbations, 20 accepted — 4%**, against the 48% these nine modules opened at. The
+three are not 152 parameters of backlog; they are essentially closed.
+
+### Where the 20 sit
+
+```
+ 9  Pallas ENTRY points  nearfield_fused_leaf_pallas 4, leafpair_pallas_decoupled 3,
+                         leafpair_pallas 1, m2l_complex_fused_pallas 1
+ 8  broadcast helpers    _matvec 3, _matvec_T 3, _block_matmul 2
+ 2  the chunked scatter  _chunk_segment_scatter_add
+ 1  a pure-JAX twin      nearfield_leafpair_jax
+```
+
+Two of those groups have a mechanism, and they are different mechanisms.
+
+**THE PALLAS CLAMP — the 9 entry-point acceptances.** A `pallas_call` derives its grid
+from ONE array's shape and indexes every other operand with the same block index, so a
+short operand is read out of bounds and **JAX clamps** rather than raising. Verified in
+`nearfield_fused_leaf_pallas`, where `num_leaves` and `tile_t` both come from
+`target_positions`:
+
+* perturbing **positions** shrinks the grid, so the output shape shrinks and the last leaf
+  is silently dropped — visible to a caller who checks;
+* perturbing the **mask** leaves the grid at 4, so the BlockSpec indexes mask block 3 out of
+  bounds and leaf 3 reuses leaf 2's mask. Real particles masked out or phantom ones
+  included, with **no shape change to notice**.
+
+The pure-JAX reference twins reject the identical perturbation, because ordinary
+broadcasting fails. So the Pallas lane is strictly weaker at shape validation than the lane
+`_m2l.py`'s docstring requires it to equal — `nearfield_fused_leaf_jax` accepted **zero** of
+its 21 perturbations while its `_pallas` twin accepted 4.
+
+**THE BROADCAST — the 8 helper acceptances.** Covered in #336: a reduction written as
+`jnp.sum(mat * vec[None, :], axis=1)` accepts a length-1 operand and spreads it, and a
+rank change (an extra leading axis, or a flattened operand) changes which axis is reduced
+rather than raising. Arithmetic objects to a *mismatched* length but not to a broadcastable
+one, which is why these eight sit in the three helpers that reduce by hand and not in the
+nine `src_mult`/`deltas` functions that reduce by matmul -- all of which accepted zero.
+
+A corollary that spans both groups: **an annotated axis only bites when a SECOND parameter
+binds the same name.** `target_mask: Bool[Array, "leaves w"]` beside a
+BARE `target_positions` binds `leaves`/`w` alone, so there is nothing for it to disagree
+with. Same for `multipoles`' `sh` in `m2l_complex_fused_pallas`. Half-annotating a family is
+worse than it looks: it reads as covered and validates nothing.
+
+### A category this document did not have: the free axis
+
+Not every acceptance is a defect. Where an axis is bound by exactly one parameter and
+nothing derives from it, perturbing it produces a **well-formed call** and the pilot counts
+it as silently accepted — correctly, by its own definition, but it is not work.
+
+Proven rather than argued, on `_chunk_segment_scatter_add`: 12 recorded calls show
+`local_accum`'s leading axis at 7, 15, 31, 127, 255, 511 and 1023 against an **unchanged**
+`contribs`. Same for `rows` in `_matvec` and `cols` in `_matvec_T` — a (31, 16) operator
+with a (16,) vector is a perfectly good matvec.
+
+Of the 20, **3 are free-axis artefacts**. Both PRs from this pass assert the free axes stay
+accepted, so the pilot's own report cannot later talk someone into cross-binding an axis the
+evidence does not support.
+
+### Nine predictions, written down first: four right, four wrong, one partial
+
+Recorded because the error has a direction. P1 called `nearfield_fused_leaf_jax` the biggest
+gap in the module (it accepted 0); P2 called its `_pallas` twin low (it has the most); P4
+called the dispatcher high (0); P8 called the nine `src_mult`/`deltas` functions open (all
+0). Every miss is the same mistake: **predicting acceptance from "nothing annotates it",
+forgetting that ordinary array arithmetic rejects most shape errors by failing to
+broadcast.** Which is exactly why §4.1 needs this tool and not a grep — and why the four
+correct predictions were all about *broadcast* reductions, where arithmetic does not object.
+
+### What was closed, and the one decision left
+
+Closed: the three `m2l_complex_fused` broadcast helpers (#336) and
+`_chunk_segment_scatter_add` (this PR). `_m2l.py` is done at 1% — the August verdict
+("last, and possibly not worth a PR") was right and is now more so.
+
+`m2l_complex_fused_pallas`'s `multipoles` is **not closable by annotation**: `sh` is bound by
+that parameter alone and the output's `sh` derives from it, so the two move together and
+stay consistent. `_m2l_one`/`_m2l_one_vjp` stay UNREPLAYABLE (opaque `t`) and so unmeasured,
+but every reduction in them goes through the helpers #336 annotates, so they are
+transitively protected without being decorated.
+
+**The remaining 9 are not an annotation job at all — decided 2026-09-07.** Eight are the
+Pallas entry points in `pallas/nearfield_fused_leaf.py` and one is its `leafpair_jax` twin.
+Annotating the position arrays would give the masks something to agree with, but each of
+those parameters raises a documented `ValueError` in its own body, and checklist item 13
+plus `DELIBERATELY_BARE`'s first entry set the policy: changing which exception a caller
+sees is a behaviour change.
+
+Unlike #310's case this was not a pure exception swap, which is what made it a real choice.
+The guard checks `ndim != 3 or shape[-1] != 3` and **never the leading extent**, while the
+docstring promises `ValueError` "if the input shapes are mutually inconsistent" — a
+consistency the body does not actually check. So the docstring over-promises and the
+annotation would have delivered it, under a different exception type.
+
+**Resolved in favour of the guard.** The body check is strengthened to verify what its own
+docstring already promises, the `ValueError` stays reachable and stays the exception callers
+see, and no annotation is added. That keeps the Raises contract intact and fixes the defect
+in the same place the contract is documented. It is a `fix:` PR with its own test, not part
+of the annotation burn-down, and the census does not move for it.
+
+The general rule this settles, for the next module that hits it: where a bare parameter's
+own body already documents a `ValueError` over its shape, an annotation is the WRONG
+instrument even when it would close something real. Strengthen the guard; the census is not
+the objective.

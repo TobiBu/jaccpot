@@ -85,6 +85,15 @@ repos:
         #     blocksize the target block size, `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`
         #     farleaves the FAR-field leaf view, which is not the near-field one:
         #               they differ on the octree backend (5 vs 3)
+        #     rows      a dense operator's OUTPUT extent, in the two generic
+        #               matvec helpers only. Not a tree or particle quantity: the
+        #               same helper is applied to three different operators at
+        #               four different extents, so the pair `rows`/`cols` names a
+        #               RELATION between its two arguments rather than a width
+        #     cols      the same operator's INPUT extent, i.e. the length the
+        #               vector must have. `_matvec` reduces against `cols` and its
+        #               adjoint `_matvec_T` against `rows`; that one swap is the
+        #               entire difference between them
         #     _         an anonymous axis: rank asserted, extent deliberately not.
         #               Needed as a builtin only for the SINGLE-axis spelling
         #               `Int[Array, "_"]`; `"_ 2"` and `"leaves _ _"` are
@@ -101,7 +110,7 @@ repos:
         args:
           [
             "--select=F821,F822",
-            "--builtins=n,t,ct,levels,internal,leaves,edges,pairs,farleaves,blocks,blocksize,orders,slots,nodes,degrees,targets,sources,w,sw,coarse,crossleaves,_",
+            "--builtins=n,t,ct,levels,internal,leaves,edges,pairs,farleaves,blocks,blocksize,orders,slots,nodes,degrees,targets,sources,w,sw,coarse,crossleaves,rows,cols,chunkflat,_",
           ]
         # NOT scoped: the whole repo, `examples/` and `bench/` and `tests/` included.
         # It was `files: ^jaccpot/` when introduced, because
