@@ -124,9 +124,13 @@ def test_defaulted_flag_falls_back_and_explicit_flag_raises(
     tree, geometry = tree_and_geometry
     mac_type = "dehnen"
     if blocker == "treecode":
+        # the treecode graft is exercised elsewhere; here only the routing
+        # matters, so its builder is replaced by one that returns a known
+        # (correctly typed) artifacts object built by the dual walk.
+        monkeypatch.setenv(_FLAG, "0")
+        sentinel = _seam(tree, geometry)
+        monkeypatch.delenv(_FLAG)
         monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
-        # the treecode graft is exercised elsewhere; here only the routing matters
-        sentinel = object()
         monkeypatch.setattr(
             ic, "_build_treecode_artifacts_strict_streamed", lambda **k: sentinel
         )
