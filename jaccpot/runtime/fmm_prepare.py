@@ -3397,14 +3397,24 @@ class PrepareMixin(_EngineBase):
         nbr_override: Optional[int] = None
         validated = getattr(self, "_strict_fused_validated_caps", None)
         if bool(suppress_host_side_effects) and isinstance(validated, dict):
+            flat_walk = bool(validated.get("flat_walk"))
             observed_rows = validated.get("max_neighbors_observed")
-            if observed_rows is not None:
+            if observed_rows is not None and not flat_walk:
+                # The flat walk has no per-leaf row buffer, so no row cap to widen.
                 nbr_override = _pow2_ceil(int(1.5 * int(observed_rows)) + 1)
             validated_queue = validated.get("queue_capacity")
+            peak_wavefront = validated.get("peak_wavefront")
             if validated_queue is not None and runtime_traversal_config is not None:
+                if flat_walk and peak_wavefront is not None:
+                    # Sized from DATA: the eager flat walk reports the largest
+                    # wavefront any round needed, so 1.5x that (pow2) replaces the
+                    # 2x-the-rung rule -- the per-round cost of the traced walk is
+                    # linear in this capacity (3-6x saved at leaf 64, measured).
+                    target_queue = _pow2_ceil(int(1.5 * int(peak_wavefront)))
+                else:
+                    target_queue = _pow2_ceil(2 * int(validated_queue))
                 widened_queue = max(
-                    int(runtime_traversal_config.max_pair_queue),
-                    _pow2_ceil(2 * int(validated_queue)),
+                    int(runtime_traversal_config.max_pair_queue), target_queue
                 )
                 if widened_queue != int(runtime_traversal_config.max_pair_queue):
                     runtime_traversal_config = DualTreeTraversalConfig(

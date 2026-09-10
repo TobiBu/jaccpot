@@ -1053,6 +1053,14 @@ class StrictRunMixin(_EngineBase):
                         "Raise JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF, pass "
                         "jaccpot.TraversalOverrides(max_neighbors_per_leaf=...), or raise "
                         "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
+                        + (
+                            " On the flat-walk lane (JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK) "
+                            "the far-pair count saturates on ANY overflow -- far, near "
+                            "(JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP) or queue "
+                            "(TraversalOverrides(max_pair_queue=...)) -- so check all three."
+                            if traced_caps.get("flat_walk")
+                            else ""
+                        )
                     )
             except Exception as exc:
                 if bool(
