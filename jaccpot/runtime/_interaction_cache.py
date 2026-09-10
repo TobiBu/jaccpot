@@ -1102,7 +1102,9 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 "far-pair layout (JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS=1)."
             )
         near_edge_capacity = int(
-            os.environ.get("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", str(1 << 21))
+            os.environ.get(
+                "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", str(1 << 21)
+            )
         )
         return _build_flat_walk_artifacts_strict_streamed(
             tree=tree,
@@ -1830,7 +1832,10 @@ def _build_flat_walk_artifacts_strict_streamed(
                 _strict_streamed_retry_diag(grew)
             break
         grown = int(queue) * 2
-        if attempt == _STRICT_STREAMED_RETRY_ATTEMPTS - 1 or grown > _STRICT_STREAMED_RETRY_LIMIT:
+        if (
+            attempt == _STRICT_STREAMED_RETRY_ATTEMPTS - 1
+            or grown > _STRICT_STREAMED_RETRY_LIMIT
+        ):
             raise RuntimeError(
                 "max_pair_queue overflowed on the flat wavefront walk and re-planning "
                 f"did not fit it: grew to {queue} (ceiling {_STRICT_STREAMED_RETRY_LIMIT}) "

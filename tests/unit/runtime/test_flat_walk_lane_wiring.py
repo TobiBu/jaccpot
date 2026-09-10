@@ -68,16 +68,28 @@ def _force(monkeypatch, n, leaf, flat: bool):
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK", "1" if flat else "0")
     pos, mass = _plummer(n)
     solver = FastMultipoleMethod(
-        preset="large_n_gpu", runtime_path="large_n", basis="real", theta=0.6,
-        G=1.0, softening=1e-3, working_dtype=jnp.float32,
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        basis="real",
+        theta=0.6,
+        G=1.0,
+        softening=1e-3,
+        working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix", leaf_target=leaf),
-            farfield=FarFieldConfig(mode="auto"), nearfield=NearFieldConfig(mode="auto"),
-            mac_type="dehnen"),
-        fixed_order=3)
+            farfield=FarFieldConfig(mode="auto"),
+            nearfield=NearFieldConfig(mode="auto"),
+            mac_type="dehnen",
+        ),
+        fixed_order=3,
+    )
     prepared, ev = solver.strict_fused_prepared_eval_fn(
-        positions=jnp.asarray(pos), masses=jnp.asarray(mass), leaf_size=leaf,
-        max_order=3, theta=0.6)
+        positions=jnp.asarray(pos),
+        masses=jnp.asarray(mass),
+        leaf_size=leaf,
+        max_order=3,
+        theta=0.6,
+    )
     acc = np.asarray(jax.block_until_ready(ev(prepared)), np.float64)
     caps = dict(getattr(solver._impl, "_strict_fused_validated_caps", None) or {})
     return acc, caps

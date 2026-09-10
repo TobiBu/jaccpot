@@ -29,7 +29,9 @@ from yggdrax._geometry_impl import compute_tree_geometry
 from yggdrax._interactions_impl import build_interactions_and_neighbors
 from yggdrax.tree import Tree
 
-from jaccpot.runtime._interaction_cache import _build_flat_walk_artifacts_strict_streamed
+from jaccpot.runtime._interaction_cache import (
+    _build_flat_walk_artifacts_strict_streamed,
+)
 
 _LEAF = 8
 
@@ -39,31 +41,60 @@ def tree_and_geometry():
     points = jax.random.uniform(jax.random.PRNGKey(3), (512, 3), dtype=jnp.float64)
     masses = jnp.ones((512,), dtype=jnp.float64)
     tree = Tree.from_particles(points, masses, leaf_size=_LEAF, tree_type="radix")
-    geometry = compute_tree_geometry(tree.topology, tree.positions_sorted, max_leaf_size=_LEAF)
+    geometry = compute_tree_geometry(
+        tree.topology, tree.positions_sorted, max_leaf_size=_LEAF
+    )
     num_internal = int(tree.topology.left_child.shape[0])
     total_nodes = int(tree.topology.parent.shape[0])
     return tree, geometry, num_internal, total_nodes
 
 
-def _flat(tree, geometry, *, theta=0.5, mac_type="dehnen", scale=1.0, far_cap=1 << 15,
-          near_cap=1 << 15, queue=1 << 14, report=None):
+def _flat(
+    tree,
+    geometry,
+    *,
+    theta=0.5,
+    mac_type="dehnen",
+    scale=1.0,
+    far_cap=1 << 15,
+    near_cap=1 << 15,
+    queue=1 << 14,
+    report=None,
+):
     return _build_flat_walk_artifacts_strict_streamed(
-        tree=tree, geometry=geometry, theta=theta, mac_type=mac_type,
-        dehnen_radius_scale=scale, compact_far_pair_capacity=far_cap,
-        near_edge_capacity=near_cap, max_pair_queue=queue, capacity_report=report,
+        tree=tree,
+        geometry=geometry,
+        theta=theta,
+        mac_type=mac_type,
+        dehnen_radius_scale=scale,
+        compact_far_pair_capacity=far_cap,
+        near_edge_capacity=near_cap,
+        max_pair_queue=queue,
+        capacity_report=report,
     )
 
 
 def _dual_sets(tree, geometry, *, theta, mac_type, scale=1.0):
     config = DualTreeTraversalConfig(
-        max_pair_queue=1 << 15, process_block=64,
-        max_interactions_per_node=2048, max_neighbors_per_leaf=2048,
+        max_pair_queue=1 << 15,
+        process_block=64,
+        max_interactions_per_node=2048,
+        max_neighbors_per_leaf=2048,
     )
     _i, neighbors, result = build_interactions_and_neighbors(
-        tree.topology, geometry, theta=theta, traversal_config=config,
-        mac_type=mac_type, dehnen_radius_scale=scale, return_result=True,
+        tree.topology,
+        geometry,
+        theta=theta,
+        traversal_config=config,
+        mac_type=mac_type,
+        dehnen_radius_scale=scale,
+        return_result=True,
     )
-    assert not (bool(result.queue_overflow) or bool(result.far_overflow) or bool(result.near_overflow))
+    assert not (
+        bool(result.queue_overflow)
+        or bool(result.far_overflow)
+        or bool(result.near_overflow)
+    )
     src = np.asarray(result.interaction_sources)
     tgt = np.asarray(result.interaction_targets)
     live = (src >= 0) & (tgt >= 0)
@@ -90,20 +121,26 @@ def _flat_near_sets(nl, num_internal, total_nodes):
     offsets, counts = np.asarray(nl.offsets), np.asarray(nl.counts)
     nbrs, leaves = np.asarray(nl.neighbors), np.asarray(nl.leaf_indices)
     assert np.array_equal(leaves, np.arange(num_internal, total_nodes))
-    assert np.all(np.diff(offsets) >= 0) and np.array_equal(offsets[1:] - offsets[:-1], counts)
+    assert np.all(np.diff(offsets) >= 0) and np.array_equal(
+        offsets[1:] - offsets[:-1], counts
+    )
     near = {}
     for row, leaf in enumerate(leaves.tolist()):
         block = nbrs[int(offsets[row]) : int(offsets[row]) + int(counts[row])].tolist()
         assert leaf not in block, "self neighbour"
         assert len(set(block)) == len(block), "duplicate neighbour"
-        assert all(num_internal <= b < total_nodes for b in block), "neighbour is not a leaf"
+        assert all(
+            num_internal <= b < total_nodes for b in block
+        ), "neighbour is not a leaf"
         near[leaf] = set(block)
     return near
 
 
 @pytest.mark.parametrize("mac_type", ["bh", "dehnen"])
 @pytest.mark.parametrize("theta", [0.3, 0.5, 0.9])
-def test_flat_walk_lists_equal_the_dual_walk_as_sets(tree_and_geometry, mac_type, theta):
+def test_flat_walk_lists_equal_the_dual_walk_as_sets(
+    tree_and_geometry, mac_type, theta
+):
     tree, geometry, num_internal, total_nodes = tree_and_geometry
     far_ref, near_ref = _dual_sets(tree, geometry, theta=theta, mac_type=mac_type)
     reports = []
@@ -125,11 +162,15 @@ def test_flat_walk_lists_equal_the_dual_walk_as_sets(tree_and_geometry, mac_type
 
 def test_dehnen_radius_scale_is_honoured(tree_and_geometry):
     tree, geometry, num_internal, total_nodes = tree_and_geometry
-    far_ref, near_ref = _dual_sets(tree, geometry, theta=0.5, mac_type="dehnen", scale=1.4)
+    far_ref, near_ref = _dual_sets(
+        tree, geometry, theta=0.5, mac_type="dehnen", scale=1.4
+    )
     art = _flat(tree, geometry, theta=0.5, mac_type="dehnen", scale=1.4)
     assert _flat_far_set(art.compact_far_pairs) == far_ref
     assert _flat_near_sets(art.neighbor_list, num_internal, total_nodes) == near_ref
-    far_unscaled, _ = _dual_sets(tree, geometry, theta=0.5, mac_type="dehnen", scale=1.0)
+    far_unscaled, _ = _dual_sets(
+        tree, geometry, theta=0.5, mac_type="dehnen", scale=1.0
+    )
     assert far_unscaled != far_ref
 
 
@@ -139,20 +180,26 @@ def test_traced_call_keeps_capacity_width_and_reports_traced(tree_and_geometry):
     eager = _flat(tree, geometry, report=reports.append)
 
     def run(positions_sorted):
-        geom = compute_tree_geometry(tree.topology, positions_sorted, max_leaf_size=_LEAF)
+        geom = compute_tree_geometry(
+            tree.topology, positions_sorted, max_leaf_size=_LEAF
+        )
         art = _flat(tree, geom, report=reports.append)
-        return (art.compact_far_pairs.sources, art.compact_far_pairs.targets,
-                art.compact_far_pairs.far_pair_count, art.neighbor_list.neighbors,
-                art.neighbor_list.counts)
+        return (
+            art.compact_far_pairs.sources,
+            art.compact_far_pairs.targets,
+            art.compact_far_pairs.far_pair_count,
+            art.neighbor_list.neighbors,
+            art.neighbor_list.counts,
+        )
 
     src, tgt, n, nbrs, counts = jax.jit(run)(tree.positions_sorted)
     assert int(n) == int(eager.compact_far_pairs.far_pair_count)
     assert src.shape == eager.compact_far_pairs.sources.shape
     assert nbrs.shape == eager.neighbor_list.neighbors.shape
     assert np.array_equal(np.asarray(counts), np.asarray(eager.neighbor_list.counts))
-    assert set(zip(np.asarray(tgt)[: int(n)].tolist(), np.asarray(src)[: int(n)].tolist())) == _flat_far_set(
-        eager.compact_far_pairs
-    )
+    assert set(
+        zip(np.asarray(tgt)[: int(n)].tolist(), np.asarray(src)[: int(n)].tolist())
+    ) == _flat_far_set(eager.compact_far_pairs)
     assert [r["traced"] for r in reports] == [False, True]
     assert "peak_wavefront" not in reports[1]
 
