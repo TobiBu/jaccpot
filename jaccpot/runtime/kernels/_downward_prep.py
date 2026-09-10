@@ -56,6 +56,30 @@ from ._m2l import (
 __all__: list[str] = []
 
 
+def _m2l_csr_pallas_active() -> bool:
+    """Whether the flat real-basis M2L runs the target-tiled CSR Pallas kernel.
+
+    Opt-in (``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=1``) and only where it can
+    lower: an Ampere+ GPU, or ``JACCPOT_M2L_CSR_INTERPRET=1`` for CPU parity
+    tests. Read at trace time through :mod:`jaccpot._env`, never at import.
+
+    Returns
+    -------
+    bool
+        True when :func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_pallas`
+        replaces the full-batch / chunked flat lanes for the real basis.
+    """
+    from jaccpot._env import env_flag
+
+    if not env_flag("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", False):
+        return False
+    if env_flag("JACCPOT_M2L_CSR_INTERPRET", False):
+        return True
+    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
+    return pallas_m2l_real_csr_supported()
+
+
 class _FarPairCOO(NamedTuple):
     """Compact COO-style far-pair representation for streamed M2L execution.
 
@@ -520,7 +544,10 @@ def _solidfmm_downward_accumulate_from_multipoles(
     picks grouped over flat, ``farfield_mode`` picks class-major over pair-grouped
     within grouped, and on the flat path ``pair_count <= chunk_size`` picks
     full-batch over a chunked scan. All four compute the same operator; they
-    differ in how the pair list is blocked.
+    differ in how the pair list is blocked. A fifth, opt-in flat lane for the
+    real basis (:func:`_m2l_csr_pallas_active`) hands the whole pair list to the
+    target-tiled CSR Pallas kernel, which owns one local row per program and so
+    needs neither the chunked scan nor its per-chunk scatter.
 
     Parameters
     ----------
@@ -631,7 +658,20 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 basis_mode=basis_mode,
             )
     else:
-        if pair_count <= chunk_size:
+        if real_basis and _m2l_csr_pallas_active():
+            from jaccpot._env import env_flag
+            from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
+
+            locals_updated = initial_locals_coeffs + m2l_real_csr_pallas(
+                multipoles_coeffs,
+                centers,
+                src,
+                tgt,
+                order=order,
+                active_pair_count=active_pair_count,
+                interpret=env_flag("JACCPOT_M2L_CSR_INTERPRET", False),
+            )
+        elif pair_count <= chunk_size:
             locals_updated = _accumulate_m2l_fullbatch(
                 initial_locals_coeffs,
                 multipoles_coeffs,

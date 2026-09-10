@@ -93,10 +93,12 @@ _MUST_RUN_SM80 = (
     "test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative",
 )
 # NOT registered here, by the registry's own contract: `tests/unit/test_gpu_gate_checks.py`
-# derives the gated set from ONE module (test_transverse_degeneracy_jvp.py) and fails on
-# any fragment outside it. The sm_80 test of the near-field self-fold
+# derives the gated set from ONE module (test_transverse_degeneracy_jvp.py) and
+# fails on any fragment outside it. The sm_80 tests of the near-field self-fold
 # (test_pallas_nearfield_fused.py::test_leafpair_include_self_gpu_matches_reference)
-# runs under the ordinary GPU suite; widening the registry is a separate change.
+# and of the CSR M2L kernel (test_m2l_real_csr_pallas.py::test_csr_pallas_gpu_matches_rot_scale)
+# therefore run under the ordinary GPU suite; widening the registry to several
+# modules is a separate change.
 
 # Measured on an A100 sm_80 / jax 0.10.2 and documented in ARCHITECTURE.md §9,
 # which carries the per-entry reasoning and the deterministic-ops column. A hit
