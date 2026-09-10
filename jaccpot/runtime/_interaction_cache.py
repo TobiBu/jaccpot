@@ -912,6 +912,11 @@ _STRICT_STREAMED_QUEUE_FLOOR = 32_768
 _STRICT_STREAMED_FAR_PAIR_FLOOR = 131_072
 _STRICT_STREAMED_RETRY_LIMIT = 1 << 25
 _STRICT_STREAMED_RETRY_ATTEMPTS = 12
+# Flat-walk lane: eager floors and ceilings for the two capacities the caller did
+# NOT name (a named cap is never widened -- #333's rule). Directed pair counts.
+_FLAT_WALK_NEAR_EDGE_FLOOR = 1 << 21
+_FLAT_WALK_NEAR_EDGE_LIMIT = 1 << 28
+_FLAT_WALK_FAR_PAIR_LIMIT = 1 << 26
 
 
 def _strict_streamed_retry_diag(grew: list[str]) -> None:
@@ -954,6 +959,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     policy_state: Optional[AdaptivePolicyState],
     capacity_report: Optional[Callable[[dict], None]] = None,
     max_neighbors_per_leaf_override: Optional[int] = None,
+    flat_walk_capacity_floor: Optional[dict] = None,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
@@ -1013,6 +1019,11 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         (far-pair count, longest neighbour row, total edges). ``None`` skips it.
     max_neighbors_per_leaf_override : Optional[int]
         Floor for the per-leaf neighbour cap; only ever raises it.
+    flat_walk_capacity_floor : Optional[dict]
+        Floors for the flat-walk lane's directed far and near capacities
+        (``compact_far_pair_capacity`` / ``near_edge_capacity``), carried over from
+        the eager pass so the traced refresh builds the same widths.  Applies only
+        to a capacity the caller did not name in the environment.
 
     Returns
     -------
@@ -1058,7 +1069,10 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     compact_far_pair_capacity = None
     if flat_compact_enabled:
         compact_far_pair_capacity = int(
-            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "131072")
+            os.environ.get(
+                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP",
+                str(_STRICT_STREAMED_FAR_PAIR_FLOOR),
+            )
         )
         if compact_far_pair_capacity <= 0:
             raise ValueError(
@@ -1071,51 +1085,88 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     treecode_enabled = os.environ.get(
         "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "0"
     ) not in ("0", "false", "False", "off", "OFF")
-    # Opt-in: yggdrax's flat-emission wavefront walk with the dual walk's own MAC
-    # extents -- the same lists as sets at a fraction of the per-step cost. See
-    # _build_flat_walk_artifacts_strict_streamed.
-    flat_walk_enabled = os.environ.get(
-        "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK", "0"
-    ) not in ("0", "false", "False", "off", "OFF")
-    if flat_walk_enabled and treecode_enabled:
-        raise RuntimeError(
-            "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK and "
-            "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK are both set; pick one walk."
-        )
+    # DEFAULT since 2026-09-10: yggdrax's flat-emission wavefront walk with the
+    # dual walk's own MAC extents -- the same lists as sets at a fraction of the
+    # per-step cost (leaf-64 step at N=200k: 177 -> 63 ms). Set
+    # JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=0 for the traced dual walk. A
+    # configuration the flat walk cannot carry (the treecode walk requested, a
+    # solver-owned pair policy, a MAC other than bh/dehnen, the non-flat far-pair
+    # layout) falls back to the dual walk quietly while the flag is merely
+    # defaulted; an EXPLICIT "1" against such a configuration raises, because then
+    # the caller asked for a walk it cannot have and silence would hand it the
+    # wrong one. See _build_flat_walk_artifacts_strict_streamed.
+    flat_walk_raw = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK")
+    flat_walk_explicit = flat_walk_raw is not None
+    flat_walk_enabled = (flat_walk_raw if flat_walk_explicit else "1") not in (
+        "0",
+        "false",
+        "False",
+        "off",
+        "OFF",
+    )
+    flat_walk_blocker: Optional[str] = None
     if flat_walk_enabled:
-        if pair_policy is not None or policy_state is not None:
-            raise RuntimeError(
+        if treecode_enabled:
+            flat_walk_blocker = (
+                "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK and "
+                "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK are both set; pick one walk."
+            )
+        elif pair_policy is not None or policy_state is not None:
+            flat_walk_blocker = (
                 "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK cannot carry a solver-owned "
                 "pair policy (mac_type='dehnen_error' / adaptive_error_model="
                 "'dehnen_paper'): the flat walk's acceptance test is the geometric "
                 "MAC on per-node extents with no policy seam. Unset the env flag, "
                 "or use mac_type='dehnen'."
             )
-        if str(mac_type) not in ("bh", "dehnen"):
-            raise RuntimeError(
+        elif str(mac_type) not in ("bh", "dehnen"):
+            flat_walk_blocker = (
                 "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK supports mac_type 'bh' and "
                 f"'dehnen' only, got {mac_type!r}."
             )
-        if compact_far_pair_capacity is None:
-            raise RuntimeError(
+        elif compact_far_pair_capacity is None:
+            flat_walk_blocker = (
                 "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK needs the flat compact "
                 "far-pair layout (JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS=1)."
             )
-        near_edge_capacity = int(
-            os.environ.get(
-                "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", str(1 << 21)
-            )
+    if flat_walk_blocker is not None:
+        if flat_walk_explicit:
+            raise RuntimeError(flat_walk_blocker)
+        flat_walk_enabled = False
+    if flat_walk_enabled:
+        assert compact_far_pair_capacity is not None
+        floor = dict(flat_walk_capacity_floor or {})
+        # A cap the caller NAMED is a deliberate memory bound: honoured exactly,
+        # never widened (#333). An unnamed one starts at its floor -- raised to
+        # what an earlier eager pass needed -- and the eager ladder grows it.
+        near_edge_env = os.environ.get(
+            "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP"
         )
+        near_edge_named = near_edge_env is not None
+        if near_edge_named:
+            near_edge_capacity = int(near_edge_env)
+        else:
+            near_edge_capacity = max(
+                _FLAT_WALK_NEAR_EDGE_FLOOR, int(floor.get("near_edge_capacity") or 0)
+            )
+        far_named = "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP" in os.environ
+        far_capacity = int(compact_far_pair_capacity)
+        if not far_named:
+            far_capacity = max(
+                far_capacity, int(floor.get("compact_far_pair_capacity") or 0)
+            )
         return _build_flat_walk_artifacts_strict_streamed(
             tree=tree,
             geometry=geometry,
             theta=theta,
             mac_type=mac_type,
             dehnen_radius_scale=dehnen_radius_scale,
-            compact_far_pair_capacity=int(compact_far_pair_capacity),
+            compact_far_pair_capacity=far_capacity,
             near_edge_capacity=near_edge_capacity,
             max_pair_queue=max_pair_queue_resolved,
             capacity_report=capacity_report,
+            far_named=far_named,
+            near_edge_named=near_edge_named,
         )
     if treecode_enabled:
         if pair_policy is not None or policy_state is not None:
@@ -1683,6 +1734,8 @@ def _build_flat_walk_artifacts_strict_streamed(
     near_edge_capacity: int,
     max_pair_queue: Optional[int],
     capacity_report: Optional[Callable[[dict], None]] = None,
+    far_named: bool = True,
+    near_edge_named: bool = True,
 ) -> _DualTreeArtifacts:
     """Far pairs and leaf neighbours from yggdrax's flat-emission wavefront walk.
 
@@ -1713,8 +1766,10 @@ def _build_flat_walk_artifacts_strict_streamed(
       duplicate-index scatter. Width is ``near_edge_capacity`` (``2 x near_cap``),
       which is exactly the fixed edge cap ``_trim_radix_fast_lane_neighbor_list``
       pads to, so eager and traced carries match without a pad.
-    * overflow: eager, the queue is doubled on ``queue_overflow`` and a far or
-      near overflow raises naming the cap (never widened -- #333's rule). Traced,
+    * overflow: eager, the queue is doubled on ``queue_overflow``; a far or near
+      overflow doubles the capacity when the caller did not name it
+      (``far_named`` / ``near_edge_named`` False) and raises naming the cap when
+      it did (a named cap is never widened -- #333's rule). Traced,
       the three flags saturate ``far_pair_count`` to the capacity, which trips
       the strict runner's existing ``far_pair_count < capacity`` arm of the
       saturation guard (``fmm_strict_run.py``), so a truncated refresh is fatal
@@ -1743,6 +1798,15 @@ def _build_flat_walk_artifacts_strict_streamed(
         Wavefront capacity; ``None`` starts the eager ladder at the floor.
     capacity_report : Optional[Callable[[dict], None]]
         Receives the capacities used (and, eager only, what was observed).
+    far_named : bool
+        Whether ``compact_far_pair_capacity`` was named by the caller
+        (``JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP``); a named cap raises
+        on overflow, an unnamed one is doubled eagerly up to
+        ``_FLAT_WALK_FAR_PAIR_LIMIT``.
+    near_edge_named : bool
+        Same for ``near_edge_capacity``
+        (``JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP``; ceiling
+        ``_FLAT_WALK_NEAR_EDGE_LIMIT``).
 
     Returns
     -------
@@ -1754,8 +1818,8 @@ def _build_flat_walk_artifacts_strict_streamed(
     ValueError
         If a capacity is not even / positive.
     RuntimeError
-        Eager far or near overflow, or a queue that will not fit within the
-        retry ceiling.
+        Eager far or near overflow of a named cap (or of an unnamed one past its
+        ceiling), or a queue that will not fit within the retry ceiling.
     """
     from yggdrax._interactions_impl import _build_mac_extents
     from yggdrax.interactions import dual_tree_walk_mutual
@@ -1796,7 +1860,12 @@ def _build_flat_walk_artifacts_strict_streamed(
     )
     grew: list[str] = []
     walk = None
-    for attempt in range(_STRICT_STREAMED_RETRY_ATTEMPTS):
+    traced = False
+    # Cap growth (unnamed caps only) is bounded by the ceilings; queue growth by
+    # the retry budget. Only queue doublings count against that budget, so a tiny
+    # unnamed cap cannot exhaust it.
+    queue_attempts = 0
+    while True:
         walk = dual_tree_walk_mutual(
             left_full,
             right_full,
@@ -1812,41 +1881,61 @@ def _build_flat_walk_artifacts_strict_streamed(
         traced = isinstance(walk.queue_overflow, Tracer)
         if traced:
             break
-        if bool(walk.far_overflow):
+        far_ovf = bool(walk.far_overflow)
+        near_ovf = bool(walk.near_overflow)
+        queue_ovf = bool(walk.queue_overflow)
+        if far_ovf and (far_named or 2 * far_cap >= _FLAT_WALK_FAR_PAIR_LIMIT):
             raise RuntimeError(
-                "flat-walk far pairs overflowed: needed "
-                f"{2 * int(walk.far_count)} directed pairs, capacity "
-                f"{compact_far_pair_capacity}. Raise "
-                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP (the caller named "
-                "it, so it is not widened here)."
+                "flat-walk far pairs overflowed: capacity "
+                f"{2 * far_cap} directed pairs"
+                + (
+                    " (the caller named it, so it is not widened here). Raise "
+                    if far_named
+                    else f" (the eager ceiling is {_FLAT_WALK_FAR_PAIR_LIMIT}). Set "
+                )
+                + "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
             )
-        if bool(walk.near_overflow):
+        if near_ovf and (near_edge_named or 2 * near_cap >= _FLAT_WALK_NEAR_EDGE_LIMIT):
             raise RuntimeError(
-                "flat-walk near pairs overflowed: needed "
-                f"{2 * int(walk.near_count)} directed pairs, capacity "
-                f"{near_edge_capacity}. Raise "
-                "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
+                "flat-walk near pairs overflowed: capacity "
+                f"{2 * near_cap} directed pairs"
+                + (
+                    " (the caller named it, so it is not widened here). Raise "
+                    if near_edge_named
+                    else f" (the eager ceiling is {_FLAT_WALK_NEAR_EDGE_LIMIT}). Set "
+                )
+                + "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
             )
-        if not bool(walk.queue_overflow):
+        if far_ovf:
+            grew.append(f"compact_far_pair_capacity {2 * far_cap}->{4 * far_cap}")
+            far_cap *= 2
+        if near_ovf:
+            grew.append(f"near_edge_capacity {2 * near_cap}->{4 * near_cap}")
+            near_cap *= 2
+        if queue_ovf:
+            grown = int(queue) * 2
+            queue_attempts += 1
+            if (
+                queue_attempts >= _STRICT_STREAMED_RETRY_ATTEMPTS
+                or grown > _STRICT_STREAMED_RETRY_LIMIT
+            ):
+                raise RuntimeError(
+                    "max_pair_queue overflowed on the flat wavefront walk and "
+                    f"re-planning did not fit it: grew to {queue} (ceiling "
+                    f"{_STRICT_STREAMED_RETRY_LIMIT}) over {queue_attempts} attempts; "
+                    "the walk needed a peak wavefront of "
+                    f"{int(walk.peak_wavefront)}. Pass jaccpot.TraversalOverrides("
+                    "max_pair_queue=...) explicitly."
+                )
+            grew.append(f"max_pair_queue {queue}->{grown}")
+            queue = grown
+        if not (far_ovf or near_ovf or queue_ovf):
             if grew:
                 _strict_streamed_retry_diag(grew)
             break
-        grown = int(queue) * 2
-        if (
-            attempt == _STRICT_STREAMED_RETRY_ATTEMPTS - 1
-            or grown > _STRICT_STREAMED_RETRY_LIMIT
-        ):
-            raise RuntimeError(
-                "max_pair_queue overflowed on the flat wavefront walk and re-planning "
-                f"did not fit it: grew to {queue} (ceiling {_STRICT_STREAMED_RETRY_LIMIT}) "
-                f"over {attempt + 1} attempts; the walk needed a peak wavefront of "
-                f"{int(walk.peak_wavefront)}. Pass jaccpot.TraversalOverrides("
-                "max_pair_queue=...) explicitly."
-            )
-        grew.append(f"max_pair_queue {queue}->{grown}")
-        queue = grown
     assert walk is not None
-    traced = isinstance(walk.queue_overflow, Tracer)
+    compact_far_pair_capacity = 2 * far_cap
+    near_edge_capacity = 2 * near_cap
 
     # --- far pairs: directed, interleaved, prefix-live, capacity-width ---
     far_live = jnp.arange(far_cap, dtype=idx) < walk.far_count
@@ -1913,6 +2002,8 @@ def _build_flat_walk_artifacts_strict_streamed(
             queue_capacity=int(queue),
             compact_far_pair_capacity=int(compact_far_pair_capacity),
             near_edge_capacity=int(near_edge_capacity),
+            far_named=bool(far_named),
+            near_edge_named=bool(near_edge_named),
             # no per-leaf row cap on this lane; None switches the guard's row arm off
             max_neighbors_per_leaf_used=None,
             grew=list(grew),
@@ -2573,6 +2664,7 @@ def _build_dual_tree_artifacts(
     planner_hint: Optional[_RefreshDualPlannerHint] = None,
     strict_capacity_report: Optional[Callable[[dict], None]] = None,
     strict_max_neighbors_per_leaf_override: Optional[int] = None,
+    strict_flat_walk_capacity_floor: Optional[dict] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree.
 
@@ -2648,6 +2740,8 @@ def _build_dual_tree_artifacts(
         Forwarded to the strict streamed builder as ``capacity_report``.
     strict_max_neighbors_per_leaf_override : Optional[int]
         Forwarded to the strict streamed builder; only ever raises the cap.
+    strict_flat_walk_capacity_floor : Optional[dict]
+        Forwarded to the strict streamed builder as ``flat_walk_capacity_floor``.
 
     Returns
     -------
@@ -2728,6 +2822,7 @@ def _build_dual_tree_artifacts(
                     max_neighbors_per_leaf_override=(
                         strict_max_neighbors_per_leaf_override
                     ),
+                    flat_walk_capacity_floor=strict_flat_walk_capacity_floor,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(

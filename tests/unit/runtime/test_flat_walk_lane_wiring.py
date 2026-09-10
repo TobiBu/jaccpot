@@ -1,5 +1,5 @@
-"""The flat-walk lane is entered from the solver when its flag is set, and it is
-force-neutral against the dual-walk lane.
+"""The flat-walk lane is the solver's default walk, ``=0`` restores the dual walk,
+and the two are force-neutral against each other.
 
 Pattern of ``test_m2l_csr_lane_wiring.py``: a lane that is silently not reached
 would pass any parity check, so the builder entry is counted. The strict fused
@@ -50,7 +50,7 @@ def _plummer(n, seed=0):
     return pos.astype(np.float32), np.full(n, 1.0 / n, np.float32)
 
 
-def _force(monkeypatch, n, leaf, flat: bool):
+def _force(monkeypatch, n, leaf, flat):
     import jax
     import jax.numpy as jnp
 
@@ -65,7 +65,12 @@ def _force(monkeypatch, n, leaf, flat: bool):
     for k, v in _ENV.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", str(n))
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK", "1" if flat else "0")
+    if flat is None:
+        monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK", raising=False)
+    else:
+        monkeypatch.setenv(
+            "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK", "1" if flat else "0"
+        )
     pos, mass = _plummer(n)
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
@@ -95,7 +100,7 @@ def _force(monkeypatch, n, leaf, flat: bool):
     return acc, caps
 
 
-def test_flag_off_by_default_and_lane_entered_when_set(monkeypatch):
+def test_default_on_and_flag_zero_takes_the_dual_walk(monkeypatch):
     calls = {"n": 0}
     real = ic._build_flat_walk_artifacts_strict_streamed
 
@@ -107,8 +112,8 @@ def test_flag_off_by_default_and_lane_entered_when_set(monkeypatch):
     a_dual, caps_dual = _force(monkeypatch, _N, 64, flat=False)
     assert calls["n"] == 0
     assert not caps_dual.get("flat_walk")
-    a_flat, caps_flat = _force(monkeypatch, _N, 64, flat=True)
-    assert calls["n"] >= 1, "the flat-walk lane was never entered"
+    a_flat, caps_flat = _force(monkeypatch, _N, 64, flat=None)
+    assert calls["n"] >= 1, "the flat-walk lane was never entered by default"
     assert caps_flat.get("flat_walk") is True
     assert caps_flat.get("peak_wavefront", 0) > 0
     assert np.all(np.isfinite(a_flat))
@@ -121,3 +126,24 @@ def test_both_walk_flags_set_is_refused(monkeypatch):
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
     with pytest.raises(RuntimeError, match="pick one walk"):
         _force(monkeypatch, _N, 64, flat=True)
+
+
+def test_treecode_flag_alone_wins_over_the_defaulted_flat_walk(monkeypatch):
+    calls = {"flat": 0, "treecode": 0}
+    real_flat = ic._build_flat_walk_artifacts_strict_streamed
+    real_tree = ic._build_treecode_artifacts_strict_streamed
+
+    def count_flat(*a, **k):
+        calls["flat"] += 1
+        return real_flat(*a, **k)
+
+    def count_tree(*a, **k):
+        calls["treecode"] += 1
+        return real_tree(*a, **k)
+
+    monkeypatch.setattr(ic, "_build_flat_walk_artifacts_strict_streamed", count_flat)
+    monkeypatch.setattr(ic, "_build_treecode_artifacts_strict_streamed", count_tree)
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
+    acc, _ = _force(monkeypatch, _N, 64, flat=None)
+    assert calls["flat"] == 0 and calls["treecode"] >= 1, calls
+    assert np.all(np.isfinite(acc))

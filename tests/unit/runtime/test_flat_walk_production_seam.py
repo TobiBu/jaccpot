@@ -13,7 +13,8 @@ replaces yggdrax's traced dual-tree walk with its flat-emission
 * the neighbour CSR is valid (offsets monotone, counts consistent, width equal to
   the edge cap);
 * the capacity report is emitted with ``peak_wavefront`` and marks the lane;
-* a too-small far or near capacity raises eagerly, naming the knob.
+* a too-small far or near capacity raises eagerly, naming the knob, when the
+  caller named it; an unnamed one is doubled eagerly and the report says so.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ def _flat(
     near_cap=1 << 15,
     queue=1 << 14,
     report=None,
+    **kw,
 ):
     return _build_flat_walk_artifacts_strict_streamed(
         tree=tree,
@@ -71,6 +73,7 @@ def _flat(
         near_edge_capacity=near_cap,
         max_pair_queue=queue,
         capacity_report=report,
+        **kw,
     )
 
 
@@ -210,6 +213,33 @@ def test_far_and_near_overflow_raise_eagerly_naming_the_knob(tree_and_geometry):
         _flat(tree, geometry, far_cap=8)
     with pytest.raises(RuntimeError, match="NEIGHBOR_EDGE_PROFILE_FIXED_CAP"):
         _flat(tree, geometry, near_cap=8)
+
+
+def test_unnamed_far_and_near_caps_grow_eagerly(tree_and_geometry):
+    tree, geometry, num_internal, total_nodes = tree_and_geometry
+    reports = []
+    ref = _flat(tree, geometry)
+    art = _flat(
+        tree,
+        geometry,
+        far_cap=8,
+        near_cap=8,
+        far_named=False,
+        near_edge_named=False,
+        report=reports.append,
+    )
+    (report,) = reports
+    assert report["compact_far_pair_capacity"] > 8 and report["near_edge_capacity"] > 8
+    assert report["far_named"] is False and report["near_edge_named"] is False
+    assert any(g.startswith("compact_far_pair_capacity") for g in report["grew"])
+    assert any(g.startswith("near_edge_capacity") for g in report["grew"])
+    # widths follow the grown caps, and the lists are the same sets as before
+    assert art.compact_far_pairs.sources.shape[0] == report["compact_far_pair_capacity"]
+    assert art.neighbor_list.neighbors.shape[0] == report["near_edge_capacity"]
+    assert _flat_far_set(art.compact_far_pairs) == _flat_far_set(ref.compact_far_pairs)
+    assert _flat_near_sets(art.neighbor_list, num_internal, total_nodes) == (
+        _flat_near_sets(ref.neighbor_list, num_internal, total_nodes)
+    )
 
 
 def test_odd_capacities_are_rejected(tree_and_geometry):

@@ -19,7 +19,8 @@ either way); the dense rows, the conditionals and the sorts are.
 
 ## The lane
 
-`JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=1` routes `_build_dual_tree_artifacts_split_strict_streamed` to
+The flat walk is the DEFAULT of the strict fused lane (since 2026-09-10; `JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=0`
+restores the traced dual walk). `_build_dual_tree_artifacts_split_strict_streamed` routes to
 `_build_flat_walk_artifacts_strict_streamed` (`runtime/_interaction_cache.py`), which calls
 `dual_tree_walk_mutual` with the dual walk's own `mac_extents` (`_build_mac_extents(...)[0]`) and
 `mac_type`, then:
@@ -29,14 +30,24 @@ either way); the dense rows, the conditionals and the sorts are.
   second direction; capacity is the compact far-pair cap;
 * builds the leaf neighbour CSR from the directed near pairs with one stable argsort by target leaf and
   `searchsorted` offsets; width is the neighbour-edge cap, so eager and traced carries match without a pad;
-* eager: a queue ladder on `queue_overflow`, far/near overflow raise naming the cap (never widened);
+* eager: a queue ladder on `queue_overflow`; a far or near overflow doubles the capacity when the caller did
+  not name it (`JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP` / `JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP`
+  absent from the environment; floors 131072 and 2^21 directed pairs, ceilings 2^26 and 2^28) and raises
+  naming the cap when it did (a named cap is never widened). The widths the eager pass settled on are handed
+  to the traced refresh -- and to any later eager prepare -- as floors by `_strict_fused_capacity_handoff`,
+  so the `lax.scan` carry shapes match and never shrink;
   traced: any overflow saturates `far_pair_count` to the capacity, which trips `strict_run_v2`'s existing
   saturation guard -- a truncated refresh is fatal, not silent;
 * always emits the capacity report (the treecode graft's early return left the guard dark) with
   `peak_wavefront`; `_strict_fused_capacity_handoff` sizes the traced queue as pow2(1.5 x peak). In the real
   fused geometry the leaf-64 peak is 466,626 pairs over 24 rounds, so the traced queue is 2^20.
 
-Supported: `mac_type` bh/dehnen, `pair_policy=None`. Both walk flags set -> refused. Indices: the harness sets
+Supported: `mac_type` bh/dehnen, `pair_policy=None`, the flat compact far-pair layout. A configuration outside
+that (the treecode walk requested, `mac_type='engblom'`, a solver-owned pair policy such as `dehnen_error`,
+`JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS=0`) falls back to the dual walk QUIETLY while the flag is
+merely defaulted, and RAISES when the flag was set to `1` explicitly -- then the caller asked for a walk it
+cannot have, and silence would hand it the wrong one (`tests/unit/runtime/test_flat_walk_default_dispatch.py`).
+Indices: the harness sets
 `YGGDRAX_INDEX_PRECISION=int32` and `JACCPOT_INDEX_PRECISION=int32` for the fused lane (read at import; set
 both, yggdrax falls back to jaccpot's variable but not the reverse).
 

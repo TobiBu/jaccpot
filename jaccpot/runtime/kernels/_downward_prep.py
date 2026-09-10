@@ -59,9 +59,10 @@ __all__: list[str] = []
 def _m2l_csr_pallas_active() -> bool:
     """Whether the flat real-basis M2L runs the target-tiled CSR Pallas kernel.
 
-    Opt-in (``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=1``) and only where it can
-    lower: an Ampere+ GPU, or ``JACCPOT_M2L_CSR_INTERPRET=1`` for CPU parity
-    tests. Read at trace time through :mod:`jaccpot._env`, never at import.
+    Default on (since 2026-09-10; ``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0``
+    restores the chunked pure-JAX lanes) and only where it can lower: an
+    Ampere+ GPU, or ``JACCPOT_M2L_CSR_INTERPRET=1`` for CPU parity tests. Read at
+    trace time through :mod:`jaccpot._env`, never at import.
 
     Returns
     -------
@@ -71,7 +72,7 @@ def _m2l_csr_pallas_active() -> bool:
     """
     from jaccpot._env import env_flag
 
-    if not env_flag("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", False):
+    if not env_flag("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", True):
         return False
     if env_flag("JACCPOT_M2L_CSR_INTERPRET", False):
         return True
@@ -544,8 +545,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
     picks grouped over flat, ``farfield_mode`` picks class-major over pair-grouped
     within grouped, and on the flat path ``pair_count <= chunk_size`` picks
     full-batch over a chunked scan. All four compute the same operator; they
-    differ in how the pair list is blocked. A fifth, opt-in flat lane for the
-    real basis (:func:`_m2l_csr_pallas_active`) hands the whole pair list to the
+    differ in how the pair list is blocked. A fifth flat lane for the real
+    basis, the default on Ampere+ GPUs
+    (:func:`_m2l_csr_pallas_active`), hands the whole pair list to the
     target-tiled CSR Pallas kernel, which owns one local row per program and so
     needs neither the chunked scan nor its per-chunk scatter.
 

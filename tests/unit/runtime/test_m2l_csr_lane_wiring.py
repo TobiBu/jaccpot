@@ -1,6 +1,7 @@
-"""The opt-in CSR M2L lane is (a) actually taken and (b) force-neutral.
+"""The CSR M2L lane (default on where it lowers) is (a) taken and (b) force-neutral.
 
-``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=1`` routes the flat real-basis M2L of
+``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR`` (default ``1`` since 2026-09-10; ``0``
+restores the chunked pure-JAX lanes) routes the flat real-basis M2L of
 ``_solidfmm_downward_accumulate_from_multipoles`` to
 :func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_pallas`. On CPU the kernel runs
 in interpret mode (``JACCPOT_M2L_CSR_INTERPRET=1``). A lane that is silently not
@@ -16,8 +17,17 @@ import jaccpot.pallas.m2l_real_csr as csr_mod
 from jaccpot.runtime.kernels._downward_prep import _m2l_csr_pallas_active
 
 
-def test_flag_off_by_default(monkeypatch):
+def test_default_on_exactly_where_the_kernel_lowers(monkeypatch):
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", raising=False)
+    monkeypatch.delenv("JACCPOT_M2L_CSR_INTERPRET", raising=False)
+    assert _m2l_csr_pallas_active() is csr_mod.pallas_m2l_real_csr_supported()
+    monkeypatch.setenv("JACCPOT_M2L_CSR_INTERPRET", "1")
+    assert _m2l_csr_pallas_active() is True
+
+
+def test_flag_zero_switches_the_lane_off(monkeypatch):
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", "0")
+    monkeypatch.setenv("JACCPOT_M2L_CSR_INTERPRET", "1")
     assert _m2l_csr_pallas_active() is False
 
 
@@ -77,7 +87,7 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
         )
         return np.asarray(acc, np.float64)
 
-    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", raising=False)
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", "0")
     a_ref = solve()
 
     calls = {"n": 0}

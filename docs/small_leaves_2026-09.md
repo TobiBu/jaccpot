@@ -38,8 +38,9 @@ both serialised by the atomic-add lowering) = 169 ms of the 410 ms leaf-64 step,
 2. **Contention-free chunk reduction** (`_m2l.py::_chunk_segment_scatter_add`): segmented
    `associative_scan` + out-of-bounds sink (`mode="drop"`, unique in-bounds indices). Leaf 64:
    410 -> 237 ms/step; leaf 128: 188 -> 145; leaf 32: 1168 -> 649.
-3. **Target-tiled CSR M2L Pallas kernel** (`jaccpot/pallas/m2l_real_csr.py`, flag
-   `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=1`): one program per target owns its local row; rotations
+3. **Target-tiled CSR M2L Pallas kernel** (`jaccpot/pallas/m2l_real_csr.py`; the DEFAULT on Ampere+
+   GPUs since 2026-09-10, `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0` restores the chunked pure-JAX lanes,
+   `JACCPOT_M2L_CSR_INTERPRET=1` runs it interpreted on CPU): one program per target owns its local row; rotations
    assembled on chip from the two alignment angles in the centred (degree, m) layout, degree-only
    z-core, no per-pair operand in HBM. Microbench on an idle A100 (`m2l_csr_microbench.json`):
 
