@@ -67,12 +67,18 @@ def _rel_l2(a, b):
 @pytest.mark.skipif(
     jax.default_backend() != "gpu", reason="fused strict lane is GPU-only"
 )
-def test_strict_run_v2_refresh_keeps_full_neighbor_lists(monkeypatch):
+@pytest.mark.parametrize("flat_walk", ["0", "1"], ids=["dual_walk", "flat_walk"])
+def test_strict_run_v2_refresh_keeps_full_neighbor_lists(monkeypatch, flat_walk):
     n = 200_000
     leaf, order, theta = 256, 3, 0.6
     for key, val in _FUSED_ENV.items():
         monkeypatch.setenv(key, val)
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", str(n))
+    # The flat-emission walk (plan "tree walk", 2026-09-10) has no per-leaf row
+    # cap: its neighbour list is a CSR of width JACCPOT_LARGE_N_NEIGHBOR_EDGE_
+    # PROFILE_FIXED_CAP, and every overflow saturates the far-pair count into
+    # the same guard. Same force, same lists as sets, different fp32 order.
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK", flat_walk)
 
     from jaccpot import (
         FarFieldConfig,
@@ -157,4 +163,11 @@ def test_strict_run_v2_refresh_keeps_full_neighbor_lists(monkeypatch):
         int(eager_rows.max()),
     )
     caps = solver._impl._strict_fused_traced_caps
-    assert caps["max_neighbors_per_leaf_used"] > int(refreshed_rows.max())
+    if flat_walk == "1":
+        assert caps["flat_walk"] is True
+        assert caps["near_edge_capacity"] > int(refreshed_rows.sum())
+        validated = solver._impl._strict_fused_validated_caps
+        assert validated["peak_wavefront"] > 0
+        assert caps["queue_capacity"] >= validated["peak_wavefront"]
+    else:
+        assert caps["max_neighbors_per_leaf_used"] > int(refreshed_rows.max())

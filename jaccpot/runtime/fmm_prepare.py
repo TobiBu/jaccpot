@@ -1467,6 +1467,7 @@ class PrepareMixin(_EngineBase):
         (
             runtime_traversal_config,
             strict_nbr_override,
+            strict_flat_floor,
             _strict_capacity_report,
         ) = self._strict_fused_capacity_handoff(
             runtime_traversal_config=runtime_traversal_config,
@@ -1478,6 +1479,7 @@ class PrepareMixin(_EngineBase):
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
+            strict_flat_walk_capacity_floor=strict_flat_floor,
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
@@ -3341,6 +3343,7 @@ class PrepareMixin(_EngineBase):
     ) -> tuple[
         Optional[DualTreeTraversalConfig],
         Optional[int],
+        Optional[dict],
         Callable[[dict], None],
     ]:
         """Carry the eager walk's validated capacities into the traced refresh.
@@ -3386,6 +3389,10 @@ class PrepareMixin(_EngineBase):
             The traversal config to build with.
         Optional[int]
             ``max_neighbors_per_leaf`` floor for the strict streamed builder.
+        Optional[dict]
+            Floors for the flat-walk lane's directed far / near capacities (the
+            widths the eager pass settled on, so the traced carry matches; an
+            eager re-prepare starts from them too, so widths never shrink).
         Callable[[dict], None]
             Report callback that stores the builder's capacities on the engine.
         """
@@ -3395,16 +3402,33 @@ class PrepareMixin(_EngineBase):
             return 1 << (value - 1).bit_length()
 
         nbr_override: Optional[int] = None
+        flat_floor: Optional[dict] = None
         validated = getattr(self, "_strict_fused_validated_caps", None)
+        if isinstance(validated, dict) and bool(validated.get("flat_walk")):
+            flat_floor = {
+                k: int(validated[k])
+                for k in ("compact_far_pair_capacity", "near_edge_capacity")
+                if validated.get(k) is not None
+            }
         if bool(suppress_host_side_effects) and isinstance(validated, dict):
+            flat_walk = bool(validated.get("flat_walk"))
             observed_rows = validated.get("max_neighbors_observed")
-            if observed_rows is not None:
+            if observed_rows is not None and not flat_walk:
+                # The flat walk has no per-leaf row buffer, so no row cap to widen.
                 nbr_override = _pow2_ceil(int(1.5 * int(observed_rows)) + 1)
             validated_queue = validated.get("queue_capacity")
+            peak_wavefront = validated.get("peak_wavefront")
             if validated_queue is not None and runtime_traversal_config is not None:
+                if flat_walk and peak_wavefront is not None:
+                    # Sized from DATA: the eager flat walk reports the largest
+                    # wavefront any round needed, so 1.5x that (pow2) replaces the
+                    # 2x-the-rung rule -- the per-round cost of the traced walk is
+                    # linear in this capacity (3-6x saved at leaf 64, measured).
+                    target_queue = _pow2_ceil(int(1.5 * int(peak_wavefront)))
+                else:
+                    target_queue = _pow2_ceil(2 * int(validated_queue))
                 widened_queue = max(
-                    int(runtime_traversal_config.max_pair_queue),
-                    _pow2_ceil(2 * int(validated_queue)),
+                    int(runtime_traversal_config.max_pair_queue), target_queue
                 )
                 if widened_queue != int(runtime_traversal_config.max_pair_queue):
                     runtime_traversal_config = DualTreeTraversalConfig(
@@ -3424,7 +3448,7 @@ class PrepareMixin(_EngineBase):
             else:
                 self._strict_fused_validated_caps = dict(report)
 
-        return runtime_traversal_config, nbr_override, _report
+        return runtime_traversal_config, nbr_override, flat_floor, _report
 
     def _prepare_state_dual_and_downward_strict_streamed_fast(
         self,
@@ -3491,6 +3515,7 @@ class PrepareMixin(_EngineBase):
         (
             runtime_traversal_config,
             strict_nbr_override,
+            strict_flat_floor,
             _strict_capacity_report,
         ) = self._strict_fused_capacity_handoff(
             runtime_traversal_config=runtime_traversal_config,
@@ -3502,6 +3527,7 @@ class PrepareMixin(_EngineBase):
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
+            strict_flat_walk_capacity_floor=strict_flat_floor,
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,

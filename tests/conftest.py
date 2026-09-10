@@ -10,7 +10,12 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-YGGDRAX_ROOT = REPO_ROOT.parent / "yggdrax"
+# The sibling checkout is the default; ``YGGDRAX_WORKTREE`` names another (a
+# git worktree on a branch under test) -- the shared checkout is often on a
+# paper branch, and a test run must be able to pin the yggdrax it exercises.
+YGGDRAX_ROOT = pathlib.Path(
+    os.environ.get("YGGDRAX_WORKTREE") or (REPO_ROOT.parent / "yggdrax")
+)
 if YGGDRAX_ROOT.exists() and str(YGGDRAX_ROOT) not in sys.path:
     sys.path.insert(0, str(YGGDRAX_ROOT))
 
