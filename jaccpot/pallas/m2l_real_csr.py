@@ -140,6 +140,11 @@ def m2l_real_csr_tables(order: int) -> dict:
         preserves ``m``, so it is a degree x degree operator per column.
         ``degn [Bp]``: ``n + 1`` (radius exponent of the output degree);
         ``degk [Bp]``: ``k`` (radius exponent of the source degree).
+
+    Raises
+    ------
+    ValueError
+        If ``order`` is negative.
     """
     p = int(order)
     if p < 0:
@@ -276,12 +281,42 @@ def unpack_centred(rows: Array, *, order: int) -> Array:
 
 
 def _bapply(bstack: Array, rows: Array) -> Array:
-    """``out[l, i] = sum_j bstack[l, i, j] rows[l, j]`` (block-diagonal by degree)."""
+    """Apply the per-degree constant blocks: ``out[l, i] = sum_j bstack[l, i, j] rows[l, j]``.
+
+    Parameters
+    ----------
+    bstack : Array
+        Block-diagonal-by-degree operator stack, ``(Bp, Wp, Wp)``.
+    rows : Array
+        Centred coefficient rows, ``(Bp, Wp)``.
+
+    Returns
+    -------
+    Array
+        ``(Bp, Wp)``.
+    """
     return jnp.sum(bstack * rows[:, None, :], axis=-1)
 
 
 def _dz(rows: Array, cosv: Array, sinv: Array, apat: Array) -> Array:
-    """``Dz(t)`` on every degree row at once: ``cos(|m|t) v + A (sin(|m|t) v)``."""
+    """``Dz(t)`` on every degree row at once: ``cos(|m|t) v + A (sin(|m|t) v)``.
+
+    Parameters
+    ----------
+    rows : Array
+        Centred coefficient rows, ``(Bp, Wp)``.
+    cosv : Array
+        ``cos(|m| t)`` per column, ``(Wp,)``.
+    sinv : Array
+        ``sin(|m| t)`` per column, ``(Wp,)``; pass its negative for ``Dz(-t)``.
+    apat : Array
+        The constant antisymmetric sine pattern, ``(Wp, Wp)``.
+
+    Returns
+    -------
+    Array
+        ``(Bp, Wp)``.
+    """
     sv = rows * sinv[None, :]
     return rows * cosv[None, :] + jnp.sum(apat[None, :, :] * sv[:, None, :], axis=-1)
 
@@ -367,7 +402,7 @@ def m2l_real_csr_pair_jax(multipoles: Array, deltas: Array, *, order: int) -> Ar
     rows = pack_centred(mult, order=int(order)).reshape(-1, Bp, Wp)
     d = jnp.asarray(deltas, dtype=dtype)
 
-    def one(rw, dd):
+    def one(rw: Array, dd: Array) -> Array:
         return _m2l_pair_rows(rw, (dd[0], dd[1], dd[2]), t)
 
     out_rows = jax.vmap(one)(rows, d).reshape(-1, Bp * Wp)
@@ -519,7 +554,7 @@ def _m2l_real_csr_kernel(
     ctz = cent_ref[tgt, 2]
     acc0 = jnp.zeros((bp, wp), dtype=out_ref.dtype)
 
-    def body(k, acc):
+    def body(k: Array, acc: Array) -> Array:
         sid = src_ref[start + k]
         rows = mult_ref[sid, :].reshape(bp, wp)
         dx = ctx - cent_ref[sid, 0]
@@ -574,6 +609,12 @@ def m2l_real_csr_pallas(
     -------
     Array
         ``[n, C]`` local increments, same dtype as ``multipoles``.
+
+    Raises
+    ------
+    ValueError
+        If ``multipoles`` does not carry ``(p+1)^2`` coefficients or ``centers``
+        is not ``(n, 3)`` aligned with it.
     """
     tb = m2l_real_csr_tables(int(order))
     C, Bp, Wp = tb["C"], tb["Bp"], tb["Wp"]
