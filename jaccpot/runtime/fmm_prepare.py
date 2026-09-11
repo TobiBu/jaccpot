@@ -59,7 +59,7 @@ from ._adaptive_policy import (
     compute_node_force_scale_from_sorted_magnitudes,
 )
 from ._level_shapes import level_width_overflow
-from ._mac_geometry import resolve_walk_geometry
+from ._mac_geometry import mac_geometry_mode, resolve_walk_geometry
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
     _compiled_refresh_dual_planner_route,
@@ -1019,6 +1019,17 @@ class PrepareMixin(_EngineBase):
             and str(upward_center_mode).strip().lower() == "com"
             and self._interaction_cache is not None
         )
+        # Under the COM MAC geometry the walk never reads the box geometry (only
+        # the dehnen_error policy and the octree lanes do), and on a cell-leaf
+        # tree its level loop is nodes x depth work: build it lazily instead.
+        if (
+            tree_config.mode == "static_radix"
+            and str(upward_center_mode).strip().lower() == "com"
+            and mac_geometry_mode() == "com"
+            and not self._uses_paper_style_force_scale()
+            and str(getattr(self, "execution_backend", "")) != "octree"
+        ):
+            defer_geometry = True
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
