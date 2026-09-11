@@ -337,30 +337,36 @@ def _m2m_level_kernel(
     n_tables = len(_TABLE_KEYS) + len(_CORE_KEYS)
     table_refs = table_and_out_refs[:n_tables]
     (out_ref,) = table_and_out_refs[n_tables:]
-    t = {k: ref[...] for k, ref in zip((*_TABLE_KEYS, *_CORE_KEYS), table_refs)}
     slot = pl.program_id(0)
     start = start_ref[0]
     count = count_ref[0]
-    node = nbl_ref[start + slot]
-    valid = (slot < count) & (node >= 0) & (node < num_internal)
-    node_safe = jnp.where(valid, node, 0)
-    px = cent_ref[node_safe, 0]
-    py = cent_ref[node_safe, 1]
-    pz = cent_ref[node_safe, 2]
-    acc = jnp.zeros((bp, wp), dtype=out_ref.dtype)
-    for child_ref in (left_ref, right_ref):
-        c = child_ref[node_safe]
-        c_valid = valid & (c >= 0)
-        c_safe = jnp.where(c_valid, c, 0)
-        rows = rows_ref[c_safe, :].reshape(bp, wp)
-        dx = cent_ref[c_safe, 0] - px
-        dy = cent_ref[c_safe, 1] - py
-        dz_ = cent_ref[c_safe, 2] - pz
-        contrib = _translate_rows(rows, (dx, dy, dz_), t, "m2m")
-        acc = acc + jnp.where(c_valid, contrib, 0.0)
-    dead = jnp.asarray(out_ref.shape[0] - 1, dtype=node.dtype)
-    target = jnp.where(valid, node_safe, dead)
-    out_ref[target, :] = acc.reshape(bp * wp).astype(out_ref.dtype)
+
+    # The grid is the widest level's width for EVERY level; programs past this
+    # level's count exit before touching the tables (47 launches x the widest
+    # level's work = 8.4 ms at N=2e5 without this, ~1 ms with it).
+    @pl.when(slot < count)
+    def _live():
+        t = {k: ref[...] for k, ref in zip((*_TABLE_KEYS, *_CORE_KEYS), table_refs)}
+        node = nbl_ref[start + slot]
+        valid = (node >= 0) & (node < num_internal)
+        node_safe = jnp.where(valid, node, 0)
+        px = cent_ref[node_safe, 0]
+        py = cent_ref[node_safe, 1]
+        pz = cent_ref[node_safe, 2]
+        acc = jnp.zeros((bp, wp), dtype=out_ref.dtype)
+        for child_ref in (left_ref, right_ref):
+            c = child_ref[node_safe]
+            c_valid = valid & (c >= 0)
+            c_safe = jnp.where(c_valid, c, 0)
+            rows = rows_ref[c_safe, :].reshape(bp, wp)
+            dx = cent_ref[c_safe, 0] - px
+            dy = cent_ref[c_safe, 1] - py
+            dz_ = cent_ref[c_safe, 2] - pz
+            contrib = _translate_rows(rows, (dx, dy, dz_), t, "m2m")
+            acc = acc + jnp.where(c_valid, contrib, 0.0)
+        dead = jnp.asarray(out_ref.shape[0] - 1, dtype=node.dtype)
+        target = jnp.where(valid, node_safe, dead)
+        out_ref[target, :] = acc.reshape(bp * wp).astype(out_ref.dtype)
 
 
 def _l2l_level_kernel(
@@ -406,26 +412,29 @@ def _l2l_level_kernel(
     n_tables = len(_TABLE_KEYS) + len(_CORE_KEYS)
     table_refs = table_and_out_refs[:n_tables]
     (out_ref,) = table_and_out_refs[n_tables:]
-    t = {k: ref[...] for k, ref in zip((*_TABLE_KEYS, *_CORE_KEYS), table_refs)}
     slot = pl.program_id(0)
     start = start_ref[0]
     count = count_ref[0]
-    node = nbl_ref[start + slot]
-    valid = (slot < count) & (node >= 0)
-    node_safe = jnp.where(valid, node, 0)
-    par = parent_ref[node_safe]
-    valid = valid & (par >= 0)
-    par_safe = jnp.where(valid, par, 0)
-    rows = rows_ref[par_safe, :].reshape(bp, wp)
-    dx = cent_ref[par_safe, 0] - cent_ref[node_safe, 0]
-    dy = cent_ref[par_safe, 1] - cent_ref[node_safe, 1]
-    dz_ = cent_ref[par_safe, 2] - cent_ref[node_safe, 2]
-    contrib = _translate_rows(rows, (dx, dy, dz_), t, "l2l")
-    own = rows_ref[node_safe, :].reshape(bp, wp)
-    new = own + jnp.where(valid, contrib, 0.0)
-    dead = jnp.asarray(out_ref.shape[0] - 1, dtype=node.dtype)
-    target = jnp.where(valid, node_safe, dead)
-    out_ref[target, :] = new.reshape(bp * wp).astype(out_ref.dtype)
+
+    @pl.when(slot < count)  # see _m2m_level_kernel
+    def _live():
+        t = {k: ref[...] for k, ref in zip((*_TABLE_KEYS, *_CORE_KEYS), table_refs)}
+        node = nbl_ref[start + slot]
+        valid = node >= 0
+        node_safe = jnp.where(valid, node, 0)
+        par = parent_ref[node_safe]
+        valid = valid & (par >= 0)
+        par_safe = jnp.where(valid, par, 0)
+        rows = rows_ref[par_safe, :].reshape(bp, wp)
+        dx = cent_ref[par_safe, 0] - cent_ref[node_safe, 0]
+        dy = cent_ref[par_safe, 1] - cent_ref[node_safe, 1]
+        dz_ = cent_ref[par_safe, 2] - cent_ref[node_safe, 2]
+        contrib = _translate_rows(rows, (dx, dy, dz_), t, "l2l")
+        own = rows_ref[node_safe, :].reshape(bp, wp)
+        new = own + jnp.where(valid, contrib, 0.0)
+        dead = jnp.asarray(out_ref.shape[0] - 1, dtype=node.dtype)
+        target = jnp.where(valid, node_safe, dead)
+        out_ref[target, :] = new.reshape(bp * wp).astype(out_ref.dtype)
 
 
 def _full(arr: Array) -> "pl.BlockSpec":

@@ -95,7 +95,10 @@ class PallasWalkResult(NamedTuple):
 
 
 # counter slots
-_C_FAR, _C_NEAR, _C_NEXT, _C_OVER = 0, 1, 2, 3
+#: counter slots: far, near, next-queue, and one overflow flag EACH (an OR of
+#: bits under atomic_max would let a later flag erase an earlier one)
+_C_FAR, _C_NEAR, _C_NEXT, _C_OVF_FAR, _C_OVF_NEAR, _C_OVF_Q = 0, 1, 2, 3, 4, 5
+_NUM_COUNTERS = 6
 
 
 def _round_kernel(
@@ -147,8 +150,8 @@ def _round_kernel(
     theta_ref : KernelRef
         ``theta^2`` ``[1]``.
     far_a_ref .. counters_ref : KernelRef
-        The list buffers and the counters ``[4]`` (far, near, next, overflow
-        bits); aliased to the ``*_out`` refs, written in place.
+        The list buffers and the counters ``[6]`` (far, near, next, overflow
+        far/near/queue); aliased to the ``*_out`` refs, written in place.
     block : int
         Pairs per program. Static.
     far_cap, near_cap, queue_cap : int
@@ -253,13 +256,10 @@ def _round_block(
     for ca, cb in ((c0a, c0b), (c1a, c1b), (c2a, c2b), (c3a, c3b)):
         m = refine & (ca >= 0) & (cb >= 0)
         over_q = over_q | emit(m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap)
-    i32 = jnp.int32
-    flags = (
-        jnp.where(over_far, jnp.asarray(1, i32), jnp.asarray(0, i32))
-        | jnp.where(over_near, jnp.asarray(2, i32), jnp.asarray(0, i32))
-        | jnp.where(over_q, jnp.asarray(4, i32), jnp.asarray(0, i32))
-    ).astype(i32)
-    plgpu.atomic_max(counters_out, (jnp.asarray(_C_OVER, jnp.int32),), jnp.max(flags).astype(jnp.int32))
+    for slot_id, over in ((_C_OVF_FAR, over_far), (_C_OVF_NEAR, over_near), (_C_OVF_Q, over_q)):
+        plgpu.atomic_max(
+            counters_out, (jnp.asarray(slot_id, jnp.int32),), jnp.max(over).astype(jnp.int32)
+        )
 
 
 def _full(arr: Array) -> "pl.BlockSpec":
@@ -284,6 +284,7 @@ def mutual_walk_pallas(
     backend: str = "triton",
     num_warps: int = 2,
     max_rounds: int = 256,
+    rounds_per_check: int = 4,
 ) -> PallasWalkResult:
     """Run the mutual walk, one Pallas launch per round.
 
@@ -319,6 +320,10 @@ def mutual_walk_pallas(
         Warps per program.
     max_rounds : int
         Safety bound on the round loop.
+    rounds_per_check : int
+        Rounds launched per ``while_loop`` iteration: every iteration costs a
+        device-to-host copy of the loop predicate, so several rounds run
+        between checks (an empty round is one early-exiting launch).
 
     Returns
     -------
@@ -368,16 +373,17 @@ def mutual_walk_pallas(
         qa0, qb0, jnp.asarray(1, idx),
         jnp.full((int(far_cap),), -1, idx), jnp.full((int(far_cap),), -1, idx),
         jnp.full((int(near_cap),), -1, idx), jnp.full((int(near_cap),), -1, idx),
-        jnp.zeros((4,), idx),  # far, near, next(unused between rounds), flags
+        jnp.zeros((_NUM_COUNTERS,), idx),  # far, near, next, overflow far/near/queue
         jnp.asarray(1, idx),   # peak
         jnp.asarray(0, idx),   # rounds
     )
 
     def cond(state):
         _qa, _qb, size, *_rest, counters, _peak, rounds = state
-        return (size > 0) & (counters[_C_OVER] == 0) & (rounds < int(max_rounds))
+        no_overflow = (counters[_C_OVF_FAR] + counters[_C_OVF_NEAR] + counters[_C_OVF_Q]) == 0
+        return (size > 0) & no_overflow & (rounds < int(max_rounds))
 
-    def body(state):
+    def one_step(state):
         qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = state
         # the kernel reads only lanes < size, so the next queue needs no fill
         next_a = jnp.empty((Q,), idx)
@@ -388,13 +394,20 @@ def mutual_walk_pallas(
         )
         new_size = counters[_C_NEXT]
         peak = jnp.maximum(peak, new_size)
-        return (next_a, next_b, jnp.minimum(new_size, Q), far_a, far_b, near_a, near_b, counters, peak, rounds + 1)
+        # an empty round leaves everything untouched, so the count stays honest
+        rounds = rounds + jnp.where(size > 0, 1, 0).astype(idx)
+        return (next_a, next_b, jnp.minimum(new_size, Q), far_a, far_b, near_a, near_b, counters, peak, rounds)
+
+    def body(state):
+        for _ in range(max(int(rounds_per_check), 1)):
+            state = one_step(state)
+        return state
 
     qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = lax.while_loop(cond, body, init)
-    flags = counters[_C_OVER]
     return PallasWalkResult(
         far_a=far_a, far_b=far_b, far_count=jnp.minimum(counters[_C_FAR], int(far_cap)),
         near_a=near_a, near_b=near_b, near_count=jnp.minimum(counters[_C_NEAR], int(near_cap)),
-        far_overflow=(flags & 1) > 0, near_overflow=(flags & 2) > 0, queue_overflow=(flags & 4) > 0,
+        far_overflow=counters[_C_OVF_FAR] > 0, near_overflow=counters[_C_OVF_NEAR] > 0,
+        queue_overflow=counters[_C_OVF_Q] > 0,
         peak_wavefront=peak, rounds=rounds,
     )
