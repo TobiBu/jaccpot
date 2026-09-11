@@ -16,6 +16,8 @@ Split out of ``core.py`` (Tier 1.6, A.9 seam 1); every function body is unchange
 
 from __future__ import annotations
 
+import os
+
 from typing import Any, NamedTuple, Optional
 
 import jax.numpy as jnp
@@ -663,16 +665,37 @@ def _solidfmm_downward_accumulate_from_multipoles(
         if real_basis and _m2l_csr_pallas_active():
             from jaccpot._env import env_flag
             from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
-
-            locals_updated = initial_locals_coeffs + m2l_real_csr_pallas(
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                order=order,
-                active_pair_count=active_pair_count,
-                interpret=env_flag("JACCPOT_M2L_CSR_INTERPRET", False),
+            from jaccpot.pallas.m2l_real_csr_tiled import (
+                m2l_real_csr_tiled_pallas,
+                m2l_real_csr_tiled_supported,
             )
+
+            interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
+            # plan sub-10ms Phase 5: K-source tiles per iteration (orders >= 4)
+            if env_flag("JACCPOT_M2L_CSR_TILED", False) and m2l_real_csr_tiled_supported(order):
+                m2l_inc = m2l_real_csr_tiled_pallas(
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    order=order,
+                    active_pair_count=active_pair_count,
+                    k_tile=int(os.environ.get("JACCPOT_M2L_CSR_TILE", "16")),
+                    num_warps=int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "4")),
+                    dot_algorithm=os.environ.get("JACCPOT_M2L_CSR_DOT", "ieee"),
+                    interpret=interpret,
+                )
+            else:
+                m2l_inc = m2l_real_csr_pallas(
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    order=order,
+                    active_pair_count=active_pair_count,
+                    interpret=interpret,
+                )
+            locals_updated = initial_locals_coeffs + m2l_inc
         elif pair_count <= chunk_size:
             locals_updated = _accumulate_m2l_fullbatch(
                 initial_locals_coeffs,

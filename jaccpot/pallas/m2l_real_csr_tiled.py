@@ -47,6 +47,13 @@ from jaccpot.pallas.m2l_real_csr import (
 __all__ = ["m2l_real_csr_tiled_pallas", "m2l_real_csr_tiled_supported"]
 
 _HIGHEST = lax.Precision.HIGHEST
+#: dot algorithms: IEEE fp32 FMA (exact fp32), 3-pass TF32 on the tensor cores
+#: (~fp32 accuracy), single-pass TF32 (10-bit mantissa: measurement only)
+_DOT_ALGORITHMS = {
+    "ieee": _HIGHEST,
+    "tf32x3": lax.DotAlgorithmPreset.TF32_TF32_F32_X3,
+    "tf32": lax.DotAlgorithmPreset.TF32_TF32_F32,
+}
 
 
 def m2l_real_csr_tiled_supported(order: int) -> bool:
@@ -83,6 +90,7 @@ def _m2l_tiled_kernel(
     wp: int,
     k_tile: int,
     zf: tuple,
+    dot_precision: Any,
 ) -> None:
     """One program per target: tiles of ``k_tile`` sources of its CSR row.
 
@@ -114,6 +122,8 @@ def _m2l_tiled_kernel(
         Sources per iteration. Static.
     zf : tuple
         ``Zf[n][k]`` factorial table as Python floats. Static.
+    dot_precision : Any
+        ``precision`` of every ``jnp.dot`` (see ``_DOT_ALGORITHMS``). Static.
 
     Returns
     -------
@@ -135,17 +145,19 @@ def _m2l_tiled_kernel(
     bt_mats = [bt_ref[pl.ds(l * wp, wp), :] for l in range(p + 1)]
     b_mats = [b_ref[pl.ds(l * wp, wp), :] for l in range(p + 1)]
     n_tiles = (cnt + (k_tile - 1)) // k_tile
-    acc0 = tuple(jnp.zeros((wp,), dtype) for _ in range(p + 1))
+    # whole (K, Wp) tiles accumulate across the row; the lane reduction happens
+    # once at the end, not per tile
+    acc0 = tuple(jnp.zeros((k_tile, wp), dtype) for _ in range(p + 1))
 
     def dz(tiles, cosv, sinv):
         # out[k, i] = cos_i v[k, i] + sum_j Apat[i, j] sin_j v[k, j]
         return [
-            v * cosv + jnp.dot(v * sinv, apat_t, precision=_HIGHEST) for v in tiles
+            v * cosv + jnp.dot(v * sinv, apat_t, precision=dot_precision) for v in tiles
         ]
 
     def bapply(tiles, mats):
         # out[k, i] = sum_j M_l[i, j] v[k, j]  ->  v @ M_l^T; ``mats`` already transposed
-        return [jnp.dot(v, m, precision=_HIGHEST) for v, m in zip(tiles, mats)]
+        return [jnp.dot(v, m, precision=dot_precision) for v, m in zip(tiles, mats)]
 
     def body(t, accs):
         pos = t * k_tile + lane
@@ -197,11 +209,11 @@ def _m2l_tiled_kernel(
         w = bapply(w, b_mats)
         w = dz(w, cos_az, -sin_az)
         m = valid.astype(dtype)[:, None]
-        return tuple(a + jnp.sum(wl * m, axis=0) for a, wl in zip(accs, w))
+        return tuple(a + wl * m for a, wl in zip(accs, w))
 
     accs = lax.fori_loop(0, n_tiles, body, acc0)
     for l in range(bp):
-        row = accs[l] if l <= p else jnp.zeros((wp,), dtype)
+        row = jnp.sum(accs[l], axis=0) if l <= p else jnp.zeros((wp,), dtype)
         out_ref[0, pl.ds(l * wp, wp)] = row
 
 
@@ -249,6 +261,7 @@ def m2l_real_csr_tiled_pallas(
     order: int,
     active_pair_count: Optional[Array] = None,
     k_tile: int = 16,
+    dot_algorithm: str = "ieee",
     interpret: bool = False,
     backend: str = "triton",
     num_warps: int = 4,
@@ -271,6 +284,10 @@ def m2l_real_csr_tiled_pallas(
         Live prefix length of the pair list.
     k_tile : int
         Sources per iteration (multiple of 16). Static.
+    dot_algorithm : str
+        ``"ieee"`` (exact fp32, default), ``"tf32x3"`` (3-pass tensor-core
+        TF32, ~fp32 accuracy) or ``"tf32"`` (single pass, 10-bit mantissa --
+        for measurement only).
     interpret : bool
         Pallas interpret mode.
     backend : str
@@ -286,14 +303,16 @@ def m2l_real_csr_tiled_pallas(
     Raises
     ------
     ValueError
-        On a shape mismatch, an unsupported order, or a ``k_tile`` that is not
-        a positive multiple of 16.
+        On a shape mismatch, an unsupported order, a ``k_tile`` that is not a
+        positive multiple of 16, or an unknown ``dot_algorithm``.
     """
     p = int(order)
     if not m2l_real_csr_tiled_supported(p):
         raise ValueError(f"tiled M2L needs Wp >= 16 (order >= 4); got order {p}")
     if int(k_tile) < 16 or int(k_tile) % 16:
         raise ValueError("k_tile must be a positive multiple of 16")
+    if str(dot_algorithm) not in _DOT_ALGORITHMS:
+        raise ValueError(f"dot_algorithm must be one of {sorted(_DOT_ALGORITHMS)}")
     mult = jnp.asarray(multipoles)
     dtype = mult.dtype
     tb = _tiled_tables(p, dtype)
@@ -312,7 +331,8 @@ def m2l_real_csr_tiled_pallas(
     if n == 0 or int(src_sorted.shape[0]) == 0:
         return jnp.zeros((n, C), dtype=dtype)
     kernel = functools.partial(
-        _m2l_tiled_kernel, p=p, bp=Bp, wp=Wp, k_tile=int(k_tile), zf=tb["zf"]
+        _m2l_tiled_kernel, p=p, bp=Bp, wp=Wp, k_tile=int(k_tile), zf=tb["zf"],
+        dot_precision=_DOT_ALGORITHMS[str(dot_algorithm)],
     )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
@@ -335,7 +355,7 @@ def m2l_real_csr_tiled_pallas(
         out_specs=pl.BlockSpec((1, Bp * Wp), lambda t: (t, 0)),
         out_shape=jax.ShapeDtypeStruct((n, Bp * Wp), dtype),
         interpret=bool(interpret),
-        name=f"m2l_real_csr_tiled_p{p}_k{int(k_tile)}",
+        name=f"m2l_real_csr_tiled_p{p}_k{int(k_tile)}_{dot_algorithm}",
         **backend_kwargs,
     )(*operands)
     return unpack_centred(out, order=p)
