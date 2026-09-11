@@ -258,7 +258,7 @@ def _round_block(
         over_q = over_q | emit(m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap)
     for slot_id, over in ((_C_OVF_FAR, over_far), (_C_OVF_NEAR, over_near), (_C_OVF_Q, over_q)):
         plgpu.atomic_max(
-            counters_out, (jnp.asarray(slot_id, jnp.int32),), jnp.max(over).astype(jnp.int32)
+            counters_out, (jnp.asarray(slot_id, jnp.int32),), jnp.max(over.astype(jnp.int32))
         )
 
 
