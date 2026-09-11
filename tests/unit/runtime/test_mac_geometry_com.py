@@ -130,6 +130,8 @@ def test_flat_walk_with_com_geometry_accepts_only_convergent_pairs(tree_data, th
 def test_mode_knob(monkeypatch, tree_data):
     tree, topo, ps, ms, com, box = tree_data
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", raising=False)
+    assert mac_geometry_mode() == "com"  # the default since plan sub-10ms Phase 6
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "aabb")
     assert mac_geometry_mode() == "aabb"
     g, f = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF, geometry_factory="factory")
     assert g is box and f == "factory"

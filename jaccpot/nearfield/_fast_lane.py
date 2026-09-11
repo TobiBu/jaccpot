@@ -76,12 +76,21 @@ def _nearfield_csr_lane_enabled() -> bool:
     rectangle is 99 % padding. The rectangle payload shrinks to a one-block
     placeholder and its capacity guard is skipped. Read at call time.
 
+    Default ON wherever the kernel can lower (an Ampere+ GPU; plan sub-10ms
+    Phase 6, 2026-09-11); ``=0`` restores the rectangle kernel, ``=1`` on a
+    CPU-only process is honoured too (interpret mode is the caller's business).
+
     Returns
     -------
     bool
         ``True`` when the CSR near-field lane is selected.
     """
-    return _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_CSR", False)
+    raw = os.environ.get("JACCPOT_NEARFIELD_LEAFPAIR_CSR")
+    if raw is not None:
+        return _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_CSR", False)
+    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
+    return bool(pallas_m2l_real_csr_supported())
 
 __all__ = [
     "compute_leaf_p2p_accelerations_radix_fast_lane",

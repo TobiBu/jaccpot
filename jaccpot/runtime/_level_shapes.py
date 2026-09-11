@@ -138,7 +138,7 @@ def pallas_cascades_enabled() -> bool:
     """
     from jaccpot._env import env_flag
 
-    if not env_flag("JACCPOT_CASCADE_PALLAS", False):
+    if not env_flag("JACCPOT_CASCADE_PALLAS", True):  # default on since Phase 6 (2026-09-11)
         return False
     if env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False):
         return True

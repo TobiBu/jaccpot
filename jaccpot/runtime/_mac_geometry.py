@@ -71,7 +71,7 @@ def mac_geometry_mode() -> str:
     Returns
     -------
     str
-        ``"aabb"`` (default: box centres and half-diagonals, the historical
+        ``"aabb"`` (box centres and half-diagonals, the historical
         behaviour) or ``"com"`` (centres of mass with particle radii about them).
 
     Raises
@@ -79,7 +79,7 @@ def mac_geometry_mode() -> str:
     ValueError
         If the environment names a mode this module does not implement.
     """
-    raw = os.environ.get(_MAC_GEOMETRY_ENV, "aabb").strip().lower()
+    raw = os.environ.get(_MAC_GEOMETRY_ENV, "com").strip().lower()  # default com since Phase 6
     if raw not in _MAC_GEOMETRY_MODES:
         raise ValueError(
             f"{_MAC_GEOMETRY_ENV} must be one of {_MAC_GEOMETRY_MODES}, got {raw!r}"

@@ -676,8 +676,8 @@ def _solidfmm_downward_accumulate_from_multipoles(
             # plan sub-10ms Phase 5: JACCPOT_M2L_CSR_KERNEL = pair | tiled | lanes
             # (JACCPOT_M2L_CSR_TILED=1 is the older spelling of "tiled")
             which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
-            if not which:
-                which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "pair"
+            if not which:  # default: lanes (Phase 6, 2026-09-11; 18x the per-pair kernel)
+                which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "lanes"
             if which not in ("pair", "tiled", "lanes"):
                 raise ValueError(
                     f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected pair, tiled or lanes"

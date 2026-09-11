@@ -1728,9 +1728,11 @@ def _build_treecode_artifacts_strict_streamed(
 def strict_walk_backend() -> str:
     """Walk implementation of the strict flat lane (plan sub-10ms Phase 2).
 
-    ``JACCPOT_STATIC_STRICT_FUSED_WALK``: ``"flat"`` (default, yggdrax
-    ``dual_tree_walk_mutual``) or ``"pallas"`` (one Pallas launch per round,
-    :func:`jaccpot.pallas.mutual_walk_pallas.mutual_walk_pallas`).
+    ``JACCPOT_STATIC_STRICT_FUSED_WALK``: ``"pallas"`` (one Pallas launch per
+    round, :func:`jaccpot.pallas.mutual_walk_pallas.mutual_walk_pallas`) or
+    ``"flat"`` (yggdrax ``dual_tree_walk_mutual``). Unset: ``"pallas"`` wherever
+    the kernel lowers (an Ampere+ GPU; plan sub-10ms Phase 6, 2026-09-11),
+    ``"flat"`` elsewhere.
 
     Returns
     -------
@@ -1742,7 +1744,14 @@ def strict_walk_backend() -> str:
     ValueError
         On any other value.
     """
-    raw = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_WALK", "flat").strip().lower()
+    raw = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_WALK")
+    if raw is None:
+        if env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False):
+            return "pallas"
+        from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
+        return "pallas" if pallas_m2l_real_csr_supported() else "flat"
+    raw = raw.strip().lower()
     if raw not in ("flat", "pallas"):
         raise ValueError(
             f"JACCPOT_STATIC_STRICT_FUSED_WALK={raw!r}; expected 'flat' or 'pallas'"

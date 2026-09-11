@@ -98,6 +98,9 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
         return real_kernel(*a, **k)
 
     monkeypatch.setattr(csr_mod, "m2l_real_csr_pallas", counting)
+    # the lane's default kernel is the pair-per-lane one (Phase 6); pin the
+    # per-pair kernel here so the counter sees the call
+    monkeypatch.setenv("JACCPOT_M2L_CSR_KERNEL", "pair")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", "1")
     monkeypatch.setenv("JACCPOT_M2L_CSR_INTERPRET", "1")
     a_csr = solve()
