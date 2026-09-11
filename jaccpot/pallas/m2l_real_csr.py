@@ -448,11 +448,14 @@ def csr_by_target(
     key = jnp.where(valid, tgt, jnp.asarray(total_nodes, jnp.int32))
     perm = jnp.argsort(key, stable=True)
     src_sorted = jnp.where(valid[perm], src[perm], 0)
-    counts = jax.ops.segment_sum(
-        valid.astype(jnp.int32), jnp.where(valid, tgt, 0), num_segments=int(total_nodes)
-    )
-    offsets = jnp.cumsum(counts) - counts
-    return src_sorted, offsets.astype(jnp.int32), counts.astype(jnp.int32)
+    # offsets from the SORTED key (a searchsorted), not a scatter-add over the
+    # P entries: that segment_sum was a 1.3 ms int32 scatter at P = 2^21
+    sorted_key = key[perm]
+    offsets = jnp.searchsorted(
+        sorted_key, jnp.arange(int(total_nodes) + 1, dtype=jnp.int32), side="left"
+    ).astype(jnp.int32)
+    counts = offsets[1:] - offsets[:-1]
+    return src_sorted, offsets[:-1], counts.astype(jnp.int32)
 
 
 def m2l_real_csr_jax(

@@ -2537,6 +2537,34 @@ def _evaluate_local_expansions_for_particles(
 # The rank is NOT constrained beyond this. These bodies `reshape(-1)` deliberately, and the
 # docstrings say "flattened before use", so a caller that pre-flattens is legitimate; every
 # recorded call passes the 2-D form, and pinning `leaves w` asserts only what all 25 show.
+def _unique_slot_indices(flat_idx: Array, flat_mask: Array, n: int) -> Array:
+    """Indices for a leaf-slot scatter that XLA can apply WITHOUT atomics.
+
+    Every particle sits in exactly one leaf slot, so the live indices are
+    unique; the padded slots used to carry whatever index the padding held
+    (typically one shared value), and 800k padded slots of a capacity-padded
+    cell tree colliding on one address made a 200k x 3 scatter-add cost 1-2 ms.
+    Padded slots now point past the buffer (unique, dropped by ``mode="drop"``)
+    and the scatter is declared ``unique_indices``.
+
+    Parameters
+    ----------
+    flat_idx : Array
+        Destination index per slot ``[S]``.
+    flat_mask : Array
+        Validity per slot ``[S]``.
+    n : int
+        Destination length; padded slots map to ``n + slot``.
+
+    Returns
+    -------
+    Array
+        Unique indices, ``flat_idx``'s dtype.
+    """
+    slot = jnp.arange(int(flat_idx.shape[0]), dtype=flat_idx.dtype)
+    return jnp.where(flat_mask, flat_idx, jnp.asarray(int(n), flat_idx.dtype) + slot)
+
+
 @jaxtyped(typechecker=beartype)
 def _scatter_vectors(
     base: Float[Array, "n 3"],
@@ -2574,7 +2602,8 @@ def _scatter_vectors(
     flat_mask = mask.reshape(-1)
     zero = jnp.zeros((), dtype=base.dtype)
     masked = jnp.where(flat_mask[:, None], flat_values, zero)
-    return base.at[flat_idx].add(masked)
+    flat_idx = _unique_slot_indices(flat_idx, flat_mask, int(base.shape[0]))
+    return base.at[flat_idx].add(masked, unique_indices=True, mode="drop")
 
 
 @jaxtyped(typechecker=beartype)
@@ -2612,7 +2641,8 @@ def _scatter_scalars(
     flat_mask = mask.reshape(-1)
     zero = jnp.zeros((), dtype=base.dtype)
     masked = jnp.where(flat_mask, flat_values, zero)
-    return base.at[flat_idx].add(masked)
+    flat_idx = _unique_slot_indices(flat_idx, flat_mask, int(base.shape[0]))
+    return base.at[flat_idx].add(masked, unique_indices=True, mode="drop")
 
 
 @jaxtyped(typechecker=beartype)
@@ -2651,4 +2681,5 @@ def _scatter_rank3(
     flat_mask = mask.reshape(-1)
     zero = jnp.zeros((), dtype=base.dtype)
     masked = jnp.where(flat_mask[:, None, None], flat_values, zero)
-    return base.at[flat_idx].add(masked)
+    flat_idx = _unique_slot_indices(flat_idx, flat_mask, int(base.shape[0]))
+    return base.at[flat_idx].add(masked, unique_indices=True, mode="drop")
