@@ -613,6 +613,7 @@ def evaluate_large_n_nearfield_fast_lane(
                     softening=float(getattr(fmm, "softening")),
                     return_potential=True,
                     use_pallas=True,
+                    neighbor_list=state.neighbor_list,
                 )
 
         # Keep potential compatibility by delegating to canonical generic
@@ -665,6 +666,7 @@ def evaluate_large_n_nearfield_fast_lane(
             return_potential=False,
             use_pallas=use_pallas,
             differentiable=differentiable,
+            neighbor_list=state.neighbor_list,
         )
     overflow_payload = getattr(state, "radix_overflow_payload", None)
     if overflow_payload is not None and diag_mode in ("full", "overflow_only"):

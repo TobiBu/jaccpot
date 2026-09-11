@@ -294,6 +294,10 @@ class _TreeBuildArtifacts:
     workspace: Optional[object]
     max_leaf_size: int
     cache_leaf_parameter: int
+    #: ``leaf_partition="cells"`` under trace: the partition's overflow flag
+    #: (more leaves needed than ``leaf_capacity``); ``None`` otherwise. Eager
+    #: builds raise on it instead.
+    leaf_capacity_overflow: Optional[Array] = None
 
 
 @dataclass(frozen=True)
@@ -642,6 +646,8 @@ def _build_tree_with_config(
     refine_local: bool,
     max_refine_levels: int,
     aspect_threshold: float,
+    leaf_partition: str = "buckets",
+    leaf_capacity: Optional[int] = None,
 ) -> _TreeBuildArtifacts:
     """Construct a tree according to the resolved builder configuration.
 
@@ -691,6 +697,54 @@ def _build_tree_with_config(
     """
 
     mode = tree_config.mode
+    if mode == "static_radix" and leaf_partition == "cells":
+        # Cell leaves in the static radix lane (plan sub-10ms Phase 1.2): the
+        # shape is fixed by leaf_capacity, the structure is rebuilt on device.
+        from yggdrax._tree_impl import build_static_cells_tree
+        from yggdrax.tree import RadixTree as _RadixTreeContainer
+
+        if leaf_capacity is None:
+            raise ValueError("leaf_partition='cells' needs a leaf_capacity")
+        topo, pos_sorted, mass_sorted, inverse, overflow = build_static_cells_tree(
+            positions,
+            masses,
+            bounds,
+            leaf_size=int(leaf_size),
+            leaf_capacity=int(leaf_capacity),
+            return_reordered=True,
+            return_overflow=True,
+        )
+        overflow_out: Optional[Array]
+        if isinstance(overflow, Tracer):
+            overflow_out = overflow
+        else:
+            if bool(overflow):
+                raise RuntimeError(
+                    "static_radix cell leaves overflowed the leaf capacity: "
+                    f"leaf_capacity={int(leaf_capacity)} at leaf_size={int(leaf_size)}, "
+                    f"N={int(positions.shape[0])}. Raise TreeConfig(leaf_capacity=...)."
+                )
+            overflow_out = None
+        tree = _RadixTreeContainer(
+            topology=topo,
+            build_mode="static_radix",
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            inverse_permutation=inverse,
+        )
+        tree.require_fmm_topology()
+        # the leaf table width is the CONTRACT leaf_size, not the achieved max
+        # occupancy: eager and traced builds must agree on every static shape
+        return _TreeBuildArtifacts(
+            tree=tree,
+            positions_sorted=pos_sorted,
+            masses_sorted=mass_sorted,
+            inverse_permutation=inverse,
+            workspace=None,
+            max_leaf_size=int(leaf_size),
+            cache_leaf_parameter=int(leaf_size),
+            leaf_capacity_overflow=overflow_out,
+        )
     use_fast_lbvh_path = (
         bool(jit_tree)
         and tree_type == "radix"
@@ -1182,6 +1236,7 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     topology_key: Optional[str]
     upward: TreeUpwardData
     locals_template: Optional[LocalExpansionData]
+    leaf_capacity_overflow: Optional[Array] = None
 
 
 class _PrepareStateDualDownwardArtifacts(NamedTuple):

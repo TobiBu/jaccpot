@@ -816,6 +816,12 @@ class StrictRunMixin(_EngineBase):
         else:
             acceleration_current = acceleration_self_current
 
+        from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_enabled
+
+        # the CSR near-field lane never reads the rectangle, so its capacity is
+        # not a correctness condition there (plan sub-10ms 4.1)
+        rectangle_guard_active = not bool(_nearfield_csr_lane_enabled())
+
         def _static_target_block_capacity_ok(
             prepared_in: PreparedStateLike,
         ) -> Array:
@@ -827,7 +833,7 @@ class StrictRunMixin(_EngineBase):
                 "nearfield_target_block_source_leaf_ids_padded",
                 None,
             )
-            if padded is not None:
+            if padded is not None and rectangle_guard_active:
                 padded_arr = jnp.asarray(padded)
                 if padded_arr.ndim == 3 and int(padded_arr.shape[1]) > 0:
                     capacity = int(padded_arr.shape[1]) * int(padded_arr.shape[2])

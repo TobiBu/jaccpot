@@ -464,6 +464,21 @@ class FMMEngine(
         retain_far_pairs_for_grad = _ff.retain_far_pairs_for_grad
         _tree = TreeConfig() if tree is None else tree
         tree_type = "radix" if _tree.tree_type is None else _tree.tree_type
+        # Leaf partition of the static radix tree (plan sub-10ms Phase 1.2):
+        # "buckets" (historical) or "cells" with a static leaf capacity.
+        self._tree_leaf_partition: str = (
+            "buckets" if _tree.leaf_partition is None else str(_tree.leaf_partition)
+        )
+        self._tree_leaf_capacity: Optional[int] = (
+            None if _tree.leaf_capacity is None else int(_tree.leaf_capacity)
+        )
+        if self._tree_leaf_partition not in ("buckets", "cells"):
+            raise ValueError(
+                "TreeConfig.leaf_partition must be 'buckets' or 'cells', "
+                f"got {self._tree_leaf_partition!r}"
+            )
+        if self._tree_leaf_partition == "cells" and self._tree_leaf_capacity is None:
+            raise ValueError("TreeConfig(leaf_partition='cells') needs leaf_capacity")
         tree_build_mode = _tree.mode
         target_leaf_particles = _tree.leaf_target
         refine_local = _tree.refine_local

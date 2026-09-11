@@ -202,6 +202,10 @@ class SweepsMixin(_EngineBase):
             yet. Any failure to read the depth falls back to the stashed value
             rather than raising, so this never breaks a traced refresh.
         """
+        if getattr(self, "_tree_leaf_partition", "buckets") == "cells":
+            # the radix structure over cell leaves is rebuilt per step and its
+            # depth varies; only the padded shape-derived depth is an upper bound
+            return None
         probe = getattr(tree, "parent", None)
         if probe is None or isinstance(probe, Tracer):
             return self._static_upward_num_levels

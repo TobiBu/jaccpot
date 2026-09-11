@@ -960,6 +960,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     capacity_report: Optional[Callable[[dict], None]] = None,
     max_neighbors_per_leaf_override: Optional[int] = None,
     flat_walk_capacity_floor: Optional[dict] = None,
+    extra_overflow: Optional[Array] = None,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
@@ -1167,6 +1168,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             capacity_report=capacity_report,
             far_named=far_named,
             near_edge_named=near_edge_named,
+            extra_overflow=extra_overflow,
         )
     if treecode_enabled:
         if pair_policy is not None or policy_state is not None:
@@ -1736,6 +1738,7 @@ def _build_flat_walk_artifacts_strict_streamed(
     capacity_report: Optional[Callable[[dict], None]] = None,
     far_named: bool = True,
     near_edge_named: bool = True,
+    extra_overflow: Optional[Array] = None,
 ) -> _DualTreeArtifacts:
     """Far pairs and leaf neighbours from yggdrax's flat-emission wavefront walk.
 
@@ -1953,6 +1956,17 @@ def _build_flat_walk_artifacts_strict_streamed(
     far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_cap,))
     far_tags = jnp.full((2 * far_cap,), -1, dtype=idx)
     any_overflow = walk.far_overflow | walk.near_overflow | walk.queue_overflow
+    if extra_overflow is not None:
+        # an upstream capacity the caller wants treated like the walk's own --
+        # today the cell-leaf partition's leaf_capacity (plan sub-10ms 1.2)
+        if not traced and not isinstance(extra_overflow, Tracer):
+            if bool(extra_overflow):
+                raise RuntimeError(
+                    "static_radix cell leaves overflowed TreeConfig.leaf_capacity; "
+                    "raise it."
+                )
+        else:
+            any_overflow = any_overflow | jnp.asarray(extra_overflow, dtype=bool)
     # Saturate on ANY overflow: the strict runner's guard tests
     # ``far_pair_count < compact_far_pair_capacity`` and this is how the near and
     # queue flags reach it under trace. Eager overflow raised above, so this only
@@ -2673,6 +2687,7 @@ def _build_dual_tree_artifacts(
     strict_capacity_report: Optional[Callable[[dict], None]] = None,
     strict_max_neighbors_per_leaf_override: Optional[int] = None,
     strict_flat_walk_capacity_floor: Optional[dict] = None,
+    strict_extra_overflow: Optional[Array] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree.
 
@@ -2831,6 +2846,7 @@ def _build_dual_tree_artifacts(
                         strict_max_neighbors_per_leaf_override
                     ),
                     flat_walk_capacity_floor=strict_flat_walk_capacity_floor,
+                    extra_overflow=strict_extra_overflow,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(

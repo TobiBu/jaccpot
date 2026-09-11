@@ -127,6 +127,18 @@ class TreeConfig:
         Depth cap for that refinement pass.
     aspect_threshold : Optional[float]
         Leaf aspect ratio above which refinement splits a leaf.
+    leaf_partition : Optional[str]
+        ``"static_radix"`` only. ``"buckets"`` (default): leaves are runs of
+        exactly ``leaf_target`` Morton-consecutive particles. ``"cells"``: leaves
+        are the coarsest Morton cells holding at most ``leaf_target`` particles,
+        padded with empty leaves to ``leaf_capacity`` -- bounded in extent, so a
+        low-density shell no longer produces huge leaves that the mutual MAC
+        makes neighbours of the whole tree (near-field volume 24x lower at
+        N=2e5 Plummer, theta 0.8; plan sub-10ms Phase 1.2).
+    leaf_capacity : Optional[int]
+        Static leaf count for ``leaf_partition="cells"`` (the tree is padded to
+        it; exceeding it raises eagerly and trips the strict runner's capacity
+        guard under trace). Required with ``"cells"``.
     """
 
     tree_type: Optional[str] = None
@@ -135,6 +147,8 @@ class TreeConfig:
     refine_local: Optional[bool] = None
     max_refine_levels: Optional[int] = None
     aspect_threshold: Optional[float] = None
+    leaf_partition: Optional[str] = None
+    leaf_capacity: Optional[int] = None
 
 
 @dataclass(frozen=True)

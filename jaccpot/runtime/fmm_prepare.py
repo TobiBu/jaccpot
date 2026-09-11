@@ -690,18 +690,35 @@ class PrepareMixin(_EngineBase):
             If the template topology disagrees with the request.
         """
 
+        leaf_partition = getattr(self, "_tree_leaf_partition", "buckets")
+        cells = leaf_partition == "cells"
         rebuilt_result = rebuild_static_radix_tree_from_template(
             positions,
             masses,
             template_tree,
             bounds=bounds,
             return_reordered=True,
+            leaf_partition=leaf_partition,
+            return_overflow=cells,
         )
-        if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != 4:
+        expected = 5 if cells else 4
+        if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != expected:
             raise RuntimeError(
                 "static radix template rebuild must return tree and reordered arrays"
             )
-        rebuilt_tree, positions_sorted, masses_sorted, inverse = rebuilt_result
+        leaf_capacity_overflow: Optional[Array] = None
+        if cells:
+            rebuilt_tree, positions_sorted, masses_sorted, inverse, overflow = rebuilt_result
+            if isinstance(overflow, Tracer):
+                leaf_capacity_overflow = overflow
+            elif bool(overflow):
+                raise RuntimeError(
+                    "static_radix cell leaves overflowed the leaf capacity on refresh: "
+                    f"leaf_capacity={int(template_tree.leaf_codes.shape[0])}. "
+                    "Raise TreeConfig(leaf_capacity=...)."
+                )
+        else:
+            rebuilt_tree, positions_sorted, masses_sorted, inverse = rebuilt_result
         if not isinstance(rebuilt_tree, RadixTree):
             raise ValueError("static radix template rebuild returned non-radix tree")
         return _TreeBuildArtifacts(
@@ -712,6 +729,7 @@ class PrepareMixin(_EngineBase):
             workspace=template_tree.workspace,
             max_leaf_size=int(max_leaf_size),
             cache_leaf_parameter=int(cache_leaf_parameter),
+            leaf_capacity_overflow=leaf_capacity_overflow,
         )
 
     def _build_locals_template_for_prepare_state(
@@ -889,6 +907,8 @@ class PrepareMixin(_EngineBase):
                 refine_local=refine_local_val,
                 max_refine_levels=max_refine_levels_val,
                 aspect_threshold=aspect_threshold_val,
+                leaf_partition=getattr(self, "_tree_leaf_partition", "buckets"),
+                leaf_capacity=getattr(self, "_tree_leaf_capacity", None),
             )
             if allow_stateful_cache:
                 self._tree_workspace = build_artifacts.workspace
@@ -1031,6 +1051,7 @@ class PrepareMixin(_EngineBase):
             topology_key=topology_key_for_state,
             upward=upward,
             locals_template=locals_template,
+            leaf_capacity_overflow=getattr(build_artifacts, "leaf_capacity_overflow", None),
         )
 
     def _prepare_state_tree_upward_and_dual_downward(
@@ -1492,6 +1513,7 @@ class PrepareMixin(_EngineBase):
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
             strict_flat_walk_capacity_floor=strict_flat_floor,
+            strict_extra_overflow=getattr(tree_artifacts, "leaf_capacity_overflow", None),
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
@@ -3551,6 +3573,7 @@ class PrepareMixin(_EngineBase):
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
             strict_flat_walk_capacity_floor=strict_flat_floor,
+            strict_extra_overflow=getattr(tree_artifacts, "leaf_capacity_overflow", None),
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,

@@ -824,6 +824,8 @@ class FastMultipoleMethod:
                 aspect_threshold=legacy_kwargs.pop(
                     "aspect_threshold", advanced_cfg.tree.aspect_threshold
                 ),
+                leaf_partition=advanced_cfg.tree.leaf_partition,
+                leaf_capacity=advanced_cfg.tree.leaf_capacity,
             ),
             runtime_policy=dataclasses.replace(
                 advanced_cfg.runtime,
