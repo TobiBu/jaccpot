@@ -29,6 +29,8 @@ from jax import lax
 from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
+
+from jaccpot.runtime._level_shapes import level_batch_width as _level_batch_width
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
@@ -451,7 +453,11 @@ def prepare_real_upward_sweep(
         num_levels = int(level_offsets.shape[0] - 1)
         if num_levels <= 0:
             num_levels = 1
-    level_batch_width = max(int(num_internal), 1)
+    # widest level (with headroom) rather than every internal node: the level
+    # loop's cost is batch x depth, and cell-leaf trees are 3x deeper
+    level_batch_width = _level_batch_width(
+        level_offsets, total_nodes=total_nodes, num_internal=num_internal
+    )
     resolved_leaf_batch_size = (
         min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE)
         if leaf_batch_size is None

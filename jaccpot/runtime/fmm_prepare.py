@@ -58,6 +58,7 @@ from ._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_node_force_scale_from_sorted_magnitudes,
 )
+from ._level_shapes import level_width_overflow
 from ._mac_geometry import resolve_walk_geometry
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
@@ -715,6 +716,13 @@ class PrepareMixin(_EngineBase):
             if depth_bound is not None:
                 depth_now = jnp.max(jnp.asarray(rebuilt_tree.node_level)) + 1
                 overflow = jnp.asarray(overflow) | (depth_now > int(depth_bound))
+            # the level loops' static batch is the eager widest level (+25 %):
+            # a rebuilt tree with a wider level would drop nodes -> capacity failure
+            overflow = jnp.asarray(overflow) | level_width_overflow(
+                rebuilt_tree.level_offsets,
+                total_nodes=int(rebuilt_tree.parent.shape[0]),
+                num_internal=int(rebuilt_tree.left_child.shape[0]),
+            )
             if isinstance(overflow, Tracer):
                 leaf_capacity_overflow = overflow
             elif bool(overflow):
