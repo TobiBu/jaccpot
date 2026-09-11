@@ -50,6 +50,11 @@ def pallas_p2m_real_leaf_supported() -> bool:
     return pallas_m2l_real_csr_supported()
 
 
+#: Measured on an idle A100 (leaf 64 lanes, 16k cell leaves): the register
+#: allocation is sensitive to the warp count and the wrong one spills.
+_DEFAULT_WARPS = {4: 2, 5: 4, 6: 2}
+
+
 def _next_pow2(n: int) -> int:
     n = max(1, int(n))
     return 1 << (n - 1).bit_length()
@@ -169,7 +174,7 @@ def p2m_real_leaves_pallas(
     leaf_width: int,
     interpret: bool = False,
     backend: str = "triton",
-    num_warps: int = 2,
+    num_warps: int | None = None,
 ) -> Array:
     """Packed leaf multipoles for every leaf in one Pallas launch.
 
@@ -196,8 +201,10 @@ def p2m_real_leaves_pallas(
         Pallas interpret mode.
     backend : str
         Pallas GPU lowering.
-    num_warps : int
-        Warps per program (64 lanes -> 2 warps).
+    num_warps : int | None
+        Warps per program; ``None`` picks the measured best per order
+        (A100, 64 lanes, N=2e5 cell tree: p4 2 -> 0.22 ms, p5 4 -> 0.59 ms,
+        p6 2 -> 0.46 ms; the wrong count spills and costs 4-5x).
 
     Returns
     -------
@@ -207,6 +214,8 @@ def p2m_real_leaves_pallas(
     p = int(order)
     C = sh_size(p)
     cp = _next_pow2(C)
+    if num_warps is None:
+        num_warps = _DEFAULT_WARPS.get(p, 2)
     dtype = jnp.result_type(positions_sorted.dtype, masses_sorted.dtype)
     n = int(positions_sorted.shape[0])
     L = int(leaf_ranges.shape[0])
