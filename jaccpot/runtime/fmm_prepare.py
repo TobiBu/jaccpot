@@ -58,6 +58,7 @@ from ._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_node_force_scale_from_sorted_magnitudes,
 )
+from ._mac_geometry import resolve_walk_geometry
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
     _compiled_refresh_dual_planner_route,
@@ -1473,9 +1474,20 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
+        # Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
+        # expansions use (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com), see
+        # jaccpot.runtime._mac_geometry.
+        walk_geometry, geometry_factory = resolve_walk_geometry(
+            tree_artifacts.tree,
+            tree_artifacts.positions_sorted,
+            tree_artifacts.upward.geometry,
+            getattr(tree_artifacts.upward.multipoles, "centers", None),
+            leaf_cap=int(tree_artifacts.leaf_cap),
+            geometry_factory=geometry_factory,
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
-            tree_artifacts.upward.geometry,
+            walk_geometry,
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
@@ -3521,9 +3533,20 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
+        # Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
+        # expansions use (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com), see
+        # jaccpot.runtime._mac_geometry.
+        walk_geometry, geometry_factory = resolve_walk_geometry(
+            tree_artifacts.tree,
+            tree_artifacts.positions_sorted,
+            tree_artifacts.upward.geometry,
+            getattr(tree_artifacts.upward.multipoles, "centers", None),
+            leaf_cap=int(tree_artifacts.leaf_cap),
+            geometry_factory=geometry_factory,
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
-            tree_artifacts.upward.geometry,
+            walk_geometry,
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
