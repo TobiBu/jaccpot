@@ -284,7 +284,7 @@ def mutual_walk_pallas(
     backend: str = "triton",
     num_warps: int = 2,
     max_rounds: int = 256,
-    rounds_per_check: int = 4,
+    rounds_per_check: int = 16,
 ) -> PallasWalkResult:
     """Run the mutual walk, one Pallas launch per round.
 
@@ -322,8 +322,10 @@ def mutual_walk_pallas(
         Safety bound on the round loop.
     rounds_per_check : int
         Rounds launched per ``while_loop`` iteration: every iteration costs a
-        device-to-host copy of the loop predicate, so several rounds run
-        between checks (an empty round is one early-exiting launch).
+        device-to-host copy of the predicate AND a copy of every carried buffer
+        (XLA preserves the loop state around the aliased pallas_call: 19 D2D
+        memcpys per iteration at N=2e5), so many rounds run between checks; an
+        empty round is one early-exiting launch plus a few scalar ops.
 
     Returns
     -------
