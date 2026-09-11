@@ -48,6 +48,8 @@ from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.geometry import TreeGeometry
 
+_MAX_TREE_LEVELS = 64  # yggdrax._tree_impl.MAX_TREE_LEVELS: level tables are padded to it
+
 __all__ = [
     "com_mac_geometry",
     "mac_geometry_mode",
@@ -197,29 +199,55 @@ def com_mac_geometry(
 
     if num_internal > 0 and internal == "exact":
         # Every internal node's particles are exactly the union of its
-        # descendant leaves', so walking each leaf up its ancestor chain and
-        # taking, per ancestor, the max of that leaf's particle distances about
-        # the ancestor's centre gives the exact radius. Pointer jumping over the
-        # parent array; the loop runs to the tree's depth (traced trip count).
+        # descendant leaves', so the max over (leaf, ancestor) pairs of the
+        # leaf's particle distances about the ancestor's centre is the exact
+        # radius. Ancestor table by pointer jumping (leaves x levels), distances
+        # in level chunks, then ONE segmented max: a node's leaves are consecutive,
+        # so its (leaf, level) entries form one run in one column, and an
+        # associative scan carries the run max to its last entry -- no
+        # scatter-max, whose atomics serialise on the few top-level nodes
+        # (44 ms per step at 16k leaves before this).
+        max_levels = int(_MAX_TREE_LEVELS)
         leaf_ids = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
-        dist_masked = lambda c: jnp.max(  # noqa: E731 - (L,) max over the leaf's lanes
-            jnp.where(valid, jnp.linalg.norm(pts - c[:, None, :], axis=-1), jnp.asarray(0.0, dtype)),
-            axis=1,
-        )
+        parent_safe = jnp.where(parent >= 0, parent, jnp.asarray(0, INDEX_DTYPE))
 
-        def _cond(state):
-            anc, _r = state
-            return jnp.any(anc >= 0)
-
-        def _body(state):
-            anc, r = state
+        def _up(anc, _):
             live = anc >= 0
-            anc_safe = jnp.where(live, anc, 0)
-            d = jnp.where(live, dist_masked(centers[anc_safe]), jnp.asarray(0.0, dtype))
-            r = r.at[anc_safe].max(d)
-            return jnp.where(live, parent[anc_safe], jnp.asarray(-1, INDEX_DTYPE)), r
+            nxt = jnp.where(live, parent_safe[jnp.where(live, anc, 0)], -1)
+            nxt = jnp.where(live & (parent[jnp.where(live, anc, 0)] >= 0), nxt, -1)
+            return nxt, anc
 
-        _, radii = lax.while_loop(_cond, _body, (parent[leaf_ids], radii))
+        _, anc_t = lax.scan(_up, parent[leaf_ids], None, length=max_levels)
+        anc = anc_t.T  # (L, D); -1 past the root
+        chunk = 4
+        n_chunks = max_levels // chunk
+        anc_chunks = anc.reshape(num_leaves, n_chunks, chunk).transpose(1, 0, 2)  # (nc, L, chunk)
+
+        def _dist_chunk(anc_c):
+            live = anc_c >= 0
+            c = centers[jnp.where(live, anc_c, 0)]  # (L, chunk, 3)
+            diff = pts[:, :, None, :] - c[:, None, :, :]  # (L, w, chunk, 3)
+            d = jnp.linalg.norm(diff, axis=-1)
+            d = jnp.max(jnp.where(valid[:, :, None], d, jnp.asarray(0.0, dtype)), axis=1)
+            return jnp.where(live, d, jnp.asarray(0.0, dtype))
+
+        d_all = lax.map(_dist_chunk, anc_chunks).transpose(1, 0, 2).reshape(num_leaves, max_levels)
+
+        def _seg(a, b):
+            ka, va = a
+            kb, vb = b
+            return kb, jnp.where(ka == kb, jnp.maximum(va, vb), vb)
+
+        _, run_max = lax.associative_scan(_seg, (anc, d_all), axis=0)
+        last = jnp.concatenate(
+            [anc[1:] != anc[:-1], jnp.ones((1, max_levels), dtype=bool)], axis=0
+        ) & (anc >= 0)
+        target = jnp.where(last, anc, jnp.asarray(num_nodes, INDEX_DTYPE))
+        radii = (
+            jnp.concatenate([radii, jnp.zeros((1,), dtype)])
+            .at[target.reshape(-1)]
+            .max(run_max.reshape(-1))[:num_nodes]
+        )
 
     elif num_internal > 0:
         depth = _node_depths(parent)

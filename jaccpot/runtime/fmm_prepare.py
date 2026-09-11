@@ -709,6 +709,12 @@ class PrepareMixin(_EngineBase):
         leaf_capacity_overflow: Optional[Array] = None
         if cells:
             rebuilt_tree, positions_sorted, masses_sorted, inverse, overflow = rebuilt_result
+            # a rebuilt tree deeper than the level-loop bound would truncate
+            # the M2M/L2L sweeps: make it a capacity failure like the leaf cap
+            depth_bound = getattr(self, "_cells_upward_num_levels", None)
+            if depth_bound is not None:
+                depth_now = jnp.max(jnp.asarray(rebuilt_tree.node_level)) + 1
+                overflow = jnp.asarray(overflow) | (depth_now > int(depth_bound))
             if isinstance(overflow, Tracer):
                 leaf_capacity_overflow = overflow
             elif bool(overflow):

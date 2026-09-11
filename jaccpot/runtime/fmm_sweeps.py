@@ -72,6 +72,11 @@ __all__ = [
 ]
 
 
+#: Levels of headroom above the eager depth for cell-leaf trees (their structure
+#: is rebuilt per step); a deeper tree trips the capacity guard.
+_CELLS_DEPTH_HEADROOM = 8
+
+
 class SweepsMixin(_EngineBase):
     @staticmethod
     @jaxtyped(typechecker=beartype)
@@ -203,9 +208,23 @@ class SweepsMixin(_EngineBase):
             rather than raising, so this never breaks a traced refresh.
         """
         if getattr(self, "_tree_leaf_partition", "buckets") == "cells":
-            # the radix structure over cell leaves is rebuilt per step and its
-            # depth varies; only the padded shape-derived depth is an upper bound
-            return None
+            # The radix structure over cell leaves is rebuilt per step and its
+            # depth varies. Loop bound = the eager depth plus headroom (never
+            # shrinking); the traced rebuild folds ``depth > bound`` into the
+            # tree's overflow flag, so a deeper tree trips the capacity guard
+            # rather than truncating the M2M/L2L sweeps.
+            probe = getattr(tree, "parent", None)
+            if probe is not None and not isinstance(probe, Tracer):
+                try:
+                    levels = get_node_levels(tree)
+                    if not isinstance(levels, Tracer):
+                        depth = int(jax.device_get(levels).max()) + 1
+                        bound = min(64, depth + _CELLS_DEPTH_HEADROOM)
+                        prev = getattr(self, "_cells_upward_num_levels", None)
+                        self._cells_upward_num_levels = max(bound, prev or 0)
+                except Exception:
+                    pass
+            return getattr(self, "_cells_upward_num_levels", None)
         probe = getattr(tree, "parent", None)
         if probe is None or isinstance(probe, Tracer):
             return self._static_upward_num_levels
