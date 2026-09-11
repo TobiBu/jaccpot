@@ -175,6 +175,7 @@ def _nearfield_leafpair_csr_kernel(
     table_pos_ref: KernelRef,
     table_mass_ref: KernelRef,
     table_mask_ref: KernelRef,
+    leaf_count_ref: KernelRef,
     neighbors_ref: KernelRef,
     chunk_leaf_ref: KernelRef,
     chunk_start_ref: KernelRef,
@@ -245,85 +246,99 @@ def _nearfield_leafpair_csr_kernel(
     tl_safe = jnp.maximum(tl, 0)
     off = sub * bt
     lanes = pl.ds(off, bt)
+    tcount = leaf_count_ref[tl_safe]
 
-    tx = table_pos_ref[tl_safe, lanes, 0]
-    ty = table_pos_ref[tl_safe, lanes, 1]
-    tz = table_pos_ref[tl_safe, lanes, 2]
-    tvalid = table_mask_ref[tl_safe, lanes] & live
-    soft = softening_sq_ref[0]
-    g_value = g_ref[0]
+    # The block is written whatever happens; the work below only runs for a
+    # live chunk whose target subtile holds at least one particle. Cell leaves
+    # average 18 of 64 slots at N=2e5, so the second subtile of most leaves is
+    # empty and used to loop over every source for nothing.
+    zeros_bt = jnp.zeros((bt,), out_dtype)
+    for comp in range(4):
+        out_ref[0, :, comp] = zeros_bt
 
-    zero = jnp.zeros_like(tx)
-    wide = accum_dtype is not None
-    acc0 = (
-        tuple(jnp.zeros(tx.shape, accum_dtype) for _ in range(4))
-        if wide
-        else (zero, zero, zero, zero)
-    )
+    @pl.when(live & (off < tcount))
+    def _work():
+        tx = table_pos_ref[tl_safe, lanes, 0]
+        ty = table_pos_ref[tl_safe, lanes, 1]
+        tz = table_pos_ref[tl_safe, lanes, 2]
+        tvalid = table_mask_ref[tl_safe, lanes]
+        soft = softening_sq_ref[0]
+        g_value = g_ref[0]
 
-    def _leaf_pass(sid, acc, exclude_lane=None):
-        # The rectangle kernel's lane body, op for op (nearfield_fused_leaf.py),
-        # so the two lanes agree to float32 summation order.
-        def _lane_body(j, acc):
-            acc_x, acc_y, acc_z, acc_p = acc
-            sx = table_pos_ref[sid, j, 0]
-            sy = table_pos_ref[sid, j, 1]
-            sz = table_pos_ref[sid, j, 2]
-            sm = table_mass_ref[sid, j]
-            lane_valid = table_mask_ref[sid, j]
-            dx = tx - sx
-            dy = ty - sy
-            dz = tz - sz
-            dist_sq = dx * dx + dy * dy + dz * dz + soft
-            active = tvalid & lane_valid
-            if exclude_lane is not None:
-                active = active & (exclude_lane != j)
-            safe_dist_sq = jnp.where(active, dist_sq, 1.0)
-            inv_r = lax.rsqrt(safe_dist_sq)
-            inv_r = jnp.where(active, inv_r, 0.0)
-            inv_dist3 = inv_r * inv_r * inv_r
-            scale = -g_value * inv_dist3 * sm
-            acc_x = acc_x + scale * dx
-            acc_y = acc_y + scale * dy
-            acc_z = acc_z + scale * dz
-            acc_p = acc_p - g_value * inv_r * sm
-            return (acc_x, acc_y, acc_z, acc_p)
+        zero = jnp.zeros_like(tx)
+        wide = accum_dtype is not None
+        acc0 = (
+            tuple(jnp.zeros(tx.shape, accum_dtype) for _ in range(4))
+            if wide
+            else (zero, zero, zero, zero)
+        )
 
-        if not wide:
-            return lax.fori_loop(0, leaf_width, _lane_body, acc)
-        part = lax.fori_loop(0, leaf_width, _lane_body, (zero, zero, zero, zero))
-        return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
+        def _leaf_pass(sid, acc, exclude_lane=None):
+            # The rectangle kernel's lane body, op for op (nearfield_fused_leaf.py),
+            # so the two lanes agree to float32 summation order. The loop runs to
+            # the source leaf's occupancy (its live slots are a prefix): the
+            # skipped slots were masked to exact zeros, so the sums are unchanged.
+            def _lane_body(j, acc):
+                acc_x, acc_y, acc_z, acc_p = acc
+                sx = table_pos_ref[sid, j, 0]
+                sy = table_pos_ref[sid, j, 1]
+                sz = table_pos_ref[sid, j, 2]
+                sm = table_mass_ref[sid, j]
+                lane_valid = table_mask_ref[sid, j]
+                dx = tx - sx
+                dy = ty - sy
+                dz = tz - sz
+                dist_sq = dx * dx + dy * dy + dz * dz + soft
+                active = tvalid & lane_valid
+                if exclude_lane is not None:
+                    active = active & (exclude_lane != j)
+                safe_dist_sq = jnp.where(active, dist_sq, 1.0)
+                inv_r = lax.rsqrt(safe_dist_sq)
+                inv_r = jnp.where(active, inv_r, 0.0)
+                inv_dist3 = inv_r * inv_r * inv_r
+                scale = -g_value * inv_dist3 * sm
+                acc_x = acc_x + scale * dx
+                acc_y = acc_y + scale * dy
+                acc_z = acc_z + scale * dz
+                acc_p = acc_p - g_value * inv_r * sm
+                return (acc_x, acc_y, acc_z, acc_p)
 
-    start = chunk_start_ref[c]
-    cnt = chunk_count_ref[c]
+            scount = leaf_count_ref[sid]
+            if not wide:
+                return lax.fori_loop(0, scount, _lane_body, acc)
+            part = lax.fori_loop(0, scount, _lane_body, (zero, zero, zero, zero))
+            return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
 
-    def _slot_body(s, acc):
-        sid = neighbors_ref[start + s]
-        return _leaf_pass(sid, acc)
+        start = chunk_start_ref[c]
+        cnt = chunk_count_ref[c]
 
-    # Traced trip count: padding chunks and short rows cost one comparison,
-    # not ``chunk`` predicated iterations.
-    acc = lax.fori_loop(0, cnt, _slot_body, acc0)
+        def _slot_body(s, acc):
+            sid = neighbors_ref[start + s]
+            return _leaf_pass(sid, acc)
 
-    if include_self:
-        lane_idx = off + lax.broadcasted_iota(jnp.int32, (bt,), 0)
+        # Traced trip count: padding chunks and short rows cost one comparison,
+        # not ``chunk`` predicated iterations.
+        acc = lax.fori_loop(0, cnt, _slot_body, acc0)
 
-        def _self_pass(acc):
-            return _leaf_pass(tl_safe, acc, exclude_lane=lane_idx)
+        if include_self:
+            lane_idx = off + lax.broadcasted_iota(jnp.int32, (bt,), 0)
 
-        acc = lax.cond(chunk_first_ref[c] != 0, _self_pass, lambda acc: acc, acc)
+            def _self_pass(acc):
+                return _leaf_pass(tl_safe, acc, exclude_lane=lane_idx)
 
-    acc_x, acc_y, acc_z, acc_p = acc
-    if wide and out_dtype != accum_dtype:
-        acc_x = acc_x.astype(out_dtype)
-        acc_y = acc_y.astype(out_dtype)
-        acc_z = acc_z.astype(out_dtype)
-        acc_p = acc_p.astype(out_dtype)
-    zero_out = jnp.zeros_like(acc_x)
-    out_ref[0, :, 0] = jnp.where(tvalid, acc_x, zero_out)
-    out_ref[0, :, 1] = jnp.where(tvalid, acc_y, zero_out)
-    out_ref[0, :, 2] = jnp.where(tvalid, acc_z, zero_out)
-    out_ref[0, :, 3] = jnp.where(tvalid, acc_p, zero_out)
+            acc = lax.cond(chunk_first_ref[c] != 0, _self_pass, lambda acc: acc, acc)
+
+        acc_x, acc_y, acc_z, acc_p = acc
+        if wide and out_dtype != accum_dtype:
+            acc_x = acc_x.astype(out_dtype)
+            acc_y = acc_y.astype(out_dtype)
+            acc_z = acc_z.astype(out_dtype)
+            acc_p = acc_p.astype(out_dtype)
+        zero_out = jnp.zeros_like(acc_x)
+        out_ref[0, :, 0] = jnp.where(tvalid, acc_x, zero_out)
+        out_ref[0, :, 1] = jnp.where(tvalid, acc_y, zero_out)
+        out_ref[0, :, 2] = jnp.where(tvalid, acc_z, zero_out)
+        out_ref[0, :, 3] = jnp.where(tvalid, acc_p, zero_out)
 
 
 @jaxtyped(typechecker=beartype)
@@ -448,6 +463,11 @@ def nearfield_leafpair_csr_pallas(
         shp = tuple(arr.shape)
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
+    # one past the last live slot of each leaf: the source loops run to it
+    slot_no = jnp.arange(width_pad, dtype=jnp.int32)[None, :] + 1
+    leaf_count = jnp.max(
+        jnp.where(leaf_mask, slot_no, jnp.zeros_like(slot_no)), axis=1
+    ).astype(jnp.int32)
     kernel = pl.pallas_call(
         _kernel,
         out_shape=jax.ShapeDtypeStruct((capacity, width_pad, _OUT_WIDTH), partial_dtype),
@@ -455,6 +475,7 @@ def nearfield_leafpair_csr_pallas(
             _full(pos_padded),
             _full(leaf_masses),
             _full(leaf_mask),
+            _full(leaf_count),
             _full(neighbors),
             _full(chunks.leaf),
             _full(chunks.start),
@@ -478,6 +499,7 @@ def nearfield_leafpair_csr_pallas(
         pos_padded,
         leaf_masses,
         leaf_mask,
+        leaf_count,
         neighbors,
         chunks.leaf,
         chunks.start,
