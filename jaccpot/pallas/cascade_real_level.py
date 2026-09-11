@@ -551,7 +551,9 @@ def m2m_real_levels_pallas(
             name=f"m2m_real_level_p{p}",
         )
 
-    rows = lax.fori_loop(0, max(int(num_levels) - 1, 0), body, rows)
+    # static trip count: unrolled so the per-level launches sit in the parent
+    # computation (graph-capturable) instead of a while body
+    rows = lax.fori_loop(0, max(int(num_levels) - 1, 0), body, rows, unroll=True)
     return unpack_centred(rows[:total], order=p)
 
 
@@ -630,5 +632,5 @@ def l2l_real_levels_pallas(
         )
 
     # level 0 is the root (nothing above it); levels 1 .. num_levels-1 receive
-    rows = lax.fori_loop(1, max(int(num_levels), 1), body, rows)
+    rows = lax.fori_loop(1, max(int(num_levels), 1), body, rows, unroll=True)
     return unpack_centred(rows[:total], order=p)
