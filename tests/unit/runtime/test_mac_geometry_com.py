@@ -70,22 +70,31 @@ def _exact_rmax(topo, ps, centers):
     return out
 
 
-def test_com_geometry_bounds_every_node_and_is_exact_on_leaves(tree_data):
+@pytest.mark.parametrize("internal", ["exact", "bound"])
+def test_com_geometry_bounds_every_node_and_is_exact_on_leaves(tree_data, internal):
     tree, topo, ps, ms, com, _box = tree_data
-    geom = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
+    geom = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal)
     num_internal = int(topo.left_child.shape[0])
     exact = _exact_rmax(topo, ps, com)
     r = np.asarray(geom.radius)
     assert np.allclose(np.asarray(geom.center), np.asarray(com))
     assert np.all(r + 1e-12 >= exact), "a node's particles leave its MAC sphere"
     assert np.allclose(r[num_internal:], exact[num_internal:], rtol=1e-12, atol=1e-12)
-    # internal nodes carry a conservative child-sphere bound; it compounds over
-    # deep chains (3x over exact was seen on a 1024-particle leaf-8 tree), which
-    # costs far pairs, never accuracy. Its looseness on the real tree is what
-    # ``probe_mac_consistency.py`` reports; here only finiteness is pinned.
-    assert np.all(np.isfinite(r))
+    if internal == "exact":
+        # every internal node too: the ancestor walk sees all of a node's particles
+        assert np.allclose(r, exact, rtol=1e-12, atol=1e-12)
+    else:
+        # the child-sphere bound compounds over deep chains (3x over exact seen on
+        # this 1024-particle leaf-8 tree); it costs far pairs, never accuracy
+        assert np.all(np.isfinite(r))
     assert np.allclose(np.asarray(geom.max_extent), r)
     assert np.allclose(np.asarray(geom.half_extent), r[:, None])
+
+
+def test_internal_mode_is_validated(tree_data):
+    tree, topo, ps, ms, com, _box = tree_data
+    with pytest.raises(ValueError):
+        com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal="tight")
 
 
 def _far_pair_ratios(tree, geometry, centers, exact_r, *, theta):
@@ -132,10 +141,19 @@ def test_mode_knob(monkeypatch, tree_data):
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "bogus")
     with pytest.raises(ValueError):
         mac_geometry_mode()
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "com")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "bound")
+    g_b, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "exact")
+    g_e, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
+    assert np.all(np.asarray(g_b.radius) + 1e-12 >= np.asarray(g_e.radius))
+    assert float(np.max(np.asarray(g_b.radius) - np.asarray(g_e.radius))) > 0
 
 
-def test_com_geometry_is_jittable(tree_data):
+@pytest.mark.parametrize("internal", ["exact", "bound"])
+def test_com_geometry_is_jittable(tree_data, internal):
     tree, topo, ps, ms, com, box = tree_data
-    f = jax.jit(lambda ps, com: com_mac_geometry(topo, ps, com, leaf_cap=_LEAF))
+    f = jax.jit(lambda ps, com: com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal))
     g = f(ps, com)
-    assert np.allclose(np.asarray(g.radius), np.asarray(com_mac_geometry(topo, ps, com, leaf_cap=_LEAF).radius))
+    ref = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal)
+    assert np.allclose(np.asarray(g.radius), np.asarray(ref.radius))

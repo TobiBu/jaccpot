@@ -19,12 +19,17 @@ matched error.
 
 :func:`com_mac_geometry` builds a ``TreeGeometry`` whose centres are the COMs
 and whose radii bound every particle of the node about its COM: exact for the
-leaves (one gather over the leaf particle table), and for internal nodes the
-conservative upward bound ``r_p = max_c (|c_c - c_p| + r_c)`` over the two
-children, level by level from the deepest internal level up (the same
-level-parallel pass ``yggdrax._geometry_impl.compute_tree_geometry`` uses for
-the boxes). ``half_extent`` and ``max_extent`` are set to the radius too, so the
-``bh`` box test degrades to the sphere test rather than to a stale box.
+leaves (one gather over the leaf particle table), and for internal nodes
+either EXACT (default, ``internal="exact"``: every leaf walks its ancestor
+chain by pointer jumping and each ancestor takes the segment-max of the leaf's
+particle distances about the ancestor's centre -- one gather + segment-max per
+tree level) or the conservative upward bound ``r_p = max_c (|c_c - c_p| + r_c)``
+(``internal="bound"``, level by level like ``yggdrax._geometry_impl``). Measured
+on the real 2e5 / leaf-64 tree at theta 0.8 (``probe_tree_volume.py``): the
+bound is 1.38x (p50) / 1.94x (p90) over exact and costs 2.7x in far pairs
+(565k -> 1541k directed) for 7 % fewer near edges, so exact is the default.
+``half_extent`` and ``max_extent`` are set to the radius too, so the ``bh`` box
+test degrades to the sphere test rather than to a stale box.
 
 Selected in the fused lane by ``JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY``
 (``"aabb"`` = the historical box geometry, ``"com"`` = this module); see
@@ -46,11 +51,14 @@ from yggdrax.geometry import TreeGeometry
 __all__ = [
     "com_mac_geometry",
     "mac_geometry_mode",
+    "mac_radius_mode",
     "resolve_walk_geometry",
 ]
 
 _MAC_GEOMETRY_ENV = "JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY"
 _MAC_GEOMETRY_MODES = ("aabb", "com")
+_MAC_RADIUS_ENV = "JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS"
+_MAC_RADIUS_MODES = ("exact", "bound")
 
 
 def mac_geometry_mode() -> str:
@@ -73,6 +81,27 @@ def mac_geometry_mode() -> str:
     if raw not in _MAC_GEOMETRY_MODES:
         raise ValueError(
             f"{_MAC_GEOMETRY_ENV} must be one of {_MAC_GEOMETRY_MODES}, got {raw!r}"
+        )
+    return raw
+
+
+def mac_radius_mode() -> str:
+    """How ``com_mac_geometry`` sizes internal nodes: ``"exact"`` (default) or ``"bound"``.
+
+    Returns
+    -------
+    str
+        The mode named by ``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS``.
+
+    Raises
+    ------
+    ValueError
+        If the environment names a mode this module does not implement.
+    """
+    raw = os.environ.get(_MAC_RADIUS_ENV, "exact").strip().lower()
+    if raw not in _MAC_RADIUS_MODES:
+        raise ValueError(
+            f"{_MAC_RADIUS_ENV} must be one of {_MAC_RADIUS_MODES}, got {raw!r}"
         )
     return raw
 
@@ -105,6 +134,7 @@ def com_mac_geometry(
     centers: Array,
     *,
     leaf_cap: int,
+    internal: str = "exact",
 ) -> TreeGeometry:
     """``TreeGeometry`` about the expansion centres: COM centres, particle radii about them.
 
@@ -122,14 +152,24 @@ def com_mac_geometry(
         ``multipoles.centers`` (centres of mass).
     leaf_cap : int
         Leaf capacity (particles per leaf at most). Static.
+    internal : str
+        ``"exact"`` (max particle distance about the node's own centre, via the
+        leaves' ancestor chains) or ``"bound"`` (child-sphere bound). Static.
 
     Returns
     -------
     TreeGeometry
         ``center = centers``; ``radius`` bounds every particle of the node about
-        its centre (exact for leaves, the child-bound for internal nodes);
-        ``half_extent`` and ``max_extent`` equal the radius.
+        its centre (exact for leaves and, with ``internal="exact"``, for every
+        node); ``half_extent`` and ``max_extent`` equal the radius.
+
+    Raises
+    ------
+    ValueError
+        If ``internal`` is not ``"exact"`` or ``"bound"``.
     """
+    if internal not in _MAC_RADIUS_MODES:
+        raise ValueError(f"internal must be one of {_MAC_RADIUS_MODES}, got {internal!r}")
     positions_sorted = jnp.asarray(positions_sorted)
     dtype = positions_sorted.dtype
     centers = jnp.asarray(centers, dtype=dtype)
@@ -155,7 +195,33 @@ def com_mac_geometry(
 
     radii = jnp.zeros((num_nodes,), dtype=dtype).at[num_internal:].set(r_leaf)
 
-    if num_internal > 0:
+    if num_internal > 0 and internal == "exact":
+        # Every internal node's particles are exactly the union of its
+        # descendant leaves', so walking each leaf up its ancestor chain and
+        # taking, per ancestor, the max of that leaf's particle distances about
+        # the ancestor's centre gives the exact radius. Pointer jumping over the
+        # parent array; the loop runs to the tree's depth (traced trip count).
+        leaf_ids = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
+        dist_masked = lambda c: jnp.max(  # noqa: E731 - (L,) max over the leaf's lanes
+            jnp.where(valid, jnp.linalg.norm(pts - c[:, None, :], axis=-1), jnp.asarray(0.0, dtype)),
+            axis=1,
+        )
+
+        def _cond(state):
+            anc, _r = state
+            return jnp.any(anc >= 0)
+
+        def _body(state):
+            anc, r = state
+            live = anc >= 0
+            anc_safe = jnp.where(live, anc, 0)
+            d = jnp.where(live, dist_masked(centers[anc_safe]), jnp.asarray(0.0, dtype))
+            r = r.at[anc_safe].max(d)
+            return jnp.where(live, parent[anc_safe], jnp.asarray(-1, INDEX_DTYPE)), r
+
+        _, radii = lax.while_loop(_cond, _body, (parent[leaf_ids], radii))
+
+    elif num_internal > 0:
         depth = _node_depths(parent)
         max_depth = jnp.max(depth)
         internal_depth = depth[:num_internal]
@@ -220,6 +286,10 @@ def resolve_walk_geometry(
             "and this lane's upward data has none."
         )
     geometry = com_mac_geometry(
-        tree, positions_sorted, expansion_centers, leaf_cap=int(leaf_cap)
+        tree,
+        positions_sorted,
+        expansion_centers,
+        leaf_cap=int(leaf_cap),
+        internal=mac_radius_mode(),
     )
     return geometry, None

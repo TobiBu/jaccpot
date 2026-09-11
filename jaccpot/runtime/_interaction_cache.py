@@ -1854,6 +1854,13 @@ def _build_flat_walk_artifacts_strict_streamed(
         topo.parent, geometry, num_internal, str(mac_type), float(dehnen_radius_scale)
     )
     mac_extents = jnp.asarray(mac_extents, dtype=centers.dtype)
+    # A capacity-padded leaf partition (cell leaves) carries EMPTY nodes: one
+    # centre, radius zero. Left in the walk they fail the MAC against each
+    # other and flood the near list (30M edges at N=2e5), so they are dead
+    # nodes for the walk. Bucket trees have no empty node and the mask is all
+    # true -- the walk's result is then identical to the unmasked walk.
+    node_ranges_all = jnp.asarray(topo.node_ranges)
+    node_active = node_ranges_all[:, 1] >= node_ranges_all[:, 0]
 
     queue = (
         _STRICT_STREAMED_QUEUE_FLOOR if max_pair_queue is None else int(max_pair_queue)
@@ -1877,6 +1884,7 @@ def _build_flat_walk_artifacts_strict_streamed(
             far_cap=far_cap,
             near_cap=near_cap,
             mac_type=str(mac_type),
+            node_active=node_active,
         )
         traced = isinstance(walk.queue_overflow, Tracer)
         if traced:
