@@ -670,9 +670,31 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 m2l_real_csr_tiled_supported,
             )
 
+            from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
+
             interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
-            # plan sub-10ms Phase 5: K-source tiles per iteration (orders >= 4)
-            if env_flag("JACCPOT_M2L_CSR_TILED", False) and m2l_real_csr_tiled_supported(order):
+            # plan sub-10ms Phase 5: JACCPOT_M2L_CSR_KERNEL = pair | tiled | lanes
+            # (JACCPOT_M2L_CSR_TILED=1 is the older spelling of "tiled")
+            which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
+            if not which:
+                which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "pair"
+            if which not in ("pair", "tiled", "lanes"):
+                raise ValueError(
+                    f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected pair, tiled or lanes"
+                )
+            if which == "lanes":
+                m2l_inc = m2l_real_csr_lanes_pallas(
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    order=order,
+                    active_pair_count=active_pair_count,
+                    k_lanes=int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
+                    num_warps=int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
+                    interpret=interpret,
+                )
+            elif which == "tiled" and m2l_real_csr_tiled_supported(order):
                 m2l_inc = m2l_real_csr_tiled_pallas(
                     multipoles_coeffs,
                     centers,
