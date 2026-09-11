@@ -30,7 +30,11 @@ from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
 
-from jaccpot.runtime._level_shapes import level_batch_width as _level_batch_width
+from jaccpot.runtime._level_shapes import (
+    level_batch_width as _level_batch_width,
+    pallas_cascades_enabled as _pallas_cascades_enabled,
+    registered_num_levels as _registered_num_levels,
+)
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
@@ -475,18 +479,40 @@ def prepare_real_upward_sweep(
         total_nodes=total_nodes,
         leaf_batch_size=resolved_leaf_batch_size,
     )
-    packed = aggregate_m2m_real_by_level(
-        packed,
-        centers,
-        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
-        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
-        jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
-        jnp.asarray(level_offsets, dtype=INDEX_DTYPE),
-        order=p,
-        num_internal=num_internal,
-        num_levels=num_levels,
-        level_batch_width=level_batch_width,
-    )
+    if _pallas_cascades_enabled() and num_internal > 0:
+        # plan sub-10ms Phase 3: one Pallas launch per level instead of the
+        # vectorised level loop (66 ms on the 40-level cell tree at N=2e5)
+        from jaccpot._env import env_flag
+        from jaccpot.pallas.cascade_real_level import m2m_real_levels_pallas
+
+        hinted = _registered_num_levels(total_nodes=total_nodes, num_internal=num_internal)
+        pallas_levels = num_levels if static_num_levels is not None else (hinted or num_levels)
+        packed = m2m_real_levels_pallas(
+            packed,
+            centers,
+            jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+            jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+            jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
+            jnp.asarray(level_offsets, dtype=INDEX_DTYPE),
+            order=p,
+            num_internal=num_internal,
+            num_levels=int(pallas_levels),
+            level_batch_width=level_batch_width,
+            interpret=env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+        )
+    else:
+        packed = aggregate_m2m_real_by_level(
+            packed,
+            centers,
+            jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+            jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+            jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
+            jnp.asarray(level_offsets, dtype=INDEX_DTYPE),
+            order=p,
+            num_internal=num_internal,
+            num_levels=num_levels,
+            level_batch_width=level_batch_width,
+        )
     return RealTreeUpwardData(
         multipoles=RealNodeMultipoleData(order=p, centers=centers, packed=packed)
     )

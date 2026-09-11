@@ -29,10 +29,18 @@ from jaxtyping import Array
 
 from jaccpot._jax_compat import Tracer
 
-__all__ = ["level_batch_width", "level_width_overflow", "registered_level_batch_width"]
+__all__ = [
+    "level_batch_width",
+    "level_width_overflow",
+    "registered_level_batch_width",
+    "registered_num_levels",
+    "pallas_cascades_enabled",
+]
 
 _WIDTHS: dict[tuple[int, int], int] = {}
+_LEVELS: dict[tuple[int, int], int] = {}
 _HEADROOM = 1.25
+_LEVEL_HEADROOM = 8
 
 
 def _key(total_nodes: int, num_internal: int) -> tuple[int, int]:
@@ -83,12 +91,60 @@ def level_batch_width(level_offsets: Array, *, total_nodes: int, num_internal: i
     if isinstance(level_offsets, Tracer):
         return int(_WIDTHS.get(key) or max(int(num_internal), 1))
     offs = np.asarray(jax.device_get(level_offsets)).astype(np.int64)
-    widest = int(np.max(np.diff(offs))) if offs.size >= 2 else 1
+    counts = np.diff(offs) if offs.size >= 2 else np.ones((1,), np.int64)
+    widest = int(np.max(counts))
+    live = int(np.count_nonzero(counts))
+    levels = min(int(level_offsets.shape[0]) - 1, live + _LEVEL_HEADROOM)
+    _LEVELS[key] = max(levels, _LEVELS.get(key, 0))
     width = max(1, int(math.ceil(widest * _HEADROOM)))
     width = min(width, max(int(total_nodes), 1))
     width = max(width, _WIDTHS.get(key, 0))
     _WIDTHS[key] = width
     return width
+
+
+def registered_num_levels(*, total_nodes: int, num_internal: int) -> int | None:
+    """Static level-loop trip count for this tree shape: live levels + 8 headroom.
+
+    Filled by :func:`level_batch_width` on an eager visit (never lowered);
+    ``None`` before any. The traced rebuild guards ``depth > bound`` elsewhere.
+
+    Parameters
+    ----------
+    total_nodes : int
+        Node count (registry key).
+    num_internal : int
+        Internal node count (registry key).
+
+    Returns
+    -------
+    int | None
+        The stashed static level count.
+    """
+    return _LEVELS.get(_key(total_nodes, num_internal))
+
+
+def pallas_cascades_enabled() -> bool:
+    """Whether the M2M/L2L cascades run as one Pallas launch per level (plan sub-10ms 3).
+
+    ``JACCPOT_CASCADE_PALLAS=1`` selects :mod:`jaccpot.pallas.cascade_real_level`
+    on the real basis where its Triton lowering runs (or under
+    ``JACCPOT_CASCADE_PALLAS_INTERPRET=1`` anywhere); default off.
+
+    Returns
+    -------
+    bool
+        ``True`` when the Pallas cascades are selected.
+    """
+    from jaccpot._env import env_flag
+
+    if not env_flag("JACCPOT_CASCADE_PALLAS", False):
+        return False
+    if env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False):
+        return True
+    from jaccpot.pallas.cascade_real_level import pallas_cascade_level_supported
+
+    return bool(pallas_cascade_level_supported())
 
 
 def level_width_overflow(level_offsets: Array, *, total_nodes: int, num_internal: int) -> Array:
