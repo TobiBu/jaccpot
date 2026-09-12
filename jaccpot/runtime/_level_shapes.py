@@ -129,7 +129,11 @@ def pallas_cascades_enabled() -> bool:
 
     ``JACCPOT_CASCADE_PALLAS=1`` selects :mod:`jaccpot.pallas.cascade_real_level`
     on the real basis where its Triton lowering runs (or under
-    ``JACCPOT_CASCADE_PALLAS_INTERPRET=1`` anywhere); default off.
+    ``JACCPOT_CASCADE_PALLAS_INTERPRET=1`` anywhere); default ON since Phase 6.
+
+    A context-local override wins over the flag, and the gradient path installs
+    ``False``: these kernels have no autodiff rule, and ``pallas_call``'s generic
+    JVP rule dies on ``program_id`` (no grid context under that trace).
 
     Returns
     -------
@@ -137,7 +141,12 @@ def pallas_cascades_enabled() -> bool:
         ``True`` when the Pallas cascades are selected.
     """
     from jaccpot._env import env_flag
+    from jaccpot.runtime.grad_options import cascade_pallas_override
 
+    override = cascade_pallas_override()
+    if override is not None:
+        # the gradient path forces the pure-JAX loops: pallas_call has no AD rule
+        return bool(override)
     if not env_flag("JACCPOT_CASCADE_PALLAS", True):  # default on since Phase 6 (2026-09-11)
         return False
     if env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False):

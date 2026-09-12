@@ -101,12 +101,17 @@ class ResolvedGradOptions:
         Use the analytic near-field P2P reverse rule.
     analytic_l2p_vjp : bool
         Use the analytic real-basis L2P reverse rule.
+    cascade_pallas : bool
+        Always ``False``: the per-level Pallas M2M/L2L cascades and the leaf P2M
+        carry no autodiff rule, so the gradient path runs the pure-JAX loops.
     reverse : LeafPairReverseOptions
         Tuning for the analytic leaf-pair reverse.
     """
 
     nearfield_lane: str  # "bucketed" | "fast_lane"
     nearfield_lane_was_auto: bool
+    #: Always False: the Pallas cascades are forward-only (see the ContextVar).
+    cascade_pallas: bool
     fused_m2l_pallas: bool
     analytic_p2p_vjp: bool
     analytic_l2p_vjp: bool
@@ -161,6 +166,7 @@ def resolve_grad_options(
     return ResolvedGradOptions(
         nearfield_lane=lane,
         nearfield_lane_was_auto=lane_was_auto,
+        cascade_pallas=False,
         fused_m2l_pallas=(
             bool(cfg.fused_m2l_pallas)
             if cfg.fused_m2l_pallas is not None
@@ -240,6 +246,28 @@ _analytic_p2p_vjp_override: ContextVar[Optional[bool]] = ContextVar(
 _analytic_l2p_vjp_override: ContextVar[Optional[bool]] = ContextVar(
     "jaccpot_analytic_l2p_vjp_override", default=None
 )
+#: Forced False on the gradient path: the per-level Pallas M2M/L2L cascades and
+#: the leaf P2M have no autodiff rule, and ``pallas_call``'s generic JVP rule
+#: dies on ``program_id`` (no grid context under that trace). Phase 6 of the
+#: sub-10 ms plan made them default-ON, which broke ``jax.grad`` everywhere
+#: Pallas lowers -- invisibly, because Pallas does not lower on CPU and the
+#: whole gradient suite runs there. See ``pallas_cascades_enabled``.
+_cascade_pallas_override: ContextVar[Optional[bool]] = ContextVar(
+    "jaccpot_cascade_pallas_override", default=None
+)
+
+
+def cascade_pallas_override() -> Optional[bool]:
+    """Context-local answer for the Pallas-cascade gate, if one is installed.
+
+    Returns
+    -------
+    Optional[bool]
+        ``False`` inside :func:`grad_option_overrides` (the gradient path cannot
+        differentiate those kernels), else ``None``, meaning "no opinion, read
+        the environment".
+    """
+    return _cascade_pallas_override.get()
 
 
 def fused_m2l_pallas_enabled() -> bool:
@@ -309,6 +337,7 @@ def grad_option_overrides(options: ResolvedGradOptions) -> Iterator[None]:
         _fused_m2l_pallas_override.set(options.fused_m2l_pallas),
         _analytic_p2p_vjp_override.set(options.analytic_p2p_vjp),
         _analytic_l2p_vjp_override.set(options.analytic_l2p_vjp),
+        _cascade_pallas_override.set(options.cascade_pallas),
     )
     try:
         yield
@@ -316,6 +345,7 @@ def grad_option_overrides(options: ResolvedGradOptions) -> Iterator[None]:
         _fused_m2l_pallas_override.reset(tokens[0])
         _analytic_p2p_vjp_override.reset(tokens[1])
         _analytic_l2p_vjp_override.reset(tokens[2])
+        _cascade_pallas_override.reset(tokens[3])
 
 
 __all__ = [
