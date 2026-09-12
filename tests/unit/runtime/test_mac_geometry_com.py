@@ -159,3 +159,33 @@ def test_com_geometry_is_jittable(tree_data, internal):
     g = f(ps, com)
     ref = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal)
     assert np.allclose(np.asarray(g.radius), np.asarray(ref.radius))
+
+
+def test_a_folded_per_node_criterion_survives_the_com_geometry(tree_data):
+    """`dehnen_theta` folds its criterion into the radii; COM mode must keep it.
+
+    Between the Phase 6 default switch and 2026-09-12 the COM walk geometry
+    recomputed every radius from the expansion centres, which DISCARDED the
+    folded criterion: two injected force scales three orders of magnitude apart
+    gave byte-identical accept masks (11486 far pairs either way).
+    """
+    from jaccpot.runtime._mac_geometry import resolve_walk_geometry
+
+    tree, topo, ps, _ms, com, box = tree_data
+    nodes = int(box.radius.shape[0])
+    plain, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
+    scale = jnp.full((nodes,), 4.0, box.radius.dtype)
+    scaled, _ = resolve_walk_geometry(
+        topo, ps, box, com, leaf_cap=_LEAF, radius_scale=scale
+    )
+    assert np.allclose(np.asarray(scaled.radius), 4.0 * np.asarray(plain.radius))
+    assert np.array_equal(np.asarray(scaled.center), np.asarray(plain.center))
+    with pytest.raises(ValueError, match="one factor per node"):
+        resolve_walk_geometry(
+            topo,
+            ps,
+            box,
+            com,
+            leaf_cap=_LEAF,
+            radius_scale=jnp.ones((nodes + 1,), box.radius.dtype),
+        )

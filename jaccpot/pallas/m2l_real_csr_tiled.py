@@ -149,17 +149,17 @@ def _m2l_tiled_kernel(
     # once at the end, not per tile
     acc0 = tuple(jnp.zeros((k_tile, wp), dtype) for _ in range(p + 1))
 
-    def dz(tiles, cosv, sinv):
+    def dz(tiles: list[Array], cosv: Array, sinv: Array) -> list[Array]:
         # out[k, i] = cos_i v[k, i] + sum_j Apat[i, j] sin_j v[k, j]
         return [
             v * cosv + jnp.dot(v * sinv, apat_t, precision=dot_precision) for v in tiles
         ]
 
-    def bapply(tiles, mats):
+    def bapply(tiles: list[Array], mats: list[Array]) -> list[Array]:
         # out[k, i] = sum_j M_l[i, j] v[k, j]  ->  v @ M_l^T; ``mats`` already transposed
         return [jnp.dot(v, m, precision=dot_precision) for v, m in zip(tiles, mats)]
 
-    def body(t, accs):
+    def body(t: Array, accs: tuple[Array, ...]) -> tuple[Array, ...]:
         pos = t * k_tile + lane
         valid = pos < cnt
         i_safe = jnp.where(valid, start + pos, start)

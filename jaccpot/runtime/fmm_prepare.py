@@ -1530,6 +1530,7 @@ class PrepareMixin(_EngineBase):
             getattr(tree_artifacts.upward.multipoles, "centers", None),
             leaf_cap=int(tree_artifacts.leaf_cap),
             geometry_factory=geometry_factory,
+            radius_scale=self._folded_criterion_radius_scale(),
         )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -3590,6 +3591,7 @@ class PrepareMixin(_EngineBase):
             getattr(tree_artifacts.upward.multipoles, "centers", None),
             leaf_cap=int(tree_artifacts.leaf_cap),
             geometry_factory=geometry_factory,
+            radius_scale=self._folded_criterion_radius_scale(),
         )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,

@@ -588,6 +588,25 @@ class PolicyMixin(_EngineBase):
             dehnen_geometry_mode=dehnen_geometry_mode,
         )
 
+    def _folded_criterion_radius_scale(self) -> Optional[Array]:
+        """Per-node radius multiplier a COM-geometry walk must re-apply.
+
+        ``mac_type='dehnen_theta'`` folds its criterion into
+        ``geometry.radius`` before the dual build; a walk that recomputes radii
+        about the expansion centres has to carry the same factor or the
+        criterion is silently lost (it was, between the Phase 6 default switch
+        and 2026-09-12).
+
+        Returns
+        -------
+        Optional[Array]
+            ``(nodes,)`` multiplier when this solver folds a per-node criterion
+            and one has been computed, else ``None``.
+        """
+        if not self._uses_per_node_effective_theta():
+            return None
+        return getattr(self, "_recent_effective_theta_radius_scale", None)
+
     def _apply_per_node_effective_theta(
         self,
         *,
@@ -670,6 +689,13 @@ class PolicyMixin(_EngineBase):
             theta_global=float(theta_val),
         )
         self._recent_effective_theta_nodes = theta_nodes
+        # The same multiplier a COM-geometry walk must re-apply: it recomputes
+        # radii from the expansion centres and would otherwise drop the folded
+        # criterion (see resolve_walk_geometry's ``radius_scale``).
+        bound = policy_state.source_radius_bound
+        self._recent_effective_theta_radius_scale = jnp.where(
+            bound > 0, scaled_radius / jnp.where(bound > 0, bound, 1.0), 1.0
+        )
         upward = tree_artifacts.upward
         return tree_artifacts._replace(
             upward=upward._replace(

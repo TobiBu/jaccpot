@@ -45,7 +45,7 @@ _FALSEY = frozenset({"0", "false", "no", "off"})
 #: wide on purpose; `_reset_malformed_warning_cache` exists for tests.
 _WARNED: set[str] = set()
 
-__all__ = ["env_choice", "env_flag", "env_float", "env_int"]
+__all__ = ["env_choice", "env_flag", "env_flag_optional", "env_float", "env_int"]
 
 
 def _reset_malformed_warning_cache() -> None:
@@ -124,6 +124,30 @@ def env_flag(name: str, default: bool = False) -> bool:
         name, str(raw), "expected one of 1/true/yes/on/0/false/no/off", bool(default)
     )
     return bool(default)
+
+
+def env_flag_optional(name: str) -> Optional[bool]:
+    """Read a boolean switch that also has an "unset" meaning.
+
+    Some knobs are tri-state: unset means "decide automatically", while an
+    explicit ``0``/``1`` overrides that decision
+    (``JACCPOT_NEARFIELD_LEAFPAIR_CSR``). Call sites used to test
+    ``os.environ`` directly for that; this keeps the read inside ``_env``.
+
+    Parameters
+    ----------
+    name : str
+        Environment variable name.
+
+    Returns
+    -------
+    Optional[bool]
+        ``None`` when the variable is unset, else :func:`env_flag`'s reading of
+        it (a malformed value warns once and yields ``False``).
+    """
+    if os.environ.get(name) is None:
+        return None
+    return env_flag(name, False)
 
 
 def env_int(name: str, default: int, *, minimum: Optional[int] = None) -> int:

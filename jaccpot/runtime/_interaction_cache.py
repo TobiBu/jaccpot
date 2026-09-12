@@ -49,6 +49,8 @@ from ._adaptive_policy import AdaptivePolicyState
 __all__ = [
     "POLICY_IDENTITY_UNCACHEABLE",
     "pair_policy_cache_identity",
+    "strict_walk_backend",
+    "strict_walk_deterministic_rows",
 ]
 
 

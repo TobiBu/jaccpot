@@ -878,6 +878,7 @@ class FMMEngine(
         #: mac_type='dehnen_theta'. Diagnostic only -- the traversal consumes them as
         #: rescaled geometry.radius, not from here.
         self._recent_effective_theta_nodes: Optional[Array] = None
+        self._recent_effective_theta_radius_scale: Optional[Array] = None
 
         rotation_norm = str(complex_rotation).strip().lower()
         if rotation_norm != "solidfmm":

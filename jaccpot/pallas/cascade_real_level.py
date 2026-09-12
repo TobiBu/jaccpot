@@ -540,7 +540,7 @@ def m2m_real_levels_pallas(
     offs = jnp.asarray(level_offsets, idx)
     kernel = functools.partial(_m2m_level_kernel, bp=Bp, wp=Wp, num_internal=int(num_internal))
 
-    def body(rev, rows_state):
+    def body(rev: Array, rows_state: Array) -> Array:
         level = (int(num_levels) - 2) - rev
         start = offs[level][None]
         count = (offs[level + 1] - offs[level])[None]
@@ -621,7 +621,7 @@ def l2l_real_levels_pallas(
     par = jnp.asarray(parent, idx)
     kernel = functools.partial(_l2l_level_kernel, bp=Bp, wp=Wp)
 
-    def body(level, rows_state):
+    def body(level: Array, rows_state: Array) -> Array:
         start = offs[level][None]
         count = (offs[level + 1] - offs[level])[None]
         return _level_call(

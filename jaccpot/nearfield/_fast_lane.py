@@ -31,8 +31,6 @@ from __future__ import annotations
 from functools import partial
 from typing import Any, Literal, Optional, Union, overload
 
-import os
-
 import jax
 import jax.numpy as jnp
 from beartype import beartype
@@ -61,7 +59,13 @@ from .grad import (
 # module is their only consumer -- so they arguably belong here now. Left where
 # they are deliberately: relocating them is a judgement about where the near-field
 # diagnostics surface lives, not part of a mechanical seam split.
-from .near_field import _env_flag, _env_int, _large_n_nearfield_diag_mode
+from .near_field import (
+    _env_choice,
+    _env_flag,
+    _env_flag_optional,
+    _env_int,
+    _large_n_nearfield_diag_mode,
+)
 
 
 def _nearfield_csr_lane_enabled() -> bool:
@@ -85,9 +89,9 @@ def _nearfield_csr_lane_enabled() -> bool:
     bool
         ``True`` when the CSR near-field lane is selected.
     """
-    raw = os.environ.get("JACCPOT_NEARFIELD_LEAFPAIR_CSR")
-    if raw is not None:
-        return _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_CSR", False)
+    explicit = _env_flag_optional("JACCPOT_NEARFIELD_LEAFPAIR_CSR")
+    if explicit is not None:
+        return explicit
     from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
     return bool(pallas_m2l_real_csr_supported())
@@ -1594,7 +1598,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         num_leaves_csr = int(counts.shape[0])
         capacity = leafpair_chunk_capacity(int(nbr_nodes.shape[0]), num_leaves_csr, chunk)
         table = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=capacity)
-        accum = str(os.environ.get("JACCPOT_NEARFIELD_ACCUM", "input")).strip().lower() or "input"
+        accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
         out = nearfield_leafpair_csr_pallas(
             leaf_positions,
             leaf_masses,
@@ -1608,7 +1612,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             num_stages=pallas_num_stages,
             target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
             interpret=pallas_interpret,
-            accum=accum if accum in ("input", "wide") else "input",
+            accum=accum,
             include_self=True,
         )
         pair_acc = _scatter_contributions(

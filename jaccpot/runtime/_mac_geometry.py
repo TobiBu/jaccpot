@@ -277,6 +277,7 @@ def resolve_walk_geometry(
     *,
     leaf_cap: int,
     geometry_factory: Optional[Any] = None,
+    radius_scale: Optional[Array] = None,
 ) -> tuple[Optional[TreeGeometry], Optional[Any]]:
     """The geometry the walk should test the MAC against, per ``mac_geometry_mode``.
 
@@ -294,6 +295,14 @@ def resolve_walk_geometry(
         Leaf capacity.
     geometry_factory : Optional[Any]
         The deferred box-geometry builder the caller would otherwise pass on.
+    radius_scale : Optional[Array]
+        Per-node multiplier already folded into ``box_geometry.radius`` by the
+        caller, ``(nodes,)``. ``mac_type='dehnen_theta'`` folds its criterion
+        into the radii before the walk (``_apply_per_node_effective_theta``);
+        recomputing radii about the COMs would otherwise DROP that criterion
+        silently, which is what it did until 2026-09-12. The same multiplier is
+        applied to the COM radii, so the walk tests
+        ``r_t/theta_t + r_s/theta_s <= d`` about the expansion centres.
 
     Returns
     -------
@@ -320,4 +329,12 @@ def resolve_walk_geometry(
         leaf_cap=int(leaf_cap),
         internal=mac_radius_mode(),
     )
+    if radius_scale is not None:
+        scale = jnp.asarray(radius_scale, geometry.radius.dtype)
+        if scale.shape != geometry.radius.shape:
+            raise ValueError(
+                f"radius_scale has shape {scale.shape}, expected "
+                f"{geometry.radius.shape} (one factor per node)"
+            )
+        geometry = geometry._replace(radius=geometry.radius * scale)
     return geometry, None

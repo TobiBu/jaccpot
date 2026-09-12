@@ -218,7 +218,15 @@ def _round_block(
     one = jnp.ones_like(lane)
     neg1 = jnp.full_like(lane, -1)
 
-    def emit(mask, va, vb, out_a, out_b, counter, cap):
+    def emit(
+        mask: Array,
+        va: Array,
+        vb: Array,
+        out_a: KernelRef,
+        out_b: KernelRef,
+        counter: int,
+        cap: int,
+    ) -> Array:
         # One atomic per program: the block claims sum(mask) slots and hands them
         # out by an in-block exclusive prefix sum (no per-lane counter contention).
         inc = jnp.where(mask, one, zero).astype(jnp.int32)
@@ -351,7 +359,18 @@ def mutual_walk_pallas(
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(num_warps=int(num_warps))
     kernel = functools.partial(_round_kernel, block=blk, far_cap=int(far_cap), near_cap=int(near_cap), queue_cap=Q)
 
-    def one_round(qa, qb, size, far_a, far_b, near_a, near_b, next_a, next_b, counters):
+    def one_round(
+        qa: Array,
+        qb: Array,
+        size: Array,
+        far_a: Array,
+        far_b: Array,
+        near_a: Array,
+        near_b: Array,
+        next_a: Array,
+        next_b: Array,
+        counters: Array,
+    ) -> list[Array]:
         operands = [qa, qb, size, left, right, cent, rad, active, theta_sq,
                     far_a, far_b, near_a, near_b, next_a, next_b, counters]
         outs = [far_a, far_b, near_a, near_b, next_a, next_b, counters]
@@ -380,12 +399,12 @@ def mutual_walk_pallas(
         jnp.asarray(0, idx),   # rounds
     )
 
-    def cond(state):
+    def cond(state: tuple[Array, ...]) -> Array:
         _qa, _qb, size, *_rest, counters, _peak, rounds = state
         no_overflow = (counters[_C_OVF_FAR] + counters[_C_OVF_NEAR] + counters[_C_OVF_Q]) == 0
         return (size > 0) & no_overflow & (rounds < int(max_rounds))
 
-    def one_step(state):
+    def one_step(state: tuple[Array, ...]) -> tuple[Array, ...]:
         qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = state
         # the kernel reads only lanes < size, so the next queue needs no fill
         next_a = jnp.empty((Q,), idx)
@@ -400,7 +419,7 @@ def mutual_walk_pallas(
         rounds = rounds + jnp.where(size > 0, 1, 0).astype(idx)
         return (next_a, next_b, jnp.minimum(new_size, Q), far_a, far_b, near_a, near_b, counters, peak, rounds)
 
-    def body(state):
+    def body(state: tuple[Array, ...]) -> tuple[Array, ...]:
         for _ in range(max(int(rounds_per_check), 1)):
             state = one_step(state)
         return state

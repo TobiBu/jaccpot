@@ -170,7 +170,7 @@ def _m2l_lanes_kernel(
     keys = [(ell, m) for ell in range(p + 1) for m in range(-ell, ell + 1)]
     acc0 = tuple(jnp.zeros((k_lanes,), dtype) for _ in keys)
 
-    def body(t, accs):
+    def body(t: Array, accs: tuple[Array, ...]) -> tuple[Array, ...]:
         pos = t * k_lanes + lane
         valid = pos < cnt
         i_safe = jnp.where(valid, start + pos, start)
