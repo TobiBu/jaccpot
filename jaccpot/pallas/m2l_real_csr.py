@@ -271,8 +271,12 @@ def unpack_centred(rows: Array, *, order: int) -> Array:
     mask = np.asarray(t["mask"])
     flat_slots = np.nonzero(mask.reshape(-1))[0]
     packed_idx = np.asarray(t["idx"]).reshape(-1)[flat_slots]
-    out = jnp.zeros((rows.shape[0], t["C"]), dtype=rows.dtype)
-    return out.at[:, packed_idx].set(rows[:, flat_slots])
+    # packed_idx is a permutation of range(C): invert it and gather, rather
+    # than scatter into zeros (an XLA scatter kernel per call; four of them sat
+    # in the gradient's kernel table at ~0.2 ms each)
+    slot_of_coeff = np.empty(int(t["C"]), dtype=np.int64)
+    slot_of_coeff[packed_idx] = flat_slots
+    return rows[:, slot_of_coeff]
 
 
 # --------------------------------------------------------------------------- math

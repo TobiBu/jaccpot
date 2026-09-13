@@ -33,6 +33,7 @@ from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
@@ -1027,6 +1028,76 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     return pair_acc
 
 
+def _leaf_layout_inverse(
+    target_particle_ids: Array, target_particle_mask: Array
+) -> Optional[Array]:
+    """Flat leaf-slot index of every particle, or ``None`` when the payload is traced.
+
+    Parameters
+    ----------
+    target_particle_ids : Array
+        ``(leaves, W)`` particle index per slot (frozen topology).
+    target_particle_mask : Array
+        ``(leaves, W)`` slot validity.
+
+    Returns
+    -------
+    Optional[Array]
+        ``(n,)`` int32: ``leaf * W + slot`` of each particle, ``leaves * W`` (a
+        dead row) for a particle in no slot. ``None`` if the tables are tracers,
+        which they never are on the production path (the payload is host-built).
+    """
+    from jaccpot._jax_compat import Tracer
+
+    if isinstance(target_particle_ids, Tracer) or isinstance(target_particle_mask, Tracer):
+        return None
+    ids = np.asarray(target_particle_ids)
+    mask = np.asarray(target_particle_mask, dtype=bool)
+    num_slots = int(ids.size)
+    n = int(ids[mask].max()) + 1 if mask.any() else 0
+    inverse = np.full((n,), num_slots, dtype=np.int32)
+    inverse[ids[mask]] = np.flatnonzero(mask.reshape(-1))
+    return jnp.asarray(inverse)
+
+
+@jax.custom_vjp
+def _leaf_layout_gather(values: Array, safe_ids: Array, inverse: Array) -> Array:
+    """``values[safe_ids]`` whose reverse is a gather through ``inverse``.
+
+    Parameters
+    ----------
+    values : Array
+        ``(n, ...)`` per-particle values. Differentiable.
+    safe_ids : Array
+        ``(leaves, W)`` particle index per slot (``0`` on masked slots).
+    inverse : Array
+        :func:`_leaf_layout_inverse` of the same tables.
+
+    Returns
+    -------
+    Array
+        ``(leaves, W, ...)`` leaf-layout values.
+    """
+    return values[safe_ids]
+
+
+def _leaf_layout_gather_fwd(values, safe_ids, inverse):
+    return values[safe_ids], (inverse, jnp.shape(values)[0])
+
+
+def _leaf_layout_gather_bwd(residual, g):
+    inverse, n = residual
+    flat = g.reshape((-1,) + tuple(g.shape[2:]))
+    flat = jnp.concatenate([flat, jnp.zeros((1,) + tuple(flat.shape[1:]), flat.dtype)], axis=0)
+    out = flat[inverse]
+    if int(out.shape[0]) < int(n):  # particles past every slot get zero
+        out = jnp.pad(out, ((0, int(n) - int(out.shape[0])),) + ((0, 0),) * (out.ndim - 1))
+    return (out, None, None)
+
+
+_leaf_layout_gather.defvjp(_leaf_layout_gather_fwd, _leaf_layout_gather_bwd)
+
+
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
 @jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_accel_cvjp(
@@ -1529,6 +1600,14 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     leaf_masses = masses[safe_target_particle_ids]
     leaf_mask = target_particle_mask
     leaf_particle_idx = safe_target_particle_ids
+    if differentiable:
+        # Each particle sits in exactly one leaf slot, so the transpose of this
+        # gather is a gather too; plain autodiff makes it a 1M-row scatter-add
+        # (2.7 ms for positions + masses at N = 2x10^5, plan fast-gradients).
+        inverse = _leaf_layout_inverse(target_particle_ids, target_particle_mask)
+        if inverse is not None:
+            leaf_positions = _leaf_layout_gather(positions, safe_target_particle_ids, inverse)
+            leaf_masses = _leaf_layout_gather(masses, safe_target_particle_ids, inverse)
 
     diag_mode = _large_n_nearfield_diag_mode()
     if diag_mode == "zero":

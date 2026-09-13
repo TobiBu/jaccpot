@@ -492,12 +492,18 @@ def p2m_real_leaves_reverse_pallas(
         name=f"p2m_rev_real_leaf_p{p}_w{w}",
         **backend_kwargs,
     )(pos, mass, starts, counts, cent, gbar)
-    lane = jnp.arange(w, dtype=jnp.int32)
-    slot_valid = lane[None, :] < counts[:, None]
-    idx = jnp.where(slot_valid, starts[:, None] + lane[None, :], n)  # dead row n
-    buf = jnp.zeros((n + 1, 4), dtype).at[idx.reshape(-1)].add(out.reshape(-1, 4))
-    positions_bar = buf[:n, :3].astype(positions_sorted.dtype)
-    masses_bar = buf[:n, 3].astype(masses_sorted.dtype)
+    # Every particle sits in exactly one leaf slot, so the block-to-particle
+    # transpose is a GATHER, not a scatter-add: the XLA scatter it replaced was
+    # 3.8 ms at N = 2x10^5 (the largest single kernel of the reverse pass,
+    # docs/fast_gradients_2026-09.md). Leaves are laid out in particle order
+    # (Morton leaves cover increasing contiguous ranges; padding leaves have
+    # count 0 and drop out of the repeat), so particle i belongs to the leaf
+    # whose cumulative count first exceeds i.
+    leaf_of = jnp.repeat(jnp.arange(L, dtype=jnp.int32), counts, total_repeat_length=n)
+    slot_of = jnp.arange(n, dtype=jnp.int32) - starts[leaf_of]
+    per_particle = out[leaf_of, slot_of]  # (n, 4)
+    positions_bar = per_particle[:, :3].astype(positions_sorted.dtype)
+    masses_bar = per_particle[:, 3].astype(masses_sorted.dtype)
     centers_bar = (-jnp.sum(out[:, :, :3], axis=1)).astype(leaf_centers.dtype)
     return positions_bar, masses_bar, centers_bar
 
