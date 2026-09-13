@@ -125,12 +125,20 @@ def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, leaf, to
 
 @pytest.mark.parametrize("basis", ["complex", "real"])
 def test_grad_fmm_matches_grad_directsum_masses(basis):
-    n = 64
+    n = 128
     positions, masses, probe = _system(n, seed=1)
     # leaf_size=4 at theta=0.6 -> multi-level tree with a non-empty M2L list, so
     # the mass gradient flows through the far field (P2M/M2M/M2L/L2L/L2P), not
     # just the near-field P2P (see module docstring for the far-field rationale
     # and memory characterization).
+    #
+    # n was 64 until the walk started testing the MAC about the expansion
+    # centres: COM radii are tighter than the bounding boxes', and at this theta
+    # and leaf size the 64-particle tree stopped producing ANY far pair, so the
+    # inertness guard below fired (which is exactly its job). Measured at
+    # theta 0.6 / leaf 4 under the COM geometry: n=64 gives 0 far pairs, n=128
+    # gives 48, n=256 gives 658. 128 is the smallest of those that restores the
+    # far field, and theta and leaf size are unchanged.
     softening, G, theta, order, leaf = 1e-2, 1.5, 0.6, 4, 4
     fmm = FastMultipoleMethod(
         basis=basis, use_pallas=False, theta=theta, G=G, softening=softening

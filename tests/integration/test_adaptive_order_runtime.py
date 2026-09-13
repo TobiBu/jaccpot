@@ -188,6 +188,16 @@ def test_dehnen_error_fixed_order_runs():
 
 
 def test_dehnen_error_uses_adaptive_pair_policy(monkeypatch):
+    # This test is about WHICH pair policy reaches the traversal, and it gets
+    # there on stub artifacts -- a ``SimpleNamespace`` tree and upward sweep with
+    # only the fields the policy code reads. The COM walk geometry (the default
+    # since the MAC-geometry fix) runs before that point and needs the real
+    # thing: the upward sweep's expansion centres, then ``tree.node_ranges`` and
+    # the rest of the tree to recompute radii about them. Filling the stubs in
+    # far enough to satisfy it would make this a tree test. Opt out of that lane
+    # instead -- the geometry mode is orthogonal to the policy routing under
+    # test, and ``tests/unit/runtime/test_mac_geometry_com.py`` covers it.
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "aabb")
     fmm = FastMultipoleMethod(
         preset="accurate",
         basis="real",

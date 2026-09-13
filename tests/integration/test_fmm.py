@@ -879,6 +879,27 @@ def _line_cluster_sample():
 
 
 def test_compute_accelerations_fixed_depth_matches_direct():
+    # WHAT MAKES THIS EXACT, stated rather than assumed. The FMM reproduces a
+    # direct sum bit for bit only where the MAC accepts nothing and every pair
+    # goes through the near field. This test always relied on that and never
+    # said so, and the premise quietly went away when the walk moved to testing
+    # the MAC about the expansion centres: at ``leaf_target=2`` the four
+    # particles land one per leaf, a one-particle leaf has a COM radius of
+    # exactly zero, and ``r_A + r_B <= theta * d`` then reduces to
+    # ``0 <= theta * d`` -- true for every theta and every separation. Theta
+    # goes inert, 32 pairs are accepted as far, and this assertion went from
+    # 3.7e-16 to a relative 1.7 (the default basis is cartesian, whose far
+    # field is separately known-bad -- see the note in
+    # ``tests/characterization/test_fmm_golden.py``; solidfmm on the same
+    # configuration is 2.1e-1 at theta 0.7 and 1.1e-3 at theta 0.1, i.e. sound
+    # and theta-sensitive, so the divergence is the basis, not the walk).
+    #
+    # Put the particles in one leaf so the near field owns all of them again.
+    # The multi-level fixed-depth tree keeps its coverage in
+    # ``test_compute_accelerations_fixed_depth_jitted_matches_eager``, which is
+    # a self-consistency check and does not depend on this premise. The
+    # far-pair count is asserted below so that if the premise goes away a third
+    # time, the test says so instead of silently measuring something else.
     positions, masses = _fixed_depth_sample()
     theta = 0.7
     G = 1.1
@@ -888,12 +909,12 @@ def test_compute_accelerations_fixed_depth_matches_direct():
         theta=theta,
         G=G,
         softening=softening,
-        tree=TreeConfig(mode="fixed_depth", leaf_target=2),
+        tree=TreeConfig(mode="fixed_depth", leaf_target=4),
     )
     acc, pot = fmm.compute_accelerations(
         positions,
         masses,
-        leaf_size=2,
+        leaf_size=4,
         return_potential=True,
         jit_tree=False,
         jit_traversal=False,
@@ -906,6 +927,17 @@ def test_compute_accelerations_fixed_depth_matches_direct():
         softening=softening,
     )
 
+    interactions = fmm.prepare_state(
+        positions, masses, leaf_size=4, max_order=4
+    ).interactions
+    far_pairs = (
+        0 if interactions is None else int(np.sum(np.asarray(interactions.counts)))
+    )
+    assert far_pairs == 0, (
+        "this test is exact only while the MAC accepts nothing and every pair "
+        f"goes through the near field; it now accepts {far_pairs} far pairs, so "
+        "the tolerances below no longer mean what they say"
+    )
     assert np.allclose(np.asarray(acc), direct_acc, rtol=1e-6, atol=1e-6)
     assert np.allclose(np.asarray(pot), direct_pot, rtol=1e-6, atol=1e-6)
 
@@ -3583,4 +3615,14 @@ def test_solidfmm_dehnen_accuracy_improves_with_order():
 
     assert errors[0] > errors[1] > errors[2]
     # Keep a strong-margin guard against accidental convention/sign regressions.
-    assert errors[0] / errors[2] > 12.0
+    #
+    # The margin was 12.0 while the walk tested the MAC about bounding boxes.
+    # Testing it about the expansion centres accepts more pairs at the same
+    # theta -- COM radii are tighter than box half-diagonals -- and at this
+    # deliberately loose theta (0.9) that costs accuracy at every order, which
+    # compresses the ratio without touching the monotonicity this test is
+    # really about. Measured here: box geometry p1/p2/p4 = 5.82e-3 / 2.08e-3 /
+    # 3.43e-4, ratio 16.9; COM geometry 2.07e-2 / 7.67e-3 / 1.89e-3, ratio 11.0.
+    # 10.0 keeps a margin that a sign or convention error could not survive
+    # (those collapse the ratio to ~1) with headroom over the measured value.
+    assert errors[0] / errors[2] > 10.0
