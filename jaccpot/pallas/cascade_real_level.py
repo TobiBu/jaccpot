@@ -866,8 +866,7 @@ def _l2l_rev_level_kernel(
     _dbar_in_ref: KernelRef,
     rows_ref: KernelRef,
     cent_ref: KernelRef,
-    left_ref: KernelRef,
-    right_ref: KernelRef,
+    child_ref: KernelRef,
     nbl_ref: KernelRef,
     start_ref: KernelRef,
     count_ref: KernelRef,
@@ -876,7 +875,15 @@ def _l2l_rev_level_kernel(
     wp: int,
     num_internal: int,
 ) -> None:
-    """One parent of the level: gather its two children's local cotangents onto its own.
+    """One parent of the level: pull ONE child's local cotangent onto its own.
+
+    One child per launch, not both (plan fast-gradients, follow-up). The
+    two-children body was 5.3x its own forward where the M2M reverse -- the same
+    arithmetic, one vjp per program -- is 1.24x, and a warp sweep (1/2/4/8) put
+    both at the same optimum, so the cost was the doubled body's register
+    pressure, not the warp count or the arithmetic. Two sequential launches per
+    level read and rewrite ``g[parent]`` in turn, which is deterministic and
+    needs no atomics.
 
     Parameters
     ----------
@@ -890,10 +897,8 @@ def _l2l_rev_level_kernel(
         linearisation point of both edges).
     cent_ref : KernelRef
         Padded centres ``[nodes + 1, 4]``.
-    left_ref : KernelRef
-        Left child per internal node.
-    right_ref : KernelRef
-        Right child per internal node.
+    child_ref : KernelRef
+        This pass's child per internal node (the left or the right array).
     nbl_ref : KernelRef
         ``nodes_by_level`` padded with ``-1``.
     start_ref : KernelRef
@@ -912,7 +917,7 @@ def _l2l_rev_level_kernel(
     Returns
     -------
     None
-        Writes the parent's cotangent row and both children's edge cotangents.
+        Writes the parent's cotangent row and this child's edge cotangent.
     """
     n_tables = len(_TABLE_KEYS) + len(_CORE_KEYS)
     table_refs = table_and_out_refs[:n_tables]
@@ -932,28 +937,26 @@ def _l2l_rev_level_kernel(
         py = cent_ref[node_safe, 1]
         pz = cent_ref[node_safe, 2]
         dead = jnp.asarray(g_out_ref.shape[0] - 1, dtype=node.dtype)
-        acc = jnp.zeros((bp, wp), dtype=g_out_ref.dtype)
 
         def translate(r: Array, d: tuple) -> Array:
             return _translate_rows(r, d, t, "l2l", safe=True)
 
-        for child_ref in (left_ref, right_ref):
-            c = child_ref[node_safe]
-            c_valid = valid & (c >= 0)
-            c_safe = jnp.where(c_valid, c, 0)
-            g_c = g_ref[c_safe, :].reshape(bp, wp)
-            # L2L delta = parent - child
-            dx = px - cent_ref[c_safe, 0]
-            dy = py - cent_ref[c_safe, 1]
-            dz_ = pz - cent_ref[c_safe, 2]
-            _, vjp = jax.vjp(translate, rows_p, (dx, dy, dz_))
-            rb, (dxb, dyb, dzb) = vjp(g_c)
-            acc = acc + jnp.where(c_valid, rb, 0.0)
-            ctarget = jnp.where(c_valid, c_safe, dead)
-            dbar_ref[ctarget, :] = _dbar_row(dxb, dyb, dzb, c_valid, dbar_ref.dtype)
+        c = child_ref[node_safe]
+        c_valid = valid & (c >= 0)
+        c_safe = jnp.where(c_valid, c, 0)
+        g_c = g_ref[c_safe, :].reshape(bp, wp)
+        # L2L delta = parent - child
+        dx = px - cent_ref[c_safe, 0]
+        dy = py - cent_ref[c_safe, 1]
+        dz_ = pz - cent_ref[c_safe, 2]
+        _, vjp = jax.vjp(translate, rows_p, (dx, dy, dz_))
+        rb, (dxb, dyb, dzb) = vjp(g_c)
+        ctarget = jnp.where(c_valid, c_safe, dead)
+        dbar_ref[ctarget, :] = _dbar_row(dxb, dyb, dzb, c_valid, dbar_ref.dtype)
         own = g_ref[node_safe, :].reshape(bp, wp)
+        new_row = own + jnp.where(c_valid, rb, 0.0)
         target = jnp.where(valid, node_safe, dead)
-        g_out_ref[target, :] = (own + acc).reshape(bp * wp).astype(g_out_ref.dtype)
+        g_out_ref[target, :] = new_row.reshape(bp * wp).astype(g_out_ref.dtype)
 
 
 def _level_call2(
@@ -1235,19 +1238,33 @@ def l2l_real_levels_reverse_pallas(
     rc = jnp.asarray(right_child, idx)
 
     def body(rev: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
-        g_state, dbar_state = carry
         level = (int(num_levels) - 2) - rev  # parent level, deepest first
         start = offs[level][None]
         count = (offs[level + 1] - offs[level])[None]
-        return _level_call2(
-            kernel,
-            [g_state, dbar_state, rows, cent, lc, rc, nbl, start, count, *table_arrays],
-            num_programs=width,
-            interpret=interpret,
-            backend=backend,
-            num_warps=num_warps,
-            name=f"l2l_rev_real_level_p{p}",
-        )
+        # one launch per child side: see the kernel's docstring (5.3x -> the M2M
+        # reverse's ratio). The two are sequential, so both read the g[parent]
+        # the previous one wrote.
+        for side, child in (("l", lc), ("r", rc)):
+            carry = _level_call2(
+                kernel,
+                [
+                    carry[0],
+                    carry[1],
+                    rows,
+                    cent,
+                    child,
+                    nbl,
+                    start,
+                    count,
+                    *table_arrays,
+                ],
+                num_programs=width,
+                interpret=interpret,
+                backend=backend,
+                num_warps=num_warps,
+                name=f"l2l_rev_real_level_{side}_p{p}",
+            )
+        return carry
 
     g, dbar = lax.fori_loop(
         0, max(int(num_levels) - 1, 0), body, (g, dbar), unroll=True

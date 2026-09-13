@@ -161,6 +161,7 @@ not the fusion boundary.
 | trace device busy, normalised | 31.56 ms | 21.90 ms |
 | XLA scatter fusions | 13.73 ms | 4.19 ms |
 | five reverse Pallas kernels | 10.05 ms | 10.49 ms (the M2L's second pass) |
+| device busy after the L2L split, normalised | -- | 29.45 vs 30.24 ms (2 %) |
 | upward / far / near grads, jitted | 13.5 / 23.6 / 13.9 ms | 6.9 / 16.8 / 10.5 ms |
 
 **Normalising the trace is not optional.** The same run's unchanged forward kernels came out a uniform **1.70x**
@@ -170,12 +171,36 @@ which would have read as "the reverse kernels got 70 % slower". `grad_step_profi
 `grad_trace.forward_kernel_ms` as that normaliser, and the headline row above is a same-card, matched-load pair
 (`phase2b_before_scatters.json` vs `phase4_gathers.json`).
 
-### What is left
+### What is left, and what the L2L/M2M asymmetry actually was
 
 Of the 21.9 ms: the five reverse kernels 10.5, the forwards 2.5, the surviving scatters 4.2 (3.1 of it the L2P
-locals transpose above), and ~4.7 in small fusions, sorts and 121 `MemcpyD2D`. The biggest single kernel is
+locals transpose above), and ~4.7 in small fusions, sorts and 121 `MemcpyD2D`. The biggest single kernel was
 `l2l_rev_real_level_p5` at 4.2 ms over 47 launches -- 5.5x its own forward, where M2M's reverse is 1.3x its
-forward. That asymmetry is the next thing to look at.
+forward. `bench/grad_cascade_reverse_microbench.py` times all four level kernels standalone on the production
+tree shape, sweeping the warp count:
+
+| kernel | per program | 1 warp | 2 | 4 | 8 |
+|---|---|---|---|---|---|
+| `m2m_fwd` | 2 translates | 4.23 | 2.60 | **2.50** | 4.14 |
+| `m2m_rev` | 1 vjp | 3.46 | 3.20 | **3.10** | 8.49 |
+| `l2l_fwd` | 1 translate | 1.72 | 1.44 | **1.40** | 2.20 |
+| `l2l_rev` | 2 vjps | 8.33 | 7.77 | **7.47** | 17.96 |
+
+4 warps is already the optimum everywhere, so the warp count was not it. Splitting the L2L reverse into ONE
+LAUNCH PER CHILD SIDE (matching the M2M reverse's one-vjp-per-program shape; the two launches are sequential, so
+both read the `g[parent]` the other wrote, no atomics) takes it 7.47 -> 6.35 ms standalone and **30.24 -> 29.45 ms
+of normalised device time in the step**, at +47 launches. Kept, but that is 2 %, not the 2x the register-pressure
+story predicted -- so the asymmetry was mostly an artefact of the comparison:
+
+* one `jax.vjp` of the translate body costs **4.6x** the primal translate (l2l_rev 6.35 vs l2l_fwd 1.37 at equal
+  translate counts, 32.8k each). That is the real reverse-pass cost, and only a hand-written adjoint would move it.
+* the M2M **forward** is the inflated one: 2.47 ms for the same 32.8k translates that the L2L forward does in
+  1.37 -- **1.8x**, because it runs two translates per program. That makes `m2m_rev / m2m_fwd = 1.3x` look healthy
+  when the reverse is no cheaper than L2L's.
+
+**So the open lever is on the FORWARD, not the gradient**: splitting the M2M forward's two children into two
+launches the way the L2L reverse now is should be worth ~1 ms per step at N = 2x10^5. That is production
+forward-path code owned by `perf/sub10ms-lanes`, needs its own accuracy validation, and is not done here.
 
 ## Bookkeeping
 
