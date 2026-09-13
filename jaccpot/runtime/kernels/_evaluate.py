@@ -2100,45 +2100,22 @@ def _evaluate_prepared_tree_targets(
     return near_acc + far_acc, acc_derivatives
 
 
-@jax.custom_vjp
-def _leaf_rows_gather(table: Array, leaf_nodes: Array) -> Array:
-    """``table[leaf_nodes]`` whose reverse reduces over the leaf's slots BEFORE it scatters.
-
-    Plain autodiff of this gather is correct but XLA fuses the per-slot
-    cotangent reduction INTO the scatter's update computation, so the locals
-    cotangent became a scatter with one thread per leaf doing the whole
-    ``W x (p+1)^2`` contraction -- 3.0 ms at N = 2x10^5, second only to the P2M
-    scatter (docs/fast_gradients_2026-09.md). The barrier makes the reduced
-    ``(leaves, C)`` cotangent a materialised buffer, so the scatter is one row
-    per leaf.
-
-    Parameters
-    ----------
-    table : Array
-        ``[nodes, ...]`` per-node rows (locals or centres).
-    leaf_nodes : Array
-        ``[leaves]`` node ids.
-
-    Returns
-    -------
-    Array
-        ``[leaves, ...]``.
-    """
-    return table[leaf_nodes]
-
-
-def _leaf_rows_gather_fwd(table, leaf_nodes):
-    return table[leaf_nodes], (leaf_nodes, table.shape[0])
-
-
-def _leaf_rows_gather_bwd(residual, g):
-    leaf_nodes, num_rows = residual
-    g = jax.lax.optimization_barrier(g)
-    out = jnp.zeros((num_rows,) + tuple(g.shape[1:]), g.dtype).at[leaf_nodes].add(g)
-    return (out, None)
-
-
-_leaf_rows_gather.defvjp(_leaf_rows_gather_fwd, _leaf_rows_gather_bwd)
+# MEASURED NEGATIVE, kept as a signpost (plan fast-gradients, scatter round).
+#
+# The locals/centres leaf gathers below (`local_data.coefficients[leaf_nodes]`)
+# transpose into an XLA scatter that costs 3.0 ms at N = 2x10^5 -- one of the
+# three big ones in the gradient's kernel table. XLA fuses the per-slot
+# cotangent reduction INTO that scatter's update computation, so it looked like
+# a scatter doing a `W x (p+1)^2` contraction per thread, and the obvious fix
+# was a `custom_vjp` whose `bwd` puts an `optimization_barrier` before the
+# scatter, splitting it into a reduce and a one-row-per-leaf scatter.
+#
+# That is 3x WORSE: measured, the split reduce alone is 9.1 ms (normalised;
+# `input_reduce_fusion_1` in `artifacts/grad/phase3_scatter_free.json`) against
+# the 3.0 ms of the fused form, because materialising the unreduced
+# `(leaves, W, C)` cotangent is 151 MB of traffic that the fusion avoided.
+# The fused scatter stays. If this is worth another attempt, the lever is the
+# LAYOUT (leaf-major locals, so the gather is a slice), not the fusion boundary.
 
 
 @partial(
@@ -2224,11 +2201,11 @@ def _evaluate_local_expansions_for_particles(
     leaf_positions = positions[safe_idx]
     leaf_positions = jnp.where(valid[..., None], leaf_positions, 0.0)
 
-    centers = _leaf_rows_gather(local_data.centers, leaf_nodes)
+    centers = local_data.centers[leaf_nodes]
     offsets = leaf_positions - centers[:, None, :]
     offsets = jnp.where(valid[..., None], offsets, 0.0)
 
-    coeffs = _leaf_rows_gather(local_data.coefficients, leaf_nodes)
+    coeffs = local_data.coefficients[leaf_nodes]
     dtype = positions.dtype
 
     if expansion_basis == "solidfmm":

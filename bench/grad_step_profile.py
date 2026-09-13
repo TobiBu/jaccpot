@@ -517,8 +517,27 @@ def main() -> int:
             s["ms_per_call"] += float(k["total_ms_per_call"])
             s["launches_per_call"] += float(k["count_per_call"])
             s["kernels"] += 1
+        # The trace's absolute times are NOT comparable across runs: the same
+        # unchanged forward kernels came out a uniform 1.70x slower in a
+        # throttled session (plan fast-gradients, scatter round). Record the
+        # forward kernels' total as the normaliser so a later comparison can
+        # divide it out -- they are bit-identical code in every variant.
+        forward_names = (
+            "m2m_real_level",
+            "l2l_real_level",
+            "p2m_real_leaf",
+            "m2l_real_csr_lanes_p",
+        )
+        norm = sum(
+            float(k["total_ms_per_call"])
+            for k in res["top"]
+            if any(k["name"].startswith(f) for f in forward_names)
+        )
         result["grad_trace"] = dict(
-            per_call=res["per_call"], stages=stages, top=res["top"][:40]
+            per_call=res["per_call"],
+            stages=stages,
+            top=res["top"][:40],
+            forward_kernel_ms=norm,
         )
         print(
             f"[{tag}] grad trace: busy {res['per_call']['busy_ms']:.2f}/{res['per_call']['window_ms']:.2f} ms, "

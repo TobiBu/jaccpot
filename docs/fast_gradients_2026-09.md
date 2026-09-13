@@ -69,6 +69,9 @@ record. "eval" is the production eval-only closure (no tree rebuild); "grad" is 
 through `differentiable_accelerations` w.r.t. positions and masses. The eager grad retraces the whole pipeline
 per call (6-120 s) and is host-bound; the jitted number is the one that means anything.
 
+(The rows below are the FIRST measurement round, before the scatter work; the section after them
+supersedes the "grad, jitted" column.)
+
 | lane | code | diff. forward vs eval | vs fp64 direct sum (aggL2) | grad, jitted |
 |---|---|---|---|---|
 | Phase 0 (d06dee0): loop cascades, pure-JAX M2L, rectangle near field | d06dee0 | 4.9e-2 | 5.0e-2 | 942 ms |
@@ -113,13 +116,66 @@ Kernel table of the jitted full grad (Perfetto, 3 calls): device busy 31.6 of 32
 | `p2m_real_leaf_p5_w64` (forward) | 0.18 | 1 |
 
 So the five reverse kernels together cost 10.1 ms (the plan's "~78 ms prize" for the two cascades alone became
-5.9 ms), the forward kernels 4.1 ms, and the remaining ~13 ms is seven XLA scatter fusions of one launch each. The
-candidates, by the sizes involved (the fusions are anonymous; not yet attributed one by one): the transposes of
-the leaf-table gathers (positions/masses -> `(leaves, W)` layout, 1M rows), the P2M reverse's particle scatter
-(1M rows), the M2L reverse's per-pair segment sum (690k rows), the near-field partial reduce onto the leaves
-(22k chunks x 64 x 8) and the COM cotangent's per-node segment sums. **That is the next lever, and it is XLA,
-not Pallas**; the P2M scatter and the leaf-table transposes have unique indices and could be gathers. The reverse cascades are 3.1x (M2M) and 5.5x (L2L) their
-forwards, which is the expected 2-3x transpose cost plus the geometry half.
+5.9 ms), the forward kernels 4.1 ms, and the remaining ~13 ms is seven XLA scatter fusions of one launch each --
+more than all five reverse kernels together. That is the next section. The reverse cascades are 3.1x (M2M) and
+5.5x (L2L) their forwards, which is the expected 2-3x transpose cost plus the geometry half.
+
+## The scatter round: 13.7 -> 4.2 ms, and the one that got worse
+
+`bench/grad_scatter_attribution.py` joins the compiled HLO (whose fusion names ARE the trace's names) with the
+trace, and prints each scatter fusion's result shape and the instructions feeding it. All seven are transposes of
+gathers, and the large ones have **unique indices** -- gathers in disguise:
+
+| fusion | ms | result | what it is |
+|---|---|---|---|
+| `..._10` | 3.82 | `f32[200001,4]` | near-field lane: the positions/masses leaf-table gathers |
+| `..._11` | 2.96 | `f32[32767,36]` | L2P: the locals leaf gather, with the per-slot reduction fused in |
+| `..._7` | 2.86 | `f32[32767,3]` | M2L reverse: the per-pair centre cotangents, 2M padded rows |
+| `..._3`, `..._1` | 1.59, 1.08 | `f32[200000,3]`, `f32[200000]` | P2M reverse: the per-particle scatter |
+| `..._5`, `..._4` | 0.69, 0.27 | -- | leaf-layout transposes of the same family |
+
+Four of the five were removed:
+
+* **P2M reverse** -- the `(leaves, W, 4)` block is gathered onto the particles through `leaf_of` / `slot_of`
+  (Morton leaves cover increasing contiguous ranges), not scatter-added.
+* **M2L reverse** -- the per-pair table + segment sum is replaced by a SECOND pass of the same lane kernel over
+  the forward's CSR by target (one program per target, sources per lane). It recomputes each pair's vjp rather
+  than writing anything per pair: two passes at 0.55 + 0.44 ms against one pass at 0.56 plus a 2.86 ms scatter.
+* **near-field lane** -- the positions/masses leaf gathers take a `custom_vjp` whose reverse gathers through a
+  host-built inverse slot map (each particle sits in exactly one slot).
+* **`unpack_centred`** -- the inverse of a permutation gather is a gather, not a scatter into zeros.
+
+**The L2P one is a measured negative and was reverted.** XLA fuses the per-slot cotangent reduction into that
+scatter's update computation, which looks like a scatter doing a `W x (p+1)^2` contraction per thread; an
+`optimization_barrier` in a `custom_vjp` splits it into a reduce plus a one-row-per-leaf scatter. The split
+reduce ALONE is 9.1 ms against the fused form's 3.0, because materialising the unreduced `(leaves, W, C)`
+cotangent is 151 MB of traffic the fusion avoided. The comment at the call site records this so it is not
+re-attempted; if it is worth another try the lever is the LAYOUT (leaf-major locals, making the gather a slice),
+not the fusion boundary.
+
+### Result
+
+| | before the scatter round | after |
+|---|---|---|
+| jitted `jax.grad`, same card, load 17/18 | 31.73 ms | **22.10 ms** (1.44x) |
+| trace device busy, normalised | 31.56 ms | 21.90 ms |
+| XLA scatter fusions | 13.73 ms | 4.19 ms |
+| five reverse Pallas kernels | 10.05 ms | 10.49 ms (the M2L's second pass) |
+| upward / far / near grads, jitted | 13.5 / 23.6 / 13.9 ms | 6.9 / 16.8 / 10.5 ms |
+
+**Normalising the trace is not optional.** The same run's unchanged forward kernels came out a uniform **1.70x**
+slower in a throttled session (`m2m_real_level` 1.335 -> 2.278, `l2l_real_level` 0.756 -> 1.284,
+`p2m_real_leaf` 0.180 -> 0.313, `m2l_real_csr_lanes` 0.208 -> 0.351 -- four independent kernels, spread 1.69-1.74),
+which would have read as "the reverse kernels got 70 % slower". `grad_step_profile.py` now records
+`grad_trace.forward_kernel_ms` as that normaliser, and the headline row above is a same-card, matched-load pair
+(`phase2b_before_scatters.json` vs `phase4_gathers.json`).
+
+### What is left
+
+Of the 21.9 ms: the five reverse kernels 10.5, the forwards 2.5, the surviving scatters 4.2 (3.1 of it the L2P
+locals transpose above), and ~4.7 in small fusions, sorts and 121 `MemcpyD2D`. The biggest single kernel is
+`l2l_rev_real_level_p5` at 4.2 ms over 47 launches -- 5.5x its own forward, where M2M's reverse is 1.3x its
+forward. That asymmetry is the next thing to look at.
 
 ## Bookkeeping
 
