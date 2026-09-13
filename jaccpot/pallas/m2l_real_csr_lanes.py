@@ -639,7 +639,9 @@ def m2l_real_csr_lanes_reverse_pallas(
         shp = tuple(arr.shape)
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
-    def one_pass(idx_sorted: Array, offsets: Array, counts: Array, *, by_target: bool):
+    def one_pass(
+        idx_sorted: Array, offsets: Array, counts: Array, *, by_target: bool
+    ) -> tuple[Array, Array]:
         kernel = functools.partial(
             _m2l_rev_lanes_kernel, p=p, k_lanes=K, tables=tables, by_target=by_target
         )
