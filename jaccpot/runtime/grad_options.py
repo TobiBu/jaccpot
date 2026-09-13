@@ -353,6 +353,7 @@ __all__ = [
     "ResolvedGradOptions",
     "analytic_l2p_vjp_enabled",
     "analytic_p2p_vjp_enabled",
+    "cascade_pallas_override",
     "fused_m2l_pallas_enabled",
     "grad_option_overrides",
     "resolve_grad_options",
