@@ -68,7 +68,11 @@ def _lane_tables(order: int) -> dict:
     zf = [[float(x) for x in row] for row in np.asarray(tb["Zf"])]
     signm = [float(x) for x in np.asarray(tb["signm"])[: 2 * p + 1]]
     idx = np.asarray(tb["idx"])
-    packed = {(ell, m): int(idx[ell, p + m]) for ell in range(p + 1) for m in range(-ell, ell + 1)}
+    packed = {
+        (ell, m): int(idx[ell, p + m])
+        for ell in range(p + 1)
+        for m in range(-ell, ell + 1)
+    }
     return dict(p=p, C=int(tb["C"]), B=B, Zf=zf, signm=signm, packed=packed)
 
 
@@ -297,7 +301,9 @@ def m2l_real_csr_lanes_pallas(
     )
     if n == 0 or int(src_sorted.shape[0]) == 0:
         return jnp.zeros((n, C), dtype=dtype)
-    kernel = functools.partial(_m2l_lanes_kernel, p=p, k_lanes=int(k_lanes), tables=tables)
+    kernel = functools.partial(
+        _m2l_lanes_kernel, p=p, k_lanes=int(k_lanes), tables=tables
+    )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(

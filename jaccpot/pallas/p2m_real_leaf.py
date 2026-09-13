@@ -151,7 +151,9 @@ def _p2m_leaf_kernel(
                 pnm2 = pmm
                 pnm1 = (2.0 * ma + 1.0) * cos_t * pmm
                 for k in range(ma + 2, n + 1):
-                    pk = ((2.0 * k - 1.0) * cos_t * pnm1 - (k + ma - 1.0) * pnm2) / (k - ma)
+                    pk = ((2.0 * k - 1.0) * cos_t * pnm1 - (k + ma - 1.0) * pnm2) / (
+                        k - ma
+                    )
                     pnm2, pnm1 = pnm1, pk
                 pnm = pnm1
             inv_denom = 1.0 / math.factorial(n + ma)
@@ -227,11 +229,17 @@ def p2m_real_leaves_pallas(
     starts = jnp.where(counts > 0, ranges[:, 0], n).astype(jnp.int32)
     cent = jnp.asarray(leaf_centers, dtype)
     kernel = functools.partial(
-        _p2m_leaf_kernel, order=p, width=w, coeff_pad=cp, floor=float(squared_radius_floor(dtype))
+        _p2m_leaf_kernel,
+        order=p,
+        width=w,
+        coeff_pad=cp,
+        floor=float(squared_radius_floor(dtype)),
     )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
-        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(num_warps=int(num_warps))
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
 
     def _full(arr):
         shp = tuple(arr.shape)
@@ -248,4 +256,6 @@ def p2m_real_leaves_pallas(
         **backend_kwargs,
     )(pos, mass, starts, counts, cent)
     leaf_rows = rows[:, :C]
-    return jnp.concatenate([jnp.zeros((int(num_internal), C), dtype), leaf_rows], axis=0)[: int(total_nodes)]
+    return jnp.concatenate(
+        [jnp.zeros((int(num_internal), C), dtype), leaf_rows], axis=0
+    )[: int(total_nodes)]

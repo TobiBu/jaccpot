@@ -184,9 +184,7 @@ def _m2l_tiled_kernel(
         sin_az = jnp.sin(m_az)
         cos_ax = jnp.cos(m_ax)
         sin_ax = jnp.sin(m_ax)
-        tiles = [
-            mult_ref[sid[:, None], (l * wp + cols)[None, :]] for l in range(p + 1)
-        ]
+        tiles = [mult_ref[sid[:, None], (l * wp + cols)[None, :]] for l in range(p + 1)]
         # world -> z (multipole): B Dz(-ax) B Dz(az)
         v = dz(tiles, cos_az, sin_az)
         v = bapply(v, bt_mats)
@@ -331,7 +329,12 @@ def m2l_real_csr_tiled_pallas(
     if n == 0 or int(src_sorted.shape[0]) == 0:
         return jnp.zeros((n, C), dtype=dtype)
     kernel = functools.partial(
-        _m2l_tiled_kernel, p=p, bp=Bp, wp=Wp, k_tile=int(k_tile), zf=tb["zf"],
+        _m2l_tiled_kernel,
+        p=p,
+        bp=Bp,
+        wp=Wp,
+        k_tile=int(k_tile),
+        zf=tb["zf"],
         dot_precision=_DOT_ALGORITHMS[str(dot_algorithm)],
     )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
@@ -345,8 +348,16 @@ def m2l_real_csr_tiled_pallas(
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
     operands = [
-        mult_c, cent_p, src_sorted, offsets, counts,
-        tb["bt"], tb["b"], tb["apat_t"], tb["mabs"], tb["signm"],
+        mult_c,
+        cent_p,
+        src_sorted,
+        offsets,
+        counts,
+        tb["bt"],
+        tb["b"],
+        tb["apat_t"],
+        tb["mabs"],
+        tb["signm"],
     ]
     out = pl.pallas_call(
         kernel,

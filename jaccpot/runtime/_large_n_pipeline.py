@@ -1685,7 +1685,8 @@ def prepare_large_n_state(
             neighbor_list=neighbor_payload,
             block_size=block_size,
             max_blocks_per_leaf=int(effective_static_cap),
-            check_capacity=(not csr_lane) and not (
+            check_capacity=(not csr_lane)
+            and not (
                 bool(fused_device_mode)
                 and bool(fused_payload_enabled)
                 and bool(traced_target_block_payload)

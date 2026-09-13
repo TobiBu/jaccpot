@@ -52,9 +52,17 @@ def test_tiled_honours_the_active_prefix_and_padding():
     src_p = jnp.concatenate([src, jnp.full((16,), -1, jnp.int32)])
     tgt_p = jnp.concatenate([tgt, jnp.full((16,), -1, jnp.int32)])
     live = P // 2
-    ref = m2l_real_csr_jax(mult, cent, src_p, tgt_p, order=order, active_pair_count=jnp.asarray(live))
+    ref = m2l_real_csr_jax(
+        mult, cent, src_p, tgt_p, order=order, active_pair_count=jnp.asarray(live)
+    )
     got = m2l_real_csr_tiled_pallas(
-        mult, cent, src_p, tgt_p, order=order, active_pair_count=jnp.asarray(live), interpret=True
+        mult,
+        cent,
+        src_p,
+        tgt_p,
+        order=order,
+        active_pair_count=jnp.asarray(live),
+        interpret=True,
     )
     r, g = np.asarray(ref), np.asarray(got)
     assert np.allclose(g, r, rtol=1e-4, atol=1e-4 * np.abs(r).max())
@@ -63,7 +71,11 @@ def test_tiled_honours_the_active_prefix_and_padding():
 def test_tiled_is_jittable_and_rejects_low_orders():
     order = 5
     mult, cent, src, tgt = _case(3, 20, np.full(20, 5), order)
-    f = jax.jit(lambda m, c: m2l_real_csr_tiled_pallas(m, c, src, tgt, order=order, interpret=True))
+    f = jax.jit(
+        lambda m, c: m2l_real_csr_tiled_pallas(
+            m, c, src, tgt, order=order, interpret=True
+        )
+    )
     assert np.all(np.isfinite(np.asarray(f(mult, cent))))
     assert not m2l_real_csr_tiled_supported(3)
     with pytest.raises(ValueError):

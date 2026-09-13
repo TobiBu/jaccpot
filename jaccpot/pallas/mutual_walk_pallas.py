@@ -162,26 +162,73 @@ def _round_kernel(
     None
         Writes into the aliased outputs.
     """
-    del far_a_ref, far_b_ref, near_a_ref, near_b_ref, next_a_ref, next_b_ref, counters_ref
+    del (
+        far_a_ref,
+        far_b_ref,
+        near_a_ref,
+        near_b_ref,
+        next_a_ref,
+        next_b_ref,
+        counters_ref,
+    )
     pid = pl.program_id(0)
     size = size_ref[0]
 
     @pl.when(pid * block < size)
     def _block():
         _round_block(
-            qa_ref, qb_ref, size, left_ref, right_ref, cent_ref, rad_ref, active_ref, theta_ref,
-            far_a_out, far_b_out, near_a_out, near_b_out, next_a_out, next_b_out, counters_out,
-            pid=pid, block=block, far_cap=far_cap, near_cap=near_cap, queue_cap=queue_cap,
+            qa_ref,
+            qb_ref,
+            size,
+            left_ref,
+            right_ref,
+            cent_ref,
+            rad_ref,
+            active_ref,
+            theta_ref,
+            far_a_out,
+            far_b_out,
+            near_a_out,
+            near_b_out,
+            next_a_out,
+            next_b_out,
+            counters_out,
+            pid=pid,
+            block=block,
+            far_cap=far_cap,
+            near_cap=near_cap,
+            queue_cap=queue_cap,
         )
 
 
 def _round_block(
-    qa_ref, qb_ref, size, left_ref, right_ref, cent_ref, rad_ref, active_ref, theta_ref,
-    far_a_out, far_b_out, near_a_out, near_b_out, next_a_out, next_b_out, counters_out,
-    *, pid, block, far_cap, near_cap, queue_cap,
+    qa_ref,
+    qb_ref,
+    size,
+    left_ref,
+    right_ref,
+    cent_ref,
+    rad_ref,
+    active_ref,
+    theta_ref,
+    far_a_out,
+    far_b_out,
+    near_a_out,
+    near_b_out,
+    next_a_out,
+    next_b_out,
+    counters_out,
+    *,
+    pid,
+    block,
+    far_cap,
+    near_cap,
+    queue_cap,
 ):
     """Body of one non-empty block (see :func:`_round_kernel`)."""
-    lane = (pid * block + lax.broadcasted_iota(jnp.int32, (block,), 0)).astype(jnp.int32)
+    lane = (pid * block + lax.broadcasted_iota(jnp.int32, (block,), 0)).astype(
+        jnp.int32
+    )
     in_range = lane < size
     lane_safe = jnp.where(in_range, lane, jnp.zeros_like(lane))
     a = qa_ref[lane_safe]
@@ -264,9 +311,15 @@ def _round_block(
     for ca, cb in ((c0a, c0b), (c1a, c1b), (c2a, c2b), (c3a, c3b)):
         m = refine & (ca >= 0) & (cb >= 0)
         over_q = over_q | emit(m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap)
-    for slot_id, over in ((_C_OVF_FAR, over_far), (_C_OVF_NEAR, over_near), (_C_OVF_Q, over_q)):
+    for slot_id, over in (
+        (_C_OVF_FAR, over_far),
+        (_C_OVF_NEAR, over_near),
+        (_C_OVF_Q, over_q),
+    ):
         plgpu.atomic_max(
-            counters_out, (jnp.asarray(slot_id, jnp.int32),), jnp.max(over.astype(jnp.int32))
+            counters_out,
+            (jnp.asarray(slot_id, jnp.int32),),
+            jnp.max(over.astype(jnp.int32)),
         )
 
 
@@ -348,7 +401,9 @@ def mutual_walk_pallas(
     cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
     rad = jnp.asarray(radii, dtype)
     active = (
-        jnp.ones((nodes,), idx) if node_active is None else jnp.asarray(node_active).astype(idx)
+        jnp.ones((nodes,), idx)
+        if node_active is None
+        else jnp.asarray(node_active).astype(idx)
     )
     theta_sq = jnp.asarray([float(theta) ** 2], dtype)
     Q = int(max_pair_queue)
@@ -356,8 +411,16 @@ def mutual_walk_pallas(
     grid = (Q + blk - 1) // blk
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
-        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(num_warps=int(num_warps))
-    kernel = functools.partial(_round_kernel, block=blk, far_cap=int(far_cap), near_cap=int(near_cap), queue_cap=Q)
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
+    kernel = functools.partial(
+        _round_kernel,
+        block=blk,
+        far_cap=int(far_cap),
+        near_cap=int(near_cap),
+        queue_cap=Q,
+    )
 
     def one_round(
         qa: Array,
@@ -371,8 +434,24 @@ def mutual_walk_pallas(
         next_b: Array,
         counters: Array,
     ) -> list[Array]:
-        operands = [qa, qb, size, left, right, cent, rad, active, theta_sq,
-                    far_a, far_b, near_a, near_b, next_a, next_b, counters]
+        operands = [
+            qa,
+            qb,
+            size,
+            left,
+            right,
+            cent,
+            rad,
+            active,
+            theta_sq,
+            far_a,
+            far_b,
+            near_a,
+            near_b,
+            next_a,
+            next_b,
+            counters,
+        ]
         outs = [far_a, far_b, near_a, near_b, next_a, next_b, counters]
         n_in = len(operands)
         alias = {n_in - 7 + k: k for k in range(7)}
@@ -391,17 +470,23 @@ def mutual_walk_pallas(
     qa0 = jnp.full((Q,), -1, idx).at[0].set(jnp.asarray(root, idx))
     qb0 = qa0
     init = (
-        qa0, qb0, jnp.asarray(1, idx),
-        jnp.full((int(far_cap),), -1, idx), jnp.full((int(far_cap),), -1, idx),
-        jnp.full((int(near_cap),), -1, idx), jnp.full((int(near_cap),), -1, idx),
+        qa0,
+        qb0,
+        jnp.asarray(1, idx),
+        jnp.full((int(far_cap),), -1, idx),
+        jnp.full((int(far_cap),), -1, idx),
+        jnp.full((int(near_cap),), -1, idx),
+        jnp.full((int(near_cap),), -1, idx),
         jnp.zeros((_NUM_COUNTERS,), idx),  # far, near, next, overflow far/near/queue
-        jnp.asarray(1, idx),   # peak
-        jnp.asarray(0, idx),   # rounds
+        jnp.asarray(1, idx),  # peak
+        jnp.asarray(0, idx),  # rounds
     )
 
     def cond(state: tuple[Array, ...]) -> Array:
         _qa, _qb, size, *_rest, counters, _peak, rounds = state
-        no_overflow = (counters[_C_OVF_FAR] + counters[_C_OVF_NEAR] + counters[_C_OVF_Q]) == 0
+        no_overflow = (
+            counters[_C_OVF_FAR] + counters[_C_OVF_NEAR] + counters[_C_OVF_Q]
+        ) == 0
         return (size > 0) & no_overflow & (rounds < int(max_rounds))
 
     def one_step(state: tuple[Array, ...]) -> tuple[Array, ...]:
@@ -417,18 +502,37 @@ def mutual_walk_pallas(
         peak = jnp.maximum(peak, new_size)
         # an empty round leaves everything untouched, so the count stays honest
         rounds = rounds + jnp.where(size > 0, 1, 0).astype(idx)
-        return (next_a, next_b, jnp.minimum(new_size, Q), far_a, far_b, near_a, near_b, counters, peak, rounds)
+        return (
+            next_a,
+            next_b,
+            jnp.minimum(new_size, Q),
+            far_a,
+            far_b,
+            near_a,
+            near_b,
+            counters,
+            peak,
+            rounds,
+        )
 
     def body(state: tuple[Array, ...]) -> tuple[Array, ...]:
         for _ in range(max(int(rounds_per_check), 1)):
             state = one_step(state)
         return state
 
-    qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = lax.while_loop(cond, body, init)
+    qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = lax.while_loop(
+        cond, body, init
+    )
     return PallasWalkResult(
-        far_a=far_a, far_b=far_b, far_count=jnp.minimum(counters[_C_FAR], int(far_cap)),
-        near_a=near_a, near_b=near_b, near_count=jnp.minimum(counters[_C_NEAR], int(near_cap)),
-        far_overflow=counters[_C_OVF_FAR] > 0, near_overflow=counters[_C_OVF_NEAR] > 0,
+        far_a=far_a,
+        far_b=far_b,
+        far_count=jnp.minimum(counters[_C_FAR], int(far_cap)),
+        near_a=near_a,
+        near_b=near_b,
+        near_count=jnp.minimum(counters[_C_NEAR], int(near_cap)),
+        far_overflow=counters[_C_OVF_FAR] > 0,
+        near_overflow=counters[_C_OVF_NEAR] > 0,
         queue_overflow=counters[_C_OVF_Q] > 0,
-        peak_wavefront=peak, rounds=rounds,
+        peak_wavefront=peak,
+        rounds=rounds,
     )

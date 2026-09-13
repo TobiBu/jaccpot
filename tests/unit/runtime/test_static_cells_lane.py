@@ -13,11 +13,13 @@ import pytest
 
 pytest.importorskip("yggdrax")
 from yggdrax.bounds import infer_bounds
+from yggdrax.tree_moments import compute_tree_mass_moments
 
-from jaccpot.runtime._interaction_cache import _build_flat_walk_artifacts_strict_streamed
+from jaccpot.runtime._interaction_cache import (
+    _build_flat_walk_artifacts_strict_streamed,
+)
 from jaccpot.runtime._mac_geometry import com_mac_geometry
 from jaccpot.runtime.fmm_state import TreeBuilderConfig, _build_tree_with_config
-from yggdrax.tree_moments import compute_tree_mass_moments
 
 
 def _plummer(n, seed=0):
@@ -31,7 +33,11 @@ def _plummer(n, seed=0):
 
 
 _CFG = TreeBuilderConfig(
-    mode="static_radix", target_leaf_particles=16, refine_local=False, max_refine_levels=0, aspect_threshold=8.0
+    mode="static_radix",
+    target_leaf_particles=16,
+    refine_local=False,
+    max_refine_levels=0,
+    aspect_threshold=8.0,
 )
 
 
@@ -39,9 +45,19 @@ def _build(n=4000, leaf=16, cap=1024, seed=0):
     P = jnp.asarray(_plummer(n, seed), jnp.float32)
     M = jnp.ones((n,), jnp.float32)
     art = _build_tree_with_config(
-        P, M, infer_bounds(P), tree_type="radix", tree_config=_CFG, leaf_size=leaf, workspace=None,
-        jit_tree=False, refine_local=False, max_refine_levels=0, aspect_threshold=8.0,
-        leaf_partition="cells", leaf_capacity=cap,
+        P,
+        M,
+        infer_bounds(P),
+        tree_type="radix",
+        tree_config=_CFG,
+        leaf_size=leaf,
+        workspace=None,
+        jit_tree=False,
+        refine_local=False,
+        max_refine_levels=0,
+        aspect_threshold=8.0,
+        leaf_partition="cells",
+        leaf_capacity=cap,
     )
     return art, P, M
 
@@ -63,9 +79,19 @@ def test_build_helper_returns_a_padded_cell_tree():
     with pytest.raises(ValueError):
         P2 = jnp.asarray(_plummer(100), jnp.float32)
         _build_tree_with_config(
-            P2, jnp.ones((100,), jnp.float32), infer_bounds(P2), tree_type="radix", tree_config=_CFG,
-            leaf_size=16, workspace=None, jit_tree=False, refine_local=False, max_refine_levels=0,
-            aspect_threshold=8.0, leaf_partition="cells", leaf_capacity=None,
+            P2,
+            jnp.ones((100,), jnp.float32),
+            infer_bounds(P2),
+            tree_type="radix",
+            tree_config=_CFG,
+            leaf_size=16,
+            workspace=None,
+            jit_tree=False,
+            refine_local=False,
+            max_refine_levels=0,
+            aspect_threshold=8.0,
+            leaf_partition="cells",
+            leaf_capacity=None,
         )
 
 
@@ -82,13 +108,23 @@ def test_com_geometry_and_flat_walk_ignore_empty_nodes():
     assert empty.size > 0 and np.all(r[empty] == 0)
     for theta in (0.6, 0.9):
         art_w = _build_flat_walk_artifacts_strict_streamed(
-            tree=tree, geometry=geom, theta=theta, mac_type="dehnen", dehnen_radius_scale=1.0,
-            compact_far_pair_capacity=1 << 18, near_edge_capacity=1 << 18, max_pair_queue=1 << 16,
+            tree=tree,
+            geometry=geom,
+            theta=theta,
+            mac_type="dehnen",
+            dehnen_radius_scale=1.0,
+            compact_far_pair_capacity=1 << 18,
+            near_edge_capacity=1 << 18,
+            max_pair_queue=1 << 16,
         )
         cfp = art_w.compact_far_pairs
         n_far = int(cfp.far_pair_count)
         src, tgt = np.asarray(cfp.sources)[:n_far], np.asarray(cfp.targets)[:n_far]
-        assert n_far > 0 and not np.isin(src, empty).any() and not np.isin(tgt, empty).any()
+        assert (
+            n_far > 0
+            and not np.isin(src, empty).any()
+            and not np.isin(tgt, empty).any()
+        )
         nl = art_w.neighbor_list
         counts = np.asarray(nl.counts)
         num_internal = int(tree.left_child.shape[0])

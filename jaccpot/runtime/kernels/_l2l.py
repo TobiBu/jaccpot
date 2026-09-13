@@ -195,7 +195,9 @@ def _propagate_solidfmm_locals_to_children(
     return coeffs_local + updates
 
 
-def _l2l_level_compact_kwargs(tree: Tree, *, total_nodes: int, num_internal: int) -> dict:
+def _l2l_level_compact_kwargs(
+    tree: Tree, *, total_nodes: int, num_internal: int
+) -> dict:
     """Level tables and the static batch width for the level-compact L2L cascade.
 
     Empty (the masked full-array cascade runs) when ``JACCPOT_L2L_LEVEL_COMPACT=0``
@@ -240,7 +242,9 @@ def _l2l_level_compact_kwargs(tree: Tree, *, total_nodes: int, num_internal: int
         ),
     )
     if pallas_cascades_enabled():
-        levels = registered_num_levels(total_nodes=int(total_nodes), num_internal=int(num_internal))
+        levels = registered_num_levels(
+            total_nodes=int(total_nodes), num_internal=int(num_internal)
+        )
         par = getattr(tree, "parent", None)
         if levels is not None and par is not None:
             out["parent"] = par
@@ -509,7 +513,9 @@ def _propagate_solidfmm_locals_by_level(
         def level_body_compact(level: Array, state: Array) -> Array:
             start = offs[level]
             count = offs[level + 1] - start
-            batch = jax.lax.dynamic_slice_in_dim(nbl, start_index=start, slice_size=width, axis=0)
+            batch = jax.lax.dynamic_slice_in_dim(
+                nbl, start_index=start, slice_size=width, axis=0
+            )
             is_parent = (slot < count) & (batch >= 0) & (batch < num_internal)
             par = jnp.where(is_parent, batch, 0)
             lc = jnp.where(is_parent, left_internal[par], minus_one)
@@ -520,7 +526,9 @@ def _propagate_solidfmm_locals_by_level(
             parent_rep_b = jnp.concatenate([par, par], axis=0)
             translated = _compact(state, centers, parent_rep_b, safe_child, valid)
             target = jnp.where(valid, safe_child, dead)
-            updates = jax.ops.segment_sum(translated, target, total_nodes + 1)[:total_nodes]
+            updates = jax.ops.segment_sum(translated, target, total_nodes + 1)[
+                :total_nodes
+            ]
             return state + updates
 
         return jax.lax.fori_loop(0, max_level + 1, level_body_compact, coeffs_local)
@@ -909,7 +917,9 @@ def _prepare_solidfmm_downward_sweep(
             basis_mode=basis_mode,
             num_levels=l2l_num_levels,
             **_l2l_level_compact_kwargs(
-                tree, total_nodes=total_nodes, num_internal=child_inputs.num_internal_nodes
+                tree,
+                total_nodes=total_nodes,
+                num_internal=child_inputs.num_internal_nodes,
             ),
         )
         locals_updated = _record_timed_array(
@@ -961,7 +971,9 @@ def _prepare_solidfmm_downward_sweep(
                 basis_mode=basis_mode,
                 num_levels=l2l_num_levels,
                 **_l2l_level_compact_kwargs(
-                    tree, total_nodes=total_nodes, num_internal=child_inputs.num_internal_nodes
+                    tree,
+                    total_nodes=total_nodes,
+                    num_internal=child_inputs.num_internal_nodes,
                 ),
             )
             source_motion_locals_updated = _record_timed_array(

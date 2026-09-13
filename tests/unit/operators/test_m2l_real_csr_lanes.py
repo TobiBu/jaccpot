@@ -33,7 +33,9 @@ def test_lanes_match_the_reference_on_ragged_rows(order, k_lanes):
     rows[7] = 2 * k_lanes + 1
     mult, cent, src, tgt = _case(order, n, rows, order)
     ref = m2l_real_csr_jax(mult, cent, src, tgt, order=order)
-    got = m2l_real_csr_lanes_pallas(mult, cent, src, tgt, order=order, k_lanes=k_lanes, interpret=True)
+    got = m2l_real_csr_lanes_pallas(
+        mult, cent, src, tgt, order=order, k_lanes=k_lanes, interpret=True
+    )
     r, g = np.asarray(ref), np.asarray(got)
     scale = np.abs(r).max()
     assert np.allclose(g, r, rtol=1e-4, atol=1e-4 * scale)
@@ -53,11 +55,19 @@ def test_lanes_axis_aligned_displacements_and_prefix():
     cent = jnp.asarray(cent)
     tgt = np.repeat(np.arange(n), n - 1)
     src = np.concatenate([np.delete(np.arange(n), t) for t in range(n)])
-    src_p = jnp.concatenate([jnp.asarray(src, jnp.int32), jnp.full((7,), -1, jnp.int32)])
-    tgt_p = jnp.concatenate([jnp.asarray(tgt, jnp.int32), jnp.full((7,), -1, jnp.int32)])
+    src_p = jnp.concatenate(
+        [jnp.asarray(src, jnp.int32), jnp.full((7,), -1, jnp.int32)]
+    )
+    tgt_p = jnp.concatenate(
+        [jnp.asarray(tgt, jnp.int32), jnp.full((7,), -1, jnp.int32)]
+    )
     live = jnp.asarray(src.size // 2)
-    ref = m2l_real_csr_jax(mult, cent, src_p, tgt_p, order=order, active_pair_count=live)
-    got = m2l_real_csr_lanes_pallas(mult, cent, src_p, tgt_p, order=order, active_pair_count=live, interpret=True)
+    ref = m2l_real_csr_jax(
+        mult, cent, src_p, tgt_p, order=order, active_pair_count=live
+    )
+    got = m2l_real_csr_lanes_pallas(
+        mult, cent, src_p, tgt_p, order=order, active_pair_count=live, interpret=True
+    )
     r, g = np.asarray(ref), np.asarray(got)
     assert np.all(np.isfinite(g))
     assert np.allclose(g, r, rtol=1e-4, atol=1e-4 * np.abs(r).max())
@@ -66,5 +76,9 @@ def test_lanes_axis_aligned_displacements_and_prefix():
 def test_lanes_is_jittable():
     order = 5
     mult, cent, src, tgt = _case(3, 20, np.full(20, 5), order)
-    f = jax.jit(lambda m, c: m2l_real_csr_lanes_pallas(m, c, src, tgt, order=order, interpret=True))
+    f = jax.jit(
+        lambda m, c: m2l_real_csr_lanes_pallas(
+            m, c, src, tgt, order=order, interpret=True
+        )
+    )
     assert np.all(np.isfinite(np.asarray(f(mult, cent))))

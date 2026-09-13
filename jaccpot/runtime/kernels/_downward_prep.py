@@ -17,7 +17,6 @@ Split out of ``core.py`` (Tier 1.6, A.9 seam 1); every function body is unchange
 from __future__ import annotations
 
 import os
-
 from typing import Any, NamedTuple, Optional
 
 import jax.numpy as jnp
@@ -665,18 +664,19 @@ def _solidfmm_downward_accumulate_from_multipoles(
         if real_basis and _m2l_csr_pallas_active():
             from jaccpot._env import env_flag
             from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
+            from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
             from jaccpot.pallas.m2l_real_csr_tiled import (
                 m2l_real_csr_tiled_pallas,
                 m2l_real_csr_tiled_supported,
             )
 
-            from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
-
             interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
             # plan sub-10ms Phase 5: JACCPOT_M2L_CSR_KERNEL = pair | tiled | lanes
             # (JACCPOT_M2L_CSR_TILED=1 is the older spelling of "tiled")
             which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
-            if not which:  # default: lanes (Phase 6, 2026-09-11; 18x the per-pair kernel)
+            if (
+                not which
+            ):  # default: lanes (Phase 6, 2026-09-11; 18x the per-pair kernel)
                 which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "lanes"
             if which not in ("pair", "tiled", "lanes"):
                 raise ValueError(

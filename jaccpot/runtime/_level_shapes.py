@@ -65,7 +65,9 @@ def registered_level_batch_width(*, total_nodes: int, num_internal: int) -> int 
     return _WIDTHS.get(_key(total_nodes, num_internal))
 
 
-def level_batch_width(level_offsets: Array, *, total_nodes: int, num_internal: int) -> int:
+def level_batch_width(
+    level_offsets: Array, *, total_nodes: int, num_internal: int
+) -> int:
     """Static batch width for the level loops: the widest level, with headroom.
 
     Concrete ``level_offsets`` (eager) measure the tree and raise the registry
@@ -147,7 +149,9 @@ def pallas_cascades_enabled() -> bool:
     if override is not None:
         # the gradient path forces the pure-JAX loops: pallas_call has no AD rule
         return bool(override)
-    if not env_flag("JACCPOT_CASCADE_PALLAS", True):  # default on since Phase 6 (2026-09-11)
+    if not env_flag(
+        "JACCPOT_CASCADE_PALLAS", True
+    ):  # default on since Phase 6 (2026-09-11)
         return False
     if env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False):
         return True
@@ -156,7 +160,9 @@ def pallas_cascades_enabled() -> bool:
     return bool(pallas_cascade_level_supported())
 
 
-def level_width_overflow(level_offsets: Array, *, total_nodes: int, num_internal: int) -> Array:
+def level_width_overflow(
+    level_offsets: Array, *, total_nodes: int, num_internal: int
+) -> Array:
     """Traced check that no level of a rebuilt tree exceeds the registered width.
 
     Parameters
@@ -173,7 +179,9 @@ def level_width_overflow(level_offsets: Array, *, total_nodes: int, num_internal
     Array
         Boolean scalar; ``True`` when a level is wider than the loops' batch.
     """
-    width = registered_level_batch_width(total_nodes=total_nodes, num_internal=num_internal)
+    width = registered_level_batch_width(
+        total_nodes=total_nodes, num_internal=num_internal
+    )
     if width is None:
         return jnp.asarray(False)
     offs = jnp.asarray(level_offsets)

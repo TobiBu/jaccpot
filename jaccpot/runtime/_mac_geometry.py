@@ -48,7 +48,9 @@ from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.geometry import TreeGeometry
 
-_MAX_TREE_LEVELS = 64  # yggdrax._tree_impl.MAX_TREE_LEVELS: level tables are padded to it
+_MAX_TREE_LEVELS = (
+    64  # yggdrax._tree_impl.MAX_TREE_LEVELS: level tables are padded to it
+)
 
 __all__ = [
     "com_mac_geometry",
@@ -79,7 +81,9 @@ def mac_geometry_mode() -> str:
     ValueError
         If the environment names a mode this module does not implement.
     """
-    raw = os.environ.get(_MAC_GEOMETRY_ENV, "com").strip().lower()  # default com since Phase 6
+    raw = (
+        os.environ.get(_MAC_GEOMETRY_ENV, "com").strip().lower()
+    )  # default com since Phase 6
     if raw not in _MAC_GEOMETRY_MODES:
         raise ValueError(
             f"{_MAC_GEOMETRY_ENV} must be one of {_MAC_GEOMETRY_MODES}, got {raw!r}"
@@ -114,7 +118,9 @@ def _node_depths(parent: Array) -> Array:
     parent_safe = jnp.where(parent >= 0, parent, as_index(0))
     is_root = parent < 0
     init_dist = jnp.where(is_root, as_index(0), as_index(1))
-    init_shortcut = jnp.where(is_root, jnp.arange(num_nodes, dtype=INDEX_DTYPE), parent_safe)
+    init_shortcut = jnp.where(
+        is_root, jnp.arange(num_nodes, dtype=INDEX_DTYPE), parent_safe
+    )
 
     def _cond(state):
         _sc, _d, changed = state
@@ -126,7 +132,9 @@ def _node_depths(parent: Array) -> Array:
         new_sc = sc[sc]
         return new_sc, new_d, jnp.any(new_sc != sc)
 
-    _, depth, _ = lax.while_loop(_cond, _body, (init_shortcut, init_dist, jnp.bool_(True)))
+    _, depth, _ = lax.while_loop(
+        _cond, _body, (init_shortcut, init_dist, jnp.bool_(True))
+    )
     return depth
 
 
@@ -171,7 +179,9 @@ def com_mac_geometry(
         If ``internal`` is not ``"exact"`` or ``"bound"``.
     """
     if internal not in _MAC_RADIUS_MODES:
-        raise ValueError(f"internal must be one of {_MAC_RADIUS_MODES}, got {internal!r}")
+        raise ValueError(
+            f"internal must be one of {_MAC_RADIUS_MODES}, got {internal!r}"
+        )
     positions_sorted = jnp.asarray(positions_sorted)
     dtype = positions_sorted.dtype
     centers = jnp.asarray(centers, dtype=dtype)
@@ -221,17 +231,25 @@ def com_mac_geometry(
         anc = anc_t.T  # (L, D); -1 past the root
         chunk = 4
         n_chunks = max_levels // chunk
-        anc_chunks = anc.reshape(num_leaves, n_chunks, chunk).transpose(1, 0, 2)  # (nc, L, chunk)
+        anc_chunks = anc.reshape(num_leaves, n_chunks, chunk).transpose(
+            1, 0, 2
+        )  # (nc, L, chunk)
 
         def _dist_chunk(anc_c):
             live = anc_c >= 0
             c = centers[jnp.where(live, anc_c, 0)]  # (L, chunk, 3)
             diff = pts[:, :, None, :] - c[:, None, :, :]  # (L, w, chunk, 3)
             d = jnp.linalg.norm(diff, axis=-1)
-            d = jnp.max(jnp.where(valid[:, :, None], d, jnp.asarray(0.0, dtype)), axis=1)
+            d = jnp.max(
+                jnp.where(valid[:, :, None], d, jnp.asarray(0.0, dtype)), axis=1
+            )
             return jnp.where(live, d, jnp.asarray(0.0, dtype))
 
-        d_all = lax.map(_dist_chunk, anc_chunks).transpose(1, 0, 2).reshape(num_leaves, max_levels)
+        d_all = (
+            lax.map(_dist_chunk, anc_chunks)
+            .transpose(1, 0, 2)
+            .reshape(num_leaves, max_levels)
+        )
 
         def _seg(a, b):
             ka, va = a

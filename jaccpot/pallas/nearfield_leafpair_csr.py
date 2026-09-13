@@ -470,7 +470,9 @@ def nearfield_leafpair_csr_pallas(
     ).astype(jnp.int32)
     kernel = pl.pallas_call(
         _kernel,
-        out_shape=jax.ShapeDtypeStruct((capacity, width_pad, _OUT_WIDTH), partial_dtype),
+        out_shape=jax.ShapeDtypeStruct(
+            (capacity, width_pad, _OUT_WIDTH), partial_dtype
+        ),
         in_specs=[
             _full(pos_padded),
             _full(leaf_masses),

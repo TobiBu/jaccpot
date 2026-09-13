@@ -54,7 +54,9 @@ def _random_csr(seed, L, W, *, max_row, edge_capacity=None, empty_rows=()):
 
 @pytest.mark.parametrize("chunk", [1, 2, 3, 8])
 def test_chunk_table_covers_every_row_exactly_once(chunk):
-    _, _, _, nbr, offsets, counts = _random_csr(3, L=7, W=4, max_row=9, empty_rows=(2, 5))
+    _, _, _, nbr, offsets, counts = _random_csr(
+        3, L=7, W=4, max_row=9, empty_rows=(2, 5)
+    )
     cap = leafpair_chunk_capacity(int(nbr.shape[0]), 7, chunk)
     tab = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=cap)
     leaf = np.asarray(tab.leaf)
@@ -63,7 +65,7 @@ def test_chunk_table_covers_every_row_exactly_once(chunk):
     first = np.asarray(tab.is_first)
     live = leaf >= 0
     # live prefix, then padding
-    assert np.all(live[: live.sum()]) and not np.any(live[live.sum():])
+    assert np.all(live[: live.sum()]) and not np.any(live[live.sum() :])
     assert np.all(count[~live] == 0) and np.all(first[~live] == 0)
     off = np.asarray(offsets)
     cnt = np.asarray(counts)
@@ -71,7 +73,9 @@ def test_chunk_table_covers_every_row_exactly_once(chunk):
         mine = np.where(leaf == l)[0]
         assert len(mine) == max(1, -(-int(cnt[l]) // chunk))
         assert first[mine].sum() == 1 and first[mine[0]] == 1
-        covered = np.concatenate([np.arange(start[c], start[c] + count[c]) for c in mine])
+        covered = np.concatenate(
+            [np.arange(start[c], start[c] + count[c]) for c in mine]
+        )
         assert np.array_equal(covered, np.arange(off[l], off[l + 1]))
         assert np.all(count[mine] <= chunk)
     # chunks of one leaf are consecutive (the sorted segment sum relies on it)
@@ -90,11 +94,26 @@ def test_csr_interpret_matches_dense_twin(chunk, include_self):
     cap = leafpair_chunk_capacity(int(nbr.shape[0]), L, chunk)
     tab = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=cap)
     got = nearfield_leafpair_csr_pallas(
-        pos, mass, mask, nbr, tab, softening_sq=soft, G=G, chunk=chunk,
-        interpret=True, include_self=include_self,
+        pos,
+        mass,
+        mask,
+        nbr,
+        tab,
+        softening_sq=soft,
+        G=G,
+        chunk=chunk,
+        interpret=True,
+        include_self=include_self,
     )
     ref = nearfield_leafpair_csr_jax(
-        pos, mass, mask, nbr, offsets, counts, softening_sq=soft, G=G,
+        pos,
+        mass,
+        mask,
+        nbr,
+        offsets,
+        counts,
+        softening_sq=soft,
+        G=G,
         include_self=include_self,
     )
     assert got.shape == (L, W, 4)
@@ -108,24 +127,44 @@ def test_csr_interpret_matches_dense_twin(chunk, include_self):
 def test_csr_matches_rectangle_kernel_and_pads_subtile():
     """W = 6 is not a power of two: Bt = 4, the table is padded to 8 lanes."""
     L, W = 5, 6
-    pos, mass, mask, nbr, offsets, counts = _random_csr(5, L=L, W=W, max_row=4, edge_capacity=32)
+    pos, mass, mask, nbr, offsets, counts = _random_csr(
+        5, L=L, W=W, max_row=4, edge_capacity=32
+    )
     soft = jnp.float32(0.02**2)
     G = jnp.float32(0.7)
     chunk = 3
     cap = leafpair_chunk_capacity(int(nbr.shape[0]), L, chunk)
     tab = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=cap)
     got = nearfield_leafpair_csr_pallas(
-        pos, mass, mask, nbr, tab, softening_sq=soft, G=G, chunk=chunk,
-        interpret=True, include_self=True,
+        pos,
+        mass,
+        mask,
+        nbr,
+        tab,
+        softening_sq=soft,
+        G=G,
+        chunk=chunk,
+        interpret=True,
+        include_self=True,
     )
     # the rectangle kernel on the same lists
     max_count = int(jnp.max(counts))
     slots = jnp.arange(max_count, dtype=jnp.int32)
     valid = slots[None, :] < counts[:, None]
-    ids = jnp.where(valid, nbr[jnp.where(valid, offsets[:-1, None] + slots[None, :], 0)], 0)
+    ids = jnp.where(
+        valid, nbr[jnp.where(valid, offsets[:-1, None] + slots[None, :], 0)], 0
+    )
     rect = nearfield_leafpair_pallas(
-        pos, mass, mask, ids, valid, softening_sq=soft, G=G, interpret=True,
-        include_self=True, source_chunk=2,
+        pos,
+        mass,
+        mask,
+        ids,
+        valid,
+        softening_sq=soft,
+        G=G,
+        interpret=True,
+        include_self=True,
+        source_chunk=2,
     )
     assert got.shape == rect.shape == (L, W, 4)
     assert np.allclose(np.asarray(got), np.asarray(rect), rtol=1e-5, atol=1e-6)
@@ -133,22 +172,32 @@ def test_csr_matches_rectangle_kernel_and_pads_subtile():
 
 def test_csr_wide_accumulator_interpret_matches_input_accumulator():
     L, W = 4, 8
-    pos, mass, mask, nbr, offsets, counts = _random_csr(9, L=L, W=W, max_row=3, edge_capacity=16)
+    pos, mass, mask, nbr, offsets, counts = _random_csr(
+        9, L=L, W=W, max_row=3, edge_capacity=16
+    )
     soft = jnp.float32(0.1**2)
     G = jnp.float32(1.0)
     chunk = 2
     cap = leafpair_chunk_capacity(int(nbr.shape[0]), L, chunk)
     tab = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=cap)
-    common = dict(softening_sq=soft, G=G, chunk=chunk, interpret=True, include_self=True)
-    narrow = nearfield_leafpair_csr_pallas(pos, mass, mask, nbr, tab, accum="input", **common)
-    wide = nearfield_leafpair_csr_pallas(pos, mass, mask, nbr, tab, accum="wide", **common)
+    common = dict(
+        softening_sq=soft, G=G, chunk=chunk, interpret=True, include_self=True
+    )
+    narrow = nearfield_leafpair_csr_pallas(
+        pos, mass, mask, nbr, tab, accum="input", **common
+    )
+    wide = nearfield_leafpair_csr_pallas(
+        pos, mass, mask, nbr, tab, accum="wide", **common
+    )
     assert wide.dtype == narrow.dtype == jnp.float32
     assert np.allclose(np.asarray(wide), np.asarray(narrow), rtol=1e-5, atol=1e-6)
 
 
 def test_csr_is_jittable_with_traced_table():
     L, W = 4, 4
-    pos, mass, mask, nbr, offsets, counts = _random_csr(2, L=L, W=W, max_row=3, edge_capacity=16)
+    pos, mass, mask, nbr, offsets, counts = _random_csr(
+        2, L=L, W=W, max_row=3, edge_capacity=16
+    )
     chunk = 2
     cap = leafpair_chunk_capacity(int(nbr.shape[0]), L, chunk)
 
@@ -156,12 +205,26 @@ def test_csr_is_jittable_with_traced_table():
     def f(pos, mass, mask, nbr, offsets, counts):
         tab = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=cap)
         return nearfield_leafpair_csr_pallas(
-            pos, mass, mask, nbr, tab, softening_sq=jnp.float32(1e-4), G=jnp.float32(1.0),
-            chunk=chunk, interpret=True,
+            pos,
+            mass,
+            mask,
+            nbr,
+            tab,
+            softening_sq=jnp.float32(1e-4),
+            G=jnp.float32(1.0),
+            chunk=chunk,
+            interpret=True,
         )
 
     out = f(pos, mass, mask, nbr, offsets, counts)
     ref = nearfield_leafpair_csr_jax(
-        pos, mass, mask, nbr, offsets, counts, softening_sq=jnp.float32(1e-4), G=jnp.float32(1.0)
+        pos,
+        mass,
+        mask,
+        nbr,
+        offsets,
+        counts,
+        softening_sq=jnp.float32(1e-4),
+        G=jnp.float32(1.0),
     )
     assert np.allclose(np.asarray(out), np.asarray(ref), rtol=1e-5, atol=1e-6)

@@ -29,11 +29,12 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 __all__: list[str] = []
 
 
-
 def _drop_masked(flat_indices, flat_mask, n: int):
     """Unique out-of-range indices for masked slots (see ``_scatter_contributions``)."""
     slot = jnp.arange(int(flat_indices.shape[0]), dtype=flat_indices.dtype)
-    return jnp.where(flat_mask, flat_indices, jnp.asarray(int(n), flat_indices.dtype) + slot)
+    return jnp.where(
+        flat_mask, flat_indices, jnp.asarray(int(n), flat_indices.dtype) + slot
+    )
 
 
 def _scatter_contributions(

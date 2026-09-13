@@ -181,7 +181,9 @@ def _shift_core(v: Array, r: Array, sel: Array, invfact: Array, kpow: Array) -> 
     return jnp.sum(S[:, :, None] * v[None, :, :], axis=1)
 
 
-def _translate_rows(rows: Array, delta3: tuple, t: dict[str, Array], which: str) -> Array:
+def _translate_rows(
+    rows: Array, delta3: tuple, t: dict[str, Array], which: str
+) -> Array:
     """Rotate onto the pair axis, shift along z, rotate back (centred layout).
 
     Multipoles (``which="m2m"``) rotate with ``T`` in and ``T^-1`` out; locals
@@ -238,7 +240,9 @@ def _translate_rows(rows: Array, delta3: tuple, t: dict[str, Array], which: str)
 # ----------------------------------------------------------------- pure-jnp twins
 
 
-def m2m_real_centred_pair_jax(child_packed: Array, delta: Array, *, order: int) -> Array:
+def m2m_real_centred_pair_jax(
+    child_packed: Array, delta: Array, *, order: int
+) -> Array:
     """M2M of one packed child expansion to a parent at ``-delta`` (twin of :func:`m2m_real`).
 
     Parameters
@@ -256,12 +260,16 @@ def m2m_real_centred_pair_jax(child_packed: Array, delta: Array, *, order: int) 
         ``(C,)`` packed multipole at the parent.
     """
     t = _core_tables_to_jnp(int(order), child_packed.dtype)
-    rows = pack_centred(child_packed[None, :], order=int(order))[0].reshape(t["invfact"].shape[0], -1)
+    rows = pack_centred(child_packed[None, :], order=int(order))[0].reshape(
+        t["invfact"].shape[0], -1
+    )
     out = _translate_rows(rows, (delta[0], delta[1], delta[2]), t, "m2m")
     return unpack_centred(out.reshape(1, -1), order=int(order))[0]
 
 
-def l2l_real_centred_pair_jax(parent_packed: Array, delta: Array, *, order: int) -> Array:
+def l2l_real_centred_pair_jax(
+    parent_packed: Array, delta: Array, *, order: int
+) -> Array:
     """L2L of one packed parent local to a child at ``-delta`` (twin of :func:`l2l_real`).
 
     Parameters
@@ -279,7 +287,9 @@ def l2l_real_centred_pair_jax(parent_packed: Array, delta: Array, *, order: int)
         ``(C,)`` packed local at the child.
     """
     t = _core_tables_to_jnp(int(order), parent_packed.dtype)
-    rows = pack_centred(parent_packed[None, :], order=int(order))[0].reshape(t["invfact"].shape[0], -1)
+    rows = pack_centred(parent_packed[None, :], order=int(order))[0].reshape(
+        t["invfact"].shape[0], -1
+    )
     out = _translate_rows(rows, (delta[0], delta[1], delta[2]), t, "l2l")
     return unpack_centred(out.reshape(1, -1), order=int(order))[0]
 
@@ -442,8 +452,16 @@ def _full(arr: Array) -> "pl.BlockSpec":
     return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
 
-def _level_call(kernel, operands: list, *, num_programs: int, interpret: bool,
-                backend: str, num_warps: int, name: str):
+def _level_call(
+    kernel,
+    operands: list,
+    *,
+    num_programs: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    name: str,
+):
     """One level launch: whole-array refs, ``num_programs`` programs.
 
     ``operands[0]`` is the coefficient table; it is aliased to the output, so
@@ -452,7 +470,9 @@ def _level_call(kernel, operands: list, *, num_programs: int, interpret: bool,
     """
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
-        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(num_warps=int(num_warps))
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
     rows = operands[0]
     return pl.pallas_call(
         kernel,
@@ -536,9 +556,13 @@ def m2m_real_levels_pallas(
     cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 1), (0, 1)))
     width = int(max(level_batch_width, 1))
     idx = level_offsets.dtype
-    nbl = jnp.concatenate([jnp.asarray(nodes_by_level, idx), jnp.full((width,), -1, idx)])
+    nbl = jnp.concatenate(
+        [jnp.asarray(nodes_by_level, idx), jnp.full((width,), -1, idx)]
+    )
     offs = jnp.asarray(level_offsets, idx)
-    kernel = functools.partial(_m2m_level_kernel, bp=Bp, wp=Wp, num_internal=int(num_internal))
+    kernel = functools.partial(
+        _m2m_level_kernel, bp=Bp, wp=Wp, num_internal=int(num_internal)
+    )
 
     def body(rev: Array, rows_state: Array) -> Array:
         level = (int(num_levels) - 2) - rev
@@ -546,8 +570,20 @@ def m2m_real_levels_pallas(
         count = (offs[level + 1] - offs[level])[None]
         return _level_call(
             kernel,
-            [rows_state, cent, jnp.asarray(left_child, idx), jnp.asarray(right_child, idx), nbl, start, count, *table_arrays],
-            num_programs=width, interpret=interpret, backend=backend, num_warps=num_warps,
+            [
+                rows_state,
+                cent,
+                jnp.asarray(left_child, idx),
+                jnp.asarray(right_child, idx),
+                nbl,
+                start,
+                count,
+                *table_arrays,
+            ],
+            num_programs=width,
+            interpret=interpret,
+            backend=backend,
+            num_warps=num_warps,
             name=f"m2m_real_level_p{p}",
         )
 
@@ -616,7 +652,9 @@ def l2l_real_levels_pallas(
     cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 1), (0, 1)))
     width = int(max(level_batch_width, 1))
     idx = level_offsets.dtype
-    nbl = jnp.concatenate([jnp.asarray(nodes_by_level, idx), jnp.full((width,), -1, idx)])
+    nbl = jnp.concatenate(
+        [jnp.asarray(nodes_by_level, idx), jnp.full((width,), -1, idx)]
+    )
     offs = jnp.asarray(level_offsets, idx)
     par = jnp.asarray(parent, idx)
     kernel = functools.partial(_l2l_level_kernel, bp=Bp, wp=Wp)
@@ -627,7 +665,10 @@ def l2l_real_levels_pallas(
         return _level_call(
             kernel,
             [rows_state, cent, par, nbl, start, count, *table_arrays],
-            num_programs=width, interpret=interpret, backend=backend, num_warps=num_warps,
+            num_programs=width,
+            interpret=interpret,
+            backend=backend,
+            num_warps=num_warps,
             name=f"l2l_real_level_p{p}",
         )
 

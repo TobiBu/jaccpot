@@ -41,7 +41,9 @@ def pallas_cascades_on(monkeypatch):
     """Force the Pallas cascades reachable on CPU (interpret mode)."""
     monkeypatch.setenv("JACCPOT_CASCADE_PALLAS", "1")
     monkeypatch.setenv("JACCPOT_CASCADE_PALLAS_INTERPRET", "1")
-    assert pallas_cascades_enabled(), "fixture is vacuous: the Pallas path is not reachable"
+    assert (
+        pallas_cascades_enabled()
+    ), "fixture is vacuous: the Pallas path is not reachable"
 
 
 def test_the_override_turns_the_gate_off_and_restores_it(pallas_cascades_on):
@@ -55,7 +57,9 @@ def test_the_override_turns_the_gate_off_and_restores_it(pallas_cascades_on):
 
 
 @pytest.mark.filterwarnings("ignore::FutureWarning")
-def test_grad_runs_and_matches_the_direct_sum_with_the_cascades_default_on(pallas_cascades_on):
+def test_grad_runs_and_matches_the_direct_sum_with_the_cascades_default_on(
+    pallas_cascades_on,
+):
     """``jax.grad`` through the FMM, with the Pallas cascades enabled globally.
 
     Before the override this raised ``AssertionError`` from
@@ -74,11 +78,14 @@ def test_grad_runs_and_matches_the_direct_sum_with_the_cascades_default_on(palla
     ref = np.asarray(
         jax.grad(
             lambda p: jnp.sum(
-                direct_sum_gravitational_acceleration(p, mass, G=1.0, softening=_SOFT) ** 2
+                direct_sum_gravitational_acceleration(p, mass, G=1.0, softening=_SOFT)
+                ** 2
             )
         )(pos)
     )
     assert np.all(np.isfinite(got))
     assert np.linalg.norm(got) > 0  # non-vacuous
     rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
-    assert rel < 1e-5, f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"
+    assert (
+        rel < 1e-5
+    ), f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"

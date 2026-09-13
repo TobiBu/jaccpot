@@ -29,15 +29,16 @@ from jax import lax
 from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
-
-from jaccpot.runtime._level_shapes import (
-    level_batch_width as _level_batch_width,
-    pallas_cascades_enabled as _pallas_cascades_enabled,
-    registered_num_levels as _registered_num_levels,
-)
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
+from jaccpot.runtime._level_shapes import level_batch_width as _level_batch_width
+from jaccpot.runtime._level_shapes import (
+    pallas_cascades_enabled as _pallas_cascades_enabled,
+)
+from jaccpot.runtime._level_shapes import (
+    registered_num_levels as _registered_num_levels,
+)
 
 __all__ = [
     "RealNodeMultipoleData",
@@ -503,8 +504,12 @@ def prepare_real_upward_sweep(
         from jaccpot._env import env_flag
         from jaccpot.pallas.cascade_real_level import m2m_real_levels_pallas
 
-        hinted = _registered_num_levels(total_nodes=total_nodes, num_internal=num_internal)
-        pallas_levels = num_levels if static_num_levels is not None else (hinted or num_levels)
+        hinted = _registered_num_levels(
+            total_nodes=total_nodes, num_internal=num_internal
+        )
+        pallas_levels = (
+            num_levels if static_num_levels is not None else (hinted or num_levels)
+        )
         packed = m2m_real_levels_pallas(
             packed,
             centers,

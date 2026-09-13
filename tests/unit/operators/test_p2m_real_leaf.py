@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 pytest.importorskip("yggdrax")
-from yggdrax.bounds import infer_bounds
 from yggdrax._tree_impl import build_static_cells_tree
+from yggdrax.bounds import infer_bounds
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas
@@ -32,13 +32,34 @@ def test_pallas_leaf_p2m_matches_the_batched_reference(order, dtype):
     P = jnp.asarray(_plummer(n, 1), dtype)
     M = jnp.asarray(np.random.default_rng(2).uniform(0.5, 1.5, n), dtype)
     # a cell tree with padding leaves (empty) and a few tiny leaves (delta ~ 0 lanes)
-    topo, ps, ms, inv = build_static_cells_tree(P, M, infer_bounds(P), leaf_size=leaf, leaf_capacity=1024, return_reordered=True)
-    ni = int(topo.left_child.shape[0]); tot = int(topo.parent.shape[0])
+    topo, ps, ms, inv = build_static_cells_tree(
+        P, M, infer_bounds(P), leaf_size=leaf, leaf_capacity=1024, return_reordered=True
+    )
+    ni = int(topo.left_child.shape[0])
+    tot = int(topo.parent.shape[0])
     com = jnp.asarray(compute_tree_mass_moments(topo, ps, ms).center_of_mass, dtype)
-    ref = _p2m_leaves_real(topo.node_ranges, ps, ms, com, order=order, max_leaf_size=leaf,
-                           num_internal=ni, total_nodes=tot, leaf_batch_size=256)
-    got = p2m_real_leaves_pallas(ps, ms, com[ni:], topo.node_ranges[ni:], order=order, num_internal=ni,
-                                 total_nodes=tot, leaf_width=leaf, interpret=True)
+    ref = _p2m_leaves_real(
+        topo.node_ranges,
+        ps,
+        ms,
+        com,
+        order=order,
+        max_leaf_size=leaf,
+        num_internal=ni,
+        total_nodes=tot,
+        leaf_batch_size=256,
+    )
+    got = p2m_real_leaves_pallas(
+        ps,
+        ms,
+        com[ni:],
+        topo.node_ranges[ni:],
+        order=order,
+        num_internal=ni,
+        total_nodes=tot,
+        leaf_width=leaf,
+        interpret=True,
+    )
     r, g = np.asarray(ref), np.asarray(got)
     assert g.shape == r.shape
     assert np.all(g[:ni] == 0)

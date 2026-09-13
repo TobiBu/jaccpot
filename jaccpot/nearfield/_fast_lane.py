@@ -96,6 +96,7 @@ def _nearfield_csr_lane_enabled() -> bool:
 
     return bool(pallas_m2l_real_csr_supported())
 
+
 __all__ = [
     "compute_leaf_p2p_accelerations_radix_fast_lane",
     "compute_leaf_p2p_accelerations_radix_payload_pairs_only",
@@ -1596,8 +1597,12 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         nbr_leaf = jnp.maximum(nbr_nodes - leaf_nodes[0], 0)
         chunk = max(1, _env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64))
         num_leaves_csr = int(counts.shape[0])
-        capacity = leafpair_chunk_capacity(int(nbr_nodes.shape[0]), num_leaves_csr, chunk)
-        table = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=capacity)
+        capacity = leafpair_chunk_capacity(
+            int(nbr_nodes.shape[0]), num_leaves_csr, chunk
+        )
+        table = build_leafpair_chunk_table(
+            offsets, counts, chunk=chunk, capacity=capacity
+        )
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
         out = nearfield_leafpair_csr_pallas(
             leaf_positions,
@@ -1620,7 +1625,10 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         )
         if want_potential:
             pair_pot = _scatter_scalar_contributions(
-                jnp.zeros(positions.shape[:1], dtype=dtype), leaf_particle_idx, out[..., 3], leaf_mask
+                jnp.zeros(positions.shape[:1], dtype=dtype),
+                leaf_particle_idx,
+                out[..., 3],
+                leaf_mask,
             )
             return pair_acc, pair_pot
         return pair_acc

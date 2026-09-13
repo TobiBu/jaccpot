@@ -24,7 +24,9 @@ from yggdrax._geometry_impl import compute_tree_geometry
 from yggdrax.tree import Tree
 from yggdrax.tree_moments import compute_tree_mass_moments
 
-from jaccpot.runtime._interaction_cache import _build_flat_walk_artifacts_strict_streamed
+from jaccpot.runtime._interaction_cache import (
+    _build_flat_walk_artifacts_strict_streamed,
+)
 from jaccpot.runtime._mac_geometry import (
     com_mac_geometry,
     mac_geometry_mode,
@@ -99,8 +101,14 @@ def test_internal_mode_is_validated(tree_data):
 
 def _far_pair_ratios(tree, geometry, centers, exact_r, *, theta):
     art = _build_flat_walk_artifacts_strict_streamed(
-        tree=tree, geometry=geometry, theta=theta, mac_type="dehnen", dehnen_radius_scale=1.0,
-        compact_far_pair_capacity=1 << 16, near_edge_capacity=1 << 16, max_pair_queue=1 << 14,
+        tree=tree,
+        geometry=geometry,
+        theta=theta,
+        mac_type="dehnen",
+        dehnen_radius_scale=1.0,
+        compact_far_pair_capacity=1 << 16,
+        near_edge_capacity=1 << 16,
+        max_pair_queue=1 << 14,
     )
     cfp = art.compact_far_pairs
     cnt = int(cfp.far_pair_count)
@@ -133,10 +141,14 @@ def test_mode_knob(monkeypatch, tree_data):
     assert mac_geometry_mode() == "com"  # the default since plan sub-10ms Phase 6
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "aabb")
     assert mac_geometry_mode() == "aabb"
-    g, f = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF, geometry_factory="factory")
+    g, f = resolve_walk_geometry(
+        topo, ps, box, com, leaf_cap=_LEAF, geometry_factory="factory"
+    )
     assert g is box and f == "factory"
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "com")
-    g, f = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF, geometry_factory="factory")
+    g, f = resolve_walk_geometry(
+        topo, ps, box, com, leaf_cap=_LEAF, geometry_factory="factory"
+    )
     assert f is None and np.allclose(np.asarray(g.center), np.asarray(com))
     with pytest.raises(RuntimeError):
         resolve_walk_geometry(topo, ps, box, None, leaf_cap=_LEAF)
@@ -155,7 +167,11 @@ def test_mode_knob(monkeypatch, tree_data):
 @pytest.mark.parametrize("internal", ["exact", "bound"])
 def test_com_geometry_is_jittable(tree_data, internal):
     tree, topo, ps, ms, com, box = tree_data
-    f = jax.jit(lambda ps, com: com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal))
+    f = jax.jit(
+        lambda ps, com: com_mac_geometry(
+            topo, ps, com, leaf_cap=_LEAF, internal=internal
+        )
+    )
     g = f(ps, com)
     ref = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal)
     assert np.allclose(np.asarray(g.radius), np.asarray(ref.radius))

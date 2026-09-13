@@ -58,8 +58,6 @@ from ._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_node_force_scale_from_sorted_magnitudes,
 )
-from ._level_shapes import level_width_overflow
-from ._mac_geometry import mac_geometry_mode, resolve_walk_geometry
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
     _compiled_refresh_dual_planner_route,
@@ -71,6 +69,8 @@ from ._interaction_cache import (
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
 from ._large_n_types import LargeNPrepareRequest
+from ._level_shapes import level_width_overflow
+from ._mac_geometry import mac_geometry_mode, resolve_walk_geometry
 from ._nearfield_cache import (
     NearfieldPrecomputeArtifacts,
     nearfield_cache_matches,
@@ -709,7 +709,9 @@ class PrepareMixin(_EngineBase):
             )
         leaf_capacity_overflow: Optional[Array] = None
         if cells:
-            rebuilt_tree, positions_sorted, masses_sorted, inverse, overflow = rebuilt_result
+            rebuilt_tree, positions_sorted, masses_sorted, inverse, overflow = (
+                rebuilt_result
+            )
             # a rebuilt tree deeper than the level-loop bound would truncate
             # the M2M/L2L sweeps: make it a capacity failure like the leaf cap
             depth_bound = getattr(self, "_cells_upward_num_levels", None)
@@ -1076,7 +1078,9 @@ class PrepareMixin(_EngineBase):
             topology_key=topology_key_for_state,
             upward=upward,
             locals_template=locals_template,
-            leaf_capacity_overflow=getattr(build_artifacts, "leaf_capacity_overflow", None),
+            leaf_capacity_overflow=getattr(
+                build_artifacts, "leaf_capacity_overflow", None
+            ),
         )
 
     def _prepare_state_tree_upward_and_dual_downward(
@@ -1539,7 +1543,9 @@ class PrepareMixin(_EngineBase):
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
             strict_flat_walk_capacity_floor=strict_flat_floor,
-            strict_extra_overflow=getattr(tree_artifacts, "leaf_capacity_overflow", None),
+            strict_extra_overflow=getattr(
+                tree_artifacts, "leaf_capacity_overflow", None
+            ),
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
@@ -3600,7 +3606,9 @@ class PrepareMixin(_EngineBase):
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
             strict_flat_walk_capacity_floor=strict_flat_floor,
-            strict_extra_overflow=getattr(tree_artifacts, "leaf_capacity_overflow", None),
+            strict_extra_overflow=getattr(
+                tree_artifacts, "leaf_capacity_overflow", None
+            ),
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
