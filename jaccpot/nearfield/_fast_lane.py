@@ -1049,7 +1049,9 @@ def _leaf_layout_inverse(
     """
     from jaccpot._jax_compat import Tracer
 
-    if isinstance(target_particle_ids, Tracer) or isinstance(target_particle_mask, Tracer):
+    if isinstance(target_particle_ids, Tracer) or isinstance(
+        target_particle_mask, Tracer
+    ):
         return None
     ids = np.asarray(target_particle_ids)
     mask = np.asarray(target_particle_mask, dtype=bool)
@@ -1088,10 +1090,14 @@ def _leaf_layout_gather_fwd(values, safe_ids, inverse):
 def _leaf_layout_gather_bwd(residual, g):
     inverse, n = residual
     flat = g.reshape((-1,) + tuple(g.shape[2:]))
-    flat = jnp.concatenate([flat, jnp.zeros((1,) + tuple(flat.shape[1:]), flat.dtype)], axis=0)
+    flat = jnp.concatenate(
+        [flat, jnp.zeros((1,) + tuple(flat.shape[1:]), flat.dtype)], axis=0
+    )
     out = flat[inverse]
     if int(out.shape[0]) < int(n):  # particles past every slot get zero
-        out = jnp.pad(out, ((0, int(n) - int(out.shape[0])),) + ((0, 0),) * (out.ndim - 1))
+        out = jnp.pad(
+            out, ((0, int(n) - int(out.shape[0])),) + ((0, 0),) * (out.ndim - 1)
+        )
     return (out, None, None)
 
 
@@ -1606,7 +1612,9 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         # (2.7 ms for positions + masses at N = 2x10^5, plan fast-gradients).
         inverse = _leaf_layout_inverse(target_particle_ids, target_particle_mask)
         if inverse is not None:
-            leaf_positions = _leaf_layout_gather(positions, safe_target_particle_ids, inverse)
+            leaf_positions = _leaf_layout_gather(
+                positions, safe_target_particle_ids, inverse
+            )
             leaf_masses = _leaf_layout_gather(masses, safe_target_particle_ids, inverse)
 
     diag_mode = _large_n_nearfield_diag_mode()

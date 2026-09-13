@@ -45,7 +45,11 @@ def main() -> int:
     sys.path.insert(0, str(bench_root / "codes"))
     from common.gpu_guard import idle_gpus, pick_idle_gpus, set_cuda_visible
     from common.ic import IC_GENERATORS
-    from compare_force import FAST_LANE_ENV_BY_LEAF, apply_fast_lane_env, fast_lane_overrides_for_leaf
+    from compare_force import (
+        FAST_LANE_ENV_BY_LEAF,
+        apply_fast_lane_env,
+        fast_lane_overrides_for_leaf,
+    )
 
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -55,15 +59,23 @@ def main() -> int:
         set_cuda_visible(pick_idle_gpus(1))
     extra = dict(kv.split("=", 1) for kv in args.env)
     overrides = fast_lane_overrides_for_leaf(args.leaf, args.n, extra)
-    preset_trav = dict((FAST_LANE_ENV_BY_LEAF.get(args.leaf) or {}).get("_traversal_overrides", {}))
+    preset_trav = dict(
+        (FAST_LANE_ENV_BY_LEAF.get(args.leaf) or {}).get("_traversal_overrides", {})
+    )
     overrides.update(extra)
     apply_fast_lane_env(args.n, overrides=overrides)
 
     import jax
     import jax.numpy as jnp
+
     from jaccpot import (
-        FarFieldConfig, FastMultipoleMethod, FMMAdvancedConfig, NearFieldConfig,
-        RuntimePolicyConfig, TraversalOverrides, TreeConfig,
+        FarFieldConfig,
+        FastMultipoleMethod,
+        FMMAdvancedConfig,
+        NearFieldConfig,
+        RuntimePolicyConfig,
+        TraversalOverrides,
+        TreeConfig,
     )
     from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
 
@@ -74,7 +86,9 @@ def main() -> int:
     runtime_cfg = RuntimePolicyConfig()
     if preset_trav:
         runtime_cfg = RuntimePolicyConfig(
-            traversal_config=TraversalOverrides(**{k: int(v) for k, v in preset_trav.items()})
+            traversal_config=TraversalOverrides(
+                **{k: int(v) for k, v in preset_trav.items()}
+            )
         )
     from yggdrax._cell_partition import adaptive_cell_leaf_partition_numpy
     from yggdrax.bounds import infer_bounds
@@ -84,24 +98,44 @@ def main() -> int:
     k = adaptive_cell_leaf_partition_numpy(codes, leaf_size=args.leaf)[0].size
     leaf_capacity = 1 << int(np.ceil(np.log2(1.25 * k)))
     solver = FastMultipoleMethod(
-        preset="large_n_gpu", runtime_path="large_n", basis="real", theta=args.theta, G=1.0,
-        softening=args.softening, working_dtype=jnp.float32,
+        preset="large_n_gpu",
+        runtime_path="large_n",
+        basis="real",
+        theta=args.theta,
+        G=1.0,
+        softening=args.softening,
+        working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
-            tree=TreeConfig(mode="static_radix", leaf_target=args.leaf, leaf_partition="cells",
-                            leaf_capacity=leaf_capacity),
+            tree=TreeConfig(
+                mode="static_radix",
+                leaf_target=args.leaf,
+                leaf_partition="cells",
+                leaf_capacity=leaf_capacity,
+            ),
             farfield=FarFieldConfig(mode="auto", retain_far_pairs_for_grad=True),
-            nearfield=NearFieldConfig(mode="auto"), runtime=runtime_cfg, mac_type="dehnen"),
-        fixed_order=args.order)
-    state = solver.prepare_state(P, M, leaf_size=args.leaf, max_order=args.order, theta=args.theta)
+            nearfield=NearFieldConfig(mode="auto"),
+            runtime=runtime_cfg,
+            mac_type="dehnen",
+        ),
+        fixed_order=args.order,
+    )
+    state = solver.prepare_state(
+        P, M, leaf_size=args.leaf, max_order=args.order, theta=args.theta
+    )
     plan = prepare_large_n_grad_plan(solver, state)
     L = int(np.asarray(state.neighbor_list.counts).shape[0])
     W = int(state.max_leaf_size)
     nodes = int(np.asarray(state.tree.parent).shape[0])
     edges = int(np.asarray(state.neighbor_list.counts).sum())
-    print(f"N {n} leaves {L} W {W} nodes {nodes} far cap {plan.num_far_pairs} near edges {edges}", flush=True)
+    print(
+        f"N {n} leaves {L} W {W} nodes {nodes} far cap {plan.num_far_pairs} near edges {edges}",
+        flush=True,
+    )
 
     def loss(p, m):
-        return jnp.sum(solver.differentiable_accelerations(state, p, m, grad_plan=plan) ** 2)
+        return jnp.sum(
+            solver.differentiable_accelerations(state, p, m, grad_plan=plan) ** 2
+        )
 
     compiled = jax.jit(jax.value_and_grad(loss, argnums=(0, 1))).lower(P, M).compile()
     hlo = compiled.as_text()
@@ -123,7 +157,8 @@ def main() -> int:
     for line in hlo.splitlines():
         m = re.match(r"^(?:ENTRY )?%?([\w.\-]+) \(", line)
         if m and line.rstrip().endswith("{"):
-            cur = m.group(1); comps[cur] = []
+            cur = m.group(1)
+            comps[cur] = []
         elif cur is not None:
             if line.strip() == "}":
                 cur = None
@@ -133,9 +168,18 @@ def main() -> int:
     fusions = {}
     for cname, body in comps.items():
         for line in body:
-            m = re.match(r"\s*%?([\w.\-]+) = (\S+) fusion\((.*?)\), kind=(\w+), calls=%?([\w.\-]+)", line)
+            m = re.match(
+                r"\s*%?([\w.\-]+) = (\S+) fusion\((.*?)\), kind=(\w+), calls=%?([\w.\-]+)",
+                line,
+            )
             if m and "scatter" in m.group(1):
-                fusions[m.group(1)] = dict(result=m.group(2), operands=m.group(3), kind=m.group(4), calls=m.group(5), caller=cname)
+                fusions[m.group(1)] = dict(
+                    result=m.group(2),
+                    operands=m.group(3),
+                    kind=m.group(4),
+                    calls=m.group(5),
+                    caller=cname,
+                )
     rows = []
     for fname, f in sorted(fusions.items(), key=lambda kv: -trace_ms.get(kv[0], 0.0)):
         body = comps.get(f["calls"], [])
@@ -144,7 +188,9 @@ def main() -> int:
         for s in scat:
             m = re.match(r"%?[\w.\-]+ = (\S+) scatter\((.*?)\), update_window_dims", s)
             if m:
-                ops = re.findall(r"([a-z0-9]+\[[0-9,]*\](?:\{[^}]*\})?)\s*%", m.group(2) + " %")
+                ops = re.findall(
+                    r"([a-z0-9]+\[[0-9,]*\](?:\{[^}]*\})?)\s*%", m.group(2) + " %"
+                )
                 shapes.append((m.group(1), ops))
             comb = re.search(r"to_apply=%?([\w.\-]+)", s)
             if comb:
@@ -156,17 +202,41 @@ def main() -> int:
             for ln in caller_body:
                 if re.match(rf"\s*%{re.escape(op)} = ", ln):
                     kind = re.match(r"\s*%[\w.\-]+ = (\S+) ([\w\-]+)\(", ln)
-                    feeders.append(f"{op}: {kind.group(2) if kind else '?'} {kind.group(1) if kind else ''}")
+                    feeders.append(
+                        f"{op}: {kind.group(2) if kind else '?'} {kind.group(1) if kind else ''}"
+                    )
                     break
         ms = trace_ms.get(fname)
-        rows.append(dict(fusion=fname, ms_per_call=ms, result=f["result"], scatters=shapes, feeders=feeders))
-        print(f"\n== {fname}  {'' if ms is None else f'{ms:.3f} ms'}  result {f['result']}")
+        rows.append(
+            dict(
+                fusion=fname,
+                ms_per_call=ms,
+                result=f["result"],
+                scatters=shapes,
+                feeders=feeders,
+            )
+        )
+        print(
+            f"\n== {fname}  {'' if ms is None else f'{ms:.3f} ms'}  result {f['result']}"
+        )
         for sh in shapes:
             print("   scatter:", sh)
         for fe in feeders[:8]:
             print("   feeder:", fe[:140])
     with open(out_dir / "grad_scatter_attribution.json", "w") as fh:
-        json.dump(dict(n=n, leaves=L, W=W, nodes=nodes, far_cap=plan.num_far_pairs, near_edges=edges, rows=rows), fh, indent=2)
+        json.dump(
+            dict(
+                n=n,
+                leaves=L,
+                W=W,
+                nodes=nodes,
+                far_cap=plan.num_far_pairs,
+                near_edges=edges,
+                rows=rows,
+            ),
+            fh,
+            indent=2,
+        )
     print("\nwrote", out_dir / "grad_scatter_attribution.json", flush=True)
     return 0
 
