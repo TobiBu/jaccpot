@@ -490,19 +490,25 @@ def _propagate_solidfmm_locals_by_level(
                 "level-compact L2L does not support the grouped/cached rotation blocks"
             )
         if pallas_levels is not None and parent is not None and real_basis:
-            # plan sub-10ms Phase 3: one Pallas launch per level
-            from jaccpot.pallas.cascade_real_level import l2l_real_levels_pallas
+            # plan sub-10ms Phase 3: one Pallas launch per level, through the
+            # custom_vjp seam (plan fast-gradients) so the reverse is the level
+            # kernels' own adjoint rather than pallas_call's generic JVP rule
+            from jaccpot.pallas.cascade_real_level import l2l_real_levels_pallas_cvjp
 
-            return l2l_real_levels_pallas(
+            return l2l_real_levels_pallas_cvjp(
                 coeffs_local,
                 centers,
                 jnp.asarray(parent, dtype=left_internal.dtype),
+                left_internal,
+                right_internal,
                 jnp.asarray(nodes_by_level, dtype=left_internal.dtype),
                 jnp.asarray(level_offsets, dtype=left_internal.dtype),
-                order=order,
-                num_levels=int(pallas_levels),
-                level_batch_width=int(level_batch_width),
-                interpret=env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+                order,
+                int(pallas_levels),
+                int(level_batch_width),
+                env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+                "triton",
+                4,
             )
         width = int(level_batch_width)
         nbl = jnp.concatenate(

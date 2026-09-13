@@ -1487,10 +1487,23 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     # evaluations. Forward lane only: the differentiable prepacked lane keeps
     # ``self_acc + cvjp(...)`` so its gradient path is byte-identical
     # (JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF=0 restores the scan everywhere).
-    fold_self = (
+    fold_self_flag = _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True)
+    # CSR row-chunk lane (plan sub-10ms 4.1). On the differentiable path it runs
+    # through its custom_vjp (plan fast-gradients: an analytic CSR-driven reverse,
+    # no rectangle), which is what keeps the cell-tree gradient off the
+    # neighbour-capped rectangle payload; the potential half has no reverse, so
+    # a differentiable potential request falls through to the older lanes.
+    csr_lane = (
+        neighbor_list is not None
+        and pallas_prepacked
+        and fold_self_flag
+        and _nearfield_csr_lane_enabled()
+        and not (differentiable and want_potential)
+    )
+    fold_self = csr_lane or (
         pallas_prepacked
         and not (differentiable and not want_potential)
-        and _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True)
+        and fold_self_flag
     )
 
     # Potential is only implemented on the fused Pallas paths; otherwise the
@@ -1578,19 +1591,14 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             return self_acc, self_pot
         return self_acc
 
-    if (
-        neighbor_list is not None
-        and pallas_prepacked
-        and fold_self
-        and _nearfield_csr_lane_enabled()
-        and not differentiable
-    ):
+    if csr_lane:
         # CSR row-chunk lane (plan sub-10ms 4.1): one program per chunk of a
         # leaf's neighbour row; the self term rides on each leaf's first chunk.
         from jaccpot.pallas.nearfield_leafpair_csr import (
             build_leafpair_chunk_table,
             leafpair_chunk_capacity,
             nearfield_leafpair_csr_pallas,
+            nearfield_leafpair_csr_pallas_cvjp,
         )
 
         offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
@@ -1609,22 +1617,40 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             offsets, counts, chunk=chunk, capacity=capacity
         )
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
-        out = nearfield_leafpair_csr_pallas(
-            leaf_positions,
-            leaf_masses,
-            leaf_mask,
-            nbr_leaf,
-            table,
-            softening_sq=softening_sq,
-            G=jnp.asarray(G, dtype=dtype),
-            chunk=chunk,
-            num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
-            num_stages=pallas_num_stages,
-            target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
-            interpret=pallas_interpret,
-            accum=accum,
-            include_self=True,
-        )
+        if differentiable:
+            out = nearfield_leafpair_csr_pallas_cvjp(
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                nbr_leaf,
+                table,
+                softening_sq,
+                jnp.asarray(G, dtype=dtype),
+                chunk,
+                (pallas_num_warps if pallas_num_warps > 0 else None),
+                pallas_num_stages,
+                (pallas_subtile if pallas_subtile > 0 else None),
+                pallas_interpret,
+                accum,
+                True,
+            )
+        else:
+            out = nearfield_leafpair_csr_pallas(
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                nbr_leaf,
+                table,
+                softening_sq=softening_sq,
+                G=jnp.asarray(G, dtype=dtype),
+                chunk=chunk,
+                num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
+                num_stages=pallas_num_stages,
+                target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
+                interpret=pallas_interpret,
+                accum=accum,
+                include_self=True,
+            )
         pair_acc = _scatter_contributions(
             jnp.zeros_like(positions), leaf_particle_idx, out[..., :3], leaf_mask
         )

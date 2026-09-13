@@ -470,21 +470,26 @@ def prepare_real_upward_sweep(
     )
 
     if _pallas_cascades_enabled() and num_leaves > 0:
-        # plan sub-10ms Phase 3: one program per leaf instead of vmapped batches
+        # plan sub-10ms Phase 3: one program per leaf instead of vmapped batches.
+        # Through the custom_vjp seam (plan fast-gradients): the forward is the
+        # same launch, and jax.grad reaches the reverse Pallas kernel instead of
+        # pallas_call's generic JVP rule (which dies on program_id).
         from jaccpot._env import env_flag
-        from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas
+        from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas_cvjp
 
         node_ranges_arr = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
-        packed = p2m_real_leaves_pallas(
+        packed = p2m_real_leaves_pallas_cvjp(
             positions_sorted,
             masses_sorted,
             centers[num_internal:],
             node_ranges_arr[num_internal:],
-            order=p,
-            num_internal=num_internal,
-            total_nodes=total_nodes,
-            leaf_width=int(max_leaf_size),
-            interpret=env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+            p,
+            num_internal,
+            total_nodes,
+            int(max_leaf_size),
+            env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+            "triton",
+            None,
         )
     else:
         packed = _p2m_leaves_real(
@@ -502,7 +507,7 @@ def prepare_real_upward_sweep(
         # plan sub-10ms Phase 3: one Pallas launch per level instead of the
         # vectorised level loop (66 ms on the 40-level cell tree at N=2e5)
         from jaccpot._env import env_flag
-        from jaccpot.pallas.cascade_real_level import m2m_real_levels_pallas
+        from jaccpot.pallas.cascade_real_level import m2m_real_levels_pallas_cvjp
 
         hinted = _registered_num_levels(
             total_nodes=total_nodes, num_internal=num_internal
@@ -510,18 +515,21 @@ def prepare_real_upward_sweep(
         pallas_levels = (
             num_levels if static_num_levels is not None else (hinted or num_levels)
         )
-        packed = m2m_real_levels_pallas(
+        packed = m2m_real_levels_pallas_cvjp(
             packed,
             centers,
             jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
             jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+            jnp.asarray(tree.parent, dtype=INDEX_DTYPE),
             jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
             jnp.asarray(level_offsets, dtype=INDEX_DTYPE),
-            order=p,
-            num_internal=num_internal,
-            num_levels=int(pallas_levels),
-            level_batch_width=level_batch_width,
-            interpret=env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+            p,
+            num_internal,
+            int(pallas_levels),
+            level_batch_width,
+            env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+            "triton",
+            4,
         )
     else:
         packed = aggregate_m2m_real_by_level(

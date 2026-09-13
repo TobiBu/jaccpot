@@ -35,12 +35,17 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 from jax.experimental import pallas as pl
+from jax.experimental.pallas import triton as plgpu
 from jaxtyping import Array
 
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import csr_by_target, m2l_real_csr_tables
 
-__all__ = ["m2l_real_csr_lanes_pallas"]
+__all__ = [
+    "m2l_real_csr_lanes_pallas",
+    "m2l_real_csr_lanes_pallas_cvjp",
+    "m2l_real_csr_lanes_reverse_pallas",
+]
 
 
 def _lane_tables(order: int) -> dict:
@@ -167,6 +172,91 @@ def _angle_powers(c1: Array, s1: Array, p: int) -> tuple[list, list]:
     return cosm[: p + 1], sinm[: p + 1]
 
 
+def _m2l_lane_pair(
+    v: dict,
+    dx: Array,
+    dy: Array,
+    dz_: Array,
+    *,
+    p: int,
+    tables: dict,
+    safe: bool = False,
+) -> dict:
+    """The whole real M2L of one pair per lane: ``(source coeffs, delta) -> local coeffs``.
+
+    Parameters
+    ----------
+    v : dict
+        Source multipole per ``(degree, m)`` key, lane vectors ``(K,)``.
+    dx : Array
+        Target minus source centre, ``x``; lanes.
+    dy : Array
+        Same, ``y``.
+    dz_ : Array
+        Same, ``z`` (padding lanes carry ``1``).
+    p : int
+        Order. Static.
+    tables : dict
+        :func:`_lane_tables`. Static.
+    safe : bool
+        Guard ``sqrt(rho2)`` at ``rho == 0`` with a double-``where`` so the
+        transpose stays finite (the reverse pass; every padding lane sits at
+        ``rho == 0``). The primal is bit-identical.
+
+    Returns
+    -------
+    dict
+        Local coefficients per key, lane vectors.
+    """
+    B = tables["B"]
+    Zf = tables["Zf"]
+    signm = tables["signm"]
+    dtype = dx.dtype
+    rho2 = dx * dx + dy * dy
+    if safe:
+        rho_pos = rho2 > 0.0
+        rho = jnp.where(rho_pos, jnp.sqrt(jnp.where(rho_pos, rho2, 1.0)), 0.0)
+    else:
+        rho = jnp.sqrt(rho2)
+    r = jnp.sqrt(rho2 + dz_ * dz_)
+    r = jnp.maximum(r, jnp.asarray(1.0e-30, dtype=dtype))
+    rinv = 1.0 / r
+    # az = atan2(dx, dy): cos az = dy / rho, sin az = dx / rho (rho = 0: az = 0)
+    rho_ok = rho > 0.0
+    rho_inv = jnp.where(rho_ok, 1.0 / jnp.where(rho_ok, rho, 1.0), 0.0)
+    cos_az = jnp.where(rho_ok, dy * rho_inv, jnp.ones_like(dy))
+    sin_az = dx * rho_inv
+    # ax = atan2(rho, dz): cos ax = dz / r, sin ax = rho / r
+    cos_ax = dz_ * rinv
+    sin_ax = rho * rinv
+    cos_maz, sin_maz = _angle_powers(cos_az, sin_az, p)
+    cos_max, sin_max = _angle_powers(cos_ax, sin_ax, p)
+    rinv_pow = [jnp.ones_like(rinv)]
+    for _ in range(2 * p + 1):
+        rinv_pow.append(rinv_pow[-1] * rinv)
+    # world -> z (multipole): B Dz(-ax) B Dz(az)
+    v = _dz_lanes(v, cos_maz, sin_maz, sign=1.0, p=p)
+    v = _bapply_lanes(v, B, transpose=False, p=p)
+    v = _dz_lanes(v, cos_max, sin_max, sign=-1.0, p=p)
+    v = _bapply_lanes(v, B, transpose=False, p=p)
+    # z-core: same m; out[n, m] = signm[m] r^-(n+1) sum_k (n+k)! r^-k v[k, m]
+    w = {}
+    for n in range(p + 1):
+        for m in range(-n, n + 1):
+            acc = None
+            for k in range(abs(m), p - n + 1):
+                term = v[(k, m)] * (rinv_pow[k] * Zf[n][k])
+                acc = term if acc is None else acc + term
+            if acc is None:
+                acc = jnp.zeros_like(rinv)
+            w[(n, m)] = acc * (rinv_pow[n + 1] * signm[m + p])
+    # z -> world (local): Dz(-az) B^T Dz(ax) B^T
+    w = _bapply_lanes(w, B, transpose=True, p=p)
+    w = _dz_lanes(w, cos_max, sin_max, sign=1.0, p=p)
+    w = _bapply_lanes(w, B, transpose=True, p=p)
+    return _dz_lanes(w, cos_maz, sin_maz, sign=-1.0, p=p)
+
+
 def _m2l_lanes_kernel(
     mult_ref: KernelRef,
     cent_ref: KernelRef,
@@ -235,46 +325,8 @@ def _m2l_lanes_kernel(
         dx = jnp.where(valid, dx, zero)
         dy = jnp.where(valid, dy, zero)
         dz_ = jnp.where(valid, dz_, jnp.ones_like(dz_))
-        rho2 = dx * dx + dy * dy
-        rho = jnp.sqrt(rho2)
-        r = jnp.sqrt(rho2 + dz_ * dz_)
-        r = jnp.maximum(r, jnp.asarray(1.0e-30, dtype=dtype))
-        rinv = 1.0 / r
-        # az = atan2(dx, dy): cos az = dy / rho, sin az = dx / rho (rho = 0: az = 0)
-        rho_ok = rho > 0.0
-        rho_inv = jnp.where(rho_ok, 1.0 / jnp.where(rho_ok, rho, 1.0), 0.0)
-        cos_az = jnp.where(rho_ok, dy * rho_inv, jnp.ones_like(dy))
-        sin_az = dx * rho_inv
-        # ax = atan2(rho, dz): cos ax = dz / r, sin ax = rho / r
-        cos_ax = dz_ * rinv
-        sin_ax = rho * rinv
-        cos_maz, sin_maz = _angle_powers(cos_az, sin_az, p)
-        cos_max, sin_max = _angle_powers(cos_ax, sin_ax, p)
-        rinv_pow = [jnp.ones_like(rinv)]
-        for _ in range(2 * p + 1):
-            rinv_pow.append(rinv_pow[-1] * rinv)
         v = {key: mult_ref[sid, packed[key]] for key in keys}
-        # world -> z (multipole): B Dz(-ax) B Dz(az)
-        v = _dz_lanes(v, cos_maz, sin_maz, sign=1.0, p=p)
-        v = _bapply_lanes(v, B, transpose=False, p=p)
-        v = _dz_lanes(v, cos_max, sin_max, sign=-1.0, p=p)
-        v = _bapply_lanes(v, B, transpose=False, p=p)
-        # z-core: same m; out[n, m] = signm[m] r^-(n+1) sum_k (n+k)! r^-k v[k, m]
-        w = {}
-        for n in range(p + 1):
-            for m in range(-n, n + 1):
-                acc = None
-                for k in range(abs(m), p - n + 1):
-                    term = v[(k, m)] * (rinv_pow[k] * Zf[n][k])
-                    acc = term if acc is None else acc + term
-                if acc is None:
-                    acc = jnp.zeros_like(rinv)
-                w[(n, m)] = acc * (rinv_pow[n + 1] * signm[m + p])
-        # z -> world (local): Dz(-az) B^T Dz(ax) B^T
-        w = _bapply_lanes(w, B, transpose=True, p=p)
-        w = _dz_lanes(w, cos_max, sin_max, sign=1.0, p=p)
-        w = _bapply_lanes(w, B, transpose=True, p=p)
-        w = _dz_lanes(w, cos_maz, sin_maz, sign=-1.0, p=p)
+        w = _m2l_lane_pair(v, dx, dy, dz_, p=p, tables=tables)
         mask = valid.astype(dtype)
         return tuple(a + w[key] * mask for a, key in zip(accs, keys))
 
@@ -376,3 +428,329 @@ def m2l_real_csr_lanes_pallas(
         name=f"m2l_real_csr_lanes_p{p}_k{int(k_lanes)}",
         **backend_kwargs,
     )(*operands)
+
+
+# ------------------------------------------------------------------ reverse
+# Adjoint over the TRANSPOSED list (plan fast-gradients, Phase 2): the forward
+# sums sources per target; the multipole cotangent sums targets per source, so
+# the reverse runs one program per SOURCE over the CSR by source (the same
+# ``csr_by_target`` with the roles swapped). Per pair, ``jax.vjp`` of the same
+# lane body gives both halves at once: ``mult_bar[s] += J^T loc_bar[t]`` and the
+# geometry cotangent ``dbar = <loc_bar[t], dM2L/ddelta mult[s]>`` with
+# ``delta = c_t - c_s``, so ``c_s`` takes ``-dbar`` (program-local) and ``c_t``
+# takes ``+dbar`` -- written per pair with a masked store into a ``[P, 4]`` table
+# in by-source order and folded onto the targets by one segment sum in XLA.
+
+
+def _m2l_rev_lanes_kernel(
+    mult_ref: KernelRef,
+    cent_ref: KernelRef,
+    tgt_ref: KernelRef,
+    off_ref: KernelRef,
+    cnt_ref: KernelRef,
+    lbar_ref: KernelRef,
+    _dbar_in_ref: KernelRef,
+    mbar_ref: KernelRef,
+    cbar_ref: KernelRef,
+    dbar_ref: KernelRef,
+    *,
+    p: int,
+    k_lanes: int,
+    tables: dict,
+) -> None:
+    """One program per source; ``k_lanes`` of its pairs per iteration.
+
+    Parameters
+    ----------
+    mult_ref : KernelRef
+        Packed multipoles ``[n, C]``.
+    cent_ref : KernelRef
+        Padded centres ``[n, 4]``.
+    tgt_ref : KernelRef
+        Source-sorted targets ``[P]``.
+    off_ref : KernelRef
+        Row start per source ``[n]``.
+    cnt_ref : KernelRef
+        Row length per source ``[n]``.
+    lbar_ref : KernelRef
+        Local cotangents ``[n, C]``.
+    _dbar_in_ref : KernelRef
+        Per-pair geometry cotangent table ``[P + K, 4]`` (aliased to ``dbar_ref``).
+    mbar_ref : KernelRef
+        **Output** this source's multipole cotangent ``[1, C]``.
+    cbar_ref : KernelRef
+        **Output** this source's centre cotangent ``[1, 4]`` (its own half).
+    dbar_ref : KernelRef
+        **Output** per-pair geometry cotangent (the targets' half), aliased.
+    p : int
+        Order. Static.
+    k_lanes : int
+        Lanes per tile. Static.
+    tables : dict
+        :func:`_lane_tables`. Static.
+
+    Returns
+    -------
+    None
+        Writes the rows.
+    """
+    dtype = mbar_ref.dtype
+    packed = tables["packed"]
+    src = pl.program_id(0)
+    start = off_ref[src]
+    cnt = cnt_ref[src]
+    csx = cent_ref[src, 0]
+    csy = cent_ref[src, 1]
+    csz = cent_ref[src, 2]
+    lane = lax.broadcasted_iota(jnp.int32, (k_lanes,), 0)
+    n_tiles = (cnt + (k_lanes - 1)) // k_lanes
+    keys = [(ell, m) for ell in range(p + 1) for m in range(-ell, ell + 1)]
+    ones = jnp.ones((k_lanes,), dtype)
+    v_lanes = tuple(mult_ref[src, packed[key]] * ones for key in keys)
+    zeros = jnp.zeros((k_lanes,), dtype)
+    acc0 = (tuple(zeros for _ in keys), zeros, zeros, zeros)
+    col = [jnp.asarray(i, jnp.int32) for i in range(3)]
+
+    def pair(vs: tuple, dx: Array, dy: Array, dz_: Array) -> tuple:
+        v = {key: vs[i] for i, key in enumerate(keys)}
+        w = _m2l_lane_pair(v, dx, dy, dz_, p=p, tables=tables, safe=True)
+        return tuple(w[key] for key in keys)
+
+    def body(t: Array, carry: tuple) -> tuple:
+        accs, ax_, ay_, az_ = carry
+        pos = t * k_lanes + lane
+        valid = pos < cnt
+        i_safe = jnp.where(valid, start + pos, start)
+        tid = tgt_ref[i_safe]
+        dx = cent_ref[tid, 0] - csx
+        dy = cent_ref[tid, 1] - csy
+        dz_ = cent_ref[tid, 2] - csz
+        zero = jnp.zeros_like(dx)
+        dx = jnp.where(valid, dx, zero)
+        dy = jnp.where(valid, dy, zero)
+        dz_ = jnp.where(valid, dz_, jnp.ones_like(dz_))
+        mask = valid.astype(dtype)
+        gb = tuple(lbar_ref[tid, packed[key]] * mask for key in keys)
+        _, vjp = jax.vjp(pair, v_lanes, dx, dy, dz_)
+        vb, dxb, dyb, dzb = vjp(gb)
+        rows = pl.ds(start + t * k_lanes, k_lanes)
+        plgpu.store(dbar_ref.at[rows, col[0]], dxb, mask=valid)
+        plgpu.store(dbar_ref.at[rows, col[1]], dyb, mask=valid)
+        plgpu.store(dbar_ref.at[rows, col[2]], dzb, mask=valid)
+        return (tuple(a + b for a, b in zip(accs, vb)), ax_ + dxb, ay_ + dyb, az_ + dzb)
+
+    accs, ax_, ay_, az_ = lax.fori_loop(0, n_tiles, body, acc0)
+    for key, a in zip(keys, accs):
+        mbar_ref[0, packed[key]] = jnp.sum(a)
+    cbar_ref[0, 0] = -jnp.sum(ax_)
+    cbar_ref[0, 1] = -jnp.sum(ay_)
+    cbar_ref[0, 2] = -jnp.sum(az_)
+    cbar_ref[0, 3] = jnp.zeros((), dtype)
+
+
+def m2l_real_csr_lanes_reverse_pallas(
+    multipoles: Array,
+    centers: Array,
+    sources: Array,
+    targets: Array,
+    loc_bar: Array,
+    *,
+    order: int,
+    active_pair_count: Optional[Array] = None,
+    k_lanes: int = 32,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 1,
+) -> tuple[Array, Array]:
+    """Adjoint of :func:`m2l_real_csr_lanes_pallas`: one program per source over the by-source CSR.
+
+    Parameters
+    ----------
+    multipoles : Array
+        ``[n, C]`` real multipoles (the forward's).
+    centers : Array
+        ``[n, 3]`` expansion centres.
+    sources : Array
+        ``[P]`` source ids of the directed far pairs (negative = padding).
+    targets : Array
+        ``[P]`` target ids, aligned.
+    loc_bar : Array
+        ``[n, C]`` cotangent of the local increments.
+    order : int
+        Expansion order.
+    active_pair_count : Optional[Array]
+        Live prefix length of the pair list.
+    k_lanes : int
+        Pairs per iteration. Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(multipoles_bar [n, C], centers_bar [n, 3])``.
+    """
+    p = int(order)
+    tables = _lane_tables(p)
+    C = tables["C"]
+    mult = jnp.asarray(multipoles)
+    dtype = mult.dtype
+    n = int(mult.shape[0])
+    cent = jnp.asarray(centers, dtype=dtype)
+    cent_p = jnp.pad(cent, ((0, 0), (0, 1)))
+    # CSR by SOURCE: the same sort with the roles swapped
+    tgt_sorted, offsets, counts = csr_by_target(
+        targets, sources, total_nodes=n, active_pair_count=active_pair_count
+    )
+    P = int(tgt_sorted.shape[0])
+    if n == 0 or P == 0:
+        return jnp.zeros((n, C), dtype), jnp.zeros_like(centers)
+    K = int(k_lanes)
+    lbar = jnp.asarray(loc_bar, dtype)
+    dbar0 = jnp.zeros((P + K, 4), dtype)  # the last tile's masked lanes index past P
+    kernel = functools.partial(_m2l_rev_lanes_kernel, p=p, k_lanes=K, tables=tables)
+    backend_kwargs = pallas_backend_kwargs(backend, interpret)
+    if "compiler_params" in backend_kwargs:
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
+
+    def bs_full(arr: Array) -> pl.BlockSpec:
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    operands = [mult, cent_p, tgt_sorted, offsets, counts, lbar, dbar0]
+    mbar, cbar, dbar = pl.pallas_call(
+        kernel,
+        grid=(n,),
+        in_specs=[bs_full(o) for o in operands],
+        out_specs=[
+            pl.BlockSpec((1, C), lambda s: (s, 0)),
+            pl.BlockSpec((1, 4), lambda s: (s, 0)),
+            bs_full(dbar0),
+        ],
+        out_shape=[
+            jax.ShapeDtypeStruct((n, C), dtype),
+            jax.ShapeDtypeStruct((n, 4), dtype),
+            jax.ShapeDtypeStruct(dbar0.shape, dtype),
+        ],
+        input_output_aliases={6: 2},
+        interpret=bool(interpret),
+        name=f"m2l_rev_real_csr_lanes_p{p}_k{K}",
+        **backend_kwargs,
+    )(*operands)
+    # padding entries of the by-source list carry target 0 and exact zeros
+    onto_targets = jax.ops.segment_sum(dbar[:P, :3], tgt_sorted, num_segments=n)
+    centers_bar = (cbar[:, :3] + onto_targets).astype(centers.dtype)
+    return mbar, centers_bar
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
+def m2l_real_csr_lanes_pallas_cvjp(
+    multipoles: Array,
+    centers: Array,
+    sources: Array,
+    targets: Array,
+    active_pair_count: Optional[Array],
+    order: int,
+    k_lanes: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+) -> Array:
+    """Differentiable :func:`m2l_real_csr_lanes_pallas` (forward byte-identical).
+
+    Parameters
+    ----------
+    multipoles : Array
+        ``[n, C]`` real multipoles. Differentiable.
+    centers : Array
+        ``[n, 3]`` expansion centres. Differentiable.
+    sources : Array
+        ``[P]`` source ids (topology).
+    targets : Array
+        ``[P]`` target ids (topology).
+    active_pair_count : Optional[Array]
+        Live prefix length, or ``None``.
+    order : int
+        Expansion order. ``nondiff_argnums``.
+    k_lanes : int
+        Pairs per iteration. ``nondiff_argnums``.
+    interpret : bool
+        Pallas interpret mode. ``nondiff_argnums``.
+    backend : str
+        Pallas GPU lowering. ``nondiff_argnums``.
+    num_warps : int
+        Warps per program. ``nondiff_argnums``.
+
+    Returns
+    -------
+    Array
+        ``[n, C]`` local increments.
+    """
+    return m2l_real_csr_lanes_pallas(
+        multipoles,
+        centers,
+        sources,
+        targets,
+        order=order,
+        active_pair_count=active_pair_count,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+
+
+def _m2l_lanes_cvjp_fwd(
+    multipoles,
+    centers,
+    sources,
+    targets,
+    active_pair_count,
+    order,
+    k_lanes,
+    interpret,
+    backend,
+    num_warps,
+):
+    out = m2l_real_csr_lanes_pallas(
+        multipoles,
+        centers,
+        sources,
+        targets,
+        order=order,
+        active_pair_count=active_pair_count,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+    return out, (multipoles, centers, sources, targets, active_pair_count)
+
+
+def _m2l_lanes_cvjp_bwd(
+    order, k_lanes, interpret, backend, num_warps, residual, loc_bar
+):
+    multipoles, centers, sources, targets, active_pair_count = residual
+    mult_bar, centers_bar = m2l_real_csr_lanes_reverse_pallas(
+        multipoles,
+        centers,
+        sources,
+        targets,
+        loc_bar,
+        order=order,
+        active_pair_count=active_pair_count,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+    return (mult_bar, centers_bar, None, None, None)
+
+
+m2l_real_csr_lanes_pallas_cvjp.defvjp(_m2l_lanes_cvjp_fwd, _m2l_lanes_cvjp_bwd)

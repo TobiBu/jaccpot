@@ -1330,6 +1330,8 @@ class EvaluateMixin(_EngineBase):
             use_pallas=bool(getattr(self, "use_pallas", False)),
             differentiable=True,
             reverse_options=reverse_options,
+            # the CSR row-chunk lane and its analytic reverse (plan fast-gradients)
+            neighbor_list=neighbor_list,
         )
 
     @jaxtyped(typechecker=beartype)

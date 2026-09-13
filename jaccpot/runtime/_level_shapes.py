@@ -133,9 +133,11 @@ def pallas_cascades_enabled() -> bool:
     on the real basis where its Triton lowering runs (or under
     ``JACCPOT_CASCADE_PALLAS_INTERPRET=1`` anywhere); default ON since Phase 6.
 
-    A context-local override wins over the flag, and the gradient path installs
-    ``False``: these kernels have no autodiff rule, and ``pallas_call``'s generic
-    JVP rule dies on ``program_id`` (no grid context under that trace).
+    On the gradient path the context-local override (the resolved
+    ``GradConfig.cascade_pallas``) replaces the flag; the hardware check is the
+    same. The kernels are differentiable through their ``custom_vjp`` seams
+    (reverse Pallas kernels, plan fast-gradients), so the gradient path no
+    longer needs the pure-JAX loops.
 
     Returns
     -------
@@ -146,12 +148,14 @@ def pallas_cascades_enabled() -> bool:
     from jaccpot.runtime.grad_options import cascade_pallas_override
 
     override = cascade_pallas_override()
-    if override is not None:
-        # the gradient path forces the pure-JAX loops: pallas_call has no AD rule
-        return bool(override)
-    if not env_flag(
-        "JACCPOT_CASCADE_PALLAS", True
-    ):  # default on since Phase 6 (2026-09-11)
+    requested = (
+        bool(override)
+        if override is not None
+        else env_flag(
+            "JACCPOT_CASCADE_PALLAS", True
+        )  # default on since Phase 6 (2026-09-11)
+    )
+    if not requested:
         return False
     if env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False):
         return True
