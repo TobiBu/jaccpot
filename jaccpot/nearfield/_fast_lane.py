@@ -33,6 +33,7 @@ from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
@@ -1027,6 +1028,82 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     return pair_acc
 
 
+def _leaf_layout_inverse(
+    target_particle_ids: Array, target_particle_mask: Array
+) -> Optional[Array]:
+    """Flat leaf-slot index of every particle, or ``None`` when the payload is traced.
+
+    Parameters
+    ----------
+    target_particle_ids : Array
+        ``(leaves, W)`` particle index per slot (frozen topology).
+    target_particle_mask : Array
+        ``(leaves, W)`` slot validity.
+
+    Returns
+    -------
+    Optional[Array]
+        ``(n,)`` int32: ``leaf * W + slot`` of each particle, ``leaves * W`` (a
+        dead row) for a particle in no slot. ``None`` if the tables are tracers,
+        which they never are on the production path (the payload is host-built).
+    """
+    from jaccpot._jax_compat import Tracer
+
+    if isinstance(target_particle_ids, Tracer) or isinstance(
+        target_particle_mask, Tracer
+    ):
+        return None
+    ids = np.asarray(target_particle_ids)
+    mask = np.asarray(target_particle_mask, dtype=bool)
+    num_slots = int(ids.size)
+    n = int(ids[mask].max()) + 1 if mask.any() else 0
+    inverse = np.full((n,), num_slots, dtype=np.int32)
+    inverse[ids[mask]] = np.flatnonzero(mask.reshape(-1))
+    return jnp.asarray(inverse)
+
+
+@jax.custom_vjp
+def _leaf_layout_gather(values: Array, safe_ids: Array, inverse: Array) -> Array:
+    """``values[safe_ids]`` whose reverse is a gather through ``inverse``.
+
+    Parameters
+    ----------
+    values : Array
+        ``(n, ...)`` per-particle values. Differentiable.
+    safe_ids : Array
+        ``(leaves, W)`` particle index per slot (``0`` on masked slots).
+    inverse : Array
+        :func:`_leaf_layout_inverse` of the same tables.
+
+    Returns
+    -------
+    Array
+        ``(leaves, W, ...)`` leaf-layout values.
+    """
+    return values[safe_ids]
+
+
+def _leaf_layout_gather_fwd(values, safe_ids, inverse):
+    return values[safe_ids], (inverse, jnp.shape(values)[0])
+
+
+def _leaf_layout_gather_bwd(residual, g):
+    inverse, n = residual
+    flat = g.reshape((-1,) + tuple(g.shape[2:]))
+    flat = jnp.concatenate(
+        [flat, jnp.zeros((1,) + tuple(flat.shape[1:]), flat.dtype)], axis=0
+    )
+    out = flat[inverse]
+    if int(out.shape[0]) < int(n):  # particles past every slot get zero
+        out = jnp.pad(
+            out, ((0, int(n) - int(out.shape[0])),) + ((0, 0),) * (out.ndim - 1)
+        )
+    return (out, None, None)
+
+
+_leaf_layout_gather.defvjp(_leaf_layout_gather_fwd, _leaf_layout_gather_bwd)
+
+
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
 @jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_accel_cvjp(
@@ -1487,10 +1564,23 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     # evaluations. Forward lane only: the differentiable prepacked lane keeps
     # ``self_acc + cvjp(...)`` so its gradient path is byte-identical
     # (JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF=0 restores the scan everywhere).
-    fold_self = (
+    fold_self_flag = _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True)
+    # CSR row-chunk lane (plan sub-10ms 4.1). On the differentiable path it runs
+    # through its custom_vjp (plan fast-gradients: an analytic CSR-driven reverse,
+    # no rectangle), which is what keeps the cell-tree gradient off the
+    # neighbour-capped rectangle payload; the potential half has no reverse, so
+    # a differentiable potential request falls through to the older lanes.
+    csr_lane = (
+        neighbor_list is not None
+        and pallas_prepacked
+        and fold_self_flag
+        and _nearfield_csr_lane_enabled()
+        and not (differentiable and want_potential)
+    )
+    fold_self = csr_lane or (
         pallas_prepacked
         and not (differentiable and not want_potential)
-        and _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True)
+        and fold_self_flag
     )
 
     # Potential is only implemented on the fused Pallas paths; otherwise the
@@ -1516,6 +1606,16 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     leaf_masses = masses[safe_target_particle_ids]
     leaf_mask = target_particle_mask
     leaf_particle_idx = safe_target_particle_ids
+    if differentiable:
+        # Each particle sits in exactly one leaf slot, so the transpose of this
+        # gather is a gather too; plain autodiff makes it a 1M-row scatter-add
+        # (2.7 ms for positions + masses at N = 2x10^5, plan fast-gradients).
+        inverse = _leaf_layout_inverse(target_particle_ids, target_particle_mask)
+        if inverse is not None:
+            leaf_positions = _leaf_layout_gather(
+                positions, safe_target_particle_ids, inverse
+            )
+            leaf_masses = _leaf_layout_gather(masses, safe_target_particle_ids, inverse)
 
     diag_mode = _large_n_nearfield_diag_mode()
     if diag_mode == "zero":
@@ -1578,19 +1678,14 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             return self_acc, self_pot
         return self_acc
 
-    if (
-        neighbor_list is not None
-        and pallas_prepacked
-        and fold_self
-        and _nearfield_csr_lane_enabled()
-        and not differentiable
-    ):
+    if csr_lane:
         # CSR row-chunk lane (plan sub-10ms 4.1): one program per chunk of a
         # leaf's neighbour row; the self term rides on each leaf's first chunk.
         from jaccpot.pallas.nearfield_leafpair_csr import (
             build_leafpair_chunk_table,
             leafpair_chunk_capacity,
             nearfield_leafpair_csr_pallas,
+            nearfield_leafpair_csr_pallas_cvjp,
         )
 
         offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
@@ -1609,22 +1704,40 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             offsets, counts, chunk=chunk, capacity=capacity
         )
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
-        out = nearfield_leafpair_csr_pallas(
-            leaf_positions,
-            leaf_masses,
-            leaf_mask,
-            nbr_leaf,
-            table,
-            softening_sq=softening_sq,
-            G=jnp.asarray(G, dtype=dtype),
-            chunk=chunk,
-            num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
-            num_stages=pallas_num_stages,
-            target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
-            interpret=pallas_interpret,
-            accum=accum,
-            include_self=True,
-        )
+        if differentiable:
+            out = nearfield_leafpair_csr_pallas_cvjp(
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                nbr_leaf,
+                table,
+                softening_sq,
+                jnp.asarray(G, dtype=dtype),
+                chunk,
+                (pallas_num_warps if pallas_num_warps > 0 else None),
+                pallas_num_stages,
+                (pallas_subtile if pallas_subtile > 0 else None),
+                pallas_interpret,
+                accum,
+                True,
+            )
+        else:
+            out = nearfield_leafpair_csr_pallas(
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                nbr_leaf,
+                table,
+                softening_sq=softening_sq,
+                G=jnp.asarray(G, dtype=dtype),
+                chunk=chunk,
+                num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
+                num_stages=pallas_num_stages,
+                target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
+                interpret=pallas_interpret,
+                accum=accum,
+                include_self=True,
+            )
         pair_acc = _scatter_contributions(
             jnp.zeros_like(positions), leaf_particle_idx, out[..., :3], leaf_mask
         )

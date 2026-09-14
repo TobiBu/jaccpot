@@ -494,6 +494,13 @@ class GradConfig:
     analytic_l2p_vjp : Optional[bool]
         Analytic reverse rule for the real-basis L2P, on by default. Same
         caveat as ``analytic_p2p_vjp``.
+    cascade_pallas : Optional[bool]
+        Run the per-level Pallas M2M/L2L cascades and the leaf P2M on the
+        gradient path (Ampere+, or interpret mode), through their own reverse
+        Pallas kernels. ``None`` defers to ``JACCPOT_CASCADE_PALLAS`` (default
+        on). ``False`` restores the pure-JAX level loops, whose reverse is
+        autodiff and ~40x slower per cascade at N = 2x10^5 -- for A/B
+        measurement, not production.
     reverse_tiers : Optional[int]
         Maximum occupancy tiers for the analytic leaf-pair reverse (default 4).
         The prepacked payload is padded to the global maximum neighbour count,
@@ -521,6 +528,7 @@ class GradConfig:
     fused_m2l_pallas: Optional[bool] = None
     analytic_p2p_vjp: Optional[bool] = None
     analytic_l2p_vjp: Optional[bool] = None
+    cascade_pallas: Optional[bool] = None
     reverse_tiers: Optional[int] = None
     reverse_tier_min_gain: Optional[float] = None
     reverse_skip_empty_tiles: Optional[bool] = None

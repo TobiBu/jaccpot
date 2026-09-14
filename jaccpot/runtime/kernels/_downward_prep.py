@@ -664,11 +664,12 @@ def _solidfmm_downward_accumulate_from_multipoles(
         if real_basis and _m2l_csr_pallas_active():
             from jaccpot._env import env_flag
             from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
-            from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
+            from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas_cvjp
             from jaccpot.pallas.m2l_real_csr_tiled import (
                 m2l_real_csr_tiled_pallas,
                 m2l_real_csr_tiled_supported,
             )
+            from jaccpot.runtime.grad_options import on_grad_path
 
             interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
             # plan sub-10ms Phase 5: JACCPOT_M2L_CSR_KERNEL = pair | tiled | lanes
@@ -682,17 +683,24 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 raise ValueError(
                     f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected pair, tiled or lanes"
                 )
+            if which != "lanes" and on_grad_path():
+                # only the lanes kernel carries a custom_vjp (plan fast-gradients);
+                # the pair / tiled kernels would hit pallas_call's generic JVP rule
+                which = "lanes"
             if which == "lanes":
-                m2l_inc = m2l_real_csr_lanes_pallas(
+                # the custom_vjp seam: the forward is the same launch, and the
+                # reverse runs the transposed (by-source) lane kernel
+                m2l_inc = m2l_real_csr_lanes_pallas_cvjp(
                     multipoles_coeffs,
                     centers,
                     src,
                     tgt,
-                    order=order,
-                    active_pair_count=active_pair_count,
-                    k_lanes=int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
-                    num_warps=int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
-                    interpret=interpret,
+                    active_pair_count,
+                    order,
+                    int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
+                    interpret,
+                    "triton",
+                    int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
                 )
             elif which == "tiled" and m2l_real_csr_tiled_supported(order):
                 m2l_inc = m2l_real_csr_tiled_pallas(

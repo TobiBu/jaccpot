@@ -2100,6 +2100,24 @@ def _evaluate_prepared_tree_targets(
     return near_acc + far_acc, acc_derivatives
 
 
+# MEASURED NEGATIVE, kept as a signpost (plan fast-gradients, scatter round).
+#
+# The locals/centres leaf gathers below (`local_data.coefficients[leaf_nodes]`)
+# transpose into an XLA scatter that costs 3.0 ms at N = 2x10^5 -- one of the
+# three big ones in the gradient's kernel table. XLA fuses the per-slot
+# cotangent reduction INTO that scatter's update computation, so it looked like
+# a scatter doing a `W x (p+1)^2` contraction per thread, and the obvious fix
+# was a `custom_vjp` whose `bwd` puts an `optimization_barrier` before the
+# scatter, splitting it into a reduce and a one-row-per-leaf scatter.
+#
+# That is 3x WORSE: measured, the split reduce alone is 9.1 ms (normalised;
+# `input_reduce_fusion_1` in `artifacts/grad/phase3_scatter_free.json`) against
+# the 3.0 ms of the fused form, because materialising the unreduced
+# `(leaves, W, C)` cotangent is 151 MB of traffic that the fusion avoided.
+# The fused scatter stays. If this is worth another attempt, the lever is the
+# LAYOUT (leaf-major locals, so the gather is a slice), not the fusion boundary.
+
+
 @partial(
     jax.jit,
     static_argnames=(
