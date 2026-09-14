@@ -354,6 +354,7 @@ def resolve_walk_geometry(
     default_mode : str
         Geometry to use when the environment names none; see
         :func:`mac_geometry_mode`. Only the strict fused lane passes ``"com"``.
+
     Returns
     -------
     tuple[Optional[TreeGeometry], Optional[Any]]
