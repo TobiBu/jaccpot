@@ -20,7 +20,6 @@ from jaccpot.pallas.cascade_real_level import (
 )
 from jaccpot.runtime.kernels._l2l import _propagate_solidfmm_locals_by_level
 from jaccpot.upward.real_tree_expansions import aggregate_m2m_real_by_level
-
 from tests.unit._typecheck_budget import trim
 
 

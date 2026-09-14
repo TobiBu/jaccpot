@@ -12,8 +12,6 @@ from jaccpot.pallas.m2l_real_csr_tiled import (
     m2l_real_csr_tiled_pallas,
     m2l_real_csr_tiled_supported,
 )
-
-
 from tests.unit._typecheck_budget import trim
 
 

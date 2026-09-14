@@ -9,14 +9,13 @@ import numpy as np
 import pytest
 
 pytest.importorskip("yggdrax")
-from yggdrax.bounds import infer_bounds
 from yggdrax._tree_impl import build_static_cells_tree, build_static_radix_tree
+from yggdrax.bounds import infer_bounds
 from yggdrax.interactions import dual_tree_walk_mutual
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
 from jaccpot.runtime._mac_geometry import com_mac_geometry
-
 from tests.unit._typecheck_budget import trim
 
 _KINDS = trim(["cells", "buckets"])

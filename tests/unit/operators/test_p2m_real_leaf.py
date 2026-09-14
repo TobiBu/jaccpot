@@ -13,7 +13,6 @@ from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas
 from jaccpot.upward.real_tree_expansions import _p2m_leaves_real
-
 from tests.unit._typecheck_budget import trim
 
 

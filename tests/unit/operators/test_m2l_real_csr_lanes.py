@@ -9,7 +9,6 @@ import pytest
 
 from jaccpot.pallas.m2l_real_csr import m2l_real_csr_jax
 from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
-
 from tests.unit._typecheck_budget import trim
 
 

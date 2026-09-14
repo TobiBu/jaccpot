@@ -19,8 +19,6 @@ from jaccpot.pallas.nearfield_leafpair_csr import (
     nearfield_leafpair_csr_jax,
     nearfield_leafpair_csr_pallas,
 )
-
-
 from tests.unit._typecheck_budget import trim
 
 
