@@ -337,12 +337,34 @@ jobs:
     # COST, measured rather than guessed: 24:05 at `-n 2` on a 64-core dev box
     # (1264 passed, 52 skipped). The hosted runner is slower and a PR branch
     # misses the exact `.jax_cache` key, so expect the same 30-45 min bracket the
-    # other suites sit in. `timeout-minutes: 60` for the reason `test-full`
-    # documents at length: it has to sit above the real spread and below the ~2.6x
-    # CPU slowdown the JAX ceiling exists to catch.
+    # other suites sit in. The cap has to sit above the real spread and below the
+    # ~2.6x CPU slowdown the JAX ceiling exists to catch, for the reason
+    # `test-full` documents at length.
+    #
+    # RAISED 60 -> 75, TEMPORARILY, AND THIS IS A DEBT NOT A FIX. The 30-45 min
+    # bracket above is out of date: measured on the hosted runner, this job now
+    # takes 52.5 min (#344), 54.8 min (#348) and 60.3 min twice (#343, #344),
+    # i.e. it straddles the old cap and times out perhaps half the time. That is
+    # self-sustaining rather than self-correcting -- a cancelled job never saves
+    # `.jax_cache`, whose key is `hashFiles('jaccpot/**/*.py')`, so one
+    # over-budget run leaves the next one cold, which makes it slower still.
+    #
+    # WHAT THIS COSTS. The number is a regression detector and widening it blunts
+    # one: against the documented 30-45 min bracket a 2.6x slowdown lands at
+    # 78-117 min, so 75 still catches it from the top of that bracket but no
+    # longer from the bottom. That is the sensitivity being traded away, and it
+    # is why this is the smallest raise that clears the observed 60.3 with
+    # headroom rather than a round 90 or 120.
+    #
+    # THE ACTUAL FIX is the one this file already prescribes for `test-mac-runtime`
+    # -- another split by path, so each half finishes, each half saves its cache,
+    # and the cap can come back down. Trimming the heaviest fixtures was tried
+    # first and did not move the runner (#348: 54.8 min against 52.5 without it,
+    # inside run-to-run noise), which is evidence that the cost is spread across
+    # the suite rather than concentrated where a fixture change can reach it.
     name: test-runtime-typecheck
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       JAX_ENABLE_X64: "1"
       # The switch this job exists for. `_typecheck.py` reads it at import, before
