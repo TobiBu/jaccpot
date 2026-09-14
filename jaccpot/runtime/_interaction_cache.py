@@ -1027,6 +1027,9 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         (``compact_far_pair_capacity`` / ``near_edge_capacity``), carried over from
         the eager pass so the traced refresh builds the same widths.  Applies only
         to a capacity the caller did not name in the environment.
+    extra_overflow : Optional[Array]
+        An upstream capacity flag treated like the walk's own -- today the
+        cell-leaf partition's ``leaf_capacity``.
 
     Returns
     -------
@@ -1785,12 +1788,16 @@ def _lex_perm(
 
     Parameters
     ----------
-    primary, secondary : Array
-        Non-negative integer keys, ``primary < primary_bound`` and
-        ``secondary < secondary_bound``.
-    primary_bound, secondary_bound : int
-        Static exclusive bounds; when their product fits ``int32`` one composite
-        sort is used, otherwise two stable sorts.
+    primary : Array
+        Non-negative primary keys, all below ``primary_bound``.
+    secondary : Array
+        Non-negative secondary keys, all below ``secondary_bound``.
+    primary_bound : int
+        Static exclusive bound on ``primary``.
+    secondary_bound : int
+        Static exclusive bound on ``secondary``. When the product of the two
+        bounds fits ``int32`` one composite sort is used, otherwise two stable
+        sorts.
 
     Returns
     -------
@@ -1893,6 +1900,9 @@ def _build_flat_walk_artifacts_strict_streamed(
         Same for ``near_edge_capacity``
         (``JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP``; ceiling
         ``_FLAT_WALK_NEAR_EDGE_LIMIT``).
+    extra_overflow : Optional[Array]
+        An upstream capacity flag treated like the walk's own -- today the
+        cell-leaf partition's ``leaf_capacity``.
 
     Returns
     -------
@@ -2896,6 +2906,9 @@ def _build_dual_tree_artifacts(
         Forwarded to the strict streamed builder; only ever raises the cap.
     strict_flat_walk_capacity_floor : Optional[dict]
         Forwarded to the strict streamed builder as ``flat_walk_capacity_floor``.
+    strict_extra_overflow : Optional[Array]
+        An upstream capacity flag treated like the walk's own; forwarded to the
+        strict streamed builder as ``extra_overflow``.
 
     Returns
     -------

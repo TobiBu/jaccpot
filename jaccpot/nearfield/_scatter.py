@@ -29,8 +29,24 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 __all__: list[str] = []
 
 
-def _drop_masked(flat_indices, flat_mask, n: int):
-    """Unique out-of-range indices for masked slots (see ``_scatter_contributions``)."""
+def _drop_masked(flat_indices: Array, flat_mask: Array, n: int) -> Array:
+    """Unique out-of-range indices for masked slots (see ``_scatter_contributions``).
+
+    Parameters
+    ----------
+    flat_indices : Array
+        Destination row per slot ``[S]``.
+    flat_mask : Array
+        Which slots are live ``[S]``.
+    n : int
+        Number of real destination rows; masked slots are sent past it.
+
+    Returns
+    -------
+    Array
+        ``flat_indices`` with every masked slot replaced by a DISTINCT index at
+        or above ``n``, so a scatter drops them without colliding.
+    """
     slot = jnp.arange(int(flat_indices.shape[0]), dtype=flat_indices.dtype)
     return jnp.where(
         flat_mask, flat_indices, jnp.asarray(int(n), flat_indices.dtype) + slot

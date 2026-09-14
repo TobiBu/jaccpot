@@ -77,7 +77,24 @@ def _lane_tables(order: int) -> dict:
 
 
 def _bapply_lanes(v: dict, B: list, *, transpose: bool, p: int) -> dict:
-    """``out[l, i] = sum_j B_l[i, j] v[l, j]`` (or ``B_l^T``) on lane vectors."""
+    """``out[l, i] = sum_j B_l[i, j] v[l, j]`` (or ``B_l^T``) on lane vectors.
+
+    Parameters
+    ----------
+    v : dict
+        Lane vectors keyed by ``(ell, m)``.
+    B : list
+        Per-degree dense blocks, ``B[ell][i][j]``.
+    transpose : bool
+        Apply ``B_l^T`` instead of ``B_l``.
+    p : int
+        Expansion order.
+
+    Returns
+    -------
+    dict
+        The transformed lane vectors, same keys as ``v``.
+    """
     out = {}
     for ell in range(p + 1):
         for i in range(-ell, ell + 1):
@@ -95,8 +112,23 @@ def _bapply_lanes(v: dict, B: list, *, transpose: bool, p: int) -> dict:
 def _dz_lanes(v: dict, cosm: list, sinm: list, *, sign: float, p: int) -> dict:
     """``Dz(t)``: ``out[+m] = cos v[+m] - sin v[-m]``, ``out[-m] = cos v[-m] + sin v[+m]``.
 
-    ``cosm[m]``, ``sinm[m]`` are ``cos(m t)``, ``sin(m t)`` for ``t`` the base
-    angle; ``sign = -1`` gives ``Dz(-t)``.
+    Parameters
+    ----------
+    v : dict
+        Lane vectors keyed by ``(ell, m)``.
+    cosm : list
+        ``cos(m t)`` for ``m = 0 .. p``, ``t`` the base angle.
+    sinm : list
+        ``sin(m t)`` for the same ``m``.
+    sign : float
+        ``-1`` gives ``Dz(-t)``.
+    p : int
+        Expansion order.
+
+    Returns
+    -------
+    dict
+        The rotated lane vectors, same keys as ``v``.
     """
     out = {}
     for ell in range(p + 1):
@@ -110,7 +142,22 @@ def _dz_lanes(v: dict, cosm: list, sinm: list, *, sign: float, p: int) -> dict:
 
 
 def _angle_powers(c1: Array, s1: Array, p: int) -> tuple[list, list]:
-    """``cos(m t)``, ``sin(m t)`` for ``m = 0 .. p`` from ``cos t``, ``sin t``."""
+    """``cos(m t)``, ``sin(m t)`` for ``m = 0 .. p`` from ``cos t``, ``sin t``.
+
+    Parameters
+    ----------
+    c1 : Array
+        ``cos t``.
+    s1 : Array
+        ``sin t``.
+    p : int
+        Highest multiple required.
+
+    Returns
+    -------
+    tuple[list, list]
+        ``(cosm, sinm)``, each of length ``p + 1``.
+    """
     cosm = [jnp.ones_like(c1), c1]
     sinm = [jnp.zeros_like(s1), s1]
     for _ in range(2, p + 1):
@@ -142,8 +189,10 @@ def _m2l_lanes_kernel(
         Padded centres ``[n, 4]``.
     src_ref : KernelRef
         Target-sorted sources ``[P]``.
-    off_ref, cnt_ref : KernelRef
-        Row start and length per target ``[n]``.
+    off_ref : KernelRef
+        Row start per target ``[n]``.
+    cnt_ref : KernelRef
+        Row length per target ``[n]``.
     out_ref : KernelRef
         This target's packed local row ``[1, C]``.
     p : int
@@ -257,8 +306,10 @@ def m2l_real_csr_lanes_pallas(
         ``[n, C]`` real multipoles.
     centers : Array
         ``[n, 3]`` expansion centres.
-    sources, targets : Array
-        ``[P]`` directed far pairs (negative = padding).
+    sources : Array
+        ``[P]`` far-pair sources (negative = padding).
+    targets : Array
+        ``[P]`` far-pair targets, aligned with ``sources``.
     order : int
         Expansion order.
     active_pair_count : Optional[Array]

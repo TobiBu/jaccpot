@@ -70,12 +70,6 @@ def mac_geometry_mode(default: str = "aabb") -> str:
 
     Read at call time (never captured at import), like every runtime knob.
 
-    Returns
-    -------
-    str
-        ``"aabb"`` (box centres and half-diagonals, the historical
-        behaviour) or ``"com"`` (centres of mass with particle radii about them).
-
     Parameters
     ----------
     default : str
@@ -94,6 +88,12 @@ def mac_geometry_mode(default: str = "aabb") -> str:
         therefore silently degraded accuracy at every caller's existing theta.
         It was measured and tuned on the strict fused lane at theta 0.6-1.0 with
         cell leaves, which is the only lane that gets it by default.
+
+    Returns
+    -------
+    str
+        ``"aabb"`` (box centres and half-diagonals, the historical
+        behaviour) or ``"com"`` (centres of mass with particle radii about them).
 
     Raises
     ------
@@ -116,25 +116,6 @@ def mac_radius_mode() -> str:
     str
         The mode named by ``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS``.
 
-    Parameters
-    ----------
-    default : str
-        Mode to use when the environment does not name one. The strict fused lane
-        passes ``"com"``; every other lane leaves it at ``"aabb"``.
-
-        WHY NOT "com" EVERYWHERE. The COM MAC is *consistent* -- it tests the
-        criterion about the centres the expansions actually use -- but at a fixed
-        theta it is not equivalent to the box criterion: the box radius is the
-        half-DIAGONAL, which is strictly larger than the exact COM radius, so the
-        box test is the more conservative one and the same theta admits MORE far
-        pairs under COM. Measured on tests/integration/test_fmm.py's order sweep
-        (solidfmm+dehnen, theta 0.9, leaf 16, N=224), COM is worse at every order:
-        rel-L2 5.8e-3 / 2.1e-3 / 3.4e-4 at orders 1/2/4 under the box geometry
-        against 2.1e-2 / 7.7e-3 / 1.9e-3 under COM. Making it the global default
-        therefore silently degraded accuracy at every caller's existing theta.
-        It was measured and tuned on the strict fused lane at theta 0.6-1.0 with
-        cell leaves, which is the only lane that gets it by default.
-
     Raises
     ------
     ValueError
@@ -149,7 +130,18 @@ def mac_radius_mode() -> str:
 
 
 def _node_depths(parent: Array) -> Array:
-    """Depth of every node from the parent array by pointer doubling (root = 0)."""
+    """Depth of every node from the parent array by pointer doubling (root = 0).
+
+    Parameters
+    ----------
+    parent : Array
+        Parent index per node ``[nodes]``; negative marks a root.
+
+    Returns
+    -------
+    Array
+        Depth per node, index dtype, roots at 0.
+    """
     num_nodes = int(parent.shape[0])
     parent_safe = jnp.where(parent >= 0, parent, as_index(0))
     is_root = parent < 0
@@ -350,9 +342,6 @@ def resolve_walk_geometry(
         Leaf capacity.
     geometry_factory : Optional[Any]
         The deferred box-geometry builder the caller would otherwise pass on.
-    default_mode : str
-        Geometry to use when the environment names none; see
-        :func:`mac_geometry_mode`. Only the strict fused lane passes ``"com"``.
     radius_scale : Optional[Array]
         Per-node multiplier already folded into ``box_geometry.radius`` by the
         caller, ``(nodes,)``. ``mac_type='dehnen_theta'`` folds its criterion
@@ -362,6 +351,9 @@ def resolve_walk_geometry(
         applied to the COM radii, so the walk tests
         ``r_t/theta_t + r_s/theta_s <= d`` about the expansion centres.
 
+    default_mode : str
+        Geometry to use when the environment names none; see
+        :func:`mac_geometry_mode`. Only the strict fused lane passes ``"com"``.
     Returns
     -------
     tuple[Optional[TreeGeometry], Optional[Any]]
@@ -371,7 +363,11 @@ def resolve_walk_geometry(
     Raises
     ------
     RuntimeError
-        ``"com"`` requested but the upward data carries no expansion centres.
+        ``"com"`` requested EXPLICITLY but the upward data carries no expansion
+        centres. Defaulted requests fall back to the box geometry instead.
+    ValueError
+        If ``radius_scale`` does not have one entry per node, or the environment
+        names a mode this module does not implement.
     """
     if mac_geometry_mode(default_mode) == "aabb":
         return box_geometry, geometry_factory

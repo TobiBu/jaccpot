@@ -340,11 +340,30 @@ def _propagate_solidfmm_locals_by_level(
     num_levels : Optional[int]
         Concrete tree depth. ``None`` falls back to the padded shape-derived
         depth, which is correct but iterates more levels than necessary.
+    nodes_by_level : Optional[Array]
+        Node ids grouped by level. With ``level_offsets`` it selects the
+        level-compact path, whose batch is the widest level rather than every
+        internal node.
+    level_offsets : Optional[Array]
+        Start of each level in ``nodes_by_level``.
+    level_batch_width : Optional[int]
+        Static width of the level-compact batch.
+    parent : Optional[Array]
+        Parent per node. Required by the Pallas cascade, which is parent-driven.
+    pallas_levels : Optional[int]
+        Number of levels to run as one Pallas launch each. ``None`` keeps the
+        pure-JAX loop.
 
     Returns
     -------
     Array
         ``(total_nodes, C)`` locals after the full root-to-leaf cascade.
+
+    Raises
+    ------
+    NotImplementedError
+        If the Pallas cascade is requested for a configuration it does not
+        implement.
     """
     num_internal = int(left_child.shape[0])
     if num_internal <= 0:

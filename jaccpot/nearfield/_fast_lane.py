@@ -1426,6 +1426,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     reverse_options : Optional[LeafPairReverseOptions]
         Resolved reverse-pass tuning. ``None`` resolves from the environment,
         which is what forward-only callers get.
+    neighbor_list : Any
+        The prepared state's leaf neighbour CSR. Present, it enables the CSR
+        row-chunk lane, whose rows are the real ones rather than a padded
+        rectangle; ``None`` keeps the rectangle kernel. Forward only -- the
+        differentiable path never takes the CSR branch.
 
     Returns
     -------

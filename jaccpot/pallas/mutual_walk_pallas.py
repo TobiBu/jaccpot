@@ -65,16 +65,24 @@ class PallasWalkResult(NamedTuple):
 
     Attributes
     ----------
-    far_a, far_b : Array
-        Canonical far pairs (``a < b``), live prefix ``far_count``.
+    far_a : Array
+        Lower node of each canonical far pair, live prefix ``far_count``.
+    far_b : Array
+        Upper node of each canonical far pair.
     far_count : Array
         Number of far pairs emitted (may exceed the capacity when ``far_overflow``).
-    near_a, near_b : Array
-        Canonical leaf-leaf near pairs, live prefix ``near_count``.
+    near_a : Array
+        Lower leaf of each canonical near pair, live prefix ``near_count``.
+    near_b : Array
+        Upper leaf of each canonical near pair.
     near_count : Array
         Number of near pairs emitted.
-    far_overflow, near_overflow, queue_overflow : Array
-        Capacity flags; any of them means the lists are incomplete.
+    far_overflow : Array
+        The far list hit its capacity, so the lists are incomplete.
+    near_overflow : Array
+        The near list hit its capacity.
+    queue_overflow : Array
+        The wavefront queue hit its capacity.
     peak_wavefront : Array
         Largest queue occupancy seen.
     rounds : Array
@@ -135,12 +143,16 @@ def _round_kernel(
 
     Parameters
     ----------
-    qa_ref, qb_ref : KernelRef
-        Current queue ``[Q]`` (canonical pairs, ``-1`` past ``size``).
+    qa_ref : KernelRef
+        Current queue's first node per pair ``[Q]`` (``-1`` past ``size``).
+    qb_ref : KernelRef
+        Current queue's second node per pair ``[Q]``.
     size_ref : KernelRef
         Live pair count ``[1]``.
-    left_ref, right_ref : KernelRef
-        Children per node ``[nodes]``, ``-1`` for leaves.
+    left_ref : KernelRef
+        Left child per node ``[nodes]``, ``-1`` for leaves.
+    right_ref : KernelRef
+        Right child per node ``[nodes]``, ``-1`` for leaves.
     cent_ref : KernelRef
         Centres ``[nodes, 4]`` (padded).
     rad_ref : KernelRef
@@ -149,13 +161,43 @@ def _round_kernel(
         Node activity ``[nodes]`` (``int32`` 0/1).
     theta_ref : KernelRef
         ``theta^2`` ``[1]``.
-    far_a_ref .. counters_ref : KernelRef
-        The list buffers and the counters ``[6]`` (far, near, next, overflow
-        far/near/queue); aliased to the ``*_out`` refs, written in place.
+    far_a_ref : KernelRef
+        Far list, first node ``[far_cap]``; aliased to ``far_a_out``.
+    far_b_ref : KernelRef
+        Far list, second node ``[far_cap]``.
+    near_a_ref : KernelRef
+        Near list, first leaf ``[near_cap]``.
+    near_b_ref : KernelRef
+        Near list, second leaf ``[near_cap]``.
+    next_a_ref : KernelRef
+        Next queue, first node ``[queue_cap]``.
+    next_b_ref : KernelRef
+        Next queue, second node ``[queue_cap]``.
+    counters_ref : KernelRef
+        Counters ``[6]``: far, near, next, and one overflow flag each for
+        far, near and the queue.
+    far_a_out : KernelRef
+        Output alias of ``far_a_ref``, written in place.
+    far_b_out : KernelRef
+        Output alias of ``far_b_ref``.
+    near_a_out : KernelRef
+        Output alias of ``near_a_ref``.
+    near_b_out : KernelRef
+        Output alias of ``near_b_ref``.
+    next_a_out : KernelRef
+        Output alias of ``next_a_ref``.
+    next_b_out : KernelRef
+        Output alias of ``next_b_ref``.
+    counters_out : KernelRef
+        Output alias of ``counters_ref``; the atomics target this ref.
     block : int
         Pairs per program. Static.
-    far_cap, near_cap, queue_cap : int
-        Buffer capacities. Static.
+    far_cap : int
+        Far list capacity. Static.
+    near_cap : int
+        Near list capacity. Static.
+    queue_cap : int
+        Next-queue capacity. Static.
 
     Returns
     -------
@@ -202,30 +244,81 @@ def _round_kernel(
 
 
 def _round_block(
-    qa_ref,
-    qb_ref,
-    size,
-    left_ref,
-    right_ref,
-    cent_ref,
-    rad_ref,
-    active_ref,
-    theta_ref,
-    far_a_out,
-    far_b_out,
-    near_a_out,
-    near_b_out,
-    next_a_out,
-    next_b_out,
-    counters_out,
+    qa_ref: KernelRef,
+    qb_ref: KernelRef,
+    size: Array,
+    left_ref: KernelRef,
+    right_ref: KernelRef,
+    cent_ref: KernelRef,
+    rad_ref: KernelRef,
+    active_ref: KernelRef,
+    theta_ref: KernelRef,
+    far_a_out: KernelRef,
+    far_b_out: KernelRef,
+    near_a_out: KernelRef,
+    near_b_out: KernelRef,
+    next_a_out: KernelRef,
+    next_b_out: KernelRef,
+    counters_out: KernelRef,
     *,
-    pid,
-    block,
-    far_cap,
-    near_cap,
-    queue_cap,
-):
-    """Body of one non-empty block (see :func:`_round_kernel`)."""
+    pid: Array,
+    block: int,
+    far_cap: int,
+    near_cap: int,
+    queue_cap: int,
+) -> None:
+    """Body of one non-empty block (see :func:`_round_kernel`).
+
+    Parameters
+    ----------
+    qa_ref : KernelRef
+        Current queue's first node per pair ``[Q]``.
+    qb_ref : KernelRef
+        Current queue's second node per pair ``[Q]``.
+    size : Array
+        Live pair count, already loaded from the size ref.
+    left_ref : KernelRef
+        Left child per node ``[nodes]``, ``-1`` for leaves.
+    right_ref : KernelRef
+        Right child per node ``[nodes]``.
+    cent_ref : KernelRef
+        Centres ``[nodes, 4]`` (padded).
+    rad_ref : KernelRef
+        MAC radii ``[nodes]``.
+    active_ref : KernelRef
+        Node activity ``[nodes]`` (``int32`` 0/1).
+    theta_ref : KernelRef
+        ``theta^2`` ``[1]``.
+    far_a_out : KernelRef
+        Far list, first node; written in place.
+    far_b_out : KernelRef
+        Far list, second node.
+    near_a_out : KernelRef
+        Near list, first leaf.
+    near_b_out : KernelRef
+        Near list, second leaf.
+    next_a_out : KernelRef
+        Next queue, first node.
+    next_b_out : KernelRef
+        Next queue, second node.
+    counters_out : KernelRef
+        Counters ``[6]``; the atomics target this ref.
+    pid : Array
+        This program's index in the grid.
+    block : int
+        Pairs per program. Static.
+    far_cap : int
+        Far list capacity. Static.
+    near_cap : int
+        Near list capacity. Static.
+    queue_cap : int
+        Next-queue capacity. Static.
+
+    Returns
+    -------
+    None
+        Writes into the aliased outputs.
+    """
     lane = (pid * block + lax.broadcasted_iota(jnp.int32, (block,), 0)).astype(
         jnp.int32
     )
@@ -355,8 +448,10 @@ def mutual_walk_pallas(
 
     Parameters
     ----------
-    left_child_full, right_child_full : Array
-        ``[nodes]`` children, ``-1`` for leaves.
+    left_child_full : Array
+        ``[nodes]`` left children, ``-1`` for leaves.
+    right_child_full : Array
+        ``[nodes]`` right children, ``-1`` for leaves.
     centers : Array
         ``[nodes, 3]`` MAC centres.
     radii : Array
@@ -367,8 +462,10 @@ def mutual_walk_pallas(
         Root node id (scalar).
     max_pair_queue : int
         Queue capacity (also the block-padded grid). Static.
-    far_cap, near_cap : int
-        List capacities. Static.
+    far_cap : int
+        Far list capacity. Static.
+    near_cap : int
+        Near list capacity. Static.
     node_active : Optional[Array]
         ``[nodes]`` bool; ``None`` = all active.
     block : int

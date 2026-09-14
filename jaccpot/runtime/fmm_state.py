@@ -285,6 +285,11 @@ class _TreeBuildArtifacts:
         The leaf-size *request* this build was made with, as opposed to
         ``max_leaf_size`` which is the outcome. Cache keys use this one, so two
         builds that asked for the same thing match even if the trees differ.
+    leaf_capacity_overflow : Optional[Array]
+        Cell-leaf partitions only: set when the partition needed more leaves than
+        ``TreeConfig.leaf_capacity``, which means the arrays cover only the first
+        ``leaf_capacity`` leaves and the rest of the particles are NOT covered.
+        The walk's saturation guard treats it exactly like its own overflows.
     """
 
     tree: Tree
@@ -682,6 +687,13 @@ def _build_tree_with_config(
         Extra refinement levels permitted.
     aspect_threshold : float
         Aspect ratio above which refinement is attempted.
+    leaf_partition : str
+        ``"buckets"`` (equal-count runs of the Morton order, the historical
+        behaviour) or ``"cells"`` (each leaf the coarsest Morton cell holding at
+        most ``leaf_size`` particles).
+    leaf_capacity : Optional[int]
+        Static leaf-array capacity for ``leaf_partition="cells"``, whose leaf
+        count is data dependent. Required in that mode.
 
     Returns
     -------
@@ -692,8 +704,11 @@ def _build_tree_with_config(
     Raises
     ------
     ValueError
-        If the requested build mode is not supported for this tree type, or the
-        builder returns a tree without the FMM topology the pipeline needs.
+        If the requested build mode is not supported for this tree type, the
+        builder returns a tree without the FMM topology the pipeline needs, or
+        ``leaf_partition="cells"`` comes without a ``leaf_capacity``.
+    RuntimeError
+        If the cell partition needed more leaves than ``leaf_capacity``.
     """
 
     mode = tree_config.mode
@@ -1224,6 +1239,8 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     locals_template : Optional[LocalExpansionData]
         Zero-filled locals matching the tree's shape, kept so the downward sweep
         can allocate without re-deriving the layout.
+    leaf_capacity_overflow : Optional[Array]
+        Cell-leaf partitions only; see :class:`_TreeBuildArtifacts`.
     """
 
     tree_mode: str

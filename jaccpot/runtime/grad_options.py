@@ -94,6 +94,9 @@ class ResolvedGradOptions:
         Whether ``nearfield_lane`` came from auto-selection rather than the caller.
         Kept because a diagnostic needs to distinguish "chose this" from "was told
         this".
+    cascade_pallas : bool
+        Always ``False``: the per-level Pallas M2M/L2L cascades and the leaf P2M
+        carry no autodiff rule, so the gradient path runs the pure-JAX loops.
     fused_m2l_pallas : bool
         Whether the fused Pallas M2L is requested; hardware support is checked
         separately.
@@ -101,9 +104,6 @@ class ResolvedGradOptions:
         Use the analytic near-field P2P reverse rule.
     analytic_l2p_vjp : bool
         Use the analytic real-basis L2P reverse rule.
-    cascade_pallas : bool
-        Always ``False``: the per-level Pallas M2M/L2L cascades and the leaf P2M
-        carry no autodiff rule, so the gradient path runs the pure-JAX loops.
     reverse : LeafPairReverseOptions
         Tuning for the analytic leaf-pair reverse.
     """

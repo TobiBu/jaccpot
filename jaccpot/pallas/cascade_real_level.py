@@ -453,7 +453,7 @@ def _full(arr: Array) -> "pl.BlockSpec":
 
 
 def _level_call(
-    kernel,
+    kernel: Any,
     operands: list,
     *,
     num_programs: int,
@@ -461,12 +461,34 @@ def _level_call(
     backend: str,
     num_warps: int,
     name: str,
-):
+) -> Array:
     """One level launch: whole-array refs, ``num_programs`` programs.
 
     ``operands[0]`` is the coefficient table; it is aliased to the output, so
     every row a program does not write keeps its value (programs read rows of
     OTHER levels and write only their own, so the in-place update is safe).
+
+    Parameters
+    ----------
+    kernel : Any
+        The Pallas kernel to launch, already bound to its static arguments.
+    operands : list
+        Kernel operands; ``operands[0]`` is the aliased coefficient table.
+    num_programs : int
+        Programs in the 1-D grid.
+    interpret : bool
+        Run Pallas' reference interpreter instead of lowering.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+    name : str
+        Kernel name, as it appears in a profile.
+
+    Returns
+    -------
+    Array
+        The updated coefficient table.
     """
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:

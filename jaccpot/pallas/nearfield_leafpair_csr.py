@@ -118,7 +118,14 @@ def leafpair_chunk_capacity(edge_capacity: int, num_leaves: int, chunk: int) -> 
 
 @jaxtyped(typechecker=beartype)
 def build_leafpair_chunk_table(
-    offsets: Int[Array, "leavesp1"],
+    # `_` and not `leaves+1`, though that is what it is: jaxtyping evaluates a
+    # symbolic axis only against names already bound, and `offsets` PRECEDES
+    # `counts` here, so `leaves` is unbound at that point ("Cannot process
+    # symbolic axis 'leaves+1' as some axis names have not been processed").
+    # The same constraint is documented in runtime/_adaptive_policy.py and
+    # nearfield/_large_n_blocks.py. A bare `leavesp1` reads as a forward
+    # reference to flake8 and trips F821.
+    offsets: Int[Array, "_"],
     counts: Int[Array, "leaves"],
     *,
     chunk: int,
@@ -131,7 +138,7 @@ def build_leafpair_chunk_table(
 
     Parameters
     ----------
-    offsets : Int[Array, 'leavesp1']
+    offsets : Int[Array, '_']
         CSR row starts, ``num_leaves + 1`` entries.
     counts : Int[Array, 'leaves']
         Row lengths (``offsets[1:] - offsets[:-1]``; passed separately because
@@ -203,6 +210,9 @@ def _nearfield_leafpair_csr_kernel(
         Full mass table ``(L, W)``.
     table_mask_ref : KernelRef
         Full validity table ``(L, W)``.
+    leaf_count_ref : KernelRef
+        Occupancy per leaf ``(L,)``; the source and target loops run to it
+        instead of the padded width.
     neighbors_ref : KernelRef
         Flat neighbour array of LEAF indices ``(E,)``.
     chunk_leaf_ref : KernelRef
@@ -407,8 +417,6 @@ def nearfield_leafpair_csr_pallas(
     ------
     RuntimeError
         If Pallas or its Triton backend could not be imported.
-    ValueError
-        If the operand shapes are mutually inconsistent.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -528,7 +536,14 @@ def nearfield_leafpair_csr_jax(
     leaf_masses: Float[Array, "leaves w"],
     leaf_mask: Bool[Array, "leaves w"],
     neighbors: Int[Array, "edges"],
-    offsets: Int[Array, "leavesp1"],
+    # `_` and not `leaves+1`, though that is what it is: jaxtyping evaluates a
+    # symbolic axis only against names already bound, and `offsets` PRECEDES
+    # `counts` here, so `leaves` is unbound at that point ("Cannot process
+    # symbolic axis 'leaves+1' as some axis names have not been processed").
+    # The same constraint is documented in runtime/_adaptive_policy.py and
+    # nearfield/_large_n_blocks.py. A bare `leavesp1` reads as a forward
+    # reference to flake8 and trips F821.
+    offsets: Int[Array, "_"],
     counts: Int[Array, "leaves"],
     *,
     softening_sq: Array,
@@ -552,7 +567,7 @@ def nearfield_leafpair_csr_jax(
         Slot validity.
     neighbors : Int[Array, 'edges']
         Flat neighbour array of leaf indices.
-    offsets : Int[Array, 'leavesp1']
+    offsets : Int[Array, '_']
         CSR row starts.
     counts : Int[Array, 'leaves']
         CSR row lengths.

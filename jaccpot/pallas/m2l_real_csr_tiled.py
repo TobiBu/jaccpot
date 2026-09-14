@@ -102,22 +102,28 @@ def _m2l_tiled_kernel(
         Padded centres ``[n, 4]``.
     src_ref : KernelRef
         Target-sorted sources ``[P]``.
-    off_ref, cnt_ref : KernelRef
-        Row start and length per target ``[n]``.
+    off_ref : KernelRef
+        Row start per target ``[n]``.
+    cnt_ref : KernelRef
+        Row length per target ``[n]``.
     bt_ref : KernelRef
         Per-degree ``B_l^T`` stacked ``[Bp*Wp, Wp]`` (rows ``l*Wp .. (l+1)*Wp``).
     b_ref : KernelRef
         Per-degree ``B_l`` stacked the same way.
     apat_t_ref : KernelRef
         ``Apat^T`` ``[Wp, Wp]``.
-    mabs_ref, signm_ref : KernelRef
-        ``|m|`` and the z-core sign per column ``[Wp]``.
+    mabs_ref : KernelRef
+        ``|m|`` per column ``[Wp]``.
+    signm_ref : KernelRef
+        z-core sign per column ``[Wp]``.
     out_ref : KernelRef
         This target's centred local row ``[1, Bp*Wp]``.
     p : int
         Order. Static.
-    bp, wp : int
-        Centred layout. Static.
+    bp : int
+        Centred layout rows. Static.
+    wp : int
+        Centred layout columns. Static.
     k_tile : int
         Sources per iteration. Static.
     zf : tuple
@@ -274,8 +280,10 @@ def m2l_real_csr_tiled_pallas(
         ``[n, C]`` real multipoles.
     centers : Array
         ``[n, 3]`` expansion centres.
-    sources, targets : Array
-        ``[P]`` directed far pairs (negative = padding).
+    sources : Array
+        ``[P]`` far-pair sources (negative = padding).
+    targets : Array
+        ``[P]`` far-pair targets, aligned with ``sources``.
     order : int
         Expansion order (4 .. 7 for this kernel).
     active_pair_count : Optional[Array]
