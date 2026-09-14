@@ -144,9 +144,15 @@ def test_flat_walk_with_com_geometry_accepts_only_convergent_pairs(tree_data, th
 def test_mode_knob(monkeypatch, tree_data):
     tree, topo, ps, ms, com, box = tree_data
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", raising=False)
-    assert mac_geometry_mode() == "com"  # the default since plan sub-10ms Phase 6
+    # The default belongs to the CALLER, not the environment: only the strict
+    # fused lane passes "com". A global "com" default silently changed the
+    # meaning of theta for every other lane -- the box radius is the
+    # half-diagonal, so the same theta admits more far pairs under COM.
+    assert mac_geometry_mode() == "aabb"
+    assert mac_geometry_mode("com") == "com"
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "aabb")
     assert mac_geometry_mode() == "aabb"
+    assert mac_geometry_mode("com") == "aabb"  # the environment overrides the caller
     g, f = resolve_walk_geometry(
         topo, ps, box, com, leaf_cap=_LEAF, geometry_factory="factory"
     )
@@ -195,10 +201,12 @@ def test_a_folded_per_node_criterion_survives_the_com_geometry(tree_data):
 
     tree, topo, ps, _ms, com, box = tree_data
     nodes = int(box.radius.shape[0])
-    plain, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
+    plain, _ = resolve_walk_geometry(
+        topo, ps, box, com, leaf_cap=_LEAF, default_mode="com"
+    )
     scale = jnp.full((nodes,), 4.0, box.radius.dtype)
     scaled, _ = resolve_walk_geometry(
-        topo, ps, box, com, leaf_cap=_LEAF, radius_scale=scale
+        topo, ps, box, com, leaf_cap=_LEAF, radius_scale=scale, default_mode="com"
     )
     assert np.allclose(np.asarray(scaled.radius), 4.0 * np.asarray(plain.radius))
     assert np.array_equal(np.asarray(scaled.center), np.asarray(plain.center))
@@ -210,4 +218,5 @@ def test_a_folded_per_node_criterion_survives_the_com_geometry(tree_data):
             com,
             leaf_cap=_LEAF,
             radius_scale=jnp.ones((nodes + 1,), box.radius.dtype),
+            default_mode="com",
         )
