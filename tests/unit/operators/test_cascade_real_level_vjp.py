@@ -39,7 +39,14 @@ def _plummer(n, seed=0):
 
 @pytest.fixture(scope="module")
 def tree_data():
-    n, leaf = 1500, 16
+    # 400, not 1500: these run in Pallas INTERPRET mode, which simulates the
+    # grid in Python, so cost is linear in the node count and this fixture is
+    # the dominant term in `test-runtime-typecheck` (whole of tests/unit under
+    # jaxtyping+beartype, 60 min cap). 400 particles at leaf 16 still give a
+    # multi-level tree with internal nodes at several depths, which is all the
+    # cascade adjoints need to be exercised; the order sweep is what carries
+    # the coverage here, and it is unchanged.
+    n, leaf = 400, 16
     P = jnp.asarray(_plummer(n, 1), jnp.float64)
     M = jnp.asarray(np.random.default_rng(2).uniform(0.5, 1.5, n), jnp.float64)
     tree = Tree.from_particles(

@@ -52,7 +52,12 @@ def _native_or_skip(interpret: bool) -> None:
 @pytest.mark.parametrize("order", [2, 4, 5])
 def test_p2m_reverse_matches_vjp_of_the_batched_reference(order, interpret):
     _native_or_skip(interpret)
-    n, leaf = 2000, 16
+    # 600, not 2000: interpret mode makes the cost linear in the leaf count and
+    # this is one of the heavier files in `test-runtime-typecheck`. The
+    # assertions below still require what the fixture is for -- empty padding
+    # leaves AND single-particle leaves -- so a size that lost either would
+    # fail rather than silently cover less.
+    n, leaf = 600, 16
     dtype = jnp.float64
     P = jnp.asarray(_plummer(n, 1), dtype)
     M = jnp.asarray(np.random.default_rng(2).uniform(0.5, 1.5, n), dtype)
