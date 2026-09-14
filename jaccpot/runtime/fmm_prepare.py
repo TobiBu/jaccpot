@@ -69,6 +69,8 @@ from ._interaction_cache import (
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
 from ._large_n_types import LargeNPrepareRequest
+from ._level_shapes import level_width_overflow
+from ._mac_geometry import mac_geometry_mode, resolve_walk_geometry
 from ._nearfield_cache import (
     NearfieldPrecomputeArtifacts,
     nearfield_cache_matches,
@@ -689,18 +691,50 @@ class PrepareMixin(_EngineBase):
             If the template topology disagrees with the request.
         """
 
+        leaf_partition = getattr(self, "_tree_leaf_partition", "buckets")
+        cells = leaf_partition == "cells"
         rebuilt_result = rebuild_static_radix_tree_from_template(
             positions,
             masses,
             template_tree,
             bounds=bounds,
             return_reordered=True,
+            leaf_partition=leaf_partition,
+            return_overflow=cells,
         )
-        if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != 4:
+        expected = 5 if cells else 4
+        if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != expected:
             raise RuntimeError(
                 "static radix template rebuild must return tree and reordered arrays"
             )
-        rebuilt_tree, positions_sorted, masses_sorted, inverse = rebuilt_result
+        leaf_capacity_overflow: Optional[Array] = None
+        if cells:
+            rebuilt_tree, positions_sorted, masses_sorted, inverse, overflow = (
+                rebuilt_result
+            )
+            # a rebuilt tree deeper than the level-loop bound would truncate
+            # the M2M/L2L sweeps: make it a capacity failure like the leaf cap
+            depth_bound = getattr(self, "_cells_upward_num_levels", None)
+            if depth_bound is not None:
+                depth_now = jnp.max(jnp.asarray(rebuilt_tree.node_level)) + 1
+                overflow = jnp.asarray(overflow) | (depth_now > int(depth_bound))
+            # the level loops' static batch is the eager widest level (+25 %):
+            # a rebuilt tree with a wider level would drop nodes -> capacity failure
+            overflow = jnp.asarray(overflow) | level_width_overflow(
+                rebuilt_tree.level_offsets,
+                total_nodes=int(rebuilt_tree.parent.shape[0]),
+                num_internal=int(rebuilt_tree.left_child.shape[0]),
+            )
+            if isinstance(overflow, Tracer):
+                leaf_capacity_overflow = overflow
+            elif bool(overflow):
+                raise RuntimeError(
+                    "static_radix cell leaves overflowed the leaf capacity on refresh: "
+                    f"leaf_capacity={int(template_tree.leaf_codes.shape[0])}. "
+                    "Raise TreeConfig(leaf_capacity=...)."
+                )
+        else:
+            rebuilt_tree, positions_sorted, masses_sorted, inverse = rebuilt_result
         if not isinstance(rebuilt_tree, RadixTree):
             raise ValueError("static radix template rebuild returned non-radix tree")
         return _TreeBuildArtifacts(
@@ -711,6 +745,7 @@ class PrepareMixin(_EngineBase):
             workspace=template_tree.workspace,
             max_leaf_size=int(max_leaf_size),
             cache_leaf_parameter=int(cache_leaf_parameter),
+            leaf_capacity_overflow=leaf_capacity_overflow,
         )
 
     def _build_locals_template_for_prepare_state(
@@ -888,6 +923,8 @@ class PrepareMixin(_EngineBase):
                 refine_local=refine_local_val,
                 max_refine_levels=max_refine_levels_val,
                 aspect_threshold=aspect_threshold_val,
+                leaf_partition=getattr(self, "_tree_leaf_partition", "buckets"),
+                leaf_capacity=getattr(self, "_tree_leaf_capacity", None),
             )
             if allow_stateful_cache:
                 self._tree_workspace = build_artifacts.workspace
@@ -984,6 +1021,17 @@ class PrepareMixin(_EngineBase):
             and str(upward_center_mode).strip().lower() == "com"
             and self._interaction_cache is not None
         )
+        # Under the COM MAC geometry the walk never reads the box geometry (only
+        # the dehnen_error policy and the octree lanes do), and on a cell-leaf
+        # tree its level loop is nodes x depth work: build it lazily instead.
+        if (
+            tree_config.mode == "static_radix"
+            and str(upward_center_mode).strip().lower() == "com"
+            and mac_geometry_mode() == "com"
+            and not self._uses_paper_style_force_scale()
+            and str(getattr(self, "execution_backend", "")) != "octree"
+        ):
+            defer_geometry = True
         upward = self.prepare_upward_sweep(
             tree,
             pos_sorted,
@@ -1030,6 +1078,9 @@ class PrepareMixin(_EngineBase):
             topology_key=topology_key_for_state,
             upward=upward,
             locals_template=locals_template,
+            leaf_capacity_overflow=getattr(
+                build_artifacts, "leaf_capacity_overflow", None
+            ),
         )
 
     def _prepare_state_tree_upward_and_dual_downward(
@@ -1473,13 +1524,34 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
+        # Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
+        # expansions use (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com), see
+        # jaccpot.runtime._mac_geometry.
+        walk_geometry, geometry_factory = resolve_walk_geometry(
+            tree_artifacts.tree,
+            tree_artifacts.positions_sorted,
+            tree_artifacts.upward.geometry,
+            getattr(tree_artifacts.upward.multipoles, "centers", None),
+            leaf_cap=int(tree_artifacts.leaf_cap),
+            geometry_factory=geometry_factory,
+            radius_scale=self._folded_criterion_radius_scale(),
+            # Only this lane gets the COM MAC by default: at a fixed theta it is
+            # LESS conservative than the box half-diagonal, so a global default
+            # would quietly change every caller's accuracy (see mac_geometry_mode).
+            default_mode=(
+                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+            ),
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
-            tree_artifacts.upward.geometry,
+            walk_geometry,
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
             strict_flat_walk_capacity_floor=strict_flat_floor,
+            strict_extra_overflow=getattr(
+                tree_artifacts, "leaf_capacity_overflow", None
+            ),
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,
@@ -3521,13 +3593,34 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
+        # Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
+        # expansions use (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com), see
+        # jaccpot.runtime._mac_geometry.
+        walk_geometry, geometry_factory = resolve_walk_geometry(
+            tree_artifacts.tree,
+            tree_artifacts.positions_sorted,
+            tree_artifacts.upward.geometry,
+            getattr(tree_artifacts.upward.multipoles, "centers", None),
+            leaf_cap=int(tree_artifacts.leaf_cap),
+            geometry_factory=geometry_factory,
+            radius_scale=self._folded_criterion_radius_scale(),
+            # Only this lane gets the COM MAC by default: at a fixed theta it is
+            # LESS conservative than the box half-diagonal, so a global default
+            # would quietly change every caller's accuracy (see mac_geometry_mode).
+            default_mode=(
+                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+            ),
+        )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
-            tree_artifacts.upward.geometry,
+            walk_geometry,
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
             strict_flat_walk_capacity_floor=strict_flat_floor,
+            strict_extra_overflow=getattr(
+                tree_artifacts, "leaf_capacity_overflow", None
+            ),
             theta=theta_val,
             mac_type=mac_type_val,
             dehnen_radius_scale=dehnen_radius_scale,

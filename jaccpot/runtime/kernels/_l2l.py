@@ -35,8 +35,9 @@ from yggdrax.interactions import (
     MACType,
     NodeInteractionList,
 )
-from yggdrax.tree import Tree, get_node_levels
+from yggdrax.tree import Tree, get_level_offsets, get_node_levels, get_nodes_by_level
 
+from jaccpot._env import env_flag
 from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
@@ -194,6 +195,63 @@ def _propagate_solidfmm_locals_to_children(
     return coeffs_local + updates
 
 
+def _l2l_level_compact_kwargs(
+    tree: Tree, *, total_nodes: int, num_internal: int
+) -> dict:
+    """Level tables and the static batch width for the level-compact L2L cascade.
+
+    Empty (the masked full-array cascade runs) when ``JACCPOT_L2L_LEVEL_COMPACT=0``
+    or the tree carries no level tables. With the Pallas cascades enabled
+    (``JACCPOT_CASCADE_PALLAS=1``) it also carries the parent array and the
+    registered static level count that select the per-level Pallas kernel.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree the cascade descends.
+    total_nodes : int
+        Node count (registry key).
+    num_internal : int
+        Internal node count (registry key).
+
+    Returns
+    -------
+    dict
+        Keyword arguments for :func:`_propagate_solidfmm_locals_by_level`.
+    """
+    if not env_flag("JACCPOT_L2L_LEVEL_COMPACT", True):
+        return {}
+    try:
+        offs = get_level_offsets(tree)
+        nbl = get_nodes_by_level(tree)
+    except Exception:
+        return {}
+    if offs is None or nbl is None:
+        return {}
+    from jaccpot.runtime._level_shapes import (
+        level_batch_width,
+        pallas_cascades_enabled,
+        registered_num_levels,
+    )
+
+    out = dict(
+        nodes_by_level=nbl,
+        level_offsets=offs,
+        level_batch_width=level_batch_width(
+            offs, total_nodes=int(total_nodes), num_internal=int(num_internal)
+        ),
+    )
+    if pallas_cascades_enabled():
+        levels = registered_num_levels(
+            total_nodes=int(total_nodes), num_internal=int(num_internal)
+        )
+        par = getattr(tree, "parent", None)
+        if levels is not None and par is not None:
+            out["parent"] = par
+            out["pallas_levels"] = int(levels)
+    return out
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -204,6 +262,8 @@ def _propagate_solidfmm_locals_to_children(
         "l2l_grouped",
         "mm_class_capacity",
         "num_levels",
+        "level_batch_width",
+        "pallas_levels",
     ),
     donate_argnums=(0,),
 )
@@ -221,8 +281,24 @@ def _propagate_solidfmm_locals_by_level(
     l2l_grouped: bool = False,
     mm_class_capacity: int = 512,
     num_levels: Optional[int] = None,
+    nodes_by_level: Optional[Array] = None,
+    level_offsets: Optional[Array] = None,
+    level_batch_width: Optional[int] = None,
+    parent: Optional[Array] = None,
+    pallas_levels: Optional[int] = None,
 ) -> Array:
     """Top-down, level-by-level L2L cascade over a binary tree.
+
+    With ``nodes_by_level`` / ``level_offsets`` / ``level_batch_width`` the
+    cascade is LEVEL-COMPACT: each level gathers only its own parents (a
+    ``dynamic_slice`` of ``nodes_by_level``, static width) and scatters onto
+    their ``2 x width`` children, instead of translating every internal node
+    masked by level and scatter-adding ``2 x num_internal`` rows per level --
+    which cost ``nodes x depth`` and 44 ms per step on the 39-level cell-leaf
+    tree at N = 2x10^5. With ``parent`` and ``pallas_levels`` as well (real
+    basis) the cascade runs as one Pallas launch per level
+    (:mod:`jaccpot.pallas.cascade_real_level`). Numerics: the level-compact
+    loop is identical to the masked one; the Pallas lane agrees to round-off.
 
     A single parent->child pass (``_propagate_solidfmm_locals_to_children``)
     moves each node's local expansion down exactly one level. That is only
@@ -264,11 +340,30 @@ def _propagate_solidfmm_locals_by_level(
     num_levels : Optional[int]
         Concrete tree depth. ``None`` falls back to the padded shape-derived
         depth, which is correct but iterates more levels than necessary.
+    nodes_by_level : Optional[Array]
+        Node ids grouped by level. With ``level_offsets`` it selects the
+        level-compact path, whose batch is the widest level rather than every
+        internal node.
+    level_offsets : Optional[Array]
+        Start of each level in ``nodes_by_level``.
+    level_batch_width : Optional[int]
+        Static width of the level-compact batch.
+    parent : Optional[Array]
+        Parent per node. Required by the Pallas cascade, which is parent-driven.
+    pallas_levels : Optional[int]
+        Number of levels to run as one Pallas launch each. ``None`` keeps the
+        pure-JAX loop.
 
     Returns
     -------
     Array
         ``(total_nodes, C)`` locals after the full root-to-leaf cascade.
+
+    Raises
+    ------
+    NotImplementedError
+        If the Pallas cascade is requested for a configuration it does not
+        implement.
     """
     num_internal = int(left_child.shape[0])
     if num_internal <= 0:
@@ -388,6 +483,80 @@ def _propagate_solidfmm_locals_by_level(
         return jnp.where(valid[:, None], translated, 0)
 
     _l2l_level = jax.checkpoint(_l2l_level_apply)
+
+    if nodes_by_level is not None and level_offsets is not None and level_batch_width:
+        if use_grouped_l2l:
+            raise NotImplementedError(
+                "level-compact L2L does not support the grouped/cached rotation blocks"
+            )
+        if pallas_levels is not None and parent is not None and real_basis:
+            # plan sub-10ms Phase 3: one Pallas launch per level, through the
+            # custom_vjp seam (plan fast-gradients) so the reverse is the level
+            # kernels' own adjoint rather than pallas_call's generic JVP rule
+            from jaccpot.pallas.cascade_real_level import l2l_real_levels_pallas_cvjp
+
+            return l2l_real_levels_pallas_cvjp(
+                coeffs_local,
+                centers,
+                jnp.asarray(parent, dtype=left_internal.dtype),
+                left_internal,
+                right_internal,
+                jnp.asarray(nodes_by_level, dtype=left_internal.dtype),
+                jnp.asarray(level_offsets, dtype=left_internal.dtype),
+                order,
+                int(pallas_levels),
+                int(level_batch_width),
+                env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+                "triton",
+                4,
+            )
+        width = int(level_batch_width)
+        nbl = jnp.concatenate(
+            [
+                jnp.asarray(nodes_by_level, dtype=left_internal.dtype),
+                jnp.full((width,), -1, dtype=left_internal.dtype),
+            ]
+        )
+        offs = jnp.asarray(level_offsets, dtype=left_internal.dtype)
+        slot = jnp.arange(width, dtype=left_internal.dtype)
+        num_internal = int(left_internal.shape[0])
+        dead = jnp.asarray(total_nodes, dtype=left_internal.dtype)
+
+        def _compact_apply(state_in, centers_all, parent_rep_b, safe_child, valid):
+            parent_coeffs = state_in[parent_rep_b]
+            deltas = centers_all[parent_rep_b] - centers_all[safe_child]
+            if real_basis:
+                translated = _l2l_real_batch_kernel(parent_coeffs, deltas, order=order)
+            else:
+                translated = _l2l_complex_batch_kernel(
+                    parent_coeffs, deltas, order=order, rotation=rotation
+                )
+            return jnp.where(valid[:, None], translated.astype(state_in.dtype), 0)
+
+        _compact = jax.checkpoint(_compact_apply)
+
+        def level_body_compact(level: Array, state: Array) -> Array:
+            start = offs[level]
+            count = offs[level + 1] - start
+            batch = jax.lax.dynamic_slice_in_dim(
+                nbl, start_index=start, slice_size=width, axis=0
+            )
+            is_parent = (slot < count) & (batch >= 0) & (batch < num_internal)
+            par = jnp.where(is_parent, batch, 0)
+            lc = jnp.where(is_parent, left_internal[par], minus_one)
+            rc = jnp.where(is_parent, right_internal[par], minus_one)
+            child_idx = jnp.concatenate([lc, rc], axis=0)
+            valid = child_idx >= 0
+            safe_child = jnp.where(valid, child_idx, 0)
+            parent_rep_b = jnp.concatenate([par, par], axis=0)
+            translated = _compact(state, centers, parent_rep_b, safe_child, valid)
+            target = jnp.where(valid, safe_child, dead)
+            updates = jax.ops.segment_sum(translated, target, total_nodes + 1)[
+                :total_nodes
+            ]
+            return state + updates
+
+        return jax.lax.fori_loop(0, max_level + 1, level_body_compact, coeffs_local)
 
     def level_body(level: Array, state: Array) -> Array:
         active = parent_levels == level
@@ -772,6 +941,11 @@ def _prepare_solidfmm_downward_sweep(
             total_nodes=total_nodes,
             basis_mode=basis_mode,
             num_levels=l2l_num_levels,
+            **_l2l_level_compact_kwargs(
+                tree,
+                total_nodes=total_nodes,
+                num_internal=child_inputs.num_internal_nodes,
+            ),
         )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_l2l_compute_seconds",
@@ -821,6 +995,11 @@ def _prepare_solidfmm_downward_sweep(
                 total_nodes=total_nodes,
                 basis_mode=basis_mode,
                 num_levels=l2l_num_levels,
+                **_l2l_level_compact_kwargs(
+                    tree,
+                    total_nodes=total_nodes,
+                    num_internal=child_inputs.num_internal_nodes,
+                ),
             )
             source_motion_locals_updated = _record_timed_array(
                 "_refresh_timing_dual_source_motion_seconds",

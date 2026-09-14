@@ -29,6 +29,30 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 __all__: list[str] = []
 
 
+def _drop_masked(flat_indices: Array, flat_mask: Array, n: int) -> Array:
+    """Unique out-of-range indices for masked slots (see ``_scatter_contributions``).
+
+    Parameters
+    ----------
+    flat_indices : Array
+        Destination row per slot ``[S]``.
+    flat_mask : Array
+        Which slots are live ``[S]``.
+    n : int
+        Number of real destination rows; masked slots are sent past it.
+
+    Returns
+    -------
+    Array
+        ``flat_indices`` with every masked slot replaced by a DISTINCT index at
+        or above ``n``, so a scatter drops them without colliding.
+    """
+    slot = jnp.arange(int(flat_indices.shape[0]), dtype=flat_indices.dtype)
+    return jnp.where(
+        flat_mask, flat_indices, jnp.asarray(int(n), flat_indices.dtype) + slot
+    )
+
+
 def _scatter_contributions(
     base_acc: Array,
     indices: Array,
@@ -64,7 +88,11 @@ def _scatter_contributions(
     flat_values = values.reshape(-1, values.shape[-1])
     flat_mask = mask.reshape(-1)
     masked_values = jnp.where(flat_mask[:, None], flat_values, 0.0)
-    return base_acc.at[flat_indices].add(masked_values)
+    # Masked slots point PAST the buffer (unique, dropped): padding slots that
+    # all carry one index serialise XLA's atomic scatter-add on that address
+    # (800k padded slots of a capacity-padded cell tree = 1.8 ms at N=2e5).
+    flat_indices = _drop_masked(flat_indices, flat_mask, int(base_acc.shape[0]))
+    return base_acc.at[flat_indices].add(masked_values, mode="drop")
 
 
 def _scatter_contributions_sorted_hint(
@@ -280,7 +308,8 @@ def _scatter_scalar_contributions(
     flat_values = values.reshape(-1)
     flat_mask = mask.reshape(-1)
     masked = jnp.where(flat_mask, flat_values, 0.0)
-    return base.at[flat_indices].add(masked)
+    flat_indices = _drop_masked(flat_indices, flat_mask, int(base.shape[0]))
+    return base.at[flat_indices].add(masked, mode="drop")
 
 
 def _scatter_scalars_with_schedule(

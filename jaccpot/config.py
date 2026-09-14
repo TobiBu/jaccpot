@@ -127,6 +127,18 @@ class TreeConfig:
         Depth cap for that refinement pass.
     aspect_threshold : Optional[float]
         Leaf aspect ratio above which refinement splits a leaf.
+    leaf_partition : Optional[str]
+        ``"static_radix"`` only. ``"buckets"`` (default): leaves are runs of
+        exactly ``leaf_target`` Morton-consecutive particles. ``"cells"``: leaves
+        are the coarsest Morton cells holding at most ``leaf_target`` particles,
+        padded with empty leaves to ``leaf_capacity`` -- bounded in extent, so a
+        low-density shell no longer produces huge leaves that the mutual MAC
+        makes neighbours of the whole tree (near-field volume 24x lower at
+        N=2e5 Plummer, theta 0.8; plan sub-10ms Phase 1.2).
+    leaf_capacity : Optional[int]
+        Static leaf count for ``leaf_partition="cells"`` (the tree is padded to
+        it; exceeding it raises eagerly and trips the strict runner's capacity
+        guard under trace). Required with ``"cells"``.
     """
 
     tree_type: Optional[str] = None
@@ -135,6 +147,8 @@ class TreeConfig:
     refine_local: Optional[bool] = None
     max_refine_levels: Optional[int] = None
     aspect_threshold: Optional[float] = None
+    leaf_partition: Optional[str] = None
+    leaf_capacity: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -480,6 +494,13 @@ class GradConfig:
     analytic_l2p_vjp : Optional[bool]
         Analytic reverse rule for the real-basis L2P, on by default. Same
         caveat as ``analytic_p2p_vjp``.
+    cascade_pallas : Optional[bool]
+        Run the per-level Pallas M2M/L2L cascades and the leaf P2M on the
+        gradient path (Ampere+, or interpret mode), through their own reverse
+        Pallas kernels. ``None`` defers to ``JACCPOT_CASCADE_PALLAS`` (default
+        on). ``False`` restores the pure-JAX level loops, whose reverse is
+        autodiff and ~40x slower per cascade at N = 2x10^5 -- for A/B
+        measurement, not production.
     reverse_tiers : Optional[int]
         Maximum occupancy tiers for the analytic leaf-pair reverse (default 4).
         The prepacked payload is padded to the global maximum neighbour count,
@@ -507,6 +528,7 @@ class GradConfig:
     fused_m2l_pallas: Optional[bool] = None
     analytic_p2p_vjp: Optional[bool] = None
     analytic_l2p_vjp: Optional[bool] = None
+    cascade_pallas: Optional[bool] = None
     reverse_tiers: Optional[int] = None
     reverse_tier_min_gain: Optional[float] = None
     reverse_skip_empty_tiles: Optional[bool] = None

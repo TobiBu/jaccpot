@@ -16,7 +16,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_choice, env_flag, env_int
+from jaccpot._env import env_choice, env_flag, env_flag_optional, env_int
 
 # Several of these are unused *in this module* -- some were already, and four more
 # became so when the radix fast lane moved to `_fast_lane.py` (Tier 1.4). They are
@@ -107,6 +107,8 @@ def _large_n_nearfield_diag_mode() -> str:
 # would turn "auto" into a real, wrong value.
 _env_flag = env_flag
 _env_int = env_int
+_env_flag_optional = env_flag_optional
+_env_choice = env_choice
 
 
 @dataclass(frozen=True)

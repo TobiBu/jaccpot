@@ -33,6 +33,7 @@ from typing import Any, Literal, Optional, Union, overload
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
@@ -59,7 +60,43 @@ from .grad import (
 # module is their only consumer -- so they arguably belong here now. Left where
 # they are deliberately: relocating them is a judgement about where the near-field
 # diagnostics surface lives, not part of a mechanical seam split.
-from .near_field import _env_flag, _env_int, _large_n_nearfield_diag_mode
+from .near_field import (
+    _env_choice,
+    _env_flag,
+    _env_flag_optional,
+    _env_int,
+    _large_n_nearfield_diag_mode,
+)
+
+
+def _nearfield_csr_lane_enabled() -> bool:
+    """Whether the fused near field runs the CSR row-chunk kernel (plan sub-10ms 4.1).
+
+    ``JACCPOT_NEARFIELD_LEAFPAIR_CSR=1`` selects
+    :func:`jaccpot.pallas.nearfield_leafpair_csr.nearfield_leafpair_csr_pallas`
+    over the per-leaf rectangle kernel: programs own chunks of the neighbour
+    CSR rows, so the cost follows the real edges rather than
+    ``num_leaves x longest_row`` -- with cell leaves one far-out cell is a
+    neighbour of nearly every leaf (row 10950 of 10956 at N=2e5), and the
+    rectangle is 99 % padding. The rectangle payload shrinks to a one-block
+    placeholder and its capacity guard is skipped. Read at call time.
+
+    Default ON wherever the kernel can lower (an Ampere+ GPU; plan sub-10ms
+    Phase 6, 2026-09-11); ``=0`` restores the rectangle kernel, ``=1`` on a
+    CPU-only process is honoured too (interpret mode is the caller's business).
+
+    Returns
+    -------
+    bool
+        ``True`` when the CSR near-field lane is selected.
+    """
+    explicit = _env_flag_optional("JACCPOT_NEARFIELD_LEAFPAIR_CSR")
+    if explicit is not None:
+        return explicit
+    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
+    return bool(pallas_m2l_real_csr_supported())
+
 
 __all__ = [
     "compute_leaf_p2p_accelerations_radix_fast_lane",
@@ -991,6 +1028,82 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     return pair_acc
 
 
+def _leaf_layout_inverse(
+    target_particle_ids: Array, target_particle_mask: Array
+) -> Optional[Array]:
+    """Flat leaf-slot index of every particle, or ``None`` when the payload is traced.
+
+    Parameters
+    ----------
+    target_particle_ids : Array
+        ``(leaves, W)`` particle index per slot (frozen topology).
+    target_particle_mask : Array
+        ``(leaves, W)`` slot validity.
+
+    Returns
+    -------
+    Optional[Array]
+        ``(n,)`` int32: ``leaf * W + slot`` of each particle, ``leaves * W`` (a
+        dead row) for a particle in no slot. ``None`` if the tables are tracers,
+        which they never are on the production path (the payload is host-built).
+    """
+    from jaccpot._jax_compat import Tracer
+
+    if isinstance(target_particle_ids, Tracer) or isinstance(
+        target_particle_mask, Tracer
+    ):
+        return None
+    ids = np.asarray(target_particle_ids)
+    mask = np.asarray(target_particle_mask, dtype=bool)
+    num_slots = int(ids.size)
+    n = int(ids[mask].max()) + 1 if mask.any() else 0
+    inverse = np.full((n,), num_slots, dtype=np.int32)
+    inverse[ids[mask]] = np.flatnonzero(mask.reshape(-1))
+    return jnp.asarray(inverse)
+
+
+@jax.custom_vjp
+def _leaf_layout_gather(values: Array, safe_ids: Array, inverse: Array) -> Array:
+    """``values[safe_ids]`` whose reverse is a gather through ``inverse``.
+
+    Parameters
+    ----------
+    values : Array
+        ``(n, ...)`` per-particle values. Differentiable.
+    safe_ids : Array
+        ``(leaves, W)`` particle index per slot (``0`` on masked slots).
+    inverse : Array
+        :func:`_leaf_layout_inverse` of the same tables.
+
+    Returns
+    -------
+    Array
+        ``(leaves, W, ...)`` leaf-layout values.
+    """
+    return values[safe_ids]
+
+
+def _leaf_layout_gather_fwd(values, safe_ids, inverse):
+    return values[safe_ids], (inverse, jnp.shape(values)[0])
+
+
+def _leaf_layout_gather_bwd(residual, g):
+    inverse, n = residual
+    flat = g.reshape((-1,) + tuple(g.shape[2:]))
+    flat = jnp.concatenate(
+        [flat, jnp.zeros((1,) + tuple(flat.shape[1:]), flat.dtype)], axis=0
+    )
+    out = flat[inverse]
+    if int(out.shape[0]) < int(n):  # particles past every slot get zero
+        out = jnp.pad(
+            out, ((0, int(n) - int(out.shape[0])),) + ((0, 0),) * (out.ndim - 1)
+        )
+    return (out, None, None)
+
+
+_leaf_layout_gather.defvjp(_leaf_layout_gather_fwd, _leaf_layout_gather_bwd)
+
+
 @partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
 @jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_accel_cvjp(
@@ -1312,6 +1425,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     use_pallas: bool = ...,
     differentiable: bool = ...,
     reverse_options: Optional["LeafPairReverseOptions"] = ...,
+    neighbor_list: Any = ...,
 ) -> Array: ...
 
 
@@ -1327,6 +1441,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     use_pallas: bool = ...,
     differentiable: bool = ...,
     reverse_options: Optional["LeafPairReverseOptions"] = ...,
+    neighbor_list: Any = ...,
 ) -> Tuple[Array, Array]: ...
 
 
@@ -1342,8 +1457,13 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     use_pallas: bool = False,
     differentiable: bool = False,
     reverse_options: Optional["LeafPairReverseOptions"] = None,
+    neighbor_list: Any = None,
 ) -> Union[Array, Tuple[Array, Array]]:
     """Payload-driven nearfield entry for the radix fast lane.
+
+    ``neighbor_list`` (the prepared state's leaf neighbour CSR) enables the CSR
+    row-chunk kernel when ``JACCPOT_NEARFIELD_LEAFPAIR_CSR=1``; without it, or
+    with the flag off, the rectangle payload lane runs as before.
 
     ``differentiable`` routes the fused Pallas lanes through their ``custom_vjp``
     wrappers so ``jax.grad`` works. ``pallas_call`` has no autodiff rule, so the
@@ -1383,6 +1503,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     reverse_options : Optional[LeafPairReverseOptions]
         Resolved reverse-pass tuning. ``None`` resolves from the environment,
         which is what forward-only callers get.
+    neighbor_list : Any
+        The prepared state's leaf neighbour CSR. Present, it enables the CSR
+        row-chunk lane, whose rows are the real ones rather than a padded
+        rectangle; ``None`` keeps the rectangle kernel. Forward only -- the
+        differentiable path never takes the CSR branch.
 
     Returns
     -------
@@ -1439,10 +1564,23 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     # evaluations. Forward lane only: the differentiable prepacked lane keeps
     # ``self_acc + cvjp(...)`` so its gradient path is byte-identical
     # (JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF=0 restores the scan everywhere).
-    fold_self = (
+    fold_self_flag = _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True)
+    # CSR row-chunk lane (plan sub-10ms 4.1). On the differentiable path it runs
+    # through its custom_vjp (plan fast-gradients: an analytic CSR-driven reverse,
+    # no rectangle), which is what keeps the cell-tree gradient off the
+    # neighbour-capped rectangle payload; the potential half has no reverse, so
+    # a differentiable potential request falls through to the older lanes.
+    csr_lane = (
+        neighbor_list is not None
+        and pallas_prepacked
+        and fold_self_flag
+        and _nearfield_csr_lane_enabled()
+        and not (differentiable and want_potential)
+    )
+    fold_self = csr_lane or (
         pallas_prepacked
         and not (differentiable and not want_potential)
-        and _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True)
+        and fold_self_flag
     )
 
     # Potential is only implemented on the fused Pallas paths; otherwise the
@@ -1468,6 +1606,16 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     leaf_masses = masses[safe_target_particle_ids]
     leaf_mask = target_particle_mask
     leaf_particle_idx = safe_target_particle_ids
+    if differentiable:
+        # Each particle sits in exactly one leaf slot, so the transpose of this
+        # gather is a gather too; plain autodiff makes it a 1M-row scatter-add
+        # (2.7 ms for positions + masses at N = 2x10^5, plan fast-gradients).
+        inverse = _leaf_layout_inverse(target_particle_ids, target_particle_mask)
+        if inverse is not None:
+            leaf_positions = _leaf_layout_gather(
+                positions, safe_target_particle_ids, inverse
+            )
+            leaf_masses = _leaf_layout_gather(masses, safe_target_particle_ids, inverse)
 
     diag_mode = _large_n_nearfield_diag_mode()
     if diag_mode == "zero":
@@ -1529,6 +1677,79 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         if want_potential:
             return self_acc, self_pot
         return self_acc
+
+    if csr_lane:
+        # CSR row-chunk lane (plan sub-10ms 4.1): one program per chunk of a
+        # leaf's neighbour row; the self term rides on each leaf's first chunk.
+        from jaccpot.pallas.nearfield_leafpair_csr import (
+            build_leafpair_chunk_table,
+            leafpair_chunk_capacity,
+            nearfield_leafpair_csr_pallas,
+            nearfield_leafpair_csr_pallas_cvjp,
+        )
+
+        offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+        counts = jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE)
+        nbr_nodes = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+        leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        # static radix: leaves are the last num_leaves nodes, so leaf index =
+        # node id - first leaf node (entries past a row's count are never read)
+        nbr_leaf = jnp.maximum(nbr_nodes - leaf_nodes[0], 0)
+        chunk = max(1, _env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64))
+        num_leaves_csr = int(counts.shape[0])
+        capacity = leafpair_chunk_capacity(
+            int(nbr_nodes.shape[0]), num_leaves_csr, chunk
+        )
+        table = build_leafpair_chunk_table(
+            offsets, counts, chunk=chunk, capacity=capacity
+        )
+        accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
+        if differentiable:
+            out = nearfield_leafpair_csr_pallas_cvjp(
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                nbr_leaf,
+                table,
+                softening_sq,
+                jnp.asarray(G, dtype=dtype),
+                chunk,
+                (pallas_num_warps if pallas_num_warps > 0 else None),
+                pallas_num_stages,
+                (pallas_subtile if pallas_subtile > 0 else None),
+                pallas_interpret,
+                accum,
+                True,
+            )
+        else:
+            out = nearfield_leafpair_csr_pallas(
+                leaf_positions,
+                leaf_masses,
+                leaf_mask,
+                nbr_leaf,
+                table,
+                softening_sq=softening_sq,
+                G=jnp.asarray(G, dtype=dtype),
+                chunk=chunk,
+                num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
+                num_stages=pallas_num_stages,
+                target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
+                interpret=pallas_interpret,
+                accum=accum,
+                include_self=True,
+            )
+        pair_acc = _scatter_contributions(
+            jnp.zeros_like(positions), leaf_particle_idx, out[..., :3], leaf_mask
+        )
+        if want_potential:
+            pair_pot = _scatter_scalar_contributions(
+                jnp.zeros(positions.shape[:1], dtype=dtype),
+                leaf_particle_idx,
+                out[..., 3],
+                leaf_mask,
+            )
+            return pair_acc, pair_pot
+        return pair_acc
 
     if pallas_pairs:
         pairs_result = _radix_fast_lane_pairs_pallas(

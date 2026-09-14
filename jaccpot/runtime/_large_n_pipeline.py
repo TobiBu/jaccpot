@@ -1606,6 +1606,11 @@ def prepare_large_n_state(
     # fixed shape (zero-recompile). Grows monotonically across eager refreshes.
     resolved_cap_attr = "_large_n_fused_static_target_blocks_resolved_cap"
     cached_static_cap = int(getattr(fmm, resolved_cap_attr, 0) or 0)
+    from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_enabled
+
+    # The CSR near-field lane reads the neighbour CSR directly; the rectangle
+    # becomes a one-block placeholder (selects the prepacked layout, never read).
+    csr_lane = bool(_nearfield_csr_lane_enabled())
     if bool(traced_target_block_payload):
         effective_static_cap = (
             cached_static_cap
@@ -1636,6 +1641,9 @@ def prepare_large_n_state(
             _sb_candidate = int(static_target_blocks_max_per_leaf)
         effective_static_cap = max(cached_static_cap, int(_sb_candidate), 1)
         setattr(fmm, resolved_cap_attr, int(effective_static_cap))
+    if csr_lane:
+        effective_static_cap = 1
+        setattr(fmm, resolved_cap_attr, 1)
 
     preflight_key = (
         int(num_leaves),
@@ -1677,7 +1685,8 @@ def prepare_large_n_state(
             neighbor_list=neighbor_payload,
             block_size=block_size,
             max_blocks_per_leaf=int(effective_static_cap),
-            check_capacity=not (
+            check_capacity=(not csr_lane)
+            and not (
                 bool(fused_device_mode)
                 and bool(fused_payload_enabled)
                 and bool(traced_target_block_payload)
@@ -1685,7 +1694,8 @@ def prepare_large_n_state(
             ),
         )
         if (
-            bool(fused_device_mode)
+            not csr_lane
+            and bool(fused_device_mode)
             and bool(fused_payload_enabled)
             and not bool(traced_target_block_payload)
             and not bool(static_capacity_ok)

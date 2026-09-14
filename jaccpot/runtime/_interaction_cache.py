@@ -49,6 +49,8 @@ from ._adaptive_policy import AdaptivePolicyState
 __all__ = [
     "POLICY_IDENTITY_UNCACHEABLE",
     "pair_policy_cache_identity",
+    "strict_walk_backend",
+    "strict_walk_deterministic_rows",
 ]
 
 
@@ -960,6 +962,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     capacity_report: Optional[Callable[[dict], None]] = None,
     max_neighbors_per_leaf_override: Optional[int] = None,
     flat_walk_capacity_floor: Optional[dict] = None,
+    extra_overflow: Optional[Array] = None,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
@@ -1024,6 +1027,9 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         (``compact_far_pair_capacity`` / ``near_edge_capacity``), carried over from
         the eager pass so the traced refresh builds the same widths.  Applies only
         to a capacity the caller did not name in the environment.
+    extra_overflow : Optional[Array]
+        An upstream capacity flag treated like the walk's own -- today the
+        cell-leaf partition's ``leaf_capacity``.
 
     Returns
     -------
@@ -1167,6 +1173,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             capacity_report=capacity_report,
             far_named=far_named,
             near_edge_named=near_edge_named,
+            extra_overflow=extra_overflow,
         )
     if treecode_enabled:
         if pair_policy is not None or policy_state is not None:
@@ -1723,6 +1730,91 @@ def _build_treecode_artifacts_strict_streamed(
     )
 
 
+def strict_walk_backend() -> str:
+    """Walk implementation of the strict flat lane (plan sub-10ms Phase 2).
+
+    ``JACCPOT_STATIC_STRICT_FUSED_WALK``: ``"pallas"`` (one Pallas launch per
+    round, :func:`jaccpot.pallas.mutual_walk_pallas.mutual_walk_pallas`) or
+    ``"flat"`` (yggdrax ``dual_tree_walk_mutual``). Unset: ``"pallas"`` wherever
+    the kernel lowers (an Ampere+ GPU; plan sub-10ms Phase 6, 2026-09-11),
+    ``"flat"`` elsewhere.
+
+    Returns
+    -------
+    str
+        ``"flat"`` or ``"pallas"``.
+
+    Raises
+    ------
+    ValueError
+        On any other value.
+    """
+    raw = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_WALK")
+    if raw is None:
+        if env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False):
+            return "pallas"
+        from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
+        return "pallas" if pallas_m2l_real_csr_supported() else "flat"
+    raw = raw.strip().lower()
+    if raw not in ("flat", "pallas"):
+        raise ValueError(
+            f"JACCPOT_STATIC_STRICT_FUSED_WALK={raw!r}; expected 'flat' or 'pallas'"
+        )
+    return raw
+
+
+def strict_walk_deterministic_rows() -> bool:
+    """Whether the Pallas walk's rows are sorted by (target, source).
+
+    ``JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC`` (default on): the Pallas
+    walk emits in atomic order, so without the sort the fp32 summation order of
+    every M2L and near-field row -- hence the forces at ~1e-7 -- would vary
+    between runs. Off saves one sort of the far list.
+
+    Returns
+    -------
+    bool
+        ``True`` unless the flag is ``0``/``off``/``false``.
+    """
+    raw = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", "1")
+    return raw.strip().lower() not in ("0", "off", "false")
+
+
+def _lex_perm(
+    primary: Array, secondary: Array, *, primary_bound: int, secondary_bound: int
+) -> Array:
+    """Permutation sorting by ``(primary, secondary)`` ascending.
+
+    Parameters
+    ----------
+    primary : Array
+        Non-negative primary keys, all below ``primary_bound``.
+    secondary : Array
+        Non-negative secondary keys, all below ``secondary_bound``.
+    primary_bound : int
+        Static exclusive bound on ``primary``.
+    secondary_bound : int
+        Static exclusive bound on ``secondary``. When the product of the two
+        bounds fits ``int32`` one composite sort is used, otherwise two stable
+        sorts.
+
+    Returns
+    -------
+    Array
+        The permutation, index dtype of ``primary``.
+    """
+    idx = primary.dtype
+    if int(primary_bound) * int(secondary_bound) < 2**31:
+        composite = primary.astype(jnp.int32) * jnp.asarray(
+            int(secondary_bound), jnp.int32
+        ) + secondary.astype(jnp.int32)
+        return jnp.argsort(composite, stable=True).astype(idx)
+    p1 = jnp.argsort(secondary, stable=True)
+    p2 = jnp.argsort(primary[p1], stable=True)
+    return p1[p2].astype(idx)
+
+
 def _build_flat_walk_artifacts_strict_streamed(
     *,
     tree: Tree,
@@ -1736,6 +1828,7 @@ def _build_flat_walk_artifacts_strict_streamed(
     capacity_report: Optional[Callable[[dict], None]] = None,
     far_named: bool = True,
     near_edge_named: bool = True,
+    extra_overflow: Optional[Array] = None,
 ) -> _DualTreeArtifacts:
     """Far pairs and leaf neighbours from yggdrax's flat-emission wavefront walk.
 
@@ -1807,6 +1900,9 @@ def _build_flat_walk_artifacts_strict_streamed(
         Same for ``near_edge_capacity``
         (``JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP``; ceiling
         ``_FLAT_WALK_NEAR_EDGE_LIMIT``).
+    extra_overflow : Optional[Array]
+        An upstream capacity flag treated like the walk's own -- today the
+        cell-leaf partition's ``leaf_capacity``.
 
     Returns
     -------
@@ -1823,6 +1919,14 @@ def _build_flat_walk_artifacts_strict_streamed(
     """
     from yggdrax._interactions_impl import _build_mac_extents
     from yggdrax.interactions import dual_tree_walk_mutual
+
+    walk_backend = strict_walk_backend()
+    deterministic_rows = strict_walk_deterministic_rows()
+    if walk_backend == "pallas" and str(mac_type) not in ("bh", "dehnen"):
+        raise RuntimeError(
+            "JACCPOT_STATIC_STRICT_FUSED_WALK=pallas implements the dual-tree "
+            f"sphere MAC (bh/dehnen) only; mac_type={mac_type!r}."
+        )
 
     if int(compact_far_pair_capacity) <= 0 or int(compact_far_pair_capacity) % 2:
         raise ValueError(
@@ -1854,6 +1958,13 @@ def _build_flat_walk_artifacts_strict_streamed(
         topo.parent, geometry, num_internal, str(mac_type), float(dehnen_radius_scale)
     )
     mac_extents = jnp.asarray(mac_extents, dtype=centers.dtype)
+    # A capacity-padded leaf partition (cell leaves) carries EMPTY nodes: one
+    # centre, radius zero. Left in the walk they fail the MAC against each
+    # other and flood the near list (30M edges at N=2e5), so they are dead
+    # nodes for the walk. Bucket trees have no empty node and the mask is all
+    # true -- the walk's result is then identical to the unmasked walk.
+    node_ranges_all = jnp.asarray(topo.node_ranges)
+    node_active = node_ranges_all[:, 1] >= node_ranges_all[:, 0]
 
     queue = (
         _STRICT_STREAMED_QUEUE_FLOOR if max_pair_queue is None else int(max_pair_queue)
@@ -1866,18 +1977,40 @@ def _build_flat_walk_artifacts_strict_streamed(
     # unnamed cap cannot exhaust it.
     queue_attempts = 0
     while True:
-        walk = dual_tree_walk_mutual(
-            left_full,
-            right_full,
-            centers,
-            mac_extents,
-            float(theta),
-            root_idx,
-            max_pair_queue=int(queue),
-            far_cap=far_cap,
-            near_cap=near_cap,
-            mac_type=str(mac_type),
-        )
+        if walk_backend == "pallas":
+            # plan sub-10ms Phase 2: one Pallas launch per wavefront round with
+            # atomic slot counters; same pair SETS as the flat walk (pinned by
+            # tests/unit/runtime/test_mutual_walk_pallas.py), emission order
+            # nondeterministic -> the rows below are sorted by (target, source).
+            from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+
+            walk = mutual_walk_pallas(
+                left_full,
+                right_full,
+                centers,
+                mac_extents,
+                float(theta),
+                root_idx,
+                max_pair_queue=int(queue),
+                far_cap=far_cap,
+                near_cap=near_cap,
+                node_active=node_active,
+                interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
+            )
+        else:
+            walk = dual_tree_walk_mutual(
+                left_full,
+                right_full,
+                centers,
+                mac_extents,
+                float(theta),
+                root_idx,
+                max_pair_queue=int(queue),
+                far_cap=far_cap,
+                near_cap=near_cap,
+                mac_type=str(mac_type),
+                node_active=node_active,
+            )
         traced = isinstance(walk.queue_overflow, Tracer)
         if traced:
             break
@@ -1941,10 +2074,32 @@ def _build_flat_walk_artifacts_strict_streamed(
     far_live = jnp.arange(far_cap, dtype=idx) < walk.far_count
     fa = jnp.where(far_live, walk.far_a, -1).astype(idx)
     fb = jnp.where(far_live, walk.far_b, -1).astype(idx)
+    if walk_backend == "pallas" and deterministic_rows:
+        # canonical pairs in (a, b) order: the M2L CSR's stable sort by target
+        # then lists every row's sources ascending, whatever the emission order
+        perm = _lex_perm(
+            jnp.where(far_live, fa, jnp.asarray(total_nodes, idx)),
+            jnp.where(far_live, fb, jnp.asarray(0, idx)),
+            primary_bound=total_nodes + 1,
+            secondary_bound=total_nodes,
+        )
+        fa = fa[perm]
+        fb = fb[perm]
     far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_cap,))
     far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_cap,))
     far_tags = jnp.full((2 * far_cap,), -1, dtype=idx)
     any_overflow = walk.far_overflow | walk.near_overflow | walk.queue_overflow
+    if extra_overflow is not None:
+        # an upstream capacity the caller wants treated like the walk's own --
+        # today the cell-leaf partition's leaf_capacity (plan sub-10ms 1.2)
+        if not traced and not isinstance(extra_overflow, Tracer):
+            if bool(extra_overflow):
+                raise RuntimeError(
+                    "static_radix cell leaves overflowed TreeConfig.leaf_capacity; "
+                    "raise it."
+                )
+        else:
+            any_overflow = any_overflow | jnp.asarray(extra_overflow, dtype=bool)
     # Saturate on ANY overflow: the strict runner's guard tests
     # ``far_pair_count < compact_far_pair_capacity`` and this is how the near and
     # queue flags reach it under trace. Eager overflow raised above, so this only
@@ -1971,7 +2126,15 @@ def _build_flat_walk_artifacts_strict_streamed(
     # static radix: leaves are the last ``num_leaves`` nodes
     tgt_leaf = tgt - jnp.asarray(num_internal, idx)
     key = jnp.where(valid, tgt_leaf, jnp.asarray(num_leaves, idx))
-    perm = jnp.argsort(key, stable=True)
+    if walk_backend == "pallas" and deterministic_rows:
+        perm = _lex_perm(
+            key,
+            jnp.where(valid, src, jnp.asarray(0, idx)),
+            primary_bound=num_leaves + 1,
+            secondary_bound=total_nodes,
+        )
+    else:
+        perm = jnp.argsort(key, stable=True)
     sorted_key = key[perm]
     neighbors = jnp.where(valid[perm], src[perm], jnp.asarray(0, idx))
     offsets = jnp.searchsorted(
@@ -2665,6 +2828,7 @@ def _build_dual_tree_artifacts(
     strict_capacity_report: Optional[Callable[[dict], None]] = None,
     strict_max_neighbors_per_leaf_override: Optional[int] = None,
     strict_flat_walk_capacity_floor: Optional[dict] = None,
+    strict_extra_overflow: Optional[Array] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree.
 
@@ -2742,6 +2906,9 @@ def _build_dual_tree_artifacts(
         Forwarded to the strict streamed builder; only ever raises the cap.
     strict_flat_walk_capacity_floor : Optional[dict]
         Forwarded to the strict streamed builder as ``flat_walk_capacity_floor``.
+    strict_extra_overflow : Optional[Array]
+        An upstream capacity flag treated like the walk's own; forwarded to the
+        strict streamed builder as ``extra_overflow``.
 
     Returns
     -------
@@ -2823,6 +2990,7 @@ def _build_dual_tree_artifacts(
                         strict_max_neighbors_per_leaf_override
                     ),
                     flat_walk_capacity_floor=strict_flat_walk_capacity_floor,
+                    extra_overflow=strict_extra_overflow,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(

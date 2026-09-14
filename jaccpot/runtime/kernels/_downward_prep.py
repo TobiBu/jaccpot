@@ -16,6 +16,7 @@ Split out of ``core.py`` (Tier 1.6, A.9 seam 1); every function body is unchange
 
 from __future__ import annotations
 
+import os
 from typing import Any, NamedTuple, Optional
 
 import jax.numpy as jnp
@@ -663,16 +664,68 @@ def _solidfmm_downward_accumulate_from_multipoles(
         if real_basis and _m2l_csr_pallas_active():
             from jaccpot._env import env_flag
             from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
-
-            locals_updated = initial_locals_coeffs + m2l_real_csr_pallas(
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                order=order,
-                active_pair_count=active_pair_count,
-                interpret=env_flag("JACCPOT_M2L_CSR_INTERPRET", False),
+            from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas_cvjp
+            from jaccpot.pallas.m2l_real_csr_tiled import (
+                m2l_real_csr_tiled_pallas,
+                m2l_real_csr_tiled_supported,
             )
+            from jaccpot.runtime.grad_options import on_grad_path
+
+            interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
+            # plan sub-10ms Phase 5: JACCPOT_M2L_CSR_KERNEL = pair | tiled | lanes
+            # (JACCPOT_M2L_CSR_TILED=1 is the older spelling of "tiled")
+            which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
+            if (
+                not which
+            ):  # default: lanes (Phase 6, 2026-09-11; 18x the per-pair kernel)
+                which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "lanes"
+            if which not in ("pair", "tiled", "lanes"):
+                raise ValueError(
+                    f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected pair, tiled or lanes"
+                )
+            if which != "lanes" and on_grad_path():
+                # only the lanes kernel carries a custom_vjp (plan fast-gradients);
+                # the pair / tiled kernels would hit pallas_call's generic JVP rule
+                which = "lanes"
+            if which == "lanes":
+                # the custom_vjp seam: the forward is the same launch, and the
+                # reverse runs the transposed (by-source) lane kernel
+                m2l_inc = m2l_real_csr_lanes_pallas_cvjp(
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    active_pair_count,
+                    order,
+                    int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
+                    interpret,
+                    "triton",
+                    int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
+                )
+            elif which == "tiled" and m2l_real_csr_tiled_supported(order):
+                m2l_inc = m2l_real_csr_tiled_pallas(
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    order=order,
+                    active_pair_count=active_pair_count,
+                    k_tile=int(os.environ.get("JACCPOT_M2L_CSR_TILE", "16")),
+                    num_warps=int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "4")),
+                    dot_algorithm=os.environ.get("JACCPOT_M2L_CSR_DOT", "ieee"),
+                    interpret=interpret,
+                )
+            else:
+                m2l_inc = m2l_real_csr_pallas(
+                    multipoles_coeffs,
+                    centers,
+                    src,
+                    tgt,
+                    order=order,
+                    active_pair_count=active_pair_count,
+                    interpret=interpret,
+                )
+            locals_updated = initial_locals_coeffs + m2l_inc
         elif pair_count <= chunk_size:
             locals_updated = _accumulate_m2l_fullbatch(
                 initial_locals_coeffs,
