@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import os
+
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 pytest.importorskip("yggdrax")
-from yggdrax._tree_impl import build_static_cells_tree, build_static_radix_tree
 from yggdrax.bounds import infer_bounds
+from yggdrax._tree_impl import build_static_cells_tree, build_static_radix_tree
 from yggdrax.interactions import dual_tree_walk_mutual
 from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
 from jaccpot.runtime._mac_geometry import com_mac_geometry
+
+from tests.unit._typecheck_budget import trim
+
+_KINDS = trim(["cells", "buckets"])
+_THETAS = trim([0.8, 0.5])
 
 
 def _plummer(n, seed=0):
@@ -33,23 +40,26 @@ def _sets(res):
     return set(zip(fa.tolist(), fb.tolist())), set(zip(na.tolist(), nb.tolist()))
 
 
-@pytest.mark.parametrize("kind", ["buckets", "cells"])
-@pytest.mark.parametrize("theta", [0.5, 0.8])
+@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("theta", _THETAS)
 def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta):
-    n = 4000
+    # Interpret-mode cost tracks the PAIR count, not n: 800 particles at leaf 4 ran
+    # SLOWER than 4000 at leaf 16 (more leaves -> 43k far pairs). The typecheck job is
+    # handled by trimming the grid above, not by shrinking here.
+    n, leaf = 4000, 16
     P = jnp.asarray(_plummer(n, 3), jnp.float32)
     M = jnp.ones((n,), jnp.float32)
     bounds = infer_bounds(P)
     if kind == "buckets":
         topo, ps, ms, inv = build_static_radix_tree(
-            P, M, bounds, leaf_size=16, return_reordered=True
+            P, M, bounds, leaf_size=leaf, return_reordered=True
         )
     else:
         topo, ps, ms, inv = build_static_cells_tree(
-            P, M, bounds, leaf_size=16, leaf_capacity=1024, return_reordered=True
+            P, M, bounds, leaf_size=leaf, leaf_capacity=1024, return_reordered=True
         )
     com = compute_tree_mass_moments(topo, ps, ms).center_of_mass
-    geom = com_mac_geometry(topo, ps, com, leaf_cap=16)
+    geom = com_mac_geometry(topo, ps, com, leaf_cap=leaf)
     ni = int(topo.left_child.shape[0])
     tot = int(topo.parent.shape[0])
     idx = topo.parent.dtype
@@ -91,6 +101,10 @@ def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta):
     assert not (
         bool(got.queue_overflow) or bool(got.far_overflow) or bool(got.near_overflow)
     )
+    assert (
+        int(ref.far_count) > 0
+    ), "vacuous: no far pairs at this size/theta, the MAC never fires"
+    assert int(ref.near_count) > 0, "vacuous: no near pairs"
     far_r, near_r = _sets(ref)
     far_g, near_g = _sets(got)
     assert len(far_g) == int(got.far_count) and len(near_g) == int(

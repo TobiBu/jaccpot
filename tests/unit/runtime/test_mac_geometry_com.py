@@ -14,6 +14,8 @@ Pinned here on a real radix tree, on CPU:
 
 from __future__ import annotations
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -35,6 +37,10 @@ from jaccpot.runtime._mac_geometry import (
 
 _LEAF = 8
 _N = 1024
+from tests.unit._typecheck_budget import trim
+
+_INTERNALS = trim(["exact", "bound"])
+_THETAS = trim([0.6, 0.9])
 
 
 def _plummer(n, seed=0):
@@ -72,7 +78,7 @@ def _exact_rmax(topo, ps, centers):
     return out
 
 
-@pytest.mark.parametrize("internal", ["exact", "bound"])
+@pytest.mark.parametrize("internal", _INTERNALS)
 def test_com_geometry_bounds_every_node_and_is_exact_on_leaves(tree_data, internal):
     tree, topo, ps, ms, com, _box = tree_data
     geom = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal)
@@ -121,7 +127,7 @@ def _far_pair_ratios(tree, geometry, centers, exact_r, *, theta):
     return (exact_r[src] + exact_r[tgt]) / d, int(src.size)
 
 
-@pytest.mark.parametrize("theta", [0.6, 0.9])
+@pytest.mark.parametrize("theta", _THETAS)
 def test_flat_walk_with_com_geometry_accepts_only_convergent_pairs(tree_data, theta):
     tree, topo, ps, ms, com, box = tree_data
     exact = _exact_rmax(topo, ps, com)
@@ -164,7 +170,7 @@ def test_mode_knob(monkeypatch, tree_data):
     assert float(np.max(np.asarray(g_b.radius) - np.asarray(g_e.radius))) > 0
 
 
-@pytest.mark.parametrize("internal", ["exact", "bound"])
+@pytest.mark.parametrize("internal", _INTERNALS)
 def test_com_geometry_is_jittable(tree_data, internal):
     tree, topo, ps, ms, com, box = tree_data
     f = jax.jit(

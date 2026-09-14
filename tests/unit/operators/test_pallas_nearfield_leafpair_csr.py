@@ -21,6 +21,9 @@ from jaccpot.pallas.nearfield_leafpair_csr import (
 )
 
 
+from tests.unit._typecheck_budget import trim
+
+
 def _random_csr(seed, L, W, *, max_row, edge_capacity=None, empty_rows=()):
     """Random leaf tables plus a CSR whose rows never contain the row's own leaf."""
     rng = np.random.default_rng(seed)
@@ -52,7 +55,7 @@ def _random_csr(seed, L, W, *, max_row, edge_capacity=None, empty_rows=()):
     )
 
 
-@pytest.mark.parametrize("chunk", [1, 2, 3, 8])
+@pytest.mark.parametrize("chunk", trim([3, 1, 2, 8]))
 def test_chunk_table_covers_every_row_exactly_once(chunk):
     _, _, _, nbr, offsets, counts = _random_csr(
         3, L=7, W=4, max_row=9, empty_rows=(2, 5)
@@ -82,7 +85,7 @@ def test_chunk_table_covers_every_row_exactly_once(chunk):
     assert np.all(np.diff(leaf[live]) >= 0)
 
 
-@pytest.mark.parametrize("chunk", [1, 2, 5])
+@pytest.mark.parametrize("chunk", trim([2, 1, 5]))
 @pytest.mark.parametrize("include_self", [False, True])
 def test_csr_interpret_matches_dense_twin(chunk, include_self):
     L, W = 6, 8

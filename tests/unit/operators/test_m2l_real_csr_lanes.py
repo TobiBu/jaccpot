@@ -10,6 +10,8 @@ import pytest
 from jaccpot.pallas.m2l_real_csr import m2l_real_csr_jax
 from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
 
+from tests.unit._typecheck_budget import trim
+
 
 def _case(seed, n, rows, order):
     rng = np.random.default_rng(seed)
@@ -22,8 +24,8 @@ def _case(seed, n, rows, order):
     return mult, cent, jnp.asarray(src, jnp.int32), jnp.asarray(tgt, jnp.int32)
 
 
-@pytest.mark.parametrize("order", [2, 3, 5, 6])
-@pytest.mark.parametrize("k_lanes", [8, 32])
+@pytest.mark.parametrize("order", trim([5, 2, 3, 6]))
+@pytest.mark.parametrize("k_lanes", trim([32, 8]))
 def test_lanes_match_the_reference_on_ragged_rows(order, k_lanes):
     rng = np.random.default_rng(order)
     n = 40

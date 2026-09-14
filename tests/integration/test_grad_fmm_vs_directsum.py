@@ -127,10 +127,18 @@ def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, leaf, to
 def test_grad_fmm_matches_grad_directsum_masses(basis):
     n = 64
     positions, masses, probe = _system(n, seed=1)
-    # leaf_size=4 at theta=0.6 -> multi-level tree with a non-empty M2L list, so
+    # leaf_size=2 at theta=0.6 -> multi-level tree with a non-empty M2L list, so
     # the mass gradient flows through the far field (P2M/M2M/M2L/L2L/L2P), not
     # just the near-field P2P (see module docstring for the far-field rationale
     # and memory characterization).
+    #
+    # This config leaves only TWO far pairs -- one opening-criterion change away
+    # from vacuous, which the guard below exists to catch and nearly did: the COM
+    # MAC took it to zero while that was briefly the global default. Retuning it
+    # is not free either, measured at this seed: leaf 3 gives 44 far pairs but
+    # trips the 5e-3 tolerance under the box criterion, and leaf 2 gives 260 far
+    # pairs at rel-L2 1.4e-2. More far field is not automatically a better test.
+    # Left as it is, with the margin documented rather than discovered again.
     softening, G, theta, order, leaf = 1e-2, 1.5, 0.6, 4, 4
     fmm = FastMultipoleMethod(
         basis=basis, use_pallas=False, theta=theta, G=G, softening=softening

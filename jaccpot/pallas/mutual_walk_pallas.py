@@ -433,7 +433,7 @@ def mutual_walk_pallas(
         next_a: Array,
         next_b: Array,
         counters: Array,
-    ) -> list[Array]:
+    ) -> tuple[Array, ...]:  # pallas_call returns a tuple, not a list
         operands = [
             qa,
             qb,

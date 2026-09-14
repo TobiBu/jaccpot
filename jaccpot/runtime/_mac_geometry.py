@@ -65,7 +65,7 @@ _MAC_RADIUS_ENV = "JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS"
 _MAC_RADIUS_MODES = ("exact", "bound")
 
 
-def mac_geometry_mode() -> str:
+def mac_geometry_mode(default: str = "aabb") -> str:
     """Which geometry the fused lane's walk tests the MAC against.
 
     Read at call time (never captured at import), like every runtime knob.
@@ -76,14 +76,31 @@ def mac_geometry_mode() -> str:
         ``"aabb"`` (box centres and half-diagonals, the historical
         behaviour) or ``"com"`` (centres of mass with particle radii about them).
 
+    Parameters
+    ----------
+    default : str
+        Mode to use when the environment does not name one. The strict fused lane
+        passes ``"com"``; every other lane leaves it at ``"aabb"``.
+
+        WHY NOT "com" EVERYWHERE. The COM MAC is *consistent* -- it tests the
+        criterion about the centres the expansions actually use -- but at a fixed
+        theta it is not equivalent to the box criterion: the box radius is the
+        half-DIAGONAL, which is strictly larger than the exact COM radius, so the
+        box test is the more conservative one and the same theta admits MORE far
+        pairs under COM. Measured on tests/integration/test_fmm.py's order sweep
+        (solidfmm+dehnen, theta 0.9, leaf 16, N=224), COM is worse at every order:
+        rel-L2 5.8e-3 / 2.1e-3 / 3.4e-4 at orders 1/2/4 under the box geometry
+        against 2.1e-2 / 7.7e-3 / 1.9e-3 under COM. Making it the global default
+        therefore silently degraded accuracy at every caller's existing theta.
+        It was measured and tuned on the strict fused lane at theta 0.6-1.0 with
+        cell leaves, which is the only lane that gets it by default.
+
     Raises
     ------
     ValueError
         If the environment names a mode this module does not implement.
     """
-    raw = (
-        os.environ.get(_MAC_GEOMETRY_ENV, "com").strip().lower()
-    )  # default com since Phase 6
+    raw = os.environ.get(_MAC_GEOMETRY_ENV, default).strip().lower()
     if raw not in _MAC_GEOMETRY_MODES:
         raise ValueError(
             f"{_MAC_GEOMETRY_ENV} must be one of {_MAC_GEOMETRY_MODES}, got {raw!r}"
@@ -98,6 +115,25 @@ def mac_radius_mode() -> str:
     -------
     str
         The mode named by ``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS``.
+
+    Parameters
+    ----------
+    default : str
+        Mode to use when the environment does not name one. The strict fused lane
+        passes ``"com"``; every other lane leaves it at ``"aabb"``.
+
+        WHY NOT "com" EVERYWHERE. The COM MAC is *consistent* -- it tests the
+        criterion about the centres the expansions actually use -- but at a fixed
+        theta it is not equivalent to the box criterion: the box radius is the
+        half-DIAGONAL, which is strictly larger than the exact COM radius, so the
+        box test is the more conservative one and the same theta admits MORE far
+        pairs under COM. Measured on tests/integration/test_fmm.py's order sweep
+        (solidfmm+dehnen, theta 0.9, leaf 16, N=224), COM is worse at every order:
+        rel-L2 5.8e-3 / 2.1e-3 / 3.4e-4 at orders 1/2/4 under the box geometry
+        against 2.1e-2 / 7.7e-3 / 1.9e-3 under COM. Making it the global default
+        therefore silently degraded accuracy at every caller's existing theta.
+        It was measured and tuned on the strict fused lane at theta 0.6-1.0 with
+        cell leaves, which is the only lane that gets it by default.
 
     Raises
     ------
@@ -296,6 +332,7 @@ def resolve_walk_geometry(
     leaf_cap: int,
     geometry_factory: Optional[Any] = None,
     radius_scale: Optional[Array] = None,
+    default_mode: str = "aabb",
 ) -> tuple[Optional[TreeGeometry], Optional[Any]]:
     """The geometry the walk should test the MAC against, per ``mac_geometry_mode``.
 
@@ -313,6 +350,9 @@ def resolve_walk_geometry(
         Leaf capacity.
     geometry_factory : Optional[Any]
         The deferred box-geometry builder the caller would otherwise pass on.
+    default_mode : str
+        Geometry to use when the environment names none; see
+        :func:`mac_geometry_mode`. Only the strict fused lane passes ``"com"``.
     radius_scale : Optional[Array]
         Per-node multiplier already folded into ``box_geometry.radius`` by the
         caller, ``(nodes,)``. ``mac_type='dehnen_theta'`` folds its criterion
@@ -333,13 +373,22 @@ def resolve_walk_geometry(
     RuntimeError
         ``"com"`` requested but the upward data carries no expansion centres.
     """
-    if mac_geometry_mode() == "aabb":
+    if mac_geometry_mode(default_mode) == "aabb":
         return box_geometry, geometry_factory
     if expansion_centers is None:
-        raise RuntimeError(
-            f"{_MAC_GEOMETRY_ENV}=com needs the upward sweep's expansion centres, "
-            "and this lane's upward data has none."
-        )
+        # Quiet fallback, NOT an error. While "com" was opt-in, a lane without
+        # expansion centres asking for it was a caller mistake worth raising on.
+        # Since Phase 6 made it the DEFAULT, the same raise turned every such lane
+        # into a hard failure (tests/integration/test_adaptive_order_runtime.py).
+        # A lane with no COM centres cannot be inconsistent with them, so the box
+        # geometry is the correct answer for it, not an error. An EXPLICIT request
+        # still raises, because then the caller asked for something it cannot have.
+        if os.environ.get(_MAC_GEOMETRY_ENV):
+            raise RuntimeError(
+                f"{_MAC_GEOMETRY_ENV}=com needs the upward sweep's expansion "
+                "centres, and this lane's upward data has none."
+            )
+        return box_geometry, geometry_factory
     geometry = com_mac_geometry(
         tree,
         positions_sorted,

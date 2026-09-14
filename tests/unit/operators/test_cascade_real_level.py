@@ -21,6 +21,8 @@ from jaccpot.pallas.cascade_real_level import (
 from jaccpot.runtime.kernels._l2l import _propagate_solidfmm_locals_by_level
 from jaccpot.upward.real_tree_expansions import aggregate_m2m_real_by_level
 
+from tests.unit._typecheck_budget import trim
+
 
 def _plummer(n, seed=0):
     rng = np.random.default_rng(seed)
@@ -32,8 +34,8 @@ def _plummer(n, seed=0):
     return np.stack([r * s * np.cos(phi), r * s * np.sin(phi), r * mu], axis=1)
 
 
-@pytest.mark.parametrize("order", [2, 4, 5])
-@pytest.mark.parametrize("seed", [0, 3])
+@pytest.mark.parametrize("order", trim([5, 2, 4]))
+@pytest.mark.parametrize("seed", trim([0, 3]))
 def test_pair_twins_match_the_reference_operators(order, seed):
     rng = np.random.default_rng(seed)
     C = (order + 1) ** 2
@@ -83,7 +85,7 @@ def tree_data():
     return topo, jnp.asarray(com, jnp.float32)
 
 
-@pytest.mark.parametrize("order", [3, 5])
+@pytest.mark.parametrize("order", trim([5, 3]))
 def test_m2m_levels_interpret_matches_the_level_loop(tree_data, order):
     topo, com = tree_data
     num_internal = int(topo.left_child.shape[0])
@@ -129,7 +131,7 @@ def test_m2m_levels_interpret_matches_the_level_loop(tree_data, order):
     assert np.abs(g[:num_internal]).max() > 0  # non-vacuous: the root got something
 
 
-@pytest.mark.parametrize("order", [3, 5])
+@pytest.mark.parametrize("order", trim([5, 3]))
 def test_l2l_levels_interpret_matches_the_cascade(tree_data, order):
     topo, com = tree_data
     num_internal = int(topo.left_child.shape[0])

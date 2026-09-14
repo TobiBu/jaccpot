@@ -1535,6 +1535,12 @@ class PrepareMixin(_EngineBase):
             leaf_cap=int(tree_artifacts.leaf_cap),
             geometry_factory=geometry_factory,
             radius_scale=self._folded_criterion_radius_scale(),
+            # Only this lane gets the COM MAC by default: at a fixed theta it is
+            # LESS conservative than the box half-diagonal, so a global default
+            # would quietly change every caller's accuracy (see mac_geometry_mode).
+            default_mode=(
+                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+            ),
         )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -3598,6 +3604,12 @@ class PrepareMixin(_EngineBase):
             leaf_cap=int(tree_artifacts.leaf_cap),
             geometry_factory=geometry_factory,
             radius_scale=self._folded_criterion_radius_scale(),
+            # Only this lane gets the COM MAC by default: at a fixed theta it is
+            # LESS conservative than the box half-diagonal, so a global default
+            # would quietly change every caller's accuracy (see mac_geometry_mode).
+            default_mode=(
+                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+            ),
         )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,

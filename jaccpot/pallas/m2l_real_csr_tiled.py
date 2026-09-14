@@ -27,7 +27,7 @@ per-pair kernel.
 from __future__ import annotations
 
 import functools
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -149,13 +149,13 @@ def _m2l_tiled_kernel(
     # once at the end, not per tile
     acc0 = tuple(jnp.zeros((k_tile, wp), dtype) for _ in range(p + 1))
 
-    def dz(tiles: list[Array], cosv: Array, sinv: Array) -> list[Array]:
+    def dz(tiles: Sequence[Array], cosv: Array, sinv: Array) -> list[Array]:
         # out[k, i] = cos_i v[k, i] + sum_j Apat[i, j] sin_j v[k, j]
         return [
             v * cosv + jnp.dot(v * sinv, apat_t, precision=dot_precision) for v in tiles
         ]
 
-    def bapply(tiles: list[Array], mats: list[Array]) -> list[Array]:
+    def bapply(tiles: Sequence[Array], mats: Sequence[Array]) -> list[Array]:
         # out[k, i] = sum_j M_l[i, j] v[k, j]  ->  v @ M_l^T; ``mats`` already transposed
         return [jnp.dot(v, m, precision=dot_precision) for v, m in zip(tiles, mats)]
 

@@ -14,6 +14,9 @@ from jaccpot.pallas.m2l_real_csr_tiled import (
 )
 
 
+from tests.unit._typecheck_budget import trim
+
+
 def _case(seed, n, rows, order):
     rng = np.random.default_rng(seed)
     C = (order + 1) ** 2
@@ -26,7 +29,7 @@ def _case(seed, n, rows, order):
     return mult, cent, jnp.asarray(src, jnp.int32), jnp.asarray(tgt, jnp.int32)
 
 
-@pytest.mark.parametrize("order", [4, 5, 6])
+@pytest.mark.parametrize("order", trim([5, 4, 6]))
 def test_tiled_matches_the_reference_on_ragged_rows(order):
     rng = np.random.default_rng(order)
     n = 40

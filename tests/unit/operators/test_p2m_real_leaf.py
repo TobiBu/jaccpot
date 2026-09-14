@@ -14,6 +14,8 @@ from yggdrax.tree_moments import compute_tree_mass_moments
 from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas
 from jaccpot.upward.real_tree_expansions import _p2m_leaves_real
 
+from tests.unit._typecheck_budget import trim
+
 
 def _plummer(n, seed=0):
     rng = np.random.default_rng(seed)
@@ -25,8 +27,8 @@ def _plummer(n, seed=0):
     return np.stack([r * s * np.cos(phi), r * s * np.sin(phi), r * mu], axis=1)
 
 
-@pytest.mark.parametrize("order", [2, 4, 5])
-@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize("order", trim([5, 2, 4]))
+@pytest.mark.parametrize("dtype", trim([jnp.float64, jnp.float32]))
 def test_pallas_leaf_p2m_matches_the_batched_reference(order, dtype):
     n, leaf = 3000, 16
     P = jnp.asarray(_plummer(n, 1), dtype)
