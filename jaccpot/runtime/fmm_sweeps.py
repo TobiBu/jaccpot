@@ -77,6 +77,36 @@ __all__ = [
 _CELLS_DEPTH_HEADROOM = 8
 
 
+
+def _planned_upward_num_levels(tree) -> Optional[int]:
+    """The installed capacity plan's upward depth bound for this tree's shape.
+
+    Parameters
+    ----------
+    tree : Tree
+        Tree whose depth bound is wanted; only its static shapes are read, so a
+        tracer is fine.
+
+    Returns
+    -------
+    Optional[int]
+        The planned bound, or ``None`` when no plan covers this shape.
+    """
+    from jaccpot.runtime.capacity_plan import fused_capacity_plan
+
+    plan = fused_capacity_plan()
+    if plan is None:
+        return None
+    try:
+        total_nodes = int(tree.node_ranges.shape[0])
+        num_internal = int(tree.left_child.shape[0])
+    except Exception:
+        return None
+    if not plan.matches(total_nodes=total_nodes, num_internal=num_internal):
+        return None
+    return int(plan.upward_num_levels)
+
+
 class SweepsMixin(_EngineBase):
     @staticmethod
     @jaxtyped(typechecker=beartype)
@@ -207,6 +237,12 @@ class SweepsMixin(_EngineBase):
             yet. Any failure to read the depth falls back to the stashed value
             rather than raising, so this never breaks a traced refresh.
         """
+        planned = _planned_upward_num_levels(tree)
+        if planned is not None:
+            # An installed capacity plan is authoritative: under ``shard_map`` no
+            # eager prepare fills the stash, and one compiled program must use the
+            # depth bound that covers every device, not this one's.
+            return planned
         if getattr(self, "_tree_leaf_partition", "buckets") == "cells":
             # The radix structure over cell leaves is rebuilt per step and its
             # depth varies. Loop bound = the eager depth plus headroom (never

@@ -16,6 +16,16 @@ that always precedes a traced refresh fills it (with headroom, never
 shrinking), and the traced rebuild checks the live tree against it
 (:func:`level_width_overflow`) so a wider level trips the capacity guard rather
 than dropping nodes.
+
+That "always precedes" holds on one device and **fails inside ``shard_map``**,
+where the body is traced from the first call and the registry is cold: the width
+falls back to ``num_internal`` and :func:`registered_num_levels` returns ``None``,
+which deselects the per-level Pallas cascades outright, silently. An explicit
+:class:`~jaccpot.runtime.capacity_plan.FusedCapacityPlan` therefore takes
+precedence over the registry wherever one is installed -- including for CONCRETE
+offsets, so that a planning pass and the traced refresh it plans for cannot
+compile different widths. The registry still records what it observes, so a
+planner can widen the next plan.
 """
 
 from __future__ import annotations
@@ -47,6 +57,31 @@ def _key(total_nodes: int, num_internal: int) -> tuple[int, int]:
     return (int(total_nodes), int(num_internal))
 
 
+def _plan_for(*, total_nodes: int, num_internal: int):
+    """The installed capacity plan, if it describes this tree shape.
+
+    Parameters
+    ----------
+    total_nodes : int
+        Node count being resolved.
+    num_internal : int
+        Internal node count being resolved.
+
+    Returns
+    -------
+    Optional[FusedCapacityPlan]
+        The plan, or ``None`` when none is installed or it is for another shape.
+    """
+    from jaccpot.runtime.capacity_plan import fused_capacity_plan
+
+    plan = fused_capacity_plan()
+    if plan is None:
+        return None
+    if not plan.matches(total_nodes=int(total_nodes), num_internal=int(num_internal)):
+        return None
+    return plan
+
+
 def registered_level_batch_width(*, total_nodes: int, num_internal: int) -> int | None:
     """The registered width for this tree shape, or ``None`` before any eager visit.
 
@@ -60,8 +95,12 @@ def registered_level_batch_width(*, total_nodes: int, num_internal: int) -> int 
     Returns
     -------
     int | None
-        The stashed static width.
+        The planned width when a plan is installed for this shape, else the
+        stashed one, else ``None`` before any eager visit.
     """
+    plan = _plan_for(total_nodes=total_nodes, num_internal=num_internal)
+    if plan is not None:
+        return int(plan.level_batch_width)
     return _WIDTHS.get(_key(total_nodes, num_internal))
 
 
@@ -90,7 +129,10 @@ def level_batch_width(
         A Python int in ``[1, total_nodes]``.
     """
     key = _key(total_nodes, num_internal)
+    plan = _plan_for(total_nodes=total_nodes, num_internal=num_internal)
     if isinstance(level_offsets, Tracer):
+        if plan is not None:
+            return int(plan.level_batch_width)
         return int(_WIDTHS.get(key) or max(int(num_internal), 1))
     offs = np.asarray(jax.device_get(level_offsets)).astype(np.int64)
     counts = np.diff(offs) if offs.size >= 2 else np.ones((1,), np.int64)
@@ -102,6 +144,12 @@ def level_batch_width(
     width = min(width, max(int(total_nodes), 1))
     width = max(width, _WIDTHS.get(key, 0))
     _WIDTHS[key] = width
+    if plan is not None:
+        # Record what this tree actually needs (a planner reads it back through
+        # ``plan_from_registry``), but hand back the PLANNED width: a planning
+        # pass and the traced refresh it plans for must compile the same shape.
+        # A tree too wide for the plan is caught by ``level_width_overflow``.
+        return int(plan.level_batch_width)
     return width
 
 
@@ -121,8 +169,12 @@ def registered_num_levels(*, total_nodes: int, num_internal: int) -> int | None:
     Returns
     -------
     int | None
-        The stashed static level count.
+        The planned level count when a plan is installed for this shape, else
+        the stashed one, else ``None`` before any eager visit.
     """
+    plan = _plan_for(total_nodes=total_nodes, num_internal=num_internal)
+    if plan is not None:
+        return int(plan.num_levels)
     return _LEVELS.get(_key(total_nodes, num_internal))
 
 
