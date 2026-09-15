@@ -89,6 +89,9 @@ class StrictRunMixin(_EngineBase):
             Expansion order; ``None`` keeps the state's own.
         theta : Optional[float]
             Opening angle; ``None`` keeps the state's own.
+        num_valid : Optional[Array]
+            Live row count of a capacity-padded shard (the distributed fused
+            lane); ``None`` treats every row as live. Requires cell leaves.
         fused_device_mode : bool
             Refresh into the fused device-resident layout.
 
@@ -1228,6 +1231,7 @@ class StrictRunMixin(_EngineBase):
         theta: Optional[float],
         runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
         fused_device_mode: bool = False,
+        num_valid: Optional[Array] = None,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged.
 
@@ -1356,6 +1360,7 @@ class StrictRunMixin(_EngineBase):
                 bounds=inferred_bounds,
                 max_leaf_size=int(prepared_state.max_leaf_size),
                 cache_leaf_parameter=int(leaf_size),
+                num_valid=num_valid,
             )
             if refresh_topology_key is None:
                 refresh_topology_key = "static_fused_template"

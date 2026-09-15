@@ -660,6 +660,7 @@ class PrepareMixin(_EngineBase):
         bounds: Optional[Tuple[Array, Array]],
         max_leaf_size: int,
         cache_leaf_parameter: int,
+        num_valid: Optional[Array] = None,
     ) -> _TreeBuildArtifacts:
         """Refresh static-radix tree artifacts from a fixed template topology.
 
@@ -675,6 +676,9 @@ class PrepareMixin(_EngineBase):
             Explicit domain bounds, or None to infer them from the particles.
         max_leaf_size : int
             Largest leaf occupancy in the built tree.
+        num_valid : Optional[Array]
+            Live row count of a capacity-padded shard (the distributed lane);
+            ``None`` treats every row as live. Cells only -- see the raise below.
         cache_leaf_parameter : int
             Leaf parameter the cache entry was built with.
 
@@ -693,6 +697,12 @@ class PrepareMixin(_EngineBase):
 
         leaf_partition = getattr(self, "_tree_leaf_partition", "buckets")
         cells = leaf_partition == "cells"
+        if num_valid is not None and not cells:
+            raise ValueError(
+                "num_valid needs leaf_partition='cells': a bucket partition cuts "
+                "the sorted particles into fixed runs, so a live/dead cut would "
+                "silently reshape every leaf."
+            )
         rebuilt_result = rebuild_static_radix_tree_from_template(
             positions,
             masses,
@@ -701,6 +711,7 @@ class PrepareMixin(_EngineBase):
             return_reordered=True,
             leaf_partition=leaf_partition,
             return_overflow=cells,
+            **({"num_valid": num_valid} if num_valid is not None else {}),
         )
         expected = 5 if cells else 4
         if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != expected:
