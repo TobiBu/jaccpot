@@ -22,6 +22,16 @@ mesh forces and that are the whole content of this module:
    must be visible to all of them, or one card silently truncates its lists
    while its peers look clean.
 
+**Array convention, and it is a trap.** ``shard_map`` does NOT remove the mapped
+axis: with ``in_specs=P("gpus")`` a ``(ndev, cap, 3)`` input arrives inside the
+body as ``(1, cap, 3)``, so a ``min(axis=0)`` reduces the device axis instead of
+the particles and every subsequent collective compares whole shards elementwise
+-- silently, with plausible shapes. This module therefore follows the convention
+:mod:`jaccpot.distributed.fmm` already uses: particle arrays are passed FLAT as
+``(ndev * cap, ...)`` so a device sees ``(cap, ...)``. Per-device pytrees that
+genuinely need a leading device axis (the prepared states) are sliced with
+``[0]`` on entry.
+
 Static shapes come from a :class:`~jaccpot.runtime.capacity_plan.FusedCapacityPlan`
 rather than from the process-level registry, because inside ``shard_map`` no
 eager prepare ever fills that registry -- see the plan module for what fails
@@ -219,3 +229,180 @@ def fused_force_step(
         max_acc_derivative_order=0,
     )
     return refreshed, jnp.asarray(acceleration)
+
+
+def stack_prepared_states(states: "list[Any]") -> Any:
+    """Stack per-device prepared states into one pytree with a leading device axis.
+
+    Each device needs its OWN prepared state -- its own tree, multipoles and
+    interaction lists -- so beyond a single device the state cannot ride as a
+    closure constant. It becomes a ``shard_map`` input, which requires every leaf
+    to share a shape across devices.
+
+    Measured at N = 2x10^5 on two Morton domains: the states already stack, with
+    an identical treedef, 55 leaves each and no shape disagreement, because the
+    interaction-list capacities are fixed by configuration rather than measured
+    per shard. What *does* differ per shard is the level-shape plan (widths 3205
+    and 3460, depths 44 and 50 on those two domains), which is why
+    :func:`~jaccpot.runtime.capacity_plan.merge_plans` exists and why it is not
+    optional.
+
+    Parameters
+    ----------
+    states : list[Any]
+        One prepared state per device, in mesh order.
+
+    Returns
+    -------
+    Any
+        The same pytree with every leaf gaining a leading axis of ``len(states)``.
+
+    Raises
+    ------
+    ValueError
+        If ``states`` is empty, the structures differ, or any leaf's shape or
+        dtype disagrees -- naming the offending leaf, because "cannot stack" with
+        55 anonymous leaves is not an actionable message.
+    """
+    if not states:
+        raise ValueError("stack_prepared_states needs at least one state")
+    flats, treedefs = zip(*(jax.tree_util.tree_flatten(s) for s in states))
+    reference = treedefs[0]
+    for device, treedef in enumerate(treedefs[1:], start=1):
+        if treedef != reference:
+            raise ValueError(
+                f"prepared state {device} has a different pytree structure from "
+                "device 0; every device must be prepared with the same "
+                "configuration (leaf_capacity, order, caps)."
+            )
+    paths = [
+        jax.tree_util.keystr(path)
+        for path, _ in jax.tree_util.tree_flatten_with_path(states[0])[0]
+    ]
+    for device, flat in enumerate(flats[1:], start=1):
+        for index, (a, b) in enumerate(zip(flats[0], flat)):
+            shape_a = getattr(a, "shape", ())
+            shape_b = getattr(b, "shape", ())
+            if shape_a != shape_b:
+                name = paths[index] if index < len(paths) else f"leaf #{index}"
+                raise ValueError(
+                    f"prepared states disagree on {name}: device 0 has "
+                    f"{shape_a}, device {device} has {shape_b}. Every static "
+                    "shape must cover the worst device -- size it from the "
+                    "capacity plan rather than from each shard's own measurement."
+                )
+    stacked = [
+        jnp.stack([jnp.asarray(f[i]) for f in flats]) for i in range(len(flats[0]))
+    ]
+    return jax.tree_util.tree_unflatten(reference, stacked)
+
+
+def make_fused_force_evaluator(
+    solver: Any,
+    prepared_stacked: Any,
+    *,
+    mesh: Any,
+    plan: Any,
+    leaf_size: int,
+    max_order: int,
+    theta: Optional[float] = None,
+    axis_name: str = AXIS_NAME,
+):
+    """A jitted ``shard_map`` force: the fused lane per device, one program.
+
+    The capacity plan is installed around the BUILD, not around the call: the
+    static shapes are read at trace time. Its fingerprint belongs in whatever
+    caches the returned callable, since a ContextVar does not retrace by itself.
+
+    Parameters
+    ----------
+    solver : Any
+        The fused-lane solver (or its runtime impl).
+    prepared_stacked : Any
+        Per-device prepared states from :func:`stack_prepared_states`.
+    mesh : Any
+        A 1-D device mesh whose axis is ``axis_name``.
+    plan : Any
+        The merged :class:`~jaccpot.runtime.capacity_plan.FusedCapacityPlan`.
+    leaf_size : int
+        Leaf width the templates were built with.
+    max_order : int
+        Expansion order.
+    theta : Optional[float]
+        Opening-angle override.
+    axis_name : str
+        Mesh axis name.
+
+    Returns
+    -------
+    Callable
+        ``(positions, masses, num_valid) -> (acceleration, overflow)``. Positions
+        are ``(ndev * cap, 3)`` and masses ``(ndev * cap,)`` -- FLAT, see the
+        module docstring on why not ``(ndev, cap, ...)``; ``num_valid`` is
+        ``(ndev,)``. The acceleration comes back flat too, dead rows included and
+        meaningless. ``overflow`` is one replicated boolean: a capacity that
+        saturated on ANY device.
+    """
+    from jax.sharding import PartitionSpec as P
+
+    from jaccpot.runtime.capacity_plan import fused_capacity_plan_overrides
+
+    def body(prepared, positions, masses, num_valid):
+        # shard_map keeps the mapped axis at size 1; strip it so the rest of the
+        # body sees exactly what the single-device lane sees.
+        prepared_local = jax.tree_util.tree_map(lambda leaf: leaf[0], prepared)
+        live = num_valid[0]
+        bounds = global_mesh_bounds(positions, num_valid=live, axis_name=axis_name)
+        refreshed, acceleration = fused_force_step(
+            solver,
+            prepared_local,
+            positions,
+            masses,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            num_valid=live,
+        )
+        local = _local_overflow(refreshed)
+        return acceleration, reduce_flag_across_mesh(local, axis_name=axis_name)
+
+    with fused_capacity_plan_overrides(plan):
+        mapped = jax.shard_map(
+            body,
+            mesh=mesh,
+            in_specs=(P(axis_name), P(axis_name), P(axis_name), P(axis_name)),
+            out_specs=(P(axis_name), P()),
+            check_vma=False,
+        )
+        compiled = jax.jit(mapped)
+
+    def force(positions, masses, num_valid):
+        with fused_capacity_plan_overrides(plan):
+            return compiled(prepared_stacked, positions, masses, num_valid)
+
+    return force
+
+
+def _local_overflow(refreshed: Any) -> Array:
+    """This device's saturation flag, OR-ed from whatever the refresh surfaced.
+
+    Kept separate from the mesh reduction so the local value stays available to
+    the per-device count that must NOT be driven by the mesh flag.
+
+    Parameters
+    ----------
+    refreshed : Any
+        The refreshed prepared state.
+
+    Returns
+    -------
+    Array
+        Boolean scalar for this device.
+    """
+    flag = jnp.asarray(False)
+    for name in ("leaf_capacity_overflow", "walk_overflow", "capacity_overflow"):
+        value = getattr(refreshed, name, None)
+        if value is not None:
+            flag = jnp.logical_or(flag, jnp.asarray(value, jnp.bool_).any())
+    return flag

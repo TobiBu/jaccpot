@@ -93,6 +93,20 @@ purely because the all-reduced box carries slack that `infer_bounds` does not an
 valid) tree. Comparing only that arm would leave "the trace changed the answer" and "the box changed the tree"
 indistinguishable.
 
+### Per-device states (jaccpot)
+
+`stack_prepared_states` + `make_fused_force_evaluator`. Beyond one device the prepared state cannot ride as a
+closure constant -- each device needs its own tree, multipoles and lists -- so it becomes a `shard_map` input,
+which requires every leaf to share a shape across devices.
+
+Measured at N = 2x10^5 over two Morton domains: **the states already stack** -- identical treedef, 55 leaves each,
+no shape disagreement -- because the interaction-list capacities are fixed by configuration rather than measured
+per shard. What does differ per shard is the level-shape plan: **widths 3205 and 3460, depths 44 and 50** on those
+two domains. That is `merge_plans` earning its place at production scale, not on a toy tree.
+
+`stack_prepared_states` names the leaf that disagrees when one does; "cannot stack" over 55 anonymous leaves is
+not an actionable message.
+
 ## Traps found
 
 * The fused lane's profile gate keys on the **exact array length**. A shard's length is the padded capacity, not
@@ -100,6 +114,12 @@ indistinguishable.
 * The **per-leaf capacity fits are real**: the default fast-lane environment is the leaf-256 entry, and leaf 64
   has ~10x the far pairs and does not fit without its own preset plus traversal overrides. Both are whole-problem
   host state that no process can compute under one process per GPU -- which is what the capacity plan must absorb.
+* **`shard_map` does not remove the mapped axis.** With `in_specs=P("gpus")` a `(ndev, cap, 3)` input arrives
+  inside the body as `(1, cap, 3)`, so a `min(axis=0)` reduces the DEVICE axis instead of the particles and every
+  collective after it compares whole shards elementwise -- silently, with plausible shapes. It surfaced here as a
+  global box that came back equal to one shard's raw positions. Particle arrays are therefore passed FLAT as
+  `(ndev * cap, ...)`, matching `jaccpot/distributed/fmm.py`; per-device pytrees are sliced `[0]` on entry.
+  jz-fmm ships a wrapper (`expanding_shard_map`) whose whole purpose is stripping this axis.
 * yggdrax exposes the tree builders **twice**, an implementation and a public wrapper, and jaccpot imports the
   wrapper. Threading a parameter through the implementation alone leaves it unreachable, surfacing as a jaxtyping
   signature-bind `TypeError` three frames from the cause; tests run from inside the yggdrax worktree call the
