@@ -166,7 +166,10 @@ At 10^6 only 1.4-4.3 % of the near volume crosses a domain boundary. One-sided e
 so it costs a few per cent of the near field, not a factor. That is the number that could have killed the design
 and it did not.
 
-**Measured but UNEXPLAINED -- do not build on it yet.** The import volume per device comes out at exactly its own
+**RESOLVED (see the section below): the import is fine, and ONE leaf was hiding that.** The text that follows
+records the state before the resolution.
+
+**Measured but UNEXPLAINED at the time -- superseded.** The import volume per device comes out at exactly its own
 particle count at every device count:
 
 | ndev | imported leaves | share of EACH foreign domain | imported particles | halo / local |
@@ -192,13 +195,71 @@ distant and export zero (use per-device unions), and `occ` is indexed over ALL n
 it includes every internal node and doubles the leaf count -- which halves the apparent per-domain leaf share and
 inverts the reading of the import volumes.
 
+## The import volume, resolved: one leaf, not the decomposition
+
+The earlier probe measured the wrong object -- ONE global tree with leaves merely LABELLED by domain -- so it was
+rebuilt as `bench/multigpu_import_volume_probe.py`: each domain gets its own cell tree in the shared Morton frame,
+and the cross relation is the real `dual_tree_walk_cross_impl` the distributed lane uses. Per-domain trees also
+dissolve the RCB problem, because leaves cannot straddle a cut they were never built across.
+
+**The decomposition was never the problem.** Cross-neighbours per target leaf, plane split, N = 2x10^5, ndev = 2,
+cells64, theta 0.8:
+
+| statistic | foreign leaves needed |
+|---|---|
+| median | **0** |
+| p90 | 8 |
+| p99 | 23 |
+| max | **5,523** (of 5,534 -- the entire source domain) |
+
+Half of all leaves import NOTHING. The import is one leaf:
+
+| excluded target leaves | imported leaves | imported particles |
+|---|---|---|
+| none | 99.8 % | 100.0 % |
+| **the single worst** | **28.6 %** | **30.5 %** |
+| top 10 | 27.1 % | 29.1 % |
+| top 50 | 24.6 % | 26.7 % |
+
+The offender has radius **119.88 against a median leaf radius of 0.128** -- about 900x. Its two runners-up are
+33.83 and 33.28. **A Morton cell bounds OCCUPANCY, not EXTENT**: in a sparse halo the coarsest cell holding 64
+particles is geometrically vast, and such a cell fails the MAC against everything. Cell leaves fixed exactly this
+for the LOCAL near field (direct share 0.1225 N -> 0.0052 N); across a domain boundary it returns, and a single
+instance on the receiving side forces a whole-domain import.
+
+Excluding it, the halo is 30.5 % of a neighbour domain -- inside jz-fmm's stated 10-60 % of local data. So the
+design is viable and the fix is narrow: treat the few oversized cells as FAR (ship a multipole) rather than
+importing their neighbours' particles, or split them. It is a handful of leaves, not a policy change.
+
+**The partitioner is not the lever.** Plane, RCB and Morton give essentially the same import (0.663 / 0.663 /
+0.692 at ndev = 2), and RCB reproduces the plane exactly at two devices, as it must -- its first cut IS a plane on
+the longest axis. The cost is set by a few oversized cells, not by boundary shape, so the aligned-Morton partition
+of Phase 2 stands.
+
+**A gap in yggdrax this exposed:** `dual_tree_walk_cross_impl` takes **no `node_active` mask**, unlike
+`dual_tree_walk_mutual`. The production lane must pad for static shapes, and unmasked padding leaves (radius 0)
+fail the MAC against everything -- the documented 30M-spurious-edge failure. Phase 3's cross walk needs that mask
+added. The probe sidesteps it by building unpadded trees, which a probe may do and the lane may not.
+
+Two more measurement traps, both of which produced plausible wrong readings:
+* **A union over target leaves is not a summary.** The mean (3.2 foreign leaves per target) and the union (99.8 %)
+  describe the same data and disagree completely, because one saturated row swallows the union.
+* A padding leaf carries `start == end == n`, which a naive `end - start + 1` reads as ONE particle rather than as
+  empty.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
 fp32 noise, at one and at two devices. What it does NOT yet have is any cross-domain field -- each device sees
 only its own shard.
 
-That is plan Phase 3. Its volume probe has answered the question that could have killed the approach -- cell
-leaves keep the cross-domain near field to a few per cent -- but has NOT yet produced a trustworthy import volume,
-and the export design depends on that. Finish the probe first: debug the per-device union against a directly
-counted cross-pair list, then get the RCB control running so the partitioner choice rests on a measurement.
+That is plan Phase 3, and its volume question is now settled: the cross-domain near field is a few per cent of
+the local one, and the halo is ~30 % of a neighbour domain once the oversized outer cells are handled. Both are
+inside the regime the design assumed.
+
+Phase 3 therefore starts with two concrete pieces rather than another probe:
+1. `node_active` on `dual_tree_walk_cross_impl` (yggdrax), without which padded shards make every device's
+   padding leaves universal neighbours.
+2. An oversized-cell policy: ship a multipole for cells whose radius is far above the median instead of importing
+   for them. The threshold wants measuring across ICs -- a disc will differ from a Plummer sphere -- but the
+   mechanism is settled.
