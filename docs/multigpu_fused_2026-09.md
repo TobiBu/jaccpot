@@ -107,6 +107,24 @@ two domains. That is `merge_plans` earning its place at production scale, not on
 `stack_prepared_states` names the leaf that disagrees when one does; "cannot stack" over 55 anonymous leaves is
 not an actionable message.
 
+## Gate G1 (ndev = 2): measured
+
+Two A100s (cards 1 and 7, loadavg 23), N = 2x10^5 split into two Morton domains of 100,000, cap 114,999,
+leaf_capacity 8192, cells64, theta 0.8, p4. Probe: `bench/multigpu_fused_ndev2_probe.py`. No cross-domain field
+yet -- each device computes the force of its OWN shard on itself, and the reference is that same computation run
+singly, so any difference is the mesh plumbing alone.
+
+| device | mesh vs single-device, max abs | rel-L2 | local-only aggL2 vs fp64 direct over its shard |
+|---|---|---|---|
+| 0 | 9.313e-10 | **2.361e-11** | 2.7920e-03 |
+| 1 | 2.328e-10 | **2.080e-11** | 3.2663e-03 |
+
+No overflow. **The mesh plumbing is transparent to fp32 noise** -- stacking, the per-device slice, the specs, the
+box all-reduce and the plan installation together contribute 2e-11, the same level as ndev = 1's 1.76e-11.
+
+The per-device plans differed as expected (width 3205 / depth 44 on device 0, 3460 / 50 on device 1) and merged
+to 3460 / 50, which is the width both devices then compiled against.
+
 ## Traps found
 
 * The fused lane's profile gate keys on the **exact array length**. A shard's length is the padded capacity, not
@@ -114,6 +132,13 @@ not an actionable message.
 * The **per-leaf capacity fits are real**: the default fast-lane environment is the leaf-256 entry, and leaf 64
   has ~10x the far pairs and does not fit without its own preset plus traversal overrides. Both are whole-problem
   host state that no process can compute under one process per GPU -- which is what the capacity plan must absorb.
+* **The solver carries host-side caches that only an eager prepare fills**, and a cold one fails *inside* the
+  traced body: `_resolve_dual_downward_planner_hint` calls a jitted planner and takes `bool()` of its result,
+  which is concrete only when `_refresh_dual_planner_cache` is warm. Building the evaluator around a fresh solver
+  dies on a `TracerBoolConversionError`. This is the **third** site of the same "an eager prepare always precedes
+  a traced refresh" assumption, after the level-shape registry and the upward depth stash -- the first two degrade
+  silently, this one at least fails loudly. The driver must run its eager per-shard prepares on the SAME solver
+  instance it then builds the `shard_map` around.
 * **`shard_map` does not remove the mapped axis.** With `in_specs=P("gpus")` a `(ndev, cap, 3)` input arrives
   inside the body as `(1, cap, 3)`, so a `min(axis=0)` reduces the DEVICE axis instead of the particles and every
   collective after it compares whole shards elementwise -- silently, with plausible shapes. It surfaced here as a
@@ -127,7 +152,12 @@ not an actionable message.
 
 ## Next
 
-The prepared state currently rides as a closure constant, which is correct at one device only. Beyond that it
-becomes a per-device input: eagerly prepare each shard, merge the plans, stack, and pass with `P("gpus")`. Then
-the walk capacities on the engine (`_strict_fused_capacity_handoff`) join the plan, and the cross-domain import
-(plan Phase 3) begins with the volume probe that decides its shape.
+Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
+fp32 noise, at one and at two devices. What it does NOT yet have is any cross-domain field -- each device sees
+only its own shard.
+
+That is plan Phase 3, and it begins with the volume probe that decides its shape
+(`bench/multigpu_cross_volume_probe.py`): the cross-domain near volume as a fraction of the local one, the
+exported node set per ordered domain pair, and the opened particles per pair. The first of those can invalidate
+the approach -- with bucket leaves the cross half is already 54-80 % of near leaf pairs at 4-6 devices, and cell
+leaves' effect on that share has never been measured.
