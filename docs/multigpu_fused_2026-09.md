@@ -150,14 +150,55 @@ to 3460 / 50, which is the width both devices then compiled against.
   signature-bind `TypeError` three frames from the cause; tests run from inside the yggdrax worktree call the
   implementation directly and miss it.
 
+## Phase 3.1 -- the cross-domain volume probe (partial, and one number is unexplained)
+
+`bench/multigpu_cross_volume_probe.py`, one A100, Plummer, cells64, theta 0.8, Morton domains snapped to a
+level-`align_level` cell edge (zero straddling leaves, which is what alignment buys).
+
+**Solid, and favourable.** The cross-domain share of the near field is small and the tree is what makes it so:
+
+| N | ndev | cross share of near VOLUME | cross share of near PAIRS |
+|---|---|---|---|
+| 2x10^5 | 2 / 4 / 8 | 0.099 / 0.099 / 0.112 | 0.097 / 0.097 / 0.112 |
+| 10^6 | 2 / 4 / 8 | 0.014 / 0.014 / 0.043 | 0.039 / 0.039 / 0.078 |
+
+At 10^6 only 1.4-4.3 % of the near volume crosses a domain boundary. One-sided evaluation doubles the cross half,
+so it costs a few per cent of the near field, not a factor. That is the number that could have killed the design
+and it did not.
+
+**Measured but UNEXPLAINED -- do not build on it yet.** The import volume per device comes out at exactly its own
+particle count at every device count:
+
+| ndev | imported leaves | share of EACH foreign domain | imported particles | halo / local |
+|---|---|---|---|---|
+| 2 | 25,944 | 1.000 | 499,972 | 1.00 |
+| 4 | 12,972 | 0.333 | 249,986 | 1.00 |
+| 8 | 6,486 | 0.143 | 124,996 | 1.00 |
+
+The figures are internally consistent (leaves x occupancy = particles, occupancy 19.3 matching the tree's own
+mean), but the per-source share is exactly `1/(ndev-1)` in all three rows and the particle count matches `N/ndev`
+to 0.006 %. A boundary region has no reason to scale that way. Either a Morton bisection's boundary really is
+fractal enough to reach every leaf -- which is plausible, a z-order split interlocks at every scale -- or the
+union logic has a structural flaw. **Resolve this before the export design depends on it**; jz-fmm's comparable
+figure is 10-60 % of local data, and 100 % would change the design.
+
+**The RCB control could not be run.** RCB cuts through cells (3,133-9,382 straddling leaves at 10^6), so the
+leaf-to-domain assignment by first particle is wrong for those and they are miscounted as cross-domain, inflating
+RCB's cross fraction from 0.014 to 0.168. That is a measurement of the assignment breaking, not of RCB. Comparing
+the two partitioners needs per-domain trees, or a leaf assignment that handles straddling.
+
+Two mistakes in the probe worth remembering: means over ordered domain pairs summarise nothing when most pairs are
+distant and export zero (use per-device unions), and `occ` is indexed over ALL nodes, so counting `occ > 0` across
+it includes every internal node and doubles the leaf count -- which halves the apparent per-domain leaf share and
+inverts the reading of the import volumes.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
 fp32 noise, at one and at two devices. What it does NOT yet have is any cross-domain field -- each device sees
 only its own shard.
 
-That is plan Phase 3, and it begins with the volume probe that decides its shape
-(`bench/multigpu_cross_volume_probe.py`): the cross-domain near volume as a fraction of the local one, the
-exported node set per ordered domain pair, and the opened particles per pair. The first of those can invalidate
-the approach -- with bucket leaves the cross half is already 54-80 % of near leaf pairs at 4-6 devices, and cell
-leaves' effect on that share has never been measured.
+That is plan Phase 3. Its volume probe has answered the question that could have killed the approach -- cell
+leaves keep the cross-domain near field to a few per cent -- but has NOT yet produced a trustworthy import volume,
+and the export design depends on that. Finish the probe first: debug the per-device union against a directly
+counted cross-pair list, then get the RCB control running so the partitioner choice rests on a measurement.
