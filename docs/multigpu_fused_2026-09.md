@@ -247,6 +247,124 @@ Two more measurement traps, both of which produced plausible wrong readings:
 * A padding leaf carries `start == end == n`, which a naive `end - start + 1` reads as ONE particle rather than as
   empty.
 
+## Phase 3.2 -- `node_active` on the cross walk (yggdrax)
+
+`dual_tree_walk_cross_impl` now takes `target_node_active` and `source_node_active`: **two** masks, not one,
+because unlike `dual_tree_walk_mutual` this walk spans two index spaces. A pair whose target OR source node is
+inactive is dead -- never accepted, never near, never refined. `None` on either side is bit-identical to the walk
+without the argument, and the masks are shape-checked against their own tree (unlike `policy_state`, whose shapes
+are not static and which therefore reads the wrong node rather than raising).
+
+The mask must be **ancestor-closed**, and nothing can check that for you: an inactive node is never refined, so
+marking an internal node inactive prunes every live descendant with it. The rule that satisfies it is the one the
+padding produces naturally -- inactive exactly when a node's own particle range is empty.
+
+The failure it prevents is worse across two trees than within one. In the self walk the padding leaves share a
+centre and only fail the MAC against each other; here each is a distinct point that is near to part of the other
+tree and far from the rest, so it emits spurious pairs of BOTH kinds against the whole live tree. Measured on two
+padded cell trees (300 points each, leaf 8, 87 and 97 live leaves in a capacity of 256): the per-leaf near demand
+goes 28 -> 156 and the total cross-near count 140 -> 22,535, a factor of 161. In practice the first thing the
+padding blows is the pair QUEUE, so at the walk's default queue the unmasked run never reaches a near decision at
+all.
+
+`tests/distributed/test_cross_walk_node_active.py`, 7 tests. The control is the admissibility partition of
+`test_cross_walk.py` -- far sources from a target leaf and its ancestors plus its near sources must tile every
+source particle exactly once -- and it was **mutation-checked rather than assumed**: killing one live source leaf
+breaks 86 of 87 target leaves, one live internal source node 84, and a target mask that is not ancestor-closed 2.
+It is also blind to the flood (padding nodes carry no particles, so an unmasked walk partitions just as well),
+which is why the flood test is separate. One test goes through the jitted `dual_tree_walk_cross` wrapper rather
+than the impl, because that is the name jaccpot imports and a parameter has been left unreachable there before.
+
+## Phase 3.3 -- the oversized-cell policy, measured on both ICs
+
+Probe: `bench/multigpu_oversized_cell_probe.py`. Per-domain cell trees in the shared Morton frame, the real
+`dual_tree_walk_cross_impl` for the cross relation, and the reclassification applied POST HOC to the walk's own
+neighbour lists -- exact for "this pair is served by an expansion instead of by particles", and not a model of
+SPLITTING the cell, which would change the walk. Capacities are grown until the walk reports no overflow; nothing
+is ever accepted as a truncation.
+
+### The statistic changed, and so did one number in the section above
+
+The import is reported as **`worst1src`: the largest single ordered (receiver, sender) pair**, not a mean. The two
+are not interchangeable and the difference is threefold. At the plane split, N = 2x10^5, ndev = 2, device 0 imports
+**100 %** of device 1 and device 1 imports **33 %** of device 0 (their max/median leaf radii are 1689 and 653), so
+a mean over devices reads 66 %. The "100.0 %" in the section above is the FIRST of those two ordered pairs; it is
+correct, and it is one pair.
+
+The probe reproduces that configuration exactly as a control -- `worst1src` 1.000 with nothing cut, 0.326 after the
+single worst importer -- against the record's 30.5 %. The remaining 2 pp is that
+`multigpu_import_locality_probe.py` asserts on `near_overflow` and `queue_overflow` but **not on `far_overflow`**,
+which is also one of the walk's termination conditions.
+
+### Radius is a weak discriminant; leaf DEPTH is the right one
+
+Spearman(leaf radius, import size) is **+0.05** over all leaves -- radius only works because the top few importers
+happen to be the top few radii. Spearman(-depth, radius) is **+0.73**. And a per-device radius quantile is the
+wrong SHAPE regardless: at ndev = 4 on a Plummer sphere one device has max/median leaf radius 1838 and another
+**4.4**, so a per-device quantile makes the healthy device cut good leaves while under-cutting the sick one.
+
+Depth needs no order statistic and no reduction. The Morton frame is global, so depth `d` is exactly cell size
+`box / 2^d` -- the same absolute test on every device. It is also the direct statement of the cause: a
+cell-partition leaf's bounding radius is at most `sqrt(3)/2` of its own cell, so a leaf is vast only when its CELL
+is shallow.
+
+**Plummer, Morton partition, N/device = 10^5**, worst single ordered import:
+
+| ndev | no policy | radius quantile | leaf depth |
+|---|---|---|---|
+| 2 | 1.000 | 0.018 % of cells -> 0.384 | depth <= 1: 0.055 % -> 0.384 |
+| 4 | 1.000 | 0.21 % -> 0.269 | depth <= 3: **0.135 %** -> 0.273 |
+| 8 | 1.000 | 0.21 % -> 0.384 | depth <= 5: **0.080 %** -> 0.387 |
+
+Converted from percentages to counts, the knee sits at **3-7 leaves per device at every ndev** -- so the rule is
+"reclassify the shallowest handful of leaves", a bincount over an integer array with ~20 distinct values. The sweep
+is flat past the knee (cutting 11 % of cells at ndev = 4 buys 0.273 -> 0.273), so the threshold is not knife-edge.
+
+### The disc+bulge IC has NO pathology, and that is the finding
+
+| ndev | disc+bulge, no policy | after the best cut measured |
+|---|---|---|
+| 2 | **0.411** | 0.375 at 6.6 % of cells |
+| 4 | **0.395** | 0.387 at 1.0 % |
+| 8 | **0.280** | 0.275 at 1.4 % |
+
+The application IC is already at the gate before any policy, and the policy barely moves it -- its import is simply
+not concentrated in a few cells. Its max/median leaf radius is 145-320 against Plummer's 835-1916.
+
+**Why**: the Plummer sphere's bounding box is **745 for a system of scale radius 1**, because one particle in its
+unbounded tail sets it. The Morton hierarchy therefore burns about nine levels before reaching the body of the
+system, and its shallow cells are enormous -- the worst leaf spans half the box. The disc+bulge IC is clipped at
+`rmax_code = 20` (box ~40) and has no such cells. **This is the same trap as "a Hernquist tail needs clipping --
+one particle sets the tree's bounding box"** from the rollout work (memory `disc-bulge-rollout-and-cap-cliff`),
+resurfacing as the cross-domain import.
+
+The subsampling runs the safe way: the disc numbers are a 1:105 uniform subsample of the 21M IC, which makes each
+halo cell about 4.7x larger in linear size than at full N, so the production disc is FURTHER from the pathology
+than what is measured here, not closer.
+
+**So the oversized-cell policy is a defence against unclipped ICs, not a prerequisite for the application.** It
+should still be built -- it is a bincount and a mask, and Plummer is a standard test case -- but Phase 3.5's
+exchange does not wait on it.
+
+### A trap that was nearly shipped as a scaling trick
+
+To reach ndev = 8 the probe first capped `max_neighbors_per_leaf` at 256 and counted the truncated rows as
+importing their whole source domain, on the reasoning that an upper bound errs against the design. It does not
+work, because **`near_overflow` is one of the walk's `cond_fun` termination conditions**: an overflowing row does
+not truncate itself, it HALTS the walk and every other row loses its remaining rounds. Measured against the
+full-capacity arm on the same configuration, it read one device's import as **0.010 of its neighbour against a true
+0.304** -- 30x too small -- while the other device's number and the entire radius sweep were unaffected and looked
+perfectly sane. Both capacities are now GROWN until the walk reports no overflow, which reproduces the
+full-capacity control row for row and is still cheap, because almost every ordered pair needs a small fraction of
+the worst pair's buffers.
+
+### Where the floor is
+
+Cutting by import size directly -- the best any target-side rule could do -- reaches 0.180 (Plummer, ndev = 2) and
+0.287 (ndev = 8) only after cutting 3.6-3.9 % of cells. So roughly **30 % of a neighbour domain is structural**,
+not removable by reclassifying cells, and that is the number Phase 3.5 should size the exchange for. It is inside
+jz-fmm's stated 10-60 % of local data.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
@@ -257,9 +375,13 @@ That is plan Phase 3, and its volume question is now settled: the cross-domain n
 the local one, and the halo is ~30 % of a neighbour domain once the oversized outer cells are handled. Both are
 inside the regime the design assumed.
 
-Phase 3 therefore starts with two concrete pieces rather than another probe:
-1. `node_active` on `dual_tree_walk_cross_impl` (yggdrax), without which padded shards make every device's
-   padding leaves universal neighbours.
-2. An oversized-cell policy: ship a multipole for cells whose radius is far above the median instead of importing
-   for them. The threshold wants measuring across ICs -- a disc will differ from a Plummer sphere -- but the
-   mechanism is settled.
+Phase 3.2 and 3.3 are now done, and 3.3 reshaped what follows.
+
+`node_active` is on the cross walk. The oversized-cell policy is measured on both ICs, and the answer is that it is
+a defence rather than a prerequisite: reclassify by Morton leaf DEPTH (not radius, and not a per-device quantile),
+about the shallowest 3-7 leaves per device, which takes an unclipped Plummer sphere from importing a whole
+neighbour domain to ~0.3 of one; the disc+bulge IC never needed it, being already at 0.28-0.41.
+
+Next is **3.4**, sizing the cross FAR import -- the same ordered domain pair produced 56,821 far pairs against
+17,385 near, and nothing yet says how many distinct source NODES, at what depth, a device needs as far sources.
+Then 3.5's exchange, which should be sized for the ~30 % of a neighbour domain that is structural.
