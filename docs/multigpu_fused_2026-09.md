@@ -453,6 +453,55 @@ so an unsliced table runs a discarded self-pass on every halo leaf), asserting t
 silently drops a remote leaf wider than the contract width, and rebasing the local half's node ids through the
 scatter table rather than by subtracting `leaf_nodes[0]`.
 
+## Phase 3.5 -- a flat imported POOL double-counts, and the plan's 4.1 data model has to change
+
+Probe: `bench/multigpu_export_walk_probe.py`, plus three diagnostics under it.
+
+The exchange has to answer "the receiver does not have the sender's tree". The scheme tried here is a **sender-side
+export walk**: every device publishes a small level-k Morton summary of itself, and each SENDER walks its own full
+tree against every receiver's summary cells and decides unilaterally what to send -- one ragged round, no request
+round. It is correct by construction, because a summary cell BOUNDS every real target inside it, so a node far
+from the cell is far from each target in it. The export walk is `dual_tree_walk_mutual` seeded with
+`(cell_i, sender_root)` over a combined `[cells ; sender_tree]` space: Phase 4.1's multi-pair seed used in the
+opposite direction from the evaluation.
+
+**The export itself is sound.** Fed the receiver's own leaves as its "summary", the export names every source the
+exact cross walk names -- the 23 it appears to miss are every one of them covered by a shipped ANCESTOR, so
+nothing is lost, and it adds 177 extras. A set difference was simply the wrong way to compare two cuts.
+
+**But the shipped set is not a cut: 2,033 of 2,034 exported nodes also have a shipped ancestor in the set.** That
+is not waste -- different receiver cells genuinely need different granularities, which is the same fact Phase 3.4
+measured as "the union spans most of the sender's levels". It is fatal to the plan's 4.1 data model, which has the
+receiver seed `(local_root, imported_i)` against a FLAT pool and refine locally. Measured on that exact
+construction at N = 2x10^4, ndev = 2:
+
+| | |
+|---|---|
+| exported nodes | 1,284 |
+| pairs emitted, orientation `a < n_local <= b` | 144,368, **all correct** |
+| target leaves whose source coverage DOUBLE-COUNTS | **583 of 583** |
+| target leaves with a coverage hole | 0 |
+
+Every target leaf accepts an ancestor for one pair and a descendant of it for another, and counts that mass twice.
+**A conservation check cannot see this**: double counting leaves momentum exact, which is the failure mode this
+project has already been bitten by (memory `cross-m2l-theta-lift-design`). It would surface only as a percent-level
+force error in a global comparison.
+
+So Phase 4.1's seed mechanism is right and its *payload* is wrong. The imported object cannot be a flat node pool;
+it must carry PROVENANCE -- which receiver cell each node was exported for. The corrected design:
+
+* ship each distinct node payload ONCE, plus a small per-cell CSR naming which nodes each receiver cell needs;
+* the receiver seeds `(cell_root_local, imported_node)` only for the pairs in that cell's list, and refines
+  locally. Each cell's list IS a cut by construction -- it is one export walk's output from a single target -- so
+  each local target below that cell gets a valid partition.
+
+**This ties Phase 2 to Phase 3.5 harder than the plan says.** "The local root of cell C" only exists if the cell is
+a subtree of the receiver's tree, which is exactly what Morton `align_level` guarantees. Alignment was justified in
+Phase 2 as a tree-structure nicety; it is in fact what makes the corrected exchange addressable at all.
+
+Not yet measured: the size of the per-cell CSR against the node payload, which is what decides whether this stays
+one round. That is the next thing to probe, before any exchange code is written.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
