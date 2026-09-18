@@ -547,6 +547,56 @@ each device's node set is disjoint -- but the exchange does not depend on it for
 Not measured here: the accuracy of the conservative export, which over-ships by up to 1.55x in nodes
 (`nodes/need`) and is therefore never less accurate, only more expensive. Nothing here was timed.
 
+## Phase 3.5 BUILT -- the exchange, five pieces, all on CPU
+
+yggdrax `4b07908`, `99c1560`, `a880135`, `0138c7a`, `4b769cb`. 51 tests, none needing a GPU.
+
+| piece | what it is |
+|---|---|
+| `dual_tree_walk_mutual(seed_a=, seed_b=)` | many seed pairs instead of one root pair |
+| `distributed/summary.py::occupancy_cut` | the cut of a tree the exchange is addressed by |
+| `distributed/export.py::export_walk` | what this device owes every other, in ONE walk |
+| `distributed/export.py::build_send_buffers` | grouped by destination, payload deduplicated |
+| `distributed/import_cells.py` | two ragged rounds, then receiver-side assembly |
+
+**The multi-pair seed is used three times, in three directions**: the sender seeds
+`(cell, sender_root)` to decide what to export; the receiver seeds
+`(cell_root_local, imported_entry)` to expand what arrived down to its own targets; and the
+evaluation seeds `(local_root, imported_i)`. Each time the walk's `(min, max)` canonicalisation
+supplies the pair ordering for free, because one index space is placed wholly below the other.
+
+**The whole thing rests on one property, and it is tested end to end.** Summary -> export -> send
+buffers -> assembly, then: for every local target leaf, the sender's particles reached through far
+sources accepted for it or any ancestor, plus its near sources, are covered **exactly once**. Green
+at `max_leaves` 1, 4 and 16. The pooled construction fails the same check on 583 of 583 leaves, and
+neither failure mode is visible to a conservation check -- a gap loses force, an overlap
+double-counts it, and double counting leaves momentum exact.
+
+**Two traps made into named, separately tested functions** rather than inline steps, because both
+produce plausible values, correct shapes and wrong forces:
+
+* `rebase_csr`. Each sender numbers `csr_row` from zero inside its own block; the blocks land
+  end-to-end in one receive buffer, so entries from every sender after the first must be shifted.
+  Tested on hand-made sizes where the arithmetic is visible, with a single-sender identity control.
+* A device never exports to ITSELF. Its particles are already in its own local field, and counting
+  them twice leaves momentum exact. The test hands the sender's own cells in ACTIVE so the function
+  is the only thing masking them.
+
+**What the tests deliberately do not claim.** A padded shard's cut is NOT the unpadded one's -- the
+two trees have different balanced structures, so it lands on different nodes; what holds is that it
+tiles exactly the LIVE particles. And `num_valid` is a measured NO-OP on this ranges convention
+(padding carries `start > end`, which the `sub > 0` guard already excludes); a synthetic tree built
+to exercise the other convention passed for an accidental reason and was removed rather than kept
+as false assurance.
+
+Output is `(local node, imported payload row)`, which is exactly what Phase 4's arguments take: the
+far list feeds an M2L over `[local ; imported]` with `n_targets = n_local`, the near list a leafpair
+kernel with `num_target_leaves = L_local`.
+
+**Not done**: gathering the real payloads (multipoles, particles) into the send buffers, and wiring
+the lists into the fused lane's kernels -- that is the driver, and it needs Phase 2's device-resident
+partition. Nothing here has been timed.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
@@ -569,8 +619,13 @@ of each sender's tree, which at p >= 5 outweighs the near particles and is no be
 
 Phase 4's kernel side is done as well, so the only thing between here and a force is the exchange and the driver.
 
-Next is **3.5, the exchange itself**, and every measurement points the same way: build it as jz-fmm's progressive
-per-level request rather than one frontier round. Size the near half for the ~30 % of a neighbour domain that is
-structural, and treat expansion order as a communication knob, not just an accuracy one. **Phase 2** (the
-device-resident partition) is still not built and the driver needs it; the probes so far have used host-side
-domains, which a probe may do and the lane may not.
+Phase 3 is now complete: measured (3.1, 3.3, 3.4), gated (3.2) and built (3.5). The exchange turned out to need
+ONE round, not jz-fmm's progressive per-level request, because the per-cell CSR that makes the import addressable
+costs only 5-60 % of the payload it addresses.
+
+Next is **Phase 2, the device-resident partition**, which the driver needs and which every probe so far has stood
+in for with host-side domains -- a probe may do that and the lane may not. Then the driver itself: gather the real
+payloads into the send buffers, wire the imported lists into the fused kernels through `n_targets` and
+`num_target_leaves`, and take Gate G4 (the one-sided force against the single-GPU lane on the identical particle
+set). Size the near half for the ~30 % of a neighbour domain that is structural, and remember that expansion order
+is a communication knob here, not only an accuracy one.
