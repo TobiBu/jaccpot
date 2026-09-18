@@ -410,6 +410,49 @@ is a second, independent reason to drop `build_coarse_frontier`'s every-leaf exp
 
 These are counted BYTES, not timings; the box has been loaded throughout and nothing here was timed.
 
+## Phase 4 (kernel side) -- no new Pallas kernel, now verified rather than read
+
+The plan's claim was that the one-sided cross field needs argument changes to kernels that already exist. That
+was read off the signatures; it is now measured. Three commits, each with the same shape: an optional static
+argument, `None` keeping the single-tree behaviour exactly, and a test that the rows the old call produced beyond
+the new bound were *exactly zero* -- pure waste, not an approximation.
+
+**4.1 -- the walk can be seeded with many pairs** (yggdrax `4b07908`). `dual_tree_walk_mutual` took only
+`(root, root)`. It now takes `seed_a` / `seed_b` / `seed_count`. Concatenate an imported source set at
+`[n_local, n_local + n_remote)`, seed `(local_root, imported_i)`, and the walk's existing `(min, max)`
+canonicalisation orders every emitted pair as (local target, imported source) for free, because every local index
+is strictly below every imported one. Seeds are canonicalised here too, so a seed and its own descendants cannot
+be emitted in opposite orientations.
+
+**That ordering is asserted directly, not inferred.** The test builds the combined index space and checks every
+emitted pair satisfies `a < n_local <= b`, and that every imported node stayed whole -- the walk refined only on
+the local side, as the design requires. Putting the imports first instead makes the M2L expand the wrong way
+round with a plausible-looking result, and nothing else would catch it.
+
+**4.2 -- `n_targets` on the lanes M2L** (jaccpot `f4d0ede`). The grid, the `out_shape` and `csr_by_target`'s
+`total_nodes` all came from `multipoles.shape[0]`, so a concatenated source array emitted `n_local + n_remote`
+rows: twice the launches and twice the buffer for discarded rows, then a shape mismatch against the local-only
+accumulator. Hence "mandatory", not an optimisation.
+
+**4.3 -- `num_target_leaves` on the leafpair near field** (jaccpot `62650b4`). Here the claim really did hold:
+`leaf_positions` is targets and source gather table alike, and the grid comes from the chunk table built over the
+target rows, so `L_source = L_local + L_halo` already works. Only the tail `segment_sum` spanned the whole pool.
+
+Both 4.2 and 4.3 pin the part that could have been quietly false: **zeroing the imported half must change the
+local rows**. Without that check the kernel could be ignoring precisely the half of the source array the import
+provides, and every shape assertion would still pass.
+
+**The reverse of both cvjps REFUSES a non-trivial value** with `NotImplementedError` rather than returning a
+quietly wrong gradient. Each would have to rebase its own second pass and accept a cotangent shorter than the
+pool; gradients through the cross-domain import are a later phase by decision, so this is left unplumbed and loud
+instead of half-plumbed and silent.
+
+**Still open in 4.3**, because they need the driver that does not exist yet: slicing `_combined_neighbors`' counts
+and offsets to the local rows (`build_leafpair_chunk_table` gives every empty row one chunk with `is_first = 1`,
+so an unsliced table runs a discarded self-pass on every halo leaf), asserting that `import_near_halo` never
+silently drops a remote leaf wider than the contract width, and rebasing the local half's node ids through the
+scatter table rather than by subtracting `leaf_nodes[0]`.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
@@ -430,6 +473,10 @@ neighbour domain to ~0.3 of one; the disc+bulge IC never needed it, being alread
 3.4 is now done too, and it moved the cost: the FAR half is the bigger one. A device needs multipoles for 38-59 %
 of each sender's tree, which at p >= 5 outweighs the near particles and is no better on the disc than on Plummer.
 
-Next is **3.5, the exchange itself**, and both measurements point the same way: build it as jz-fmm's progressive
+Phase 4's kernel side is done as well, so the only thing between here and a force is the exchange and the driver.
+
+Next is **3.5, the exchange itself**, and every measurement points the same way: build it as jz-fmm's progressive
 per-level request rather than one frontier round. Size the near half for the ~30 % of a neighbour domain that is
-structural, and treat expansion order as a communication knob, not just an accuracy one.
+structural, and treat expansion order as a communication knob, not just an accuracy one. **Phase 2** (the
+device-resident partition) is still not built and the driver needs it; the probes so far have used host-side
+domains, which a probe may do and the lane may not.
