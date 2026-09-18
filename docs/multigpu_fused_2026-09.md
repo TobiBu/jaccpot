@@ -365,6 +365,51 @@ Cutting by import size directly -- the best any target-side rule could do -- rea
 not removable by reclassifying cells, and that is the number Phase 3.5 should size the exchange for. It is inside
 jz-fmm's stated 10-60 % of local data.
 
+## Phase 3.4 -- the cross FAR import is the BIGGER half
+
+Probe: `bench/multigpu_far_import_probe.py`, same per-domain cell trees and the same real
+`dual_tree_walk_cross_impl`, capacities grown until no overflow (`far_overflow` is a `cond_fun` termination
+condition too, so it may not be accepted any more than `near_overflow` may).
+
+Pairs are not the payload: the exchange ships each distinct source node ONCE however many target nodes name it,
+and that compression is **8-13 far pairs per node shipped**. What is left after it is still large.
+
+Worst ordered (receiver, sender) pair, N/device = 10^5, Morton, cells64, theta 0.8:
+
+| IC | ndev | far nodes | as a fraction of the sender's tree | near particles | p=4 far/near bytes | p=6 |
+|---|---|---|---|---|---|---|
+| Plummer | 2 | 5,755 | 0.53 | 38,409 | 0.94 | 1.84 |
+| Plummer | 4 | 4,169 | 0.38 | 25,549 | 1.02 | 2.00 |
+| Plummer | 8 | 5,767 | 0.53 | 36,630 | 0.98 | 1.93 |
+| disc+bulge | 2 | 6,024 | 0.59 | 41,074 | 0.92 | 1.80 |
+| disc+bulge | 4 | 5,583 | 0.49 | 32,006 | 1.09 | 2.14 |
+| disc+bulge | 8 | 5,513 | 0.47 | 27,496 | 1.25 | 2.46 |
+
+(A real multipole of order p is (p+1)^2 coefficients at 4 bytes; a particle is 4 floats.)
+
+**Three things follow.**
+
+1. **The far import is not a coarse summary.** It is a multipole for **38-59 % of the sender's whole tree**, at
+   median depth 10-27 of a tree 15-35 deep -- deep nodes near the leaves, not a handful near the root. The reason
+   is structural rather than pathological: different target nodes are served at different levels, so the UNION
+   over one receiver's targets spans most of the sender's levels even though each individual cut is thin. The
+   per-target row is small (median 1-11) and the union is not one saturated row.
+2. **At p >= 5 the far half is the DOMINANT half**, 1.2-2.5x the near payload. At p = 4 the two are within 25 %
+   of each other. Expansion order is therefore a communication knob in the distributed lane in a way it is not on
+   one card, and the p = 6 the single-GPU record uses is the expensive end.
+3. **The disc+bulge IC is NOT better here, and at ndev = 8 it is worse** (1.25 against 0.98 at p = 4). That is the
+   opposite of the near half, where the disc has no pathology at all. So the far import is a property of the
+   method, not of the IC, and unlike the oversized-cell policy there is nothing IC-specific to exploit.
+
+**What this means for 3.5.** A single frontier exchange that ships half of every sender's tree to every receiver
+is ~0.5-1.2 MB per ordered pair at 10^5/device, so ~4-8 MB received per device per step at ndev = 8, on top of the
+near half. That is affordable at this size and is NOT affordable at 10^6/device, where it scales to tens of MB
+against a budget of tens of ms. This is exactly the case for jz-fmm's progressive per-plane request -- ask only
+for the nodes each level's interaction list names, when that level runs -- rather than one frontier round, and it
+is a second, independent reason to drop `build_coarse_frontier`'s every-leaf export.
+
+These are counted BYTES, not timings; the box has been loaded throughout and nothing here was timed.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
@@ -382,6 +427,9 @@ a defence rather than a prerequisite: reclassify by Morton leaf DEPTH (not radiu
 about the shallowest 3-7 leaves per device, which takes an unclipped Plummer sphere from importing a whole
 neighbour domain to ~0.3 of one; the disc+bulge IC never needed it, being already at 0.28-0.41.
 
-Next is **3.4**, sizing the cross FAR import -- the same ordered domain pair produced 56,821 far pairs against
-17,385 near, and nothing yet says how many distinct source NODES, at what depth, a device needs as far sources.
-Then 3.5's exchange, which should be sized for the ~30 % of a neighbour domain that is structural.
+3.4 is now done too, and it moved the cost: the FAR half is the bigger one. A device needs multipoles for 38-59 %
+of each sender's tree, which at p >= 5 outweighs the near particles and is no better on the disc than on Plummer.
+
+Next is **3.5, the exchange itself**, and both measurements point the same way: build it as jz-fmm's progressive
+per-level request rather than one frontier round. Size the near half for the ~30 % of a neighbour domain that is
+structural, and treat expansion order as a communication knob, not just an accuracy one.
