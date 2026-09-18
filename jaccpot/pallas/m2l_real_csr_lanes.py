@@ -342,6 +342,7 @@ def m2l_real_csr_lanes_pallas(
     *,
     order: int,
     active_pair_count: Optional[Array] = None,
+    n_targets: Optional[int] = None,
     k_lanes: int = 32,
     interpret: bool = False,
     backend: str = "triton",
@@ -365,6 +366,18 @@ def m2l_real_csr_lanes_pallas(
         Expansion order.
     active_pair_count : Optional[Array]
         Live prefix length of the pair list.
+    n_targets : Optional[int]
+        Number of TARGET rows, when the source array is longer than the target
+        range. ``None`` (default) means ``n``, the single-tree case. Static.
+
+        This exists for the one-sided distributed lane, where the multipole array
+        is a concatenation ``[local ; imported]`` and only the local prefix
+        receives. Without it the grid, the ``out_shape`` and ``csr_by_target``'s
+        ``total_nodes`` all come from ``multipoles.shape[0]``, so the kernel emits
+        ``n_local + n_remote`` rows -- twice the launches and twice the output
+        buffer for rows that are discarded, and then a shape mismatch when the
+        result is added to the local-only accumulator. Rows beyond ``n_targets``
+        cost exactly nothing; sources may still index the whole array.
     k_lanes : int
         Pairs per iteration (lanes). Static.
     interpret : bool
@@ -377,12 +390,13 @@ def m2l_real_csr_lanes_pallas(
     Returns
     -------
     Array
-        ``[n, C]`` local increments, dtype of ``multipoles``.
+        ``[n_targets, C]`` local increments, dtype of ``multipoles``.
 
     Raises
     ------
     ValueError
-        On a shape mismatch or a non-positive ``k_lanes``.
+        On a shape mismatch, a non-positive ``k_lanes``, or an ``n_targets``
+        outside ``[0, n]``.
     """
     p = int(order)
     if int(k_lanes) < 1:
@@ -398,11 +412,14 @@ def m2l_real_csr_lanes_pallas(
     if cent.ndim != 2 or int(cent.shape[1]) != 3 or int(cent.shape[0]) != n:
         raise ValueError("centers must have shape (n, 3) aligned with multipoles")
     cent_p = jnp.pad(cent, ((0, 0), (0, 1)))
+    nt = n if n_targets is None else int(n_targets)
+    if not (0 <= nt <= n):
+        raise ValueError(f"n_targets must lie in [0, {n}], got {nt}")
     src_sorted, offsets, counts = csr_by_target(
-        sources, targets, total_nodes=n, active_pair_count=active_pair_count
+        sources, targets, total_nodes=nt, active_pair_count=active_pair_count
     )
-    if n == 0 or int(src_sorted.shape[0]) == 0:
-        return jnp.zeros((n, C), dtype=dtype)
+    if nt == 0 or int(src_sorted.shape[0]) == 0:
+        return jnp.zeros((nt, C), dtype=dtype)
     kernel = functools.partial(
         _m2l_lanes_kernel, p=p, k_lanes=int(k_lanes), tables=tables
     )
@@ -419,10 +436,10 @@ def m2l_real_csr_lanes_pallas(
     operands = [mult, cent_p, src_sorted, offsets, counts]
     return pl.pallas_call(
         kernel,
-        grid=(n,),
+        grid=(nt,),
         in_specs=[bs_full(o) for o in operands],
         out_specs=pl.BlockSpec((1, C), lambda t: (t, 0)),
-        out_shape=jax.ShapeDtypeStruct((n, C), dtype),
+        out_shape=jax.ShapeDtypeStruct((nt, C), dtype),
         interpret=bool(interpret),
         name=f"m2l_real_csr_lanes_p{p}_k{int(k_lanes)}",
         **backend_kwargs,
@@ -680,7 +697,7 @@ def m2l_real_csr_lanes_reverse_pallas(
     return mbar, centers_bar
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10))
 def m2l_real_csr_lanes_pallas_cvjp(
     multipoles: Array,
     centers: Array,
@@ -692,6 +709,7 @@ def m2l_real_csr_lanes_pallas_cvjp(
     interpret: bool,
     backend: str,
     num_warps: int,
+    n_targets: Optional[int] = None,
 ) -> Array:
     """Differentiable :func:`m2l_real_csr_lanes_pallas` (forward byte-identical).
 
@@ -722,6 +740,14 @@ def m2l_real_csr_lanes_pallas_cvjp(
     -------
     Array
         ``[n, C]`` local increments.
+    n_targets : Optional[int]
+        Forwarded to :func:`m2l_real_csr_lanes_pallas`. Static.
+
+        The FORWARD honours it; the reverse does not, and says so rather than
+        returning a quietly wrong gradient. The reverse runs a second pass over the
+        by-target CSR whose grid and `loc_bar` rows would both have to be rebased,
+        while `mult_bar` stays full length -- real work, and gradients through the
+        cross-domain import are a later phase by decision, so it raises.
     """
     return m2l_real_csr_lanes_pallas(
         multipoles,
@@ -730,6 +756,7 @@ def m2l_real_csr_lanes_pallas_cvjp(
         targets,
         order=order,
         active_pair_count=active_pair_count,
+        n_targets=n_targets,
         k_lanes=k_lanes,
         interpret=interpret,
         backend=backend,
@@ -748,6 +775,7 @@ def _m2l_lanes_cvjp_fwd(
     interpret,
     backend,
     num_warps,
+    n_targets,
 ):
     out = m2l_real_csr_lanes_pallas(
         multipoles,
@@ -756,6 +784,7 @@ def _m2l_lanes_cvjp_fwd(
         targets,
         order=order,
         active_pair_count=active_pair_count,
+        n_targets=n_targets,
         k_lanes=k_lanes,
         interpret=interpret,
         backend=backend,
@@ -765,9 +794,16 @@ def _m2l_lanes_cvjp_fwd(
 
 
 def _m2l_lanes_cvjp_bwd(
-    order, k_lanes, interpret, backend, num_warps, residual, loc_bar
+    order, k_lanes, interpret, backend, num_warps, n_targets, residual, loc_bar
 ):
     multipoles, centers, sources, targets, active_pair_count = residual
+    if n_targets is not None and int(n_targets) != int(multipoles.shape[0]):
+        raise NotImplementedError(
+            "m2l_real_csr_lanes_pallas_cvjp: the reverse does not support "
+            f"n_targets={n_targets} against {int(multipoles.shape[0])} multipole "
+            "rows. The one-sided cross-domain lane is forward-only for now; "
+            "differentiate the single-tree call instead."
+        )
     mult_bar, centers_bar = m2l_real_csr_lanes_reverse_pallas(
         multipoles,
         centers,
