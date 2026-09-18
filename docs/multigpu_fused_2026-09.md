@@ -597,6 +597,49 @@ kernel with `num_target_leaves = L_local`.
 the lists into the fused lane's kernels -- that is the driver, and it needs Phase 2's device-resident
 partition. Nothing here has been timed.
 
+## Phase 2 -- `align_level` is NOT worth having, and the plan's value for it is unusable
+
+Probe: `bench/multigpu_align_level_probe.py`. The plan gave two reasons to snap domain boundaries to level-k
+Morton cell edges. Both are now answered, and the answer is to drop the idea.
+
+**Reason one is void.** "It makes each device's node set disjoint" belonged to the LET design, where every device
+built a coarse tree over other devices' leaves in a shared numbering. The Phase 3 lane gives each device its own
+tree over its own particles in its own index space, and the exchange addresses cells by an occupancy cut of real
+tree nodes. Disjointness holds whatever the partition does.
+
+**Reason two is real, testable, and too small to matter.** A pivot cutting inside a cell splits it across two
+devices, and the halves occupy the same region on either side of the boundary. Alignment does remove that -- but
+removing it changes nothing measurable:
+
+| align | occupied cells | imbalance % | straddling cells @11 | imported nodes | near import / own |
+|---|---|---|---|---|---|
+| none | -- | 0.000 | 1 | 6056 | **0.411** |
+| 9 | 20,023 | 0.306 | **0** | 6055 | 0.410 |
+| 11 | 117,169 | 0.004 | **0** | 6056 | 0.411 |
+
+(disc+bulge, N/device = 10^5, ndev = 2. The 0.411 independently reproduces Phase 3.3's figure for the same point
+from a probe written separately.) There was exactly ONE straddling cell out of 117,169 occupied, so the mechanism
+is real and far too rare to price.
+
+**And the plan's `align_level = min(ceil(log8(512 x ndev)), leaf_depth_min - 1)` = 3 is unusable.** It assumed
+particles spread over the level-3 grid. They do not: the bounding box is set by the tail, so a Plummer sphere
+occupies **21 cells of 512** at level 3. Aligning there leaves a device with 9 particles at ndev = 2 and **zero**
+at ndev = 4; levels 5 and 7 also empty a device at 4 devices. Only levels 9 and finer are affordable, and by then
+alignment buys nothing.
+
+**Decision: no `align_level` selector.** Use unaligned equal-count Morton pivots, which balance exactly (0.000 %).
+
+**Two probe errors, both caught by the numbers being impossible or immovable**, and both recorded because the
+second is the more dangerous kind:
+1. Summing each imported node's particle range double-counts, because the import holds nodes together with their
+   own descendants -- it read an import of 19.8x a domain. Fixed with a coverage mask.
+2. **A saturated statistic cannot answer anything.** Coverage over far AND near is pinned at 1.000 by
+   construction, because the far list reaches nodes near the root whose ranges cover the sender outright. Three
+   runs were spent before that was spotted. The near list alone is the one with headroom, and the node count --
+   which is the payload the exchange actually pays for -- was unsaturated the whole time and flat.
+
+Nothing here was timed.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
@@ -623,9 +666,12 @@ Phase 3 is now complete: measured (3.1, 3.3, 3.4), gated (3.2) and built (3.5). 
 ONE round, not jz-fmm's progressive per-level request, because the per-cell CSR that makes the import addressable
 costs only 5-60 % of the payload it addresses.
 
-Next is **Phase 2, the device-resident partition**, which the driver needs and which every probe so far has stood
-in for with host-side domains -- a probe may do that and the lane may not. Then the driver itself: gather the real
-payloads into the send buffers, wire the imported lists into the fused kernels through `n_targets` and
-`num_target_leaves`, and take Gate G4 (the one-sided force against the single-GPU lane on the identical particle
-set). Size the near half for the ~30 % of a neighbour domain that is structural, and remember that expansion order
-is a communication knob here, not only an accuracy one.
+Phase 2 is under way. `sfc_partition` now routes a particle's identity WITH the particle (yggdrax `99125ff`), and
+`align_level` has been measured and dropped -- unaligned equal-count Morton pivots balance exactly and the import
+does not care. What remains of Phase 2 is the repartition CADENCE (every ~16 steps, with the predicate coming from
+an all-reduce, because a device-divergent predicate deadlocks) and Gate G2.
+
+Then the driver: gather the real payloads into the send buffers, wire the imported lists into the fused kernels
+through `n_targets` and `num_target_leaves`, and take Gate G4 (the one-sided force against the single-GPU lane on
+the identical particle set). Size the near half for the ~30 % of a neighbour domain that is structural, and
+remember that expansion order is a communication knob here, not only an accuracy one.
