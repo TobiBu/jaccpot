@@ -502,6 +502,51 @@ Phase 2 as a tree-structure nicety; it is in fact what makes the corrected excha
 Not yet measured: the size of the per-cell CSR against the node payload, which is what decides whether this stays
 one round. That is the next thing to probe, before any exchange code is written.
 
+## Phase 3.5 -- sizing the corrected exchange: the CSR is cheap, the SUMMARY is the design
+
+`bench/multigpu_export_walk_probe.py` now reports the per-cell interaction list itself, not just the node set
+behind it. The node set is the PAYLOAD; the pair list is the CSR that makes it addressable; they scale
+differently, and a node needed by many cells costs one payload and many CSR entries.
+
+**The question is answered: provenance is affordable.** A CSR entry is 4 bytes against ~120 (p = 4) or ~164
+(p = 5) for a node payload, and the duplication factor is 3-25 pairs per node, so the CSR runs **5-60 % of the
+payload**. The corrected exchange stays one round. Every row also verifies the property the fix rests on --
+`cutOK`: no single cell's list contains both a node and one of its ancestors, so a target below that cell gets a
+partition. Checked on every configuration, because the flat pool over all cells demonstrably is not a cut.
+
+**Bytes are not the only currency and they move OPPOSITE to flops.** A coarse summary ships fewer, deeper nodes
+(the union is over fewer cuts) but every target inside a cell is evaluated against that cell's whole list. A probe
+reporting only bytes would have picked the coarsest level available; `evalPairs` is reported beside it.
+
+**Fixed Morton levels are not merely suboptimal, they are unusable, and it gets worse with N.** Against the
+leaf-granularity floor:
+
+| summary | ndev 2, N/dev 10^4 | ndev 2, N/dev 10^5 | disc, N/dev 10^5 | ndev 4, N/dev 10^5 |
+|---|---|---|---|---|
+| occ4 | 1.26x | **1.28x** | **1.28x** | **1.13x** |
+| occ16 | 2.41x | 2.21x | 1.99x | 1.48x |
+| Morton level 6 | 6.09x | **61x** | 12x | **61x** |
+| Morton level 3 | 7.01x | **64x** | 48x | **65x** |
+
+At N/dev = 10^4 a fixed level cost 7x; at 10^5 it costs 64x, while the occupancy cut is flat at ~1.3x. The cost is
+`sum over cells of |list| x leaves_in_cell`, which a few big cells with many leaves AND long lists dominate -- at
+N/dev = 10^4, occ16 and Morton level 6 had the SAME cell count (88 against 90) and differed 2.5x. It is the
+population imbalance of a fixed level, not the summary's size, and imbalance grows with N.
+
+**So the summary is an occupancy-balanced cut of the receiver's own tree** (`occupancy_cut`), descending until a
+subtree holds at most a few leaves. Operating band **occ4 to occ16**: 1.1-2.2x the ideal evaluation work with the
+CSR at 0.30-0.64 of the payload, so total bytes ~1.3-1.6x the payload. Leaf granularity is the flop floor but
+costs 2.8-4.7x the payload in CSR alone, and is 5,000 cells to publish.
+
+**A correction to what this document said above.** The Phase 3.5 entry before this one claimed the corrected
+exchange is addressable only because Morton `align_level` makes a cell a subtree. That is not right: an occupancy
+cut is made of REAL TREE NODES, so its cells are subtrees by construction whatever the partition does, and each
+has a local root for free. `align_level` keeps its Phase 2 justification -- no top node straddles a device, so
+each device's node set is disjoint -- but the exchange does not depend on it for addressability.
+
+Not measured here: the accuracy of the conservative export, which over-ships by up to 1.55x in nodes
+(`nodes/need`) and is therefore never less accurate, only more expensive. Nothing here was timed.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
