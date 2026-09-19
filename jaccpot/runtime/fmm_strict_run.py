@@ -1232,6 +1232,7 @@ class StrictRunMixin(_EngineBase):
         runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
         fused_device_mode: bool = False,
         num_valid: Optional[Array] = None,
+        cross_hook: Optional[Callable[[Any], None]] = None,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged.
 
@@ -1589,6 +1590,21 @@ class StrictRunMixin(_EngineBase):
                 self._static_radix_compact_pair_reuse_hits += 1
             else:
                 self._static_radix_compact_pair_reuse_misses += 1
+        # The one point where a cross-domain exchange belongs: the multipoles exist
+        # here and the downward sweep -- either branch below -- has not consumed them.
+        # It goes in the REFRESH because that is what a per-step force runs; the
+        # prepare path builds the state once, and `LargeNPreparedState.upward` is None
+        # (measured), so no caller holding a state can reach the multipoles at all.
+        # Doing the cross field afterwards instead would need a SECOND L2L cascade,
+        # and Phase 3.4 measured the far half as the bigger one.
+        #
+        # ABOVE the branch, not inside one: the compact-pair reuse path and the
+        # general path both build a downward sweep, and a hook in only one of them
+        # silently never fires on the other -- which is exactly what happened first.
+        #
+        # Phase C1: called, result discarded, force bit-identical either way.
+        if cross_hook is not None:
+            cross_hook(tree_artifacts)
         if reuse_static_compact_pairs:
             src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(cached_compact_far_pairs.targets, dtype=INDEX_DTYPE)

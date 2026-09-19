@@ -149,6 +149,7 @@ def fused_force_step(
     max_order: int,
     theta: Optional[float] = None,
     num_valid: Optional[Array] = None,
+    cross_hook: Optional[Any] = None,
 ) -> tuple[Any, Array]:
     """One fused-lane force: refresh the static template, then evaluate.
 
@@ -182,6 +183,11 @@ def fused_force_step(
         Opening-angle override.
     num_valid : Optional[Array]
         Live row count of this shard.
+    cross_hook : Optional[Any]
+        Called between the upward and downward sweeps with the upward artifacts --
+        the one point where the cross-domain exchange belongs, because the
+        multipoles exist there and the downward sweep has not consumed them.
+        ``None`` (the default) means the force is bit-identical to a run without it.
 
     Returns
     -------
@@ -216,6 +222,7 @@ def fused_force_step(
         runtime_overrides_override=None,
         fused_device_mode=True,
         num_valid=num_valid,
+        cross_hook=cross_hook,
     )
     if refreshed is None:
         raise RuntimeError(
