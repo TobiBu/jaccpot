@@ -1603,13 +1603,15 @@ class StrictRunMixin(_EngineBase):
         # silently never fires on the other -- which is exactly what happened first.
         #
         # Phase C1: called, result discarded, force bit-identical either way.
+        cross_far = None
         if cross_hook is not None:
-            cross_hook(tree_artifacts)
+            cross_far = cross_hook(tree_artifacts)
         if reuse_static_compact_pairs:
             src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(cached_compact_far_pairs.targets, dtype=INDEX_DTYPE)
             far_pairs_by_gear = ((src_far, tgt_far),)
             downward = self._prepare_downward_with_artifacts(
+                cross_far=cross_far,
                 tree=tree_artifacts.tree,
                 upward=tree_artifacts.upward,
                 theta_val=theta_val,
@@ -1653,6 +1655,7 @@ class StrictRunMixin(_EngineBase):
             )
         else:
             dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                cross_far=cross_far,
                 tree_artifacts=tree_artifacts,
                 force_scale_nodes=prepared_state.force_scale_nodes,
                 upward_center_mode=upward_center_mode,

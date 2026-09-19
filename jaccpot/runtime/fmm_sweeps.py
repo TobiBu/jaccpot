@@ -529,6 +529,7 @@ class SweepsMixin(_EngineBase):
         adaptive_order: Optional[bool] = None,
         p_gears: Optional[tuple[int, ...]] = None,
         n_targets: Optional[int] = None,
+        cross_far: Optional[tuple] = None,
     ) -> TreeDownwardData:
         """Build interactions and locals needed for the downward sweep.
 
@@ -649,10 +650,15 @@ class SweepsMixin(_EngineBase):
                 def timing_recorder(attr: str, elapsed: float) -> None:
                     setattr(self, attr, float(getattr(self, attr, 0.0)) + elapsed)
 
+            _cm, _cc, _cs, _ct = cross_far if cross_far is not None else (None,) * 4
             return _prepare_solidfmm_downward_sweep(
                 tree,
                 upward_data,
                 n_targets=n_targets,
+                cross_multipoles=_cm,
+                cross_centers=_cc,
+                cross_src=_cs,
+                cross_tgt=_ct,
                 theta=theta_val,
                 mac_type=mac_type_val,
                 initial_locals=initial_locals,

@@ -1214,6 +1214,7 @@ class PrepareMixin(_EngineBase):
         allow_stateful_cache: bool,
         suppress_host_side_effects: bool = False,
         retain_compact_far_pairs: bool = False,
+        cross_far: Optional[tuple] = None,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts.
 
@@ -1363,6 +1364,7 @@ class PrepareMixin(_EngineBase):
                 self._refresh_dual_planner_execute_count += 1
                 self._refresh_dual_planner_steady_timing_bypass_count += 1
             return self._prepare_state_dual_and_downward_strict_streamed_fast(
+                cross_far=cross_far,
                 tree_artifacts=tree_artifacts,
                 theta_val=theta_val,
                 mac_type_val=mac_type_val,
@@ -3336,6 +3338,7 @@ class PrepareMixin(_EngineBase):
         adaptive_order: bool = False,
         p_gears: tuple[int, ...] = tuple(),
         n_targets: Optional[int] = None,
+        cross_far: Optional[tuple] = None,
     ) -> TreeDownwardData:
         """Prepare downward sweep using precomputed interaction artifacts.
 
@@ -3416,6 +3419,7 @@ class PrepareMixin(_EngineBase):
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             n_targets=n_targets,
+            cross_far=cross_far,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
         )
@@ -3549,6 +3553,7 @@ class PrepareMixin(_EngineBase):
         farfield_mode: str,
         retain_interactions: bool = False,
         suppress_host_side_effects: bool = False,
+        cross_far: Optional[tuple] = None,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Strict static fast path with compact streamed far-pairs only.
 
@@ -3731,6 +3736,7 @@ class PrepareMixin(_EngineBase):
                 0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
             )
         downward = self._prepare_downward_with_artifacts(
+            cross_far=cross_far,
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
             theta_val=theta_val,

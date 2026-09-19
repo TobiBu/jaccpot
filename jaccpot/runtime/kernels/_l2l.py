@@ -659,6 +659,10 @@ def _prepare_solidfmm_downward_sweep(
     far_pairs_coo: Optional[_FarPairCOO] = None,
     far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
     n_targets: Optional[int] = None,
+    cross_multipoles: Optional[Array] = None,
+    cross_centers: Optional[Array] = None,
+    cross_src: Optional[Array] = None,
+    cross_tgt: Optional[Array] = None,
     adaptive_order: bool = False,
     p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
@@ -867,6 +871,35 @@ def _prepare_solidfmm_downward_sweep(
         chunk_size = 4096 if m2l_chunk_size is None else int(m2l_chunk_size)
         if chunk_size <= 0:
             raise ValueError("m2l_chunk_size must be positive")
+
+        # ---- cross-domain sources, concatenated (plan phase C) -------------
+        # The imported multipoles ride at indices >= the local node count, which is
+        # what makes the walk's (min, max) canonicalisation an exact
+        # (local target, imported source) ordering. `n_targets` then keeps the M2L
+        # output local-only so it still adds to `locals_coeffs` and the existing L2L
+        # cascade runs ONCE -- the whole reason this is interleaved here rather than
+        # bolted on after the force.
+        if cross_multipoles is not None:
+            n_local_nodes = int(multip_packed_kernel.shape[0])
+            multip_packed_kernel = jnp.concatenate(
+                [
+                    multip_packed_kernel,
+                    jnp.asarray(cross_multipoles, multip_packed_kernel.dtype),
+                ]
+            )
+            centers = jnp.concatenate(
+                [centers, jnp.asarray(cross_centers, centers.dtype)]
+            )
+            if cross_src is not None and int(jnp.asarray(cross_src).shape[0]) > 0:
+                src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
+                tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
+                pair_count = int(src.shape[0])
+                # A merged list has no live PREFIX: the local half is -1-padded and
+                # the cross half follows it, so `arange(P) < active_pair_count` --
+                # which is what this argument means -- would cut the cross pairs off
+                # entirely. The -1 entries are dropped by the CSR build on their own.
+                active_pair_count = None
+            n_targets = n_local_nodes
 
         stage_t0 = time.perf_counter()
         locals_updated = _solidfmm_downward_accumulate_from_multipoles(

@@ -148,6 +148,35 @@ def main():
         raise SystemExit(f"C1 FAILED: force moved, max|d|={d.max():.3e}")
     print("C1 PASS")
 
+    # ---- C2: an imported block that no pair references ----------------------
+    # GARBAGE rows, not zeros. Zeros would pass even if the extra rows were being
+    # summed into the result; non-zero rows that nothing names can only leave the
+    # force unchanged if `n_targets` and the widened source array are genuinely
+    # being ignored, which is the claim.
+    rng = np.random.default_rng(0)
+    K = 8
+
+    def hook_c2(tree_artifacts):
+        mp = tree_artifacts.upward.multipoles
+        packed = np.asarray(mp.packed)
+        junk = jnp.asarray(
+            rng.standard_normal((K, packed.shape[1])) * 10.0, packed.dtype
+        )
+        far_junk = jnp.asarray(
+            rng.standard_normal((K, 3)) * 10.0, np.asarray(mp.centers).dtype
+        )
+        empty = jnp.zeros((0,), jnp.int32)
+        return junk, far_junk, empty, empty
+
+    _, a_c2 = fused_force_step(solver, prepared, P0, M0, cross_hook=hook_c2, **kw)
+    a_c2 = np.asarray(jax.block_until_ready(a_c2))
+    same2 = np.array_equal(a_off, a_c2)
+    print(f"C2  {K} unreferenced imported rows, force BIT-IDENTICAL: {same2}")
+    if not same2:
+        d = np.abs(a_off - a_c2)
+        raise SystemExit(f"C2 FAILED: force moved, max|d|={d.max():.3e}")
+    print("C2 PASS")
+
 
 if __name__ == "__main__":
     main()
