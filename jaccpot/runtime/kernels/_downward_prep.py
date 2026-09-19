@@ -509,6 +509,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     initial_locals_coeffs: Array,
     multipoles_coeffs: Array,
     *,
+    n_targets: Optional[int] = None,
     tree: Tree,
     upward: TreeUpwardData,
     interactions: NodeInteractionList,
@@ -701,7 +702,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                     interpret,
                     "triton",
                     int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
-                    None,  # n_targets: single-tree lane, targets == multipoles
+                    n_targets,
                 )
             elif which == "tiled" and m2l_real_csr_tiled_supported(order):
                 m2l_inc = m2l_real_csr_tiled_pallas(

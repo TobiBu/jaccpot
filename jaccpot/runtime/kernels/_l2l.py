@@ -658,6 +658,7 @@ def _prepare_solidfmm_downward_sweep(
     farfield_mode: str = "pair_grouped",
     far_pairs_coo: Optional[_FarPairCOO] = None,
     far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+    n_targets: Optional[int] = None,
     adaptive_order: bool = False,
     p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
@@ -871,6 +872,7 @@ def _prepare_solidfmm_downward_sweep(
         locals_updated = _solidfmm_downward_accumulate_from_multipoles(
             locals_coeffs,
             multip_packed_kernel,
+            n_targets=n_targets,
             tree=tree,
             upward=upward,
             interactions=interactions,
@@ -959,6 +961,7 @@ def _prepare_solidfmm_downward_sweep(
                 _solidfmm_downward_accumulate_from_multipoles(
                     jnp.zeros_like(locals_coeffs),
                     source_motion_multip_packed,
+                    n_targets=n_targets,
                     tree=tree,
                     upward=upward,
                     interactions=interactions,

@@ -77,7 +77,6 @@ __all__ = [
 _CELLS_DEPTH_HEADROOM = 8
 
 
-
 def _planned_upward_num_levels(tree) -> Optional[int]:
     """The installed capacity plan's upward depth bound for this tree's shape.
 
@@ -529,6 +528,7 @@ class SweepsMixin(_EngineBase):
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: Optional[bool] = None,
         p_gears: Optional[tuple[int, ...]] = None,
+        n_targets: Optional[int] = None,
     ) -> TreeDownwardData:
         """Build interactions and locals needed for the downward sweep.
 
@@ -652,6 +652,7 @@ class SweepsMixin(_EngineBase):
             return _prepare_solidfmm_downward_sweep(
                 tree,
                 upward_data,
+                n_targets=n_targets,
                 theta=theta_val,
                 mac_type=mac_type_val,
                 initial_locals=initial_locals,

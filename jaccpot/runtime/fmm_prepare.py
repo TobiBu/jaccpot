@@ -3335,6 +3335,7 @@ class PrepareMixin(_EngineBase):
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: bool = False,
         p_gears: tuple[int, ...] = tuple(),
+        n_targets: Optional[int] = None,
     ) -> TreeDownwardData:
         """Prepare downward sweep using precomputed interaction artifacts.
 
@@ -3414,6 +3415,7 @@ class PrepareMixin(_EngineBase):
             farfield_mode=farfield_mode,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
+            n_targets=n_targets,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
         )
