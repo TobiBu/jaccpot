@@ -193,9 +193,21 @@ def main():
     hook_c3 = make_cross_hook(ndev=1, theta=THETA, caps=caps, record=rec)
     mesh = make_mesh(1)
 
+    _KEYS = (
+        "export_far",
+        "send_nodes",
+        "recv_nodes",
+        "recv_csr",
+        "far_pairs",
+        "overflow",
+    )
+
     def body(p_, m_):
         _, a = fused_force_step(solver, prepared, p_, m_, cross_hook=hook_c3, **kw)
-        return a
+        # the record holds TRACERS under jit, so the counts must leave as OUTPUTS;
+        # reading them host-side is a TracerArrayConversionError
+        diag = jnp.stack([jnp.asarray(rec[k]).astype(jnp.int32) for k in _KEYS])
+        return a, diag[None]
 
     # `check_vma=False`, as the Phase 1 G1 probe does: the fused lane's Pallas
     # kernels build their `out_shape` without a `manual_axis_type`, and shard_map's
@@ -206,12 +218,26 @@ def main():
             body,
             mesh=mesh,
             in_specs=(Psp("gpus"), Psp("gpus")),
-            out_specs=Psp("gpus"),
+            out_specs=(Psp("gpus"), Psp("gpus")),
             check_vma=False,
         )
     )
-    a_c3 = np.asarray(jax.block_until_ready(fn(P0, M0)))
-    print(f"C3  pipeline ran: {sorted(rec)}")
+    a_c3, diag = jax.block_until_ready(fn(P0, M0))
+    a_c3 = np.asarray(a_c3)
+    vals = dict(zip(_KEYS, np.asarray(diag)[0].tolist()))
+    # The numbers matter, not just that keys exist: at ndev=1 the export must be
+    # EMPTY. If it were non-empty and the force still matched, the import would be
+    # being computed and then dropped -- which is a different bug wearing the same
+    # green tick.
+    print(f"C3  pipeline ran: {vals}")
+    for k in ("export_far", "send_nodes", "recv_nodes", "recv_csr", "far_pairs"):
+        if vals.get(k, 0) != 0:
+            raise SystemExit(
+                f"C3 FAILED: {k}={vals[k]} at ndev=1, but a device cannot export "
+                "to itself -- the force matching would then be luck, not correctness"
+            )
+    if vals.get("overflow", 0):
+        raise SystemExit("C3 FAILED: a capacity overflowed")
     same3 = np.array_equal(a_off, a_c3)
     print(f"C3  ndev=1 real pipeline, force BIT-IDENTICAL: {same3}")
     if not rec:
