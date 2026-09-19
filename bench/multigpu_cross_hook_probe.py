@@ -177,6 +177,50 @@ def main():
         raise SystemExit(f"C2 FAILED: force moved, max|d|={d.max():.3e}")
     print("C2 PASS")
 
+    # ---- C3: the REAL pipeline at ndev = 1 ----------------------------------
+    # Summary -> export walk -> send buffers -> two ragged rounds -> receiver
+    # lists, all of it, inside a shard_map with real collectives. A device never
+    # exports to itself, so the import is empty BY CONSTRUCTION while every code
+    # path executes. The force must not move. This is the strongest link in the
+    # chain: everything runs and nothing may change.
+    from jax.sharding import PartitionSpec as Psp
+
+    from jaccpot.distributed.cross import CrossCapacities, make_cross_hook
+    from yggdrax.distributed.sharding import make_mesh
+
+    rec = {}
+    caps = CrossCapacities(max_cells=512, send_node_cap=2048, recv_node_cap=2048)
+    hook_c3 = make_cross_hook(ndev=1, theta=THETA, caps=caps, record=rec)
+    mesh = make_mesh(1)
+
+    def body(p_, m_):
+        _, a = fused_force_step(solver, prepared, p_, m_, cross_hook=hook_c3, **kw)
+        return a
+
+    # `check_vma=False`, as the Phase 1 G1 probe does: the fused lane's Pallas
+    # kernels build their `out_shape` without a `manual_axis_type`, and shard_map's
+    # variance check rejects that outright. This is how the fused lane runs under
+    # shard_map at all -- not a workaround introduced here.
+    fn = jax.jit(
+        jax.shard_map(
+            body,
+            mesh=mesh,
+            in_specs=(Psp("gpus"), Psp("gpus")),
+            out_specs=Psp("gpus"),
+            check_vma=False,
+        )
+    )
+    a_c3 = np.asarray(jax.block_until_ready(fn(P0, M0)))
+    print(f"C3  pipeline ran: {sorted(rec)}")
+    same3 = np.array_equal(a_off, a_c3)
+    print(f"C3  ndev=1 real pipeline, force BIT-IDENTICAL: {same3}")
+    if not rec:
+        raise SystemExit("C3 FAILED: the hook never ran, so this proves nothing")
+    if not same3:
+        d = np.abs(a_off - a_c3)
+        raise SystemExit(f"C3 FAILED: force moved, max|d|={d.max():.3e}")
+    print("C3 PASS")
+
 
 if __name__ == "__main__":
     main()
