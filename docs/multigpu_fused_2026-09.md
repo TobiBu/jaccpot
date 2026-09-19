@@ -640,6 +640,34 @@ second is the more dangerous kind:
 
 Nothing here was timed.
 
+## Forced CPU devices do NOT cover the GPU tracing path
+
+Everything in Phases 2 and 3 was developed against `--xla_force_host_platform_device_count=4`. On two real A100s
+(cards 3 and 4, the only idle ones) the whole stack passes -- **62 passed, 5 skipped**, the skips being the
+ndev = 4 cases -- with one exception that matters more than the pass.
+
+`maybe_repartition` failed on GPU and passed on CPU, with **every shape and dtype agreeing**:
+
+```
+cond branches must have equal output types but they differ.
+  the output of true_fun has type float32[96,3] but the corresponding output of
+  false_fun has type float32[96,3]{V:gpus}, so the manual axis types do not match
+```
+
+`resolve_ragged_method` picks the `buf` all-gather fallback on CPU and the native `ragged_all_to_all` on GPU.
+Under native, `sfc_partition`'s result is inferred **axis-invariant**; under buf it is varying. The identity
+branch is varying either way, so the `lax.cond` is well-typed on one backend and rejected on the other. The two
+backends are not two ways of running the same program.
+
+Fixed by pushing both branches to varying, and **the form matters**: `pcast(x, (), to='varying')`, which is what
+the error message itself suggests, is a NO-OP in both directions and changed nothing.
+`pcast(x, axis_name, to='varying')` does convert invariant to varying, RAISES on an input that is already
+varying, and the variance is not exposed as an attribute to test -- so the cast is attempted and the raise is
+read as "already varying", at trace time.
+
+The native ragged path itself is sound on jax 0.10.2: `auto` resolves to it and the exchange round-trips every
+reference to the right payload, which is the thing the 0.9.0 corruption would have broken silently.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
