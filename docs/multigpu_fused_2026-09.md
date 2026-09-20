@@ -668,6 +668,50 @@ read as "already varying", at trace time.
 The native ragged path itself is sound on jax 0.10.2: `auto` resolves to it and the exchange round-trips every
 reference to the right payload, which is the thing the 0.9.0 corruption would have broken silently.
 
+## Phase C -- the cross field interleaved between the sweeps (C0-C4 done, far half only)
+
+Plan `~/.claude/plans/phase-c-interleaved-cross-field.md`. Decided after Phase 3.4 measured the FAR half as the
+bigger one: adding the cross field after the force would need a SECOND L2L cascade, so it goes where it belongs,
+between the upward and downward sweeps. Gate agreed with the user: **G4 clause two only** -- match an fp64 direct
+sum to the accuracy the single-GPU lane achieves at the same `(p, theta, leaf)`, with a monotone per-order sweep.
+Clause one (1e-6 against the single-GPU lane) is unreachable in principle: Phase 1 measured that a device building
+its own tree from an all-reduced box already sits 2.6e-3 away, "purely because it builds a different but equally
+valid tree".
+
+**It is a concatenation, not a second pass.** `_solidfmm_downward_accumulate_from_multipoles` already takes the far
+pair list and the multipoles as arguments and does `locals_updated = initial_locals_coeffs + m2l_inc` before the
+cascade. So: `[local ; imported]` multipoles, local ++ cross pairs, `n_targets = n_local`, one cascade.
+
+| step | what it establishes | commit |
+|---|---|---|
+| C0 | `LargeNPreparedState.upward` is **None** -- multipoles are an unretained intermediate, so the hook cannot live outside the refresh | `27818b9` |
+| C1 | the hook fires, sees `packed (4095, 25)`, force **bit-identical** | `27818b9` |
+| C2 | 8 unreferenced GARBAGE rows + `n_targets`, force **bit-identical** | `25427c6`, `c866d5b` |
+| C3 | the REAL pipeline under `shard_map` with live collectives, every count 0, force **bit-identical** | `83e7e30`, `dddca04` |
+| C4 | **the cross FAR field reaches the force at ndev = 2**: 5.825e-01 -> 2.409e-01 against an fp64 direct sum over ALL sources | `0145f06` |
+
+**C4 does NOT meet the gate and cannot yet**: the hook returns far pairs and discards the near list, so the
+residual is the missing cross NEAR field. That is C5.
+
+**What the bit-identity chain caught**, none of which would have surfaced as a wrong force:
+
+* The hook placed in the PREPARE path (which runs once) and then inside one of TWO downward branches (the run took
+  the other). Caught only because the probe asserts the hook FIRED -- without that, "bit-identical" is vacuous and
+  both wrong placements report PASS.
+* C3's first version checked that diagnostic KEYS existed, not their VALUES. A non-empty-but-dropped import would
+  have passed; it now requires every count to be zero at ndev = 1.
+* Those diagnostics cannot be read host-side -- the record dict holds TRACERS under jit.
+* The C4 control was written as `local > 3x cross` with no basis for the 3, and rejected a real 2.42x improvement.
+  It is a liveness check, not an accuracy assertion.
+
+**Two environment facts worth keeping.** The fused lane runs under `shard_map` with **`check_vma=False`**, because
+its Pallas kernels build `out_shape` without a `manual_axis_type` -- which sits beside the `maybe_repartition` fix
+that needed `pcast` precisely because THAT path runs with the check on; different call sites, not a contradiction.
+And the single-GPU comparison arm needs its own process: `apply_fast_lane_env` is process-wide and tuned to the
+shard length, while the fused profile gate keys on the exact array length.
+
+Nothing in this phase was timed.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
