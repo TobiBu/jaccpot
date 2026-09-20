@@ -314,6 +314,7 @@ def make_fused_force_evaluator(
     max_order: int,
     theta: Optional[float] = None,
     axis_name: str = AXIS_NAME,
+    cross_hook: Optional[Any] = None,
 ):
     """A jitted ``shard_map`` force: the fused lane per device, one program.
 
@@ -365,6 +366,7 @@ def make_fused_force_evaluator(
             prepared_local,
             positions,
             masses,
+            cross_hook=cross_hook,
             bounds=bounds,
             leaf_size=int(leaf_size),
             max_order=int(max_order),
