@@ -126,10 +126,12 @@ def make_cross_hook(
         must be consumed inside the same trace.
     near_theta:
         MAC parameter of the receiver's walk over the NEAR import; ``None`` uses
-        ``theta``. ``0.0`` makes every near-imported pair bottom out as a direct
-        sum, which serves the pairs the sender exported as near and the receiver
-        would otherwise call far (unservable: no multipole travels with a near
-        leaf). Correct, and a measurement of that hole rather than the fix for it.
+        ``theta``. The near-imported leaves travel WITH their multipoles, so the
+        pairs this walk calls far go through the M2L (as a second imported block
+        behind the far import) and the pairs it calls near are summed directly.
+        ``0.0`` forces every pair into the direct sum: the same answer to expansion
+        accuracy, at the price of ~90k direct pairs per device at N = 2e5 -- the
+        control for the multipole route, not a setting.
     export_theta:
         MAC parameter of the SENDER's export walk alone; ``None`` uses ``theta``.
         A BISECTION knob, not a setting: ``0.0`` makes every exported pair bottom
@@ -396,12 +398,23 @@ def make_cross_hook(
             # with the far import's centres, as this first did, pairs every imported
             # leaf's particles with an unrelated node's geometry: a wrong force that
             # looks entirely plausible.
+            # The leaf's MULTIPOLE travels with its particles. The sender decided
+            # (cell, leaf) is near at the granularity of the cell; the receiver
+            # refines the cell down to its own leaves and, for most of those, the
+            # leaf-leaf pair passes the MAC after all (72 % of the near walk at
+            # N = 2e5: `near_walk_far_pairs`). Without a multipole behind the
+            # imported leaf those pairs were unservable -- neither list had them --
+            # and the only correct answer was near_theta = 0, every one a direct
+            # sum. With the coefficients here they go back through the M2L, as a
+            # second imported block behind the far one (Task 2 of the record).
             near_payload = jnp.concatenate(
                 [
                     tile_pos.reshape(tile_pos.shape[0], -1),
                     tile_mass,
                     jnp.where(okrow, jnp.asarray(geom.center)[lrow], 0.0),
                     jnp.where(okrow, jnp.asarray(geom.radius)[lrow][:, None], 0.0),
+                    jnp.where(okrow, jnp.asarray(mp.packed)[lrow], 0.0),
+                    jnp.where(okrow, jnp.asarray(mp.centers)[lrow], 0.0),
                 ],
                 axis=1,
             )
@@ -419,8 +432,11 @@ def make_cross_hook(
             )
             imp_pos = got_n.payload[:, : 3 * W].reshape(-1, W, 3)
             imp_mass = got_n.payload[:, 3 * W : 4 * W]
-            imp_cen_n = got_n.payload[:, 4 * W : 4 * W + 3]
+            imp_cen_n = got_n.payload[:, 4 * W : 4 * W + 3]  # geometric -> MAC
             imp_rad_n = got_n.payload[:, 4 * W + 3]
+            _o = 4 * W + 4
+            imp_mp_n = got_n.payload[:, _o : _o + n_coeff]  # multipole -> M2L
+            imp_ecen_n = got_n.payload[:, _o + n_coeff : _o + n_coeff + 3]  # expansion -> M2L
 
             combined_cen_n = jnp.concatenate([jnp.asarray(geom.center), imp_cen_n])
             combined_rad_n = jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n])
@@ -435,12 +451,11 @@ def make_cross_hook(
                 got_n.csr_cell,
                 got_n.csr_row,
                 got_n.num_csr,
-                # The near import ships PARTICLES, so any pair this walk calls far
-                # is unservable and gets dropped -- 89568/93005 of them, which is
-                # the largest known hole left. Setting this to 0 makes every pair
-                # bottom out as near, which costs direct sums but drops nothing.
-                # It is an EXPERIMENT to size that hole, not the fix: the fix is to
-                # ship multipoles for the near-exported leaves as well.
+                # Pairs this walk calls far (89568/93005 at N = 2e5) are served by
+                # the M2L from the multipole each near leaf now carries; pairs it
+                # calls near are summed directly. Before the multipole travelled the
+                # far ones were unservable and dropped, and near_theta = 0 was the
+                # only correct setting. It remains as the control.
                 float(theta if near_theta is None else near_theta),
                 max_pair_queue=cap.walk_queue,
                 far_cap=cap.recv_far_cap,
@@ -456,8 +471,9 @@ def make_cross_hook(
             if record is not None:
                 record["near_recv_nodes"] = got_n.num_payload
                 record["near_list_pairs"] = rl_n.near_count
-                # pairs the NEAR walk classified as far are wasted: the near import
-                # ships particles, not multipoles, so nothing can consume them
+                # pairs the NEAR walk classified as far: served by M2L from the
+                # multipole that now travels with each near-exported leaf (before
+                # Task 2 nothing could consume them and they were dropped)
                 record["near_walk_far_pairs"] = rl_n.far_count
             near_sink["overflow"] = (
                 summary.overflow
@@ -503,12 +519,86 @@ def make_cross_hook(
         # -1 padding on the pair list is dropped by the CSR build; the imported
         # sources are rebased to sit ABOVE every local index, which is what the
         # (min, max) canonicalisation downstream depends on
+        if near_sink is not None:
+            return merge_imported_blocks(
+                imp_mp,
+                imp_cen,
+                rl.far_source,
+                rl.far_target,
+                rl.far_count,
+                imp_mp_n,
+                imp_ecen_n,
+                rl_n.far_source,
+                rl_n.far_target,
+                rl_n.far_count,
+                n_local=n_local,
+            )
         live_pair = jnp.arange(rl.far_target.shape[0]) < rl.far_count
         src = jnp.where(live_pair, jnp.asarray(n_local) + rl.far_source, -1)
         tgt = jnp.where(live_pair, rl.far_target, -1)
         return imp_mp, imp_cen, src, tgt
 
     return hook
+
+
+def merge_imported_blocks(
+    far_mp: Array,
+    far_cen: Array,
+    far_src: Array,
+    far_tgt: Array,
+    far_count: Array,
+    near_mp: Array,
+    near_cen: Array,
+    near_src: Array,
+    near_tgt: Array,
+    near_count: Array,
+    *,
+    n_local: int,
+) -> tuple[Array, Array, Array, Array]:
+    """Stack the far and near imports into ONE imported block for the M2L.
+
+    The far import (internal nodes) and the near import (leaves) arrive in two
+    capacity-padded payloads, each with its own receiver walk whose far pairs
+    name a payload ROW. The M2L sees a single ``[local ; imported]`` space, so the
+    near block is placed behind the far block and its rows are shifted by the far
+    block's FULL capacity -- the padded length, not the live count, because the
+    far payload's dead rows are still rows in the concatenated array. Getting
+    that shift wrong aliases a near-leaf pair onto an unrelated far node's
+    multipole: right shapes, plausible force, wrong answer.
+
+    Dead pair slots become ``-1`` on both sides; the CSR build drops them.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(multipoles, centers, src, tgt)`` -- the ``cross_far`` tuple the sweep
+        concatenates behind the local nodes with ``n_targets = n_local``.
+    """
+    far_mp = jnp.asarray(far_mp)
+    near_mp = jnp.asarray(near_mp)
+    far_rows = int(far_mp.shape[0])
+    mp = jnp.concatenate([far_mp, near_mp.astype(far_mp.dtype)])
+    cen = jnp.concatenate(
+        [jnp.asarray(far_cen), jnp.asarray(near_cen, jnp.asarray(far_cen).dtype)]
+    )
+    far_src = jnp.asarray(far_src)
+    near_src = jnp.asarray(near_src)
+    base = jnp.asarray(n_local, far_src.dtype)
+    live_f = jnp.arange(far_src.shape[0]) < far_count
+    live_n = jnp.arange(near_src.shape[0]) < near_count
+    src = jnp.concatenate(
+        [
+            jnp.where(live_f, base + far_src, -1),
+            jnp.where(live_n, base + jnp.asarray(far_rows, far_src.dtype) + near_src, -1),
+        ]
+    )
+    tgt = jnp.concatenate(
+        [
+            jnp.where(live_f, jnp.asarray(far_tgt), -1),
+            jnp.where(live_n, jnp.asarray(near_tgt, jnp.asarray(far_tgt).dtype), -1),
+        ]
+    )
+    return mp, cen, src, tgt
 
 
 def cross_near_acceleration(
