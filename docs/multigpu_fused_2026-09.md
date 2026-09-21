@@ -1035,6 +1035,55 @@ asserts the lists are identical across three capacities with every dead slot poi
 declaring those slots live DOES change the answer -- without which the invariance test could pass because the
 fixture's padding is harmless rather than because the walk ignores it.
 
+## Task 1 -- the floor: what the CPU could settle before a card came free (2026-09-22)
+
+The handoff's hypothesis was fp32, on the strength of one asymmetry: the reference arm's near field goes
+through the two-level fp64 accumulator, the cross near term does not. **Half of that premise is false.**
+The accumulator is selected by `JACCPOT_NEARFIELD_ACCUM`, read in `_fast_lane.py` with default `"input"`,
+and the benchmark's `apply_fast_lane_env` never sets it -- so BOTH arms of the gate probe ran with a
+single fp32 accumulator. The other half was true: `cross_near_acceleration` passed no `accum` at all, so
+it was pinned to `"input"` whatever the lane did. It now takes `accum` and, when `None`, reads the same
+env choice the lane reads (jaccpot `f8e0fea`). Its final scatter is a permutation, one leaf slot per
+live particle, so the kernel is the only place the width matters.
+
+The sweep that decides the fp32 question needs two arms at the same width, so the probe has
+`PROBE_DTYPE`; the runs are queued behind a saturated box (all eight cards foreign, loadavg 18-45). While
+waiting, two other explanations for a p-independent residual were tested where they can be tested --
+on CPU, with yggdrax alone, `bench/multigpu_far_import_dropped_pairs_probe.py`, at N = 2e4 and at the
+gate's N = 2e5, both orderings:
+
+1. **Pairs the far import cannot serve.** A far payload row is a childless multipole, so the receiver
+   walk treats it as a leaf; a local leaf that fails the MAC against it yields a NEAR pair with no
+   particles behind it, which the hook records (`near_pairs`) and drops. If that happened it would be a
+   coverage hole and exactly p-independent. **It does not happen**: far pairs = CSR entries
+   (115232 and 145507 at 2e5), receiver NEAR pairs against the far import **0**, seeds failing the MAC
+   at the receiver **0**. The receiver walk is an exact pass-through of the sender's decisions, as the
+   `import_cells` docstring claims and the centre fix made true.
+2. **A looser MAC for cross pairs than for local ones.** The lane's walk uses `_build_mac_extents`
+   (radii PROPAGATED up the tree plus a depth pad on zero-radius leaves); the export and receiver walks
+   use the raw `geom.radius`. A pair accepted near theta converges slowly in p, so a systematically
+   looser cross MAC would widen the ratio with order. **They are the same number**: propagation only
+   fills ZERO extents, eff/raw = 1.000 (median and max) on every exported and every target node, and
+   **0 of the accepted cross pairs would fail the lane's own test**. The accepted cross pairs sit at
+   (r_t + r_s)/d median 0.68, p90 0.78, max 0.800.
+
+**A confound in the probe itself, fixed (jaccpot `cb0ac32`).** One `default_rng(12345)` was advanced once
+per arm, so the reference arm scored the FIRST 512-per-device draw and the far+near arm the THIRD. The
+record's own `rel_l2` finding says a different target sample alone swings a ratio by tens of percent. The
+draw is now made once per device and shared by every arm and by the SOLO process. The recorded fp32
+figures (1.26x / 1.54x / 2.36x) were taken under the old sampling and are re-run in the sweep below.
+
+**The bisection arm.** `make_cross_hook(export_theta=)`: the sender's export walk at theta 0 sends every
+pair as leaf particles, the far list is empty, and with `near_theta = 0` the ENTIRE cross field is a direct
+sum in the working dtype. If that arm matches the single-GPU lane, the residual lives in the multipole path
+(import, M2L, cascade); if it does not, it lives in the local lane on a shard, in fp32, or in the probe.
+It needs the near caps raised (~1560 leaves per device pair with ~1560 imported leaves): `PROBE_*_BITS`.
+
+Queued, in this order, all N = 2e5 ndev = 2 leaf 64 theta 0.8 `near_theta = 0`, every flag read:
+fp64 both arms p4/p6; fp32 all-direct + fp32 reference + fp32 multipole path p4/p6 (the last two
+re-take the recorded numbers under the shared draw); fp32 with `accum = wide` on both arms p4/p6;
+then p5 everywhere. Results below when the cards free up. **Nothing here is a timing.**
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
