@@ -204,3 +204,67 @@ def test_imported_tile_width_need_not_match_the_local_pool(pad_local, pad_import
 
     got = _run(near, (lp, lm, lk, lidx), n_lp)
     assert np.allclose(got, ref, rtol=1e-10, atol=1e-12), np.abs(got - ref).max()
+
+
+def _run_fp32(near, local, n_local_particles, accum):
+    lp, lm, lk, lidx = local
+    f32 = lambda a: jnp.asarray(np.asarray(a), jnp.float32)
+    near32 = dict(near)
+    near32["positions"] = f32(near["positions"])
+    near32["masses"] = f32(near["masses"])
+    out = cross_near_acceleration(
+        near32,
+        f32(lp),
+        f32(lm),
+        jnp.asarray(lk),
+        jnp.asarray(lidx),
+        n_local_particles,
+        NUM_INTERNAL,
+        softening_sq=jnp.asarray(SOFT**2, jnp.float32),
+        G=jnp.asarray(G, jnp.float32),
+        chunk=8,
+        interpret=True,
+        accum=accum,
+    )
+    return out
+
+
+@pytest.mark.parametrize("accum", ["input", "wide"])
+def test_accum_mode_reaches_the_kernel_and_keeps_the_answer(accum):
+    """`accum` is plumbed to the leafpair kernel, and both widths give the sum.
+
+    The output stays in the input dtype either way: the widening is INSIDE the
+    kernel (float64 across source leaves), the downcast is the last thing it does.
+    """
+    rng = np.random.default_rng(29)
+    pairs = [(0, 0), (0, 1), (0, 2), (2, 1), (3, 2)]
+    near, local, imported, n_lp, total = _build(rng, pairs)
+    got = _run_fp32(near, local, n_lp, accum)
+    assert got.dtype == jnp.float32
+    ref = _reference(pairs, local, imported, n_lp, total)
+    assert np.allclose(np.asarray(got, np.float64), ref, rtol=2e-5, atol=1e-6)
+
+
+def test_unknown_accum_mode_is_refused_by_the_kernel():
+    """A bad mode raising proves the argument is passed through, not swallowed."""
+    rng = np.random.default_rng(31)
+    near, local, imported, n_lp, total = _build(rng, [(0, 0)])
+    with pytest.raises(ValueError, match="accum"):
+        _run_fp32(near, local, n_lp, "bogus")
+
+
+def test_default_accum_follows_the_local_lane_env(monkeypatch):
+    """With no explicit mode the term reads JACCPOT_NEARFIELD_ACCUM like the lane.
+
+    The lane's env reader does not raise on a bad value, it WARNS and falls back
+    (naming the variable), so the warning is the observable: it fires only if the
+    variable is actually consulted.
+    """
+    rng = np.random.default_rng(37)
+    near, local, imported, n_lp, total = _build(rng, [(0, 0)])
+    monkeypatch.setenv("JACCPOT_NEARFIELD_ACCUM", "wide")
+    ok = _run_fp32(near, local, n_lp, None)
+    assert ok.dtype == jnp.float32
+    monkeypatch.setenv("JACCPOT_NEARFIELD_ACCUM", "nonsense")
+    with pytest.warns(RuntimeWarning, match="JACCPOT_NEARFIELD_ACCUM"):
+        _run_fp32(near, local, n_lp, None)

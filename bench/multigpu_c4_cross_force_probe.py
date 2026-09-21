@@ -23,6 +23,14 @@ NDEV = int(os.environ.get("PROBE_NDEV", "2"))
 N = int(os.environ.get("PROBE_N", "200000"))
 LEAF = int(os.environ.get("PROBE_LEAF", "64"))
 SOLO = os.environ.get("PROBE_SOLO") == "1"
+# Working dtype of BOTH arms. The gate compares the distributed lane against the
+# same lane on one device, so the two must run at the same width or the ratio
+# means nothing; the SOLO process reads the same variable. `float64` is the
+# instrument for the fp32-floor question (record: the ratio widened 1.26x -> 2.36x
+# over p = 4 -> 6 at fp32, i.e. the distributed arm approached a floor near
+# 1.9e-03 that the reference passed through).
+DTYPE = os.environ.get("PROBE_DTYPE", "float32")
+assert DTYPE in ("float32", "float64"), DTYPE
 CAP = int(N / NDEV * 1.15)
 # `apply_fast_lane_env` is process-wide and has to be tuned to the length the lane
 # will actually see. The mesh arm sees CAP rows per device, the reference arm sees
@@ -40,6 +48,9 @@ _TRAV = dict((FAST_LANE_ENV_BY_LEAF.get(LEAF) or {}).get("_traversal_overrides",
 import numpy as np, jax, jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
+WDT = getattr(np, DTYPE)
+JDT = getattr(jnp, DTYPE)
+ACCUM = os.environ.get("JACCPOT_NEARFIELD_ACCUM", "input")
 from jaccpot import FastMultipoleMethod, TraversalOverrides
 from jaccpot.config import (
     FMMAdvancedConfig,
@@ -77,8 +88,10 @@ if not SOLO:
     assert len(jax.devices()) >= NDEV, f"need {NDEV} devices"
 
 _ic = IC_GENERATORS["plummer"](N, seed=0)
-pos = np.asarray(_ic[0], np.float32)
-mass = np.asarray(_ic[1], np.float32)
+# The generator hands out float32; widening it changes no particle, so the fp64
+# arm evaluates the SAME system as the fp32 one, just without fp32 arithmetic.
+pos = np.asarray(_ic[0], WDT)
+mass = np.asarray(_ic[1], WDT)
 P0 = jnp.asarray(pos)
 codes = np.asarray(morton_encode(P0, infer_bounds(P0)))
 order = np.argsort(codes)
@@ -88,7 +101,8 @@ kk = int(cp.adaptive_cell_leaf_partition_numpy(np.sort(codes), leaf_size=LEAF)[0
 # device trees a shard -- dividing by NDEV in the reference arm overflows the cut.
 LEAF_CAP = 1 << int(np.ceil(np.log2(1.25 * kk / (1 if SOLO else NDEV))))
 print(
-    f"N={N} ndev={NDEV} cap={CAP} leaf_capacity={LEAF_CAP} shards={[len(s) for s in shards]}",
+    f"N={N} ndev={NDEV} cap={CAP} leaf_capacity={LEAF_CAP} shards={[len(s) for s in shards]} "
+    f"dtype={DTYPE} nearfield_accum={ACCUM}",
     flush=True,
 )
 
@@ -101,7 +115,7 @@ def build():
         theta=THETA,
         G=1.0,
         softening=SOFT,
-        working_dtype=jnp.float32,
+        working_dtype=JDT,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(
                 mode="static_radix",
@@ -132,7 +146,7 @@ for sel in shards:
     dev_pos.append(
         np.concatenate([pos[sel], np.repeat(pos[sel][:1], CAP - len(sel), 0)])
     )
-    dev_mass.append(np.concatenate([mass[sel], np.zeros(CAP - len(sel), np.float32)]))
+    dev_mass.append(np.concatenate([mass[sel], np.zeros(CAP - len(sel), WDT)]))
     dev_live.append(len(sel))
 
 # --- the box, computed exactly as global_mesh_bounds does, so both arms agree
@@ -188,7 +202,7 @@ if SOLO:
         num += float(((got - ref) ** 2).sum())
         den += float((ref**2).sum())
     print(
-        f"SOLO order={ORDER} theta={THETA} leaf={LEAF}  "
+        f"SOLO order={ORDER} theta={THETA} leaf={LEAF} dtype={DTYPE} accum={ACCUM}  "
         f"rel-L2 vs fp64 direct = {float(np.sqrt(num / den)):.4e}"
     )
     raise SystemExit(0)
@@ -365,7 +379,10 @@ def err_against_direct(accel_by_dev, tag):
         num += float(((got - ref) ** 2).sum())
         den += float((ref**2).sum())
     rel = float(np.sqrt(num / den))
-    print(f"  {tag:<28} rel-L2 vs fp64 direct (ALL sources) = {rel:.4e}")
+    print(
+        f"  {tag:<28} rel-L2 vs fp64 direct (ALL sources) = {rel:.4e}"
+        f"   [order={ORDER} dtype={DTYPE} accum={ACCUM}]"
+    )
     return rel
 
 

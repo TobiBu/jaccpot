@@ -510,6 +510,7 @@ def cross_near_acceleration(
     G: Array,
     chunk: int = 64,
     interpret: bool = False,
+    accum: Optional[str] = None,
 ) -> Array:
     """Acceleration on local particles from the IMPORTED leaves, as its own term.
 
@@ -544,17 +545,29 @@ def cross_near_acceleration(
         Entries per chunk for the leafpair table. Static.
     interpret:
         Pallas interpret mode.
+    accum:
+        Accumulator width of the leafpair kernel, ``"input"`` or ``"wide"`` (a
+        float32 partial per source leaf, float64 across leaves -- the two-level
+        accumulator of the local lane's near field). ``None`` reads the SAME
+        env choice the local lane reads, ``JACCPOT_NEARFIELD_ACCUM``, so the two
+        near terms widen together. Before this knob existed the cross term was
+        pinned to ``"input"`` whatever the local lane did, which made it the one
+        fp32-only reduction in an otherwise widened force.
 
     Returns
     -------
     Array
         ``(n_particles, 3)`` acceleration to ADD to the local force.
     """
+    from jaccpot.nearfield.near_field import _env_choice
     from jaccpot.pallas.nearfield_leafpair_csr import (
         build_leafpair_chunk_table,
         leafpair_chunk_capacity,
         nearfield_leafpair_csr_pallas,
     )
+
+    if accum is None:
+        accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
 
     loc_pos = jnp.asarray(local_leaf_positions)
     loc_mass = jnp.asarray(local_leaf_masses)
@@ -630,8 +643,14 @@ def cross_near_acceleration(
         interpret=bool(interpret),
         include_self=False,  # the local self term is already in the force
         num_target_leaves=L,
+        accum=str(accum),
     )
     acc = out[..., :3]
+    # The scatter below is a PERMUTATION, not a reduction: every live particle sits
+    # in exactly one leaf slot, so each output row receives one addend and the
+    # dead slots all land on the discarded row n_particles. Nothing is summed in
+    # the input dtype here; the only reductions are inside the kernel, under
+    # `accum`.
     flat_idx = jnp.where(loc_mask, idx, n_particles).reshape(-1)
     return (
         jnp.zeros((n_particles + 1, 3), acc.dtype)
