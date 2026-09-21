@@ -712,6 +712,329 @@ shard length, while the fused profile gate keys on the exact array length.
 
 Nothing in this phase was timed.
 
+## Phase C5 -- the cross NEAR half is ADDED, not interleaved, and it is verified without a GPU
+
+The far half goes BETWEEN the sweeps because a far contribution arrives as a local expansion and has to ride the
+L2L cascade down. That argument does not extend to the near half: a near contribution is a direct sum with no
+cascade behind it, so it can be computed once and added to the finished acceleration. Gravity is linear in the
+sources, so this is exact, not an approximation, and it costs one extra kernel instead of a second plumbing path
+through the prepared state. Phase 3.1 measured the cross near field at 1.4-4.3 % of the local near list, so this
+is the cheap half by a wide margin.
+
+**What was built.** `make_cross_hook` takes a `near_sink` dict. Given one it does the near half on the SAME export
+walk as the far half -- one walk, one set of exported cells -- building `W`-wide leaf particle tiles from
+`node_ranges` + `positions_sorted`, exchanging them, and running `receiver_interaction_lists` on the near CSR.
+`cross_near_acceleration` then concatenates the imported leaves onto the local pool, builds a CSR over LOCAL target
+leaf rows, and calls the leafpair kernel with `num_target_leaves = L_local` and `include_self=False`, so it emits
+local rows only and never re-counts the local self term that is already in the force.
+
+**The near overflow flag is folded into the one the evaluator returns.** It is a tracer the caller cannot read
+host-side, and the cross buffers saturate independently of the local lane's, so without this fold a saturated
+cross near list would be invisible.
+
+**Two traps in the pair list, both real.**
+
+* A target arrives as a leaf NODE id and the pool is indexed by leaf ROW. They differ by the internal-node count,
+  which is passed in explicitly: deriving it from the pool's own length happens to work for a balanced structure,
+  and that is exactly why it should not be done here.
+* The first version CLIPPED an out-of-range target into `[0, L-1]`. That silently ADDS a foreign leaf's sources to
+  a real local row -- a wrong force. The bound is now part of the liveness mask, so such a pair is dropped instead.
+  Neither outcome is acceptable, but only the second is detectable, and the test asserts nothing is dropped.
+
+**Verification, and it needed no GPU at all.** `tests/unit/distributed/test_cross_near_acceleration.py` builds a
+pool by hand -- ragged occupancy, `num_internal` deliberately NOT `L-1` so a row/node mixup cannot hide -- and
+requires the kernel's answer to equal a numpy Plummer sum written out in the test, over exactly the paired
+sources, to rtol 1e-10 under Pallas `interpret`. Around it: untouched leaves stay zero, poisoned padding beyond
+`count` changes nothing, an out-of-range target is dropped rather than folded, and doubling the imported masses
+doubles the term.
+
+Three mutants were run against that suite and all three were killed: `row -> row + 1` (the node/row off-by-one),
+`G -> 2G`, and `include_self False -> True`. This is the first piece of the cross field that is checked exactly
+rather than by a ratio.
+
+**Not yet run on GPUs.** The C4 probe now has a third arm (local-only / +FAR / +FAR and NEAR) sharing one sink,
+but it needs two idle cards and the box has had one, at loadavg 36-66. The arm is wired, not measured.
+
+## Two geometry bugs in the cross exchange, found by reading rather than by a failing number
+
+Both were found while checking the near half against the plan's `_combined_neighbors` traps, and neither would
+have announced itself: no crash, no overflow, no momentum signature.
+
+**The imported RADIUS was never shipped.** The receiver built `combined_rad` as the local radii followed by
+`zeros(recv_node_cap)`. A zero source radius passes `radius / distance < theta` at ANY distance, so every imported
+node was unconditionally admissible: multipoles used at close range, and the near list starved of exactly the
+pairs that carry the largest forces. The radius now travels with the multipole, and `imported_zero_radius` is a
+diagnostic so the run can confirm they arrive.
+
+**The near walk scored the FAR import's geometry.** The two halves export DIFFERENT node sets -- far sends
+internal nodes, near sends leaves -- so payload row k means a different node in each. The near call reused
+`combined_cen` / `combined_rad`, pairing each imported leaf's particles with an unrelated node's centre and
+radius. The near payload now carries its own centre and radius.
+
+**The prediction below was FALSIFIED, and the section after it records what was actually wrong.** It is left
+here unedited because the way it failed is the useful part.
+
+**A prediction, recorded before the run so it cannot be fitted afterwards.** At order 4, ndev = 2, N = 2e5,
+leaf 64, theta 0.8, the single-GPU reference is **2.9401e-03** and the mesh arms before these fixes were
+local-only 5.825e-01 and far-only 2.409e-01 -- the cross field was reaching the force but leaving it ~82x worse
+than the same lane on one card. If the zero-radius defect is the cause, the far-only error must fall
+substantially from 2.409e-01 on its own, and `imported_zero_radius` must be 0. If it does not fall, the diagnosis
+is wrong and the gap is elsewhere -- most likely the near half, whose few per cent of PAIRS are the closest
+sources and so can carry most of the residual regardless.
+
+**The single-GPU reference, measured (card 4, pinned).** Order 4 `2.9401e-03`, order 5 `1.5599e-03`, order 6
+`8.2045e-04`: monotone, about 1.9x per order, so the reference arm itself behaves. This is the second clause of gate G4 -- the first clause, rel-L2 below 1e-6
+against the single-GPU lane, is unreachable because one-sided evaluation is not exact here.
+
+## The prediction failed, and the real fault was three silent truncations
+
+Shipping the correct radii made the far-only error WORSE, not better: 2.409e-01 -> 5.1256e-01. That is consistent
+rather than contradictory. A zero radius made every imported node unconditionally far-admissible, so close cross
+pairs were evaluated by multipole -- a bad approximation, but nonzero. With true radii those pairs are correctly
+rejected as far and nothing picked them up, so they became simply ABSENT. A bad approximation beats a missing
+term, which is why the better-looking number came from the buggier code. The radius fixes are still right; they
+exposed a hole they had been papering over.
+
+**The per-order sweep is what identified it.** At p = 4, 5, 6 the error was 5.1256e-01, 5.1261e-01, 5.1263e-01 --
+FLAT. An expansion missing sources cannot be improved by more terms. A single-point C4 ratio would have read as a
+mild regression rather than a structural gap; the sweep read it correctly. This is the third time in this project
+that a coverage defect was invisible to everything except an order sweep.
+
+**The diagnostics, which had to leave the `shard_map` as outputs (the record holds tracers).** At `max_cells=1024`:
+`export_far` 69717/71281 but `recv_nodes` only 499/653, against Phase 3.4's measured need of 38-59 % of a
+16383-node tree. A 12-19x shortfall, reported with no overflow anywhere.
+
+**Three truncations, one cause: the flags existed and were wired to nothing.**
+
+* `summary.overflow` was never read. At `max_cells=1024` with ~5500 live leaves and `max_leaves_per_cell=4` the cut
+  needs ~1500 cells and got 1024. `TreeSummary`'s own docstring, written in Phase 3.5, says verbatim: "**Must be
+  read**: a truncated summary silently drops part of the receiver from the exchange, which loses force rather than
+  accuracy." It was then left out of the OR. Losing FORCE rather than accuracy is exactly what makes the error flat
+  in p.
+* `export_far` was 69717 against an `export_far_cap` of 65536. `ex.far_overflow` was set, but only reachable
+  through `record["overflow"]`, which nothing consumed.
+* The near sink's flag omitted `ex.far_overflow` entirely.
+
+All caps are now over-allocated and every flag is OR-ed into what the caller reads. The standing rule in this
+record -- over-allocate and read the flags -- only ever worked on its first half.
+
+**A sizing constraint that is now a hard error rather than a silent one.** The receiver walk seeds one pair per
+received CSR entry, so `walk_queue` MUST exceed `recv_csr_cap`. Over-allocating both in the wrong ratio raises
+`ValueError: the wavefront cannot hold its own seed`, which is the behaviour every one of these caps should have.
+
+**After the fixes, at order 4, ndev = 2, N = 2e5, leaf 64, theta 0.8, all flags clean:**
+
+| arm | rel-L2 vs fp64 direct |
+| --- | --- |
+| local-only (no cross) | 5.7593e-01 |
+| + cross FAR | 2.0061e-01 |
+| + cross FAR and NEAR | 1.9515e-01 |
+| single-GPU reference | 2.9401e-03 |
+
+`recv_nodes` is now 6010/6734 -- 37-41 % of the tree, which is Phase 3.4's measured 38-59 %, so the import volume
+is finally the predicted one. C4's liveness control passes at 2.95x. The gate does NOT pass: 1.95e-01 against a
+2.94e-03 reference is still ~66x short.
+
+**The open question, stated precisely so it is not guessed at.** The far walk produces `near_pairs` of
+166505/85124 -- pairs where the receiver's MAC failed and the source is an imported INTERNAL node whose particles
+were never shipped, so nothing can consume them. Against that, the usable near import is only 34618/34637 pairs.
+Two hypotheses were checked and BOTH are wrong: the imported radii do arrive (`imported_zero_radius` = 0), and the
+sender and receiver use the same criterion (both call `dual_tree_walk_mutual` with the same `mac_type`, and the
+receiver seeds from `(cell_root, imported node)` -- exactly the pair the sender judged). So an admissible seed
+should pass straight through to the far list and `near_pairs` should be near zero. It is not.
+
+`recv_csr` was then measured and it settles half of it. `recv_csr` = 180409/128919 is the exact mirror of
+`export_far` = 128919/180409, so the exchange itself loses nothing -- every pair the sender emitted arrives. Of
+device 0's 180409 seeds, 149223 pass straight through to the far list and about 31186 (17 %) do NOT: those descend
+and produce the 166505 near pairs, ~5.3 each. So the fault is neither the exchange nor a capacity. **17 % of the
+pairs the sender judged far-admissible are rejected by the receiver's re-test of the SAME pair.**
+
+Three further explanations were checked in the source and all three are wrong: `build_send_buffers` rebases
+`csr_cell` by `s_cell - s_dev * mc` and `csr_row` by `g_row - node_offsets[s_dev]`, which is one rebase each and
+correct; the sender cannot descend the cell side (cells are childless in its combined tree) so its far list really
+is judged against the whole cell; and the canonicalisation puts the cell in slot `a` and the source node in slot
+`b` on BOTH sides, so the two tests are not mirror images of each other.
+
+What has NOT been checked, and is the next measurement rather than the next guess: recompute the MAC for the seed
+pairs on the receiver and count the failures directly, instead of inferring them from the walk's output. 
+
+**The MAC recomputation, built and queued.** Two independent recomputations of the REAL predicate -- imported as
+`_compute_mac_ok` from `yggdrax._interactions_impl` rather than retyped, so the test cannot diverge from what the
+walk does. `export_mac_fail` runs it on the sender over the pairs `export_walk` emitted as far, with the sender's
+own geometry; `seed_mac_fail` runs it on the receiver over the seeds it starts from, with the geometry that
+arrived. Same pairs, same predicate, two ends of the wire. Both near zero means the seeds are admissible and the
+walk expands them anyway; sender clean and receiver failing means the geometry changes in transit; both failing
+means `export_walk` emits inadmissible pairs.
+
+It carries its own control: `export_near_mac_fail` runs the same check over the sender's NEAR list, whose pairs
+bottomed out precisely because they fail the MAC. If the far list comes back clean and the near list comes back
+rejected, the instrument discriminates; if the two look alike, the instrument is broken and none of the other
+numbers mean anything.
+
+The GPU form of it never got a slot -- two waiters ran 6 h and 10 h and all eight cards stayed busy (16-37 GiB
+each, 22-86 % utilisation, other users). So the question was answered on CPU instead, which turned out to be
+possible for every link in the chain: the exchange logic is yggdrax and needs no Pallas kernel.
+
+### The sender's list is clean, and the instrument proves it can tell
+
+`tests/distributed/test_export_walk_admissibility.py` builds two Morton-split domains, runs `export_walk`, and
+recomputes the imported `_compute_mac_ok` over what it emitted:
+
+| list | pairs | MAC failures |
+| --- | --- | --- |
+| FAR | 19997 | **0** |
+| NEAR | 14029 | **14029** |
+
+0 % against 100 %. The near list is the control -- those pairs bottomed out precisely because they fail the MAC --
+so the recomputation discriminates perfectly, and the sender's far list is fully admissible by its own geometry.
+The defect is therefore introduced AFTER emission.
+
+### The send buffers preserve every pairing
+
+`tests/distributed/test_send_buffer_pairing.py` checks the exact invariant at ndev = 3 with duplicate nodes and
+duplicate cells: every live `(global_cell, node)` must reappear as a CSR entry whose rebased cell is
+`global_cell % max_cells`, in destination `global_cell // max_cells`, whose `csr_row` points at a `node_rows` slot
+holding that same node. Five cases pass, including a non-vacuity control. Dedup, grouping and the double rebase
+are not the defect either, and `test_import_cells` already covers the exchange round-trip.
+
+### The defect: the MAC was re-tested at a point the sender never used
+
+`export_walk` is handed `geom.center` -- geometric, bounding-box centres. The far payload shipped
+`mp.centers` -- EXPANSION centres, a different point. The receiver then built
+`combined_cen = concat([geom.center, imp_cen])`, so the one array the walk reads was geometric for local nodes and
+expansion for imported ones. Every imported node was re-tested at coordinates the sender's decision was never
+based on, which is precisely how a pair the sender accepted comes back inadmissible.
+
+Both centres now travel, because the two consumers need different ones: `mp.centers` is the expansion centre and
+belongs to the M2L, `geom.center` is what the MAC was computed with and belongs to the walk. This is the same
+class as memory `mac-geometry-inconsistent-with-com-centres`, and jax here is 0.10.2, so the
+`ragged_all_to_all` corruption is not in play.
+
+The diagnostics channel was switched from int64 to float64 for this -- an int cast would have truncated a
+DISTANCE to zero and made a real effect look like nothing.
+
+### Confirmed on GPU, and the prediction was exact
+
+| diagnostic | before | after |
+| --- | --- | --- |
+| `center_mismatch` (of 16383 nodes) | -- | 11116 / 10628 |
+| `center_max_delta` (box spans ~600) | -- | 180.9 / 114.1 |
+| `seed_mac_fail` | ~31186 (inferred) | **0 / 0** |
+| far walk's `near_pairs` | 166505 / 85124 | **0 / 0** |
+| `far_pairs` vs `recv_csr` | 149223 of 180409 | **180409 of 180409** |
+| `export_mac_fail` / `export_near_mac_fail` | -- | 0 / 49623 (control discriminates) |
+
+The two centre arrays differ on two thirds of the nodes by up to 180 units, so the fix was not a no-op. Every
+seed now survives the receiver's re-test, the far walk emits no unusable near pairs at all, and `far_pairs`
+equals `recv_csr` exactly -- which is precisely what the theory said an admissible seed should do. The far-only
+error fell 2.0061e-01 -> **7.1542e-02** and C4's control went 2.95x -> 6.59x.
+
+### Coverage is still not restored, and the near half makes it worse
+
+far-only across p = 4, 5, 6 is 7.1542e-02, 7.1427e-02, 7.1296e-02 -- 0.3 % over two orders, while the single-GPU
+reference improves 3.58x across the same range. Still FLAT. Part of that is expected, since the far-only arm is
+missing the cross near sources by construction, so this arm alone cannot distinguish "the near half is missing"
+from "the far half still has a hole". It becomes a real discriminator only once the near half is correct.
+
+### The near half is WRONG, and it is NOT double counting
+
+
+
+Adding it makes the answer worse, not better: 7.1542e-02 -> 8.7360e-02, C5 = 0.82x.
+
+**The first explanation written here was double counting, and it is WRONG.** The argument was that the sender's
+two lists are complementary only at cell granularity, so after the receiver expands them a target could get both
+node X's multipole and the particles of a leaf beneath X. That is testable: if the walk stops at X when X is
+far-admissible for cell C, it never descends into X, so no near source for C can be a descendant of a far source
+for C. Measured on CPU over a real export walk: of 14029 near pairs, all of whose cells also have far sources,
+**0** have a near source descended from a far source. The two imports are disjoint subtrees and double counting
+cannot be the explanation.
+
+What fitted the evidence instead was a MISDIRECTED contribution: a term of roughly the right magnitude landing on
+the wrong particles adds noise rather than signal, and a rising error is what that looks like.
+
+The first suspect -- that pool row `r` might not be leaf node `num_internal + r` -- was WRONG:
+`leaf_pool_mismatch` came back 0/0 over 5558/5314 occupied rows. But that check is what identified the real
+fault, because it passes by comparing against `node_ranges`, **which is defined in Morton-sorted order**. So
+`leaf_particle_indices` indexes the SORTED array, while the lane's acceleration is in the caller's original
+particle order. The near term was being scattered by a sorted index into an array indexed by original position.
+
+The scatter now maps sorted slot -> original index through `tree.particle_indices`. `perm_nonidentity` guards it
+the way `center_mismatch` guarded the centre fix: it reads 99989/99980 of ~100000, so essentially every particle
+was permuted and the remap is emphatically not a no-op.
+
+| arm | before the remap | after |
+| --- | --- | --- |
+| + cross FAR and NEAR | 8.7360e-02 | **3.5859e-02** |
+| C5 (the near half) | 0.82x, harmful | **2.00x** |
+| C4 control | 6.59x | **16.06x** |
+
+The unit test could not have caught this: it built its own pool and its own index array, so sorted and original
+order coincided by construction. This is also the second time in this phase that a PASSING diagnostic located
+the defect, and it matches the note in memory `mesh-galaxy-rollout` that the mesh lane's output rows come back
+permuted even with zero padding.
+
+A second, separate loss is already visible and is NOT the cause of the regression: `near_walk_far_pairs` is
+89568/93005, pairs the receiver reclassified as far. They are dropped because the near import ships particles and
+not multipoles, and they are not in the far import either, since they came from the sender's near list. That is
+missing force, but dropping a term cannot make the answer worse than omitting the whole half.
+
+### The dropped pairs WERE the remaining hole
+
+`near_walk_far_pairs` = 89568/93005 -- 72 % of everything the receiver's near walk produces -- were pairs the
+sender exported as NEAR (so it shipped particles) that the receiver reclassifies as FAR. With no multipole behind
+them they were discarded, and they are absent from the far import too because the two export lists are disjoint
+subtrees.
+
+Sized with a one-line experiment before building anything: `near_theta = 0` makes every pair in that walk bottom
+out as near, so nothing is dropped. It costs direct sums and changes no physics -- direct summation is exact --
+so it measures the hole without fixing it efficiently.
+
+| | dropped (near_theta = theta) | nothing dropped (near_theta = 0) |
+| --- | --- | --- |
+| `near_walk_far_pairs` | 89568 / 93005 | **0 / 0** |
+| `near_list_pairs` | 34618 / 34637 | 150608 / 165105 |
+| rel-L2 at p = 4 | 3.5859e-02 | **3.6959e-03** |
+
+One discarded list was the entire 12x gap.
+
+### Gate G4, second clause: the coverage check PASSES, the accuracy match does NOT
+
+| p | distributed (far+near) | single-GPU reference | ratio |
+| --- | --- | --- | --- |
+| 4 | 3.6959e-03 | 2.9401e-03 | 1.26x |
+| 5 | 2.3956e-03 | 1.5599e-03 | 1.54x |
+| 6 | 1.9403e-03 | 8.2045e-04 | 2.36x |
+
+**Monotone at last** -- 3.70e-03 -> 2.40e-03 -> 1.94e-03, after three rounds where this sweep was dead flat. The
+coverage hole is closed: the field now responds to expansion order, which an expansion missing sources cannot do.
+
+But the RATIO widens, 1.26x -> 1.54x -> 2.36x. The distributed error improves 1.90x over p = 4 -> 6 while the
+reference improves 3.58x, so the distributed lane is approaching a floor near 1.9e-03 that the reference passes
+straight through. Something in it does not improve with order and becomes dominant at high p. The gate asks for a
+match to the lane's own accuracy, and 2.36x and widening is not a match.
+
+**The leading hypothesis is fp32, and it is not a guess.** The lane runs `working_dtype=jnp.float32`, and memory
+`fp32-roundoff-floor-at-1e7` records exactly this signature: fp32 pins the distributed force near 1e-3 and makes
+expansion order inert. A floor at 1.9e-03 sits right there. The reference arm is fp32 too, but its near field
+goes through the two-level fp64 accumulator of `nearfield-accumulator-fix`, whereas the cross near term is a
+SEPARATE accumulation added to the lane's acceleration afterwards -- and at `near_theta = 0` it now carries
+150k-165k direct pairs per device. Testing it needs a `working_dtype` knob on the probe; NOT YET RUN.
+
+**Efficiency, deliberately not addressed.** `near_theta = 0` is correct but not the efficient answer: it converts
+~90k pairs per device from an M2L into direct sums. The efficient fix is to ship multipole coefficients for the
+near-exported leaves as well -- they are leaves, they already have multipoles, and the near payload already
+carries their centre and radius -- so the receiver can serve those pairs by M2L. Its cost cannot be quantified on
+this box, where nothing may be timed.
+
+**A width defect found while reading the walk, fixed and guarded.** `receiver_interaction_lists` passed
+`seed_a`/`seed_b` but not `seed_count`, so `init_size` fell back to the CSR CAPACITY -- 524288 slots per round
+against 180409 live ones. Dead slots carry `-1` and are filtered by the walk's own liveness mask, so this is width
+and not correctness, and it is NOT the cause of the rejections. `tests/distributed/test_receiver_seed_count.py`
+asserts the lists are identical across three capacities with every dead slot poisoned, plus a control that
+declaring those slots live DOES change the answer -- without which the invariance test could pass because the
+fixture's padding is harmless rather than because the walk ignores it.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to

@@ -150,6 +150,8 @@ def fused_force_step(
     theta: Optional[float] = None,
     num_valid: Optional[Array] = None,
     cross_hook: Optional[Any] = None,
+    cross_near_sink: Optional[dict] = None,
+    cross_record: Optional[dict] = None,  # filled by the hook; read by the caller
 ) -> tuple[Any, Array]:
     """One fused-lane force: refresh the static template, then evaluate.
 
@@ -211,6 +213,13 @@ def fused_force_step(
             "fused_force_step needs an explicit global box: inferring it per "
             "device gives every card its own Morton frame and de-aligns the mesh."
         )
+    # Clear before the hook refills it: on a RE-TRACE the dict would still hold
+    # the previous trace's tracers, and reading those below would leak a value
+    # across jaxprs.
+    if cross_near_sink is not None:
+        cross_near_sink.clear()
+    if cross_record is not None:
+        cross_record.clear()
     refreshed = engine._refresh_large_n_same_topology(
         prepared,
         jnp.asarray(positions),
@@ -235,7 +244,67 @@ def fused_force_step(
         return_potential=False,
         max_acc_derivative_order=0,
     )
-    return refreshed, jnp.asarray(acceleration)
+    acceleration = jnp.asarray(acceleration)
+
+    # The cross NEAR field is ADDED here rather than interleaved. A far contribution
+    # arrives as a local expansion and would need a second L2L cascade, which is why
+    # that half goes between the sweeps; a near contribution is a direct sum with no
+    # cascade behind it, so one small extra kernel is cheaper than plumbing it
+    # through the prepared state. Gravity is linear in the sources, so adding is
+    # exact.
+    if cross_near_sink:
+        from jaccpot.distributed.cross import cross_near_acceleration
+
+        tree = refreshed.tree
+        idx = jnp.asarray(refreshed.nearfield_leaf_particle_indices)
+        msk = jnp.asarray(refreshed.nearfield_leaf_particle_mask)
+        psort = jnp.asarray(refreshed.positions_sorted)
+        msort = jnp.asarray(refreshed.masses_sorted)
+        # The near term assumes pool row r IS leaf node (num_internal + r). That
+        # held in the unit test because the test BUILT the pool that way; here the
+        # pool comes from the lane and the assumption is unverified. If it is
+        # wrong the contribution lands on the wrong particles, which adds noise
+        # rather than signal -- exactly what a rising error looks like.
+        if cross_record is not None:
+            _ni = int(jnp.asarray(tree.left_child).shape[0])
+            _nr = jnp.asarray(tree.node_ranges)
+            _L = int(idx.shape[0])
+            _rows = jnp.arange(_L)
+            _first = jnp.where(msk[:, 0], idx[:, 0], -1)
+            _want = jnp.where(
+                _ni + _rows < _nr.shape[0], _nr[jnp.clip(_ni + _rows, 0, _nr.shape[0] - 1), 0], -1
+            )
+            _has = msk.any(axis=1)
+            cross_record["leaf_pool_mismatch"] = jnp.sum(_has & (_first != _want))
+            cross_record["leaf_pool_rows"] = jnp.sum(_has)
+        safe = jnp.clip(idx, 0, psort.shape[0] - 1)
+        leaf_pos = jnp.where(msk[..., None], psort[safe], 0.0)
+        leaf_mass = jnp.where(msk, msort[safe], 0.0)
+        # `leaf_particle_indices` indexes the MORTON-SORTED array -- that is what
+        # the leaf_pool_mismatch check above establishes, since `node_ranges` is
+        # defined in sorted order. The lane's acceleration is in the caller's
+        # original order. Scattering the near term by the sorted index would add
+        # it to the wrong particles: right magnitudes, wrong rows, which shows up
+        # as a RISE in the error rather than as anything obviously broken.
+        orig = jnp.asarray(tree.particle_indices)
+        idx_orig = jnp.where(msk, orig[jnp.clip(idx, 0, orig.shape[0] - 1)], 0)
+        if cross_record is not None:
+            # if this permutation were the identity the remap would be a no-op
+            cross_record["perm_nonidentity"] = jnp.sum(
+                orig != jnp.arange(orig.shape[0], dtype=orig.dtype)
+            )
+        acceleration = acceleration + cross_near_acceleration(
+            cross_near_sink,
+            leaf_pos,
+            leaf_mass,
+            msk,
+            idx_orig,
+            int(psort.shape[0]),
+            int(jnp.asarray(tree.left_child).shape[0]),
+            softening_sq=jnp.asarray(engine.softening, acceleration.dtype) ** 2,
+            G=jnp.asarray(engine.G, acceleration.dtype),
+        )
+    return refreshed, acceleration
 
 
 def stack_prepared_states(states: "list[Any]") -> Any:
@@ -315,6 +384,9 @@ def make_fused_force_evaluator(
     theta: Optional[float] = None,
     axis_name: str = AXIS_NAME,
     cross_hook: Optional[Any] = None,
+    cross_near_sink: Optional[dict] = None,
+    cross_record: Optional[dict] = None,
+    cross_record_keys: tuple = (),
 ):
     """A jitted ``shard_map`` force: the fused lane per device, one program.
 
@@ -367,6 +439,8 @@ def make_fused_force_evaluator(
             positions,
             masses,
             cross_hook=cross_hook,
+            cross_near_sink=cross_near_sink,
+            cross_record=cross_record,
             bounds=bounds,
             leaf_size=int(leaf_size),
             max_order=int(max_order),
@@ -374,14 +448,37 @@ def make_fused_force_evaluator(
             num_valid=live,
         )
         local = _local_overflow(refreshed)
-        return acceleration, reduce_flag_across_mesh(local, axis_name=axis_name)
+        # The cross near buffers saturate independently of the local lane's, and
+        # their flag is a tracer the caller cannot read host-side. Folding it in
+        # here is the only way it reaches the caller at all.
+        if cross_near_sink and "overflow" in cross_near_sink:
+            local = local | jnp.asarray(cross_near_sink["overflow"]).any()
+        if cross_record and "overflow" in cross_record:
+            local = local | jnp.asarray(cross_record["overflow"]).any()
+        flag = reduce_flag_across_mesh(local, axis_name=axis_name)
+        if not cross_record_keys:
+            return acceleration, flag
+        # The record holds TRACERS under jit, so a count can only be read by
+        # leaving the mapped region as an OUTPUT. The key ORDER is fixed by the
+        # caller so `out_specs` stays static.
+        diag = tuple(
+            # float64, not int: counts up to 2^53 are exact in it, and a
+            # diagnostic that is a DISTANCE would be truncated to 0 by an int
+            # cast -- which would make a real effect look like a no-op.
+            jnp.asarray(cross_record[k]).reshape(1).astype(jnp.float64)
+            for k in cross_record_keys
+        )
+        return acceleration, flag, diag
 
+    out_specs = (P(axis_name), P())
+    if cross_record_keys:
+        out_specs = out_specs + (tuple(P(axis_name) for _ in cross_record_keys),)
     with fused_capacity_plan_overrides(plan):
         mapped = jax.shard_map(
             body,
             mesh=mesh,
             in_specs=(P(axis_name), P(axis_name), P(axis_name), P(axis_name)),
-            out_specs=(P(axis_name), P()),
+            out_specs=out_specs,
             check_vma=False,
         )
         compiled = jax.jit(mapped)
