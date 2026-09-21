@@ -97,6 +97,7 @@ def make_cross_hook(
     record: Optional[dict] = None,
     near_sink: Optional[dict] = None,
     near_theta: Optional[float] = None,
+    export_theta: Optional[float] = None,
 ) -> Callable[[Any], Optional[tuple]]:
     """Build the ``cross_hook`` for a mesh of ``ndev`` devices.
 
@@ -123,6 +124,19 @@ def make_cross_hook(
         that term after the force and adds it; see the module docstring for why the
         near half is added rather than interleaved. Holds tracers under jit, so it
         must be consumed inside the same trace.
+    near_theta:
+        MAC parameter of the receiver's walk over the NEAR import; ``None`` uses
+        ``theta``. ``0.0`` makes every near-imported pair bottom out as a direct
+        sum, which serves the pairs the sender exported as near and the receiver
+        would otherwise call far (unservable: no multipole travels with a near
+        leaf). Correct, and a measurement of that hole rather than the fix for it.
+    export_theta:
+        MAC parameter of the SENDER's export walk alone; ``None`` uses ``theta``.
+        A BISECTION knob, not a setting: ``0.0`` makes every exported pair bottom
+        out at a sender leaf, so the far list is empty and the whole cross field
+        travels as particles and is summed directly (with ``near_theta=0``). If
+        the error then matches the single-GPU lane, the residual lives in the
+        multipole path (import, M2L, cascade); if it does not, it lives elsewhere.
 
     Returns
     -------
@@ -175,7 +189,7 @@ def make_cross_hook(
             all_cen,
             all_rad,
             all_act,
-            float(theta),
+            float(theta if export_theta is None else export_theta),
             me,
             max_pair_queue=cap.walk_queue,
             far_cap=cap.export_far_cap,

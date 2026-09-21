@@ -140,6 +140,16 @@ def build():
     )
 
 
+# --- the probe targets: ONE draw per device, used by every arm in this process
+# and by the SOLO process. Before this the rng was advanced once per arm, so the
+# reference (first draw) and the far+near arm (third draw) scored DIFFERENT
+# particles -- the rel_l2-probe finding in the record says that alone can swing a
+# ratio by tens of percent.
+_pick_rng = np.random.default_rng(12345)
+PICKS = [
+    _pick_rng.choice(len(sel), size=min(512, len(sel)), replace=False) for sel in shards
+]
+
 # --- pad each shard; keep the per-device pieces
 dev_pos, dev_mass, dev_live = [], [], []
 for sel in shards:
@@ -184,14 +194,12 @@ if SOLO:
         ),
         np.float64,
     )
-    rng = np.random.default_rng(12345)
     allp = jnp.asarray(pos, jnp.float64)
     allm = jnp.asarray(mass, jnp.float64)
     num = den = 0.0
     for d in range(NDEV):
         sel = shards[d]
-        k = min(512, len(sel))
-        pick = rng.choice(len(sel), size=k, replace=False)
+        pick = PICKS[d]
         ref = np.asarray(
             direct_accelerations(
                 allp, allm, G=1.0, softening=SOFT, target_indices=np.asarray(sel)[pick]
@@ -294,6 +302,17 @@ def run(hook, near_sink=None, record=None, keys=()):
     return acc, bool(ovf)
 
 
+def _cap_bits(name, default):
+    """log2 of a capacity, from the environment. The all-direct bisection arm
+    (PROBE_EXPORT_THETA=0) ships every sender leaf and pairs it with every local
+    leaf, which is far past the defaults; every flag is still read."""
+    return int(os.environ.get(name, default))
+
+
+EXPORT_THETA = (
+    float(os.environ["PROBE_EXPORT_THETA"]) if "PROBE_EXPORT_THETA" in os.environ else None
+)
+
 caps = CrossCapacities(
     # The cut needs about num_leaves / max_leaves_per_cell cells; at leaf 64 and
     # N/2 per device that is ~2000, so the 1024 first written here TRUNCATED the
@@ -305,17 +324,17 @@ caps = CrossCapacities(
     # The rule the record already states -- over-allocate and read the flags -- only
     # works if the flags are wired, so both halves of that are now true.
     export_far_cap=1 << 21,
-    export_near_cap=1 << 21,
+    export_near_cap=1 << _cap_bits("PROBE_EXPORT_NEAR_BITS", 21),
     send_node_cap=1 << 15,
-    send_csr_cap=1 << 21,
+    send_csr_cap=1 << _cap_bits("PROBE_SEND_CSR_BITS", 21),
     recv_node_cap=1 << 15,
     # The receiver walk SEEDS from the received CSR, one pair per entry, so the
     # queue has to be able to hold that seed: walk_queue > recv_csr_cap is a hard
     # requirement, not a tuning choice.
-    recv_csr_cap=1 << 19,
-    walk_queue=1 << 20,
+    recv_csr_cap=1 << _cap_bits("PROBE_RECV_CSR_BITS", 19),
+    walk_queue=1 << _cap_bits("PROBE_WALK_QUEUE_BITS", 20),
     recv_far_cap=1 << 21,
-    recv_near_cap=1 << 21,
+    recv_near_cap=1 << _cap_bits("PROBE_RECV_NEAR_BITS", 21),
     leaf_width=LEAF,
 )
 a_local, ovf_local = run(None)
@@ -342,6 +361,7 @@ a_both, ovf_both = run(
             if "PROBE_NEAR_THETA" in os.environ
             else None
         ),
+        export_theta=EXPORT_THETA,
     ),
     near_sink=sink,
     record=rec,
@@ -354,7 +374,6 @@ print(
 )
 
 # --- the fp64 reference: every particle against ALL others, subsampled
-rng = np.random.default_rng(12345)
 allp = jnp.asarray(pos, jnp.float64)
 allm = jnp.asarray(mass, jnp.float64)
 
@@ -364,8 +383,7 @@ def err_against_direct(accel_by_dev, tag):
     num = den = 0.0
     for d in range(NDEV):
         sel = shards[d]
-        k = min(512, len(sel))
-        pick = rng.choice(len(sel), size=k, replace=False)
+        pick = PICKS[d]
         # target_indices restricts the ROWS evaluated; every source still enters
         # every sum, which is what makes this the full-N reference and not a
         # shard-local one
@@ -381,7 +399,7 @@ def err_against_direct(accel_by_dev, tag):
     rel = float(np.sqrt(num / den))
     print(
         f"  {tag:<28} rel-L2 vs fp64 direct (ALL sources) = {rel:.4e}"
-        f"   [order={ORDER} dtype={DTYPE} accum={ACCUM}]"
+        f"   [order={ORDER} dtype={DTYPE} accum={ACCUM} export_theta={EXPORT_THETA}]"
     )
     return rel
 
