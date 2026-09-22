@@ -245,6 +245,7 @@ def main():
             print(f"   same pairs under the LANE's extents:   median {qe[0]:.3f} p90 {qe[1]:.3f} max {qe[2]:.3f}"
                   f"   -> {int((ratio_eff > THETA).sum())} of {nf} pairs would FAIL the lane's MAC "
                   f"({100.0 * (ratio_eff > THETA).mean():.2f} %)")
+            asymmetry_report(rr[ft], sr[fs], d, "cross pairs (target = receiver node, source = imported)")
             zero_leaf_src = int((sr[fs] <= 0).sum())
             print(f"   exported sources with zero raw radius (single-particle nodes): {zero_leaf_src}")
 
@@ -298,3 +299,86 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def asymmetry_report(rt, rs, d, tag):
+    """Per-pair truncation factors, not the MAC sum.
+
+    The MAC bounds (r_t + r_s)/d. The M2L's two truncations are bounded
+    separately: the multipole side by r_s/(d - r_t), the local side by
+    r_t/(d - r_s). For a symmetric pair at the MAC limit each is ~0.667^(p+1);
+    for a lopsided one (a small cell against a huge node) the bigger side is
+    ~0.8^(p+1) -- and the one-sided export refines ONLY the source against a
+    fixed small cell, so it is the construction that makes lopsided pairs.
+    """
+    ms = rs / np.maximum(d - rt, 1e-30)
+    ml = rt / np.maximum(d - rs, 1e-30)
+    eff = np.maximum(ms, ml)
+    lop = np.maximum(rs, rt) / np.maximum(np.minimum(rs, rt), 1e-30)
+    q = lambda a: np.quantile(a, [0.5, 0.9, 0.99])
+    qs, ql, qe, qq = q(ms), q(ml), q(eff), q(lop)
+    print(f"   {tag}: multipole-side r_s/(d-r_t) median {qs[0]:.3f} p90 {qs[1]:.3f} p99 {qs[2]:.3f} | "
+          f"local-side r_t/(d-r_s) median {ql[0]:.3f} p90 {ql[1]:.3f} | "
+          f"worse side median {qe[0]:.3f} p90 {qe[1]:.3f} p99 {qe[2]:.3f} | "
+          f"r_big/r_small median {qq[0]:.1f} p90 {qq[1]:.1f}")
+    # the p-convergence this population predicts, worse side, p4 -> p6, error-weighted crudely by eff^(p+1)
+    e4 = np.sum(eff ** 5); e6 = np.sum(eff ** 7)
+    print(f"   {tag}: sum eff^(p+1) improvement p4 -> p6 = {e4 / max(e6, 1e-300):.2f}x  "
+          f"(symmetric-at-theta pairs would give {(1/0.6667)**2:.2f}x, lopsided-at-theta {(1/0.8)**2:.2f}x)")
+
+
+def local_pair_ratios(tree, geom, tag):
+    """(r_t + r_s)/d over the pairs the LANE's own mutual walk accepts on ``tree``.
+
+    The cross pairs cluster just below theta (median 0.68, p90 0.78): the export
+    walk refines the SOURCE only, against a fixed receiver cell, and stops at the
+    first admissible level. If the mutual walk's local pairs sit lower, cross
+    pairs converge more slowly in p than local ones and the ratio to the
+    single-GPU lane widens with order without any coverage hole.
+    """
+    from yggdrax.interactions import dual_tree_walk_mutual
+
+    left, right = children_full(tree)
+    idx = tree.parent.dtype
+    cen = jnp.asarray(geom.center)
+    rad = jnp.asarray(geom.radius)
+    root = jnp.argmin(tree.parent).astype(idx)
+    queue, fcap = 1 << 20, 1 << 22
+    while True:
+        res = dual_tree_walk_mutual(
+            left, right, cen, rad, THETA, root,
+            max_pair_queue=queue, far_cap=fcap, near_cap=1 << 22, mac_type=MAC,
+        )
+        if bool(res.queue_overflow):
+            queue *= 4
+            continue
+        if bool(res.far_overflow):
+            fcap *= 4
+            continue
+        break
+    n = int(res.far_count)
+    a = np.asarray(res.far_a)[:n]
+    b = np.asarray(res.far_b)[:n]
+    c = np.asarray(cen)
+    r = np.asarray(rad)
+    d = np.linalg.norm(c[a] - c[b], axis=1)
+    ratio = (r[a] + r[b]) / d
+    q = np.quantile(ratio, [0.1, 0.5, 0.9, 0.99, 1.0])
+    print(f"   {tag}: {n} mutual far pairs, (r_t+r_s)/d p10 {q[0]:.3f} median {q[1]:.3f} "
+          f"p90 {q[2]:.3f} p99 {q[3]:.3f} max {q[4]:.3f}; near pairs {int(res.near_count)}")
+    # mutual pairs serve BOTH directions, so either node is a target: report both orientations
+    asymmetry_report(np.concatenate([r[a], r[b]]), np.concatenate([r[b], r[a]]), np.concatenate([d, d]), tag)
+    return ratio
+
+
+if __name__ == "__main__" and os.environ.get("PROBE_LOCAL_PAIRS") == "1":
+    pos, mass = load_ic(IC, N)
+    bounds = infer_bounds(jnp.asarray(pos))
+    print("\n== the LANE's own pairs, for comparison with the cross pairs above")
+    t_full, g_full = build_domain_tree(pos, mass, bounds, LEAF)
+    local_pair_ratios(t_full, g_full, "single-GPU reference tree (all N)")
+    dom = morton_domains(pos, bounds, NDEV)
+    for d in range(NDEV):
+        sel = dom == d
+        t, g = build_domain_tree(pos[sel], mass[sel], bounds, LEAF)
+        local_pair_ratios(t, g, f"device {d} local tree")

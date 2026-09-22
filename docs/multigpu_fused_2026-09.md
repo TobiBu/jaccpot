@@ -1084,6 +1084,46 @@ fp64 both arms p4/p6; fp32 all-direct + fp32 reference + fp32 multipole path p4/
 re-take the recorded numbers under the shared draw); fp32 with `accum = wide` on both arms p4/p6;
 then p5 everywhere. Results below when the cards free up. **Nothing here is a timing.**
 
+### Task 1, the sweep (2026-09-22, cards 2+7 after a 15 h wait): fp32 is NOT the floor, and fp64 cannot be run
+
+**fp64 is unavailable on this lane by construction.** `resolve_large_n_execution_config` raises
+`radix_fast_lane requires working_dtype=float32`; both fp64 arms fail in under a minute at every order. The
+instrument the handoff asked for does not exist here, so the fp32 question was answered the other way round.
+
+**The two-level accumulator changes nothing.** N = 2e5, ndev = 2, leaf 64, theta 0.8, `near_theta = 0`, ONE
+shared target draw for every arm, every flag clean:
+
+| p | mesh fp32 `accum=input` | mesh fp32 `accum=wide` | reference `input` | reference `wide` | ratio |
+| --- | --- | --- | --- | --- | --- |
+| 4 | 3.6120e-03 | 3.6120e-03 | 2.9401e-03 | 2.9401e-03 | 1.23x |
+| 5 | 2.2580e-03 | -- | 1.5599e-03 | -- | 1.45x |
+| 6 | 1.7045e-03 | 1.7045e-03 | 8.2045e-04 | 8.2046e-04 | 2.08x |
+
+Identical to five digits on the mesh arm and to the last digit on the reference (which proves the wide path
+ran). With 10-30 source leaves per target at this N the fp32 accumulation error is orders below the residual;
+the 439x of `nearfield-accumulator-fix` was a 10^7-particle, many-leaves-per-target effect. **Dead.**
+
+**The reference reproduces the record exactly** under the shared draw (2.9401e-03 / 1.5599e-03 / 8.2045e-04),
+because the reference had always used the FIRST draw; only the mesh arm moved (3.6959 -> 3.6120e-03 at p4,
+1.9403 -> 1.7045e-03 at p6). The confound was worth 2-12 %, not the widening.
+
+**What is left, in quadrature** (mesh^2 - reference^2)^1/2: **2.10e-03 -> 1.63e-03 -> 1.49e-03** over p = 4/5/6,
+a 1.41x improvement where the reference improves 3.58x. Not flat -- it converges, slowly.
+
+**A third CPU negative.** The lane's own mutual pairs on the full tree sit at (r_t + r_s)/d median **0.718**,
+p90 0.785, and the per-device local trees are identical to three digits; the cross pairs sit LOWER (median
+0.66-0.67, p90 0.78). The MAC sum does not distinguish the populations, so "cross pairs are accepted closer
+to theta" is dead too.
+
+**The live hypothesis: lopsided pairs.** The export walk refines ONLY the source against a fixed receiver cell
+(<= 4 leaves), so a cross pair can be a small cell against a node of radius up to 0.8 d. The MAC bounds the
+SUM; the M2L's multipole truncation is bounded by r_s/(d - r_t) alone, which for a symmetric pair at the MAC
+limit is 0.667 and for a lopsided one 0.8 -- per order. Over p = 4 -> 6 that predicts 2.25x vs 1.56x, and the
+measured 3.58x (reference) vs 1.41x (excess) sit on either side. The mutual walk splits the LARGER node, so
+its pairs are near-symmetric by construction. Being measured now (per-side truncation factors of the two
+populations); the all-direct bisection arm is queued behind the Task 2 check and decides whether the excess
+is in the multipole path at all.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
