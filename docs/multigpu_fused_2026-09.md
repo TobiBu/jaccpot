@@ -1169,6 +1169,61 @@ through the M2L from the shipped leaf multipole:
 Flat in p against the single-GPU lane and within the M2L's own truncation of the direct-sum control. This is
 the configuration to carry forward: `near_theta` defaults to `theta`, no knob set, every flag clean.
 
+### Task 1 RESOLVED: the cross MAC was tested about the box, the expansions are about the COM
+
+**Bisection first.** With `PROBE_EXPORT_THETA=0` the entire cross field travels as particles and is summed
+directly (8.4M export entries, 29.5M near leaf pairs per device, caps 2^24/2^25, every flag clean):
+
+| p | all-direct cross | multipole-path cross (AABB geometry) | reference | multipole-path component (quadrature) |
+| --- | --- | --- | --- | --- |
+| 4 | 1.9192e-03 | 3.6120e-03 | 2.9401e-03 | 3.06e-03 |
+| 5 | 1.0598e-03 | 2.2580e-03 | 1.5599e-03 | 1.99e-03 |
+| 6 | 6.0038e-04 | 1.7045e-03 | 8.2045e-04 | 1.60e-03 |
+
+The all-direct arm is BETTER than the single-GPU lane at every order and converges 3.2x over p = 4 -> 6, so the
+local lane on a shard, the near path and the probe are all sound; the residual is entirely in the cross
+MULTIPOLE path, and its component decelerates (1.54x, then 1.25x): a floor of ~1.4e-03 plus a part that
+converges like the local lane. The per-particle dump (`PROBE_DUMP`) puts 67 % of the distributed error^2 at
+p6 in the shell r in [0.5, 1) and half of the excess in 1 % of the targets, inner particles with ~1 % force
+error: a few pairs, not a diffuse approximation.
+
+**The cause is memory `mac-geometry-inconsistent-with-com-centres`, one level up.** The lane's real-basis
+sweep expands about the COM (`center_mode='com'` only) and since sub-10ms Phase 1.2 its own walk tests the
+MAC about those centres with exact particle radii about them (`resolve_walk_geometry`, default `"com"` in
+the strict fused lane). The cross exchange used `upward.geometry` -- AABB centres and box half-diagonals --
+for the summary cells, the export walk and both receiver walks, and shipped `mp.centers` beside it for the
+M2L. `center_mismatch` 11116/16383, `center_max_delta` 180 was that gap, read the wrong way: the fix that
+made "both centres travel" kept the walk consistent with ITSELF, not with the expansions. A pair admissible
+about the box centre can be divergent about the COM the receiver expands from, and a divergent pair does not
+improve with order. The CPU probe's exact COM radii show such pairs in both populations, but the lane's own
+walk never emits one and the export walk did.
+
+**Fix (jaccpot `6d3097c`):** the hook builds the walk geometry exactly as the lane does
+(`resolve_walk_geometry(tree, positions_sorted, upward.geometry, mp.centers, leaf_cap, default_mode="com")`)
+and uses it everywhere the MAC is tested. `JACCPOT_CROSS_MAC_GEOMETRY=aabb` keeps the old geometry as a
+control. `center_mismatch` must now read 0, and does.
+
+**Gate G4, second clause, PASSES.** Same probe, same shared draw, `near_theta = 0`, every flag clean:
+
+| p | distributed, COM geometry | reference | ratio | (AABB geometry, for the record) |
+| --- | --- | --- | --- | --- |
+| 4 | 2.3623e-03 | 2.9401e-03 | 0.80x | 3.6120e-03 (1.23x) |
+| 5 | 1.1804e-03 | 1.5599e-03 | 0.76x | 2.2580e-03 (1.45x) |
+| 6 | 6.8569e-04 | 8.2045e-04 | 0.84x | 1.7045e-03 (2.08x) |
+
+Flat in p (0.80 / 0.76 / 0.84) and BELOW the single-GPU lane -- below because the cross half is direct-summed
+at `near_theta = 0` here; Task 2 puts those pairs back through the M2L and is re-verified under this geometry
+below. The distributed error improves 3.44x over p = 4 -> 6 against the reference's 3.58x. Cost: the exact COM
+MAC is less conservative about the centre and more honest about the radius; far pairs 180k -> 293k and near
+list pairs 150k -> 249k / 165k -> 329k per device. **Nothing here is a timing.**
+
+**What the four dead hypotheses bought.** fp32 (wide accumulator inert to five digits; fp64 refused by the
+lane), dropped far-import pairs (0), a looser cross MAC (identical extents), and cross pairs sitting closer to
+theta (they sit LOWER) were each killed by a measurement before the bisection arm pointed at the multipole path
+and the per-particle dump at a handful of pairs. The method note is the one the record already carries: the
+diagnostic that "passed" (`center_mismatch` -> both centres travel) was answering a narrower question than the
+one that mattered.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
