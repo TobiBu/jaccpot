@@ -340,7 +340,11 @@ caps = CrossCapacities(
 a_local, ovf_local = run(None)
 rec_far = {}
 a_far, ovf_far = run(
-    make_cross_hook(ndev=NDEV, theta=THETA, caps=caps, record=rec_far),
+    # the same export knob as the far+near arm, or under PROBE_EXPORT_THETA=0 this
+    # arm would be the ordinary far import while the arm below has none
+    make_cross_hook(
+        ndev=NDEV, theta=THETA, caps=caps, record=rec_far, export_theta=EXPORT_THETA
+    ),
     record=rec_far,
     keys=("summary_cells", "export_far", "recv_nodes", "far_pairs", "near_pairs"),
 )
