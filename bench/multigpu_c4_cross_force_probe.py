@@ -150,6 +150,27 @@ PICKS = [
     _pick_rng.choice(len(sel), size=min(512, len(sel)), replace=False) for sel in shards
 ]
 
+_DUMP = {}
+
+
+def _dump(key, p, got, ref):
+    """Per-particle (position, lane force, fp64 direct force) for the probe targets,
+    written to PROBE_DUMP (an .npz) at exit so the error can be located on the sphere."""
+    if os.environ.get("PROBE_DUMP"):
+        _DUMP[f"{key}_pos"] = np.asarray(p, np.float64)
+        _DUMP[f"{key}_got"] = np.asarray(got, np.float64)
+        _DUMP[f"{key}_ref"] = np.asarray(ref, np.float64)
+
+
+import atexit
+
+
+@atexit.register
+def _write_dump():
+    if os.environ.get("PROBE_DUMP") and _DUMP:
+        np.savez(os.environ["PROBE_DUMP"], **_DUMP)
+
+
 # --- pad each shard; keep the per-device pieces
 dev_pos, dev_mass, dev_live = [], [], []
 for sel in shards:
@@ -209,6 +230,7 @@ if SOLO:
         got = a_solo[np.asarray(sel)[pick]]
         num += float(((got - ref) ** 2).sum())
         den += float((ref**2).sum())
+        _dump(f"solo_d{d}", pos[np.asarray(sel)[pick]], got, ref)
     print(
         f"SOLO order={ORDER} theta={THETA} leaf={LEAF} dtype={DTYPE} accum={ACCUM}  "
         f"rel-L2 vs fp64 direct = {float(np.sqrt(num / den)):.4e}"
@@ -400,6 +422,8 @@ def err_against_direct(accel_by_dev, tag):
         got = accel_by_dev[d * CAP : (d + 1) * CAP][: dev_live[d]][pick]
         num += float(((got - ref) ** 2).sum())
         den += float((ref**2).sum())
+        _key = {"local-only (no cross)": "local", "+ cross FAR": "far", "+ cross FAR and NEAR": "both"}[tag]
+        _dump(f"{_key}_d{d}", pos[np.asarray(sel)[pick]], got, ref)
     rel = float(np.sqrt(num / den))
     print(
         f"  {tag:<28} rel-L2 vs fp64 direct (ALL sources) = {rel:.4e}"

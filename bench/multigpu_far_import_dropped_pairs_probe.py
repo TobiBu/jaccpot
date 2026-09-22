@@ -84,6 +84,7 @@ def main():
     for d in range(NDEV):
         sel = dom == d
         doms.append(build_domain_tree(pos[sel], mass[sel], bounds, LEAF) + (int(sel.sum()),))
+    dom_pm = [(pos[dom == d], mass[dom == d]) for d in range(NDEV)]
     print(f"N={N} ndev={NDEV} leaf={LEAF} theta={THETA} max_leaves={MAX_LEAVES} ic={IC}")
 
     # summaries, padded to a common capacity (the hook's all_gather)
@@ -246,6 +247,10 @@ def main():
                   f"   -> {int((ratio_eff > THETA).sum())} of {nf} pairs would FAIL the lane's MAC "
                   f"({100.0 * (ratio_eff > THETA).mean():.2f} %)")
             asymmetry_report(rr[ft], sr[fs], d, "cross pairs (target = receiver node, source = imported)")
+            s_com, s_m, s_rcom = node_com(s_tree, *dom_pm[s])
+            r_com_, _r_m, r_rcom = node_com(r_tree, *dom_pm[r])
+            com_report(rc, rr, sc, sr, s_com, s_m, ft, fs, "cross pairs")
+            com_report_exact(r_com_, r_rcom, s_com, s_rcom, s_m, ft, fs, "cross pairs")
             zero_leaf_src = int((sr[fs] <= 0).sum())
             print(f"   exported sources with zero raw radius (single-particle nodes): {zero_leaf_src}")
 
@@ -297,10 +302,6 @@ def main():
                   f"   sender fraction missing per such leaf: median {np.median(vals):.4f} max {vals.max():.4f}")
 
 
-if __name__ == "__main__":
-    main()
-
-
 def asymmetry_report(rt, rs, d, tag):
     """Per-pair truncation factors, not the MAC sum.
 
@@ -327,7 +328,82 @@ def asymmetry_report(rt, rs, d, tag):
           f"(symmetric-at-theta pairs would give {(1/0.6667)**2:.2f}x, lopsided-at-theta {(1/0.8)**2:.2f}x)")
 
 
-def local_pair_ratios(tree, geom, tag):
+def node_com(tree, pos, mass):
+    """Mass centre and its offset from the geometric centre, per node.
+
+    The fast lane's real-basis upward sweep expands about the COM
+    (`center_mode='com'` only), while every MAC here is tested on the GEOMETRIC
+    sphere. A multipole about the COM converges only outside the sphere that
+    bounds the node's particles ABOUT THE COM, whose radius is up to
+    r_geo + |COM - gcen| -- larger than the MAC's r_geo by the offset.
+    """
+    order = np.asarray(tree.particle_indices).astype(np.int64)
+    ps = np.asarray(pos, np.float64)[order]
+    ms = np.asarray(mass, np.float64)[order]
+    cm = np.concatenate([[0.0], np.cumsum(ms)])
+    cx = np.concatenate([np.zeros((1, 3)), np.cumsum(ms[:, None] * ps, axis=0)])
+    nr = np.asarray(tree.node_ranges).astype(np.int64)
+    st, en = nr[:, 0], nr[:, 1]
+    live = en >= st
+    m = np.where(live, cm[np.minimum(en + 1, len(cm) - 1)] - cm[np.minimum(st, len(cm) - 1)], 0.0)
+    x = np.where(live[:, None], cx[np.minimum(en + 1, len(cm) - 1)] - cx[np.minimum(st, len(cm) - 1)], 0.0)
+    com = np.where((m > 0)[:, None], x / np.maximum(m, 1e-300)[:, None], 0.0)
+    # the EXACT convergence radius about the COM: the farthest particle from it.
+    # r_geo + |COM - gcen| is only a bound, and a loose one (it reported 11-23 %
+    # "divergent" pairs in populations whose error demonstrably converges).
+    r_com = np.zeros(len(m))
+    for i in np.flatnonzero(live & (m > 0)):
+        seg = ps[st[i] : en[i] + 1]
+        r_com[i] = np.sqrt(np.max(np.sum((seg - com[i]) ** 2, axis=1)))
+    return com, m, r_com
+
+
+def com_report_exact(t_com, t_rcom, s_com, s_rcom, s_mass, ft, fs, tag):
+    """Both truncation factors about the lane's ACTUAL expansion centres (COM) with
+    the EXACT particle radii about them; and the mass/distance-weighted error proxy."""
+    d = np.linalg.norm(t_com[ft] - s_com[fs], axis=1)
+    rho_m = s_rcom[fs] / np.maximum(d - t_rcom[ft], 1e-30)  # multipole side
+    rho_l = t_rcom[ft] / np.maximum(d - s_rcom[fs], 1e-30)  # local side
+    rho = np.maximum(rho_m, rho_l)
+    q = lambda a: np.quantile(a, [0.5, 0.9, 0.99, 1.0])
+    qm, qw = q(rho_m), q(rho)
+    print(f"   {tag}: EXACT COM factors -- multipole side median {qm[0]:.3f} p90 {qm[1]:.3f} p99 {qm[2]:.3f} "
+          f"max {qm[3]:.3f} | worse side median {qw[0]:.3f} p90 {qw[1]:.3f} p99 {qw[2]:.3f} max {qw[3]:.3f} | "
+          f">=0.9: {int((rho>=0.9).sum())} ({100*(rho>=0.9).mean():.2f} %), >=1: {int((rho>=1).sum())} of {len(rho)}")
+    w = s_mass[fs] / np.maximum(d, 1e-30) ** 2
+    # A pair whose series does not converge contributes an error of the order of
+    # its whole field whatever p is -- a FLOOR -- so cap rho at 1 in the proxy
+    # instead of letting rho^(p+1) blow up. The uncapped version reported 0.00x.
+    rc = np.minimum(rho, 1.0)
+    e = lambda p: float(np.sum(w * rc ** (p + 1)))
+    share1 = float(np.sum(w[rho >= 1.0]) / max(np.sum(w), 1e-300))
+    share09 = float(np.sum(w[rho >= 0.9]) / max(np.sum(w), 1e-300))
+    print(f"   {tag}: EXACT error proxy sum m_s min(rho,1)^(p+1)/d^2: p4 -> p5 {e(4)/e(5):.2f}x, "
+          f"p5 -> p6 {e(5)/e(6):.2f}x, p4 -> p6 {e(4)/e(6):.2f}x   (measured: reference 3.58x, distributed "
+          f"excess 1.41x); weight share of non-converging pairs (rho >= 1) {100*share1:.2f} %, rho >= 0.9 {100*share09:.2f} %")
+
+
+def com_report(t_cen, t_rad, s_cen, s_rad, s_com, s_mass, ft, fs, tag):
+    """Multipole-side truncation factor ABOUT THE COM, and a mass/distance-weighted
+    error proxy sum m_s rho^(p+1) / d^2 whose p4 -> p6 ratio predicts how fast this
+    population's M2L error converges."""
+    delta = np.linalg.norm(s_com[fs] - s_cen[fs], axis=1)
+    d_com = np.linalg.norm(t_cen[ft] - s_com[fs], axis=1)
+    rho = (s_rad[fs] + delta) / np.maximum(d_com - t_rad[ft], 1e-30)
+    q = np.quantile(rho, [0.5, 0.9, 0.99, 1.0])
+    n_div = int((rho >= 1.0).sum())
+    n_09 = int((rho >= 0.9).sum())
+    w = s_mass[fs] / np.maximum(d_com, 1e-30) ** 2
+    e = lambda p: float(np.sum(w * rho ** (p + 1)))
+    print(f"   {tag}: COM-based multipole factor (r_geo+|COM-gcen|)/(d_com-r_t) median {q[0]:.3f} "
+          f"p90 {q[1]:.3f} p99 {q[2]:.3f} max {q[3]:.3f}; >=0.9: {n_09} ({100*n_09/max(len(rho),1):.2f} %), "
+          f">=1 (DIVERGENT): {n_div}; |COM-gcen|/r_geo median {np.median(delta/np.maximum(s_rad[fs],1e-30)):.3f} "
+          f"p99 {np.quantile(delta/np.maximum(s_rad[fs],1e-30),0.99):.3f}")
+    print(f"   {tag}: error proxy sum m_s rho^(p+1)/d^2: p4 -> p5 {e(4)/e(5):.2f}x, p5 -> p6 {e(5)/e(6):.2f}x, "
+          f"p4 -> p6 {e(4)/e(6):.2f}x   (measured: reference 3.58x, distributed excess 1.41x)")
+
+
+def local_pair_ratios(tree, geom, tag, pos=None, mass=None):
     """(r_t + r_s)/d over the pairs the LANE's own mutual walk accepts on ``tree``.
 
     The cross pairs cluster just below theta (median 0.68, p90 0.78): the export
@@ -368,17 +444,24 @@ def local_pair_ratios(tree, geom, tag):
           f"p90 {q[2]:.3f} p99 {q[3]:.3f} max {q[4]:.3f}; near pairs {int(res.near_count)}")
     # mutual pairs serve BOTH directions, so either node is a target: report both orientations
     asymmetry_report(np.concatenate([r[a], r[b]]), np.concatenate([r[b], r[a]]), np.concatenate([d, d]), tag)
+    if pos is not None:
+        com, m, rcom = node_com(tree, pos, mass)
+        com_report(c, r, c, r, com, m, np.concatenate([a, b]), np.concatenate([b, a]), tag)
+        com_report_exact(com, rcom, com, rcom, m, np.concatenate([a, b]), np.concatenate([b, a]), tag)
     return ratio
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__" and os.environ.get("PROBE_LOCAL_PAIRS") == "1":
     pos, mass = load_ic(IC, N)
     bounds = infer_bounds(jnp.asarray(pos))
     print("\n== the LANE's own pairs, for comparison with the cross pairs above")
     t_full, g_full = build_domain_tree(pos, mass, bounds, LEAF)
-    local_pair_ratios(t_full, g_full, "single-GPU reference tree (all N)")
+    local_pair_ratios(t_full, g_full, "single-GPU reference tree (all N)", pos, mass)
     dom = morton_domains(pos, bounds, NDEV)
     for d in range(NDEV):
         sel = dom == d
         t, g = build_domain_tree(pos[sel], mass[sel], bounds, LEAF)
-        local_pair_ratios(t, g, f"device {d} local tree")
+        local_pair_ratios(t, g, f"device {d} local tree", pos[sel], mass[sel])

@@ -50,6 +50,20 @@ from yggdrax.distributed.summary import occupancy_cut
 __all__ = ["CrossCapacities", "make_cross_hook"]
 
 
+_CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
+
+
+def _cross_mac_geometry_mode() -> str:
+    """``"com"`` (default: the geometry the lane's own walk uses) or ``"aabb"`` (the
+    box geometry this exchange used before Task 1; kept as a control)."""
+    import os
+
+    raw = os.environ.get(_CROSS_MAC_GEOMETRY_ENV, "com").strip().lower()
+    if raw not in ("com", "aabb"):
+        raise ValueError(f"{_CROSS_MAC_GEOMETRY_ENV} must be 'com' or 'aabb', got {raw!r}")
+    return raw
+
+
 class CrossCapacities:
     """Static capacities for one cross exchange. Every one is an overflow risk.
 
@@ -149,8 +163,36 @@ def make_cross_hook(
     def hook(tree_artifacts: Any) -> Optional[tuple]:
         tree = tree_artifacts.tree
         upward = tree_artifacts.upward
-        geom = upward.geometry
         mp = upward.multipoles
+        # THE GEOMETRY THE MAC IS TESTED ON MUST BE THE ONE THE EXPANSIONS USE.
+        # The lane's real-basis sweep expands about the COM (`center_mode='com'`
+        # only) and its own walk tests the MAC about those centres with the exact
+        # particle radii about them (`resolve_walk_geometry`, default "com" in the
+        # strict fused lane -- plan sub-10ms Phase 1.2). This exchange used
+        # `upward.geometry` -- AABB centres, box radii -- so the sender accepted
+        # pairs that are admissible about the box centre and DIVERGENT about the
+        # COM the receiver's M2L actually expands from. Divergent pairs do not
+        # improve with order: measured as a floor near 1.4e-03 the reference lane
+        # passes through (record, Task 1), while routing the whole cross field
+        # through direct sums removed it (6.0e-04 at p6). Same defect class as
+        # memory `mac-geometry-inconsistent-with-com-centres`, one level up.
+        # `JACCPOT_CROSS_MAC_GEOMETRY=aabb` keeps the old behaviour as a control.
+        box_geom = upward.geometry
+        if _cross_mac_geometry_mode() == "com":
+            from jaccpot.runtime._mac_geometry import resolve_walk_geometry
+
+            geom, _ = resolve_walk_geometry(
+                tree,
+                tree_artifacts.positions_sorted,
+                box_geom,
+                getattr(mp, "centers", None),
+                leaf_cap=int(tree_artifacts.leaf_cap),
+                default_mode="com",
+            )
+            if geom is None:
+                geom = box_geom
+        else:
+            geom = box_geom
 
         parent = jnp.asarray(tree.parent)
         n_local = int(jnp.asarray(mp.packed).shape[0])
@@ -222,9 +264,10 @@ def make_cross_hook(
                 valid_pairs=f_live,
                 different_nodes=jnp.ones_like(f_live),
             )
-            # If these two centre arrays were identical the shipping fix above
-            # would be a no-op, and the ~17 % rejection would still be unexplained.
-            # Count the rows where they actually differ.
+            # Walk centres vs expansion centres. Under the COM geometry these are
+            # the SAME array and both numbers must read 0 -- that is the check the
+            # geometry fix is in place. Under `aabb` they differed on 11116/16383
+            # nodes by up to 180 units, which is why both centres travel.
             _gc = jnp.asarray(geom.center)
             _mc_ = jnp.asarray(mp.centers)
             record["center_mismatch"] = jnp.sum(jnp.any(_gc != _mc_, axis=-1))
