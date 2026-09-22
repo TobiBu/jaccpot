@@ -1154,6 +1154,21 @@ Double counting is excluded twice over: the sender's far and near source sets ar
 0 of 14029 earlier), and at the receiver each (local leaf, imported leaf) pair ends in exactly one of the two
 lists the walk emits.
 
+### Task 2 re-verified under the COM geometry
+
+With Task 1's geometry fix merged in (`66494a8`), the near walk at theta classifies MORE of the near import as
+far -- 125472 / 173775 pairs per device (was 89568 / 93005 under the box geometry) -- and every one goes
+through the M2L from the shipped leaf multipole:
+
+| p | `near_theta = theta`, multipoles shipped | `near_theta = 0` (all direct, COM geometry) | difference | vs reference |
+| --- | --- | --- | --- | --- |
+| 4 | 2.3806e-03 | 2.3623e-03 | +0.8 % | 0.81x |
+| 5 | 1.1951e-03 | 1.1804e-03 | +1.2 % | 0.77x |
+| 6 | 6.9536e-04 | 6.8569e-04 | +1.4 % | 0.85x |
+
+Flat in p against the single-GPU lane and within the M2L's own truncation of the direct-sum control. This is
+the configuration to carry forward: `near_theta` defaults to `theta`, no knob set, every flag clean.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
