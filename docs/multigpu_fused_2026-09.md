@@ -1084,6 +1084,37 @@ fp64 both arms p4/p6; fp32 all-direct + fp32 reference + fp32 multipole path p4/
 re-take the recorded numbers under the shared draw); fp32 with `accum = wide` on both arms p4/p6;
 then p5 everywhere. Results below when the cards free up. **Nothing here is a timing.**
 
+## Task 2 -- the near-exported leaves ship their multipoles; `near_theta` returns to theta (2026-09-22)
+
+Branch `perf/multigpu-near-multipoles` (worktree `jaccpot-mgpu-task2-wt`, off the Task 1 head). The near
+payload is now `[3W positions | W masses | 3 geometric centre | 1 radius | n_coeff multipole | 3 expansion
+centre]` per leaf tile, and the receiver's near walk runs at theta again: its near pairs are summed directly as
+before, its far pairs -- **89568 / 93005 per device at N = 2e5, 72 % of the near walk, the ones that were
+unservable and were the final 12x** -- become a SECOND imported multipole block behind the far import.
+`merge_imported_blocks` stacks the two and shifts the near block's source rows by the far payload's
+**capacity**, not its live count (the far payload's dead rows are still rows of the concatenated array); a
+control test reads the multipole each pair points at, so a live-count shift would fail it. `_l2l.py` needs no
+change: the imported block is simply longer and `n_targets` stays `n_local`.
+
+**Verified on cards 2+7, same probe, same shared draw, every flag clean:**
+
+| p | `near_theta = theta`, multipoles shipped | `near_theta = 0` (all direct) | difference |
+| --- | --- | --- | --- |
+| 4 | 3.6200e-03 | 3.6120e-03 | +0.2 % |
+| 5 | 2.2580e-03 | 2.2580e-03 | 0 |
+| 6 | 1.7073e-03 | 1.7045e-03 | +0.2 % |
+
+The two agree to expansion accuracy at every order, which is the check the handoff demanded: pairs are neither
+double-served nor dropped. The same worktree at `near_theta = 0` reproduces 3.6120e-03 exactly, so the code
+change is inert when the knob removes the far pairs, and the 0.2 % is the M2L truncation on ~90k pairs that
+were exact direct sums before. The cost side cannot be quoted on this box (nothing here is a timing); what
+moved is ~90k direct-sum leaf pairs per device back into the M2L, at the price of `n_coeff + 3` floats per
+near-exported leaf (+20 % of the near payload at p6, W = 64).
+
+Double counting is excluded twice over: the sender's far and near source sets are disjoint subtrees (measured
+0 of 14029 earlier), and at the receiver each (local leaf, imported leaf) pair ends in exactly one of the two
+lists the walk emits.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
