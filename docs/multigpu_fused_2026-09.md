@@ -1224,6 +1224,20 @@ and the per-particle dump at a handful of pairs. The method note is the one the 
 diagnostic that "passed" (`center_mismatch` -> both centres travel) was answering a narrower question than the
 one that mattered.
 
+### Why the one-sided export was hit and the mutual walk was not (CPU, N = 2e5)
+
+`bench/multigpu_far_import_dropped_pairs_probe.py` with `PROBE_LOCAL_PAIRS=1`, both walks run on the BOX
+geometry, then scored about the COM with the exact particle radius about it: the mutual walk's pairs are
+near-symmetric (r_big/r_small median 1.2) and carry **0.3 %** of their mass/distance weight in pairs whose
+expansion cannot converge about the COM (rho >= 1); the export walk's pairs are lopsided (r_big/r_small
+median 10-13, p90 ~150: a fixed <= 4-leaf cell against whatever node first passes the MAC) and carry
+**17.5 % and 29.3 %** of their weight in non-converging pairs. The capped proxy sum m_s min(rho,1)^(p+1) / d^2
+predicts a p4 -> p6 improvement of 1.12-1.19x for the cross pairs against 2.25-2.49x for the mutual pairs --
+the measured 1.41x vs 3.58x, in order and in magnitude. So both surviving hypotheses were right TOGETHER: the
+box/COM inconsistency exists for every pair, and the lopsided pairs the one-sided export produces are the ones
+without slack to absorb it. Testing the MAC about the COM with exact radii removes the inconsistency; the
+lopsidedness stays, and is why the cross field still costs more pairs per unit of accuracy than the local one.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
