@@ -10,7 +10,7 @@ repos:
       - id: isort
 
   - repo: https://github.com/jsh9/pydoclint
-    rev: 0.9.1
+    rev: 0.10.1
     hooks:
       - id: pydoclint
         # Runs on commit. Docstring drift is cheap to catch now and expensive to fix
@@ -33,7 +33,7 @@ repos:
         args: ["--config", "pyproject.toml"]
 
   - repo: https://github.com/PyCQA/flake8
-    rev: 7.3.0
+    rev: 7.4.1
     hooks:
       - id: flake8
         # UNDEFINED NAMES ONLY -- deliberately not a style linter.
