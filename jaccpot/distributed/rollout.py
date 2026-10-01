@@ -274,7 +274,7 @@ def _make_repartition(
 
     ndev = len(_mesh_devices(mesh))
 
-    def body(x, v, m, ids, count):
+    def body(x: Array, v: Array, m: Array, ids: Array, count: Array) -> tuple:
         n_live = count[0]
         bounds = global_mesh_bounds(x, num_valid=n_live, axis_name=axis_name)
         payload = {"v": v, "id": ids} if route_velocities else {"id": ids}
@@ -360,7 +360,7 @@ def make_reference_direct_force(
         ``force(positions, masses, count, ids) -> (acceleration, overflow=False)``.
     """
 
-    def body(x, m, count, ids):
+    def body(x: Array, m: Array, count: Array, ids: Array) -> tuple:
         live = jnp.arange(x.shape[0]) < count[0]
         xs = jax.lax.all_gather(x, axis_name, tiled=True)
         ms = jax.lax.all_gather(jnp.where(live, m, 0.0), axis_name, tiled=True)
@@ -385,7 +385,7 @@ def make_reference_direct_force(
         )
     )
 
-    def force(positions, masses, count, ids):
+    def force(positions: Array, masses: Array, count: Array, ids: Array) -> tuple:
         acc, flag = mapped(positions, masses, count, ids)
         return acc, jnp.any(flag)
 
@@ -507,7 +507,9 @@ def setup_fused_force(
         cross_near_sink=sink,
     )
 
-    def force(positions, masses, count, ids):
+    def force(
+        positions: Array, masses: Array, count: Array, ids: Optional[Array]
+    ) -> tuple:
         del ids  # the fused lane's rows come back in their input order
         acc, flag = evaluator(positions, masses, count)
         return acc, flag
