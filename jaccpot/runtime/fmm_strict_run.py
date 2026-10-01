@@ -825,45 +825,15 @@ class StrictRunMixin(_EngineBase):
         def _static_target_block_capacity_ok(
             prepared_in: PreparedStateLike,
         ) -> Array:
-            offsets = jnp.asarray(prepared_in.neighbor_list.offsets)
-            counts = offsets[1:] - offsets[:-1]
-            ok = jnp.asarray(True)
-            padded = getattr(
+            # The guard is shared with the multi-GPU lane (`capacity_guard`); the
+            # traced caps are host constants recorded while the refresh traced.
+            from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
+
+            return fused_state_capacity_ok(
                 prepared_in,
-                "nearfield_target_block_source_leaf_ids_padded",
-                None,
+                traced_caps=getattr(self, "_strict_fused_traced_caps", None),
+                rectangle_guard_active=rectangle_guard_active,
             )
-            if padded is not None and rectangle_guard_active:
-                padded_arr = jnp.asarray(padded)
-                if padded_arr.ndim == 3 and int(padded_arr.shape[1]) > 0:
-                    capacity = int(padded_arr.shape[1]) * int(padded_arr.shape[2])
-                    ok = ok & jnp.all(
-                        counts <= jnp.asarray(capacity, dtype=counts.dtype)
-                    )
-            # Traversal-capacity saturation guard.  The traced refresh walk runs
-            # with fixed caps, and a neighbour row that fills its cap -- or a
-            # far-pair list that fills its buffer -- means entries were dropped
-            # and the force is wrong.  The neighbour cap is the one that fails
-            # SILENTLY: yggdrax's near-overflow flag is a tracer under jit and
-            # nothing reads it, which is the defect this guard exists for.  The
-            # far-pair cap already raises through a debug callback in
-            # ``_raw_to_compact_far_pairs``, so its arm here is a second, cheap
-            # line of defence rather than the only one.  Both caps are host
-            # constants recorded while the refresh traced
-            # (``_strict_fused_traced_caps``), so this is a static comparison.
-            traced_caps = getattr(self, "_strict_fused_traced_caps", None)
-            if isinstance(traced_caps, dict):
-                nbr_cap = traced_caps.get("max_neighbors_per_leaf_used")
-                if nbr_cap is not None and int(counts.shape[0]) > 0:
-                    ok = ok & (
-                        jnp.max(counts) < jnp.asarray(int(nbr_cap), counts.dtype)
-                    )
-                far_cap = traced_caps.get("compact_far_pair_capacity")
-                far_pairs = getattr(prepared_in, "compact_far_pairs", None)
-                far_count = getattr(far_pairs, "far_pair_count", None)
-                if far_cap is not None and far_count is not None:
-                    ok = ok & (jnp.asarray(far_count) < jnp.asarray(int(far_cap)))
-            return ok
 
         def _refresh_and_evaluate_endpoint(
             prepared_in: PreparedStateLike,

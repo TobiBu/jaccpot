@@ -162,8 +162,15 @@ def make_cross_hook(
         imported sources indexed from ``n_local``.
     """
     cap = caps if caps is not None else CrossCapacities()
+    # ALWAYS-ON overflow channel, independent of the diagnostics `record`: the
+    # production and timing paths pass no record, and before this sink existed the
+    # far half's flags then reached nobody. Holds tracers; the evaluator reads it
+    # inside the same trace (`hook.flag_sink`) and ORs it into the mesh flag.
+    flag_sink: dict = {}
 
     def hook(tree_artifacts: Any) -> Optional[tuple]:
+        # a RE-TRACE must not see the previous trace's tracers
+        flag_sink.clear()
         tree = tree_artifacts.tree
         upward = tree_artifacts.upward
         mp = upward.multipoles
@@ -527,8 +534,33 @@ def make_cross_hook(
                 | sb_n.csr_overflow
                 | rl_n.near_overflow
                 | rl_n.queue_overflow
+                # the near walk's FAR list now feeds the M2L (leaf multipoles are
+                # shipped), so its capacity is a correctness condition too
+                | rl_n.far_overflow
                 | tile_truncated
+                # the exchange itself has no overflow flag: compare what arrived
+                # with what the receive buffers can hold
+                | (got_n.num_payload > cap.recv_node_cap)
+                | (got_n.num_csr > cap.recv_csr_cap)
             )
+            flag_sink["near"] = near_sink["overflow"]
+
+        far_overflow = (
+            # `summary.overflow` is the flag whose absence is silent: a truncated cut
+            # drops part of the RECEIVER from the exchange, so those particles get
+            # no cross field at all. It loses force, not accuracy.
+            summary.overflow
+            | ex.far_overflow
+            | ex.near_overflow
+            | ex.queue_overflow
+            | sb.node_overflow
+            | sb.csr_overflow
+            | rl.far_overflow
+            | rl.queue_overflow
+            | (got.num_payload > cap.recv_node_cap)
+            | (got.num_csr > cap.recv_csr_cap)
+        )
+        flag_sink["far"] = far_overflow
 
         if record is not None:
             record["export_far"] = ex.far_count
@@ -547,20 +579,7 @@ def make_cross_hook(
             record["imported_rows"] = got.num_payload
             record["summary_cells"] = summary.num_cells
             record["summary_leaves"] = jnp.sum(summary.leaves_per_cell)
-            record["overflow"] = (
-                # `summary.overflow` was missing from this list, and it is the one
-                # flag whose absence is silent: a truncated cut drops part of the
-                # RECEIVER from the exchange, so those particles get no cross field
-                # at all. It loses force, not accuracy, so no invariant moves.
-                summary.overflow
-                | ex.far_overflow
-                | ex.near_overflow
-                | ex.queue_overflow
-                | sb.node_overflow
-                | sb.csr_overflow
-                | rl.far_overflow
-                | rl.queue_overflow
-            )
+            record["overflow"] = far_overflow
 
         # -1 padding on the pair list is dropped by the CSR build; the imported
         # sources are rebased to sit ABOVE every local index, which is what the
@@ -584,6 +603,7 @@ def make_cross_hook(
         tgt = jnp.where(live_pair, rl.far_target, -1)
         return imp_mp, imp_cen, src, tgt
 
+    hook.flag_sink = flag_sink  # pyright: ignore[reportFunctionMemberAccess]
     return hook
 
 

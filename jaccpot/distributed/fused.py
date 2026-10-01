@@ -433,7 +433,11 @@ def make_fused_force_evaluator(
         # shard_map keeps the mapped axis at size 1; strip it so the rest of the
         # body sees exactly what the single-device lane sees.
         prepared_local = jax.tree_util.tree_map(lambda leaf: leaf[0], prepared)
-        live = num_valid[0]
+        # A count above the shard's capacity cannot be real particles; clamp so a
+        # bad count cannot index past the arrays, and report it as an overflow.
+        cap_rows = int(positions.shape[0])
+        count_over_cap = num_valid[0] > cap_rows
+        live = jnp.minimum(num_valid[0], cap_rows)
         bounds = global_mesh_bounds(positions, num_valid=live, axis_name=axis_name)
         refreshed, acceleration = fused_force_step(
             solver,
@@ -449,14 +453,10 @@ def make_fused_force_evaluator(
             theta=theta,
             num_valid=live,
         )
-        local = _local_overflow(refreshed)
-        # The cross near buffers saturate independently of the local lane's, and
-        # their flag is a tracer the caller cannot read host-side. Folding it in
-        # here is the only way it reaches the caller at all.
-        if cross_near_sink and "overflow" in cross_near_sink:
-            local = local | jnp.asarray(cross_near_sink["overflow"]).any()
-        if cross_record and "overflow" in cross_record:
-            local = local | jnp.asarray(cross_record["overflow"]).any()
+        local = _local_overflow(refreshed, getattr(solver, "_impl", solver))
+        local = _fold_cross_flags(
+            local | count_over_cap, cross_hook, cross_near_sink, cross_record
+        )
         flag = reduce_flag_across_mesh(local, axis_name=axis_name)
         if not cross_record_keys:
             return acceleration, flag
@@ -492,25 +492,77 @@ def make_fused_force_evaluator(
     return force
 
 
-def _local_overflow(refreshed: Any) -> Array:
-    """This device's saturation flag, OR-ed from whatever the refresh surfaced.
+def _fold_cross_flags(
+    local: Array,
+    cross_hook: Any,
+    cross_near_sink: Optional[dict],
+    cross_record: Optional[dict],
+) -> Array:
+    """OR every cross-domain overflow flag of this trace into the local flag.
 
-    Kept separate from the mesh reduction so the local value stays available to
-    the per-device count that must NOT be driven by the mesh flag.
+    The cross buffers saturate independently of the local lane's, and their flags
+    are tracers the caller cannot read host-side, so folding them in here is the
+    only way they reach the caller. ``cross_hook.flag_sink`` is the hook's
+    ALWAYS-ON channel and does not depend on a diagnostics record, which the
+    production and timing paths do not pass; the near sink and the record are
+    read as well, for hooks that predate the sink.
+
+    Parameters
+    ----------
+    local : Array
+        This device's flag so far.
+    cross_hook : Any
+        The hook, or ``None``.
+    cross_near_sink : Optional[dict]
+        The near-half sink, or ``None``.
+    cross_record : Optional[dict]
+        The diagnostics record, or ``None``.
+
+    Returns
+    -------
+    Array
+        Boolean scalar, ``True`` when anything saturated.
+    """
+    flag = jnp.asarray(local, jnp.bool_)
+    sink = getattr(cross_hook, "flag_sink", None)
+    if sink:
+        for value in sink.values():
+            flag = flag | jnp.asarray(value, jnp.bool_).any()
+    if cross_near_sink and "overflow" in cross_near_sink:
+        flag = flag | jnp.asarray(cross_near_sink["overflow"], jnp.bool_).any()
+    if cross_record and "overflow" in cross_record:
+        flag = flag | jnp.asarray(cross_record["overflow"], jnp.bool_).any()
+    return flag
+
+
+def _local_overflow(refreshed: Any, engine: Any = None) -> Array:
+    """This device's saturation flag for the local (single-device) half of the force.
+
+    Delegates to :func:`jaccpot.runtime.capacity_guard.fused_state_capacity_ok`, the
+    same guard ``strict_run_v2`` uses. This function used to read
+    ``leaf_capacity_overflow`` / ``walk_overflow`` / ``capacity_overflow``, none of
+    which ``LargeNPreparedState`` has, so the flag was the constant ``False`` and a
+    saturated walk or leaf partition on a mesh device went unreported.
 
     Parameters
     ----------
     refreshed : Any
         The refreshed prepared state.
+    engine : Any
+        The runtime engine whose recorded traced caps refine the check; ``None``
+        uses the structural checks only.
 
     Returns
     -------
     Array
-        Boolean scalar for this device.
+        Boolean scalar for this device, ``True`` when something saturated.
     """
-    flag = jnp.asarray(False)
-    for name in ("leaf_capacity_overflow", "walk_overflow", "capacity_overflow"):
-        value = getattr(refreshed, name, None)
-        if value is not None:
-            flag = jnp.logical_or(flag, jnp.asarray(value, jnp.bool_).any())
-    return flag
+    from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_enabled
+    from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
+
+    ok = fused_state_capacity_ok(
+        refreshed,
+        traced_caps=getattr(engine, "_strict_fused_traced_caps", None),
+        rectangle_guard_active=not bool(_nearfield_csr_lane_enabled()),
+    )
+    return jnp.logical_not(ok)
