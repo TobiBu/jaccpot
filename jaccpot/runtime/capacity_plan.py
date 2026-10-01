@@ -257,7 +257,9 @@ def plan_from_registry(
         num_internal=int(num_internal),
         level_batch_width=int(width),
         num_levels=int(levels),
-        upward_num_levels=int(levels if upward_num_levels is None else upward_num_levels),
+        upward_num_levels=int(
+            levels if upward_num_levels is None else upward_num_levels
+        ),
     )
 
 

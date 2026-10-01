@@ -88,9 +88,9 @@ def test_a_cold_registry_silently_deselects_the_pallas_cascade(monkeypatch):
     cold = _traced_kwargs(tree, total_nodes, num_internal)
 
     assert "pallas_levels" not in cold, "cold registry unexpectedly kept the cascade"
-    assert cold["level_batch_width"] == num_internal, (
-        "cold registry should fall back to the nodes x depth width"
-    )
+    assert (
+        cold["level_batch_width"] == num_internal
+    ), "cold registry should fall back to the nodes x depth width"
 
 
 @pytest.mark.usefixtures("cold_registry")
@@ -182,7 +182,9 @@ def test_merge_plans_covers_the_worst_device():
         _l2l_level_compact_kwargs(
             tree, total_nodes=total_nodes, num_internal=num_internal
         )
-        plans.append(plan_from_registry(total_nodes=total_nodes, num_internal=num_internal))
+        plans.append(
+            plan_from_registry(total_nodes=total_nodes, num_internal=num_internal)
+        )
     level_shapes._WIDTHS.clear()
     level_shapes._LEVELS.clear()
 

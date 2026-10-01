@@ -48,11 +48,11 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from yggdrax.distributed.cross_walk import dual_tree_walk_cross_impl  # noqa: E402
 from multigpu_import_volume_probe import build_domain_tree  # noqa: E402
 from multigpu_oversized_cell_probe import load_ic  # noqa: E402
 from yggdrax._cell_partition import MORTON_LEVELS  # noqa: E402
 from yggdrax.bounds import infer_bounds  # noqa: E402
+from yggdrax.distributed.cross_walk import dual_tree_walk_cross_impl  # noqa: E402
 from yggdrax.morton import morton_encode  # noqa: E402
 
 N = int(os.environ.get("PROBE_N", "200000"))

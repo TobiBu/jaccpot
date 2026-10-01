@@ -10,13 +10,14 @@ comparison means nothing (learned the hard way at ndev=1), so the box is compute
 on the host exactly as global_mesh_bounds computes it and handed to the reference.
 """
 
-import os, sys
+import os
+import sys
 
 sys.path.insert(0, "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu")
 from codes.compare_force import (
+    FAST_LANE_ENV_BY_LEAF,
     apply_fast_lane_env,
     fast_lane_overrides_for_leaf,
-    FAST_LANE_ENV_BY_LEAF,
 )
 
 NDEV = int(os.environ.get("PROBE_NDEV", "2"))
@@ -46,37 +47,41 @@ os.environ["JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"] = f"{CAP},{N}"
 _TRAV = dict((FAST_LANE_ENV_BY_LEAF.get(LEAF) or {}).get("_traversal_overrides", {}))
 
 import time
-import numpy as np, jax, jax.numpy as jnp
+
+import jax
+import jax.numpy as jnp
+import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 WDT = getattr(np, DTYPE)
 JDT = getattr(jnp, DTYPE)
 ACCUM = os.environ.get("JACCPOT_NEARFIELD_ACCUM", "input")
-from jaccpot import FastMultipoleMethod, TraversalOverrides
-from jaccpot.config import (
-    FMMAdvancedConfig,
-    TreeConfig,
-    FarFieldConfig,
-    NearFieldConfig,
-    RuntimePolicyConfig,
-)
-from jaccpot.distributed.fused import (
-    fused_force_step,
-    stack_prepared_states,
-    make_fused_force_evaluator,
-)
-from jaccpot.runtime.capacity_plan import (
-    plan_from_registry,
-    merge_plans,
-    fused_capacity_plan_overrides,
-)
-from jaccpot.runtime import _level_shapes as LS
-from yggdrax.distributed.sharding import make_mesh
-from yggdrax.bounds import infer_bounds
-from yggdrax.morton import morton_encode
 import yggdrax._cell_partition as cp
 from common.ic import IC_GENERATORS
 from common.reference import direct_accelerations
+from yggdrax.bounds import infer_bounds
+from yggdrax.distributed.sharding import make_mesh
+from yggdrax.morton import morton_encode
+
+from jaccpot import FastMultipoleMethod, TraversalOverrides
+from jaccpot.config import (
+    FarFieldConfig,
+    FMMAdvancedConfig,
+    NearFieldConfig,
+    RuntimePolicyConfig,
+    TreeConfig,
+)
+from jaccpot.distributed.fused import (
+    fused_force_step,
+    make_fused_force_evaluator,
+    stack_prepared_states,
+)
+from jaccpot.runtime import _level_shapes as LS
+from jaccpot.runtime.capacity_plan import (
+    fused_capacity_plan_overrides,
+    merge_plans,
+    plan_from_registry,
+)
 
 ORDER = int(os.environ.get("PROBE_ORDER", "4"))
 THETA = float(os.environ.get("PROBE_THETA", "0.8"))
@@ -156,7 +161,8 @@ _DUMP = {}
 
 def _dump(key, p, got, ref):
     """Per-particle (position, lane force, fp64 direct force) for the probe targets,
-    written to PROBE_DUMP (an .npz) at exit so the error can be located on the sphere."""
+    written to PROBE_DUMP (an .npz) at exit so the error can be located on the sphere.
+    """
     if os.environ.get("PROBE_DUMP"):
         _DUMP[f"{key}_pos"] = np.asarray(p, np.float64)
         _DUMP[f"{key}_got"] = np.asarray(got, np.float64)
@@ -270,7 +276,8 @@ nv = jnp.asarray(np.asarray(dev_live, np.int32))
 # Pre-shard the inputs on the mesh once. Handing the jitted shard_map unsharded
 # arrays (committed to device 0) makes every call re-shard them first, which a
 # timing would then charge to the force.
-from jax.sharding import NamedSharding, PartitionSpec as _P
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as _P
 from yggdrax.distributed.comm import AXIS_NAME as _AXIS
 
 _shard = NamedSharding(mesh, _P(_AXIS))
@@ -359,7 +366,13 @@ def run(hook, near_sink=None, record=None, keys=(), time_tag=None):
         timing["first_call_s"] = first_call_s
         timing["contention"] = {
             k: getattr(cont, k)
-            for k in ("loadavg1_max", "other_gpu_util_max", "foreign_pids_on_devices", "contaminated", "flags")
+            for k in (
+                "loadavg1_max",
+                "other_gpu_util_max",
+                "foreign_pids_on_devices",
+                "contaminated",
+                "flags",
+            )
             if hasattr(cont, k)
         }
         TIMINGS[time_tag] = timing
@@ -393,7 +406,9 @@ def _cap_bits(name, default):
 
 
 EXPORT_THETA = (
-    float(os.environ["PROBE_EXPORT_THETA"]) if "PROBE_EXPORT_THETA" in os.environ else None
+    float(os.environ["PROBE_EXPORT_THETA"])
+    if "PROBE_EXPORT_THETA" in os.environ
+    else None
 )
 
 caps = CrossCapacities(
@@ -443,7 +458,11 @@ def err_against_direct(accel_by_dev, tag):
         got = accel_by_dev[d * CAP : (d + 1) * CAP][: dev_live[d]][pick]
         num += float(((got - ref) ** 2).sum())
         den += float((ref**2).sum())
-        _key = {"local-only (no cross)": "local", "+ cross FAR": "far", "+ cross FAR and NEAR": "both"}[tag]
+        _key = {
+            "local-only (no cross)": "local",
+            "+ cross FAR": "far",
+            "+ cross FAR and NEAR": "both",
+        }[tag]
         _dump(f"{_key}_d{d}", pos[np.asarray(sel)[pick]], got, ref)
     rel = float(np.sqrt(num / den))
     print(
@@ -466,9 +485,18 @@ if TIME_REPS > 0:
     e_cross = err_against_direct(a_both, "+ cross FAR and NEAR")
     print(f"local-only overflow={ovf_local}   far+near overflow={ovf_both}", flush=True)
     result = dict(
-        n=N, ndev=NDEV, n_per_dev=N // NDEV, leaf=LEAF, order=ORDER, theta=THETA, dtype=DTYPE,
+        n=N,
+        ndev=NDEV,
+        n_per_dev=N // NDEV,
+        leaf=LEAF,
+        order=ORDER,
+        theta=THETA,
+        dtype=DTYPE,
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
-        err_local=e_local, err_cross=e_cross, overflow_local=ovf_local, overflow_cross=ovf_both,
+        err_local=e_local,
+        err_cross=e_cross,
+        overflow_local=ovf_local,
+        overflow_cross=ovf_both,
         timings=TIMINGS,
         cross_mac_geometry=os.environ.get("JACCPOT_CROSS_MAC_GEOMETRY", "com"),
     )

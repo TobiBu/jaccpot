@@ -272,7 +272,9 @@ def fused_force_step(
             _rows = jnp.arange(_L)
             _first = jnp.where(msk[:, 0], idx[:, 0], -1)
             _want = jnp.where(
-                _ni + _rows < _nr.shape[0], _nr[jnp.clip(_ni + _rows, 0, _nr.shape[0] - 1), 0], -1
+                _ni + _rows < _nr.shape[0],
+                _nr[jnp.clip(_ni + _rows, 0, _nr.shape[0] - 1), 0],
+                -1,
             )
             _has = msk.any(axis=1)
             cross_record["leaf_pool_mismatch"] = jnp.sum(_has & (_first != _want))

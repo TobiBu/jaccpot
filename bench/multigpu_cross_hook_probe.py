@@ -44,6 +44,9 @@ jax.config.update("jax_enable_x64", True)
 
 import yggdrax._cell_partition as cp  # noqa: E402
 from common.ic import IC_GENERATORS  # noqa: E402
+from yggdrax.bounds import infer_bounds  # noqa: E402
+from yggdrax.morton import morton_encode  # noqa: E402
+
 from jaccpot import FastMultipoleMethod, TraversalOverrides  # noqa: E402
 from jaccpot.config import (  # noqa: E402
     FarFieldConfig,
@@ -53,8 +56,6 @@ from jaccpot.config import (  # noqa: E402
     TreeConfig,
 )
 from jaccpot.distributed.fused import fused_force_step  # noqa: E402
-from yggdrax.bounds import infer_bounds  # noqa: E402
-from yggdrax.morton import morton_encode  # noqa: E402
 
 ORDER, THETA, SOFT = 4, 0.8, 1e-7
 
@@ -184,9 +185,9 @@ def main():
     # path executes. The force must not move. This is the strongest link in the
     # chain: everything runs and nothing may change.
     from jax.sharding import PartitionSpec as Psp
+    from yggdrax.distributed.sharding import make_mesh
 
     from jaccpot.distributed.cross import CrossCapacities, make_cross_hook
-    from yggdrax.distributed.sharding import make_mesh
 
     rec = {}
     caps = CrossCapacities(max_cells=512, send_node_cap=2048, recv_node_cap=2048)

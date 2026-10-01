@@ -38,7 +38,6 @@ from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
-
 from yggdrax.distributed.comm import AXIS_NAME
 from yggdrax.distributed.export import build_send_buffers, export_walk
 from yggdrax.distributed.import_cells import (
@@ -60,7 +59,9 @@ def _cross_mac_geometry_mode() -> str:
 
     raw = os.environ.get(_CROSS_MAC_GEOMETRY_ENV, "com").strip().lower()
     if raw not in ("com", "aabb"):
-        raise ValueError(f"{_CROSS_MAC_GEOMETRY_ENV} must be 'com' or 'aabb', got {raw!r}")
+        raise ValueError(
+            f"{_CROSS_MAC_GEOMETRY_ENV} must be 'com' or 'aabb', got {raw!r}"
+        )
     return raw
 
 
@@ -479,7 +480,9 @@ def make_cross_hook(
             imp_rad_n = got_n.payload[:, 4 * W + 3]
             _o = 4 * W + 4
             imp_mp_n = got_n.payload[:, _o : _o + n_coeff]  # multipole -> M2L
-            imp_ecen_n = got_n.payload[:, _o + n_coeff : _o + n_coeff + 3]  # expansion -> M2L
+            imp_ecen_n = got_n.payload[
+                :, _o + n_coeff : _o + n_coeff + 3
+            ]  # expansion -> M2L
 
             combined_cen_n = jnp.concatenate([jnp.asarray(geom.center), imp_cen_n])
             combined_rad_n = jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n])
@@ -632,7 +635,9 @@ def merge_imported_blocks(
     src = jnp.concatenate(
         [
             jnp.where(live_f, base + far_src, -1),
-            jnp.where(live_n, base + jnp.asarray(far_rows, far_src.dtype) + near_src, -1),
+            jnp.where(
+                live_n, base + jnp.asarray(far_rows, far_src.dtype) + near_src, -1
+            ),
         ]
     )
     tgt = jnp.concatenate(

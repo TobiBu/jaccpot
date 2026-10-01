@@ -61,11 +61,11 @@ from multigpu_import_volume_probe import (  # noqa: E402
     plane_domains,
 )
 from multigpu_oversized_cell_probe import load_ic  # noqa: E402
+from yggdrax._cell_partition import MORTON_LEVELS  # noqa: E402
 from yggdrax._interactions_impl import _build_mac_extents  # noqa: E402
 from yggdrax.bounds import infer_bounds  # noqa: E402
 from yggdrax.distributed.cross_walk import dual_tree_walk_cross_impl  # noqa: E402
 from yggdrax.interactions import dual_tree_walk_mutual  # noqa: E402
-from yggdrax._cell_partition import MORTON_LEVELS  # noqa: E402
 from yggdrax.morton import morton_encode  # noqa: E402
 
 N = int(os.environ.get("PROBE_N", "200000"))

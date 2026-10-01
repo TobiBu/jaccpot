@@ -174,14 +174,23 @@ def main():
                     # direction that would flatter the design.
                     full = max(64, n_leaves_s)
                     res = dual_tree_walk_cross_impl(
-                        trees[dst], geoms[dst], trees[src], geoms[src], float(THETA),
+                        trees[dst],
+                        geoms[dst],
+                        trees[src],
+                        geoms[src],
+                        float(THETA),
                         mac_type="dehnen",
                         max_interactions_per_node=full,
                         max_neighbors_per_leaf=full,
                         max_pair_queue=1 << 22,
-                        collect_far=True, collect_near=True,
+                        collect_far=True,
+                        collect_near=True,
                     )
-                    if bool(res.near_overflow) or bool(res.queue_overflow) or bool(res.far_overflow):
+                    if (
+                        bool(res.near_overflow)
+                        or bool(res.queue_overflow)
+                        or bool(res.far_overflow)
+                    ):
                         raise RuntimeError(
                             f"{part} ndev={ndev} dst={dst} src={src}: overflow "
                             f"(near={bool(res.near_overflow)} far={bool(res.far_overflow)} "
@@ -193,11 +202,15 @@ def main():
                     # dense [leaves, K] rows: take each row's live prefix
                     if nbr.ndim == 2:
                         rows = [nbr[i, : cnt[i]] for i in range(nbr.shape[0])]
-                        used = np.unique(np.concatenate(rows)) if rows else np.empty(0, int)
+                        used = (
+                            np.unique(np.concatenate(rows))
+                            if rows
+                            else np.empty(0, int)
+                        )
                     else:
                         used = np.unique(nbr[nbr >= 0])
                     used = used[used >= 0]
-                    used = used[occ_src[used] > 0]   # never count an empty leaf
+                    used = used[occ_src[used] > 0]  # never count an empty leaf
                     need_l += int(used.size)
                     need_p += int(occ_src[used].sum()) if used.size else 0
                 imp_leaves.append(need_l)
@@ -205,7 +218,11 @@ def main():
 
             per_dev = N / ndev
             halo = float(np.mean(imp_parts)) / per_dev
-            per_src = float(np.mean(imp_leaves)) / max(ndev - 1, 1) / max(np.mean(loc_leaves), 1)
+            per_src = (
+                float(np.mean(imp_leaves))
+                / max(ndev - 1, 1)
+                / max(np.mean(loc_leaves), 1)
+            )
             print(
                 f"{part:>8} {ndev:>5} {per_dev:>9.0f} {np.mean(loc_leaves):>8.0f} "
                 f"{np.mean(imp_leaves):>8.0f} {np.mean(imp_parts):>9.0f} "

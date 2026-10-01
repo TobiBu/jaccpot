@@ -38,9 +38,15 @@ def _blocks(rng, far_live, near_live, far_pairs, near_pairs):
     for i, (t, r) in enumerate(near_pairs):
         nt[i], ns[i] = t, r
     return (
-        jnp.asarray(far_mp), jnp.asarray(far_cen), jnp.asarray(fs), jnp.asarray(ft),
+        jnp.asarray(far_mp),
+        jnp.asarray(far_cen),
+        jnp.asarray(fs),
+        jnp.asarray(ft),
         jnp.asarray(len(far_pairs), jnp.int32),
-        jnp.asarray(near_mp), jnp.asarray(near_cen), jnp.asarray(ns), jnp.asarray(nt),
+        jnp.asarray(near_mp),
+        jnp.asarray(near_cen),
+        jnp.asarray(ns),
+        jnp.asarray(nt),
         jnp.asarray(len(near_pairs), jnp.int32),
     )
 
