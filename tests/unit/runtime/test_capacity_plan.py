@@ -47,9 +47,16 @@ def _cell_tree(n, seed, leaf_size=64, leaf_capacity=512):
         jnp.float32,
     )
     mass = jnp.full((n,), 1.0 / n, jnp.float32)
-    return build_static_cells_tree(
+    topology = build_static_cells_tree(
         pos, mass, infer_bounds(pos), leaf_size=leaf_size, leaf_capacity=leaf_capacity
     )
+    # Wrap the impl topology in the PUBLIC tree, as every production caller does:
+    # `_l2l_level_compact_kwargs` is annotated `tree: yggdrax.tree.Tree`, and the
+    # runtime type-check job (JACCPOT_RUNTIME_TYPECHECK=1) rejects the bare impl
+    # RadixTree the helper used to return. The wrapper delegates every field.
+    from yggdrax.tree import RadixTree
+
+    return RadixTree(topology=topology, build_mode="static_radix")
 
 
 def _shape_of(tree):
