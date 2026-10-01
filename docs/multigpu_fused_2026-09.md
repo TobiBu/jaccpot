@@ -1324,6 +1324,39 @@ shard; the records are now merged (field-wise max) and installed. And the traced
 cell-tree depth check now reads the same bound the upward sweep loops to (the
 installed plan first).
 
+## Gate G2: the rollout repartitions on device, and nothing but ownership changes (2026-10-01)
+
+`jaccpot/distributed/rollout.py` + yggdrax `sfc_repartition`; gate `bench/multigpu_rollout_gate.py`, rows in
+`bench/results/multigpu_rollout_gate/`. Plummer N = 2e5 with isotropic DF velocities (virial), leaf 64,
+theta 0.8, p6, dt 0.005, 100 steps, 2 cards (1 and 4; a correctness gate, not a timing), every flag live.
+
+**CPU first (4 forced devices, partition-independent reference force):** repartitioning every step and never
+repartitioning give BITWISE-identical positions, velocities and accelerations by id over 30 steps at ndev 2
+and 4, with different ownership; a mutated arm that leaves velocities in the old row order is caught.
+
+**GPU, the fused lane:**
+
+| clause | result |
+| --- | --- |
+| flags | clean on all 100 steps |
+| ids exactly once | at every repartition and probe step |
+| balance | counts 99542 / 100458 at worst (bound 101,563 = ceil(N/2) x (1 + 4/256)) |
+| repartitions | 6 (steps 16 .. 96), each moving ~3,100 particles |
+| ownership vs the never-repartition arm at step 100 | 17,731 of 200,000 particles on a different device |
+| force vs the single-GPU lane on the same positions | ratio 0.87 - 1.07 over the 7 probe steps (gate 1.2) |
+| energy dE/E at step 100 | 2.48e-04 (2 cards) vs 2.50e-04 (1 card) vs 2.47e-04 (2 cards, never repartitioned) |
+
+The fp64 probe errors stay between 5.8e-04 and 8.6e-04 over the run, the single-GPU lane's class. The energy
+drift is the time step's and the force error's, not the repartition's: the three arms agree to three digits,
+including a rise between steps 50 and 75 that all of them show.
+
+**~3,100 moved per repartition is mostly pivot jitter, not dynamics:** at 256 samples per device the sample-sort
+boundary moves by ~2 ndev / num_samples = 1.6 % of a shard between repartitions, about that many particles.
+Harmless for correctness (the moves are exact), but it is exchange volume a cheaper criterion could skip.
+
+**Not covered:** the cross-volume comparison against the control arm (the timing-mode hook carries no
+diagnostics), a disc IC, ndev > 2, and a run long enough for the repartition to matter for the cross cost.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
