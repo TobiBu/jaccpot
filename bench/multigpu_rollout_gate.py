@@ -23,7 +23,13 @@ import json
 import os
 import sys
 
-sys.path.insert(0, "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu")
+# the Odisseo bench harness (codes/, common/); BENCH_DIR on any other machine
+sys.path.insert(
+    0,
+    os.environ.get(
+        "BENCH_DIR", "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu"
+    ),
+)
 from codes.compare_force import apply_fast_lane_env, fast_lane_overrides_for_leaf
 
 MODE = os.environ.get("GATE_MODE", "mesh")
