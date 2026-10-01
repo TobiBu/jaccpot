@@ -1238,6 +1238,50 @@ box/COM inconsistency exists for every pair, and the lopsided pairs the one-side
 without slack to absorb it. Testing the MAC about the COM with exact radii removes the inconsistency; the
 lopsidedness stays, and is why the cross field still costs more pairs per unit of accuracy than the local one.
 
+## First timings (2026-10-01): correct and accurate, but slower than one card
+
+The first timed forces of this lane, from a quiet-enough host (loadavg 8-18, cards 5/6/7 idle, cards 6+7 on one
+PCIe switch; `common.gpu_guard` contention monitor, no foreign process on any timed card). Every number is a FULL
+force -- tree rebuild, walk, exchange, evaluation -- the same scope as the single-GPU record's `scan_full` step,
+with the record's command-buffer flags. Probe `bench/multigpu_c4_cross_force_probe.py` with `PROBE_TIME_REPS=20`;
+min of 20 after 3 warm-up calls, Plummer, leaf 64, theta 0.8, fp32, COM cross geometry, `near_theta = theta`.
+
+| N total | cards | p | local only (ms) | full force (ms) | error | particles/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1e5 | 1 | 6 | 8.62 | -- | 7.30e-04 | 11.6 M |
+| 2e5 | 1 | 6 | 11.87 | -- | 6.77e-04 | 16.8 M |
+| 2e5 | 1 | 4 | 11.52 | -- | 2.17e-03 | 17.4 M |
+| 4e5 | 1 | 6 | 22.58 | -- | 5.51e-04 | 17.7 M |
+| 2e5 | 2 | 6 | 9.65 | **25.45** | 6.95e-04 | 7.9 M |
+| 2e5 | 2 | 4 | 9.15 | **24.55** | 2.38e-03 | 8.1 M |
+| 4e5 | 2 | 6 | 13.85 | **39.99** | 6.10e-04 | 10.0 M |
+
+* **The one-card arm reproduces the single-GPU record** (11.87 vs 11.45 ms at 2e5 p6, 11.52 vs 11.35 at p4), so
+  the mesh evaluator costs nothing at ndev = 1 and these rows are on the record's scale.
+* **Two cards are slower than one at every N measured**: 2.1x at 2e5, 1.8x at 4e5. At 2e5 per device the force
+  is 3.4x the single-GPU lane's per-device time; the plan's final gate is 1.5x.
+* **Against the old distributed lane** (199.5 ms at 1.3e5 per device on 2 cards, 1.3 M particles/s) the new lane
+  is ~7.7x faster per particle. That gap was the plan's starting point and it is mostly closed.
+* **The cross field costs 16 ms at 1e5 per device and 26 ms at 2e5 per device, nearly the same at p4 and p6** --
+  it is not expansion work. At ndev = 1, with nothing to import, the hook alone costs 4.1-4.4 ms.
+
+**Where the 16 ms goes** (per-device perfetto trace, 2 cards, N = 2e5, p6; cross arm minus local arm, device 0):
+
+| stage | extra per force |
+| --- | --- |
+| kernel launches | +1,864 (1,576 -> 3,440) |
+| ragged all-to-all (4 rounds: far + near, payload + CSR) | 4.5 ms |
+| summary all-gather | 1.2 ms |
+| generic fusions, sorts, gathers/scatters (the export and receiver walks run as TRACED JAX, not the Pallas walk) | ~7 ms |
+| M2L + extra near-field kernel | < 1 ms |
+| idle gaps (launches + collective synchronisation) | +6.6 ms |
+
+**The levers, in order of size.** (1) Run the export walk and both receiver walks through the Pallas mutual walk
+the local lane already uses -- the same cure the sub-10 ms work applied to the local walk. (2) Merge the far and
+near exchanges into one, halving the ragged rounds, and ship live particles instead of 64-slot padded tiles;
+each round also memsets a capacity-sized receive buffer. (3) Cut the launch count, which drives the idle gaps.
+A one-card baseline at N/dev = 1e6 and the jz-fmm multi-GPU front (Phase 0.2) are still unmeasured.
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to

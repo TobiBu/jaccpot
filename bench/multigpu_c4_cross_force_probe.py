@@ -363,6 +363,14 @@ def run(hook, near_sink=None, record=None, keys=(), time_tag=None):
             if hasattr(cont, k)
         }
         TIMINGS[time_tag] = timing
+        if os.environ.get("PROBE_PROFILE_DIR"):
+            # One trace of a few warm calls per timed arm; attribute it per DEVICE
+            # (the bench's analyser sums every device pid together).
+            _tdir = os.path.join(os.environ["PROBE_PROFILE_DIR"], time_tag)
+            with jax.profiler.trace(_tdir, create_perfetto_trace=True):
+                for _ in range(5):
+                    jax.block_until_ready(f(flat_pos, flat_mass, nv))
+            print(f"  TRACE {time_tag} -> {_tdir} (5 calls)", flush=True)
         print(
             f"  TIMING {time_tag:<10} min {1e3 * timing['min']:.2f} ms  median "
             f"{1e3 * timing['median']:.2f} ms  iqr {1e3 * timing['iqr']:.2f} ms  "
