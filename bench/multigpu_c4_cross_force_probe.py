@@ -13,7 +13,13 @@ on the host exactly as global_mesh_bounds computes it and handed to the referenc
 import os
 import sys
 
-sys.path.insert(0, "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu")
+# the Odisseo bench harness (codes/, common/); BENCH_DIR on any other machine
+sys.path.insert(
+    0,
+    os.environ.get(
+        "BENCH_DIR", "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu"
+    ),
+)
 from codes.compare_force import (
     FAST_LANE_ENV_BY_LEAF,
     apply_fast_lane_env,
