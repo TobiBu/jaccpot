@@ -20,7 +20,7 @@ from typing import Any, Optional
 import jax.numpy as jnp
 from jaxtyping import Array
 
-__all__ = ["fused_state_capacity_ok"]
+__all__ = ["fused_state_capacity_ok", "last_refresh_capacity_ok"]
 
 
 def fused_state_capacity_ok(
@@ -80,3 +80,29 @@ def fused_state_capacity_ok(
         if far_cap is not None and far_count is not None:
             ok = ok & (jnp.asarray(far_count) < jnp.asarray(int(far_cap)))
     return ok
+
+
+def last_refresh_capacity_ok(engine: Any) -> Array:
+    """The capacity verdict of the lists the engine's most recent refresh BUILT.
+
+    ``_refresh_large_n_same_topology`` swaps its freshly built far-pair list for the
+    cached placeholder in the fresh-rebuild mode (the default), so the saturated count
+    that signals an overflow never reaches the returned state. The refresh leaves the
+    verdict on the engine instead; read it inside the SAME trace, right after the
+    refresh -- it holds a tracer and is reset at the start of every refresh.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine (``FastMultipoleMethod._impl``), or the facade.
+
+    Returns
+    -------
+    Array
+        Boolean scalar; ``True`` when no refresh has recorded a verdict.
+    """
+    impl = getattr(engine, "_impl", engine)
+    value = getattr(impl, "_last_refresh_capacity_ok", None)
+    if value is None:
+        return jnp.asarray(True)
+    return jnp.asarray(value, jnp.bool_)

@@ -639,11 +639,18 @@ def _local_overflow(refreshed: Any, engine: Any = None) -> Array:
         Boolean scalar for this device, ``True`` when something saturated.
     """
     from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_enabled
-    from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
+    from jaccpot.runtime.capacity_guard import (
+        fused_state_capacity_ok,
+        last_refresh_capacity_ok,
+    )
 
     ok = fused_state_capacity_ok(
         refreshed,
         traced_caps=getattr(engine, "_strict_fused_traced_caps", None),
         rectangle_guard_active=not bool(_nearfield_csr_lane_enabled()),
     )
+    # the RETURNED state carries the cached far-pair placeholder in the fresh-rebuild
+    # mode, so the verdict on the lists this refresh built comes from the engine
+    if engine is not None:
+        ok = ok & last_refresh_capacity_ok(engine)
     return jnp.logical_not(ok)

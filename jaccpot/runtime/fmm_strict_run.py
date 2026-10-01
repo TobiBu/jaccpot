@@ -824,16 +824,27 @@ class StrictRunMixin(_EngineBase):
 
         def _static_target_block_capacity_ok(
             prepared_in: PreparedStateLike,
+            after_refresh: bool = False,
         ) -> Array:
             # The guard is shared with the multi-GPU lane (`capacity_guard`); the
             # traced caps are host constants recorded while the refresh traced.
-            from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
+            # `after_refresh`: the call directly follows a refresh IN THIS TRACE, so
+            # the verdict on the lists it built (which the returned state no longer
+            # carries in the fresh-rebuild mode) is live and must be folded in. The
+            # initial-state call must not read it: it could be a previous trace's.
+            from jaccpot.runtime.capacity_guard import (
+                fused_state_capacity_ok,
+                last_refresh_capacity_ok,
+            )
 
-            return fused_state_capacity_ok(
+            ok = fused_state_capacity_ok(
                 prepared_in,
                 traced_caps=getattr(self, "_strict_fused_traced_caps", None),
                 rectangle_guard_active=rectangle_guard_active,
             )
+            if after_refresh:
+                ok = ok & last_refresh_capacity_ok(self)
+            return ok
 
         def _refresh_and_evaluate_endpoint(
             prepared_in: PreparedStateLike,
@@ -841,6 +852,9 @@ class StrictRunMixin(_EngineBase):
         ) -> tuple[PreparedStateLike, Array]:
             if diag_mode in {"integrator_only", "eval_only"}:
                 prepared_new = prepared_in
+                # no refresh in this trace: the capacity side channel must not
+                # carry a previous trace's verdict into this one
+                self._last_refresh_capacity_ok = None
             else:
                 # Same invariant as `_evaluate_self` above, restated at the
                 # second place that relies on it.
@@ -967,7 +981,9 @@ class StrictRunMixin(_EngineBase):
                                 operand=None,
                             )
                         capacity_ok_new = capacity_ok_now & (
-                            _static_target_block_capacity_ok(prepared_new)
+                            _static_target_block_capacity_ok(
+                                prepared_new, after_refresh=True
+                            )
                         )
                         return (
                             prepared_new,
@@ -1256,6 +1272,8 @@ class StrictRunMixin(_EngineBase):
         RuntimeError
             Only for genuine inconsistencies, not for a declined reuse.
         """
+        # Side channel for the traced capacity guard; see the end of this method.
+        self._last_refresh_capacity_ok = None
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):
@@ -1772,6 +1790,18 @@ class StrictRunMixin(_EngineBase):
             dual_downward_artifacts=dual_downward_artifacts,
             fused_device_mode=bool(fused_device_mode),
         )
+        # The capacity verdict of the lists THIS refresh built. Under trace a walk
+        # overflow (far / near / queue) or a leaf-capacity overflow surfaces only as
+        # a saturated `compact_far_pairs.far_pair_count`, and in the fresh-rebuild
+        # mode below that freshly built list is swapped for the cached placeholder
+        # before the state is returned (carry shapes must not change) -- so a guard
+        # reading the RETURNED state sees the prepare's count, never this one. It is
+        # left here, as a tracer, for the caller to read inside the same trace
+        # (`capacity_guard.last_refresh_capacity_ok`). It must not be read anywhere
+        # else: it is cleared at the start of every refresh.
+        from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
+
+        self._last_refresh_capacity_ok = fused_state_capacity_ok(refreshed_state)
         if bool(safe_fresh_compact_pair_rebuild):
             return replace(
                 refreshed_state,
