@@ -46,7 +46,12 @@ from yggdrax.distributed.import_cells import (
 )
 from yggdrax.distributed.summary import occupancy_cut
 
-__all__ = ["CrossCapacities", "make_cross_hook"]
+__all__ = [
+    "CrossCapacities",
+    "cross_near_acceleration",
+    "make_cross_hook",
+    "merge_imported_blocks",
+]
 
 
 _CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
@@ -55,14 +60,10 @@ _CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
 def _cross_mac_geometry_mode() -> str:
     """``"com"`` (default: the geometry the lane's own walk uses) or ``"aabb"`` (the
     box geometry this exchange used before Task 1; kept as a control)."""
-    import os
+    from jaccpot._env import env_choice
 
-    raw = os.environ.get(_CROSS_MAC_GEOMETRY_ENV, "com").strip().lower()
-    if raw not in ("com", "aabb"):
-        raise ValueError(
-            f"{_CROSS_MAC_GEOMETRY_ENV} must be 'com' or 'aabb', got {raw!r}"
-        )
-    return raw
+    # a malformed value warns and keeps the correct default, as every jaccpot switch does
+    return env_choice(_CROSS_MAC_GEOMETRY_ENV, "com", ("com", "aabb"))
 
 
 class CrossCapacities:

@@ -40,7 +40,7 @@ silently when it is cold.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -470,7 +470,7 @@ def make_fused_force_evaluator(
     cross_near_sink: Optional[dict] = None,
     cross_record: Optional[dict] = None,
     cross_record_keys: tuple = (),
-):
+) -> Callable[[Array, Array, Array], tuple]:
     """A jitted ``shard_map`` force: the fused lane per device, one program.
 
     The capacity plan is installed around the BUILD, not around the call: the
@@ -510,7 +510,7 @@ def make_fused_force_evaluator(
 
     from jaccpot.runtime.capacity_plan import fused_capacity_plan_overrides
 
-    def body(prepared, positions, masses, num_valid):
+    def body(prepared: Any, positions: Array, masses: Array, num_valid: Array) -> tuple:
         # shard_map keeps the mapped axis at size 1; strip it so the rest of the
         # body sees exactly what the single-device lane sees.
         prepared_local = jax.tree_util.tree_map(lambda leaf: leaf[0], prepared)
@@ -566,7 +566,7 @@ def make_fused_force_evaluator(
         )
         compiled = jax.jit(mapped)
 
-    def force(positions, masses, num_valid):
+    def force(positions: Array, masses: Array, num_valid: Array) -> tuple:
         with fused_capacity_plan_overrides(plan):
             return compiled(prepared_stacked, positions, masses, num_valid)
 
