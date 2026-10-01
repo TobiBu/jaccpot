@@ -729,6 +729,22 @@ def _prepare_solidfmm_downward_sweep(
         Pre-built COO far pairs, which take precedence over ``interactions``.
     far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
         Per-gear far-pair lists for the adaptive-order path.
+    n_targets : Optional[int]
+        Number of leading nodes that receive M2L contributions. ``None`` means
+        all. Set to the local node count when cross-domain sources sit behind the
+        local ones, so the M2L output stays local-only and adds to the local
+        expansions.
+    cross_multipoles : Optional[Array]
+        ``(K, C)`` imported source multipoles, concatenated behind the local
+        ones. ``None`` (default) is the single-domain lane.
+    cross_centers : Optional[Array]
+        ``(K, 3)`` expansion centres of ``cross_multipoles``.
+    cross_src : Optional[Array]
+        Cross far-pair sources, already offset past the local nodes;
+        ``-1`` entries are dead and dropped by the CSR build.
+    cross_tgt : Optional[Array]
+        Cross far-pair targets (local node ids), ``-1``-padded like
+        ``cross_src``.
     adaptive_order : bool
         Choose the expansion order per interaction from ``p_gears``.
     p_gears : tuple[int, ...]

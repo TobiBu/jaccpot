@@ -37,7 +37,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 from dataclasses import dataclass, replace
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 __all__ = [
     "FusedCapacityPlan",
@@ -141,7 +141,7 @@ class FusedCapacityPlan:
         level_batch_width: int = 0,
         num_levels: int = 0,
         upward_num_levels: int = 0,
-    ):
+    ) -> "FusedCapacityPlan":
         """A copy no narrower than the given shapes.
 
         Parameters
@@ -192,7 +192,9 @@ def fused_capacity_plan() -> Optional[FusedCapacityPlan]:
 
 
 @contextlib.contextmanager
-def fused_capacity_plan_overrides(plan: Optional[FusedCapacityPlan]):
+def fused_capacity_plan_overrides(
+    plan: Optional[FusedCapacityPlan],
+) -> Iterator[Optional[FusedCapacityPlan]]:
     """Install ``plan`` for the duration of the block.
 
     Wrap the ``jax.jit`` / ``shard_map`` **build** in this, not just the call:

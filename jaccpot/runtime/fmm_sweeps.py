@@ -77,12 +77,12 @@ __all__ = [
 _CELLS_DEPTH_HEADROOM = 8
 
 
-def _planned_upward_num_levels(tree) -> Optional[int]:
+def _planned_upward_num_levels(tree: Any) -> Optional[int]:
     """The installed capacity plan's upward depth bound for this tree's shape.
 
     Parameters
     ----------
-    tree : Tree
+    tree : Any
         Tree whose depth bound is wanted; only its static shapes are read, so a
         tracer is fine.
 
@@ -594,6 +594,16 @@ class SweepsMixin(_EngineBase):
         p_gears : Optional[tuple[int, ...]]
             Candidate orders for ``adaptive_order``; ``None`` takes the
             engine's.
+        n_targets : Optional[int]
+            Number of leading nodes that receive M2L contributions. ``None`` means
+            all. Set to the local node count when cross-domain sources sit behind the
+            local ones, so the M2L output stays local-only and adds to the local
+            expansions.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------

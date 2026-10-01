@@ -735,11 +735,6 @@ def m2l_real_csr_lanes_pallas_cvjp(
         Pallas GPU lowering. ``nondiff_argnums``.
     num_warps : int
         Warps per program. ``nondiff_argnums``.
-
-    Returns
-    -------
-    Array
-        ``[n, C]`` local increments.
     n_targets : Optional[int]
         Forwarded to :func:`m2l_real_csr_lanes_pallas`. Static.
 
@@ -748,6 +743,11 @@ def m2l_real_csr_lanes_pallas_cvjp(
         by-target CSR whose grid and `loc_bar` rows would both have to be rebased,
         while `mult_bar` stays full length -- real work, and gradients through the
         cross-domain import are a later phase by decision, so it raises.
+
+    Returns
+    -------
+    Array
+        ``[n_targets, C]`` local increments (``[n, C]`` when ``n_targets`` is None).
     """
     return m2l_real_csr_lanes_pallas(
         multipoles,

@@ -676,11 +676,11 @@ class PrepareMixin(_EngineBase):
             Explicit domain bounds, or None to infer them from the particles.
         max_leaf_size : int
             Largest leaf occupancy in the built tree.
+        cache_leaf_parameter : int
+            Leaf parameter the cache entry was built with.
         num_valid : Optional[Array]
             Live row count of a capacity-padded shard (the distributed lane);
             ``None`` treats every row as live. Cells only -- see the raise below.
-        cache_leaf_parameter : int
-            Leaf parameter the cache entry was built with.
 
         Returns
         -------
@@ -1270,6 +1270,11 @@ class PrepareMixin(_EngineBase):
             and no node interaction list, so without this the far term is simply
             absent and the estimate reads as an ordinary under-estimate rather
             than a missing term.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------
@@ -3390,6 +3395,16 @@ class PrepareMixin(_EngineBase):
             Whether adaptive per-node order is active.
         p_gears : tuple[int, ...]
             Expansion orders available to the adaptive-order gears.
+        n_targets : Optional[int]
+            Number of leading nodes that receive M2L contributions. ``None`` means
+            all. Set to the local node count when cross-domain sources sit behind the
+            local ones, so the M2L output stays local-only and adds to the local
+            expansions.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------
@@ -3581,6 +3596,11 @@ class PrepareMixin(_EngineBase):
             Whether the prepared state keeps its interaction list.
         suppress_host_side_effects : bool
             Whether to skip host-side caching and diagnostics.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------

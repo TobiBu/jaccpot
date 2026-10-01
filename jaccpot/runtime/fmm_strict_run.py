@@ -89,9 +89,6 @@ class StrictRunMixin(_EngineBase):
             Expansion order; ``None`` keeps the state's own.
         theta : Optional[float]
             Opening angle; ``None`` keeps the state's own.
-        num_valid : Optional[Array]
-            Live row count of a capacity-padded shard (the distributed fused
-            lane); ``None`` treats every row as live. Requires cell leaves.
         fused_device_mode : bool
             Refresh into the fused device-resident layout.
 
@@ -1268,6 +1265,15 @@ class StrictRunMixin(_EngineBase):
         fused_device_mode : bool
             Refresh into the fused device-resident layout. Also relaxes the
             traced-input guard, since the fused lane is designed to be traced.
+        num_valid : Optional[Array]
+            Live row count of a capacity-padded shard (the distributed fused
+            lane); ``None`` treats every row as live. Requires cell leaves.
+        cross_hook : Optional[Callable[[Any], None]]
+            Called once per refresh between the upward and downward sweeps with the
+            tree artifacts (`jaccpot.distributed.cross.make_cross_hook`). It returns
+            ``(multipoles, centers, src, tgt)`` for the cross-domain far field, which the
+            downward sweep concatenates behind the local nodes, or ``None``. ``None``
+            (default) is the single-domain lane, bit-identical.
 
         Returns
         -------

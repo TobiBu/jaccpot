@@ -435,6 +435,8 @@ def nearfield_leafpair_csr_pallas(
     ------
     RuntimeError
         If Pallas or its Triton backend could not be imported.
+    ValueError
+        If ``num_target_leaves`` lies outside ``[0, L]``.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -1059,11 +1061,17 @@ def nearfield_leafpair_csr_pallas_cvjp(
         ``nondiff_argnums``.
     include_self : bool
         ``nondiff_argnums``.
+    num_target_leaves : int | None
+        Forwarded to :func:`nearfield_leafpair_csr_pallas`: the number of leading
+        leaf rows that receive. ``nondiff_argnums``. The reverse refuses a
+        non-trivial value rather than return a wrong gradient; gradients through
+        the cross-domain import are a later phase by decision.
 
     Returns
     -------
     Array
-        ``(L, W, 4)`` acceleration lanes 0:3 and potential lane 3.
+        ``(L, W, 4)`` acceleration lanes 0:3 and potential lane 3, with ``L``
+        replaced by ``num_target_leaves`` when it is given.
     """
     return nearfield_leafpair_csr_pallas(
         leaf_positions,

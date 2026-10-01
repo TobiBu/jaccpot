@@ -559,6 +559,11 @@ def _solidfmm_downward_accumulate_from_multipoles(
         Local coefficients to accumulate into, ``[total_nodes, sh_size(order)]``.
     multipoles_coeffs : Array
         Packed source multipoles, same node ordering.
+    n_targets : Optional[int]
+        Number of leading nodes that receive M2L contributions. ``None`` means
+        all. Set to the local node count when cross-domain sources sit behind the
+        local ones, so the M2L output stays local-only and adds to the local
+        expansions.
     tree : Tree
         Tree being swept; used to build grouped buffers on demand.
     upward : TreeUpwardData

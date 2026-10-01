@@ -31,6 +31,7 @@ planner can widen the next plan.
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING, Optional
 
 import jax
 import jax.numpy as jnp
@@ -38,6 +39,9 @@ import numpy as np
 from jaxtyping import Array
 
 from jaccpot._jax_compat import Tracer
+
+if TYPE_CHECKING:  # capacity_plan imports this module; annotation only
+    from jaccpot.runtime.capacity_plan import FusedCapacityPlan
 
 __all__ = [
     "level_batch_width",
@@ -57,7 +61,7 @@ def _key(total_nodes: int, num_internal: int) -> tuple[int, int]:
     return (int(total_nodes), int(num_internal))
 
 
-def _plan_for(*, total_nodes: int, num_internal: int):
+def _plan_for(*, total_nodes: int, num_internal: int) -> Optional[FusedCapacityPlan]:
     """The installed capacity plan, if it describes this tree shape.
 
     Parameters
