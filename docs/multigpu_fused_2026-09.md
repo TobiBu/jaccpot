@@ -1282,6 +1282,48 @@ near exchanges into one, halving the ragged rounds, and ship live particles inst
 each round also memsets a capacity-sized receive buffer. (3) Cut the launch count, which drives the idle gaps.
 A one-card baseline at N/dev = 1e6 and the jz-fmm multi-GPU front (Phase 0.2) are still unmeasured.
 
+## The capacity flags could not fire (2026-10-01), on either lane
+
+Found while planning the large-N sweep, then measured. Under `jit` a saturated walk
+(far / near / queue) or cell-leaf partition cannot raise: it surfaces in ONE place,
+`compact_far_pairs.far_pair_count`, saturated to the far-pair buffer's length. Two
+defects hid that signal.
+
+1. **The mesh lane read three attributes that do not exist.** `_local_overflow` OR-ed
+   `leaf_capacity_overflow`, `walk_overflow` and `capacity_overflow`;
+   `LargeNPreparedState` has none of them, so the mesh lane's local flag was the
+   constant `False`. The cross FAR half's flags reached the caller only through the
+   diagnostics `record`, which the production and timing paths do not pass.
+2. **The refresh replaced the list whose count carries the signal.** In the
+   fresh-rebuild mode (the default) `_refresh_large_n_same_topology` swaps the far-pair
+   list it just built for the cached placeholder before returning, so the carried
+   state keeps its shapes. A guard reading the returned state saw the PREPARE's count.
+   That disabled the far-pair arm of the single-GPU `strict_run_v2` guard too -- its
+   own error message describes exactly this saturation and could not be reached.
+
+**Measured (1 card, N = 2e5, the mesh evaluator's local arm):** evaluating at theta 0.3
+against capacities sized for 0.8 gives a force that is 99 % wrong (rel-L2 9.91e-01)
+with `overflow=False` before the fix and `overflow=True` after; the theta-0.8 control
+stays `False` with an unchanged error (6.7740e-04). The single-GPU record
+configuration through `strict_run_v2` still runs without raising (11.68 ms/step,
+aggL2 7.4121e-04, the record's value).
+
+**Fixes (jaccpot `ff4f4ef`, `d173d19`):** one shared guard
+(`jaccpot.runtime.capacity_guard.fused_state_capacity_ok`) with a structural check
+against the buffer's own length; the refresh evaluates it on the lists it built and
+leaves the verdict on the engine for the same trace (`last_refresh_capacity_ok`); the
+cross hook carries an always-on `flag_sink` (far half, the near walk's far list, and
+both exchanges' received counts against their receive capacities). Earlier ACCURACY
+results stand -- they were checked against fp64 direct sums -- but every
+`overflow=False` before this was vacuous for the local half and, in timing mode, for
+the far half.
+
+**Also fixed while there (`13bb9fa`):** each eager per-shard prepare overwrote the
+engine's walk-capacity record, so every device's traced walk was sized for the LAST
+shard; the records are now merged (field-wise max) and installed. And the traced
+cell-tree depth check now reads the same bound the upward sweep loops to (the
+installed plan first).
+
 ## Next
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
