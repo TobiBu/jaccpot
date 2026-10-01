@@ -106,8 +106,29 @@ kk = int(cp.adaptive_cell_leaf_partition_numpy(np.sort(codes), leaf_size=LEAF)[0
 # The leaf capacity is per TREE, and the reference arm trees all N while each mesh
 # device trees a shard -- dividing by NDEV in the reference arm overflows the cut.
 LEAF_CAP = 1 << int(np.ceil(np.log2(1.25 * kk / (1 if SOLO else NDEV))))
+# The pow2 rule can pad a shard's leaf capacity up to ~2.4x (it made the old 4M
+# single-card row look cheaper than the 2M one); PROBE_LEAF_CAP pins it.
+if os.environ.get("PROBE_LEAF_CAP"):
+    LEAF_CAP = int(os.environ["PROBE_LEAF_CAP"])
+# live cell leaves of the WORST shard: what every cross capacity scales with
+SHARD_LEAVES = max(
+    int(
+        cp.adaptive_cell_leaf_partition_numpy(np.sort(codes[s]), leaf_size=LEAF)[0].size
+    )
+    for s in shards
+)
+# Evaluate at a different theta from the prepare's. A DIAGNOSTIC knob only: a tighter
+# theta than the capacities were sized for saturates the walk UNDER TRACE, which is
+# how the capacity-flag gate makes the local guard fire without tripping the eager
+# prepare's own raise.
+EVAL_THETA = float(os.environ.get("PROBE_EVAL_THETA", THETA))
+# timing-mode arms: "local" (no cross hook), "cross" (production cross field)
+TIME_ARMS = tuple(
+    a.strip() for a in os.environ.get("PROBE_TIME_ARMS", "local,cross").split(",")
+)
 print(
-    f"N={N} ndev={NDEV} cap={CAP} leaf_capacity={LEAF_CAP} shards={[len(s) for s in shards]} "
+    f"N={N} ndev={NDEV} cap={CAP} leaf_capacity={LEAF_CAP} worst-shard live leaves={SHARD_LEAVES} "
+    f"shards={[len(s) for s in shards]} "
     f"dtype={DTYPE} nearfield_accum={ACCUM}",
     flush=True,
 )
@@ -252,13 +273,16 @@ preps, plans = [], []
 for d in range(NDEV):
     LS._WIDTHS.clear()
     LS._LEVELS.clear()
-    pr = solver.strict_fused_prepared_eval_fn(
-        positions=jnp.asarray(dev_pos[d]),
-        masses=jnp.asarray(dev_mass[d]),
-        leaf_size=LEAF,
-        max_order=ORDER,
-        theta=THETA,
-    )[0]
+    # Prepare each shard ON ITS OWN device: at large N one card cannot hold every
+    # shard's state, and the assembly below then needs no cross-device copy.
+    with jax.default_device(jax.devices()[d if not SOLO else 0]):
+        pr = solver.strict_fused_prepared_eval_fn(
+            positions=jnp.asarray(dev_pos[d]),
+            masses=jnp.asarray(dev_mass[d]),
+            leaf_size=LEAF,
+            max_order=ORDER,
+            theta=THETA,
+        )[0]
     TN = int(np.asarray(pr.tree.node_ranges).shape[0])
     NI = int(pr.tree.left_child.shape[0])
     plans.append(plan_from_registry(total_nodes=TN, num_internal=NI))
@@ -269,7 +293,12 @@ print(f"merged plan: {plan}", flush=True)
 from jaccpot.distributed.cross import CrossCapacities, make_cross_hook
 
 mesh = make_mesh(NDEV)
-stacked = stack_prepared_states(preps)
+from jaccpot.distributed.fused import assemble_prepared_states
+
+# sharded P(axis) from per-device pieces: not re-split on every call, and no device
+# holds another's state
+stacked = assemble_prepared_states(preps, mesh)
+del preps
 flat_pos = jnp.asarray(np.concatenate(dev_pos))
 flat_mass = jnp.asarray(np.concatenate(dev_mass))
 nv = jnp.asarray(np.asarray(dev_live, np.int32))
@@ -342,7 +371,7 @@ def run(hook, near_sink=None, record=None, keys=(), time_tag=None):
         plan=plan,
         leaf_size=LEAF,
         max_order=ORDER,
-        theta=THETA,
+        theta=EVAL_THETA,
         cross_hook=hook,
         cross_near_sink=near_sink,
         cross_record=record,
@@ -411,30 +440,44 @@ EXPORT_THETA = (
     else None
 )
 
+
+def _auto_cap(env_bits, per_leaf, floor_bits, headroom=2.5):
+    """A cross capacity sized from the worst shard's live leaf count.
+
+    `per_leaf` is the occupancy per live leaf measured at 1e5 per device (record,
+    Phase C / Task 1 under the COM geometry), times `headroom`, times the number of
+    senders a receiver can hear from; rounded up to a power of two and never below
+    `floor_bits`. An explicit PROBE_*_BITS still wins. The flags are real now, so an
+    undersized cap reports itself rather than truncating quietly.
+    """
+    if os.environ.get(env_bits):
+        return 1 << int(os.environ[env_bits])
+    need = headroom * per_leaf * SHARD_LEAVES * max(1, NDEV - 1)
+    return 1 << max(int(floor_bits), int(np.ceil(np.log2(max(need, 1.0)))))
+
+
+# per live leaf at 1e5/dev, leaf 64, theta 0.8, COM geometry: summary cells ~0.29;
+# export far pairs ~53 (293k / 5.5k leaves); export near ~10; sent / received
+# nodes ~1.25 (far nodes 6.7k, near leaves 5.5k); received CSR ~53; receiver far
+# pairs ~53 (+ near-walk far pairs); receiver near pairs ~60
+_recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", 53, 19)
 caps = CrossCapacities(
-    # The cut needs about num_leaves / max_leaves_per_cell cells; at leaf 64 and
-    # N/2 per device that is ~2000, so the 1024 first written here TRUNCATED the
-    # summary and quietly removed half of each receiver from the exchange.
-    max_cells=int(os.environ.get("PROBE_MAX_CELLS", "8192")),
-    # Every one of these is over-allocated on purpose. The previous run saturated
-    # export_far (69717 against a 65536 cap) and the summary cut, and NEITHER was
-    # visible: the flags existed but were not OR-ed into anything the caller reads.
-    # The rule the record already states -- over-allocate and read the flags -- only
-    # works if the flags are wired, so both halves of that are now true.
-    export_far_cap=1 << 21,
-    export_near_cap=1 << _cap_bits("PROBE_EXPORT_NEAR_BITS", 21),
-    send_node_cap=1 << 15,
-    send_csr_cap=1 << _cap_bits("PROBE_SEND_CSR_BITS", 21),
-    recv_node_cap=1 << 15,
+    max_cells=int(os.environ.get("PROBE_MAX_CELLS", 0))
+    or _auto_cap("PROBE_MAX_CELLS_BITS", 0.29, 13),
+    export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", 53, 21),
+    export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 21),
+    send_node_cap=_auto_cap("PROBE_SEND_NODE_BITS", 1.25, 15),
+    send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", 53, 21),
+    recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
+    recv_csr_cap=_recv_csr,
     # The receiver walk SEEDS from the received CSR, one pair per entry, so the
-    # queue has to be able to hold that seed: walk_queue > recv_csr_cap is a hard
-    # requirement, not a tuning choice.
-    recv_csr_cap=1 << _cap_bits("PROBE_RECV_CSR_BITS", 19),
-    walk_queue=1 << _cap_bits("PROBE_WALK_QUEUE_BITS", 20),
-    recv_far_cap=1 << 21,
-    recv_near_cap=1 << _cap_bits("PROBE_RECV_NEAR_BITS", 21),
+    # queue has to hold that seed: walk_queue > recv_csr_cap is a hard requirement.
+    walk_queue=max(_auto_cap("PROBE_WALK_QUEUE_BITS", 53, 20), 2 * _recv_csr),
+    recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 106, 21),
+    recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 60, 21),
     leaf_width=LEAF,
 )
+print(f"cross caps: {vars(caps)}", flush=True)
 # --- the fp64 reference: every particle against ALL others, subsampled
 allp = jnp.asarray(pos, jnp.float64)
 allm = jnp.asarray(mass, jnp.float64)
@@ -472,17 +515,21 @@ def err_against_direct(accel_by_dev, tag):
     return rel
 
 
-a_local, ovf_local = run(None, time_tag="local")
 if TIME_REPS > 0:
-    # the production cross configuration, no record: near_theta defaults to theta
-    sink = {}
-    a_both, ovf_both = run(
-        make_cross_hook(ndev=NDEV, theta=THETA, caps=caps, near_sink=sink),
-        near_sink=sink,
-        time_tag="cross",
-    )
-    e_local = err_against_direct(a_local, "local-only (no cross)")
-    e_cross = err_against_direct(a_both, "+ cross FAR and NEAR")
+    e_local = e_cross = None
+    ovf_local = ovf_both = None
+    if "local" in TIME_ARMS:
+        a_local, ovf_local = run(None, time_tag="local")
+        e_local = err_against_direct(a_local, "local-only (no cross)")
+    if "cross" in TIME_ARMS:
+        # the production cross configuration, no record: near_theta defaults to theta
+        sink = {}
+        a_both, ovf_both = run(
+            make_cross_hook(ndev=NDEV, theta=THETA, caps=caps, near_sink=sink),
+            near_sink=sink,
+            time_tag="cross",
+        )
+        e_cross = err_against_direct(a_both, "+ cross FAR and NEAR")
     print(f"local-only overflow={ovf_local}   far+near overflow={ovf_both}", flush=True)
     result = dict(
         n=N,
@@ -491,6 +538,11 @@ if TIME_REPS > 0:
         leaf=LEAF,
         order=ORDER,
         theta=THETA,
+        eval_theta=EVAL_THETA,
+        arms=TIME_ARMS,
+        leaf_capacity=LEAF_CAP,
+        worst_shard_live_leaves=SHARD_LEAVES,
+        cross_caps=vars(caps),
         dtype=DTYPE,
         cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
         err_local=e_local,
@@ -508,6 +560,7 @@ if TIME_REPS > 0:
     if ovf_local or ovf_both:
         raise SystemExit("TIMING FAILED: a capacity overflowed")
     raise SystemExit(0)
+a_local, ovf_local = run(None)
 rec_far = {}
 a_far, ovf_far = run(
     # the same export knob as the far+near arm, or under PROBE_EXPORT_THETA=0 this
