@@ -509,6 +509,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     initial_locals_coeffs: Array,
     multipoles_coeffs: Array,
     *,
+    n_targets: Optional[int] = None,
     tree: Tree,
     upward: TreeUpwardData,
     interactions: NodeInteractionList,
@@ -558,6 +559,11 @@ def _solidfmm_downward_accumulate_from_multipoles(
         Local coefficients to accumulate into, ``[total_nodes, sh_size(order)]``.
     multipoles_coeffs : Array
         Packed source multipoles, same node ordering.
+    n_targets : Optional[int]
+        Number of leading nodes that receive M2L contributions. ``None`` means
+        all. Set to the local node count when cross-domain sources sit behind the
+        local ones, so the M2L output stays local-only and adds to the local
+        expansions.
     tree : Tree
         Tree being swept; used to build grouped buffers on demand.
     upward : TreeUpwardData
@@ -701,6 +707,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                     interpret,
                     "triton",
                     int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
+                    n_targets,
                 )
             elif which == "tiled" and m2l_real_csr_tiled_supported(order):
                 m2l_inc = m2l_real_csr_tiled_pallas(

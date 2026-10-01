@@ -371,6 +371,7 @@ def nearfield_leafpair_csr_pallas(
     interpret: bool = False,
     accum: str = "input",
     include_self: bool = True,
+    num_target_leaves: int | None = None,
 ) -> Array:
     """Leaf-pair near field from a neighbour CSR, one Pallas program per row chunk.
 
@@ -409,17 +410,33 @@ def nearfield_leafpair_csr_pallas(
         Add the intra-leaf term on each leaf's first chunk. Default True: the
         CSR never lists a leaf in its own row (the walk emits near pairs for
         ``different_nodes`` only).
+    num_target_leaves : int | None
+        Number of leading leaf rows that are TARGETS. ``None`` (default) means all
+        ``L``, the single-tree case. Static.
+
+        For the one-sided distributed lane the pool is ``[local ; halo]`` and only
+        the local prefix receives, so ``L_source = L_local + L_halo`` while
+        ``L_target = L_local``. The grid needs no help -- it comes from the chunk
+        table, which is built over the target rows -- but the tail ``segment_sum``
+        otherwise allocates ``L + 1`` segments and returns ``L`` rows, of which the
+        halo ones are zero and then discarded.
+
+        The chunk table must cover only rows below this bound. A chunk naming a
+        higher row is dropped by the ``segment_sum``, as an out-of-range row is
+        today; nothing can check that here because the table is traced.
 
     Returns
     -------
     Array
-        ``(L, W, _OUT_WIDTH)``: acceleration lanes 0:3, potential lane 3, in
-        the input dtype.
+        ``(num_target_leaves, W, _OUT_WIDTH)``: acceleration lanes 0:3, potential
+        lane 3, in the input dtype.
 
     Raises
     ------
     RuntimeError
         If Pallas or its Triton backend could not be imported.
+    ValueError
+        If ``num_target_leaves`` lies outside ``[0, L]``.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -523,10 +540,15 @@ def nearfield_leafpair_csr_pallas(
     )
     # Sorted segment sum onto the leaves: chunks of one leaf are consecutive and
     # padding chunks (exact zeros) go to an extra segment that is sliced off.
-    seg = jnp.where(chunks.leaf < 0, jnp.asarray(num_leaves, idx), chunks.leaf)
+    n_tgt = num_leaves if num_target_leaves is None else int(num_target_leaves)
+    if not (0 <= n_tgt <= num_leaves):
+        raise ValueError(
+            f"num_target_leaves must lie in [0, {num_leaves}], got {n_tgt}"
+        )
+    seg = jnp.where(chunks.leaf < 0, jnp.asarray(n_tgt, idx), chunks.leaf)
     out = jax.ops.segment_sum(
-        partials, seg, num_segments=num_leaves + 1, indices_are_sorted=True
-    )[:num_leaves]
+        partials, seg, num_segments=n_tgt + 1, indices_are_sorted=True
+    )[:n_tgt]
     out = out.astype(dtype)
     if pad_t:
         out = out[:, :leaf_width, :]
@@ -985,7 +1007,7 @@ def nearfield_leafpair_csr_reverse_pallas(
     return out[..., :3], out[..., 3], soft_bar, g_bar
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14))
 def nearfield_leafpair_csr_pallas_cvjp(
     leaf_positions: Array,
     leaf_masses: Array,
@@ -1001,6 +1023,7 @@ def nearfield_leafpair_csr_pallas_cvjp(
     interpret: bool,
     accum: str,
     include_self: bool,
+    num_target_leaves: int | None = None,
 ) -> Array:
     """Differentiable :func:`nearfield_leafpair_csr_pallas` (forward byte-identical).
 
@@ -1038,11 +1061,17 @@ def nearfield_leafpair_csr_pallas_cvjp(
         ``nondiff_argnums``.
     include_self : bool
         ``nondiff_argnums``.
+    num_target_leaves : int | None
+        Forwarded to :func:`nearfield_leafpair_csr_pallas`: the number of leading
+        leaf rows that receive. ``nondiff_argnums``. The reverse refuses a
+        non-trivial value rather than return a wrong gradient; gradients through
+        the cross-domain import are a later phase by decision.
 
     Returns
     -------
     Array
-        ``(L, W, 4)`` acceleration lanes 0:3 and potential lane 3.
+        ``(L, W, 4)`` acceleration lanes 0:3 and potential lane 3, with ``L``
+        replaced by ``num_target_leaves`` when it is given.
     """
     return nearfield_leafpair_csr_pallas(
         leaf_positions,
@@ -1059,6 +1088,7 @@ def nearfield_leafpair_csr_pallas_cvjp(
         interpret=interpret,
         accum=accum,
         include_self=include_self,
+        num_target_leaves=num_target_leaves,
     )
 
 
@@ -1077,6 +1107,7 @@ def _near_csr_cvjp_fwd(
     interpret,
     accum,
     include_self,
+    num_target_leaves,
 ):
     out = nearfield_leafpair_csr_pallas(
         leaf_positions,
@@ -1093,6 +1124,7 @@ def _near_csr_cvjp_fwd(
         interpret=interpret,
         accum=accum,
         include_self=include_self,
+        num_target_leaves=num_target_leaves,
     )
     return out, (
         leaf_positions,
@@ -1113,12 +1145,23 @@ def _near_csr_cvjp_bwd(
     interpret,
     accum,
     include_self,
+    num_target_leaves,
     residual,
     cotangent,
 ):
     leaf_positions, leaf_masses, leaf_mask, neighbors, chunks, softening_sq, G = (
         residual
     )
+    if num_target_leaves is not None and int(num_target_leaves) != int(
+        leaf_positions.shape[0]
+    ):
+        raise NotImplementedError(
+            "nearfield_leafpair_csr_pallas_cvjp: the reverse does not support "
+            f"num_target_leaves={num_target_leaves} against "
+            f"{int(leaf_positions.shape[0])} leaf rows. The one-sided cross-domain "
+            "lane is forward-only for now; the reverse would have to rebase its own "
+            "segment sum and accept a cotangent shorter than the pool."
+        )
     pos_bar, mass_bar, soft_bar, g_bar = nearfield_leafpair_csr_reverse_pallas(
         leaf_positions,
         leaf_masses,

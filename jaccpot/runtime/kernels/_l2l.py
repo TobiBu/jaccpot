@@ -658,6 +658,11 @@ def _prepare_solidfmm_downward_sweep(
     farfield_mode: str = "pair_grouped",
     far_pairs_coo: Optional[_FarPairCOO] = None,
     far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
+    n_targets: Optional[int] = None,
+    cross_multipoles: Optional[Array] = None,
+    cross_centers: Optional[Array] = None,
+    cross_src: Optional[Array] = None,
+    cross_tgt: Optional[Array] = None,
     adaptive_order: bool = False,
     p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
@@ -724,6 +729,22 @@ def _prepare_solidfmm_downward_sweep(
         Pre-built COO far pairs, which take precedence over ``interactions``.
     far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
         Per-gear far-pair lists for the adaptive-order path.
+    n_targets : Optional[int]
+        Number of leading nodes that receive M2L contributions. ``None`` means
+        all. Set to the local node count when cross-domain sources sit behind the
+        local ones, so the M2L output stays local-only and adds to the local
+        expansions.
+    cross_multipoles : Optional[Array]
+        ``(K, C)`` imported source multipoles, concatenated behind the local
+        ones. ``None`` (default) is the single-domain lane.
+    cross_centers : Optional[Array]
+        ``(K, 3)`` expansion centres of ``cross_multipoles``.
+    cross_src : Optional[Array]
+        Cross far-pair sources, already offset past the local nodes;
+        ``-1`` entries are dead and dropped by the CSR build.
+    cross_tgt : Optional[Array]
+        Cross far-pair targets (local node ids), ``-1``-padded like
+        ``cross_src``.
     adaptive_order : bool
         Choose the expansion order per interaction from ``p_gears``.
     p_gears : tuple[int, ...]
@@ -867,10 +888,40 @@ def _prepare_solidfmm_downward_sweep(
         if chunk_size <= 0:
             raise ValueError("m2l_chunk_size must be positive")
 
+        # ---- cross-domain sources, concatenated (plan phase C) -------------
+        # The imported multipoles ride at indices >= the local node count, which is
+        # what makes the walk's (min, max) canonicalisation an exact
+        # (local target, imported source) ordering. `n_targets` then keeps the M2L
+        # output local-only so it still adds to `locals_coeffs` and the existing L2L
+        # cascade runs ONCE -- the whole reason this is interleaved here rather than
+        # bolted on after the force.
+        if cross_multipoles is not None:
+            n_local_nodes = int(multip_packed_kernel.shape[0])
+            multip_packed_kernel = jnp.concatenate(
+                [
+                    multip_packed_kernel,
+                    jnp.asarray(cross_multipoles, multip_packed_kernel.dtype),
+                ]
+            )
+            centers = jnp.concatenate(
+                [centers, jnp.asarray(cross_centers, centers.dtype)]
+            )
+            if cross_src is not None and int(jnp.asarray(cross_src).shape[0]) > 0:
+                src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
+                tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
+                pair_count = int(src.shape[0])
+                # A merged list has no live PREFIX: the local half is -1-padded and
+                # the cross half follows it, so `arange(P) < active_pair_count` --
+                # which is what this argument means -- would cut the cross pairs off
+                # entirely. The -1 entries are dropped by the CSR build on their own.
+                active_pair_count = None
+            n_targets = n_local_nodes
+
         stage_t0 = time.perf_counter()
         locals_updated = _solidfmm_downward_accumulate_from_multipoles(
             locals_coeffs,
             multip_packed_kernel,
+            n_targets=n_targets,
             tree=tree,
             upward=upward,
             interactions=interactions,
@@ -959,6 +1010,7 @@ def _prepare_solidfmm_downward_sweep(
                 _solidfmm_downward_accumulate_from_multipoles(
                     jnp.zeros_like(locals_coeffs),
                     source_motion_multip_packed,
+                    n_targets=n_targets,
                     tree=tree,
                     upward=upward,
                     interactions=interactions,

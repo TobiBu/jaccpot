@@ -824,45 +824,26 @@ class StrictRunMixin(_EngineBase):
 
         def _static_target_block_capacity_ok(
             prepared_in: PreparedStateLike,
+            after_refresh: bool = False,
         ) -> Array:
-            offsets = jnp.asarray(prepared_in.neighbor_list.offsets)
-            counts = offsets[1:] - offsets[:-1]
-            ok = jnp.asarray(True)
-            padded = getattr(
-                prepared_in,
-                "nearfield_target_block_source_leaf_ids_padded",
-                None,
+            # The guard is shared with the multi-GPU lane (`capacity_guard`); the
+            # traced caps are host constants recorded while the refresh traced.
+            # `after_refresh`: the call directly follows a refresh IN THIS TRACE, so
+            # the verdict on the lists it built (which the returned state no longer
+            # carries in the fresh-rebuild mode) is live and must be folded in. The
+            # initial-state call must not read it: it could be a previous trace's.
+            from jaccpot.runtime.capacity_guard import (
+                fused_state_capacity_ok,
+                last_refresh_capacity_ok,
             )
-            if padded is not None and rectangle_guard_active:
-                padded_arr = jnp.asarray(padded)
-                if padded_arr.ndim == 3 and int(padded_arr.shape[1]) > 0:
-                    capacity = int(padded_arr.shape[1]) * int(padded_arr.shape[2])
-                    ok = ok & jnp.all(
-                        counts <= jnp.asarray(capacity, dtype=counts.dtype)
-                    )
-            # Traversal-capacity saturation guard.  The traced refresh walk runs
-            # with fixed caps, and a neighbour row that fills its cap -- or a
-            # far-pair list that fills its buffer -- means entries were dropped
-            # and the force is wrong.  The neighbour cap is the one that fails
-            # SILENTLY: yggdrax's near-overflow flag is a tracer under jit and
-            # nothing reads it, which is the defect this guard exists for.  The
-            # far-pair cap already raises through a debug callback in
-            # ``_raw_to_compact_far_pairs``, so its arm here is a second, cheap
-            # line of defence rather than the only one.  Both caps are host
-            # constants recorded while the refresh traced
-            # (``_strict_fused_traced_caps``), so this is a static comparison.
-            traced_caps = getattr(self, "_strict_fused_traced_caps", None)
-            if isinstance(traced_caps, dict):
-                nbr_cap = traced_caps.get("max_neighbors_per_leaf_used")
-                if nbr_cap is not None and int(counts.shape[0]) > 0:
-                    ok = ok & (
-                        jnp.max(counts) < jnp.asarray(int(nbr_cap), counts.dtype)
-                    )
-                far_cap = traced_caps.get("compact_far_pair_capacity")
-                far_pairs = getattr(prepared_in, "compact_far_pairs", None)
-                far_count = getattr(far_pairs, "far_pair_count", None)
-                if far_cap is not None and far_count is not None:
-                    ok = ok & (jnp.asarray(far_count) < jnp.asarray(int(far_cap)))
+
+            ok = fused_state_capacity_ok(
+                prepared_in,
+                traced_caps=getattr(self, "_strict_fused_traced_caps", None),
+                rectangle_guard_active=rectangle_guard_active,
+            )
+            if after_refresh:
+                ok = ok & last_refresh_capacity_ok(self)
             return ok
 
         def _refresh_and_evaluate_endpoint(
@@ -871,6 +852,9 @@ class StrictRunMixin(_EngineBase):
         ) -> tuple[PreparedStateLike, Array]:
             if diag_mode in {"integrator_only", "eval_only"}:
                 prepared_new = prepared_in
+                # no refresh in this trace: the capacity side channel must not
+                # carry a previous trace's verdict into this one
+                self._last_refresh_capacity_ok = None
             else:
                 # Same invariant as `_evaluate_self` above, restated at the
                 # second place that relies on it.
@@ -997,7 +981,9 @@ class StrictRunMixin(_EngineBase):
                                 operand=None,
                             )
                         capacity_ok_new = capacity_ok_now & (
-                            _static_target_block_capacity_ok(prepared_new)
+                            _static_target_block_capacity_ok(
+                                prepared_new, after_refresh=True
+                            )
                         )
                         return (
                             prepared_new,
@@ -1228,6 +1214,8 @@ class StrictRunMixin(_EngineBase):
         theta: Optional[float],
         runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
         fused_device_mode: bool = False,
+        num_valid: Optional[Array] = None,
+        cross_hook: Optional[Callable[[Any], None]] = None,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged.
 
@@ -1263,6 +1251,15 @@ class StrictRunMixin(_EngineBase):
         fused_device_mode : bool
             Refresh into the fused device-resident layout. Also relaxes the
             traced-input guard, since the fused lane is designed to be traced.
+        num_valid : Optional[Array]
+            Live row count of a capacity-padded shard (the distributed fused
+            lane); ``None`` treats every row as live. Requires cell leaves.
+        cross_hook : Optional[Callable[[Any], None]]
+            Called once per refresh between the upward and downward sweeps with the
+            tree artifacts (`jaccpot.distributed.cross.make_cross_hook`). It returns
+            ``(multipoles, centers, src, tgt)`` for the cross-domain far field, which the
+            downward sweep concatenates behind the local nodes, or ``None``. ``None``
+            (default) is the single-domain lane, bit-identical.
 
         Returns
         -------
@@ -1275,6 +1272,8 @@ class StrictRunMixin(_EngineBase):
         RuntimeError
             Only for genuine inconsistencies, not for a declined reuse.
         """
+        # Side channel for the traced capacity guard; see the end of this method.
+        self._last_refresh_capacity_ok = None
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):
@@ -1356,6 +1355,7 @@ class StrictRunMixin(_EngineBase):
                 bounds=inferred_bounds,
                 max_leaf_size=int(prepared_state.max_leaf_size),
                 cache_leaf_parameter=int(leaf_size),
+                num_valid=num_valid,
             )
             if refresh_topology_key is None:
                 refresh_topology_key = "static_fused_template"
@@ -1584,11 +1584,28 @@ class StrictRunMixin(_EngineBase):
                 self._static_radix_compact_pair_reuse_hits += 1
             else:
                 self._static_radix_compact_pair_reuse_misses += 1
+        # The one point where a cross-domain exchange belongs: the multipoles exist
+        # here and the downward sweep -- either branch below -- has not consumed them.
+        # It goes in the REFRESH because that is what a per-step force runs; the
+        # prepare path builds the state once, and `LargeNPreparedState.upward` is None
+        # (measured), so no caller holding a state can reach the multipoles at all.
+        # Doing the cross field afterwards instead would need a SECOND L2L cascade,
+        # and Phase 3.4 measured the far half as the bigger one.
+        #
+        # ABOVE the branch, not inside one: the compact-pair reuse path and the
+        # general path both build a downward sweep, and a hook in only one of them
+        # silently never fires on the other -- which is exactly what happened first.
+        #
+        # Phase C1: called, result discarded, force bit-identical either way.
+        cross_far = None
+        if cross_hook is not None:
+            cross_far = cross_hook(tree_artifacts)
         if reuse_static_compact_pairs:
             src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(cached_compact_far_pairs.targets, dtype=INDEX_DTYPE)
             far_pairs_by_gear = ((src_far, tgt_far),)
             downward = self._prepare_downward_with_artifacts(
+                cross_far=cross_far,
                 tree=tree_artifacts.tree,
                 upward=tree_artifacts.upward,
                 theta_val=theta_val,
@@ -1632,6 +1649,7 @@ class StrictRunMixin(_EngineBase):
             )
         else:
             dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                cross_far=cross_far,
                 tree_artifacts=tree_artifacts,
                 force_scale_nodes=prepared_state.force_scale_nodes,
                 upward_center_mode=upward_center_mode,
@@ -1772,6 +1790,18 @@ class StrictRunMixin(_EngineBase):
             dual_downward_artifacts=dual_downward_artifacts,
             fused_device_mode=bool(fused_device_mode),
         )
+        # The capacity verdict of the lists THIS refresh built. Under trace a walk
+        # overflow (far / near / queue) or a leaf-capacity overflow surfaces only as
+        # a saturated `compact_far_pairs.far_pair_count`, and in the fresh-rebuild
+        # mode below that freshly built list is swapped for the cached placeholder
+        # before the state is returned (carry shapes must not change) -- so a guard
+        # reading the RETURNED state sees the prepare's count, never this one. It is
+        # left here, as a tracer, for the caller to read inside the same trace
+        # (`capacity_guard.last_refresh_capacity_ok`). It must not be read anywhere
+        # else: it is cleared at the start of every refresh.
+        from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
+
+        self._last_refresh_capacity_ok = fused_state_capacity_ok(refreshed_state)
         if bool(safe_fresh_compact_pair_rebuild):
             return replace(
                 refreshed_state,

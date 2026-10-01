@@ -660,6 +660,7 @@ class PrepareMixin(_EngineBase):
         bounds: Optional[Tuple[Array, Array]],
         max_leaf_size: int,
         cache_leaf_parameter: int,
+        num_valid: Optional[Array] = None,
     ) -> _TreeBuildArtifacts:
         """Refresh static-radix tree artifacts from a fixed template topology.
 
@@ -677,6 +678,9 @@ class PrepareMixin(_EngineBase):
             Largest leaf occupancy in the built tree.
         cache_leaf_parameter : int
             Leaf parameter the cache entry was built with.
+        num_valid : Optional[Array]
+            Live row count of a capacity-padded shard (the distributed lane);
+            ``None`` treats every row as live. Cells only -- see the raise below.
 
         Returns
         -------
@@ -693,6 +697,12 @@ class PrepareMixin(_EngineBase):
 
         leaf_partition = getattr(self, "_tree_leaf_partition", "buckets")
         cells = leaf_partition == "cells"
+        if num_valid is not None and not cells:
+            raise ValueError(
+                "num_valid needs leaf_partition='cells': a bucket partition cuts "
+                "the sorted particles into fixed runs, so a live/dead cut would "
+                "silently reshape every leaf."
+            )
         rebuilt_result = rebuild_static_radix_tree_from_template(
             positions,
             masses,
@@ -701,6 +711,7 @@ class PrepareMixin(_EngineBase):
             return_reordered=True,
             leaf_partition=leaf_partition,
             return_overflow=cells,
+            **({"num_valid": num_valid} if num_valid is not None else {}),
         )
         expected = 5 if cells else 4
         if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != expected:
@@ -714,7 +725,14 @@ class PrepareMixin(_EngineBase):
             )
             # a rebuilt tree deeper than the level-loop bound would truncate
             # the M2M/L2L sweeps: make it a capacity failure like the leaf cap
-            depth_bound = getattr(self, "_cells_upward_num_levels", None)
+            # the SAME bound the upward sweep loops to: an installed capacity plan
+            # wins there (`_planned_upward_num_levels`), so it must win here, or a
+            # plan lower than the stash would truncate the sweep while this passed
+            from jaccpot.runtime.fmm_sweeps import _planned_upward_num_levels
+
+            depth_bound = _planned_upward_num_levels(rebuilt_tree)
+            if depth_bound is None:
+                depth_bound = getattr(self, "_cells_upward_num_levels", None)
             if depth_bound is not None:
                 depth_now = jnp.max(jnp.asarray(rebuilt_tree.node_level)) + 1
                 overflow = jnp.asarray(overflow) | (depth_now > int(depth_bound))
@@ -1203,6 +1221,7 @@ class PrepareMixin(_EngineBase):
         allow_stateful_cache: bool,
         suppress_host_side_effects: bool = False,
         retain_compact_far_pairs: bool = False,
+        cross_far: Optional[tuple] = None,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Build/reuse interactions and prepare downward artifacts.
 
@@ -1258,6 +1277,11 @@ class PrepareMixin(_EngineBase):
             and no node interaction list, so without this the far term is simply
             absent and the estimate reads as an ordinary under-estimate rather
             than a missing term.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------
@@ -1352,6 +1376,7 @@ class PrepareMixin(_EngineBase):
                 self._refresh_dual_planner_execute_count += 1
                 self._refresh_dual_planner_steady_timing_bypass_count += 1
             return self._prepare_state_dual_and_downward_strict_streamed_fast(
+                cross_far=cross_far,
                 tree_artifacts=tree_artifacts,
                 theta_val=theta_val,
                 mac_type_val=mac_type_val,
@@ -3324,6 +3349,8 @@ class PrepareMixin(_EngineBase):
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: bool = False,
         p_gears: tuple[int, ...] = tuple(),
+        n_targets: Optional[int] = None,
+        cross_far: Optional[tuple] = None,
     ) -> TreeDownwardData:
         """Prepare downward sweep using precomputed interaction artifacts.
 
@@ -3375,6 +3402,16 @@ class PrepareMixin(_EngineBase):
             Whether adaptive per-node order is active.
         p_gears : tuple[int, ...]
             Expansion orders available to the adaptive-order gears.
+        n_targets : Optional[int]
+            Number of leading nodes that receive M2L contributions. ``None`` means
+            all. Set to the local node count when cross-domain sources sit behind the
+            local ones, so the M2L output stays local-only and adds to the local
+            expansions.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------
@@ -3403,6 +3440,8 @@ class PrepareMixin(_EngineBase):
             farfield_mode=farfield_mode,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
+            n_targets=n_targets,
+            cross_far=cross_far,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
         )
@@ -3536,6 +3575,7 @@ class PrepareMixin(_EngineBase):
         farfield_mode: str,
         retain_interactions: bool = False,
         suppress_host_side_effects: bool = False,
+        cross_far: Optional[tuple] = None,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Strict static fast path with compact streamed far-pairs only.
 
@@ -3563,6 +3603,11 @@ class PrepareMixin(_EngineBase):
             Whether the prepared state keeps its interaction list.
         suppress_host_side_effects : bool
             Whether to skip host-side caching and diagnostics.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------
@@ -3718,6 +3763,7 @@ class PrepareMixin(_EngineBase):
                 0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
             )
         downward = self._prepare_downward_with_artifacts(
+            cross_far=cross_far,
             tree=tree_artifacts.tree,
             upward=tree_artifacts.upward,
             theta_val=theta_val,

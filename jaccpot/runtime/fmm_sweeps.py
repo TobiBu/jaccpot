@@ -77,6 +77,35 @@ __all__ = [
 _CELLS_DEPTH_HEADROOM = 8
 
 
+def _planned_upward_num_levels(tree: Any) -> Optional[int]:
+    """The installed capacity plan's upward depth bound for this tree's shape.
+
+    Parameters
+    ----------
+    tree : Any
+        Tree whose depth bound is wanted; only its static shapes are read, so a
+        tracer is fine.
+
+    Returns
+    -------
+    Optional[int]
+        The planned bound, or ``None`` when no plan covers this shape.
+    """
+    from jaccpot.runtime.capacity_plan import fused_capacity_plan
+
+    plan = fused_capacity_plan()
+    if plan is None:
+        return None
+    try:
+        total_nodes = int(tree.node_ranges.shape[0])
+        num_internal = int(tree.left_child.shape[0])
+    except Exception:
+        return None
+    if not plan.matches(total_nodes=total_nodes, num_internal=num_internal):
+        return None
+    return int(plan.upward_num_levels)
+
+
 class SweepsMixin(_EngineBase):
     @staticmethod
     @jaxtyped(typechecker=beartype)
@@ -207,6 +236,12 @@ class SweepsMixin(_EngineBase):
             yet. Any failure to read the depth falls back to the stashed value
             rather than raising, so this never breaks a traced refresh.
         """
+        planned = _planned_upward_num_levels(tree)
+        if planned is not None:
+            # An installed capacity plan is authoritative: under ``shard_map`` no
+            # eager prepare fills the stash, and one compiled program must use the
+            # depth bound that covers every device, not this one's.
+            return planned
         if getattr(self, "_tree_leaf_partition", "buckets") == "cells":
             # The radix structure over cell leaves is rebuilt per step and its
             # depth varies. Loop bound = the eager depth plus headroom (never
@@ -493,6 +528,8 @@ class SweepsMixin(_EngineBase):
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: Optional[bool] = None,
         p_gears: Optional[tuple[int, ...]] = None,
+        n_targets: Optional[int] = None,
+        cross_far: Optional[tuple] = None,
     ) -> TreeDownwardData:
         """Build interactions and locals needed for the downward sweep.
 
@@ -557,6 +594,16 @@ class SweepsMixin(_EngineBase):
         p_gears : Optional[tuple[int, ...]]
             Candidate orders for ``adaptive_order``; ``None`` takes the
             engine's.
+        n_targets : Optional[int]
+            Number of leading nodes that receive M2L contributions. ``None`` means
+            all. Set to the local node count when cross-domain sources sit behind the
+            local ones, so the M2L output stays local-only and adds to the local
+            expansions.
+        cross_far : Optional[tuple]
+            ``(multipoles, centers, src, tgt)`` from the cross hook: imported source
+            multipoles and expansion centres, and the cross far pairs as indices into
+            ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
+            cascade serves both. ``None`` (default) is the single-domain lane.
 
         Returns
         -------
@@ -613,9 +660,15 @@ class SweepsMixin(_EngineBase):
                 def timing_recorder(attr: str, elapsed: float) -> None:
                     setattr(self, attr, float(getattr(self, attr, 0.0)) + elapsed)
 
+            _cm, _cc, _cs, _ct = cross_far if cross_far is not None else (None,) * 4
             return _prepare_solidfmm_downward_sweep(
                 tree,
                 upward_data,
+                n_targets=n_targets,
+                cross_multipoles=_cm,
+                cross_centers=_cc,
+                cross_src=_cs,
+                cross_tgt=_ct,
                 theta=theta_val,
                 mac_type=mac_type_val,
                 initial_locals=initial_locals,

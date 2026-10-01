@@ -1720,6 +1720,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 pallas_interpret,
                 accum,
                 True,
+                None,  # num_target_leaves: single-tree lane, targets == the pool
             )
         else:
             out = nearfield_leafpair_csr_pallas(
