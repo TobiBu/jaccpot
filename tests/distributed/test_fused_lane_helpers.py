@@ -16,6 +16,7 @@ import pytest
 from jax.sharding import PartitionSpec as P
 
 from jaccpot.distributed.fused import (
+    assemble_prepared_states,
     global_mesh_bounds,
     reduce_flag_across_mesh,
     stack_prepared_states,
@@ -159,3 +160,28 @@ def test_the_mapped_axis_is_not_removed_by_shard_map():
 
     assert seen["stacked"] == (1, 8, 3), "shard_map unexpectedly squeezed the axis"
     assert seen["flat"] == (8, 3)
+
+
+def test_assembled_states_equal_the_stacked_ones_and_are_sharded():
+    """Per-device assembly is the stack, placed: same values, one shard per device."""
+    mesh = _mesh(2)
+    states = [
+        {"a": jnp.arange(4.0) + d, "b": {"c": jnp.full((2, 3), float(d))}}
+        for d in range(2)
+    ]
+    stacked = stack_prepared_states(states)
+    assembled = assemble_prepared_states(states, mesh, axis_name=AXIS)
+    for got, want in zip(
+        jax.tree_util.tree_leaves(assembled), jax.tree_util.tree_leaves(stacked)
+    ):
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        assert got.sharding.spec == P(AXIS)
+        # each device holds exactly its own slice
+        for shard in got.addressable_shards:
+            assert shard.data.shape[0] == 1
+
+
+def test_assembly_needs_one_state_per_device():
+    mesh = _mesh(2)
+    with pytest.raises(ValueError, match="for a mesh of"):
+        assemble_prepared_states([{"a": jnp.zeros(3)}], mesh, axis_name=AXIS)

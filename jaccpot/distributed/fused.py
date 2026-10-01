@@ -44,13 +44,17 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array
 
 __all__ = [
     "AXIS_NAME",
+    "assemble_prepared_states",
     "fused_force_step",
     "global_mesh_bounds",
+    "make_fused_force_evaluator",
     "reduce_flag_across_mesh",
+    "stack_prepared_states",
 ]
 
 #: Mesh axis the distributed lanes agree on (matches ``yggdrax.distributed``).
@@ -342,6 +346,86 @@ def stack_prepared_states(states: "list[Any]") -> Any:
         dtype disagrees -- naming the offending leaf, because "cannot stack" with
         55 anonymous leaves is not an actionable message.
     """
+    flats, reference = _check_stackable(states)
+    stacked = [
+        jnp.stack([jnp.asarray(f[i]) for f in flats]) for i in range(len(flats[0]))
+    ]
+    return jax.tree_util.tree_unflatten(reference, stacked)
+
+
+def assemble_prepared_states(
+    states: "list[Any]", mesh: Any, *, axis_name: str = AXIS_NAME
+) -> Any:
+    """Per-device prepared states as ONE pytree of mesh-sharded arrays.
+
+    The same result as :func:`stack_prepared_states` followed by a ``device_put``
+    with ``P(axis_name)``, but built from per-device pieces with
+    ``jax.make_array_from_single_device_arrays``: no device ever holds the other
+    devices' states, and nothing is re-sharded on each call (an unsharded stacked
+    state lives on the default device and the jitted ``shard_map`` would split it
+    every time). The same construction works when each process only holds its own
+    devices' states, which is the one-process-per-GPU form.
+
+    Parameters
+    ----------
+    states : list[Any]
+        One prepared state per mesh device, in mesh order.
+    mesh : Any
+        The 1-D ``jax.sharding.Mesh`` the evaluator runs on.
+    axis_name : str
+        The mesh axis.
+
+    Returns
+    -------
+    Any
+        The pytree with every leaf a ``(ndev, ...)`` array sharded over the mesh.
+
+    Raises
+    ------
+    ValueError
+        If ``states`` does not hold one state per mesh device, or the states
+        cannot be stacked (see :func:`stack_prepared_states`).
+    """
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    devices = list(np.asarray(mesh.devices).reshape(-1))
+    if len(states) != len(devices):
+        raise ValueError(
+            f"assemble_prepared_states got {len(states)} states for a mesh of "
+            f"{len(devices)} devices"
+        )
+    flats, reference = _check_stackable(states)
+    sharding = NamedSharding(mesh, P(axis_name))
+    leaves = []
+    for i in range(len(flats[0])):
+        parts = [
+            jax.device_put(jnp.asarray(flats[d][i])[None], devices[d])
+            for d in range(len(devices))
+        ]
+        shape = (len(devices),) + tuple(parts[0].shape[1:])
+        leaves.append(jax.make_array_from_single_device_arrays(shape, sharding, parts))
+    return jax.tree_util.tree_unflatten(reference, leaves)
+
+
+def _check_stackable(states: "list[Any]") -> tuple:
+    """Flatten per-device states and check they stack; see :func:`stack_prepared_states`.
+
+    Parameters
+    ----------
+    states : list[Any]
+        One prepared state per device.
+
+    Returns
+    -------
+    tuple
+        ``(flats, treedef)``: the flattened leaves per device and the shared treedef.
+
+    Raises
+    ------
+    ValueError
+        If ``states`` is empty, the structures differ, or a leaf's shape disagrees.
+    """
     if not states:
         raise ValueError("stack_prepared_states needs at least one state")
     flats, treedefs = zip(*(jax.tree_util.tree_flatten(s) for s in states))
@@ -369,10 +453,7 @@ def stack_prepared_states(states: "list[Any]") -> Any:
                     "shape must cover the worst device -- size it from the "
                     "capacity plan rather than from each shard's own measurement."
                 )
-    stacked = [
-        jnp.stack([jnp.asarray(f[i]) for f in flats]) for i in range(len(flats[0]))
-    ]
-    return jax.tree_util.tree_unflatten(reference, stacked)
+    return flats, reference
 
 
 def make_fused_force_evaluator(
