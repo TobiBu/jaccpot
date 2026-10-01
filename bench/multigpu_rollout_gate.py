@@ -56,8 +56,12 @@ import jax.numpy as jnp
 import numpy as np
 
 jax.config.update("jax_enable_x64", True)
+import yggdrax._cell_partition as cp
 from common.ic import IC_GENERATORS
 from common.reference import direct_accelerations
+from yggdrax.bounds import infer_bounds
+from yggdrax.distributed.sharding import make_mesh
+from yggdrax.morton import morton_encode
 
 from jaccpot import FastMultipoleMethod
 from jaccpot.config import (
@@ -73,10 +77,6 @@ from jaccpot.distributed.rollout import (
     decompose,
     setup_fused_force,
 )
-from yggdrax.distributed.sharding import make_mesh
-import yggdrax._cell_partition as cp
-from yggdrax.bounds import infer_bounds
-from yggdrax.morton import morton_encode
 
 
 def plummer_with_velocities(n, seed=0):
