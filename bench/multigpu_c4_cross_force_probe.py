@@ -45,6 +45,7 @@ apply_fast_lane_env(
 os.environ["JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"] = f"{CAP},{N}"
 _TRAV = dict((FAST_LANE_ENV_BY_LEAF.get(LEAF) or {}).get("_traversal_overrides", {}))
 
+import time
 import numpy as np, jax, jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
@@ -266,6 +267,25 @@ stacked = stack_prepared_states(preps)
 flat_pos = jnp.asarray(np.concatenate(dev_pos))
 flat_mass = jnp.asarray(np.concatenate(dev_mass))
 nv = jnp.asarray(np.asarray(dev_live, np.int32))
+# Pre-shard the inputs on the mesh once. Handing the jitted shard_map unsharded
+# arrays (committed to device 0) makes every call re-shard them first, which a
+# timing would then charge to the force.
+from jax.sharding import NamedSharding, PartitionSpec as _P
+from yggdrax.distributed.comm import AXIS_NAME as _AXIS
+
+_shard = NamedSharding(mesh, _P(_AXIS))
+flat_pos = jax.device_put(flat_pos, _shard)
+flat_mass = jax.device_put(flat_mass, _shard)
+nv = jax.device_put(nv, _shard)
+
+# Timing mode (PROBE_TIME_REPS > 0): the production configuration only -- no
+# diagnostics record (it adds in-trace MAC recomputations), no far-only arm --
+# timed with the bench's own `timed_calls` under its contention monitor. Every
+# call is a FULL force: tree rebuild, walk, exchange, evaluation; the same scope
+# as the single-GPU record's `scan_full` step (11.45 ms at N = 2e5, p6, th0.8).
+TIME_REPS = int(os.environ.get("PROBE_TIME_REPS", "0"))
+TIME_WARMUP = int(os.environ.get("PROBE_TIME_WARMUP", "3"))
+TIMINGS = {}
 
 
 DIAG_KEYS = (
@@ -299,7 +319,15 @@ DIAG_KEYS = (
 )
 
 
-def run(hook, near_sink=None, record=None, keys=()):
+def _physical_devices():
+    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    try:
+        return [int(x) for x in cvd.split(",") if x.strip() != ""][:NDEV]
+    except ValueError:
+        return list(range(NDEV))
+
+
+def run(hook, near_sink=None, record=None, keys=(), time_tag=None):
     f = make_fused_force_evaluator(
         solver,
         stacked,
@@ -313,9 +341,34 @@ def run(hook, near_sink=None, record=None, keys=()):
         cross_record=record,
         cross_record_keys=keys,
     )
+    t0 = time.perf_counter()
     out = f(flat_pos, flat_mass, nv)
     a, ovf = out[0], out[1]
     acc = np.asarray(jax.block_until_ready(a), np.float64)
+    first_call_s = time.perf_counter() - t0
+    if time_tag is not None and TIME_REPS > 0:
+        from common.gpu_guard import timed_calls
+
+        _, timing, cont = timed_calls(
+            lambda: f(flat_pos, flat_mass, nv),
+            repeats=TIME_REPS,
+            warmup=TIME_WARMUP,
+            devices=_physical_devices(),
+            block=jax.block_until_ready,
+        )
+        timing["first_call_s"] = first_call_s
+        timing["contention"] = {
+            k: getattr(cont, k)
+            for k in ("loadavg1_max", "other_gpu_util_max", "foreign_pids_on_devices", "contaminated", "flags")
+            if hasattr(cont, k)
+        }
+        TIMINGS[time_tag] = timing
+        print(
+            f"  TIMING {time_tag:<10} min {1e3 * timing['min']:.2f} ms  median "
+            f"{1e3 * timing['median']:.2f} ms  iqr {1e3 * timing['iqr']:.2f} ms  "
+            f"(first call incl. compile {first_call_s:.1f} s; {timing['contention']})",
+            flush=True,
+        )
     if keys:
         vals = {k: np.asarray(v) for k, v in zip(keys, out[2])}
         print("  diagnostics (per device):")
@@ -359,7 +412,66 @@ caps = CrossCapacities(
     recv_near_cap=1 << _cap_bits("PROBE_RECV_NEAR_BITS", 21),
     leaf_width=LEAF,
 )
-a_local, ovf_local = run(None)
+# --- the fp64 reference: every particle against ALL others, subsampled
+allp = jnp.asarray(pos, jnp.float64)
+allm = jnp.asarray(mass, jnp.float64)
+
+
+def err_against_direct(accel_by_dev, tag):
+    """rel-L2 of the distributed force against an fp64 direct sum over ALL particles."""
+    num = den = 0.0
+    for d in range(NDEV):
+        sel = shards[d]
+        pick = PICKS[d]
+        # target_indices restricts the ROWS evaluated; every source still enters
+        # every sum, which is what makes this the full-N reference and not a
+        # shard-local one
+        ref = np.asarray(
+            direct_accelerations(
+                allp, allm, G=1.0, softening=SOFT, target_indices=np.asarray(sel)[pick]
+            ),
+            np.float64,
+        )
+        got = accel_by_dev[d * CAP : (d + 1) * CAP][: dev_live[d]][pick]
+        num += float(((got - ref) ** 2).sum())
+        den += float((ref**2).sum())
+        _key = {"local-only (no cross)": "local", "+ cross FAR": "far", "+ cross FAR and NEAR": "both"}[tag]
+        _dump(f"{_key}_d{d}", pos[np.asarray(sel)[pick]], got, ref)
+    rel = float(np.sqrt(num / den))
+    print(
+        f"  {tag:<28} rel-L2 vs fp64 direct (ALL sources) = {rel:.4e}"
+        f"   [order={ORDER} dtype={DTYPE} accum={ACCUM} export_theta={EXPORT_THETA}]"
+    )
+    return rel
+
+
+a_local, ovf_local = run(None, time_tag="local")
+if TIME_REPS > 0:
+    # the production cross configuration, no record: near_theta defaults to theta
+    sink = {}
+    a_both, ovf_both = run(
+        make_cross_hook(ndev=NDEV, theta=THETA, caps=caps, near_sink=sink),
+        near_sink=sink,
+        time_tag="cross",
+    )
+    e_local = err_against_direct(a_local, "local-only (no cross)")
+    e_cross = err_against_direct(a_both, "+ cross FAR and NEAR")
+    print(f"local-only overflow={ovf_local}   far+near overflow={ovf_both}", flush=True)
+    result = dict(
+        n=N, ndev=NDEV, n_per_dev=N // NDEV, leaf=LEAF, order=ORDER, theta=THETA, dtype=DTYPE,
+        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+        err_local=e_local, err_cross=e_cross, overflow_local=ovf_local, overflow_cross=ovf_both,
+        timings=TIMINGS,
+        cross_mac_geometry=os.environ.get("JACCPOT_CROSS_MAC_GEOMETRY", "com"),
+    )
+    if os.environ.get("PROBE_JSON"):
+        import json
+
+        with open(os.environ["PROBE_JSON"], "w") as fh:
+            json.dump(result, fh, indent=1, default=str)
+    if ovf_local or ovf_both:
+        raise SystemExit("TIMING FAILED: a capacity overflowed")
+    raise SystemExit(0)
 rec_far = {}
 a_far, ovf_far = run(
     # the same export knob as the far+near arm, or under PROBE_EXPORT_THETA=0 this
@@ -398,39 +510,6 @@ print(
     f"far+near overflow={ovf_both}",
     flush=True,
 )
-
-# --- the fp64 reference: every particle against ALL others, subsampled
-allp = jnp.asarray(pos, jnp.float64)
-allm = jnp.asarray(mass, jnp.float64)
-
-
-def err_against_direct(accel_by_dev, tag):
-    """rel-L2 of the distributed force against an fp64 direct sum over ALL particles."""
-    num = den = 0.0
-    for d in range(NDEV):
-        sel = shards[d]
-        pick = PICKS[d]
-        # target_indices restricts the ROWS evaluated; every source still enters
-        # every sum, which is what makes this the full-N reference and not a
-        # shard-local one
-        ref = np.asarray(
-            direct_accelerations(
-                allp, allm, G=1.0, softening=SOFT, target_indices=np.asarray(sel)[pick]
-            ),
-            np.float64,
-        )
-        got = accel_by_dev[d * CAP : (d + 1) * CAP][: dev_live[d]][pick]
-        num += float(((got - ref) ** 2).sum())
-        den += float((ref**2).sum())
-        _key = {"local-only (no cross)": "local", "+ cross FAR": "far", "+ cross FAR and NEAR": "both"}[tag]
-        _dump(f"{_key}_d{d}", pos[np.asarray(sel)[pick]], got, ref)
-    rel = float(np.sqrt(num / den))
-    print(
-        f"  {tag:<28} rel-L2 vs fp64 direct (ALL sources) = {rel:.4e}"
-        f"   [order={ORDER} dtype={DTYPE} accum={ACCUM} export_theta={EXPORT_THETA}]"
-    )
-    return rel
-
 
 print()
 e_local = err_against_direct(a_local, "local-only (no cross)")
