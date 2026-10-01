@@ -725,7 +725,14 @@ class PrepareMixin(_EngineBase):
             )
             # a rebuilt tree deeper than the level-loop bound would truncate
             # the M2M/L2L sweeps: make it a capacity failure like the leaf cap
-            depth_bound = getattr(self, "_cells_upward_num_levels", None)
+            # the SAME bound the upward sweep loops to: an installed capacity plan
+            # wins there (`_planned_upward_num_levels`), so it must win here, or a
+            # plan lower than the stash would truncate the sweep while this passed
+            from jaccpot.runtime.fmm_sweeps import _planned_upward_num_levels
+
+            depth_bound = _planned_upward_num_levels(rebuilt_tree)
+            if depth_bound is None:
+                depth_bound = getattr(self, "_cells_upward_num_levels", None)
             if depth_bound is not None:
                 depth_now = jnp.max(jnp.asarray(rebuilt_tree.node_level)) + 1
                 overflow = jnp.asarray(overflow) | (depth_now > int(depth_bound))

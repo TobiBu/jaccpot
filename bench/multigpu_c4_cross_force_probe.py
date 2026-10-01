@@ -269,25 +269,42 @@ if SOLO:
 # --- eager prepare per shard, collect plans (same discipline as the G1 probe:
 # ONE solver instance, warmed by the eager prepares the traced body depends on)
 solver = build()
-preps, plans = [], []
+from jaccpot.runtime.capacity_plan import (
+    install_walk_caps,
+    measure_shard_plan,
+    merge_walk_caps,
+)
+
+preps, plans, walk_reports = [], [], []
 for d in range(NDEV):
-    LS._WIDTHS.clear()
-    LS._LEVELS.clear()
     # Prepare each shard ON ITS OWN device: at large N one card cannot hold every
     # shard's state, and the assembly below then needs no cross-device copy.
     with jax.default_device(jax.devices()[d if not SOLO else 0]):
-        pr = solver.strict_fused_prepared_eval_fn(
-            positions=jnp.asarray(dev_pos[d]),
-            masses=jnp.asarray(dev_mass[d]),
+        pr, shard_plan, shard_caps = measure_shard_plan(
+            solver,
+            jnp.asarray(dev_pos[d]),
+            jnp.asarray(dev_mass[d]),
             leaf_size=LEAF,
             max_order=ORDER,
             theta=THETA,
-        )[0]
-    TN = int(np.asarray(pr.tree.node_ranges).shape[0])
-    NI = int(pr.tree.left_child.shape[0])
-    plans.append(plan_from_registry(total_nodes=TN, num_internal=NI))
+        )
+    plans.append(shard_plan)
+    walk_reports.append(shard_caps)
     preps.append(pr)
 plan = merge_plans(plans)
+# each eager prepare overwrote the engine's walk record with ITS shard's needs; the
+# traced walk of every device must be sized for the worst one
+walk_caps = merge_walk_caps(walk_reports)
+install_walk_caps(solver, walk_caps)
+print(
+    "merged walk caps: "
+    + str(
+        {k: walk_caps.get(k) for k in ("queue_capacity", "peak_wavefront")}
+        if walk_caps
+        else None
+    ),
+    flush=True,
+)
 print(f"merged plan: {plan}", flush=True)
 
 from jaccpot.distributed.cross import CrossCapacities, make_cross_hook

@@ -37,13 +37,16 @@ from __future__ import annotations
 import contextlib
 import contextvars
 from dataclasses import dataclass, replace
-from typing import Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 __all__ = [
     "FusedCapacityPlan",
     "fused_capacity_plan",
     "fused_capacity_plan_overrides",
+    "install_walk_caps",
+    "measure_shard_plan",
     "merge_plans",
+    "merge_walk_caps",
     "plan_from_registry",
 ]
 
@@ -304,3 +307,132 @@ def merge_plans(plans: Iterable[FusedCapacityPlan]) -> FusedCapacityPlan:
         num_levels=max(int(p.num_levels) for p in items),
         upward_num_levels=max(int(p.upward_num_levels) for p in items),
     )
+
+
+#: Walk-capacity report fields that size the TRACED walk; merged by maximum.
+_WALK_CAP_MAX_FIELDS = (
+    "queue_capacity",
+    "max_pair_queue_requested",
+    "compact_far_pair_capacity",
+    "near_edge_capacity",
+    "max_neighbors_observed",
+    "peak_wavefront",
+)
+
+
+def merge_walk_caps(reports: "Iterable[Optional[dict]]") -> Optional[dict]:
+    """Field-wise maximum of per-shard walk-capacity reports.
+
+    Each eager prepare records what ITS shard's walk needed
+    (``engine._strict_fused_validated_caps``), and the traced walk is sized from that
+    record (queue = 1.5 x the peak wavefront, the flat-walk floors). Prepared one shard
+    after another on the same engine, the record is simply the LAST shard's -- so every
+    device's traced walk is sized for one device. Merge the records and install the
+    result (:func:`install_walk_caps`) before building the evaluator.
+
+    Parameters
+    ----------
+    reports : Iterable[Optional[dict]]
+        One report per shard; ``None`` entries are skipped.
+
+    Returns
+    -------
+    Optional[dict]
+        The merged report (the first report's keys, maxima over the sizing fields),
+        or ``None`` when no report was given.
+
+    Raises
+    ------
+    ValueError
+        If the reports disagree on ``flat_walk`` -- one compiled program cannot run
+        both walks.
+    """
+    reports = [dict(r) for r in reports if r]
+    if not reports:
+        return None
+    merged = dict(reports[0])
+    flat = {bool(r.get("flat_walk")) for r in reports}
+    if len(flat) > 1:
+        raise ValueError("shards disagree on flat_walk; prepare them alike")
+    for key in _WALK_CAP_MAX_FIELDS:
+        values = [int(r[key]) for r in reports if r.get(key) is not None]
+        if values:
+            merged[key] = max(values)
+    return merged
+
+
+def install_walk_caps(engine: Any, caps: Optional[dict]) -> None:
+    """Make ``caps`` the record the engine sizes its traced walk from.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine, or the ``FastMultipoleMethod`` facade.
+    caps : Optional[dict]
+        A (merged) walk-capacity report; ``None`` leaves the engine unchanged.
+    """
+    if caps is None:
+        return
+    impl = getattr(engine, "_impl", engine)
+    impl._strict_fused_validated_caps = dict(caps)
+
+
+def measure_shard_plan(
+    solver: Any,
+    positions: Any,
+    masses: Any,
+    *,
+    leaf_size: int,
+    max_order: int,
+    theta: Optional[float] = None,
+) -> tuple:
+    """Eagerly prepare one shard and read back what its static shapes must cover.
+
+    The sequence every multi-device driver needs per shard: clear the process-level
+    level registry (so this shard's widths are not mixed with another's), run the
+    eager fused prepare, then read the level plan and the walk-capacity report it
+    recorded. Merge the results over shards with :func:`merge_plans` and
+    :func:`merge_walk_caps`.
+
+    Parameters
+    ----------
+    solver : Any
+        The ``FastMultipoleMethod`` (the SAME instance the evaluator will be built
+        around: the traced body depends on caches the eager prepare fills).
+    positions : Any
+        This shard's padded positions.
+    masses : Any
+        This shard's padded masses (zero on padding rows).
+    leaf_size : int
+        Leaf target.
+    max_order : int
+        Expansion order.
+    theta : Optional[float]
+        Opening angle.
+
+    Returns
+    -------
+    tuple
+        ``(prepared_state, FusedCapacityPlan, walk_caps)``.
+    """
+    from jaccpot.runtime import _level_shapes as level_shapes
+
+    level_shapes._WIDTHS.clear()
+    level_shapes._LEVELS.clear()
+    prepared = solver.strict_fused_prepared_eval_fn(
+        positions=positions,
+        masses=masses,
+        leaf_size=int(leaf_size),
+        max_order=int(max_order),
+        theta=theta,
+    )[0]
+    impl = getattr(solver, "_impl", solver)
+    total_nodes = int(prepared.tree.node_ranges.shape[0])
+    num_internal = int(prepared.tree.left_child.shape[0])
+    plan = plan_from_registry(
+        total_nodes=total_nodes,
+        num_internal=num_internal,
+        upward_num_levels=getattr(impl, "_cells_upward_num_levels", None),
+    )
+    caps = getattr(impl, "_strict_fused_validated_caps", None)
+    return prepared, plan, (dict(caps) if isinstance(caps, dict) else None)

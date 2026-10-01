@@ -318,3 +318,35 @@ def test_the_two_level_counts_are_distinct_fields():
     assert merged.level_batch_width == 120
     assert merged.num_levels == 35
     assert merged.upward_num_levels == 44
+
+
+def test_merged_walk_caps_cover_the_worst_shard():
+    """Each eager prepare overwrites the engine's record; the merge keeps the maxima."""
+    from types import SimpleNamespace
+
+    from jaccpot.runtime.capacity_plan import install_walk_caps, merge_walk_caps
+
+    a = {
+        "flat_walk": True,
+        "queue_capacity": 1 << 17,
+        "peak_wavefront": 85_000,
+        "compact_far_pair_capacity": 1 << 21,
+        "near_edge_capacity": 1 << 22,
+    }
+    b = {
+        "flat_walk": True,
+        "queue_capacity": 1 << 16,
+        "peak_wavefront": 120_000,
+        "compact_far_pair_capacity": 1 << 21,
+        "near_edge_capacity": 1 << 23,
+    }
+    merged = merge_walk_caps([a, None, b])
+    assert merged["peak_wavefront"] == 120_000
+    assert merged["queue_capacity"] == 1 << 17
+    assert merged["near_edge_capacity"] == 1 << 23
+    assert merge_walk_caps([None]) is None
+    with pytest.raises(ValueError, match="flat_walk"):
+        merge_walk_caps([a, dict(b, flat_walk=False)])
+    engine = SimpleNamespace(_strict_fused_validated_caps=b)
+    install_walk_caps(SimpleNamespace(_impl=engine), merged)
+    assert engine._strict_fused_validated_caps["peak_wavefront"] == 120_000
