@@ -1599,6 +1599,18 @@ class StrictRunMixin(_EngineBase):
         # Phase C1: called, result discarded, force bit-identical either way.
         cross_far = None
         if cross_hook is not None:
+            # ONE exact-radius COM geometry for the hook and the local walk below:
+            # each used to resolve its own, 9.7 ms per force at 1e6 particles per
+            # A100. Shared only where the two would compute the same thing -- the
+            # strict fused lane (COM by default) and no folded per-node radius scale
+            # (`dehnen_theta` folds one the hook does not apply).
+            if (
+                getattr(self, "_strict_fused_mode_active", False)
+                and self._folded_criterion_radius_scale() is None
+            ):
+                tree_artifacts = tree_artifacts._replace(
+                    walk_geometry=self._strict_walk_geometry(tree_artifacts)
+                )
             cross_far = cross_hook(tree_artifacts)
         if reuse_static_compact_pairs:
             src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)

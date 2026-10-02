@@ -1531,15 +1531,6 @@ class PrepareMixin(_EngineBase):
         _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
 
         stage_t0 = time.perf_counter()
-        geometry_factory = (
-            None
-            if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry_compiled(
-                tree_artifacts.tree,
-                tree_artifacts.positions_sorted,
-                max_leaf_size=int(tree_artifacts.leaf_cap),
-            )
-        )
         (
             runtime_traversal_config,
             strict_nbr_override,
@@ -1549,24 +1540,7 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
-        # Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
-        # expansions use (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com), see
-        # jaccpot.runtime._mac_geometry.
-        walk_geometry, geometry_factory = resolve_walk_geometry(
-            tree_artifacts.tree,
-            tree_artifacts.positions_sorted,
-            tree_artifacts.upward.geometry,
-            getattr(tree_artifacts.upward.multipoles, "centers", None),
-            leaf_cap=int(tree_artifacts.leaf_cap),
-            geometry_factory=geometry_factory,
-            radius_scale=self._folded_criterion_radius_scale(),
-            # Only this lane gets the COM MAC by default: at a fixed theta it is
-            # LESS conservative than the box half-diagonal, so a global default
-            # would quietly change every caller's accuracy (see mac_geometry_mode).
-            default_mode=(
-                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
-            ),
-        )
+        walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             walk_geometry,
@@ -3446,6 +3420,55 @@ class PrepareMixin(_EngineBase):
             p_gears=p_gears,
         )
 
+    def _strict_walk_geometry(self, tree_artifacts: Any) -> tuple[Any, Any]:
+        """The geometry this lane's dual walk tests the MAC on, resolved ONCE per tree.
+
+        Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
+        expansions use (``JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com``), see
+        :mod:`jaccpot.runtime._mac_geometry`. Only this lane gets the COM MAC by
+        default: at a fixed theta it is LESS conservative than the box
+        half-diagonal, so a global default would quietly change every caller's
+        accuracy (see ``mac_geometry_mode``).
+
+        A refresh that has already resolved it (``tree_artifacts.walk_geometry``,
+        set once for the multi-GPU cross hook and the local walk together) is reused.
+
+        Parameters
+        ----------
+        tree_artifacts : Any
+            The refresh's or prepare's tree/upward artifacts.
+
+        Returns
+        -------
+        tuple[Any, Any]
+            ``(walk_geometry, geometry_factory)`` as :func:`resolve_walk_geometry`
+            returns them.
+        """
+        shared = getattr(tree_artifacts, "walk_geometry", None)
+        if shared is not None:
+            return shared
+        geometry_factory = (
+            None
+            if tree_artifacts.upward.geometry is not None
+            else lambda: compute_tree_geometry_compiled(
+                tree_artifacts.tree,
+                tree_artifacts.positions_sorted,
+                max_leaf_size=int(tree_artifacts.leaf_cap),
+            )
+        )
+        return resolve_walk_geometry(
+            tree_artifacts.tree,
+            tree_artifacts.positions_sorted,
+            tree_artifacts.upward.geometry,
+            getattr(tree_artifacts.upward.multipoles, "centers", None),
+            leaf_cap=int(tree_artifacts.leaf_cap),
+            geometry_factory=geometry_factory,
+            radius_scale=self._folded_criterion_radius_scale(),
+            default_mode=(
+                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+            ),
+        )
+
     def _strict_fused_capacity_handoff(
         self,
         *,
@@ -3620,15 +3643,6 @@ class PrepareMixin(_EngineBase):
             If the strict streamed preconditions do not hold at build time.
         """
 
-        geometry_factory = (
-            None
-            if tree_artifacts.upward.geometry is not None
-            else lambda: compute_tree_geometry_compiled(
-                tree_artifacts.tree,
-                tree_artifacts.positions_sorted,
-                max_leaf_size=int(tree_artifacts.leaf_cap),
-            )
-        )
         (
             runtime_traversal_config,
             strict_nbr_override,
@@ -3638,24 +3652,7 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
-        # Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
-        # expansions use (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com), see
-        # jaccpot.runtime._mac_geometry.
-        walk_geometry, geometry_factory = resolve_walk_geometry(
-            tree_artifacts.tree,
-            tree_artifacts.positions_sorted,
-            tree_artifacts.upward.geometry,
-            getattr(tree_artifacts.upward.multipoles, "centers", None),
-            leaf_cap=int(tree_artifacts.leaf_cap),
-            geometry_factory=geometry_factory,
-            radius_scale=self._folded_criterion_radius_scale(),
-            # Only this lane gets the COM MAC by default: at a fixed theta it is
-            # LESS conservative than the box half-diagonal, so a global default
-            # would quietly change every caller's accuracy (see mac_geometry_mode).
-            default_mode=(
-                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
-            ),
-        )
+        walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             walk_geometry,

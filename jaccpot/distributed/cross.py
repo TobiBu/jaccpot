@@ -195,7 +195,11 @@ def make_cross_hook(
         # memory `mac-geometry-inconsistent-with-com-centres`, one level up.
         # `JACCPOT_CROSS_MAC_GEOMETRY=aabb` keeps the old behaviour as a control.
         box_geom = upward.geometry
-        if _cross_mac_geometry_mode() == "com":
+        shared = getattr(tree_artifacts, "walk_geometry", None)
+        if _cross_mac_geometry_mode() == "com" and shared is not None:
+            # the refresh resolved the local walk's geometry once for both of us
+            geom = shared[0] if shared[0] is not None else box_geom
+        elif _cross_mac_geometry_mode() == "com":
             from jaccpot.runtime._mac_geometry import resolve_walk_geometry
 
             geom, _ = jax.named_call(resolve_walk_geometry, name="cross_geometry")(
