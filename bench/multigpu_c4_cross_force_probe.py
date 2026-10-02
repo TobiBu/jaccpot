@@ -86,6 +86,7 @@ from jaccpot.config import (
     TreeConfig,
 )
 from jaccpot.distributed.fused import (
+    cube_bounds,
     fused_force_step,
     make_fused_force_evaluator,
     stack_prepared_states,
@@ -96,6 +97,7 @@ from jaccpot.runtime.capacity_plan import (
     merge_plans,
     plan_from_registry,
 )
+from jaccpot.runtime.kernels._evaluate import _infer_bounds as _infer_lane_bounds
 
 ORDER = int(os.environ.get("PROBE_ORDER", "4"))
 THETA = float(os.environ.get("PROBE_THETA", "0.8"))
@@ -113,7 +115,8 @@ _ic = IC_GENERATORS["plummer"](N, seed=0)
 pos = np.asarray(_ic[0], WDT)
 mass = np.asarray(_ic[1], WDT)
 P0 = jnp.asarray(pos)
-codes = np.asarray(morton_encode(P0, infer_bounds(P0)))
+# the partition and the leaf counts use the lane's own (cubic) box rule
+codes = np.asarray(morton_encode(P0, _infer_lane_bounds(P0)))
 order = np.argsort(codes)
 shards = np.array_split(order, NDEV)
 kk = int(cp.adaptive_cell_leaf_partition_numpy(np.sort(codes), leaf_size=LEAF)[0].size)
@@ -226,10 +229,7 @@ for sel in shards:
 allpos = np.concatenate([dev_pos[d][: dev_live[d]] for d in range(NDEV)])
 glo = allpos.min(0)
 ghi = allpos.max(0)
-span = np.maximum(ghi - glo, np.float32(1e-6))
-slack = (span * np.float32(1e-6)).astype(np.float32)
-BLO = jnp.asarray(glo - slack)
-BHI = jnp.asarray(ghi + slack)
+BLO, BHI = cube_bounds(jnp.asarray(glo), jnp.asarray(ghi), pad=1e-6)
 print(f"global box lo={np.asarray(BLO)} hi={np.asarray(BHI)}", flush=True)
 
 if SOLO:

@@ -51,6 +51,7 @@ __all__ = [
     "AXIS_NAME",
     "RAGGED_EXCHANGE_XLA_FLAG",
     "assemble_prepared_states",
+    "cube_bounds",
     "fused_force_step",
     "global_mesh_bounds",
     "make_fused_force_evaluator",
@@ -157,9 +158,59 @@ def global_mesh_bounds(
         pos = jnp.where(live[:, None], pos, pos[0][None, :])
     lo = jax.lax.pmin(jnp.min(pos, axis=0), axis_name)
     hi = jax.lax.pmax(jnp.max(pos, axis=0), axis_name)
-    span = jnp.maximum(hi - lo, jnp.asarray(pad, lo.dtype))
-    slack = span * jnp.asarray(pad, lo.dtype)
-    return lo - slack, hi + slack
+    return cube_bounds(lo, hi, pad=pad)
+
+
+def cube_bounds(lo: Array, hi: Array, *, pad: float) -> tuple[Array, Array]:
+    """Padded Morton box around ``[lo, hi]``; a cube if ``JACCPOT_CUBIC_BOUNDS=1``.
+
+    ``morton_encode`` normalises each axis by its OWN extent, so a box that is longer
+    in x than in z makes every octree cell longer in x than in z by the same factor --
+    and a handful of outliers decide that factor. A cube makes every cell a cube.
+
+    It is OPT-IN because it is a trade, not a fix (one A100, Plummer, leaf 64, theta
+    0.8, p6, interleaved A/B, 2026-10-02):
+
+    ====  ======================  ======================
+    N     per-axis box            cube
+    ====  ======================  ======================
+    2M    111.0 ms, 8.7e-4        125.8 ms, 4.5e-4
+    4M    374 ms, 2.7e-3          256 ms, 4.9e-4
+    8M    393.9 ms, 4.6e-4        502.8 ms, 4.0e-4
+    ====  ======================  ======================
+
+    The 4M draw (box 3.2:1) is pathological under the per-axis box -- 58.1M directed
+    far pairs against 14.2M in the cube -- but at 2M and 8M the cube walks MORE pairs,
+    so how the dense core sits on the Morton grid matters more than the box's aspect.
+
+    Kept a separate function so the reference arm of a probe can build exactly the
+    box the mesh builds.
+
+    Parameters
+    ----------
+    lo, hi : Array
+        Per-axis minimum and maximum of the live positions, shape ``(3,)``.
+    pad : float
+        Fractional slack added to each side.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(min_corner, max_corner)``.
+    """
+    from jaccpot._env import env_flag
+
+    lo = jnp.asarray(lo)
+    hi = jnp.asarray(hi)
+    padv = jnp.asarray(pad, lo.dtype)
+    if not env_flag("JACCPOT_CUBIC_BOUNDS", False):
+        span = jnp.maximum(hi - lo, padv)
+        slack = span * padv
+        return lo - slack, hi + slack
+    edge = jnp.maximum(jnp.max(hi - lo), padv)
+    centre = (lo + hi) * jnp.asarray(0.5, lo.dtype)
+    half = edge * jnp.asarray(0.5, lo.dtype) + edge * padv
+    return centre - half, centre + half
 
 
 def reduce_flag_across_mesh(flag: Array, *, axis_name: str = AXIS_NAME) -> Array:
