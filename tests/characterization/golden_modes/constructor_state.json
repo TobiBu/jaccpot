@@ -215,6 +215,7 @@
   "_strict_velocity_verlet_acceleration_carry_active": "False",
   "_topology_reuse_entry": "None",
   "_traversal_field_overrides": "{}",
+  "_tree_cell_min_level": "0",
   "_tree_leaf_capacity": "None",
   "_tree_leaf_partition": "'buckets'",
   "_tree_workspace": "None",
