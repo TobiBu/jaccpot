@@ -439,6 +439,9 @@ def mutual_walk_pallas(
     num_warps: int = 2,
     max_rounds: int = 256,
     rounds_per_check: int = 16,
+    seed_a: Optional[Array] = None,
+    seed_b: Optional[Array] = None,
+    seed_count: Optional[Array] = None,
 ) -> PallasWalkResult:
     """Run the mutual walk, one Pallas launch per round.
 
@@ -484,11 +487,31 @@ def mutual_walk_pallas(
         (XLA preserves the loop state around the aliased pallas_call: 19 D2D
         memcpys per iteration at N=2e5), so many rounds run between checks; an
         empty round is one early-exiting launch plus a few scalar ops.
+    seed_a : Optional[Array]
+        ``[K]`` first nodes of the starting pairs in place of ``(root, root)``,
+        ``-1`` for dead slots (the walk filters them). ``K <= max_pair_queue``. This
+        is what makes the kernel a ONE-SIDED walk: a node with no children (an
+        imported row, a summary cell) is never split, so only the other side refines
+        -- the same contract as ``dual_tree_walk_mutual``'s seeds, used by the
+        multi-GPU export and receiver walks. Pairs come out as ``(min, max)``, so a
+        block indexed above the local nodes always lands in ``*_b``.
+    seed_b : Optional[Array]
+        ``[K]`` second nodes of the starting pairs; given together with ``seed_a``.
+    seed_count : Optional[Array]
+        Live prefix of the seed (a width, not a filter: dead slots past it are
+        never read). ``None`` uses ``K``.
 
     Returns
     -------
     PallasWalkResult
-        The lists, counts and flags.
+        The lists, counts and flags. ``queue_overflow`` is also raised when the
+        walk stops at ``max_rounds`` with pairs still queued -- those pairs were
+        never classified, so the lists are incomplete.
+
+    Raises
+    ------
+    ValueError
+        If the seed is longer than ``max_pair_queue`` or only one half is given.
     """
     idx = jnp.int32
     nodes = int(left_child_full.shape[0])
@@ -564,18 +587,34 @@ def mutual_walk_pallas(
             **backend_kwargs,
         )(*operands)
 
-    qa0 = jnp.full((Q,), -1, idx).at[0].set(jnp.asarray(root, idx))
-    qb0 = qa0
+    if (seed_a is None) != (seed_b is None):
+        raise ValueError("seed_a and seed_b go together")
+    if seed_a is None:
+        qa0 = jnp.full((Q,), -1, idx).at[0].set(jnp.asarray(root, idx))
+        qb0 = qa0
+        size0 = jnp.asarray(1, idx)
+    else:
+        assert seed_b is not None  # checked above; for the type checker
+        K = int(jnp.asarray(seed_a).shape[0])
+        if K > Q:
+            raise ValueError(f"seed of {K} pairs exceeds max_pair_queue={Q}")
+        qa0 = jnp.full((Q,), -1, idx).at[:K].set(jnp.asarray(seed_a, idx))
+        qb0 = jnp.full((Q,), -1, idx).at[:K].set(jnp.asarray(seed_b, idx))
+        size0 = (
+            jnp.asarray(K, idx)
+            if seed_count is None
+            else jnp.minimum(jnp.asarray(seed_count, idx), jnp.asarray(K, idx))
+        )
     init = (
         qa0,
         qb0,
-        jnp.asarray(1, idx),
+        size0,
         jnp.full((int(far_cap),), -1, idx),
         jnp.full((int(far_cap),), -1, idx),
         jnp.full((int(near_cap),), -1, idx),
         jnp.full((int(near_cap),), -1, idx),
         jnp.zeros((_NUM_COUNTERS,), idx),  # far, near, next, overflow far/near/queue
-        jnp.asarray(1, idx),  # peak
+        size0,  # peak
         jnp.asarray(0, idx),  # rounds
     )
 
@@ -620,6 +659,14 @@ def mutual_walk_pallas(
     qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = lax.while_loop(
         cond, body, init
     )
+    # Stopping at max_rounds with pairs still queued leaves them unclassified. Only
+    # when the round limit is WHY it stopped: an overflow also stops the loop with
+    # pairs queued, and the eager ladder must keep reading that as a far/near
+    # overflow rather than grow a queue that never filled.
+    other_overflow = (
+        counters[_C_OVF_FAR] + counters[_C_OVF_NEAR] + counters[_C_OVF_Q]
+    ) > 0
+    unfinished = (size > 0) & ~other_overflow
     return PallasWalkResult(
         far_a=far_a,
         far_b=far_b,
@@ -629,7 +676,7 @@ def mutual_walk_pallas(
         near_count=jnp.minimum(counters[_C_NEAR], int(near_cap)),
         far_overflow=counters[_C_OVF_FAR] > 0,
         near_overflow=counters[_C_OVF_NEAR] > 0,
-        queue_overflow=counters[_C_OVF_Q] > 0,
+        queue_overflow=(counters[_C_OVF_Q] > 0) | unfinished,
         peak_wavefront=peak,
         rounds=rounds,
     )

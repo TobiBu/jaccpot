@@ -372,6 +372,10 @@ DIAG_KEYS = (
     "near_recv_nodes",
     "near_list_pairs",
     "near_walk_far_pairs",
+    "near_csr",
+    "export_near",
+    "near_walk_peak",
+    "export_walk_peak",
     "center_mismatch",
     "center_max_delta",
     "export_far_live",
@@ -492,6 +496,14 @@ def _auto_cap(env_bits, per_leaf, floor_bits, headroom=2.5):
 # nodes ~1.25 (far nodes 6.7k, near leaves 5.5k); received CSR ~53; receiver far
 # pairs ~53 (+ near-walk far pairs); receiver near pairs ~60
 _recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", 53, 19)
+# Measured at 1e6 per device (2 cards, 2026-10-02): near CSR 1.43-1.51M entries
+# (~29 per leaf), near receiver walk peak 2.66M pairs (~52 per leaf), export walk
+# peak 0.72-0.90M (~17 per leaf). The FAR receiver walk is skipped (a pass-through,
+# see cross._direct_far_lists), so the queue no longer has to hold the far CSR.
+_recv_near_csr = _auto_cap("PROBE_RECV_NEAR_CSR_BITS", 29, 19)
+_far_walk = EXPORT_THETA is not None or os.environ.get(
+    "JACCPOT_CROSS_FAR_RECEIVER_WALK"
+) in ("1", "true", "on")
 caps = CrossCapacities(
     max_cells=int(os.environ.get("PROBE_MAX_CELLS", 0))
     or _auto_cap("PROBE_MAX_CELLS_BITS", 0.29, 13),
@@ -501,9 +513,15 @@ caps = CrossCapacities(
     send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", 53, 21),
     recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
     recv_csr_cap=_recv_csr,
-    # The receiver walk SEEDS from the received CSR, one pair per entry, so the
-    # queue has to hold that seed: walk_queue > recv_csr_cap is a hard requirement.
-    walk_queue=max(_auto_cap("PROBE_WALK_QUEUE_BITS", 53, 20), 2 * _recv_csr),
+    recv_near_csr_cap=_recv_near_csr,
+    # A receiver walk SEEDS from its received CSR, one pair per entry, so the queue
+    # has to hold that seed (and the walk's peak). Only the near walk runs now
+    # unless the far one is forced; every queue overflow raises the cross flag.
+    walk_queue=max(
+        _auto_cap("PROBE_WALK_QUEUE_BITS", 52, 20, headroom=1.5),
+        _recv_near_csr,
+        2 * _recv_csr if _far_walk else 0,
+    ),
     recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 106, 21),
     recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 60, 21),
     leaf_width=LEAF,

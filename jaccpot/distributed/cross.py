@@ -49,6 +49,8 @@ from yggdrax.distributed.summary import occupancy_cut
 __all__ = [
     "CrossCapacities",
     "cross_near_acceleration",
+    "cross_walk_backend",
+    "cross_walk_fn",
     "make_cross_hook",
     "merge_imported_blocks",
 ]
@@ -64,6 +66,154 @@ def _cross_mac_geometry_mode() -> str:
 
     # a malformed value warns and keeps the correct default, as every jaccpot switch does
     return env_choice(_CROSS_MAC_GEOMETRY_ENV, "com", ("com", "aabb"))
+
+
+def _far_receiver_walk_needed(export_theta: Optional[float], theta: float) -> bool:
+    """Whether the far receiver walk can refine anything (else it is a pass-through).
+
+    Parameters
+    ----------
+    export_theta : Optional[float]
+        The sender's export MAC parameter (``None``: ``theta``).
+    theta : float
+        The receiver's MAC parameter.
+
+    Returns
+    -------
+    bool
+        ``True`` when the walk must run: a sender exporting under a different theta,
+        or ``JACCPOT_CROSS_FAR_RECEIVER_WALK=1``.
+    """
+    from jaccpot._env import env_flag
+
+    if export_theta is not None and float(export_theta) != float(theta):
+        return True
+    return env_flag("JACCPOT_CROSS_FAR_RECEIVER_WALK", False)
+
+
+def _direct_far_lists(cells: Array, got: Any) -> Any:
+    """The far receiver lists read straight off the received CSR.
+
+    Parameters
+    ----------
+    cells : Array
+        ``(max_cells,)`` this device's summary cell roots.
+    got : Any
+        The received far import (``ImportedCells``): its CSR is prefix-live, one
+        contiguous block per sender, ``num_csr`` entries in all.
+
+    Returns
+    -------
+    Any
+        A :class:`yggdrax.distributed.import_cells.ReceiverLists` with every CSR
+        entry as a far pair (local cell root, imported payload row) and no near pairs.
+    """
+    from yggdrax.distributed.import_cells import ReceiverLists
+
+    csr_cell = jnp.asarray(got.csr_cell)
+    csr_row = jnp.asarray(got.csr_row)
+    idx = csr_row.dtype
+    live = (jnp.arange(csr_cell.shape[0]) < got.num_csr) & (csr_cell >= 0)
+    neg = jnp.asarray(-1, idx)
+    target = jnp.where(live, jnp.asarray(cells, idx)[jnp.where(live, csr_cell, 0)], neg)
+    source = jnp.where(live, csr_row, neg)
+    empty = jnp.full((1,), -1, idx)
+    false = jnp.asarray(False)
+    return ReceiverLists(
+        far_target=target,
+        far_source=source,
+        far_count=jnp.asarray(got.num_csr),
+        near_target=empty,
+        near_source=empty,
+        near_count=jnp.asarray(0, idx),
+        far_overflow=false,
+        near_overflow=false,
+        queue_overflow=false,
+    )
+
+
+def cross_walk_backend() -> str:
+    """Walk implementation of the export and receiver walks.
+
+    ``JACCPOT_CROSS_WALK``: ``"pallas"`` (one Pallas launch per round,
+    :func:`jaccpot.pallas.mutual_walk_pallas.mutual_walk_pallas` with a seeded
+    start) or ``"flat"`` (yggdrax ``dual_tree_walk_mutual``, traced JAX). Unset:
+    whatever the local lane's own walk uses (``JACCPOT_STATIC_STRICT_FUSED_WALK``,
+    Pallas on an Ampere+ GPU).
+
+    Returns
+    -------
+    str
+        ``"flat"`` or ``"pallas"``.
+    """
+    from jaccpot._env import env_choice
+    from jaccpot.runtime._interaction_cache import strict_walk_backend
+
+    return env_choice("JACCPOT_CROSS_WALK", strict_walk_backend(), ("flat", "pallas"))
+
+
+def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
+    """The ``walk_fn`` the export and receiver walks run, or ``None`` for yggdrax's.
+
+    The traced walk runs one ``while_loop`` per wavefront width with ~40 ops per
+    round and copies its full-capacity queues on every round: 64 MB twice per
+    round at 1e6 particles per A100, ~8 ms of copies plus ~15 ms of walk kernels
+    per force across the three cross walks. The Pallas walk classifies a round in
+    one launch and checks the loop predicate every 16 rounds.
+
+    Parameters
+    ----------
+    mac_type : str
+        The hook's MAC; the Pallas kernel implements ``dehnen`` / ``bh`` only, so
+        any other keeps the traced walk.
+
+    Returns
+    -------
+    Optional[Callable[..., Any]]
+        A function with ``dual_tree_walk_mutual``'s signature and result fields.
+    """
+    if cross_walk_backend() != "pallas" or str(mac_type) not in ("dehnen", "bh"):
+        return None
+
+    def pallas_walk(
+        left_child_full: Array,
+        right_child_full: Array,
+        centers: Array,
+        radii: Array,
+        theta: float,
+        root: Array,
+        *,
+        max_pair_queue: int,
+        far_cap: int,
+        near_cap: int,
+        mac_type: Optional[str] = None,
+        node_active: Optional[Array] = None,
+        seed_a: Optional[Array] = None,
+        seed_b: Optional[Array] = None,
+        seed_count: Optional[Array] = None,
+    ) -> Any:
+        from jaccpot._env import env_flag
+        from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+
+        del mac_type  # dehnen / bh: the kernel's (r_a + r_b)^2 <= theta^2 d^2
+        return mutual_walk_pallas(
+            left_child_full,
+            right_child_full,
+            centers,
+            radii,
+            float(theta),
+            root,
+            max_pair_queue=int(max_pair_queue),
+            far_cap=int(far_cap),
+            near_cap=int(near_cap),
+            node_active=node_active,
+            seed_a=seed_a,
+            seed_b=seed_b,
+            seed_count=seed_count,
+            interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
+        )
+
+    return pallas_walk
 
 
 class CrossCapacities:
@@ -88,6 +238,7 @@ class CrossCapacities:
         leaf_width: int = 64,
         recv_far_cap: int = 1 << 17,
         recv_near_cap: int = 1 << 17,
+        recv_near_csr_cap: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         self.max_leaves_per_cell = int(max_leaves_per_cell)
@@ -101,6 +252,13 @@ class CrossCapacities:
         self.leaf_width = int(leaf_width)
         self.recv_far_cap = int(recv_far_cap)
         self.recv_near_cap = int(recv_near_cap)
+        # The NEAR import's CSR: one entry per (cell, near leaf) the sender exported,
+        # so at most export_near_cap x (ndev - 1) -- much shorter than the far CSR,
+        # and it is the near receiver walk's seed width, i.e. a floor on walk_queue.
+        # None keeps the old shared width.
+        self.recv_near_csr_cap = (
+            self.recv_csr_cap if recv_near_csr_cap is None else int(recv_near_csr_cap)
+        )
 
 
 def make_cross_hook(
@@ -163,6 +321,7 @@ def make_cross_hook(
         imported sources indexed from ``n_local``.
     """
     cap = caps if caps is not None else CrossCapacities()
+    walk_fn = cross_walk_fn(mac_type)
     # ALWAYS-ON overflow channel, independent of the diagnostics `record`: the
     # production and timing paths pass no record, and before this sink existed the
     # far half's flags then reached nobody. Holds tracers; the evaluator reads it
@@ -258,6 +417,7 @@ def make_cross_hook(
             far_cap=cap.export_far_cap,
             near_cap=cap.export_near_cap,
             mac_type=mac_type,
+            walk_fn=walk_fn,
         )
 
         if record is not None:
@@ -404,22 +564,34 @@ def make_cross_hook(
             record["seed_live"] = jnp.sum(s_live)
             record["seed_mac_fail"] = jnp.sum(s_live & ~ok_r)
 
-        rl = jax.named_call(receiver_interaction_lists, name="cross_recv_walk_far")(
-            combined_left,
-            combined_right,
-            combined_cen,
-            combined_rad,
-            n_local,
-            cells,
-            got.csr_cell,
-            got.csr_row,
-            got.num_csr,
-            float(theta),
-            max_pair_queue=cap.walk_queue,
-            far_cap=cap.recv_far_cap,
-            near_cap=cap.recv_near_cap,
-            mac_type=mac_type,
-        )
+        if _far_receiver_walk_needed(export_theta, theta):
+            rl = jax.named_call(receiver_interaction_lists, name="cross_recv_walk_far")(
+                combined_left,
+                combined_right,
+                combined_cen,
+                combined_rad,
+                n_local,
+                cells,
+                got.csr_cell,
+                got.csr_row,
+                got.num_csr,
+                float(theta),
+                max_pair_queue=cap.walk_queue,
+                far_cap=cap.recv_far_cap,
+                near_cap=cap.recv_near_cap,
+                mac_type=mac_type,
+                walk_fn=walk_fn,
+            )
+        else:
+            # The far receiver walk is a PASS-THROUGH by construction: each seed is
+            # (my cell's root, a node the sender ACCEPTED against that very cell),
+            # tested on the same centre and radius the sender used -- the cell's came
+            # from my summary, the node's travelled in the payload. Measured at 2e6 on
+            # two cards: far pairs == received CSR entries (5,083,648 / 4,640,119),
+            # zero near pairs. So map the CSR directly and skip the walk, whose seed
+            # alone forced a queue of 2 x recv_csr_cap. JACCPOT_CROSS_FAR_RECEIVER_WALK=1
+            # runs the walk (the control; `export_theta` != theta always does).
+            rl = _direct_far_lists(cells, got)
 
         # ---- the NEAR half: ship the exported leaves' PARTICLES -------------
         if near_sink is not None:
@@ -488,7 +660,7 @@ def make_cross_hook(
                 sb_n.csr_row,
                 sb_n.csr_sizes,
                 payload_capacity=cap.recv_node_cap,
-                csr_capacity=cap.recv_csr_cap,
+                csr_capacity=cap.recv_near_csr_cap,
                 ndev=ndev,
                 axis_name=axis_name,
             )
@@ -527,6 +699,7 @@ def make_cross_hook(
                 far_cap=cap.recv_far_cap,
                 near_cap=cap.recv_near_cap,
                 mac_type=mac_type,
+                walk_fn=walk_fn,
             )
             near_sink["positions"] = imp_pos
             near_sink["masses"] = imp_mass
@@ -541,6 +714,11 @@ def make_cross_hook(
                 # multipole that now travels with each near-exported leaf (before
                 # Task 2 nothing could consume them and they were dropped)
                 record["near_walk_far_pairs"] = rl_n.far_count
+                # what the walk_queue / recv_near_csr_cap have to cover
+                record["near_csr"] = got_n.num_csr
+                record["export_near"] = ex.near_count
+                if rl_n.peak_wavefront is not None:
+                    record["near_walk_peak"] = rl_n.peak_wavefront
             near_sink["overflow"] = (
                 summary.overflow
                 | sb_n.node_overflow
@@ -554,7 +732,7 @@ def make_cross_hook(
                 # the exchange itself has no overflow flag: compare what arrived
                 # with what the receive buffers can hold
                 | (got_n.num_payload > cap.recv_node_cap)
-                | (got_n.num_csr > cap.recv_csr_cap)
+                | (got_n.num_csr > cap.recv_near_csr_cap)
             )
             flag_sink["near"] = near_sink["overflow"]
 
@@ -577,6 +755,8 @@ def make_cross_hook(
 
         if record is not None:
             record["export_far"] = ex.far_count
+            if ex.peak_wavefront is not None:
+                record["export_walk_peak"] = ex.peak_wavefront
             record["send_nodes"] = jnp.sum(sb.node_sizes)
             record["recv_nodes"] = got.num_payload
             record["recv_csr"] = got.num_csr
