@@ -530,8 +530,13 @@ caps = CrossCapacities(
         _recv_near_csr,
         2 * _recv_csr if _far_walk else 0,
     ),
-    recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 106, 21),
-    recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 60, 21),
+    # Re-measured at 1e6 per device with near_theta = theta (the old 106 / 60 per leaf
+    # were the near_theta = 0 counts): with the far receiver walk skipped these hold
+    # only the NEAR walk's lists -- far 2.36-2.38M (~46 per leaf), near 1.0M (~20).
+    # Both widths are padded work downstream: the far list joins the M2L CSR sort and
+    # the near list sets the cross near-field kernel's grid.
+    recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 46, 21, headroom=2.0),
+    recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 20, 20, headroom=2.0),
     leaf_width=LEAF,
 )
 print(f"cross caps: {vars(caps)}", flush=True)
