@@ -121,13 +121,16 @@ def _near_tiles_on_the_wire() -> bool:
 
 
 def _cross_two_sided() -> bool:
-    """``JACCPOT_CROSS_TWO_SIDED=1``: export against every receiver's summary TREE.
+    """Export against every receiver's summary TREE (default on).
+
+    ``JACCPOT_CROSS_TWO_SIDED=0`` keeps the one-sided export as the control.
 
     The one-sided export refines only the sender, so each receiver cell collects a
-    treecode-style list of sender nodes (~360 per cell at 1e6 particles per device;
-    ~20 of the ~33 ms cross cost at 2e6 on two cards). The two-sided walk splits
-    whichever side is larger, so far pairs can land on the receiver's internal nodes
-    and its L2L cascade carries them down.
+    treecode-style list of sender nodes: 5.1M far pairs per device at 1e6 particles
+    per A100, against 0.46M two-sided (the same 8.7 per leaf as at 1e5, i.e. O(N)).
+    The two-sided walk splits whichever side is larger, so far pairs can land on the
+    receiver's internal nodes and its L2L cascade carries them down. Measured on two
+    A100s, Plummer, p6: 2e6 71.2 -> 64.1 ms, 8e6 229.5 -> 202.3 ms, forces in class.
 
     Returns
     -------
@@ -136,7 +139,35 @@ def _cross_two_sided() -> bool:
     """
     from jaccpot._env import env_flag
 
-    return env_flag("JACCPOT_CROSS_TWO_SIDED", False)
+    return env_flag("JACCPOT_CROSS_TWO_SIDED", True)
+
+
+def _max_leaves_per_cell(cap: "CrossCapacities", two_sided: bool) -> int:
+    """The summary cut's occupancy bound: the caller's, or the measured best per mode.
+
+    Two-sided, 1: the summary tree is the receiver's whole tree above its leaves, so the
+    sender decides "needs particles" per receiver LEAF. With cells of up to 4 leaves a
+    small outskirt cell next to the remote core was near 48k sender leaves at 1e6 per
+    device; its leaves then received them all as M2L sources in one CSR row (the M2L
+    grid is one program per target) and the near import shipped ~2x the particles. At
+    2e6 on two A100s: 61.3 -> 57.3 ms, the receiver near walk a pass-through. One-sided,
+    4: per-leaf cells there would give every leaf its own treecode list.
+
+    Parameters
+    ----------
+    cap : CrossCapacities
+        Capacities; an explicit ``max_leaves_per_cell`` wins.
+    two_sided : bool
+        The export mode.
+
+    Returns
+    -------
+    int
+        Leaves per summary cell at most.
+    """
+    if cap.max_leaves_per_cell is not None:
+        return int(cap.max_leaves_per_cell)
+    return 1 if two_sided else 4
 
 
 class _Published(NamedTuple):
@@ -204,7 +235,7 @@ def _summary_rows(
         parent,
         jnp.asarray(tree.node_ranges),
         num_internal,
-        max_leaves=cap.max_leaves_per_cell,
+        max_leaves=_max_leaves_per_cell(cap, two_sided),
         capacity=cap.max_cells,
         **size_bound,
     )
@@ -686,7 +717,7 @@ class CrossCapacities:
         self,
         *,
         max_cells: int = 1024,
-        max_leaves_per_cell: int = 4,
+        max_leaves_per_cell: Optional[int] = None,
         export_far_cap: int = 1 << 16,
         export_near_cap: int = 1 << 16,
         send_node_cap: int = 1 << 13,
@@ -705,7 +736,12 @@ class CrossCapacities:
         max_summary_nodes: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
-        self.max_leaves_per_cell = int(max_leaves_per_cell)
+        # None: 1 under the two-sided export, 4 under the one-sided one (see
+        # `_max_leaves_per_cell`). At 1 the summary holds every live leaf, so
+        # max_cells must cover the shard's live leaf count.
+        self.max_leaves_per_cell = (
+            None if max_leaves_per_cell is None else int(max_leaves_per_cell)
+        )
         self.export_far_cap = int(export_far_cap)
         self.export_near_cap = int(export_near_cap)
         self.send_node_cap = int(send_node_cap)
@@ -818,7 +854,7 @@ def make_cross_hook(
         Publish each device's summary TREE (the cut plus its ancestors, with child
         links) and walk both trees in the export, so far pairs can land on the
         receiver's internal nodes instead of every cell collecting its own list.
-        ``None`` reads ``JACCPOT_CROSS_TWO_SIDED`` (default off). Static.
+        ``None`` reads ``JACCPOT_CROSS_TWO_SIDED`` (default on). Static.
 
     Returns
     -------

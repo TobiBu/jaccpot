@@ -46,6 +46,15 @@ from jaccpot.runtime._mac_geometry import com_mac_geometry  # noqa: E402
 
 LEAF = 16
 MAX_CELLS = 256
+LEAF_CAPACITY = 2048  # the fixture trees' leaf slots: bounds the live leaves
+
+# (two_sided, max_leaves_per_cell): the one-sided control, the two-sided walk over
+# 4-leaf cells, and the default -- two-sided over the receiver's LEAVES
+MODES = {
+    "one_sided": (False, 4),
+    "two_sided_cells": (True, 4),
+    "two_sided_leaves": (True, 1),
+}
 CAP = 1 << 16
 
 
@@ -95,10 +104,12 @@ def two_domains():
     return _domain(pts[order[:half]], bounds), _domain(pts[order[half:]], bounds)
 
 
-def _caps(summary_cell_level=None):
+def _caps(summary_cell_level=None, max_leaves=4):
+    cells = LEAF_CAPACITY if max_leaves == 1 else MAX_CELLS
     return CrossCapacities(
-        max_cells=MAX_CELLS,
-        max_summary_nodes=2 * MAX_CELLS,
+        max_cells=cells,
+        max_summary_nodes=2 * cells,
+        max_leaves_per_cell=max_leaves,
         export_far_cap=CAP,
         export_near_cap=CAP,
         export_walk_queue=CAP,
@@ -106,13 +117,14 @@ def _caps(summary_cell_level=None):
     )
 
 
-def _export(send, recv, theta, *, two_sided, drop_entry=None, cell_level=None):
+def _export(send, recv, theta, *, mode, drop_entry=None, cell_level=None):
     """The hook's publish + gather + export, sender = device 1, receiver = device 0.
 
     ``drop_entry`` (MUTATION) marks one of the receiver's published entries inactive:
     a cell nobody exports to, or (two-sided) a whole subtree of the summary.
     """
-    cap = _caps(cell_level)
+    two_sided, max_leaves = MODES[mode]
+    cap = _caps(cell_level, max_leaves)
     pub_r = _summary_rows(recv.topo, recv.geom, cap, two_sided=two_sided)
     pub_s = _summary_rows(send.topo, send.geom, cap, two_sided=two_sided)
     assert not (bool(pub_r.overflow) or bool(pub_s.overflow))
@@ -158,7 +170,7 @@ def _deliver(cell, node, count, *, block, n_send):
     return rows, got
 
 
-def cross_pairs(recv, send, theta, *, two_sided=False, **kw):
+def cross_pairs(recv, send, theta, *, mode="one_sided", **kw):
     """Every pair device 0 (receiver) evaluates against device 1 (sender).
 
     Returns
@@ -167,7 +179,7 @@ def cross_pairs(recv, send, theta, *, two_sided=False, **kw):
         ``(receiver nodes, sender nodes)`` blocks: far pairs read off the CSR, and the
         receiver near walk's far and near pairs.
     """
-    ex, block_nodes, block = _export(send, recv, theta, two_sided=two_sided, **kw)
+    ex, block_nodes, block = _export(send, recv, theta, mode=mode, **kw)
     assert not (
         bool(ex.far_overflow) or bool(ex.near_overflow) or bool(ex.queue_overflow)
     )
@@ -254,33 +266,44 @@ def _report(C):
     )
 
 
-@pytest.mark.parametrize("two_sided", [False, True], ids=["one_sided", "two_sided"])
+@pytest.mark.parametrize("mode", list(MODES))
 @pytest.mark.parametrize("theta", [0.8, 0.5])
 @pytest.mark.parametrize("direction", ["right_to_left", "left_to_right"])
 def test_the_cross_field_covers_every_cross_pair_once(
-    two_domains, two_sided, theta, direction
+    two_domains, mode, theta, direction
 ):
     a, b = two_domains
     recv, send = (a, b) if direction == "right_to_left" else (b, a)
-    pairs = cross_pairs(recv, send, theta, two_sided=two_sided)
+    pairs = cross_pairs(recv, send, theta, mode=mode)
     nf = len(pairs[0][0])
     assert nf > 0 and len(pairs[2][0]) > 0, "vacuous: no far or no direct pairs"
     C = coverage(recv, send, pairs)
     assert np.all(C == 1), _report(C)
 
 
-@pytest.mark.parametrize("two_sided", [False, True], ids=["one_sided", "two_sided"])
-def test_a_size_bounded_summary_covers_too(two_domains, two_sided):
+@pytest.mark.parametrize("mode", list(MODES))
+def test_a_size_bounded_summary_covers_too(two_domains, mode):
     """``summary_cell_level`` (the production default is 8) changes the cut."""
     a, b = two_domains
-    C = coverage(a, b, cross_pairs(a, b, 0.8, two_sided=two_sided, cell_level=3))
+    C = coverage(a, b, cross_pairs(a, b, 0.8, mode=mode, cell_level=3))
     assert np.all(C == 1), _report(C)
+
+
+def test_over_receiver_leaves_the_near_walk_is_a_pass_through(two_domains):
+    """Published per leaf, a near pair the sender emits is (receiver leaf, sender leaf)
+    on the same geometry, so the receiver's near walk refines nothing: no far pairs out
+    of it, and its near pairs are exactly the received CSR."""
+    a, b = two_domains
+    pairs = cross_pairs(a, b, 0.8, mode="two_sided_leaves")
+    assert len(pairs[1][0]) == 0, "the near walk found far pairs under a leaf summary"
+    assert len(pairs[2][0]) > 0, "vacuous"
+    assert np.all(pairs[2][0] >= a.num_internal), "a near target that is no leaf"
 
 
 def test_two_sided_far_pairs_land_above_the_cells_and_are_fewer(two_domains):
     a, b = two_domains
     one = cross_pairs(a, b, 0.8)
-    two = cross_pairs(a, b, 0.8, two_sided=True)
+    two = cross_pairs(a, b, 0.8, mode="two_sided_cells")
     assert len(two[0][0]) < len(one[0][0]), (len(two[0][0]), len(one[0][0]))
     ni = a.num_internal
     cut_cells = set(
@@ -293,11 +316,11 @@ def test_two_sided_far_pairs_land_above_the_cells_and_are_fewer(two_domains):
     assert any(t < ni for t in targets - cut_cells)
 
 
-@pytest.mark.parametrize("two_sided", [False, True], ids=["one_sided", "two_sided"])
-def test_the_coverage_check_sees_a_dropped_entry(two_domains, two_sided):
+@pytest.mark.parametrize("mode", list(MODES))
+def test_the_coverage_check_sees_a_dropped_entry(two_domains, mode):
     """MUTATION: one receiver entry left out of the export loses its particles' rows."""
     a, b = two_domains
-    C = coverage(a, b, cross_pairs(a, b, 0.8, two_sided=two_sided, drop_entry=3))
+    C = coverage(a, b, cross_pairs(a, b, 0.8, mode=mode, drop_entry=3))
     assert np.sum(C == 0) > 0 and np.sum(C > 1) == 0, _report(C)
 
 
