@@ -442,18 +442,57 @@ def _retains_heavy_executables(node: pytest.Item) -> bool:
     )
 
 
+# The coarser trigger the note above names as the lever: a MODULE boundary. The file and
+# directory lists bound the piles somebody measured; the rest of the suite accumulates
+# too, and diffusely. `pytest tests/unit -n 2` under JACCPOT_RUNTIME_TYPECHECK=1 (the
+# test-runtime-typecheck job) climbs steadily to ~15 GB of two workers' retained
+# executables, with a spike to 18.5-19.2 GB -- measured identically on main and on PR #353
+# merged into main, in a cgroup -- and the 16 GB runner is killed there ("The runner has
+# received a shutdown signal", 2026-10-02, twice, at 48 %). A per-test RSS log of the
+# non-runtime half put the growth in 97 files (largest: test_local_expansions 2.1 GB,
+# test_cascade_real_level_vjp 1.5 GB, test_complex_ops 1.3 GB, ...): no list fixes that.
+# Each module's executables are of no use to the NEXT module, so dropping them when a
+# worker moves to a different file bounds a worker by its largest single module, and the
+# recompiles it causes are the few programs two files share (served by the disk cache).
+# A per-test RSS watermark was tried first: it cut the peak to 13.9 GB but cleared after
+# nearly every test (the non-clearable floor is ~4 GB a worker) and cost +17 % wall.
+# JACCPOT_TEST_CLEAR_CACHES_PER_MODULE=0 switches it off.
+_CLEAR_PER_MODULE = os.environ.get("JACCPOT_TEST_CLEAR_CACHES_PER_MODULE", "1") != "0"
+
+
+def _clear_jax_caches() -> None:
+    """Drop JAX's in-process compiled-executable caches and collect garbage."""
+    import gc
+
+    import jax
+
+    jax.clear_caches()
+    gc.collect()
+
+
 @pytest.fixture(autouse=True)
 def _bound_diff_fmm_compile_cache(request):
     """Free JAX's in-process compiled-executable cache after each heavy
     differentiable-FMM or solver-heavy test (see the notes above)."""
     yield
     if _retains_heavy_executables(request.node):
-        import gc
+        _clear_jax_caches()
 
-        import jax
 
-        jax.clear_caches()
-        gc.collect()
+def pytest_runtest_teardown(item, nextitem):
+    """Free JAX's in-process caches when this worker moves on to another test FILE.
+
+    Parameters
+    ----------
+    item : pytest.Item
+        The test that just ran.
+    nextitem : Optional[pytest.Item]
+        The next test this worker will run, or ``None`` at the end.
+    """
+    if not _CLEAR_PER_MODULE or _retains_heavy_executables(item):
+        return  # the fixture above already cleared after this one
+    if nextitem is None or nextitem.path != item.path:
+        _clear_jax_caches()
 
 
 @pytest.fixture(autouse=True)
