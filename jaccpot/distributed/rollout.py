@@ -371,7 +371,14 @@ def make_reference_direct_force(
         d = xs[None, :, :] - x[:, None, :]
         r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, x.dtype) ** 2
         inv = jnp.where(r2 > 0, r2 ** jnp.asarray(-1.5, x.dtype), 0.0)
-        acc = jnp.asarray(G, x.dtype) * jnp.einsum("ij,ijk->ik", ms[None, :] * inv, d)
+        # HIGHEST: on Ampere an fp32 einsum defaults to TF32 (~10-bit mantissa), which
+        # would make the reference less accurate than the lane it checks
+        acc = jnp.asarray(G, x.dtype) * jnp.einsum(
+            "ij,ijk->ik",
+            ms[None, :] * inv,
+            d,
+            precision=jax.lax.Precision.HIGHEST,
+        )
         return jnp.where(live[:, None], acc, 0.0), jnp.zeros((1,), jnp.bool_)
 
     spec = P(axis_name)
