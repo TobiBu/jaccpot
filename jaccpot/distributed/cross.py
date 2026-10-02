@@ -828,13 +828,14 @@ def cross_near_acceleration(
     )
     acc = out[..., :3]
     # The scatter below is a PERMUTATION, not a reduction: every live particle sits
-    # in exactly one leaf slot, so each output row receives one addend and the
-    # dead slots all land on the discarded row n_particles. Nothing is summed in
-    # the input dtype here; the only reductions are inside the kernel, under
-    # `accum`.
+    # in exactly one leaf slot, so each output row receives one addend. Nothing is
+    # summed in the input dtype here; the only reductions are inside the kernel,
+    # under `accum`. Dead slots get the out-of-range row n_particles and are
+    # DROPPED -- routing them onto one discard row made every dead slot (~70 % of
+    # L x W at ~18 particles per 64-slot leaf) an atomic add on the same address.
     flat_idx = jnp.where(loc_mask, idx, n_particles).reshape(-1)
     return (
-        jnp.zeros((n_particles + 1, 3), acc.dtype)
+        jnp.zeros((n_particles, 3), acc.dtype)
         .at[flat_idx]
-        .add(acc.reshape(-1, 3))[:n_particles]
+        .add(acc.reshape(-1, 3), mode="drop")
     )

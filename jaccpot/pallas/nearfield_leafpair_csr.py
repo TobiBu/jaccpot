@@ -538,8 +538,12 @@ def nearfield_leafpair_csr_pallas(
         softening_sq_arr,
         g_arr,
     )
-    # Sorted segment sum onto the leaves: chunks of one leaf are consecutive and
-    # padding chunks (exact zeros) go to an extra segment that is sliced off.
+    # Sorted segment sum onto the leaves: chunks of one leaf are consecutive.
+    # Padding chunks (exact zeros) get the out-of-range id n_tgt and are DROPPED by
+    # the scatter. They used to land on one extra segment that was sliced off --
+    # the same result, but at a capacity-sized table most chunks are padding, and
+    # every one of them was an atomic add onto that single row: 10 ms of a 74 ms
+    # force at 1e6 particles per A100 (520k of 655k chunks, one row of 256 floats).
     n_tgt = num_leaves if num_target_leaves is None else int(num_target_leaves)
     if not (0 <= n_tgt <= num_leaves):
         raise ValueError(
@@ -547,8 +551,12 @@ def nearfield_leafpair_csr_pallas(
         )
     seg = jnp.where(chunks.leaf < 0, jnp.asarray(n_tgt, idx), chunks.leaf)
     out = jax.ops.segment_sum(
-        partials, seg, num_segments=n_tgt + 1, indices_are_sorted=True
-    )[:n_tgt]
+        partials,
+        seg,
+        num_segments=n_tgt,
+        indices_are_sorted=True,
+        mode=jax.lax.GatherScatterMode.FILL_OR_DROP,
+    )
     out = out.astype(dtype)
     if pad_t:
         out = out[:, :leaf_width, :]
