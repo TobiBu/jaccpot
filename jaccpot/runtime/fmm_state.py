@@ -653,6 +653,7 @@ def _build_tree_with_config(
     aspect_threshold: float,
     leaf_partition: str = "buckets",
     leaf_capacity: Optional[int] = None,
+    cell_min_level: int = 0,
 ) -> _TreeBuildArtifacts:
     """Construct a tree according to the resolved builder configuration.
 
@@ -694,6 +695,9 @@ def _build_tree_with_config(
     leaf_capacity : Optional[int]
         Static leaf-array capacity for ``leaf_partition="cells"``, whose leaf
         count is data dependent. Required in that mode.
+    cell_min_level : int
+        ``"cells"`` only: no leaf coarser than this Morton level
+        (``TreeConfig.cell_min_level``).
 
     Returns
     -------
@@ -728,6 +732,7 @@ def _build_tree_with_config(
             leaf_capacity=int(leaf_capacity),
             return_reordered=True,
             return_overflow=True,
+            min_level=int(cell_min_level),
         )
         overflow_out: Optional[Array]
         if isinstance(overflow, Tracer):
@@ -1241,6 +1246,12 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
         can allocate without re-deriving the layout.
     leaf_capacity_overflow : Optional[Array]
         Cell-leaf partitions only; see :class:`_TreeBuildArtifacts`.
+    walk_geometry : Optional[tuple]
+        ``(geometry, geometry_factory)`` already resolved for this tree's walk, so
+        every consumer in one refresh -- the multi-GPU cross hook and the local
+        dual walk -- shares ONE exact-radius COM geometry instead of each
+        recomputing it (9.7 ms per force at 1e6 particles per A100). ``None``: each
+        consumer resolves its own.
     """
 
     tree_mode: str
@@ -1254,6 +1265,7 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     upward: TreeUpwardData
     locals_template: Optional[LocalExpansionData]
     leaf_capacity_overflow: Optional[Array] = None
+    walk_geometry: Optional[tuple] = None
 
 
 class _PrepareStateDualDownwardArtifacts(NamedTuple):

@@ -36,6 +36,7 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
+from jaccpot._env import env_flag
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -158,9 +159,17 @@ def _infer_bounds(positions: Float[Array, "n 3"]) -> tuple[Array, Array]:
 
     minimum = jnp.min(positions, axis=0)
     maximum = jnp.max(positions, axis=0)
-    span = maximum - minimum
-    padding = jnp.maximum(span * 0.05, jnp.full_like(span, 1e-6))
-    return minimum - padding, maximum + padding
+    if not env_flag("JACCPOT_CUBIC_BOUNDS", False):
+        span = maximum - minimum
+        padding = jnp.maximum(span * 0.05, jnp.full_like(span, 1e-6))
+        return minimum - padding, maximum + padding
+    # A CUBE: Morton normalises each axis by its own extent, so an elongated box makes
+    # every cell elongated (see `jaccpot.distributed.fused.cube_bounds`).
+    edge = jnp.max(maximum - minimum)
+    padding = jnp.maximum(edge * 0.05, jnp.asarray(1e-6, edge.dtype))
+    centre = (minimum + maximum) * jnp.asarray(0.5, minimum.dtype)
+    half = edge * jnp.asarray(0.5, minimum.dtype) + padding
+    return centre - half, centre + half
 
 
 def _max_leaf_size_from_tree(tree: Tree) -> int:

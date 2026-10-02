@@ -157,6 +157,23 @@ class TestEnvChoice:
             _env.env_choice("JACCPOT_TEST_MODE", "nope", self.MODES)
 
 
+class TestEnvText:
+    """The verbatim reader, for variables jaccpot inspects but does not own."""
+
+    def test_the_value_comes_back_verbatim(self, monkeypatch):
+        """No normalising: ``XLA_FLAGS`` is matched as written."""
+        monkeypatch.setenv("JACCPOT_TEST_TEXT", "  --a=1 --B=2 ")
+        assert _env.env_text("JACCPOT_TEST_TEXT") == "  --a=1 --B=2 "
+
+    def test_unset_gives_the_default(self, monkeypatch):
+        """Unset is the default, without a warning."""
+        monkeypatch.delenv("JACCPOT_TEST_TEXT", raising=False)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert _env.env_text("JACCPOT_TEST_TEXT", "fallback") == "fallback"
+        assert not caught
+
+
 class TestMalformedWarning:
     """Falling back silently is what lets a typo survive a whole session."""
 

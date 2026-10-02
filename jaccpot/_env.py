@@ -45,7 +45,14 @@ _FALSEY = frozenset({"0", "false", "no", "off"})
 #: wide on purpose; `_reset_malformed_warning_cache` exists for tests.
 _WARNED: set[str] = set()
 
-__all__ = ["env_choice", "env_flag", "env_flag_optional", "env_float", "env_int"]
+__all__ = [
+    "env_choice",
+    "env_flag",
+    "env_flag_optional",
+    "env_float",
+    "env_int",
+    "env_text",
+]
 
 
 def _reset_malformed_warning_cache() -> None:
@@ -261,3 +268,26 @@ def env_choice(name: str, default: str, choices: Iterable[str]) -> str:
         name, str(raw), f"expected one of {sorted(allowed)}", normalised_default
     )
     return normalised_default
+
+
+def env_text(name: str, default: str = "") -> str:
+    """Read a variable verbatim, for checks on settings jaccpot does not own.
+
+    The other readers parse a ``JACCPOT_*`` knob into a value. This one only hands
+    back the text -- e.g. ``XLA_FLAGS``, which jaccpot inspects to warn about a slow
+    configuration but never parses or sets.
+
+    Parameters
+    ----------
+    name : str
+        Environment variable name.
+    default : str
+        Value to use when the variable is unset.
+
+    Returns
+    -------
+    str
+        The raw value, or ``default``.
+    """
+    raw = os.environ.get(name)
+    return default if raw is None else str(raw)

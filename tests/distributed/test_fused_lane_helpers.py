@@ -185,3 +185,122 @@ def test_assembly_needs_one_state_per_device():
     mesh = _mesh(2)
     with pytest.raises(ValueError, match="for a mesh of"):
         assemble_prepared_states([{"a": jnp.zeros(3)}], mesh, axis_name=AXIS)
+
+
+class _FakeDevice:
+    def __init__(self, platform):
+        self.platform = platform
+
+
+class _FakeMesh:
+    def __init__(self, n, platform):
+        self.devices = np.asarray([_FakeDevice(platform) for _ in range(n)])
+
+
+@pytest.fixture
+def _fresh_ragged_warning(monkeypatch):
+    from jaccpot.distributed import fused
+
+    monkeypatch.setattr(fused, "_WARNED_RAGGED_FLAG", [])
+    return fused
+
+
+def test_a_gpu_mesh_without_the_ragged_flag_warns_once(
+    _fresh_ragged_warning, monkeypatch
+):
+    """XLA's default one-shot ragged exchange is 4-6x slower on PCIe GPUs, and XLA
+    reads its flags once -- so the lane cannot fix it, only say so, once."""
+    fused = _fresh_ragged_warning
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_enable_command_buffer=FUSION")
+    with pytest.warns(RuntimeWarning, match="ragged_all_to_all"):
+        fused._warn_if_slow_ragged_exchange(_FakeMesh(2, "gpu"))
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fused._warn_if_slow_ragged_exchange(_FakeMesh(2, "gpu"))
+    assert not caught, "the warning must fire once per process"
+
+
+@pytest.mark.parametrize(
+    "mesh, flags",
+    [
+        (_FakeMesh(2, "gpu"), "--x=1 " + "RAGGED"),
+        (_FakeMesh(1, "gpu"), ""),
+        (_FakeMesh(2, "cpu"), ""),
+    ],
+)
+def test_no_warning_with_the_flag_one_device_or_cpu(
+    _fresh_ragged_warning, monkeypatch, mesh, flags
+):
+    """CONTROLS: the flag set, a single device (no exchange), or CPU devices."""
+    import warnings
+
+    fused = _fresh_ragged_warning
+    monkeypatch.setenv(
+        "XLA_FLAGS", flags.replace("RAGGED", fused.RAGGED_EXCHANGE_XLA_FLAG)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fused._warn_if_slow_ragged_exchange(mesh)
+    assert not caught
+
+
+def _elongated(n=64, seed=3):
+    """A cloud 8x longer in x than in z: the per-axis box would be 8:2:1."""
+    rng = np.random.default_rng(seed)
+    return (rng.uniform(-1.0, 1.0, (n, 3)) * np.array([8.0, 2.0, 1.0])).astype(
+        np.float32
+    )
+
+
+def _mesh_box(positions):
+    mesh = _mesh(2)
+    fn = jax.jit(
+        jax.shard_map(
+            lambda p: global_mesh_bounds(p, axis_name=AXIS),
+            mesh=mesh,
+            in_specs=(P(AXIS),),
+            out_specs=(P(), P()),
+            check_vma=False,
+        )
+    )
+    lo, hi = fn(jnp.asarray(positions))
+    return np.asarray(lo), np.asarray(hi)
+
+
+def test_the_opt_in_mesh_box_is_a_cube_that_holds_every_particle(monkeypatch):
+    """Morton normalises each axis by its own extent, so only a cube gives cubic
+    cells; an 8:2:1 box makes every cell 8:2:1. JACCPOT_CUBIC_BOUNDS=1 gives the cube
+    (opt-in: measured as a time/accuracy trade, see `cube_bounds`)."""
+    monkeypatch.setenv("JACCPOT_CUBIC_BOUNDS", "1")
+    pts = _elongated()
+    lo, hi = _mesh_box(pts)
+    edge = hi - lo
+    np.testing.assert_allclose(edge, edge.max(), rtol=1e-6)
+    assert np.all(lo <= pts.min(axis=0)) and np.all(hi >= pts.max(axis=0))
+
+
+def test_the_default_box_is_per_axis(monkeypatch):
+    """CONTROL and default: unset keeps the per-axis box, which is NOT a cube here --
+    so the test above is not passing on a cloud that was cubic anyway."""
+    monkeypatch.delenv("JACCPOT_CUBIC_BOUNDS", raising=False)
+    lo, hi = _mesh_box(_elongated())
+    edge = hi - lo
+    assert edge.max() / edge.min() > 7.0
+
+
+def test_the_single_device_box_follows_the_same_switch(monkeypatch):
+    """The single-GPU lane infers its own box; it must follow the same rule, or the
+    1-card reference and the mesh would tree different cells."""
+    from jaccpot.runtime.kernels._evaluate import _infer_bounds
+
+    monkeypatch.setenv("JACCPOT_CUBIC_BOUNDS", "1")
+    pts = jnp.asarray(_elongated())
+    lo, hi = (np.asarray(a) for a in _infer_bounds(pts))
+    np.testing.assert_allclose(hi - lo, (hi - lo).max(), rtol=1e-6)
+    assert np.all(lo <= np.asarray(pts).min(axis=0))
+    assert np.all(hi >= np.asarray(pts).max(axis=0))
+    monkeypatch.delenv("JACCPOT_CUBIC_BOUNDS", raising=False)
+    lo0, hi0 = (np.asarray(a) for a in _infer_bounds(pts))
+    assert (hi0 - lo0).max() / (hi0 - lo0).min() > 7.0

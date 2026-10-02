@@ -139,6 +139,16 @@ class TreeConfig:
         Static leaf count for ``leaf_partition="cells"`` (the tree is padded to
         it; exceeding it raises eagerly and trips the strict runner's capacity
         guard under trace). Required with ``"cells"``.
+    cell_min_level : Optional[int]
+        ``leaf_partition="cells"`` only: no leaf coarser than this Morton level
+        (``None``/``0``: unconstrained). Leaves are the coarsest cells holding at
+        most ``leaf_target`` particles, so a sparse outskirt cell with a few
+        far-apart outliers stays ONE leaf whose bounding sphere spans much of the
+        box -- it fails the MAC against nearly everything, gets a near list of
+        hundreds of thousands of leaves, and on a mesh pulls the whole remote
+        domain into the cross-domain near export. Level 8 (cells at most 1/256 of
+        the box) adds ~0.7 % leaves on a 2e6 Plummer and was measured at 110.7 ->
+        90.8 ms on one A100 and 87.2 -> 76.8 ms on two, forces unchanged.
     """
 
     tree_type: Optional[str] = None
@@ -149,6 +159,7 @@ class TreeConfig:
     aspect_threshold: Optional[float] = None
     leaf_partition: Optional[str] = None
     leaf_capacity: Optional[int] = None
+    cell_min_level: Optional[int] = None
 
 
 @dataclass(frozen=True)

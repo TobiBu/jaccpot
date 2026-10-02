@@ -51,6 +51,22 @@ apply_fast_lane_env(
 # need their own entry or the second one refuses to run at all
 os.environ["JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"] = f"{CAP},{N}"
 _TRAV = dict((FAST_LANE_ENV_BY_LEAF.get(LEAF) or {}).get("_traversal_overrides", {}))
+# The NCCL ragged exchange, not XLA's one-shot kernel: 4-6x faster per round on PCIe
+# (see `jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAG`). It has to be in XLA_FLAGS
+# before the backend starts; PROBE_RAGGED_ONE_SHOT=1 keeps the old path for an A/B.
+_RAGGED = "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false"
+if os.environ.get("PROBE_RAGGED_ONE_SHOT") != "1" and _RAGGED.split("=")[0] not in (
+    os.environ.get("XLA_FLAGS", "")
+):
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _RAGGED).strip()
+# XLA's latency-hiding scheduler: lets the cross exchange overlap independent work.
+# 2-card cross arm, cards 1+2: 90.0 / 89.5 -> 88.0 / 87.6 ms at 2e6 and 21.7 -> 21.0
+# ms at 4e5, forces unchanged (2026-10-02). PROBE_LHS=0 leaves it out for an A/B.
+_LHS = "--xla_gpu_enable_latency_hiding_scheduler=true"
+if os.environ.get("PROBE_LHS") != "0" and _LHS.split("=")[0] not in (
+    os.environ.get("XLA_FLAGS", "")
+):
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _LHS).strip()
 
 import time
 
@@ -78,6 +94,7 @@ from jaccpot.config import (
     TreeConfig,
 )
 from jaccpot.distributed.fused import (
+    cube_bounds,
     fused_force_step,
     make_fused_force_evaluator,
     stack_prepared_states,
@@ -88,6 +105,7 @@ from jaccpot.runtime.capacity_plan import (
     merge_plans,
     plan_from_registry,
 )
+from jaccpot.runtime.kernels._evaluate import _infer_bounds as _infer_lane_bounds
 
 ORDER = int(os.environ.get("PROBE_ORDER", "4"))
 THETA = float(os.environ.get("PROBE_THETA", "0.8"))
@@ -105,24 +123,41 @@ _ic = IC_GENERATORS["plummer"](N, seed=0)
 pos = np.asarray(_ic[0], WDT)
 mass = np.asarray(_ic[1], WDT)
 P0 = jnp.asarray(pos)
-codes = np.asarray(morton_encode(P0, infer_bounds(P0)))
+# the partition and the leaf counts use the lane's own (cubic) box rule
+codes = np.asarray(morton_encode(P0, _infer_lane_bounds(P0)))
 order = np.argsort(codes)
 shards = np.array_split(order, NDEV)
-kk = int(cp.adaptive_cell_leaf_partition_numpy(np.sort(codes), leaf_size=LEAF)[0].size)
-# The leaf capacity is per TREE, and the reference arm trees all N while each mesh
-# device trees a shard -- dividing by NDEV in the reference arm overflows the cut.
-LEAF_CAP = 1 << int(np.ceil(np.log2(1.25 * kk / (1 if SOLO else NDEV))))
-# The pow2 rule can pad a shard's leaf capacity up to ~2.4x (it made the old 4M
-# single-card row look cheaper than the 2M one); PROBE_LEAF_CAP pins it.
-if os.environ.get("PROBE_LEAF_CAP"):
-    LEAF_CAP = int(os.environ["PROBE_LEAF_CAP"])
+# no leaf coarser than this Morton level (TreeConfig.cell_min_level; 0 = unconstrained).
+# Default 8: one A100 -4..-18 % from 2e5 to 8e6, two A100s -8..-16 %, forces unchanged.
+CELL_MIN_LEVEL = int(os.environ.get("PROBE_CELL_MIN_LEVEL", "8"))
+kk = int(
+    cp.adaptive_cell_leaf_partition_numpy(
+        np.sort(codes), leaf_size=LEAF, min_level=CELL_MIN_LEVEL
+    )[0].size
+)
 # live cell leaves of the WORST shard: what every cross capacity scales with
 SHARD_LEAVES = max(
     int(
-        cp.adaptive_cell_leaf_partition_numpy(np.sort(codes[s]), leaf_size=LEAF)[0].size
+        cp.adaptive_cell_leaf_partition_numpy(
+            np.sort(codes[s]), leaf_size=LEAF, min_level=CELL_MIN_LEVEL
+        )[0].size
     )
     for s in shards
 )
+# The leaf capacity is per TREE, and the reference arm trees all N while each mesh
+# device trees a shard. It used to be the next power of two above 1.25x the leaves,
+# which padded up to 2.4x -- and time is linear in that padding (4M on one card:
+# 299 / 374 / 541 ms at 1.2 / 2.4 / 4.8x, same pairs to the digit), so crossing a
+# power of two by a few hundred leaves doubled the cost and masqueraded as a
+# regression of whatever had added them. Now 1.15x the live leaves in steps of 1024;
+# nothing needs a power of two. PROBE_LEAF_CAP_RULE=pow2 restores the old rule.
+_live_for_cap = kk if (SOLO or NDEV == 1) else SHARD_LEAVES
+if os.environ.get("PROBE_LEAF_CAP_RULE") == "pow2":
+    LEAF_CAP = 1 << int(np.ceil(np.log2(1.25 * kk / (1 if SOLO else NDEV))))
+else:
+    LEAF_CAP = int(-(-int(np.ceil(1.15 * _live_for_cap)) // 1024) * 1024)
+if os.environ.get("PROBE_LEAF_CAP"):
+    LEAF_CAP = int(os.environ["PROBE_LEAF_CAP"])
 # Evaluate at a different theta from the prepare's. A DIAGNOSTIC knob only: a tighter
 # theta than the capacities were sized for saturates the walk UNDER TRACE, which is
 # how the capacity-flag gate makes the local guard fire without tripping the eager
@@ -155,6 +190,7 @@ def build():
                 leaf_target=LEAF,
                 leaf_partition="cells",
                 leaf_capacity=LEAF_CAP,
+                cell_min_level=CELL_MIN_LEVEL or None,
             ),
             farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
@@ -218,10 +254,7 @@ for sel in shards:
 allpos = np.concatenate([dev_pos[d][: dev_live[d]] for d in range(NDEV)])
 glo = allpos.min(0)
 ghi = allpos.max(0)
-span = np.maximum(ghi - glo, np.float32(1e-6))
-slack = (span * np.float32(1e-6)).astype(np.float32)
-BLO = jnp.asarray(glo - slack)
-BHI = jnp.asarray(ghi + slack)
+BLO, BHI = cube_bounds(jnp.asarray(glo), jnp.asarray(ghi), pad=1e-6)
 print(f"global box lo={np.asarray(BLO)} hi={np.asarray(BHI)}", flush=True)
 
 if SOLO:
@@ -364,6 +397,23 @@ DIAG_KEYS = (
     "near_recv_nodes",
     "near_list_pairs",
     "near_walk_far_pairs",
+    "near_csr",
+    "near_particles",
+    "near_rows_needing_particles",
+    "near_rows_far_only",
+    "near_csr_max_per_cell",
+    "near_csr_top100_cells",
+    "near_csr_cells_over_1000",
+    "worst_cell_is_leaf",
+    "worst_cell_particles",
+    "worst_cell_leaves",
+    "worst_cell_radius",
+    "worst_cell_edge",
+    "worst_cell_r_center",
+    "root_radius",
+    "export_near",
+    "near_walk_peak",
+    "export_walk_peak",
     "center_mismatch",
     "center_max_delta",
     "export_far_live",
@@ -484,20 +534,54 @@ def _auto_cap(env_bits, per_leaf, floor_bits, headroom=2.5):
 # nodes ~1.25 (far nodes 6.7k, near leaves 5.5k); received CSR ~53; receiver far
 # pairs ~53 (+ near-walk far pairs); receiver near pairs ~60
 _recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", 53, 19)
+# Measured at 1e6 per device (2 cards, 2026-10-02): near CSR 1.43-1.51M entries
+# (~29 per leaf), near receiver walk peak 2.66M pairs (~52 per leaf), export walk
+# peak 0.72-0.90M (~17 per leaf). The FAR receiver walk is skipped (a pass-through,
+# see cross._direct_far_lists), so the queue no longer has to hold the far CSR.
+_recv_near_csr = _auto_cap("PROBE_RECV_NEAR_CSR_BITS", 29, 19)
+_far_walk = EXPORT_THETA is not None or os.environ.get(
+    "JACCPOT_CROSS_FAR_RECEIVER_WALK"
+) in ("1", "true", "on")
+_max_cells = int(os.environ.get("PROBE_MAX_CELLS", 0)) or _auto_cap(
+    "PROBE_MAX_CELLS_BITS", 0.29, 13
+)
 caps = CrossCapacities(
-    max_cells=int(os.environ.get("PROBE_MAX_CELLS", 0))
-    or _auto_cap("PROBE_MAX_CELLS_BITS", 0.29, 13),
+    max_leaves_per_cell=int(os.environ.get("PROBE_MAX_LEAVES_PER_CELL", 4)),
+    # a summary cell must fit in one Morton cell of this level (0: off). Default 8:
+    # 2-card 2e6 75.0 -> 72.1 ms, 8e6 254.2 -> 231.6 ms, forces unchanged.
+    summary_cell_level=int(os.environ.get("PROBE_SUMMARY_CELL_LEVEL", "8")) or None,
+    max_cells=_max_cells,
     export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", 53, 21),
     export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 21),
     send_node_cap=_auto_cap("PROBE_SEND_NODE_BITS", 1.25, 15),
     send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", 53, 21),
     recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
     recv_csr_cap=_recv_csr,
-    # The receiver walk SEEDS from the received CSR, one pair per entry, so the
-    # queue has to hold that seed: walk_queue > recv_csr_cap is a hard requirement.
-    walk_queue=max(_auto_cap("PROBE_WALK_QUEUE_BITS", 53, 20), 2 * _recv_csr),
-    recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 106, 21),
-    recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 60, 21),
+    recv_near_csr_cap=_recv_near_csr,
+    # the near import's live particles, flat: ~1 exported leaf per local leaf at
+    # ~18 particles each (51k leaves, ~0.95M particles at 1e6 per device)
+    send_particle_cap=_auto_cap("PROBE_SEND_PARTICLE_BITS", 20, 18, headroom=2.0),
+    recv_particle_cap=_auto_cap("PROBE_RECV_PARTICLE_BITS", 20, 18, headroom=2.0),
+    # export walk peak ~17 per leaf; its seed is ndev x max_cells pairs
+    export_walk_queue=max(
+        _auto_cap("PROBE_EXPORT_WALK_QUEUE_BITS", 17, 18, headroom=1.5),
+        1 << int(np.ceil(np.log2(NDEV * _max_cells))),
+    ),
+    # A receiver walk SEEDS from its received CSR, one pair per entry, so the queue
+    # has to hold that seed (and the walk's peak). Only the near walk runs now
+    # unless the far one is forced; every queue overflow raises the cross flag.
+    walk_queue=max(
+        _auto_cap("PROBE_WALK_QUEUE_BITS", 52, 20, headroom=1.5),
+        _recv_near_csr,
+        2 * _recv_csr if _far_walk else 0,
+    ),
+    # Re-measured at 1e6 per device with near_theta = theta (the old 106 / 60 per leaf
+    # were the near_theta = 0 counts): with the far receiver walk skipped these hold
+    # only the NEAR walk's lists -- far 2.36-2.38M (~46 per leaf), near 1.0M (~20).
+    # Both widths are padded work downstream: the far list joins the M2L CSR sort and
+    # the near list sets the cross near-field kernel's grid.
+    recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 46, 21, headroom=2.0),
+    recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 20, 20, headroom=2.0),
     leaf_width=LEAF,
 )
 print(f"cross caps: {vars(caps)}", flush=True)
