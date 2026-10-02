@@ -504,9 +504,12 @@ _recv_near_csr = _auto_cap("PROBE_RECV_NEAR_CSR_BITS", 29, 19)
 _far_walk = EXPORT_THETA is not None or os.environ.get(
     "JACCPOT_CROSS_FAR_RECEIVER_WALK"
 ) in ("1", "true", "on")
+_max_cells = int(os.environ.get("PROBE_MAX_CELLS", 0)) or _auto_cap(
+    "PROBE_MAX_CELLS_BITS", 0.29, 13
+)
 caps = CrossCapacities(
-    max_cells=int(os.environ.get("PROBE_MAX_CELLS", 0))
-    or _auto_cap("PROBE_MAX_CELLS_BITS", 0.29, 13),
+    max_leaves_per_cell=int(os.environ.get("PROBE_MAX_LEAVES_PER_CELL", 4)),
+    max_cells=_max_cells,
     export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", 53, 21),
     export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 21),
     send_node_cap=_auto_cap("PROBE_SEND_NODE_BITS", 1.25, 15),
@@ -514,6 +517,11 @@ caps = CrossCapacities(
     recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
     recv_csr_cap=_recv_csr,
     recv_near_csr_cap=_recv_near_csr,
+    # export walk peak ~17 per leaf; its seed is ndev x max_cells pairs
+    export_walk_queue=max(
+        _auto_cap("PROBE_EXPORT_WALK_QUEUE_BITS", 17, 18, headroom=1.5),
+        1 << int(np.ceil(np.log2(NDEV * _max_cells))),
+    ),
     # A receiver walk SEEDS from its received CSR, one pair per entry, so the queue
     # has to hold that seed (and the walk's peak). Only the near walk runs now
     # unless the far one is forced; every queue overflow raises the cross flag.

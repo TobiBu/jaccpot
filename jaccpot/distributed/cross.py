@@ -239,6 +239,7 @@ class CrossCapacities:
         recv_far_cap: int = 1 << 17,
         recv_near_cap: int = 1 << 17,
         recv_near_csr_cap: Optional[int] = None,
+        export_walk_queue: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         self.max_leaves_per_cell = int(max_leaves_per_cell)
@@ -258,6 +259,13 @@ class CrossCapacities:
         # None keeps the old shared width.
         self.recv_near_csr_cap = (
             self.recv_csr_cap if recv_near_csr_cap is None else int(recv_near_csr_cap)
+        )
+        # The export walk's own queue: its peak is ~1/3 of the near receiver walk's
+        # (0.72-0.90M vs 2.66M at 1e6 per device), and the Pallas walk launches one
+        # program per 64 queue slots on EVERY round, so a shared queue sized for the
+        # larger walk costs the smaller one in proportion. None: walk_queue.
+        self.export_walk_queue = (
+            self.walk_queue if export_walk_queue is None else int(export_walk_queue)
         )
 
 
@@ -413,7 +421,7 @@ def make_cross_hook(
             all_act,
             float(theta if export_theta is None else export_theta),
             me,
-            max_pair_queue=cap.walk_queue,
+            max_pair_queue=cap.export_walk_queue,
             far_cap=cap.export_far_cap,
             near_cap=cap.export_near_cap,
             mac_type=mac_type,
