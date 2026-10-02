@@ -1357,7 +1357,95 @@ Harmless for correctness (the moves are exact), but it is exchange volume a chea
 **Not covered:** the cross-volume comparison against the control arm (the timing-mode hook carries no
 diagnostics), a disc IC, ndev > 2, and a run long enough for the repartition to matter for the cross cost.
 
+## Cutting the cross cost (2026-10-02): two cards now beat one from 1e6 up
+
+**Setup.** Cards 1+2 (one CPU socket, different PCIe switches), Plummer seed 0, leaf 64, theta 0.8, p6, fp32,
+full force per call (local and cross arms), min of 10-20 after 3 warm-ups, host load 8-14. Every change below
+was kept only after an interleaved A/B on the same cards, with rel-L2 vs fp64 unchanged in every printed digit.
+One A/B was discarded because another user's job landed on its cards mid-run (that trace ran 10x slow).
+
+**What each change bought** (2-card cross arm at N = 2e6, i.e. 1e6 per card):
+
+| change | ms |
+| --- | --- |
+| start of the day | 189 |
+| NCCL ragged exchange: `--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false` | 138 |
+| near-field padding dropped instead of piled on one row (both lanes); send counts without atomics | 122 |
+| one walk geometry shared by the cross hook and the local walk | 121 |
+| far receiver walk skipped (a pass-through), queue 2^24 -> 2^22, export and near walks on the Pallas walk | 97 |
+| export walk's own queue; receive caps from live counts; XLA latency-hiding scheduler | 88 |
+| `cell_min_level = 8` (no leaf coarser than 1/256 of the box) | 75 |
+| `summary_cell_level = 8` (no summary cell coarser either) | 72 (71.7 / 72.5) |
+
+**Where it stands** (both levels 8; the probe's leaf capacity is now 1.15x the live leaves, see below):
+
+| N | 1 card (ms) | 2 cards (ms) | speed-up | error 1 / 2 cards |
+| --- | --- | --- | --- | --- |
+| 4e5 | 17.9 | 18.6 | 0.96x | 5.51e-04 / 6.08e-04 |
+| 1e6 | 42.0 | 35.2 | 1.19x | 7.13e-04 / 7.02e-04 |
+| 2e6 | 88.9 | 71.7 | 1.24x | 8.71e-04 / 8.81e-04 |
+| 8e6 | 330.6 | 231.6 | 1.43x | 4.56e-04 / 5.36e-04 |
+
+The final gate (per-device time within 1.5x of one card) is NOT met: at 1e6 per card, two cards at 2e6 would
+have to take <= 1.5 x 42.0 = 63 ms. They take 71.7.
+
+**Findings, in the order they were made**
+
+1. **The exchange kernel, not the bytes.** `bench/multigpu_exchange_bench.py` times the cross hook's own helper
+   at its row widths. XLA's default one-shot `ragged_all_to_all` kernel stores straight into peer memory and
+   moves ~2 GB/s over PCIe; the NCCL path moves 11-13 GB/s, the same on a pair under one switch and a pair across
+   switches. `xla_gpu_ragged_all_to_all_mode` takes `peer|private|symmetric` (not the enum names); `symmetric`
+   hangs and `private` is 0.75 GB/s. XLA reads its flags once, so the library cannot set this: the mesh evaluator
+   warns when it is missing (`fused.RAGGED_EXCHANGE_XLA_FLAG`) and the probe and rollout gate set it.
+2. **Padding piled on one address.** The near-field segment sum sent every padding chunk to one extra row (520k
+   of 655k chunks at 1e6 per card, 10 ms of a 74 ms local force in a trace without command buffers), and the
+   cross near term sent every dead leaf slot to one discard row. Both now drop padding (`FILL_OR_DROP`). The
+   per-destination send counts were a `segment_sum` of 2^23 rows into two counters (2.6 ms a call); they are now
+   two lookups at the device boundaries of the sorted order.
+3. **The far receiver walk is a pass-through by construction.** It pairs the receiver's cell root with a node the
+   sender accepted against that very cell, on the same centre and radius, so it can only re-accept: far pairs ==
+   received CSR entries (5,083,648 / 4,640,119), zero near pairs, and the seed MAC re-check fails 0 of them. It is
+   now read off the CSR; that walk's seed was also why the queue had to be 2 x the receive CSR capacity.
+4. **The Pallas walk needs a right-sized queue.** Seeded (`seed_a/seed_b/seed_count`), it emits exactly the
+   traced walk's pair sets, but at a 2^24 queue it bought nothing: its grid is one program per 64 queue slots on
+   EVERY round and its loop carries are copied each iteration. At the measured peaks (export 0.9M, near 2.7M ->
+   2^22) it wins 9 ms at 2e6 and 4.6 ms at 4e5 over the traced walk.
+5. **Payload compaction is not a speed lever.** Shipping the near import's live particles flat (plus a count per
+   leaf) instead of 64-slot tiles is bit-identical (CPU test) and cuts that payload from ~65 to ~16 MB per
+   direction, but times +1.3 ms at 2e6 and -0.5 at 4e5: the exchange is bound by its synchronisation, not its
+   bytes. It stays (less receive memory; `JACCPOT_CROSS_NEAR_TILES=1` is the control).
+6. **It exposed the real waste: the near export shipped the WHOLE remote shard** (999,999 of 1e6 particles, 51k
+   of 51.4k leaves) every force. Leaves are the coarsest Morton cells holding <= leaf_size particles, so a
+   sparse outskirt cell with a few far-apart outliers stays one leaf (Morton depth 1-5) whose bounding sphere
+   spans much of the box; it fails the MAC against everything. One summary cell per device held every remote
+   leaf in its near CSR. The same leaves have near rows of hundreds of thousands on ONE card (the long serial
+   rows of the near-field kernel). `TreeConfig.cell_min_level = 8` splits them: +0.7 % leaves, one card 4-18 %
+   faster from 2e5 to 8e6, two cards 88 -> 75 ms at 2e6. `summary_cell_level = 8` bounds the cells the same way
+   (monotone Morton-cell edge, so the occupancy cut stays a cut): 75 -> 72 ms at 2e6, 254 -> 232 ms at 8e6.
+   Near pairs at 2e6 fell from 1.0M to 150k per device; the particles shipped did not (one small cell next to
+   the dense core, radius 16 at r = 17, is still near most of the remote core at cell granularity).
+7. **A measurement trap: the power-of-two leaf capacity.** The probe sized it as the next power of two above
+   1.25x the leaves. Time is linear in that padding (4e6 on one card: 299 / 374 / 541 ms at 1.2 / 2.4 / 4.8x with
+   the same pairs to the digit), so 800 extra leaves that crossed 65,536 made `cell_min_level` look 23 % SLOWER at
+   1e6. It is now 1.15x in steps of 1024 (`PROBE_LEAF_CAP_RULE=pow2` restores the old rule); that alone took one
+   card at 4e5 from 22.5 to 18.6 ms.
+8. **The cubic Morton box is a trade, not a fix.** A per-axis box gives every cell its aspect; a 4e6 draw with a
+   3.2:1 box walked 58.1M far pairs (2.7e-3) against 14.2M (4.9e-4) in a cube -- but at 2e6 and 8e6 the cube is
+   13 % and 28 % slower for a smaller error. Opt-in: `JACCPOT_CUBIC_BOUNDS=1`.
+
+**What remains** (stage-split trace at 2e6, `bench/analyse_trace_by_stage.py`; command buffers off, so the
+proportions and not the totals count): the cross arm adds ~33 ms of kernel time per device. ~20 ms of it is the
+cell-level FAR pairs -- ~5.5M per device, treecode-style (~360 sender nodes per summary cell, because only the
+sender side refines): the cross M2L +6.6 ms, its gathers +2.7, the wider CSR sort +1.4, the export walk 3.3, the
+far CSR on the wire. The rest is the exchange (NCCL 7 ms), device copies (+2.3), the near term (2.8) and send
+buffers. The lever is a **two-sided export walk** over the receiver's summary tree, so large sender nodes pair with
+large receiver nodes as the local mutual walk does; plan `two-sided-export-walk.md` (2026-10-02).
+
 ## Next
+
+**2026-10-02:** the cross field is built, correct, and two cards now beat one from N = 1e6 up (section above).
+What follows is the two-sided export walk; the paragraphs below are the Phase 1-3 history.
+
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
 fp32 noise, at one and at two devices. What it does NOT yet have is any cross-domain field -- each device sees

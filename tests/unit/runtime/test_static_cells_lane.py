@@ -170,7 +170,9 @@ def test_cell_min_level_reaches_the_partition():
         counts.append(int(live.sum()))
     codes = np.sort(np.asarray(morton_encode(P, infer_bounds(P))).astype(np.uint64))
     want = [
-        cp.adaptive_cell_leaf_partition_numpy(codes, leaf_size=16, min_level=lvl)[0].size
+        cp.adaptive_cell_leaf_partition_numpy(codes, leaf_size=16, min_level=lvl)[
+            0
+        ].size
         for lvl in (0, 6)
     ]
     assert counts == want

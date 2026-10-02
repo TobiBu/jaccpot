@@ -46,7 +46,18 @@ def test_row_of_slot_inverts_the_layout():
     counts = jnp.asarray([3, 0, 2, 0, 0, 4, 1], jnp.int32)
     row, within, live, total = _row_of_slot(counts, 16)
     assert int(total) == 10
-    want = [(0, 0), (0, 1), (0, 2), (2, 0), (2, 1), (5, 0), (5, 1), (5, 2), (5, 3), (6, 0)]
+    want = [
+        (0, 0),
+        (0, 1),
+        (0, 2),
+        (2, 0),
+        (2, 1),
+        (5, 0),
+        (5, 1),
+        (5, 2),
+        (5, 3),
+        (6, 0),
+    ]
     got = list(zip(np.asarray(row)[:10].tolist(), np.asarray(within)[:10].tolist()))
     assert got == want
     assert not np.asarray(live)[10:].any() and np.asarray(live)[:10].all()
@@ -162,7 +173,9 @@ def _run(fn, **extra):
 
 def test_the_compact_format_delivers_the_same_tiles_rows_and_csr():
     tiles = _run(_near_exchange_tiles)
-    compact = _run(_near_exchange_compact, send_particle_cap=1024, recv_particle_cap=1024)
+    compact = _run(
+        _near_exchange_compact, send_particle_cap=1024, recv_particle_cap=1024
+    )
     names = ("geometry rows", "positions", "masses", "csr_cell", "csr_row", "num_csr")
     for name, a, b in zip(names, tiles[:6], compact[:6]):
         np.testing.assert_array_equal(a, b, err_msg=name)
