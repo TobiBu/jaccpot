@@ -50,6 +50,11 @@ NUM_SAMPLES = max(256, 64 * NDEV)
 CAP = int(N / NDEV * 1.15)
 apply_fast_lane_env(CAP, overrides=fast_lane_overrides_for_leaf(LEAF, CAP))
 os.environ["JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"] = f"{CAP}"
+# the NCCL ragged exchange (`jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAG`); it
+# has to be in XLA_FLAGS before the backend starts
+_RAGGED = "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false"
+if _RAGGED.split("=")[0] not in os.environ.get("XLA_FLAGS", ""):
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _RAGGED).strip()
 
 import jax
 import jax.numpy as jnp

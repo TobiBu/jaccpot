@@ -49,6 +49,7 @@ from jaxtyping import Array
 
 __all__ = [
     "AXIS_NAME",
+    "RAGGED_EXCHANGE_XLA_FLAG",
     "assemble_prepared_states",
     "fused_force_step",
     "global_mesh_bounds",
@@ -59,6 +60,57 @@ __all__ = [
 
 #: Mesh axis the distributed lanes agree on (matches ``yggdrax.distributed``).
 AXIS_NAME = "gpus"
+
+#: Add this to ``XLA_FLAGS`` before JAX starts its GPU backend. XLA's default
+#: ``ragged_all_to_all`` on GPU is a one-shot kernel that stores straight into peer
+#: memory; across PCIe (no NVLink) it moves ~2 GB/s, where the NCCL path this flag
+#: selects moves 11-13 GB/s at the cross field's message sizes
+#: (``bench/multigpu_exchange_bench.py``, 2026-10-02, A100 pairs on one PCIe switch
+#: and across switches alike). On the 2-card force that is 41.1 -> 33.2 ms at 2e5
+#: particles per card and 189 -> 138 ms at 1e6, with bit-identical forces. XLA reads
+#: its flags once, so jaccpot cannot set this for you; the mesh evaluator warns
+#: when it is missing. ``xla_gpu_ragged_all_to_all_mode=symmetric`` hangs on that
+#: hardware and ``=private`` is slower still.
+RAGGED_EXCHANGE_XLA_FLAG = (
+    "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false"
+)
+
+_WARNED_RAGGED_FLAG: list[bool] = []
+
+
+def _warn_if_slow_ragged_exchange(mesh: Any) -> None:
+    """Warn once when a multi-GPU mesh runs without :data:`RAGGED_EXCHANGE_XLA_FLAG`.
+
+    Parameters
+    ----------
+    mesh : Any
+        The device mesh the evaluator is built on; only its devices are read.
+
+    Returns
+    -------
+    None
+        Emits at most one ``RuntimeWarning`` per process.
+    """
+    import warnings
+
+    from jaccpot._env import env_text
+
+    if _WARNED_RAGGED_FLAG:
+        return
+    devices = list(getattr(mesh, "devices", np.zeros(0)).flat)
+    if len(devices) < 2 or getattr(devices[0], "platform", "") != "gpu":
+        return
+    if RAGGED_EXCHANGE_XLA_FLAG.split("=")[0] in env_text("XLA_FLAGS"):
+        return
+    _WARNED_RAGGED_FLAG.append(True)
+    warnings.warn(
+        "the multi-GPU fused lane is running with XLA's default one-shot "
+        "ragged_all_to_all, which is 4-6x slower than the NCCL path on PCIe GPUs; "
+        f"start the process with XLA_FLAGS='{RAGGED_EXCHANGE_XLA_FLAG}' "
+        "(jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAG).",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 def global_mesh_bounds(
@@ -511,6 +563,8 @@ def make_fused_force_evaluator(
     from jax.sharding import PartitionSpec as P
 
     from jaccpot.runtime.capacity_plan import fused_capacity_plan_overrides
+
+    _warn_if_slow_ragged_exchange(mesh)
 
     def body(prepared: Any, positions: Array, masses: Array, num_valid: Array) -> tuple:
         # shard_map keeps the mapped axis at size 1; strip it so the rest of the

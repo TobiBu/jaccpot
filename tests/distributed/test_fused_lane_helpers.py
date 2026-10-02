@@ -185,3 +185,62 @@ def test_assembly_needs_one_state_per_device():
     mesh = _mesh(2)
     with pytest.raises(ValueError, match="for a mesh of"):
         assemble_prepared_states([{"a": jnp.zeros(3)}], mesh, axis_name=AXIS)
+
+
+class _FakeDevice:
+    def __init__(self, platform):
+        self.platform = platform
+
+
+class _FakeMesh:
+    def __init__(self, n, platform):
+        self.devices = np.asarray([_FakeDevice(platform) for _ in range(n)])
+
+
+@pytest.fixture
+def _fresh_ragged_warning(monkeypatch):
+    from jaccpot.distributed import fused
+
+    monkeypatch.setattr(fused, "_WARNED_RAGGED_FLAG", [])
+    return fused
+
+
+def test_a_gpu_mesh_without_the_ragged_flag_warns_once(
+    _fresh_ragged_warning, monkeypatch
+):
+    """XLA's default one-shot ragged exchange is 4-6x slower on PCIe GPUs, and XLA
+    reads its flags once -- so the lane cannot fix it, only say so, once."""
+    fused = _fresh_ragged_warning
+    monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_enable_command_buffer=FUSION")
+    with pytest.warns(RuntimeWarning, match="ragged_all_to_all"):
+        fused._warn_if_slow_ragged_exchange(_FakeMesh(2, "gpu"))
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fused._warn_if_slow_ragged_exchange(_FakeMesh(2, "gpu"))
+    assert not caught, "the warning must fire once per process"
+
+
+@pytest.mark.parametrize(
+    "mesh, flags",
+    [
+        (_FakeMesh(2, "gpu"), "--x=1 " + "RAGGED"),
+        (_FakeMesh(1, "gpu"), ""),
+        (_FakeMesh(2, "cpu"), ""),
+    ],
+)
+def test_no_warning_with_the_flag_one_device_or_cpu(
+    _fresh_ragged_warning, monkeypatch, mesh, flags
+):
+    """CONTROLS: the flag set, a single device (no exchange), or CPU devices."""
+    import warnings
+
+    fused = _fresh_ragged_warning
+    monkeypatch.setenv(
+        "XLA_FLAGS", flags.replace("RAGGED", fused.RAGGED_EXCHANGE_XLA_FLAG)
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fused._warn_if_slow_ragged_exchange(mesh)
+    assert not caught

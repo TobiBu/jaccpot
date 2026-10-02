@@ -51,6 +51,14 @@ apply_fast_lane_env(
 # need their own entry or the second one refuses to run at all
 os.environ["JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"] = f"{CAP},{N}"
 _TRAV = dict((FAST_LANE_ENV_BY_LEAF.get(LEAF) or {}).get("_traversal_overrides", {}))
+# The NCCL ragged exchange, not XLA's one-shot kernel: 4-6x faster per round on PCIe
+# (see `jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAG`). It has to be in XLA_FLAGS
+# before the backend starts; PROBE_RAGGED_ONE_SHOT=1 keeps the old path for an A/B.
+_RAGGED = "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false"
+if os.environ.get("PROBE_RAGGED_ONE_SHOT") != "1" and _RAGGED.split("=")[0] not in (
+    os.environ.get("XLA_FLAGS", "")
+):
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _RAGGED).strip()
 
 import time
 
