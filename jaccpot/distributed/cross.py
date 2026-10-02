@@ -68,6 +68,36 @@ def _cross_mac_geometry_mode() -> str:
     return env_choice(_CROSS_MAC_GEOMETRY_ENV, "com", ("com", "aabb"))
 
 
+def _node_cell_edge(tree: Any) -> Array:
+    """Per node, the edge (box units, ``2**-depth``) of the smallest Morton cell
+    holding all of its particles.
+
+    From the common prefix of the codes at the two ends of the node's particle range:
+    63-bit codes, 3 bits per level. Monotone down the tree (a child's range lies inside
+    its parent's), which is what :func:`occupancy_cut`'s size bound needs.
+
+    Parameters
+    ----------
+    tree : Any
+        The refreshed tree; its ``morton_codes`` are in sorted order, like
+        ``node_ranges``.
+
+    Returns
+    -------
+    Array
+        ``(total_nodes,)`` float edges; empty nodes get an arbitrary value (they hold
+        no leaves and never enter the cut).
+    """
+    codes = jnp.asarray(tree.morton_codes).astype(jnp.uint64)
+    nr = jnp.asarray(tree.node_ranges)
+    n = int(codes.shape[0])
+    lo = codes[jnp.clip(nr[:, 0], 0, n - 1)]
+    hi = codes[jnp.clip(nr[:, 1], 0, n - 1)]
+    clz = jax.lax.clz(jnp.bitwise_xor(lo, hi)).astype(jnp.int32)  # 64 when equal
+    depth = jnp.minimum((clz - 1) // 3, 21)
+    return jnp.exp2(-depth.astype(jnp.float32))
+
+
 def _near_tiles_on_the_wire() -> bool:
     """``JACCPOT_CROSS_NEAR_TILES=1``: ship W-wide particle tiles (the old format).
 
@@ -460,6 +490,7 @@ class CrossCapacities:
         export_walk_queue: Optional[int] = None,
         send_particle_cap: Optional[int] = None,
         recv_particle_cap: Optional[int] = None,
+        summary_cell_level: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         self.max_leaves_per_cell = int(max_leaves_per_cell)
@@ -500,6 +531,15 @@ class CrossCapacities:
             self.recv_node_cap * self.leaf_width
             if recv_particle_cap is None
             else int(recv_particle_cap)
+        )
+        # A summary cell must fit inside one Morton cell of this level (leaves are
+        # exempt). Without it a sparse node holding a few tiny far-apart leaves is one
+        # huge cell; a sender's MAC against its bounding sphere fails for the whole
+        # remote domain, so every remote particle ships every force (measured: one
+        # cell per device held all 51k remote leaves in its near CSR at 2e6). None:
+        # occupancy bound only.
+        self.summary_cell_level = (
+            None if summary_cell_level is None else int(summary_cell_level)
         )
 
 
@@ -620,12 +660,21 @@ def make_cross_hook(
         n_local = int(jnp.asarray(mp.packed).shape[0])
         num_internal = int(jnp.asarray(tree.left_child).shape[0])
 
+        size_bound = (
+            {}
+            if cap.summary_cell_level is None
+            else dict(
+                node_extent=_node_cell_edge(tree),
+                max_extent=2.0 ** -int(cap.summary_cell_level),
+            )
+        )
         summary = jax.named_call(occupancy_cut, name="cross_summary")(
             parent,
             jnp.asarray(tree.node_ranges),
             num_internal,
             max_leaves=cap.max_leaves_per_cell,
             capacity=cap.max_cells,
+            **size_bound,
         )
         cells = summary.cells
         live = jnp.arange(cap.max_cells) < summary.num_cells
@@ -997,6 +1046,19 @@ def make_cross_hook(
                 record["near_csr_max_per_cell"] = _srt[0]
                 record["near_csr_top100_cells"] = jnp.sum(_srt[:100])
                 record["near_csr_cells_over_1000"] = jnp.sum(_per_cell > 1000)
+                # who is the worst cell: node id, leaf?, particles, MAC radius, Morton
+                # cell edge (box units) and distance of its centre from the box centre
+                _w = jnp.argmax(_per_cell)
+                _wn = cells[_w]
+                _nr = jnp.asarray(tree.node_ranges)
+                record["worst_cell_is_leaf"] = (_wn >= num_internal).astype(jnp.int32)
+                record["worst_cell_particles"] = _nr[_wn, 1] - _nr[_wn, 0] + 1
+                record["worst_cell_leaves"] = summary.leaves_per_cell[_w]
+                record["worst_cell_radius"] = jnp.asarray(geom.radius)[_wn]
+                record["worst_cell_edge"] = _node_cell_edge(tree)[_wn]
+                _c = jnp.asarray(geom.center)[_wn]
+                record["worst_cell_r_center"] = jnp.sqrt(jnp.sum(_c * _c))
+                record["root_radius"] = jnp.asarray(geom.radius)[jnp.argmin(parent)]
                 # live particles the near import carries (compact format only)
                 record["near_particles"] = jnp.sum(
                     jnp.where(got_n.num_payload > 0, imp_mass != 0.0, False)

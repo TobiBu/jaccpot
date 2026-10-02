@@ -127,8 +127,9 @@ P0 = jnp.asarray(pos)
 codes = np.asarray(morton_encode(P0, _infer_lane_bounds(P0)))
 order = np.argsort(codes)
 shards = np.array_split(order, NDEV)
-# no leaf coarser than this Morton level (TreeConfig.cell_min_level; 0 = unconstrained)
-CELL_MIN_LEVEL = int(os.environ.get("PROBE_CELL_MIN_LEVEL", "0"))
+# no leaf coarser than this Morton level (TreeConfig.cell_min_level; 0 = unconstrained).
+# Default 8: one A100 -4..-18 % from 2e5 to 8e6, two A100s -8..-16 %, forces unchanged.
+CELL_MIN_LEVEL = int(os.environ.get("PROBE_CELL_MIN_LEVEL", "8"))
 kk = int(
     cp.adaptive_cell_leaf_partition_numpy(
         np.sort(codes), leaf_size=LEAF, min_level=CELL_MIN_LEVEL
@@ -403,6 +404,13 @@ DIAG_KEYS = (
     "near_csr_max_per_cell",
     "near_csr_top100_cells",
     "near_csr_cells_over_1000",
+    "worst_cell_is_leaf",
+    "worst_cell_particles",
+    "worst_cell_leaves",
+    "worst_cell_radius",
+    "worst_cell_edge",
+    "worst_cell_r_center",
+    "root_radius",
     "export_near",
     "near_walk_peak",
     "export_walk_peak",
@@ -539,6 +547,9 @@ _max_cells = int(os.environ.get("PROBE_MAX_CELLS", 0)) or _auto_cap(
 )
 caps = CrossCapacities(
     max_leaves_per_cell=int(os.environ.get("PROBE_MAX_LEAVES_PER_CELL", 4)),
+    # a summary cell must fit in one Morton cell of this level (0: off). Default 8:
+    # 2-card 2e6 75.0 -> 72.1 ms, 8e6 254.2 -> 231.6 ms, forces unchanged.
+    summary_cell_level=int(os.environ.get("PROBE_SUMMARY_CELL_LEVEL", "8")) or None,
     max_cells=_max_cells,
     export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", 53, 21),
     export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 21),
