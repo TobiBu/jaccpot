@@ -653,6 +653,7 @@ def _build_tree_with_config(
     aspect_threshold: float,
     leaf_partition: str = "buckets",
     leaf_capacity: Optional[int] = None,
+    cell_min_level: int = 0,
 ) -> _TreeBuildArtifacts:
     """Construct a tree according to the resolved builder configuration.
 
@@ -694,6 +695,9 @@ def _build_tree_with_config(
     leaf_capacity : Optional[int]
         Static leaf-array capacity for ``leaf_partition="cells"``, whose leaf
         count is data dependent. Required in that mode.
+    cell_min_level : int
+        ``"cells"`` only: no leaf coarser than this Morton level
+        (``TreeConfig.cell_min_level``).
 
     Returns
     -------
@@ -728,6 +732,7 @@ def _build_tree_with_config(
             leaf_capacity=int(leaf_capacity),
             return_reordered=True,
             return_overflow=True,
+            min_level=int(cell_min_level),
         )
         overflow_out: Optional[Array]
         if isinstance(overflow, Tracer):

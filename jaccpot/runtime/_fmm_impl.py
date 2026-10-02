@@ -479,6 +479,16 @@ class FMMEngine(
             )
         if self._tree_leaf_partition == "cells" and self._tree_leaf_capacity is None:
             raise ValueError("TreeConfig(leaf_partition='cells') needs leaf_capacity")
+        self._tree_cell_min_level: int = (
+            0 if _tree.cell_min_level is None else int(_tree.cell_min_level)
+        )
+        if self._tree_cell_min_level and self._tree_leaf_partition != "cells":
+            raise ValueError("TreeConfig.cell_min_level needs leaf_partition='cells'")
+        if not 0 <= self._tree_cell_min_level <= 21:
+            raise ValueError(
+                f"TreeConfig.cell_min_level must be in [0, 21], got "
+                f"{self._tree_cell_min_level}"
+            )
         tree_build_mode = _tree.mode
         target_leaf_particles = _tree.leaf_target
         refine_local = _tree.refine_local

@@ -965,6 +965,38 @@ def make_cross_hook(
                 record["near_walk_far_pairs"] = rl_n.far_count
                 # what the walk_queue / recv_near_csr_cap have to cover
                 record["near_csr"] = got_n.num_csr
+                # How much of the near import the receiver USES: imported leaves its
+                # final near list touches (their particles are needed) vs those only
+                # its far list touches (the multipole would have done), and how the
+                # near CSR is spread over my cells (a few huge outskirt cells can pull
+                # in the whole remote domain).
+                _nr = int(got_n.payload.shape[0])
+                _ns = jnp.where(
+                    jnp.arange(rl_n.near_source.shape[0]) < rl_n.near_count,
+                    rl_n.near_source,
+                    _nr,
+                )
+                _fs = jnp.where(
+                    jnp.arange(rl_n.far_source.shape[0]) < rl_n.far_count,
+                    rl_n.far_source,
+                    _nr,
+                )
+                _used_n = jnp.zeros((_nr,), jnp.int32).at[_ns].set(1, mode="drop")
+                _used_f = jnp.zeros((_nr,), jnp.int32).at[_fs].set(1, mode="drop")
+                record["near_rows_needing_particles"] = jnp.sum(_used_n)
+                record["near_rows_far_only"] = jnp.sum(_used_f * (1 - _used_n))
+                _cc = jnp.where(
+                    jnp.arange(got_n.csr_cell.shape[0]) < got_n.num_csr,
+                    got_n.csr_cell,
+                    cap.max_cells,
+                )
+                _per_cell = (
+                    jnp.zeros((cap.max_cells,), jnp.int32).at[_cc].add(1, mode="drop")
+                )
+                _srt = jnp.sort(_per_cell)[::-1]
+                record["near_csr_max_per_cell"] = _srt[0]
+                record["near_csr_top100_cells"] = jnp.sum(_srt[:100])
+                record["near_csr_cells_over_1000"] = jnp.sum(_per_cell > 1000)
                 # live particles the near import carries (compact format only)
                 record["near_particles"] = jnp.sum(
                     jnp.where(got_n.num_payload > 0, imp_mass != 0.0, False)

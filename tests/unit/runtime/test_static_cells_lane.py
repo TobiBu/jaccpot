@@ -132,3 +132,59 @@ def test_com_geometry_and_flat_walk_ignore_empty_nodes():
         assert np.all(counts[empty_leaf_rows] == 0), "an empty leaf has neighbours"
         nbrs = np.asarray(nl.neighbors)[: int(counts.sum())]
         assert not np.isin(nbrs, empty).any()
+
+
+def test_cell_min_level_reaches_the_partition():
+    """TreeConfig.cell_min_level threads down to the cell partition: the same
+    particles get MORE leaves at min level 6 (a Plummer outskirt has coarser
+    leaves), and every particle is still covered exactly once."""
+    from yggdrax import _cell_partition as cp
+    from yggdrax.morton import morton_encode
+
+    n = 4000
+    P = jnp.asarray(_plummer(n, 0), jnp.float32)
+    M = jnp.ones((n,), jnp.float32)
+    counts = []
+    for lvl in (0, 6):
+        art = _build_tree_with_config(
+            P,
+            M,
+            infer_bounds(P),
+            tree_type="radix",
+            tree_config=_CFG,
+            leaf_size=16,
+            workspace=None,
+            jit_tree=False,
+            refine_local=False,
+            max_refine_levels=0,
+            aspect_threshold=8.0,
+            leaf_partition="cells",
+            leaf_capacity=4096,
+            cell_min_level=lvl,
+        )
+        topo = art.tree.topology if hasattr(art.tree, "topology") else art.tree
+        ni = int(topo.left_child.shape[0])
+        r = np.asarray(topo.node_ranges)[ni:]
+        live = r[:, 1] >= r[:, 0]
+        assert int(np.sum(r[live, 1] - r[live, 0] + 1)) == n, "every particle once"
+        counts.append(int(live.sum()))
+    codes = np.sort(np.asarray(morton_encode(P, infer_bounds(P))).astype(np.uint64))
+    want = [
+        cp.adaptive_cell_leaf_partition_numpy(codes, leaf_size=16, min_level=lvl)[0].size
+        for lvl in (0, 6)
+    ]
+    assert counts == want
+    assert counts[1] > counts[0], "vacuous: min level 6 changed nothing"
+
+
+def test_cell_min_level_needs_cell_leaves():
+    from jaccpot import FastMultipoleMethod
+    from jaccpot.config import FMMAdvancedConfig, TreeConfig
+
+    with pytest.raises(ValueError, match="cell_min_level"):
+        FastMultipoleMethod(
+            preset="large_n_gpu",
+            advanced=FMMAdvancedConfig(
+                tree=TreeConfig(mode="static_radix", cell_min_level=8)
+            ),
+        )

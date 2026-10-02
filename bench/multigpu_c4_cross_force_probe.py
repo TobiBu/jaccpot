@@ -127,21 +127,36 @@ P0 = jnp.asarray(pos)
 codes = np.asarray(morton_encode(P0, _infer_lane_bounds(P0)))
 order = np.argsort(codes)
 shards = np.array_split(order, NDEV)
-kk = int(cp.adaptive_cell_leaf_partition_numpy(np.sort(codes), leaf_size=LEAF)[0].size)
-# The leaf capacity is per TREE, and the reference arm trees all N while each mesh
-# device trees a shard -- dividing by NDEV in the reference arm overflows the cut.
-LEAF_CAP = 1 << int(np.ceil(np.log2(1.25 * kk / (1 if SOLO else NDEV))))
-# The pow2 rule can pad a shard's leaf capacity up to ~2.4x (it made the old 4M
-# single-card row look cheaper than the 2M one); PROBE_LEAF_CAP pins it.
-if os.environ.get("PROBE_LEAF_CAP"):
-    LEAF_CAP = int(os.environ["PROBE_LEAF_CAP"])
+# no leaf coarser than this Morton level (TreeConfig.cell_min_level; 0 = unconstrained)
+CELL_MIN_LEVEL = int(os.environ.get("PROBE_CELL_MIN_LEVEL", "0"))
+kk = int(
+    cp.adaptive_cell_leaf_partition_numpy(
+        np.sort(codes), leaf_size=LEAF, min_level=CELL_MIN_LEVEL
+    )[0].size
+)
 # live cell leaves of the WORST shard: what every cross capacity scales with
 SHARD_LEAVES = max(
     int(
-        cp.adaptive_cell_leaf_partition_numpy(np.sort(codes[s]), leaf_size=LEAF)[0].size
+        cp.adaptive_cell_leaf_partition_numpy(
+            np.sort(codes[s]), leaf_size=LEAF, min_level=CELL_MIN_LEVEL
+        )[0].size
     )
     for s in shards
 )
+# The leaf capacity is per TREE, and the reference arm trees all N while each mesh
+# device trees a shard. It used to be the next power of two above 1.25x the leaves,
+# which padded up to 2.4x -- and time is linear in that padding (4M on one card:
+# 299 / 374 / 541 ms at 1.2 / 2.4 / 4.8x, same pairs to the digit), so crossing a
+# power of two by a few hundred leaves doubled the cost and masqueraded as a
+# regression of whatever had added them. Now 1.15x the live leaves in steps of 1024;
+# nothing needs a power of two. PROBE_LEAF_CAP_RULE=pow2 restores the old rule.
+_live_for_cap = kk if (SOLO or NDEV == 1) else SHARD_LEAVES
+if os.environ.get("PROBE_LEAF_CAP_RULE") == "pow2":
+    LEAF_CAP = 1 << int(np.ceil(np.log2(1.25 * kk / (1 if SOLO else NDEV))))
+else:
+    LEAF_CAP = int(-(-int(np.ceil(1.15 * _live_for_cap)) // 1024) * 1024)
+if os.environ.get("PROBE_LEAF_CAP"):
+    LEAF_CAP = int(os.environ["PROBE_LEAF_CAP"])
 # Evaluate at a different theta from the prepare's. A DIAGNOSTIC knob only: a tighter
 # theta than the capacities were sized for saturates the walk UNDER TRACE, which is
 # how the capacity-flag gate makes the local guard fire without tripping the eager
@@ -174,6 +189,7 @@ def build():
                 leaf_target=LEAF,
                 leaf_partition="cells",
                 leaf_capacity=LEAF_CAP,
+                cell_min_level=CELL_MIN_LEVEL or None,
             ),
             farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
@@ -382,6 +398,11 @@ DIAG_KEYS = (
     "near_walk_far_pairs",
     "near_csr",
     "near_particles",
+    "near_rows_needing_particles",
+    "near_rows_far_only",
+    "near_csr_max_per_cell",
+    "near_csr_top100_cells",
+    "near_csr_cells_over_1000",
     "export_near",
     "near_walk_peak",
     "export_walk_peak",

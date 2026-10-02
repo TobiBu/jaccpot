@@ -711,6 +711,7 @@ class PrepareMixin(_EngineBase):
             return_reordered=True,
             leaf_partition=leaf_partition,
             return_overflow=cells,
+            cell_min_level=int(getattr(self, "_tree_cell_min_level", 0)),
             **({"num_valid": num_valid} if num_valid is not None else {}),
         )
         expected = 5 if cells else 4
@@ -943,6 +944,7 @@ class PrepareMixin(_EngineBase):
                 aspect_threshold=aspect_threshold_val,
                 leaf_partition=getattr(self, "_tree_leaf_partition", "buckets"),
                 leaf_capacity=getattr(self, "_tree_leaf_capacity", None),
+                cell_min_level=int(getattr(self, "_tree_cell_min_level", 0)),
             )
             if allow_stateful_cache:
                 self._tree_workspace = build_artifacts.workspace
