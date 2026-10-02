@@ -299,7 +299,9 @@ def fused_force_step(
             cross_record["perm_nonidentity"] = jnp.sum(
                 orig != jnp.arange(orig.shape[0], dtype=orig.dtype)
             )
-        acceleration = acceleration + cross_near_acceleration(
+        acceleration = acceleration + jax.named_call(
+            cross_near_acceleration, name="cross_near_term"
+        )(
             cross_near_sink,
             leaf_pos,
             leaf_mass,

@@ -170,6 +170,12 @@ def make_cross_hook(
     flag_sink: dict = {}
 
     def hook(tree_artifacts: Any) -> Optional[tuple]:
+        # stage labels for per-device traces (`jax.named_scope` costs nothing at
+        # run time; it only names the ops). Every stage call below adds its own.
+        with jax.named_scope("cross_hook"):
+            return _hook_body(tree_artifacts)
+
+    def _hook_body(tree_artifacts: Any) -> Optional[tuple]:
         # a RE-TRACE must not see the previous trace's tracers
         flag_sink.clear()
         tree = tree_artifacts.tree
@@ -192,7 +198,7 @@ def make_cross_hook(
         if _cross_mac_geometry_mode() == "com":
             from jaccpot.runtime._mac_geometry import resolve_walk_geometry
 
-            geom, _ = resolve_walk_geometry(
+            geom, _ = jax.named_call(resolve_walk_geometry, name="cross_geometry")(
                 tree,
                 tree_artifacts.positions_sorted,
                 box_geom,
@@ -209,7 +215,7 @@ def make_cross_hook(
         n_local = int(jnp.asarray(mp.packed).shape[0])
         num_internal = int(jnp.asarray(tree.left_child).shape[0])
 
-        summary = occupancy_cut(
+        summary = jax.named_call(occupancy_cut, name="cross_summary")(
             parent,
             jnp.asarray(tree.node_ranges),
             num_internal,
@@ -233,7 +239,7 @@ def make_cross_hook(
         left = jnp.concatenate([jnp.asarray(tree.left_child, idx), leaf_fill])
         right = jnp.concatenate([jnp.asarray(tree.right_child, idx), leaf_fill])
 
-        ex = export_walk(
+        ex = jax.named_call(export_walk, name="cross_export_walk")(
             left,
             right,
             jnp.asarray(geom.center),
@@ -310,7 +316,7 @@ def make_cross_hook(
             record["export_near_live"] = jnp.sum(n_live)
             record["export_near_mac_fail"] = jnp.sum(n_live & ~ok_n)
 
-        sb = build_send_buffers(
+        sb = jax.named_call(build_send_buffers, name="cross_send_far")(
             ex.far_cell,
             ex.far_node,
             ex.far_count,
@@ -346,7 +352,7 @@ def make_cross_hook(
             axis=1,
         )
 
-        got = exchange_export_list(
+        got = jax.named_call(exchange_export_list, name="cross_exchange_far")(
             payload,
             sb.node_sizes,
             sb.csr_cell,
@@ -394,7 +400,7 @@ def make_cross_hook(
             record["seed_live"] = jnp.sum(s_live)
             record["seed_mac_fail"] = jnp.sum(s_live & ~ok_r)
 
-        rl = receiver_interaction_lists(
+        rl = jax.named_call(receiver_interaction_lists, name="cross_recv_walk_far")(
             combined_left,
             combined_right,
             combined_cen,
@@ -418,7 +424,7 @@ def make_cross_hook(
             pos_sorted = jnp.asarray(tree.positions_sorted)
             mass_sorted = jnp.asarray(tree.masses_sorted)
 
-            sb_n = build_send_buffers(
+            sb_n = jax.named_call(build_send_buffers, name="cross_send_near")(
                 ex.near_cell,
                 ex.near_node,
                 ex.near_count,
@@ -471,7 +477,7 @@ def make_cross_hook(
                 axis=1,
             )
 
-            got_n = exchange_export_list(
+            got_n = jax.named_call(exchange_export_list, name="cross_exchange_near")(
                 near_payload,
                 sb_n.node_sizes,
                 sb_n.csr_cell,
@@ -495,7 +501,9 @@ def make_cross_hook(
             combined_cen_n = jnp.concatenate([jnp.asarray(geom.center), imp_cen_n])
             combined_rad_n = jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n])
 
-            rl_n = receiver_interaction_lists(
+            rl_n = jax.named_call(
+                receiver_interaction_lists, name="cross_recv_walk_near"
+            )(
                 combined_left,
                 combined_right,
                 combined_cen_n,
@@ -586,7 +594,7 @@ def make_cross_hook(
         # sources are rebased to sit ABOVE every local index, which is what the
         # (min, max) canonicalisation downstream depends on
         if near_sink is not None:
-            return merge_imported_blocks(
+            return jax.named_call(merge_imported_blocks, name="cross_merge")(
                 imp_mp,
                 imp_cen,
                 rl.far_source,
