@@ -33,18 +33,27 @@ only the cost differs, and for the near half it differs the other way.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 from yggdrax.distributed.comm import AXIS_NAME, ragged_all_to_all_exchange
-from yggdrax.distributed.export import build_send_buffers, export_walk
+from yggdrax.distributed.export import (
+    ExportLists,
+    build_send_buffers,
+    export_walk,
+    export_walk_two_sided,
+)
 from yggdrax.distributed.import_cells import (
     exchange_export_list,
     receiver_interaction_lists,
 )
-from yggdrax.distributed.summary import occupancy_cut
+from yggdrax.distributed.summary import (
+    occupancy_cut,
+    subtree_leaf_counts,
+    summary_tree,
+)
 
 __all__ = [
     "CrossCapacities",
@@ -109,6 +118,207 @@ def _near_tiles_on_the_wire() -> bool:
     from jaccpot._env import env_flag
 
     return env_flag("JACCPOT_CROSS_NEAR_TILES", False)
+
+
+def _cross_two_sided() -> bool:
+    """``JACCPOT_CROSS_TWO_SIDED=1``: export against every receiver's summary TREE.
+
+    The one-sided export refines only the sender, so each receiver cell collects a
+    treecode-style list of sender nodes (~360 per cell at 1e6 particles per device;
+    ~20 of the ~33 ms cross cost at 2e6 on two cards). The two-sided walk splits
+    whichever side is larger, so far pairs can land on the receiver's internal nodes
+    and its L2L cascade carries them down.
+
+    Returns
+    -------
+    bool
+        Whether to publish the summary tree and walk both sides.
+    """
+    from jaccpot._env import env_flag
+
+    return env_flag("JACCPOT_CROSS_TWO_SIDED", False)
+
+
+class _Published(NamedTuple):
+    """What one device publishes for the export walks, and how to read it back.
+
+    Attributes
+    ----------
+    cut : Any
+        The occupancy cut (``TreeSummary``).
+    block_nodes : Array
+        ``(B,)`` this device's own node behind every published index, ``-1`` in the
+        padding: the cut cells (one-sided) or the summary-tree nodes (two-sided). A
+        received CSR entry names a published index; this maps it to a target.
+    rows : Array
+        ``(B, k)`` the packed rows every device all_gathers: centre 3, radius, then
+        (two-sided) left and right child in the summary index space, then active.
+        Indices travel as floats -- exact below 2**24 in fp32.
+    overflow : Array
+        The cut's overflow, or the summary tree's (which includes the cut's).
+    num_entries : Array
+        Live published entries.
+    """
+
+    cut: Any
+    block_nodes: Array
+    rows: Array
+    overflow: Array
+    num_entries: Array
+
+
+def _summary_rows(
+    tree: Any, geom: Any, cap: "CrossCapacities", *, two_sided: bool
+) -> _Published:
+    """This device's summary, packed for ONE all_gather.
+
+    Parameters
+    ----------
+    tree : Any
+        The refreshed tree (``parent``, ``left_child``, ``right_child``,
+        ``node_ranges``, and ``morton_codes`` when ``cap.summary_cell_level`` is set).
+    geom : Any
+        The walk geometry (``center``, ``radius`` per node) the sender's MAC uses.
+    cap : CrossCapacities
+        Capacities; ``max_cells`` (one-sided) or ``max_summary_nodes`` (two-sided)
+        is the block width.
+    two_sided : bool
+        Publish the summary tree (with child links) instead of the bare cells.
+
+    Returns
+    -------
+    _Published
+        The packed rows and what the receiver needs to read its CSR back.
+    """
+    parent = jnp.asarray(tree.parent)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    size_bound = (
+        {}
+        if cap.summary_cell_level is None
+        else dict(
+            node_extent=_node_cell_edge(tree),
+            max_extent=2.0 ** -int(cap.summary_cell_level),
+        )
+    )
+    cut = jax.named_call(occupancy_cut, name="cross_summary")(
+        parent,
+        jnp.asarray(tree.node_ranges),
+        num_internal,
+        max_leaves=cap.max_leaves_per_cell,
+        capacity=cap.max_cells,
+        **size_bound,
+    )
+    center = jnp.asarray(geom.center)
+    radius = jnp.asarray(geom.radius)
+    dtype = center.dtype
+    if not two_sided:
+        live = jnp.arange(cap.max_cells) < cut.num_cells
+        safe = jnp.where(live, cut.cells, 0)
+        rows = jnp.concatenate(
+            [
+                jnp.where(live[:, None], center[safe], 0.0),
+                jnp.where(live, radius[safe], 0.0)[:, None],
+                live.astype(dtype)[:, None],
+            ],
+            axis=1,
+        )
+        return _Published(cut, cut.cells, rows, cut.overflow, cut.num_cells)
+
+    S = int(cap.max_summary_nodes)
+    if jnp.finfo(dtype).nmant < 52 and S >= (1 << (jnp.finfo(dtype).nmant + 1)):
+        raise ValueError(
+            f"max_summary_nodes={S} does not travel exactly as {dtype} indices"
+        )
+    st = jax.named_call(summary_tree, name="cross_summary_tree")(
+        parent,
+        jnp.asarray(tree.left_child),
+        jnp.asarray(tree.right_child),
+        jnp.asarray(tree.node_ranges),
+        num_internal,
+        cut,
+        capacity=S,
+    )
+    ok = st.nodes >= 0
+    safe = jnp.where(ok, st.nodes, 0)
+    rows = jnp.concatenate(
+        [
+            jnp.where(ok[:, None], center[safe], 0.0),
+            jnp.where(ok, radius[safe], 0.0)[:, None],
+            st.left.astype(dtype)[:, None],
+            st.right.astype(dtype)[:, None],
+            st.active.astype(dtype)[:, None],
+        ],
+        axis=1,
+    )
+    return _Published(cut, st.nodes, rows, st.overflow, st.num_nodes)
+
+
+def _export_from_rows(
+    gathered: Array,
+    left: Array,
+    right: Array,
+    geom: Any,
+    root: Array,
+    theta: float,
+    me: Array,
+    cap: "CrossCapacities",
+    *,
+    two_sided: bool,
+    mac_type: str,
+    walk_fn: Optional[Callable[..., Any]],
+) -> ExportLists:
+    """Unpack every device's published rows and run the export walk against them.
+
+    Parameters
+    ----------
+    gathered : Array
+        ``(ndev, B, k)`` every device's :attr:`_Published.rows`.
+    left, right : Array
+        This device's full child arrays (``-1`` at leaves).
+    geom : Any
+        This device's walk geometry.
+    root : Array
+        This device's root node.
+    theta : float
+        The export MAC parameter.
+    me : Array
+        This device's index along the mesh axis.
+    cap : CrossCapacities
+        Capacities (export walk queue and list caps).
+    two_sided : bool
+        The rows carry child links; walk both trees.
+    mac_type : str
+        MAC variant. Static.
+    walk_fn : Optional[Callable[..., Any]]
+        The walk implementation (``None``: yggdrax's traced walk).
+
+    Returns
+    -------
+    ExportLists
+        Pairs ``(device * B + published index, local node)``.
+    """
+    cen = gathered[..., 0:3]
+    rad = gathered[..., 3]
+    kw = dict(
+        max_pair_queue=cap.export_walk_queue,
+        far_cap=cap.export_far_cap,
+        near_cap=cap.export_near_cap,
+        mac_type=mac_type,
+        walk_fn=walk_fn,
+    )
+    args = (left, right, jnp.asarray(geom.center), jnp.asarray(geom.radius), root)
+    if not two_sided:
+        act = gathered[..., 4] > 0.5
+        return jax.named_call(export_walk, name="cross_export_walk")(
+            *args, cen, rad, act, float(theta), me, **kw
+        )
+    idx = jnp.asarray(left).dtype
+    kids_l = jnp.round(gathered[..., 4]).astype(idx)
+    kids_r = jnp.round(gathered[..., 5]).astype(idx)
+    act = gathered[..., 6] > 0.5
+    return jax.named_call(export_walk_two_sided, name="cross_export_walk")(
+        *args, cen, rad, kids_l, kids_r, act, float(theta), me, **kw
+    )
 
 
 def _row_of_slot(counts: Array, capacity: int) -> tuple[Array, Array, Array, Array]:
@@ -345,7 +555,8 @@ def _direct_far_lists(cells: Array, got: Any) -> Any:
     Parameters
     ----------
     cells : Array
-        ``(max_cells,)`` this device's summary cell roots.
+        ``(B,)`` this device's node behind every published summary index: its cut
+        cells, or (two-sided export) its summary-tree nodes, internal ones included.
     got : Any
         The received far import (``ImportedCells``): its CSR is prefix-live, one
         contiguous block per sender, ``num_csr`` entries in all.
@@ -491,6 +702,7 @@ class CrossCapacities:
         send_particle_cap: Optional[int] = None,
         recv_particle_cap: Optional[int] = None,
         summary_cell_level: Optional[int] = None,
+        max_summary_nodes: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         self.max_leaves_per_cell = int(max_leaves_per_cell)
@@ -541,6 +753,12 @@ class CrossCapacities:
         self.summary_cell_level = (
             None if summary_cell_level is None else int(summary_cell_level)
         )
+        # The two-sided export's published summary TREE: the cut plus its ancestors
+        # (and their empty children), a full binary tree over the cells -- 2 x cells
+        # - 1 nodes, plus two per empty child. None: 2 x max_cells.
+        self.max_summary_nodes = (
+            2 * self.max_cells if max_summary_nodes is None else int(max_summary_nodes)
+        )
 
 
 def make_cross_hook(
@@ -554,6 +772,7 @@ def make_cross_hook(
     near_sink: Optional[dict] = None,
     near_theta: Optional[float] = None,
     export_theta: Optional[float] = None,
+    two_sided: Optional[bool] = None,
 ) -> Callable[[Any], Optional[tuple]]:
     """Build the ``cross_hook`` for a mesh of ``ndev`` devices.
 
@@ -595,6 +814,11 @@ def make_cross_hook(
         travels as particles and is summed directly (with ``near_theta=0``). If
         the error then matches the single-GPU lane, the residual lives in the
         multipole path (import, M2L, cascade); if it does not, it lives elsewhere.
+    two_sided:
+        Publish each device's summary TREE (the cut plus its ancestors, with child
+        links) and walk both trees in the export, so far pairs can land on the
+        receiver's internal nodes instead of every cell collecting its own list.
+        ``None`` reads ``JACCPOT_CROSS_TWO_SIDED`` (default off). Static.
 
     Returns
     -------
@@ -604,6 +828,7 @@ def make_cross_hook(
     """
     cap = caps if caps is not None else CrossCapacities()
     walk_fn = cross_walk_fn(mac_type)
+    two_sided = _cross_two_sided() if two_sided is None else bool(two_sided)
     # ALWAYS-ON overflow channel, independent of the diagnostics `record`: the
     # production and timing paths pass no record, and before this sink existed the
     # far half's flags then reached nobody. Holds tracers; the evaluator reads it
@@ -660,32 +885,15 @@ def make_cross_hook(
         n_local = int(jnp.asarray(mp.packed).shape[0])
         num_internal = int(jnp.asarray(tree.left_child).shape[0])
 
-        size_bound = (
-            {}
-            if cap.summary_cell_level is None
-            else dict(
-                node_extent=_node_cell_edge(tree),
-                max_extent=2.0 ** -int(cap.summary_cell_level),
-            )
-        )
-        summary = jax.named_call(occupancy_cut, name="cross_summary")(
-            parent,
-            jnp.asarray(tree.node_ranges),
-            num_internal,
-            max_leaves=cap.max_leaves_per_cell,
-            capacity=cap.max_cells,
-            **size_bound,
-        )
-        cells = summary.cells
-        live = jnp.arange(cap.max_cells) < summary.num_cells
-        safe = jnp.where(live, cells, 0)
-        my_cen = jnp.where(live[:, None], jnp.asarray(geom.center)[safe], 0.0)
-        my_rad = jnp.where(live, jnp.asarray(geom.radius)[safe], 0.0)
-
-        # every device's summary, so a sender can decide unilaterally
-        all_cen = jax.lax.all_gather(my_cen, axis_name, tiled=False)
-        all_rad = jax.lax.all_gather(my_rad, axis_name, tiled=False)
-        all_act = jax.lax.all_gather(live, axis_name, tiled=False)
+        # what every device publishes -- the cut cells, or (two-sided) the summary
+        # tree over them -- packed so that ONE all_gather carries it
+        pub = _summary_rows(tree, geom, cap, two_sided=two_sided)
+        summary = pub.cut
+        block_nodes = pub.block_nodes
+        block = int(block_nodes.shape[0])
+        gathered = jax.lax.all_gather(pub.rows, axis_name, tiled=False)
+        all_cen = gathered[..., 0:3]
+        all_rad = gathered[..., 3]
         me = jax.lax.axis_index(axis_name)
 
         idx = parent.dtype
@@ -693,20 +901,16 @@ def make_cross_hook(
         left = jnp.concatenate([jnp.asarray(tree.left_child, idx), leaf_fill])
         right = jnp.concatenate([jnp.asarray(tree.right_child, idx), leaf_fill])
 
-        ex = jax.named_call(export_walk, name="cross_export_walk")(
+        ex = _export_from_rows(
+            gathered,
             left,
             right,
-            jnp.asarray(geom.center),
-            jnp.asarray(geom.radius),
+            geom,
             jnp.argmin(parent).astype(idx),
-            all_cen,
-            all_rad,
-            all_act,
             float(theta if export_theta is None else export_theta),
             me,
-            max_pair_queue=cap.export_walk_queue,
-            far_cap=cap.export_far_cap,
-            near_cap=cap.export_near_cap,
+            cap,
+            two_sided=two_sided,
             mac_type=mac_type,
             walk_fn=walk_fn,
         )
@@ -718,7 +922,7 @@ def make_cross_hook(
             # the receiver runs the identical check on the identical pairs below.
             from yggdrax._interactions_impl import _compute_mac_ok
 
-            mc = int(cap.max_cells)
+            mc = block
             fc = jnp.asarray(ex.far_cell)
             fn = jnp.asarray(ex.far_node)
             f_live = (jnp.arange(fc.shape[0]) < ex.far_count) & (fc >= 0)
@@ -776,7 +980,7 @@ def make_cross_hook(
             ex.far_node,
             ex.far_count,
             ndev=ndev,
-            max_cells=cap.max_cells,
+            max_cells=block,
             num_nodes=n_local,
             node_capacity=cap.send_node_cap,
             csr_capacity=cap.send_csr_cap,
@@ -839,7 +1043,7 @@ def make_cross_hook(
             sc = jnp.asarray(got.csr_cell)
             sr = jnp.asarray(got.csr_row)
             s_live = (jnp.arange(sc.shape[0]) < got.num_csr) & (sc >= 0)
-            sa = jnp.where(s_live, cells[jnp.where(s_live, sc, 0)], 0)
+            sa = jnp.where(s_live, block_nodes[jnp.where(s_live, sc, 0)], 0)
             sb_ = jnp.where(s_live, n_local + sr, 0)
             d_r = combined_cen[sa] - combined_cen[sb_]
             d2_r = jnp.sum(d_r * d_r, axis=-1)
@@ -862,7 +1066,7 @@ def make_cross_hook(
                 combined_cen,
                 combined_rad,
                 n_local,
-                cells,
+                block_nodes,
                 got.csr_cell,
                 got.csr_row,
                 got.num_csr,
@@ -882,7 +1086,7 @@ def make_cross_hook(
             # zero near pairs. So map the CSR directly and skip the walk, whose seed
             # alone forced a queue of 2 x recv_csr_cap. JACCPOT_CROSS_FAR_RECEIVER_WALK=1
             # runs the walk (the control; `export_theta` != theta always does).
-            rl = _direct_far_lists(cells, got)
+            rl = _direct_far_lists(block_nodes, got)
 
         # ---- the NEAR half: ship the exported leaves' PARTICLES -------------
         if near_sink is not None:
@@ -896,7 +1100,7 @@ def make_cross_hook(
                 ex.near_node,
                 ex.near_count,
                 ndev=ndev,
-                max_cells=cap.max_cells,
+                max_cells=block,
                 num_nodes=n_local,
                 node_capacity=cap.send_node_cap,
                 csr_capacity=cap.send_csr_cap,
@@ -983,7 +1187,7 @@ def make_cross_hook(
                 combined_cen_n,
                 combined_rad_n,
                 n_local,
-                cells,
+                block_nodes,
                 got_n.csr_cell,
                 got_n.csr_row,
                 got_n.num_csr,
@@ -1037,11 +1241,9 @@ def make_cross_hook(
                 _cc = jnp.where(
                     jnp.arange(got_n.csr_cell.shape[0]) < got_n.num_csr,
                     got_n.csr_cell,
-                    cap.max_cells,
+                    block,
                 )
-                _per_cell = (
-                    jnp.zeros((cap.max_cells,), jnp.int32).at[_cc].add(1, mode="drop")
-                )
+                _per_cell = jnp.zeros((block,), jnp.int32).at[_cc].add(1, mode="drop")
                 _srt = jnp.sort(_per_cell)[::-1]
                 record["near_csr_max_per_cell"] = _srt[0]
                 record["near_csr_top100_cells"] = jnp.sum(_srt[:100])
@@ -1049,11 +1251,13 @@ def make_cross_hook(
                 # who is the worst cell: node id, leaf?, particles, MAC radius, Morton
                 # cell edge (box units) and distance of its centre from the box centre
                 _w = jnp.argmax(_per_cell)
-                _wn = cells[_w]
+                _wn = jnp.maximum(block_nodes[_w], 0)
                 _nr = jnp.asarray(tree.node_ranges)
                 record["worst_cell_is_leaf"] = (_wn >= num_internal).astype(jnp.int32)
                 record["worst_cell_particles"] = _nr[_wn, 1] - _nr[_wn, 0] + 1
-                record["worst_cell_leaves"] = summary.leaves_per_cell[_w]
+                record["worst_cell_leaves"] = subtree_leaf_counts(_nr, num_internal)[
+                    _wn
+                ]
                 record["worst_cell_radius"] = jnp.asarray(geom.radius)[_wn]
                 record["worst_cell_edge"] = _node_cell_edge(tree)[_wn]
                 _c = jnp.asarray(geom.center)[_wn]
@@ -1067,7 +1271,7 @@ def make_cross_hook(
                 if rl_n.peak_wavefront is not None:
                     record["near_walk_peak"] = rl_n.peak_wavefront
             near_sink["overflow"] = (
-                summary.overflow
+                pub.overflow
                 | sb_n.node_overflow
                 | sb_n.csr_overflow
                 | rl_n.near_overflow
@@ -1087,8 +1291,9 @@ def make_cross_hook(
         far_overflow = (
             # `summary.overflow` is the flag whose absence is silent: a truncated cut
             # drops part of the RECEIVER from the exchange, so those particles get
-            # no cross field at all. It loses force, not accuracy.
-            summary.overflow
+            # no cross field at all. It loses force, not accuracy. Two-sided, it is
+            # the summary TREE's flag (max_summary_nodes), which includes the cut's.
+            pub.overflow
             | ex.far_overflow
             | ex.near_overflow
             | ex.queue_overflow
@@ -1119,6 +1324,7 @@ def make_cross_hook(
             )
             record["imported_rows"] = got.num_payload
             record["summary_cells"] = summary.num_cells
+            record["summary_nodes"] = pub.num_entries
             record["summary_leaves"] = jnp.sum(summary.leaves_per_cell)
             record["overflow"] = far_overflow
 
