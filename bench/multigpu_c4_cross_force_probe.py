@@ -59,6 +59,14 @@ if os.environ.get("PROBE_RAGGED_ONE_SHOT") != "1" and _RAGGED.split("=")[0] not 
     os.environ.get("XLA_FLAGS", "")
 ):
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _RAGGED).strip()
+# XLA's latency-hiding scheduler: lets the cross exchange overlap independent work.
+# 2-card cross arm, cards 1+2: 90.0 / 89.5 -> 88.0 / 87.6 ms at 2e6 and 21.7 -> 21.0
+# ms at 4e5, forces unchanged (2026-10-02). PROBE_LHS=0 leaves it out for an A/B.
+_LHS = "--xla_gpu_enable_latency_hiding_scheduler=true"
+if os.environ.get("PROBE_LHS") != "0" and _LHS.split("=")[0] not in (
+    os.environ.get("XLA_FLAGS", "")
+):
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _LHS).strip()
 
 import time
 

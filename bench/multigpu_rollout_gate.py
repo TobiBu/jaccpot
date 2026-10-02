@@ -55,6 +55,10 @@ os.environ["JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"] = f"{CAP}"
 _RAGGED = "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false"
 if _RAGGED.split("=")[0] not in os.environ.get("XLA_FLAGS", ""):
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _RAGGED).strip()
+# and XLA's latency-hiding scheduler (see the probe: ~2 ms of 90 at 2e6 on 2 cards)
+_LHS = "--xla_gpu_enable_latency_hiding_scheduler=true"
+if _LHS.split("=")[0] not in os.environ.get("XLA_FLAGS", ""):
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _LHS).strip()
 
 import jax
 import jax.numpy as jnp
