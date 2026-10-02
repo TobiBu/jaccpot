@@ -38,7 +38,7 @@ from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array
-from yggdrax.distributed.comm import AXIS_NAME
+from yggdrax.distributed.comm import AXIS_NAME, ragged_all_to_all_exchange
 from yggdrax.distributed.export import build_send_buffers, export_walk
 from yggdrax.distributed.import_cells import (
     exchange_export_list,
@@ -66,6 +66,224 @@ def _cross_mac_geometry_mode() -> str:
 
     # a malformed value warns and keeps the correct default, as every jaccpot switch does
     return env_choice(_CROSS_MAC_GEOMETRY_ENV, "com", ("com", "aabb"))
+
+
+def _near_tiles_on_the_wire() -> bool:
+    """``JACCPOT_CROSS_NEAR_TILES=1``: ship W-wide particle tiles (the old format).
+
+    Returns
+    -------
+    bool
+        Whether to use the tile format; the default is the compact one.
+    """
+    from jaccpot._env import env_flag
+
+    return env_flag("JACCPOT_CROSS_NEAR_TILES", False)
+
+
+def _row_of_slot(counts: Array, capacity: int) -> tuple[Array, Array, Array, Array]:
+    """Map every slot of a flat buffer laid out row by row back to its row.
+
+    Row ``r`` owns ``counts[r]`` consecutive slots starting at the exclusive cumsum.
+    Each non-empty row's first slot is marked with the row id and a running maximum
+    carries it forward -- O(capacity), no sort and no search.
+
+    Parameters
+    ----------
+    counts : Array
+        ``(rows,)`` non-negative slot counts.
+    capacity : int
+        Length of the flat buffer. Static.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(row, within, live, total)``: per slot its row and offset in that row, whether
+        it holds data, and the total number of live slots.
+    """
+    idx = jnp.int32
+    counts = jnp.asarray(counts, idx)
+    start = jnp.cumsum(counts, dtype=idx) - counts
+    total = jnp.sum(counts, dtype=idx)
+    rows = counts.shape[0]
+    mark = (
+        jnp.full((capacity,), -1, idx)
+        .at[jnp.where(counts > 0, start, capacity)]
+        .set(jnp.arange(rows, dtype=idx), mode="drop")
+    )
+    row = jnp.maximum(jax.lax.cummax(mark, axis=0), 0)
+    slot = jnp.arange(capacity, dtype=idx)
+    live = slot < total
+    row = jnp.where(live, row, 0)
+    within = jnp.where(live, slot - start[row], 0)
+    return row, within, live, total
+
+
+def _near_exchange_tiles(
+    sb_n: Any,
+    leaf_rows: list,
+    starts: Array,
+    ends: Array,
+    pos_sorted: Array,
+    mass_sorted: Array,
+    *,
+    W: int,
+    payload_capacity: int,
+    csr_capacity: int,
+    ndev: int,
+    axis_name: str,
+) -> tuple[Any, Array, Array, Array]:
+    """The near import with every leaf's particles in a W-wide tile (the control).
+
+    Parameters
+    ----------
+    sb_n : Any
+        The near send buffers.
+    leaf_rows : list
+        Per-row geometry and multipole columns, in payload order.
+    starts, ends : Array
+        Each row's leaf particle range ``[start, end]`` in sorted order.
+    pos_sorted, mass_sorted : Array
+        This device's Morton-sorted particles.
+    W : int
+        Tile width. Static.
+    payload_capacity, csr_capacity : int
+        Receive capacities. Static.
+    ndev : int
+        Mesh size.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    tuple[Any, Array, Array, Array]
+        ``(imported, imported_positions (rows, W, 3), imported_masses (rows, W),
+        overflow)``; the tile format has no particle buffer to overflow.
+    """
+    okrow = (sb_n.node_rows >= 0)[:, None]
+    slot = jnp.arange(W, dtype=starts.dtype)[None, :]
+    idx_p = jnp.clip(starts[:, None] + slot, 0, pos_sorted.shape[0] - 1)
+    valid = okrow & (starts[:, None] + slot <= ends[:, None])
+    tile_pos = jnp.where(valid[..., None], pos_sorted[idx_p], 0.0)
+    tile_mass = jnp.where(valid, mass_sorted[idx_p], 0.0)
+    head = sum(int(c.shape[1]) for c in leaf_rows)
+    payload = jnp.concatenate(
+        leaf_rows + [tile_pos.reshape(tile_pos.shape[0], -1), tile_mass], axis=1
+    )
+    got = exchange_export_list(
+        payload,
+        sb_n.node_sizes,
+        sb_n.csr_cell,
+        sb_n.csr_row,
+        sb_n.csr_sizes,
+        payload_capacity=payload_capacity,
+        csr_capacity=csr_capacity,
+        ndev=ndev,
+        axis_name=axis_name,
+    )
+    imp_pos = got.payload[:, head : head + 3 * W].reshape(-1, W, 3)
+    imp_mass = got.payload[:, head + 3 * W : head + 4 * W]
+    return got, imp_pos, imp_mass, jnp.asarray(False)
+
+
+def _near_exchange_compact(
+    sb_n: Any,
+    leaf_rows: list,
+    starts: Array,
+    ends: Array,
+    pos_sorted: Array,
+    mass_sorted: Array,
+    *,
+    W: int,
+    payload_capacity: int,
+    csr_capacity: int,
+    send_particle_cap: int,
+    recv_particle_cap: int,
+    ndev: int,
+    axis_name: str,
+) -> tuple[Any, Array, Array, Array]:
+    """The near import with only the LIVE particles on the wire.
+
+    A W-wide tile per leaf is ~70 % zeros at ~18 particles per 64-slot leaf, and the
+    exchange sends whole rows. Here a row carries its geometry, multipole and particle
+    COUNT, and the particles travel as one flat ``(P, 4)`` buffer in the same row order
+    (rows and particles are both grouped by destination, so they arrive in the same
+    sender order and one exclusive cumsum of the counts locates every row's particles).
+    The receiver rebuilds the same tiles, so nothing downstream changes.
+
+    Parameters
+    ----------
+    sb_n : Any
+        The near send buffers.
+    leaf_rows : list
+        Per-row geometry and multipole columns, in payload order.
+    starts, ends : Array
+        Each row's leaf particle range ``[start, end]`` in sorted order.
+    pos_sorted, mass_sorted : Array
+        This device's Morton-sorted particles.
+    W : int
+        Tile width. Static.
+    payload_capacity, csr_capacity : int
+        Receive capacities of the row and CSR rounds. Static.
+    send_particle_cap, recv_particle_cap : int
+        Flat particle buffer capacities. Static.
+    ndev : int
+        Mesh size.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    tuple[Any, Array, Array, Array]
+        ``(imported, imported_positions (rows, W, 3), imported_masses (rows, W),
+        overflow)`` -- ``overflow`` when either particle buffer is too small.
+    """
+    idx = jnp.int32
+    live_row = sb_n.node_rows >= 0
+    counts = jnp.where(live_row, jnp.clip(ends - starts + 1, 0, W), 0).astype(idx)
+    row, within, live_q, total = _row_of_slot(counts, send_particle_cap)
+    src = jnp.clip(starts.astype(idx)[row] + within, 0, pos_sorted.shape[0] - 1)
+    parts = jnp.where(
+        live_q[:, None],
+        jnp.concatenate([pos_sorted[src], mass_sorted[src][:, None]], axis=1),
+        0.0,
+    )
+    # rows are grouped by destination: [row_bound[d], row_bound[d + 1])
+    row_bound = jnp.concatenate(
+        [jnp.zeros((1,), idx), jnp.cumsum(jnp.asarray(sb_n.node_sizes, idx), dtype=idx)]
+    )
+    count_bound = jnp.concatenate([jnp.zeros((1,), idx), jnp.cumsum(counts, dtype=idx)])
+    part_sizes = count_bound[row_bound[1:]] - count_bound[row_bound[:-1]]
+    payload = jnp.concatenate(
+        leaf_rows + [counts.astype(pos_sorted.dtype)[:, None]], axis=1
+    )
+    got = exchange_export_list(
+        payload,
+        sb_n.node_sizes,
+        sb_n.csr_cell,
+        sb_n.csr_row,
+        sb_n.csr_sizes,
+        payload_capacity=payload_capacity,
+        csr_capacity=csr_capacity,
+        ndev=ndev,
+        axis_name=axis_name,
+    )
+    recv, recv_sizes, _ = ragged_all_to_all_exchange(
+        parts,
+        part_sizes,
+        output_capacity=recv_particle_cap,
+        axis_name=axis_name,
+    )
+    # rows beyond what arrived are filled with zeros, i.e. count 0
+    r_counts = jnp.clip(got.payload[:, -1], 0, W).astype(idx)
+    r_start = jnp.cumsum(r_counts, dtype=idx) - r_counts
+    slot = jnp.arange(W, dtype=idx)[None, :]
+    take = jnp.clip(r_start[:, None] + slot, 0, recv_particle_cap - 1)
+    valid = slot < r_counts[:, None]
+    imp_pos = jnp.where(valid[..., None], recv[take, :3], 0.0)
+    imp_mass = jnp.where(valid, recv[take, 3], 0.0)
+    overflow = (total > send_particle_cap) | (jnp.sum(recv_sizes) > recv_particle_cap)
+    return got, imp_pos, imp_mass, overflow
 
 
 def _far_receiver_walk_needed(export_theta: Optional[float], theta: float) -> bool:
@@ -240,6 +458,8 @@ class CrossCapacities:
         recv_near_cap: int = 1 << 17,
         recv_near_csr_cap: Optional[int] = None,
         export_walk_queue: Optional[int] = None,
+        send_particle_cap: Optional[int] = None,
+        recv_particle_cap: Optional[int] = None,
     ) -> None:
         self.max_cells = int(max_cells)
         self.max_leaves_per_cell = int(max_leaves_per_cell)
@@ -266,6 +486,20 @@ class CrossCapacities:
         # larger walk costs the smaller one in proportion. None: walk_queue.
         self.export_walk_queue = (
             self.walk_queue if export_walk_queue is None else int(export_walk_queue)
+        )
+        # The near import's LIVE particles, flat (4 floats each), instead of a
+        # leaf_width tile per leaf: at ~18 particles per 64-slot leaf the tiles were
+        # ~70 % zeros on the wire. None: the tile-equivalent bound node_cap x W,
+        # which can never overflow.
+        self.send_particle_cap = (
+            self.send_node_cap * self.leaf_width
+            if send_particle_cap is None
+            else int(send_particle_cap)
+        )
+        self.recv_particle_cap = (
+            self.recv_node_cap * self.leaf_width
+            if recv_particle_cap is None
+            else int(recv_particle_cap)
         )
 
 
@@ -618,17 +852,11 @@ def make_cross_hook(
                 node_capacity=cap.send_node_cap,
                 csr_capacity=cap.send_csr_cap,
             )
-            # a leaf's particles are a contiguous run [start, end]; gather them into
-            # a W-wide tile, which is the layout the leafpair kernel's pool wants
+            # a leaf's particles are a contiguous run [start, end]
             lrow = jnp.clip(sb_n.node_rows, 0, n_local - 1)
             starts = nr[lrow, 0]
             ends = nr[lrow, 1]
-            slot = jnp.arange(W, dtype=starts.dtype)[None, :]
-            idx_p = jnp.clip(starts[:, None] + slot, 0, pos_sorted.shape[0] - 1)
             okrow = (sb_n.node_rows >= 0)[:, None]
-            valid = okrow & (starts[:, None] + slot <= ends[:, None])
-            tile_pos = jnp.where(valid[..., None], pos_sorted[idx_p], 0.0)
-            tile_mass = jnp.where(valid, mass_sorted[idx_p], 0.0)
             # A leaf holding more than W particles would lose the excess here with
             # no other trace of it -- a MISSING force that every invariant passes.
             # W comes from a capacity, so this is a real possibility, not a
@@ -649,38 +877,51 @@ def make_cross_hook(
             # and the only correct answer was near_theta = 0, every one a direct
             # sum. With the coefficients here they go back through the M2L, as a
             # second imported block behind the far one (Task 2 of the record).
-            near_payload = jnp.concatenate(
-                [
-                    tile_pos.reshape(tile_pos.shape[0], -1),
-                    tile_mass,
-                    jnp.where(okrow, jnp.asarray(geom.center)[lrow], 0.0),
-                    jnp.where(okrow, jnp.asarray(geom.radius)[lrow][:, None], 0.0),
-                    jnp.where(okrow, jnp.asarray(mp.packed)[lrow], 0.0),
-                    jnp.where(okrow, jnp.asarray(mp.centers)[lrow], 0.0),
-                ],
-                axis=1,
-            )
-
-            got_n = jax.named_call(exchange_export_list, name="cross_exchange_near")(
-                near_payload,
-                sb_n.node_sizes,
-                sb_n.csr_cell,
-                sb_n.csr_row,
-                sb_n.csr_sizes,
-                payload_capacity=cap.recv_node_cap,
-                csr_capacity=cap.recv_near_csr_cap,
-                ndev=ndev,
-                axis_name=axis_name,
-            )
-            imp_pos = got_n.payload[:, : 3 * W].reshape(-1, W, 3)
-            imp_mass = got_n.payload[:, 3 * W : 4 * W]
-            imp_cen_n = got_n.payload[:, 4 * W : 4 * W + 3]  # geometric -> MAC
-            imp_rad_n = got_n.payload[:, 4 * W + 3]
-            _o = 4 * W + 4
-            imp_mp_n = got_n.payload[:, _o : _o + n_coeff]  # multipole -> M2L
-            imp_ecen_n = got_n.payload[
-                :, _o + n_coeff : _o + n_coeff + 3
-            ]  # expansion -> M2L
+            leaf_rows = [
+                jnp.where(okrow, jnp.asarray(geom.center)[lrow], 0.0),
+                jnp.where(okrow, jnp.asarray(geom.radius)[lrow][:, None], 0.0),
+                jnp.where(okrow, jnp.asarray(mp.packed)[lrow], 0.0),
+                jnp.where(okrow, jnp.asarray(mp.centers)[lrow], 0.0),
+            ]
+            if _near_tiles_on_the_wire():
+                got_n, imp_pos, imp_mass, particle_overflow = jax.named_call(
+                    _near_exchange_tiles, name="cross_exchange_near"
+                )(
+                    sb_n,
+                    leaf_rows,
+                    starts,
+                    ends,
+                    pos_sorted,
+                    mass_sorted,
+                    W=W,
+                    payload_capacity=cap.recv_node_cap,
+                    csr_capacity=cap.recv_near_csr_cap,
+                    ndev=ndev,
+                    axis_name=axis_name,
+                )
+            else:
+                got_n, imp_pos, imp_mass, particle_overflow = jax.named_call(
+                    _near_exchange_compact, name="cross_exchange_near"
+                )(
+                    sb_n,
+                    leaf_rows,
+                    starts,
+                    ends,
+                    pos_sorted,
+                    mass_sorted,
+                    W=W,
+                    payload_capacity=cap.recv_node_cap,
+                    csr_capacity=cap.recv_near_csr_cap,
+                    send_particle_cap=cap.send_particle_cap,
+                    recv_particle_cap=cap.recv_particle_cap,
+                    ndev=ndev,
+                    axis_name=axis_name,
+                )
+            # geometry and multipole rows, the same layout in both wire formats
+            imp_cen_n = got_n.payload[:, 0:3]  # geometric -> MAC
+            imp_rad_n = got_n.payload[:, 3]
+            imp_mp_n = got_n.payload[:, 4 : 4 + n_coeff]  # multipole -> M2L
+            imp_ecen_n = got_n.payload[:, 4 + n_coeff : 7 + n_coeff]  # expansion -> M2L
 
             combined_cen_n = jnp.concatenate([jnp.asarray(geom.center), imp_cen_n])
             combined_rad_n = jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n])
@@ -724,6 +965,10 @@ def make_cross_hook(
                 record["near_walk_far_pairs"] = rl_n.far_count
                 # what the walk_queue / recv_near_csr_cap have to cover
                 record["near_csr"] = got_n.num_csr
+                # live particles the near import carries (compact format only)
+                record["near_particles"] = jnp.sum(
+                    jnp.where(got_n.num_payload > 0, imp_mass != 0.0, False)
+                )
                 record["export_near"] = ex.near_count
                 if rl_n.peak_wavefront is not None:
                     record["near_walk_peak"] = rl_n.peak_wavefront
@@ -737,6 +982,7 @@ def make_cross_hook(
                 # shipped), so its capacity is a correctness condition too
                 | rl_n.far_overflow
                 | tile_truncated
+                | particle_overflow
                 # the exchange itself has no overflow flag: compare what arrived
                 # with what the receive buffers can hold
                 | (got_n.num_payload > cap.recv_node_cap)

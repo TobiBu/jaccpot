@@ -381,6 +381,7 @@ DIAG_KEYS = (
     "near_list_pairs",
     "near_walk_far_pairs",
     "near_csr",
+    "near_particles",
     "export_near",
     "near_walk_peak",
     "export_walk_peak",
@@ -525,6 +526,10 @@ caps = CrossCapacities(
     recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
     recv_csr_cap=_recv_csr,
     recv_near_csr_cap=_recv_near_csr,
+    # the near import's live particles, flat: ~1 exported leaf per local leaf at
+    # ~18 particles each (51k leaves, ~0.95M particles at 1e6 per device)
+    send_particle_cap=_auto_cap("PROBE_SEND_PARTICLE_BITS", 20, 18, headroom=2.0),
+    recv_particle_cap=_auto_cap("PROBE_RECV_PARTICLE_BITS", 20, 18, headroom=2.0),
     # export walk peak ~17 per leaf; its seed is ndev x max_cells pairs
     export_walk_queue=max(
         _auto_cap("PROBE_EXPORT_WALK_QUEUE_BITS", 17, 18, headroom=1.5),
