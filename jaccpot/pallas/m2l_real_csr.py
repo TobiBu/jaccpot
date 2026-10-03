@@ -455,8 +455,13 @@ def csr_by_target(
     # offsets from the SORTED key (a searchsorted), not a scatter-add over the
     # P entries: that segment_sum was a 1.3 ms int32 scatter at P = 2^21
     sorted_key = key[perm]
+    # unrolled: the default is a while loop with one small kernel per bisection
+    # step (~23 here), launch-bound inside the fused step; unrolled, XLA fuses it
     offsets = jnp.searchsorted(
-        sorted_key, jnp.arange(int(total_nodes) + 1, dtype=jnp.int32), side="left"
+        sorted_key,
+        jnp.arange(int(total_nodes) + 1, dtype=jnp.int32),
+        side="left",
+        method="scan_unrolled",
     ).astype(jnp.int32)
     counts = offsets[1:] - offsets[:-1]
     return src_sorted, offsets[:-1], counts.astype(jnp.int32)

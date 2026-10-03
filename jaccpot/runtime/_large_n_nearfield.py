@@ -288,6 +288,7 @@ def build_large_n_target_owned_blocks(
         block_offsets[1:],
         block_ids,
         side="right",
+        method="scan_unrolled",
     )
     local_block_idx = block_ids - block_offsets[block_target_leaf_ids]
     edge_start = offsets[block_target_leaf_ids] + local_block_idx * as_index(k)

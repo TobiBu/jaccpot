@@ -166,7 +166,7 @@ def build_leafpair_chunk_table(
     first = ends - per_leaf  # exclusive
     c = jnp.arange(capacity, dtype=idx)
     # leaf of chunk c: the first row whose inclusive end exceeds c
-    leaf = jnp.searchsorted(ends, c, side="right").astype(idx)
+    leaf = jnp.searchsorted(ends, c, side="right", method="scan_unrolled").astype(idx)
     valid = leaf < jnp.asarray(num_leaves, idx)
     leaf_safe = jnp.minimum(leaf, jnp.asarray(max(num_leaves - 1, 0), idx))
     k = c - first[leaf_safe]

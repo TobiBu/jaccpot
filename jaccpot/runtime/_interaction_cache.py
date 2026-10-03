@@ -2137,8 +2137,13 @@ def _build_flat_walk_artifacts_strict_streamed(
         perm = jnp.argsort(key, stable=True)
     sorted_key = key[perm]
     neighbors = jnp.where(valid[perm], src[perm], jnp.asarray(0, idx))
+    # unrolled: the default is a while loop with one small kernel per bisection
+    # step (~23 here), launch-bound inside the fused step; unrolled, XLA fuses it
     offsets = jnp.searchsorted(
-        sorted_key, jnp.arange(num_leaves + 1, dtype=idx), side="left"
+        sorted_key,
+        jnp.arange(num_leaves + 1, dtype=idx),
+        side="left",
+        method="scan_unrolled",
     ).astype(idx)
     counts = offsets[1:] - offsets[:-1]
     leaf_nodes = jnp.arange(num_internal, total_nodes, dtype=idx)

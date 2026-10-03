@@ -72,6 +72,26 @@ import time
 
 import jax
 import jax.numpy as jnp
+
+if os.environ.get("PROBE_SEARCHSORTED"):
+    # DIAGNOSTIC: the default `jnp.searchsorted` is a while-loop binary search, one
+    # small kernel per step; this makes every caller that does not pick a method use
+    # PROBE_SEARCHSORTED (e.g. "scan_unrolled") instead
+    import functools as _ft
+
+    _ss_orig = jnp.searchsorted
+
+    @_ft.wraps(_ss_orig)
+    def _ss(a, v, side="left", sorter=None, *, method=None):
+        return _ss_orig(
+            a,
+            v,
+            side=side,
+            sorter=sorter,
+            method=method or os.environ["PROBE_SEARCHSORTED"],
+        )
+
+    jnp.searchsorted = _ss
 import numpy as np
 
 jax.config.update("jax_enable_x64", True)

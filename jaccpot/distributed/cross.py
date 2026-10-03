@@ -708,7 +708,10 @@ def _direct_near_lists(
     # leaves hold ascending, contiguous ranges (padding leaves start past every live
     # one), so the leaf under a one-leaf cell is found by the cell's start
     leaf = num_internal + jnp.searchsorted(
-        nr[num_internal:, 0], nr[jnp.maximum(cell, 0), 0], side="left"
+        nr[num_internal:, 0],
+        nr[jnp.maximum(cell, 0), 0],
+        side="left",
+        method="scan_unrolled",
     )
     target = jnp.where(live, leaf.astype(idx), neg)
     source = jnp.where(live, csr_row, neg)
@@ -966,7 +969,10 @@ def _leaf_under(cells: Array, node_ranges: Array, num_internal: int) -> Array:
     """
     nr = jnp.asarray(node_ranges)
     return num_internal + jnp.searchsorted(
-        nr[num_internal:, 0], nr[jnp.maximum(cells, 0), 0], side="left"
+        nr[num_internal:, 0],
+        nr[jnp.maximum(cells, 0), 0],
+        side="left",
+        method="scan_unrolled",
     )
 
 
@@ -1136,6 +1142,7 @@ def _symmetric_exchange(
             jnp.cumsum(imp_n.sizes, dtype=idx),
             jnp.arange(imp_n.rows.shape[0], dtype=idx),
             side="right",
+            method="scan_unrolled",
         )
         r_peer = jnp.minimum(r_peer, ndev - 1)
         r_count = jnp.where(

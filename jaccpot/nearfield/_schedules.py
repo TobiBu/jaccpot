@@ -89,7 +89,9 @@ def prepare_leaf_neighbor_pairs(
         jnp.arange(leaf_nodes.shape[0], dtype=INDEX_DTYPE)
     )
     edge_indices = jnp.arange(neighbors.shape[0], dtype=INDEX_DTYPE)
-    target_leaf_ids = jnp.searchsorted(offsets[1:], edge_indices, side="right")
+    target_leaf_ids = jnp.searchsorted(
+        offsets[1:], edge_indices, side="right", method="scan_unrolled"
+    )
     # `neighbors` may carry -1 padding when the neighbour list is not compacted
     # (e.g. the traced/jax.shard_map branch of _result_to_neighbors keeps the
     # full [num_leaves * max_neighbors] buffer). A raw leaf_lookup[-1] would wrap
