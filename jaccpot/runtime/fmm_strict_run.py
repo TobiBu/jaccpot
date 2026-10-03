@@ -849,6 +849,7 @@ class StrictRunMixin(_EngineBase):
         def _refresh_and_evaluate_endpoint(
             prepared_in: PreparedStateLike,
             state_position: Array,
+            masses_in: Array,
         ) -> tuple[PreparedStateLike, Array]:
             if diag_mode in {"integrator_only", "eval_only"}:
                 prepared_new = prepared_in
@@ -868,7 +869,7 @@ class StrictRunMixin(_EngineBase):
                 prepared_new = self._refresh_large_n_same_topology(
                     prepared_in,
                     state_position[:, 0, :],
-                    masses_arr,
+                    masses_in,
                     bounds=None,
                     leaf_size=int(leaf_size),
                     max_order=int(max_order),
@@ -921,11 +922,15 @@ class StrictRunMixin(_EngineBase):
             compiled_runner = jit_cache.get(cache_key)
             if compiled_runner is None:
 
+                # The masses are an ARGUMENT, not a closure constant: the cache key
+                # holds only their shape and dtype, so a closed-over array was
+                # silently reused by a later call with different masses.
                 @jax.jit
                 def _compiled_runner(
                     prepared_initial: LargeNPreparedState,
                     state_initial: Array,
                     acceleration_initial: Array,
+                    masses_in: Array,
                 ) -> tuple[
                     tuple[LargeNPreparedState, Array, Array, Array], Optional[Array]
                 ]:
@@ -943,7 +948,9 @@ class StrictRunMixin(_EngineBase):
                         )
                         state_position = state_now.at[:, 0].set(position_new)
                         prepared_new, acceleration_self_new = (
-                            _refresh_and_evaluate_endpoint(prepared_now, state_position)
+                            _refresh_and_evaluate_endpoint(
+                                prepared_now, state_position, masses_in
+                            )
                         )
                         if add_external and external_acceleration_fn is not None:
                             acceleration_new = acceleration_self_new + jnp.asarray(
@@ -1025,6 +1032,7 @@ class StrictRunMixin(_EngineBase):
                     prepared_curr,
                     state_arr,
                     jnp.asarray(acceleration_current, dtype=state_arr.dtype),
+                    masses_arr,
                 )
                 self._strict_static_target_block_capacity_ok = bool(
                     np.asarray(jax.device_get(capacity_ok_all))
@@ -1076,7 +1084,7 @@ class StrictRunMixin(_EngineBase):
                 )
                 state_position = state_curr.at[:, 0].set(position_new)
                 prepared_curr, acceleration_self_new = _refresh_and_evaluate_endpoint(
-                    prepared_curr, state_position
+                    prepared_curr, state_position, masses_arr
                 )
                 if add_external and external_acceleration_fn is not None:
                     acceleration_new = acceleration_self_new + jnp.asarray(
