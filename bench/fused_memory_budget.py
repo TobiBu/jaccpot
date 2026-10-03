@@ -96,6 +96,12 @@ def _args() -> argparse.Namespace:
         help="score the eager force against an fp64 direct sum on this many random "
         "targets, LAST (after every FMM peak is recorded)",
     )
+    ap.add_argument(
+        "--no-donate",
+        action="store_true",
+        help="do not donate the carried state into strict_run_v2 (the A/B control; "
+        "the bench always passes the returned state on, so donating is safe)",
+    )
     ap.add_argument("--no-scan", action="store_true")
     ap.add_argument("--no-analysis", action="store_true", help="skip memory_analysis()")
     ap.add_argument("--dump-dir", default=None, help="XLA dump (buffer assignment)")
@@ -596,6 +602,7 @@ def run_budget(result: dict) -> None:
             return_prepared_state=True,
             add_external=ext is not None,
             external_acceleration_fn=ext,
+            **({} if ARGS.no_donate else {"donate_prepared_state": True}),
         )
         jax.block_until_ready(out[0])
         return out
@@ -628,6 +635,13 @@ def run_budget(result: dict) -> None:
             (fn for key, fn in cache.items() if int(key[6]) == int(ARGS.steps)), None
         )
         if runner is not None:
+            # lower with the carry the scan sees: the far list rides outside it
+            # where the lane rebuilds it fresh (jaccpot perf/fused-carry)
+            ride = getattr(
+                solver._impl, "_strict_far_pairs_ride_outside_the_scan", None
+            )
+            if ride is not None and ride(prep):
+                prep = dataclasses.replace(prep, compact_far_pairs=None)
             spec = jax.tree_util.tree_map(
                 lambda x: (
                     jax.ShapeDtypeStruct(x.shape, x.dtype)
@@ -777,6 +791,7 @@ def main() -> int:
         order=ARGS.order,
         cell_min_level=ARGS.cell_min_level,
         caps=ARGS.caps,
+        donate=not ARGS.no_donate,
         cap_env={v: os.environ.get(v) for v in _CAP_VARS},
         xla_flags=os.environ.get("XLA_FLAGS"),
         mem_fraction=os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
