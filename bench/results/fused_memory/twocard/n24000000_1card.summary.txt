@@ -1,0 +1,2 @@
+merged walk caps: {'queue_capacity': 33554432, 'peak_wavefront': 21560802, 'compact_far_pair_capacity': 100663296, 'near_edge_capacity': 336592896}
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 19.99GiB. [executable_name='jit_body'] [tf-allocator-allocation-error='']
