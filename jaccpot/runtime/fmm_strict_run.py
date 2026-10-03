@@ -18,6 +18,8 @@ from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
 from yggdrax.tree import RadixTree
 
+from jaccpot._env import env_flag
+
 from ._large_n_pipeline import evaluate_large_n_state, prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
 from .dtypes import INDEX_DTYPE
@@ -50,7 +52,147 @@ __all__ = [
 ]
 
 
+def _walk_caps_key(validated: Optional[dict]) -> tuple:
+    """The part of the validated walk caps a traced refresh is sized from.
+
+    The traced flat walk builds its lists at the validated widths and sizes its
+    queue from the validated peak wavefront (``pow2(1.5 x peak)``, see
+    ``_strict_fused_capacity_handoff``), both read when the runner TRACES. A
+    runner cached under a key without them would keep the old sizes after a
+    re-plan. The queue enters as its pow2 target, so a re-prepare whose peak moved a
+    little does not recompile.
+
+    Parameters
+    ----------
+    validated : Optional[dict]
+        ``engine._strict_fused_validated_caps``.
+
+    Returns
+    -------
+    tuple
+        Hashable key fragment.
+    """
+    if not isinstance(validated, dict):
+        return ()
+    peak = validated.get("peak_wavefront")
+    queue_target = (
+        None if peak is None else 1 << (max(1, int(1.5 * int(peak))) - 1).bit_length()
+    )
+    return (
+        validated.get("compact_far_pair_capacity"),
+        validated.get("near_edge_capacity"),
+        queue_target,
+    )
+
+
 class StrictRunMixin(_EngineBase):
+    def _replan_walk_caps_from_needs(self, needs: np.ndarray) -> bool:
+        """Raise the validated walk caps to what a failed segment's walks needed.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            The segment's running maximum of
+            :func:`jaccpot.runtime.capacity_guard.last_refresh_walk_needs`.
+
+        Returns
+        -------
+        bool
+            Whether anything was re-planned. ``False`` -- the caller raises -- when
+            no walk flag fired (the failure was some other capacity), when a list
+            that overflowed was NAMED by the caller (a deliberate bound, never
+            widened), or when the lane is not the flat walk.
+        """
+        from jaccpot.runtime._interaction_cache import (
+            _tight_list_capacity,
+            flat_walk_cap_headroom,
+        )
+        from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
+
+        n = dict(zip(WALK_NEEDS_FIELDS, (int(v) for v in needs)))
+        validated = dict(getattr(self, "_strict_fused_validated_caps", None) or {})
+        if not validated.get("flat_walk"):
+            return False
+        if not (n["far_overflow"] or n["near_overflow"] or n["queue_overflow"]):
+            return False
+        if (n["far_overflow"] and validated.get("far_named")) or (
+            n["near_overflow"] and validated.get("near_edge_named")
+        ):
+            return False
+        headroom = flat_walk_cap_headroom()
+        # the counts are lower bounds when the walk stops at its first overflow or
+        # its queue overflowed (pairs never classified): a list that overflowed
+        # then at least doubles
+        lower = bool(n["lower_bound"] or n["queue_overflow"])
+        for key, needed, ovf in (
+            ("compact_far_pair_capacity", n["far_needed"], n["far_overflow"]),
+            ("near_edge_capacity", n["near_needed"], n["near_overflow"]),
+        ):
+            cap = int(validated.get(key) or 0)
+            grown = _tight_list_capacity(needed, headroom=headroom, floor=cap)
+            if ovf and lower:
+                grown = max(grown, 2 * cap)
+            validated[key] = int(grown)
+        peak = max(int(validated.get("peak_wavefront") or 0), n["peak_wavefront"])
+        if n["queue_overflow"]:
+            traced = getattr(self, "_strict_fused_traced_caps", None) or {}
+            # one past the traced queue: the handoff's pow2(1.5 x peak) doubles it
+            peak = max(peak, int(traced.get("queue_capacity") or 0) + 1)
+        validated["peak_wavefront"] = int(peak)
+        self._strict_fused_validated_caps = validated
+        return True
+
+    def _raise_scan_capacity_saturated(self, needs: Optional[np.ndarray]) -> None:
+        """Raise the fused scan's capacity error (after any retry was spent).
+
+        Parameters
+        ----------
+        needs : Optional[np.ndarray]
+            The segment's walk needs, named in the message when given.
+
+        Raises
+        ------
+        RuntimeError
+            Always.
+        """
+        from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
+
+        max_blocks = os.environ.get(
+            "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
+            "32",
+        )
+        traced_caps = getattr(self, "_strict_fused_traced_caps", None) or {}
+        walk = (
+            ""
+            if needs is None
+            else " The segment's walks needed: "
+            + ", ".join(f"{k}={int(v)}" for k, v in zip(WALK_NEEDS_FIELDS, needs))
+            + "."
+        )
+        raise RuntimeError(
+            "a fixed capacity saturated inside the compiled velocity-Verlet "
+            "scan, so the refreshed interaction lists are truncated and the "
+            "forces from that step on are wrong. Checked: static target-block "
+            f"cap (max_blocks_per_leaf={max_blocks}), traced neighbour cap "
+            f"({traced_caps.get('max_neighbors_per_leaf_used')} per leaf) and "
+            f"compact far-pair cap ({traced_caps.get('compact_far_pair_capacity')}). "
+            "Raise JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF, pass "
+            "jaccpot.TraversalOverrides(max_neighbors_per_leaf=...), or raise "
+            "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
+            + (
+                " On the flat-walk lane (the default; "
+                "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=0 for the dual walk) "
+                "the far-pair count saturates on ANY overflow -- far, near "
+                "(JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP) or queue "
+                "(TraversalOverrides(max_pair_queue=...)) -- so check all three; "
+                "unnamed caps are re-planned once per segment "
+                "(JACCPOT_STRICT_SEGMENT_RETRY=0 turns that off), named ones never."
+                if traced_caps.get("flat_walk")
+                else ""
+            )
+            + walk
+        )
+
     def refresh_prepared_state(
         self,
         prepared_state: PreparedStateLike,
@@ -853,9 +995,10 @@ class StrictRunMixin(_EngineBase):
         ) -> tuple[PreparedStateLike, Array]:
             if diag_mode in {"integrator_only", "eval_only"}:
                 prepared_new = prepared_in
-                # no refresh in this trace: the capacity side channel must not
+                # no refresh in this trace: the capacity side channels must not
                 # carry a previous trace's verdict into this one
                 self._last_refresh_capacity_ok = None
+                self._last_refresh_walk_needs = None
             else:
                 # Same invariant as `_evaluate_self` above, restated at the
                 # second place that relies on it.
@@ -884,43 +1027,59 @@ class StrictRunMixin(_EngineBase):
             return prepared_new, _evaluate_self(prepared_new, state_position)
 
         if self._strict_fused_mode_active:
-            # Stash the concrete tree depth now, while prepared_curr is concrete,
-            # so the traced refresh inside the compiled runner passes it as the
-            # M2M level-loop static arg. Keyed into cache_key so a topology with a
-            # different depth compiles its own runner.
-            static_upward_num_levels = self._resolve_upward_num_levels(
-                getattr(prepared_curr, "tree", None)
+            from jaccpot.runtime.capacity_guard import (
+                WALK_NEEDS_FIELDS,
+                last_refresh_walk_needs,
             )
-            cache_key = (
-                "strict_velocity_verlet",
-                tuple(int(v) for v in state_arr.shape),
-                str(state_arr.dtype),
-                tuple(int(v) for v in masses_arr.shape),
-                str(masses_arr.dtype),
-                float(dt),
-                num_steps_i,
-                int(leaf_size),
-                int(max_order),
-                float(self.theta if theta is None else theta),
-                bool(add_external),
-                (
-                    id(external_acceleration_fn)
-                    if external_acceleration_fn is not None
-                    else 0
-                ),
-                bool(rematerialize_between_refresh),
-                bool(return_history),
-                diag_mode,
-                detail_diag_mode,
-                eval_diag_mode,
-                str(getattr(self, "_large_n_nearfield_diag_mode", "full")),
-                static_upward_num_levels,
-                id(step_callback) if step_callback is not None else 0,
-                int(step_callback_stride),
-            )
-            jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
-            compiled_runner = jit_cache.get(cache_key)
-            if compiled_runner is None:
+
+            def _compiled_runner_for(prepared_ref: PreparedStateLike) -> Callable:
+                # Stash the concrete tree depth now, while the state is concrete,
+                # so the traced refresh inside the compiled runner passes it as the
+                # M2M level-loop static arg. Keyed into cache_key so a topology with
+                # a different depth compiles its own runner.
+                static_upward_num_levels = self._resolve_upward_num_levels(
+                    getattr(prepared_ref, "tree", None)
+                )
+                cache_key = (
+                    "strict_velocity_verlet",
+                    tuple(int(v) for v in state_arr.shape),
+                    str(state_arr.dtype),
+                    tuple(int(v) for v in masses_arr.shape),
+                    str(masses_arr.dtype),
+                    float(dt),
+                    num_steps_i,
+                    int(leaf_size),
+                    int(max_order),
+                    float(self.theta if theta is None else theta),
+                    bool(add_external),
+                    (
+                        id(external_acceleration_fn)
+                        if external_acceleration_fn is not None
+                        else 0
+                    ),
+                    bool(rematerialize_between_refresh),
+                    bool(return_history),
+                    diag_mode,
+                    detail_diag_mode,
+                    eval_diag_mode,
+                    str(getattr(self, "_large_n_nearfield_diag_mode", "full")),
+                    static_upward_num_levels,
+                    id(step_callback) if step_callback is not None else 0,
+                    int(step_callback_stride),
+                    # the traced walk is sized from these at TRACE time; a re-plan
+                    # that changes them must not reuse a runner traced before it
+                    _walk_caps_key(getattr(self, "_strict_fused_validated_caps", None)),
+                )
+                jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
+                compiled_runner = jit_cache.get(cache_key)
+                if compiled_runner is not None:
+                    return compiled_runner
+                # The new runner traces on its first call, and its scan checks the
+                # INITIAL state before this trace's refresh records its traced caps:
+                # a record left by an earlier, narrower trace (a re-planned segment)
+                # would fail a state that fits. Without one, the check falls back to
+                # the state's own widths, which is what the eager prepare validated.
+                self._strict_fused_traced_caps = None
 
                 # The masses are an ARGUMENT, not a closure constant: the cache key
                 # holds only their shape and dtype, so a closed-over array was
@@ -932,7 +1091,8 @@ class StrictRunMixin(_EngineBase):
                     acceleration_initial: Array,
                     masses_in: Array,
                 ) -> tuple[
-                    tuple[LargeNPreparedState, Array, Array, Array], Optional[Array]
+                    tuple[LargeNPreparedState, Array, Array, Array, Array],
+                    Optional[Array],
                 ]:
                     def _step(carry, scan_x):
                         (
@@ -940,6 +1100,7 @@ class StrictRunMixin(_EngineBase):
                             state_now,
                             acceleration_now,
                             capacity_ok_now,
+                            walk_needs_now,
                         ) = carry
                         position_new = (
                             state_now[:, 0]
@@ -992,11 +1153,17 @@ class StrictRunMixin(_EngineBase):
                                 prepared_new, after_refresh=True
                             )
                         )
+                        # what the walks of this segment needed, at most: a failed
+                        # segment is re-planned from it
+                        walk_needs_new = jnp.maximum(
+                            walk_needs_now, last_refresh_walk_needs(self)
+                        )
                         return (
                             prepared_new,
                             state_new,
                             acceleration_new,
                             capacity_ok_new,
+                            walk_needs_new,
                         ), (state_new if return_history else None)
 
                     # Feed a per-step index only when a streaming callback needs it
@@ -1013,56 +1180,86 @@ class StrictRunMixin(_EngineBase):
                             state_initial,
                             acceleration_initial,
                             _static_target_block_capacity_ok(prepared_initial),
+                            jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
                         ),
                         xs=scan_xs,
                         length=num_steps_i,
                     )
 
-                compiled_runner = _compiled_runner
-                jit_cache[cache_key] = compiled_runner
+                jit_cache[cache_key] = _compiled_runner
                 self._strict_fused_jit_function_cache = jit_cache
+                return _compiled_runner
 
             try:
-                (
-                    prepared_curr,
-                    state_curr,
-                    _,
-                    capacity_ok_all,
-                ), history_out = compiled_runner(
-                    prepared_curr,
-                    state_arr,
-                    jnp.asarray(acceleration_current, dtype=state_arr.dtype),
-                    masses_arr,
-                )
-                self._strict_static_target_block_capacity_ok = bool(
-                    np.asarray(jax.device_get(capacity_ok_all))
-                )
-                if not self._strict_static_target_block_capacity_ok:
-                    max_blocks = os.environ.get(
-                        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
-                        "32",
+                retried = False
+                while True:
+                    compiled_runner = _compiled_runner_for(prepared_curr)
+                    (
+                        prepared_out,
+                        state_out,
+                        _,
+                        capacity_ok_all,
+                        walk_needs,
+                    ), history_out = compiled_runner(
+                        prepared_curr,
+                        state_arr,
+                        jnp.asarray(acceleration_current, dtype=state_arr.dtype),
+                        masses_arr,
                     )
-                    traced_caps = getattr(self, "_strict_fused_traced_caps", None) or {}
-                    raise RuntimeError(
-                        "a fixed capacity saturated inside the compiled velocity-Verlet "
-                        "scan, so the refreshed interaction lists are truncated and the "
-                        "forces from that step on are wrong. Checked: static target-block "
-                        f"cap (max_blocks_per_leaf={max_blocks}), traced neighbour cap "
-                        f"({traced_caps.get('max_neighbors_per_leaf_used')} per leaf) and "
-                        f"compact far-pair cap ({traced_caps.get('compact_far_pair_capacity')}). "
-                        "Raise JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF, pass "
-                        "jaccpot.TraversalOverrides(max_neighbors_per_leaf=...), or raise "
-                        "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
-                        + (
-                            " On the flat-walk lane (the default; "
-                            "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=0 for the dual walk) "
-                            "the far-pair count saturates on ANY overflow -- far, near "
-                            "(JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP) or queue "
-                            "(TraversalOverrides(max_pair_queue=...)) -- so check all three."
-                            if traced_caps.get("flat_walk")
-                            else ""
+                    self._strict_static_target_block_capacity_ok = bool(
+                        np.asarray(jax.device_get(capacity_ok_all))
+                    )
+                    if self._strict_static_target_block_capacity_ok:
+                        prepared_curr, state_curr = prepared_out, state_out
+                        break
+                    needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
+                    # Segment retry: a walk list or queue of the traced refresh
+                    # outgrew the caps the eager prepare sized. Re-plan them from
+                    # what the segment's walks needed, re-prepare from the
+                    # segment's START, recompile and run the segment once more.
+                    # Anything else (a named cap, a leaf capacity, a second failure)
+                    # raises below.
+                    if (
+                        retried
+                        or not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True)
+                        or not self._replan_walk_caps_from_needs(needs)
+                    ):
+                        self._raise_scan_capacity_saturated(needs)
+                    retried = True
+                    del prepared_out, state_out, history_out
+                    replanned_peak = int(
+                        (self._strict_fused_validated_caps or {}).get(
+                            "peak_wavefront", 0
                         )
                     )
+                    prepared_curr = self.prepare_state(
+                        state_arr[:, 0, :],
+                        masses_arr,
+                        leaf_size=int(leaf_size),
+                        max_order=int(max_order),
+                        theta=theta,
+                        jit_tree=self._jit_tree_default,
+                        runtime_overrides_override=runtime_overrides,
+                        fused_device_mode=True,
+                    )
+                    # the eager walk saw the segment's START; keep the wavefront the
+                    # segment needed, so the retraced walk's queue covers it
+                    validated = dict(self._strict_fused_validated_caps or {})
+                    validated["peak_wavefront"] = max(
+                        int(validated.get("peak_wavefront") or 0), replanned_peak
+                    )
+                    self._strict_fused_validated_caps = validated
+                    # the starting force from the state the segment now starts from
+                    # (the same field when the caller's state matched its positions)
+                    if initial_self_acceleration is None:
+                        acceleration_current = _evaluate_self(prepared_curr, state_arr)
+                        if add_external and external_acceleration_fn is not None:
+                            acceleration_current = acceleration_current + jnp.asarray(
+                                external_acceleration_fn(state_arr),
+                                dtype=state_arr.dtype,
+                            )
+                    self._strict_fused_fallback_count += 1
+                    self._strict_fused_last_fallback_reason = "capacity_segment_retry"
             except Exception as exc:
                 if bool(
                     getattr(self, "_strict_fused_disallow_host_segment_fallback", False)
@@ -1288,8 +1485,10 @@ class StrictRunMixin(_EngineBase):
         RuntimeError
             Only for genuine inconsistencies, not for a declined reuse.
         """
-        # Side channel for the traced capacity guard; see the end of this method.
+        # Side channels for the traced capacity guard and the segment retry; see
+        # the end of this method and `capacity_guard.last_refresh_walk_needs`.
         self._last_refresh_capacity_ok = None
+        self._last_refresh_walk_needs = None
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):

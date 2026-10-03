@@ -144,6 +144,26 @@ def test_pallas_walk_flags_overflow():
         interpret=True,
     )
     assert bool(small.far_overflow) and not bool(small.near_overflow)
+    # A full far list does not stop the walk: it reports what the list needed,
+    # which is the count of a walk that fits, and the near list is complete.
+    fits = mutual_walk_pallas(
+        left,
+        right,
+        geom.center,
+        geom.radius,
+        0.6,
+        root,
+        max_pair_queue=1 << 14,
+        far_cap=1 << 16,
+        near_cap=1 << 16,
+        block=64,
+        interpret=True,
+    )
+    assert not bool(fits.far_overflow) and int(fits.far_count) > 256
+    assert int(small.far_needed) == int(fits.far_count)
+    assert int(small.far_count) == 256
+    assert int(small.near_needed) == int(small.near_count) == int(fits.near_count)
+    assert _sets(small)[1] == _sets(fits)[1]
     tiny_q = mutual_walk_pallas(
         left,
         right,
@@ -160,26 +180,20 @@ def test_pallas_walk_flags_overflow():
     assert bool(tiny_q.queue_overflow)
 
 
-def test_lex_perm_orders_by_target_then_source_in_both_branches():
-    from jaccpot.runtime._interaction_cache import _lex_perm
+def test_lex_sorted_orders_by_target_then_source_in_both_branches():
+    from jaccpot.runtime._interaction_cache import _lex_sorted
 
     rng = np.random.default_rng(7)
     prim = jnp.asarray(rng.integers(0, 50, 500), jnp.int32)
     sec = jnp.asarray(rng.integers(0, 70000, 500), jnp.int32)
     expect = np.lexsort((np.asarray(sec), np.asarray(prim)))
-    small = np.asarray(
-        _lex_perm(prim, sec, primary_bound=50, secondary_bound=70000)
-    )  # composite fits int32
-    big = np.asarray(
-        _lex_perm(prim, sec, primary_bound=50000, secondary_bound=70000)
-    )  # two stable sorts
-    for perm in (small, big):
-        p, s = np.asarray(prim)[perm], np.asarray(sec)[perm]
-        assert np.all(np.diff(p) >= 0)
-        assert np.all((np.diff(s) >= 0) | (np.diff(p) > 0))
-        assert np.array_equal(p, np.asarray(prim)[expect]) and np.array_equal(
-            s, np.asarray(sec)[expect]
+    for primary_bound in (50, 50000):  # int32 composite / int64 composite
+        p, s = _lex_sorted(
+            prim, sec, primary_bound=primary_bound, secondary_bound=70000
         )
+        assert p.dtype == prim.dtype and s.dtype == sec.dtype
+        assert np.array_equal(np.asarray(p), np.asarray(prim)[expect])
+        assert np.array_equal(np.asarray(s), np.asarray(sec)[expect])
 
 
 def test_walk_backend_flag_parsing(monkeypatch):

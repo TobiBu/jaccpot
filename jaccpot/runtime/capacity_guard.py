@@ -20,7 +20,26 @@ from typing import Any, Optional
 import jax.numpy as jnp
 from jaxtyping import Array
 
-__all__ = ["fused_state_capacity_ok", "last_refresh_capacity_ok"]
+__all__ = [
+    "WALK_NEEDS_FIELDS",
+    "fused_state_capacity_ok",
+    "last_refresh_capacity_ok",
+    "last_refresh_walk_needs",
+]
+
+#: Entries of the vector :func:`last_refresh_walk_needs` returns, in order: the
+#: directed far and near list lengths the walk needed, its peak wavefront, its three
+#: overflow flags, and whether the counts are only lower bounds (a walk that stops
+#: at the first overflow).
+WALK_NEEDS_FIELDS = (
+    "far_needed",
+    "near_needed",
+    "peak_wavefront",
+    "far_overflow",
+    "near_overflow",
+    "queue_overflow",
+    "lower_bound",
+)
 
 
 def fused_state_capacity_ok(
@@ -106,3 +125,31 @@ def last_refresh_capacity_ok(engine: Any) -> Array:
     if value is None:
         return jnp.asarray(True)
     return jnp.asarray(value, jnp.bool_)
+
+
+def last_refresh_walk_needs(engine: Any) -> Array:
+    """What the walk of the engine's most recent traced refresh needed.
+
+    The flat-walk builder reports, under a trace, the list lengths its walk needed
+    (exact for the Pallas walk even past a list overflow), its peak wavefront and
+    its overflow flags; the capacity report callback leaves them on the engine. Read
+    inside the SAME trace, right after the refresh, like
+    :func:`last_refresh_capacity_ok` -- it holds tracers and is reset at the start
+    of every refresh. ``strict_run_v2`` folds it into a running maximum so a segment
+    whose capacity flag fired can be re-run with caps that fit.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine (``FastMultipoleMethod._impl``), or the facade.
+
+    Returns
+    -------
+    Array
+        ``int32[len(WALK_NEEDS_FIELDS)]``; zeros when no refresh recorded any.
+    """
+    impl = getattr(engine, "_impl", engine)
+    value = getattr(impl, "_last_refresh_walk_needs", None)
+    if value is None:
+        return jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32)
+    return jnp.asarray(value, jnp.int32)

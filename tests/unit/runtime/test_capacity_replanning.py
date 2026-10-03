@@ -168,3 +168,40 @@ class TestCapacityReport:
         # And a way forward, not just a diagnosis.
         assert "large_n_gpu" in text
         assert "TraversalOverrides" in text
+
+    # The fused flat-walk lane at N = 8e6 (bench caps of 2026-10-03): its own
+    # buffers, not the dual walk's per-node and per-leaf ones, which it never builds.
+    FLAT_CAPS = dict(
+        flat_walk=True,
+        compact_far_pair_capacity=134217728,
+        near_edge_capacity=268435456,
+        queue_capacity=4194304,
+        peak_wavefront=3241059,
+    )
+
+    def test_the_flat_walk_lane_lists_its_own_buffers(self) -> None:
+        config = dict(self.CONFIG, num_particles=8_000_000, leaf_size=64, max_order=5)
+        entries = capacity_report(
+            **config,
+            traversal_config=self._traversal(),
+            walk_caps=self.FLAT_CAPS,
+            num_leaves=466944,
+        )
+        names = [name for name, _, _ in entries]
+        assert not any("max_interactions_per_node" in n for n in names)
+        assert not any("fast-lane source payload" in n for n in names)
+        assert any("far-pair list" in n for n in names)
+        # sort scratch 16 B x 2^28 + 8 B x 2^27 = 5 GiB, near partials
+        # 16 B x (2^28 + 466944 x 64) = 4.4 GiB: the two largest
+        assert "sort scratch" in names[0] and "near-field partials" in names[1]
+        assert 4.9 <= entries[0][1] <= 5.1 and 4.3 <= entries[1][1] <= 4.6
+
+    def test_the_flat_walk_reraise_names_the_cap_rule(self) -> None:
+        with pytest.raises(RuntimeError) as excinfo:
+            reraise_with_capacity_report(
+                RuntimeError("RESOURCE_EXHAUSTED: Out of memory"),
+                **self.CONFIG,
+                walk_caps=self.FLAT_CAPS,
+            )
+        text = str(excinfo.value)
+        assert "unnamed" in text and "JACCPOT_FLAT_WALK_CAP_HEADROOM" in text

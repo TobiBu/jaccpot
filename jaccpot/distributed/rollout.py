@@ -458,6 +458,7 @@ def setup_fused_force(
     )
     from jaccpot.runtime.capacity_plan import (
         install_walk_caps,
+        list_widths,
         measure_shard_plan,
         merge_plans,
         merge_walk_caps,
@@ -475,10 +476,10 @@ def setup_fused_force(
     # the box the traced force builds in: the plan must cover the trees built THERE,
     # not the eager prepare's own-box trees (capacity_plan.measure_shard_plan)
     mesh_box = host_mesh_bounds([np.asarray(p) for p in pos_d], counts)
-    preps, plans, walks = [], [], []
-    for d, device in enumerate(devices):
-        with jax.default_device(device):
-            prepared, plan_d, caps_d = measure_shard_plan(
+
+    def _prepare(d: int) -> tuple:
+        with jax.default_device(devices[d]):
+            return measure_shard_plan(
                 solver,
                 pos_d[d],
                 mass_d[d],
@@ -488,9 +489,21 @@ def setup_fused_force(
                 bounds=mesh_box,
                 num_valid=counts[d],
             )
-        preps.append(prepared)
-        plans.append(plan_d)
-        walks.append(caps_d)
+
+    preps, plans, walks = (list(t) for t in zip(*(_prepare(d) for d in range(ndev))))
+    walk_caps = merge_walk_caps(walks)
+    install_walk_caps(solver, walk_caps)
+    # Unnamed list caps are sized per shard from its own counts, never below the
+    # width an earlier shard validated, so a shard prepared before a wider one is
+    # narrower; the stacked state needs one width. Re-prepare those against the
+    # merged record (their floor), then re-install it -- each prepare overwrites
+    # the engine's record with its own shard's.
+    widest = tuple(max(w) for w in zip(*(list_widths(p) for p in preps)))
+    for d in range(ndev):
+        if list_widths(preps[d]) != widest:
+            preps[d] = None
+            preps[d], plans[d], walks[d] = _prepare(d)
+            install_walk_caps(solver, walk_caps)
     plan = merge_plans(plans)
     walk_caps = merge_walk_caps(walks)
     install_walk_caps(solver, walk_caps)

@@ -70,7 +70,7 @@ class PallasWalkResult(NamedTuple):
     far_b : Array
         Upper node of each canonical far pair.
     far_count : Array
-        Number of far pairs emitted (may exceed the capacity when ``far_overflow``).
+        Number of far pairs in the list, at most the capacity.
     near_a : Array
         Lower leaf of each canonical near pair, live prefix ``near_count``.
     near_b : Array
@@ -87,6 +87,12 @@ class PallasWalkResult(NamedTuple):
         Largest queue occupancy seen.
     rounds : Array
         Rounds executed.
+    far_needed : Array
+        Far pairs the walk found, stored or not. A far or near overflow does not
+        stop the walk, so this is the capacity the list needed -- exact unless
+        ``queue_overflow`` (pairs never classified), when it is a lower bound.
+    near_needed : Array
+        The same for the near list.
     """
 
     far_a: Array
@@ -100,6 +106,8 @@ class PallasWalkResult(NamedTuple):
     queue_overflow: Array
     peak_wavefront: Array
     rounds: Array
+    far_needed: Array
+    near_needed: Array
 
 
 # counter slots
@@ -506,12 +514,135 @@ def mutual_walk_pallas(
     PallasWalkResult
         The lists, counts and flags. ``queue_overflow`` is also raised when the
         walk stops at ``max_rounds`` with pairs still queued -- those pairs were
-        never classified, so the lists are incomplete.
+        never classified, so the lists are incomplete. A far or near overflow does
+        not stop the walk: ``far_needed`` / ``near_needed`` then hold the capacity
+        the list needed.
 
     Raises
     ------
     ValueError
         If the seed is longer than ``max_pair_queue`` or only one half is given.
+    """
+    if (seed_a is None) != (seed_b is None):
+        raise ValueError("seed_a and seed_b go together")
+    if seed_a is not None:
+        K = int(jnp.asarray(seed_a).shape[0])
+        if K > int(max_pair_queue):
+            raise ValueError(
+                f"seed of {K} pairs exceeds max_pair_queue={int(max_pair_queue)}"
+            )
+    # One jit around the whole walk, so an EAGER call creates the list and queue
+    # buffers inside the program and the loop updates them in place. Called op by
+    # op, the initial buffers were arguments of the while loop and stayed alive
+    # beside its outputs: twice the walk's memory at the peak. Under a trace the
+    # jit simply inlines.
+    return _mutual_walk_jit(
+        left_child_full,
+        right_child_full,
+        centers,
+        radii,
+        root,
+        node_active,
+        seed_a,
+        seed_b,
+        seed_count,
+        theta=float(theta),
+        max_pair_queue=int(max_pair_queue),
+        far_cap=int(far_cap),
+        near_cap=int(near_cap),
+        block=int(block),
+        interpret=bool(interpret),
+        backend=str(backend),
+        num_warps=int(num_warps),
+        max_rounds=int(max_rounds),
+        rounds_per_check=int(rounds_per_check),
+    )
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "theta",
+        "max_pair_queue",
+        "far_cap",
+        "near_cap",
+        "block",
+        "interpret",
+        "backend",
+        "num_warps",
+        "max_rounds",
+        "rounds_per_check",
+    ),
+)
+def _mutual_walk_jit(
+    left_child_full: Array,
+    right_child_full: Array,
+    centers: Array,
+    radii: Array,
+    root: Array,
+    node_active: Optional[Array],
+    seed_a: Optional[Array],
+    seed_b: Optional[Array],
+    seed_count: Optional[Array],
+    *,
+    theta: float,
+    max_pair_queue: int,
+    far_cap: int,
+    near_cap: int,
+    block: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    max_rounds: int,
+    rounds_per_check: int,
+) -> PallasWalkResult:
+    """The body of :func:`mutual_walk_pallas` (validated arguments, static sizes).
+
+    Parameters
+    ----------
+    left_child_full : Array
+        ``[nodes]`` left children.
+    right_child_full : Array
+        ``[nodes]`` right children.
+    centers : Array
+        ``[nodes, 3]`` MAC centres.
+    radii : Array
+        ``[nodes]`` MAC radii.
+    root : Array
+        Root node id.
+    node_active : Optional[Array]
+        ``[nodes]`` liveness mask.
+    seed_a : Optional[Array]
+        Seed pairs, first nodes.
+    seed_b : Optional[Array]
+        Seed pairs, second nodes.
+    seed_count : Optional[Array]
+        Live seed prefix.
+    theta : float
+        Opening angle.
+    max_pair_queue : int
+        Queue capacity.
+    far_cap : int
+        Far list capacity.
+    near_cap : int
+        Near list capacity.
+    block : int
+        Pairs per program.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+    max_rounds : int
+        Safety bound on the round loop.
+    rounds_per_check : int
+        Rounds per ``while_loop`` iteration.
+
+    Returns
+    -------
+    PallasWalkResult
+        As :func:`mutual_walk_pallas`.
     """
     idx = jnp.int32
     nodes = int(left_child_full.shape[0])
@@ -587,8 +718,6 @@ def mutual_walk_pallas(
             **backend_kwargs,
         )(*operands)
 
-    if (seed_a is None) != (seed_b is None):
-        raise ValueError("seed_a and seed_b go together")
     if seed_a is None:
         qa0 = jnp.full((Q,), -1, idx).at[0].set(jnp.asarray(root, idx))
         qb0 = qa0
@@ -596,8 +725,6 @@ def mutual_walk_pallas(
     else:
         assert seed_b is not None  # checked above; for the type checker
         K = int(jnp.asarray(seed_a).shape[0])
-        if K > Q:
-            raise ValueError(f"seed of {K} pairs exceeds max_pair_queue={Q}")
         qa0 = jnp.full((Q,), -1, idx).at[:K].set(jnp.asarray(seed_a, idx))
         qb0 = jnp.full((Q,), -1, idx).at[:K].set(jnp.asarray(seed_b, idx))
         size0 = (
@@ -620,10 +747,11 @@ def mutual_walk_pallas(
 
     def cond(state: tuple[Array, ...]) -> Array:
         _qa, _qb, size, *_rest, counters, _peak, rounds = state
-        no_overflow = (
-            counters[_C_OVF_FAR] + counters[_C_OVF_NEAR] + counters[_C_OVF_Q]
-        ) == 0
-        return (size > 0) & no_overflow & (rounds < int(max_rounds))
+        # Only a QUEUE overflow stops the walk: pairs dropped from the queue are
+        # never classified. A full far or near list drops what does not fit and
+        # keeps counting, so the walk reports the capacity it needed and an eager
+        # caller can size the list in one retry instead of a doubling ladder.
+        return (size > 0) & (counters[_C_OVF_Q] == 0) & (rounds < int(max_rounds))
 
     def one_step(state: tuple[Array, ...]) -> tuple[Array, ...]:
         qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = state
@@ -659,14 +787,9 @@ def mutual_walk_pallas(
     qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = lax.while_loop(
         cond, body, init
     )
-    # Stopping at max_rounds with pairs still queued leaves them unclassified. Only
-    # when the round limit is WHY it stopped: an overflow also stops the loop with
-    # pairs queued, and the eager ladder must keep reading that as a far/near
-    # overflow rather than grow a queue that never filled.
-    other_overflow = (
-        counters[_C_OVF_FAR] + counters[_C_OVF_NEAR] + counters[_C_OVF_Q]
-    ) > 0
-    unfinished = (size > 0) & ~other_overflow
+    # Stopping at max_rounds with pairs still queued leaves them unclassified. A
+    # queue overflow also stops the loop with pairs queued and is flagged already.
+    unfinished = (size > 0) & (counters[_C_OVF_Q] == 0)
     return PallasWalkResult(
         far_a=far_a,
         far_b=far_b,
@@ -679,4 +802,6 @@ def mutual_walk_pallas(
         queue_overflow=(counters[_C_OVF_Q] > 0) | unfinished,
         peak_wavefront=peak,
         rounds=rounds,
+        far_needed=counters[_C_FAR],
+        near_needed=counters[_C_NEAR],
     )

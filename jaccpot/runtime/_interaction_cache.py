@@ -32,7 +32,7 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_flag
+from jaccpot._env import env_flag, env_float
 from jaccpot._jax_compat import Tracer
 
 # `_adaptive_policy` reaches only `fmm_caches` and `fmm_constants`, both UPSTREAM of
@@ -48,6 +48,7 @@ from ._adaptive_policy import AdaptivePolicyState
 
 __all__ = [
     "POLICY_IDENTITY_UNCACHEABLE",
+    "flat_walk_cap_headroom",
     "pair_policy_cache_identity",
     "strict_walk_backend",
     "strict_walk_deterministic_rows",
@@ -915,10 +916,69 @@ _STRICT_STREAMED_FAR_PAIR_FLOOR = 131_072
 _STRICT_STREAMED_RETRY_LIMIT = 1 << 25
 _STRICT_STREAMED_RETRY_ATTEMPTS = 12
 # Flat-walk lane: eager floors and ceilings for the two capacities the caller did
-# NOT name (a named cap is never widened -- #333's rule). Directed pair counts.
+# NOT name (a named cap is never widened -- #333's rule). Directed pair counts. The
+# ladder width is only transient -- an unnamed list is built at
+# `_tight_list_capacity` of the count the eager walk measured -- so the ceilings
+# only guard the int32 index range; memory is the real bound.
 _FLAT_WALK_NEAR_EDGE_FLOOR = 1 << 21
-_FLAT_WALK_NEAR_EDGE_LIMIT = 1 << 28
-_FLAT_WALK_FAR_PAIR_LIMIT = 1 << 26
+_FLAT_WALK_NEAR_EDGE_LIMIT = 1 << 30
+_FLAT_WALK_FAR_PAIR_LIMIT = 1 << 30
+#: Default headroom of an unnamed flat-walk list over the count it is sized from
+#: (``JACCPOT_FLAT_WALK_CAP_HEADROOM``).
+_FLAT_WALK_CAP_HEADROOM = 1.5
+#: An unnamed list cap is rounded up to a multiple of this (a smaller one to the
+#: next power of two), so a re-prepare whose counts moved a little keeps its width
+#: and the compiled step its shapes.
+_FLAT_WALK_CAP_GRANULE = 1 << 20
+
+
+def flat_walk_cap_headroom() -> float:
+    """Headroom of an unnamed flat-walk list cap over the eager count.
+
+    ``JACCPOT_FLAT_WALK_CAP_HEADROOM`` (at least 1). The traced refresh inside the
+    compiled step cannot grow a list, so the headroom is what the counts may grow
+    by along a rollout before the step's capacity flag fires.
+
+    Returns
+    -------
+    float
+        The factor.
+    """
+    return env_float(
+        "JACCPOT_FLAT_WALK_CAP_HEADROOM", _FLAT_WALK_CAP_HEADROOM, minimum=1.0
+    )
+
+
+def _tight_list_capacity(count: int, *, headroom: float, floor: int = 0) -> int:
+    """Directed list capacity for ``count`` live entries.
+
+    ``headroom x count`` rounded up to a multiple of ``_FLAT_WALK_CAP_GRANULE``
+    (below one granule, to the next power of two), never below ``floor`` -- the
+    width an earlier eager pass validated, so a re-prepare never shrinks a width
+    the compiled step was built for -- and even.
+
+    Parameters
+    ----------
+    count : int
+        Directed entries the eager walk produced.
+    headroom : float
+        Factor over ``count``.
+    floor : int
+        Smallest capacity to return.
+
+    Returns
+    -------
+    int
+        The capacity.
+    """
+    want = max(2, int(np.ceil(float(headroom) * max(int(count), 1))))
+    granule = (
+        _FLAT_WALK_CAP_GRANULE
+        if want >= _FLAT_WALK_CAP_GRANULE
+        else 1 << (want - 1).bit_length()
+    )
+    cap = max(-(-want // granule) * granule, int(floor))
+    return cap + (cap & 1)
 
 
 def _strict_streamed_retry_diag(grew: list[str]) -> None:
@@ -1145,22 +1205,24 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         # A cap the caller NAMED is a deliberate memory bound: honoured exactly,
         # never widened (#333). An unnamed one starts at its floor -- raised to
         # what an earlier eager pass needed -- and the eager ladder grows it.
+        # A validated width is used EXACTLY: it is what the traced refresh must
+        # build (the carry's shapes) and where an eager re-prepare starts, and it
+        # can sit below the ladder's floor (an unnamed list is sized from its
+        # count).
         near_edge_env = os.environ.get(
             "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP"
         )
         near_edge_named = near_edge_env is not None
+        near_floor = int(floor.get("near_edge_capacity") or 0)
         if near_edge_named:
             near_edge_capacity = int(near_edge_env)
         else:
-            near_edge_capacity = max(
-                _FLAT_WALK_NEAR_EDGE_FLOOR, int(floor.get("near_edge_capacity") or 0)
-            )
+            near_edge_capacity = near_floor or _FLAT_WALK_NEAR_EDGE_FLOOR
         far_named = "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP" in os.environ
+        far_floor = int(floor.get("compact_far_pair_capacity") or 0)
         far_capacity = int(compact_far_pair_capacity)
-        if not far_named:
-            far_capacity = max(
-                far_capacity, int(floor.get("compact_far_pair_capacity") or 0)
-            )
+        if not far_named and far_floor:
+            far_capacity = far_floor
         return _build_flat_walk_artifacts_strict_streamed(
             tree=tree,
             geometry=geometry,
@@ -1174,6 +1236,8 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             far_named=far_named,
             near_edge_named=near_edge_named,
             extra_overflow=extra_overflow,
+            far_floor=0 if far_named else far_floor,
+            near_floor=0 if near_edge_named else near_floor,
         )
     if treecode_enabled:
         if pair_policy is not None or policy_state is not None:
@@ -1781,10 +1845,18 @@ def strict_walk_deterministic_rows() -> bool:
     return raw.strip().lower() not in ("0", "off", "false")
 
 
-def _lex_perm(
+def _lex_sorted(
     primary: Array, secondary: Array, *, primary_bound: int, secondary_bound: int
-) -> Array:
-    """Permutation sorting by ``(primary, secondary)`` ascending.
+) -> tuple[Array, Array]:
+    """``(primary, secondary)`` sorted lexicographically, ascending.
+
+    One keys-only sort of the composite ``primary * secondary_bound + secondary``,
+    decoded afterwards: int32 when the bounds' product fits, int64 otherwise (x64
+    is on wherever yggdrax is imported). At the 8M flat walk's sizes this is HALF
+    the time of two stable int32 argsorts (6.4 against 13.3 ms for 28.8M near
+    entries, identical output), and needs neither a permutation nor the gathers
+    that apply it. A two-key ``lax.sort`` is 5x slower again: XLA hands only
+    single-key sorts to CUB.
 
     Parameters
     ----------
@@ -1795,24 +1867,185 @@ def _lex_perm(
     primary_bound : int
         Static exclusive bound on ``primary``.
     secondary_bound : int
-        Static exclusive bound on ``secondary``. When the product of the two
-        bounds fits ``int32`` one composite sort is used, otherwise two stable
-        sorts.
+        Static exclusive bound on ``secondary``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        The sorted keys, in the dtypes of ``primary`` and ``secondary``.
+    """
+    pdt, sdt = primary.dtype, secondary.dtype
+    if int(primary_bound) * int(secondary_bound) < 2**31:
+        wide = jnp.int32
+    elif jax.config.jax_enable_x64:
+        wide = jnp.int64
+    else:  # pragma: no cover - the lane always runs with x64 on
+        p1 = jnp.argsort(secondary, stable=True, dtype=jnp.int32)
+        p2 = jnp.argsort(primary[p1], stable=True, dtype=jnp.int32)
+        perm = p1[p2]
+        return primary[perm], secondary[perm]
+    bound = jnp.asarray(int(secondary_bound), wide)
+    composite = jnp.sort(primary.astype(wide) * bound + secondary.astype(wide))
+    return (composite // bound).astype(pdt), (composite % bound).astype(sdt)
+
+
+def _fit_width(x: Array, width: int, fill: int) -> Array:
+    """``x`` cut or ``fill``-padded to ``width`` entries (its live part is a prefix).
+
+    Parameters
+    ----------
+    x : Array
+        ``[w]`` list.
+    width : int
+        Target width. Static.
+    fill : int
+        Padding value.
 
     Returns
     -------
     Array
-        The permutation, index dtype of ``primary``.
+        ``[width]``.
     """
-    idx = primary.dtype
-    if int(primary_bound) * int(secondary_bound) < 2**31:
-        composite = primary.astype(jnp.int32) * jnp.asarray(
-            int(secondary_bound), jnp.int32
-        ) + secondary.astype(jnp.int32)
-        return jnp.argsort(composite, stable=True).astype(idx)
-    p1 = jnp.argsort(secondary, stable=True)
-    p2 = jnp.argsort(primary[p1], stable=True)
-    return p1[p2].astype(idx)
+    w = int(x.shape[0])
+    if w >= int(width):
+        return x[: int(width)]
+    return jnp.concatenate([x, jnp.full((int(width) - w,), fill, x.dtype)])
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "far_width",
+        "near_width",
+        "num_internal",
+        "total_nodes",
+        "deterministic",
+        "idx",
+    ),
+)
+def _flat_walk_lists(
+    far_a: Array,
+    far_b: Array,
+    far_count: Array,
+    near_a: Array,
+    near_b: Array,
+    near_count: Array,
+    any_overflow: Array,
+    *,
+    far_width: int,
+    near_width: int,
+    num_internal: int,
+    total_nodes: int,
+    deterministic: bool,
+    idx: Any,
+) -> tuple[Array, ...]:
+    """The flat walk's far list and leaf-neighbour CSR at the given widths.
+
+    One jit, so the EAGER build frees its capacity-width temporaries as XLA goes
+    instead of keeping every op-by-op local alive until the builder returns (the
+    16M prepare ran out of memory here). Under a trace it inlines.
+
+    Parameters
+    ----------
+    far_a : Array
+        Walk output, lower node of each canonical far pair (live prefix).
+    far_b : Array
+        Upper node of each canonical far pair.
+    far_count : Array
+        Live canonical far pairs.
+    near_a : Array
+        Lower leaf of each canonical near pair (live prefix).
+    near_b : Array
+        Upper leaf of each canonical near pair.
+    near_count : Array
+        Live canonical near pairs.
+    any_overflow : Array
+        Any capacity flag; saturates the far-pair count.
+    far_width : int
+        Canonical far width (the directed list is twice that). Static.
+    near_width : int
+        Canonical near width. Static.
+    num_internal : int
+        Internal nodes (leaves are the last ``total_nodes - num_internal``). Static.
+    total_nodes : int
+        All nodes. Static.
+    deterministic : bool
+        Sort the rows by (target, source) (the Pallas walk emits in atomic order).
+    idx : Any
+        Index dtype. Static.
+
+    Returns
+    -------
+    tuple[Array, ...]
+        ``(far_sources, far_targets, far_tags, far_pair_count, neighbors, offsets,
+        counts)``.
+    """
+    num_leaves = total_nodes - num_internal
+    # --- far pairs: directed, interleaved, prefix-live, capacity-width ---
+    far_live = jnp.arange(far_width, dtype=idx) < far_count
+    fa = jnp.where(far_live, _fit_width(far_a, far_width, -1), -1).astype(idx)
+    fb = jnp.where(far_live, _fit_width(far_b, far_width, -1), -1).astype(idx)
+    if deterministic:
+        # canonical pairs in (a, b) order: the M2L CSR's stable sort by target
+        # then lists every row's sources ascending, whatever the emission order
+        fa, fb = _lex_sorted(
+            jnp.where(far_live, fa, jnp.asarray(total_nodes, idx)),
+            jnp.where(far_live, fb, jnp.asarray(0, idx)),
+            primary_bound=total_nodes + 1,
+            secondary_bound=total_nodes,
+        )
+        # the padding sorted to the end as (total_nodes, 0); restore its -1s
+        fa = jnp.where(far_live, fa, -1).astype(idx)
+        fb = jnp.where(far_live, fb, -1).astype(idx)
+    far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_width,))
+    far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_width,))
+    far_tags = jnp.full((2 * far_width,), -1, dtype=idx)
+    # Saturate on ANY overflow: the strict runner's guard tests
+    # ``far_pair_count < compact_far_pair_capacity`` and this is how the near and
+    # queue flags reach it under trace.
+    far_pair_count = jnp.where(
+        any_overflow,
+        jnp.asarray(2 * far_width, idx),
+        (2 * far_count).astype(idx),
+    )
+
+    # --- near pairs: directed, one stable sort by target leaf, CSR ---
+    near_live = jnp.arange(near_width, dtype=idx) < near_count
+    na = jnp.where(near_live, _fit_width(near_a, near_width, 0), 0).astype(idx)
+    nb = jnp.where(near_live, _fit_width(near_b, near_width, 0), 0).astype(idx)
+    tgt = jnp.concatenate([na, nb])
+    src = jnp.concatenate([nb, na])
+    valid = jnp.concatenate([near_live, near_live])
+    # static radix: leaves are the last ``num_leaves`` nodes
+    tgt_leaf = tgt - jnp.asarray(num_internal, idx)
+    key = jnp.where(valid, tgt_leaf, jnp.asarray(num_leaves, idx))
+    src = jnp.where(valid, src, jnp.asarray(0, idx))
+    if deterministic:
+        sorted_key, neighbors = _lex_sorted(
+            key, src, primary_bound=num_leaves + 1, secondary_bound=total_nodes
+        )
+    else:
+        # one key-value sort by target (stable): no permutation, no gathers
+        sorted_key, neighbors = jax.lax.sort((key, src), num_keys=1, is_stable=True)
+    # the padding sorted to the end with source 0, as the CSR's consumers expect
+    # unrolled: the default is a while loop with one small kernel per bisection
+    # step (~23 here), launch-bound inside the fused step; unrolled, XLA fuses it
+    offsets = jnp.searchsorted(
+        sorted_key,
+        jnp.arange(num_leaves + 1, dtype=idx),
+        side="left",
+        method="scan_unrolled",
+    ).astype(idx)
+    counts = offsets[1:] - offsets[:-1]
+    return (
+        far_sources,
+        far_targets,
+        far_tags,
+        far_pair_count,
+        neighbors,
+        offsets,
+        counts,
+    )
 
 
 def _build_flat_walk_artifacts_strict_streamed(
@@ -1829,6 +2062,8 @@ def _build_flat_walk_artifacts_strict_streamed(
     far_named: bool = True,
     near_edge_named: bool = True,
     extra_overflow: Optional[Array] = None,
+    far_floor: int = 0,
+    near_floor: int = 0,
 ) -> _DualTreeArtifacts:
     """Far pairs and leaf neighbours from yggdrax's flat-emission wavefront walk.
 
@@ -1869,6 +2104,14 @@ def _build_flat_walk_artifacts_strict_streamed(
       rather than silent. The capacity report is ALWAYS emitted (the treecode
       graft's early return left that guard dark) and carries ``peak_wavefront``
       so the traced queue can be sized from data.
+    * width: an UNNAMED list is built, eagerly, at ``_tight_list_capacity`` of the
+      count the walk measured (``flat_walk_cap_headroom`` x count, granule-rounded,
+      never below ``far_floor`` / ``near_floor``), cut from the walk's live prefix,
+      and that width is what the report validates -- so the traced refresh, the
+      M2L and near-field kernels and their sorts run at the pairs' size, not at a
+      ladder rung or a cap fitted at another N (8M on one card: caps 6-9x the
+      pairs). The Pallas walk reports what an overflowed list needed, so the
+      eager ladder sizes such a cap in one retry.
 
     Parameters
     ----------
@@ -1903,6 +2146,12 @@ def _build_flat_walk_artifacts_strict_streamed(
     extra_overflow : Optional[Array]
         An upstream capacity flag treated like the walk's own -- today the
         cell-leaf partition's ``leaf_capacity``.
+    far_floor : int
+        Directed far width an earlier eager pass validated; an unnamed far list
+        is never built narrower (widths never shrink, so the compiled step keeps
+        its shapes).
+    near_floor : int
+        Same for the near list.
 
     Returns
     -------
@@ -1969,6 +2218,7 @@ def _build_flat_walk_artifacts_strict_streamed(
     queue = (
         _STRICT_STREAMED_QUEUE_FLOOR if max_pair_queue is None else int(max_pair_queue)
     )
+    headroom = flat_walk_cap_headroom()
     grew: list[str] = []
     walk = None
     traced = False
@@ -1977,6 +2227,8 @@ def _build_flat_walk_artifacts_strict_streamed(
     # unnamed cap cannot exhaust it.
     queue_attempts = 0
     while True:
+        # drop the previous attempt before the next one allocates its buffers
+        walk = None
         if walk_backend == "pallas":
             # plan sub-10ms Phase 2: one Pallas launch per wavefront round with
             # atomic slot counters; same pair SETS as the flat walk (pinned by
@@ -2017,10 +2269,26 @@ def _build_flat_walk_artifacts_strict_streamed(
         far_ovf = bool(walk.far_overflow)
         near_ovf = bool(walk.near_overflow)
         queue_ovf = bool(walk.queue_overflow)
-        if far_ovf and (far_named or 2 * far_cap >= _FLAT_WALK_FAR_PAIR_LIMIT):
+        # The Pallas walk keeps walking past a full far or near list and reports
+        # what the list needed, so an unnamed cap is sized in ONE retry; the flat
+        # walk stops at the first overflow (a lower bound), and so does any walk
+        # whose queue overflowed -- those caps double.
+        exact = (not queue_ovf) and hasattr(walk, "far_needed")
+        grown_far = (
+            _tight_list_capacity(2 * int(walk.far_needed), headroom=headroom) // 2
+            if exact
+            else 2 * far_cap
+        )
+        grown_near = (
+            _tight_list_capacity(2 * int(walk.near_needed), headroom=headroom) // 2
+            if exact
+            else 2 * near_cap
+        )
+        if far_ovf and (far_named or 2 * grown_far > _FLAT_WALK_FAR_PAIR_LIMIT):
             raise RuntimeError(
                 "flat-walk far pairs overflowed: capacity "
                 f"{2 * far_cap} directed pairs"
+                + (f", {2 * int(walk.far_needed)} needed" if exact else "")
                 + (
                     " (the caller named it, so it is not widened here). Raise "
                     if far_named
@@ -2028,10 +2296,13 @@ def _build_flat_walk_artifacts_strict_streamed(
                 )
                 + "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
             )
-        if near_ovf and (near_edge_named or 2 * near_cap >= _FLAT_WALK_NEAR_EDGE_LIMIT):
+        if near_ovf and (
+            near_edge_named or 2 * grown_near > _FLAT_WALK_NEAR_EDGE_LIMIT
+        ):
             raise RuntimeError(
                 "flat-walk near pairs overflowed: capacity "
                 f"{2 * near_cap} directed pairs"
+                + (f", {2 * int(walk.near_needed)} needed" if exact else "")
                 + (
                     " (the caller named it, so it is not widened here). Raise "
                     if near_edge_named
@@ -2040,11 +2311,11 @@ def _build_flat_walk_artifacts_strict_streamed(
                 + "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
             )
         if far_ovf:
-            grew.append(f"compact_far_pair_capacity {2 * far_cap}->{4 * far_cap}")
-            far_cap *= 2
+            grew.append(f"compact_far_pair_capacity {2 * far_cap}->{2 * grown_far}")
+            far_cap = grown_far
         if near_ovf:
-            grew.append(f"near_edge_capacity {2 * near_cap}->{4 * near_cap}")
-            near_cap *= 2
+            grew.append(f"near_edge_capacity {2 * near_cap}->{2 * grown_near}")
+            near_cap = grown_near
         if queue_ovf:
             grown = int(queue) * 2
             queue_attempts += 1
@@ -2067,27 +2338,33 @@ def _build_flat_walk_artifacts_strict_streamed(
                 _strict_streamed_retry_diag(grew)
             break
     assert walk is not None
-    compact_far_pair_capacity = 2 * far_cap
-    near_edge_capacity = 2 * near_cap
 
-    # --- far pairs: directed, interleaved, prefix-live, capacity-width ---
-    far_live = jnp.arange(far_cap, dtype=idx) < walk.far_count
-    fa = jnp.where(far_live, walk.far_a, -1).astype(idx)
-    fb = jnp.where(far_live, walk.far_b, -1).astype(idx)
-    if walk_backend == "pallas" and deterministic_rows:
-        # canonical pairs in (a, b) order: the M2L CSR's stable sort by target
-        # then lists every row's sources ascending, whatever the emission order
-        perm = _lex_perm(
-            jnp.where(far_live, fa, jnp.asarray(total_nodes, idx)),
-            jnp.where(far_live, fb, jnp.asarray(0, idx)),
-            primary_bound=total_nodes + 1,
-            secondary_bound=total_nodes,
-        )
-        fa = fa[perm]
-        fb = fb[perm]
-    far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_cap,))
-    far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_cap,))
-    far_tags = jnp.full((2 * far_cap,), -1, dtype=idx)
+    # The widths the lists are BUILT at. A named cap is exact. An unnamed one is
+    # sized from the count the eager walk measured -- headroom x count, never below
+    # the width an earlier pass validated (`far_floor` / `near_floor`) -- and that
+    # width is reported, so the traced refresh walks and builds at the same width
+    # (the carry's shapes must match) and the step's per-pair work and memory scale
+    # with the pairs, not with the ladder rung the walk happened to fit at.
+    # Traced, the widths are the capacities as passed.
+    far_width, near_width = far_cap, near_cap
+    if not traced:
+        if not far_named:
+            far_width = (
+                _tight_list_capacity(
+                    2 * int(walk.far_count), headroom=headroom, floor=int(far_floor)
+                )
+                // 2
+            )
+        if not near_edge_named:
+            near_width = (
+                _tight_list_capacity(
+                    2 * int(walk.near_count), headroom=headroom, floor=int(near_floor)
+                )
+                // 2
+            )
+    compact_far_pair_capacity = 2 * far_width
+    near_edge_capacity = 2 * near_width
+
     any_overflow = walk.far_overflow | walk.near_overflow | walk.queue_overflow
     if extra_overflow is not None:
         # an upstream capacity the caller wants treated like the walk's own --
@@ -2100,14 +2377,30 @@ def _build_flat_walk_artifacts_strict_streamed(
                 )
         else:
             any_overflow = any_overflow | jnp.asarray(extra_overflow, dtype=bool)
-    # Saturate on ANY overflow: the strict runner's guard tests
-    # ``far_pair_count < compact_far_pair_capacity`` and this is how the near and
-    # queue flags reach it under trace. Eager overflow raised above, so this only
-    # bites inside the compiled scan.
-    far_pair_count = jnp.where(
+    # Eager overflow raised above, so the saturation inside only bites in the
+    # compiled scan.
+    (
+        far_sources,
+        far_targets,
+        far_tags,
+        far_pair_count,
+        neighbors,
+        offsets,
+        counts,
+    ) = _flat_walk_lists(
+        walk.far_a,
+        walk.far_b,
+        walk.far_count,
+        walk.near_a,
+        walk.near_b,
+        walk.near_count,
         any_overflow,
-        jnp.asarray(2 * far_cap, idx),
-        (2 * walk.far_count).astype(idx),
+        far_width=int(far_width),
+        near_width=int(near_width),
+        num_internal=num_internal,
+        total_nodes=total_nodes,
+        deterministic=bool(walk_backend == "pallas" and deterministic_rows),
+        idx=np.dtype(idx),
     )
     compact_far_pairs = CompactTaggedFarPairs(
         sources=far_sources,
@@ -2115,37 +2408,6 @@ def _build_flat_walk_artifacts_strict_streamed(
         tags=far_tags,
         far_pair_count=far_pair_count,
     )
-
-    # --- near pairs: directed, one stable sort by target leaf, CSR ---
-    near_live = jnp.arange(near_cap, dtype=idx) < walk.near_count
-    na = jnp.where(near_live, walk.near_a, 0).astype(idx)
-    nb = jnp.where(near_live, walk.near_b, 0).astype(idx)
-    tgt = jnp.concatenate([na, nb])
-    src = jnp.concatenate([nb, na])
-    valid = jnp.concatenate([near_live, near_live])
-    # static radix: leaves are the last ``num_leaves`` nodes
-    tgt_leaf = tgt - jnp.asarray(num_internal, idx)
-    key = jnp.where(valid, tgt_leaf, jnp.asarray(num_leaves, idx))
-    if walk_backend == "pallas" and deterministic_rows:
-        perm = _lex_perm(
-            key,
-            jnp.where(valid, src, jnp.asarray(0, idx)),
-            primary_bound=num_leaves + 1,
-            secondary_bound=total_nodes,
-        )
-    else:
-        perm = jnp.argsort(key, stable=True)
-    sorted_key = key[perm]
-    neighbors = jnp.where(valid[perm], src[perm], jnp.asarray(0, idx))
-    # unrolled: the default is a while loop with one small kernel per bisection
-    # step (~23 here), launch-bound inside the fused step; unrolled, XLA fuses it
-    offsets = jnp.searchsorted(
-        sorted_key,
-        jnp.arange(num_leaves + 1, dtype=idx),
-        side="left",
-        method="scan_unrolled",
-    ).astype(idx)
-    counts = offsets[1:] - offsets[:-1]
     leaf_nodes = jnp.arange(num_internal, total_nodes, dtype=idx)
     neighbor_list = NodeNeighborList(
         offsets=offsets,
@@ -2175,6 +2437,7 @@ def _build_flat_walk_artifacts_strict_streamed(
             # no per-leaf row cap on this lane; None switches the guard's row arm off
             max_neighbors_per_leaf_used=None,
             grew=list(grew),
+            headroom=float(headroom),
         )
         if not traced:
             report["far_pair_count"] = 2 * int(walk.far_count)
@@ -2182,6 +2445,23 @@ def _build_flat_walk_artifacts_strict_streamed(
             report["max_neighbors_observed"] = int(jnp.max(counts)) if num_leaves else 0
             report["peak_wavefront"] = int(walk.peak_wavefront)
             report["rounds"] = int(walk.rounds)
+        else:
+            # What this traced walk needed, as TRACERS: the receiver keeps them on
+            # the engine for the scan to fold into its carry (they must never
+            # reach host-side state). `strict_run_v2` sizes a segment retry from
+            # them -- the Pallas walk's counts are exact past a list overflow; the
+            # flat walk's are lower bounds, marked by the last entry.
+            report["walk_needs"] = jnp.stack(
+                [
+                    2 * jnp.asarray(getattr(walk, "far_needed", walk.far_count)),
+                    2 * jnp.asarray(getattr(walk, "near_needed", walk.near_count)),
+                    jnp.asarray(walk.peak_wavefront),
+                    jnp.asarray(walk.far_overflow),
+                    jnp.asarray(walk.near_overflow),
+                    jnp.asarray(walk.queue_overflow),
+                    jnp.asarray(not hasattr(walk, "far_needed")),
+                ]
+            ).astype(jnp.int32)
         capacity_report(report)
 
     return _DualTreeArtifacts(
