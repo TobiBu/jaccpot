@@ -151,6 +151,30 @@ P0 = jnp.asarray(pos)
 codes = np.asarray(morton_encode(P0, _infer_lane_bounds(P0)))
 order = np.argsort(codes)
 shards = np.array_split(order, NDEV)
+
+
+def _rcb_shards(x, ndev):
+    """Recursive coordinate bisection: equal-count cuts along the longest axis.
+
+    A DIAGNOSTIC partition (PROBE_PARTITION=rcb): compact boxes, against the
+    equal-count chunks of the Morton order the lane uses. ``ndev`` a power of two.
+    Each shard is returned in Morton order, as the Morton split's shards are.
+    """
+    parts = [np.arange(x.shape[0])]
+    while len(parts) < ndev:
+        nxt = []
+        for idx in parts:
+            ax = int(np.argmax(x[idx].max(0) - x[idx].min(0)))
+            o = idx[np.argsort(x[idx, ax], kind="stable")]
+            nxt.extend([o[: len(o) // 2], o[len(o) // 2 :]])
+        parts = nxt
+    return [q[np.argsort(codes[q], kind="stable")] for q in parts]
+
+
+if os.environ.get("PROBE_PARTITION", "morton") == "rcb":
+    if NDEV & (NDEV - 1):
+        raise SystemExit("PROBE_PARTITION=rcb needs a power-of-two NDEV")
+    shards = _rcb_shards(pos, NDEV)
 # no leaf coarser than this Morton level (TreeConfig.cell_min_level; 0 = unconstrained).
 # Default 8: one A100 -4..-18 % from 2e5 to 8e6, two A100s -8..-16 %, forces unchanged.
 CELL_MIN_LEVEL = int(os.environ.get("PROBE_CELL_MIN_LEVEL", "8"))
