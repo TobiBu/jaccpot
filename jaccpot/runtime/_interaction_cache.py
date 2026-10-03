@@ -923,6 +923,10 @@ _STRICT_STREAMED_RETRY_ATTEMPTS = 12
 _FLAT_WALK_NEAR_EDGE_FLOOR = 1 << 21
 _FLAT_WALK_NEAR_EDGE_LIMIT = 1 << 30
 _FLAT_WALK_FAR_PAIR_LIMIT = 1 << 30
+#: The flat walk's queue ceiling. The dual walk's 2^25 stopped one card at 3.2e7
+#: Plummer particles, whose peak wavefront is past it (2.2e7 at 2.4e7); 2^28 slots
+#: are 4 GiB of queue, allocated only if a walk needs them.
+_FLAT_WALK_QUEUE_LIMIT = 1 << 28
 #: Default headroom of an unnamed flat-walk list over the count it is sized from
 #: (``JACCPOT_FLAT_WALK_CAP_HEADROOM``).
 _FLAT_WALK_CAP_HEADROOM = 1.5
@@ -2274,6 +2278,10 @@ def _build_flat_walk_artifacts_strict_streamed(
         # walk stops at the first overflow (a lower bound), and so does any walk
         # whose queue overflowed -- those caps double.
         exact = (not queue_ovf) and hasattr(walk, "far_needed")
+        # A walk that stopped on its queue counted only part of the pairs. The
+        # Pallas walk sizes its lists exactly once the queue fits, so it grows only
+        # the queue now; the flat walk's counts are never exact, so its lists double.
+        defer_lists = queue_ovf and hasattr(walk, "far_needed")
         grown_far = (
             _tight_list_capacity(2 * int(walk.far_needed), headroom=headroom) // 2
             if exact
@@ -2284,7 +2292,9 @@ def _build_flat_walk_artifacts_strict_streamed(
             if exact
             else 2 * near_cap
         )
-        if far_ovf and (far_named or 2 * grown_far > _FLAT_WALK_FAR_PAIR_LIMIT):
+        if far_ovf and (
+            far_named or (not defer_lists and 2 * grown_far > _FLAT_WALK_FAR_PAIR_LIMIT)
+        ):
             raise RuntimeError(
                 "flat-walk far pairs overflowed: capacity "
                 f"{2 * far_cap} directed pairs"
@@ -2297,7 +2307,8 @@ def _build_flat_walk_artifacts_strict_streamed(
                 + "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
             )
         if near_ovf and (
-            near_edge_named or 2 * grown_near > _FLAT_WALK_NEAR_EDGE_LIMIT
+            near_edge_named
+            or (not defer_lists and 2 * grown_near > _FLAT_WALK_NEAR_EDGE_LIMIT)
         ):
             raise RuntimeError(
                 "flat-walk near pairs overflowed: capacity "
@@ -2310,10 +2321,10 @@ def _build_flat_walk_artifacts_strict_streamed(
                 )
                 + "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
             )
-        if far_ovf:
+        if far_ovf and not defer_lists:
             grew.append(f"compact_far_pair_capacity {2 * far_cap}->{2 * grown_far}")
             far_cap = grown_far
-        if near_ovf:
+        if near_ovf and not defer_lists:
             grew.append(f"near_edge_capacity {2 * near_cap}->{2 * grown_near}")
             near_cap = grown_near
         if queue_ovf:
@@ -2321,12 +2332,12 @@ def _build_flat_walk_artifacts_strict_streamed(
             queue_attempts += 1
             if (
                 queue_attempts >= _STRICT_STREAMED_RETRY_ATTEMPTS
-                or grown > _STRICT_STREAMED_RETRY_LIMIT
+                or grown > _FLAT_WALK_QUEUE_LIMIT
             ):
                 raise RuntimeError(
                     "max_pair_queue overflowed on the flat wavefront walk and "
                     f"re-planning did not fit it: grew to {queue} (ceiling "
-                    f"{_STRICT_STREAMED_RETRY_LIMIT}) over {queue_attempts} attempts; "
+                    f"{_FLAT_WALK_QUEUE_LIMIT}) over {queue_attempts} attempts; "
                     "the walk needed a peak wavefront of "
                     f"{int(walk.peak_wavefront)}. Pass jaccpot.TraversalOverrides("
                     "max_pair_queue=...) explicitly."

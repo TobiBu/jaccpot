@@ -634,9 +634,14 @@ def run_budget(result: dict) -> None:
                     if hasattr(x, "shape") and hasattr(x, "dtype")
                     else x
                 ),
-                (prep, state, jnp.zeros_like(state[:, 0])),
+                (prep, state, jnp.zeros_like(state[:, 0]), M),
             )
-            result["runner_memory_analysis"] = _analysis(runner.lower(*spec).compile())
+            try:
+                result["runner_memory_analysis"] = _analysis(
+                    runner.lower(*spec).compile()
+                )
+            except Exception as exc:  # noqa: BLE001 -- diagnostics must not end the row
+                result["runner_memory_analysis"] = dict(error=str(exc)[:300])
             print(
                 f"runner memory_analysis {result['runner_memory_analysis']}", flush=True
             )

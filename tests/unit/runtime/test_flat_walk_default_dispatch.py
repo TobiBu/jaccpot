@@ -53,7 +53,7 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def _seam(tree, geometry, *, mac_type="dehnen", report=None, floor=None):
+def _seam(tree, geometry, *, mac_type="dehnen", report=None, floor=None, queue=1 << 14):
     return ic._build_dual_tree_artifacts_split_strict_streamed(
         tree=tree,
         geometry=geometry,
@@ -63,7 +63,7 @@ def _seam(tree, geometry, *, mac_type="dehnen", report=None, floor=None):
         max_pair_queue=None,
         pair_process_block=None,
         traversal_config=DualTreeTraversalConfig(
-            max_pair_queue=1 << 14,
+            max_pair_queue=queue,
             process_block=256,
             max_interactions_per_node=1024,
             max_neighbors_per_leaf=512,
@@ -299,3 +299,22 @@ def test_a_floor_keeps_a_wider_validated_width(monkeypatch, tree_and_geometry):
     assert reports[0]["near_edge_capacity"] == floor["near_edge_capacity"]
     assert reports[0]["compact_far_pair_capacity"] == floor["compact_far_pair_capacity"]
     assert art.neighbor_list.neighbors.shape[0] == floor["near_edge_capacity"]
+
+
+def test_pallas_ladder_grows_lists_only_once_the_queue_fits(
+    monkeypatch, tree_and_geometry
+):
+    """A walk stopped by its queue counted part of the pairs: lists wait for a full walk."""
+    tree, geometry = tree_and_geometry
+    monkeypatch.setenv("JACCPOT_WALK_PALLAS_INTERPRET", "1")
+    monkeypatch.setattr(ic, "_FLAT_WALK_NEAR_EDGE_FLOOR", 16)
+    monkeypatch.setattr(ic, "_STRICT_STREAMED_FAR_PAIR_FLOOR", 16)
+    reports = []
+    _seam(tree, geometry, report=reports.append, queue=16)
+    (report,) = reports
+    queue_growth = [g for g in report["grew"] if g.startswith("max_pair_queue")]
+    list_growth = [g for g in report["grew"] if not g.startswith("max_pair_queue")]
+    assert queue_growth, report["grew"]
+    assert len(list_growth) == 2, report["grew"]
+    # and the lists' growth came after the queue's last doubling
+    assert report["grew"].index(list_growth[0]) > report["grew"].index(queue_growth[-1])
