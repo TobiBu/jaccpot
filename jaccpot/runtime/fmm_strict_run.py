@@ -1112,6 +1112,7 @@ class StrictRunMixin(_EngineBase):
         leaf_size: int,
         max_order: int,
         theta: Optional[float] = None,
+        bounds: Optional[tuple[Array, Array]] = None,
     ) -> tuple[PreparedStateLike, Callable[[PreparedStateLike], Array]]:
         """Build a fused-lane prepared state and return a jitted eval-only closure.
 
@@ -1138,6 +1139,12 @@ class StrictRunMixin(_EngineBase):
             Expansion order ``p``.
         theta : Optional[float]
             Per-call MAC opening-angle override.
+        bounds : Optional[tuple[Array, Array]]
+            Morton box for the tree; ``None`` infers it from ``positions``. A mesh
+            device passes the GLOBAL box its traced force builds in, so the eager
+            tree -- whose leaf count, level widths and walk caps size the static
+            shapes -- is the tree that force walks, not one cut in the shard's own,
+            smaller box (finer cells: 33,388 leaves against 26,302 on one 1e6 shard).
 
         Returns
         -------
@@ -1183,6 +1190,7 @@ class StrictRunMixin(_EngineBase):
             jit_tree=self._jit_tree_default,
             runtime_overrides_override=runtime_overrides,
             fused_device_mode=True,
+            **({} if bounds is None else {"bounds": bounds}),
         )
         if not isinstance(prepared, LargeNPreparedState):
             raise RuntimeError("strict fused eval-only requires a LargeNPreparedState.")

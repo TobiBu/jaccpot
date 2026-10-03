@@ -2046,6 +2046,7 @@ class FastMultipoleMethod:
         leaf_size: int,
         max_order: int,
         theta: Optional[float] = None,
+        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
     ) -> tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]:
         """Fused-lane eval-only closure for apples-to-apples eval benchmarking.
 
@@ -2067,6 +2068,9 @@ class FastMultipoleMethod:
             Expansion order ``p``.
         theta : Optional[float]
             Per-call MAC opening-angle override.
+        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
+            Morton box for the tree; ``None`` infers it from ``positions``. A mesh
+            device passes the global box its traced force builds in.
 
         Returns
         -------
@@ -2080,6 +2084,7 @@ class FastMultipoleMethod:
             leaf_size=int(leaf_size),
             max_order=int(max_order),
             theta=theta,
+            bounds=bounds,
         )
 
     def update_multipoles_only(

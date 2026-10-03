@@ -117,7 +117,11 @@ print(f"devices visible: {jax.devices()}", flush=True)
 if not SOLO:
     assert len(jax.devices()) >= NDEV, f"need {NDEV} devices"
 
-_ic = IC_GENERATORS["plummer"](N, seed=0)
+# PROBE_SEED: the Plummer draw. Gate rows on ONE seed conflate code and draw (the
+# 2e6 seed-0 draw is a heavy geometry: walk peak 12.6 per leaf against 8.0 for the
+# 1e6 and 8e6 draws), so the gate is measured over several.
+SEED = int(os.environ.get("PROBE_SEED", "0"))
+_ic = IC_GENERATORS["plummer"](N, seed=SEED)
 # The generator hands out float32; widening it changes no particle, so the fp64
 # arm evaluates the SAME system as the fp32 one, just without fp32 arithmetic.
 pos = np.asarray(_ic[0], WDT)
@@ -326,11 +330,30 @@ for d in range(NDEV):
             leaf_size=LEAF,
             max_order=ORDER,
             theta=THETA,
+            # plan the trees the force builds: the mesh box, the live rows. Without
+            # it seed 2 at 4e5 lost one particle's far field (rel-L2 4.2e-2)
+            **(
+                {}
+                if os.environ.get("PROBE_PLAN_OWN_BOX") == "1" or SOLO
+                else dict(bounds=(BLO, BHI), num_valid=dev_live[d])
+            ),
         )
     plans.append(shard_plan)
     walk_reports.append(shard_caps)
     preps.append(pr)
 plan = merge_plans(plans)
+if os.environ.get("PROBE_PLAN_WIDEN"):
+    # DIAGNOSTIC: widen the merged plan's level batch (the static width of the
+    # M2M/L2L level loops) by this factor
+    import dataclasses
+
+    _f = float(os.environ["PROBE_PLAN_WIDEN"])
+    plan = dataclasses.replace(
+        plan,
+        level_batch_width=min(
+            int(np.ceil(_f * plan.level_batch_width)), int(plan.total_nodes)
+        ),
+    )
 # each eager prepare overwrote the engine's walk record with ITS shard's needs; the
 # traced walk of every device must be sized for the worst one
 walk_caps = merge_walk_caps(walk_reports)
@@ -382,6 +405,8 @@ TIMINGS = {}
 
 DIAG_KEYS = (
     "summary_cells",
+    # two-sided export (JACCPOT_CROSS_TWO_SIDED=1): the published summary TREE's size
+    "summary_nodes",
     "summary_leaves",
     "export_far",
     "recv_nodes",
@@ -529,32 +554,55 @@ def _auto_cap(env_bits, per_leaf, floor_bits, headroom=2.5):
     return 1 << max(int(floor_bits), int(np.ceil(np.log2(max(need, 1.0)))))
 
 
+# JACCPOT_CROSS_TWO_SIDED=1: the export walk refines the receiver's summary TREE too,
+# so far pairs land on its internal nodes. Measured at 2e5 on two cards: export far
+# 54k per device (8.7 per leaf) against 283-367k one-sided (45-59), walk peak 6.2k
+# (1.0 per leaf) against 36-47k, seeded with ndev pairs instead of ndev x max_cells.
+from jaccpot.distributed.cross import _cross_two_sided
+
+TWO_SIDED = _cross_two_sided()
+_far_per_leaf = 16 if TWO_SIDED else 53
+
 # per live leaf at 1e5/dev, leaf 64, theta 0.8, COM geometry: summary cells ~0.29;
 # export far pairs ~53 (293k / 5.5k leaves); export near ~10; sent / received
 # nodes ~1.25 (far nodes 6.7k, near leaves 5.5k); received CSR ~53; receiver far
 # pairs ~53 (+ near-walk far pairs); receiver near pairs ~60
-_recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", 53, 19)
-# Measured at 1e6 per device (2 cards, 2026-10-02): near CSR 1.43-1.51M entries
-# (~29 per leaf), near receiver walk peak 2.66M pairs (~52 per leaf), export walk
-# peak 0.72-0.90M (~17 per leaf). The FAR receiver walk is skipped (a pass-through,
-# see cross._direct_far_lists), so the queue no longer has to hold the far CSR.
-_recv_near_csr = _auto_cap("PROBE_RECV_NEAR_CSR_BITS", 29, 19)
+_recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", _far_per_leaf, 19)
+# Measured at 1e6 per device (2 cards, 2026-10-02, before summary_cell_level = 8):
+# near CSR 1.43-1.51M entries (~29 per leaf), near receiver walk peak 2.66M pairs
+# (~52 per leaf), export walk peak 0.72-0.90M (~17 per leaf). The FAR receiver walk
+# is skipped (a pass-through, see cross._direct_far_lists), so the queue no longer
+# has to hold the far CSR.
+# Re-measured 2026-10-03 with summary_cell_level = 8 (both export walks): near CSR
+# 0.27-0.29M (5.5 per leaf), near walk peak 0.52M (9.9), near walk far pairs 0.50M
+# (9.5), near list 0.15M (2.9). The old factors left every one of these 8-17x
+# oversized, and each is padded work: the near-walk far list joins the merged M2L CSR
+# sort (27M wide at 2e6) and two more 8M sorts, the queue sets the Pallas walk grid.
+# Sized to 1e6 per device -> 2^20 / 2^20 / 2^20 / 2^19, 4e6 -> 2^22 / 2^22 / 2^22 /
+# 2^21 (both measured clean): 2-card 2e6 -3.3 ms one-sided, -2.9 two-sided; 8e6
+# -10 / -13 ms; forces identical.
+_recv_near_csr = _auto_cap("PROBE_RECV_NEAR_CSR_BITS", 7.5, 18)
 _far_walk = EXPORT_THETA is not None or os.environ.get(
     "JACCPOT_CROSS_FAR_RECEIVER_WALK"
 ) in ("1", "true", "on")
-_max_cells = int(os.environ.get("PROBE_MAX_CELLS", 0)) or _auto_cap(
-    "PROBE_MAX_CELLS_BITS", 0.29, 13
+# Two-sided, the summary cut defaults to ONE leaf per cell (cross._max_leaves_per_cell:
+# 2e6 on two cards 61.3 -> 57.3 ms), so max_cells must hold every live leaf: the
+# shard's leaf capacity bounds that exactly, and 2 x it bounds the summary tree.
+_ml_env = os.environ.get("PROBE_MAX_LEAVES_PER_CELL")
+MAX_LEAVES = int(_ml_env) if _ml_env else (1 if TWO_SIDED else 4)
+_max_cells = int(os.environ.get("PROBE_MAX_CELLS", 0)) or (
+    LEAF_CAP if MAX_LEAVES == 1 else _auto_cap("PROBE_MAX_CELLS_BITS", 0.29, 13)
 )
 caps = CrossCapacities(
-    max_leaves_per_cell=int(os.environ.get("PROBE_MAX_LEAVES_PER_CELL", 4)),
+    max_leaves_per_cell=MAX_LEAVES,
     # a summary cell must fit in one Morton cell of this level (0: off). Default 8:
     # 2-card 2e6 75.0 -> 72.1 ms, 8e6 254.2 -> 231.6 ms, forces unchanged.
     summary_cell_level=int(os.environ.get("PROBE_SUMMARY_CELL_LEVEL", "8")) or None,
     max_cells=_max_cells,
-    export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", 53, 21),
+    export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", _far_per_leaf, 21),
     export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 21),
     send_node_cap=_auto_cap("PROBE_SEND_NODE_BITS", 1.25, 15),
-    send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", 53, 21),
+    send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", _far_per_leaf, 21),
     recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
     recv_csr_cap=_recv_csr,
     recv_near_csr_cap=_recv_near_csr,
@@ -562,16 +610,21 @@ caps = CrossCapacities(
     # ~18 particles each (51k leaves, ~0.95M particles at 1e6 per device)
     send_particle_cap=_auto_cap("PROBE_SEND_PARTICLE_BITS", 20, 18, headroom=2.0),
     recv_particle_cap=_auto_cap("PROBE_RECV_PARTICLE_BITS", 20, 18, headroom=2.0),
-    # export walk peak ~17 per leaf; its seed is ndev x max_cells pairs
-    export_walk_queue=max(
-        _auto_cap("PROBE_EXPORT_WALK_QUEUE_BITS", 17, 18, headroom=1.5),
-        1 << int(np.ceil(np.log2(NDEV * _max_cells))),
+    # export walk peak ~17 per leaf; its seed is ndev x max_cells pairs (one-sided)
+    # or ndev pairs (two-sided, peak ~1 per leaf at 2e5)
+    export_walk_queue=(
+        _auto_cap("PROBE_EXPORT_WALK_QUEUE_BITS", 3, 16, headroom=1.5)
+        if TWO_SIDED
+        else max(
+            _auto_cap("PROBE_EXPORT_WALK_QUEUE_BITS", 17, 18, headroom=1.5),
+            1 << int(np.ceil(np.log2(NDEV * _max_cells))),
+        )
     ),
     # A receiver walk SEEDS from its received CSR, one pair per entry, so the queue
     # has to hold that seed (and the walk's peak). Only the near walk runs now
     # unless the far one is forced; every queue overflow raises the cross flag.
     walk_queue=max(
-        _auto_cap("PROBE_WALK_QUEUE_BITS", 52, 20, headroom=1.5),
+        _auto_cap("PROBE_WALK_QUEUE_BITS", 13, 18, headroom=1.5),
         _recv_near_csr,
         2 * _recv_csr if _far_walk else 0,
     ),
@@ -580,8 +633,8 @@ caps = CrossCapacities(
     # only the NEAR walk's lists -- far 2.36-2.38M (~46 per leaf), near 1.0M (~20).
     # Both widths are padded work downstream: the far list joins the M2L CSR sort and
     # the near list sets the cross near-field kernel's grid.
-    recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 46, 21, headroom=2.0),
-    recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 20, 20, headroom=2.0),
+    recv_far_cap=_auto_cap("PROBE_RECV_FAR_BITS", 9.5, 18, headroom=2.0),
+    recv_near_cap=_auto_cap("PROBE_RECV_NEAR_BITS", 4.5, 17, headroom=2.0),
     leaf_width=LEAF,
 )
 print(f"cross caps: {vars(caps)}", flush=True)
@@ -658,6 +711,8 @@ if TIME_REPS > 0:
         overflow_cross=ovf_both,
         timings=TIMINGS,
         cross_mac_geometry=os.environ.get("JACCPOT_CROSS_MAC_GEOMETRY", "com"),
+        cross_two_sided=os.environ.get("JACCPOT_CROSS_TWO_SIDED", "0"),
+        seed=SEED,
     )
     if os.environ.get("PROBE_JSON"):
         import json

@@ -54,6 +54,7 @@ __all__ = [
     "cube_bounds",
     "fused_force_step",
     "global_mesh_bounds",
+    "host_mesh_bounds",
     "make_fused_force_evaluator",
     "reduce_flag_across_mesh",
     "stack_prepared_states",
@@ -158,6 +159,41 @@ def global_mesh_bounds(
         pos = jnp.where(live[:, None], pos, pos[0][None, :])
     lo = jax.lax.pmin(jnp.min(pos, axis=0), axis_name)
     hi = jax.lax.pmax(jnp.max(pos, axis=0), axis_name)
+    return cube_bounds(lo, hi, pad=pad)
+
+
+def host_mesh_bounds(
+    positions: list, num_valid: list, *, pad: float = 1e-6
+) -> tuple[Array, Array]:
+    """:func:`global_mesh_bounds` on the host, from per-device pieces.
+
+    For setup code that has every shard in hand and must reproduce the box the traced
+    force will build in -- e.g. to measure the capacity plan on the trees the force
+    actually walks (:func:`~jaccpot.runtime.capacity_plan.measure_shard_plan`).
+
+    Parameters
+    ----------
+    positions : list
+        Per-device padded positions ``(cap, 3)``.
+    num_valid : list
+        Per-device live row counts.
+    pad : float
+        As :func:`global_mesh_bounds`.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(min_corner, max_corner)``, the same box the mesh reduction gives.
+    """
+    los, his = [], []
+    for pos, n in zip(positions, num_valid):
+        live = jnp.asarray(pos)[: int(n)]
+        if int(live.shape[0]) == 0:
+            continue
+        los.append(jnp.min(live, axis=0))
+        his.append(jnp.max(live, axis=0))
+    lo = jnp.min(jnp.stack(los), axis=0)
+    hi = jnp.max(jnp.stack(his), axis=0)
     return cube_bounds(lo, hi, pad=pad)
 
 
@@ -760,4 +796,11 @@ def _local_overflow(refreshed: Any, engine: Any = None) -> Array:
     # mode, so the verdict on the lists this refresh built comes from the engine
     if engine is not None:
         ok = ok & last_refresh_capacity_ok(engine)
+    # a tree wider or deeper than the installed plan's level loops loses nodes from
+    # both cascades with no other trace (capacity_plan.plan_level_overflow)
+    tree = getattr(refreshed, "tree", None)
+    if tree is not None and getattr(tree, "level_offsets", None) is not None:
+        from jaccpot.runtime.capacity_plan import plan_level_overflow
+
+        ok = ok & jnp.logical_not(plan_level_overflow(tree))
     return jnp.logical_not(ok)

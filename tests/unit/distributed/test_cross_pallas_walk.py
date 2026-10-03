@@ -141,6 +141,53 @@ def test_the_export_walk_emits_the_same_sets(two_domains, pallas_walk, theta):
     assert all(c >= MAX_CELLS for c, _ in far_g | near_g)
 
 
+@pytest.mark.parametrize("max_leaves", [4, 1])
+@pytest.mark.parametrize("theta", [0.8, 0.5])
+def test_the_two_sided_export_walk_emits_the_same_sets(
+    two_domains, pallas_walk, theta, max_leaves
+):
+    """Both trees refine: the summary tree's internal nodes are just more nodes with
+    children to the kernel, so its sets must equal the traced walk's here too."""
+    from jaccpot.distributed.cross import (
+        CrossCapacities,
+        _export_from_rows,
+        _summary_rows,
+    )
+
+    me, other = two_domains
+    cap = CrossCapacities(
+        max_cells=MAX_CELLS if max_leaves > 1 else 2048,  # 2048 = the leaf capacity
+        max_leaves_per_cell=max_leaves,
+        export_far_cap=1 << 16,
+        export_near_cap=1 << 16,
+        export_walk_queue=1 << 15,
+    )
+    pubs = [
+        _summary_rows(d["topo"], d["geom"], cap, two_sided=True) for d in (me, other)
+    ]
+    assert not any(bool(p.overflow) for p in pubs)
+    rows = jnp.stack([p.rows for p in pubs])
+    args = (rows, me["left"], me["right"], me["geom"], me["root"], float(theta))
+    kw = dict(two_sided=True, mac_type="dehnen")
+    ref = _export_from_rows(*args, jnp.asarray(0), cap, walk_fn=None, **kw)
+    got = _export_from_rows(*args, jnp.asarray(0), cap, walk_fn=pallas_walk, **kw)
+    for res in (ref, got):
+        assert not (
+            bool(res.far_overflow)
+            or bool(res.near_overflow)
+            or bool(res.queue_overflow)
+        )
+    assert int(ref.far_count) > 0 and int(ref.near_count) > 0, "vacuous"
+    far_g = _pairs(got.far_cell, got.far_node, got.far_count)
+    assert len(far_g) == int(got.far_count), "duplicate far emission"
+    assert far_g == _pairs(ref.far_cell, ref.far_node, ref.far_count)
+    assert _pairs(got.near_cell, got.near_node, got.near_count) == _pairs(
+        ref.near_cell, ref.near_node, ref.near_count
+    )
+    S = int(cap.max_summary_nodes)
+    assert all(c >= S for c, _ in far_g), "exported to its own block"
+
+
 def test_the_receiver_walk_emits_the_same_sets(two_domains, pallas_walk):
     """Seeds (my cell root, imported row) over a combined [local ; imported] space."""
     me, other = two_domains

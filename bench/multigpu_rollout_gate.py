@@ -205,8 +205,12 @@ caps = None
 if NDEV > 1:
     per = leaves_total / NDEV
     pow2 = lambda x, floor: 1 << max(floor, int(np.ceil(np.log2(max(x, 1)))))
+    from jaccpot.distributed.cross import _cross_two_sided
+
+    # two-sided (the default) publishes one summary cell per LEAF, so max_cells must
+    # hold every live leaf of a shard: its leaf capacity bounds that exactly
     caps = CrossCapacities(
-        max_cells=pow2(2.5 * 0.29 * per, 13),
+        max_cells=LEAF_CAP if _cross_two_sided() else pow2(2.5 * 0.29 * per, 13),
         export_far_cap=pow2(2.5 * 53 * per, 21),
         export_near_cap=pow2(2.5 * 10 * per, 21),
         send_node_cap=pow2(2.5 * 1.25 * per, 15),
