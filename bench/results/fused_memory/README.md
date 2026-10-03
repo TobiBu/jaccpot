@@ -9,6 +9,7 @@ carries the contention flag). Plummer seed 0 unless named, leaf 64 cell leaves, 
 | --- | --- | --- |
 | base | b296ec2 | #357's head (81a17ef) + the budget bench |
 | new | 9c91797 | perf/fused-memory: caps from counts, sorts, retry, masses fix (the A/B, the ladder to 2.4e7, `twocard/`) |
+| step 3 | perf/fused-carry | + donated carry, far list outside the scan (`step3/`; `p32m_pr358_prealloc` is #358's head a7767b8+) |
 | new + queue | a7767b8 | + the flat walk's queue ceiling 2^28 (the 3.2e7 rungs, `disc_25m`, the `acc_*` rows; bench file of the working tree) |
 
 * `step0/`: `b_<N>_<bench|tight>_r<k>`, base code; `bench` = the harness's named caps, `tight` = caps named at 1.5x
@@ -19,3 +20,6 @@ carries the contention flag). Plummer seed 0 unless named, leaf 64 cell leaves, 
 * `ladder/`: the one-card N ladder on the new code, caps unnamed, memory fraction 0.9; `acc_*` the fp64
   accuracy rows; `disc_25m` the production IC whole.
 * `twocard/`: the c4 probe, two cards (2+1, a NODE pair) against one, caps unnamed.
+* `step3/`: Step 3 (donated carry). `c8m_{donate,nodonate}_r<k>` interleaved at 8e6; `disc25m_donate`;
+  `p32m_donate` (on-demand allocator: fails on fragmentation), `p32m_donate_async` (cuda_async allocator),
+  `p32m_donate_prealloc` and `p32m_pr358_prealloc` (preallocated arena at fraction 0.88, Step 3 vs #358).
