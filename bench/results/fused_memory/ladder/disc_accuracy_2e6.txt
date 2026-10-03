@@ -1,0 +1,12 @@
+Eager fused-lane force on disk_bulge_25m.npz, prefix 2e6 (masses x 12.58), cell leaves, cell_min_level 8,
+dehnen MAC, against an fp64 direct sum on 512 targets (rng 12345), card 3, 2026-10-03. Scratch script
+scratchpad/disc/disc_acc.py (the bench's IC path, plus LEAF/THETA/ORDER/SOFT overrides).
+
+code  caps     leaf theta p  softening  rel-L2      median     max
+base  harness  64   0.8   5  0.02683    4.5142e-01  2.642e-02  3.036e+00
+new   unnamed  64   0.8   5  0.02683    4.5142e-01  2.642e-02  3.036e+00
+new   unnamed  256  0.6   6  0.02683    2.6871e-01  1.398e-02  1.836e+00
+new   unnamed  64   0.8   5  1e-4       1.0617e-03  7.193e-04  5.153e-03
+
+Worst particles (base, leaf 64): bulge (component 1) at r = 0.014-0.026, |a| 22-33, FMM force 2.5-4x the
+direct one -- the unsoftened far field accepted within the softening length.

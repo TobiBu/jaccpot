@@ -1,0 +1,3 @@
+shard 0: lists (52428800, 118489088) -> (60817408, 118489088)
+merged walk caps: {'queue_capacity': 16777216, 'peak_wavefront': 8580674, 'compact_far_pair_capacity': 60817408, 'near_edge_capacity': 118489088}
+  TIMING local      min 1081.00 ms  median 1121.06 ms  iqr 60.34 ms  (first call incl. compile 31.4 s; {'loadavg1_max': 18.86669921875, 'other_gpu_util_max': 100, 'foreign_pids_on_devices': [(1, 3623362, 'rremme'), (2, 3957035, 'afortuin'), (2, 3957746, 'afortuin'), (2, 3958514, 'afortuin')], 'contaminated': True, 'flags': ['foreign-process-on-device', 'loadavg>=8 (18.9)', 'other-gpus-busy (100%)']})

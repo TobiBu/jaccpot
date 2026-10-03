@@ -1,0 +1,3 @@
+merged walk caps: {'queue_capacity': 16777216, 'peak_wavefront': 14731810, 'compact_far_pair_capacity': 104857600, 'near_edge_capacity': 193986560}
+  TIMING local      min 1717.54 ms  median 1728.03 ms  iqr 56.61 ms  (first call incl. compile 29.1 s; {'loadavg1_max': 22.30322265625, 'other_gpu_util_max': 100, 'foreign_pids_on_devices': [(2, 3957035, 'afortuin'), (2, 3957746, 'afortuin'), (2, 3958514, 'afortuin')], 'contaminated': True, 'flags': ['foreign-process-on-device', 'loadavg>=8 (22.3)', 'other-gpus-busy (100%)']})
+  local-only (no cross)        rel-L2 vs fp64 direct (ALL sources) = 6.3417e-04   [order=6 dtype=float32 accum=input export_theta=None]

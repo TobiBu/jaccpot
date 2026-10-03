@@ -1,0 +1,1619 @@
+{
+ "mode": "budget",
+ "n": 2000000,
+ "ic": "plummer",
+ "seed": 0,
+ "leaf": 64,
+ "theta": 0.8,
+ "order": 5,
+ "cell_min_level": 8,
+ "caps": "bench",
+ "cap_env": {
+  "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "33554432",
+  "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "67108864"
+ },
+ "xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUSTOM_CALL --xla_gpu_graph_min_graph_size=2 --xla_dump_to=/tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/s0/dump_bench_2000000 --xla_dump_hlo_as_text --xla_dump_hlo_module_re=.*(_eval|_compiled_runner).*",
+ "mem_fraction": "0.9",
+ "worktree": "/export/home/tbuck/jaccpot-memory-base",
+ "yggdrax_worktree": "/export/home/tbuck/yggdrax-memory-wt",
+ "device": "cuda:0",
+ "cuda_visible": "3",
+ "live_leaves": 102648,
+ "leaf_capacity": 118784,
+ "softening": 1e-07,
+ "dt": 0.01,
+ "prepare_s": 50.3282779045403,
+ "counts": {
+  "far_pair_count": 11045986,
+  "total_neighbors": 5110856,
+  "peak_wavefront": 1290546,
+  "max_neighbors_observed": 639,
+  "rounds": 74,
+  "compact_far_pair_capacity": 33554432,
+  "near_edge_capacity": 67108864,
+  "queue_capacity": 2097152,
+  "far_named": true,
+  "near_edge_named": true,
+  "grew": [
+   "max_pair_queue 262144->524288",
+   "max_pair_queue 524288->1048576",
+   "max_pair_queue 1048576->2097152"
+  ]
+ },
+ "prepare_events": [
+  {
+   "label": "start",
+   "t": 0.00014821067452430725,
+   "in_use": 95232,
+   "peak": 95232,
+   "limit": 38166069248
+  },
+  {
+   "label": "before_prepare",
+   "t": 1.5061470996588469,
+   "in_use": 41649664,
+   "peak": 100788736,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:start",
+   "t": 1.5064537599682808,
+   "in_use": 41649664,
+   "peak": 100788736,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 1.5067098122090101,
+   "in_use": 41649664,
+   "peak": 100788736,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 14.479562995955348,
+   "in_use": 182625280,
+   "peak": 615601152,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 14.480031378567219,
+   "in_use": 182625280,
+   "peak": 615601152,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 32.40749289467931,
+   "in_use": 188982784,
+   "peak": 948153600,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 34.136099169030786,
+   "in_use": 193419520,
+   "peak": 948153600,
+   "limit": 38166069248,
+   "queue": 262144,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 37.02860235981643,
+   "in_use": 596074496,
+   "peak": 1010927104,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 37.02947588264942,
+   "in_use": 596074496,
+   "peak": 1010927104,
+   "limit": 38166069248,
+   "queue": 524288,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 39.577812537550926,
+   "in_use": 998729472,
+   "peak": 1424432896,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 39.57848466001451,
+   "in_use": 596074496,
+   "peak": 1424432896,
+   "limit": 38166069248,
+   "queue": 1048576,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 41.70247082412243,
+   "in_use": 998729472,
+   "peak": 1435887872,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 41.703262727707624,
+   "in_use": 596074496,
+   "peak": 1435887872,
+   "limit": 38166069248,
+   "queue": 2097152,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 44.096760615706444,
+   "in_use": 998729472,
+   "peak": 1470097664,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 46.82056828960776,
+   "in_use": 863437312,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:start",
+   "t": 46.82083663158119,
+   "in_use": 863437312,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:end",
+   "t": 50.57542167417705,
+   "in_use": 899547904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 50.57773092575371,
+   "in_use": 893588224,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:end",
+   "t": 51.83392586000264,
+   "in_use": 882043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_prepare",
+   "t": 51.83447336219251,
+   "in_use": 882043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  }
+ ],
+ "live_after_prepare": {
+  "count": 94,
+  "total_gib": 0.8054232206195593,
+  "top": [
+   {
+    "shape": [
+     67108864
+    ],
+    "dtype": "int32",
+    "gib": 0.25
+   },
+   {
+    "shape": [
+     33554432
+    ],
+    "dtype": "int32",
+    "gib": 0.125
+   },
+   {
+    "shape": [
+     33554432
+    ],
+    "dtype": "int32",
+    "gib": 0.125
+   },
+   {
+    "shape": [
+     33554432
+    ],
+    "dtype": "int32",
+    "gib": 0.125
+   },
+   {
+    "shape": [
+     237567,
+     36
+    ],
+    "dtype": "float32",
+    "gib": 0.031860217452049255
+   },
+   {
+    "shape": [
+     118784,
+     64
+    ],
+    "dtype": "int32",
+    "gib": 0.0283203125
+   },
+   {
+    "shape": [
+     2000000,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.022351741790771484
+   },
+   {
+    "shape": [
+     2000000,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.022351741790771484
+   },
+   {
+    "shape": [
+     2000000
+    ],
+    "dtype": "uint64",
+    "gib": 0.014901161193847656
+   },
+   {
+    "shape": [
+     2000000
+    ],
+    "dtype": "int32",
+    "gib": 0.007450580596923828
+   },
+   {
+    "shape": [
+     2000000
+    ],
+    "dtype": "float32",
+    "gib": 0.007450580596923828
+   },
+   {
+    "shape": [
+     2000000
+    ],
+    "dtype": "int32",
+    "gib": 0.007450580596923828
+   },
+   {
+    "shape": [
+     2000000
+    ],
+    "dtype": "float32",
+    "gib": 0.007450580596923828
+   },
+   {
+    "shape": [
+     118784,
+     64
+    ],
+    "dtype": "bool",
+    "gib": 0.007080078125
+   },
+   {
+    "shape": [
+     237567,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.0026550181210041046
+   },
+   {
+    "shape": [
+     237567,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.0026550181210041046
+   },
+   {
+    "shape": [
+     237567,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.0026550181210041046
+   },
+   {
+    "shape": [
+     118784,
+     1,
+     4
+    ],
+    "dtype": "int32",
+    "gib": 0.00177001953125
+   },
+   {
+    "shape": [
+     237567
+    ],
+    "dtype": "int64",
+    "gib": 0.001770012080669403
+   },
+   {
+    "shape": [
+     237567,
+     2
+    ],
+    "dtype": "int32",
+    "gib": 0.001770012080669403
+   }
+  ]
+ },
+ "prepared_breakdown": {
+  "total_gib": 0.7675744174048305,
+  "top": [
+   {
+    "path": ".neighbor_list.neighbors",
+    "shape": [
+     67108864
+    ],
+    "dtype": "int32",
+    "gib": 0.25
+   },
+   {
+    "path": ".compact_far_pairs.sources",
+    "shape": [
+     33554432
+    ],
+    "dtype": "int32",
+    "gib": 0.125
+   },
+   {
+    "path": ".compact_far_pairs.targets",
+    "shape": [
+     33554432
+    ],
+    "dtype": "int32",
+    "gib": 0.125
+   },
+   {
+    "path": ".compact_far_pairs.tags",
+    "shape": [
+     33554432
+    ],
+    "dtype": "int32",
+    "gib": 0.125
+   },
+   {
+    "path": ".local_data.coefficients",
+    "shape": [
+     237567,
+     36
+    ],
+    "dtype": "float32",
+    "gib": 0.031860217452049255
+   },
+   {
+    "path": ".nearfield_leaf_particle_indices",
+    "shape": [
+     118784,
+     64
+    ],
+    "dtype": "int32",
+    "gib": 0.0283203125
+   },
+   {
+    "path": ".tree.positions_sorted",
+    "shape": [
+     2000000,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.022351741790771484
+   },
+   {
+    "path": ".tree.topology.morton_codes",
+    "shape": [
+     2000000
+    ],
+    "dtype": "uint64",
+    "gib": 0.014901161193847656
+   },
+   {
+    "path": ".tree.topology.particle_indices",
+    "shape": [
+     2000000
+    ],
+    "dtype": "int32",
+    "gib": 0.007450580596923828
+   },
+   {
+    "path": ".tree.masses_sorted",
+    "shape": [
+     2000000
+    ],
+    "dtype": "float32",
+    "gib": 0.007450580596923828
+   },
+   {
+    "path": ".tree.inverse_permutation",
+    "shape": [
+     2000000
+    ],
+    "dtype": "int32",
+    "gib": 0.007450580596923828
+   },
+   {
+    "path": ".nearfield_leaf_particle_mask",
+    "shape": [
+     118784,
+     64
+    ],
+    "dtype": "bool",
+    "gib": 0.007080078125
+   },
+   {
+    "path": ".local_data.centers",
+    "shape": [
+     237567,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.0026550181210041046
+   },
+   {
+    "path": ".nearfield_target_block_source_leaf_ids_padded",
+    "shape": [
+     118784,
+     1,
+     4
+    ],
+    "dtype": "int32",
+    "gib": 0.00177001953125
+   },
+   {
+    "path": ".tree.topology.node_ranges",
+    "shape": [
+     237567,
+     2
+    ],
+    "dtype": "int32",
+    "gib": 0.001770012080669403
+   },
+   {
+    "path": ".tree.topology.nodes_by_level",
+    "shape": [
+     237567
+    ],
+    "dtype": "int64",
+    "gib": 0.001770012080669403
+   },
+   {
+    "path": ".tree.topology.leaf_codes",
+    "shape": [
+     118784
+    ],
+    "dtype": "uint64",
+    "gib": 0.000885009765625
+   },
+   {
+    "path": ".tree.topology.parent",
+    "shape": [
+     237567
+    ],
+    "dtype": "int32",
+    "gib": 0.0008850060403347015
+   },
+   {
+    "path": ".tree.topology.node_level",
+    "shape": [
+     237567
+    ],
+    "dtype": "int32",
+    "gib": 0.0008850060403347015
+   },
+   {
+    "path": ".neighbor_list.offsets",
+    "shape": [
+     118785
+    ],
+    "dtype": "int32",
+    "gib": 0.00044250860810279846
+   },
+   {
+    "path": ".neighbor_list.target_block_offsets",
+    "shape": [
+     118785
+    ],
+    "dtype": "int32",
+    "gib": 0.00044250860810279846
+   },
+   {
+    "path": ".nearfield_target_block_offsets",
+    "shape": [
+     118785
+    ],
+    "dtype": "int32",
+    "gib": 0.00044250860810279846
+   },
+   {
+    "path": ".tree.topology.leaf_depths",
+    "shape": [
+     118784
+    ],
+    "dtype": "int32",
+    "gib": 0.0004425048828125
+   },
+   {
+    "path": ".neighbor_list.leaf_indices",
+    "shape": [
+     118784
+    ],
+    "dtype": "int32",
+    "gib": 0.0004425048828125
+   },
+   {
+    "path": ".neighbor_list.counts",
+    "shape": [
+     118784
+    ],
+    "dtype": "int32",
+    "gib": 0.0004425048828125
+   }
+  ],
+  "by_field_gib": {
+   "compact_far_pairs": 0.3750000037252903,
+   "neighbor_list": 0.2522125318646431,
+   "tree": 0.0673487177118659,
+   "local_data": 0.03451523557305336,
+   "nearfield_leaf_particle_indices": 0.0283203125,
+   "nearfield_leaf_particle_mask": 0.007080078125,
+   "nearfield_target_block_source_leaf_ids_padded": 0.00177001953125,
+   "nearfield_target_block_offsets": 0.00044250860810279846,
+   "nearfield_target_block_valid_mask_padded": 0.0004425048828125,
+   "radix_fast_payload": 0.0004425048828125
+  }
+ },
+ "eval_contention": {
+  "devices": [
+   3
+  ],
+  "n_samples": 2,
+  "duration_s": 1.5972862243652344,
+  "foreign_pids_on_devices": [
+   [
+    3,
+    1349794,
+    "psaegert"
+   ]
+  ],
+  "own_util_max": {
+   "3": 30
+  },
+  "other_gpu_util_max": 100,
+  "loadavg1_max": 22.3974609375,
+  "loadavg1_min": 22.3974609375,
+  "cores": 64,
+  "contaminated": true,
+  "flags": [
+   "foreign-process-on-device",
+   "loadavg>=8 (22.4)",
+   "other-gpus-busy (100%)"
+  ]
+ },
+ "eval_ms": {
+  "min": 26.68687142431736,
+  "median": 26.83113142848015,
+  "samples": [
+   29.044434428215027,
+   26.819884777069092,
+   26.68687142431736,
+   26.83113142848015,
+   26.85721218585968,
+   26.805395260453224,
+   26.882605627179146
+  ]
+ },
+ "eval_memory_analysis": {
+  "argument_gib": 0.3602660596370697,
+  "output_gib": 0.022351741790771484,
+  "alias_gib": 0.0,
+  "temp_gib": 1.518377110362053,
+  "generated_code_gib": 2.3245811462402344e-06
+ },
+ "peak_after_eval_gib": 5.561689615249634,
+ "scan_compile_s": 66.84230911545455,
+ "scan_contention": {
+  "devices": [
+   3
+  ],
+  "n_samples": 2,
+  "duration_s": 1.6804611682891846,
+  "foreign_pids_on_devices": [
+   [
+    3,
+    1349794,
+    "psaegert"
+   ]
+  ],
+  "own_util_max": {
+   "3": 99
+  },
+  "other_gpu_util_max": 100,
+  "loadavg1_max": 20.10400390625,
+  "loadavg1_min": 20.10400390625,
+  "cores": 64,
+  "contaminated": true,
+  "flags": [
+   "foreign-process-on-device",
+   "loadavg>=8 (20.1)",
+   "other-gpus-busy (100%)"
+  ]
+ },
+ "step_ms": {
+  "min": 95.2498521655798,
+  "median": 96.19048734505971,
+  "samples": [
+   112.31338667372863,
+   96.19048734505971,
+   95.2498521655798
+  ]
+ },
+ "peak_after_scan_gib": 5.659826278686523,
+ "scan_events": [
+  {
+   "label": "after_eval_compile",
+   "t": 58.23613538220525,
+   "in_use": 906043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_eval_timing",
+   "t": 59.912915740162134,
+   "in_use": 882043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:start",
+   "t": 60.07495257072151,
+   "in_use": 196915968,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 60.07531772367656,
+   "in_use": 196915968,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 64.42934539169073,
+   "in_use": 235798784,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 64.4297166839242,
+   "in_use": 235798784,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 64.74017127230763,
+   "in_use": 239599872,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 65.42197391949594,
+   "in_use": 244330240,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 262144,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 67.7409164197743,
+   "in_use": 714094080,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 67.7417360637337,
+   "in_use": 714094080,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 524288,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 70.32377371937037,
+   "in_use": 1116749056,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 70.32457235455513,
+   "in_use": 646985216,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 1048576,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 72.57105118781328,
+   "in_use": 1049640192,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 72.57213384285569,
+   "in_use": 646985216,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 2097152,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 74.82567241229117,
+   "in_use": 1049640192,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 74.88316039554775,
+   "in_use": 981046272,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:start",
+   "t": 74.88369770906866,
+   "in_use": 981046272,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:end",
+   "t": 76.48046680353582,
+   "in_use": 1036753152,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 76.48355877771974,
+   "in_use": 1033050880,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:end",
+   "t": 76.49896444380283,
+   "in_use": 1036598272,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_scan_compile",
+   "t": 126.83603716827929,
+   "in_use": 1224150528,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_scan_timing",
+   "t": 128.51701514422894,
+   "in_use": 1278667776,
+   "peak": 6077192192,
+   "limit": 38166069248
+  }
+ ],
+ "runner_memory_analysis": {
+  "argument_gib": 0.8726850925013423,
+  "output_gib": 0.8726855255663395,
+  "alias_gib": 0.0,
+  "temp_gib": 2.784465231001377,
+  "generated_code_gib": 4.265643656253815e-05
+ },
+ "eval_buffer_assignment": {
+  "file": "module_2595.jit__eval.sm_8.0_gpu_after_optimizations-buffer-assignment.txt",
+  "total_gib": 1.9009950533509254,
+  "top": [
+   {
+    "id": "allocation 46",
+    "gib": 1.518377110362053,
+    "kind": "size 1630345008, preallocated-temp:",
+    "largest_values": [
+     "<2744 pallas_call.1 @0> (size=1195376640,offset=0): f32[1167360,64,4]{2,1,0}",
+     "<2687 loop_maximum_fusion @0> (size=268435456,offset=1195376640): s32[67108864]{0}",
+     "<2677 loop_broadcast_fusion.1 @0> (size=121634816,offset=1195376640): f32[118784,64,4]{2,1,0}"
+    ]
+   },
+   {
+    "id": "allocation 0",
+    "gib": 0.25,
+    "kind": "size 268435456, parameter 7, shape |s32[67108864]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2685 prepared_in_2__neighbors.1 @0> (size=268435456,offset=0): s32[67108864]{0}"
+    ]
+   },
+   {
+    "id": "allocation 1",
+    "gib": 0.031860217452049255,
+    "kind": "size 34209648, parameter 5, shape |f32[237567,36]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2601 prepared_in_1__coefficients.1 @0> (size=34209648,offset=0): f32[237567,36]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 2",
+    "gib": 0.0283203125,
+    "kind": "size 30408704, parameter 10, shape |s32[118784,64]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2679 prepared_in_17__1_.1 @0> (size=30408704,offset=0): s32[118784,64]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 3",
+    "gib": 0.022351741790771484,
+    "kind": "size 24000000, output shape is |f32[2000000,3]|, maybe-live-out:",
+    "largest_values": [
+     "<2596 loop_broadcast_fusion @0> (size=24000000,offset=0): f32[2000000,3]{1,0}",
+     "<2675 input_scatter_fusion.2 @0> (size=24000000,offset=0): f32[2000000,3]{1,0}",
+     "<2748 loop_gather_fusion @0> (size=24000000,offset=0): f32[2000000,1,3]{2,1,0}"
+    ]
+   },
+   {
+    "id": "allocation 4",
+    "gib": 0.022351741790771484,
+    "kind": "size 24000000, parameter 1, shape |f32[2000000,3]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2600 prepared_in_0__19_.1 @0> (size=24000000,offset=0): f32[2000000,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 5",
+    "gib": 0.007450580596923828,
+    "kind": "size 8000000, parameter 2, shape |f32[2000000]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2681 prepared_in_0__20_.1 @0> (size=8000000,offset=0): f32[2000000]{0}"
+    ]
+   },
+   {
+    "id": "allocation 6",
+    "gib": 0.007450580596923828,
+    "kind": "size 8000000, parameter 3, shape |s32[2000000]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2747 prepared_in_0__21_.1 @0> (size=8000000,offset=0): s32[2000000]{0}"
+    ]
+   },
+   {
+    "id": "allocation 7",
+    "gib": 0.007080078125,
+    "kind": "size 7602176, parameter 11, shape |pred[118784,64]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2678 prepared_in_17__2_.1 @0> (size=7602176,offset=0): pred[118784,64]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 8",
+    "gib": 0.0026550181210041046,
+    "kind": "size 2850804, parameter 4, shape |f32[237567,3]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2597 prepared_in_1__centers.1 @0> (size=2850804,offset=0): f32[237567,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 9",
+    "gib": 0.001770012080669403,
+    "kind": "size 1900536, parameter 0, shape |s32[237567,2]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2603 prepared_in_0__7_.1 @0> (size=1900536,offset=0): s32[237567,2]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 10",
+    "gib": 0.00044250860810279846,
+    "kind": "size 475140, parameter 6, shape |s32[118785]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2688 prepared_in_2__offsets.1 @0> (size=475140,offset=0): s32[118785]{0}"
+    ]
+   },
+   {
+    "id": "allocation 11",
+    "gib": 0.0004425048828125,
+    "kind": "size 475136, parameter 8, shape |s32[118784]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2598 prepared_in_2__leaf_indices.1 @0> (size=475136,offset=0): s32[118784]{0}"
+    ]
+   },
+   {
+    "id": "allocation 12",
+    "gib": 0.0004425048828125,
+    "kind": "size 475136, parameter 9, shape |s32[118784]| at ShapeIndex {}:",
+    "largest_values": [
+     "<2689 prepared_in_2__counts.1 @0> (size=475136,offset=0): s32[118784]{0}"
+    ]
+   },
+   {
+    "id": "allocation 18",
+    "gib": 2.2351741790771484e-08,
+    "kind": "size 24, constant:",
+    "largest_values": [
+     "<2648 constant_1195_0 @0> (size=24,offset=0): f32[6]{0}"
+    ]
+   },
+   {
+    "id": "allocation 13",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<23 add.227.0 @0> (size=4,offset=0): f32[]"
+    ]
+   },
+   {
+    "id": "allocation 14",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<22 scatter-add.4 @0> (size=4,offset=0): f32[]"
+    ]
+   },
+   {
+    "id": "allocation 15",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<21 scatter-add.1 @0> (size=4,offset=0): f32[]"
+    ]
+   },
+   {
+    "id": "allocation 16",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<8 add.15.0 @0> (size=4,offset=0): f32[]"
+    ]
+   },
+   {
+    "id": "allocation 17",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<7 scatter-add.3 @0> (size=4,offset=0): f32[]"
+    ]
+   },
+   {
+    "id": "allocation 19",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<6 scatter-add.2 @0> (size=4,offset=0): f32[]"
+    ]
+   },
+   {
+    "id": "allocation 20",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<5 reduce_max.5.0 @0> (size=4,offset=0): s32[]"
+    ]
+   },
+   {
+    "id": "allocation 21",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<4 reduce_max.4 @0> (size=4,offset=0): s32[]"
+    ]
+   },
+   {
+    "id": "allocation 22",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<3 reduce_max.3 @0> (size=4,offset=0): s32[]"
+    ]
+   },
+   {
+    "id": "allocation 23",
+    "gib": 3.725290298461914e-09,
+    "kind": "size 4, thread-local:",
+    "largest_values": [
+     "<20 reduce_window_sum.21.0 @0> (size=4,offset=0): s32[]"
+    ]
+   }
+  ]
+ },
+ "runner_buffer_assignment": {
+  "file": "module_3087.jit__compiled_runner.sm_8.0_gpu_after_optimizations-buffer-assignment.txt",
+  "total_gib": 4.529874718748033,
+  "top": [
+   {
+    "id": "allocation 778",
+    "gib": 2.784465231001377,
+    "kind": "size 2989796776, preallocated-temp:",
+    "largest_values": [
+     "<18678 pallas_call.532 @0> (size=1195376640,offset=0): f32[1167360,64,4]{2,1,0}",
+     "<18110 custom-call.12{2} @0> (size=827685375,offset=0): u8[827685375]{0}",
+     "<18116 custom-call.13{2} @0> (size=827685375,offset=0): u8[827685375]{0}"
+    ]
+   },
+   {
+    "id": "allocation 0",
+    "gib": 0.25,
+    "kind": "size 268435456, maybe-live-out:",
+    "largest_values": [
+     "<18105 loop_select_fusion.2 @0> (size=268435456,offset=0): s32[67108864]{0}",
+     "<18111 loop_gather_fusion.2 @0> (size=268435456,offset=0): s32[67108864,1]{1,0}",
+     "<18398 wrapped_iota.7 @0> (size=268435456,offset=0): s64[33554432]{0}"
+    ]
+   },
+   {
+    "id": "allocation 1",
+    "gib": 0.25,
+    "kind": "size 268435456, parameter 26, shape |s32[67108864]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18746 prepared_initial_2__neighbors.1 @0> (size=268435456,offset=0): s32[67108864]{0}"
+    ]
+   },
+   {
+    "id": "allocation 2",
+    "gib": 0.125,
+    "kind": "size 134217728, maybe-live-out:",
+    "largest_values": [
+     "<18381 wrapped_iota.5 @0> (size=134217728,offset=0): s64[16777216]{0}",
+     "<18387 wrapped_iota.6 @0> (size=134217728,offset=0): s64[16777216]{0}",
+     "<18393 input_concatenate_fusion.1 @0> (size=134217728,offset=0): s32[16777216,2]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 3",
+    "gib": 0.125,
+    "kind": "size 134217728, maybe-live-out:",
+    "largest_values": [
+     "<1026 pallas_call.661{3} @0> (size=134217728,offset=0): s32[33554432]{0}",
+     "<1038 pallas_call.669{3} @0> (size=134217728,offset=0): s32[33554432]{0}",
+     "<1051 pallas_call.677{3} @0> (size=134217728,offset=0): s32[33554432]{0}"
+    ]
+   },
+   {
+    "id": "allocation 4",
+    "gib": 0.125,
+    "kind": "size 134217728, maybe-live-out:",
+    "largest_values": [
+     "<1025 pallas_call.661{2} @0> (size=134217728,offset=0): s32[33554432]{0}",
+     "<1037 pallas_call.669{2} @0> (size=134217728,offset=0): s32[33554432]{0}",
+     "<1050 pallas_call.677{2} @0> (size=134217728,offset=0): s32[33554432]{0}"
+    ]
+   },
+   {
+    "id": "allocation 5",
+    "gib": 0.125,
+    "kind": "size 134217728, parameter 51, shape |s32[33554432]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18795 prepared_initial_19__sources.1 @0> (size=134217728,offset=0): s32[33554432]{0}"
+    ]
+   },
+   {
+    "id": "allocation 6",
+    "gib": 0.125,
+    "kind": "size 134217728, parameter 52, shape |s32[33554432]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18796 prepared_initial_19__targets.1 @0> (size=134217728,offset=0): s32[33554432]{0}"
+    ]
+   },
+   {
+    "id": "allocation 7",
+    "gib": 0.125,
+    "kind": "size 134217728, parameter 53, shape |s32[33554432]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18797 prepared_initial_19__tags.1 @0> (size=134217728,offset=0): s32[33554432]{0}"
+    ]
+   },
+   {
+    "id": "allocation 8",
+    "gib": 0.04470348358154297,
+    "kind": "size 48000000, maybe-live-out:",
+    "largest_values": [
+     "<17688 loop_dynamic_update_slice_fusion.19 @0> (size=48000000,offset=0): f32[2000000,2,3]{2,1,0}",
+     "<18681 loop_dynamic_update_slice_fusion.18 @0> (size=48000000,offset=0): f32[2000000,2,3]{2,1,0}",
+     "<18781 copy.817 @0> (size=48000000,offset=0): f32[2000000,2,3]{2,1,0}"
+    ]
+   },
+   {
+    "id": "allocation 9",
+    "gib": 0.04470348358154297,
+    "kind": "size 48000000, parameter 55, shape |f32[2000000,2,3]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18780 state_initial.1 @0> (size=48000000,offset=0): f32[2000000,2,3]{2,1,0}"
+    ]
+   },
+   {
+    "id": "allocation 10",
+    "gib": 0.031860217452049255,
+    "kind": "size 34209648, maybe-live-out:",
+    "largest_values": [
+     "<18379 loop_gather_fusion.8 @0> (size=34209648,offset=0): f32[36,237567,1]{2,0,1}",
+     "<18787 input_transpose_fusion @0> (size=34209648,offset=0): f32[237567,36]{1,0}",
+     "<18397 loop_and_select_fusion.1{1} @0> (size=33554432,offset=0): pred[33554432]{0}"
+    ]
+   },
+   {
+    "id": "allocation 11",
+    "gib": 0.031860217452049255,
+    "kind": "size 34209648, parameter 24, shape |f32[237567,36]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18742 prepared_initial_1__coefficients.1 @0> (size=34209648,offset=0): f32[237567,36]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 12",
+    "gib": 0.0283203125,
+    "kind": "size 30408704, maybe-live-out:",
+    "largest_values": [
+     "<18069 wrapped_transpose.1 @0> (size=30408704,offset=0): s32[118784,64]{1,0}",
+     "<18579 input_add_gather_reduce_fusion.1{2} @0> (size=30408704,offset=0): s32[118784,64]{1,0}",
+     "<18761 copy.807 @0> (size=30408704,offset=0): s32[118784,64]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 13",
+    "gib": 0.0283203125,
+    "kind": "size 30408704, maybe-live-out:",
+    "largest_values": [
+     "<710 loop_dynamic_update_slice_fusion @0> (size=30408704,offset=0): f32[16,118784,4]{2,1,0}",
+     "<778 loop_dynamic_update_slice_fusion.1 @0> (size=30408704,offset=0): s32[64,118784]{1,0}",
+     "<18067 loop_broadcast_fusion.7 @0> (size=30408704,offset=0): s32[64,118784]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 14",
+    "gib": 0.0283203125,
+    "kind": "size 30408704, parameter 36, shape |s32[118784,64]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18760 prepared_initial_3_.1 @0> (size=30408704,offset=0): s32[118784,64]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 15",
+    "gib": 0.0283203125,
+    "kind": "size 30408704, parameter 45, shape |s32[118784,64]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18772 prepared_initial_17__1_.1 @0> (size=30408704,offset=0): s32[118784,64]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 16",
+    "gib": 0.022351741790771484,
+    "kind": "size 24000000, maybe-live-out:",
+    "largest_values": [
+     "<17686 wrapped_slice @0> (size=24000000,offset=0): f32[2000000,1,3]{2,1,0}",
+     "<18040 loop_gather_fusion.5 @0> (size=24000000,offset=0): f32[2000000,1,3]{2,1,0}",
+     "<18733 copy.794 @0> (size=24000000,offset=0): f32[2000000,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 17",
+    "gib": 0.022351741790771484,
+    "kind": "size 24000000, maybe-live-out:",
+    "largest_values": [
+     "<18682 loop_gather_fusion.1 @0> (size=24000000,offset=0): f32[2000000,1,3]{2,1,0}",
+     "<18783 copy.818 @0> (size=24000000,offset=0): f32[2000000,3]{1,0}",
+     "<18982 arg_tuple.39{45} (phi) @0> (size=24000000,offset=0): f32[2000000,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 18",
+    "gib": 0.022351741790771484,
+    "kind": "size 24000000, parameter 19, shape |f32[2000000,3]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18732 prepared_initial_0__19_.1 @0> (size=24000000,offset=0): f32[2000000,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 19",
+    "gib": 0.022351741790771484,
+    "kind": "size 24000000, parameter 56, shape |f32[2000000,3]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18782 acceleration_initial.1 @0> (size=24000000,offset=0): f32[2000000,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 20",
+    "gib": 0.014901161193847656,
+    "kind": "size 16000000, maybe-live-out:",
+    "largest_values": [
+     "<17699 wrapped_iota @0> (size=16000000,offset=0): s64[2000000]{0}",
+     "<17704 loop_gather_fusion.6 @0> (size=16000000,offset=0): u64[2000000,1]{1,0}",
+     "<18707 copy.781 @0> (size=16000000,offset=0): u64[2000000]{0}"
+    ]
+   },
+   {
+    "id": "allocation 21",
+    "gib": 0.014901161193847656,
+    "kind": "size 16000000, parameter 6, shape |u64[2000000]| at ShapeIndex {}:",
+    "largest_values": [
+     "<18706 prepared_initial_0__6_.1 @0> (size=16000000,offset=0): u64[2000000]{0}"
+    ]
+   },
+   {
+    "id": "allocation 22",
+    "gib": 0.007450580596923828,
+    "kind": "size 8000000, maybe-live-out:",
+    "largest_values": [
+     "<17867 input_add_compare_convert_gather_reduce_select_fusion{5} @0> (size=8000000,offset=0): s32[2000000]{0}",
+     "<18705 copy.780 @0> (size=8000000,offset=0): s32[2000000]{0}",
+     "<18943 arg_tuple.39{6} (phi) @0> (size=8000000,offset=0): s32[2000000]{0}"
+    ]
+   },
+   {
+    "id": "allocation 23",
+    "gib": 0.007450580596923828,
+    "kind": "size 8000000, maybe-live-out:",
+    "largest_values": [
+     "<17865 input_add_compare_convert_gather_reduce_select_fusion{3} @0> (size=8000000,offset=0): f32[2000000,1]{1,0}",
+     "<18735 copy.795 @0> (size=8000000,offset=0): f32[2000000]{0}",
+     "<18958 arg_tuple.39{21} (phi) @0> (size=8000000,offset=0): f32[2000000]{0}"
+    ]
+   }
+  ]
+ },
+ "events": [
+  {
+   "label": "start",
+   "t": 0.00014821067452430725,
+   "in_use": 95232,
+   "peak": 95232,
+   "limit": 38166069248
+  },
+  {
+   "label": "before_prepare",
+   "t": 1.5061470996588469,
+   "in_use": 41649664,
+   "peak": 100788736,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:start",
+   "t": 1.5064537599682808,
+   "in_use": 41649664,
+   "peak": 100788736,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 1.5067098122090101,
+   "in_use": 41649664,
+   "peak": 100788736,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 14.479562995955348,
+   "in_use": 182625280,
+   "peak": 615601152,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 14.480031378567219,
+   "in_use": 182625280,
+   "peak": 615601152,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 32.40749289467931,
+   "in_use": 188982784,
+   "peak": 948153600,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 34.136099169030786,
+   "in_use": 193419520,
+   "peak": 948153600,
+   "limit": 38166069248,
+   "queue": 262144,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 37.02860235981643,
+   "in_use": 596074496,
+   "peak": 1010927104,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 37.02947588264942,
+   "in_use": 596074496,
+   "peak": 1010927104,
+   "limit": 38166069248,
+   "queue": 524288,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 39.577812537550926,
+   "in_use": 998729472,
+   "peak": 1424432896,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 39.57848466001451,
+   "in_use": 596074496,
+   "peak": 1424432896,
+   "limit": 38166069248,
+   "queue": 1048576,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 41.70247082412243,
+   "in_use": 998729472,
+   "peak": 1435887872,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 41.703262727707624,
+   "in_use": 596074496,
+   "peak": 1435887872,
+   "limit": 38166069248,
+   "queue": 2097152,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 44.096760615706444,
+   "in_use": 998729472,
+   "peak": 1470097664,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 46.82056828960776,
+   "in_use": 863437312,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:start",
+   "t": 46.82083663158119,
+   "in_use": 863437312,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:end",
+   "t": 50.57542167417705,
+   "in_use": 899547904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 50.57773092575371,
+   "in_use": 893588224,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:end",
+   "t": 51.83392586000264,
+   "in_use": 882043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_prepare",
+   "t": 51.83447336219251,
+   "in_use": 882043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_eval_compile",
+   "t": 58.23613538220525,
+   "in_use": 906043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_eval_timing",
+   "t": 59.912915740162134,
+   "in_use": 882043904,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:start",
+   "t": 60.07495257072151,
+   "in_use": 196915968,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 60.07531772367656,
+   "in_use": 196915968,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 64.42934539169073,
+   "in_use": 235798784,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 64.4297166839242,
+   "in_use": 235798784,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 64.74017127230763,
+   "in_use": 239599872,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 65.42197391949594,
+   "in_use": 244330240,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 262144,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 67.7409164197743,
+   "in_use": 714094080,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 67.7417360637337,
+   "in_use": 714094080,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 524288,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 70.32377371937037,
+   "in_use": 1116749056,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 70.32457235455513,
+   "in_use": 646985216,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 1048576,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 72.57105118781328,
+   "in_use": 1049640192,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk:start",
+   "t": 72.57213384285569,
+   "in_use": 646985216,
+   "peak": 5971818752,
+   "limit": 38166069248,
+   "queue": 2097152,
+   "far_cap": 16777216,
+   "near_cap": 33554432
+  },
+  {
+   "label": "walk:end",
+   "t": 74.82567241229117,
+   "in_use": 1049640192,
+   "peak": 5971818752,
+   "limit": 38166069248
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 74.88316039554775,
+   "in_use": 981046272,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:start",
+   "t": 74.88369770906866,
+   "in_use": 981046272,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "downward:end",
+   "t": 76.48046680353582,
+   "in_use": 1036753152,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 76.48355877771974,
+   "in_use": 1033050880,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "prepare:end",
+   "t": 76.49896444380283,
+   "in_use": 1036598272,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_scan_compile",
+   "t": 126.83603716827929,
+   "in_use": 1224150528,
+   "peak": 6077192192,
+   "limit": 38166069248
+  },
+  {
+   "label": "after_scan_timing",
+   "t": 128.51701514422894,
+   "in_use": 1278667776,
+   "peak": 6077192192,
+   "limit": 38166069248
+  }
+ ],
+ "final_peak_gib": 5.659826278686523
+}
