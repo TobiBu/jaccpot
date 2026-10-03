@@ -165,8 +165,24 @@ indicative), local caps unnamed, min of 5:
 
 ## Next
 
-* A softening-aware acceptance on the flat walk (accept only beyond a multiple of the softening), then the 25M
-  disc+bulge production rollout on this code.
-* The leaf-major evaluation's 3.7x slot padding; the step's carry (plan Step 3) when a real IC needs it.
-* A segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today).
-* The record configuration at 2e5 on a quiet card.
+Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
+2026-10-03, neither started):
+
+* **Consider the softening properly.** The far field is the unsoftened expansion and the geometric MAC ignores
+  epsilon, so in the bulge centre it accepts cells closer than the softening length. Options, to be measured:
+  * a distance floor `d - r_a - r_b >= c eps` in the walk's acceptance (cheap; with Plummer softening c must be
+    ~20-30 for 1e-3, since the Plummer force never turns Newtonian);
+  * compact-support (spline) softening in the near-field kernels plus a floor at its support, exact beyond it;
+  * softened far-field corrections (heaviest; the real-harmonic M2L assumes a harmonic kernel).
+* **`dehnen_error` on the fused lane.** The flat walk has no pair-policy seam, and the per-node fold
+  (`dehnen_theta`) is refuted. The Pallas walk (and yggdrax's flat walk, to keep their pair sets identical) has
+  to evaluate the criterion per pair from the policy's per-node arrays, rebuilt from the refreshed tree inside the
+  scan. Its force-scale estimate already takes the softening, and the mesh lane was in class with it on this IC,
+  so measure whether it alone fixes the bulge centre before building the distance floor.
+
+Then:
+
+* plan Step 3 (slim the step's carry: arguments and outputs are each ~5.7 GiB at 25M);
+* the leaf-major evaluation's 3.7x slot padding;
+* a segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today);
+* the record configuration at 2e5 on a quiet card.
