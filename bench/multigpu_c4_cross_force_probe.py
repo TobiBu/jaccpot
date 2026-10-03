@@ -567,7 +567,7 @@ _far_per_leaf = 16 if TWO_SIDED else 53
 # export far pairs ~53 (293k / 5.5k leaves); export near ~10; sent / received
 # nodes ~1.25 (far nodes 6.7k, near leaves 5.5k); received CSR ~53; receiver far
 # pairs ~53 (+ near-walk far pairs); receiver near pairs ~60
-_recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", _far_per_leaf, 19)
+_recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", _far_per_leaf, 18)
 # Measured at 1e6 per device (2 cards, 2026-10-02, before summary_cell_level = 8):
 # near CSR 1.43-1.51M entries (~29 per leaf), near receiver walk peak 2.66M pairs
 # (~52 per leaf), export walk peak 0.72-0.90M (~17 per leaf). The FAR receiver walk
@@ -599,10 +599,13 @@ caps = CrossCapacities(
     # 2-card 2e6 75.0 -> 72.1 ms, 8e6 254.2 -> 231.6 ms, forces unchanged.
     summary_cell_level=int(os.environ.get("PROBE_SUMMARY_CELL_LEVEL", "8")) or None,
     max_cells=_max_cells,
-    export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", _far_per_leaf, 21),
-    export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 21),
+    # floors at 2^18, not 2^21: at 2e5 per card the 2^21 floors were ~4x the per-leaf
+    # rule (~150k live far pairs) and every one of these buffers is sorted or cleared
+    # on every force
+    export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", _far_per_leaf, 18),
+    export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 18),
     send_node_cap=_auto_cap("PROBE_SEND_NODE_BITS", 1.25, 15),
-    send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", _far_per_leaf, 21),
+    send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", _far_per_leaf, 18),
     recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
     recv_csr_cap=_recv_csr,
     recv_near_csr_cap=_recv_near_csr,
