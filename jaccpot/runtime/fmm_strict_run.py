@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
 import jax
@@ -85,7 +86,89 @@ def _walk_caps_key(validated: Optional[dict]) -> tuple:
     )
 
 
+def _fresh_compact_pair_rebuild_enabled() -> bool:
+    """Whether the fused refresh rebuilds its far-pair list fresh on every step.
+
+    ``JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD`` (default on) and not the
+    legacy ``JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE``. Then the
+    far list a state carries into the refresh is never read: the refresh builds its
+    own, uses it in the same step and returns the input's as a shape placeholder.
+
+    Returns
+    -------
+    bool
+        The flag pair's verdict (the caller adds the lane conditions).
+    """
+    fresh = os.environ.get(
+        "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD", "1"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    unsafe = os.environ.get(
+        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE", "0"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    return fresh and not unsafe
+
+
+def _unaliased(tree: Any) -> Any:
+    """``tree`` with every array that appears under more than one leaf copied.
+
+    XLA refuses to donate one buffer twice ("Attempt to donate the same buffer
+    twice"), and a prepared state can hold the same array under two fields (the
+    flat walk's neighbour list uses one leaf-node range for ``leaf_indices`` and
+    ``particle_order_leaf_indices``). The repeats are small index arrays.
+
+    Parameters
+    ----------
+    tree : Any
+        A pytree about to be donated.
+
+    Returns
+    -------
+    Any
+        The same pytree, each buffer appearing once.
+    """
+    seen: set[int] = set()
+
+    def _once(leaf: Any) -> Any:
+        if not isinstance(leaf, jax.Array):
+            return leaf
+        if id(leaf) in seen:
+            return jnp.copy(leaf)
+        seen.add(id(leaf))
+        return leaf
+
+    return jax.tree_util.tree_map(_once, tree)
+
+
 class StrictRunMixin(_EngineBase):
+    def _strict_far_pairs_ride_outside_the_scan(self, prepared: Any) -> bool:
+        """Whether ``strict_run_v2`` may keep the state's far list out of the scan.
+
+        On the static-radix fused lane with the fresh far-pair rebuild (the
+        default) the carried far list is a placeholder: every refresh builds its
+        own and returns the input's unchanged, so it is dead inside the scan, yet
+        it was an argument AND an output of the compiled runner (3 x P int32 each,
+        1.1 GB at 2.5e7 on the disc+bulge IC). It is detached before the scan and
+        re-attached to the returned state, which the gradient path reads.
+
+        Parameters
+        ----------
+        prepared : Any
+            The state about to enter the scan.
+
+        Returns
+        -------
+        bool
+            ``True`` when the list can ride outside.
+        """
+        mode = str(getattr(self.config.tree, "mode", "")).strip().lower()
+        return (
+            self.tree_type == "radix"
+            and mode == "static_radix"
+            and isinstance(prepared, LargeNPreparedState)
+            and getattr(prepared, "compact_far_pairs", None) is not None
+            and _fresh_compact_pair_rebuild_enabled()
+        )
+
     def _replan_walk_caps_from_needs(self, needs: np.ndarray) -> bool:
         """Raise the validated walk caps to what a failed segment's walks needed.
 
@@ -712,6 +795,7 @@ class StrictRunMixin(_EngineBase):
         return_prepared_state: bool = True,
         step_callback: Optional[Callable[[Array, Array], None]] = None,
         step_callback_stride: int = 1,
+        donate_prepared_state: bool = False,
     ) -> tuple[Array, Optional[PreparedStateLike], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -773,6 +857,14 @@ class StrictRunMixin(_EngineBase):
             Fire-and-forget streaming hook; see above.
         step_callback_stride : int
             Steps between ``step_callback`` invocations.
+        donate_prepared_state : bool
+            Hand ``prepared_state``'s buffers to the compiled scan, which then
+            writes the returned state into them instead of allocating a second copy
+            (the state is the scan's carry: arguments and outputs were each 5.7 GiB
+            at 2.5e7 particles). The passed state is CONSUMED -- its arrays are
+            deleted -- so pass the state this call returns to the next one, never
+            the same one twice. A state this call prepares itself
+            (``prepared_state=None``) is always donated: nothing else holds it.
 
         Returns
         -------
@@ -892,6 +984,8 @@ class StrictRunMixin(_EngineBase):
             num_particles=int(state_arr.shape[0])
         )
         prepared_curr = prepared_state
+        # a state built here is held by nothing else, so the scan may consume it
+        donate_carry = bool(donate_prepared_state) or prepared_state is None
         if prepared_curr is None:
             prepared_curr = self.prepare_state(
                 state_arr[:, 0, :],
@@ -1069,6 +1163,7 @@ class StrictRunMixin(_EngineBase):
                     # the traced walk is sized from these at TRACE time; a re-plan
                     # that changes them must not reuse a runner traced before it
                     _walk_caps_key(getattr(self, "_strict_fused_validated_caps", None)),
+                    donate_carry,
                 )
                 jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
                 compiled_runner = jit_cache.get(cache_key)
@@ -1084,7 +1179,7 @@ class StrictRunMixin(_EngineBase):
                 # The masses are an ARGUMENT, not a closure constant: the cache key
                 # holds only their shape and dtype, so a closed-over array was
                 # silently reused by a later call with different masses.
-                @jax.jit
+                @partial(jax.jit, donate_argnums=(0,) if donate_carry else ())
                 def _compiled_runner(
                     prepared_initial: LargeNPreparedState,
                     state_initial: Array,
@@ -1193,7 +1288,31 @@ class StrictRunMixin(_EngineBase):
             try:
                 retried = False
                 while True:
-                    compiled_runner = _compiled_runner_for(prepared_curr)
+                    # the far list is dead inside the scan (fresh rebuild): keep it
+                    # out of the carry and put it back on the returned state
+                    far_outside = self._strict_far_pairs_ride_outside_the_scan(
+                        prepared_curr
+                    )
+                    far_kept = prepared_curr.compact_far_pairs if far_outside else None
+                    prepared_in = (
+                        replace(prepared_curr, compact_far_pairs=None)
+                        if far_outside
+                        else prepared_curr
+                    )
+                    if donate_carry:
+                        prepared_in = _unaliased(prepared_in)
+                        # Caches that may share the state's buffers would hold
+                        # deleted arrays after the call: the topology-reuse entry
+                        # keeps the prepare's tree (a later prepare_state with the
+                        # same key rebuilds from it), the prepared-state slot a
+                        # whole state. Both only save a rebuild.
+                        self._topology_reuse_entry = None
+                        self._prepared_state_cache_key = None
+                        self._prepared_state_cache_value = None
+                        self._prepared_state_cache_positions = None
+                        self._prepared_state_cache_masses = None
+                    compiled_runner = _compiled_runner_for(prepared_in)
+                    prepared_curr = None  # a donated carry is gone after the call
                     (
                         prepared_out,
                         state_out,
@@ -1201,16 +1320,22 @@ class StrictRunMixin(_EngineBase):
                         capacity_ok_all,
                         walk_needs,
                     ), history_out = compiled_runner(
-                        prepared_curr,
+                        prepared_in,
                         state_arr,
                         jnp.asarray(acceleration_current, dtype=state_arr.dtype),
                         masses_arr,
                     )
+                    del prepared_in
                     self._strict_static_target_block_capacity_ok = bool(
                         np.asarray(jax.device_get(capacity_ok_all))
                     )
                     if self._strict_static_target_block_capacity_ok:
-                        prepared_curr, state_curr = prepared_out, state_out
+                        prepared_curr = (
+                            replace(prepared_out, compact_far_pairs=far_kept)
+                            if far_outside
+                            else prepared_out
+                        )
+                        state_curr = state_out
                         break
                     needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
                     # Segment retry: a walk list or queue of the traced refresh
@@ -1226,7 +1351,7 @@ class StrictRunMixin(_EngineBase):
                     ):
                         self._raise_scan_capacity_saturated(needs)
                     retried = True
-                    del prepared_out, state_out, history_out
+                    del prepared_out, state_out, history_out, far_kept
                     replanned_peak = int(
                         (self._strict_fused_validated_caps or {}).get(
                             "peak_wavefront", 0
@@ -1318,6 +1443,7 @@ class StrictRunMixin(_EngineBase):
         max_order: int,
         theta: Optional[float] = None,
         bounds: Optional[tuple[Array, Array]] = None,
+        donate_prepared: bool = False,
     ) -> tuple[PreparedStateLike, Callable[[PreparedStateLike], Array]]:
         """Build a fused-lane prepared state and return a jitted eval-only closure.
 
@@ -1350,6 +1476,11 @@ class StrictRunMixin(_EngineBase):
             tree -- whose leaf count, level widths and walk caps size the static
             shapes -- is the tree that force walks, not one cut in the shard's own,
             smaller box (finer cells: 33,388 leaves against 26,302 on one 1e6 shard).
+        donate_prepared : bool
+            Jit ``eval_fn`` with its argument donated, so the evaluation may reuse
+            the state's buffers for its temporaries. ``eval_fn`` then CONSUMES the
+            state: one call per state. Off by default -- the seam exists to time
+            repeated calls on one state.
 
         Returns
         -------
@@ -1401,7 +1532,14 @@ class StrictRunMixin(_EngineBase):
             raise RuntimeError("strict fused eval-only requires a LargeNPreparedState.")
         self._record_large_n_eval_shape_diagnostics(prepared)
 
-        @jax.jit
+        if donate_prepared:
+            # see strict_run_v2: caches sharing the state's buffers must not
+            # outlive a donating call
+            self._topology_reuse_entry = None
+            self._prepared_state_cache_value = None
+            self._prepared_state_cache_key = None
+
+        @partial(jax.jit, donate_argnums=(0,) if donate_prepared else ())
         def _eval(prepared_in: LargeNPreparedState) -> Array:
             return jnp.asarray(
                 evaluate_large_n_state(
@@ -1755,16 +1893,7 @@ class StrictRunMixin(_EngineBase):
         safe_fresh_compact_pair_rebuild = (
             bool(strict_fused_traced_hot_path)
             and str(tree_config.mode).strip().lower() == "static_radix"
-            and str(
-                os.environ.get(
-                    "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD",
-                    "1",
-                )
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-            and not bool(allow_unsafe_compact_pair_reuse)
+            and _fresh_compact_pair_rebuild_enabled()
         )
         reuse_static_compact_pairs = (
             bool(strict_fused_traced_hot_path)

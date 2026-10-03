@@ -1954,6 +1954,7 @@ class FastMultipoleMethod:
         return_prepared_state: bool = True,
         step_callback: Optional[Callable[[Array, Array], None]] = None,
         step_callback_stride: int = 1,
+        donate_prepared_state: bool = False,
     ) -> tuple[Array, Optional[FMMPreparedState], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -2009,6 +2010,11 @@ class FastMultipoleMethod:
             Fire-and-forget streaming hook; see above.
         step_callback_stride : int
             Steps between ``step_callback`` invocations.
+        donate_prepared_state : bool
+            Let the compiled scan write the returned state into
+            ``prepared_state``'s buffers instead of a second copy. The passed state
+            is CONSUMED: pass the returned state to the next call, never the same
+            one twice. A state this call prepares itself is always donated.
 
         Returns
         -------
@@ -2036,6 +2042,7 @@ class FastMultipoleMethod:
             return_prepared_state=bool(return_prepared_state),
             step_callback=step_callback,
             step_callback_stride=int(step_callback_stride),
+            donate_prepared_state=bool(donate_prepared_state),
         )
 
     def strict_fused_prepared_eval_fn(
@@ -2047,6 +2054,7 @@ class FastMultipoleMethod:
         max_order: int,
         theta: Optional[float] = None,
         bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
+        donate_prepared: bool = False,
     ) -> tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]:
         """Fused-lane eval-only closure for apples-to-apples eval benchmarking.
 
@@ -2071,6 +2079,9 @@ class FastMultipoleMethod:
         bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
             Morton box for the tree; ``None`` infers it from ``positions``. A mesh
             device passes the global box its traced force builds in.
+        donate_prepared : bool
+            ``eval_fn`` consumes its state (one call per state) and may reuse its
+            buffers for temporaries. Off by default, for repeated timing calls.
 
         Returns
         -------
@@ -2085,6 +2096,7 @@ class FastMultipoleMethod:
             max_order=int(max_order),
             theta=theta,
             bounds=bounds,
+            donate_prepared=bool(donate_prepared),
         )
 
     def update_multipoles_only(
