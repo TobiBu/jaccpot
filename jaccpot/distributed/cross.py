@@ -872,10 +872,15 @@ def _rows_by_peer(
 ) -> _PeerRows:
     """Deduplicate a pair list's (peer, node) and lay the rows out peer by peer.
 
-    Sorting by ``peer * S + node`` puts the rows for peer ``d`` in a contiguous block
-    in ascending summary index. A sender laying out what it ships to ``d`` and ``d``
-    laying out what it receives from this sender both sort by the SENDER's summary
-    index, so both ends agree on every row without exchanging an index.
+    Rows for peer ``d`` form a contiguous block in ascending summary index. A sender
+    laying out what it ships to ``d`` and ``d`` laying out what it receives from this
+    sender both order by the SENDER's summary index, so both ends agree on every row
+    without exchanging an index.
+
+    No sort: ``(peer, node)`` lives in the fixed ``[ndev x S]`` summary space, so a
+    presence map over it and one prefix sum give every row and every pair's row in
+    O(ndev x S) -- instead of an argsort over the whole pair-list capacity (2^21 at
+    2e5 per card on four cards, four of them per force).
 
     Parameters
     ----------
@@ -895,30 +900,19 @@ def _rows_by_peer(
         The rows, per-peer sizes and each pair's row.
     """
     idx = jnp.int32
-    P = int(peer.shape[0])
-    big = jnp.asarray(ndev * S, idx)
-    key = jnp.where(live, peer.astype(idx) * S + node.astype(idx), big)
-    order = jnp.argsort(key, stable=True)
-    sk = key[order]
-    s_live = sk < big
-    first = jnp.concatenate([jnp.ones((1,), bool), sk[1:] != sk[:-1]]) & s_live
-    g = jnp.cumsum(first.astype(idx), dtype=idx) - 1
-    n_rows = jnp.sum(first.astype(idx), dtype=idx)
-    keep = first & (g < capacity)
+    span = ndev * S
+    key = jnp.where(live, peer.astype(idx) * S + node.astype(idx), span)
+    present = jnp.zeros((span,), idx).at[key].set(1, mode="drop")
+    before = jnp.cumsum(present, dtype=idx) - present  # rows ahead of each key
+    n_rows = jnp.sum(present, dtype=idx)
+    slot = jnp.where((present > 0) & (before < capacity), before, capacity)
     rows = (
         jnp.full((capacity,), -1, idx)
-        .at[jnp.where(keep, g, capacity)]
-        .set(sk % S, mode="drop")
+        .at[slot]
+        .set(jnp.arange(span, dtype=idx) % S, mode="drop")
     )
-    s_peer = jnp.where(s_live, sk // S, jnp.asarray(ndev, idx))
-    bounds = jnp.searchsorted(s_peer, jnp.arange(ndev + 1, dtype=idx), side="left")
-    kept_before = jnp.concatenate([jnp.zeros((1,), idx), g + 1])
-    sizes = kept_before[bounds[1:]] - kept_before[bounds[:-1]]
-    pair_row = (
-        jnp.full((P,), -1, idx)
-        .at[order]
-        .set(jnp.where(s_live, g, jnp.asarray(-1, idx)))
-    )
+    sizes = jnp.sum(present.reshape(ndev, S), axis=1, dtype=idx)
+    pair_row = jnp.where(live, before[jnp.minimum(key, span - 1)], -1)
     return _PeerRows(rows, sizes, pair_row, n_rows > capacity)
 
 
