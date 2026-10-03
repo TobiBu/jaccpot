@@ -1558,12 +1558,118 @@ the one-card lane on the same positions 6.10-8.04e-4, a ratio of 0.96-1.01 (gate
 CAPACITY (2 x the leaf capacity x 7 floats: 3.4 MB per device at 1e6 per card), which grows with ndev; one outskirt
 leaf (radius 9.4) still has 17.5k near sender leaves at 2e6, a long row in the cross near-field kernel.
 
+## Beyond two cards (2026-10-03): the symmetric exchange
+
+Four free A100s (cards 4-7: two PIX pairs, one CPU socket). Probe as before, arms from frozen worktrees.
+
+**Four cards worked out of the box and are in class.** At N = 8e5, seed 0: one card 1.13e-3, two cards 1.30e-3,
+four cards 1.16e-3 (rel-L2 vs fp64; this draw is harder for every lane). No flag fired.
+
+**But weak scaling was poor**, at 2e5 per card: one card 10.7 ms, two cards 16.3, four cards 25.5. The four-card
+trace (command buffers off) put it in the exchanges, not in compute:
+* NCCL `SendRecv` 6.45 ms per call on four cards against 0.88 on two, over five ragged exchanges (far payload, far
+  CSR, near rows, near CSR, near particles), plus a summary all_gather and two size all_gathers;
+* XLA's NCCL path for `ragged_all_to_all` reads the send/receive sizes back to the HOST before posting the sends, so
+  every ragged exchange is a host sync: each `ragged-all-to-all-start` host thunk held its device thread for
+  3.7-13.7 ms per call (summed over the four device threads);
+* shrinking every exchange capacity to ~1.5x its live count bought only 1 ms, so it is the synchronisation, not
+  the bytes.
+
+**What each change bought** (cross arm, min of 15, interleaved; forces identical in every printed digit unless
+noted):
+
+| change | 2 cards, 4e5 | 4 cards, 8e5 | 2 cards, 2e6 | 4 cards, 4e6 |
+| --- | --- | --- | --- | --- |
+| #356 (two-sided over leaves) | 16.59 | 26.55 | 56.15 | 117.96 |
+| near receiver walk skipped (a pass-through over leaves) | 16.34 | 25.47 | 55.90 | 99.02 |
+| probe capacity floors 2^21 -> 2^18 | 15.72 | 23.00 | 55.82 | 99.34 |
+| symmetric exchange, sort-based rows | 16.01 | 23.65 | 56.70 | 96.33 |
+| symmetric exchange, presence-map rows | 15.06 | 22.21 | 54.63 | 91.97 |
+
+1. **The near receiver walk is a pass-through over leaves.** Every near pair the sender emits is (my one-leaf
+   cell, its leaf) on the same geometry, so re-walking it can only re-find it (0 far pairs, near == CSR, measured).
+   Read off the CSR, and the near rows carry no geometry and no multipole. Worth 19 ms at 4e6 on four cards.
+2. **The symmetric exchange.** Over leaves every device publishes its whole live tree, so the summary all_gather
+   already hands every device every tree. Each device walks its tree against each peer's over the gathered blocks,
+   seeded (lower device, higher device) -- the identical walk, in the identical orientation, that the peer runs
+   (the walk splits side `a` on an exact radius tie, so "peer vs mine" and "mine vs peer" could decompose
+   differently) -- and reads BOTH lists off the same pairs. Only multipoles and particles travel: two ragged
+   exchanges instead of five, no CSR. Both ends order rows by the sender's summary index; the received sizes are
+   checked against the locally predicted ones, so a divergence raises the flag. Tested on CPU: both devices derive
+   the same pair set, the sender's rows equal the receiver's expected rows, the receiver's lists cover every cross
+   pair exactly once, and the Pallas walk's sets equal the traced walk's.
+3. **No sort for the row layout.** The first version deduplicated (peer, node) with an argsort over the pair-list
+   capacity, four per force, and LOST at two cards. (peer, node) lives in the fixed `[ndev x S]` summary space, so
+   a presence map and one prefix sum give every row: -0.6 to -7 ms against the floors arm everywhere.
+
+4. **Unrolled `searchsorted` on the hot paths.** The default `jnp.searchsorted` is a while loop with one small
+   kernel per bisection step -- ~23 for the near-field CSR offsets (13k queries into 8.4M sorted keys at 2e5 per
+   card) and as many for the M2L CSR by target -- launch-bound inside the fused step. `method="scan_unrolled"`
+   is the same search as straight-line code: one card at 2e5 10.80 -> 10.12 ms, four cards at 8e5 22.1 -> 21.0
+   ms, forces identical (measured with the probe's `PROBE_SEARCHSORTED` switch, then applied at 11 call sites).
+5. **A finer `cell_min_level` fixes the near-import imbalance but loses.** On four cards device 0 imported 554k
+   near particles against 120-200k on the others: a big sparse leaf of device 0 next to a neighbour's dense core
+   pairs with thousands of small leaves, and the symmetric near pairs carry very asymmetric particle counts. Level
+   10 (11) evens that out (124k / 152k / 197k / 126k) but adds 22 % (one card) to 49 % (four-card shards) leaves:
+   one card 10.72 -> 12.24 ms, four cards 21.70 -> 21.96. Level 8 stays.
+6. **What remains at four cards is compute and waiting, evenly spread.** Per-device compute 18.4-19.8 ms per call
+   (no skew worth a cost-weighted partition), NCCL 5.6-9.5 ms of which most is waiting at collectives; and the
+   cross VOLUME per device roughly doubles from two to four cards at equal particles per card (export far pairs
+   ~150k -> 283-403k at 2e5 per card): more domain boundary per device.
+
+**Weak scaling on the final state** (`bench/results/multigpu_ndev_scaling/weak/`; one card at N, two at 2N, four at
+4N, min of 15, seeds 0-2; host load 8-20 from other users' jobs, so the launch-bound 2e5-per-card single-card time
+moves 10.1-12.7 ms; every run flag-clean):
+
+| per card | seed | 1 card | 2 cards | 4 cards | 2 / 1 | 4 / 1 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2e5 | 0 | 12.36 | 15.43 | 21.95 | 1.25 | 1.78 |
+| 2e5 | 1 | 12.70 | 16.02 | 24.24 | 1.26 | 1.91 |
+| 2e5 | 2 | 11.06 | 15.38 | 20.63 | 1.39 | 1.87 |
+| 5e5 | 0 | 21.29 | 26.21 | 36.31 | 1.23 | 1.71 |
+| 5e5 | 1 | 18.67 | 26.54 | 37.01 | 1.42 | 1.98 |
+| 5e5 | 2 | 22.34 | 29.47 | 34.80 | 1.32 | 1.56 |
+| 1e6 | 0 | 41.20 | 53.55 | 87.72 | 1.30 | 2.13 (*) |
+| 1e6 | 1 | 41.85 | 51.15 | 61.93 | 1.22 | 1.48 |
+| 1e6 | 2 | 42.73 | 49.29 | 59.01 | 1.15 | 1.38 |
+
+(*) the 4e6 seed-0 draw is the known per-axis-box anomaly (rel-L2 2.4e-3 on one card as on four).
+
+**Two cards pass the 1.5x gate on all nine rows; four cards pass at 1e6 per card on both ordinary draws and fail at
+2e5-5e5 per card** (1.56-1.98). rel-L2 4.0e-4 to 1.4e-3 throughout, draw-dependent; at the same N (8e5, seed 0)
+one card 1.13e-3, two 1.30e-3, four 1.16e-3.
+
+**Domain shape is the next lever, partly.** From two to four cards at equal particles per card the cross volume per
+device grows (more boundary per domain). A diagnostic recursive-coordinate-bisection split in the probe
+(`PROBE_PARTITION=rcb`: equal-count cuts along the longest axis; the lane takes any partition) cuts the export far
+pairs at 2e6 on four cards from 560-691k to 360-515k per device and the near pairs from 143-190k to 70-176k, but
+concentrates the near import further (one device 1.36M particles against 0.93M under Morton). Interleaved, two
+rounds, cross arm:
+
+| point | Morton | RCB |
+| --- | --- | --- |
+| 2 cards, 1e6 | 26.15 / 26.36 | 24.61 / 24.89 |
+| 4 cards, 8e5 | 21.29 / 21.60 | 20.11 / 19.46 |
+| 4 cards, 2e6 | 36.16 / 36.48 | 35.15 / 35.43 |
+
+-1 to -2 ms. (Its rel-L2 reads 25-35 % lower, but the probe samples different targets per partition, so that is not
+an accuracy claim.) Production partitions in Morton order (`sfc_partition`), so taking this needs yggdrax work.
+
+**Not done, and why:** the near-import asymmetry (a big sparse leaf next to a dense core pulls in thousands of small
+leaves' particles) wants an asymmetric treatment -- the far side's multipoles evaluated at the few target particles
+(M2P), or the light side shipped and forces returned -- worth at most ~1.5 ms at 8e5 on four cards by the level-10
+bound; and dropping the per-exchange size gather (fixed per-sender receive slots) would remove two small collectives
+whose cost is mostly waiting at them.
+
 ## Next
 
+**2026-10-03, later:** four cards run (section "Beyond two cards"): the symmetric exchange, the near pass-through,
+smaller probe floors and an unrolled searchsorted; two cards pass the 1.5x gate on every row of three draws, four
+cards at 1e6 per card. What follows: the four-card rows at 2e5-5e5 per card (domain shape -- RCB is -1 to -2 ms --
+and the near-import asymmetry); eight cards; the 25M disc+bulge rollout on the tuned code.
+
 **2026-10-03:** the two-sided export walk is built and the default (section above); the 1e6-per-card gate row
-passes on three draws, and a silent level-loop truncation in the mesh lane's capacity plan is fixed. What follows:
-the 2e5-per-card row (the cross hook's fixed, launch-bound cost); the summary all_gather moving its capacity (it
-grows with ndev); ndev > 2 on GPU; the weak-scaling sweep and the 25M disc+bulge rollout on the tuned code.
+passes on three draws, and a silent level-loop truncation in the mesh lane's capacity plan is fixed.
 
 **2026-10-02:** the cross field is built, correct, and two cards now beat one from N = 1e6 up (section above).
 The paragraphs below are the Phase 1-3 history.

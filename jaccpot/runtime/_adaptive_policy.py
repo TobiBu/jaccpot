@@ -969,7 +969,10 @@ def _near_field_force_scale(
     # slot by searchsorted keeps every shape static.
     flat = jnp.arange(flat_len, dtype=jnp.int32)
     slot_of_flat = (
-        jnp.searchsorted(neighbor_offsets, flat, side="right").astype(jnp.int32) - 1
+        jnp.searchsorted(
+            neighbor_offsets, flat, side="right", method="scan_unrolled"
+        ).astype(jnp.int32)
+        - 1
     )
     slot_of_flat = jnp.clip(slot_of_flat, 0, num_slots - 1)
     # Both ends of the slot's window. The lower bound is not redundant: if the

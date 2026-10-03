@@ -1430,7 +1430,12 @@ def _map_targets_to_leaf_positions(
     leaf_ranges = node_ranges[leaf_nodes]
     starts = leaf_ranges[:, 0]
     ends = leaf_ranges[:, 1]
-    leaf_pos = jnp.searchsorted(starts, target_sorted_indices, side="right") - 1
+    leaf_pos = (
+        jnp.searchsorted(
+            starts, target_sorted_indices, side="right", method="scan_unrolled"
+        )
+        - 1
+    )
     leaf_pos = jnp.clip(leaf_pos, 0, leaf_nodes.shape[0] - 1)
     valid = (target_sorted_indices >= starts[leaf_pos]) & (
         target_sorted_indices <= ends[leaf_pos]

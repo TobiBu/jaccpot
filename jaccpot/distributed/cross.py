@@ -183,8 +183,9 @@ class _Published(NamedTuple):
         received CSR entry names a published index; this maps it to a target.
     rows : Array
         ``(B, k)`` the packed rows every device all_gathers: centre 3, radius, then
-        (two-sided) left and right child in the summary index space, then active.
-        Indices travel as floats -- exact below 2**24 in fp32.
+        (two-sided) left and right child in the summary index space, active, and
+        the live particle count under the entry. Indices and counts travel as
+        floats -- exact below 2**24 in fp32.
     overflow : Array
         The cut's overflow, or the summary tree's (which includes the cut's).
     num_entries : Array
@@ -271,6 +272,10 @@ def _summary_rows(
     )
     ok = st.nodes >= 0
     safe = jnp.where(ok, st.nodes, 0)
+    nr = jnp.asarray(tree.node_ranges)
+    # live particles under each entry: what a peer receiving this node's particles
+    # needs to lay them out (`_symmetric_exchange`), so no row counts travel
+    count = jnp.where(st.active, jnp.maximum(nr[safe, 1] - nr[safe, 0] + 1, 0), 0)
     rows = jnp.concatenate(
         [
             jnp.where(ok[:, None], center[safe], 0.0),
@@ -278,6 +283,7 @@ def _summary_rows(
             st.left.astype(dtype)[:, None],
             st.right.astype(dtype)[:, None],
             st.active.astype(dtype)[:, None],
+            count.astype(dtype)[:, None],
         ],
         axis=1,
     )
@@ -622,6 +628,563 @@ def _direct_far_lists(cells: Array, got: Any) -> Any:
     )
 
 
+def _near_receiver_walk_needed(
+    *,
+    two_sided: bool,
+    max_leaves: int,
+    theta: float,
+    near_theta: Optional[float],
+    export_theta: Optional[float],
+) -> bool:
+    """Whether the NEAR receiver walk can refine anything (else it is a pass-through).
+
+    Two-sided over receiver LEAVES, a near pair the sender emits is (my cell, its
+    leaf) where my cell holds exactly one live leaf, tested on the very centre and
+    radius the sender used. Re-walking it can only bottom out at (my leaf, its leaf)
+    and fail the MAC again: no far pairs, near pairs == the received CSR (tested on
+    CPU). Any other mode, a different receiver or export theta, or
+    ``JACCPOT_CROSS_NEAR_RECEIVER_WALK=1`` runs the walk.
+
+    Parameters
+    ----------
+    two_sided : bool
+        The export mode.
+    max_leaves : int
+        Leaves per summary cell at most.
+    theta : float
+        The hook's MAC parameter.
+    near_theta, export_theta : Optional[float]
+        The receiver's near-walk and the sender's export MAC parameters.
+
+    Returns
+    -------
+    bool
+        ``True`` when the walk must run.
+    """
+    from jaccpot._env import env_flag
+
+    if env_flag("JACCPOT_CROSS_NEAR_RECEIVER_WALK", False):
+        return True
+    if not two_sided or int(max_leaves) != 1:
+        return True
+    return any(
+        t is not None and float(t) != float(theta) for t in (near_theta, export_theta)
+    )
+
+
+def _direct_near_lists(
+    cells: Array, node_ranges: Array, num_internal: int, got: Any
+) -> Any:
+    """The near receiver lists read straight off the received CSR (leaf summary).
+
+    Parameters
+    ----------
+    cells : Array
+        ``(B,)`` this device's node behind every published summary index.
+    node_ranges : Array
+        ``(total_nodes, 2)`` this device's inclusive particle ranges.
+    num_internal : int
+        Nodes at or above this index are leaves.
+    got : Any
+        The received near import (``ImportedCells``).
+
+    Returns
+    -------
+    Any
+        A :class:`yggdrax.distributed.import_cells.ReceiverLists` with every CSR
+        entry as a near pair (my LEAF under the cell, imported row) and no far pairs.
+        A cell with one live leaf can be an internal node whose other child is empty;
+        its leaf is the one starting where the cell starts.
+    """
+    from yggdrax.distributed.import_cells import ReceiverLists
+
+    csr_cell = jnp.asarray(got.csr_cell)
+    csr_row = jnp.asarray(got.csr_row)
+    idx = csr_row.dtype
+    live = (jnp.arange(csr_cell.shape[0]) < got.num_csr) & (csr_cell >= 0)
+    neg = jnp.asarray(-1, idx)
+    nr = jnp.asarray(node_ranges)
+    cell = jnp.asarray(cells, idx)[jnp.where(live, csr_cell, 0)]
+    # leaves hold ascending, contiguous ranges (padding leaves start past every live
+    # one), so the leaf under a one-leaf cell is found by the cell's start
+    leaf = num_internal + jnp.searchsorted(
+        nr[num_internal:, 0],
+        nr[jnp.maximum(cell, 0), 0],
+        side="left",
+        method="scan_unrolled",
+    )
+    target = jnp.where(live, leaf.astype(idx), neg)
+    source = jnp.where(live, csr_row, neg)
+    empty = jnp.full((1,), -1, idx)
+    false = jnp.asarray(False)
+    return ReceiverLists(
+        far_target=empty,
+        far_source=empty,
+        far_count=jnp.asarray(0, idx),
+        near_target=target,
+        near_source=source,
+        near_count=jnp.asarray(got.num_csr),
+        far_overflow=false,
+        near_overflow=false,
+        queue_overflow=false,
+    )
+
+
+def _symmetric_exchange_enabled(
+    *,
+    two_sided: bool,
+    max_leaves: int,
+    theta: float,
+    near_theta: Optional[float],
+    export_theta: Optional[float],
+) -> bool:
+    """Whether the hook runs the SYMMETRIC exchange (no CSR on the wire).
+
+    Under a two-sided leaf summary every device publishes its whole live tree, so the
+    gathered summaries hold every device's tree and any two devices can run the same
+    walk between their trees and agree on every pair without telling each other.
+    ``JACCPOT_CROSS_SYMMETRIC=0`` keeps the CSR exchange (the control), as do the tile
+    wire format, a receiver walk forced on, and any theta that differs between sender
+    and receiver.
+
+    Parameters
+    ----------
+    two_sided : bool
+        The export mode.
+    max_leaves : int
+        Leaves per summary cell at most.
+    theta : float
+        The hook's MAC parameter.
+    near_theta, export_theta : Optional[float]
+        The receiver's near-walk and the sender's export MAC parameters.
+
+    Returns
+    -------
+    bool
+        ``True`` for the symmetric exchange.
+    """
+    from jaccpot._env import env_flag
+
+    if not env_flag("JACCPOT_CROSS_SYMMETRIC", True) or _near_tiles_on_the_wire():
+        return False
+    if env_flag("JACCPOT_CROSS_FAR_RECEIVER_WALK", False):
+        return False
+    return not _near_receiver_walk_needed(
+        two_sided=two_sided,
+        max_leaves=max_leaves,
+        theta=theta,
+        near_theta=near_theta,
+        export_theta=export_theta,
+    )
+
+
+def _symmetric_walk(
+    gathered: Array,
+    me: Array,
+    theta: float,
+    cap: "CrossCapacities",
+    *,
+    mac_type: str,
+    walk_fn: Optional[Callable[..., Any]],
+) -> Any:
+    """One walk between this device's tree and every peer's, over the gathered trees.
+
+    The index space is ``[ndev x S]``, each device's published summary tree in its
+    own block, and the seed for peer ``d`` is ``(min(me, d), max(me, d))`` in block
+    terms -- the SAME seed, in the same orientation, that device ``d`` uses for this
+    pair. The walk reads only the gathered arrays, which are identical on every
+    device, so both devices of a pair get the identical pair set. The orientation is
+    load-bearing: the walk splits side ``a`` on an exact radius tie, so a device
+    walking "peer vs mine" and its peer walking "mine vs peer" could decompose
+    differently.
+
+    Parameters
+    ----------
+    gathered : Array
+        ``(ndev, S, k)`` every device's summary rows (``_summary_rows``, two-sided).
+    me : Array
+        This device's index along the mesh axis.
+    theta : float
+        MAC parameter.
+    cap : CrossCapacities
+        Queue and list capacities (the export walk's).
+    mac_type : str
+        MAC variant. Static.
+    walk_fn : Optional[Callable[..., Any]]
+        The walk implementation (``None``: yggdrax's traced walk).
+
+    Returns
+    -------
+    Any
+        The walk result: pairs ``(a, b)`` with ``a`` in the lower device's block.
+    """
+    from yggdrax.interactions import dual_tree_walk_mutual
+
+    ndev, S = int(gathered.shape[0]), int(gathered.shape[1])
+    idx = jnp.int32
+    base = (jnp.arange(ndev, dtype=idx) * S)[:, None]
+
+    def kids(col: int) -> Array:
+        k = jnp.round(gathered[..., col]).astype(idx)
+        return jnp.where(k >= 0, k + base, jnp.asarray(-1, idx)).reshape(ndev * S)
+
+    dev = jnp.arange(ndev, dtype=idx)
+    me_i = jnp.asarray(me).astype(idx)
+    dead = dev == me_i
+    return (walk_fn or dual_tree_walk_mutual)(
+        kids(4),
+        kids(5),
+        gathered[..., 0:3].reshape(ndev * S, 3),
+        gathered[..., 3].reshape(ndev * S),
+        float(theta),
+        jnp.asarray(0, idx),
+        max_pair_queue=cap.export_walk_queue,
+        far_cap=cap.export_far_cap,
+        near_cap=cap.export_near_cap,
+        mac_type=mac_type,  # pyright: ignore[reportArgumentType]
+        node_active=(gathered[..., 6] > 0.5).reshape(ndev * S),
+        seed_a=jnp.where(dead, jnp.asarray(-1, idx), jnp.minimum(dev, me_i) * S),
+        seed_b=jnp.where(dead, jnp.asarray(-1, idx), jnp.maximum(dev, me_i) * S),
+    )
+
+
+class _PeerRows(NamedTuple):
+    """Unique (peer, node) rows of a pair list, grouped by peer, and each pair's row.
+
+    Attributes
+    ----------
+    rows : Array
+        ``(capacity,)`` the node (a summary index) of every unique (peer, node), in
+        (peer, node) order, ``-1``-padded.
+    sizes : Array
+        ``(ndev,)`` unique rows per peer.
+    pair_row : Array
+        ``(P,)`` each pair's index into ``rows``; ``-1`` for dead pairs.
+    overflow : Array
+        More unique rows than ``capacity``.
+    """
+
+    rows: Array
+    sizes: Array
+    pair_row: Array
+    overflow: Array
+
+
+def _rows_by_peer(
+    peer: Array, node: Array, live: Array, *, ndev: int, S: int, capacity: int
+) -> _PeerRows:
+    """Deduplicate a pair list's (peer, node) and lay the rows out peer by peer.
+
+    Rows for peer ``d`` form a contiguous block in ascending summary index. A sender
+    laying out what it ships to ``d`` and ``d`` laying out what it receives from this
+    sender both order by the SENDER's summary index, so both ends agree on every row
+    without exchanging an index.
+
+    No sort: ``(peer, node)`` lives in the fixed ``[ndev x S]`` summary space, so a
+    presence map over it and one prefix sum give every row and every pair's row in
+    O(ndev x S) -- instead of an argsort over the whole pair-list capacity (2^21 at
+    2e5 per card on four cards, four of them per force).
+
+    Parameters
+    ----------
+    peer, node : Array
+        ``(P,)`` per pair: the peer device and the node (summary index in the block
+        that matters for this list).
+    live : Array
+        ``(P,)`` live pairs.
+    ndev, S : int
+        Mesh size and summary block width.
+    capacity : int
+        Static row capacity. Read the overflow flag.
+
+    Returns
+    -------
+    _PeerRows
+        The rows, per-peer sizes and each pair's row.
+    """
+    idx = jnp.int32
+    span = ndev * S
+    key = jnp.where(live, peer.astype(idx) * S + node.astype(idx), span)
+    present = jnp.zeros((span,), idx).at[key].set(1, mode="drop")
+    before = jnp.cumsum(present, dtype=idx) - present  # rows ahead of each key
+    n_rows = jnp.sum(present, dtype=idx)
+    slot = jnp.where((present > 0) & (before < capacity), before, capacity)
+    rows = (
+        jnp.full((capacity,), -1, idx)
+        .at[slot]
+        .set(jnp.arange(span, dtype=idx) % S, mode="drop")
+    )
+    sizes = jnp.sum(present.reshape(ndev, S), axis=1, dtype=idx)
+    pair_row = jnp.where(live, before[jnp.minimum(key, span - 1)], -1)
+    return _PeerRows(rows, sizes, pair_row, n_rows > capacity)
+
+
+def _symmetric_pair_sides(
+    res_a: Array, res_b: Array, count: Array, me: Array, S: int
+) -> tuple[Array, Array, Array, Array]:
+    """Split walk pairs into (live, my summary index, peer, peer's summary index).
+
+    Parameters
+    ----------
+    res_a, res_b : Array
+        ``(P,)`` the walk's pair ends (global summary indices).
+    count : Array
+        Live prefix length.
+    me : Array
+        This device's index.
+    S : int
+        Summary block width.
+
+    Returns
+    -------
+    tuple
+        ``(live, mine, peer, theirs)``, all ``(P,)``.
+    """
+    idx = jnp.int32
+    a = jnp.asarray(res_a).astype(idx)
+    b = jnp.asarray(res_b).astype(idx)
+    live = (jnp.arange(a.shape[0]) < count) & (a >= 0) & (b >= 0)
+    a_mine = (a // S) == jnp.asarray(me).astype(idx)
+    mine = jnp.where(a_mine, a, b)
+    theirs = jnp.where(a_mine, b, a)
+    return live, mine % S, theirs // S, theirs % S
+
+
+def _leaf_under(cells: Array, node_ranges: Array, num_internal: int) -> Array:
+    """The leaf under each one-leaf cell (itself when it is a leaf).
+
+    Parameters
+    ----------
+    cells : Array
+        Node indices, each holding exactly one live leaf.
+    node_ranges : Array
+        ``(total_nodes, 2)`` inclusive particle ranges.
+    num_internal : int
+        Nodes at or above this index are leaves.
+
+    Returns
+    -------
+    Array
+        The leaf node indices.
+    """
+    nr = jnp.asarray(node_ranges)
+    return num_internal + jnp.searchsorted(
+        nr[num_internal:, 0],
+        nr[jnp.maximum(cells, 0), 0],
+        side="left",
+        method="scan_unrolled",
+    )
+
+
+def _symmetric_exchange(
+    gathered: Array,
+    me: Array,
+    nodes: Array,
+    tree: Any,
+    mp: Any,
+    *,
+    theta: float,
+    cap: "CrossCapacities",
+    ndev: int,
+    mac_type: str,
+    walk_fn: Optional[Callable[..., Any]],
+    axis_name: str,
+    with_near: bool,
+) -> dict:
+    """The cross field with only multipoles and particles on the wire.
+
+    Every device runs :func:`_symmetric_walk` over the gathered trees and reads BOTH
+    of its lists off the same pairs: a far pair (my node, peer's node) means "ship my
+    multipole to the peer" and "apply the peer's multipole to my node"; a near pair
+    (my leaf, peer's leaf) means the same for particles. The peer derives the
+    identical pairs, so neither side sends the other a CSR, a row count or a size
+    beyond the one per-exchange size gather -- two ragged exchanges in place of five.
+    What a sender ships to ``d`` and what ``d`` expects from it are both laid out in
+    the sender's ascending summary index (:func:`_rows_by_peer`); the receive sizes
+    the size gather reports are checked against the ones predicted locally, so a
+    divergence raises the overflow flag instead of misaligning rows.
+
+    Parameters
+    ----------
+    gathered : Array
+        ``(ndev, S, 8)`` every device's two-sided summary rows (with counts).
+    me : Array
+        This device's index along the mesh axis.
+    nodes : Array
+        ``(S,)`` this device's tree node behind each of its summary indices.
+    tree : Any
+        This device's refreshed tree.
+    mp : Any
+        This device's multipoles (``packed``, ``centers``).
+    theta : float
+        MAC parameter.
+    cap : CrossCapacities
+        Capacities.
+    ndev : int
+        Mesh size.
+    mac_type : str
+        MAC variant. Static.
+    walk_fn : Optional[Callable[..., Any]]
+        The walk implementation.
+    axis_name : str
+        Mesh axis.
+    with_near : bool
+        Also exchange particles and return the near list.
+
+    Returns
+    -------
+    dict
+        ``cross_far`` (the M2L tuple), ``far_overflow``, the walk result ``walk``, the
+        far send/receive rows, and with ``with_near`` the near-sink fields
+        (``positions``, ``masses``, ``mask``, ``target_node``, ``source_row``,
+        ``count``, ``overflow``) and ``near_particles``.
+    """
+    S = int(gathered.shape[1])
+    idx = jnp.int32
+    nodes = jnp.asarray(nodes).astype(idx)
+    packed = jnp.asarray(mp.packed)
+    n_local = int(packed.shape[0])
+    n_coeff = int(packed.shape[1])
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    nr = jnp.asarray(tree.node_ranges)
+
+    res = jax.named_call(_symmetric_walk, name="cross_export_walk")(
+        gathered, me, theta, cap, mac_type=mac_type, walk_fn=walk_fn
+    )
+    out: dict = {"walk": res}
+
+    # ---- far: my multipoles out, the peers' in, one ragged exchange ----------
+    with jax.named_scope("cross_send_far"):
+        fl, f_mine, f_peer, f_theirs = _symmetric_pair_sides(
+            res.far_a, res.far_b, res.far_count, me, S
+        )
+        exp_f = _rows_by_peer(
+            f_peer, f_mine, fl, ndev=ndev, S=S, capacity=cap.send_node_cap
+        )
+        imp_f = _rows_by_peer(
+            f_peer, f_theirs, fl, ndev=ndev, S=S, capacity=cap.recv_node_cap
+        )
+        alive = (exp_f.rows >= 0)[:, None]
+        send_node = nodes[jnp.maximum(exp_f.rows, 0)]
+        payload = jnp.concatenate(
+            [
+                jnp.where(alive, packed[send_node], 0.0),
+                jnp.where(alive, jnp.asarray(mp.centers)[send_node], 0.0),
+            ],
+            axis=1,
+        )
+    recv, recv_sizes, _ = jax.named_call(
+        ragged_all_to_all_exchange, name="cross_exchange_far"
+    )(payload, exp_f.sizes, output_capacity=cap.recv_node_cap, axis_name=axis_name)
+    far_mismatch = jnp.any(recv_sizes.astype(idx) != imp_f.sizes)
+    ok_f = fl & (imp_f.pair_row >= 0)
+    src_f = jnp.where(ok_f, n_local + imp_f.pair_row, -1)
+    tgt_f = jnp.where(ok_f, nodes[f_mine], -1)
+    out["cross_far"] = (
+        recv[:, :n_coeff],
+        recv[:, n_coeff : n_coeff + 3],
+        src_f,
+        tgt_f,
+    )
+    out["exp_far"] = exp_f
+    out["imp_far"] = imp_f
+    out["far_overflow"] = (
+        res.far_overflow
+        | res.near_overflow
+        | res.queue_overflow
+        | exp_f.overflow
+        | imp_f.overflow
+        | far_mismatch
+    )
+    if not with_near:
+        return out
+
+    # ---- near: my leaves' particles out, the peers' in, one ragged exchange ---
+    W = int(cap.leaf_width)
+    pos_sorted = jnp.asarray(tree.positions_sorted)
+    mass_sorted = jnp.asarray(tree.masses_sorted)
+    with jax.named_scope("cross_send_near"):
+        nl, n_mine, n_peer, n_theirs = _symmetric_pair_sides(
+            res.near_a, res.near_b, res.near_count, me, S
+        )
+        exp_n = _rows_by_peer(
+            n_peer, n_mine, nl, ndev=ndev, S=S, capacity=cap.send_node_cap
+        )
+        imp_n = _rows_by_peer(
+            n_peer, n_theirs, nl, ndev=ndev, S=S, capacity=cap.recv_node_cap
+        )
+        s_ok = exp_n.rows >= 0
+        s_node = nodes[jnp.maximum(exp_n.rows, 0)]
+        starts = nr[s_node, 0].astype(idx)
+        full = jnp.where(s_ok, nr[s_node, 1].astype(idx) - starts + 1, 0)
+        counts = jnp.clip(full, 0, W)
+        row, within, live_q, total = _row_of_slot(counts, cap.send_particle_cap)
+        src = jnp.clip(starts[row] + within, 0, pos_sorted.shape[0] - 1)
+        parts = jnp.where(
+            live_q[:, None],
+            jnp.concatenate([pos_sorted[src], mass_sorted[src][:, None]], axis=1),
+            0.0,
+        )
+        row_bound = jnp.concatenate(
+            [jnp.zeros((1,), idx), jnp.cumsum(exp_n.sizes, dtype=idx)]
+        )
+        count_bound = jnp.concatenate(
+            [jnp.zeros((1,), idx), jnp.cumsum(counts, dtype=idx)]
+        )
+        part_sizes = count_bound[row_bound[1:]] - count_bound[row_bound[:-1]]
+    recv_p, recv_psizes, _ = jax.named_call(
+        ragged_all_to_all_exchange, name="cross_exchange_near"
+    )(parts, part_sizes, output_capacity=cap.recv_particle_cap, axis_name=axis_name)
+    with jax.named_scope("cross_recv_near"):
+        # each received row's particle count, read off the SENDER's published tree
+        r_ok = imp_n.rows >= 0
+        r_peer = jnp.searchsorted(
+            jnp.cumsum(imp_n.sizes, dtype=idx),
+            jnp.arange(imp_n.rows.shape[0], dtype=idx),
+            side="right",
+            method="scan_unrolled",
+        )
+        r_peer = jnp.minimum(r_peer, ndev - 1)
+        r_count = jnp.where(
+            r_ok,
+            jnp.round(gathered[r_peer, jnp.maximum(imp_n.rows, 0), 7]).astype(idx),
+            0,
+        )
+        r_count = jnp.clip(r_count, 0, W)
+        expect = jax.ops.segment_sum(
+            r_count, jnp.where(r_ok, r_peer, ndev), num_segments=ndev + 1
+        )[:ndev]
+        near_mismatch = jnp.any(expect != recv_psizes.astype(idx))
+        r_start = jnp.cumsum(r_count, dtype=idx) - r_count
+        slot = jnp.arange(W, dtype=idx)[None, :]
+        take = jnp.clip(r_start[:, None] + slot, 0, cap.recv_particle_cap - 1)
+        valid = slot < r_count[:, None]
+        imp_pos = jnp.where(valid[..., None], recv_p[take, :3], 0.0)
+        imp_mass = jnp.where(valid, recv_p[take, 3], 0.0)
+        ok_n = nl & (imp_n.pair_row >= 0)
+        leaf = _leaf_under(nodes[n_mine], nr, num_internal).astype(idx)
+    out.update(
+        positions=imp_pos,
+        masses=imp_mass,
+        mask=imp_mass != 0.0,
+        target_node=jnp.where(ok_n, leaf, -1),
+        source_row=jnp.where(ok_n, imp_n.pair_row, -1),
+        count=res.near_count,
+        near_particles=jnp.sum(recv_psizes),
+        exp_near=exp_n,
+        imp_near=imp_n,
+        overflow=(
+            exp_n.overflow
+            | imp_n.overflow
+            | (total > cap.send_particle_cap)
+            | (jnp.sum(recv_psizes) > cap.recv_particle_cap)
+            | jnp.any(full > W)
+            | near_mismatch
+        ),
+    )
+    return out
+
+
 def cross_walk_backend() -> str:
     """Walk implementation of the export and receiver walks.
 
@@ -865,6 +1428,13 @@ def make_cross_hook(
     cap = caps if caps is not None else CrossCapacities()
     walk_fn = cross_walk_fn(mac_type)
     two_sided = _cross_two_sided() if two_sided is None else bool(two_sided)
+    symmetric = two_sided and _symmetric_exchange_enabled(
+        two_sided=two_sided,
+        max_leaves=_max_leaves_per_cell(cap, two_sided),
+        theta=theta,
+        near_theta=near_theta,
+        export_theta=export_theta,
+    )
     # ALWAYS-ON overflow channel, independent of the diagnostics `record`: the
     # production and timing paths pass no record, and before this sink existed the
     # far half's flags then reached nobody. Holds tracers; the evaluator reads it
@@ -931,6 +1501,52 @@ def make_cross_hook(
         all_cen = gathered[..., 0:3]
         all_rad = gathered[..., 3]
         me = jax.lax.axis_index(axis_name)
+
+        if symmetric:
+            sym = _symmetric_exchange(
+                gathered,
+                me,
+                block_nodes,
+                tree,
+                mp,
+                theta=float(theta),
+                cap=cap,
+                ndev=ndev,
+                mac_type=mac_type,
+                walk_fn=walk_fn,
+                axis_name=axis_name,
+                with_near=near_sink is not None,
+            )
+            far_overflow = pub.overflow | sym["far_overflow"]
+            flag_sink["far"] = far_overflow
+            if near_sink is not None:
+                for k in ("positions", "masses", "mask", "target_node", "source_row"):
+                    near_sink[k] = sym[k]
+                near_sink["count"] = sym["count"]
+                near_sink["overflow"] = pub.overflow | sym["overflow"]
+                flag_sink["near"] = near_sink["overflow"]
+            if record is not None:
+                w = sym["walk"]
+                record["summary_cells"] = summary.num_cells
+                record["summary_nodes"] = pub.num_entries
+                record["summary_leaves"] = jnp.sum(summary.leaves_per_cell)
+                record["export_far"] = w.far_count
+                record["far_pairs"] = w.far_count
+                record["send_nodes"] = jnp.sum(sym["exp_far"].sizes)
+                record["recv_nodes"] = jnp.sum(sym["imp_far"].sizes)
+                record["imported_rows"] = jnp.sum(sym["imp_far"].sizes)
+                if getattr(w, "peak_wavefront", None) is not None:
+                    record["export_walk_peak"] = w.peak_wavefront
+                record["overflow"] = far_overflow
+                if near_sink is not None:
+                    record["export_near"] = w.near_count
+                    record["near_list_pairs"] = w.near_count
+                    record["near_csr"] = w.near_count
+                    record["near_recv_nodes"] = jnp.sum(sym["imp_near"].sizes)
+                    record["near_particles"] = sym["near_particles"]
+                    record["near_walk_peak"] = jnp.asarray(0, jnp.int32)
+                    record["near_walk_far_pairs"] = jnp.asarray(0, jnp.int32)
+            return sym["cross_far"]
 
         idx = parent.dtype
         leaf_fill = jnp.full((n_local - num_internal,), -1, idx)
@@ -1166,12 +1782,26 @@ def make_cross_hook(
             # and the only correct answer was near_theta = 0, every one a direct
             # sum. With the coefficients here they go back through the M2L, as a
             # second imported block behind the far one (Task 2 of the record).
-            leaf_rows = [
-                jnp.where(okrow, jnp.asarray(geom.center)[lrow], 0.0),
-                jnp.where(okrow, jnp.asarray(geom.radius)[lrow][:, None], 0.0),
-                jnp.where(okrow, jnp.asarray(mp.packed)[lrow], 0.0),
-                jnp.where(okrow, jnp.asarray(mp.centers)[lrow], 0.0),
-            ]
+            near_walk = _near_receiver_walk_needed(
+                two_sided=two_sided,
+                max_leaves=_max_leaves_per_cell(cap, two_sided),
+                theta=theta,
+                near_theta=near_theta,
+                export_theta=export_theta,
+            )
+            # Without the receiver walk nothing reads the near rows' geometry or
+            # multipoles (no near-walk far pairs reach the M2L), so only the particles
+            # and their per-row counts travel: 52 floats per row fewer at p6.
+            leaf_rows = (
+                [
+                    jnp.where(okrow, jnp.asarray(geom.center)[lrow], 0.0),
+                    jnp.where(okrow, jnp.asarray(geom.radius)[lrow][:, None], 0.0),
+                    jnp.where(okrow, jnp.asarray(mp.packed)[lrow], 0.0),
+                    jnp.where(okrow, jnp.asarray(mp.centers)[lrow], 0.0),
+                ]
+                if near_walk or _near_tiles_on_the_wire()
+                else []
+            )
             if _near_tiles_on_the_wire():
                 got_n, imp_pos, imp_mass, particle_overflow = jax.named_call(
                     _near_exchange_tiles, name="cross_exchange_near"
@@ -1206,39 +1836,44 @@ def make_cross_hook(
                     ndev=ndev,
                     axis_name=axis_name,
                 )
-            # geometry and multipole rows, the same layout in both wire formats
-            imp_cen_n = got_n.payload[:, 0:3]  # geometric -> MAC
-            imp_rad_n = got_n.payload[:, 3]
-            imp_mp_n = got_n.payload[:, 4 : 4 + n_coeff]  # multipole -> M2L
-            imp_ecen_n = got_n.payload[:, 4 + n_coeff : 7 + n_coeff]  # expansion -> M2L
-
-            combined_cen_n = jnp.concatenate([jnp.asarray(geom.center), imp_cen_n])
-            combined_rad_n = jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n])
-
-            rl_n = jax.named_call(
-                receiver_interaction_lists, name="cross_recv_walk_near"
-            )(
-                combined_left,
-                combined_right,
-                combined_cen_n,
-                combined_rad_n,
-                n_local,
-                block_nodes,
-                got_n.csr_cell,
-                got_n.csr_row,
-                got_n.num_csr,
-                # Pairs this walk calls far (89568/93005 at N = 2e5) are served by
-                # the M2L from the multipole each near leaf now carries; pairs it
-                # calls near are summed directly. Before the multipole travelled the
-                # far ones were unservable and dropped, and near_theta = 0 was the
-                # only correct setting. It remains as the control.
-                float(theta if near_theta is None else near_theta),
-                max_pair_queue=cap.walk_queue,
-                far_cap=cap.recv_far_cap,
-                near_cap=cap.recv_near_cap,
-                mac_type=mac_type,
-                walk_fn=walk_fn,
-            )
+            if not near_walk:
+                # a pass-through (`_near_receiver_walk_needed`): read the CSR directly
+                rl_n = _direct_near_lists(
+                    block_nodes, jnp.asarray(tree.node_ranges), num_internal, got_n
+                )
+                imp_mp_n = jnp.zeros((1, n_coeff), jnp.asarray(mp.packed).dtype)
+                imp_ecen_n = jnp.zeros((1, 3), jnp.asarray(mp.centers).dtype)
+            else:
+                # geometry and multipole rows, the same layout in both wire formats
+                imp_cen_n = got_n.payload[:, 0:3]  # geometric -> MAC
+                imp_rad_n = got_n.payload[:, 3]
+                imp_mp_n = got_n.payload[:, 4 : 4 + n_coeff]  # multipole -> M2L
+                imp_ecen_n = got_n.payload[:, 4 + n_coeff : 7 + n_coeff]  # -> M2L
+                rl_n = jax.named_call(
+                    receiver_interaction_lists, name="cross_recv_walk_near"
+                )(
+                    combined_left,
+                    combined_right,
+                    jnp.concatenate([jnp.asarray(geom.center), imp_cen_n]),
+                    jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n]),
+                    n_local,
+                    block_nodes,
+                    got_n.csr_cell,
+                    got_n.csr_row,
+                    got_n.num_csr,
+                    # Pairs this walk calls far (89568/93005 at N = 2e5, 4-leaf cells)
+                    # are served by the M2L from the multipole each near leaf
+                    # carries; pairs it calls near are summed directly. Before the
+                    # multipole travelled the far ones were unservable and dropped,
+                    # and near_theta = 0 was the only correct setting. It remains as
+                    # the control.
+                    float(theta if near_theta is None else near_theta),
+                    max_pair_queue=cap.walk_queue,
+                    far_cap=cap.recv_far_cap,
+                    near_cap=cap.recv_near_cap,
+                    mac_type=mac_type,
+                    walk_fn=walk_fn,
+                )
             near_sink["positions"] = imp_pos
             near_sink["masses"] = imp_mass
             near_sink["mask"] = imp_mass != 0.0
@@ -1304,8 +1939,12 @@ def make_cross_hook(
                     jnp.where(got_n.num_payload > 0, imp_mass != 0.0, False)
                 )
                 record["export_near"] = ex.near_count
-                if rl_n.peak_wavefront is not None:
-                    record["near_walk_peak"] = rl_n.peak_wavefront
+                # 0 when the walk was skipped (a pass-through under a leaf summary)
+                record["near_walk_peak"] = (
+                    rl_n.peak_wavefront
+                    if rl_n.peak_wavefront is not None
+                    else jnp.asarray(0, jnp.int32)
+                )
             near_sink["overflow"] = (
                 pub.overflow
                 | sb_n.node_overflow

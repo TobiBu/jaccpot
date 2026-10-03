@@ -72,6 +72,26 @@ import time
 
 import jax
 import jax.numpy as jnp
+
+if os.environ.get("PROBE_SEARCHSORTED"):
+    # DIAGNOSTIC: the default `jnp.searchsorted` is a while-loop binary search, one
+    # small kernel per step; this makes every caller that does not pick a method use
+    # PROBE_SEARCHSORTED (e.g. "scan_unrolled") instead
+    import functools as _ft
+
+    _ss_orig = jnp.searchsorted
+
+    @_ft.wraps(_ss_orig)
+    def _ss(a, v, side="left", sorter=None, *, method=None):
+        return _ss_orig(
+            a,
+            v,
+            side=side,
+            sorter=sorter,
+            method=method or os.environ["PROBE_SEARCHSORTED"],
+        )
+
+    jnp.searchsorted = _ss
 import numpy as np
 
 jax.config.update("jax_enable_x64", True)
@@ -131,6 +151,30 @@ P0 = jnp.asarray(pos)
 codes = np.asarray(morton_encode(P0, _infer_lane_bounds(P0)))
 order = np.argsort(codes)
 shards = np.array_split(order, NDEV)
+
+
+def _rcb_shards(x, ndev):
+    """Recursive coordinate bisection: equal-count cuts along the longest axis.
+
+    A DIAGNOSTIC partition (PROBE_PARTITION=rcb): compact boxes, against the
+    equal-count chunks of the Morton order the lane uses. ``ndev`` a power of two.
+    Each shard is returned in Morton order, as the Morton split's shards are.
+    """
+    parts = [np.arange(x.shape[0])]
+    while len(parts) < ndev:
+        nxt = []
+        for idx in parts:
+            ax = int(np.argmax(x[idx].max(0) - x[idx].min(0)))
+            o = idx[np.argsort(x[idx, ax], kind="stable")]
+            nxt.extend([o[: len(o) // 2], o[len(o) // 2 :]])
+        parts = nxt
+    return [q[np.argsort(codes[q], kind="stable")] for q in parts]
+
+
+if os.environ.get("PROBE_PARTITION", "morton") == "rcb":
+    if NDEV & (NDEV - 1):
+        raise SystemExit("PROBE_PARTITION=rcb needs a power-of-two NDEV")
+    shards = _rcb_shards(pos, NDEV)
 # no leaf coarser than this Morton level (TreeConfig.cell_min_level; 0 = unconstrained).
 # Default 8: one A100 -4..-18 % from 2e5 to 8e6, two A100s -8..-16 %, forces unchanged.
 CELL_MIN_LEVEL = int(os.environ.get("PROBE_CELL_MIN_LEVEL", "8"))
@@ -567,7 +611,7 @@ _far_per_leaf = 16 if TWO_SIDED else 53
 # export far pairs ~53 (293k / 5.5k leaves); export near ~10; sent / received
 # nodes ~1.25 (far nodes 6.7k, near leaves 5.5k); received CSR ~53; receiver far
 # pairs ~53 (+ near-walk far pairs); receiver near pairs ~60
-_recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", _far_per_leaf, 19)
+_recv_csr = _auto_cap("PROBE_RECV_CSR_BITS", _far_per_leaf, 18)
 # Measured at 1e6 per device (2 cards, 2026-10-02, before summary_cell_level = 8):
 # near CSR 1.43-1.51M entries (~29 per leaf), near receiver walk peak 2.66M pairs
 # (~52 per leaf), export walk peak 0.72-0.90M (~17 per leaf). The FAR receiver walk
@@ -599,10 +643,13 @@ caps = CrossCapacities(
     # 2-card 2e6 75.0 -> 72.1 ms, 8e6 254.2 -> 231.6 ms, forces unchanged.
     summary_cell_level=int(os.environ.get("PROBE_SUMMARY_CELL_LEVEL", "8")) or None,
     max_cells=_max_cells,
-    export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", _far_per_leaf, 21),
-    export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 21),
+    # floors at 2^18, not 2^21: at 2e5 per card the 2^21 floors were ~4x the per-leaf
+    # rule (~150k live far pairs) and every one of these buffers is sorted or cleared
+    # on every force
+    export_far_cap=_auto_cap("PROBE_EXPORT_FAR_BITS", _far_per_leaf, 18),
+    export_near_cap=_auto_cap("PROBE_EXPORT_NEAR_BITS", 10, 18),
     send_node_cap=_auto_cap("PROBE_SEND_NODE_BITS", 1.25, 15),
-    send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", _far_per_leaf, 21),
+    send_csr_cap=_auto_cap("PROBE_SEND_CSR_BITS", _far_per_leaf, 18),
     recv_node_cap=_auto_cap("PROBE_RECV_NODE_BITS", 1.25, 15),
     recv_csr_cap=_recv_csr,
     recv_near_csr_cap=_recv_near_csr,

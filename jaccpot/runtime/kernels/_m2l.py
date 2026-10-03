@@ -506,9 +506,9 @@ def _pair_class_ids_from_offsets(
     Array
         Class id per entry of ``pair_indices``.
     """
-    return jnp.searchsorted(class_offsets[1:], pair_indices, side="right").astype(
-        INDEX_DTYPE
-    )
+    return jnp.searchsorted(
+        class_offsets[1:], pair_indices, side="right", method="scan_unrolled"
+    ).astype(INDEX_DTYPE)
 
 
 @partial(

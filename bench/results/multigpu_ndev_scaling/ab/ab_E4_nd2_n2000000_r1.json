@@ -1,0 +1,81 @@
+{
+ "n": 2000000,
+ "ndev": 2,
+ "n_per_dev": 1000000,
+ "leaf": 64,
+ "order": 6,
+ "theta": 0.8,
+ "eval_theta": 0.8,
+ "arms": [
+  "cross"
+ ],
+ "leaf_capacity": 60416,
+ "worst_shard_live_leaves": 51755,
+ "cross_caps": {
+  "max_cells": 60416,
+  "max_leaves_per_cell": 1,
+  "export_far_cap": 2097152,
+  "export_near_cap": 2097152,
+  "send_node_cap": 262144,
+  "send_csr_cap": 2097152,
+  "recv_node_cap": 262144,
+  "recv_csr_cap": 2097152,
+  "walk_queue": 1048576,
+  "leaf_width": 64,
+  "recv_far_cap": 1048576,
+  "recv_near_cap": 524288,
+  "recv_near_csr_cap": 1048576,
+  "export_walk_queue": 262144,
+  "send_particle_cap": 2097152,
+  "recv_particle_cap": 2097152,
+  "summary_cell_level": 8,
+  "max_summary_nodes": 120832
+ },
+ "dtype": "float32",
+ "cuda_visible_devices": "6,7",
+ "err_local": null,
+ "err_cross": 0.0008845667523258846,
+ "overflow_local": null,
+ "overflow_cross": false,
+ "timings": {
+  "cross": {
+   "min": 0.05464663542807102,
+   "median": 0.0549023374915123,
+   "iqr": 0.0005145147442817688,
+   "max": 0.05529138818383217,
+   "mean": 0.05495274215936661,
+   "std": 0.00023894952280243545,
+   "samples": [
+    0.0549023374915123,
+    0.05470557510852814,
+    0.0551192294806242,
+    0.054855240508913994,
+    0.05529138818383217,
+    0.05476333573460579,
+    0.055228039622306824,
+    0.05464663542807102,
+    0.05517876148223877,
+    0.05465472489595413,
+    0.055220089852809906,
+    0.054723456501960754,
+    0.055262940004467964,
+    0.05469420924782753,
+    0.05504516884684563
+   ],
+   "first_call_s": 31.624299474060535,
+   "contention": {
+    "loadavg1_max": 8.41796875,
+    "other_gpu_util_max": 71,
+    "foreign_pids_on_devices": [],
+    "contaminated": false,
+    "flags": [
+     "loadavg>=8 (8.4)",
+     "other-gpus-busy (71%)"
+    ]
+   }
+  }
+ },
+ "cross_mac_geometry": "com",
+ "cross_two_sided": "0",
+ "seed": 0
+}
