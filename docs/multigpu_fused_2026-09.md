@@ -1441,10 +1441,132 @@ far CSR on the wire. The rest is the exchange (NCCL 7 ms), device copies (+2.3),
 buffers. The lever is a **two-sided export walk** over the receiver's summary tree, so large sender nodes pair with
 large receiver nodes as the local mutual walk does; plan `two-sided-export-walk.md` (2026-10-02).
 
+## The two-sided export walk (2026-10-03): the 1e6-per-card gate row passes
+
+Plan `two-sided-export-walk.md`. yggdrax `summary_tree` + `export_walk_two_sided`; jaccpot `cross.py`
+(`JACCPOT_CROSS_TWO_SIDED`, default on; `=0` is the one-sided control).
+
+**What changed.** The one-sided export walked the sender's tree against the receiver's summary CELLS, which are
+childless, so only the sender refined and every cell collected a treecode-style list of sender nodes: 4.6-5.1M
+far pairs per device at 1e6 per card. Each device now publishes the top of its tree -- the occupancy cut plus every
+ancestor of it, with child links, root at index 0, in ONE packed all_gather (centre, radius, children, active;
+indices exact as floats) -- and the export walk splits whichever side is larger, as the local mutual walk does.
+Far pairs land on the receiver's internal nodes; its L2L cascade carries them down; the far receiver lists stay a
+pass-through (the CSR index names the summary node the sender tested). Near pairs name cut cells only.
+
+Two details that a test pinned rather than an argument:
+* The walks read `left < 0` as a leaf. Where the padding subtree joins the live tree, an ancestor of the cut has
+  one EMPTY child (one such node in every padded shard). It is kept as an inactive summary leaf; dropped, the
+  walk would stop at that ancestor.
+* Ancestors are "live, not in the cut, no strict ancestor in the cut"; the last is one pointer-doubling pass over
+  `parent` (ceil(log2 nodes) rounds of two gathers).
+
+**Coverage, tested first.** Momentum cannot see a coverage error, so `tests/unit/distributed/test_cross_coverage.py`
+counts: every pair the pipeline emits (publish, export, send buffers, the receiver's slice, the far pass-through,
+the receiver near walk -- the hook's own `_summary_rows` / `_export_from_rows`) is expanded to its particle block,
+and the (receiver particle, sender particle) matrix must be exactly 1. It passes one-sided, two-sided over cells
+and two-sided over leaves, both directions, theta 0.8 and 0.5, with a size-bounded cut; a dropped summary entry
+and a duplicated far pair are caught. yggdrax tests the export lists the same way at ndev 2 and 3, and the
+Pallas walk's two-sided pair sets equal the traced walk's.
+
+**Volume** (two A100s, Plummer seed 0, leaf 64, theta 0.8, p6, per device):
+
+| | 1e5 / card one-sided | two-sided | 1e6 / card one-sided | two-sided cells | two-sided leaves |
+| --- | --- | --- | --- | --- | --- |
+| export far pairs | 283-367k | 54k | 4.6-5.1M | 437-458k | 606k |
+| export walk peak | 36-47k | 6.2k | 0.72-0.90M | 61-63k | 71k |
+| near CSR | 12-14k | 12-14k | -- | 265-288k | 149k |
+| near-walk far pairs (M2L) | 21-25k | 20-25k | -- | 479-501k | 0 |
+| near particles shipped | | | | 0.98M / 0.80M | 0.23M / 0.52M |
+
+Two-sided far pairs are 8.7 per leaf at both N: O(N), as an FMM's should be.
+
+**Accuracy** (N = 2e5, rel-L2 vs fp64 over all sources): p4 / p5 / p6 = 2.38 / 1.19 / 0.695e-3 one-sided,
+2.24 / 1.20 / 0.663e-3 two-sided (one-card lane 2.94 / 1.56 / 0.820e-3). Flat in p, in class. At 2e6 8.81e-4 ->
+8.80e-4 (cells) / 8.85e-4 (leaves); at 8e6 5.36e-4 -> 4.95e-4.
+
+**Timing** (cards 6+7, a PIX pair, interleaved arms from frozen worktrees, min of 15, cross arm):
+
+| N | one-sided | two-sided cells | one-sided + caps | two-sided cells + caps | two-sided leaves + caps |
+| --- | --- | --- | --- | --- | --- |
+| 4e5 | 17.35 / 17.43 | 17.05 / 17.06 | 16.73 / 16.55 | 16.46-16.59 | 16.65 / 16.43 |
+| 2e6 | 71.12 / 71.22 | 64.15 / 64.01 | 67.94 / 67.93 | 61.11-61.47 | 57.35 / 57.31 |
+| 8e6 | 229.4 / 229.6 | 202.4 / 202.3 | 219.5 / 219.2 | 188.9-189.1 | 188.3 / 188.3 |
+
+**Findings, in order.**
+1. **The far pairs were not what the M2L paid for.** Two-sided cut the export far pairs 12x but the 2e6 force by
+   only 7 ms, not the ~20 the stage trace had attributed to them. The M2L kernel took 5.4 ms with ~5.6M cross
+   pairs and 5.2 ms with ~0.95M -- against 1.4 ms in the local arm. Its grid is ONE program per target walking its CSR
+   row in 32-lane tiles, so the cost is the longest row, not the pair count. The long rows came from the NEAR
+   import: one outskirt cell (4 leaves, radius 15.8 at r = 17.4) was near 48k sender leaves, and the receiver's
+   near walk gave its leaves those leaves as M2L sources.
+2. **Publishing receiver LEAVES fixes that.** With the summary a tree, cells of one leaf
+   (`max_leaves_per_cell = 1`, now the two-sided default) cost only a deeper walk: the sender decides "needs
+   particles" per receiver leaf, the receiver near walk becomes a pass-through (0 far pairs out of it; tested),
+   the near CSR halves and the near particles shipped fall 2-4x. 2e6: 61.3 -> 57.3 ms. At 8e6 and 4e5 it is
+   neutral (-0.7 / 0 ms): the 2e6 seed-0 draw is the one with the pathological outskirt cell.
+3. **The receiver caps were 8-17x oversized, in both arms.** The probe's per-leaf factors predate
+   `summary_cell_level = 8`, which cut the near import. At 1e6 per card: near-walk queue 4.2M for a 0.52M peak,
+   near-walk far list 8.4M for 0.50M, near list 2.1M for 0.15M, near CSR 4.2M for 0.29M. Each is padded work: the
+   far list joins the merged M2L CSR sort (27M wide at 2e6) and two more 8M sorts, the queue sets the Pallas grid.
+   Re-derived from the live counts: -3.3 ms one-sided and -2.9 two-sided at 2e6, -10 / -13 ms at 8e6, forces
+   identical in every digit.
+
+**A pre-existing silent truncation, found by the three-seed gate** (fixed in this branch). Two of nine two-card
+gate rows were wrong with every capacity flag False -- seed 2 at 4e5 rel-L2 4.2e-2, seed 1 at 1e6 3.6e-2 -- and
+identically so in the one-sided and both two-sided modes (4.2287 / 4.2288 / 4.2298e-2), against 7.8e-4 on one
+card. A per-particle dump (`PROBE_DUMP`) put it on ONE particle that kept its near field and lost its far field
+(0.024 against 0.37). Cause: `measure_shard_plan` ran the eager prepare in each shard's OWN box, while the traced
+force rebuilds in the GLOBAL mesh box; different boxes cut different cells, and shard 0's widest level was 4564
+nodes against a planned 4525 (= 1.25 x 3620, its own-box width), so the M2M/L2L level loops dropped 39 nodes and
+everything under them. A larger leaf capacity (which widens the plan through the padding levels) or the plan
+widened by 10 % (`PROBE_PLAN_WIDEN=1.1`) restored 8.8e-4 exactly. The refresh's own width guard folds into the
+walk's far-pair saturation and never reached the mesh flag: with the plan's width HALVED on purpose the force was
+49 % wrong and every flag read False. Fixed: the eager prepare builds in the mesh box
+(`strict_fused_prepared_eval_fn(bounds=)`), the registry is lifted to the tree rebuilt exactly as the refresh will,
+and `capacity_plan.plan_level_overflow` is ORed into the mesh flag (the halved plan now raises it). The eager
+own-box tree also over-counted leaves (33,388 against 26,302 on a 1e6 shard), which is why the probe's leaf
+capacity raised at setup on seed 1. Every gate row before this one was seed 0, which does not trip it.
+
+**The gate** (one card at N on card 6 vs two cards at 2N on 6+7, back to back, min of 15, after the fix):
+
+| per card | seed | 1 card at N | 2 cards at 2N, local / cross | ratio | gate 1.5 |
+| --- | --- | --- | --- | --- | --- |
+| 2e5 | 0 | 10.73 | 12.18 / 16.59 | 1.55 | fail by 0.5 ms |
+| 2e5 | 1 | 11.24 | 11.73 / 17.46 | 1.55 | fail by 0.6 ms |
+| 2e5 | 2 | 11.59 | 11.56 / 17.02 | 1.47 | pass |
+| 5e5 | 0 | 21.75 | 21.29 / 28.70 | 1.32 | pass |
+| 5e5 | 1 | 19.36 | 21.65 / 29.03 | 1.50 | pass (on the line) |
+| 5e5 | 2 | 22.84 | 23.57 / 30.78 | 1.35 | pass |
+| 1e6 | 0 | 41.98 | 46.28 / 56.24 | 1.34 | pass |
+| 1e6 | 1 | 42.54 | 44.75 / 54.66 | 1.28 | pass |
+| 1e6 | 2 | 43.92 | 42.39 / 52.05 | 1.19 | pass |
+
+The 1e6-per-card row -- the one this plan was for (needed <= 63 ms at 2e6, was 71.0) -- passes on every draw.
+At 2e5 per card the cross hook's fixed cost (~5 ms over the local arm on a launch-bound one-card time of
+10.7-11.6 ms) is what fails; the volume this plan cut is not. Same-N accuracy, two cards against one: seed 1 at
+4e5 1.36e-3 / 1.22e-3, seed 2 at 4e5 8.81e-4 / 7.82e-4, seed 2 at 1e6 1.24e-3 / 1.17e-3 (the seed-1 4e5 and
+seed-2 1e6 draws are harder for both lanes).
+
+**Gate G2.2 on the new defaults** (`bench/multigpu_rollout_gate.py`, arm D, N = 2e5, 100 steps, repartition every
+16; rows in `bench/results/multigpu_two_sided_export/rollout_gate/`): flags clean and ids exactly once on every
+step, 6 repartitions moving 18,725 particles, fp64 probe errors 6.10-8.01e-4 (the 2026-10-01 run: 5.8-8.6e-4);
+the one-card lane on the same positions 6.10-8.04e-4, a ratio of 0.96-1.01 (gate 1.2); dE/E at step 100
+2.44e-4 on two cards against 2.50e-4 on one.
+
+**Not covered:** ndev > 2 on GPU (the CPU coverage and yggdrax tests run ndev 3); the summary all_gather moves its
+CAPACITY (2 x the leaf capacity x 7 floats: 3.4 MB per device at 1e6 per card), which grows with ndev; one outskirt
+leaf (radius 9.4) still has 17.5k near sender leaves at 2e6, a long row in the cross near-field kernel.
+
 ## Next
 
+**2026-10-03:** the two-sided export walk is built and the default (section above); the 1e6-per-card gate row
+passes on three draws, and a silent level-loop truncation in the mesh lane's capacity plan is fixed. What follows:
+the 2e5-per-card row (the cross hook's fixed, launch-bound cost); the summary all_gather moving its capacity (it
+grows with ndev); ndev > 2 on GPU; the weak-scaling sweep and the 25M disc+bulge rollout on the tuned code.
+
 **2026-10-02:** the cross field is built, correct, and two cards now beat one from N = 1e6 up (section above).
-What follows is the two-sided export walk; the paragraphs below are the Phase 1-3 history.
+The paragraphs below are the Phase 1-3 history.
 
 
 Phase 1 is done: the fused lane runs per device under one `shard_map`, at parity with the single-device lane to
