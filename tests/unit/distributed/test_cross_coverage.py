@@ -39,6 +39,7 @@ from yggdrax.tree_moments import compute_tree_mass_moments  # noqa: E402
 from jaccpot.distributed.cross import (  # noqa: E402
     CrossCapacities,
     _direct_far_lists,
+    _direct_near_lists,
     _export_from_rows,
     _summary_rows,
 )
@@ -170,8 +171,12 @@ def _deliver(cell, node, count, *, block, n_send):
     return rows, got
 
 
-def cross_pairs(recv, send, theta, *, mode="one_sided", **kw):
+def cross_pairs(recv, send, theta, *, mode="one_sided", direct_near=False, **kw):
     """Every pair device 0 (receiver) evaluates against device 1 (sender).
+
+    ``direct_near`` reads the near lists straight off the CSR
+    (``cross._direct_near_lists``, what the hook does under a leaf summary) instead of
+    walking them.
 
     Returns
     -------
@@ -216,6 +221,19 @@ def cross_pairs(recv, send, theta, *, mode="one_sided", **kw):
         [jnp.asarray(recv.geom.radius), jnp.asarray(send.geom.radius)[rows_safe]]
     )
     active = jnp.concatenate([recv.active, jnp.asarray(imp_live)])
+    if direct_near:
+        direct = _direct_near_lists(
+            block_nodes, jnp.asarray(recv.ranges), recv.num_internal, got_n
+        )
+        c = int(direct.near_count)
+        out.append((np.zeros(0, np.int64), np.zeros(0, np.int64)))  # no far pairs
+        out.append(
+            (
+                np.asarray(direct.near_target)[:c],
+                rows_n[np.asarray(direct.near_source)[:c]],
+            )
+        )
+        return out
     walked = receiver_interaction_lists(
         left,
         right,
@@ -298,6 +316,24 @@ def test_over_receiver_leaves_the_near_walk_is_a_pass_through(two_domains):
     assert len(pairs[1][0]) == 0, "the near walk found far pairs under a leaf summary"
     assert len(pairs[2][0]) > 0, "vacuous"
     assert np.all(pairs[2][0] >= a.num_internal), "a near target that is no leaf"
+
+
+@pytest.mark.parametrize("theta", [0.8, 0.5])
+def test_the_hook_reads_the_leaf_summary_near_lists_off_the_csr(two_domains, theta):
+    """What the hook does instead of the near walk under a leaf summary: the same
+    near pairs, and the same exact coverage."""
+    a, b = two_domains
+    for recv, send in ((a, b), (b, a)):
+        walked = cross_pairs(recv, send, theta, mode="two_sided_leaves")
+        direct = cross_pairs(
+            recv, send, theta, mode="two_sided_leaves", direct_near=True
+        )
+        assert len(walked[1][0]) == 0, "the walk was not a pass-through"
+        as_set = lambda p: set(zip(p[0].tolist(), p[1].tolist()))  # noqa: E731
+        assert as_set(direct[2]) == as_set(walked[2])
+        assert len(direct[2][0]) == len(walked[2][0]) > 0
+        C = coverage(recv, send, direct)
+        assert np.all(C == 1), _report(C)
 
 
 def test_two_sided_far_pairs_land_above_the_cells_and_are_fewer(two_domains):

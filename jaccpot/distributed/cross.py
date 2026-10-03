@@ -622,6 +622,105 @@ def _direct_far_lists(cells: Array, got: Any) -> Any:
     )
 
 
+def _near_receiver_walk_needed(
+    *,
+    two_sided: bool,
+    max_leaves: int,
+    theta: float,
+    near_theta: Optional[float],
+    export_theta: Optional[float],
+) -> bool:
+    """Whether the NEAR receiver walk can refine anything (else it is a pass-through).
+
+    Two-sided over receiver LEAVES, a near pair the sender emits is (my cell, its
+    leaf) where my cell holds exactly one live leaf, tested on the very centre and
+    radius the sender used. Re-walking it can only bottom out at (my leaf, its leaf)
+    and fail the MAC again: no far pairs, near pairs == the received CSR (tested on
+    CPU). Any other mode, a different receiver or export theta, or
+    ``JACCPOT_CROSS_NEAR_RECEIVER_WALK=1`` runs the walk.
+
+    Parameters
+    ----------
+    two_sided : bool
+        The export mode.
+    max_leaves : int
+        Leaves per summary cell at most.
+    theta : float
+        The hook's MAC parameter.
+    near_theta, export_theta : Optional[float]
+        The receiver's near-walk and the sender's export MAC parameters.
+
+    Returns
+    -------
+    bool
+        ``True`` when the walk must run.
+    """
+    from jaccpot._env import env_flag
+
+    if env_flag("JACCPOT_CROSS_NEAR_RECEIVER_WALK", False):
+        return True
+    if not two_sided or int(max_leaves) != 1:
+        return True
+    return any(
+        t is not None and float(t) != float(theta) for t in (near_theta, export_theta)
+    )
+
+
+def _direct_near_lists(
+    cells: Array, node_ranges: Array, num_internal: int, got: Any
+) -> Any:
+    """The near receiver lists read straight off the received CSR (leaf summary).
+
+    Parameters
+    ----------
+    cells : Array
+        ``(B,)`` this device's node behind every published summary index.
+    node_ranges : Array
+        ``(total_nodes, 2)`` this device's inclusive particle ranges.
+    num_internal : int
+        Nodes at or above this index are leaves.
+    got : Any
+        The received near import (``ImportedCells``).
+
+    Returns
+    -------
+    Any
+        A :class:`yggdrax.distributed.import_cells.ReceiverLists` with every CSR
+        entry as a near pair (my LEAF under the cell, imported row) and no far pairs.
+        A cell with one live leaf can be an internal node whose other child is empty;
+        its leaf is the one starting where the cell starts.
+    """
+    from yggdrax.distributed.import_cells import ReceiverLists
+
+    csr_cell = jnp.asarray(got.csr_cell)
+    csr_row = jnp.asarray(got.csr_row)
+    idx = csr_row.dtype
+    live = (jnp.arange(csr_cell.shape[0]) < got.num_csr) & (csr_cell >= 0)
+    neg = jnp.asarray(-1, idx)
+    nr = jnp.asarray(node_ranges)
+    cell = jnp.asarray(cells, idx)[jnp.where(live, csr_cell, 0)]
+    # leaves hold ascending, contiguous ranges (padding leaves start past every live
+    # one), so the leaf under a one-leaf cell is found by the cell's start
+    leaf = num_internal + jnp.searchsorted(
+        nr[num_internal:, 0], nr[jnp.maximum(cell, 0), 0], side="left"
+    )
+    target = jnp.where(live, leaf.astype(idx), neg)
+    source = jnp.where(live, csr_row, neg)
+    empty = jnp.full((1,), -1, idx)
+    false = jnp.asarray(False)
+    return ReceiverLists(
+        far_target=empty,
+        far_source=empty,
+        far_count=jnp.asarray(0, idx),
+        near_target=target,
+        near_source=source,
+        near_count=jnp.asarray(got.num_csr),
+        far_overflow=false,
+        near_overflow=false,
+        queue_overflow=false,
+    )
+
+
 def cross_walk_backend() -> str:
     """Walk implementation of the export and receiver walks.
 
@@ -1166,12 +1265,26 @@ def make_cross_hook(
             # and the only correct answer was near_theta = 0, every one a direct
             # sum. With the coefficients here they go back through the M2L, as a
             # second imported block behind the far one (Task 2 of the record).
-            leaf_rows = [
-                jnp.where(okrow, jnp.asarray(geom.center)[lrow], 0.0),
-                jnp.where(okrow, jnp.asarray(geom.radius)[lrow][:, None], 0.0),
-                jnp.where(okrow, jnp.asarray(mp.packed)[lrow], 0.0),
-                jnp.where(okrow, jnp.asarray(mp.centers)[lrow], 0.0),
-            ]
+            near_walk = _near_receiver_walk_needed(
+                two_sided=two_sided,
+                max_leaves=_max_leaves_per_cell(cap, two_sided),
+                theta=theta,
+                near_theta=near_theta,
+                export_theta=export_theta,
+            )
+            # Without the receiver walk nothing reads the near rows' geometry or
+            # multipoles (no near-walk far pairs reach the M2L), so only the particles
+            # and their per-row counts travel: 52 floats per row fewer at p6.
+            leaf_rows = (
+                [
+                    jnp.where(okrow, jnp.asarray(geom.center)[lrow], 0.0),
+                    jnp.where(okrow, jnp.asarray(geom.radius)[lrow][:, None], 0.0),
+                    jnp.where(okrow, jnp.asarray(mp.packed)[lrow], 0.0),
+                    jnp.where(okrow, jnp.asarray(mp.centers)[lrow], 0.0),
+                ]
+                if near_walk or _near_tiles_on_the_wire()
+                else []
+            )
             if _near_tiles_on_the_wire():
                 got_n, imp_pos, imp_mass, particle_overflow = jax.named_call(
                     _near_exchange_tiles, name="cross_exchange_near"
@@ -1206,39 +1319,44 @@ def make_cross_hook(
                     ndev=ndev,
                     axis_name=axis_name,
                 )
-            # geometry and multipole rows, the same layout in both wire formats
-            imp_cen_n = got_n.payload[:, 0:3]  # geometric -> MAC
-            imp_rad_n = got_n.payload[:, 3]
-            imp_mp_n = got_n.payload[:, 4 : 4 + n_coeff]  # multipole -> M2L
-            imp_ecen_n = got_n.payload[:, 4 + n_coeff : 7 + n_coeff]  # expansion -> M2L
-
-            combined_cen_n = jnp.concatenate([jnp.asarray(geom.center), imp_cen_n])
-            combined_rad_n = jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n])
-
-            rl_n = jax.named_call(
-                receiver_interaction_lists, name="cross_recv_walk_near"
-            )(
-                combined_left,
-                combined_right,
-                combined_cen_n,
-                combined_rad_n,
-                n_local,
-                block_nodes,
-                got_n.csr_cell,
-                got_n.csr_row,
-                got_n.num_csr,
-                # Pairs this walk calls far (89568/93005 at N = 2e5) are served by
-                # the M2L from the multipole each near leaf now carries; pairs it
-                # calls near are summed directly. Before the multipole travelled the
-                # far ones were unservable and dropped, and near_theta = 0 was the
-                # only correct setting. It remains as the control.
-                float(theta if near_theta is None else near_theta),
-                max_pair_queue=cap.walk_queue,
-                far_cap=cap.recv_far_cap,
-                near_cap=cap.recv_near_cap,
-                mac_type=mac_type,
-                walk_fn=walk_fn,
-            )
+            if not near_walk:
+                # a pass-through (`_near_receiver_walk_needed`): read the CSR directly
+                rl_n = _direct_near_lists(
+                    block_nodes, jnp.asarray(tree.node_ranges), num_internal, got_n
+                )
+                imp_mp_n = jnp.zeros((1, n_coeff), jnp.asarray(mp.packed).dtype)
+                imp_ecen_n = jnp.zeros((1, 3), jnp.asarray(mp.centers).dtype)
+            else:
+                # geometry and multipole rows, the same layout in both wire formats
+                imp_cen_n = got_n.payload[:, 0:3]  # geometric -> MAC
+                imp_rad_n = got_n.payload[:, 3]
+                imp_mp_n = got_n.payload[:, 4 : 4 + n_coeff]  # multipole -> M2L
+                imp_ecen_n = got_n.payload[:, 4 + n_coeff : 7 + n_coeff]  # -> M2L
+                rl_n = jax.named_call(
+                    receiver_interaction_lists, name="cross_recv_walk_near"
+                )(
+                    combined_left,
+                    combined_right,
+                    jnp.concatenate([jnp.asarray(geom.center), imp_cen_n]),
+                    jnp.concatenate([jnp.asarray(geom.radius), imp_rad_n]),
+                    n_local,
+                    block_nodes,
+                    got_n.csr_cell,
+                    got_n.csr_row,
+                    got_n.num_csr,
+                    # Pairs this walk calls far (89568/93005 at N = 2e5, 4-leaf cells)
+                    # are served by the M2L from the multipole each near leaf
+                    # carries; pairs it calls near are summed directly. Before the
+                    # multipole travelled the far ones were unservable and dropped,
+                    # and near_theta = 0 was the only correct setting. It remains as
+                    # the control.
+                    float(theta if near_theta is None else near_theta),
+                    max_pair_queue=cap.walk_queue,
+                    far_cap=cap.recv_far_cap,
+                    near_cap=cap.recv_near_cap,
+                    mac_type=mac_type,
+                    walk_fn=walk_fn,
+                )
             near_sink["positions"] = imp_pos
             near_sink["masses"] = imp_mass
             near_sink["mask"] = imp_mass != 0.0
