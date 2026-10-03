@@ -89,6 +89,13 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--steps", type=int, default=3, help="scan steps per timed call")
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--eval-repeats", type=int, default=7)
+    ap.add_argument(
+        "--accuracy-targets",
+        type=int,
+        default=0,
+        help="score the eager force against an fp64 direct sum on this many random "
+        "targets, LAST (after every FMM peak is recorded)",
+    )
     ap.add_argument("--no-scan", action="store_true")
     ap.add_argument("--no-analysis", action="store_true", help="skip memory_analysis()")
     ap.add_argument("--dump-dir", default=None, help="XLA dump (buffer assignment)")
@@ -133,7 +140,9 @@ if ARGS.caps == "named":
 elif ARGS.caps == "unnamed":
     for v in _CAP_VARS:
         os.environ.pop(v, None)
-_TRAV = dict((FAST_LANE_ENV_BY_LEAF.get(ARGS.leaf) or {}).get("_traversal_overrides", {}))
+_TRAV = dict(
+    (FAST_LANE_ENV_BY_LEAF.get(ARGS.leaf) or {}).get("_traversal_overrides", {})
+)
 
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
@@ -161,7 +170,9 @@ from jaccpot.runtime.kernels._evaluate import _infer_bounds  # noqa: E402
 
 GIB = float(1 << 30)
 #: physical card(s) for the contention monitor
-_PHYS = [int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",") if x.strip()][:1]
+_PHYS = [
+    int(x) for x in os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",") if x.strip()
+][:1]
 
 
 # --------------------------------------------------------------------------- memory
@@ -181,7 +192,9 @@ _T0 = time.perf_counter()
 
 
 def _traced(x) -> bool:
-    return any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(x))
+    return any(
+        isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(x)
+    )
 
 
 def _sync(x) -> None:
@@ -317,7 +330,9 @@ def _analysis(compiled) -> dict:
 
 def _buffer_assignment(dump_dir: str, needle: str, top: int = 25) -> dict:
     """Largest allocations of the dumped module whose name contains ``needle``."""
-    files = sorted(glob.glob(os.path.join(dump_dir, f"*{needle}*buffer-assignment.txt")))
+    files = sorted(
+        glob.glob(os.path.join(dump_dir, f"*{needle}*buffer-assignment.txt"))
+    )
     if not files:
         return dict(error="no buffer-assignment dump")
     path = files[-1]
@@ -327,7 +342,9 @@ def _buffer_assignment(dump_dir: str, needle: str, top: int = 25) -> dict:
         for line in fh:
             if line.startswith("allocation "):
                 head, _, rest = line.partition(":")
-                size = int(rest.split("size ")[1].split(",")[0]) if "size " in rest else 0
+                size = (
+                    int(rest.split("size ")[1].split(",")[0]) if "size " in rest else 0
+                )
                 cur = dict(id=head, bytes=size, kind=rest.strip()[:160], values=[])
                 allocs.append(cur)
             elif cur is not None and line.strip().startswith("value:"):
@@ -348,7 +365,9 @@ def _buffer_assignment(dump_dir: str, needle: str, top: int = 25) -> dict:
                 id=a["id"],
                 gib=a["bytes"] / GIB,
                 kind=a["kind"],
-                largest_values=[v for _, v in sorted(a["values"], key=lambda v: -v[0])[:3]],
+                largest_values=[
+                    v for _, v in sorted(a["values"], key=lambda v: -v[0])[:3]
+                ],
             )
             for a in allocs[:top]
         ],
@@ -374,9 +393,9 @@ def _plummer_velocities(pos: np.ndarray, rng: np.random.Generator) -> np.ndarray
     mu = rng.uniform(-1.0, 1.0, n)
     phi = rng.uniform(0.0, 2.0 * np.pi, n)
     st = np.sqrt(1.0 - mu * mu)
-    return (speed[:, None] * np.stack([st * np.cos(phi), st * np.sin(phi), mu], 1)).astype(
-        np.float32
-    )
+    return (
+        speed[:, None] * np.stack([st * np.cos(phi), st * np.sin(phi), mu], 1)
+    ).astype(np.float32)
 
 
 def _initial_conditions():
@@ -386,7 +405,14 @@ def _initial_conditions():
         vel = _plummer_velocities(np.asarray(pos, np.float64), np.random.default_rng(7))
         soft = 1e-7 if ARGS.softening is None else ARGS.softening
         dt = 1e-2 if ARGS.dt is None else ARGS.dt
-        return np.asarray(pos, np.float32), vel, np.asarray(mass, np.float32), soft, dt, None
+        return (
+            np.asarray(pos, np.float32),
+            vel,
+            np.asarray(mass, np.float32),
+            soft,
+            dt,
+            None,
+        )
     ic = np.load(_DISC_IC)
     n_all = int(ic["state0"].shape[0])
     if ARGS.n > n_all:
@@ -509,7 +535,11 @@ def run_budget(result: dict) -> None:
     _event("before_prepare")
     t0 = time.perf_counter()
     prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
-        positions=P, masses=M, leaf_size=ARGS.leaf, max_order=ARGS.order, theta=ARGS.theta
+        positions=P,
+        masses=M,
+        leaf_size=ARGS.leaf,
+        max_order=ARGS.order,
+        theta=ARGS.theta,
     )
     _sync(prepared)
     result["prepare_s"] = time.perf_counter() - t0
@@ -522,6 +552,7 @@ def run_budget(result: dict) -> None:
 
     a = jax.block_until_ready(eval_fn(prepared))
     _event("after_eval_compile")
+    a_host = np.asarray(a, np.float64) if ARGS.accuracy_targets else None
     del a
     samples = []
     for _ in range(2):
@@ -534,7 +565,9 @@ def run_budget(result: dict) -> None:
     result["eval_contention"] = mon.summary().as_dict()
     _event("after_eval_timing")
     result["eval_ms"] = dict(
-        min=min(samples) * 1e3, median=float(np.median(samples)) * 1e3, samples=[s * 1e3 for s in samples]
+        min=min(samples) * 1e3,
+        median=float(np.median(samples)) * 1e3,
+        samples=[s * 1e3 for s in samples],
     )
     print(f"eval-only min {result['eval_ms']['min']:.2f} ms", flush=True)
     if not ARGS.no_analysis:
@@ -545,6 +578,7 @@ def run_budget(result: dict) -> None:
     del prepared, eval_fn
 
     if ARGS.no_scan:
+        _accuracy(result, pos, mass, soft, a_host)
         return
     state0 = jnp.stack([P, jnp.asarray(vel)], axis=1)
 
@@ -580,7 +614,9 @@ def run_budget(result: dict) -> None:
     result["scan_contention"] = mon.summary().as_dict()
     _event("after_scan_timing")
     result["step_ms"] = dict(
-        min=min(samples) * 1e3, median=float(np.median(samples)) * 1e3, samples=[s * 1e3 for s in samples]
+        min=min(samples) * 1e3,
+        median=float(np.median(samples)) * 1e3,
+        samples=[s * 1e3 for s in samples],
     )
     result["peak_after_scan_gib"] = _mem()["peak"] / GIB
     result["scan_events"] = EVENTS[len(result["prepare_events"]) :]
@@ -593,18 +629,61 @@ def run_budget(result: dict) -> None:
         )
         if runner is not None:
             spec = jax.tree_util.tree_map(
-                lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype)
-                if hasattr(x, "shape") and hasattr(x, "dtype")
-                else x,
+                lambda x: (
+                    jax.ShapeDtypeStruct(x.shape, x.dtype)
+                    if hasattr(x, "shape") and hasattr(x, "dtype")
+                    else x
+                ),
                 (prep, state, jnp.zeros_like(state[:, 0])),
             )
             result["runner_memory_analysis"] = _analysis(runner.lower(*spec).compile())
-            print(f"runner memory_analysis {result['runner_memory_analysis']}", flush=True)
+            print(
+                f"runner memory_analysis {result['runner_memory_analysis']}", flush=True
+            )
     if ARGS.dump_dir:
         result["eval_buffer_assignment"] = _buffer_assignment(ARGS.dump_dir, "_eval")
         result["runner_buffer_assignment"] = _buffer_assignment(
             ARGS.dump_dir, "_compiled_runner"
         )
+    _write(result)
+    del state, prep
+    _accuracy(result, pos, mass, soft, a_host)
+
+
+def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
+    """fp64 direct-sum score of the eager force (``--accuracy-targets``)."""
+    if a_host is None:
+        return
+    from common.reference import direct_accelerations
+
+    result["peak_before_accuracy_gib"] = _mem()["peak"] / GIB
+    idx = np.sort(
+        np.random.default_rng(12345).choice(
+            ARGS.n, ARGS.accuracy_targets, replace=False
+        )
+    )
+    ref = direct_accelerations(
+        np.asarray(pos, np.float64),
+        np.asarray(mass, np.float64),
+        G=1.0,
+        softening=soft,
+        target_indices=idx,
+    )
+    got = a_host[idx]
+    err = np.linalg.norm(got - ref, axis=1) / np.maximum(
+        np.linalg.norm(ref, axis=1), 1e-300
+    )
+    result["accuracy"] = dict(
+        targets=int(len(idx)),
+        rel_l2=float(np.linalg.norm(got - ref) / np.linalg.norm(ref)),
+        median=float(np.median(err)),
+        p90=float(np.percentile(err, 90)),
+        max=float(err.max()),
+    )
+    print(
+        f"accuracy vs fp64 direct ({len(idx)} targets): {result['accuracy']}",
+        flush=True,
+    )
     _write(result)
 
 
@@ -612,7 +691,10 @@ def run_drift(result: dict) -> None:
     pos, vel, mass, soft, dt, ext = _initial_conditions()
     live, leaf_cap = _leaf_capacity(pos)
     result.update(live_leaves=live, leaf_capacity=leaf_cap, softening=soft, dt=dt)
-    print(f"N={ARGS.n} {ARGS.ic} live leaves {live} -> leaf capacity {leaf_cap}", flush=True)
+    print(
+        f"N={ARGS.n} {ARGS.ic} live leaves {live} -> leaf capacity {leaf_cap}",
+        flush=True,
+    )
     M = jnp.asarray(mass)
     solver = _solver(leaf_cap, soft)
     marks = sorted(int(s) for s in ARGS.drift_steps.split(","))
@@ -648,7 +730,12 @@ def run_drift(result: dict) -> None:
         del prepared
         lo, hi = p_now.min(0), p_now.max(0)
         ext_ = hi - lo
-        row = dict(step=mark, live_leaves=live_now, aspect=float(ext_.max() / ext_.min()), **_counts(solver))
+        row = dict(
+            step=mark,
+            live_leaves=live_now,
+            aspect=float(ext_.max() / ext_.min()),
+            **_counts(solver),
+        )
         rows.append(row)
         print(
             f"step {mark:5d}: far {row['far_pair_count']} near {row['total_neighbors']} "
@@ -661,7 +748,12 @@ def run_drift(result: dict) -> None:
     result["drift_ratio"] = [
         {
             k: (r[k] / base[k] if base.get(k) else None)
-            for k in ("far_pair_count", "total_neighbors", "peak_wavefront", "live_leaves")
+            for k in (
+                "far_pair_count",
+                "total_neighbors",
+                "peak_wavefront",
+                "live_leaves",
+            )
         }
         | {"step": r["step"]}
         for r in rows
