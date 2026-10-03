@@ -337,3 +337,45 @@ def test_the_far_receiver_walk_is_a_pass_through(two_domains):
     assert _pairs(direct.far_target, direct.far_source, direct.far_count) == _pairs(
         walked.far_target, walked.far_source, walked.far_count
     )
+
+
+def test_the_symmetric_walk_emits_the_same_sets(two_domains, pallas_walk):
+    """The walk between two gathered trees (both blocks refine) on the Pallas kernel."""
+    from jaccpot.distributed.cross import (
+        CrossCapacities,
+        _summary_rows,
+        _symmetric_walk,
+    )
+
+    me, other = two_domains
+    cap = CrossCapacities(
+        max_cells=2048,
+        max_leaves_per_cell=1,
+        export_far_cap=1 << 16,
+        export_near_cap=1 << 16,
+        export_walk_queue=1 << 15,
+    )
+    pubs = [
+        _summary_rows(d["topo"], d["geom"], cap, two_sided=True) for d in (me, other)
+    ]
+    gathered = jnp.stack([p.rows for p in pubs])
+    for dev in (0, 1):
+        ref = _symmetric_walk(
+            gathered, jnp.asarray(dev), 0.8, cap, mac_type="dehnen", walk_fn=None
+        )
+        got = _symmetric_walk(
+            gathered, jnp.asarray(dev), 0.8, cap, mac_type="dehnen", walk_fn=pallas_walk
+        )
+        for res in (ref, got):
+            assert not (
+                bool(res.far_overflow)
+                or bool(res.near_overflow)
+                or bool(res.queue_overflow)
+            )
+        assert int(ref.far_count) > 0 and int(ref.near_count) > 0, "vacuous"
+        assert _pairs(got.far_a, got.far_b, got.far_count) == _pairs(
+            ref.far_a, ref.far_b, ref.far_count
+        )
+        assert _pairs(got.near_a, got.near_b, got.near_count) == _pairs(
+            ref.near_a, ref.near_b, ref.near_count
+        )

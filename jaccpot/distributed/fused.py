@@ -691,7 +691,9 @@ def make_fused_force_evaluator(
             # float64, not int: counts up to 2^53 are exact in it, and a
             # diagnostic that is a DISTANCE would be truncated to 0 by an int
             # cast -- which would make a real effect look like a no-op.
-            jnp.asarray(cross_record[k]).reshape(1).astype(jnp.float64)
+            # a key this hook mode does not record reads as NaN, not as a KeyError:
+            # the symmetric exchange has no CSR, receiver walk or MAC re-check
+            jnp.asarray(cross_record.get(k, jnp.nan)).reshape(1).astype(jnp.float64)
             for k in cross_record_keys
         )
         return acceleration, flag, diag

@@ -368,3 +368,125 @@ def test_the_coverage_check_sees_a_double_count(two_domains):
     pairs[0] = (np.append(tgt, tgt[:1]), np.append(src, src[:1]))
     C = coverage(a, b, pairs)
     assert np.sum(C > 1) > 0 and np.sum(C == 0) == 0, _report(C)
+
+
+# ---- the symmetric exchange: both devices derive the same pairs from the gathered trees
+
+
+def _gathered_leaf_summaries(a, b):
+    cap = _caps(max_leaves=1)
+    pubs = [_summary_rows(d.topo, d.geom, cap, two_sided=True) for d in (a, b)]
+    assert not any(bool(p.overflow) for p in pubs)
+    return cap, pubs, jnp.stack([p.rows for p in pubs])
+
+
+def _walk_pairs(res):
+    nf, nn = int(res.far_count), int(res.near_count)
+    far = set(
+        zip(np.asarray(res.far_a)[:nf].tolist(), np.asarray(res.far_b)[:nf].tolist())
+    )
+    near = set(
+        zip(np.asarray(res.near_a)[:nn].tolist(), np.asarray(res.near_b)[:nn].tolist())
+    )
+    return far, near
+
+
+@pytest.mark.parametrize("theta", [0.8, 0.5])
+def test_both_devices_derive_the_same_pairs_and_rows(two_domains, theta):
+    """No CSR travels, so the two ends must agree by construction: the same pair set,
+    and what the sender ships to d row for row what d expects from it."""
+    from jaccpot.distributed.cross import (
+        _rows_by_peer,
+        _symmetric_pair_sides,
+        _symmetric_walk,
+    )
+
+    a, b = two_domains
+    cap, pubs, gathered = _gathered_leaf_summaries(a, b)
+    S = int(gathered.shape[1])
+    res = [
+        _symmetric_walk(
+            gathered, jnp.asarray(me), theta, cap, mac_type="dehnen", walk_fn=None
+        )
+        for me in (0, 1)
+    ]
+    for r in res:
+        assert not (
+            bool(r.far_overflow) or bool(r.near_overflow) or bool(r.queue_overflow)
+        )
+    p0, p1 = _walk_pairs(res[0]), _walk_pairs(res[1])
+    assert p0 == p1, "the two devices walked different pair sets"
+    assert len(p0[0]) > 0 and len(p0[1]) > 0, "vacuous"
+
+    def rows(r, me, field, export):
+        a_, b_, n_ = (
+            (r.far_a, r.far_b, r.far_count)
+            if field == "far"
+            else (r.near_a, r.near_b, r.near_count)
+        )
+        live, mine, peer, theirs = _symmetric_pair_sides(a_, b_, n_, jnp.asarray(me), S)
+        out = _rows_by_peer(
+            peer, mine if export else theirs, live, ndev=2, S=S, capacity=CAP
+        )
+        assert not bool(out.overflow)
+        return out
+
+    for field in ("far", "near"):
+        for sender, receiver in ((1, 0), (0, 1)):
+            sent = rows(res[sender], sender, field, export=True)
+            got = rows(res[receiver], receiver, field, export=False)
+            n_s = int(sent.sizes[receiver])
+            n_r = int(got.sizes[sender])
+            assert n_s == n_r > 0
+            off_s = int(np.sum(np.asarray(sent.sizes)[:receiver]))
+            off_r = int(np.sum(np.asarray(got.sizes)[:sender]))
+            np.testing.assert_array_equal(
+                np.asarray(sent.rows)[off_s : off_s + n_s],
+                np.asarray(got.rows)[off_r : off_r + n_r],
+            )
+
+
+@pytest.mark.parametrize("theta", [0.8, 0.5])
+def test_the_symmetric_lists_cover_every_cross_pair_once(two_domains, theta):
+    """The receiver's own far and near lists, rebuilt from the walk alone."""
+    from jaccpot.distributed.cross import (
+        _leaf_under,
+        _rows_by_peer,
+        _symmetric_pair_sides,
+        _symmetric_walk,
+    )
+
+    a, b = two_domains
+    cap, pubs, gathered = _gathered_leaf_summaries(a, b)
+    S = int(gathered.shape[1])
+    for me, recv, send in ((0, a, b), (1, b, a)):
+        peer_nodes = np.asarray(pubs[1 - me].block_nodes)
+        my_nodes = np.asarray(pubs[me].block_nodes)
+        r = _symmetric_walk(
+            gathered, jnp.asarray(me), theta, cap, mac_type="dehnen", walk_fn=None
+        )
+        pairs = []
+        for field in ("far", "near"):
+            a_, b_, n_ = (
+                (r.far_a, r.far_b, r.far_count)
+                if field == "far"
+                else (r.near_a, r.near_b, r.near_count)
+            )
+            live, mine, peer, theirs = _symmetric_pair_sides(
+                a_, b_, n_, jnp.asarray(me), S
+            )
+            imp = _rows_by_peer(peer, theirs, live, ndev=2, S=S, capacity=CAP)
+            live = np.asarray(live)
+            src_rows = np.asarray(imp.pair_row)[live]
+            src = peer_nodes[np.asarray(imp.rows)[src_rows]]
+            tgt = my_nodes[np.asarray(mine)[live]]
+            if field == "near":
+                tgt = np.asarray(
+                    _leaf_under(
+                        jnp.asarray(tgt), jnp.asarray(recv.ranges), recv.num_internal
+                    )
+                )
+                assert np.all(tgt >= recv.num_internal), "a near target that is no leaf"
+            pairs.append((tgt, src))
+        C = coverage(recv, send, pairs)
+        assert np.all(C == 1), _report(C)
