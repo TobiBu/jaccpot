@@ -350,3 +350,117 @@ def test_merged_walk_caps_cover_the_worst_shard():
     engine = SimpleNamespace(_strict_fused_validated_caps=b)
     install_walk_caps(SimpleNamespace(_impl=engine), merged)
     assert engine._strict_fused_validated_caps["peak_wavefront"] == 120_000
+
+
+def _plan_for_tree(tree, *, width, levels):
+    total_nodes, num_internal = _shape_of(tree)
+    return FusedCapacityPlan(
+        total_nodes=total_nodes,
+        num_internal=num_internal,
+        level_batch_width=width,
+        num_levels=levels,
+        upward_num_levels=levels,
+    )
+
+
+def _widest_and_depth(tree):
+    offs = np.asarray(tree.level_offsets)
+    return int(np.max(np.diff(offs))), int(np.max(np.asarray(tree.node_level))) + 1
+
+
+def test_the_mesh_flag_sees_a_tree_that_outgrew_the_plan():
+    """``plan_level_overflow``: what the mesh evaluator ORs into its local flag.
+
+    On two A100s a plan 39 nodes narrower than one level of a shard's tree lost that
+    level from both cascades -- one particle with its near field and no far field,
+    rel-L2 4.2e-2 -- and every capacity flag read False.
+    """
+    from jaccpot.runtime.capacity_plan import plan_level_overflow
+
+    tree = _cell_tree(4000, 0)
+    widest, depth = _widest_and_depth(tree)
+    assert not bool(plan_level_overflow(tree)), "no plan installed: nothing to outgrow"
+    fits = _plan_for_tree(tree, width=widest, levels=depth)
+    with fused_capacity_plan_overrides(fits):
+        assert not bool(plan_level_overflow(tree)), "exactly covered is not an overflow"
+    for narrow in (
+        _plan_for_tree(tree, width=widest - 1, levels=depth),
+        _plan_for_tree(tree, width=widest, levels=depth - 1),
+    ):
+        with fused_capacity_plan_overrides(narrow):
+            assert bool(plan_level_overflow(tree)), narrow
+            # and under trace, where the mesh evaluator calls it
+            traced = jax.jit(plan_level_overflow)(tree)
+        assert bool(traced)
+
+
+def test_the_plan_is_measured_on_the_tree_the_refresh_builds(cold_registry):
+    """The eager tree lives in the shard's own box; the refresh rebuilds it in the
+    GLOBAL box. Rebuilt the way the refresh will, the registry must cover that tree."""
+    from types import SimpleNamespace
+
+    from yggdrax._tree_impl import build_static_cells_tree
+    from yggdrax.tree import rebuild_static_radix_tree_from_template
+
+    from jaccpot.distributed.fused import cube_bounds
+    from jaccpot.runtime.capacity_plan import _lift_registry_to_refresh_tree
+
+    rng = np.random.default_rng(3)
+    n = 3000
+    pos = jnp.asarray(rng.standard_normal((n, 3)), jnp.float32)
+    mass = jnp.full((n,), 1.0 / n, jnp.float32)
+    own = cube_bounds(jnp.min(pos, 0), jnp.max(pos, 0), pad=1e-6)
+    # the mesh box: the other device's particles reach much further out
+    mesh = cube_bounds(jnp.min(pos, 0) - 40.0, jnp.max(pos, 0) + 3.0, pad=1e-6)
+    template = build_static_cells_tree(pos, mass, own, leaf_size=16, leaf_capacity=1024)
+    total_nodes, num_internal = _shape_of(template)
+    rebuilt = rebuild_static_radix_tree_from_template(
+        pos,
+        mass,
+        template,
+        bounds=mesh,
+        return_reordered=True,
+        leaf_partition="cells",
+        return_overflow=True,
+    )[0]
+    w_own, d_own = _widest_and_depth(template)
+    w_mesh, d_mesh = _widest_and_depth(rebuilt)
+    assert (w_mesh, d_mesh) != (w_own, d_own), "vacuous: the box changed nothing"
+
+    depths = []
+    impl = SimpleNamespace(
+        _tree_leaf_partition="cells",
+        _tree_cell_min_level=0,
+        _resolve_upward_num_levels=lambda t: depths.append(_widest_and_depth(t)[1]),
+    )
+    level_shapes.level_batch_width(
+        template.level_offsets, total_nodes=total_nodes, num_internal=num_internal
+    )  # what the eager prepare records
+    _lift_registry_to_refresh_tree(
+        impl, template, pos, mass, bounds=mesh, num_valid=None
+    )
+    width = level_shapes.registered_level_batch_width(
+        total_nodes=total_nodes, num_internal=num_internal
+    )
+    levels = level_shapes.registered_num_levels(
+        total_nodes=total_nodes, num_internal=num_internal
+    )
+    assert width >= max(w_own, w_mesh), (width, w_own, w_mesh)
+    assert levels >= max(d_own, d_mesh)
+    assert depths == [d_mesh], "the upward depth stash must see the refresh tree"
+
+
+def test_the_host_mesh_box_ignores_padding_and_matches_the_traced_reduction():
+    from jaccpot.distributed.fused import cube_bounds, host_mesh_bounds
+
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((50, 3)).astype(np.float32)
+    b = (rng.standard_normal((50, 3)) + 5.0).astype(np.float32)
+    a[40:] = 1e6  # padding rows: never part of the box
+    lo, hi = host_mesh_bounds([a, b], [40, 50])
+    live = np.concatenate([a[:40], b])
+    ref_lo, ref_hi = cube_bounds(
+        jnp.asarray(live.min(0)), jnp.asarray(live.max(0)), pad=1e-6
+    )
+    np.testing.assert_array_equal(np.asarray(lo), np.asarray(ref_lo))
+    np.testing.assert_array_equal(np.asarray(hi), np.asarray(ref_hi))

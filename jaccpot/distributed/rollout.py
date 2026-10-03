@@ -453,6 +453,7 @@ def setup_fused_force(
     from jaccpot.distributed.cross import make_cross_hook
     from jaccpot.distributed.fused import (
         assemble_prepared_states,
+        host_mesh_bounds,
         make_fused_force_evaluator,
     )
     from jaccpot.runtime.capacity_plan import (
@@ -470,6 +471,10 @@ def setup_fused_force(
         return [shards[d] for d in devices]
 
     pos_d, mass_d = _by_device(state.positions), _by_device(state.masses)
+    counts = [int(c) for c in np.asarray(state.count)]
+    # the box the traced force builds in: the plan must cover the trees built THERE,
+    # not the eager prepare's own-box trees (capacity_plan.measure_shard_plan)
+    mesh_box = host_mesh_bounds([np.asarray(p) for p in pos_d], counts)
     preps, plans, walks = [], [], []
     for d, device in enumerate(devices):
         with jax.default_device(device):
@@ -480,6 +485,8 @@ def setup_fused_force(
                 leaf_size=leaf_size,
                 max_order=max_order,
                 theta=theta,
+                bounds=mesh_box,
+                num_valid=counts[d],
             )
         preps.append(prepared)
         plans.append(plan_d)

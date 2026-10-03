@@ -330,11 +330,30 @@ for d in range(NDEV):
             leaf_size=LEAF,
             max_order=ORDER,
             theta=THETA,
+            # plan the trees the force builds: the mesh box, the live rows. Without
+            # it seed 2 at 4e5 lost one particle's far field (rel-L2 4.2e-2)
+            **(
+                {}
+                if os.environ.get("PROBE_PLAN_OWN_BOX") == "1" or SOLO
+                else dict(bounds=(BLO, BHI), num_valid=dev_live[d])
+            ),
         )
     plans.append(shard_plan)
     walk_reports.append(shard_caps)
     preps.append(pr)
 plan = merge_plans(plans)
+if os.environ.get("PROBE_PLAN_WIDEN"):
+    # DIAGNOSTIC: widen the merged plan's level batch (the static width of the
+    # M2M/L2L level loops) by this factor
+    import dataclasses
+
+    _f = float(os.environ["PROBE_PLAN_WIDEN"])
+    plan = dataclasses.replace(
+        plan,
+        level_batch_width=min(
+            int(np.ceil(_f * plan.level_batch_width)), int(plan.total_nodes)
+        ),
+    )
 # each eager prepare overwrote the engine's walk record with ITS shard's needs; the
 # traced walk of every device must be sized for the worst one
 walk_caps = merge_walk_caps(walk_reports)

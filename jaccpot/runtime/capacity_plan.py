@@ -48,6 +48,7 @@ __all__ = [
     "merge_plans",
     "merge_walk_caps",
     "plan_from_registry",
+    "plan_level_overflow",
 ]
 
 
@@ -377,6 +378,104 @@ def install_walk_caps(engine: Any, caps: Optional[dict]) -> None:
     impl._strict_fused_validated_caps = dict(caps)
 
 
+def plan_level_overflow(tree: Any) -> Any:
+    """Traced: whether ``tree`` outgrew the installed plan's static level loops.
+
+    The M2M/L2L level loops run ``num_levels`` / ``upward_num_levels`` levels of at
+    most ``level_batch_width`` nodes each. A rebuilt tree with a wider level or more
+    levels loses the excess nodes from both cascades: every particle under them keeps
+    its near field and gets NO far field. Measured on the mesh lane (two A100s,
+    Plummer N = 4e5, seed 2): one particle at 0.024 against 0.37, rel-L2 4.2e-2
+    against 8.8e-4, and with the plan's width halved on purpose 4.9e-1 -- with every
+    capacity flag False both times. The refresh's own width/depth guard folds into the
+    walk's far-pair saturation and never reached the mesh flag; this reads the tree
+    directly.
+
+    Parameters
+    ----------
+    tree : Any
+        The rebuilt tree (``level_offsets``, ``node_level``).
+
+    Returns
+    -------
+    Any
+        Boolean scalar; ``False`` when no plan is installed.
+    """
+    import jax.numpy as jnp
+
+    plan = fused_capacity_plan()
+    if plan is None:
+        return jnp.asarray(False)
+    offs = jnp.asarray(tree.level_offsets)
+    widest = jnp.max(offs[1:] - offs[:-1])
+    depth = jnp.max(jnp.asarray(tree.node_level)) + 1
+    levels = min(int(plan.num_levels), int(plan.upward_num_levels))
+    return (widest > int(plan.level_batch_width)) | (depth > levels)
+
+
+def _lift_registry_to_refresh_tree(
+    impl: Any,
+    template: Any,
+    positions: Any,
+    masses: Any,
+    *,
+    bounds: Any,
+    num_valid: Optional[Any],
+) -> None:
+    """Raise the level registry and the depth stash to the tree the REFRESH builds.
+
+    The eager prepare builds this shard's tree in the shard's own box over every row;
+    the traced refresh rebuilds it from the same template in the GLOBAL mesh box over
+    the live rows. Different boxes cut different cells, so the refresh tree can be
+    wider or deeper than the one the plan was measured on (seed 2 at 4e5 on two
+    cards: widest level 4564 against a planned 4525 = 1.25 x 3620). Rebuild it the
+    way the refresh will and let the registry rise to it (it never lowers).
+
+    Parameters
+    ----------
+    impl : Any
+        The runtime engine (``FastMultipoleMethod._impl``).
+    template : Any
+        The prepared tree, the refresh's template.
+    positions : Any
+        This shard's padded positions, as the refresh receives them.
+    masses : Any
+        This shard's padded masses.
+    bounds : Any
+        The global mesh box (``fused.global_mesh_bounds``).
+    num_valid : Optional[Any]
+        Live rows; ``None`` treats every row as live.
+    """
+    import jax.numpy as jnp
+    from yggdrax.tree import rebuild_static_radix_tree_from_template
+
+    from jaccpot.runtime._level_shapes import level_batch_width
+
+    cells = getattr(impl, "_tree_leaf_partition", "buckets") == "cells"
+    if not cells:
+        return  # only the cell partition is rebuilt per step against a box
+    out = rebuild_static_radix_tree_from_template(
+        jnp.asarray(positions),
+        jnp.asarray(masses),
+        template,
+        bounds=bounds,
+        return_reordered=True,
+        leaf_partition="cells",
+        return_overflow=True,
+        cell_min_level=int(getattr(impl, "_tree_cell_min_level", 0)),
+        **({"num_valid": jnp.asarray(num_valid)} if num_valid is not None else {}),
+    )
+    tree = out[0]
+    level_batch_width(
+        tree.level_offsets,
+        total_nodes=int(tree.parent.shape[0]),
+        num_internal=int(tree.left_child.shape[0]),
+    )
+    resolve = getattr(impl, "_resolve_upward_num_levels", None)
+    if resolve is not None:
+        resolve(tree)
+
+
 def measure_shard_plan(
     solver: Any,
     positions: Any,
@@ -385,6 +484,8 @@ def measure_shard_plan(
     leaf_size: int,
     max_order: int,
     theta: Optional[float] = None,
+    bounds: Optional[Any] = None,
+    num_valid: Optional[Any] = None,
 ) -> tuple:
     """Eagerly prepare one shard and read back what its static shapes must cover.
 
@@ -409,6 +510,16 @@ def measure_shard_plan(
         Expansion order.
     theta : Optional[float]
         Opening angle.
+    bounds : Optional[Any]
+        The GLOBAL mesh box the traced force will build in
+        (:func:`jaccpot.distributed.fused.global_mesh_bounds`). Given, the eager
+        prepare builds in it, and the plan also covers this shard's tree rebuilt in
+        it over the live rows only -- the tree the force actually walks. ``None``
+        measures the eager tree in the shard's own box, whose cells differ: it can
+        be narrower than the refresh tree (a silently truncated level) or hold more
+        leaves (a leaf-capacity raise at setup).
+    num_valid : Optional[Any]
+        This shard's live row count, with ``bounds``.
 
     Returns
     -------
@@ -425,8 +536,15 @@ def measure_shard_plan(
         leaf_size=int(leaf_size),
         max_order=int(max_order),
         theta=theta,
+        # the eager tree in the force's box: its leaf count, level widths and walk
+        # caps are what the static shapes are sized from
+        **({} if bounds is None else {"bounds": bounds}),
     )[0]
     impl = getattr(solver, "_impl", solver)
+    if bounds is not None:
+        _lift_registry_to_refresh_tree(
+            impl, prepared.tree, positions, masses, bounds=bounds, num_valid=num_valid
+        )
     total_nodes = int(prepared.tree.node_ranges.shape[0])
     num_internal = int(prepared.tree.left_child.shape[0])
     plan = plan_from_registry(
