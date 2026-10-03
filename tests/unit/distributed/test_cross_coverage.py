@@ -131,7 +131,10 @@ def _export(send, recv, theta, *, mode, drop_entry=None, cell_level=None):
     assert not (bool(pub_r.overflow) or bool(pub_s.overflow))
     rows_r = pub_r.rows
     if drop_entry is not None:
-        rows_r = rows_r.at[drop_entry, -1].set(0.0)  # the active column is last
+        # the active column: after centre and radius (one-sided), or after the
+        # two child columns (two-sided, where a particle count follows it)
+        active_col = 6 if two_sided else 4
+        rows_r = rows_r.at[drop_entry, active_col].set(0.0)
     ex = _export_from_rows(
         jnp.stack([rows_r, pub_s.rows]),
         send.left,
