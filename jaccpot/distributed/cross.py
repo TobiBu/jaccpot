@@ -1422,8 +1422,12 @@ def make_cross_hook(
                     jnp.where(got_n.num_payload > 0, imp_mass != 0.0, False)
                 )
                 record["export_near"] = ex.near_count
-                if rl_n.peak_wavefront is not None:
-                    record["near_walk_peak"] = rl_n.peak_wavefront
+                # 0 when the walk was skipped (a pass-through under a leaf summary)
+                record["near_walk_peak"] = (
+                    rl_n.peak_wavefront
+                    if rl_n.peak_wavefront is not None
+                    else jnp.asarray(0, jnp.int32)
+                )
             near_sink["overflow"] = (
                 pub.overflow
                 | sb_n.node_overflow
