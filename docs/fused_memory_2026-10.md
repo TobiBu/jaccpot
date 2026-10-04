@@ -420,12 +420,12 @@ Branch `perf/fused-round4` on #362. Rows: `bench/results/fused_memory/round4/`. 
 
 | commit | change | effect |
 | --- | --- | --- |
-| 52c4c6b + 748bbb3 | `strict_run_v2(carry="particles", donate_state=False)`: OPTIONAL donation of the input state (off by default, the input is kept); with it the call keeps a host copy of the start state for a capacity retry | -24 B/p at the scan when on; 8e6 in-use after the scan 0.655 -> 0.494 GiB; bitwise |
-| 19e9175 | P2M gathers instead of padded copies; the CSR placement reads the walk's arrays directly | bitwise |
-| 0431176 | the step kicks the drifted state (`_velocity_verlet_kick_drifted`) | -12 B/p under every window; bitwise |
-| 871a18e | the direct near field runs WHOLE ROWS (`JACCPOT_NEARFIELD_DIRECT_ROWS`, default `whole`): no extra-chunk partials, no scatter | 8e6: rel-L2 vs fp64 7.70271221e-4 vs 7.70271223e-4 (chunked); 0.18 % of particles differ by <= 3e-7; step 101.6-101.9 vs 102.7-103.1 ms |
-| d1baa8e + 29bd360 | the first particle-carry call evaluates its start force as the steps' own refresh in a small program of its own, after the prepared state is freed (no eager force beside the prepare) | bitwise (2e5, 2e6, 8e6); 8e6 program blocks: start 1.12, one-step runner 1.21, two-step 1.19 GiB |
-| 02967be | each of the walk's carried buffers gets its own negative fill (identical fills were one broadcast, copied into every loop-carry slot) | bitwise; 8e6 step peak 2.26 -> 2.19 GiB |
+| bec501f + 59c03b3 | `strict_run_v2(carry="particles", donate_state=False)`: OPTIONAL donation of the input state (off by default, the input is kept); with it the call keeps a host copy of the start state for a capacity retry | -24 B/p at the scan when on; 8e6 in-use after the scan 0.655 -> 0.494 GiB; bitwise |
+| 30dcb69 | P2M gathers instead of padded copies; the CSR placement reads the walk's arrays directly | bitwise |
+| b5eab21 | the step kicks the drifted state (`_velocity_verlet_kick_drifted`) | -12 B/p under every window; bitwise |
+| f91ee92 | the direct near field runs WHOLE ROWS (`JACCPOT_NEARFIELD_DIRECT_ROWS`, default `whole`): no extra-chunk partials, no scatter | 8e6: rel-L2 vs fp64 7.70271221e-4 vs 7.70271223e-4 (chunked); 0.18 % of particles differ by <= 3e-7; step 101.6-101.9 vs 102.7-103.1 ms |
+| 836b4b1 + ec1f50b | the first particle-carry call evaluates its start force as the steps' own refresh in a small program of its own, after the prepared state is freed (no eager force beside the prepare) | bitwise (2e5, 2e6, 8e6); 8e6 program blocks: start 1.12, one-step runner 1.21, two-step 1.19 GiB |
+| d73a970 | each of the walk's carried buffers gets its own negative fill (identical fills were one broadcast, copied into every loop-carry slot) | bitwise; 8e6 step peak 2.26 -> 2.19 GiB |
 
 **Tried and reverted**
 - Freeze-and-resume retry (where(ok, new, old) on the carry): kept the step's old state and self-gravity alive
@@ -437,12 +437,12 @@ Branch `perf/fused-round4` on #362. Rows: `bench/results/fused_memory/round4/`. 
   the step, doubling the block (8e6: 1.19 -> 2.52 GiB).
 - `--xla_disable_hlo_passes=while-loop-invariant-code-motion`: no change (the overlap was the inlining).
 
-**At 1.28e8** (`--donate-state`, 02967be): process peak 26.19 GiB (220 B/p; round 3: 29.81, 250 B/p). It is now the
+**At 1.28e8** (`--donate-state`, d73a970): process peak 26.19 GiB (220 B/p; round 3: 29.81, 250 B/p). It is now the
 EAGER PREPARE's: the runner's temporary block is 14.9 GiB (round 3: 15.0; 19.8 with the reverted freeze), its live
 peak 12.2 GiB (round 3: 13.3), and at 1.52e8 the prepare peaks in its list build (21.3 GiB in use after the walk +
 9.3 GiB transient).
 
-**The ceiling now** (production sequence, arena 0.88, `--donate-state`, 02967be; card 3):
+**The ceiling now** (production sequence, arena 0.88, `--donate-state`, d73a970; card 3):
 
 | run | peak (B/p) | per step |
 | --- | --- | --- |
