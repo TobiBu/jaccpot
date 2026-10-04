@@ -119,6 +119,12 @@ def _args() -> argparse.Namespace:
         "the bench always passes the returned state on, so donating is safe)",
     )
     ap.add_argument("--no-scan", action="store_true")
+    ap.add_argument(
+        "--skip-eval",
+        action="store_true",
+        help="go straight to strict_run_v2 (one prepare, then the scan: a production "
+        "rollout's sequence; the eval section otherwise prepares a second time first)",
+    )
     ap.add_argument("--no-analysis", action="store_true", help="skip memory_analysis()")
     ap.add_argument("--dump-dir", default=None, help="XLA dump (buffer assignment)")
     ap.add_argument(
@@ -597,50 +603,55 @@ def run_budget(result: dict) -> None:
     M = jnp.asarray(mass)
     solver = _solver(leaf_cap, soft)
     _event("before_prepare")
-    t0 = time.perf_counter()
-    prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
-        positions=P,
-        masses=M,
-        leaf_size=ARGS.leaf,
-        max_order=ARGS.order,
-        theta=ARGS.theta,
-    )
-    _sync(prepared)
-    result["prepare_s"] = time.perf_counter() - t0
-    _event("after_prepare")
-    result["counts"] = _counts(solver)
-    result["prepare_events"] = list(EVENTS)
-    result["live_after_prepare"] = _live_arrays()
-    result["prepared_breakdown"] = _pytree_breakdown(prepared)
-    _write(result)
+    a_host = None
+    saved = None
+    if not ARGS.skip_eval:
+        t0 = time.perf_counter()
+        prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
+            positions=P,
+            masses=M,
+            leaf_size=ARGS.leaf,
+            max_order=ARGS.order,
+            theta=ARGS.theta,
+        )
+        _sync(prepared)
+        result["prepare_s"] = time.perf_counter() - t0
+        _event("after_prepare")
+        result["counts"] = _counts(solver)
+        result["prepare_events"] = list(EVENTS)
+        result["live_after_prepare"] = _live_arrays()
+        result["prepared_breakdown"] = _pytree_breakdown(prepared)
+        _write(result)
 
-    a = jax.block_until_ready(eval_fn(prepared))
-    _event("after_eval_compile")
-    a_host = np.asarray(a, np.float64) if ARGS.accuracy_targets else None
-    saved = {"force": np.asarray(a)} if ARGS.save_forces else None
-    del a
-    samples = []
-    for _ in range(2):
-        jax.block_until_ready(eval_fn(prepared))
-    with GpuMonitor(_PHYS) as mon:
-        for _ in range(ARGS.eval_repeats):
-            t0 = time.perf_counter()
+        a = jax.block_until_ready(eval_fn(prepared))
+        _event("after_eval_compile")
+        a_host = np.asarray(a, np.float64) if ARGS.accuracy_targets else None
+        saved = {"force": np.asarray(a)} if ARGS.save_forces else None
+        del a
+        samples = []
+        for _ in range(2):
             jax.block_until_ready(eval_fn(prepared))
-            samples.append(time.perf_counter() - t0)
-    result["eval_contention"] = mon.summary().as_dict()
-    _event("after_eval_timing")
-    result["eval_ms"] = dict(
-        min=min(samples) * 1e3,
-        median=float(np.median(samples)) * 1e3,
-        samples=[s * 1e3 for s in samples],
-    )
-    print(f"eval-only min {result['eval_ms']['min']:.2f} ms", flush=True)
-    if not ARGS.no_analysis:
-        result["eval_memory_analysis"] = _analysis(eval_fn.lower(prepared).compile())
-        print(f"eval memory_analysis {result['eval_memory_analysis']}", flush=True)
-    result["peak_after_eval_gib"] = _mem()["peak"] / GIB
-    _write(result)
-    del prepared, eval_fn
+        with GpuMonitor(_PHYS) as mon:
+            for _ in range(ARGS.eval_repeats):
+                t0 = time.perf_counter()
+                jax.block_until_ready(eval_fn(prepared))
+                samples.append(time.perf_counter() - t0)
+        result["eval_contention"] = mon.summary().as_dict()
+        _event("after_eval_timing")
+        result["eval_ms"] = dict(
+            min=min(samples) * 1e3,
+            median=float(np.median(samples)) * 1e3,
+            samples=[s * 1e3 for s in samples],
+        )
+        print(f"eval-only min {result['eval_ms']['min']:.2f} ms", flush=True)
+        if not ARGS.no_analysis:
+            result["eval_memory_analysis"] = _analysis(
+                eval_fn.lower(prepared).compile()
+            )
+            print(f"eval memory_analysis {result['eval_memory_analysis']}", flush=True)
+        result["peak_after_eval_gib"] = _mem()["peak"] / GIB
+        _write(result)
+        del prepared, eval_fn
 
     if ARGS.no_scan:
         if saved is not None:
@@ -694,6 +705,12 @@ def run_budget(result: dict) -> None:
             state, prep, _ = run(state, prep, ARGS.steps)
         result["trace"] = dict(dir=ARGS.trace_dir, steps=ARGS.steps)
     print(f"scan min {result['step_ms']['min']:.2f} ms/step", flush=True)
+    if ARGS.skip_eval:
+        # the scan's own prepare is the only one: its events are the prepare's
+        result["counts"] = _counts(solver)
+        result["prepare_events"] = [
+            e for e in EVENTS if "prepare" in e["label"] or ":" in e["label"]
+        ]
     _write(result)
     if saved is not None:
         np.savez(ARGS.save_forces, state=np.asarray(state), **saved)
