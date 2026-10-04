@@ -1295,7 +1295,7 @@ def _cascade_forward_kind() -> tuple[str, int]:
     """
     from jaccpot._env import env_choice, env_int
 
-    kind = env_choice("JACCPOT_CASCADE_KERNEL", "level", ("level", "lanes"))
+    kind = env_choice("JACCPOT_CASCADE_KERNEL", "lanes", ("level", "lanes"))
     return kind, env_int("JACCPOT_CASCADE_LANES_K", 32, minimum=1)
 
 
