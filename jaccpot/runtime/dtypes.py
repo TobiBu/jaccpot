@@ -13,19 +13,24 @@ from jaxtyping import DTypeLike
 
 
 def _resolve_index_dtype() -> DTypeLike:
-    """Resolve index dtype from environment.
+    """Resolve index dtype: ``JACCPOT_INDEX_PRECISION``, else yggdrax's.
 
     Supported values:
-    - ``JACCPOT_INDEX_PRECISION=int32`` (default since 2026-10: half the bytes of
-      every index array, list and sort key; ample for one GPU)
-    - ``JACCPOT_INDEX_PRECISION=int64`` (opt-in, for index spaces past 2^31)
+    - ``JACCPOT_INDEX_PRECISION=int32``: half the bytes of every index array,
+      list and sort key; ample for one GPU.
+    - ``JACCPOT_INDEX_PRECISION=int64``: for index spaces past 2^31.
+    - unset: **yggdrax's** ``INDEX_DTYPE`` (``YGGDRAX_INDEX_PRECISION``, else this
+      variable, else yggdrax's default). jaccpot hands its index arrays to
+      yggdrax and some of its modules use yggdrax's dtype directly, so the two
+      must agree; a jaccpot default of its own could disagree with an older or
+      newer yggdrax.
 
     Called exactly once, at import, to initialise ``INDEX_DTYPE``. Setting the
     variable after :mod:`jaccpot` is imported therefore does nothing. With int32,
     :func:`require_index_capacity` refuses a problem whose particle count, node x
     coefficient count or list capacities reach 2^31, naming the switch.
 
-    An unrecognised value falls back to the default **silently** rather than
+    An unrecognised value falls back to yggdrax's dtype **silently** rather than
     raising -- a deliberate exception to the fail-loudly policy for a
     diagnostics-adjacent knob.
 
@@ -36,10 +41,14 @@ def _resolve_index_dtype() -> DTypeLike:
         practice because importing yggdrax sets ``jax_enable_x64``; without that
         JAX would quietly demote it to int32.
     """
-    raw = str(os.environ.get("JACCPOT_INDEX_PRECISION", "int32")).strip().lower()
+    raw = str(os.environ.get("JACCPOT_INDEX_PRECISION", "")).strip().lower()
     if raw in ("int64", "i64", "64"):
         return jnp.int64
-    return jnp.int32
+    if raw in ("int32", "i32", "32"):
+        return jnp.int32
+    from yggdrax.dtypes import INDEX_DTYPE as yggdrax_index_dtype
+
+    return jnp.int64 if jnp.dtype(yggdrax_index_dtype).itemsize >= 8 else jnp.int32
 
 
 INDEX_DTYPE = _resolve_index_dtype()

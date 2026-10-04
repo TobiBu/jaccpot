@@ -1,4 +1,4 @@
-"""int32 indices by default; sizes past their range are refused, naming the switch."""
+"""jaccpot's index dtype follows yggdrax's unless set; int32 sizes past their range are refused."""
 
 from __future__ import annotations
 
@@ -10,18 +10,24 @@ import pytest
 from jaccpot.runtime import dtypes
 
 
-def test_the_default_is_int32():
-    if os.environ.get("JACCPOT_INDEX_PRECISION"):
-        pytest.skip("JACCPOT_INDEX_PRECISION is set in this environment")
-    assert jnp.dtype(dtypes.INDEX_DTYPE) == jnp.int32
-    assert jnp.dtype(dtypes._resolve_index_dtype()) == jnp.int32
+def test_the_default_follows_yggdrax(monkeypatch):
+    from yggdrax import dtypes as ydtypes
+
+    monkeypatch.delenv("JACCPOT_INDEX_PRECISION", raising=False)
+    assert jnp.dtype(dtypes._resolve_index_dtype()) == jnp.dtype(ydtypes.INDEX_DTYPE)
+    if not os.environ.get("JACCPOT_INDEX_PRECISION"):
+        assert jnp.dtype(dtypes.INDEX_DTYPE) == jnp.dtype(ydtypes.INDEX_DTYPE)
 
 
-def test_int64_is_opt_in(monkeypatch):
+def test_the_variable_overrides(monkeypatch):
+    from yggdrax import dtypes as ydtypes
+
     monkeypatch.setenv("JACCPOT_INDEX_PRECISION", "int64")
     assert jnp.dtype(dtypes._resolve_index_dtype()) == jnp.int64
-    monkeypatch.setenv("JACCPOT_INDEX_PRECISION", "nonsense")
+    monkeypatch.setenv("JACCPOT_INDEX_PRECISION", "int32")
     assert jnp.dtype(dtypes._resolve_index_dtype()) == jnp.int32
+    monkeypatch.setenv("JACCPOT_INDEX_PRECISION", "nonsense")
+    assert jnp.dtype(dtypes._resolve_index_dtype()) == jnp.dtype(ydtypes.INDEX_DTYPE)
 
 
 def test_sizes_past_the_int32_range_are_refused(monkeypatch):
