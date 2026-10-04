@@ -3471,6 +3471,7 @@ class PrepareMixin(_EngineBase):
             default_mode=(
                 "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
             ),
+            num_levels=self._resolve_upward_num_levels(tree_artifacts.tree),
         )
 
     def _strict_fused_capacity_handoff(

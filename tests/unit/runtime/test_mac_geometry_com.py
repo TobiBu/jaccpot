@@ -220,3 +220,80 @@ def test_a_folded_per_node_criterion_survives_the_com_geometry(tree_data):
             radius_scale=jnp.ones((nodes + 1,), box.radius.dtype),
             default_mode="com",
         )
+
+
+def _table_radii_reference(topo, ps, centers, leaf_cap):
+    """The (leaves x 64 levels) table ``com_mac_geometry`` computed until 2026-10-04."""
+    from jax import lax
+
+    ranges = jnp.asarray(topo.node_ranges)
+    parent = jnp.asarray(topo.parent)
+    num_nodes = int(ranges.shape[0])
+    num_internal = int(jnp.asarray(topo.left_child).shape[0])
+    num_leaves = num_nodes - num_internal
+    n = int(ps.shape[0])
+    leaf_ranges = ranges[num_internal:]
+    lane = jnp.arange(leaf_cap)
+    idx = leaf_ranges[:, 0][:, None] + lane[None, :]
+    valid = idx <= leaf_ranges[:, 1][:, None]
+    pts = ps[jnp.clip(idx, 0, n - 1)]
+    d = jnp.linalg.norm(pts - centers[num_internal:][:, None, :], axis=-1)
+    r_leaf = jnp.max(jnp.where(valid, d, 0.0), axis=1)
+    radii = jnp.zeros((num_nodes,), ps.dtype).at[num_internal:].set(r_leaf)
+    parent_safe = jnp.where(parent >= 0, parent, 0)
+
+    def _up(anc, _):
+        live = anc >= 0
+        nxt = jnp.where(live, parent_safe[jnp.where(live, anc, 0)], -1)
+        nxt = jnp.where(live & (parent[jnp.where(live, anc, 0)] >= 0), nxt, -1)
+        return nxt, anc
+
+    leaf_ids = jnp.arange(num_internal, num_nodes)
+    _, anc_t = lax.scan(_up, parent[leaf_ids], None, length=64)
+    anc = anc_t.T
+    live = anc >= 0
+    c = centers[jnp.where(live, anc, 0)]
+    dd = jnp.linalg.norm(pts[:, :, None, :] - c[:, None, :, :], axis=-1)
+    dd = jnp.max(jnp.where(valid[:, :, None], dd, 0.0), axis=1)
+    d_all = jnp.where(live, dd, 0.0)
+
+    def _seg(a, b):
+        return b[0], jnp.where(a[0] == b[0], jnp.maximum(a[1], b[1]), b[1])
+
+    _, run_max = lax.associative_scan(_seg, (anc, d_all), axis=0)
+    last = jnp.concatenate([anc[1:] != anc[:-1], jnp.ones((1, 64), bool)]) & live
+    target = jnp.where(last, anc, num_nodes)
+    radii = jnp.concatenate([radii, jnp.zeros((1,), ps.dtype)])
+    return radii.at[target.reshape(-1)].max(run_max.reshape(-1))[:num_nodes]
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_level_passes_equal_the_ancestor_table(tree_data, dtype):
+    """The per-level passes give the radii of the (leaves x 64) table they replaced.
+
+    Max is exact in any order; what differs is each distance's rounding: the
+    table took the norm over a ``(L, w, 4, 3)`` broadcast, which XLA sums in a
+    different order than over ``(L, w, 3)`` (a few ulp, internal nodes only; the
+    passes are the ones within 1 ulp of a float64 numpy max). At the tree's own
+    level count (the upward sweep's bound) the radii are those of the padded 64
+    levels to the bit; a bound below the depth misses the top ancestors.
+    """
+    from yggdrax.tree import get_node_levels
+
+    tree, topo, ps, ms, com, _box = tree_data
+    ps = ps.astype(dtype)
+    com = com.astype(dtype)
+    ref = np.asarray(_table_radii_reference(topo, ps, com, _LEAF))
+    eps = float(jnp.finfo(dtype).eps)
+    depth = int(np.asarray(get_node_levels(topo)).max()) + 1
+    full = np.asarray(com_mac_geometry(topo, ps, com, leaf_cap=_LEAF).radius)
+    np.testing.assert_allclose(full, ref, rtol=8 * eps, atol=0)
+    num_internal = int(topo.left_child.shape[0])
+    assert np.array_equal(full[num_internal:], ref[num_internal:])  # leaves: same op
+    bounded = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=depth)
+    assert np.array_equal(np.asarray(bounded.radius), full)
+    # non-vacuity of the bound: two levels reach only the leaves' parents, so the
+    # root (whose children are internal on this tree) keeps radius 0
+    assert depth > 3
+    short = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=2)
+    assert float(np.asarray(short.radius)[0]) == 0.0 < float(full[0])

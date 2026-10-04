@@ -174,6 +174,7 @@ def com_mac_geometry(
     *,
     leaf_cap: int,
     internal: str = "exact",
+    num_levels: Optional[int] = None,
 ) -> TreeGeometry:
     """``TreeGeometry`` about the expansion centres: COM centres, particle radii about them.
 
@@ -194,6 +195,10 @@ def com_mac_geometry(
     internal : str
         ``"exact"`` (max particle distance about the node's own centre, via the
         leaves' ancestor chains) or ``"bound"`` (child-sphere bound). Static.
+    num_levels : Optional[int]
+        Static bound on the tree's level count (the upward sweep's
+        ``static_num_levels``; a traced rebuild deeper than it trips the
+        capacity guard). ``None`` = the padded 64. Static.
 
     Returns
     -------
@@ -220,81 +225,65 @@ def com_mac_geometry(
     parent = jnp.asarray(tree.parent, dtype=INDEX_DTYPE)
     num_nodes = int(node_ranges.shape[0])
     num_internal = int(left_child.shape[0])
-    num_leaves = num_nodes - num_internal
     n = int(positions_sorted.shape[0])
     w = max(1, int(leaf_cap))
 
-    # --- leaves: exact max distance about the centre over the leaf's particles
-    leaf_ranges = node_ranges[num_internal:]
     lane = jnp.arange(w, dtype=INDEX_DTYPE)
-    idx = leaf_ranges[:, 0][:, None] + lane[None, :]
-    valid = idx <= leaf_ranges[:, 1][:, None]
-    safe = jnp.clip(idx, 0, max(n - 1, 0))
-    pts = positions_sorted[safe]  # (L, w, 3)
-    d = jnp.linalg.norm(pts - centers[num_internal:][:, None, :], axis=-1)
-    r_leaf = jnp.max(jnp.where(valid, d, jnp.asarray(0.0, dtype)), axis=1)
+    leaf_ranges = node_ranges[num_internal:]
 
+    def _leaf_max_about(node: Array) -> Array:
+        # (L,): max over each leaf's particles of the distance to centers[node],
+        # one reduction over (L, w) lanes read straight from the sorted positions
+        # (gather, difference, norm and max fuse; nothing (L, w)-sized is kept)
+        live = node >= 0
+        c = centers[jnp.where(live, node, 0)]
+        idx = leaf_ranges[:, 0][:, None] + lane[None, :]
+        valid = idx <= leaf_ranges[:, 1][:, None]
+        pts = positions_sorted[jnp.clip(idx, 0, max(n - 1, 0))]
+        d = jnp.linalg.norm(pts - c[:, None, :], axis=-1)
+        d = jnp.max(jnp.where(valid, d, jnp.asarray(0.0, dtype)), axis=1)
+        return jnp.where(live, d, jnp.asarray(0.0, dtype))
+
+    # --- leaves: exact max distance about the centre over the leaf's particles
+    leaf_ids = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
+    r_leaf = _leaf_max_about(leaf_ids)
     radii = jnp.zeros((num_nodes,), dtype=dtype).at[num_internal:].set(r_leaf)
 
     if num_internal > 0 and internal == "exact":
-        # Every internal node's particles are exactly the union of its
-        # descendant leaves', so the max over (leaf, ancestor) pairs of the
-        # leaf's particle distances about the ancestor's centre is the exact
-        # radius. Ancestor table by pointer jumping (leaves x levels), distances
-        # in level chunks, then ONE segmented max: a node's leaves are consecutive,
-        # so its (leaf, level) entries form one run in one column, and an
-        # associative scan carries the run max to its last entry -- no
-        # scatter-max, whose atomics serialise on the few top-level nodes
-        # (44 ms per step at 16k leaves before this).
-        max_levels = int(_MAX_TREE_LEVELS)
-        leaf_ids = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
+        # Every internal node's particles are exactly the union of its descendant
+        # leaves', so the max over (leaf, ancestor) pairs of the leaf's particle
+        # distances about the ancestor's centre is the exact radius. One pass per
+        # ancestor level k (the leaves' k-th ancestors, by one pointer step per
+        # pass): a node's leaves are consecutive, so it is ONE run of the column
+        # ``anc``; a segmented max carries the run max to the run's last leaf,
+        # which alone writes it (the other lanes point past the radii and are
+        # dropped -- no sentinel row collecting every lane's atomic, and no
+        # scatter-max on the few top nodes, 44 ms per step at 16k leaves once).
+        # Max is exact in any order: the radii are those of the (leaves x 64
+        # levels) table this replaced, bit for bit, at (L,)-sized memory per pass
+        # and ``num_levels`` passes instead of 64.
         parent_safe = jnp.where(parent >= 0, parent, jnp.asarray(0, INDEX_DTYPE))
-
-        def _up(anc, _):
-            live = anc >= 0
-            nxt = jnp.where(live, parent_safe[jnp.where(live, anc, 0)], -1)
-            nxt = jnp.where(live & (parent[jnp.where(live, anc, 0)] >= 0), nxt, -1)
-            return nxt, anc
-
-        _, anc_t = lax.scan(_up, parent[leaf_ids], None, length=max_levels)
-        anc = anc_t.T  # (L, D); -1 past the root
-        chunk = 4
-        n_chunks = max_levels // chunk
-        anc_chunks = anc.reshape(num_leaves, n_chunks, chunk).transpose(
-            1, 0, 2
-        )  # (nc, L, chunk)
-
-        def _dist_chunk(anc_c):
-            live = anc_c >= 0
-            c = centers[jnp.where(live, anc_c, 0)]  # (L, chunk, 3)
-            diff = pts[:, :, None, :] - c[:, None, :, :]  # (L, w, chunk, 3)
-            d = jnp.linalg.norm(diff, axis=-1)
-            d = jnp.max(
-                jnp.where(valid[:, :, None], d, jnp.asarray(0.0, dtype)), axis=1
-            )
-            return jnp.where(live, d, jnp.asarray(0.0, dtype))
-
-        d_all = (
-            lax.map(_dist_chunk, anc_chunks)
-            .transpose(1, 0, 2)
-            .reshape(num_leaves, max_levels)
-        )
+        drop = jnp.asarray(num_nodes, INDEX_DTYPE)
 
         def _seg(a, b):
             ka, va = a
             kb, vb = b
             return kb, jnp.where(ka == kb, jnp.maximum(va, vb), vb)
 
-        _, run_max = lax.associative_scan(_seg, (anc, d_all), axis=0)
-        last = jnp.concatenate(
-            [anc[1:] != anc[:-1], jnp.ones((1, max_levels), dtype=bool)], axis=0
-        ) & (anc >= 0)
-        target = jnp.where(last, anc, jnp.asarray(num_nodes, INDEX_DTYPE))
-        radii = (
-            jnp.concatenate([radii, jnp.zeros((1,), dtype)])
-            .at[target.reshape(-1)]
-            .max(run_max.reshape(-1))[:num_nodes]
-        )
+        def _level(_, carry):
+            radii, anc = carry
+            live = anc >= 0
+            _, run_max = lax.associative_scan(_seg, (anc, _leaf_max_about(anc)))
+            last = jnp.concatenate([anc[1:] != anc[:-1], jnp.ones((1,), bool)]) & live
+            radii = radii.at[jnp.where(last, anc, drop)].max(run_max, mode="drop")
+            up = jnp.where(live, parent_safe[jnp.where(live, anc, 0)], -1)
+            up = jnp.where(live & (parent[jnp.where(live, anc, 0)] >= 0), up, -1)
+            return radii, up.astype(INDEX_DTYPE)
+
+        levels = int(_MAX_TREE_LEVELS) if num_levels is None else int(num_levels)
+        # a leaf at depth D has D ancestors, so depth-bound - 1 passes cover all
+        passes = max(1, min(levels, int(_MAX_TREE_LEVELS)) - 1)
+        radii, _ = lax.fori_loop(0, passes, _level, (radii, parent[leaf_ids]))
 
     elif num_internal > 0:
         depth = _node_depths(parent)
@@ -326,6 +315,7 @@ def resolve_walk_geometry(
     geometry_factory: Optional[Any] = None,
     radius_scale: Optional[Array] = None,
     default_mode: str = "aabb",
+    num_levels: Optional[int] = None,
 ) -> tuple[Optional[TreeGeometry], Optional[Any]]:
     """The geometry the walk should test the MAC against, per ``mac_geometry_mode``.
 
@@ -355,6 +345,8 @@ def resolve_walk_geometry(
     default_mode : str
         Geometry to use when the environment names none; see
         :func:`mac_geometry_mode`. Only the strict fused lane passes ``"com"``.
+    num_levels : Optional[int]
+        Static level-count bound for :func:`com_mac_geometry`.
 
     Returns
     -------
@@ -393,6 +385,7 @@ def resolve_walk_geometry(
         expansion_centers,
         leaf_cap=int(leaf_cap),
         internal=mac_radius_mode(),
+        num_levels=num_levels,
     )
     if radius_scale is not None:
         scale = jnp.asarray(radius_scale, geometry.radius.dtype)
