@@ -2174,7 +2174,10 @@ def _flat_walk_lists(
     else:
         far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_width,))
         far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_width,))
-    far_tags = jnp.full((2 * far_width,), -1, dtype=idx)
+    # The flat walk assigns no order tags (they were all -1, 2W int32 of them:
+    # 1.6 GB at 6.4e7, held by every eager state); a zero-length array says so and
+    # the adaptive-order extractor synthesises the -1s if a caller wants them.
+    far_tags = jnp.zeros((0,), dtype=idx)
     # Saturate on ANY overflow: the strict runner's guard tests
     # ``far_pair_count < compact_far_pair_capacity`` and this is how the near and
     # queue flags reach it under trace.

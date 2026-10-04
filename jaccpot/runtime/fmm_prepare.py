@@ -2457,10 +2457,15 @@ class PrepareMixin(_EngineBase):
             )
             return far_sources, far_targets, far_tags
         if compact_far_pairs is not None:
+            sources = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+            tags = jnp.asarray(compact_far_pairs.tags, dtype=INDEX_DTYPE)
+            if tags.shape != sources.shape:
+                # the flat walk assigns no order tags and ships a zero-length array
+                tags = jnp.full(sources.shape, -1, dtype=INDEX_DTYPE)
             return (
-                jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE),
+                sources,
                 jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE),
-                jnp.asarray(compact_far_pairs.tags, dtype=INDEX_DTYPE),
+                tags,
             )
         raise RuntimeError("adaptive-order traversal requires tagged far-pair payload")
 
