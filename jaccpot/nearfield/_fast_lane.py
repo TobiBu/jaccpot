@@ -1513,10 +1513,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         ``(L, 2)`` inclusive particle range per CSR leaf, in leaf order. Given,
         the forward CSR lane can read the sorted particles directly instead of
         gathered ``(L, W)`` leaf tables (``JACCPOT_NEARFIELD_LAYOUT``):
-        ``sorted`` keeps the per-leaf result and gathers it back (the table
-        path's bits), ``direct`` stores straight into particle order with no
+        ``direct`` (default) stores straight into particle order with no
         per-leaf partials (the table path's bits on rows of at most two chunks;
-        see :mod:`jaccpot.pallas.nearfield_leafpair_csr`).
+        see :mod:`jaccpot.pallas.nearfield_leafpair_csr`), ``sorted`` keeps the
+        per-leaf result and gathers it back (the table path's bits), ``table``
+        is the gathered-table kernel.
 
     Returns
     -------
@@ -1707,7 +1708,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         chunk = max(1, _env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64))
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
         layout = _env_choice(
-            "JACCPOT_NEARFIELD_LAYOUT", "table", ("table", "sorted", "direct")
+            "JACCPOT_NEARFIELD_LAYOUT", "direct", ("table", "sorted", "direct")
         )
         if differentiable or leaf_ranges is None:
             layout = "table"

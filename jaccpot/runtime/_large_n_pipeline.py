@@ -2241,11 +2241,12 @@ def evaluate_large_n_state(
         if eval_diag_mode == "zero":
             return jnp.zeros_like(state_prepared.positions_sorted).astype(output_dtype)
 
-        # far-field evaluation layout: "leaf" sweeps padded [leaves, max_leaf_size]
-        # blocks (the step's temporary peak, 3.7 slots per particle on cell
-        # leaves); "particle" evaluates every particle in its own leaf's expansion,
-        # chunk by chunk (same arithmetic)
-        l2p_layout = env_choice("JACCPOT_L2P_LAYOUT", "leaf", ("leaf", "particle"))
+        # far-field evaluation layout: "particle" (default) evaluates every particle
+        # in its own leaf's expansion, chunk by chunk; "leaf" sweeps padded
+        # [leaves, max_leaf_size] blocks, whose residuals were the step's temporary
+        # peak (3.7-6 slots per particle on cell leaves). Same arithmetic: bitwise
+        # equal forces at 8e6 on an A100 (docs/fused_memory_2026-10.md, round 2)
+        l2p_layout = env_choice("JACCPOT_L2P_LAYOUT", "particle", ("leaf", "particle"))
         l2p_chunk = env_int("JACCPOT_L2P_PARTICLE_CHUNK", 1 << 21, minimum=1)
 
         def _fastlane_body(state_in: Any) -> Array:
