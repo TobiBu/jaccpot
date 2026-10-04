@@ -1893,6 +1893,95 @@ def _lex_sorted(
     return (composite // bound).astype(pdt), (composite % bound).astype(sdt)
 
 
+def _near_csr_from_canonical(
+    near_a: Array,
+    near_b: Array,
+    live: Array,
+    *,
+    num_internal: int,
+    num_leaves: int,
+    idx: Any,
+) -> tuple[Array, Array, Array]:
+    """The deterministic leaf-neighbour CSR from the CANONICAL near pairs.
+
+    The directed list sorted by ``(target, source)`` puts row ``t``'s sources in
+    ascending order: first the ``a`` of every canonical pair ``(a, t)`` (``a <
+    t``), then the ``b`` of every ``(t, b)`` (``b > t``) -- the walk emits each
+    unordered pair once as ``(min, max)`` and never ``(t, t)``. So instead of one
+    composite sort over the ``2W`` directed slots: one composite sort of the ``W``
+    canonical pairs by ``(a, b)`` (rows' high halves, in order), one stable int32
+    key-value re-sort of it by ``b`` (rows' low halves, ``a`` ascending within a
+    row by stability), counts and offsets from both, and one unique-index
+    placement. Same ``neighbors``, ``offsets`` and ``counts`` to the bit, about
+    half the sort bytes (the near-list build was the step's peak on dense draws).
+
+    Parameters
+    ----------
+    near_a : Array
+        ``(W,)`` lower node of each canonical near pair (dead slots arbitrary).
+    near_b : Array
+        ``(W,)`` upper node of each canonical near pair.
+    live : Array
+        ``(W,)`` live slots.
+    num_internal : int
+        Internal nodes (leaves are the last ``num_leaves`` nodes). Static.
+    num_leaves : int
+        Leaves. Static.
+    idx : Any
+        Index dtype. Static.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(neighbors (2W,), offsets (L + 1,), counts (L,))``: source NODE ids per
+        row, ascending, padded with 0 past the live entries.
+
+    Raises
+    ------
+    ValueError
+        If ``3 W`` (the dropped lanes' out-of-range slots) overflows ``idx``.
+    """
+    width = int(near_a.shape[0])
+    L = int(num_leaves)
+    if 3 * width >= int(jnp.iinfo(idx).max):
+        raise ValueError(f"near width {width} overflows {idx}")
+    dead = jnp.asarray(L, idx)
+    la = jnp.where(live, near_a - num_internal, dead).astype(idx)
+    lb = jnp.where(live, near_b - num_internal, dead).astype(idx)
+    # rows' high halves: canonical pairs by (a, b), dead (L, L) last
+    a_s, b_s = _lex_sorted(la, lb, primary_bound=L + 1, secondary_bound=L + 1)
+    # rows' low halves: the same pairs stably by b (a stays ascending per b)
+    b_t, a_t = jax.lax.sort((b_s, a_s), num_keys=1, is_stable=True)
+    rows = jnp.arange(L + 1, dtype=idx)
+    start_hi = jnp.searchsorted(a_s, rows, side="left", method="scan_unrolled").astype(
+        idx
+    )
+    start_lo = jnp.searchsorted(b_t, rows, side="left", method="scan_unrolled").astype(
+        idx
+    )
+    n_hi = start_hi[1:] - start_hi[:-1]
+    n_lo = start_lo[1:] - start_lo[:-1]
+    counts = (n_lo + n_hi).astype(idx)
+    offsets = jnp.concatenate([jnp.zeros((1,), idx), jnp.cumsum(counts).astype(idx)])
+    i = jnp.arange(width, dtype=idx)
+    # dead entries point past the list at distinct slots and are dropped
+    past = jnp.asarray(2 * width, idx) + i
+    t_lo = jnp.minimum(b_t, L - 1)
+    slot_lo = jnp.where(b_t < L, offsets[t_lo] + (i - start_lo[t_lo]), past)
+    t_hi = jnp.minimum(a_s, L - 1)
+    slot_hi = jnp.where(
+        a_s < L, offsets[t_hi] + n_lo[t_hi] + (i - start_hi[t_hi]), past
+    )
+    neighbors = jnp.zeros((2 * width,), idx)
+    neighbors = neighbors.at[slot_lo].set(
+        (a_t + num_internal).astype(idx), mode="drop", unique_indices=True
+    )
+    neighbors = neighbors.at[slot_hi].set(
+        (b_s + num_internal).astype(idx), mode="drop", unique_indices=True
+    )
+    return neighbors, offsets, counts
+
+
 def _fit_width(x: Array, width: int, fill: int) -> Array:
     """``x`` cut or ``fill``-padded to ``width`` entries (its live part is a prefix).
 
@@ -2018,6 +2107,24 @@ def _flat_walk_lists(
     near_live = jnp.arange(near_width, dtype=idx) < near_count
     na = jnp.where(near_live, _fit_width(near_a, near_width, 0), 0).astype(idx)
     nb = jnp.where(near_live, _fit_width(near_b, near_width, 0), 0).astype(idx)
+    if deterministic and num_leaves > 0:
+        neighbors, offsets, counts = _near_csr_from_canonical(
+            na,
+            nb,
+            near_live,
+            num_internal=num_internal,
+            num_leaves=num_leaves,
+            idx=idx,
+        )
+        return (
+            far_sources,
+            far_targets,
+            far_tags,
+            far_pair_count,
+            neighbors,
+            offsets,
+            counts,
+        )
     tgt = jnp.concatenate([na, nb])
     src = jnp.concatenate([nb, na])
     valid = jnp.concatenate([near_live, near_live])
