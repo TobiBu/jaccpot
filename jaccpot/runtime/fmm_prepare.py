@@ -59,12 +59,14 @@ from ._adaptive_policy import (
     compute_node_force_scale_from_sorted_magnitudes,
 )
 from ._interaction_cache import (
+    TargetSortedFarPairs,
     _build_dual_tree_artifacts,
     _compiled_refresh_dual_planner_route,
     _DualTreeArtifacts,
     _interaction_cache_key,
     _InteractionCacheEntry,
     _RefreshDualPlannerHint,
+    far_pair_targets,
     pair_policy_cache_identity,
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
@@ -137,6 +139,35 @@ else:  # pragma: no cover - annotations only, never an import at runtime
 __all__ = [
     "PrepareMixin",
 ]
+
+
+def _gear_pairs_for_autotune(
+    compact_far_pairs: Any, src_far: Array, tgt_far: Array
+) -> Optional[tuple[tuple[Array, Array], ...]]:
+    """The one-gear ``((sources, targets),)`` a direct far list hands the downward.
+
+    Only the M2L chunk autotune reads it (it times the XLA chunked M2L on a
+    sample of pairs). A :class:`TargetSortedFarPairs` list carries row offsets in
+    ``targets`` and only exists with the Pallas walk, whose M2L is a Pallas CSR
+    kernel that takes no chunk size: ``None`` (no autotune, nothing expanded).
+
+    Parameters
+    ----------
+    compact_far_pairs : Any
+        The walk's far list.
+    src_far : Array
+        Its sources.
+    tgt_far : Array
+        Its ``targets`` field.
+
+    Returns
+    -------
+    Optional[tuple[tuple[Array, Array], ...]]
+        ``((src_far, tgt_far),)``, or ``None`` for a CSR list.
+    """
+    if isinstance(compact_far_pairs, TargetSortedFarPairs):
+        return None
+    return ((src_far, tgt_far),)
 
 
 class _DualDownwardPlan(NamedTuple):
@@ -1659,7 +1690,9 @@ class PrepareMixin(_EngineBase):
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
             far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
-            far_pairs_by_gear = ((src_far, tgt_far),)
+            far_pairs_by_gear = _gear_pairs_for_autotune(
+                compact_far_pairs, src_far, tgt_far
+            )
             adaptive_order_for_downward = True
             p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
             if not suppress_host_side_effects:
@@ -2464,7 +2497,7 @@ class PrepareMixin(_EngineBase):
                 tags = jnp.full(sources.shape, -1, dtype=INDEX_DTYPE)
             return (
                 sources,
-                jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE),
+                jnp.asarray(far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE),
                 tags,
             )
         raise RuntimeError("adaptive-order traversal requires tagged far-pair payload")
@@ -2503,8 +2536,16 @@ class PrepareMixin(_EngineBase):
         far_pairs_coo: Optional[_FarPairCOO] = None
         if compact_far_pairs is not None:
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
-            tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
-            far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
+            far_pairs_coo = _far_pair_coo_from(
+                compact_far_pairs,
+                src_far,
+                jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE),
+            )
+            # one target per entry for the gear buckets (a CSR list's row offsets
+            # expanded; unused, and so never built, under a trace that skips them)
+            tgt_far = jnp.asarray(
+                far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE
+            )
         else:
             if interactions is None:
                 raise RuntimeError(
@@ -3770,7 +3811,9 @@ class PrepareMixin(_EngineBase):
         src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
         tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
         far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
-        far_pairs_by_gear: tuple[tuple[Array, Array], ...] = ((src_far, tgt_far),)
+        far_pairs_by_gear = _gear_pairs_for_autotune(
+            compact_far_pairs, src_far, tgt_far
+        )
         p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
         if not suppress_host_side_effects:
             self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)

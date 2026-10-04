@@ -53,6 +53,7 @@ __all__ = [
     "strict_walk_backend",
     "strict_walk_deterministic_rows",
     "TargetSortedFarPairs",
+    "far_pair_targets",
 ]
 
 
@@ -1895,17 +1896,44 @@ def _lex_sorted(
 
 
 class TargetSortedFarPairs(CompactTaggedFarPairs):
-    """:class:`CompactTaggedFarPairs` whose live directed prefix is sorted by (target, source).
+    """A far list in CSR order whose ``targets`` field holds the ROW OFFSETS.
 
     The deterministic flat walk emits its far list in CSR order: every target's
-    sources contiguous and ascending (:func:`_directed_csr_from_canonical`). The
-    type is the promise -- the M2L reads the list as a CSR without sorting it again
-    (``csr_by_target(presorted=True)``); every other consumer sees an ordinary
-    ``CompactTaggedFarPairs`` (a field-less subclass: same pytree fields, kept
-    through ``jit`` and ``scan`` as the node type).
+    sources contiguous and ascending (:func:`_directed_csr_from_canonical`), the
+    live entries a prefix. So the list is ``sources`` plus ``total_nodes + 1`` row
+    offsets, and ``targets`` holds those offsets rather than one target per entry
+    (which was 2W int32 live from the build through the M2L). The M2L reads it as
+    the CSR it is (``csr_by_target(presorted=True)``); anything wanting one target
+    per entry calls :func:`far_pair_targets`. A field-less subclass: the same
+    pytree fields, kept through ``jit`` and ``scan`` as the node type.
     """
 
     __slots__ = ()
+
+
+def far_pair_targets(far_pairs: CompactTaggedFarPairs) -> Array:
+    """One target per entry of a compact far list (``-1`` on padding).
+
+    A :class:`TargetSortedFarPairs` list stores its row offsets in ``targets``;
+    they are expanded here. Any other list returns its ``targets`` as they are.
+
+    Parameters
+    ----------
+    far_pairs : CompactTaggedFarPairs
+        A compact far list.
+
+    Returns
+    -------
+    Array
+        ``[len(far_pairs.sources)]`` target node ids.
+    """
+    if isinstance(far_pairs, TargetSortedFarPairs):
+        from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+
+        return targets_from_csr_offsets(
+            far_pairs.targets, int(jnp.asarray(far_pairs.sources).shape[0])
+        )
+    return jnp.asarray(far_pairs.targets)
 
 
 def _directed_csr_from_canonical(
@@ -2147,7 +2175,9 @@ def _flat_walk_lists(
     -------
     tuple[Array, ...]
         ``(far_sources, far_targets, far_tags, far_pair_count, neighbors, offsets,
-        counts)``.
+        counts)``. With ``deterministic``, ``far_targets`` are the far list's
+        ``total_nodes + 1`` ROW OFFSETS (a :class:`TargetSortedFarPairs` list);
+        otherwise one target per entry.
     """
     num_leaves = total_nodes - num_internal
     # --- far pairs: directed, interleaved, prefix-live, capacity-width ---
@@ -2158,8 +2188,11 @@ def _flat_walk_lists(
         # the directed list already in CSR order (target, then source ascending):
         # the M2L reads it without sorting it again (TargetSortedFarPairs), and
         # every row lists its sources exactly as the M2L's stable by-target sort of
-        # the (a, b)-ordered interleaved list did -- the same sums, bit for bit
-        far_sources, far_targets_opt, _, _ = _directed_csr_from_canonical(
+        # the (a, b)-ordered interleaved list did -- the same sums, bit for bit.
+        # The targets travel as the ROW OFFSETS: one target per entry was a 2W
+        # array live from this build through the M2L (8 B per canonical slot, at
+        # the step's peak); ``far_pair_targets`` expands it where one is needed.
+        far_sources, _, far_targets, _ = _directed_csr_from_canonical(
             fa,
             fb,
             far_live,
@@ -2167,10 +2200,8 @@ def _flat_walk_lists(
             num_rows=int(total_nodes),
             idx=idx,
             pad_source=-1,
-            with_targets=True,
+            with_targets=False,
         )
-        assert far_targets_opt is not None
-        far_targets = far_targets_opt
     else:
         far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_width,))
         far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_width,))

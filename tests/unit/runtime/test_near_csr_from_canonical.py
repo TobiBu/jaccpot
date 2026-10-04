@@ -91,11 +91,17 @@ def test_canonical_build_equals_the_directed_sort(num_leaves, n_pairs, width, co
     "width, n_pairs, count", [(64, 40, 40), (40, 40, 99), (30, 12, 9)]
 )
 def test_far_list_is_the_directed_target_sort(width, n_pairs, count):
-    """The deterministic far list: (target, source)-sorted directed pairs, -1 padded.
+    """The deterministic far list: (target, source)-sorted sources plus ROW OFFSETS.
 
-    And the M2L's CSR read of it without a sort equals its sorting read.
+    ``targets`` holds the ``total + 1`` row offsets; ``far_pair_targets`` expands
+    them to the directed sort's targets (-1 padded). The M2L's presorted read of
+    (sources, offsets) equals its sorting read of the expanded COO list.
     """
     from jaccpot.pallas.m2l_real_csr import csr_by_target
+    from jaccpot.runtime._interaction_cache import (
+        TargetSortedFarPairs,
+        far_pair_targets,
+    )
 
     num_leaves = 30
     num_internal = num_leaves - 1
@@ -126,7 +132,9 @@ def test_far_list_is_the_directed_target_sort(width, n_pairs, count):
         deterministic=True,
         idx=jnp.int32,
     )
-    src, tgt, _tags, n_live = (np.asarray(x) for x in out[:4])
+    far = TargetSortedFarPairs(*out[:4])
+    src, offsets, n_live = (np.asarray(x) for x in (out[0], out[1], out[3]))
+    tgt = np.asarray(far_pair_targets(far))
     live = min(count, width)
     a = np.asarray(fa)[:width][:live]
     b = np.asarray(fb)[:width][:live]
@@ -135,14 +143,36 @@ def test_far_list_is_the_directed_target_sort(width, n_pairs, count):
     order = np.lexsort((ref_s, ref_t))
     k = 2 * live
     assert int(n_live) == 2 * min(count, width) or count > width
+    assert src.shape == tgt.shape == (2 * width,)
     assert np.array_equal(tgt[:k], ref_t[order]) and np.array_equal(
         src[:k], ref_s[order]
     )
     assert np.all(src[k:] == -1) and np.all(tgt[k:] == -1)
-    # the M2L's CSR: presorted read == sorting read
-    srt = csr_by_target(src, tgt, total_nodes=total, active_pair_count=jnp.asarray(k))
-    pre = csr_by_target(
-        src, tgt, total_nodes=total, active_pair_count=jnp.asarray(k), presorted=True
+    assert np.array_equal(
+        offsets, np.searchsorted(ref_t[order], np.arange(total + 1), side="left")
     )
-    for x, y in zip(srt, pre):
+    # the M2L's CSR: presorted read of (sources, offsets) == sorting read of COO
+    srt = csr_by_target(src, tgt, total_nodes=total, active_pair_count=jnp.asarray(k))
+    pre = csr_by_target(src, offsets, total_nodes=total, presorted=True)
+    assert np.array_equal(np.asarray(pre[0])[:k], np.asarray(srt[0])[:k])
+    for x, y in zip(srt[1:], pre[1:]):
         assert np.array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_targets_from_csr_offsets_inverts_the_row_offsets():
+    """Empty rows anywhere (first, inner, last), a full list, and padding."""
+    from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+
+    counts = np.array([0, 3, 0, 0, 1, 2, 0], np.int32)
+    offsets = np.concatenate([[0], np.cumsum(counts)]).astype(np.int32)
+    want = np.repeat(np.arange(counts.size), counts)
+    for pad in (0, 5):
+        got = np.asarray(
+            targets_from_csr_offsets(jnp.asarray(offsets), want.size + pad)
+        )
+        assert np.array_equal(got[: want.size], want)
+        assert np.all(got[want.size :] == -1)
+    empty = np.asarray(
+        targets_from_csr_offsets(jnp.zeros((4,), jnp.int32), 3)
+    )  # no live entry at all
+    assert np.all(empty == -1)

@@ -112,8 +112,10 @@ def _far_pair_arrays_for_fb_prepass(
         return interactions.sources, interactions.targets
     if compact_far_pairs is None:
         return None, None
+    from ._interaction_cache import far_pair_targets
+
     sources = jnp.asarray(compact_far_pairs.sources)
-    targets = jnp.asarray(compact_far_pairs.targets)
+    targets = far_pair_targets(compact_far_pairs)
     count = getattr(compact_far_pairs, "far_pair_count", None)
     if count is None:
         return sources, targets

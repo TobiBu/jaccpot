@@ -253,8 +253,10 @@ def prepare_large_n_grad_plan(
         "the grouped M2L classifies pairs on the host and is not traceable.",
     )
 
+    from ._interaction_cache import far_pair_targets
+
     sources = jnp.asarray(compact.sources, dtype=INDEX_DTYPE)
-    targets = jnp.asarray(compact.targets, dtype=INDEX_DTYPE)
+    targets = jnp.asarray(far_pair_targets(compact), dtype=INDEX_DTYPE)
     return LargeNGradPlan(
         far_pair_sources=sources,
         far_pair_targets=targets,

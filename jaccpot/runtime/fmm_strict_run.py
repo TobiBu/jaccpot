@@ -2342,9 +2342,13 @@ class StrictRunMixin(_EngineBase):
                 )
             cross_far = cross_hook(tree_artifacts)
         if reuse_static_compact_pairs:
+            from jaccpot.runtime.fmm_prepare import _gear_pairs_for_autotune
+
             src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(cached_compact_far_pairs.targets, dtype=INDEX_DTYPE)
-            far_pairs_by_gear = ((src_far, tgt_far),)
+            far_pairs_by_gear = _gear_pairs_for_autotune(
+                cached_compact_far_pairs, src_far, tgt_far
+            )
             downward = self._prepare_downward_with_artifacts(
                 cross_far=cross_far,
                 tree=tree_artifacts.tree,
