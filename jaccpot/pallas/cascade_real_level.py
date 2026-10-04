@@ -1284,6 +1284,117 @@ def l2l_real_levels_reverse_pallas(
 # arguments whose cotangents are ``None`` (symbolic zero).
 
 
+def _cascade_forward_kind() -> tuple[str, int]:
+    """``JACCPOT_CASCADE_KERNEL`` (``level`` | ``lanes``) and the lanes per program.
+
+    Returns
+    -------
+    tuple[str, int]
+        The forward kernel and ``JACCPOT_CASCADE_LANES_K`` (nodes per program of
+        the lane kernel).
+    """
+    from jaccpot._env import env_choice, env_int
+
+    kind = env_choice("JACCPOT_CASCADE_KERNEL", "level", ("level", "lanes"))
+    return kind, env_int("JACCPOT_CASCADE_LANES_K", 32, minimum=1)
+
+
+def _m2m_forward(
+    packed: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    **kw: Any,
+) -> Array:
+    """The M2M custom VJP's forward: the level kernel or the one-node-per-lane kernel.
+
+    Parameters
+    ----------
+    packed : Array
+        As :func:`m2m_real_levels_pallas`.
+    centers : Array
+        As :func:`m2m_real_levels_pallas`.
+    left_child : Array
+        As :func:`m2m_real_levels_pallas`.
+    right_child : Array
+        As :func:`m2m_real_levels_pallas`.
+    nodes_by_level : Array
+        As :func:`m2m_real_levels_pallas`.
+    level_offsets : Array
+        As :func:`m2m_real_levels_pallas`.
+    **kw : Any
+        Its keyword arguments (``num_warps`` is the level kernel's; the lane
+        kernel runs ``k / 32`` warps).
+
+    Returns
+    -------
+    Array
+        ``[nodes, C]`` packed multipoles with the internal nodes filled.
+    """
+    kind, k = _cascade_forward_kind()
+    if kind == "lanes":
+        from jaccpot.pallas.cascade_real_lanes import m2m_real_levels_lanes_pallas
+
+        kw = dict(kw, k_lanes=k, num_warps=max(1, k // 32))
+        return m2m_real_levels_lanes_pallas(
+            packed,
+            centers,
+            left_child,
+            right_child,
+            nodes_by_level,
+            level_offsets,
+            **kw,
+        )
+    return m2m_real_levels_pallas(
+        packed, centers, left_child, right_child, nodes_by_level, level_offsets, **kw
+    )
+
+
+def _l2l_forward(
+    coeffs_local: Array,
+    centers: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    **kw: Any,
+) -> Array:
+    """The L2L custom VJP's forward: the level kernel or the one-node-per-lane kernel.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        As :func:`l2l_real_levels_pallas`.
+    centers : Array
+        As :func:`l2l_real_levels_pallas`.
+    parent : Array
+        As :func:`l2l_real_levels_pallas`.
+    nodes_by_level : Array
+        As :func:`l2l_real_levels_pallas`.
+    level_offsets : Array
+        As :func:`l2l_real_levels_pallas`.
+    **kw : Any
+        Its keyword arguments (``num_warps`` is the level kernel's).
+
+    Returns
+    -------
+    Array
+        ``[nodes, C]`` packed locals, every ancestor's field cascaded down.
+    """
+    kind, k = _cascade_forward_kind()
+    if kind == "lanes":
+        from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_pallas
+
+        kw = dict(kw, k_lanes=k, num_warps=max(1, k // 32))
+        return l2l_real_levels_lanes_pallas(
+            coeffs_local, centers, parent, nodes_by_level, level_offsets, **kw
+        )
+    return l2l_real_levels_pallas(
+        coeffs_local, centers, parent, nodes_by_level, level_offsets, **kw
+    )
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
 def m2m_real_levels_pallas_cvjp(
     packed: Array,
@@ -1339,7 +1450,7 @@ def m2m_real_levels_pallas_cvjp(
     Array
         ``[nodes, C]`` packed multipoles with the internal nodes filled.
     """
-    return m2m_real_levels_pallas(
+    return _m2m_forward(
         packed,
         centers,
         left_child,
@@ -1372,7 +1483,7 @@ def _m2m_cvjp_fwd(
     backend,
     num_warps,
 ):
-    out = m2m_real_levels_pallas(
+    out = _m2m_forward(
         packed,
         centers,
         left_child,
@@ -1475,7 +1586,7 @@ def l2l_real_levels_pallas_cvjp(
     Array
         ``[nodes, C]`` fully cascaded locals.
     """
-    return l2l_real_levels_pallas(
+    return _l2l_forward(
         coeffs_local,
         centers,
         parent,
@@ -1505,7 +1616,7 @@ def _l2l_cvjp_fwd(
     backend,
     num_warps,
 ):
-    out = l2l_real_levels_pallas(
+    out = _l2l_forward(
         coeffs_local,
         centers,
         parent,
