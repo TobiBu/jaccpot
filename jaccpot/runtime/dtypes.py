@@ -13,19 +13,26 @@ from jaxtyping import DTypeLike
 
 
 def _resolve_index_dtype() -> DTypeLike:
-    """Resolve index dtype from environment.
+    """Resolve index dtype: ``JACCPOT_INDEX_PRECISION``, else yggdrax's.
 
     Supported values:
-    - ``JACCPOT_INDEX_PRECISION=int32`` (lower memory, faster on many GPUs)
-    - ``JACCPOT_INDEX_PRECISION=int64`` (default; safest for very large indices)
+    - ``JACCPOT_INDEX_PRECISION=int32``: half the bytes of every index array,
+      list and sort key; ample for one GPU.
+    - ``JACCPOT_INDEX_PRECISION=int64``: for index spaces past 2^31.
+    - unset: **yggdrax's** ``INDEX_DTYPE`` (``YGGDRAX_INDEX_PRECISION``, else this
+      variable, else yggdrax's default). jaccpot hands its index arrays to
+      yggdrax and some of its modules use yggdrax's dtype directly, so the two
+      must agree; a jaccpot default of its own could disagree with an older or
+      newer yggdrax.
 
     Called exactly once, at import, to initialise ``INDEX_DTYPE``. Setting the
-    variable after :mod:`jaccpot` is imported therefore does nothing.
+    variable after :mod:`jaccpot` is imported therefore does nothing. With int32,
+    :func:`require_index_capacity` refuses a problem whose particle count, node x
+    coefficient count or list capacities reach 2^31, naming the switch.
 
-    An unrecognised value falls back to ``int64`` **silently** rather than
+    An unrecognised value falls back to yggdrax's dtype **silently** rather than
     raising -- a deliberate exception to the fail-loudly policy for a
-    diagnostics-adjacent knob, but it does mean a typo such as
-    ``JACCPOT_INDEX_PRECISION=in32`` gives 64-bit indices with no warning.
+    diagnostics-adjacent knob.
 
     Returns
     -------
@@ -34,16 +41,46 @@ def _resolve_index_dtype() -> DTypeLike:
         practice because importing yggdrax sets ``jax_enable_x64``; without that
         JAX would quietly demote it to int32.
     """
-    raw = str(os.environ.get("JACCPOT_INDEX_PRECISION", "int64")).strip().lower()
-    if raw in ("int32", "i32", "32"):
-        return jnp.int32
+    raw = str(os.environ.get("JACCPOT_INDEX_PRECISION", "")).strip().lower()
     if raw in ("int64", "i64", "64"):
         return jnp.int64
-    # Defensive fallback for unknown user input.
-    return jnp.int64
+    if raw in ("int32", "i32", "32"):
+        return jnp.int32
+    from yggdrax.dtypes import INDEX_DTYPE as yggdrax_index_dtype
+
+    return jnp.int64 if jnp.dtype(yggdrax_index_dtype).itemsize >= 8 else jnp.int32
 
 
 INDEX_DTYPE = _resolve_index_dtype()
+
+#: Sizes at or past this need int64 indices.
+_INT32_INDEX_LIMIT = 2**31 - 1
+
+
+def require_index_capacity(**sizes: int) -> None:
+    """Refuse sizes the index dtype cannot address (int32: ``2^31 - 1``).
+
+    Parameters
+    ----------
+    **sizes : int
+        Named element counts that index arithmetic reaches (particle count,
+        nodes x coefficients, list and queue capacities). Static.
+
+    Raises
+    ------
+    ValueError
+        With int32 indices, if any size reaches ``2^31 - 1``; the message names
+        the sizes and the switch to int64.
+    """
+    if jnp.dtype(INDEX_DTYPE).itemsize >= 8:
+        return
+    over = {k: int(v) for k, v in sizes.items() if int(v) >= _INT32_INDEX_LIMIT}
+    if over:
+        raise ValueError(
+            f"{over} reach the int32 index range (2^31 - 1); set "
+            "JACCPOT_INDEX_PRECISION=int64 (and YGGDRAX_INDEX_PRECISION=int64) "
+            "before importing jaccpot"
+        )
 
 
 def as_index(x: object) -> jnp.ndarray:
@@ -95,4 +132,9 @@ def complex_dtype_for_real(real_dtype: DTypeLike) -> DTypeLike:
     return jnp.complex64
 
 
-__all__ = ["INDEX_DTYPE", "as_index", "complex_dtype_for_real"]
+__all__ = [
+    "INDEX_DTYPE",
+    "as_index",
+    "complex_dtype_for_real",
+    "require_index_capacity",
+]
