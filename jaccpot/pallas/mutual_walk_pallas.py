@@ -36,6 +36,7 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
+from jaccpot._env import env_int
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
@@ -223,9 +224,16 @@ def _round_kernel(
     )
     pid = pl.program_id(0)
     size = size_ref[0]
+    # Grid-stride over the live blocks: the grid is capped (``num_programs``), so
+    # a round over a small queue no longer launches the full queue capacity's
+    # programs only for most of them to exit (66 rounds x 131k programs per
+    # refresh at 8e6). Which program emits a pair changes its slot, not the set:
+    # the deterministic lists sort it away.
+    num_programs = pl.num_programs(0)
+    live_blocks = (size + (block - 1)) // block
+    trips = jnp.maximum(live_blocks - pid + (num_programs - 1), 0) // num_programs
 
-    @pl.when(pid * block < size)
-    def _block():
+    def _one(it, carry):
         _round_block(
             qa_ref,
             qb_ref,
@@ -243,12 +251,15 @@ def _round_kernel(
             next_a_out,
             next_b_out,
             counters_out,
-            pid=pid,
+            pid=pid + it * num_programs,
             block=block,
             far_cap=far_cap,
             near_cap=near_cap,
             queue_cap=queue_cap,
         )
+        return carry
+
+    lax.fori_loop(0, trips, _one, 0)
 
 
 def _round_block(
@@ -574,6 +585,7 @@ def mutual_walk_pallas(
         "rounds_per_check",
     ),
 )
+@jax.named_scope("fmm_walk")
 def _mutual_walk_jit(
     left_child_full: Array,
     right_child_full: Array,
@@ -659,7 +671,9 @@ def _mutual_walk_jit(
     theta_sq = jnp.asarray([float(theta) ** 2], dtype)
     Q = int(max_pair_queue)
     blk = int(block)
-    grid = (Q + blk - 1) // blk
+    # programs per round: enough to fill the card, the kernel strides over the rest
+    max_programs = env_int("JACCPOT_WALK_MAX_PROGRAMS", 2048, minimum=1)
+    grid = min((Q + blk - 1) // blk, int(max_programs))
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
@@ -735,6 +749,9 @@ def _mutual_walk_jit(
     init = (
         qa0,
         qb0,
+        # the spare queue pair the next round writes into (double buffering)
+        jnp.zeros((Q,), idx),
+        jnp.zeros((Q,), idx),
         size0,
         jnp.full((int(far_cap),), -1, idx),
         jnp.full((int(far_cap),), -1, idx),
@@ -746,7 +763,7 @@ def _mutual_walk_jit(
     )
 
     def cond(state: tuple[Array, ...]) -> Array:
-        _qa, _qb, size, *_rest, counters, _peak, rounds = state
+        _qa, _qb, _sa, _sb, size, *_rest, counters, _peak, rounds = state
         # Only a QUEUE overflow stops the walk: pairs dropped from the queue are
         # never classified. A full far or near list drops what does not fit and
         # keeps counting, so the walk reports the capacity it needed and an eager
@@ -754,13 +771,30 @@ def _mutual_walk_jit(
         return (size > 0) & (counters[_C_OVF_Q] == 0) & (rounds < int(max_rounds))
 
     def one_step(state: tuple[Array, ...]) -> tuple[Array, ...]:
-        qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = state
-        # the kernel reads only lanes < size, so the next queue needs no fill
-        next_a = jnp.empty((Q,), idx)
-        next_b = jnp.empty((Q,), idx)
+        (
+            qa,
+            qb,
+            spare_a,
+            spare_b,
+            size,
+            far_a,
+            far_b,
+            near_a,
+            near_b,
+            counters,
+            peak,
+            rounds,
+        ) = state
+        # The next queue goes into the spare pair (the kernel reads only lanes <
+        # size, so neither needs a fill) and this round's queue becomes the next
+        # spare. A fresh ``jnp.empty`` per round cost a full-queue copy per round
+        # (XLA merged the two identical broadcasts into one buffer, and an aliased
+        # output cannot share it): 33 MB x ~2.4 per round at 8e6, 6.5 ms per step.
+        # After an even number of rounds every carry slot is back in its own
+        # buffer, so the while body needs no copy either.
         counters = counters.at[_C_NEXT].set(0)
         far_a, far_b, near_a, near_b, next_a, next_b, counters = one_round(
-            qa, qb, size[None], far_a, far_b, near_a, near_b, next_a, next_b, counters
+            qa, qb, size[None], far_a, far_b, near_a, near_b, spare_a, spare_b, counters
         )
         new_size = counters[_C_NEXT]
         peak = jnp.maximum(peak, new_size)
@@ -769,6 +803,8 @@ def _mutual_walk_jit(
         return (
             next_a,
             next_b,
+            qa,
+            qb,
             jnp.minimum(new_size, Q),
             far_a,
             far_b,
@@ -784,9 +820,20 @@ def _mutual_walk_jit(
             state = one_step(state)
         return state
 
-    qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = lax.while_loop(
-        cond, body, init
-    )
+    (
+        qa,
+        qb,
+        _sa,
+        _sb,
+        size,
+        far_a,
+        far_b,
+        near_a,
+        near_b,
+        counters,
+        peak,
+        rounds,
+    ) = lax.while_loop(cond, body, init)
     # Stopping at max_rounds with pairs still queued leaves them unclassified. A
     # queue overflow also stops the loop with pairs queued and is flagged already.
     unfinished = (size > 0) & (counters[_C_OVF_Q] == 0)

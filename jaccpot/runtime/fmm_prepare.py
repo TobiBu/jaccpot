@@ -651,6 +651,7 @@ class PrepareMixin(_EngineBase):
             cache_leaf_parameter=int(entry.cache_leaf_parameter),
         )
 
+    @jax.named_scope("fmm_tree")
     def _rebuild_tree_artifacts_from_static_template(
         self,
         *,
@@ -3299,6 +3300,7 @@ class PrepareMixin(_EngineBase):
             dual_artifacts.grouped_segment_unique_targets,
         )
 
+    @jax.named_scope("fmm_downward")
     def _prepare_downward_with_artifacts(
         self,
         *,
@@ -3469,6 +3471,7 @@ class PrepareMixin(_EngineBase):
             default_mode=(
                 "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
             ),
+            num_levels=self._resolve_upward_num_levels(tree_artifacts.tree),
         )
 
     def _strict_fused_capacity_handoff(

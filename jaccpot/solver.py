@@ -36,6 +36,7 @@ from .runtime._large_n_types import LargeNPreparedState
 from .runtime.fmm import FMMEngine as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
+from .runtime.strict_carry import StrictParticleCarry
 
 
 def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
@@ -1944,7 +1945,9 @@ class FastMultipoleMethod:
         leaf_size: int,
         max_order: int,
         theta: Optional[float] = None,
-        prepared_state: Optional[FMMPreparedState] = None,
+        prepared_state: Optional[
+            Union[FMMPreparedState, LargeNPreparedState, StrictParticleCarry]
+        ] = None,
         initial_self_acceleration: Optional[Float[Array, "n 3"]] = None,
         jit_traversal: Optional[bool] = True,
         add_external: bool = False,
@@ -1955,7 +1958,8 @@ class FastMultipoleMethod:
         step_callback: Optional[Callable[[Array, Array], None]] = None,
         step_callback_stride: int = 1,
         donate_prepared_state: bool = False,
-    ) -> tuple[Array, Optional[FMMPreparedState], Optional[Array]]:
+        carry: Optional[str] = None,
+    ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
         ``step_callback``/``step_callback_stride`` add an optional fire-and-forget
@@ -1988,8 +1992,9 @@ class FastMultipoleMethod:
             Expansion order ``p``.
         theta : Optional[float]
             Per-call MAC opening-angle override.
-        prepared_state : Optional[FMMPreparedState]
-            Existing state to refresh, or ``None`` to prepare.
+        prepared_state : Optional[Union[FMMPreparedState, LargeNPreparedState, StrictParticleCarry]]
+            Existing state to refresh, or ``None`` to prepare; with
+            ``carry="particles"`` the handle the previous call returned.
         initial_self_acceleration : Optional[Float[Array, 'n 3']]
             Self-gravity at step 0 ``[N, 3]``, if already known. ``None``
             evaluates it, costing one extra evaluation.
@@ -2015,10 +2020,16 @@ class FastMultipoleMethod:
             ``prepared_state``'s buffers instead of a second copy. The passed state
             is CONSUMED: pass the returned state to the next call, never the same
             one twice. A state this call prepares itself is always donated.
+        carry : Optional[str]
+            ``"state"`` or ``"particles"`` (``None``: ``JACCPOT_STRICT_CARRY``,
+            default ``"state"``). ``"particles"`` carries only positions,
+            velocities and forces through the fused scan and returns a
+            :class:`~jaccpot.runtime.strict_carry.StrictParticleCarry` handle for
+            the next call instead of a prepared state (see the impl docstring).
 
         Returns
         -------
-        tuple[Array, Optional[FMMPreparedState], Optional[Array]]
+        tuple[Array, Optional[Any], Optional[Array]]
             ``(final_state, prepared_state, history)``. The second is ``None``
             unless ``return_prepared_state``, the third ``None`` unless
             ``return_history``.
@@ -2043,6 +2054,7 @@ class FastMultipoleMethod:
             step_callback=step_callback,
             step_callback_stride=int(step_callback_stride),
             donate_prepared_state=bool(donate_prepared_state),
+            carry=carry,
         )
 
     def strict_fused_prepared_eval_fn(

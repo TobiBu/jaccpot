@@ -276,6 +276,7 @@ class SweepsMixin(_EngineBase):
             return self._static_upward_num_levels
         return self._static_upward_num_levels
 
+    @jax.named_scope("fmm_upward")
     def prepare_upward_sweep(
         self,
         tree: Tree,

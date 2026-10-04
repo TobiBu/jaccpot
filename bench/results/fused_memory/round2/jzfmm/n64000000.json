@@ -1,0 +1,95 @@
+{
+  "code": "jzfmm",
+  "tag": "plummer_clipped64000000",
+  "n": 64000000,
+  "ic": "plummer_clipped",
+  "softening": 1e-07,
+  "G": 1.0,
+  "devices": [
+    6
+  ],
+  "host": "compgpu9",
+  "versions": {
+    "jax": "0.11.1",
+    "jzfmm": null,
+    "jztree": null
+  },
+  "ref_targets": 64,
+  "repeats": 5,
+  "warmup": 2,
+  "defaults": {
+    "FMMConfig": "FMMConfig(tree=TreeConfig(max_leaf_size=32, coarse_fac=4.0, stop_coarsen=1024, regularization=None, alloc_fac_nodes=1.2, nsamp=1024, mass_centered=False), kernel=PlummerKernel(softening=0.001), p=5, opening=OpeningByAngle(theta=0.8), alloc_fac_ilist=64.0, alloc_fac_comm_nodes=1.5, alloc_fac_comm_particles=1.5, kahan_summation=False, remove_self_interaction=True)"
+  },
+  "rows": [
+    {
+      "leaf": 32,
+      "p": 4,
+      "theta": 0.6,
+      "compile_s_incl_first_call": 2.495541673153639,
+      "alloc_fac_ilist": 128.0,
+      "cfg": "FMMConfig(tree=TreeConfig(max_leaf_size=32, coarse_fac=4.0, stop_coarsen=1024, regularization=None, alloc_fac_nodes=1.2, nsamp=1024, mass_centered=False), kernel=PlummerKernel(softening=1e-07), p=4, opening=OpeningByAngle(theta=0.6), alloc_fac_ilist=128.0, alloc_fac_comm_nodes=1.5, alloc_fac_comm_particles=1.5, kahan_summation=False, remove_self_interaction=True)",
+      "timing": {
+        "min": 0.7964195925742388,
+        "median": 0.798773281276226,
+        "iqr": 0.0031435461714863777,
+        "max": 0.800582705065608,
+        "mean": 0.7985812667757273,
+        "std": 0.0014813244272844682,
+        "samples": [
+          0.79750338755548,
+          0.800582705065608,
+          0.7996273674070835,
+          0.798773281276226,
+          0.7964195925742388
+        ]
+      },
+      "contention": {
+        "devices": [
+          6
+        ],
+        "n_samples": 7,
+        "duration_s": 6.006108045578003,
+        "foreign_pids_on_devices": [],
+        "own_util_max": {
+          "6": 100
+        },
+        "other_gpu_util_max": 100,
+        "loadavg1_max": 19.62744140625,
+        "loadavg1_min": 19.2568359375,
+        "cores": 64,
+        "contaminated": false,
+        "flags": [
+          "loadavg>=8 (19.6)",
+          "other-gpus-busy (100%)"
+        ]
+      },
+      "error": {
+        "median": 0.00018076797490407465,
+        "p90": 0.0008310760097353886,
+        "max": 0.008125990766794072,
+        "aggL2": 0.0003312076065188099,
+        "aggL2_signflip": 1.9999446630808264,
+        "n_ref": 64
+      },
+      "memory": {
+        "peak_bytes": 15436822272,
+        "peak_gib": 14.3766610622406,
+        "peak_bytes_per_particle": 241.200348,
+        "bytes_in_use": 3584000000,
+        "largest_alloc_size": 10828822272,
+        "bytes_limit": 37318819840,
+        "process_max_mib": 36020,
+        "preallocate": "true",
+        "mem_fraction": "0.880",
+        "memory_analysis": {
+          "argument_size_in_bytes": 1792000000,
+          "output_size_in_bytes": 1024000000,
+          "temp_size_in_bytes": 10828822088,
+          "alias_size_in_bytes": 0,
+          "generated_code_size_in_bytes": 6716
+        }
+      },
+      "lists_failed": "skipped (--no-lists)"
+    }
+  ]
+}

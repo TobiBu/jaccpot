@@ -71,7 +71,23 @@ def _args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--mode", default="budget", choices=("budget", "drift"))
     ap.add_argument("--n", type=int, default=2_000_000)
-    ap.add_argument("--ic", default="plummer", choices=("plummer", "disc"))
+    ap.add_argument(
+        "--ic", default="plummer", choices=("plummer", "plummer_clipped", "disc")
+    )
+    ap.add_argument(
+        "--rmax",
+        type=float,
+        default=20.0,
+        help="plummer_clipped: radius cut in scale radii (a truncated inverse CDF, no "
+        "outliers to stretch the per-axis Morton box)",
+    )
+    ap.add_argument(
+        "--prealloc",
+        type=float,
+        default=0.0,
+        help="preallocate this fraction of the card (jax's default allocator mode); 0 "
+        "= grow on demand, which fragments after the eager prepare's peak",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--leaf", type=int, default=64)
     ap.add_argument("--theta", type=float, default=0.8)
@@ -103,8 +119,31 @@ def _args() -> argparse.Namespace:
         "the bench always passes the returned state on, so donating is safe)",
     )
     ap.add_argument("--no-scan", action="store_true")
+    ap.add_argument(
+        "--skip-eval",
+        action="store_true",
+        help="go straight to strict_run_v2 (one prepare, then the scan: a production "
+        "rollout's sequence; the eval section otherwise prepares a second time first)",
+    )
     ap.add_argument("--no-analysis", action="store_true", help="skip memory_analysis()")
     ap.add_argument("--dump-dir", default=None, help="XLA dump (buffer assignment)")
+    ap.add_argument(
+        "--trace-dir",
+        default=None,
+        help="profile one warm strict_run_v2 call here (analyse with "
+        "bench/analyse_trace_by_stage.py --module-re '*_compiled_runner*')",
+    )
+    ap.add_argument(
+        "--no-command-buffers",
+        action="store_true",
+        help="run without CUDA graphs, so a trace names every kernel",
+    )
+    ap.add_argument(
+        "--save-forces",
+        default=None,
+        metavar="NPZ",
+        help="save the first eval's force and the final scan state (bitwise A/B)",
+    )
     ap.add_argument("--dt", type=float, default=None)
     ap.add_argument("--drift-steps", default="0,50,100")
     ap.add_argument("--softening", type=float, default=None)
@@ -121,10 +160,17 @@ from codes.compare_force import (  # noqa: E402
     fast_lane_overrides_for_leaf,
 )
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
+if ARGS.prealloc > 0:
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(ARGS.prealloc)
+else:
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
 # the record configuration's command buffers (the N-max ladder ran with these)
 _CB = "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUSTOM_CALL --xla_gpu_graph_min_graph_size=2"
+if ARGS.no_command_buffers:
+    # explicitly EMPTY: an unset flag still builds command buffers
+    _CB = "--xla_gpu_enable_command_buffer="
 if "xla_gpu_enable_command_buffer" not in os.environ.get("XLA_FLAGS", ""):
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _CB).strip()
 if ARGS.dump_dir:
@@ -190,6 +236,7 @@ def _mem() -> dict:
         in_use=int(stats.get("bytes_in_use", 0)),
         peak=int(stats.get("peak_bytes_in_use", 0)),
         limit=int(stats.get("bytes_limit", 0)),
+        largest_free=int(stats.get("largest_free_block_bytes", 0)),
     )
 
 
@@ -406,6 +453,23 @@ def _plummer_velocities(pos: np.ndarray, rng: np.random.Generator) -> np.ndarray
 
 def _initial_conditions():
     """``(pos, vel, mass, softening, dt, external_fn)`` for ``ARGS.ic``."""
+    if ARGS.ic == "plummer_clipped":
+        # the Plummer inverse CDF on [0, X(rmax)], X(r) = r^3 / (r^2 + 1)^1.5: the same
+        # sphere without the outliers that set the per-axis box at large N
+        rng = np.random.default_rng(ARGS.seed)
+        x_max = ARGS.rmax**3 / (ARGS.rmax**2 + 1.0) ** 1.5
+        x = rng.uniform(0.0, x_max, size=ARGS.n)
+        r = 1.0 / np.sqrt(x ** (-2.0 / 3.0) - 1.0)
+        mu = rng.uniform(-1.0, 1.0, size=ARGS.n)
+        phi = rng.uniform(0.0, 2.0 * np.pi, size=ARGS.n)
+        st = np.sqrt(1.0 - mu * mu)
+        pos = np.stack([r * st * np.cos(phi), r * st * np.sin(phi), r * mu], 1)
+        pos = pos.astype(np.float32)
+        mass = np.full(ARGS.n, 1.0 / ARGS.n, np.float32)
+        vel = _plummer_velocities(np.asarray(pos, np.float64), np.random.default_rng(7))
+        soft = 1e-7 if ARGS.softening is None else ARGS.softening
+        dt = 1e-2 if ARGS.dt is None else ARGS.dt
+        return pos, vel, mass, soft, dt, None
     if ARGS.ic == "plummer":
         pos, mass = IC_GENERATORS["plummer"](ARGS.n, seed=ARGS.seed)
         vel = _plummer_velocities(np.asarray(pos, np.float64), np.random.default_rng(7))
@@ -539,51 +603,61 @@ def run_budget(result: dict) -> None:
     M = jnp.asarray(mass)
     solver = _solver(leaf_cap, soft)
     _event("before_prepare")
-    t0 = time.perf_counter()
-    prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
-        positions=P,
-        masses=M,
-        leaf_size=ARGS.leaf,
-        max_order=ARGS.order,
-        theta=ARGS.theta,
-    )
-    _sync(prepared)
-    result["prepare_s"] = time.perf_counter() - t0
-    _event("after_prepare")
-    result["counts"] = _counts(solver)
-    result["prepare_events"] = list(EVENTS)
-    result["live_after_prepare"] = _live_arrays()
-    result["prepared_breakdown"] = _pytree_breakdown(prepared)
-    _write(result)
+    a_host = None
+    saved = None
+    if ARGS.skip_eval:
+        result["prepare_events"] = []  # the scan's own prepare fills it afterwards
+    if not ARGS.skip_eval:
+        t0 = time.perf_counter()
+        prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
+            positions=P,
+            masses=M,
+            leaf_size=ARGS.leaf,
+            max_order=ARGS.order,
+            theta=ARGS.theta,
+        )
+        _sync(prepared)
+        result["prepare_s"] = time.perf_counter() - t0
+        _event("after_prepare")
+        result["counts"] = _counts(solver)
+        result["prepare_events"] = list(EVENTS)
+        result["live_after_prepare"] = _live_arrays()
+        result["prepared_breakdown"] = _pytree_breakdown(prepared)
+        _write(result)
 
-    a = jax.block_until_ready(eval_fn(prepared))
-    _event("after_eval_compile")
-    a_host = np.asarray(a, np.float64) if ARGS.accuracy_targets else None
-    del a
-    samples = []
-    for _ in range(2):
-        jax.block_until_ready(eval_fn(prepared))
-    with GpuMonitor(_PHYS) as mon:
-        for _ in range(ARGS.eval_repeats):
-            t0 = time.perf_counter()
+        a = jax.block_until_ready(eval_fn(prepared))
+        _event("after_eval_compile")
+        a_host = np.asarray(a, np.float64) if ARGS.accuracy_targets else None
+        saved = {"force": np.asarray(a)} if ARGS.save_forces else None
+        del a
+        samples = []
+        for _ in range(2):
             jax.block_until_ready(eval_fn(prepared))
-            samples.append(time.perf_counter() - t0)
-    result["eval_contention"] = mon.summary().as_dict()
-    _event("after_eval_timing")
-    result["eval_ms"] = dict(
-        min=min(samples) * 1e3,
-        median=float(np.median(samples)) * 1e3,
-        samples=[s * 1e3 for s in samples],
-    )
-    print(f"eval-only min {result['eval_ms']['min']:.2f} ms", flush=True)
-    if not ARGS.no_analysis:
-        result["eval_memory_analysis"] = _analysis(eval_fn.lower(prepared).compile())
-        print(f"eval memory_analysis {result['eval_memory_analysis']}", flush=True)
-    result["peak_after_eval_gib"] = _mem()["peak"] / GIB
-    _write(result)
-    del prepared, eval_fn
+        with GpuMonitor(_PHYS) as mon:
+            for _ in range(ARGS.eval_repeats):
+                t0 = time.perf_counter()
+                jax.block_until_ready(eval_fn(prepared))
+                samples.append(time.perf_counter() - t0)
+        result["eval_contention"] = mon.summary().as_dict()
+        _event("after_eval_timing")
+        result["eval_ms"] = dict(
+            min=min(samples) * 1e3,
+            median=float(np.median(samples)) * 1e3,
+            samples=[s * 1e3 for s in samples],
+        )
+        print(f"eval-only min {result['eval_ms']['min']:.2f} ms", flush=True)
+        if not ARGS.no_analysis:
+            result["eval_memory_analysis"] = _analysis(
+                eval_fn.lower(prepared).compile()
+            )
+            print(f"eval memory_analysis {result['eval_memory_analysis']}", flush=True)
+        result["peak_after_eval_gib"] = _mem()["peak"] / GIB
+        _write(result)
+        del prepared, eval_fn
 
     if ARGS.no_scan:
+        if saved is not None:
+            np.savez(ARGS.save_forces, **saved)
         _accuracy(result, pos, mass, soft, a_host)
         return
     state0 = jnp.stack([P, jnp.asarray(vel)], axis=1)
@@ -627,8 +701,21 @@ def run_budget(result: dict) -> None:
     )
     result["peak_after_scan_gib"] = _mem()["peak"] / GIB
     result["scan_events"] = EVENTS[len(result["prepare_events"]) :]
+    if ARGS.trace_dir:
+        os.makedirs(ARGS.trace_dir, exist_ok=True)
+        with jax.profiler.trace(ARGS.trace_dir):
+            state, prep, _ = run(state, prep, ARGS.steps)
+        result["trace"] = dict(dir=ARGS.trace_dir, steps=ARGS.steps)
     print(f"scan min {result['step_ms']['min']:.2f} ms/step", flush=True)
+    if ARGS.skip_eval:
+        # the scan's own prepare is the only one: its events are the prepare's
+        result["counts"] = _counts(solver)
+        result["prepare_events"] = [
+            e for e in EVENTS if "prepare" in e["label"] or ":" in e["label"]
+        ]
     _write(result)
+    if saved is not None:
+        np.savez(ARGS.save_forces, state=np.asarray(state), **saved)
     if not ARGS.no_analysis:
         cache = getattr(solver._impl, "_strict_fused_jit_function_cache", {}) or {}
         runner = next(
@@ -795,6 +882,8 @@ def main() -> int:
         cap_env={v: os.environ.get(v) for v in _CAP_VARS},
         xla_flags=os.environ.get("XLA_FLAGS"),
         mem_fraction=os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
+        preallocate=os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
+        rmax=ARGS.rmax if ARGS.ic == "plummer_clipped" else None,
         worktree=os.environ.get("JACCPOT_WORKTREE"),
         yggdrax_worktree=os.environ.get("YGGDRAX_WORKTREE"),
         device=str(jax.devices()[0]),
