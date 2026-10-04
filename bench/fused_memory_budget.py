@@ -71,7 +71,23 @@ def _args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--mode", default="budget", choices=("budget", "drift"))
     ap.add_argument("--n", type=int, default=2_000_000)
-    ap.add_argument("--ic", default="plummer", choices=("plummer", "disc"))
+    ap.add_argument(
+        "--ic", default="plummer", choices=("plummer", "plummer_clipped", "disc")
+    )
+    ap.add_argument(
+        "--rmax",
+        type=float,
+        default=20.0,
+        help="plummer_clipped: radius cut in scale radii (a truncated inverse CDF, no "
+        "outliers to stretch the per-axis Morton box)",
+    )
+    ap.add_argument(
+        "--prealloc",
+        type=float,
+        default=0.0,
+        help="preallocate this fraction of the card (jax's default allocator mode); 0 "
+        "= grow on demand, which fragments after the eager prepare's peak",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--leaf", type=int, default=64)
     ap.add_argument("--theta", type=float, default=0.8)
@@ -121,8 +137,12 @@ from codes.compare_force import (  # noqa: E402
     fast_lane_overrides_for_leaf,
 )
 
-os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
+if ARGS.prealloc > 0:
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(ARGS.prealloc)
+else:
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
 # the record configuration's command buffers (the N-max ladder ran with these)
 _CB = "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUSTOM_CALL --xla_gpu_graph_min_graph_size=2"
 if "xla_gpu_enable_command_buffer" not in os.environ.get("XLA_FLAGS", ""):
@@ -190,6 +210,7 @@ def _mem() -> dict:
         in_use=int(stats.get("bytes_in_use", 0)),
         peak=int(stats.get("peak_bytes_in_use", 0)),
         limit=int(stats.get("bytes_limit", 0)),
+        largest_free=int(stats.get("largest_free_block_bytes", 0)),
     )
 
 
@@ -406,6 +427,23 @@ def _plummer_velocities(pos: np.ndarray, rng: np.random.Generator) -> np.ndarray
 
 def _initial_conditions():
     """``(pos, vel, mass, softening, dt, external_fn)`` for ``ARGS.ic``."""
+    if ARGS.ic == "plummer_clipped":
+        # the Plummer inverse CDF on [0, X(rmax)], X(r) = r^3 / (r^2 + 1)^1.5: the same
+        # sphere without the outliers that set the per-axis box at large N
+        rng = np.random.default_rng(ARGS.seed)
+        x_max = ARGS.rmax**3 / (ARGS.rmax**2 + 1.0) ** 1.5
+        x = rng.uniform(0.0, x_max, size=ARGS.n)
+        r = 1.0 / np.sqrt(x ** (-2.0 / 3.0) - 1.0)
+        mu = rng.uniform(-1.0, 1.0, size=ARGS.n)
+        phi = rng.uniform(0.0, 2.0 * np.pi, size=ARGS.n)
+        st = np.sqrt(1.0 - mu * mu)
+        pos = np.stack([r * st * np.cos(phi), r * st * np.sin(phi), r * mu], 1)
+        pos = pos.astype(np.float32)
+        mass = np.full(ARGS.n, 1.0 / ARGS.n, np.float32)
+        vel = _plummer_velocities(np.asarray(pos, np.float64), np.random.default_rng(7))
+        soft = 1e-7 if ARGS.softening is None else ARGS.softening
+        dt = 1e-2 if ARGS.dt is None else ARGS.dt
+        return pos, vel, mass, soft, dt, None
     if ARGS.ic == "plummer":
         pos, mass = IC_GENERATORS["plummer"](ARGS.n, seed=ARGS.seed)
         vel = _plummer_velocities(np.asarray(pos, np.float64), np.random.default_rng(7))
@@ -795,6 +833,8 @@ def main() -> int:
         cap_env={v: os.environ.get(v) for v in _CAP_VARS},
         xla_flags=os.environ.get("XLA_FLAGS"),
         mem_fraction=os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
+        preallocate=os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
+        rmax=ARGS.rmax if ARGS.ic == "plummer_clipped" else None,
         worktree=os.environ.get("JACCPOT_WORKTREE"),
         yggdrax_worktree=os.environ.get("YGGDRAX_WORKTREE"),
         device=str(jax.devices()[0]),
