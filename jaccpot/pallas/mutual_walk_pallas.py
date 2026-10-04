@@ -62,7 +62,11 @@ def pallas_mutual_walk_supported() -> bool:
 
 
 class PallasWalkResult(NamedTuple):
-    """Far and near pair lists of the walk, ``-1``-padded to their capacities.
+    """Far and near pair lists of the walk, padded to their capacities.
+
+    Entries past ``far_count`` / ``near_count`` are NEGATIVE (each buffer has its
+    own fill value, so XLA does not merge the identical fills into one buffer
+    that it must then copy for the walk's loop carry); read the live prefix.
 
     Attributes
     ----------
@@ -732,15 +736,19 @@ def _mutual_walk_jit(
             **backend_kwargs,
         )(*operands)
 
+    # Every carried buffer gets its OWN fill (all negative: dead). Identical
+    # fills are one broadcast to XLA, which then copies it into each loop-carry
+    # slot and keeps it alive for later -1 selects: at 1.28e8 particles a 1.4 GiB
+    # far buffer plus two copies of it at the walk's start.
     if seed_a is None:
-        qa0 = jnp.full((Q,), -1, idx).at[0].set(jnp.asarray(root, idx))
-        qb0 = qa0
+        qa0 = jnp.full((Q,), -11, idx).at[0].set(jnp.asarray(root, idx))
+        qb0 = jnp.full((Q,), -12, idx).at[0].set(jnp.asarray(root, idx))
         size0 = jnp.asarray(1, idx)
     else:
         assert seed_b is not None  # checked above; for the type checker
         K = int(jnp.asarray(seed_a).shape[0])
-        qa0 = jnp.full((Q,), -1, idx).at[:K].set(jnp.asarray(seed_a, idx))
-        qb0 = jnp.full((Q,), -1, idx).at[:K].set(jnp.asarray(seed_b, idx))
+        qa0 = jnp.full((Q,), -11, idx).at[:K].set(jnp.asarray(seed_a, idx))
+        qb0 = jnp.full((Q,), -12, idx).at[:K].set(jnp.asarray(seed_b, idx))
         size0 = (
             jnp.asarray(K, idx)
             if seed_count is None
@@ -750,13 +758,13 @@ def _mutual_walk_jit(
         qa0,
         qb0,
         # the spare queue pair the next round writes into (double buffering)
-        jnp.zeros((Q,), idx),
-        jnp.zeros((Q,), idx),
+        jnp.full((Q,), -13, idx),
+        jnp.full((Q,), -14, idx),
         size0,
-        jnp.full((int(far_cap),), -1, idx),
-        jnp.full((int(far_cap),), -1, idx),
-        jnp.full((int(near_cap),), -1, idx),
-        jnp.full((int(near_cap),), -1, idx),
+        jnp.full((int(far_cap),), -15, idx),
+        jnp.full((int(far_cap),), -16, idx),
+        jnp.full((int(near_cap),), -17, idx),
+        jnp.full((int(near_cap),), -18, idx),
         jnp.zeros((_NUM_COUNTERS,), idx),  # far, near, next, overflow far/near/queue
         size0,  # peak
         jnp.asarray(0, idx),  # rounds
