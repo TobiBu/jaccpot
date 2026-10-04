@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
+from jaccpot._env import env_choice, env_int
 from jaccpot._jax_compat import Tracer
 
 # `_read_large_n_env_config` is re-imported although only its memoising wrapper
@@ -1249,6 +1250,7 @@ def _build_tree_and_dual_downward_artifacts(
     return tree_artifacts, dual_downward_artifacts, stage_t0
 
 
+@jax.named_scope("fmm_large_n_state")
 def prepare_large_n_state(
     fmm: "FMMEngine",
     *,
@@ -2152,6 +2154,7 @@ def evaluate_large_n_state(
 
     from .kernels.core import (
         _evaluate_local_expansions_for_particles,
+        _evaluate_local_expansions_particle_major,
         _evaluate_tree_compiled_impl,
     )
 
@@ -2238,6 +2241,13 @@ def evaluate_large_n_state(
         if eval_diag_mode == "zero":
             return jnp.zeros_like(state_prepared.positions_sorted).astype(output_dtype)
 
+        # far-field evaluation layout: "leaf" sweeps padded [leaves, max_leaf_size]
+        # blocks (the step's temporary peak, 3.7 slots per particle on cell
+        # leaves); "particle" evaluates every particle in its own leaf's expansion,
+        # chunk by chunk (same arithmetic)
+        l2p_layout = env_choice("JACCPOT_L2P_LAYOUT", "leaf", ("leaf", "particle"))
+        l2p_chunk = env_int("JACCPOT_L2P_PARTICLE_CHUNK", 1 << 21, minimum=1)
+
         def _fastlane_body(state_in: Any) -> Array:
             if bool(disable_near_eval):
                 near_acc = jnp.zeros_like(state_in.positions_sorted)
@@ -2249,6 +2259,22 @@ def evaluate_large_n_state(
                 )
             if bool(disable_far_eval):
                 far_acc = jnp.zeros_like(state_in.positions_sorted)
+            elif l2p_layout == "particle" and not jnp.iscomplexobj(
+                state_in.local_data.coefficients
+            ):
+                far_grad = _evaluate_local_expansions_particle_major(
+                    state_in.local_data,
+                    state_in.positions_sorted,
+                    leaf_nodes=jnp.asarray(
+                        state_in.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+                    ),
+                    node_ranges=jnp.asarray(
+                        state_in.tree.node_ranges, dtype=INDEX_DTYPE
+                    ),
+                    order=local_order,
+                    chunk=l2p_chunk,
+                )
+                far_acc = -float(getattr(fmm, "G")) * far_grad
             else:
                 far_grad, _, _ = _evaluate_local_expansions_for_particles(
                     state_in.local_data,
@@ -2292,6 +2318,8 @@ def evaluate_large_n_state(
                 float(getattr(fmm, "G")),
                 float(getattr(fmm, "softening")),
                 bool(getattr(fmm, "use_pallas", False)),
+                l2p_layout,
+                int(l2p_chunk),
             ),
         )
         if compiled is not None:

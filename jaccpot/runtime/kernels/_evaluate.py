@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 from beartype import beartype
 from beartype.typing import Tuple
+from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.interactions import (
     NodeNeighborList,
@@ -2132,6 +2133,91 @@ def _evaluate_prepared_tree_targets(
 # LAYOUT (leaf-major locals, so the gather is a slice), not the fusion boundary.
 
 
+@partial(jax.jit, static_argnames=("order", "chunk"))
+@jax.named_scope("fmm_l2p")
+def _evaluate_local_expansions_particle_major(
+    local_data: LocalExpansionData,
+    positions: Float[Array, "n 3"],
+    *,
+    leaf_nodes: Int[Array, "leaves"],
+    node_ranges: Int[Array, "nodes 2"],
+    order: int,
+    chunk: int,
+) -> Array:
+    """Real-basis far-field gradient at every particle, in particle order, in chunks.
+
+    The particle-major twin of :func:`_evaluate_local_expansions_for_particles` for
+    the fused lane. That one sweeps every leaf as a padded ``[leaves, max_leaf_size]``
+    block: with cell leaves holding ~20 particles in 64 slots it evaluates 3.7 slots
+    per particle, and its ``value_and_grad`` keeps ~15-25 residual arrays of that
+    padded shape alive at once -- the temporary peak of the whole force and of the
+    whole step (15 B per particle per array). Here each particle reads its own leaf's
+    expansion, ``chunk`` particles at a time, so the residuals are ``[chunk]`` arrays
+    and nothing is scattered back.
+
+    The arithmetic per particle is the same (``delta = centre - position`` into
+    :func:`evaluate_local_real_with_grad`), so the result matches the padded sweep.
+
+    Parameters
+    ----------
+    local_data : LocalExpansionData
+        Local expansions, indexed by node; real (Dehnen) coefficients.
+    positions : Float[Array, 'n 3']
+        Morton-sorted particle positions ``[N, 3]``.
+    leaf_nodes : Int[Array, 'leaves']
+        Leaf node ids in particle order: leaf ``i``'s particles directly follow leaf
+        ``i - 1``'s (static radix trees; empty padding leaves sit at the end).
+    node_ranges : Int[Array, 'nodes 2']
+        Per-node ``[start, end]`` particle ranges, inclusive of ``end``.
+    order : int
+        Expansion order ``p``.
+    chunk : int
+        Particles per chunk. Static.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` gradient of the potential (the caller applies ``-G``); zero for
+        rows past the leaves' particles (the padding of a mesh shard).
+
+    Raises
+    ------
+    NotImplementedError
+        For complex coefficients (the leaf-major sweep covers them).
+    """
+    if jnp.iscomplexobj(local_data.coefficients):
+        raise NotImplementedError("particle-major L2P covers the real basis only")
+    n = int(positions.shape[0])
+    num_leaves = int(leaf_nodes.shape[0])
+    dtype = positions.dtype
+    if n == 0 or num_leaves == 0:
+        return jnp.zeros((n, 3), dtype=dtype)
+    leaf_ranges = node_ranges[leaf_nodes]
+    counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+    leaf_of = jnp.repeat(
+        jnp.arange(num_leaves, dtype=INDEX_DTYPE), counts, total_repeat_length=n
+    )
+    live = jnp.arange(n, dtype=INDEX_DTYPE) < jnp.sum(counts)
+    k = max(1, min(int(chunk), n))
+    num_chunks = -(-n // k)
+    p = int(order)
+
+    def _chunk(c: Array, out: Array) -> Array:
+        # the last chunk overlaps the previous one instead of padding: it recomputes
+        # identical values for the overlap
+        s = jnp.minimum(c * k, n - k)
+        idx = s + jnp.arange(k, dtype=INDEX_DTYPE)
+        node = leaf_nodes[leaf_of[idx]]
+        delta = local_data.centers[node] - positions[idx]
+        grads, _ = jax.vmap(
+            lambda coeff, offset: evaluate_local_real_with_grad(coeff, offset, order=p)
+        )(local_data.coefficients[node], delta)
+        grads = jnp.where(live[idx][:, None], grads.astype(dtype), 0.0)
+        return lax.dynamic_update_slice(out, grads, (s, 0))
+
+    return lax.fori_loop(0, num_chunks, _chunk, jnp.zeros((n, 3), dtype=dtype))
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -2143,6 +2229,7 @@ def _evaluate_prepared_tree_targets(
     ),
 )
 @jaxtyped(typechecker=beartype)
+@jax.named_scope("fmm_l2p")
 def _evaluate_local_expansions_for_particles(
     local_data: LocalExpansionData,
     positions: Float[Array, "n 3"],
