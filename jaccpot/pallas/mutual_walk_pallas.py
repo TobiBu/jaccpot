@@ -736,6 +736,9 @@ def _mutual_walk_jit(
     init = (
         qa0,
         qb0,
+        # the spare queue pair the next round writes into (double buffering)
+        jnp.zeros((Q,), idx),
+        jnp.zeros((Q,), idx),
         size0,
         jnp.full((int(far_cap),), -1, idx),
         jnp.full((int(far_cap),), -1, idx),
@@ -747,7 +750,7 @@ def _mutual_walk_jit(
     )
 
     def cond(state: tuple[Array, ...]) -> Array:
-        _qa, _qb, size, *_rest, counters, _peak, rounds = state
+        _qa, _qb, _sa, _sb, size, *_rest, counters, _peak, rounds = state
         # Only a QUEUE overflow stops the walk: pairs dropped from the queue are
         # never classified. A full far or near list drops what does not fit and
         # keeps counting, so the walk reports the capacity it needed and an eager
@@ -755,13 +758,30 @@ def _mutual_walk_jit(
         return (size > 0) & (counters[_C_OVF_Q] == 0) & (rounds < int(max_rounds))
 
     def one_step(state: tuple[Array, ...]) -> tuple[Array, ...]:
-        qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = state
-        # the kernel reads only lanes < size, so the next queue needs no fill
-        next_a = jnp.empty((Q,), idx)
-        next_b = jnp.empty((Q,), idx)
+        (
+            qa,
+            qb,
+            spare_a,
+            spare_b,
+            size,
+            far_a,
+            far_b,
+            near_a,
+            near_b,
+            counters,
+            peak,
+            rounds,
+        ) = state
+        # The next queue goes into the spare pair (the kernel reads only lanes <
+        # size, so neither needs a fill) and this round's queue becomes the next
+        # spare. A fresh ``jnp.empty`` per round cost a full-queue copy per round
+        # (XLA merged the two identical broadcasts into one buffer, and an aliased
+        # output cannot share it): 33 MB x ~2.4 per round at 8e6, 6.5 ms per step.
+        # After an even number of rounds every carry slot is back in its own
+        # buffer, so the while body needs no copy either.
         counters = counters.at[_C_NEXT].set(0)
         far_a, far_b, near_a, near_b, next_a, next_b, counters = one_round(
-            qa, qb, size[None], far_a, far_b, near_a, near_b, next_a, next_b, counters
+            qa, qb, size[None], far_a, far_b, near_a, near_b, spare_a, spare_b, counters
         )
         new_size = counters[_C_NEXT]
         peak = jnp.maximum(peak, new_size)
@@ -770,6 +790,8 @@ def _mutual_walk_jit(
         return (
             next_a,
             next_b,
+            qa,
+            qb,
             jnp.minimum(new_size, Q),
             far_a,
             far_b,
@@ -785,9 +807,20 @@ def _mutual_walk_jit(
             state = one_step(state)
         return state
 
-    qa, qb, size, far_a, far_b, near_a, near_b, counters, peak, rounds = lax.while_loop(
-        cond, body, init
-    )
+    (
+        qa,
+        qb,
+        _sa,
+        _sb,
+        size,
+        far_a,
+        far_b,
+        near_a,
+        near_b,
+        counters,
+        peak,
+        rounds,
+    ) = lax.while_loop(cond, body, init)
     # Stopping at max_rounds with pairs still queued leaves them unclassified. A
     # queue overflow also stops the loop with pairs queued and is flagged already.
     unfinished = (size > 0) & (counters[_C_OVF_Q] == 0)
