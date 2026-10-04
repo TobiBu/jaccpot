@@ -670,6 +670,13 @@ def evaluate_large_n_nearfield_fast_lane(
             use_pallas=use_pallas,
             differentiable=differentiable,
             neighbor_list=state.neighbor_list,
+            leaf_ranges=(
+                None
+                if state.neighbor_list is None
+                else jnp.asarray(state.tree.node_ranges)[
+                    jnp.asarray(state.neighbor_list.leaf_indices)
+                ]
+            ),
         )
     overflow_payload = getattr(state, "radix_overflow_payload", None)
     if overflow_payload is not None and diag_mode in ("full", "overflow_only"):

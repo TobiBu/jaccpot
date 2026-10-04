@@ -132,6 +132,12 @@ def _args() -> argparse.Namespace:
         action="store_true",
         help="run without CUDA graphs, so a trace names every kernel",
     )
+    ap.add_argument(
+        "--save-forces",
+        default=None,
+        metavar="NPZ",
+        help="save the first eval's force and the final scan state (bitwise A/B)",
+    )
     ap.add_argument("--dt", type=float, default=None)
     ap.add_argument("--drift-steps", default="0,50,100")
     ap.add_argument("--softening", type=float, default=None)
@@ -611,6 +617,7 @@ def run_budget(result: dict) -> None:
     a = jax.block_until_ready(eval_fn(prepared))
     _event("after_eval_compile")
     a_host = np.asarray(a, np.float64) if ARGS.accuracy_targets else None
+    saved = {"force": np.asarray(a)} if ARGS.save_forces else None
     del a
     samples = []
     for _ in range(2):
@@ -636,6 +643,8 @@ def run_budget(result: dict) -> None:
     del prepared, eval_fn
 
     if ARGS.no_scan:
+        if saved is not None:
+            np.savez(ARGS.save_forces, **saved)
         _accuracy(result, pos, mass, soft, a_host)
         return
     state0 = jnp.stack([P, jnp.asarray(vel)], axis=1)
@@ -686,6 +695,8 @@ def run_budget(result: dict) -> None:
         result["trace"] = dict(dir=ARGS.trace_dir, steps=ARGS.steps)
     print(f"scan min {result['step_ms']['min']:.2f} ms/step", flush=True)
     _write(result)
+    if saved is not None:
+        np.savez(ARGS.save_forces, state=np.asarray(state), **saved)
     if not ARGS.no_analysis:
         cache = getattr(solver._impl, "_strict_fused_jit_function_cache", {}) or {}
         runner = next(

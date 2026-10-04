@@ -67,6 +67,9 @@ __all__ = [
     "nearfield_leafpair_csr_pallas",
     "nearfield_leafpair_csr_pallas_cvjp",
     "nearfield_leafpair_csr_reverse_pallas",
+    "leafpair_extra_chunk_capacity",
+    "nearfield_leafpair_csr_sorted_direct_pallas",
+    "nearfield_leafpair_csr_sorted_pallas",
     "nearfield_leafpair_csr_jax",
 ]
 
@@ -561,6 +564,730 @@ def nearfield_leafpair_csr_pallas(
     if pad_t:
         out = out[:, :leaf_width, :]
     return out
+
+
+def _nearfield_leafpair_csr_sorted_kernel(
+    pm_ref: KernelRef,
+    leaf_start_ref: KernelRef,
+    leaf_count_ref: KernelRef,
+    neighbors_ref: KernelRef,
+    chunk_leaf_ref: KernelRef,
+    chunk_start_ref: KernelRef,
+    chunk_count_ref: KernelRef,
+    chunk_first_ref: KernelRef,
+    softening_sq_ref: KernelRef,
+    g_ref: KernelRef,
+    *out_refs: KernelRef,
+    subtile: int,
+    accum_dtype: Any,
+    out_dtype: Any,
+    include_self: bool,
+    direct: bool,
+    num_out: int,
+) -> None:
+    """:func:`_nearfield_leafpair_csr_kernel` reading the SORTED particle array.
+
+    The table kernel reads ``(L, W)`` tables gathered from the particles every
+    force (positions, masses, mask: ~60 B per particle on cell leaves, which
+    pad ~20 particles into 64 slots). A leaf's particles are a contiguous range
+    of the Morton-sorted array, so here the target tile is ``pm[start + off :
+    start + off + Bt]`` and source particle ``j`` of leaf ``sid`` is
+    ``pm[start[sid] + j]``. The lane body, the loop bounds (the leaf's count)
+    and the order of every sum are the table kernel's, so the result is the
+    same to the bit.
+
+    Parameters
+    ----------
+    pm_ref : KernelRef
+        ``(N + Wpad, 4)``: x, y, z, mass in sorted order; the rows past ``N`` are
+        zero (a target tile of the last leaf may read into them; masked).
+    leaf_start_ref : KernelRef
+        First particle of each leaf ``(L,)``.
+    leaf_count_ref : KernelRef
+        Particles per leaf ``(L,)``.
+    neighbors_ref : KernelRef
+        Flat neighbour array of LEAF indices ``(E,)``.
+    chunk_leaf_ref : KernelRef
+        Chunk table: target leaf per chunk ``(C,)``, ``-1`` = padding.
+    chunk_start_ref : KernelRef
+        Chunk table: first entry in ``neighbors`` ``(C,)``.
+    chunk_count_ref : KernelRef
+        Chunk table: live entries ``(C,)``.
+    chunk_first_ref : KernelRef
+        Chunk table: ``1`` on each leaf's first chunk ``(C,)``.
+    softening_sq_ref : KernelRef
+        Squared softening length ``(1,)``.
+    g_ref : KernelRef
+        Gravitational constant ``(1,)``.
+    *out_refs : KernelRef
+        Blocked (``direct=False``): ONE ``(1, Bt, num_out)`` block of the
+        per-chunk partials, as the table kernel's. Direct: ``num_out`` aliased
+        zero inputs (unused here) then ``num_out`` whole ``(N,)`` outputs -- x,
+        y, z (, potential) in particle order -- that each live target lane is
+        stored into, once.
+    subtile : int
+        ``Bt``. Static.
+    accum_dtype : Any
+        As the table kernel's.
+    out_dtype : Any
+        As the table kernel's.
+    include_self : bool
+        Add the leaf's own particles, diagonal removed, on its first chunk.
+    direct : bool
+        Store into particle-order outputs instead of a per-chunk block. Static.
+    num_out : int
+        ``4`` with the potential, ``3`` without (the potential is then not
+        accumulated at all; x, y, z are computed op for op as with it). Static.
+
+    Returns
+    -------
+    None
+        The result is the write to ``out_refs``.
+    """
+    c = pl.program_id(0)
+    sub = pl.program_id(1)
+    bt = int(subtile)
+    tl = chunk_leaf_ref[c]
+    live = tl >= 0
+    tl_safe = jnp.maximum(tl, 0)
+    off = sub * bt
+    tcount = leaf_count_ref[tl_safe]
+    tstart = leaf_start_ref[tl_safe]
+    out_block = None if direct else out_refs[0]
+
+    if out_block is not None:
+        zeros_bt = jnp.zeros((bt,), out_dtype)
+        for comp in range(num_out):
+            out_block[0, :, comp] = zeros_bt
+
+    @pl.when(live & (off < tcount))
+    def _work():
+        rows = pl.ds(tstart + off, bt)
+        tx = pm_ref[rows, 0]
+        ty = pm_ref[rows, 1]
+        tz = pm_ref[rows, 2]
+        lane = lax.broadcasted_iota(jnp.int32, (bt,), 0)
+        lane_idx = off + lane
+        tvalid = lane_idx < tcount
+        soft = softening_sq_ref[0]
+        g_value = g_ref[0]
+
+        zero = jnp.zeros_like(tx)
+        wide = accum_dtype is not None
+        acc0 = (
+            tuple(jnp.zeros(tx.shape, accum_dtype) for _ in range(num_out))
+            if wide
+            else (zero,) * num_out
+        )
+
+        def _leaf_pass(sid, acc, exclude_lane=None):
+            sstart = leaf_start_ref[sid]
+
+            def _lane_body(j, acc):
+                row = sstart + j
+                sx = pm_ref[row, 0]
+                sy = pm_ref[row, 1]
+                sz = pm_ref[row, 2]
+                sm = pm_ref[row, 3]
+                dx = tx - sx
+                dy = ty - sy
+                dz = tz - sz
+                dist_sq = dx * dx + dy * dy + dz * dz + soft
+                # every source slot below the count is live, as in the table
+                active = tvalid
+                if exclude_lane is not None:
+                    active = active & (exclude_lane != j)
+                safe_dist_sq = jnp.where(active, dist_sq, 1.0)
+                inv_r = lax.rsqrt(safe_dist_sq)
+                inv_r = jnp.where(active, inv_r, 0.0)
+                inv_dist3 = inv_r * inv_r * inv_r
+                scale = -g_value * inv_dist3 * sm
+                new = (
+                    acc[0] + scale * dx,
+                    acc[1] + scale * dy,
+                    acc[2] + scale * dz,
+                )
+                if num_out == 4:
+                    new = new + (acc[3] - g_value * inv_r * sm,)
+                return new
+
+            scount = leaf_count_ref[sid]
+            if not wide:
+                return lax.fori_loop(0, scount, _lane_body, acc)
+            part = lax.fori_loop(0, scount, _lane_body, (zero,) * num_out)
+            return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
+
+        start = chunk_start_ref[c]
+        cnt = chunk_count_ref[c]
+
+        def _slot_body(s, acc):
+            sid = neighbors_ref[start + s]
+            return _leaf_pass(sid, acc)
+
+        acc = lax.fori_loop(0, cnt, _slot_body, acc0)
+
+        if include_self:
+
+            def _self_pass(acc):
+                return _leaf_pass(tl_safe, acc, exclude_lane=lane_idx)
+
+            acc = lax.cond(chunk_first_ref[c] != 0, _self_pass, lambda acc: acc, acc)
+
+        if wide and out_dtype != accum_dtype:
+            acc = tuple(a.astype(out_dtype) for a in acc)
+        if out_block is not None:
+            zero_out = jnp.zeros_like(acc[0])
+            for comp in range(num_out):
+                out_block[0, :, comp] = jnp.where(tvalid, acc[comp], zero_out)
+            return
+        outs = out_refs[num_out:]
+        n_rows = outs[0].shape[0]
+        # masked lanes point PAST the outputs (unique, out of range), as the
+        # mutual walk's emit does: Triton never touches them, the interpreter
+        # drops them, and no in-range dummy row collides with a real store
+        where = jnp.where(tvalid, tstart + lane_idx, n_rows + lane)
+        for comp in range(num_out):
+            plgpu.store(outs[comp].at[where], acc[comp], mask=tvalid)
+
+
+def _sorted_pallas_call(
+    pm: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    neighbors: Array,
+    chunk_leaf: Array,
+    chunk_start: Array,
+    chunk_count: Array,
+    chunk_first: Array,
+    softening_sq: Array,
+    g: Array,
+    *,
+    bt: int,
+    n_sub: int,
+    accum_dtype: Any,
+    partial_dtype: Any,
+    include_self: bool,
+    direct: bool,
+    num_out: int,
+    num_rows: int,
+    num_warps: int,
+    num_stages: int,
+    interpret: bool,
+    name: str,
+) -> Any:
+    """One launch of :func:`_nearfield_leafpair_csr_sorted_kernel` over ``chunk_leaf``.
+
+    Parameters
+    ----------
+    pm : Array
+        ``(N + Wpad, 4)`` sorted x, y, z, mass (:func:`_sorted_inputs`).
+    leaf_start : Array
+        ``(L,)`` int32 first particle per leaf.
+    leaf_count : Array
+        ``(L,)`` int32 particles per leaf.
+    neighbors : Array
+        Flat neighbour array of leaf indices.
+    chunk_leaf : Array
+        ``(C,)`` target leaf per program row, ``-1`` = padding.
+    chunk_start : Array
+        ``(C,)`` first entry in ``neighbors``.
+    chunk_count : Array
+        ``(C,)`` live entries.
+    chunk_first : Array
+        ``(C,)`` ``1`` where the self term rides.
+    softening_sq : Array
+        ``(1,)`` squared softening.
+    g : Array
+        ``(1,)`` gravitational constant.
+    bt : int
+        Target subtile.
+    n_sub : int
+        Subtiles per leaf (``Wpad / bt``).
+    accum_dtype : Any
+        Wide accumulator dtype or ``None``.
+    partial_dtype : Any
+        Dtype of the outputs.
+    include_self : bool
+        Run the self pass on ``chunk_first`` rows.
+    direct : bool
+        Store into particle order instead of per-chunk blocks.
+    num_out : int
+        ``3`` (acceleration) or ``4`` (with the potential).
+    num_rows : int
+        ``N``, the length of the direct outputs (unused when blocked).
+    num_warps : int
+        Triton warps per program.
+    num_stages : int
+        Triton pipeline stages.
+    interpret : bool
+        Pallas interpret mode.
+    name : str
+        Kernel name.
+
+    Returns
+    -------
+    Any
+        Blocked: the ``(C, Wpad, num_out)`` per-chunk partials. Direct: ``num_out``
+        arrays of ``num_rows``, zero where no live target lane landed.
+    """
+    capacity = int(chunk_leaf.shape[0])
+
+    def _kernel(*refs):
+        return _nearfield_leafpair_csr_sorted_kernel(
+            *refs,
+            subtile=bt,
+            accum_dtype=accum_dtype,
+            out_dtype=partial_dtype,
+            include_self=include_self,
+            direct=direct,
+            num_out=num_out,
+        )
+
+    def _full(arr: Array) -> pl.BlockSpec:
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    operands = [
+        pm,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        chunk_leaf,
+        chunk_start,
+        chunk_count,
+        chunk_first,
+        softening_sq,
+        g,
+    ]
+    in_specs = [_full(o) for o in operands[:8]] + [
+        pl.BlockSpec((1,), lambda c, sub: (0,)),
+        pl.BlockSpec((1,), lambda c, sub: (0,)),
+    ]
+    extra: dict[str, Any] = {}
+    if direct:
+        zeros = [jnp.zeros((int(num_rows),), partial_dtype) for _ in range(num_out)]
+        in_specs += [_full(z) for z in zeros]
+        out_specs: Any = [_full(z) for z in zeros]
+        out_shape: Any = [jax.ShapeDtypeStruct(z.shape, z.dtype) for z in zeros]
+        extra["input_output_aliases"] = {len(operands) + k: k for k in range(num_out)}
+        operands += zeros
+    else:
+        out_specs = pl.BlockSpec((1, bt, num_out), lambda c, sub: (c, sub, 0))
+        out_shape = jax.ShapeDtypeStruct((capacity, n_sub * bt, num_out), partial_dtype)
+    return pl.pallas_call(
+        _kernel,
+        out_shape=out_shape,
+        in_specs=in_specs,
+        out_specs=out_specs,
+        grid=(capacity, n_sub),
+        compiler_params=plgpu.CompilerParams(
+            num_warps=int(num_warps), num_stages=int(num_stages)
+        ),
+        interpret=bool(interpret),
+        name=name,
+        **extra,
+    )(*operands)
+
+
+def _sorted_inputs(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    leaf_width: int,
+    target_subtile: int | None,
+    num_warps: int | None,
+    softening_sq: Array,
+    G: Array,
+) -> tuple[Any, ...]:
+    """The shared ``(N + Wpad, 4)`` particle table and the launch geometry.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``(N, 3)`` positions in tree order.
+    masses_sorted : Array
+        ``(N,)`` masses in the same order.
+    leaf_start : Array
+        ``(L,)`` first particle per leaf.
+    leaf_count : Array
+        ``(L,)`` particles per leaf.
+    leaf_width : int
+        ``W``, the most particles a leaf holds.
+    target_subtile : int | None
+        Requested subtile (``None`` = the module default for ``W``).
+    num_warps : int | None
+        Requested warps (``None`` = one per 32 lanes).
+    softening_sq : Array
+        Scalar squared softening.
+    G : Array
+        Scalar gravitational constant.
+
+    Returns
+    -------
+    tuple[Any, ...]
+        ``(pm, leaf_start, leaf_count, softening_sq, G, bt, Wpad, num_warps)``:
+        the padded table, int32 leaf ranges (starts clipped to ``N``), the two
+        scalars as ``(1,)`` arrays and the static launch geometry.
+    """
+    dtype = positions_sorted.dtype
+    n = int(positions_sorted.shape[0])
+    bt = _resolve_subtile(target_subtile, leaf_width)
+    width_pad = ((leaf_width + bt - 1) // bt) * bt
+    pm = jnp.concatenate(
+        [positions_sorted, jnp.asarray(masses_sorted, dtype=dtype)[:, None]], axis=1
+    )
+    pm = jnp.pad(pm, ((0, width_pad), (0, 0)))
+    if num_warps is None:
+        num_warps = max(1, bt // 32)
+    return (
+        pm,
+        jnp.minimum(jnp.asarray(leaf_start, jnp.int32), n),
+        jnp.asarray(leaf_count, jnp.int32),
+        jnp.asarray([softening_sq], dtype=dtype),
+        jnp.asarray([G], dtype=dtype),
+        bt,
+        width_pad,
+        int(num_warps),
+    )
+
+
+def nearfield_leafpair_csr_sorted_pallas(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    neighbors: Array,
+    chunks: LeafPairChunkTable,
+    *,
+    leaf_width: int,
+    softening_sq: Array,
+    G: Array,
+    chunk: int,
+    num_warps: int | None = None,
+    num_stages: int = 1,
+    target_subtile: int | None = None,
+    interpret: bool = False,
+    accum: str = "input",
+    include_self: bool = True,
+) -> Array:
+    """:func:`nearfield_leafpair_csr_pallas` on the sorted particles, no leaf tables.
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``(N, 3)`` particle positions in tree (Morton) order.
+    masses_sorted : Array
+        ``(N,)`` masses in the same order.
+    leaf_start : Array
+        ``(L,)`` first particle of each leaf.
+    leaf_count : Array
+        ``(L,)`` particles per leaf (at most ``leaf_width``).
+    neighbors : Array
+        Flat neighbour array of LEAF indices (``0 <= id < L``).
+    chunks : LeafPairChunkTable
+        From :func:`build_leafpair_chunk_table` over this CSR.
+    leaf_width : int
+        ``W``, the most particles a leaf can hold. Static.
+    softening_sq : Array
+        Scalar squared softening length.
+    G : Array
+        Scalar gravitational constant.
+    chunk : int
+        Entries per chunk, the value the table was built with. Static.
+    num_warps : int | None
+        As :func:`nearfield_leafpair_csr_pallas`.
+    num_stages : int
+        As :func:`nearfield_leafpair_csr_pallas`.
+    target_subtile : int | None
+        As :func:`nearfield_leafpair_csr_pallas`.
+    interpret : bool
+        Pallas interpret mode.
+    accum : str
+        As :func:`nearfield_leafpair_csr_pallas`.
+    include_self : bool
+        As :func:`nearfield_leafpair_csr_pallas`.
+
+    Returns
+    -------
+    Array
+        ``(L, W, _OUT_WIDTH)``, the table kernel's layout and values: leaf ``l``'s
+        slot ``j`` is particle ``leaf_start[l] + j``.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas or its Triton backend could not be imported.
+    """
+    if pl is None or plgpu is None:
+        raise RuntimeError("jax.experimental.pallas is not available")
+    positions_sorted = jnp.asarray(positions_sorted)
+    dtype = positions_sorted.dtype
+    num_leaves = int(leaf_start.shape[0])
+    leaf_width = int(leaf_width)
+    if num_leaves == 0 or leaf_width == 0:
+        return jnp.zeros((num_leaves, leaf_width, _OUT_WIDTH), dtype=dtype)
+    idx = chunks.leaf.dtype
+    pm, start_i, count_i, soft, g, bt, width_pad, num_warps = _sorted_inputs(
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        leaf_width,
+        target_subtile,
+        num_warps,
+        softening_sq,
+        G,
+    )
+    accum_dtype = _resolve_accum_dtype(accum, dtype)
+    partial_dtype = accum_dtype if accum_dtype is not None else dtype
+    partials = _sorted_pallas_call(
+        pm,
+        start_i,
+        count_i,
+        jnp.asarray(neighbors, dtype=idx),
+        chunks.leaf,
+        chunks.start,
+        chunks.count,
+        chunks.is_first,
+        soft,
+        g,
+        bt=bt,
+        n_sub=width_pad // bt,
+        accum_dtype=accum_dtype,
+        partial_dtype=partial_dtype,
+        include_self=bool(include_self),
+        direct=False,
+        num_out=_OUT_WIDTH,
+        num_rows=0,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        interpret=interpret,
+        name=(
+            f"nearfield_leafpair_csr_sorted_t{bt}_c{int(chunk)}_w{leaf_width}_a{accum}"
+            f"{'_self' if include_self else ''}"
+        ),
+    )
+    # the table kernel's reduction, unchanged (see there)
+    seg = jnp.where(chunks.leaf < 0, jnp.asarray(num_leaves, idx), chunks.leaf)
+    out = jax.ops.segment_sum(
+        partials,
+        seg,
+        num_segments=num_leaves,
+        indices_are_sorted=True,
+        mode=jax.lax.GatherScatterMode.FILL_OR_DROP,
+    )
+    out = out.astype(dtype)
+    if width_pad != leaf_width:
+        out = out[:, :leaf_width, :]
+    return out
+
+
+def leafpair_extra_chunk_capacity(edge_capacity: int, chunk: int) -> int:
+    """Static number of NON-first chunks that can never overflow.
+
+    A row of ``c`` entries has ``max(0, ceil(c / chunk) - 1) < c / chunk`` chunks
+    after its first, so all rows together have fewer than ``E / chunk``.
+
+    Parameters
+    ----------
+    edge_capacity : int
+        Length of the flat neighbour array.
+    chunk : int
+        Entries per chunk.
+
+    Returns
+    -------
+    int
+        ``ceil(edge_capacity / chunk)``.
+    """
+    chunk = max(1, int(chunk))
+    return (int(edge_capacity) + chunk - 1) // chunk
+
+
+def nearfield_leafpair_csr_sorted_direct_pallas(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    neighbors: Array,
+    offsets: Array,
+    counts: Array,
+    *,
+    leaf_width: int,
+    softening_sq: Array,
+    G: Array,
+    chunk: int,
+    num_warps: int | None = None,
+    num_stages: int = 1,
+    target_subtile: int | None = None,
+    interpret: bool = False,
+    with_potential: bool = False,
+) -> tuple[Array, Array | None]:
+    """The CSR near field straight into particle order: no per-leaf partials.
+
+    :func:`nearfield_leafpair_csr_sorted_pallas` still emits a ``(Wpad, 4)``
+    partial for EVERY chunk -- and every leaf, padding leaves included, owns a
+    first chunk -- then reduces them onto ``(L, W, 4)`` and the caller gathers
+    that back to particles. On cell leaves (10-20 particles in 64 slots) those
+    three arrays are ~6x the particles. Here:
+
+    1. one program per leaf (grid ``(L, subtiles)``) runs the leaf's FIRST chunk
+       and its self term, and stores each live target lane straight into the
+       ``(N,)`` outputs (a masked store; a particle is one lane of one leaf);
+    2. the rows' remaining chunks -- fewer than ``E / chunk`` -- emit partials
+       that are scatter-added onto the same outputs.
+
+    The lane body and the order of every sum inside a chunk are the table
+    kernel's. Rows of one or two chunks therefore give the table path's bits
+    (``first + second`` is what the segment sum computes); rows of three or more
+    are summed in the scatter's order, which is already unordered (atomic) in the
+    table path. Single-precision accumulation only (``accum="input"``).
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``(N, 3)`` particle positions in tree (Morton) order.
+    masses_sorted : Array
+        ``(N,)`` masses in the same order.
+    leaf_start : Array
+        ``(L,)`` first particle of each leaf.
+    leaf_count : Array
+        ``(L,)`` particles per leaf (at most ``leaf_width``).
+    neighbors : Array
+        Flat neighbour array of LEAF indices (``0 <= id < L``).
+    offsets : Array
+        CSR row starts into ``neighbors`` (``L`` or ``L + 1`` entries).
+    counts : Array
+        ``(L,)`` row lengths.
+    leaf_width : int
+        ``W``, the most particles a leaf can hold. Static.
+    softening_sq : Array
+        Scalar squared softening length.
+    G : Array
+        Scalar gravitational constant.
+    chunk : int
+        Entries per chunk. Static.
+    num_warps : int | None
+        As :func:`nearfield_leafpair_csr_pallas`.
+    num_stages : int
+        As :func:`nearfield_leafpair_csr_pallas`.
+    target_subtile : int | None
+        As :func:`nearfield_leafpair_csr_pallas`.
+    interpret : bool
+        Pallas interpret mode.
+    with_potential : bool
+        Also accumulate and return the potential. Static.
+
+    Returns
+    -------
+    tuple[Array, Array | None]
+        ``(N, 3)`` accelerations and the ``(N,)`` potential (``None`` without
+        ``with_potential``); zero on rows no leaf holds.
+
+    Raises
+    ------
+    RuntimeError
+        If Pallas or its Triton backend could not be imported.
+    """
+    if pl is None or plgpu is None:
+        raise RuntimeError("jax.experimental.pallas is not available")
+    positions_sorted = jnp.asarray(positions_sorted)
+    dtype = positions_sorted.dtype
+    n = int(positions_sorted.shape[0])
+    num_leaves = int(leaf_start.shape[0])
+    leaf_width = int(leaf_width)
+    num_out = 4 if with_potential else 3
+    if num_leaves == 0 or leaf_width == 0 or n == 0:
+        acc = jnp.zeros((n, 3), dtype)
+        return acc, (jnp.zeros((n,), dtype) if with_potential else None)
+    idx = jnp.asarray(counts).dtype
+    chunk = max(1, int(chunk))
+    chunk_i = jnp.asarray(chunk, idx)
+    counts = jnp.asarray(counts, idx)
+    row_start = jnp.asarray(offsets, idx)[:num_leaves]
+    neighbors = jnp.asarray(neighbors, dtype=idx)
+    pm, start_i, count_i, soft, g, bt, width_pad, num_warps = _sorted_inputs(
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        leaf_width,
+        target_subtile,
+        num_warps,
+        softening_sq,
+        G,
+    )
+    common = dict(
+        bt=bt,
+        n_sub=width_pad // bt,
+        accum_dtype=None,
+        partial_dtype=dtype,
+        num_out=num_out,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        interpret=interpret,
+    )
+    tag = f"t{bt}_c{chunk}_w{leaf_width}{'_pot' if with_potential else ''}"
+    # 1. first chunks + self, stored in particle order
+    outs = _sorted_pallas_call(
+        pm,
+        start_i,
+        count_i,
+        neighbors,
+        jnp.arange(num_leaves, dtype=idx),
+        row_start,
+        jnp.minimum(counts, chunk_i),
+        jnp.ones((num_leaves,), idx),
+        soft,
+        g,
+        include_self=True,
+        direct=True,
+        num_rows=n,
+        name=f"nearfield_leafpair_csr_direct_first_{tag}",
+        **common,
+    )
+    outs = list(outs)
+    # 2. the remaining chunks: partials, scatter-added onto the outputs
+    capacity = leafpair_extra_chunk_capacity(int(neighbors.shape[0]), chunk)
+    if capacity > 0:
+        per_leaf = jnp.maximum((counts + chunk_i - 1) // chunk_i - 1, 0)
+        ends = jnp.cumsum(per_leaf, dtype=idx)  # inclusive
+        first = ends - per_leaf
+        c = jnp.arange(capacity, dtype=idx)
+        leaf = jnp.searchsorted(ends, c, side="right", method="scan_unrolled").astype(
+            idx
+        )
+        valid = leaf < jnp.asarray(num_leaves, idx)
+        leaf_safe = jnp.minimum(leaf, jnp.asarray(num_leaves - 1, idx))
+        k = c - first[leaf_safe] + 1  # chunk k >= 1 of its row
+        partials = _sorted_pallas_call(
+            pm,
+            start_i,
+            count_i,
+            neighbors,
+            jnp.where(valid, leaf_safe, jnp.asarray(-1, idx)),
+            jnp.where(valid, row_start[leaf_safe] + k * chunk_i, 0),
+            jnp.where(valid, jnp.clip(counts[leaf_safe] - k * chunk_i, 0, chunk_i), 0),
+            jnp.zeros((capacity,), idx),
+            soft,
+            g,
+            include_self=False,
+            direct=False,
+            num_rows=0,
+            name=f"nearfield_leafpair_csr_direct_rest_{tag}",
+            **common,
+        )
+        lane = jnp.arange(width_pad, dtype=jnp.int32)
+        tcount = jnp.where(valid, count_i[leaf_safe], 0)
+        rows = start_i[leaf_safe][:, None] + lane[None, :]
+        rows = jnp.where(lane[None, :] < tcount[:, None], rows, n)  # n = dropped
+        outs = [
+            o.at[rows].add(partials[..., comp], mode="drop")
+            for comp, o in enumerate(outs)
+        ]
+    acc = jnp.stack(outs[:3], axis=1)
+    return acc, (outs[3] if with_potential else None)
 
 
 @jaxtyped(typechecker=beartype)
