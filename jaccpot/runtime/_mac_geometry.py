@@ -315,9 +315,9 @@ def _com_radii(
         # which alone writes it (the other lanes point past the radii and are
         # dropped -- no sentinel row collecting every lane's atomic, and no
         # scatter-max on the few top nodes, 44 ms per step at 16k leaves once).
-        # Max is exact in any order: the radii are those of the (leaves x 64
-        # levels) table this replaced, bit for bit, at (L,)-sized memory per pass
-        # and ``num_levels`` passes instead of 64.
+        # Max is exact in any order. Four levels per pass (one read of the
+        # leaves' positions each), ``num_levels`` levels instead of 64, (L, 4)
+        # memory per pass instead of the (leaves x 64) tables.
         parent_safe = jnp.where(parent >= 0, parent, jnp.asarray(0, INDEX_DTYPE))
         drop = jnp.asarray(num_nodes, INDEX_DTYPE)
 
@@ -326,20 +326,56 @@ def _com_radii(
             kb, vb = b
             return kb, jnp.where(ka == kb, jnp.maximum(va, vb), vb)
 
-        def _level(_, carry):
-            radii, anc = carry
+        def _up(anc: Array) -> Array:
             live = anc >= 0
-            _, run_max = lax.associative_scan(_seg, (anc, _leaf_max_about(anc)))
-            last = jnp.concatenate([anc[1:] != anc[:-1], jnp.ones((1,), bool)]) & live
-            radii = radii.at[jnp.where(last, anc, drop)].max(run_max, mode="drop")
             up = jnp.where(live, parent_safe[jnp.where(live, anc, 0)], -1)
             up = jnp.where(live & (parent[jnp.where(live, anc, 0)] >= 0), up, -1)
-            return radii, up.astype(INDEX_DTYPE)
+            return up.astype(INDEX_DTYPE)
+
+        def _leaf_max_about_each(nodes: Array) -> Array:
+            # (L, C): _leaf_max_about for C ancestors at once -- one read of the
+            # leaves' positions serves C levels (the reduction fuses as before)
+            live = nodes >= 0
+            c = centers[jnp.where(live, nodes, 0)]  # (L, C, 3)
+            idx = leaf_ranges[:, 0][:, None] + lane[None, :]
+            valid = idx <= leaf_ranges[:, 1][:, None]
+            pts = positions_sorted[jnp.clip(idx, 0, max(n - 1, 0))]
+            d = jnp.linalg.norm(pts[:, :, None, :] - c[:, None, :, :], axis=-1)
+            d = jnp.max(
+                jnp.where(valid[:, :, None], d, jnp.asarray(0.0, dtype)), axis=1
+            )
+            return jnp.where(live, d, jnp.asarray(0.0, dtype))
+
+        chunk = 4
+
+        def _levels(_, carry):
+            radii, anc = carry
+            cols = [anc]
+            for _ in range(chunk - 1):
+                cols.append(_up(cols[-1]))
+            ancs = jnp.stack(cols, axis=1)  # (L, chunk): the next chunk ancestors
+            live = ancs >= 0
+            _, run_max = lax.associative_scan(
+                _seg, (ancs, _leaf_max_about_each(ancs)), axis=0
+            )
+            last = (
+                jnp.concatenate(
+                    [ancs[1:] != ancs[:-1], jnp.ones((1, chunk), bool)], axis=0
+                )
+                & live
+            )
+            # a node may end a run in several columns (and, among leaves of
+            # different depths, several runs of one): duplicates of a max, exact
+            radii = radii.at[jnp.where(last, ancs, drop).reshape(-1)].max(
+                run_max.reshape(-1), mode="drop"
+            )
+            return radii, _up(cols[-1])
 
         levels = int(_MAX_TREE_LEVELS) if num_levels is None else int(num_levels)
-        # a leaf at depth D has D ancestors, so depth-bound - 1 passes cover all
-        passes = max(1, min(levels, int(_MAX_TREE_LEVELS)) - 1)
-        radii, _ = lax.fori_loop(0, passes, _level, (radii, parent[leaf_ids]))
+        # a leaf at depth D has D ancestors, so depth-bound - 1 levels cover all
+        ancestors = max(1, min(levels, int(_MAX_TREE_LEVELS)) - 1)
+        passes = -(-ancestors // chunk)
+        radii, _ = lax.fori_loop(0, passes, _levels, (radii, parent[leaf_ids]))
 
     elif num_internal > 0:
         depth = _node_depths(parent)

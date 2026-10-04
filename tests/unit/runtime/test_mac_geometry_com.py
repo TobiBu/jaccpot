@@ -292,8 +292,10 @@ def test_level_passes_equal_the_ancestor_table(tree_data, dtype):
     assert np.array_equal(full[num_internal:], ref[num_internal:])  # leaves: same op
     bounded = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=depth)
     assert np.array_equal(np.asarray(bounded.radius), full)
-    # non-vacuity of the bound: two levels reach only the leaves' parents, so the
-    # root (whose children are internal on this tree) keeps radius 0
-    assert depth > 3
-    short = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=2)
-    assert float(np.asarray(short.radius)[0]) == 0.0 < float(full[0])
+    # non-vacuity of the bound: a short one (rounded up to whole passes of four
+    # levels) leaves the deep leaves' top ancestors short of their radius
+    assert depth > 6
+    short = np.asarray(
+        com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=2).radius
+    )
+    assert np.all(short <= full) and np.any(short < full)
