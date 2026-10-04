@@ -121,6 +121,17 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--no-scan", action="store_true")
     ap.add_argument("--no-analysis", action="store_true", help="skip memory_analysis()")
     ap.add_argument("--dump-dir", default=None, help="XLA dump (buffer assignment)")
+    ap.add_argument(
+        "--trace-dir",
+        default=None,
+        help="profile one warm strict_run_v2 call here (analyse with "
+        "bench/analyse_trace_by_stage.py --module-re '*_compiled_runner*')",
+    )
+    ap.add_argument(
+        "--no-command-buffers",
+        action="store_true",
+        help="run without CUDA graphs, so a trace names every kernel",
+    )
     ap.add_argument("--dt", type=float, default=None)
     ap.add_argument("--drift-steps", default="0,50,100")
     ap.add_argument("--softening", type=float, default=None)
@@ -145,6 +156,9 @@ else:
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
 # the record configuration's command buffers (the N-max ladder ran with these)
 _CB = "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUSTOM_CALL --xla_gpu_graph_min_graph_size=2"
+if ARGS.no_command_buffers:
+    # explicitly EMPTY: an unset flag still builds command buffers
+    _CB = "--xla_gpu_enable_command_buffer="
 if "xla_gpu_enable_command_buffer" not in os.environ.get("XLA_FLAGS", ""):
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _CB).strip()
 if ARGS.dump_dir:
@@ -665,6 +679,11 @@ def run_budget(result: dict) -> None:
     )
     result["peak_after_scan_gib"] = _mem()["peak"] / GIB
     result["scan_events"] = EVENTS[len(result["prepare_events"]) :]
+    if ARGS.trace_dir:
+        os.makedirs(ARGS.trace_dir, exist_ok=True)
+        with jax.profiler.trace(ARGS.trace_dir):
+            state, prep, _ = run(state, prep, ARGS.steps)
+        result["trace"] = dict(dir=ARGS.trace_dir, steps=ARGS.steps)
     print(f"scan min {result['step_ms']['min']:.2f} ms/step", flush=True)
     _write(result)
     if not ARGS.no_analysis:

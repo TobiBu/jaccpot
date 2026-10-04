@@ -166,6 +166,7 @@ def _node_depths(parent: Array) -> Array:
     return depth
 
 
+@jax.named_scope("fmm_com_radii")
 def com_mac_geometry(
     tree: Any,
     positions_sorted: Array,

@@ -267,6 +267,7 @@ def _l2l_level_compact_kwargs(
     ),
     donate_argnums=(0,),
 )
+@jax.named_scope("fmm_l2l")
 def _propagate_solidfmm_locals_by_level(
     coeffs_local: Array,
     centers: Array,

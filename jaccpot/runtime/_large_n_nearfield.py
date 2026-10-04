@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any, Optional
 
+import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 from yggdrax.interactions import NodeNeighborList
@@ -521,6 +522,7 @@ def build_large_n_nearfield_precompute(
     )
 
 
+@jax.named_scope("fmm_near")
 def evaluate_large_n_nearfield_fast_lane(
     fmm: "FMMEngine",
     state: LargeNPreparedState,

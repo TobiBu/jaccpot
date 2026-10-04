@@ -1927,6 +1927,7 @@ def _fit_width(x: Array, width: int, fill: int) -> Array:
         "idx",
     ),
 )
+@jax.named_scope("fmm_lists")
 def _flat_walk_lists(
     far_a: Array,
     far_b: Array,
@@ -2207,9 +2208,14 @@ def _build_flat_walk_artifacts_strict_streamed(
     )
     root_idx = jnp.argmin(topo.parent).astype(idx)
     centers = jnp.asarray(geometry.center)
-    mac_extents, _leaf_extents = _build_mac_extents(
-        topo.parent, geometry, num_internal, str(mac_type), float(dehnen_radius_scale)
-    )
+    with jax.named_scope("fmm_mac_extents"):
+        mac_extents, _leaf_extents = _build_mac_extents(
+            topo.parent,
+            geometry,
+            num_internal,
+            str(mac_type),
+            float(dehnen_radius_scale),
+        )
     mac_extents = jnp.asarray(mac_extents, dtype=centers.dtype)
     # A capacity-padded leaf partition (cell leaves) carries EMPTY nodes: one
     # centre, radius zero. Left in the walk they fail the MAC against each

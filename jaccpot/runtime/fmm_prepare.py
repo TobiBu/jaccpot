@@ -651,6 +651,7 @@ class PrepareMixin(_EngineBase):
             cache_leaf_parameter=int(entry.cache_leaf_parameter),
         )
 
+    @jax.named_scope("fmm_tree")
     def _rebuild_tree_artifacts_from_static_template(
         self,
         *,
@@ -3299,6 +3300,7 @@ class PrepareMixin(_EngineBase):
             dual_artifacts.grouped_segment_unique_targets,
         )
 
+    @jax.named_scope("fmm_downward")
     def _prepare_downward_with_artifacts(
         self,
         *,

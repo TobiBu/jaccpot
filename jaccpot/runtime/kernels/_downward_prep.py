@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from typing import Any, NamedTuple, Optional
 
+import jax
 import jax.numpy as jnp
 from beartype.typing import Callable
 from jaxtyping import Array
@@ -505,6 +506,7 @@ def _prepare_solidfmm_downward_child_inputs(
     )
 
 
+@jax.named_scope("fmm_m2l")
 def _solidfmm_downward_accumulate_from_multipoles(
     initial_locals_coeffs: Array,
     multipoles_coeffs: Array,

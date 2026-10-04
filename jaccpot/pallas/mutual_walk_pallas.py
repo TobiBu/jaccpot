@@ -574,6 +574,7 @@ def mutual_walk_pallas(
         "rounds_per_check",
     ),
 )
+@jax.named_scope("fmm_walk")
 def _mutual_walk_jit(
     left_child_full: Array,
     right_child_full: Array,
