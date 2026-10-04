@@ -1,0 +1,17 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-far card 3 16:52 others: 4249 MiB
+F1: prepare 2.70 GiB (363 B/p) eval 2.70 (363 B/p) step 2.94 (395 B/p) | force 30.0 ms step 109.0 ms | far 39093974 near 9414078 | rel-L2 None
+done 16:56
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-geo card 3 16:56 others: 4249 MiB
+G1: prepare 2.69 GiB (362 B/p) eval 2.69 (362 B/p) step 3.02 (405 B/p) | force 53.0 ms step 113.6 ms | far 39093974 near 9414078 | rel-L2 None
+done 16:59
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-geo card 3 16:59 others: 4249 MiB
+G64: prepare 18.88 GiB (317 B/p) eval - step 19.08 (320 B/p) | force - ms step 889.9 ms | far 262565198 near 75604350 | rel-L2 None
+done 17:02
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-geo card 3 17:02 others: 4249 MiB
+G96: prepare 27.92 GiB (312 B/p) eval - step 27.92 (312 B/p) | force - ms step 1326.2 ms | far 386772690 near 113987888 | rel-L2 None
+done 17:05

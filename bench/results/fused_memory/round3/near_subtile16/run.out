@@ -1,0 +1,6 @@
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r2-head4 card 3 15:37 others: 4249 MiB
+st32: prepare 3.38 GiB (453 B/p) eval 3.38 (453 B/p) step 3.59 (482 B/p) | force 37.8 ms step 111.1 ms | far 39093974 near 9414078 | rel-L2 None
+st16: prepare 3.38 GiB (453 B/p) eval 3.38 (453 B/p) step 3.56 (478 B/p) | force 42.2 ms step 123.6 ms | far 39093974 near 9414078 | rel-L2 None
+st32b: prepare 3.40 GiB (457 B/p) eval 3.40 (457 B/p) step 3.58 (481 B/p) | force 29.4 ms step 111.3 ms | far 39093974 near 9414078 | rel-L2 None
+st16b: prepare 3.41 GiB (457 B/p) eval 3.41 (457 B/p) step 3.81 (511 B/p) | force 42.6 ms step 151.4 ms | far 39093974 near 9414078 | rel-L2 None
+done 15:48
