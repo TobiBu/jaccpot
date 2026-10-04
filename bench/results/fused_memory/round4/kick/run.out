@@ -1,0 +1,20 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-kick card 3 21:02 others: 4249 MiB
+K1: prepare 1.90 GiB (256 B/p) eval 1.95 (262 B/p) step 2.33 (312 B/p) | force 29.6 ms step 106.9 ms | far 39093974 near 9414078 | rel-L2 None
+done 21:04
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-don card 3 21:04 others: 4249 MiB
+R3: prepare 1.90 GiB (255 B/p) eval 1.90 (255 B/p) step 2.24 (300 B/p) | force 29.7 ms step 106.6 ms | far 39093974 near 9414078 | rel-L2 None
+done 21:07
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-kick card 3 21:07 others: 4249 MiB
+K2: prepare 1.93 GiB (259 B/p) eval 1.94 (260 B/p) step 2.33 (312 B/p) | force 47.2 ms step 102.7 ms | far 39093974 near 9414078 | rel-L2 None
+done 21:09
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-kick card 3 21:09 others: 4249 MiB
+KD: prepare 2.21 GiB (297 B/p) eval - step 2.33 (312 B/p) | force - ms step 103.4 ms | far 39093974 near 9414078 | rel-L2 None
+done 21:12
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-kick card 3 21:12 others: 4249 MiB
+KD128: prepare 26.15 GiB (219 B/p) eval - step 27.46 (230 B/p) | force - ms step 1713.5 ms | far 504168620 near 150099422 | rel-L2 None
+done 21:15

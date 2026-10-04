@@ -1,0 +1,25 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-rows card 3 21:15 others: 4249 MiB
+WC: prepare 1.90 GiB (255 B/p) eval 1.95 (262 B/p) step 2.33 (312 B/p) | force 42.7 ms step 103.1 ms | far 39093974 near 9414078 | rel-L2 0.0007702712232837975
+done 21:18
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-rows card 3 21:18 others: 4249 MiB
+WW: prepare 1.96 GiB (263 B/p) eval 1.96 (263 B/p) step 2.29 (307 B/p) | force 28.7 ms step 101.9 ms | far 39093974 near 9414078 | rel-L2 0.0007702712207098199
+done 21:20
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-rows card 3 21:20 others: 4249 MiB
+WC2: prepare 1.93 GiB (259 B/p) eval 1.94 (260 B/p) step 2.33 (312 B/p) | force 29.7 ms step 102.7 ms | far 39093974 near 9414078 | rel-L2 None
+done 21:23
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-rows card 3 21:23 others: 4249 MiB
+WW2: prepare 1.96 GiB (263 B/p) eval 1.96 (263 B/p) step 2.29 (307 B/p) | force 28.8 ms step 101.6 ms | far 39093974 near 9414078 | rel-L2 None
+done 21:25
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=False rows_diff=24435/8000000 (0.3054 %) max_rel=7.982e-07
+force: equal=False rows_diff=14164/8000000 (0.1770 %) max_rel=2.980e-07
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-rows card 3 21:25 others: 4249 MiB
+w136: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 5.76GiB. [tf-allocator-allocation-error=''] [executable_name=
+w136ds: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 5.76GiB. [executable_name='jit__fastlane_body'] [tf-allocator
+w144ds: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.10GiB. [tf-allocator-allocation-error=''] [executable_name=
+done 21:33

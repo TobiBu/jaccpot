@@ -1,0 +1,23 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-start card 3 22:24 others: 4249 MiB
+S1: prepare 1.93 GiB (259 B/p) eval 1.93 (259 B/p) step 2.26 (303 B/p) | force 30.8 ms step 105.6 ms | far 39093974 near 9414078 | rel-L2 None
+done 22:27
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-start card 3 22:27 others: 4249 MiB
+SD: prepare 2.19 GiB (294 B/p) eval - step 2.19 (294 B/p) | force - ms step 101.9 ms | far 39093974 near 9414078 | rel-L2 None
+done 22:29
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-start card 3 22:29 others: 4249 MiB
+s136ds: prepare 27.72 GiB (219 B/p) eval - step 27.72 (219 B/p) | force - ms step 2156.3 ms | far 532526564 near 158844392 | rel-L2 None
+s144ds: prepare 29.11 GiB (217 B/p) eval - step 29.11 (217 B/p) | force - ms step 2321.5 ms | far 558127260 near 167343350 | rel-L2 None
+s152ds: prepare 30.67 GiB (217 B/p) eval - step 30.67 (217 B/p) | force - ms step 2652.7 ms | far 585189166 near 175802468 | rel-L2 None
+s136: prepare 27.56 GiB (218 B/p) eval - step 31.40 (248 B/p) | force - ms step 1905.5 ms | far 532526564 near 158844392 | rel-L2 None
+done 22:45

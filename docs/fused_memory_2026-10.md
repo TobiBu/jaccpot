@@ -401,6 +401,69 @@ move with 6690a15.)
 8.8e7 / 1.04e8). The asynchronous allocator costs ~17 % per particle (2199 ms at 1.36e8 against 1763 at 1.28e8).
 Beyond that the step's own temporary block (~150 B per particle at large N) binds.
 
+## Round 4: optional state donation, the start force, whole near rows (2026-10-04)
+
+Branch `perf/fused-round4` on #362. Rows: `bench/results/fused_memory/round4/`. Configuration as in rounds 2-3
+(`JACCPOT_STRICT_CARRY=particles`); card 3 with its idle foreign process.
+
+**What the step held** (liveness of the 1.28e8 runner at the end of round 3, 15.0 GiB block, 13.3 GiB live peak):
+
+| window | what | size at 1.28e8 |
+| --- | --- | --- |
+| every step-long | the OLD positions, kept because the final velocity-Verlet update re-drifted them | 1.43 GiB |
+| upward | the leaf P2M's padded copies of positions and masses | 1.95 GiB |
+| near | the extra-chunk partials `f32[E/64, 64, 3]` sized for the list's capacity | 2.58 GiB |
+| list build | the CSR placement's shifted and padded copies of the walk's pairs | ~1.4 GiB |
+| outside the block | the runner's output state, beside the input state | 24 B/p |
+
+**Changes**
+
+| commit | change | effect |
+| --- | --- | --- |
+| 52c4c6b + 748bbb3 | `strict_run_v2(carry="particles", donate_state=False)`: OPTIONAL donation of the input state (off by default, the input is kept); with it the call keeps a host copy of the start state for a capacity retry | -24 B/p at the scan when on; 8e6 in-use after the scan 0.655 -> 0.494 GiB; bitwise |
+| 19e9175 | P2M gathers instead of padded copies; the CSR placement reads the walk's arrays directly | bitwise |
+| 0431176 | the step kicks the drifted state (`_velocity_verlet_kick_drifted`) | -12 B/p under every window; bitwise |
+| 871a18e | the direct near field runs WHOLE ROWS (`JACCPOT_NEARFIELD_DIRECT_ROWS`, default `whole`): no extra-chunk partials, no scatter | 8e6: rel-L2 vs fp64 7.70271221e-4 vs 7.70271223e-4 (chunked); 0.18 % of particles differ by <= 3e-7; step 101.6-101.9 vs 102.7-103.1 ms |
+| d1baa8e + 29bd360 | the first particle-carry call evaluates its start force as the steps' own refresh in a small program of its own, after the prepared state is freed (no eager force beside the prepare) | bitwise (2e5, 2e6, 8e6); 8e6 program blocks: start 1.12, one-step runner 1.21, two-step 1.19 GiB |
+| 02967be | each of the walk's carried buffers gets its own negative fill (identical fills were one broadcast, copied into every loop-carry slot) | bitwise; 8e6 step peak 2.26 -> 2.19 GiB |
+
+**Tried and reverted**
+- Freeze-and-resume retry (where(ok, new, old) on the carry): kept the step's old state and self-gravity alive
+  through every step, +36 B/p; the runner's block went 15.0 -> 19.8 GiB at 1.28e8. The 8e6 process peak hid it
+  (the eager prepare sets it there): measure the runner's block, not the process peak, at small N.
+- Relocating the self-gravity through the host after the prepare: did not fix 1.36e8 (the eager force's block was
+  the failing allocation, not the self-gravity's place).
+- The start force inside the scan's program: a one-step scan is inlined and XLA overlapped the start refresh with
+  the step, doubling the block (8e6: 1.19 -> 2.52 GiB).
+- `--xla_disable_hlo_passes=while-loop-invariant-code-motion`: no change (the overlap was the inlining).
+
+**At 1.28e8** (`--donate-state`, 02967be): process peak 26.19 GiB (220 B/p; round 3: 29.81, 250 B/p). It is now the
+EAGER PREPARE's: the runner's temporary block is 14.9 GiB (round 3: 15.0; 19.8 with the reverted freeze), its live
+peak 12.2 GiB (round 3: 13.3), and at 1.52e8 the prepare peaks in its list build (21.3 GiB in use after the walk +
+9.3 GiB transient).
+
+**The ceiling now** (production sequence, arena 0.88, `--donate-state`, 02967be; card 3):
+
+| run | peak (B/p) | per step |
+| --- | --- | --- |
+| 1.36e8 | 27.72 GiB (219) | 2156 ms |
+| 1.44e8 | 29.11 GiB (217) | 2321 ms |
+| 1.52e8 | 30.62 GiB (216) | 2497 ms |
+| 1.60e8 | 32.20 GiB (216) | 2629 ms |
+| 1.68e8 | 33.45 GiB (214), one recovered allocator retry in the prepare | 2704 ms |
+| 1.76e8 | the eager prepare runs out (a 5.57 GiB block in its tree stage) | -- |
+| 1.36e8 without `--donate-state` | 31.40 GiB (248), the scan's peak | 1906 ms |
+
+**One 40 GB A100 now holds 1.68e8 particles in the preallocated arena** (round 3: 1.28e8; round 2: 8.8e7), at 214
+B per particle. The per-step times with `--donate-state` include the host copy of the start state that every call
+makes (24 B/p, ~0.25 s per 2-step bench call at 1.36e8: 2156 against 1906 ms); a production call of many steps
+pays it once.
+
+**What binds now: the eager prepare** (~215 B/p, its list build at 1.52e8). With the start force in its own
+program, the particle carry needs only the walk's caps, the shape template and the initial verdict from the eager
+prepare, so a prepare that stops after the walk (deriving the template's shapes rather than materialising the
+lists and the downward pass) is the next lever.
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
@@ -418,23 +481,18 @@ Two follow-ups stand between the fused lane and the 25M disc+bulge production ro
   scan. Its force-scale estimate already takes the softening, and the mesh lane was in class with it on this IC,
   so measure whether it alone fixes the bulge centre before building the distance floor.
 
-Then (updated after round 3):
+Then (updated after round 4):
 
-* **Memory: the ceiling.** Past 1.28e8 the preallocated arena fails on fragmentation after the eager prepare.
-  * Donate the state into the particle-carry scan (another 24 B/p at the scan). The segment retry then has to
-    resume from a frozen state: a scan that stops advancing at its first capacity failure, plus a count of the
-    steps it completed. Today the retry restarts from the call's start state, which a donated state destroys.
-  * Leave fewer survivors in the middle of the arena after the eager prepare, or prepare less eagerly. The
-    particle carry needs only the caps, the template and the initial force.
-  * Step windows at 8e6 are 0.93-1.0 GiB each:
-    * the P2M's padded position and mass copies (gathers would do);
-    * the walk's while-carry copies of its output buffers;
-    * the near field's output and padded table.
-* **Speed** (8e6, 104 ms per step): the list build is ~11 ms of it (far + near); the near field's 32-lane tiles
-  are 30 % occupied on 10-particle leaves; the walk ~27 ms.
+* **Memory: the eager prepare binds** (~215 B/p at 1.5-1.7e8, its list build). The particle carry needs only the
+  walk's caps, the shape template and the initial verdict from it (the start force is its own program now): a
+  prepare that stops after the walk and derives the template's shapes would drop the eager list build and downward
+  pass.
+* **Then the step** (live peak 12.2 GiB at 1.28e8): the list build, the walk, the near field's padded table
+  (`(N + W, 4)`, 16 B/p) and the step-long per-particle arrays are within ~1 GiB of each other.
+* **Speed** (8e6: ~101 ms per step): the list build ~11 ms; the walk ~27 ms.
 * **Production.**
-  * Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` without code changes.
-  * The int32 index default is its own PR pair (jaccpot #361, yggdrax #84): Odisseo's production runs have used
-    int64.
+  * Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` without code changes; `donate_state` needs one keyword
+    in its `strict_run_v2` call (it is off by default and keeps the input state).
+  * The int32 index default is its own PR pair (jaccpot #361, yggdrax #84).
 * Still open: a segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today), and the
   record configuration at 2e5 on a quiet card.

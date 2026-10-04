@@ -1,0 +1,87 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=136000000 live leaves 8700372 -> leaf capacity 10005504
+  [   62.1s] before_prepare                     in-use   2.53 GiB  peak   3.06 GiB  
+  [   62.5s] prepare:start                      in-use   6.59 GiB  peak   8.11 GiB  
+  [   62.5s] tree+upward:start                  in-use   6.59 GiB  peak   8.11 GiB  
+  [   83.8s] tree+upward:end                    in-use  14.62 GiB  peak  22.16 GiB  
+  [   83.8s] dual+downward:start                in-use  14.62 GiB  peak  22.16 GiB  
+  [   86.5s] walk+lists:start                   in-use  14.93 GiB  peak  22.16 GiB  
+  [   87.9s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [   90.1s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [   90.1s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [   92.3s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [   92.3s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [   94.6s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [   94.6s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [   96.7s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [   96.7s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 8388608, 'far_cap': 65536, 'near_cap': 1048576}
+  [   99.0s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [   99.0s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 16777216, 'far_cap': 65536, 'near_cap': 1048576}
+  [  101.3s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [  101.3s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 33554432, 'far_cap': 65536, 'near_cap': 1048576}
+  [  103.9s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [  103.9s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 67108864, 'far_cap': 65536, 'near_cap': 1048576}
+  [  106.6s] walk:end                           in-use  15.33 GiB  peak  22.16 GiB  
+  [  106.6s] walk:start                         in-use  15.33 GiB  peak  22.16 GiB  {'queue': 67108864, 'far_cap': 399507456, 'near_cap': 119537664}
+  [  109.1s] walk:end                           in-use  19.32 GiB  peak  22.16 GiB  
+  [  111.8s] walk+lists:end                     in-use  19.13 GiB  peak  27.83 GiB  
+  [  111.8s] downward:start                     in-use  19.13 GiB  peak  27.83 GiB  
+  [  118.9s] downward:end                       in-use  21.98 GiB  peak  27.83 GiB  
+  [  118.9s] dual+downward:end                  in-use  21.70 GiB  peak  27.83 GiB  
+  [  120.1s] prepare:end                        in-use  21.77 GiB  peak  27.83 GiB  
+W1004 21:47:25.305550 2683050 hlo_rematerialization.cc:3231] Can't reduce memory use below 29.88GiB (32080078850 bytes) by rematerialization; only reduced to 36.42GiB (39106696070 bytes), down from 47.18GiB (50655382169 bytes) originally
+W1004 21:47:48.575826 2683050 bfc_allocator.cc:514] Allocator (GPU_0_bfc) ran out of memory trying to allocate 26.05GiB (rounded to 27967281152)requested by op 
+If the cause is memory fragmentation maybe the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' will improve the situation. 
+Current allocation summary follows.
+Current allocation summary follows.
+W1004 21:47:48.576073 2683050 bfc_allocator.cc:525] ***_***************************_____________________________________________________________________
+Traceback (most recent call last):
+  File "/export/home/tbuck/jaccpot-r4-init/jaccpot/runtime/fmm_strict_run.py", line 1917, in _strict_particle_carry_run
+    np.asarray(jax.device_get(ok_all))
+               ^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/api.py", line 2314, in device_get
+    return tree_map(_device_get, x)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/tree_util.py", line 399, in tree_map
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/tree_util.py", line 399, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+                             ^^^^^^
+  File "/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/api.py", line 2275, in _device_get
+    return toarray()
+           ^^^^^^^^^
+  File "/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/array.py", line 414, in __array__
+    return np.asarray(self._value, dtype=dtype, **kwds)  # pyrefly: ignore[no-matching-overload]
+                      ^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/array.py", line 623, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 26.05GiB. [tf-allocator-allocation-error=''] [executable_name='jit__compiled_runner']
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/export/home/tbuck/jaccpot-r4-init/bench/fused_memory_budget.py", line 918, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/export/home/tbuck/jaccpot-r4-init/bench/fused_memory_budget.py", line 907, in main
+    run_budget(result)
+  File "/export/home/tbuck/jaccpot-r4-init/bench/fused_memory_budget.py", line 698, in run_budget
+    state, prep, _ = run(state0, None, 1)
+                     ^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r4-init/bench/fused_memory_budget.py", line 678, in run
+    out = solver.strict_run_v2(
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r4-init/jaccpot/solver.py", line 2043, in strict_run_v2
+    return self._impl.strict_run_v2(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r4-init/jaccpot/runtime/fmm_strict_run.py", line 1267, in strict_run_v2
+    state_curr, prepared_curr, history_out = self._strict_particle_carry_run(
+                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r4-init/jaccpot/runtime/fmm_strict_run.py", line 1979, in _strict_particle_carry_run
+    raise RuntimeError(
+RuntimeError: strict fused velocity-Verlet scan failed while host fallback is disallowed
