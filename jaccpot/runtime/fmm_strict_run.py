@@ -33,7 +33,8 @@ from .fmm_state import (
     _TopologyReuseEntry,
     _velocity_verlet_state_update,
 )
-from .kernels.core import _empty_interaction_storage_for_tree, _FarPairCOO
+from .kernels._downward_prep import _far_pair_coo_from
+from .kernels.core import _empty_interaction_storage_for_tree
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
@@ -2364,12 +2365,8 @@ class StrictRunMixin(_EngineBase):
                 grouped_segment_group_ids=None,
                 grouped_segment_unique_targets=None,
                 farfield_mode="pair_grouped",
-                far_pairs_coo=_FarPairCOO(
-                    sources=src_far,
-                    targets=tgt_far,
-                    active_count=getattr(
-                        cached_compact_far_pairs, "far_pair_count", None
-                    ),
+                far_pairs_coo=_far_pair_coo_from(
+                    cached_compact_far_pairs, src_far, tgt_far
                 ),
                 far_pairs_by_gear=far_pairs_by_gear,
                 adaptive_order=True,

@@ -112,6 +112,7 @@ from .fmm_state import (
     _TopologyReuseEntry,
     _TreeBuildArtifacts,
 )
+from .kernels._downward_prep import _far_pair_coo_from
 from .kernels.core import (
     NearfieldInteropData,
     _build_nearfield_interop_data,
@@ -1659,11 +1660,7 @@ class PrepareMixin(_EngineBase):
         if strict_streamed_direct_far_pairs:
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
-            far_pairs_coo = _FarPairCOO(
-                sources=src_far,
-                targets=tgt_far,
-                active_count=getattr(compact_far_pairs, "far_pair_count", None),
-            )
+            far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
             far_pairs_by_gear = ((src_far, tgt_far),)
             adaptive_order_for_downward = True
             p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
@@ -2500,9 +2497,11 @@ class PrepareMixin(_EngineBase):
             If the streamed payload could not be built.
         """
 
+        far_pairs_coo: Optional[_FarPairCOO] = None
         if compact_far_pairs is not None:
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
         else:
             if interactions is None:
                 raise RuntimeError(
@@ -2510,16 +2509,12 @@ class PrepareMixin(_EngineBase):
                 )
             src_far = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
-        active_count = (
-            getattr(compact_far_pairs, "far_pair_count", None)
-            if compact_far_pairs is not None
-            else None
-        )
-        far_pairs_coo = _FarPairCOO(
-            sources=src_far,
-            targets=tgt_far,
-            active_count=active_count,
-        )
+        if far_pairs_coo is None:
+            far_pairs_coo = _FarPairCOO(
+                sources=src_far,
+                targets=tgt_far,
+                active_count=None,
+            )
         max_order_int = int(upward.multipoles.order)
         strict_fused_device_only_active = bool(
             getattr(self, "_strict_fused_mode_active", False)
@@ -3743,11 +3738,7 @@ class PrepareMixin(_EngineBase):
 
         src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
         tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
-        far_pairs_coo = _FarPairCOO(
-            sources=src_far,
-            targets=tgt_far,
-            active_count=getattr(compact_far_pairs, "far_pair_count", None),
-        )
+        far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
         far_pairs_by_gear: tuple[tuple[Array, Array], ...] = ((src_far, tgt_far),)
         p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
         if not suppress_host_side_effects:

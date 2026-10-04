@@ -132,6 +132,52 @@ class _SolidFMMDownwardInit(NamedTuple):
     dtype: Any
 
 
+class _TargetSortedFarPairCOO(_FarPairCOO):
+    """:class:`_FarPairCOO` built from a ``TargetSortedFarPairs`` list, unmodified.
+
+    The live prefix is sorted by (target, source), so the M2L reads it as a CSR
+    without sorting (``csr_by_target(presorted=True)``). A field-less subclass:
+    the pytree node type carries the promise through ``jit``.
+    """
+
+    __slots__ = ()
+
+
+def _far_pair_coo_from(
+    compact_far_pairs: Any, sources: Array, targets: Array
+) -> _FarPairCOO:
+    """The COO of a compact far list, typed as target-sorted when the list is.
+
+    Parameters
+    ----------
+    compact_far_pairs : Any
+        The walk's far list (``CompactTaggedFarPairs`` or its target-sorted
+        subclass).
+    sources : Array
+        Its ``sources`` (cast), unmodified.
+    targets : Array
+        Its ``targets`` (cast), unmodified.
+
+    Returns
+    -------
+    _FarPairCOO
+        ``_TargetSortedFarPairCOO`` for a ``TargetSortedFarPairs`` list, else
+        ``_FarPairCOO``; ``active_count`` from its ``far_pair_count``.
+    """
+    from jaccpot.runtime._interaction_cache import TargetSortedFarPairs
+
+    cls = (
+        _TargetSortedFarPairCOO
+        if isinstance(compact_far_pairs, TargetSortedFarPairs)
+        else _FarPairCOO
+    )
+    return cls(
+        sources=sources,
+        targets=targets,
+        active_count=getattr(compact_far_pairs, "far_pair_count", None),
+    )
+
+
 class _SolidFMMDownwardInteractionInputs(NamedTuple):
     """Resolved far-pair arrays for solidfmm downward prep.
 
@@ -535,6 +581,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     farfield_mode: str,
     basis_mode: str = "complex",
     m2l_impl: str = "rot_scale",
+    targets_sorted: bool = False,
 ) -> Array:
     """Run one solidfmm M2L accumulation pass plus symmetry enforcement.
 
@@ -613,6 +660,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
         enforcement runs afterwards -- real coefficients have no such symmetry.
     m2l_impl : str
         M2L implementation selector for the flat lanes.
+    targets_sorted : bool
+        ``src`` / ``tgt`` are a ``TargetSortedFarPairs`` list as walked: the CSR
+        lanes kernel skips its by-target sort. Static.
 
     Returns
     -------
@@ -710,6 +760,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                     "triton",
                     int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
                     n_targets,
+                    bool(targets_sorted),
                 )
             elif which == "tiled" and m2l_real_csr_tiled_supported(order):
                 m2l_inc = m2l_real_csr_tiled_pallas(

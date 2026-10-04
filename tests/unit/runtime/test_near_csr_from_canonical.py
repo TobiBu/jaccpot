@@ -85,3 +85,64 @@ def test_canonical_build_equals_the_directed_sort(num_leaves, n_pairs, width, co
     assert np.any(counts > 0)
     if 2 * n_pairs < num_leaves:
         assert np.any(counts == 0)  # the sparse case has leaves with no neighbour
+
+
+@pytest.mark.parametrize(
+    "width, n_pairs, count", [(64, 40, 40), (40, 40, 99), (30, 12, 9)]
+)
+def test_far_list_is_the_directed_target_sort(width, n_pairs, count):
+    """The deterministic far list: (target, source)-sorted directed pairs, -1 padded.
+
+    And the M2L's CSR read of it without a sort equals its sorting read.
+    """
+    from jaccpot.pallas.m2l_real_csr import csr_by_target
+
+    num_leaves = 30
+    num_internal = num_leaves - 1
+    total = num_internal + num_leaves
+    rng = np.random.default_rng(width + n_pairs)
+    seen = set()
+    while len(seen) < n_pairs:
+        a, b = sorted(rng.integers(0, total, size=2).tolist())
+        if a != b:
+            seen.add((a, b))
+    pairs = np.asarray(sorted(seen, key=lambda _: rng.random()), np.int64)
+    pad = max(width - n_pairs, 0)
+    fa = jnp.asarray(np.concatenate([pairs[:, 0], np.full(pad, -1)]), jnp.int32)
+    fb = jnp.asarray(np.concatenate([pairs[:, 1], np.full(pad, -1)]), jnp.int32)
+    near = jnp.zeros((4,), jnp.int32)
+    out = _flat_walk_lists(
+        fa,
+        fb,
+        jnp.asarray(count, jnp.int32),
+        near,
+        near,
+        jnp.asarray(0, jnp.int32),
+        jnp.asarray(False),
+        far_width=width,
+        near_width=4,
+        num_internal=num_internal,
+        total_nodes=total,
+        deterministic=True,
+        idx=jnp.int32,
+    )
+    src, tgt, _tags, n_live = (np.asarray(x) for x in out[:4])
+    live = min(count, width)
+    a = np.asarray(fa)[:width][:live]
+    b = np.asarray(fb)[:width][:live]
+    ref_t = np.concatenate([a, b])
+    ref_s = np.concatenate([b, a])
+    order = np.lexsort((ref_s, ref_t))
+    k = 2 * live
+    assert int(n_live) == 2 * min(count, width) or count > width
+    assert np.array_equal(tgt[:k], ref_t[order]) and np.array_equal(
+        src[:k], ref_s[order]
+    )
+    assert np.all(src[k:] == -1) and np.all(tgt[k:] == -1)
+    # the M2L's CSR: presorted read == sorting read
+    srt = csr_by_target(src, tgt, total_nodes=total, active_pair_count=jnp.asarray(k))
+    pre = csr_by_target(
+        src, tgt, total_nodes=total, active_pair_count=jnp.asarray(k), presorted=True
+    )
+    for x, y in zip(srt, pre):
+        assert np.array_equal(np.asarray(x), np.asarray(y))

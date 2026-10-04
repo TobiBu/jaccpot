@@ -419,6 +419,7 @@ def csr_by_target(
     *,
     total_nodes: int,
     active_pair_count: Optional[Array] = None,
+    presorted: bool = False,
 ) -> tuple[Array, Array, Array]:
     """Sort a (padded) flat far-pair list by target into CSR form.
 
@@ -433,6 +434,10 @@ def csr_by_target(
     active_pair_count : Optional[Array]
         Number of leading live entries; ``None`` means every non-negative entry
         is live.
+    presorted : bool
+        The live entries are a prefix already sorted by target (the deterministic
+        flat walk's ``TargetSortedFarPairs``): skip the sort, keep their order.
+        Static.
 
     Returns
     -------
@@ -450,12 +455,17 @@ def csr_by_target(
             jnp.arange(P, dtype=jnp.int32) < jnp.asarray(active_pair_count, jnp.int32)
         )
     key = jnp.where(valid, tgt, jnp.asarray(total_nodes, jnp.int32))
-    # One stable key-value sort carries the sources along: no permutation, no
-    # gathers. (An argsort here also carried an int64 iota through this
-    # every-step sort -- yggdrax enables x64 -- twice the bytes per pass.)
-    sorted_key, src_sorted = jax.lax.sort(
-        (key, jnp.where(valid, src, 0)), num_keys=1, is_stable=True
-    )
+    if presorted:
+        # already in CSR order with the padding behind it: the stable sort below
+        # would return exactly these arrays (a 2P key-value sort's bytes saved)
+        sorted_key, src_sorted = key, jnp.where(valid, src, 0)
+    else:
+        # One stable key-value sort carries the sources along: no permutation, no
+        # gathers. (An argsort here also carried an int64 iota through this
+        # every-step sort -- yggdrax enables x64 -- twice the bytes per pass.)
+        sorted_key, src_sorted = jax.lax.sort(
+            (key, jnp.where(valid, src, 0)), num_keys=1, is_stable=True
+        )
     # offsets from the SORTED key (a searchsorted), not a scatter-add over the
     # P entries: that segment_sum was a 1.3 ms int32 scatter at P = 2^21
     # unrolled: the default is a while loop with one small kernel per bisection
