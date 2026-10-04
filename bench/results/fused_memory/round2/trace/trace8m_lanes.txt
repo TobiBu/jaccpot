@@ -1,0 +1,16 @@
+17169 instructions with op_name from 1 dump file(s)
+== /device:GPU:0: kernel time   171.55 ms/call, busy   171.36, window   183.31, launches 2342
+   fmm_walk                      26.91 ms   15.7 %  launches    255   [mutual_walk_round_b64 26.30, loop_dynamic_update_slice_fusion 0.27]
+   fmm_com_radii                 26.12 ms   15.2 %  launches    876   [input_reduce_fusion_2 19.15, input_scatter_fusion 1.68]
+   fmm_near                      23.50 ms   13.7 %  launches     28   [nearfield_leafpair_csr_direct_first_t32_c64_w64 22.31, nearfield_leafpair_csr_direct_rest_t32_c64_w64 0.34]
+   unmapped                      22.85 ms   13.3 %  launches    571   [nearfield_leafpair_csr_direct_first_t32_c64_w64 11.14, MemcpyD2D 10.02]
+   fmm_tree                      18.69 ms   10.9 %  launches    159   [loop_select_fusion_11 4.71, void cub::_V_300200_SM_500_600_700_800_900_1000_1010_1200::d 3.62]
+   fmm_m2l                       14.67 ms    8.6 %  launches     31   [m2l_real_csr_lanes_p5_k32 10.14, void cub::_V_300200_SM_500_600_700_800_900_1000_1010_1200::d 3.21]
+   fmm_upward                    12.31 ms    7.2 %  launches     71   [p2m_real_leaf_p5_w64 9.75, m2m_real_lanes_p5_k32 1.62]
+   unscoped                      10.82 ms    6.3 %  launches     58   [loop_gather_fusion_3 4.67, wrapped_slice_1 2.46]
+   fmm_lists                      7.20 ms    4.2 %  launches     45   [void cub::_V_300200_SM_500_600_700_800_900_1000_1010_1200::d 5.16, input_concatenate_fusion_7 0.52]
+   fmm_l2p                        4.63 ms    2.7 %  launches     67   [loop_add_multiply_slice_fusion 1.45, loop_gather_fusion_2 1.24]
+   fmm_l2l                        2.65 ms    1.5 %  launches     41   [l2l_real_lanes_p5_k32 2.65]
+   fmm_mac_extents                0.51 ms    0.3 %  launches     88   [loop_gather_select_fusion 0.11, loop_add_gather_fusion_1 0.10]
+   no_hlo_op (memcpy/memset)      0.35 ms    0.2 %  launches     43   [MemcpyD2H 0.19, Memset 3 0.16]
+   fmm_large_n_state              0.34 ms    0.2 %  launches      6   [loop_add_fusion_4 0.16, loop_compare_fusion_11 0.08]

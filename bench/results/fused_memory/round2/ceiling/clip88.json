@@ -1,0 +1,748 @@
+{
+ "mode": "budget",
+ "n": 88000000,
+ "ic": "plummer_clipped",
+ "seed": 0,
+ "leaf": 64,
+ "theta": 0.8,
+ "order": 5,
+ "cell_min_level": 8,
+ "caps": "unnamed",
+ "donate": true,
+ "cap_env": {
+  "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": null,
+  "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": null
+ },
+ "xla_flags": "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUSTOM_CALL --xla_gpu_graph_min_graph_size=2",
+ "mem_fraction": "0.88",
+ "preallocate": "true",
+ "rmax": 20.0,
+ "worktree": "/export/home/tbuck/jaccpot-r2-head2",
+ "yggdrax_worktree": "/export/home/tbuck/yggdrax-r2-head",
+ "device": "cuda:0",
+ "cuda_visible": "5",
+ "live_leaves": 5985853,
+ "leaf_capacity": 6884352,
+ "softening": 1e-07,
+ "dt": 0.01,
+ "prepare_s": 56.798563646152616,
+ "counts": {
+  "far_pair_count": 357398844,
+  "total_neighbors": 104601520,
+  "peak_wavefront": 34396398,
+  "max_neighbors_observed": 123,
+  "rounds": 72,
+  "compact_far_pair_capacity": 536870912,
+  "near_edge_capacity": 157286400,
+  "queue_capacity": 67108864,
+  "far_named": false,
+  "near_edge_named": false,
+  "grew": [
+   "max_pair_queue 524288->1048576",
+   "max_pair_queue 1048576->2097152",
+   "max_pair_queue 2097152->4194304",
+   "max_pair_queue 4194304->8388608",
+   "max_pair_queue 8388608->16777216",
+   "max_pair_queue 16777216->33554432",
+   "max_pair_queue 33554432->67108864",
+   "compact_far_pair_capacity 131072->536870912",
+   "near_edge_capacity 2097152->157286400"
+  ]
+ },
+ "prepare_events": [
+  {
+   "label": "start",
+   "t": 0.00010880827903747559,
+   "in_use": 95232,
+   "peak": 95232,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "before_prepare",
+   "t": 36.730457151308656,
+   "in_use": 1760095232,
+   "peak": 2464095232,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "prepare:start",
+   "t": 36.73068986274302,
+   "in_use": 1760095232,
+   "peak": 2464095232,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 36.73089423403144,
+   "in_use": 1760095232,
+   "peak": 2464095232,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 58.33665866591036,
+   "in_use": 7716559104,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 58.33729053847492,
+   "in_use": 7716559104,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 60.83675738237798,
+   "in_use": 7943742720,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 62.17005198262632,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 524288,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 64.3552925940603,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 64.35639540851116,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 1048576,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 66.4405023381114,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 66.44183872267604,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 2097152,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 68.65746250934899,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 68.65881989523768,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 4194304,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 70.76710751466453,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 70.76838219352067,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 8388608,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 73.02177205123007,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 73.02319892682135,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 16777216,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 75.14930830709636,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 75.15064378455281,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 33554432,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 77.69603907316923,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 77.69731599092484,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 67108864,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 80.09174071066082,
+   "in_use": 8186726144,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk:start",
+   "t": 80.09377173148096,
+   "in_use": 8177810944,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0,
+   "queue": 67108864,
+   "far_cap": 268435456,
+   "near_cap": 78643200
+  },
+  {
+   "label": "walk:end",
+   "t": 82.51918807066977,
+   "in_use": 10954442496,
+   "peak": 20672325888,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 84.4864662270993,
+   "in_use": 15188344320,
+   "peak": 22455491328,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "downward:start",
+   "t": 84.48676484636962,
+   "in_use": 15188344320,
+   "peak": 22455491328,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "downward:end",
+   "t": 92.2615315951407,
+   "in_use": 17281187584,
+   "peak": 31022371584,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 92.26430274732411,
+   "in_use": 17054003968,
+   "peak": 31022371584,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "prepare:end",
+   "t": 93.52848201431334,
+   "in_use": 17164153344,
+   "peak": 31022371584,
+   "limit": 37318819840,
+   "largest_free": 0
+  },
+  {
+   "label": "after_prepare",
+   "t": 93.5290610268712,
+   "in_use": 17164153344,
+   "peak": 31022371584,
+   "limit": 37318819840,
+   "largest_free": 0
+  }
+ ],
+ "live_after_prepare": {
+  "count": 94,
+  "total_gib": 15.790221652016044,
+  "top": [
+   {
+    "shape": [
+     536870912
+    ],
+    "dtype": "int32",
+    "gib": 2.0
+   },
+   {
+    "shape": [
+     536870912
+    ],
+    "dtype": "int32",
+    "gib": 2.0
+   },
+   {
+    "shape": [
+     536870912
+    ],
+    "dtype": "int32",
+    "gib": 2.0
+   },
+   {
+    "shape": [
+     13768703,
+     36
+    ],
+    "dtype": "float32",
+    "gib": 1.8465269654989243
+   },
+   {
+    "shape": [
+     6884352,
+     64
+    ],
+    "dtype": "int32",
+    "gib": 1.641357421875
+   },
+   {
+    "shape": [
+     88000000,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.9834766387939453
+   },
+   {
+    "shape": [
+     88000000,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.9834766387939453
+   },
+   {
+    "shape": [
+     88000000
+    ],
+    "dtype": "uint64",
+    "gib": 0.6556510925292969
+   },
+   {
+    "shape": [
+     157286400
+    ],
+    "dtype": "int32",
+    "gib": 0.5859375
+   },
+   {
+    "shape": [
+     6884352,
+     64
+    ],
+    "dtype": "bool",
+    "gib": 0.41033935546875
+   },
+   {
+    "shape": [
+     88000000
+    ],
+    "dtype": "int32",
+    "gib": 0.32782554626464844
+   },
+   {
+    "shape": [
+     88000000
+    ],
+    "dtype": "float32",
+    "gib": 0.32782554626464844
+   },
+   {
+    "shape": [
+     88000000
+    ],
+    "dtype": "int32",
+    "gib": 0.32782554626464844
+   },
+   {
+    "shape": [
+     88000000
+    ],
+    "dtype": "float32",
+    "gib": 0.32782554626464844
+   },
+   {
+    "shape": [
+     13768703,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.15387724712491035
+   },
+   {
+    "shape": [
+     13768703,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.15387724712491035
+   },
+   {
+    "shape": [
+     13768703,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.15387724712491035
+   },
+   {
+    "shape": [
+     6884352,
+     1,
+     4
+    ],
+    "dtype": "int32",
+    "gib": 0.1025848388671875
+   },
+   {
+    "shape": [
+     13768703
+    ],
+    "dtype": "int64",
+    "gib": 0.1025848314166069
+   },
+   {
+    "shape": [
+     13768703,
+     2
+    ],
+    "dtype": "int32",
+    "gib": 0.1025848314166069
+   }
+  ]
+ },
+ "prepared_breakdown": {
+  "total_gib": 14.017206299118698,
+  "top": [
+   {
+    "path": ".compact_far_pairs.sources",
+    "shape": [
+     536870912
+    ],
+    "dtype": "int32",
+    "gib": 2.0
+   },
+   {
+    "path": ".compact_far_pairs.targets",
+    "shape": [
+     536870912
+    ],
+    "dtype": "int32",
+    "gib": 2.0
+   },
+   {
+    "path": ".compact_far_pairs.tags",
+    "shape": [
+     536870912
+    ],
+    "dtype": "int32",
+    "gib": 2.0
+   },
+   {
+    "path": ".local_data.coefficients",
+    "shape": [
+     13768703,
+     36
+    ],
+    "dtype": "float32",
+    "gib": 1.8465269654989243
+   },
+   {
+    "path": ".nearfield_leaf_particle_indices",
+    "shape": [
+     6884352,
+     64
+    ],
+    "dtype": "int32",
+    "gib": 1.641357421875
+   },
+   {
+    "path": ".tree.positions_sorted",
+    "shape": [
+     88000000,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.9834766387939453
+   },
+   {
+    "path": ".tree.topology.morton_codes",
+    "shape": [
+     88000000
+    ],
+    "dtype": "uint64",
+    "gib": 0.6556510925292969
+   },
+   {
+    "path": ".neighbor_list.neighbors",
+    "shape": [
+     157286400
+    ],
+    "dtype": "int32",
+    "gib": 0.5859375
+   },
+   {
+    "path": ".nearfield_leaf_particle_mask",
+    "shape": [
+     6884352,
+     64
+    ],
+    "dtype": "bool",
+    "gib": 0.41033935546875
+   },
+   {
+    "path": ".tree.topology.particle_indices",
+    "shape": [
+     88000000
+    ],
+    "dtype": "int32",
+    "gib": 0.32782554626464844
+   },
+   {
+    "path": ".tree.masses_sorted",
+    "shape": [
+     88000000
+    ],
+    "dtype": "float32",
+    "gib": 0.32782554626464844
+   },
+   {
+    "path": ".tree.inverse_permutation",
+    "shape": [
+     88000000
+    ],
+    "dtype": "int32",
+    "gib": 0.32782554626464844
+   },
+   {
+    "path": ".local_data.centers",
+    "shape": [
+     13768703,
+     3
+    ],
+    "dtype": "float32",
+    "gib": 0.15387724712491035
+   },
+   {
+    "path": ".nearfield_target_block_source_leaf_ids_padded",
+    "shape": [
+     6884352,
+     1,
+     4
+    ],
+    "dtype": "int32",
+    "gib": 0.1025848388671875
+   },
+   {
+    "path": ".tree.topology.node_ranges",
+    "shape": [
+     13768703,
+     2
+    ],
+    "dtype": "int32",
+    "gib": 0.1025848314166069
+   },
+   {
+    "path": ".tree.topology.nodes_by_level",
+    "shape": [
+     13768703
+    ],
+    "dtype": "int64",
+    "gib": 0.1025848314166069
+   },
+   {
+    "path": ".tree.topology.leaf_codes",
+    "shape": [
+     6884352
+    ],
+    "dtype": "uint64",
+    "gib": 0.05129241943359375
+   },
+   {
+    "path": ".tree.topology.parent",
+    "shape": [
+     13768703
+    ],
+    "dtype": "int32",
+    "gib": 0.05129241570830345
+   },
+   {
+    "path": ".tree.topology.node_level",
+    "shape": [
+     13768703
+    ],
+    "dtype": "int32",
+    "gib": 0.05129241570830345
+   },
+   {
+    "path": ".neighbor_list.offsets",
+    "shape": [
+     6884353
+    ],
+    "dtype": "int32",
+    "gib": 0.025646213442087173
+   },
+   {
+    "path": ".neighbor_list.target_block_offsets",
+    "shape": [
+     6884353
+    ],
+    "dtype": "int32",
+    "gib": 0.025646213442087173
+   },
+   {
+    "path": ".nearfield_target_block_offsets",
+    "shape": [
+     6884353
+    ],
+    "dtype": "int32",
+    "gib": 0.025646213442087173
+   },
+   {
+    "path": ".tree.topology.leaf_depths",
+    "shape": [
+     6884352
+    ],
+    "dtype": "int32",
+    "gib": 0.025646209716796875
+   },
+   {
+    "path": ".neighbor_list.leaf_indices",
+    "shape": [
+     6884352
+    ],
+    "dtype": "int32",
+    "gib": 0.025646209716796875
+   },
+   {
+    "path": ".neighbor_list.counts",
+    "shape": [
+     6884352
+    ],
+    "dtype": "int32",
+    "gib": 0.025646209716796875
+   }
+  ],
+  "by_field_gib": {
+   "compact_far_pairs": 6.00000000372529,
+   "tree": 3.0714132776483893,
+   "local_data": 2.0004042126238346,
+   "nearfield_leaf_particle_indices": 1.641357421875,
+   "neighbor_list": 0.714168556034565,
+   "nearfield_leaf_particle_mask": 0.41033935546875,
+   "nearfield_target_block_source_leaf_ids_padded": 0.1025848388671875,
+   "nearfield_target_block_offsets": 0.025646213442087173,
+   "nearfield_target_block_valid_mask_padded": 0.025646209716796875,
+   "radix_fast_payload": 0.025646209716796875
+  }
+ },
+ "eval_contention": {
+  "devices": [
+   5
+  ],
+  "n_samples": 2,
+  "duration_s": 1.2927775382995605,
+  "foreign_pids_on_devices": [],
+  "own_util_max": {
+   "5": 100
+  },
+  "other_gpu_util_max": 100,
+  "loadavg1_max": 14.90869140625,
+  "loadavg1_min": 14.90869140625,
+  "cores": 64,
+  "contaminated": false,
+  "flags": [
+   "loadavg>=8 (14.9)",
+   "other-gpus-busy (100%)"
+  ]
+ },
+ "eval_ms": {
+  "min": 319.89689357578754,
+  "median": 320.52237540483475,
+  "samples": [
+   322.1150431782007,
+   320.52237540483475,
+   319.89689357578754
+  ]
+ },
+ "eval_memory_analysis": {
+  "argument_gib": 4.404992908239365,
+  "output_gib": 0.9834766387939453,
+  "alias_gib": 0.0,
+  "temp_gib": 4.224787071347237,
+  "generated_code_gib": 2.332031726837158e-06
+ },
+ "peak_after_eval_gib": 28.89183497428894
+}

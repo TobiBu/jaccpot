@@ -202,6 +202,125 @@ indicative), local caps unnamed, min of 5:
 * The probe's one-card arm runs the mesh evaluator; at 2.4e7 it needs more than `strict_run_v2` (which fit 2.4e7
   on card 3), and these two cards had a quarter to a half of their memory taken by other jobs.
 
+## Round 2: particle order, lane cascades, the particle carry (2026-10-04)
+
+Plan: `yes-we-now-have-greedy-thimble` (measure the one-card ceiling, then make the lane fit more and run
+faster). Branch `perf/fused-particle-major` on #359; yggdrax #83. Rows: `bench/results/fused_memory/round2/`.
+Bench additions: `--ic plummer_clipped --rmax 20` (the Plummer inverse CDF truncated at 20 scale radii,
+deterministic, no box-stretching outliers), `--prealloc FRAC`, `--save-forces`, `--trace-dir`,
+`--no-command-buffers`; `jax.named_scope("fmm_*")` on the fused step's stages and
+`bench/analyse_trace_by_stage.py` (kernel time per scope from a trace, buffer attribution from a dump).
+
+**First finding: the centres of mass were wrong at large N (yggdrax #83).** The node moments were differences
+of float32 prefix sums over all N particles, so at large N a deep node's centre of mass carried a rounding error
+of order N eps |x| and landed outside the node. The COM MAC radii, and with them the near lists, grew with N
+(near edges per particle 2.4 at 8e6 -> 11 at 3.2e7 on seed-0 Plummer). Accumulated in float64:
+
+| run | near pairs | force | prepare peak |
+| --- | --- | --- | --- |
+| 3.2e7 clipped, before / after | 515.9M / 35.8M | 774 / 200 ms | 28.2 / 16.7 GiB |
+| 25M disc+bulge, before / after | -- | 516 / 149 ms | -- |
+
+So part of "the disc near field is physical" was this bug (memory `disc-nearfield-is-physical` now carries the
+caveat).
+
+**The changes**, measured at 8e6 clipped Plummer (leaf 64 cell leaves, theta 0.8, p5; card 3, which carried an
+idle foreign process; same frozen worktree per comparison, interleaved, PREALLOCATE off):
+
+| step | force | per step | step peak | forces |
+| --- | --- | --- | --- | --- |
+| #359 + COM fix (table near field, leaf-major L2P) | 53.2 ms | 342 ms | 9.34 GiB (1254 B/p) | reference |
+| particle-major L2P + direct near field (now default) | 34.2 | 266 | 5.66 | bitwise (force and scan state) |
+| COM radii by level passes | 30.3 | 224 | 4.60 (prepare 5.59 -> 3.69) | bitwise |
+| lane cascades (now default) | 29.5 | 145 | 4.52 | round-off: rel-L2 7.8150e-4 -> 7.8154e-4 |
+| `carry="particles"` | -- | -- | 3.55 (contended card; prepare 3.25) | as above |
+
+* **Far-field L2P in particle order.** The leaf-major evaluation vmapped a `value_and_grad` over `[leaves, 64]`
+  slots: ~20 residuals at 3.7-6 slots per particle on cell leaves, the force's temporary peak. Now every particle
+  is evaluated in its own leaf's expansion, chunk by chunk (`JACCPOT_L2P_LAYOUT=particle`, the default).
+* **Near field on the sorted particles.** The CSR kernel read `(L, 64)` tables gathered every force, emitted a
+  `(64, 4)` partial for every chunk (every leaf, padding leaves included, owns one) and reduced them with a
+  segment sum. `JACCPOT_NEARFIELD_LAYOUT=direct` (default) reads `pm[start + j]`, runs each leaf's first chunk
+  and its self term in one program that stores straight into particle order, and scatter-adds only the rows'
+  remaining chunks; the potential lane runs only on request.
+* **COM MAC radii.** The (leaves x 64 levels) ancestor and distance tables, a `(L, 64, 4, 3)` broadcast and a
+  scatter-max whose non-final lanes hit one sentinel row became one pass per ancestor level, bounded by the
+  upward sweep's depth, reducing squared distances (one square root per leaf), jitted as one program (the eager
+  prepare had run it op by op and materialised the `(L, 64, 3)` gather). Four levels per pass was tried and
+  reverted: XLA did not fuse the `(L, 64, 4)` norm into the reduction (35 against 26 ms per step, +0.2 GiB).
+* **Lane cascades.** The level kernels ran one program per node, loaded ~40 KB of constant tables each, and
+  launched the widest level's grid at every level. One node per lane (the M2L lane kernel's design) on the
+  packed table: M2M 54 -> 1.6 ms, L2L 44 -> 2.7 ms per step (`JACCPOT_CASCADE_KERNEL=lanes`, default).
+* **The particle carry.** Jax's dead-code elimination of the fused scan step, with only the particle outputs
+  marked used, keeps none of the carried state's 51 leaves on the default fresh far-pair rebuild.
+  `strict_run_v2(carry="particles")` (or `JACCPOT_STRICT_CARRY`) carries positions, velocities and forces;
+  each step materialises the state from a shape template (NaN broadcasts XLA removes) and the call returns a
+  `StrictParticleCarry` handle that also spares the next call its eager initial force evaluation. Default
+  stays `"state"`.
+* **Smaller items:**
+  * the walk's pair queue is double-buffered (a 33 MB copy per round), and its round kernel strides over a
+    capped grid;
+  * the deterministic near CSR comes from one sort of the canonical pairs;
+  * yggdrax: one key-value Morton sort, and the cell partition without sentinel atomics and without a scan
+    pair per level (bitwise; numpy reference kept).
+
+**The one-card ceiling.** Preallocated arena 0.88 of a 40 GB A100 (35.2 GiB). Base = #359 + the COM fix,
+state carry, card 3. Round 2 = head (43bef3d) with `JACCPOT_STRICT_CARRY=particles`, card 5 (empty). The cards
+differ, so the per-step times compare only roughly; the 8e6 A/B above is the clean timing.
+
+| run | base: step peak, per step | round 2: step peak (B/p), force, per step | rel-L2 |
+| --- | --- | --- | --- |
+| clip8 | 9.40 GiB, 306 ms | 3.51 GiB (471), 29.8 ms, 111 ms | 7.82e-4 |
+| clip32 | 29.91 GiB, 1077 ms | 12.13 GiB (407), 121 ms, 400 ms | 7.10e-4 |
+| clip48 | out of memory (eval) | 17.63 GiB (394), 180 ms, 601 ms | -- |
+| clip64 | out of memory (eval) | 23.44 GiB (393), 237 ms, 815 ms | 7.03e-4 |
+| clip80 | -- | 29.06 GiB (390), 292 ms, 1020 ms | -- |
+| clip88 | -- | prepare 28.89 GiB and force (320 ms) fit; the scan's 4.0 GiB block did not, after the bench's second eager prepare | -- |
+| p32 (seed 0) | 22.43 GiB, 923 ms | 8.89 GiB (298), 144 ms, 366 ms | -- |
+| p48 | out of memory (step) | 13.70 GiB (306), 334 ms, 713 ms | -- |
+| p64 | -- | 20.44 GiB (343), 316 ms, 845 ms | -- |
+| p80 | -- | prepare 29.29 GiB (393 B/p: the draw's outliers stretch the box, 591M far pairs against 219M at p64); the force ran out of memory | -- |
+| p96 | -- | prepare 28.05 GiB, force 541 ms; the scan ran out of memory as at clip88 | -- |
+| p112 | -- | prepare 33.14 GiB; the force ran out of memory | -- |
+| 25M disc+bulge | 20.68 GiB, 779 ms | 8.91 GiB (380), 96 ms, 303 ms | 0.34 (softening, see above) |
+
+* **A production rollout's sequence** (`--skip-eval`: one prepare, then the scan; the ladder above prepares twice,
+  once for the force-only timing and once inside `strict_run_v2`):
+
+  | run | allocator | peak (B/p) | per step |
+  | --- | --- | --- | --- |
+  | clip88 | preallocated arena 0.88 | 31.76 GiB (388) | 1126 ms |
+  | clip96 | preallocated arena 0.88 | the scan's 4.4 GiB block does not fit after the prepare | -- |
+  | clip96 | `cuda_async` (on demand) | 34.20 GiB (383) | 1580 ms |
+  | clip104 | `cuda_async` | **36.87 GiB (381)** | 1730 ms |
+  | p80 (seed 0) | preallocated arena 0.88 | prepare 31.97 GiB; the scan's 3.3 GiB block does not fit | -- |
+
+  **One 40 GB A100 now holds 1.04e8 particles** (the base: 3.2e7). The arena's limit is fragmentation, not
+  size: right before the scan only the particles are live (checked at 2e4: 1.1 MB; at 8.8e7: 6.75 GiB after the
+  call), yet a 4.4 GiB block will not fit after a 30 GiB prepare. The asynchronous allocator fits it and costs
+  ~25 % of the step (1580 ms at 9.6e7 against 1126 at 8.8e7 in the arena, per particle), as in Step 3.
+* **What binds now.** With the particle carry, the scan itself is no longer the peak: after it only the
+  particles stay resident (0.8 GiB at 8e6). The binding peak is the eager prepare: the downward pass's
+  transients at 8e6, ~360 B per particle at large N.
+* **Clipped vs seed-0 Plummer.** The clipped draw has twice the leaves per particle (cell_min_level 8 is relative
+  to its smaller box: 10.5 against 19.7 particles per leaf). On it, cell_min_level 6 is 17 % faster and 18 %
+  lighter at the same rel-L2 (91 against 110 ms, 396 against 481 B/p at 8e6). On seed 0 it changes nothing. The
+  default stays 8: it is what keeps sparse outskirts from forming huge leaves (outlier draws, the multi-GPU
+  cross export).
+* **Against jz-fmm on the same IC and card class.** jz-fmm, leaf 32, p4, theta 0.6, aggL2 3-8e-4, arena 0.88,
+  card 6: 241-251 B per particle flat from 8e6 to 1e8 (23.4 GiB at 1e8); 104 ms at 8e6, 398 at 3.2e7, 1278 at
+  1e8, tree build included. Per particle, our full step (refresh, force, kick) now costs what its force
+  evaluation costs, at ~1.6x its memory.
+
+**Where a step goes now** (8e6 clipped, stage trace without command buffers, lane cascades): walk 27 ms,
+COM radii 26, near field 23.5, tree 19, M2L 15, P2M 10, the walk queue's copies 10 (since removed), each call's
+eager initial force ~11 per step at 2 steps per call (the particle carry's handle removes it). The cascades,
+40 % of the step before, are 3 %.
+
+**jz-fmm on the same IC and card** (`codes/jzfmm_force_eval.py --memory`, Odisseo; card 2 under other users'
+load, so its times are indicative): 8e6 clipped at leaf 32 peaks at 213-244 B per particle (p3-p5); p5 theta
+0.8 gives aggL2 4.4e-4.
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
@@ -219,8 +338,22 @@ Two follow-ups stand between the fused lane and the 25M disc+bulge production ro
   scan. Its force-scale estimate already takes the softening, and the mesh lane was in class with it on this IC,
   so measure whether it alone fixes the bulge centre before building the distance floor.
 
-Then:
+Then (updated after round 2):
 
-* the leaf-major evaluation's 3.7x slot padding;
-* a segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today);
-* the record configuration at 2e5 on a quiet card.
+* **Memory.** The binding peak is now the eager prepare, mostly the downward pass's transients. Next:
+  * a jitted (or chunked) eager downward;
+  * the far list's all -1 `tags` (eager state only);
+  * the near tables (`nearfield_leaf_particle_indices` / mask) that the direct layout no longer reads;
+  * an unexplained +0.13 GiB in the head's eager prepare at 8e6 against c1b40b3. It is not the near CSR, the walk
+    or yggdrax (bisected).
+* **Speed** (8e6 step at the head; stage trace without command buffers):
+  * COM radii (~20-26 ms): one fused kernel that reads each leaf's particles once for its whole ancestor chain;
+  * the near field (23 ms): its 32-lane tiles are 30 % occupied on 10-particle leaves;
+  * the far list's second sort (the M2L's `csr_by_target`, ~3 ms): the list build can hand it a presorted CSR,
+    as the near CSR now is.
+* **Production.**
+  * Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` without code changes.
+  * The int32 index default is its own PR pair (jaccpot `perf/int32-index-default`, yggdrax the same name):
+    Odisseo's production runs have used int64.
+* Still open: a segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today), and the
+  record configuration at 2e5 on a quiet card.
