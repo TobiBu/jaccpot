@@ -1046,13 +1046,11 @@ class PrepareMixin(_EngineBase):
         # Under the COM MAC geometry the walk never reads the box geometry (only
         # the dehnen_error policy and the octree lanes do), and on a cell-leaf
         # tree its level loop is nodes x depth work: build it lazily instead.
-        if (
-            tree_config.mode == "static_radix"
-            and str(upward_center_mode).strip().lower() == "com"
-            and mac_geometry_mode() == "com"
-            and not self._uses_paper_style_force_scale()
-            and str(getattr(self, "execution_backend", "")) != "octree"
-        ):
+        # The mode is asked with the strict fused lane's default, as its walk
+        # resolves it (`_strict_walk_geometry`): asked bare it said "aabb" there,
+        # and the eager prepare built the box geometry every time -- its (L, 3, w)
+        # leaf gather was the prepare's largest transient (1.3 GiB at 8e6).
+        if self._defers_box_geometry(tree_config.mode, upward_center_mode):
             defer_geometry = True
         upward = self.prepare_upward_sweep(
             tree,
@@ -3417,6 +3415,34 @@ class PrepareMixin(_EngineBase):
             cross_far=cross_far,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
+        )
+
+    def _defers_box_geometry(self, tree_mode: str, center_mode: str) -> bool:
+        """Whether the upward sweep may skip the box geometry (the walk tests COM).
+
+        Parameters
+        ----------
+        tree_mode : str
+            The tree builder mode.
+        center_mode : str
+            The upward sweep's expansion-centre mode.
+
+        Returns
+        -------
+        bool
+            True on a static-radix COM tree whose walk geometry resolves to
+            ``"com"`` (with the strict fused lane's default), outside the
+            paper-style force scale and the octree backend -- the walk then never
+            reads the box geometry, and ``_strict_walk_geometry`` builds it lazily
+            if a caller does.
+        """
+        default = "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+        return (
+            str(tree_mode) == "static_radix"
+            and str(center_mode).strip().lower() == "com"
+            and mac_geometry_mode(default) == "com"
+            and not self._uses_paper_style_force_scale()
+            and str(getattr(self, "execution_backend", "")) != "octree"
         )
 
     def _strict_walk_geometry(self, tree_artifacts: Any) -> tuple[Any, Any]:

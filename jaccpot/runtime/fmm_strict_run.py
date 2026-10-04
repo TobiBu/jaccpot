@@ -2187,7 +2187,8 @@ class StrictRunMixin(_EngineBase):
                 topology_key=refresh_topology_key,
             )
 
-        defer_geometry = False
+        # as the prepare: the COM walk never reads the box geometry
+        defer_geometry = self._defers_box_geometry(tree_config.mode, upward_center_mode)
         upward = self.prepare_upward_sweep(
             build_artifacts.tree,
             build_artifacts.positions_sorted,

@@ -128,6 +128,12 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--no-analysis", action="store_true", help="skip memory_analysis()")
     ap.add_argument("--dump-dir", default=None, help="XLA dump (buffer assignment)")
     ap.add_argument(
+        "--dump-re",
+        default=".*(_eval|_compiled_runner).*",
+        help="module regex for --dump-dir ('.*' dumps every jitted piece of the "
+        "eager prepare too)",
+    )
+    ap.add_argument(
         "--trace-dir",
         default=None,
         help="profile one warm strict_run_v2 call here (analyse with "
@@ -177,7 +183,7 @@ if ARGS.dump_dir:
     os.makedirs(ARGS.dump_dir, exist_ok=True)
     os.environ["XLA_FLAGS"] += (
         f" --xla_dump_to={ARGS.dump_dir} --xla_dump_hlo_as_text"
-        " --xla_dump_hlo_module_re=.*(_eval|_compiled_runner).*"
+        f" --xla_dump_hlo_module_re={ARGS.dump_re}"
     )
 
 overrides = fast_lane_overrides_for_leaf(ARGS.leaf, ARGS.n)
