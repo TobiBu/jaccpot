@@ -1936,6 +1936,31 @@ def far_pair_targets(far_pairs: CompactTaggedFarPairs) -> Array:
     return jnp.asarray(far_pairs.targets)
 
 
+def _list_csr_kernel() -> str:
+    """How the deterministic walk builds its directed CSR lists.
+
+    ``JACCPOT_LIST_CSR_KERNEL``: ``pallas`` (counts, atomic placement and in-row
+    ranks, :mod:`jaccpot.pallas.csr_place`: 16 B per canonical slot), ``xla``
+    (two sorts over the pairs: 24 B per slot at the placement), ``interpret``
+    (the Pallas route in interpret mode, for CPU tests) or ``auto`` (the default:
+    ``pallas`` where it lowers, else ``xla``). Read at trace time.
+
+    Returns
+    -------
+    str
+        ``"pallas"``, ``"xla"`` or ``"interpret"``.
+    """
+    from jaccpot._env import env_choice
+    from jaccpot.pallas.csr_place import pallas_directed_csr_supported
+
+    choice = env_choice(
+        "JACCPOT_LIST_CSR_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
+    )
+    if choice == "auto":
+        return "pallas" if pallas_directed_csr_supported() else "xla"
+    return choice
+
+
 def _directed_csr_from_canonical(
     a: Array,
     b: Array,
@@ -1952,7 +1977,9 @@ def _directed_csr_from_canonical(
     Each canonical pair is the two directed entries ``b -> a`` and ``a -> b``. Sorted
     by ``(target, source)``, row ``t`` holds first the ``a`` of every pair ``(a, t)``
     (``a < t``), then the ``b`` of every pair ``(t, b)`` (``b > t``), each ascending.
-    So instead of one composite sort over the ``2W`` directed entries: one composite
+    Where Pallas lowers (:func:`_list_csr_kernel`) no sort at all: counts, atomic
+    placement and in-row ranks (:mod:`jaccpot.pallas.csr_place`). Otherwise,
+    instead of one composite sort over the ``2W`` directed entries: one composite
     sort of the ``W`` canonical pairs by ``(a, b)`` (the rows' high halves, in
     order), one stable int32 key-value re-sort of them by ``b`` (the low halves,
     ``a`` ascending by stability), counts and offsets from both, and one
@@ -1965,7 +1992,7 @@ def _directed_csr_from_canonical(
     b : Array
         ``(W,)`` upper node.
     live : Array
-        ``(W,)`` live slots.
+        ``(W,)`` live slots, a prefix.
     row_offset : int
         Node id of row 0 (``num_internal`` for leaf rows, 0 for node rows). Static.
     num_rows : int
@@ -1992,6 +2019,28 @@ def _directed_csr_from_canonical(
     R = int(num_rows)
     if 3 * width >= int(jnp.iinfo(idx).max):
         raise ValueError(f"pair width {width} overflows {idx}")
+    route = _list_csr_kernel()
+    if route != "xla" and width > 0 and R > 0:
+        # no sort over the pairs: counts, atomic placement, in-row ranks (the
+        # same arrays to the bit; jaccpot.pallas.csr_place)
+        from jaccpot.pallas.csr_place import directed_csr_pallas
+        from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+
+        sources, offsets, counts = directed_csr_pallas(
+            jnp.asarray(a, idx) - jnp.asarray(row_offset, idx),
+            jnp.asarray(b, idx) - jnp.asarray(row_offset, idx),
+            jnp.sum(jnp.asarray(live, idx)),
+            num_rows=R,
+            row_offset=int(row_offset),
+            pad_source=int(pad_source),
+            idx=idx,
+            interpret=route == "interpret",
+        )
+        targets = None
+        if with_targets:
+            rows = targets_from_csr_offsets(offsets, 2 * width)
+            targets = jnp.where(rows >= 0, rows + jnp.asarray(row_offset, idx), -1)
+        return sources, targets, offsets, counts
     dead = jnp.asarray(R, idx)
     ra = jnp.where(live, a - row_offset, dead).astype(idx)
     rb = jnp.where(live, b - row_offset, dead).astype(idx)
