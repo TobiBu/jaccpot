@@ -1664,8 +1664,10 @@ class StrictRunMixin(_EngineBase):
                 return runner
             self._strict_fused_traced_caps = None
 
+            # named like the state carry's runner: dumps and the stage analyser
+            # select ``*_compiled_runner*``
             @jax.jit
-            def _runner(
+            def _compiled_runner(
                 state_initial: Array,
                 acceleration_initial: Array,
                 acceleration_self_initial: Array,
@@ -1709,9 +1711,9 @@ class StrictRunMixin(_EngineBase):
                     length=num_steps_i,
                 )
 
-            jit_cache[cache_key] = _runner
+            jit_cache[cache_key] = _compiled_runner
             self._strict_fused_jit_function_cache = jit_cache
-            return _runner
+            return _compiled_runner
 
         prepared_curr = prepared_box.pop() if prepared_box else None
         if handle_in is not None:
