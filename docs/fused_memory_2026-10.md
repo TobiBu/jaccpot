@@ -114,20 +114,59 @@ process per rung, Plummer seed 0 (per-force and per-step min of 3 and 2):
 | 1.2e7 | 45.2M / 45.5M | 130 | 469 | 4.78 | 11.6 | -- |
 | 1.6e7 | 69.9M / 130.0M | 334 | 1030 | 8.91 | 16.9 | 1.1e-3 (median 6.2e-4) |
 | 2.4e7 | 66.0M / 211.1M | 520 | 1432 | 12.96 | 24.2 | -- |
-| 3.2e7 | 56.3M / 355.5M | 845 (force fits) | out of memory | 19.81 | -- | -- |
+| 3.2e7 | 56.3M / 355.5M | 845 (force fits) | out of memory (see below) | 19.81 | -- | -- |
 
-* **The one-card ceiling moved from 8e6 to 2.4e7 Plummer particles**, and the 2.4e7 step peaks at 24.2 GiB.
+* **The one-card ceiling moved from 8e6 to 2.4e7 Plummer particles** with the benches' on-demand allocator (the
+  2.4e7 step peaks at 24.2 GiB), and to 3.2e7 with a preallocated arena (next bullet, and Step 3 below).
 * **Above 1.2e7 these draws are pathological**, not the code: the unclipped sampler's outliers stretch the
   per-axis box (extent 5.2e3 at 8e6, 2.7e4 at 1.6e7, 2.6e4 at 2.4e7) and the near list grows from 2.4 edges per
   particle at 8e6 to 8.1, 8.8 and 11.1. Hence the per-force jump from 1.2e7 to 1.6e7.
-* **3.2e7 fails in the compiled step, not in the prepare**: one 16.9 GiB temporary for the traced near-list build
-  (an int64 composite sort over 534M slots, its inputs and outputs). Doubling the near-field chunk
+* **3.2e7 failed on ALLOCATOR FRAGMENTATION, not on the card** (found with Step 3, below). The step needs one
+  16.9 GiB temporary for the traced near-list build (an int64 composite sort over 534M slots, its inputs and
+  outputs). The benches run with `XLA_PYTHON_CLIENT_PREALLOCATE=false`, so the allocator grows regions on demand
+  and keeps them. The eager prepare's 20 GiB peak had left regions that no contiguous 16.9 GiB fit beside. With a
+  preallocated arena (jax's default; fraction 0.88 here, because the card held another process) the same rung
+  fits: 845 ms per force, 2274 ms per step, step peak 33.5 GiB of 34.8. Doubling the near-field chunk
   (`JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK=128`, time-neutral at 8e6) shrinks the force's temporaries 14.2 -> 12.4
   GiB but not the step's.
 * **The force's own temporary peak at 8e6 is the far field's leaf-major evaluation**: ~20 arrays of
-  [leaf capacity, 64] slots, while cell leaves hold ~20 particles on average -- 3.7x the particle count. That, and
-  donating the step's carry (the plan's Step 3: the arguments and outputs are each ~1.4 GiB at 8e6), are the levers
-  for going further.
+  [leaf capacity, 64] slots, while cell leaves hold ~20 particles on average -- 3.7x the particle count. That is
+  the lever after Step 3.
+
+## Step 3: the step's carry, donated and slimmer (2026-10-04)
+
+Branch `perf/fused-carry`, stacked on #358. The prepared state is the compiled scan's carry, so the runner held it
+twice: as its argument and as its output.
+
+* **Donation.** `strict_run_v2(..., donate_prepared_state=True)` hands the state's buffers to the scan, which
+  writes the returned state into them. It is opt-in for a caller's state: the Odisseo coupling passes ONE
+  prepared state to every warm-up and timed run, and donating it by default would delete it under them. A state
+  `strict_run_v2` prepares itself (`prepared_state=None`) is always donated, since nothing else holds it.
+  `strict_fused_prepared_eval_fn(..., donate_prepared=True)` gives a one-shot eval closure.
+* **The far list rides outside the scan.** On the default fresh far-pair rebuild the carried far list is a
+  placeholder: each refresh builds its own and returns the input's unchanged. It is detached before the scan and
+  re-attached to the returned state, which the gradient path reads (3 x P int32, 1.0 GiB at 2.5e7 on the disc).
+* **Two things donation exposed:**
+  * the flat-walk neighbour list holds one array under two fields, and XLA refuses to donate a buffer twice, so
+    repeats are copied first (`_unaliased`);
+  * the engine's topology-reuse entry kept the prepare's tree, which a donated scan deletes, so the donating call
+    drops it and the one-slot prepared-state cache (they only save a rebuild).
+  * A test walks the engine for deleted arrays after donating calls: none.
+
+Same card, unnamed caps, interleaved where marked:
+
+| row | before (#358) | Step 3 | per step before / after |
+| --- | --- | --- | --- |
+| 8e6 (2 x 2 interleaved; "before" = Step 3 code without donation) | 6.76-6.86 GiB | 5.74-5.81 GiB | 264 / 264 ms |
+| 25M disc+bulge | 28.2 GiB (args 5.8 + out 5.7 + temp 14.2) | 22.6 GiB (args 4.8, 3.8 aliased; temp 14.3) | 1533 / 1515 ms |
+| 3.2e7 Plummer, preallocated arena (0.88) | 33.5 GiB | 26.4 GiB | 2274 / 2244 ms |
+
+Results are bitwise equal with and without donation (A-vs-A controlled), and the far list comes back as the same
+object. With the asynchronous allocator (`XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async`) 3.2e7 also fits on demand
+(26.2 GiB), but the force ran 1319 against 845 ms.
+
+**One card now holds 3.2e7 Plummer particles at 26.4 GiB, and the 25M production IC at 22.6 GiB.** What is left
+in the step is its temporaries: at 3.2e7, the near-list build over 534M slots.
 
 ## The production IC on one card -- it fits, and the lane is not accurate on it
 
@@ -182,7 +221,6 @@ Two follow-ups stand between the fused lane and the 25M disc+bulge production ro
 
 Then:
 
-* plan Step 3 (slim the step's carry: arguments and outputs are each ~5.7 GiB at 25M);
 * the leaf-major evaluation's 3.7x slot padding;
 * a segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today);
 * the record configuration at 2e5 on a quiet card.
