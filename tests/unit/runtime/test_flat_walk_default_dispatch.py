@@ -53,7 +53,7 @@ def _clean_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def _seam(tree, geometry, *, mac_type="dehnen", report=None, floor=None):
+def _seam(tree, geometry, *, mac_type="dehnen", report=None, floor=None, queue=1 << 14):
     return ic._build_dual_tree_artifacts_split_strict_streamed(
         tree=tree,
         geometry=geometry,
@@ -63,7 +63,7 @@ def _seam(tree, geometry, *, mac_type="dehnen", report=None, floor=None):
         max_pair_queue=None,
         pair_process_block=None,
         traversal_config=DualTreeTraversalConfig(
-            max_pair_queue=1 << 14,
+            max_pair_queue=queue,
             process_block=256,
             max_interactions_per_node=1024,
             max_neighbors_per_leaf=512,
@@ -96,9 +96,18 @@ def test_flat_walk_is_the_default(monkeypatch, tree_and_geometry):
     (report,) = reports
     assert report["flat_walk"] is True and report["peak_wavefront"] > 0
     assert report["far_named"] is False and report["near_edge_named"] is False
-    # unnamed caps sit at their floors (the 512-particle tree fits them)
-    assert report["near_edge_capacity"] == ic._FLAT_WALK_NEAR_EDGE_FLOOR
-    assert report["compact_far_pair_capacity"] == ic._STRICT_STREAMED_FAR_PAIR_FLOOR
+    # unnamed caps are sized from the counts the walk measured, not left at the
+    # ladder floors the 512-particle tree fits inside
+    h = ic.flat_walk_cap_headroom()
+    assert report["near_edge_capacity"] == ic._tight_list_capacity(
+        report["total_neighbors"], headroom=h
+    )
+    assert report["compact_far_pair_capacity"] == ic._tight_list_capacity(
+        report["far_pair_count"], headroom=h
+    )
+    assert report["near_edge_capacity"] < ic._FLAT_WALK_NEAR_EDGE_FLOOR
+    assert art.neighbor_list.neighbors.shape[0] == report["near_edge_capacity"]
+    assert art.compact_far_pairs.sources.shape[0] == report["compact_far_pair_capacity"]
     assert int(art.compact_far_pairs.far_pair_count) > 0
 
 
@@ -193,3 +202,119 @@ def test_capacity_floor_from_an_earlier_pass_is_honoured(
     reports.clear()
     _seam(tree, geometry, report=reports.append, floor={"near_edge_capacity": 1 << 23})
     assert reports[0]["near_edge_capacity"] == 1 << 15
+
+
+def test_tight_capacity_rule():
+    assert ic._tight_list_capacity(1000, headroom=1.5) == 2048
+    assert ic._tight_list_capacity(1000, headroom=1.5, floor=4096) == 4096
+    g = ic._FLAT_WALK_CAP_GRANULE
+    assert ic._tight_list_capacity(10 * g, headroom=1.5) == 15 * g
+    assert ic._tight_list_capacity(10 * g + 1, headroom=1.5) == 16 * g
+    assert ic._tight_list_capacity(0, headroom=1.5) == 2
+    for c in (1, 7, 999, 3 * g + 5):
+        cap = ic._tight_list_capacity(c, headroom=1.0)
+        assert cap >= c and cap % 2 == 0
+
+
+def test_headroom_env(monkeypatch):
+    monkeypatch.setenv("JACCPOT_FLAT_WALK_CAP_HEADROOM", "2.5")
+    assert ic.flat_walk_cap_headroom() == 2.5
+    monkeypatch.setenv("JACCPOT_FLAT_WALK_CAP_HEADROOM", "0.5")
+    assert ic.flat_walk_cap_headroom() == 1.0
+    monkeypatch.delenv("JACCPOT_FLAT_WALK_CAP_HEADROOM")
+    assert ic.flat_walk_cap_headroom() == ic._FLAT_WALK_CAP_HEADROOM
+
+
+def _live(art):
+    far = art.compact_far_pairs
+    nf = int(far.far_pair_count)
+    nl = art.neighbor_list
+    ne = int(nl.offsets[-1])
+    return (
+        far.sources[:nf].tolist(),
+        far.targets[:nf].tolist(),
+        nl.neighbors[:ne].tolist(),
+        nl.offsets.tolist(),
+    )
+
+
+@pytest.mark.parametrize("backend", ["flat", "pallas"])
+def test_tight_lists_are_the_live_prefix_of_a_wide_build(
+    monkeypatch, tree_and_geometry, backend
+):
+    """Same pairs in the same row order at any width: only the padding differs."""
+    tree, geometry = tree_and_geometry
+    if backend == "pallas":
+        monkeypatch.setenv("JACCPOT_WALK_PALLAS_INTERPRET", "1")
+    monkeypatch.setenv(_NEAR_CAP, str(1 << 16))
+    monkeypatch.setenv(_FAR_CAP, str(1 << 16))
+    wide = _seam(tree, geometry)
+    monkeypatch.delenv(_NEAR_CAP)
+    monkeypatch.delenv(_FAR_CAP)
+    reports = []
+    tight = _seam(tree, geometry, report=reports.append)
+    (report,) = reports
+    assert wide.compact_far_pairs.sources.shape[0] == 1 << 16
+    assert (
+        tight.compact_far_pairs.sources.shape[0] == report["compact_far_pair_capacity"]
+    )
+    assert report["compact_far_pair_capacity"] < 1 << 16
+    assert _live(tight) == _live(wide)
+
+
+def test_pallas_ladder_sizes_an_overflowed_list_in_one_retry(
+    monkeypatch, tree_and_geometry
+):
+    tree, geometry = tree_and_geometry
+    monkeypatch.setenv("JACCPOT_WALK_PALLAS_INTERPRET", "1")
+    monkeypatch.setattr(ic, "_FLAT_WALK_NEAR_EDGE_FLOOR", 16)
+    monkeypatch.setattr(ic, "_STRICT_STREAMED_FAR_PAIR_FLOOR", 16)
+    reports = []
+    _seam(tree, geometry, report=reports.append)
+    (report,) = reports
+    grew_lists = [g for g in report["grew"] if not g.startswith("max_pair_queue")]
+    # one entry per list: the first walk measured what each needed
+    assert len(grew_lists) == 2, report["grew"]
+    h = ic.flat_walk_cap_headroom()
+    assert report["compact_far_pair_capacity"] == ic._tight_list_capacity(
+        report["far_pair_count"], headroom=h
+    )
+    assert report["near_edge_capacity"] == ic._tight_list_capacity(
+        report["total_neighbors"], headroom=h
+    )
+
+
+def test_a_floor_keeps_a_wider_validated_width(monkeypatch, tree_and_geometry):
+    """A re-prepare never builds narrower than the width the step was compiled for."""
+    tree, geometry = tree_and_geometry
+    reports = []
+    _seam(tree, geometry, report=reports.append)
+    first = reports[0]
+    reports.clear()
+    floor = {
+        "near_edge_capacity": 4 * first["near_edge_capacity"],
+        "compact_far_pair_capacity": 4 * first["compact_far_pair_capacity"],
+    }
+    art = _seam(tree, geometry, report=reports.append, floor=floor)
+    assert reports[0]["near_edge_capacity"] == floor["near_edge_capacity"]
+    assert reports[0]["compact_far_pair_capacity"] == floor["compact_far_pair_capacity"]
+    assert art.neighbor_list.neighbors.shape[0] == floor["near_edge_capacity"]
+
+
+def test_pallas_ladder_grows_lists_only_once_the_queue_fits(
+    monkeypatch, tree_and_geometry
+):
+    """A walk stopped by its queue counted part of the pairs: lists wait for a full walk."""
+    tree, geometry = tree_and_geometry
+    monkeypatch.setenv("JACCPOT_WALK_PALLAS_INTERPRET", "1")
+    monkeypatch.setattr(ic, "_FLAT_WALK_NEAR_EDGE_FLOOR", 16)
+    monkeypatch.setattr(ic, "_STRICT_STREAMED_FAR_PAIR_FLOOR", 16)
+    reports = []
+    _seam(tree, geometry, report=reports.append, queue=16)
+    (report,) = reports
+    queue_growth = [g for g in report["grew"] if g.startswith("max_pair_queue")]
+    list_growth = [g for g in report["grew"] if not g.startswith("max_pair_queue")]
+    assert queue_growth, report["grew"]
+    assert len(list_growth) == 2, report["grew"]
+    # and the lists' growth came after the queue's last doubling
+    assert report["grew"].index(list_growth[0]) > report["grew"].index(queue_growth[-1])

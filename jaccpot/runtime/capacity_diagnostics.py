@@ -46,6 +46,8 @@ def capacity_report(
     preset: Optional[str],
     traversal_config: Any = None,
     nearfield_mode: Optional[str] = None,
+    walk_caps: Optional[dict] = None,
+    num_leaves: Optional[int] = None,
 ) -> list[tuple[str, float, str]]:
     """Return ``[(buffer name, GiB, the knob that sizes it)]``, largest first.
 
@@ -69,6 +71,14 @@ def capacity_report(
         Traversal capacities, which size the pair buffers.
     nearfield_mode : Optional[str]
         Near-field mode, which decides whether the bucketed buffers exist.
+    walk_caps : Optional[dict]
+        The engine's flat-walk capacity record (``_strict_fused_validated_caps``).
+        On that lane -- the fused default -- the dual walk's per-node and per-leaf
+        buffers do not exist, and listing them sent a reader after a 305 GiB
+        payload that was never allocated; its own buffers are listed instead.
+    num_leaves : Optional[int]
+        Static leaf count (``TreeConfig.leaf_capacity`` for cell leaves); ``None``
+        estimates ``N / leaf``.
 
     Returns
     -------
@@ -82,9 +92,18 @@ def capacity_report(
     leaf = max(1, int(leaf_size))
     p = max(0, int(max_order))
     itemsize = _bytes_per_element(getattr(working_dtype, "name", working_dtype))
-    num_leaves = max(1, -(-n // leaf))
+    num_leaves = max(1, int(num_leaves) if num_leaves else -(-n // leaf))
     num_nodes = 2 * num_leaves
     coeffs = (p + 1) * (p + 1)
+    if isinstance(walk_caps, dict) and walk_caps.get("flat_walk"):
+        return _flat_walk_entries(
+            walk_caps,
+            n=n,
+            leaf=leaf,
+            num_leaves=num_leaves,
+            coeffs=coeffs,
+            itemsize=itemsize,
+        )
 
     queue = block = per_node = per_leaf = 0
     if traversal_config is not None:
@@ -136,6 +155,83 @@ def capacity_report(
     return sorted((e for e in entries if e[1] > 0.0), key=lambda e: e[1], reverse=True)
 
 
+def _flat_walk_entries(
+    caps: dict, *, n: int, leaf: int, num_leaves: int, coeffs: int, itemsize: int
+) -> list[tuple[str, float, str]]:
+    """The fused flat-walk lane's capacity-sized buffers, largest first.
+
+    Parameters
+    ----------
+    caps : dict
+        Flat-walk capacity record (directed list widths, queue, peak wavefront).
+    n : int
+        Particle count.
+    leaf : int
+        Leaf occupancy target.
+    num_leaves : int
+        Static leaf count.
+    coeffs : int
+        Coefficients per expansion.
+    itemsize : int
+        Bytes per working-dtype element.
+
+    Returns
+    -------
+    list[tuple[str, float, str]]
+        ``(buffer name, GiB, sizing knob)``, largest first.
+    """
+    far = int(caps.get("compact_far_pair_capacity") or 0)
+    near = int(caps.get("near_edge_capacity") or 0)
+    queue = int(caps.get("queue_capacity") or 0)
+    peak = caps.get("peak_wavefront")
+    if peak:
+        queue = max(queue, 1 << (max(1, int(1.5 * int(peak))) - 1).bit_length())
+    width = 1 << (max(1, leaf) - 1).bit_length()
+    lists = (
+        "JACCPOT_FLAT_WALK_CAP_HEADROOM x the count the eager walk measured when "
+        "unnamed; {} when named (exact, never widened)"
+    )
+    entries = [
+        (
+            "far-pair list (sources, targets, tags: 3 x far cap, int32)",
+            3 * far * 4 / _GIB,
+            lists.format("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP"),
+        ),
+        (
+            "near-field partials per step (16 B x (near cap + leaves x leaf width))",
+            16 * (near + num_leaves * width) / _GIB,
+            lists.format("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP")
+            + "; and TreeConfig(leaf_capacity=...)",
+        ),
+        (
+            "list sort scratch (int64 composite keys, 16 B x near cap + 8 B x far cap)",
+            (16 * near + 8 * far) / _GIB,
+            "the two list caps",
+        ),
+        (
+            "near-field neighbour CSR (near cap, int32)",
+            near * 4 / _GIB,
+            lists.format("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP"),
+        ),
+        (
+            "walk queue (4 x queue, int32)",
+            16 * queue / _GIB,
+            "1.5 x the eager peak wavefront; TraversalOverrides(max_pair_queue=...)",
+        ),
+        (
+            "multipole + local coefficients (2 x total_nodes x (p+1)^2)",
+            2 * 2 * num_leaves * coeffs * itemsize / _GIB,
+            "max_order, TreeConfig(leaf_capacity=...)",
+        ),
+        (
+            "particle state (positions, velocities, sorted copies, codes)",
+            n * 68 / _GIB,
+            "N",
+        ),
+    ]
+    return sorted((e for e in entries if e[1] > 0.0), key=lambda e: e[1], reverse=True)
+
+
 def _device_memory_gib() -> Optional[tuple[float, float]]:
     """``(bytes_in_use, bytes_limit)`` in GiB for the default device, if exposed.
 
@@ -172,6 +268,8 @@ def reraise_with_capacity_report(
     preset: Optional[str],
     traversal_config: Any = None,
     nearfield_mode: Optional[str] = None,
+    walk_caps: Optional[dict] = None,
+    num_leaves: Optional[int] = None,
 ) -> None:
     """Re-raise ``exc`` with the buffer sizes and a configuration that fits.
 
@@ -197,6 +295,11 @@ def reraise_with_capacity_report(
         Traversal capacities, which size the pair buffers.
     nearfield_mode : Optional[str]
         Near-field mode, which decides whether the bucketed buffers exist.
+    walk_caps : Optional[dict]
+        The engine's flat-walk capacity record, when it has one; see
+        :func:`capacity_report`.
+    num_leaves : Optional[int]
+        Static leaf count; see :func:`capacity_report`.
 
     Returns
     -------
@@ -218,7 +321,10 @@ def reraise_with_capacity_report(
         preset=preset,
         traversal_config=traversal_config,
         nearfield_mode=nearfield_mode,
+        walk_caps=walk_caps,
+        num_leaves=num_leaves,
     )
+    flat = isinstance(walk_caps, dict) and bool(walk_caps.get("flat_walk"))
     lines = [
         f"jaccpot could not fit N={int(num_particles)} with preset={preset!r}, "
         f"leaf_size={int(leaf_size)}, max_order={int(max_order)}, "
@@ -231,14 +337,24 @@ def reraise_with_capacity_report(
     for name, gib, knob in entries[:5]:
         lines.append(f"  {gib:8.2f} GiB  {name}")
         lines.append(f"           sized by: {knob}")
-    lines.append(
-        "What usually fits: preset='large_n_gpu' with leaf_size=256 keeps the "
-        "fast-lane payload and the near-field neighbour buffer bounded (it is the "
-        "path built for this N); raising leaf_size shrinks num_leaves and every "
-        "per-leaf buffer with it, at some accuracy cost. To change ONE traversal "
-        "capacity without disturbing the preset's other tuning, pass "
-        "jaccpot.TraversalOverrides(...) rather than a full DualTreeTraversalConfig."
-    )
+    if flat:
+        lines.append(
+            "Flat-walk lane: leave the two list caps unnamed so they are sized from "
+            "the measured counts (a named cap is honoured exactly, however large); "
+            "keep TreeConfig(leaf_capacity=...) near 1.15x the live cell leaves; "
+            "set XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 (the default 0.75 leaves a "
+            "quarter of the card unused)."
+        )
+    else:
+        lines.append(
+            "What usually fits: preset='large_n_gpu' with leaf_size=256 keeps the "
+            "fast-lane payload and the near-field neighbour buffer bounded (it is "
+            "the path built for this N); raising leaf_size shrinks num_leaves and "
+            "every per-leaf buffer with it, at some accuracy cost. To change ONE "
+            "traversal capacity without disturbing the preset's other tuning, pass "
+            "jaccpot.TraversalOverrides(...) rather than a full "
+            "DualTreeTraversalConfig."
+        )
     raise RuntimeError("\n".join(lines)) from exc
 
 

@@ -44,6 +44,7 @@ __all__ = [
     "fused_capacity_plan",
     "fused_capacity_plan_overrides",
     "install_walk_caps",
+    "list_widths",
     "measure_shard_plan",
     "merge_plans",
     "merge_walk_caps",
@@ -360,6 +361,34 @@ def merge_walk_caps(reports: "Iterable[Optional[dict]]") -> Optional[dict]:
         if values:
             merged[key] = max(values)
     return merged
+
+
+def list_widths(prepared: Any) -> tuple[int, int]:
+    """Static widths of a prepared state's far-pair list and neighbour CSR.
+
+    On the flat walk an UNNAMED list is sized from the count its eager prepare
+    measured, never narrower than the width the engine had validated before. Shards
+    prepared one after another on one engine therefore come out non-decreasing in
+    width, and stacking them for a mesh needs one width: a driver re-prepares every
+    shard narrower than the widest (its floor is then the merged record) -- see
+    :func:`jaccpot.distributed.rollout.setup_fused_force`.
+
+    Parameters
+    ----------
+    prepared : Any
+        A ``LargeNPreparedState``.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(far width, near width)``; ``0`` for a list the state does not carry.
+    """
+    far = getattr(getattr(prepared, "compact_far_pairs", None), "sources", None)
+    near = getattr(getattr(prepared, "neighbor_list", None), "neighbors", None)
+    return (
+        0 if far is None else int(far.shape[0]),
+        0 if near is None else int(near.shape[0]),
+    )
 
 
 def install_walk_caps(engine: Any, caps: Optional[dict]) -> None:

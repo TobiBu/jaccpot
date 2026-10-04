@@ -926,11 +926,24 @@ def _trim_radix_fast_lane_neighbor_list(
             neighbor_profile_capacity = int(neighbor_profile_fixed_cap)
             if neighbor_profile_capacity <= 0:
                 if bool(fused_device_mode):
-                    neighbor_profile_capacity = int(
-                        getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0)
-                    )
-                    if neighbor_profile_capacity <= 0:
-                        neighbor_profile_capacity = int(neighbor_active_edges)
+                    # Unnamed cap: the width follows the neighbour list, which the
+                    # flat walk sizes from its count and never shrinks. Pinning it
+                    # to the FIRST prepare's width made any later, wider list (a
+                    # rollout's segment retry, a denser state) fail here instead of
+                    # recompiling once.
+                    stored = int(getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0))
+                    neighbor_profile_capacity = max(stored, int(neighbor_active_edges))
+                    if 0 < stored < neighbor_profile_capacity:
+                        setattr(
+                            fmm,
+                            "_large_n_neighbor_edges_profile_reprofiles",
+                            int(
+                                getattr(
+                                    fmm, "_large_n_neighbor_edges_profile_reprofiles", 0
+                                )
+                            )
+                            + 1,
+                        )
                     setattr(
                         fmm,
                         "_large_n_neighbor_edges_profile_cap",

@@ -1,0 +1,6 @@
+shard 0: lists (52428800, 62914560) -> (56623104, 62914560)
+merged walk caps: {'queue_capacity': 8388608, 'peak_wavefront': 5647598, 'compact_far_pair_capacity': 56623104, 'near_edge_capacity': 62914560}
+  TIMING local      min 712.64 ms  median 732.22 ms  iqr 32.02 ms  (first call incl. compile 29.8 s; {'loadavg1_max': 19.50341796875, 'other_gpu_util_max': 100, 'foreign_pids_on_devices': [(1, 3623362, 'rremme'), (2, 3957035, 'afortuin'), (2, 3957746, 'afortuin'), (2, 3958514, 'afortuin')], 'contaminated': True, 'flags': ['foreign-process-on-device', 'loadavg>=8 (19.5)', 'other-gpus-busy (100%)']})
+  local-only (no cross)        rel-L2 vs fp64 direct (ALL sources) = 6.4137e-01   [order=6 dtype=float32 accum=input export_theta=None]
+  TIMING cross      min 609.32 ms  median 659.74 ms  iqr 58.93 ms  (first call incl. compile 38.4 s; {'loadavg1_max': 18.3740234375, 'other_gpu_util_max': 100, 'foreign_pids_on_devices': [(1, 3623362, 'rremme'), (2, 3957035, 'afortuin'), (2, 3957746, 'afortuin'), (2, 3958514, 'afortuin')], 'contaminated': True, 'flags': ['foreign-process-on-device', 'loadavg>=8 (18.4)', 'other-gpus-busy (100%)']})
+  + cross FAR and NEAR         rel-L2 vs fp64 direct (ALL sources) = 5.8679e-04   [order=6 dtype=float32 accum=input export_theta=None]

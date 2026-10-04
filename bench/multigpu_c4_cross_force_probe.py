@@ -46,6 +46,17 @@ CAP = int(N / NDEV * 1.15)
 apply_fast_lane_env(
     N if SOLO else CAP, overrides=fast_lane_overrides_for_leaf(LEAF, N if SOLO else CAP)
 )
+# The local lane's two list caps are left UNNAMED: each shard's eager prepare sizes
+# them from its measured counts (JACCPOT_FLAT_WALK_CAP_HEADROOM x count) and the
+# shards are reconciled to one width below. The harness's caps are pow2(200k fit x
+# N/200k) -- 6-9x the pairs at 8M on one card, and every per-step sort and the
+# near-field partials scale with them. PROBE_NAMED_CAPS=1 keeps them for an A/B.
+if os.environ.get("PROBE_NAMED_CAPS") != "1":
+    for _cap_var in (
+        "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP",
+        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP",
+    ):
+        os.environ.pop(_cap_var, None)
 # BOTH lengths: the fused profile gate keys on the EXACT array length, so the
 # per-shard arm (CAP rows) and the single-GPU comparison arm (N rows) each
 # need their own entry or the second one refuses to run at all
@@ -358,16 +369,17 @@ if SOLO:
 solver = build()
 from jaccpot.runtime.capacity_plan import (
     install_walk_caps,
+    list_widths,
     measure_shard_plan,
     merge_walk_caps,
 )
 
-preps, plans, walk_reports = [], [], []
-for d in range(NDEV):
+
+def _prepare_shard(d):
     # Prepare each shard ON ITS OWN device: at large N one card cannot hold every
     # shard's state, and the assembly below then needs no cross-device copy.
     with jax.default_device(jax.devices()[d if not SOLO else 0]):
-        pr, shard_plan, shard_caps = measure_shard_plan(
+        return measure_shard_plan(
             solver,
             jnp.asarray(dev_pos[d]),
             jnp.asarray(dev_mass[d]),
@@ -382,9 +394,21 @@ for d in range(NDEV):
                 else dict(bounds=(BLO, BHI), num_valid=dev_live[d])
             ),
         )
-    plans.append(shard_plan)
-    walk_reports.append(shard_caps)
-    preps.append(pr)
+
+
+preps, plans, walk_reports = (
+    list(t) for t in zip(*(_prepare_shard(d) for d in range(NDEV)))
+)
+# one list width for the stacked state: re-prepare any shard prepared before a wider
+# one, against the merged record (see jaccpot.distributed.rollout.setup_fused_force)
+install_walk_caps(solver, merge_walk_caps(walk_reports))
+_widest = tuple(max(w) for w in zip(*(list_widths(p) for p in preps)))
+for d in range(NDEV):
+    if list_widths(preps[d]) != _widest:
+        print(f"shard {d}: lists {list_widths(preps[d])} -> {_widest}", flush=True)
+        preps[d] = None
+        preps[d], plans[d], walk_reports[d] = _prepare_shard(d)
+        install_walk_caps(solver, merge_walk_caps(walk_reports))
 plan = merge_plans(plans)
 if os.environ.get("PROBE_PLAN_WIDEN"):
     # DIAGNOSTIC: widen the merged plan's level batch (the static width of the
@@ -405,7 +429,15 @@ install_walk_caps(solver, walk_caps)
 print(
     "merged walk caps: "
     + str(
-        {k: walk_caps.get(k) for k in ("queue_capacity", "peak_wavefront")}
+        {
+            k: walk_caps.get(k)
+            for k in (
+                "queue_capacity",
+                "peak_wavefront",
+                "compact_far_pair_capacity",
+                "near_edge_capacity",
+            )
+        }
         if walk_caps
         else None
     ),

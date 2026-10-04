@@ -3579,10 +3579,14 @@ class PrepareMixin(_EngineBase):
                     )
 
         def _report(report: dict) -> None:
+            report = dict(report)
             if bool(report.get("traced")):
-                self._strict_fused_traced_caps = dict(report)
+                # the walk's traced needs go to their own side channel: the caps
+                # dict is read on the host, and a tracer must never reach it
+                self._last_refresh_walk_needs = report.pop("walk_needs", None)
+                self._strict_fused_traced_caps = report
             else:
-                self._strict_fused_validated_caps = dict(report)
+                self._strict_fused_validated_caps = report
 
         return runtime_traversal_config, nbr_override, flat_floor, _report
 
@@ -4152,6 +4156,8 @@ class PrepareMixin(_EngineBase):
                 preset=self.preset,
                 traversal_config=traversal_config,
                 nearfield_mode=str(self.nearfield_mode),
+                walk_caps=getattr(self, "_strict_fused_validated_caps", None),
+                num_leaves=getattr(self, "_tree_leaf_capacity", None),
             )
             raise  # pragma: no cover - reraise_with_capacity_report always raises
 
