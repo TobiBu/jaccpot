@@ -1959,6 +1959,7 @@ class FastMultipoleMethod:
         step_callback_stride: int = 1,
         donate_prepared_state: bool = False,
         carry: Optional[str] = None,
+        donate_state: bool = False,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -2026,6 +2027,11 @@ class FastMultipoleMethod:
             velocities and forces through the fused scan and returns a
             :class:`~jaccpot.runtime.strict_carry.StrictParticleCarry` handle for
             the next call instead of a prepared state (see the impl docstring).
+        donate_state : bool
+            ``carry="particles"`` only, off by default: hand ``state``'s buffer to
+            the scan, which writes the returned state into it (24 B per particle
+            fewer at the scan's peak). The passed ``state`` is CONSUMED. Leave it
+            off to keep the input state.
 
         Returns
         -------
@@ -2055,6 +2061,7 @@ class FastMultipoleMethod:
             step_callback_stride=int(step_callback_stride),
             donate_prepared_state=bool(donate_prepared_state),
             carry=carry,
+            donate_state=bool(donate_state),
         )
 
     def strict_fused_prepared_eval_fn(

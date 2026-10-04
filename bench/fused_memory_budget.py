@@ -120,6 +120,12 @@ def _args() -> argparse.Namespace:
     )
     ap.add_argument("--no-scan", action="store_true")
     ap.add_argument(
+        "--donate-state",
+        action="store_true",
+        help="pass donate_state=True (carry='particles' only): the scan writes the "
+        "returned state into the input state's buffer",
+    )
+    ap.add_argument(
         "--skip-eval",
         action="store_true",
         help="go straight to strict_run_v2 (one prepare, then the scan: a production "
@@ -683,6 +689,7 @@ def run_budget(result: dict) -> None:
             add_external=ext is not None,
             external_acceleration_fn=ext,
             **({} if ARGS.no_donate else {"donate_prepared_state": True}),
+            **({"donate_state": True} if ARGS.donate_state else {}),
         )
         jax.block_until_ready(out[0])
         return out

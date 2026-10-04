@@ -2111,6 +2111,8 @@ class FMMEngine(
         self._strict_fused_profile_key_misses = 0
         self._strict_fused_fallback_count = 0
         self._strict_fused_last_fallback_reason = ""
+        # the step a particle-carry retry resumed the rollout from (-1: none)
+        self._strict_particle_resume_step = -1
         self._strict_fused_device_refresh_route_count = 0
         self._strict_fused_planner_bypassed_count = 0
         self._strict_velocity_verlet_acceleration_carry_active = False
