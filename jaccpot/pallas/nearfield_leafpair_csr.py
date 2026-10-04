@@ -44,6 +44,7 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
+from jaccpot._env import env_choice
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import (
     _OUT_WIDTH,
@@ -1132,17 +1133,24 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     that back to particles. On cell leaves (10-20 particles in 64 slots) those
     three arrays are ~6x the particles. Here:
 
-    1. one program per leaf (grid ``(L, subtiles)``) runs the leaf's FIRST chunk
-       and its self term, and stores each live target lane straight into the
-       ``(N,)`` outputs (a masked store; a particle is one lane of one leaf);
-    2. the rows' remaining chunks -- fewer than ``E / chunk`` -- emit partials
-       that are scatter-added onto the same outputs.
+    one program per leaf (grid ``(L, subtiles)``) runs the leaf's whole row and
+    its self term, and stores each live target lane straight into the ``(N,)``
+    outputs (a masked store; a particle is one lane of one leaf).
+
+    ``JACCPOT_NEARFIELD_DIRECT_ROWS=chunked`` (the previous layout) runs only
+    each row's FIRST chunk there; the rows' remaining chunks emit ``(Wpad, 3)``
+    partials that are scatter-added onto the outputs. Those partials are sized
+    for the worst case, ``E / chunk`` chunks of the list's CAPACITY (2.6 GiB at
+    1.28e8 particles, the near stage's peak), though few rows outgrow one chunk.
+    ``whole`` (the default) has no partials and no scatter, and its row sums are
+    deterministic. Rows longer than a chunk are then one running sum rather than
+    chunk sums added afterwards: a different single-precision rounding, the same
+    accuracy.
 
     The lane body and the order of every sum inside a chunk are the table
-    kernel's. Rows of one or two chunks therefore give the table path's bits
-    (``first + second`` is what the segment sum computes); rows of three or more
-    are summed in the scatter's order, which is already unordered (atomic) in the
-    table path. Single-precision accumulation only (``accum="input"``).
+    kernel's: rows of one chunk give the table path's bits either way, and in
+    ``chunked`` mode rows of two do too (``first + second`` is what the segment
+    sum computes). Single-precision accumulation only (``accum="input"``).
 
     Parameters
     ----------
@@ -1228,8 +1236,12 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         num_stages=num_stages,
         interpret=interpret,
     )
+    whole_rows = (
+        env_choice("JACCPOT_NEARFIELD_DIRECT_ROWS", "whole", ("whole", "chunked"))
+        == "whole"
+    )
     tag = f"t{bt}_c{chunk}_w{leaf_width}{'_pot' if with_potential else ''}"
-    # 1. first chunks + self, stored in particle order
+    # 1. whole rows (or first chunks) + self, stored in particle order
     outs = _sorted_pallas_call(
         pm,
         start_i,
@@ -1237,7 +1249,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         neighbors,
         jnp.arange(num_leaves, dtype=idx),
         row_start,
-        jnp.minimum(counts, chunk_i),
+        jnp.asarray(counts, idx) if whole_rows else jnp.minimum(counts, chunk_i),
         jnp.ones((num_leaves,), idx),
         soft,
         g,
@@ -1248,9 +1260,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         **common,
     )
     outs = list(outs)
-    # 2. the remaining chunks: partials, scatter-added onto the outputs
+    # 2. (chunked) the remaining chunks: partials, scatter-added onto the outputs
     capacity = leafpair_extra_chunk_capacity(int(neighbors.shape[0]), chunk)
-    if capacity > 0:
+    if capacity > 0 and not whole_rows:
         per_leaf = jnp.maximum((counts + chunk_i - 1) // chunk_i - 1, 0)
         ends = jnp.cumsum(per_leaf, dtype=idx)  # inclusive
         first = ends - per_leaf

@@ -119,15 +119,19 @@ def test_sorted_ranges_equal_the_table_kernel(W, chunk, subtile, n_dead, accum):
         (8, 64, None, 2, True),  # every row one chunk: no second pass at all
     ],
 )
+@pytest.mark.parametrize("rows", ["chunked", "whole"])
 def test_direct_equals_the_table_kernel_in_particle_order(
-    W, chunk, subtile, n_dead, with_potential
+    W, chunk, subtile, n_dead, with_potential, rows, monkeypatch
 ):
-    """The two-pass direct lane, gathered back: the table kernel's values.
+    """The direct lane, gathered back: the table kernel's values.
 
-    On CPU the scatter of pass 2 adds a row's chunks in chunk order, which is
-    the segment sum's order, so even rows of three or more chunks agree to the
-    bit here (on GPU both are unordered atomics).
+    ``chunked``: on CPU the scatter of pass 2 adds a row's chunks in chunk
+    order, which is the segment sum's order, so even rows of three or more
+    chunks agree to the bit here (on GPU both are unordered atomics).
+    ``whole``: one running sum per row, so rows of one chunk agree to the bit
+    and longer rows to single-precision round-off.
     """
+    monkeypatch.setenv("JACCPOT_NEARFIELD_DIRECT_ROWS", rows)
     c = _case(7, num_live=9, num_pad=3, W=W, n_dead=n_dead, max_row=6, empty_rows=(2,))
     cap = leafpair_chunk_capacity(int(c["nbr"].shape[0]), c["L"], chunk)
     tab = build_leafpair_chunk_table(
@@ -166,10 +170,20 @@ def test_direct_equals_the_table_kernel_in_particle_order(
     acc = np.asarray(acc)
     assert acc.shape == (n, 3)
     assert np.any(acc) and not np.any(acc[n - n_dead :])
-    assert np.array_equal(acc, want[:, :3])
-    if with_potential:
-        assert np.array_equal(np.asarray(pot), want[:, 3])
-    else:
+    got = np.concatenate(
+        [acc, np.asarray(pot)[:, None] if with_potential else want[:, 3:]], axis=1
+    )
+    if rows == "chunked":
+        exact = np.ones(n, bool)
+    else:  # particles of leaves whose row is one chunk keep the table's bits
+        row_counts = np.asarray(c["row_counts"])
+        exact = np.zeros(n, bool)
+        for leaf in range(c["L"]):
+            if row_counts[leaf] <= chunk:
+                exact[starts[leaf] : starts[leaf] + counts[leaf]] = True
+        np.testing.assert_allclose(got, want, rtol=2e-6, atol=1e-6)
+    assert np.array_equal(got[exact], want[exact])
+    if not with_potential:
         assert pot is None
     if chunk < 6:  # some row really is split (non-vacuity of pass 2)
         assert int(np.asarray(c["row_counts"]).max()) > chunk
