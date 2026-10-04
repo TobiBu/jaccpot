@@ -48,6 +48,7 @@ from jaccpot.upward.tree_expansions import (
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
+from .dtypes import require_index_capacity
 from .kernels.core import _FarPairCOO, _prepare_solidfmm_downward_sweep
 from .reference import MultipoleExpansion
 from .reference import compute_expansion as reference_compute_expansion
@@ -327,9 +328,19 @@ class SweepsMixin(_EngineBase):
         ------
         ValueError
             If the native real-basis sweep is asked for a ``center_mode`` other
-            than ``"com"``.
+            than ``"com"``; or, with int32 indices, if the particle count or the
+            nodes x coefficients reach the int32 range.
         """
         self._ensure_execution_backend_supported(tree=tree)
+        node_ranges = getattr(tree, "node_ranges", None)
+        require_index_capacity(
+            particles=int(jnp.shape(positions_sorted)[0]),
+            node_coefficients=(
+                0
+                if node_ranges is None
+                else int(jnp.shape(node_ranges)[0]) * (int(max_order) + 1) ** 2
+            ),
+        )
 
         if self.expansion_basis == "solidfmm":
             if self._solidfmm_basis_mode() == "real":
