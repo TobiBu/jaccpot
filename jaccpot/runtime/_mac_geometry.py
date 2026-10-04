@@ -39,6 +39,7 @@ Selected in the fused lane by ``JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY``
 from __future__ import annotations
 
 import os
+from functools import partial
 from typing import Any, Optional
 
 import jax
@@ -217,12 +218,67 @@ def com_mac_geometry(
             f"internal must be one of {_MAC_RADIUS_MODES}, got {internal!r}"
         )
     positions_sorted = jnp.asarray(positions_sorted)
+    # one compiled program even when the caller is eager (the prepare): op by op,
+    # the leaf pass materialised its (L, w, 3) gather and (L, w) tables
+    radii = _com_radii(
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.parent, dtype=INDEX_DTYPE),
+        positions_sorted,
+        jnp.asarray(centers, dtype=positions_sorted.dtype),
+        leaf_cap=int(leaf_cap),
+        internal=str(internal),
+        num_levels=None if num_levels is None else int(num_levels),
+    )
+    centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
+    num_nodes = int(radii.shape[0])
+    half_extent = jnp.broadcast_to(radii[:, None], (num_nodes, 3))
+    return TreeGeometry(centers, half_extent, radii, radii)
+
+
+@partial(jax.jit, static_argnames=("leaf_cap", "internal", "num_levels"))
+def _com_radii(
+    node_ranges: Array,
+    left_child: Array,
+    right_child: Array,
+    parent: Array,
+    positions_sorted: Array,
+    centers: Array,
+    *,
+    leaf_cap: int,
+    internal: str,
+    num_levels: Optional[int],
+) -> Array:
+    """The radii of :func:`com_mac_geometry`, one jitted program.
+
+    Parameters
+    ----------
+    node_ranges : Array
+        ``(nodes, 2)`` inclusive particle ranges.
+    left_child : Array
+        ``(internal,)`` left children.
+    right_child : Array
+        ``(internal,)`` right children.
+    parent : Array
+        ``(nodes,)`` parents (``-1`` at the root).
+    positions_sorted : Array
+        ``(n, 3)`` positions in tree order.
+    centers : Array
+        ``(nodes, 3)`` expansion centres, in the positions' dtype.
+    leaf_cap : int
+        Leaf capacity. Static.
+    internal : str
+        ``"exact"`` or ``"bound"``. Static.
+    num_levels : Optional[int]
+        Level-count bound. Static.
+
+    Returns
+    -------
+    Array
+        ``(nodes,)`` radii.
+    """
     dtype = positions_sorted.dtype
-    centers = jnp.asarray(centers, dtype=dtype)
-    node_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
-    left_child = jnp.asarray(tree.left_child, dtype=INDEX_DTYPE)
-    right_child = jnp.asarray(tree.right_child, dtype=INDEX_DTYPE)
-    parent = jnp.asarray(tree.parent, dtype=INDEX_DTYPE)
     num_nodes = int(node_ranges.shape[0])
     num_internal = int(left_child.shape[0])
     n = int(positions_sorted.shape[0])
@@ -301,8 +357,7 @@ def com_mac_geometry(
 
         radii = lax.fori_loop(0, jnp.maximum(max_depth, as_index(0)), _body, radii)
 
-    half_extent = jnp.broadcast_to(radii[:, None], (num_nodes, 3))
-    return TreeGeometry(centers, half_extent, radii, radii)
+    return radii
 
 
 def resolve_walk_geometry(
