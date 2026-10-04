@@ -31,6 +31,7 @@ from .fmm_state import (
     _PrepareStateTreeUpwardArtifacts,
     _RuntimeExecutionOverrides,
     _TopologyReuseEntry,
+    _velocity_verlet_kick_drifted,
     _velocity_verlet_state_update,
 )
 from .kernels._downward_prep import _far_pair_coo_from
@@ -1257,8 +1258,11 @@ class StrictRunMixin(_EngineBase):
                 )
             else:
                 acceleration_new = acceleration_self_new
-            state_new = _velocity_verlet_state_update(
-                state_now,
+            # kick the drifted state: its positions are the drift's own (the full
+            # update recomputed them from the old positions, which then had to
+            # outlive the in-place drift for the whole step)
+            state_new = _velocity_verlet_kick_drifted(
+                state_position,
                 acceleration_now,
                 acceleration_new,
                 dt_arr,

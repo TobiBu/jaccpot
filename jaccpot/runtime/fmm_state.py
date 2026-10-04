@@ -138,6 +138,51 @@ def _velocity_verlet_state_update(
     return state_arr.at[:, 0].set(position_new).at[:, 1].set(velocity_new)
 
 
+def _velocity_verlet_kick_drifted(
+    state_drifted: Array,
+    acceleration_current: Array,
+    acceleration_new: Array,
+    dt: Array,
+) -> Array:
+    """:func:`_velocity_verlet_state_update` on a state already drifted.
+
+    ``state_drifted`` carries the new positions (computed by the drift with the
+    same expression) and the starting velocities, so only the velocities change:
+    the result equals ``_velocity_verlet_state_update(state, ...)`` bit for bit.
+    Inside the fused scan the drift overwrites the carried state in place; the
+    full update re-read the OLD positions after it, so they were kept for the
+    whole step (12 B per particle under every stage of it).
+
+    Parameters
+    ----------
+    state_drifted : Array
+        ``[N, 2, 3]``: the drifted positions and the starting velocities.
+    acceleration_current : Array
+        Acceleration at the starting positions ``[N, 3]``.
+    acceleration_new : Array
+        Acceleration at the new positions ``[N, 3]``.
+    dt : Array
+        Timestep.
+
+    Returns
+    -------
+    Array
+        Updated state, same shape and dtype as ``state_drifted``.
+    """
+    state_arr = jnp.asarray(state_drifted)
+    dt_arr = jnp.asarray(dt, dtype=state_arr.dtype)
+    velocity_new = (
+        state_arr[:, 1]
+        + 0.5
+        * (
+            jnp.asarray(acceleration_current, dtype=state_arr.dtype)
+            + jnp.asarray(acceleration_new, dtype=state_arr.dtype)
+        )
+        * dt_arr
+    )
+    return state_arr.at[:, 1].set(velocity_new)
+
+
 def _normalize_strict_refresh_diag_mode(raw: object) -> str:
     mode = str(raw if raw is not None else "full").strip().lower()
     if mode not in _STRICT_REFRESH_DIAG_MODES:
