@@ -34,8 +34,10 @@ from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
 try:
     from jax.experimental import pallas as pl
+    from jax.experimental.pallas import triton as plgpu
 except Exception:  # pragma: no cover - import is environment-dependent
     pl = None
+    plgpu = None
 
 __all__ = [
     "p2m_real_leaves_pallas",
@@ -72,12 +74,14 @@ def _p2m_leaf_kernel(
     start_ref: KernelRef,
     count_ref: KernelRef,
     cent_ref: KernelRef,
+    table_in: KernelRef,
     out_ref: KernelRef,
     *,
     order: int,
     width: int,
     coeff_pad: int,
     floor: float,
+    row_offset: int,
 ) -> None:
     """One leaf: ``M_n^m = sum_i m_i U_n^m(x_i - c)`` over its particle lanes.
 
@@ -93,16 +97,21 @@ def _p2m_leaf_kernel(
         Particle count of each leaf ``[L]``.
     cent_ref : KernelRef
         Expansion centre of each leaf ``[L, 3]``.
+    table_in : KernelRef
+        The zeroed multipole table, aliased to ``out_ref`` (not read).
     out_ref : KernelRef
-        **Output** ``[1, coeff_pad]``: packed coefficients, zero past ``C``.
+        **Output** the whole ``[total_nodes, C]`` table; this program writes the
+        leaf's row ``row_offset + leaf``.
     order : int
         Expansion order ``p``. Static.
     width : int
         Leaf capacity ``W`` (lanes). Static.
     coeff_pad : int
-        Output row width (power of two >= ``(p+1)^2``). Static.
+        Lanes of the coefficient vector (power of two >= ``(p+1)^2``). Static.
     floor : float
         The dtype's squared-radius floor (``squared_radius_floor``). Static.
+    row_offset : int
+        Table row of leaf 0 (the internal node count). Static.
 
     Returns
     -------
@@ -128,7 +137,17 @@ def _p2m_leaf_kernel(
     for idx_c, u in _regular_harmonics_lanes(x, y, z, order=p, floor=floor):
         coef = jnp.sum(mass * u)
         out = jnp.where(cidx == idx_c, coef, out)
-    out_ref[0, :] = out
+    # straight into the leaf's row of the table: a (1, C) block is not a power
+    # of two, so the C live lanes are a masked store (the padding lanes' columns
+    # lie past the row and are never written)
+    row = row_offset + leaf
+    n_rows, n_coeffs = out_ref.shape
+    del table_in
+    plgpu.store(
+        out_ref.at[row, cidx],
+        out,
+        mask=(cidx < n_coeffs) & (row < n_rows),
+    )
 
 
 def _regular_harmonics_lanes(
@@ -274,6 +293,7 @@ def p2m_real_leaves_pallas(
         width=w,
         coeff_pad=cp,
         floor=float(squared_radius_floor(dtype)),
+        row_offset=int(num_internal),
     )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
@@ -285,20 +305,28 @@ def p2m_real_leaves_pallas(
         shp = tuple(arr.shape)
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
-    rows = pl.pallas_call(
+    # the leaves write their rows of the zeroed table in place: no (L, cp) row
+    # array next to it, which with the table was the upward's peak (cp = 64
+    # lanes for the 36 coefficients of p = 5)
+    table = jnp.zeros((int(total_nodes), C), dtype)
+    return pl.pallas_call(
         kernel,
         grid=(L,),
-        in_specs=[_full(pos), _full(mass), _full(starts), _full(counts), _full(cent)],
-        out_specs=pl.BlockSpec((1, cp), lambda i: (i, 0)),
-        out_shape=jax.ShapeDtypeStruct((L, cp), dtype),
+        in_specs=[
+            _full(pos),
+            _full(mass),
+            _full(starts),
+            _full(counts),
+            _full(cent),
+            _full(table),
+        ],
+        out_specs=_full(table),
+        out_shape=jax.ShapeDtypeStruct((int(total_nodes), C), dtype),
+        input_output_aliases={5: 0},
         interpret=bool(interpret),
         name=f"p2m_real_leaf_p{p}_w{w}",
         **backend_kwargs,
-    )(pos, mass, starts, counts, cent)
-    leaf_rows = rows[:, :C]
-    return jnp.concatenate(
-        [jnp.zeros((int(num_internal), C), dtype), leaf_rows], axis=0
-    )[: int(total_nodes)]
+    )(pos, mass, starts, counts, cent, table)
 
 
 # ------------------------------------------------------------------ reverse
