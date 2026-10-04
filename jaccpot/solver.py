@@ -2030,8 +2030,8 @@ class FastMultipoleMethod:
         donate_state : bool
             ``carry="particles"`` only, off by default: hand ``state``'s buffer to
             the scan, which writes the returned state into it (24 B per particle
-            fewer at the scan's peak). The passed ``state`` is CONSUMED. Leave it
-            off to keep the input state.
+            fewer at the scan's peak). The passed ``state`` is CONSUMED (a host copy
+            is kept for a capacity retry). Leave it off to keep the input state.
 
         Returns
         -------

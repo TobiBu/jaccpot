@@ -1,19 +1,19 @@
-"""``strict_run_v2(carry="particles")``: a capacity retry resumes where the scan stopped.
+"""``strict_run_v2(carry="particles", donate_state=...)`` and the capacity retry.
 
-The particle-carry scan leaves its carry unchanged from the first step whose
-refresh overflows a list, and reports how many steps it completed. The retry
-re-plans the caps, re-prepares at that last good state and runs only the
-remaining steps, so it never needs the call's start state -- which
-``donate_state`` hands to the scan.
-
-The scenario forces an overflow MID-RUN. The particles drift ballistically
-(negligible masses) from a uniform cube, where the eager prepare sizes the caps,
-into a contracted version of it inside the same box. The first three steps fit;
-the fourth refresh does not. The result, its history and its streaming callbacks must match
-a run whose caps never overflow (a large cap headroom).
+``donate_state`` hands the input state's buffer to the scan; a segment whose
+refresh overflows a list is re-run once from its start with re-planned caps, so
+the call keeps a host copy of the start state when donating. The scenario forces
+the overflow MID-RUN: the particles drift ballistically (negligible masses) from
+a uniform cube, where the eager prepare sizes the caps, into a contracted version
+of it inside the same box. The first three steps fit; the fourth refresh does
+not. The re-run must equal a run whose caps never overflow (a large cap
+headroom), its history included; the stream stops at the failed step, so the
+steps before it are streamed once per attempt and never a failed step's state.
 """
 
 from __future__ import annotations
+
+import collections
 
 import jax
 import jax.numpy as jnp
@@ -166,7 +166,7 @@ def reference():
 
 
 @pytest.mark.parametrize("donate", [False, True])
-def test_the_retry_resumes_mid_run(reference, donate):
+def test_a_mid_run_overflow_is_rerun_from_the_start(reference, donate):
     ref_out, ref_history = reference
     state, masses, dt = _drifting_system()
     solver = _solver()
@@ -175,14 +175,15 @@ def test_the_retry_resumes_mid_run(reference, donate):
     out, history = _run(solver, state, masses, dt, donate_state=donate, seen=seen)
     count, reason = _fallbacks(solver)
     assert count == before + 1 and reason == "capacity_segment_retry"
-    done = solver._impl._strict_particle_resume_step
-    assert 0 < done < _STEPS, f"the overflow should come mid-run, came at {done}"
-    # the lists do not depend on their caps: the resumed run is the same run
+    failed = solver._impl._strict_particle_failed_step
+    assert 0 < failed < _STEPS, f"the overflow should come mid-run, came at {failed}"
+    # the lists do not depend on their caps: the re-run is the same run
     assert np.array_equal(out, ref_out)
     assert history.shape == ref_history.shape
     assert np.array_equal(history, ref_history)
-    # every step streamed exactly once, the frozen ones never
-    assert sorted(seen) == list(range(_STEPS))
+    # the first attempt streams the steps before the failure, the re-run all
+    want = {s: (2 if s < failed else 1) for s in range(_STEPS)}
+    assert dict(collections.Counter(seen)) == want
     assert state.is_deleted() == donate
 
 
