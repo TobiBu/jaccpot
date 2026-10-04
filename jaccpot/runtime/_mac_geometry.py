@@ -230,6 +230,7 @@ def com_mac_geometry(
         leaf_cap=int(leaf_cap),
         internal=str(internal),
         num_levels=None if num_levels is None else int(num_levels),
+        kernel=_com_radii_kernel(),
     )
     centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
     num_nodes = int(radii.shape[0])
@@ -237,7 +238,27 @@ def com_mac_geometry(
     return TreeGeometry(centers, half_extent, radii, radii)
 
 
-@partial(jax.jit, static_argnames=("leaf_cap", "internal", "num_levels"))
+def _com_radii_kernel() -> str:
+    """``JACCPOT_COM_RADII_KERNEL``: ``pallas`` (sm_80+ default), ``xla``, ``interpret``.
+
+    Returns
+    -------
+    str
+        The exact-radius implementation :func:`_com_radii` runs.
+    """
+    from jaccpot._env import env_choice
+
+    choice = env_choice(
+        "JACCPOT_COM_RADII_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
+    )
+    if choice != "auto":
+        return choice
+    from jaccpot.pallas.cascade_real_level import pallas_cascade_level_supported
+
+    return "pallas" if pallas_cascade_level_supported() else "xla"
+
+
+@partial(jax.jit, static_argnames=("leaf_cap", "internal", "num_levels", "kernel"))
 def _com_radii(
     node_ranges: Array,
     left_child: Array,
@@ -249,6 +270,7 @@ def _com_radii(
     leaf_cap: int,
     internal: str,
     num_levels: Optional[int],
+    kernel: str = "xla",
 ) -> Array:
     """The radii of :func:`com_mac_geometry`, one jitted program.
 
@@ -272,6 +294,10 @@ def _com_radii(
         ``"exact"`` or ``"bound"``. Static.
     num_levels : Optional[int]
         Level-count bound. Static.
+    kernel : str
+        ``"xla"`` (one ``(L, w)`` reduction per level), ``"pallas"`` or
+        ``"interpret"`` (:mod:`jaccpot.pallas.com_radii_leaf`: each leaf's
+        particles read once per chunk of eight levels). Exact mode only. Static.
 
     Returns
     -------
@@ -303,8 +329,60 @@ def _com_radii(
         d2 = jnp.max(jnp.where(valid, d2, jnp.asarray(0.0, dtype)), axis=1)
         return jnp.where(live, jnp.sqrt(d2), jnp.asarray(0.0, dtype))
 
-    # --- leaves: exact max distance about the centre over the leaf's particles
     leaf_ids = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
+    levels = int(_MAX_TREE_LEVELS) if num_levels is None else int(num_levels)
+    levels = max(1, min(levels, int(_MAX_TREE_LEVELS)))
+    if kernel in ("pallas", "interpret") and (internal == "exact" or num_internal == 0):
+        # Each leaf's particles read once per chunk of ``chunk`` levels (the leaf
+        # itself, then its ancestors), max SQUARED distances per (leaf, level);
+        # then, per chunk, the runs of equal ancestor reduced and their ends
+        # scattered as below, and one square root per node at the end (sqrt is
+        # monotone: the max of the distances).
+        from jaccpot.pallas.com_radii_leaf import com_radii_chunk_pallas
+
+        chunk = 8
+        counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+        drop = jnp.asarray(num_nodes, INDEX_DTYPE)
+
+        def _seg2(a, b):
+            ka, va = a
+            kb, vb = b
+            return kb, jnp.where(ka == kb, jnp.maximum(va, vb), vb)
+
+        def _chunk(_, carry):
+            r2, anc = carry
+            d2, ancs, nxt = com_radii_chunk_pallas(
+                positions_sorted,
+                centers,
+                parent,
+                leaf_ranges[:, 0],
+                counts,
+                anc,
+                leaf_cap=w,
+                levels=chunk,
+                interpret=kernel == "interpret",
+            )
+            live = ancs >= 0
+            _, run = lax.associative_scan(_seg2, (ancs, d2), axis=0)
+            last = (
+                jnp.concatenate([ancs[1:] != ancs[:-1], jnp.ones((1, chunk), bool)])
+                & live
+            )
+            r2 = r2.at[jnp.where(last, ancs, drop).reshape(-1)].max(
+                run.reshape(-1), mode="drop"
+            )
+            return r2, nxt
+
+        # the leaf itself + ``levels - 1`` ancestors (a leaf at depth D has D)
+        r2, _ = lax.fori_loop(
+            0,
+            -(-levels // chunk),
+            _chunk,
+            (jnp.zeros((num_nodes,), dtype), leaf_ids),
+        )
+        return jnp.sqrt(r2)
+
+    # --- leaves: exact max distance about the centre over the leaf's particles
     r_leaf = _leaf_max_about(leaf_ids)
     radii = jnp.zeros((num_nodes,), dtype=dtype).at[num_internal:].set(r_leaf)
 
@@ -342,9 +420,8 @@ def _com_radii(
             up = jnp.where(live & (parent[jnp.where(live, anc, 0)] >= 0), up, -1)
             return radii, up.astype(INDEX_DTYPE)
 
-        levels = int(_MAX_TREE_LEVELS) if num_levels is None else int(num_levels)
         # a leaf at depth D has D ancestors, so depth-bound - 1 passes cover all
-        passes = max(1, min(levels, int(_MAX_TREE_LEVELS)) - 1)
+        passes = max(1, levels - 1)
         radii, _ = lax.fori_loop(0, passes, _level, (radii, parent[leaf_ids]))
 
     elif num_internal > 0:
