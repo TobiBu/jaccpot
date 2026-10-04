@@ -164,8 +164,12 @@ def test_far_list_is_the_directed_target_sort(width, n_pairs, count, route):
         offsets, np.searchsorted(ref_t[order], np.arange(total + 1), side="left")
     )
     # the M2L's CSR: presorted read of (sources, offsets) == sorting read of COO
-    srt = csr_by_target(src, tgt, total_nodes=total, active_pair_count=jnp.asarray(k))
-    pre = csr_by_target(src, offsets, total_nodes=total, presorted=True)
+    # jax arrays: the runtime type-check job holds csr_by_target to its annotations
+    src_j, tgt_j, off_j = (jnp.asarray(x) for x in (src, tgt, offsets))
+    srt = csr_by_target(
+        src_j, tgt_j, total_nodes=total, active_pair_count=jnp.asarray(k)
+    )
+    pre = csr_by_target(src_j, off_j, total_nodes=total, presorted=True)
     assert np.array_equal(np.asarray(pre[0])[:k], np.asarray(srt[0])[:k])
     for x, y in zip(srt[1:], pre[1:]):
         assert np.array_equal(np.asarray(x), np.asarray(y))
