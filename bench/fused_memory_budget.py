@@ -605,6 +605,8 @@ def run_budget(result: dict) -> None:
     _event("before_prepare")
     a_host = None
     saved = None
+    if ARGS.skip_eval:
+        result["prepare_events"] = []  # the scan's own prepare fills it afterwards
     if not ARGS.skip_eval:
         t0 = time.perf_counter()
         prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
