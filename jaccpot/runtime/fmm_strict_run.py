@@ -1701,11 +1701,7 @@ class StrictRunMixin(_EngineBase):
             return shape_template(replace(prepared, compact_far_pairs=None))
 
         def _runner_for(
-            template: Any,
-            n_steps: int,
-            donate_state_i: bool,
-            donate_acc_i: bool,
-            start_force: bool,
+            template: Any, n_steps: int, donate_state_i: bool, donate_acc_i: bool
         ) -> Callable:
             # the cells lane's level bound is stashed by the eager prepare
             static_upward_num_levels = self._resolve_upward_num_levels(None)
@@ -1722,7 +1718,6 @@ class StrictRunMixin(_EngineBase):
                 template.key(),
                 bool(donate_state_i),
                 bool(donate_acc_i),
-                bool(start_force),
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
             runner = jit_cache.get(cache_key)
@@ -1792,56 +1787,68 @@ class StrictRunMixin(_EngineBase):
                 )
                 return (state_f, acc_self_f, ok_f, needs_f, done_f), history
 
-            no_needs = jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32)
-            if start_force:
+            donate = ((0,) if donate_state_i else ()) + ((1,) if donate_acc_i else ())
 
-                @partial(jax.jit, donate_argnums=(0,) if donate_state_i else ())
-                def _compiled_runner(
-                    state_initial: Array,
-                    masses_in: Array,
-                    ok_initial: Array,
-                ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
-                    # the start force, as the steps' own refresh at the start
-                    # positions (bitwise the eager prepare + evaluation)
-                    prepared0, acc_self0 = refresh_evaluate(
-                        materialize_template(template), state_initial, masses_in
-                    )
-                    ok0 = ok_initial & capacity_ok(prepared0, after_refresh=True)
-                    needs0 = jnp.maximum(no_needs, last_refresh_walk_needs(self))
-                    return _scan(
-                        state_initial,
-                        _initial_acceleration(acc_self0, state_initial),
-                        jnp.zeros_like(acc_self0),
-                        masses_in,
-                        ok0,
-                        needs0,
-                    )
-
-            else:
-                donate = ((0,) if donate_state_i else ()) + (
-                    (1,) if donate_acc_i else ()
+            @partial(jax.jit, donate_argnums=donate)
+            def _compiled_runner(
+                state_initial: Array,
+                acceleration_initial: Array,
+                masses_in: Array,
+                ok_initial: Array,
+            ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
+                # the self-gravity slot is written by every step (num_steps >= 1)
+                return _scan(
+                    state_initial,
+                    acceleration_initial,
+                    jnp.zeros_like(acceleration_initial),
+                    masses_in,
+                    ok_initial,
+                    jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
                 )
-
-                @partial(jax.jit, donate_argnums=donate)
-                def _compiled_runner(
-                    state_initial: Array,
-                    acceleration_initial: Array,
-                    masses_in: Array,
-                    ok_initial: Array,
-                ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
-                    # the self-gravity slot is written by every step (num_steps >= 1)
-                    return _scan(
-                        state_initial,
-                        acceleration_initial,
-                        jnp.zeros_like(acceleration_initial),
-                        masses_in,
-                        ok_initial,
-                        no_needs,
-                    )
 
             jit_cache[cache_key] = _compiled_runner
             self._strict_fused_jit_function_cache = jit_cache
             return _compiled_runner
+
+        def _start_force_for(template: Any) -> Callable:
+            # The start positions' self-gravity, as the steps' own refresh: its
+            # OWN small program, run after the prepared state is freed and before
+            # the scan. Inside the scan's program XLA overlapped it with the first
+            # step (a one-step scan is inlined), doubling the temporary block.
+            static_upward_num_levels = self._resolve_upward_num_levels(None)
+            cache_key = (
+                "strict_particle_start_force",
+                tuple(int(v) for v in state_arr.shape),
+                str(state_arr.dtype),
+                *cache_parts,
+                static_upward_num_levels,
+                _walk_caps_key(getattr(self, "_strict_fused_validated_caps", None)),
+                template.key(),
+            )
+            jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
+            fn = jit_cache.get(cache_key)
+            if fn is not None:
+                return fn
+            self._strict_fused_traced_caps = None
+
+            # named so the dumps' ``*_compiled_runner*`` selection includes it
+            @jax.jit
+            def _compiled_runner_start(
+                state_initial: Array, masses_in: Array, ok_initial: Array
+            ) -> tuple[Array, Array, Array]:
+                prepared0, acc_self0 = refresh_evaluate(
+                    materialize_template(template), state_initial, masses_in
+                )
+                ok0 = ok_initial & capacity_ok(prepared0, after_refresh=True)
+                needs0 = jnp.maximum(
+                    jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+                    last_refresh_walk_needs(self),
+                )
+                return acc_self0, ok0, needs0
+
+            jit_cache[cache_key] = _compiled_runner_start
+            self._strict_fused_jit_function_cache = jit_cache
+            return _compiled_runner_start
 
         external_active = bool(add_external) and external_acceleration_fn is not None
         # the self-gravity is this call's own (evaluated here, or zeros) unless it
@@ -1890,21 +1897,28 @@ class StrictRunMixin(_EngineBase):
             acc_self_now: Optional[Array] = acceleration_self_current
             del acceleration_self_current
             acc_self_owned = self_owned
+            # evaluated by the start program (the first call's start, owned)
             in_scan_force = acc_self_now is None
             donate_state_now = bool(donate_state)
             while True:
-                runner = _runner_for(
-                    template,
-                    num_steps_i,
-                    donate_state_now,
-                    external_active or acc_self_owned,
-                    in_scan_force,
-                )
+                ran_scan = True
                 if in_scan_force:
-                    (state_out, acc_self_out, ok_all, walk_needs, done), history_out = (
-                        runner(state_now, masses_arr, ok_initial)
+                    acc_self_now, ok_initial, walk_needs = _start_force_for(template)(
+                        state_now, masses_arr, ok_initial
                     )
-                else:
+                    acc_self_owned = True
+                    if not bool(np.asarray(jax.device_get(ok_initial))):
+                        # the start itself overflows: no scan, straight to a retry
+                        ran_scan = False
+                        ok_all, done = ok_initial, jnp.zeros((), jnp.int32)
+                        state_out = acc_self_out = history_out = None
+                if ran_scan:
+                    runner = _runner_for(
+                        template,
+                        num_steps_i,
+                        donate_state_now,
+                        external_active or acc_self_owned,
+                    )
                     assert acc_self_now is not None
                     acc0 = _initial_acceleration(acc_self_now, state_now)
                     if acc_self_owned and not external_active:
@@ -1938,7 +1952,7 @@ class StrictRunMixin(_EngineBase):
                     self._raise_scan_capacity_saturated(needs)
                 retried = True
                 del state_out, history_out, acc_self_out
-                if donate_state_now:
+                if donate_state_now and ran_scan:
                     assert start_host is not None
                     state_now = jax.device_put(start_host, masses_arr.sharding)
                     donate_state_now = True  # our own copy
@@ -1960,7 +1974,9 @@ class StrictRunMixin(_EngineBase):
                     int(validated.get("peak_wavefront") or 0), replanned_peak
                 )
                 self._strict_fused_validated_caps = validated
-                if acc_self_now is None and not in_scan_force:
+                if in_scan_force:
+                    acc_self_now = None  # the start program evaluates it again
+                elif acc_self_now is None:
                     # consumed by the failed segment: the same self-gravity
                     # again, from the same positions
                     acc_self_now = evaluate_self(prepared, state_now)
