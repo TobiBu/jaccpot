@@ -177,6 +177,28 @@ def _translate_lane(
     return _dz_lanes(w, cos_maz, sin_maz, sign=-1.0, p=p)
 
 
+def _flat(node: Array, C: int, size: int) -> Array:
+    """``node * C``, in int64 when the flat table outgrows int32 offsets (static).
+
+    Parameters
+    ----------
+    node : Array
+        Node ids.
+    C : int
+        Coefficients per node.
+    size : int
+        Length of the flat table. Static.
+
+    Returns
+    -------
+    Array
+        The row offsets.
+    """
+    if int(size) + int(C) * 64 >= 2**31 - 1:
+        node = node.astype(jnp.int64)
+    return node * C
+
+
 def _keys(p: int) -> list:
     return [(ell, m) for ell in range(p + 1) for m in range(-ell, ell + 1)]
 
@@ -195,7 +217,7 @@ def _store_rows(
     # masked lanes point PAST the table (unique, out of range): Triton never
     # touches them and the interpreter drops them
     n_rows = out_ref.shape[0] // C
-    base = jnp.where(valid, node, n_rows + lane) * C
+    base = _flat(jnp.where(valid, node, n_rows + lane), C, out_ref.shape[0])
     for key in _keys(p):
         plgpu.store(out_ref.at[base + packed[key]], vals[key], mask=valid)
 
@@ -272,7 +294,7 @@ def _m2m_lanes_kernel(
             dx = jnp.where(ok, cent_ref[ch, 0] - px, 0.0)
             dy = jnp.where(ok, cent_ref[ch, 1] - py, 0.0)
             dz_ = jnp.where(ok, cent_ref[ch, 2] - pz, 1.0)
-            row = ch * C
+            row = _flat(ch, C, coef_ref.shape[0])
             v = {key: coef_ref[row + packed[key]] for key in _keys(p)}
             w = _translate_lane(v, dx, dy, dz_, which="m2m", p=p, tables=tables)
             w = {key: jnp.where(ok, val, 0.0) for key, val in w.items()}
@@ -341,10 +363,10 @@ def _l2l_lanes_kernel(
         dx = jnp.where(valid, cent_ref[par, 0] - cent_ref[node_safe, 0], 0.0)
         dy = jnp.where(valid, cent_ref[par, 1] - cent_ref[node_safe, 1], 0.0)
         dz_ = jnp.where(valid, cent_ref[par, 2] - cent_ref[node_safe, 2], 1.0)
-        prow = par * C
+        prow = _flat(par, C, coef_ref.shape[0])
         v = {key: coef_ref[prow + packed[key]] for key in _keys(p)}
         w = _translate_lane(v, dx, dy, dz_, which="l2l", p=p, tables=tables)
-        nrow = node_safe * C
+        nrow = _flat(node_safe, C, coef_ref.shape[0])
         new = {key: coef_ref[nrow + packed[key]] + w[key] for key in _keys(p)}
         _store_rows(out_ref, node_safe, valid, new, p=p, C=C, packed=packed, lane=lane)
 
