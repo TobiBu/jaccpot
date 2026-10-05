@@ -1,0 +1,10 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-don card 3 19:31 others: 4249 MiB
+a136: prepare 27.46 GiB (217 B/p) eval - step 31.59 (249 B/p) | force - ms step 2198.6 ms | far 532526564 near 158844392 | rel-L2 None
+a152: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 22.62GiB. [tf-allocator-allocation-error=''] [executable_name
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+a168: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 24.71GiB. [tf-allocator-allocation-error=''] [executable_name
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+done 19:41

@@ -1,0 +1,28 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-csr card 3 18:22 others: 4249 MiB
+C1: prepare 1.92 GiB (257 B/p) eval 1.92 (257 B/p) step 2.31 (310 B/p) | force 30.9 ms step 104.8 ms | far 39093974 near 9414078 | rel-L2 None
+done 18:25
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-p2m card 3 18:25 others: 4249 MiB
+Q2: prepare 2.17 GiB (291 B/p) eval 2.17 (291 B/p) step 2.59 (348 B/p) | force 29.6 ms step 103.9 ms | far 39093974 near 9414078 | rel-L2 None
+done 18:27
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-csr card 3 18:27 others: 4249 MiB
+C2: prepare 1.88 GiB (252 B/p) eval 1.90 (255 B/p) step 2.31 (310 B/p) | force 30.0 ms step 104.4 ms | far 39093974 near 9414078 | rel-L2 None
+done 18:30
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-csr card 3 18:30 others: 4249 MiB
+CD: prepare 2.30 GiB (308 B/p) eval - step 2.35 (315 B/p) | force - ms step 104.8 ms | far 39093974 near 9414078 | rel-L2 None
+done 18:32
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-csr card 3 18:32 others: 4249 MiB
+clip136: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.47GiB. [tf-allocator-allocation-error=''] [executable_name=
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+clip144: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.83GiB. [tf-allocator-allocation-error=''] [executable_name=
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+clip152: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 7.19GiB. [tf-allocator-allocation-error=''] [executable_name=
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+done 18:41

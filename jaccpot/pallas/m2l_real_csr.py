@@ -79,6 +79,7 @@ __all__ = [
     "m2l_real_csr_jax",
     "m2l_real_csr_pallas",
     "csr_by_target",
+    "targets_from_csr_offsets",
     "pack_centred",
     "unpack_centred",
 ]
@@ -419,6 +420,7 @@ def csr_by_target(
     *,
     total_nodes: int,
     active_pair_count: Optional[Array] = None,
+    presorted: bool = False,
 ) -> tuple[Array, Array, Array]:
     """Sort a (padded) flat far-pair list by target into CSR form.
 
@@ -433,6 +435,13 @@ def csr_by_target(
     active_pair_count : Optional[Array]
         Number of leading live entries; ``None`` means every non-negative entry
         is live.
+    presorted : bool
+        The list is already in CSR order (the deterministic flat walk's
+        ``TargetSortedFarPairs``) and ``targets`` holds its ROW OFFSETS
+        (``[>= total_nodes + 1]``), not one target per entry: no sort, no copy of
+        the sources (the kernels read only ``[offsets[t], offsets[t + 1])``, so the
+        padding behind the live prefix is never addressed) and
+        ``active_pair_count`` is unused. Static.
 
     Returns
     -------
@@ -440,9 +449,27 @@ def csr_by_target(
         ``(sources_sorted [P], offsets [total_nodes], counts [total_nodes])``:
         target ``t``'s sources are ``sources_sorted[offsets[t] : offsets[t] +
         counts[t]]``. Padding sorts to the end and is never addressed.
+
+    Raises
+    ------
+    ValueError
+        If ``presorted`` and ``targets`` holds fewer than ``total_nodes + 1``
+        row offsets.
     """
     src = jnp.asarray(sources, dtype=jnp.int32)
     tgt = jnp.asarray(targets, dtype=jnp.int32)
+    if presorted:
+        # targets are the row offsets: the CSR is the list itself. (A copy of the
+        # sources with the padding zeroed was a 2P array live through the M2L and
+        # the L2L, the step's second-highest window.)
+        nt = int(total_nodes)
+        if int(tgt.shape[0]) < nt + 1:
+            raise ValueError(
+                f"presorted targets must be the {nt + 1} row offsets, got "
+                f"{int(tgt.shape[0])} entries"
+            )
+        row_offsets = tgt[: nt + 1]
+        return src, row_offsets[:-1], (row_offsets[1:] - row_offsets[:-1])
     P = int(src.shape[0])
     valid = (src >= 0) & (tgt >= 0)
     if active_pair_count is not None:
@@ -468,6 +495,35 @@ def csr_by_target(
     ).astype(jnp.int32)
     counts = offsets[1:] - offsets[:-1]
     return src_sorted, offsets[:-1], counts.astype(jnp.int32)
+
+
+def targets_from_csr_offsets(row_offsets: Array, num_entries: int) -> Array:
+    """The target of every entry of a CSR list, from its row offsets.
+
+    The inverse of storing a target-sorted list as ``(sources, row offsets)``:
+    entry ``j`` belongs to the last row whose offset is ``<= j``. Entries past
+    the live prefix (``j >= row_offsets[-1]``) get ``-1``, the padding value of a
+    COO far list.
+
+    Parameters
+    ----------
+    row_offsets : Array
+        ``[R + 1]`` non-decreasing row offsets, ``row_offsets[0] == 0``.
+    num_entries : int
+        Length of the list (live prefix plus padding). Static.
+
+    Returns
+    -------
+    Array
+        ``[num_entries]`` row ids in ``row_offsets``' dtype, ``-1`` past the live
+        prefix.
+    """
+    off = jnp.asarray(row_offsets)
+    pos = jnp.arange(int(num_entries), dtype=off.dtype)
+    row = jnp.searchsorted(off, pos, side="right", method="scan_unrolled").astype(
+        off.dtype
+    ) - jnp.asarray(1, off.dtype)
+    return jnp.where(pos < off[-1], row, jnp.asarray(-1, off.dtype))
 
 
 def m2l_real_csr_jax(

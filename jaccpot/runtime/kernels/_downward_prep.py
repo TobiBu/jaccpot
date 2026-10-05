@@ -132,6 +132,55 @@ class _SolidFMMDownwardInit(NamedTuple):
     dtype: Any
 
 
+class _TargetSortedFarPairCOO(_FarPairCOO):
+    """:class:`_FarPairCOO` of a ``TargetSortedFarPairs`` list: ``targets`` are ROW OFFSETS.
+
+    The list is in CSR order, so it travels as ``sources`` plus the row offsets
+    (``total_nodes + 1``) in ``targets``, and the lanes M2L reads it as the CSR it
+    is (``csr_by_target(presorted=True)``). Every other M2L route expands one
+    target per entry first (``targets_from_csr_offsets``). A field-less subclass:
+    the pytree node type carries the contract through ``jit``.
+    """
+
+    __slots__ = ()
+
+
+def _far_pair_coo_from(
+    compact_far_pairs: Any, sources: Array, targets: Array
+) -> _FarPairCOO:
+    """The COO of a compact far list, typed as target-sorted when the list is.
+
+    Parameters
+    ----------
+    compact_far_pairs : Any
+        The walk's far list (``CompactTaggedFarPairs`` or its target-sorted
+        subclass).
+    sources : Array
+        Its ``sources`` (cast), unmodified.
+    targets : Array
+        Its ``targets`` (cast), unmodified: the row offsets of a
+        ``TargetSortedFarPairs`` list.
+
+    Returns
+    -------
+    _FarPairCOO
+        ``_TargetSortedFarPairCOO`` for a ``TargetSortedFarPairs`` list, else
+        ``_FarPairCOO``; ``active_count`` from its ``far_pair_count``.
+    """
+    from jaccpot.runtime._interaction_cache import TargetSortedFarPairs
+
+    cls = (
+        _TargetSortedFarPairCOO
+        if isinstance(compact_far_pairs, TargetSortedFarPairs)
+        else _FarPairCOO
+    )
+    return cls(
+        sources=sources,
+        targets=targets,
+        active_count=getattr(compact_far_pairs, "far_pair_count", None),
+    )
+
+
 class _SolidFMMDownwardInteractionInputs(NamedTuple):
     """Resolved far-pair arrays for solidfmm downward prep.
 
@@ -507,6 +556,40 @@ def _prepare_solidfmm_downward_child_inputs(
 
 
 @jax.named_scope("fmm_m2l")
+def _m2l_csr_kernel_choice() -> str:
+    """The CSR M2L kernel the flat real path runs: ``pair``, ``tiled`` or ``lanes``.
+
+    ``JACCPOT_M2L_CSR_KERNEL`` (plan sub-10ms Phase 5; ``JACCPOT_M2L_CSR_TILED=1``
+    is the older spelling of ``tiled``), default ``lanes`` (Phase 6, 2026-09-11;
+    18x the per-pair kernel). On a gradient path it is always ``lanes``: only that
+    kernel carries a custom_vjp (plan fast-gradients); the pair / tiled kernels
+    would hit pallas_call's generic JVP rule.
+
+    Returns
+    -------
+    str
+        The kernel name.
+
+    Raises
+    ------
+    ValueError
+        If ``JACCPOT_M2L_CSR_KERNEL`` names no kernel.
+    """
+    from jaccpot._env import env_flag
+    from jaccpot.runtime.grad_options import on_grad_path
+
+    which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
+    if not which:
+        which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "lanes"
+    if which not in ("pair", "tiled", "lanes"):
+        raise ValueError(
+            f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected pair, tiled or lanes"
+        )
+    if which != "lanes" and on_grad_path():
+        which = "lanes"
+    return which
+
+
 def _solidfmm_downward_accumulate_from_multipoles(
     initial_locals_coeffs: Array,
     multipoles_coeffs: Array,
@@ -535,6 +618,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     farfield_mode: str,
     basis_mode: str = "complex",
     m2l_impl: str = "rot_scale",
+    targets_sorted: bool = False,
 ) -> Array:
     """Run one solidfmm M2L accumulation pass plus symmetry enforcement.
 
@@ -613,6 +697,10 @@ def _solidfmm_downward_accumulate_from_multipoles(
         enforcement runs afterwards -- real coefficients have no such symmetry.
     m2l_impl : str
         M2L implementation selector for the flat lanes.
+    targets_sorted : bool
+        ``src`` / ``tgt`` are a ``TargetSortedFarPairs`` list as walked: ``tgt``
+        holds the row offsets. The CSR lanes kernel reads it as is; every other
+        route expands one target per entry first. Static.
 
     Returns
     -------
@@ -628,6 +716,17 @@ def _solidfmm_downward_accumulate_from_multipoles(
     """
 
     real_basis = str(basis_mode).strip().lower() == "real"
+    if targets_sorted and not (
+        not grouped_interactions
+        and real_basis
+        and _m2l_csr_pallas_active()
+        and _m2l_csr_kernel_choice() == "lanes"
+    ):
+        # only the lanes kernel reads a CSR as (sources, row offsets)
+        from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+
+        tgt = targets_from_csr_offsets(tgt, int(jnp.asarray(src).shape[0]))
+        targets_sorted = False
 
     if grouped_interactions:
         grouped = (
@@ -677,24 +776,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
                 m2l_real_csr_tiled_pallas,
                 m2l_real_csr_tiled_supported,
             )
-            from jaccpot.runtime.grad_options import on_grad_path
 
             interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
-            # plan sub-10ms Phase 5: JACCPOT_M2L_CSR_KERNEL = pair | tiled | lanes
-            # (JACCPOT_M2L_CSR_TILED=1 is the older spelling of "tiled")
-            which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
-            if (
-                not which
-            ):  # default: lanes (Phase 6, 2026-09-11; 18x the per-pair kernel)
-                which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "lanes"
-            if which not in ("pair", "tiled", "lanes"):
-                raise ValueError(
-                    f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected pair, tiled or lanes"
-                )
-            if which != "lanes" and on_grad_path():
-                # only the lanes kernel carries a custom_vjp (plan fast-gradients);
-                # the pair / tiled kernels would hit pallas_call's generic JVP rule
-                which = "lanes"
+            which = _m2l_csr_kernel_choice()
             if which == "lanes":
                 # the custom_vjp seam: the forward is the same launch, and the
                 # reverse runs the transposed (by-source) lane kernel
@@ -710,6 +794,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
                     "triton",
                     int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
                     n_targets,
+                    bool(targets_sorted),
                 )
             elif which == "tiled" and m2l_real_csr_tiled_supported(order):
                 m2l_inc = m2l_real_csr_tiled_pallas(

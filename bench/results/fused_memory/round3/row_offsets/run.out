@@ -1,0 +1,21 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-tags card 3 17:35 others: 4249 MiB
+T1: prepare 2.37 GiB (318 B/p) eval 2.37 (318 B/p) step 2.82 (378 B/p) | force 31.1 ms step 108.6 ms | far 39093974 near 9414078 | rel-L2 None
+done 17:38
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-off card 3 17:38 others: 4249 MiB
+O1: prepare 2.14 GiB (287 B/p) eval 2.14 (287 B/p) step 2.59 (348 B/p) | force 40.6 ms step 104.6 ms | far 39093974 near 9414078 | rel-L2 None
+done 17:41
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-off card 3 17:41 others: 4249 MiB
+P1: prepare 4.16 GiB (559 B/p) eval 4.16 (559 B/p) step 4.92 (660 B/p) | force 30.2 ms step 591.4 ms | far 39093974 near 9414078 | rel-L2 None
+done 17:44
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=False rows_diff=2561217/8000000 (32.0152 %) max_rel=2.544e-04
+force: equal=False rows_diff=7888184/8000000 (98.6023 %) max_rel=2.401e-05
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-off card 3 17:44 others: 4249 MiB
+OD: prepare 2.45 GiB (328 B/p) eval - step 2.47 (332 B/p) | force - ms step 105.0 ms | far 39093974 near 9414078 | rel-L2 None
+done 17:47

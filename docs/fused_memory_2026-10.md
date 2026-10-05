@@ -321,6 +321,86 @@ eager initial force ~11 per step at 2 steps per call (the particle carry's handl
 load, so its times are indicative): 8e6 clipped at leaf 32 peaks at 213-244 B per particle (p3-p5); p5 theta
 0.8 gives aggL2 4.4e-4.
 
+## Round 3: the step's liveness, lists without sorts (2026-10-04)
+
+Branch `perf/fused-round3` on #360. Rows: `bench/results/fused_memory/round3/`. Configuration as in round 2, with
+`JACCPOT_STRICT_CARRY=particles` throughout. Card 3 of the A100 node carried its idle 4.2 GiB foreign process.
+
+**New tool: `bench/analyse_step_liveness.py`.** A buffer assignment gives offsets, not live ranges. This tool reads
+the scheduled HLO next to it and reports three things:
+- what is live at the compiled step's peak, per `fmm_*` scope;
+- the live maximum while each stage runs (the next windows);
+- what is live at any given instant.
+
+Its peak matched the assignment's temporary block to 1 % (1.560 against 1.570 GiB at 8e6). Every window below was
+found with it.
+
+**Where the step's peak was** (8e6, the runner at 09dff2c, 1.57 GiB temporary block):
+- **Far CSR build: 1.56 GiB.** The placement held both sorted copies of the canonical pairs, the materialised slot
+  arrays and the two 2W outputs (sources and targets): 40 B per canonical slot.
+- **M2L window.** The presorted CSR read made a `where(valid, src, 0)` copy of the list, kept through the L2L.
+- **Upward window.** The leaf P2M's `(L, 64)` row array sat next to the `(nodes, 36)` table it was concatenated into.
+
+**Changes.** 8e6 clipped Plummer; each pair is the same frozen worktrees, interleaved. Forces and the scan state
+are bitwise equal against the previous arm.
+
+| commit | change | 8e6 | large N (production sequence, arena 0.88) |
+| --- | --- | --- | --- |
+| 7381938 | COM radii by a Pallas kernel: each leaf's particles read once per 8 ancestors | step 113.7 / 111.6 -> 106.5 / 108.0 ms | -- |
+| c2298a0 | far list emitted in CSR order; the M2L reads it without its sort | step peak 3.70 -> 2.91 GiB, prepare 3.38 -> 2.76 | 6.4e7: 23.71 -> 19.47 GiB (398 -> 327 B/p) |
+| 26a9de8 | box geometry deferred on the COM lane (prepare and refresh) | neutral | 6.4e7: tree+upward 16.5 -> 10.9 GiB, 19.08 GiB (320 B/p); 9.6e7 fits the arena: 27.92 GiB (312 B/p), 1326 ms |
+| 09dff2c | far tags zero-length (were 2W int32 of -1) | -- | 1.12e8: 32.94 GiB (316 B/p), 1527 ms; 1.2e8: 31.47 GiB (275), 1617 ms; 1.28e8: the scan OOMs |
+| 2911274 | far list carries row offsets; the presorted M2L reads it without a copy | step 2.82 -> 2.59 GiB; runner block 1.570 -> 1.375 GiB | -- |
+| 8da2071 | leaf P2M writes its rows of the table in place | step 2.59 -> 2.53 GiB | 1.28e8 fits: 30.41 GiB (255 B/p), 1728 ms |
+| d35526a | directed CSR lists without a sort (Pallas placement + in-row ranks) | step 2.59 -> 2.31 GiB (348 -> 310 B/p), prepare 2.17 -> 1.88; 103.9 / 104.4 ms; runner block 1.375 -> 1.229 GiB | 1.28e8: 29.81 GiB (250 B/p), 1763 ms |
+| 6690a15 | the particle-carry runner donates the initial acceleration it built and returns no total acceleration | step 2.31 -> 2.26 GiB (303 B/p), 104.1 ms | 1.36e8 still fails in the arena (below) |
+
+Commit details:
+- **Row offsets (2911274).**
+  - `TargetSortedFarPairs.targets` holds the CSR row offsets; `far_pair_targets()` expands them for every reader
+    that wants one target per entry.
+  - Every M2L route other than lanes expands them first. Checked: the `pair` route on the new code is bitwise
+    equal to the old code's `pair` route.
+  - The lanes backward pass expands them before its by-source sort.
+- **CSR without a sort (d35526a).** Three passes:
+  1. row counts by an integer scatter-add, and their prefix sum;
+  2. placement from per-row atomic cursors;
+  3. in-row ranks, tile against tile.
+
+  A row's entries are distinct, so the ranks undo whatever order the atomics left: bitwise equal to the sorted build
+  (a GPU test at 3e5 pairs with a 1000-entry row). Live set: 16 B per canonical slot against the sorts' 24 at their
+  placement. Time is neutral: the 8e6 far list builds in 10.3-10.7 ms against 10.6-11.3. The cursors are float32:
+  on jax 0.10.2 the int32 vector form of `plgpu.atomic_add` neither updates memory nor returns old values (probed);
+  float32 does both.
+
+**Negative.** 16-lane near-field sub-tiles: 111 -> 124-151 ms per step.
+
+**The step's windows now** (8e6, d35526a): upward 1.00 GiB (the P2M's padded position and mass copies next to
+the table and the far list), walk 0.95, near 0.94, lists 0.94. The step is balanced; each further cut is ~5 %.
+
+**What binds the ceiling now.** At 1.28e8 (d35526a) the peak is the arrays in use before the scan (~9 GiB: the
+particles, masses, accelerations) plus the scan's 15 GiB temporary block plus 5.7 GiB of outputs: the measured
+29.81 GiB exactly. The outputs (state, acceleration, self-gravity: 48 B/p) were fresh buffers beside the
+arguments. 6690a15 drops the unused total acceleration and donates the initial one. That is -24 B/p at the scan,
+-0.05 GiB at 8e6.
+
+From 1.36e8 the first scan call cannot place a 6.5-7.2 GiB allocation: the eager prepare left the arena with two
+free regions, neither large enough. (XLA's rematerialisation log is no guide here: its estimate at 1.36e8 did not
+move with 6690a15.)
+
+**The ceiling now** (production sequence, `JACCPOT_STRICT_CARRY=particles`, 6690a15):
+
+| run | allocator | peak (B/p) | per step |
+| --- | --- | --- | --- |
+| 1.28e8 clipped | preallocated arena 0.88 | 29.81 GiB (250) | 1763 ms |
+| 1.36e8 - 1.52e8 | preallocated arena 0.88 | the first scan call cannot place a 6.5-7.2 GiB allocation (two free regions, neither large enough) | -- |
+| 1.36e8 | `cuda_async` | **31.59 GiB (249)** | 2199 ms |
+| 1.52e8 / 1.68e8 | `cuda_async` | the scan's temporary block itself (22.6 / 24.7 GiB) does not fit beside the particles | -- |
+
+**One 40 GB A100 now holds 1.28e8 particles in the arena, 1.36e8 with the asynchronous allocator** (round 2:
+8.8e7 / 1.04e8). The asynchronous allocator costs ~17 % per particle (2199 ms at 1.36e8 against 1763 at 1.28e8).
+Beyond that the step's own temporary block (~150 B per particle at large N) binds.
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
@@ -338,22 +418,23 @@ Two follow-ups stand between the fused lane and the 25M disc+bulge production ro
   scan. Its force-scale estimate already takes the softening, and the mesh lane was in class with it on this IC,
   so measure whether it alone fixes the bulge centre before building the distance floor.
 
-Then (updated after round 2):
+Then (updated after round 3):
 
-* **Memory.** The binding peak is now the eager prepare, mostly the downward pass's transients. Next:
-  * a jitted (or chunked) eager downward;
-  * the far list's all -1 `tags` (eager state only);
-  * the near tables (`nearfield_leaf_particle_indices` / mask) that the direct layout no longer reads;
-  * an unexplained +0.13 GiB in the head's eager prepare at 8e6 against c1b40b3. It is not the near CSR, the walk
-    or yggdrax (bisected).
-* **Speed** (8e6 step at the head; stage trace without command buffers):
-  * COM radii (~20-26 ms): one fused kernel that reads each leaf's particles once for its whole ancestor chain;
-  * the near field (23 ms): its 32-lane tiles are 30 % occupied on 10-particle leaves;
-  * the far list's second sort (the M2L's `csr_by_target`, ~3 ms): the list build can hand it a presorted CSR,
-    as the near CSR now is.
+* **Memory: the ceiling.** Past 1.28e8 the preallocated arena fails on fragmentation after the eager prepare.
+  * Donate the state into the particle-carry scan (another 24 B/p at the scan). The segment retry then has to
+    resume from a frozen state: a scan that stops advancing at its first capacity failure, plus a count of the
+    steps it completed. Today the retry restarts from the call's start state, which a donated state destroys.
+  * Leave fewer survivors in the middle of the arena after the eager prepare, or prepare less eagerly. The
+    particle carry needs only the caps, the template and the initial force.
+  * Step windows at 8e6 are 0.93-1.0 GiB each:
+    * the P2M's padded position and mass copies (gathers would do);
+    * the walk's while-carry copies of its output buffers;
+    * the near field's output and padded table.
+* **Speed** (8e6, 104 ms per step): the list build is ~11 ms of it (far + near); the near field's 32-lane tiles
+  are 30 % occupied on 10-particle leaves; the walk ~27 ms.
 * **Production.**
   * Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` without code changes.
-  * The int32 index default is its own PR pair (jaccpot `perf/int32-index-default`, yggdrax the same name):
-    Odisseo's production runs have used int64.
+  * The int32 index default is its own PR pair (jaccpot #361, yggdrax #84): Odisseo's production runs have used
+    int64.
 * Still open: a segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today), and the
   record configuration at 2e5 on a quiet card.

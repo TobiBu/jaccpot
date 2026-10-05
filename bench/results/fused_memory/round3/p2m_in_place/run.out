@@ -1,0 +1,20 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-p2m card 3 18:02 others: 4249 MiB
+Q1: prepare 2.14 GiB (287 B/p) eval 2.14 (287 B/p) step 2.53 (340 B/p) | force 29.8 ms step 104.4 ms | far 39093974 near 9414078 | rel-L2 None
+done 18:05
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-p2m card 3 18:05 others: 4249 MiB
+QD: prepare 2.53 GiB (340 B/p) eval - step 2.53 (340 B/p) | force - ms step 104.1 ms | far 39093974 near 9414078 | rel-L2 None
+done 18:07
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-p2m card 3 18:07 others: 4249 MiB
+clip128: prepare 30.41 GiB (255 B/p) eval - step 30.41 (255 B/p) | force - ms step 1727.9 ms | far 504168620 near 150099422 | rel-L2 None
+clip136: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.47GiB. [executable_name='jit__compiled_runner'] [tf-allocat
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+clip144: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.83GiB. [tf-allocator-allocation-error=''] [executable_name=
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+done 18:16

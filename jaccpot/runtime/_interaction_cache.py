@@ -53,6 +53,8 @@ __all__ = [
     "pair_policy_cache_identity",
     "strict_walk_backend",
     "strict_walk_deterministic_rows",
+    "TargetSortedFarPairs",
+    "far_pair_targets",
 ]
 
 
@@ -1894,6 +1896,194 @@ def _lex_sorted(
     return (composite // bound).astype(pdt), (composite % bound).astype(sdt)
 
 
+class TargetSortedFarPairs(CompactTaggedFarPairs):
+    """A far list in CSR order whose ``targets`` field holds the ROW OFFSETS.
+
+    The deterministic flat walk emits its far list in CSR order: every target's
+    sources contiguous and ascending (:func:`_directed_csr_from_canonical`), the
+    live entries a prefix. So the list is ``sources`` plus ``total_nodes + 1`` row
+    offsets, and ``targets`` holds those offsets rather than one target per entry
+    (which was 2W int32 live from the build through the M2L). The M2L reads it as
+    the CSR it is (``csr_by_target(presorted=True)``); anything wanting one target
+    per entry calls :func:`far_pair_targets`. A field-less subclass: the same
+    pytree fields, kept through ``jit`` and ``scan`` as the node type.
+    """
+
+    __slots__ = ()
+
+
+def far_pair_targets(far_pairs: CompactTaggedFarPairs) -> Array:
+    """One target per entry of a compact far list (``-1`` on padding).
+
+    A :class:`TargetSortedFarPairs` list stores its row offsets in ``targets``;
+    they are expanded here. Any other list returns its ``targets`` as they are.
+
+    Parameters
+    ----------
+    far_pairs : CompactTaggedFarPairs
+        A compact far list.
+
+    Returns
+    -------
+    Array
+        ``[len(far_pairs.sources)]`` target node ids.
+    """
+    if isinstance(far_pairs, TargetSortedFarPairs):
+        from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+
+        return targets_from_csr_offsets(
+            far_pairs.targets, int(jnp.asarray(far_pairs.sources).shape[0])
+        )
+    return jnp.asarray(far_pairs.targets)
+
+
+def _list_csr_kernel() -> str:
+    """How the deterministic walk builds its directed CSR lists.
+
+    ``JACCPOT_LIST_CSR_KERNEL``: ``pallas`` (counts, atomic placement and in-row
+    ranks, :mod:`jaccpot.pallas.csr_place`: 16 B per canonical slot), ``xla``
+    (two sorts over the pairs: 24 B per slot at the placement), ``interpret``
+    (the Pallas route in interpret mode, for CPU tests) or ``auto`` (the default:
+    ``pallas`` where it lowers, else ``xla``). Read at trace time.
+
+    Returns
+    -------
+    str
+        ``"pallas"``, ``"xla"`` or ``"interpret"``.
+    """
+    from jaccpot._env import env_choice
+    from jaccpot.pallas.csr_place import pallas_directed_csr_supported
+
+    choice = env_choice(
+        "JACCPOT_LIST_CSR_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
+    )
+    if choice == "auto":
+        return "pallas" if pallas_directed_csr_supported() else "xla"
+    return choice
+
+
+def _directed_csr_from_canonical(
+    a: Array,
+    b: Array,
+    live: Array,
+    *,
+    row_offset: int,
+    num_rows: int,
+    idx: Any,
+    pad_source: int,
+    with_targets: bool,
+) -> tuple[Array, Optional[Array], Array, Array]:
+    """The directed list of CANONICAL pairs ``(a, b)``, ``a < b``, sorted by (target, source).
+
+    Each canonical pair is the two directed entries ``b -> a`` and ``a -> b``. Sorted
+    by ``(target, source)``, row ``t`` holds first the ``a`` of every pair ``(a, t)``
+    (``a < t``), then the ``b`` of every pair ``(t, b)`` (``b > t``), each ascending.
+    Where Pallas lowers (:func:`_list_csr_kernel`) no sort at all: counts, atomic
+    placement and in-row ranks (:mod:`jaccpot.pallas.csr_place`). Otherwise,
+    instead of one composite sort over the ``2W`` directed entries: one composite
+    sort of the ``W`` canonical pairs by ``(a, b)`` (the rows' high halves, in
+    order), one stable int32 key-value re-sort of them by ``b`` (the low halves,
+    ``a`` ascending by stability), counts and offsets from both, and one
+    unique-index placement. The same arrays to the bit as the directed sort.
+
+    Parameters
+    ----------
+    a : Array
+        ``(W,)`` lower node of each canonical pair (dead slots arbitrary).
+    b : Array
+        ``(W,)`` upper node.
+    live : Array
+        ``(W,)`` live slots, a prefix.
+    row_offset : int
+        Node id of row 0 (``num_internal`` for leaf rows, 0 for node rows). Static.
+    num_rows : int
+        Rows. Static.
+    idx : Any
+        Index dtype. Static.
+    pad_source : int
+        Source value past the live entries (0 for the near CSR, -1 for far pairs).
+    with_targets : bool
+        Also return the target node of every entry (``-1`` past the live ones).
+
+    Returns
+    -------
+    tuple[Array, Optional[Array], Array, Array]
+        ``(sources (2W,), targets (2W,) or None, offsets (R + 1,), counts (R,))``,
+        node ids, live entries a prefix.
+
+    Raises
+    ------
+    ValueError
+        If ``3 W`` (the dropped lanes' out-of-range slots) overflows ``idx``.
+    """
+    width = int(a.shape[0])
+    R = int(num_rows)
+    if 3 * width >= int(jnp.iinfo(idx).max):
+        raise ValueError(f"pair width {width} overflows {idx}")
+    route = _list_csr_kernel()
+    if route != "xla" and width > 0 and R > 0:
+        # no sort over the pairs: counts, atomic placement, in-row ranks (the
+        # same arrays to the bit; jaccpot.pallas.csr_place)
+        from jaccpot.pallas.csr_place import directed_csr_pallas
+        from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+
+        sources, offsets, counts = directed_csr_pallas(
+            jnp.asarray(a, idx) - jnp.asarray(row_offset, idx),
+            jnp.asarray(b, idx) - jnp.asarray(row_offset, idx),
+            jnp.sum(jnp.asarray(live, idx)),
+            num_rows=R,
+            row_offset=int(row_offset),
+            pad_source=int(pad_source),
+            idx=idx,
+            interpret=route == "interpret",
+        )
+        targets = None
+        if with_targets:
+            rows = targets_from_csr_offsets(offsets, 2 * width)
+            targets = jnp.where(rows >= 0, rows + jnp.asarray(row_offset, idx), -1)
+        return sources, targets, offsets, counts
+    dead = jnp.asarray(R, idx)
+    ra = jnp.where(live, a - row_offset, dead).astype(idx)
+    rb = jnp.where(live, b - row_offset, dead).astype(idx)
+    # rows' high halves: canonical pairs by (a, b), dead (R, R) last
+    a_s, b_s = _lex_sorted(ra, rb, primary_bound=R + 1, secondary_bound=R + 1)
+    # rows' low halves: the same pairs stably by b (a stays ascending per b)
+    b_t, a_t = jax.lax.sort((b_s, a_s), num_keys=1, is_stable=True)
+    rows = jnp.arange(R + 1, dtype=idx)
+    start_hi = jnp.searchsorted(a_s, rows, side="left", method="scan_unrolled").astype(
+        idx
+    )
+    start_lo = jnp.searchsorted(b_t, rows, side="left", method="scan_unrolled").astype(
+        idx
+    )
+    n_hi = start_hi[1:] - start_hi[:-1]
+    n_lo = start_lo[1:] - start_lo[:-1]
+    counts = (n_lo + n_hi).astype(idx)
+    offsets = jnp.concatenate([jnp.zeros((1,), idx), jnp.cumsum(counts).astype(idx)])
+    i = jnp.arange(width, dtype=idx)
+    # dead entries point past the list at distinct slots and are dropped
+    past = jnp.asarray(2 * width, idx) + i
+    t_lo = jnp.minimum(b_t, R - 1)
+    slot_lo = jnp.where(b_t < R, offsets[t_lo] + (i - start_lo[t_lo]), past)
+    t_hi = jnp.minimum(a_s, R - 1)
+    slot_hi = jnp.where(
+        a_s < R, offsets[t_hi] + n_lo[t_hi] + (i - start_hi[t_hi]), past
+    )
+
+    def _place(lo_values: Array, hi_values: Array, fill: int) -> Array:
+        out = jnp.full((2 * width,), fill, idx)
+        out = out.at[slot_lo].set(
+            (lo_values + row_offset).astype(idx), mode="drop", unique_indices=True
+        )
+        return out.at[slot_hi].set(
+            (hi_values + row_offset).astype(idx), mode="drop", unique_indices=True
+        )
+
+    sources = _place(a_t, b_s, pad_source)
+    targets = _place(b_t, a_s, -1) if with_targets else None
+    return sources, targets, offsets, counts
+
+
 def _near_csr_from_canonical(
     near_a: Array,
     near_b: Array,
@@ -1905,16 +2095,11 @@ def _near_csr_from_canonical(
 ) -> tuple[Array, Array, Array]:
     """The deterministic leaf-neighbour CSR from the CANONICAL near pairs.
 
-    The directed list sorted by ``(target, source)`` puts row ``t``'s sources in
-    ascending order: first the ``a`` of every canonical pair ``(a, t)`` (``a <
-    t``), then the ``b`` of every ``(t, b)`` (``b > t``) -- the walk emits each
-    unordered pair once as ``(min, max)`` and never ``(t, t)``. So instead of one
-    composite sort over the ``2W`` directed slots: one composite sort of the ``W``
-    canonical pairs by ``(a, b)`` (rows' high halves, in order), one stable int32
-    key-value re-sort of it by ``b`` (rows' low halves, ``a`` ascending within a
-    row by stability), counts and offsets from both, and one unique-index
-    placement. Same ``neighbors``, ``offsets`` and ``counts`` to the bit, about
-    half the sort bytes (the near-list build was the step's peak on dense draws).
+    :func:`_directed_csr_from_canonical` over leaf rows: the walk emits each
+    unordered leaf pair once as ``(min, max)`` and never ``(t, t)``. Same
+    ``neighbors``, ``offsets`` and ``counts`` to the bit as one composite sort of
+    the ``2W`` directed slots, at about half the sort bytes (the near-list build
+    was the step's peak on dense draws).
 
     Parameters
     ----------
@@ -1936,49 +2121,16 @@ def _near_csr_from_canonical(
     tuple[Array, Array, Array]
         ``(neighbors (2W,), offsets (L + 1,), counts (L,))``: source NODE ids per
         row, ascending, padded with 0 past the live entries.
-
-    Raises
-    ------
-    ValueError
-        If ``3 W`` (the dropped lanes' out-of-range slots) overflows ``idx``.
     """
-    width = int(near_a.shape[0])
-    L = int(num_leaves)
-    if 3 * width >= int(jnp.iinfo(idx).max):
-        raise ValueError(f"near width {width} overflows {idx}")
-    dead = jnp.asarray(L, idx)
-    la = jnp.where(live, near_a - num_internal, dead).astype(idx)
-    lb = jnp.where(live, near_b - num_internal, dead).astype(idx)
-    # rows' high halves: canonical pairs by (a, b), dead (L, L) last
-    a_s, b_s = _lex_sorted(la, lb, primary_bound=L + 1, secondary_bound=L + 1)
-    # rows' low halves: the same pairs stably by b (a stays ascending per b)
-    b_t, a_t = jax.lax.sort((b_s, a_s), num_keys=1, is_stable=True)
-    rows = jnp.arange(L + 1, dtype=idx)
-    start_hi = jnp.searchsorted(a_s, rows, side="left", method="scan_unrolled").astype(
-        idx
-    )
-    start_lo = jnp.searchsorted(b_t, rows, side="left", method="scan_unrolled").astype(
-        idx
-    )
-    n_hi = start_hi[1:] - start_hi[:-1]
-    n_lo = start_lo[1:] - start_lo[:-1]
-    counts = (n_lo + n_hi).astype(idx)
-    offsets = jnp.concatenate([jnp.zeros((1,), idx), jnp.cumsum(counts).astype(idx)])
-    i = jnp.arange(width, dtype=idx)
-    # dead entries point past the list at distinct slots and are dropped
-    past = jnp.asarray(2 * width, idx) + i
-    t_lo = jnp.minimum(b_t, L - 1)
-    slot_lo = jnp.where(b_t < L, offsets[t_lo] + (i - start_lo[t_lo]), past)
-    t_hi = jnp.minimum(a_s, L - 1)
-    slot_hi = jnp.where(
-        a_s < L, offsets[t_hi] + n_lo[t_hi] + (i - start_hi[t_hi]), past
-    )
-    neighbors = jnp.zeros((2 * width,), idx)
-    neighbors = neighbors.at[slot_lo].set(
-        (a_t + num_internal).astype(idx), mode="drop", unique_indices=True
-    )
-    neighbors = neighbors.at[slot_hi].set(
-        (b_s + num_internal).astype(idx), mode="drop", unique_indices=True
+    neighbors, _, offsets, counts = _directed_csr_from_canonical(
+        near_a,
+        near_b,
+        live,
+        row_offset=int(num_internal),
+        num_rows=int(num_leaves),
+        idx=idx,
+        pad_source=0,
+        with_targets=False,
     )
     return neighbors, offsets, counts
 
@@ -2073,28 +2225,40 @@ def _flat_walk_lists(
     -------
     tuple[Array, ...]
         ``(far_sources, far_targets, far_tags, far_pair_count, neighbors, offsets,
-        counts)``.
+        counts)``. With ``deterministic``, ``far_targets`` are the far list's
+        ``total_nodes + 1`` ROW OFFSETS (a :class:`TargetSortedFarPairs` list);
+        otherwise one target per entry.
     """
     num_leaves = total_nodes - num_internal
     # --- far pairs: directed, interleaved, prefix-live, capacity-width ---
     far_live = jnp.arange(far_width, dtype=idx) < far_count
     fa = jnp.where(far_live, _fit_width(far_a, far_width, -1), -1).astype(idx)
     fb = jnp.where(far_live, _fit_width(far_b, far_width, -1), -1).astype(idx)
-    if deterministic:
-        # canonical pairs in (a, b) order: the M2L CSR's stable sort by target
-        # then lists every row's sources ascending, whatever the emission order
-        fa, fb = _lex_sorted(
-            jnp.where(far_live, fa, jnp.asarray(total_nodes, idx)),
-            jnp.where(far_live, fb, jnp.asarray(0, idx)),
-            primary_bound=total_nodes + 1,
-            secondary_bound=total_nodes,
+    if deterministic and total_nodes > 0:
+        # the directed list already in CSR order (target, then source ascending):
+        # the M2L reads it without sorting it again (TargetSortedFarPairs), and
+        # every row lists its sources exactly as the M2L's stable by-target sort of
+        # the (a, b)-ordered interleaved list did -- the same sums, bit for bit.
+        # The targets travel as the ROW OFFSETS: one target per entry was a 2W
+        # array live from this build through the M2L (8 B per canonical slot, at
+        # the step's peak); ``far_pair_targets`` expands it where one is needed.
+        far_sources, _, far_targets, _ = _directed_csr_from_canonical(
+            fa,
+            fb,
+            far_live,
+            row_offset=0,
+            num_rows=int(total_nodes),
+            idx=idx,
+            pad_source=-1,
+            with_targets=False,
         )
-        # the padding sorted to the end as (total_nodes, 0); restore its -1s
-        fa = jnp.where(far_live, fa, -1).astype(idx)
-        fb = jnp.where(far_live, fb, -1).astype(idx)
-    far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_width,))
-    far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_width,))
-    far_tags = jnp.full((2 * far_width,), -1, dtype=idx)
+    else:
+        far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_width,))
+        far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_width,))
+    # The flat walk assigns no order tags (they were all -1, 2W int32 of them:
+    # 1.6 GB at 6.4e7, held by every eager state); a zero-length array says so and
+    # the adaptive-order extractor synthesises the -1s if a caller wants them.
+    far_tags = jnp.zeros((0,), dtype=idx)
     # Saturate on ANY overflow: the strict runner's guard tests
     # ``far_pair_count < compact_far_pair_capacity`` and this is how the near and
     # queue flags reach it under trace.
@@ -2533,7 +2697,12 @@ def _build_flat_walk_artifacts_strict_streamed(
         deterministic=bool(walk_backend == "pallas" and deterministic_rows),
         idx=np.dtype(idx),
     )
-    compact_far_pairs = CompactTaggedFarPairs(
+    far_cls = (
+        TargetSortedFarPairs
+        if walk_backend == "pallas" and deterministic_rows
+        else CompactTaggedFarPairs
+    )
+    compact_far_pairs = far_cls(
         sources=far_sources,
         targets=far_targets,
         tags=far_tags,

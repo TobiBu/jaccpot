@@ -59,12 +59,14 @@ from ._adaptive_policy import (
     compute_node_force_scale_from_sorted_magnitudes,
 )
 from ._interaction_cache import (
+    TargetSortedFarPairs,
     _build_dual_tree_artifacts,
     _compiled_refresh_dual_planner_route,
     _DualTreeArtifacts,
     _interaction_cache_key,
     _InteractionCacheEntry,
     _RefreshDualPlannerHint,
+    far_pair_targets,
     pair_policy_cache_identity,
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
@@ -112,6 +114,7 @@ from .fmm_state import (
     _TopologyReuseEntry,
     _TreeBuildArtifacts,
 )
+from .kernels._downward_prep import _far_pair_coo_from
 from .kernels.core import (
     NearfieldInteropData,
     _build_nearfield_interop_data,
@@ -136,6 +139,35 @@ else:  # pragma: no cover - annotations only, never an import at runtime
 __all__ = [
     "PrepareMixin",
 ]
+
+
+def _gear_pairs_for_autotune(
+    compact_far_pairs: Any, src_far: Array, tgt_far: Array
+) -> Optional[tuple[tuple[Array, Array], ...]]:
+    """The one-gear ``((sources, targets),)`` a direct far list hands the downward.
+
+    Only the M2L chunk autotune reads it (it times the XLA chunked M2L on a
+    sample of pairs). A :class:`TargetSortedFarPairs` list carries row offsets in
+    ``targets`` and only exists with the Pallas walk, whose M2L is a Pallas CSR
+    kernel that takes no chunk size: ``None`` (no autotune, nothing expanded).
+
+    Parameters
+    ----------
+    compact_far_pairs : Any
+        The walk's far list.
+    src_far : Array
+        Its sources.
+    tgt_far : Array
+        Its ``targets`` field.
+
+    Returns
+    -------
+    Optional[tuple[tuple[Array, Array], ...]]
+        ``((src_far, tgt_far),)``, or ``None`` for a CSR list.
+    """
+    if isinstance(compact_far_pairs, TargetSortedFarPairs):
+        return None
+    return ((src_far, tgt_far),)
 
 
 class _DualDownwardPlan(NamedTuple):
@@ -1045,13 +1077,11 @@ class PrepareMixin(_EngineBase):
         # Under the COM MAC geometry the walk never reads the box geometry (only
         # the dehnen_error policy and the octree lanes do), and on a cell-leaf
         # tree its level loop is nodes x depth work: build it lazily instead.
-        if (
-            tree_config.mode == "static_radix"
-            and str(upward_center_mode).strip().lower() == "com"
-            and mac_geometry_mode() == "com"
-            and not self._uses_paper_style_force_scale()
-            and str(getattr(self, "execution_backend", "")) != "octree"
-        ):
+        # The mode is asked with the strict fused lane's default, as its walk
+        # resolves it (`_strict_walk_geometry`): asked bare it said "aabb" there,
+        # and the eager prepare built the box geometry every time -- its (L, 3, w)
+        # leaf gather was the prepare's largest transient (1.3 GiB at 8e6).
+        if self._defers_box_geometry(tree_config.mode, upward_center_mode):
             defer_geometry = True
         upward = self.prepare_upward_sweep(
             tree,
@@ -1659,12 +1689,10 @@ class PrepareMixin(_EngineBase):
         if strict_streamed_direct_far_pairs:
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
-            far_pairs_coo = _FarPairCOO(
-                sources=src_far,
-                targets=tgt_far,
-                active_count=getattr(compact_far_pairs, "far_pair_count", None),
+            far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
+            far_pairs_by_gear = _gear_pairs_for_autotune(
+                compact_far_pairs, src_far, tgt_far
             )
-            far_pairs_by_gear = ((src_far, tgt_far),)
             adaptive_order_for_downward = True
             p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
             if not suppress_host_side_effects:
@@ -2462,10 +2490,15 @@ class PrepareMixin(_EngineBase):
             )
             return far_sources, far_targets, far_tags
         if compact_far_pairs is not None:
+            sources = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+            tags = jnp.asarray(compact_far_pairs.tags, dtype=INDEX_DTYPE)
+            if tags.shape != sources.shape:
+                # the flat walk assigns no order tags and ships a zero-length array
+                tags = jnp.full(sources.shape, -1, dtype=INDEX_DTYPE)
             return (
-                jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE),
-                jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE),
-                jnp.asarray(compact_far_pairs.tags, dtype=INDEX_DTYPE),
+                sources,
+                jnp.asarray(far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE),
+                tags,
             )
         raise RuntimeError("adaptive-order traversal requires tagged far-pair payload")
 
@@ -2500,9 +2533,19 @@ class PrepareMixin(_EngineBase):
             If the streamed payload could not be built.
         """
 
+        far_pairs_coo: Optional[_FarPairCOO] = None
         if compact_far_pairs is not None:
             src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
-            tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+            far_pairs_coo = _far_pair_coo_from(
+                compact_far_pairs,
+                src_far,
+                jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE),
+            )
+            # one target per entry for the gear buckets (a CSR list's row offsets
+            # expanded; unused, and so never built, under a trace that skips them)
+            tgt_far = jnp.asarray(
+                far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE
+            )
         else:
             if interactions is None:
                 raise RuntimeError(
@@ -2510,16 +2553,12 @@ class PrepareMixin(_EngineBase):
                 )
             src_far = jnp.asarray(interactions.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(interactions.targets, dtype=INDEX_DTYPE)
-        active_count = (
-            getattr(compact_far_pairs, "far_pair_count", None)
-            if compact_far_pairs is not None
-            else None
-        )
-        far_pairs_coo = _FarPairCOO(
-            sources=src_far,
-            targets=tgt_far,
-            active_count=active_count,
-        )
+        if far_pairs_coo is None:
+            far_pairs_coo = _FarPairCOO(
+                sources=src_far,
+                targets=tgt_far,
+                active_count=None,
+            )
         max_order_int = int(upward.multipoles.order)
         strict_fused_device_only_active = bool(
             getattr(self, "_strict_fused_mode_active", False)
@@ -3424,6 +3463,34 @@ class PrepareMixin(_EngineBase):
             p_gears=p_gears,
         )
 
+    def _defers_box_geometry(self, tree_mode: str, center_mode: str) -> bool:
+        """Whether the upward sweep may skip the box geometry (the walk tests COM).
+
+        Parameters
+        ----------
+        tree_mode : str
+            The tree builder mode.
+        center_mode : str
+            The upward sweep's expansion-centre mode.
+
+        Returns
+        -------
+        bool
+            True on a static-radix COM tree whose walk geometry resolves to
+            ``"com"`` (with the strict fused lane's default), outside the
+            paper-style force scale and the octree backend -- the walk then never
+            reads the box geometry, and ``_strict_walk_geometry`` builds it lazily
+            if a caller does.
+        """
+        default = "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+        return (
+            str(tree_mode) == "static_radix"
+            and str(center_mode).strip().lower() == "com"
+            and mac_geometry_mode(default) == "com"
+            and not self._uses_paper_style_force_scale()
+            and str(getattr(self, "execution_backend", "")) != "octree"
+        )
+
     def _strict_walk_geometry(self, tree_artifacts: Any) -> tuple[Any, Any]:
         """The geometry this lane's dual walk tests the MAC on, resolved ONCE per tree.
 
@@ -3743,12 +3810,10 @@ class PrepareMixin(_EngineBase):
 
         src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
         tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
-        far_pairs_coo = _FarPairCOO(
-            sources=src_far,
-            targets=tgt_far,
-            active_count=getattr(compact_far_pairs, "far_pair_count", None),
+        far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
+        far_pairs_by_gear = _gear_pairs_for_autotune(
+            compact_far_pairs, src_far, tgt_far
         )
-        far_pairs_by_gear: tuple[tuple[Array, Array], ...] = ((src_far, tgt_far),)
         p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
         if not suppress_host_side_effects:
             self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)

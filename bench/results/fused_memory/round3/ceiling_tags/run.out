@@ -1,0 +1,7 @@
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-tags card 3 17:05 others: 4249 MiB
+clip112: prepare 29.54 GiB (283 B/p) eval - step 32.94 (316 B/p) | force - ms step 1527.5 ms | far 446331116 near 132334088 | rel-L2 None
+clip120: prepare 31.47 GiB (282 B/p) eval - step 31.47 (282 B/p) | force - ms step 1617.4 ms | far 475191078 near 141271818 | rel-L2 None
+clip128: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.10GiB. [tf-allocator-allocation-error=''] [executable_name=
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+done 17:15

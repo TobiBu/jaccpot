@@ -38,7 +38,11 @@ from jax.experimental import pallas as pl
 from jaxtyping import Array
 
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
-from jaccpot.pallas.m2l_real_csr import csr_by_target, m2l_real_csr_tables
+from jaccpot.pallas.m2l_real_csr import (
+    csr_by_target,
+    m2l_real_csr_tables,
+    targets_from_csr_offsets,
+)
 
 __all__ = [
     "m2l_real_csr_lanes_pallas",
@@ -347,6 +351,7 @@ def m2l_real_csr_lanes_pallas(
     interpret: bool = False,
     backend: str = "triton",
     num_warps: int = 1,
+    presorted: bool = False,
 ) -> Array:
     """Local increments from a flat far-pair list, one pair per lane.
 
@@ -386,6 +391,11 @@ def m2l_real_csr_lanes_pallas(
         Pallas GPU lowering.
     num_warps : int
         Warps per program (``k_lanes / 32`` is natural).
+    presorted : bool
+        ``sources`` is already in CSR order (``TargetSortedFarPairs``) and
+        ``targets`` holds its row offsets (``[>= n_targets + 1]``), not one target
+        per entry: no CSR sort, no copy (``csr_by_target(presorted=True)``).
+        Static.
 
     Returns
     -------
@@ -416,7 +426,11 @@ def m2l_real_csr_lanes_pallas(
     if not (0 <= nt <= n):
         raise ValueError(f"n_targets must lie in [0, {n}], got {nt}")
     src_sorted, offsets, counts = csr_by_target(
-        sources, targets, total_nodes=nt, active_pair_count=active_pair_count
+        sources,
+        targets,
+        total_nodes=nt,
+        active_pair_count=active_pair_count,
+        presorted=bool(presorted),
     )
     if nt == 0 or int(src_sorted.shape[0]) == 0:
         return jnp.zeros((nt, C), dtype=dtype)
@@ -697,7 +711,7 @@ def m2l_real_csr_lanes_reverse_pallas(
     return mbar, centers_bar
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11))
 def m2l_real_csr_lanes_pallas_cvjp(
     multipoles: Array,
     centers: Array,
@@ -710,6 +724,7 @@ def m2l_real_csr_lanes_pallas_cvjp(
     backend: str,
     num_warps: int,
     n_targets: Optional[int] = None,
+    presorted: bool = False,
 ) -> Array:
     """Differentiable :func:`m2l_real_csr_lanes_pallas` (forward byte-identical).
 
@@ -743,6 +758,10 @@ def m2l_real_csr_lanes_pallas_cvjp(
         by-target CSR whose grid and `loc_bar` rows would both have to be rebased,
         while `mult_bar` stays full length -- real work, and gradients through the
         cross-domain import are a later phase by decision, so it raises.
+    presorted : bool
+        ``targets`` are the row offsets of a CSR-ordered list: the forward reads
+        it as is, the reverse expands one target per entry before its by-source
+        sort. ``nondiff_argnums``.
 
     Returns
     -------
@@ -761,6 +780,7 @@ def m2l_real_csr_lanes_pallas_cvjp(
         interpret=interpret,
         backend=backend,
         num_warps=num_warps,
+        presorted=presorted,
     )
 
 
@@ -776,6 +796,7 @@ def _m2l_lanes_cvjp_fwd(
     backend,
     num_warps,
     n_targets,
+    presorted,
 ):
     out = m2l_real_csr_lanes_pallas(
         multipoles,
@@ -789,14 +810,27 @@ def _m2l_lanes_cvjp_fwd(
         interpret=interpret,
         backend=backend,
         num_warps=num_warps,
+        presorted=presorted,
     )
     return out, (multipoles, centers, sources, targets, active_pair_count)
 
 
 def _m2l_lanes_cvjp_bwd(
-    order, k_lanes, interpret, backend, num_warps, n_targets, residual, loc_bar
+    order,
+    k_lanes,
+    interpret,
+    backend,
+    num_warps,
+    n_targets,
+    presorted,
+    residual,
+    loc_bar,
 ):
     multipoles, centers, sources, targets, active_pair_count = residual
+    if presorted:
+        # the forward got the row offsets; the reverse sorts by source and needs
+        # one target per entry (-1 past the live prefix, as a COO list pads)
+        targets = targets_from_csr_offsets(targets, int(sources.shape[0]))
     if n_targets is not None and int(n_targets) != int(multipoles.shape[0]):
         raise NotImplementedError(
             "m2l_real_csr_lanes_pallas_cvjp: the reverse does not support "

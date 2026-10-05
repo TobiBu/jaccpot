@@ -138,3 +138,43 @@ def test_lanes_reverse_axis_aligned_pairs_with_padding_and_prefix(interpret):
         interpret=interpret,
     )
     assert np.array_equal(np.asarray(plain), np.asarray(got(mult, cent)))
+
+
+@pytest.mark.parametrize("order", [2, 4])
+def test_presorted_row_offsets_equal_the_coo_read_forward_and_reverse(order):
+    """``presorted``: ``targets`` are the row offsets of a CSR-ordered list.
+
+    The forward reads (sources, offsets) as is; the reverse expands one target
+    per entry. Both equal the COO call on the same (already target-sorted) list,
+    padding behind the live prefix included (interpret mode).
+    """
+    rng = np.random.default_rng(10 + order)
+    n, K = 30, 8
+    rows = rng.integers(0, 3 * K, n)
+    rows[0] = 0
+    rows[-1] = 0
+    rows[4] = 2 * K + 1
+    mult, cent, src, tgt = _case(order, n, rows, order)
+    pad = 7
+    src_p = jnp.concatenate([src, jnp.full((pad,), -1, jnp.int32)])
+    tgt_p = jnp.concatenate([tgt, jnp.full((pad,), -1, jnp.int32)])
+    offsets = jnp.asarray(np.concatenate([[0], np.cumsum(rows)]), jnp.int32)
+    live = jnp.asarray(int(src.shape[0]), jnp.int32)
+    C = (order + 1) ** 2
+    cot = jnp.asarray(rng.standard_normal((n, C)), jnp.float64)
+
+    def coo(m, c):
+        return m2l_real_csr_lanes_pallas_cvjp(
+            m, c, src_p, tgt_p, live, order, K, True, "triton", 1
+        )
+
+    def csr(m, c):
+        return m2l_real_csr_lanes_pallas_cvjp(
+            m, c, src_p, offsets, live, order, K, True, "triton", 1, None, True
+        )
+
+    out_c, vjp_c = jax.vjp(coo, mult, cent)
+    out_s, vjp_s = jax.vjp(csr, mult, cent)
+    assert np.array_equal(np.asarray(out_s), np.asarray(out_c))
+    for x, y in zip(vjp_s(cot), vjp_c(cot)):
+        assert np.array_equal(np.asarray(x), np.asarray(y))

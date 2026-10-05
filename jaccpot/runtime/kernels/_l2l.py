@@ -65,6 +65,7 @@ from ._downward_prep import (
     _prepare_solidfmm_downward_interaction_inputs,
     _prepare_solidfmm_downward_multipole_inputs,
     _solidfmm_downward_accumulate_from_multipoles,
+    _TargetSortedFarPairCOO,
 )
 from ._shared import _normalize_strict_refresh_detail_diag_mode
 
@@ -785,6 +786,9 @@ def _prepare_solidfmm_downward_sweep(
     interactions = interaction_inputs.interactions
     src = interaction_inputs.src
     tgt = interaction_inputs.tgt
+    # the walk's list as walked (CSR order, ``tgt`` its row offsets); expanded and
+    # cleared below if the cross-domain pairs are appended behind it
+    targets_sorted = isinstance(far_pairs_coo, _TargetSortedFarPairCOO)
     pair_count = interaction_inputs.pair_count
     active_pair_count = interaction_inputs.active_pair_count
 
@@ -908,8 +912,15 @@ def _prepare_solidfmm_downward_sweep(
                 [centers, jnp.asarray(cross_centers, centers.dtype)]
             )
             if cross_src is not None and int(jnp.asarray(cross_src).shape[0]) > 0:
+                if targets_sorted:
+                    # a target-sorted list carries row offsets: one target per
+                    # entry before the cross pairs go behind it
+                    from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+
+                    tgt = targets_from_csr_offsets(tgt, int(src.shape[0]))
                 src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
                 tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
+                targets_sorted = False
                 pair_count = int(src.shape[0])
                 # A merged list has no live PREFIX: the local half is -1-padded and
                 # the cross half follows it, so `arange(P) < active_pair_count` --
@@ -946,6 +957,7 @@ def _prepare_solidfmm_downward_sweep(
             farfield_mode=farfield_mode,
             basis_mode=basis_mode,
             m2l_impl=resolved_m2l_impl,
+            targets_sorted=targets_sorted,
         )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_m2l_compute_seconds",
@@ -1035,6 +1047,7 @@ def _prepare_solidfmm_downward_sweep(
                     farfield_mode=farfield_mode,
                     basis_mode=basis_mode,
                     m2l_impl=resolved_m2l_impl,
+                    targets_sorted=targets_sorted,
                 )
             )
             source_motion_locals_updated = _propagate_solidfmm_locals_by_level(

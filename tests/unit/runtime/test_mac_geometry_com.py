@@ -299,3 +299,31 @@ def test_level_passes_equal_the_ancestor_table(tree_data, dtype):
         com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=2).radius
     )
     assert np.all(short <= full) and np.any(short < full)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_pallas_chunks_equal_the_level_passes(tree_data, dtype, monkeypatch):
+    """The Pallas chunk kernel (interpret mode) gives the XLA level passes' radii.
+
+    Same squared distances, maxima in any order, one square root per node: equal
+    to a few ulp at most (the 3-term sum may contract differently), at the padded
+    64 levels and at the tree's own depth (chunks of eight overshoot it).
+    """
+    from yggdrax.tree import get_node_levels
+
+    tree, topo, ps, ms, com, _box = tree_data
+    ps = ps.astype(dtype)
+    com = com.astype(dtype)
+    eps = float(jnp.finfo(dtype).eps)
+    depth = int(np.asarray(get_node_levels(topo)).max()) + 1
+    for levels in (None, depth):
+        monkeypatch.setenv("JACCPOT_COM_RADII_KERNEL", "xla")
+        ref = np.asarray(
+            com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=levels).radius
+        )
+        monkeypatch.setenv("JACCPOT_COM_RADII_KERNEL", "interpret")
+        got = np.asarray(
+            com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=levels).radius
+        )
+        np.testing.assert_allclose(got, ref, rtol=4 * eps, atol=0)
+        assert np.all(got > 0)  # every node of this tree holds particles

@@ -33,7 +33,8 @@ from .fmm_state import (
     _TopologyReuseEntry,
     _velocity_verlet_state_update,
 )
-from .kernels.core import _empty_interaction_storage_for_tree, _FarPairCOO
+from .kernels._downward_prep import _far_pair_coo_from
+from .kernels.core import _empty_interaction_storage_for_tree
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
@@ -1583,7 +1584,9 @@ class StrictRunMixin(_EngineBase):
         masses_arr : Array
             ``[N]`` masses.
         acceleration_current : Array
-            Total acceleration at the start.
+            Total acceleration at the start: rebuilt per attempt from
+            ``acceleration_self_current`` (plus the external field), and donated
+            to the scan when this call owns it, so it is not read here.
         acceleration_self_current : Array
             Self-gravity at the start.
         advance : Callable[..., Any]
@@ -1657,6 +1660,7 @@ class StrictRunMixin(_EngineBase):
                 static_upward_num_levels,
                 _walk_caps_key(getattr(self, "_strict_fused_validated_caps", None)),
                 template.key(),
+                bool(donate_acceleration),
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
             runner = jit_cache.get(cache_key)
@@ -1665,15 +1669,17 @@ class StrictRunMixin(_EngineBase):
             self._strict_fused_traced_caps = None
 
             # named like the state carry's runner: dumps and the stage analyser
-            # select ``*_compiled_runner*``
-            @jax.jit
+            # select ``*_compiled_runner*``. The initial acceleration is donated
+            # when this call built it: its buffer becomes the self-gravity output,
+            # and the total acceleration (which the caller never reads) is no
+            # output at all -- two (N, 3) arrays fewer next to the scan's block.
+            @partial(jax.jit, donate_argnums=(1,) if donate_acceleration else ())
             def _compiled_runner(
                 state_initial: Array,
                 acceleration_initial: Array,
-                acceleration_self_initial: Array,
                 masses_in: Array,
                 ok_initial: Array,
-            ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
+            ) -> tuple[tuple[Array, Array, Array, Array], Optional[Array]]:
                 def _step(carry, scan_x):
                     state_now, acceleration_now, _, ok_now, needs_now = carry
                     prepared_new, state_new, acceleration_new, acc_self_new = advance(
@@ -1698,22 +1704,40 @@ class StrictRunMixin(_EngineBase):
                     if step_callback is not None
                     else None
                 )
-                return jax.lax.scan(
+                # the self-gravity slot is written by every step (num_steps >= 1)
+                (state_f, _, acc_self_f, ok_f, needs_f), history = jax.lax.scan(
                     _step,
                     (
                         state_initial,
                         acceleration_initial,
-                        acceleration_self_initial,
+                        jnp.zeros_like(acceleration_initial),
                         ok_initial,
                         jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
                     ),
                     xs=scan_xs,
                     length=num_steps_i,
                 )
+                return (state_f, acc_self_f, ok_f, needs_f), history
 
             jit_cache[cache_key] = _compiled_runner
             self._strict_fused_jit_function_cache = jit_cache
             return _compiled_runner
+
+        external_active = bool(add_external) and external_acceleration_fn is not None
+        # the self-gravity is this call's own (evaluated here, or zeros) unless it
+        # came from the caller or from the handle: only then may it be donated
+        self_owned = handle_in is None and initial_self_acceleration is None
+        donate_acceleration = external_active or self_owned
+        del acceleration_current  # rebuilt per attempt: a donated one is gone
+
+        def _initial_acceleration(acc_self: Array) -> Array:
+            acc_self = jnp.asarray(acc_self, dtype=state_arr.dtype)
+            if not external_active:
+                return acc_self
+            assert external_acceleration_fn is not None
+            return acc_self + jnp.asarray(
+                external_acceleration_fn(state_arr), dtype=state_arr.dtype
+            )
 
         prepared_curr = prepared_box.pop() if prepared_box else None
         if handle_in is not None:
@@ -1739,16 +1763,9 @@ class StrictRunMixin(_EngineBase):
             retried = False
             while True:
                 runner = _runner_for(template)
-                (
-                    state_out,
-                    _,
-                    acc_self_out,
-                    ok_all,
-                    walk_needs,
-                ), history_out = runner(
+                (state_out, acc_self_out, ok_all, walk_needs), history_out = runner(
                     state_arr,
-                    jnp.asarray(acceleration_current, dtype=state_arr.dtype),
-                    jnp.asarray(acceleration_self_current, dtype=state_arr.dtype),
+                    _initial_acceleration(acceleration_self_current),
                     masses_arr,
                     ok_initial,
                 )
@@ -1793,12 +1810,6 @@ class StrictRunMixin(_EngineBase):
                 self._strict_fused_validated_caps = validated
                 if initial_self_acceleration is None and handle_in is None:
                     acceleration_self_current = evaluate_self(prepared, state_arr)
-                    acceleration_current = acceleration_self_current
-                    if add_external and external_acceleration_fn is not None:
-                        acceleration_current = acceleration_current + jnp.asarray(
-                            external_acceleration_fn(state_arr),
-                            dtype=state_arr.dtype,
-                        )
                 template = _template_of(prepared)
                 self._strict_fused_traced_caps = None
                 ok_initial = jnp.asarray(capacity_ok(prepared))
@@ -2186,7 +2197,8 @@ class StrictRunMixin(_EngineBase):
                 topology_key=refresh_topology_key,
             )
 
-        defer_geometry = False
+        # as the prepare: the COM walk never reads the box geometry
+        defer_geometry = self._defers_box_geometry(tree_config.mode, upward_center_mode)
         upward = self.prepare_upward_sweep(
             build_artifacts.tree,
             build_artifacts.positions_sorted,
@@ -2340,9 +2352,13 @@ class StrictRunMixin(_EngineBase):
                 )
             cross_far = cross_hook(tree_artifacts)
         if reuse_static_compact_pairs:
+            from jaccpot.runtime.fmm_prepare import _gear_pairs_for_autotune
+
             src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)
             tgt_far = jnp.asarray(cached_compact_far_pairs.targets, dtype=INDEX_DTYPE)
-            far_pairs_by_gear = ((src_far, tgt_far),)
+            far_pairs_by_gear = _gear_pairs_for_autotune(
+                cached_compact_far_pairs, src_far, tgt_far
+            )
             downward = self._prepare_downward_with_artifacts(
                 cross_far=cross_far,
                 tree=tree_artifacts.tree,
@@ -2364,12 +2380,8 @@ class StrictRunMixin(_EngineBase):
                 grouped_segment_group_ids=None,
                 grouped_segment_unique_targets=None,
                 farfield_mode="pair_grouped",
-                far_pairs_coo=_FarPairCOO(
-                    sources=src_far,
-                    targets=tgt_far,
-                    active_count=getattr(
-                        cached_compact_far_pairs, "far_pair_count", None
-                    ),
+                far_pairs_coo=_far_pair_coo_from(
+                    cached_compact_far_pairs, src_far, tgt_far
                 ),
                 far_pairs_by_gear=far_pairs_by_gear,
                 adaptive_order=True,

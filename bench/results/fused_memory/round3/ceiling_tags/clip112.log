@@ -1,0 +1,35 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=112000000 live leaves 7384832 -> leaf capacity 8493056
+  [   47.6s] before_prepare                     in-use   2.09 GiB  peak   2.52 GiB  
+  [   48.1s] prepare:start                      in-use   5.42 GiB  peak   6.68 GiB  
+  [   48.1s] tree+upward:start                  in-use   5.42 GiB  peak   6.68 GiB  
+  [   70.0s] tree+upward:end                    in-use  12.10 GiB  peak  18.46 GiB  
+  [   70.0s] dual+downward:start                in-use  12.10 GiB  peak  18.46 GiB  
+  [   73.3s] walk+lists:start                   in-use  12.36 GiB  peak  18.46 GiB  
+  [   75.1s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [   77.4s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   77.4s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [   79.6s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   79.6s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [   82.1s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   82.1s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [   84.4s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   84.4s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 8388608, 'far_cap': 65536, 'near_cap': 1048576}
+  [   86.8s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   86.8s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 16777216, 'far_cap': 65536, 'near_cap': 1048576}
+  [   89.1s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   89.1s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 33554432, 'far_cap': 65536, 'near_cap': 1048576}
+  [   91.9s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   91.9s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 67108864, 'far_cap': 65536, 'near_cap': 1048576}
+  [   94.4s] walk:end                           in-use  12.71 GiB  peak  18.46 GiB  
+  [   94.4s] walk:start                         in-use  12.70 GiB  peak  18.46 GiB  {'queue': 67108864, 'far_cap': 335020032, 'near_cap': 99614720}
+  [   97.0s] walk:end                           in-use  16.03 GiB  peak  18.46 GiB  
+  [   99.8s] walk+lists:end                     in-use  18.29 GiB  peak  29.54 GiB  
+  [   99.8s] downward:start                     in-use  18.29 GiB  peak  29.54 GiB  
+  [  107.7s] downward:end                       in-use  20.72 GiB  peak  29.54 GiB  
+  [  107.7s] dual+downward:end                  in-use  20.49 GiB  peak  29.54 GiB  
+  [  108.9s] prepare:end                        in-use  20.52 GiB  peak  29.54 GiB  
+  [  187.0s] after_scan_compile                 in-use   7.93 GiB  peak  32.94 GiB  
+  [  193.6s] after_scan_timing                  in-use   7.93 GiB  peak  32.94 GiB  
+scan min 1527.50 ms/step
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r3/ceil/clip112.json
