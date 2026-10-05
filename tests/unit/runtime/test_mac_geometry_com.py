@@ -327,3 +327,34 @@ def test_pallas_chunks_equal_the_level_passes(tree_data, dtype, monkeypatch):
         )
         np.testing.assert_allclose(got, ref, rtol=4 * eps, atol=0)
         assert np.all(got > 0)  # every node of this tree holds particles
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+@pytest.mark.parametrize("lanes, block", [(4, 4), (8, 2), (2, 8)])
+def test_the_ancestor_table_kernel_is_the_chain_kernel(tree_data, dtype, lanes, block):
+    """The table variant (ancestors gathered first, particles ``lanes`` at a time)
+    gives the chain kernel's radii to the bit: the same squared distances, and max
+    is exact in any order. ``lanes`` below the leaf size takes several trips."""
+    from yggdrax.tree import get_node_levels
+
+    from jaccpot.runtime._mac_geometry import _com_radii
+
+    tree, topo, ps, ms, com, _box = tree_data
+    ps = ps.astype(dtype)
+    com = com.astype(dtype)
+    depth = int(np.asarray(get_node_levels(topo)).max()) + 1
+    args = (
+        jnp.asarray(topo.node_ranges, jnp.int32),
+        jnp.asarray(topo.left_child, jnp.int32),
+        jnp.asarray(topo.right_child, jnp.int32),
+        jnp.asarray(topo.parent, jnp.int32),
+        ps,
+        com,
+    )
+    kw = dict(leaf_cap=_LEAF, internal="exact", num_levels=depth, kernel="interpret")
+    chain = np.asarray(_com_radii(*args, variant="chain", **kw))
+    table = np.asarray(
+        _com_radii(*args, variant="table", lanes=lanes, block=block, **kw)
+    )
+    assert np.array_equal(table, chain)
+    assert np.all(table > 0)
