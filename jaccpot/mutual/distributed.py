@@ -1523,7 +1523,7 @@ def make_distributed_mutual_evaluator(
     import numpy as np
 
     # `jax.shard_map` directly, with no `jax.experimental` fallback. The fallback was
-    # not merely dead but wrong: `pyproject.toml` pins `jax>=0.10.2,<0.11` and the
+    # not merely dead but wrong: `pyproject.toml` pins `jax>=0.11.2,<0.12` and the
     # floor itself exports `jax.shard_map`, so the `except ImportError` branch is
     # unreachable across the whole supported range -- and had it ever been taken it
     # would have raised, because `jax.experimental.shard_map.shard_map` takes

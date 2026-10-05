@@ -7,7 +7,7 @@ name = "jaccpot"
 version = "0.0.1"
 description = "JAX Fast Multipole Method solver package built on yggdrax tree artifacts"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 authors = [
   { name = "AstroAI Lab", email = "astroai@iwr.uni-heidelberg.de" },
@@ -19,71 +19,54 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  # JAX FLOOR IS 0.10.2, and it is a hard floor: 0.9.1 and 0.9.2 CRASH on the CPU
-  # backend. `tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_real_n256_p6]`
-  # dies with `Fatal Python error: Floating-point exception` -- a SIGFPE inside
-  # XLA's CPU compiler while compiling the real-basis P2M `lax.scan`
-  # (`upward/real_tree_expansions.py::_p2m_leaves_real`). Not ours to fix and not
-  # catchable: it kills the worker. Measured on the CPU backend:
+  # JAX FLOOR IS 0.11.2, and Python >= 3.12 with it (every 0.11.x requires 3.12).
+  # Every step of the floor's history was forced by a measurement:
   #
-  #     jax 0.9.1   core dump        <- was briefly the floor here; CI red
-  #     jax 0.9.2   core dump        <- what a `<0.10` ceiling resolved to
-  #     jax 0.10.2  passes (23.1 s)
-  #     jax 0.11.0  passes (23.5 s)
+  #     jax 0.9.1, 0.9.2   CPU core dump: `Fatal Python error: Floating-point
+  #                        exception`, a SIGFPE inside XLA's CPU compiler while
+  #                        compiling the real-basis P2M `lax.scan`
+  #                        (`upward/real_tree_expansions.py::_p2m_leaves_real`), in
+  #                        `tests/characterization/test_fmm_golden.py::
+  #                        test_fmm_golden[uni_real_n256_p6]`. Not catchable: it kills
+  #                        the worker. GPU-only validation does not see it -- the CPU
+  #                        backend must be exercised for any JAX bump.
+  #     jax 0.10.2         the floor from 2026-07-31 to 2026-10-05.
+  #     jax 0.11.0         passed everywhere, but ran this workload ~2.6x slower on the
+  #                        CPU backend (characterization suite 289.5 s against 109.8 s
+  #                        on 0.10.2), which pushed CI's test-full past its 60-minute
+  #                        cap. That, and dropping Python 3.11, kept the floor at 0.10.2.
+  #     jax 0.11.2         the CPU regression is gone. Characterization suite, CPU,
+  #                        same code, interleaved on a shared 64-core host (load ~28):
+  #                        0.11.2 218 s, 0.10.2 250 s and 246 s (2026-10-05).
   #
-  # It is not Python-version specific (reproduced on 3.12 locally and 3.13 in CI).
-  # This is why CI went red on this branch: bumping the floor to 0.9.1 made the
-  # resolver pick 0.9.2, straight into the broken window. GPU-only validation does
-  # not see it -- the CPU backend must be exercised for any JAX bump.
+  # One golden moved with 0.11.2, as round-off and nothing else:
+  # `golden_grad/clu_real_n128_p4.npz` was regenerated because XLA:CPU now sums that
+  # case the way the A100 always did (drift 1.7e-14 per particle on positions, 2.0e-13
+  # on masses -- the A100 figures already recorded in `test_fmm_grad_golden.py`).
   #
-  # Also 0.9.1+ is what the differentiable multi-GPU path wants: 0.9.1 is the first
+  # 0.9.1+ is also what the differentiable multi-GPU path wants: 0.9.1 is the first
   # release whose `jax.lax.ragged_all_to_all` survives having its reverse pass
   # executed (XLA fixed the stale peer-address rendezvous in `4e0cc7e356`). Below
   # it, one gradient silently breaks every later halo exchange and a forward loses
-  # the whole cross-domain near field. `halo_exchange="auto"` still falls back
-  # safely below the floor, so that part is policy, not requirement; the CPU crash
-  # is the requirement. See docs/differentiable_fmm_distributed_audit.md.
+  # the whole cross-domain near field. See docs/differentiable_fmm_distributed_audit.md.
   #
-  # WHY 0.10.2 AND NOT 0.11.0. 0.11.0 also passes everywhere, but two things make
-  # it the wrong floor:
-  #   * it requires Python >= 3.12, while this package supports >= 3.11 -- so a
-  #     0.11.0 floor silently drops 3.11 and fails at INSTALL on the CI matrix's
-  #     3.11 legs (test-smoke, benchmark-guard);
-  #   * it is ~2.6x slower than 0.10.2 on the CPU backend for this workload
-  #     (characterization suite: 109.8 s on 0.10.2 and on 0.9.0.1, 289.5 s on
-  #     0.11.0), which pushed CI's test-full from ~33 min past a 60-min cap.
-  # 0.10.2 is as fast as the 0.9.0.x the project was developed against, keeps 3.11,
-  # and has the ragged fix.
-  #
-  # Validated on BOTH backends. 0.10.2: GPU (2xA100) Pallas M2L + custom_vjp +
-  # precision guards 54 passed, distributed gradients 10 passed; CPU golden
-  # uni_real_n256_p6 passes. 0.11.0: GPU broad 506 / Pallas 51 / gradients 20 /
-  # golden 13, CPU golden passes -- so 0.11.0 is *usable*, just not the floor.
-  #
-  # THE `<0.11` CEILING IS LOAD-BEARING, not caution. A floor alone does not stop
-  # the resolver taking 0.11.0, and CI proved it in one run: with `>=0.10.2` and no
-  # ceiling, the py3.11 leg got 0.10.2 and PASSED in 22.9 min, while the py3.12 and
-  # py3.13 legs got 0.11.0 and blew 30- and 50-minute caps. Same code, same runner,
-  # one variable -- which also confirms the 2.6x CPU slowdown in situ. py3.11 was
-  # only green because 0.11.0 refuses to install there.
-  #
-  # So: lifting this ceiling means either accepting ~2.6x CPU CI time or first
-  # finding out why 0.11.0 is that much slower for this workload. Note also that
-  # `pip install yggdrax` pulls JAX unconstrained BEFORE this constraint applies, so
-  # the ceiling is what downgrades it back.
+  # THE `<0.12` CEILING IS LOAD-BEARING, not caution: a minor release is admitted only
+  # after the CPU timing, the GPU Pallas kernels and the goldens have been re-run on
+  # it, because 0.11.0 showed that "passes" is not enough. `pip install yggdrax` pulls
+  # JAX unconstrained BEFORE this constraint applies, so the ceiling is also what
+  # downgrades it back.
   #
   # HISTORY: the ceiling used to be `<0.9.1` because `pallas_call`'s `backend=`
   # kwarg was removed in 0.9.1 and the fused M2L kernels passed it. They now go
   # through `jaccpot/pallas/_compat.pallas_backend_kwargs`, which selects Triton
   # via `backend=` on the old API and via `triton.CompilerParams` on the new one.
-  "jax[cuda]>=0.10.2,<0.11",
-  "jaxlib>=0.10.2,<0.11",
+  "jax[cuda]>=0.11.2,<0.12",
+  "jaxlib>=0.11.2,<0.12",
   "jaxtyping>=0.2.23",
   "beartype>=0.14.0",
   "yggdrax>=0.0.1,<0.1.0",

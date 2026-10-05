@@ -44,7 +44,7 @@ import jax.numpy as jnp
 import numpy as np
 
 # `jax.shard_map` directly, with no `jax.experimental` fallback. The fallback was
-# not merely dead but wrong: `pyproject.toml` pins `jax>=0.10.2,<0.11` and the
+# not merely dead but wrong: `pyproject.toml` pins `jax>=0.11.2,<0.12` and the
 # floor itself exports `jax.shard_map`, so the `except ImportError` branch is
 # unreachable across the whole supported range -- and had it ever been taken it
 # would have raised, because `jax.experimental.shard_map.shard_map` takes
@@ -1615,9 +1615,9 @@ def resolve_halo_exchange(method: str = "auto") -> str:
     yggdrax): 36/40 calls corrupt under donation, 3/40 under allocator churn alone,
     **0/40 with identical buffers** -- so a repeat-the-same-input reproducibility
     check passes on a broken build; only a moving-input probe against a direct sum
-    sees it. Clean on 0.9.1 and 0.10.2. The resolved method is therefore applied to
-    the forward trace too, and ``"auto"`` on an affected JAX means ``"buf"`` for
-    everything.
+    sees it. Clean on 0.9.1, 0.10.2 and 0.11.2. The resolved method is therefore
+    applied to the forward trace too, and ``"auto"`` on an affected JAX means
+    ``"buf"`` for everything.
 
     ``"auto"`` picks ``"native"`` (``jax.lax.ragged_all_to_all``, which sends only
     the actual halo) when BOTH conditions hold, and the bandwidth-hungry but safe

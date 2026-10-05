@@ -1,8 +1,9 @@
 """FORWARD-ONLY repro for jax.lax.ragged_all_to_all under jit(shard_map): donation is enough.
 
 Companion to ``repro_jax_ragged_all_to_all_grad.py``. Measured 2026-09-04 on jax 0.9.0 / 2xA100:
-donate 36/40 CORRUPT, donate+churn 35/40, churn alone 3/40, neither 0/40; jax 0.9.1 and 0.10.2
-0/40 in every config. This is why ``halo_exchange="auto"`` gates the FORWARD too (fmm.py).
+donate 36/40 CORRUPT, donate+churn 35/40, churn alone 3/40, neither 0/40; jax 0.9.1, 0.10.2
+and 0.11.2 (2026-10-05, with the gradient repro's four variants) 0/40 in every config. This is
+why ``halo_exchange="auto"`` gates the FORWARD too (fmm.py).
 
 jaccpot's bench/repro_jax_ragged_all_to_all_grad.py triggers XLA:GPU's stale
 peer-address cache (RaggedAllToAllStartThunk::Initialize caches output-buffer
