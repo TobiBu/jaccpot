@@ -61,6 +61,13 @@ def pallas_directed_csr_supported() -> bool:
     return pallas_m2l_real_csr_supported()
 
 
+#: Rows longer than this are ranked with their tiles spread over programs
+#: (:func:`_rank_long_kernel`). The standard configurations' rows are far below it
+#: (near lists: 85-634 at cell_min_level 8; far rows a few hundred), so they keep the
+#: one-program-per-row kernel.
+RANK_LONG_ROW = 2048
+
+
 def _place_kernel(
     a_ref: KernelRef,
     b_ref: KernelRef,
@@ -182,6 +189,7 @@ def _rank_kernel(
     width: int,
     rows: int,
     num_rows: int,
+    long_row: int = 2**31 - 1,
 ) -> None:
     """``rows`` rows: every entry to ``offset + its rank among the row's entries``.
 
@@ -204,6 +212,8 @@ def _rank_kernel(
         programs idle). Static.
     num_rows : int
         ``R``. Static.
+    long_row : int
+        Rows longer than this are left to :func:`_rank_long_kernel`. Static.
 
     Returns
     -------
@@ -218,31 +228,124 @@ def _rank_kernel(
         r = jnp.minimum(r0 + j, num_rows - 1)
         start = off_ref[r]
         n = jnp.where(r0 + j < num_rows, off_ref[r + 1] - start, 0)
+        # rows past ``long_row`` are the long-row kernel's (:func:`_rank_long_kernel`)
+        n = jnp.where(n <= long_row, n, 0)
         n_tiles = (n + (lanes - 1)) // lanes
 
         def tile(t: Array, c: Array) -> Array:
-            pos = t * lanes + lane
-            ok = pos < n
-            v = src_ref[jnp.where(ok, start + pos, start)]
-
-            def against(u: Array, rank: Array) -> Array:
-                pos_u = u * lanes + lane
-                ok_u = pos_u < n
-                w = src_ref[jnp.where(ok_u, start + pos_u, start)]
-                # ties (a repeated pair) by position: the ranks stay a permutation
-                before = (w[None, :] < v[:, None]) | (
-                    (w[None, :] == v[:, None]) & (pos_u[None, :] < pos[:, None])
-                )
-                return rank + jnp.sum(before & ok_u[None, :], axis=1, dtype=jnp.int32)
-
-            rank = lax.fori_loop(0, n_tiles, against, jnp.zeros((lanes,), jnp.int32))
-            dest = jnp.where(ok, start + rank, 2 * width + lane)
-            plgpu.store(out_ref.at[dest], v, mask=ok)
+            _rank_tile(src_ref, out_ref, start, n, n_tiles, t, lane, width)
             return c
 
         return lax.fori_loop(0, n_tiles, tile, carry)
 
     lax.fori_loop(0, rows, one_row, jnp.int32(0))
+
+
+def _rank_tile(
+    src_ref: KernelRef,
+    out_ref: KernelRef,
+    start: Array,
+    n: Array,
+    n_tiles: Array,
+    t: Array,
+    lane: Array,
+    width: int,
+) -> None:
+    """Rank tile ``t`` of the row at ``start`` (``n`` entries) and store it.
+
+    Parameters
+    ----------
+    src_ref : KernelRef
+        Whole ``[2W]`` unsorted directed list.
+    out_ref : KernelRef
+        **Output** the sorted list.
+    start : Array
+        The row's first entry.
+    n : Array
+        The row's entry count.
+    n_tiles : Array
+        ``ceil(n / lanes)``.
+    t : Array
+        The tile to rank.
+    lane : Array
+        ``arange(lanes)``.
+    width : int
+        ``W``. Static.
+    """
+    lanes = lane.shape[0]
+    pos = t * lanes + lane
+    ok = pos < n
+    v = src_ref[jnp.where(ok, start + pos, start)]
+
+    def against(u: Array, rank: Array) -> Array:
+        pos_u = u * lanes + lane
+        ok_u = pos_u < n
+        w = src_ref[jnp.where(ok_u, start + pos_u, start)]
+        # ties (a repeated pair) by position: the ranks stay a permutation
+        before = (w[None, :] < v[:, None]) | (
+            (w[None, :] == v[:, None]) & (pos_u[None, :] < pos[:, None])
+        )
+        return rank + jnp.sum(before & ok_u[None, :], axis=1, dtype=jnp.int32)
+
+    rank = lax.fori_loop(0, n_tiles, against, jnp.zeros((lanes,), jnp.int32))
+    dest = jnp.where(ok, start + rank, 2 * width + lane)
+    plgpu.store(out_ref.at[dest], v, mask=ok)
+
+
+def _rank_long_kernel(
+    src_ref: KernelRef,
+    off_ref: KernelRef,
+    long_ref: KernelRef,
+    out_in: KernelRef,
+    out_ref: KernelRef,
+    *,
+    lanes: int,
+    width: int,
+    split: int,
+) -> None:
+    """Program ``(i, s)``: tiles ``s, s + split, ...`` of long row ``long_ref[i]``.
+
+    A row's rank costs ``(n / lanes)^2`` tile pairs, and :func:`_rank_kernel` runs a
+    whole row in one program: a near row of 101,870 entries (an outskirt cell at
+    cell_min_level 6) took 19.9 s per list build there. Here the row's tiles are
+    spread over ``split`` programs; each still ranks against the whole row, so the
+    result is the same permutation.
+
+    Parameters
+    ----------
+    src_ref : KernelRef
+        Whole ``[2W]`` unsorted directed list.
+    off_ref : KernelRef
+        Whole ``[R + 1]`` row offsets.
+    long_ref : KernelRef
+        ``[B]`` this batch's long rows (``-1``: none).
+    out_in : KernelRef
+        The output so far, aliased to ``out_ref`` (not read).
+    out_ref : KernelRef
+        **Output** the sorted list.
+    lanes : int
+        Tile width. Static.
+    width : int
+        ``W``. Static.
+    split : int
+        Programs per long row. Static.
+    """
+    del out_in
+    r = long_ref[pl.program_id(0)]
+    s = pl.program_id(1)
+    live = r >= 0
+    rs = jnp.maximum(r, 0)
+    start = off_ref[rs]
+    n = jnp.where(live, off_ref[rs + 1] - start, 0)
+    n_tiles = (n + (lanes - 1)) // lanes
+    lane = lax.broadcasted_iota(jnp.int32, (lanes,), 0)
+    trips = jnp.maximum(n_tiles - s + (split - 1), 0) // split
+
+    def tile(k: Array, c: Array) -> Array:
+        _rank_tile(src_ref, out_ref, start, n, n_tiles, s + k * split, lane, width)
+        return c
+
+    lax.fori_loop(0, trips, tile, jnp.int32(0))
 
 
 def directed_csr_pallas(
@@ -261,6 +364,9 @@ def directed_csr_pallas(
     backend: str = "triton",
     num_warps: int = 4,
     slices: int = 1,
+    long_row: int | None = None,
+    long_batch: int = 64,
+    long_split: int = 256,
 ) -> tuple[Array, Array, Array]:
     """``(sources [2W], offsets [R + 1], counts [R])`` of the canonical pairs.
 
@@ -298,6 +404,15 @@ def directed_csr_pallas(
         contiguous range of rows, so that its cursors and slots stay in cache.
         The rank pass orders every row afterwards, so the result does not
         depend on it. Static.
+    long_row : int | None
+        Rows longer than this are ranked by :func:`_rank_long_kernel`, their
+        tiles spread over ``long_split`` programs, ``long_batch`` rows a launch,
+        under a ``lax.cond`` that skips it when no row is that long. ``None``:
+        :data:`RANK_LONG_ROW`. Static.
+    long_batch : int
+        Long rows per launch. Static.
+    long_split : int
+        Programs per long row. Static.
 
     Returns
     -------
@@ -373,8 +488,9 @@ def directed_csr_pallas(
         )(a, b, offsets, count_arr, cursor, unsorted)
     out0 = jnp.full((2 * W,), int(pad_source), idx)
     P = max(1, int(rows_per_program))
+    L = RANK_LONG_ROW if long_row is None else max(int(lanes), int(long_row))
     rank = functools.partial(
-        _rank_kernel, lanes=int(lanes), width=W, rows=P, num_rows=R
+        _rank_kernel, lanes=int(lanes), width=W, rows=P, num_rows=R, long_row=L
     )
     rank_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in rank_kwargs:
@@ -392,4 +508,34 @@ def directed_csr_pallas(
         name=f"directed_csr_rank_k{int(lanes)}",
         **rank_kwargs,
     )(unsorted, offsets, out0)
+    # rows past L: their tiles spread over programs (a whole row in one program costs
+    # (n / lanes)^2 tile pairs serially -- 19.9 s for one row of 101,870 entries)
+    max_long = (2 * W) // (L + 1)  # rows longer than L, at most
+    if max_long > 0:
+        Bb, S = max(1, int(long_batch)), max(1, int(long_split))
+        is_long = counts > jnp.asarray(L, idx)
+        n_long = jnp.sum(is_long, dtype=idx)
+        n_ids = -(-max_long // Bb) * Bb
+        long_ids = jnp.nonzero(is_long, size=n_ids, fill_value=-1)[0].astype(idx)
+        long_call = pl.pallas_call(
+            functools.partial(_rank_long_kernel, lanes=int(lanes), width=W, split=S),
+            grid=(Bb, S),
+            in_specs=[_full(unsorted), _full(offsets), _full(long_ids[:Bb])]
+            + [_full(out0)],
+            out_specs=_full(out0),
+            out_shape=jax.ShapeDtypeStruct(out0.shape, out0.dtype),
+            input_output_aliases={3: 0},
+            interpret=bool(interpret),
+            name=f"directed_csr_rank_long_k{int(lanes)}",
+            **rank_kwargs,
+        )
+
+        def _batch(b: Array, out: Array) -> Array:
+            ids = lax.dynamic_slice(long_ids, (b * Bb,), (Bb,))
+            return long_call(unsorted, offsets, ids, out)
+
+        def _long_rows(out: Array) -> Array:
+            return lax.fori_loop(0, (n_long + (Bb - 1)) // Bb, _batch, out)
+
+        sources = lax.cond(n_long > 0, _long_rows, lambda out: out, sources)
     return sources, offsets, counts
