@@ -1962,6 +1962,34 @@ def _list_csr_kernel() -> str:
     return choice
 
 
+def _list_csr_slices(num_rows: int) -> int:
+    """Placement passes of the Pallas CSR build for ``num_rows`` rows.
+
+    ``JACCPOT_LIST_CSR_SLICES``: a positive count, or ``0`` (the default) for one
+    pass per :data:`_LIST_CSR_ROWS_PER_SLICE` rows. Read at trace time.
+
+    Parameters
+    ----------
+    num_rows : int
+        Rows of the list.
+
+    Returns
+    -------
+    int
+        Passes (at least one).
+    """
+    from jaccpot._env import env_int
+
+    chosen = env_int("JACCPOT_LIST_CSR_SLICES", 0)
+    if chosen > 0:
+        return chosen
+    return max(1, -(-int(num_rows) // _LIST_CSR_ROWS_PER_SLICE))
+
+
+#: Rows per placement pass of the Pallas CSR build (``JACCPOT_LIST_CSR_SLICES=0``).
+_LIST_CSR_ROWS_PER_SLICE = 1 << 62
+
+
 def _directed_csr_from_canonical(
     a: Array,
     b: Array,
@@ -2036,6 +2064,7 @@ def _directed_csr_from_canonical(
             pad_source=int(pad_source),
             idx=idx,
             interpret=route == "interpret",
+            slices=_list_csr_slices(R),
         )
         targets = None
         if with_targets:

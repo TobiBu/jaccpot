@@ -239,3 +239,43 @@ def test_pallas_route_equals_the_sorted_route_on_gpu(monkeypatch):
     assert int(want[3].max()) > 1000  # the hub row spans many tiles
     for g, w in zip(got, want):
         assert np.array_equal(g, w)
+
+
+@pytest.mark.parametrize("slices", [2, 3, 40, 1000])
+def test_sliced_placement_is_the_same_csr(slices):
+    # the placement in passes over row ranges (cache locality at large N): the rank
+    # pass orders every row afterwards, so the arrays are the one-pass build's to
+    # the bit -- including more slices than rows (the empty passes place nothing)
+    from jaccpot.pallas.csr_place import directed_csr_pallas
+
+    num_leaves, n_pairs, width = 40, 150, 200
+    rng = np.random.default_rng(11)
+    num_internal = num_leaves - 1
+    na, nb = _pairs(rng, num_leaves, n_pairs, num_internal)
+    pad = width - n_pairs
+    a = jnp.asarray(np.concatenate([na, np.full(pad, 7)]), jnp.int32)
+    b = jnp.asarray(np.concatenate([nb, np.full(pad, 3)]), jnp.int32)
+    kw = dict(
+        num_rows=num_leaves,
+        row_offset=num_internal,
+        pad_source=-1,
+        idx=jnp.int32,
+        interpret=True,
+    )
+    one = directed_csr_pallas(a, b, jnp.asarray(n_pairs, jnp.int32), **kw)
+    many = directed_csr_pallas(
+        a, b, jnp.asarray(n_pairs, jnp.int32), slices=slices, **kw
+    )
+    for x, y in zip(one, many):
+        assert np.array_equal(np.asarray(x), np.asarray(y))
+    ref_n, ref_o, _ = _reference(
+        np.asarray(a),
+        np.asarray(b),
+        n_pairs,
+        width=width,
+        num_internal=num_internal,
+        num_leaves=num_leaves,
+    )
+    assert np.array_equal(np.asarray(many[1]), ref_o)
+    live = int(ref_o[-1])
+    assert np.array_equal(np.asarray(many[0])[:live], ref_n[:live])

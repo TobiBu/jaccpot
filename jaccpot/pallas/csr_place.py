@@ -75,8 +75,10 @@ def _place_kernel(
     row_offset: int,
     width: int,
     vector: bool,
+    row_lo: int = 0,
+    row_hi: int = 2**31 - 1,
 ) -> None:
-    """``block`` canonical pairs: one slot in each of their two rows.
+    """``block`` canonical pairs: one slot in each of their two rows in ``[row_lo, row_hi)``.
 
     The cursors are FLOAT32: on the installed jax (0.10.2, probed on an A100) the
     vector form of ``plgpu.atomic_add`` on int32 neither updates memory nor
@@ -111,6 +113,11 @@ def _place_kernel(
         ``W``, so ``2W`` is the list length. Static.
     vector : bool
         Masked vector atomics (native) or a scalar loop (interpret). Static.
+    row_lo : int
+        First row this pass places (rows outside ``[row_lo, row_hi)`` are left to
+        another pass over the pairs). Static.
+    row_hi : int
+        One past the last row this pass places. Static.
 
     Returns
     -------
@@ -130,12 +137,18 @@ def _place_kernel(
                 nb = b_ref[i0 + k]
                 ra = na - row_offset
                 rb = nb - row_offset
-                old_hi = plgpu.atomic_add(cursor_ref, (ra,), one)
-                old_lo = plgpu.atomic_add(cursor_ref, (rb,), one)
-                hi = off_ref[ra] + old_hi.astype(off_ref.dtype)
-                lo = off_ref[rb] + old_lo.astype(off_ref.dtype)
-                src_ref[hi] = nb.astype(src_ref.dtype)
-                src_ref[lo] = na.astype(src_ref.dtype)
+
+                @pl.when((ra >= row_lo) & (ra < row_hi))
+                def _() -> None:
+                    old_hi = plgpu.atomic_add(cursor_ref, (ra,), one)
+                    hi = off_ref[ra] + old_hi.astype(off_ref.dtype)
+                    src_ref[hi] = nb.astype(src_ref.dtype)
+
+                @pl.when((rb >= row_lo) & (rb < row_hi))
+                def _() -> None:
+                    old_lo = plgpu.atomic_add(cursor_ref, (rb,), one)
+                    lo = off_ref[rb] + old_lo.astype(off_ref.dtype)
+                    src_ref[lo] = na.astype(src_ref.dtype)
 
         return
     lane = lax.broadcasted_iota(jnp.int32, (block,), 0)
@@ -145,14 +158,18 @@ def _place_kernel(
     nb = b_ref[i]
     ra = jnp.where(live, na - row_offset, 0)
     rb = jnp.where(live, nb - row_offset, 0)
+    in_a = live & (ra >= row_lo) & (ra < row_hi)
+    in_b = live & (rb >= row_lo) & (rb < row_hi)
+    ra = jnp.where(in_a, ra, 0)
+    rb = jnp.where(in_b, rb, 0)
     one = jnp.ones((block,), cursor_ref.dtype)
-    old_hi = plgpu.atomic_add(cursor_ref, (ra,), one, mask=live)
-    old_lo = plgpu.atomic_add(cursor_ref, (rb,), one, mask=live)
+    old_hi = plgpu.atomic_add(cursor_ref, (ra,), one, mask=in_a)
+    old_lo = plgpu.atomic_add(cursor_ref, (rb,), one, mask=in_b)
     past = 2 * width + lane  # dead lanes point past the list (never written)
-    hi = jnp.where(live, off_ref[ra] + old_hi.astype(off_ref.dtype), past)
-    lo = jnp.where(live, off_ref[rb] + old_lo.astype(off_ref.dtype), past)
-    plgpu.store(src_ref.at[hi], nb.astype(src_ref.dtype), mask=live)
-    plgpu.store(src_ref.at[lo], na.astype(src_ref.dtype), mask=live)
+    hi = jnp.where(in_a, off_ref[ra] + old_hi.astype(off_ref.dtype), past)
+    lo = jnp.where(in_b, off_ref[rb] + old_lo.astype(off_ref.dtype), past)
+    plgpu.store(src_ref.at[hi], nb.astype(src_ref.dtype), mask=in_a)
+    plgpu.store(src_ref.at[lo], na.astype(src_ref.dtype), mask=in_b)
 
 
 def _rank_kernel(
@@ -243,6 +260,7 @@ def directed_csr_pallas(
     interpret: bool = False,
     backend: str = "triton",
     num_warps: int = 4,
+    slices: int = 1,
 ) -> tuple[Array, Array, Array]:
     """``(sources [2W], offsets [R + 1], counts [R])`` of the canonical pairs.
 
@@ -275,6 +293,11 @@ def directed_csr_pallas(
         Pallas GPU lowering.
     num_warps : int
         Warps per placement program (the rank programs run one warp).
+    slices : int
+        Placement passes over the pairs, each placing the entries of one
+        contiguous range of rows, so that its cursors and slots stay in cache.
+        The rank pass orders every row afterwards, so the result does not
+        depend on it. Static.
 
     Returns
     -------
@@ -320,28 +343,34 @@ def directed_csr_pallas(
     count_arr = jnp.reshape(n_live, (1,))
     cursor0 = jnp.zeros((R,), jnp.float32)
     unsorted0 = jnp.zeros((2 * W,), idx)
-    place = functools.partial(
-        _place_kernel,
-        block=B,
-        row_offset=int(row_offset),
-        width=W,
-        vector=not bool(interpret),
-    )
-    _, unsorted = pl.pallas_call(
-        place,
-        grid=(-(-W // B),),
-        in_specs=[_full(a), _full(b), _full(offsets), _full(count_arr)]
-        + [_full(cursor0), _full(unsorted0)],
-        out_specs=[_full(cursor0), _full(unsorted0)],
-        out_shape=[
-            jax.ShapeDtypeStruct(cursor0.shape, cursor0.dtype),
-            jax.ShapeDtypeStruct(unsorted0.shape, unsorted0.dtype),
-        ],
-        input_output_aliases={4: 0, 5: 1},
-        interpret=bool(interpret),
-        name="directed_csr_place",
-        **backend_kwargs,
-    )(a, b, offsets, count_arr, cursor0, unsorted0)
+    S = max(1, min(int(slices), R))
+    bounds = [(R * k) // S for k in range(S + 1)]
+    cursor, unsorted = cursor0, unsorted0
+    for k in range(S):
+        place = functools.partial(
+            _place_kernel,
+            block=B,
+            row_offset=int(row_offset),
+            width=W,
+            vector=not bool(interpret),
+            row_lo=int(bounds[k]),
+            row_hi=int(bounds[k + 1]) if k + 1 < S else 2**31 - 1,
+        )
+        cursor, unsorted = pl.pallas_call(
+            place,
+            grid=(-(-W // B),),
+            in_specs=[_full(a), _full(b), _full(offsets), _full(count_arr)]
+            + [_full(cursor0), _full(unsorted0)],
+            out_specs=[_full(cursor0), _full(unsorted0)],
+            out_shape=[
+                jax.ShapeDtypeStruct(cursor0.shape, cursor0.dtype),
+                jax.ShapeDtypeStruct(unsorted0.shape, unsorted0.dtype),
+            ],
+            input_output_aliases={4: 0, 5: 1},
+            interpret=bool(interpret),
+            name="directed_csr_place" if S == 1 else f"directed_csr_place_s{k}",
+            **backend_kwargs,
+        )(a, b, offsets, count_arr, cursor, unsorted)
     out0 = jnp.full((2 * W,), int(pad_source), idx)
     P = max(1, int(rows_per_program))
     rank = functools.partial(
