@@ -781,13 +781,27 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
             ARGS.n, ARGS.accuracy_targets, replace=False
         )
     )
-    ref = direct_accelerations(
-        np.asarray(pos, np.float64),
-        np.asarray(mass, np.float64),
-        G=1.0,
-        softening=soft,
-        target_indices=idx,
+    # the harness's reference cache (codes/jzfmm_force_eval.py writes and reads the
+    # same file): one fp64 direct sum per (IC, N, softening, targets) for every code
+    cache = os.path.join(
+        os.environ.get(
+            "BENCH_DIR", "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu"
+        ),
+        "artifacts",
+        "reference",
+        f"direct_fp64_{ARGS.ic}{ARGS.n}_soft{soft:g}_ref{len(idx)}_seed12345.npy",
     )
+    if os.path.exists(cache):
+        ref = np.load(cache)
+        result["accuracy_reference"] = cache
+    else:
+        ref = direct_accelerations(
+            np.asarray(pos, np.float64),
+            np.asarray(mass, np.float64),
+            G=1.0,
+            softening=soft,
+            target_indices=idx,
+        )
     got = a_host[idx]
     err = np.linalg.norm(got - ref, axis=1) / np.maximum(
         np.linalg.norm(ref, axis=1), 1e-300
