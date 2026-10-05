@@ -1987,7 +1987,11 @@ def _list_csr_slices(num_rows: int) -> int:
 
 
 #: Rows per placement pass of the Pallas CSR build (``JACCPOT_LIST_CSR_SLICES=0``).
-_LIST_CSR_ROWS_PER_SLICE = 1 << 62
+#: Measured on the 1e8 step (p6, cell_min_level 8, 13.4M far-list rows, A100,
+#: 2026-10-05): 1 pass 1180 ms, 2 passes 1157.6, 4 passes 1141.7, 8 passes 1149.0 --
+#: ~3.4M rows a pass keep its cursors and slots in cache. Lists below 4M rows (8e6)
+#: keep one pass.
+_LIST_CSR_ROWS_PER_SLICE = 1 << 22
 
 
 def _directed_csr_from_canonical(
