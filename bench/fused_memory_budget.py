@@ -91,7 +91,12 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--leaf", type=int, default=64)
     ap.add_argument("--theta", type=float, default=0.8)
-    ap.add_argument("--order", type=int, default=5)
+    # p6 since round 5 (2026-10-05): at cell_min_level 8 it halves the fp64 rel-L2 of p5
+    # for ~5 % of the step (clipped Plummer 2e6: 5.0e-4 at 34.0 ms against 9.2e-4 at
+    # 32.4) and costs nothing on the unclipped draw or the disc; theta 0.7 bought less
+    # accuracy for 30 % of the step. cell_min_level stays 8: at 6 an outskirt cell of
+    # the unclipped draw neighbours 101,870 leaves (bench/results/fused_memory/round5)
+    ap.add_argument("--order", type=int, default=6)
     ap.add_argument("--cell-min-level", type=int, default=8)
     ap.add_argument(
         "--leaf-cap-factor",
