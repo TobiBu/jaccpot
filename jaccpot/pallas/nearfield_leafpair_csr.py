@@ -45,6 +45,7 @@ from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
 from jaccpot._env import env_choice
+from jaccpot._searchsorted import searchsorted_method
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import (
     _OUT_WIDTH,
@@ -170,7 +171,9 @@ def build_leafpair_chunk_table(
     first = ends - per_leaf  # exclusive
     c = jnp.arange(capacity, dtype=idx)
     # leaf of chunk c: the first row whose inclusive end exceeds c
-    leaf = jnp.searchsorted(ends, c, side="right", method="scan_unrolled").astype(idx)
+    leaf = jnp.searchsorted(ends, c, side="right", method=searchsorted_method()).astype(
+        idx
+    )
     valid = leaf < jnp.asarray(num_leaves, idx)
     leaf_safe = jnp.minimum(leaf, jnp.asarray(max(num_leaves - 1, 0), idx))
     k = c - first[leaf_safe]
@@ -1267,9 +1270,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         ends = jnp.cumsum(per_leaf, dtype=idx)  # inclusive
         first = ends - per_leaf
         c = jnp.arange(capacity, dtype=idx)
-        leaf = jnp.searchsorted(ends, c, side="right", method="scan_unrolled").astype(
-            idx
-        )
+        leaf = jnp.searchsorted(
+            ends, c, side="right", method=searchsorted_method()
+        ).astype(idx)
         valid = leaf < jnp.asarray(num_leaves, idx)
         leaf_safe = jnp.minimum(leaf, jnp.asarray(num_leaves - 1, idx))
         k = c - first[leaf_safe] + 1  # chunk k >= 1 of its row

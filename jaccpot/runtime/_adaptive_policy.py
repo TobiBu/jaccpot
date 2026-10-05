@@ -56,6 +56,7 @@ from beartype import beartype
 from jaxtyping import Array, Bool, DTypeLike, Float, Inexact, Int, jaxtyped
 from yggdrax.tree import Tree, get_num_internal_nodes
 
+from jaccpot._searchsorted import searchsorted_method
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from .fmm_caches import _contains_tracer
@@ -970,7 +971,7 @@ def _near_field_force_scale(
     flat = jnp.arange(flat_len, dtype=jnp.int32)
     slot_of_flat = (
         jnp.searchsorted(
-            neighbor_offsets, flat, side="right", method="scan_unrolled"
+            neighbor_offsets, flat, side="right", method=searchsorted_method()
         ).astype(jnp.int32)
         - 1
     )

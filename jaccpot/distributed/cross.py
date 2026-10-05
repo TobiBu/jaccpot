@@ -55,6 +55,8 @@ from yggdrax.distributed.summary import (
     summary_tree,
 )
 
+from jaccpot._searchsorted import searchsorted_method
+
 __all__ = [
     "CrossCapacities",
     "cross_near_acceleration",
@@ -711,7 +713,7 @@ def _direct_near_lists(
         nr[num_internal:, 0],
         nr[jnp.maximum(cell, 0), 0],
         side="left",
-        method="scan_unrolled",
+        method=searchsorted_method(),
     )
     target = jnp.where(live, leaf.astype(idx), neg)
     source = jnp.where(live, csr_row, neg)
@@ -972,7 +974,7 @@ def _leaf_under(cells: Array, node_ranges: Array, num_internal: int) -> Array:
         nr[num_internal:, 0],
         nr[jnp.maximum(cells, 0), 0],
         side="left",
-        method="scan_unrolled",
+        method=searchsorted_method(),
     )
 
 
@@ -1142,7 +1144,7 @@ def _symmetric_exchange(
             jnp.cumsum(imp_n.sizes, dtype=idx),
             jnp.arange(imp_n.rows.shape[0], dtype=idx),
             side="right",
-            method="scan_unrolled",
+            method=searchsorted_method(),
         )
         r_peer = jnp.minimum(r_peer, ndev - 1)
         r_count = jnp.where(

@@ -30,6 +30,8 @@ from beartype.typing import Tuple
 from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE
 
+from jaccpot._searchsorted import searchsorted_method
+
 from ._scatter import _build_scatter_schedule
 
 __all__ = [
@@ -90,7 +92,7 @@ def prepare_leaf_neighbor_pairs(
     )
     edge_indices = jnp.arange(neighbors.shape[0], dtype=INDEX_DTYPE)
     target_leaf_ids = jnp.searchsorted(
-        offsets[1:], edge_indices, side="right", method="scan_unrolled"
+        offsets[1:], edge_indices, side="right", method=searchsorted_method()
     )
     # `neighbors` may carry -1 padding when the neighbour list is not compacted
     # (e.g. the traced/jax.shard_map branch of _result_to_neighbors keeps the
