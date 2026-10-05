@@ -44,7 +44,7 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
-from jaccpot._env import env_choice
+from jaccpot._env import env_choice, env_int
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import (
@@ -1087,6 +1087,14 @@ def nearfield_leafpair_csr_sorted_pallas(
     return out
 
 
+#: Entries of a near-field row that its own program runs in ``whole`` mode
+#: (:func:`nearfield_leafpair_csr_sorted_direct_pallas`); the rest of a longer row is
+#: split into pieces of this many. Above every row of the standard configurations
+#: (longest rows at cell_min_level 8: 101 clipped Plummer, 634 unclipped, 144 the
+#: disc, at 2e6), so those keep their bits.
+DIRECT_ROW_LIMIT = 1024
+
+
 def leafpair_extra_chunk_capacity(edge_capacity: int, chunk: int) -> int:
     """Static number of NON-first chunks that can never overflow.
 
@@ -1127,6 +1135,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     target_subtile: int | None = None,
     interpret: bool = False,
     with_potential: bool = False,
+    row_limit: int | None = None,
 ) -> tuple[Array, Array | None]:
     """The CSR near field straight into particle order: no per-leaf partials.
 
@@ -1149,6 +1158,15 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     deterministic. Rows longer than a chunk are then one running sum rather than
     chunk sums added afterwards: a different single-precision rounding, the same
     accuracy.
+
+    A whole row is ONE program, so one very long row serialises the launch: an
+    outskirt cell of an unclipped Plummer draw at ``cell_min_level`` 6 neighbours
+    101,870 leaves, and the step took 16.6 s instead of 44 ms (2026-10-05). So
+    ``whole`` runs each row up to ``row_limit`` entries in its program, and only the
+    rest of a longer row goes the chunked way, in pieces of ``row_limit`` entries:
+    partials scatter-added onto the outputs, under a ``lax.cond`` that skips them
+    when no row is that long. Rows up to the limit keep their bits; the pieces'
+    buffer is ``row_limit / chunk`` times smaller than ``chunked`` mode's.
 
     The lane body and the order of every sum inside a chunk are the table
     kernel's: rows of one chunk give the table path's bits either way, and in
@@ -1189,6 +1207,10 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         Pallas interpret mode.
     with_potential : bool
         Also accumulate and return the potential. Static.
+    row_limit : int | None
+        ``whole`` mode: entries of a row its own program runs (the rest in
+        pieces of this many). ``None``: ``JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT``,
+        default :data:`DIRECT_ROW_LIMIT`. Static.
 
     Returns
     -------
@@ -1243,8 +1265,16 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         env_choice("JACCPOT_NEARFIELD_DIRECT_ROWS", "whole", ("whole", "chunked"))
         == "whole"
     )
+    if row_limit is None:
+        row_limit = env_int(
+            "JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT", DIRECT_ROW_LIMIT, minimum=1
+        )
+    # entries a row's own program runs; the rest of the row goes in pieces of it
+    piece = max(int(row_limit), chunk) if whole_rows else chunk
+    piece_i = jnp.asarray(piece, idx)
     tag = f"t{bt}_c{chunk}_w{leaf_width}{'_pot' if with_potential else ''}"
-    # 1. whole rows (or first chunks) + self, stored in particle order
+    # 1. each row up to ``piece`` entries (all of it, when shorter) + self, stored
+    # in particle order
     outs = _sorted_pallas_call(
         pm,
         start_i,
@@ -1252,7 +1282,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         neighbors,
         jnp.arange(num_leaves, dtype=idx),
         row_start,
-        jnp.asarray(counts, idx) if whole_rows else jnp.minimum(counts, chunk_i),
+        jnp.minimum(counts, piece_i),
         jnp.ones((num_leaves,), idx),
         soft,
         g,
@@ -1263,10 +1293,11 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         **common,
     )
     outs = list(outs)
-    # 2. (chunked) the remaining chunks: partials, scatter-added onto the outputs
-    capacity = leafpair_extra_chunk_capacity(int(neighbors.shape[0]), chunk)
-    if capacity > 0 and not whole_rows:
-        per_leaf = jnp.maximum((counts + chunk_i - 1) // chunk_i - 1, 0)
+    # 2. the rows' remaining pieces: partials, scatter-added onto the outputs
+    capacity = leafpair_extra_chunk_capacity(int(neighbors.shape[0]), piece)
+
+    def _rest(outs_in: list) -> list:
+        per_leaf = jnp.maximum((counts + piece_i - 1) // piece_i - 1, 0)
         ends = jnp.cumsum(per_leaf, dtype=idx)  # inclusive
         first = ends - per_leaf
         c = jnp.arange(capacity, dtype=idx)
@@ -1275,15 +1306,15 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         ).astype(idx)
         valid = leaf < jnp.asarray(num_leaves, idx)
         leaf_safe = jnp.minimum(leaf, jnp.asarray(num_leaves - 1, idx))
-        k = c - first[leaf_safe] + 1  # chunk k >= 1 of its row
+        k = c - first[leaf_safe] + 1  # piece k >= 1 of its row
         partials = _sorted_pallas_call(
             pm,
             start_i,
             count_i,
             neighbors,
             jnp.where(valid, leaf_safe, jnp.asarray(-1, idx)),
-            jnp.where(valid, row_start[leaf_safe] + k * chunk_i, 0),
-            jnp.where(valid, jnp.clip(counts[leaf_safe] - k * chunk_i, 0, chunk_i), 0),
+            jnp.where(valid, row_start[leaf_safe] + k * piece_i, 0),
+            jnp.where(valid, jnp.clip(counts[leaf_safe] - k * piece_i, 0, piece_i), 0),
             jnp.zeros((capacity,), idx),
             soft,
             g,
@@ -1297,10 +1328,18 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         tcount = jnp.where(valid, count_i[leaf_safe], 0)
         rows = start_i[leaf_safe][:, None] + lane[None, :]
         rows = jnp.where(lane[None, :] < tcount[:, None], rows, n)  # n = dropped
-        outs = [
+        return [
             o.at[rows].add(partials[..., comp], mode="drop")
-            for comp, o in enumerate(outs)
+            for comp, o in enumerate(outs_in)
         ]
+
+    if capacity > 0:
+        if whole_rows:
+            # rows past the limit are rare (outlier cells): skip the pieces' launch,
+            # partials and scatter unless one is there
+            outs = lax.cond(jnp.max(counts) > piece_i, _rest, lambda o: o, outs)
+        else:
+            outs = _rest(outs)
     acc = jnp.stack(outs[:3], axis=1)
     return acc, (outs[3] if with_potential else None)
 

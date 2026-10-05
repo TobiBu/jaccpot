@@ -187,3 +187,46 @@ def test_direct_equals_the_table_kernel_in_particle_order(
         assert pot is None
     if chunk < 6:  # some row really is split (non-vacuity of pass 2)
         assert int(np.asarray(c["row_counts"]).max()) > chunk
+
+
+@pytest.mark.parametrize("row_limit", [1, 2, 4])
+def test_whole_rows_past_the_limit_go_in_pieces(row_limit, monkeypatch):
+    """``whole`` mode runs each row up to ``row_limit`` entries in its own program
+    and the rest in pieces: the unlimited run's values to single-precision
+    round-off, and the bits of every row that fits the limit."""
+    monkeypatch.setenv("JACCPOT_NEARFIELD_DIRECT_ROWS", "whole")
+    c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6, empty_rows=(2,))
+    common = dict(
+        softening_sq=jnp.float32(0.05**2),
+        G=jnp.float32(1.3),
+        chunk=1,
+        target_subtile=None,
+        interpret=True,
+        leaf_width=8,
+    )
+    args = (
+        c["pos"],
+        c["mass"],
+        c["starts"],
+        c["counts"],
+        c["nbr"],
+        c["offsets"],
+        c["row_counts"],
+    )
+    full, _ = nearfield_leafpair_csr_sorted_direct_pallas(
+        *args, row_limit=1 << 20, **common
+    )
+    lim, _ = nearfield_leafpair_csr_sorted_direct_pallas(
+        *args, row_limit=row_limit, **common
+    )
+    full, lim = np.asarray(full), np.asarray(lim)
+    np.testing.assert_allclose(lim, full, rtol=2e-6, atol=1e-6)
+    row_counts = np.asarray(c["row_counts"])
+    counts = np.asarray(c["counts"])
+    starts = np.asarray(c["starts"])
+    fits = np.zeros(full.shape[0], bool)
+    for leaf in range(c["L"]):
+        if row_counts[leaf] <= row_limit:
+            fits[starts[leaf] : starts[leaf] + counts[leaf]] = True
+    assert np.array_equal(lim[fits], full[fits])
+    assert int(row_counts.max()) > row_limit  # some row really goes in pieces
