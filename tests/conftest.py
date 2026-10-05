@@ -6,6 +6,24 @@ import sys
 
 import pytest
 
+# --- jax 0.11.2: no LLVM loop vectorizer in the CPU backend ------------------
+# On jax 0.11.2 XLA:CPU's LLVM loop vectorizer can fall into a recursion
+# (`llvm::vputils::onlyFirstLaneUsed`, ~300 nested frames) whose cost grows with the
+# size of the loop it plans, and stall a compile for many minutes: every Pallas
+# kernel in interpret mode (COM radii: 4.5 s with the flag, >900 s without; 3.3 s on
+# 0.10.2), and the unrolled searchsorted that jaccpot._searchsorted now keeps off the
+# CPU. Turning the pass off costs these compile-bound tests nothing. It must be in
+# XLA_FLAGS before the first backend starts, and the symbol check below imports
+# jaccpot, which starts one: so it goes first. JACCPOT_TEST_KEEP_LOOP_VECTORIZER=1
+# leaves the flags alone.
+if os.environ.get("JACCPOT_TEST_KEEP_LOOP_VECTORIZER", "0") != "1" and (
+    "xla_backend_extra_options" not in os.environ.get("XLA_FLAGS", "")
+):
+    os.environ["XLA_FLAGS"] = (
+        os.environ.get("XLA_FLAGS", "")
+        + " --xla_backend_extra_options=-vectorize-loops=false"
+    ).strip()
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
