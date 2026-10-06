@@ -259,6 +259,8 @@ def _consecutive_case(seed, *, W):
         (16, None, 8, "al", True, (4, 8, 16)),  # one launch per occupancy class
         (16, None, 4, "alr", False, (2, 8)),  # the widest class in two subtiles
         (8, None, 8, "l", True, (8,)),
+        (16, 8, 8, "alg", True, ()),  # 2D-indexed operands
+        (16, None, 4, "aglr", True, (4, 16)),
     ],
 )
 @pytest.mark.parametrize("row_limit", [1 << 20, 2])

@@ -658,8 +658,10 @@ def _nearfield_leafpair_csr_sorted_kernel(
         consecutive row entries whose particle ranges touch into one range (and
         prefetch); ``l`` a leaner pair body (the source mask and ``-G`` folded into
         the masses once per tile, one select per pair: the diagonal adds exact
-        zeros to the acceleration). ``a``, ``r`` and ``l`` change the
-        single-precision rounding. Static.
+        zeros to the acceleration); ``g`` the tile's operands loaded straight into
+        its 2D layout (2D index arrays) instead of 1D vectors broadcast against
+        each other. ``a``, ``r`` and ``l`` change the single-precision rounding.
+        Static.
 
     Returns
     -------
@@ -744,8 +746,19 @@ def _nearfield_leafpair_csr_sorted_kernel(
             s_lane = lax.broadcasted_iota(jnp.int32, (bs,), 0)
             acc2d = "a" in source_flags and not wide
             lean = "l" in source_flags
+            gather2d = "g" in source_flags
             if acc2d:
                 acc0 = tuple(jnp.zeros((bt, bs), tx.dtype) for _ in range(num_out))
+            if gather2d:
+                # the tile's operands loaded straight into the (Bt, Bs) layout: the
+                # targets once, the sources per tile through a 2D index (each lane
+                # its own row; the repeats hit the cache), instead of 1D vectors
+                # broadcast against each other through a layout conversion
+                s_lane2 = lax.broadcasted_iota(jnp.int32, (bt, bs), 1)
+                t_rows2 = tstart + off + lax.broadcasted_iota(jnp.int32, (bt, bs), 0)
+                tx2 = pm_ref[t_rows2, 0]
+                ty2 = pm_ref[t_rows2, 1]
+                tz2 = pm_ref[t_rows2, 2]
 
             def _leaf_pass(sid, acc, exclude_lane=None, rng=None):  # noqa: F811
                 # Bs sources per iteration, read as vectors. A tile may run past
@@ -760,15 +773,23 @@ def _nearfield_leafpair_csr_sorted_kernel(
 
                 def _block(b, acc):
                     j0 = b * bs
-                    srows = pl.ds(sstart + j0, bs)
-                    sx = pm_ref[srows, 0]
-                    sy = pm_ref[srows, 1]
-                    sz = pm_ref[srows, 2]
-                    sm = pm_ref[srows, 3]
-                    j = j0 + s_lane
-                    dx = tx[:, None] - sx[None, :]
-                    dy = ty[:, None] - sy[None, :]
-                    dz = tz[:, None] - sz[None, :]
+                    if gather2d:
+                        j = j0 + s_lane2  # (Bt, Bs)
+                        srows2 = sstart + j
+                        sm = pm_ref[srows2, 3]
+                        dx = tx2 - pm_ref[srows2, 0]
+                        dy = ty2 - pm_ref[srows2, 1]
+                        dz = tz2 - pm_ref[srows2, 2]
+                    else:
+                        srows = pl.ds(sstart + j0, bs)
+                        sx = pm_ref[srows, 0]
+                        sy = pm_ref[srows, 1]
+                        sz = pm_ref[srows, 2]
+                        sm = pm_ref[srows, 3]
+                        j = j0 + s_lane
+                        dx = tx[:, None] - sx[None, :]
+                        dy = ty[:, None] - sy[None, :]
+                        dz = tz[:, None] - sz[None, :]
                     r_sq = dx * dx + dy * dy + dz * dz
                     dist_sq = r_sq + soft
                     if lean:
@@ -780,23 +801,27 @@ def _nearfield_leafpair_csr_sorted_kernel(
                         gm = jnp.where(j < scount, -g_value * sm, 0.0)
                         safe_dist_sq = jnp.where(r_sq > 0.0, dist_sq, 1.0)
                         inv_r = lax.rsqrt(safe_dist_sq)
-                        inv_r_m = inv_r * gm[None, :]
+                        inv_r_m = inv_r * (gm if gather2d else gm[None, :])
                         scale = (inv_r * inv_r) * inv_r_m
                         terms = (scale * dx, scale * dy, scale * dz)
                         if num_out == 4:
                             if exclude_lane is not None:
-                                inv_r_m = jnp.where(
-                                    exclude_lane[:, None] != j[None, :], inv_r_m, 0.0
+                                same = (
+                                    exclude_lane[:, None] == j
+                                    if gather2d
+                                    else exclude_lane[:, None] == j[None, :]
                                 )
+                                inv_r_m = jnp.where(same, 0.0, inv_r_m)
                             terms = terms + (inv_r_m,)
                     else:
-                        active = tvalid[:, None] & (j < scount)[None, :]
+                        j2 = j if gather2d else j[None, :]
+                        active = tvalid[:, None] & (j2 < scount)
                         if exclude_lane is not None:
-                            active = active & (exclude_lane[:, None] != j[None, :])
+                            active = active & (exclude_lane[:, None] != j2)
                         safe_dist_sq = jnp.where(active, dist_sq, 1.0)
                         inv_r = lax.rsqrt(safe_dist_sq)
                         inv_r = jnp.where(active, inv_r, 0.0)
-                        inv_r_m = inv_r * sm[None, :]
+                        inv_r_m = inv_r * (sm if gather2d else sm[None, :])
                         scale = -g_value * (inv_r * inv_r) * inv_r_m
                         terms = (scale * dx, scale * dy, scale * dz)
                         if num_out == 4:
@@ -1380,7 +1405,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         iteration (see :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
         ``JACCPOT_NEARFIELD_SOURCE_TILE``, default ``0``. Static.
     source_flags : str | None
-        With a source tile, the kernel's options (``a``, ``l``, ``p``, ``r``; see
+        With a source tile, the kernel's options (``a``, ``g``, ``l``, ``p``, ``r``; see
         :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
         ``JACCPOT_NEARFIELD_SOURCE_FLAGS``, default ``""``. Static.
     target_classes : Sequence[int] | None
@@ -1403,7 +1428,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         If Pallas or its Triton backend could not be imported.
     ValueError
         If ``source_tile`` is not ``0`` or a power of two, ``source_flags``
-        holds a letter other than ``a``, ``l``, ``p``, ``r``, or a target class is
+        holds a letter other than ``a``, ``g``, ``l``, ``p``, ``r``, or a target class is
         not a power of two.
     """
     if pl is None or plgpu is None:
@@ -1437,9 +1462,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     if source_flags is None:
         source_flags = os.environ.get("JACCPOT_NEARFIELD_SOURCE_FLAGS", "")
     source_flags = "".join(sorted(set(source_flags))) if source_tile else ""
-    if set(source_flags) - set("alpr"):
+    if set(source_flags) - set("aglpr"):
         raise ValueError(
-            f"source_flags takes the letters a, l, p, r; got {source_flags!r}"
+            f"source_flags takes the letters a, g, l, p, r; got {source_flags!r}"
         )
     pm, start_i, count_i, soft, g, bt, width_pad, num_warps = _sorted_inputs(
         positions_sorted,
