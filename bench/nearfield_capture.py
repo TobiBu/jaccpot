@@ -120,5 +120,80 @@ def _walk_wrapped(left, right, centers, radii, theta, root, **kw):
 
 
 _mwp.mutual_walk_pallas = _walk_wrapped
+
+import jaccpot.pallas.csr_place as _csr  # noqa: E402
+
+_csr_orig = _csr.directed_csr_pallas
+_csr_state = {"traced": 0}
+
+
+def _csr_wrapped(nodes_a, nodes_b, count, **kw):
+    k = _csr_state["traced"]
+    if k < 2:
+        _csr_state["traced"] = k + 1
+        stem = os.path.splitext(out)[0] + f"_lists{k}"
+        meta = {
+            key: (v if isinstance(v, (int, float, bool, str)) else str(v))
+            for key, v in kw.items()
+        }
+        with open(stem + ".json", "w") as fh:
+            json.dump(meta, fh, indent=1)
+
+        def _cb(a, b, c, stem=stem):
+            if os.path.exists(stem + ".npz"):
+                return
+            np.savez(
+                stem + ".npz", a=np.asarray(a), b=np.asarray(b), count=np.asarray(c)
+            )
+            print(
+                f"[capture] saved {stem}.npz (count {int(np.asarray(c))})", flush=True
+            )
+
+        jax.debug.callback(_cb, nodes_a, nodes_b, count)
+    return _csr_orig(nodes_a, nodes_b, count, **kw)
+
+
+_csr.directed_csr_pallas = _csr_wrapped
+
+import jaccpot.runtime._mac_geometry as _mg  # noqa: E402
+
+_comr_orig = _mg._com_radii
+_comr_state = {"traced": False}
+_COMR = (
+    "node_ranges",
+    "left_child",
+    "right_child",
+    "parent",
+    "positions_sorted",
+    "centers",
+)
+
+
+def _comr_wrapped(*args, **kw):
+    if not _comr_state["traced"]:
+        _comr_state["traced"] = True
+        stem = os.path.splitext(out)[0] + "_comr"
+        with open(stem + ".json", "w") as fh:
+            json.dump(
+                {
+                    k: v
+                    for k, v in kw.items()
+                    if isinstance(v, (int, float, bool, str, type(None)))
+                },
+                fh,
+                indent=1,
+            )
+
+        def _cb(*a, stem=stem):
+            if os.path.exists(stem + ".npz"):
+                return
+            np.savez(stem + ".npz", **{k: np.asarray(v) for k, v in zip(_COMR, a)})
+            print(f"[capture] saved {stem}.npz", flush=True)
+
+        jax.debug.callback(_cb, *args[:6])
+    return _comr_orig(*args, **kw)
+
+
+_mg._com_radii = _comr_wrapped
 sys.argv = [os.path.join(os.path.dirname(__file__), "fused_memory_budget.py"), *rest]
 runpy.run_path(sys.argv[0], run_name="__main__")
