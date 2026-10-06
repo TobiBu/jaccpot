@@ -1,0 +1,133 @@
+N=8000000 cml=6: live leaves 472243, capacity 543744, nodes 1087487, tree levels 34
+  chain lanes 16 block   4 chunk  8 warps 4: min   11.42 ms median   14.92  bitwise-equal-to-first True
+  chain lanes 16 block   8 chunk  8 warps 4: min   10.67 ms median   10.69  bitwise-equal-to-first True
+  table lanes 16 block   8 chunk  8 warps 4: min    5.85 ms median    5.88  bitwise-equal-to-first True
+  table lanes 16 block  16 chunk  8 warps 4: min    6.45 ms median    6.46  bitwise-equal-to-first True
+  table lanes 16 block  32 chunk  8 warps 4: min    6.52 ms median    6.53  bitwise-equal-to-first True
+  table lanes  8 block  16 chunk  8 warps 4: min    4.82 ms median    4.84  bitwise-equal-to-first True
+  table lanes  8 block  32 chunk  8 warps 4: min    4.82 ms median    4.84  bitwise-equal-to-first True
+  table lanes 16 block  16 chunk 16 warps 4: min    8.92 ms median    8.98  bitwise-equal-to-first True
+  table lanes 16 block  32 chunk 16 warps 8: min    9.56 ms median    9.61  bitwise-equal-to-first True
+  table lanes 16 block  16 chunk  8 warps 2: min    6.74 ms median    6.75  bitwise-equal-to-first True
+  table lanes  8 block  64 chunk  8 warps 4: min    5.55 ms median    5.57  bitwise-equal-to-first True
+N=100000000 cml=6: live leaves 5497014, capacity 6322176, nodes 12644351, tree levels 37
+  chain lanes 16 block   4 chunk  8 warps 4: min   77.95 ms median   79.35  bitwise-equal-to-first True
+  chain lanes 16 block   8 chunk  8 warps 4: min   73.81 ms median   74.75  bitwise-equal-to-first True
+  table lanes 16 block   8 chunk  8 warps 4: min   43.55 ms median   43.82  bitwise-equal-to-first True
+  table lanes 16 block  16 chunk  8 warps 4: min   47.50 ms median   48.21  bitwise-equal-to-first True
+  table lanes 16 block  32 chunk  8 warps 4: min   47.15 ms median   47.84  bitwise-equal-to-first True
+  table lanes  8 block  16 chunk  8 warps 4: min   37.18 ms median   53.78  bitwise-equal-to-first True
+  table lanes  8 block  32 chunk  8 warps 4: min   36.46 ms median   53.29  bitwise-equal-to-first True
+  table lanes 16 block  16 chunk 16 warps 4: min   65.90 ms median   65.96  bitwise-equal-to-first True
+  table lanes 16 block  32 chunk 16 warps 8: min   67.28 ms median   67.40  bitwise-equal-to-first True
+  table lanes 16 block  16 chunk  8 warps 2: min   49.20 ms median   52.72  bitwise-equal-to-first True
+  table lanes  8 block  64 chunk  8 warps 4: min   40.54 ms median   41.04  bitwise-equal-to-first True
+tune2 done 17:51
+N=8000000 cml=6: live leaves 472243, capacity 543744, nodes 1087487, tree levels 34
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/pallas/utils.py:100: RuntimeWarning: divide by zero encountered in scalar floor_divide
+  size = size // s
+Traceback (most recent call last):
+  File "/tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r6/p2m_tune.py", line 87, in <module>
+    out = jax.block_until_ready(f(ps, ms, cl, lr))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2787, in block_until_ready
+    try_to_block(arrays[0])
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2770, in try_to_block
+    return x.block_until_ready()
+           ^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: INTERNAL: CUDA error: Failed to launch CUDA kernel: p2m_real_leaf_p5_w64; block dims: 128x1x1; grid dims: 0x1x1; shared memory size: 8: CUDA_ERROR_INVALID_VALUE: invalid argument [executable_name='jit__lambda']
+N=8000000 cml=6: live leaves 472243, capacity 543744, nodes 1087487, tree levels 34
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/pallas/utils.py:100: RuntimeWarning: divide by zero encountered in scalar floor_divide
+  size = size // s
+Traceback (most recent call last):
+  File "/tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r6/p2m_tune.py", line 87, in <module>
+    out = jax.block_until_ready(f(ps, ms, cl, lr))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2787, in block_until_ready
+    try_to_block(arrays[0])
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2770, in try_to_block
+    return x.block_until_ready()
+           ^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: INTERNAL: CUDA error: Failed to launch CUDA kernel: p2m_real_leaf_p6_w64; block dims: 64x1x1; grid dims: 0x1x1; shared memory size: 8: CUDA_ERROR_INVALID_VALUE: invalid argument [executable_name='jit__lambda']
+N=100000000 cml=6: live leaves 5497014, capacity 6322176, nodes 12644351, tree levels 37
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/pallas/utils.py:100: RuntimeWarning: divide by zero encountered in scalar floor_divide
+  size = size // s
+Traceback (most recent call last):
+  File "/tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r6/p2m_tune.py", line 87, in <module>
+    out = jax.block_until_ready(f(ps, ms, cl, lr))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2787, in block_until_ready
+    try_to_block(arrays[0])
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2770, in try_to_block
+    return x.block_until_ready()
+           ^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: INTERNAL: CUDA error: Failed to launch CUDA kernel: p2m_real_leaf_p5_w64; block dims: 128x1x1; grid dims: 0x1x1; shared memory size: 8: CUDA_ERROR_INVALID_VALUE: invalid argument [executable_name='jit__lambda']
+N=100000000 cml=6: live leaves 5497014, capacity 6322176, nodes 12644351, tree levels 37
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/pallas/utils.py:100: RuntimeWarning: divide by zero encountered in scalar floor_divide
+  size = size // s
+Traceback (most recent call last):
+  File "/tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r6/p2m_tune.py", line 87, in <module>
+    out = jax.block_until_ready(f(ps, ms, cl, lr))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2787, in block_until_ready
+    try_to_block(arrays[0])
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/api.py", line 2770, in try_to_block
+    return x.block_until_ready()
+           ^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: INTERNAL: CUDA error: Failed to launch CUDA kernel: p2m_real_leaf_p6_w64; block dims: 64x1x1; grid dims: 0x1x1; shared memory size: 8: CUDA_ERROR_INVALID_VALUE: invalid argument [executable_name='jit__lambda']
+== plummer_clipped 200000 17:55
+A_plummer_clipped_200000_f: force 2.0 ms rel-L2 1.327e-03 p90 2.160e-03 far 1876324 near 230080 leaves 49717
+A_plummer_clipped_200000_s: step 14.2 ms (median 18.6) peak 0.11 GiB (595 B/p) far 1876324 near 230080 leaves 49717
+B_plummer_clipped_200000_f: force 3.0 ms rel-L2 1.297e-03 p90 1.948e-03 far 949816 near 244198 leaves 17928
+B_plummer_clipped_200000_s: step 10.0 ms (median 13.6) peak 0.08 GiB (446 B/p) far 949816 near 244198 leaves 17928
+E_plummer_clipped_200000_f: force 1.9 ms rel-L2 7.457e-04 p90 1.068e-03 far 949816 near 244198 leaves 17928
+E_plummer_clipped_200000_s: step 13.3 ms (median 13.9) peak 0.09 GiB (459 B/p) far 949816 near 244198 leaves 17928
+== plummer_clipped 2000000 18:20
+A_plummer_clipped_2000000_f: force 13.9 ms rel-L2 9.170e-04 p90 1.420e-03 far 11749538 near 2338876 leaves 257129
+A_plummer_clipped_2000000_s: step 32.4 ms (median 33.1) peak 0.62 GiB (334 B/p) far 11749538 near 2338876 leaves 257129
+B_plummer_clipped_2000000_f: force 14.7 ms rel-L2 9.168e-04 p90 1.413e-03 far 8031098 near 2381640 leaves 130258
+B_plummer_clipped_2000000_s: step 29.2 ms (median 30.6) peak 0.50 GiB (268 B/p) far 8031098 near 2381640 leaves 130258
+E_plummer_clipped_2000000_f: force 15.7 ms rel-L2 5.009e-04 p90 7.158e-04 far 8031098 near 2381640 leaves 130258
+E_plummer_clipped_2000000_s: step 28.9 ms (median 29.0) peak 0.54 GiB (289 B/p) far 8031098 near 2381640 leaves 130258
+== plummer 2000000 18:40
+A_plummer_2000000_f: force 25.7 ms rel-L2 1.211e-03 p90 2.194e-03 far 11097506 near 4993210 leaves 102648
+A_plummer_2000000_s: step 44.0 ms (median 44.3) peak 0.59 GiB (315 B/p) far 11097506 near 4993210 leaves 102648
+B_plummer_2000000_f: force 240.8 ms rel-L2 1.211e-03 p90 2.195e-03 far 11090118 near 6766830 leaves 102059
+B_plummer_2000000_s: step 16626.7 ms (median 17995.2) peak 0.56 GiB (299 B/p) far 11090118 near 6766830 leaves 102059
+E_plummer_2000000_f: force 240.2 ms rel-L2 8.286e-04 p90 1.231e-03 far 11090118 near 6766830 leaves 102059
+E_plummer_2000000_s: step 17797.4 ms (median 18081.9) peak 0.79 GiB (422 B/p) far 11090118 near 6766830 leaves 102059
+== disc 2000000 19:13
+A_disc_2000000_f: force 15.7 ms rel-L2 5.836e-01 p90 6.892e-02 far 7356090 near 2225236 leaves 121731
+A_disc_2000000_s: step 29.7 ms (median 29.7) peak 0.53 GiB (287 B/p) far 7356090 near 2225236 leaves 121731
+B_disc_2000000_f: force 17.3 ms rel-L2 5.836e-01 p90 6.892e-02 far 6884070 near 2247724 leaves 105206
+B_disc_2000000_s: step 28.6 ms (median 34.8) peak 0.55 GiB (293 B/p) far 6884070 near 2247724 leaves 105206
+E_disc_2000000_f: force 17.8 ms rel-L2 5.838e-01 p90 6.915e-02 far 6884070 near 2247724 leaves 105206
+E_disc_2000000_s: step 34.2 ms (median 44.6) peak 0.82 GiB (442 B/p) far 6884070 near 2247724 leaves 105206
+== plummer 8000000 19:35
+A_plummer_8000000_f: force 42.4 ms rel-L2 8.307e-04 p90 1.386e-03 far 22341978 near 13136532 leaves 405630
+A_plummer_8000000_s: step 96.5 ms (median 101.1) peak 1.74 GiB (234 B/p) far 22341978 near 13136532 leaves 405630
+B_plummer_8000000_f: force 46.2 ms rel-L2 8.307e-04 p90 1.386e-03 far 22307232 near 13150598 leaves 404447
+B_plummer_8000000_s.json: no row
+E_plummer_8000000_f: force 45.4 ms rel-L2 4.872e-04 p90 7.213e-04 far 22307232 near 13150598 leaves 404447
+E_plummer_8000000_s.json: no row
+== disc 8000000 19:51
+A_disc_8000000_f: force 38.6 ms rel-L2 3.576e-01 p90 2.627e-02 far 29952910 near 9439680 leaves 489052
+A_disc_8000000_s: step 91.3 ms (median 102.7) peak 1.90 GiB (254 B/p) far 29952910 near 9439680 leaves 489052
+B_disc_8000000_f: force 35.3 ms rel-L2 3.576e-01 p90 2.627e-02 far 28740896 near 9485286 leaves 442573
+B_disc_8000000_s: step 93.6 ms (median 94.3) peak 1.87 GiB (251 B/p) far 28740896 near 9485286 leaves 442573
+E_disc_8000000_f: force 30.9 ms rel-L2 3.574e-01 p90 2.647e-02 far 28740896 near 9485286 leaves 442573
+E_disc_8000000_s: step 91.6 ms (median 97.5) peak 1.94 GiB (261 B/p) far 28740896 near 9485286 leaves 442573
+defaults done 20:15
+old_A_8000000_r1: step 105.8 ms (median 107.0) peak 2.02 GiB (272 B/p) far 39093974 near 9414078 leaves 763545
+new_A_8000000_r1: step 103.7 ms (median 105.6) peak 2.11 GiB (284 B/p) far 39093974 near 9414078 leaves 763545
+old_E_8000000_r1: step 89.0 ms (median 89.3) peak 1.90 GiB (255 B/p) far 30531598 near 9496686 leaves 472816
+new_E_8000000_r1: step 90.4 ms (median 92.5) peak 1.95 GiB (261 B/p) far 30531598 near 9496686 leaves 472816
+old_E_100000000_r1: step 1229.7 ms (median 1231.1) peak 22.61 GiB (243 B/p) far 363911992 near 118864716 leaves 5454376
+new_E_100000000_r1: step 1196.9 ms (median 1197.0) peak 23.75 GiB (255 B/p) far 363911992 near 118864716 leaves 5454376
+old_A_8000000_r2: step 105.8 ms (median 106.1) peak 2.09 GiB (280 B/p) far 39093974 near 9414078 leaves 763545
+new_A_8000000_r2: step 101.1 ms (median 101.5) peak 2.18 GiB (293 B/p) far 39093974 near 9414078 leaves 763545
+old_E_8000000_r2: step 88.8 ms (median 88.9) peak 1.98 GiB (266 B/p) far 30531598 near 9496686 leaves 472816
+new_E_8000000_r2: step 87.3 ms (median 87.4) peak 1.95 GiB (261 B/p) far 30531598 near 9496686 leaves 472816
+old_E_100000000_r2: step 1223.5 ms (median 1224.4) peak 22.61 GiB (243 B/p) far 363911992 near 118864716 leaves 5454376
+new_E_100000000_r2: step 1198.6 ms (median 1203.1) peak 23.75 GiB (255 B/p) far 363911992 near 118864716 leaves 5454376
+jax A/B done 21:18

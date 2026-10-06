@@ -464,6 +464,104 @@ program, the particle carry needs only the walk's caps, the shape template and t
 prepare, so a prepare that stops after the walk (deriving the template's shapes rather than materialising the
 lists and the downward pass) is the next lever.
 
+## Round 5: jax 0.11.2, order 6 by default, three kernels (2026-10-05)
+
+Branch `perf/fused-round5`, on the jax 0.11.2 PR (#365) on #363. Rows: `bench/results/fused_memory/round5/`
+(its directories below). One A100 40 GB (card 6, held by a guard process between runs), clipped Plummer unless
+named, `JACCPOT_STRICT_CARRY=particles`, unnamed caps, preallocated arena 0.88.
+
+**Where it started: jz-fmm, apples to apples** (`compare_jzfmm/`). Same IC draw, the same 4096 targets and the
+same fp64 direct-sum reference (cached under the harness's `artifacts/reference/`), interleaved on one card.
+jz-fmm's time is one `force()` including its tree build; ours is one full `strict_run_v2` step (rebuild + force +
+kick). Our force on an already prepared state is only ~30 % of a step, so it is never the comparison.
+
+| N | jz-fmm best (p5 theta 0.8) | ours best then (p6 theta 0.8 cell_min_level 6, round-4 kernels) | ratio |
+| --- | --- | --- | --- |
+| 8e6 | 72.3 ms at 3.8e-4 | 88.4 ms at 4.3e-4 | 1.22x |
+| 3.2e7 | 284.3 ms at 4.0e-4 | 353.2 ms at 3.6e-4 | 1.24x |
+| 1e8 | 921.5 ms at 4.8e-4 | 1224.2 ms at 3.4e-4 | 1.33x |
+
+Memory was level (1e8: 243 against 272 B/p). The ~1000 ms at 1e8 often quoted for jz-fmm is its p5/theta 0.8
+point (921.5 ms here). Theta 0.7 bought accuracy at +30 % of the step; order 6 at +5 %.
+
+**Where a step went** (1e8, p5 theta 0.8 cell_min_level 8, trace without command buffers, kernel ms per step):
+near 287, walk 292, lists 146 (of which the far CSR placement 85, superlinear: 3.5 ms at 8e6 for 10x fewer
+pairs), COM radii 112, upward 96 (P2M 78), M2L 92, tree 92. COM radii and P2M ran one program per leaf over the
+64-lane capacity for ~10-20 particles.
+
+**Defaults** (`defaults/`, jax 0.11.2, the frozen round-4 tree). Step ms / fp64 rel-L2 / longest near row:
+
+| case | p5 cml8 (old) | p6 cml8 | p5 cml6 | p6 cml6 |
+| --- | --- | --- | --- | --- |
+| clipped 2e5 | 14.2 / 1.33e-3 / 85 | 9.2 / 7.8e-4 / 85 | 10.0 / 1.30e-3 / 85 | 13.3 / 7.5e-4 / 85 |
+| clipped 2e6 | 32.4 / 9.2e-4 / 101 | 34.0 / 5.0e-4 / 101 | 29.2 / 9.2e-4 / 101 | 28.9 / 5.0e-4 / 101 |
+| unclipped 2e6 | 44.0 / 1.21e-3 / 634 | 40.1 / 8.3e-4 / 634 | **16627** / - / **101870** | **17797** / - / 101870 |
+| unclipped 8e6 | 96.5 / 8.3e-4 / 262 | 98.1 / 4.9e-4 / 262 | ended / - / 1342 | ended / - / 1342 |
+| disc 2e6 | 29.7 / 0.58 / 144 | 28.5 / 0.58 / 144 | 28.6 / 0.58 / 145 | 34.2 / 0.58 / 145 |
+| disc 8e6 | 91.3 / 0.36 / 107 | 98.8 / 0.36 / 107 | 93.6 / 0.36 / 107 | 91.6 / 0.36 / 107 |
+
+* **Order 6 is the new default** (bench `--order 6`): ~1.7x lower error for +2-8 % of the step at 8e6 (the disc's
+  error is the softening's, the known follow-up). Memory +4-7 % at 8e6-1e8.
+* **cell_min_level 6 broke the near field on outliers**: an outskirt cell of the unclipped draw stays one leaf near
+  101,870 leaves, and round 4's whole-row near field ran that row in ONE program -- 16.6 s per step. It helps
+  the clipped draw only (8e6 101 -> 83 ms, 1e8 1252 -> 1155 ms), so level 8 stays the default.
+* **Two long-row fixes.** The force at level 6 on the unclipped draw went 240.8 -> 34.2 ms with the first; the
+  step needed the second (a trace put 19.87 s of its 19.93 s in one kernel):
+  * near field (`851e1fa`): a row's own program runs it up to 1024 entries, the rest goes in pieces of 1024
+    through the chunked path's partials, under a `lax.cond` that skips them when no row is that long;
+  * CSR rank (`6d97fe0`, `bdf0674`): the rank pass ordered each row tile against tile, `(n / 32)^2` pairs, in ONE
+    program; rows past 2048 entries now spread their tiles over 256 programs, 64 rows a launch, under a
+    `lax.cond`. Ranks are exact, so the lists are the same to the bit.
+  Every row of the standard configurations is far below both limits (85-634), so those keep their bits.
+
+**cell_min_level 8 against 6 with all of round 5** (`cml/`, p6; step ms, the same rel-L2 at both levels):
+
+| case | level 8 | level 6 |
+| --- | --- | --- |
+| clipped 2e5 | 10.8 | 9.7 (-10 %), 458 vs 681 B/p |
+| clipped 2e6 | 31.0 | 25.2 (-19 %), 289 vs 395 B/p |
+| clipped 8e6 | 95.8 | 80.6 (-16 %), 261 vs 318 B/p |
+| clipped 1e8 | 1169.0 | 1094.0 (-6 %), 255 vs 270 B/p |
+| disc 2e6 / 8e6 | 31.1 / 82.7 | 27.4 / 80.5 |
+| unclipped 2e6 | 38.6 | **135.6** (was 17,445 before the two fixes) |
+| unclipped 8e6 | 88.4 | 92.1 (+4 %) |
+
+Level 6 pays on bounded distributions and costs 3.5x on the unclipped draw at 2e6, where one outskirt leaf is
+still near ~all leaves (36 % more near pairs, a 10^10-compare rank, now in parallel): level 8 stays the bench
+default, level 6 is the option for bounded ICs. The LIBRARY default (`TreeConfig.cell_min_level=None`) is
+unconstrained, which is worse than either on outliers.
+
+**Kernels** (`tunes/` alone on the 8e6 and 1e8 cell trees; `kernel_ab/` in the full step):
+
+| change | alone, 8e6 | alone, 1e8 | result |
+| --- | --- | --- | --- |
+| COM radii: ancestors gathered first (pointer jumping in XLA), particles 8 lanes at a time, 16 leaves a program (`540b0d6`) | 11.4 -> 4.8 ms | 78 -> 36.5 ms | bitwise |
+| P2M: 16 leaves a program as rows of a (16, 8) lane tile, chunks up to the block's largest leaf (`2e618db`) | p5 10.4 -> 1.6, p6 9.0 -> 2.4 ms | p5 66 -> 17, p6 56 -> 27 ms | fp32 order (1.1e-7) |
+| CSR placement in passes over row ranges, one per 4M rows (`8978dcd`, `4d15ff8`) | 1 pass (unchanged) | 1180 -> 1142 ms step (4 passes) | bitwise |
+
+In the step (p6, cell_min_level 8, jax 0.11.2, interleaved, frozen trees; old = `JACCPOT_P2M_BLOCK=0
+JACCPOT_COM_RADII_VARIANT=chain`):
+
+| N | old kernels | new kernels | + 4 placement passes | rel-L2 old / new | peak |
+| --- | --- | --- | --- | --- | --- |
+| 8e6 | 109.8, 108.1 ms | 94.5, 95.2 ms (-13 %) | (one pass) | 4.333e-4 / 4.333e-4 | 2.37 / 2.38 GiB |
+| 1e8 | 1291.7, 1295.1 ms | 1181.1, 1179.9 ms (-9 %) | 1141.7 ms (-12 %) | 3.364e-4 / 3.364e-4 | 25.19 / 25.19 GiB |
+
+At 1e8 that is 1142 ms at 3.4e-4 against jz-fmm's 921.5 ms at 4.8e-4 (1.24x, more accurate).
+
+**Where a step goes now** (p6, cell_min_level 8, new kernels, one placement pass; `kernel_ab/trace_*`), kernel ms
+per step at 8e6 / 1e8: near 22.6 / 286, walk 18.2 / 287, M2L 14.4 / 137 (p6: 92 at p5), lists 8.5 / 143
+(placement 3.5 / 82), tree 6.6 / 94, unscoped 3.9 / 57 (one gather fusion, 40 ms at 1e8), COM radii 5.4 / 51
+(kernel 2.5 / 24), upward 4.3 / 37 (P2M 1.1 / 11.6, M2M 2.3 / 17.6), L2L 2.9 / 23, L2P 2.5 / 29. The walk and the
+near field are half the step.
+
+**jax 0.11.2** (#365; yggdrax#86): the 0.11.0 CPU regression is gone (characterization suite 218 s against 246-250
+s on 0.10.2); the fused step is 0-3 % faster on the same code (8e6 105.8 -> 101-104 ms; 1e8 p6 cml6 1224-1230 ->
+1197-1199 ms) but its peak is +5 % at 1e8 (22.61 -> 23.75 GiB, the same code), so the one-card ceiling has to be
+re-measured. Two XLA:CPU stalls had to be fixed on the way, both LLVM's loop vectorizer in a deep recursion
+(`llvm::vputils::onlyFirstLaneUsed`): the unrolled `searchsorted` (kept off the CPU now) and every Pallas kernel in
+interpret mode (the test conftests turn the vectorizer off). And 0.11.2 deprecates the Pallas Triton backend.
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
@@ -481,18 +579,24 @@ Two follow-ups stand between the fused lane and the 25M disc+bulge production ro
   scan. Its force-scale estimate already takes the softening, and the mesh lane was in class with it on this IC,
   so measure whether it alone fixes the bulge centre before building the distance floor.
 
-Then (updated after round 4):
+Then (updated after round 5):
 
+* **Speed, by the 1e8 profile** (p6 cml8, ~1190 ms of kernels): the walk (287 ms) and the near field (286) are
+  half the step; then the lists (143, the far placement 82 before the 4 passes), M2L (137 at p6), the tree build
+  (94), a per-step un-permute gather of the forces (f32[1e8, 3], 40 ms: carrying the state in tree order between
+  steps would drop it), COM radii (51; its kernel is 24 of it, the rest the per-pass gathers and segment max) and
+  the upward (37).
+* **cell_min_level per IC.** Level 6 saves 6-19 % (and 6-33 % memory) on bounded distributions and costs 3.5x on
+  the unclipped draw at 2e6. An adaptive cut (split a cell leaf whose particles are spread wide relative to its
+  neighbours) would take the gain without the outlier leaf; the library default (`None`, unconstrained) should
+  become 8.
 * **Memory: the eager prepare binds** (~215 B/p at 1.5-1.7e8, its list build). The particle carry needs only the
-  walk's caps, the shape template and the initial verdict from it (the start force is its own program now): a
-  prepare that stops after the walk and derives the template's shapes would drop the eager list build and downward
-  pass.
-* **Then the step** (live peak 12.2 GiB at 1.28e8): the list build, the walk, the near field's padded table
-  (`(N + W, 4)`, 16 B/p) and the step-long per-particle arrays are within ~1 GiB of each other.
-* **Speed** (8e6: ~101 ms per step): the list build ~11 ms; the walk ~27 ms.
-* **Production.**
-  * Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` without code changes; `donate_state` needs one keyword
-    in its `strict_run_v2` call (it is off by default and keeps the input state).
-  * The int32 index default is its own PR pair (jaccpot #361, yggdrax #84).
-* Still open: a segment retry for the multi-GPU `FusedRollout` (it raises `RolloutFlagError` today), and the
-  record configuration at 2e5 on a quiet card.
+  walk's caps, the shape template and the initial verdict from it: a prepare that stops after the walk and
+  derives the template's shapes would drop the eager list build and downward pass. Re-measure the one-card ceiling
+  on jax 0.11.2 first (+5 % peak at 1e8 on the same code).
+* **The Pallas Triton backend is deprecated** in jax 0.11.2: every kernel will need its Mosaic GPU form before
+  JAX drops Triton.
+* **Production.** Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` and `donate_state`; the int32 index
+  default is in (#361, yggdrax #84).
+* Still open: a segment retry for the multi-GPU `FusedRollout`, and the GPU-only unit test failures that predate
+  0.11.2 (10 in the Pallas unit files on an A100, two of them on ARCHITECTURE section 9's list).

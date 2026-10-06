@@ -1,0 +1,8 @@
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+!! running on busy GPU(s) [6]; timings are NOT for the record
+[jzfmm plummer_clipped8000000] devices=[6] jax 0.11.1 jzfmm ? jztree ? [CudaDevice(id=0)]
+[jzfmm plummer_clipped8000000] fp64 direct reference on 4096 targets (cached): 0.0 s
+[jzfmm plummer_clipped8000000] leaf32 p6 th0.9: peak 2.295 GiB (308 B/p), nvidia-smi max 36020 MiB, temp 1.669 GiB
+[jzfmm plummer_clipped8000000] leaf32 p6 th0.9: min 83.38 ms (IQR 1.25) aggL2 5.952e-04 p90 7.913e-04 med 1.529e-04 direct nanN leaves None planes None launches - flags=['loadavg>=8 (30.5)', 'other-gpus-busy (100%)']
+[jzfmm plummer_clipped8000000] wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r5/rows/jzE_8000000.json

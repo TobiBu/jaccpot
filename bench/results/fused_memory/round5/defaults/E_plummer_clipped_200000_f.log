@@ -1,0 +1,25 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=200000 live leaves 17928 -> leaf capacity 21504
+  [    1.6s] before_prepare                     in-use   0.00 GiB  peak   0.04 GiB  
+  [    1.6s] prepare:start                      in-use   0.00 GiB  peak   0.04 GiB  
+  [    1.6s] tree+upward:start                  in-use   0.00 GiB  peak   0.04 GiB  
+  [   74.5s] tree+upward:end                    in-use   0.02 GiB  peak   0.05 GiB  
+  [   74.5s] dual+downward:start                in-use   0.02 GiB  peak   0.05 GiB  
+  [   81.7s] walk+lists:start                   in-use   0.02 GiB  peak   0.05 GiB  
+  [   84.8s] walk:start                         in-use   0.02 GiB  peak   0.05 GiB  {'queue': 65536, 'far_cap': 65536, 'near_cap': 1048576}
+  [   88.5s] walk:end                           in-use   0.03 GiB  peak   0.05 GiB  
+  [   88.6s] walk:start                         in-use   0.02 GiB  peak   0.05 GiB  {'queue': 131072, 'far_cap': 65536, 'near_cap': 1048576}
+  [   91.3s] walk:end                           in-use   0.03 GiB  peak   0.05 GiB  
+  [   91.3s] walk:start                         in-use   0.02 GiB  peak   0.05 GiB  {'queue': 131072, 'far_cap': 1048576, 'near_cap': 1048576}
+  [   95.7s] walk:end                           in-use   0.04 GiB  peak   0.05 GiB  
+  [   97.9s] walk+lists:end                     in-use   0.03 GiB  peak   0.08 GiB  
+  [   97.9s] downward:start                     in-use   0.03 GiB  peak   0.08 GiB  
+  [  126.9s] downward:end                       in-use   0.04 GiB  peak   0.08 GiB  
+  [  126.9s] dual+downward:end                  in-use   0.04 GiB  peak   0.08 GiB  
+  [  129.7s] prepare:end                        in-use   0.04 GiB  peak   0.08 GiB  
+  [  129.7s] after_prepare                      in-use   0.04 GiB  peak   0.08 GiB  
+  [  154.3s] after_eval_compile                 in-use   0.04 GiB  peak   0.08 GiB  
+  [  156.7s] after_eval_timing                  in-use   0.04 GiB  peak   0.08 GiB  
+eval-only min 1.88 ms
+accuracy vs fp64 direct (4096 targets): {'targets': 4096, 'rel_l2': 0.0007456727087808451, 'median': 0.0002890938344620424, 'p90': 0.0010682346761290529, 'max': 0.010733311365146951}
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r6/defaults/E_plummer_clipped_200000_f.json
