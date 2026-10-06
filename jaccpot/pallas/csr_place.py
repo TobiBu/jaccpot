@@ -516,11 +516,10 @@ def directed_csr_pallas(
         is_long = counts > jnp.asarray(L, idx)
         n_long = jnp.sum(is_long, dtype=idx)
         n_ids = -(-max_long // Bb) * Bb
-        long_ids = jnp.nonzero(is_long, size=n_ids, fill_value=-1)[0].astype(idx)
         long_call = pl.pallas_call(
             functools.partial(_rank_long_kernel, lanes=int(lanes), width=W, split=S),
             grid=(Bb, S),
-            in_specs=[_full(unsorted), _full(offsets), _full(long_ids[:Bb])]
+            in_specs=[_full(unsorted), _full(offsets), _full(jnp.zeros((Bb,), idx))]
             + [_full(out0)],
             out_specs=_full(out0),
             out_shape=jax.ShapeDtypeStruct(out0.shape, out0.dtype),
@@ -530,11 +529,14 @@ def directed_csr_pallas(
             **rank_kwargs,
         )
 
-        def _batch(b: Array, out: Array) -> Array:
-            ids = lax.dynamic_slice(long_ids, (b * Bb,), (Bb,))
-            return long_call(unsorted, offsets, ids, out)
-
         def _long_rows(out: Array) -> Array:
+            # inside the branch: the row scan runs only when a long row exists
+            long_ids = jnp.nonzero(is_long, size=n_ids, fill_value=-1)[0].astype(idx)
+
+            def _batch(b: Array, out_b: Array) -> Array:
+                ids = lax.dynamic_slice(long_ids, (b * Bb,), (Bb,))
+                return long_call(unsorted, offsets, ids, out_b)
+
             return lax.fori_loop(0, (n_long + (Bb - 1)) // Bb, _batch, out)
 
         sources = lax.cond(n_long > 0, _long_rows, lambda out: out, sources)
