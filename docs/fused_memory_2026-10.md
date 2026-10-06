@@ -562,6 +562,13 @@ re-measured. Two XLA:CPU stalls had to be fixed on the way, both LLVM's loop vec
 (`llvm::vputils::onlyFirstLaneUsed`): the unrolled `searchsorted` (kept off the CPU now) and every Pallas kernel in
 interpret mode (the test conftests turn the vectorizer off). And 0.11.2 deprecates the Pallas Triton backend.
 
+**jax 0.11.2's allocator once crashed a preallocated run** (1 of ~120 on 0.11.2, `rank_scan_ab/f_s1`): `Check
+failed: central_gap_ == kInvalidChunkHandle ... spatial partitioning expects one central gap`, in
+`BFCAllocator::InsertFreeChunk` while the eager prepare freed a buffer. The BFC allocator's spatial partitioning is
+on by default with preallocation; `--xla_gpu_enable_allocator_spatial_partitioning=false` costs nothing measured
+(1e8 step 1147.9 / 1146.0 ms on, 1147.1 / 1148.3 off, peak 25.185 GiB both; `allocator_ab/`), so the bench turns it
+off when it preallocates, and production runs with a preallocated arena should set it too.
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded

@@ -180,6 +180,18 @@ from codes.compare_force import (  # noqa: E402
 if ARGS.prealloc > 0:
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "true"
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = str(ARGS.prealloc)
+    # jax 0.11.2's BFC allocator partitions the preallocated range "spatially" by
+    # default, and once in ~120 preallocated runs it died freeing a buffer in the
+    # eager prepare (`Check failed: central_gap_ == kInvalidChunkHandle ... spatial
+    # partitioning expects one central gap`). Off, the 1e8 step and its peak are the
+    # same (1147-1148 ms, 25.185 GiB both ways; round-5 record).
+    if "xla_gpu_enable_allocator_spatial_partitioning" not in os.environ.get(
+        "XLA_FLAGS", ""
+    ):
+        os.environ["XLA_FLAGS"] = (
+            os.environ.get("XLA_FLAGS", "")
+            + " --xla_gpu_enable_allocator_spatial_partitioning=false"
+        ).strip()
 else:
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.9")
