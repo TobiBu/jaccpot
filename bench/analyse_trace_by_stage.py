@@ -114,7 +114,8 @@ def trace(args: argparse.Namespace) -> None:
         )
         for k, v in tot.most_common():
             heavy = ", ".join(
-                f"{n} {t / 1e3 / calls:.2f}" for n, t in top[k].most_common(2)
+                f"{n} {t / 1e3 / calls:.2f}"
+                for n, t in top[k].most_common(int(args.kernels))
             )
             print(
                 f"   {k:<26} {v / 1e3 / calls:8.2f} ms  {100 * v / max(total, 1):5.1f} %"
@@ -180,6 +181,9 @@ def main() -> None:
     ap.add_argument("--module-re", default="*body*")
     ap.add_argument("--scope-re", default=r"(cross_[a-z0-9_]+|fmm_[a-z0-9_]+)")
     ap.add_argument("--top", type=int, default=25)
+    ap.add_argument(
+        "--kernels", type=int, default=2, help="heaviest kernels listed per stage"
+    )
     args = ap.parse_args()
     if args.buffers:
         args.hlo_dir = args.buffers

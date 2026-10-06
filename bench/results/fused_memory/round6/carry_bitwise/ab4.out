@@ -1,0 +1,7 @@
+ab4 start 16:20
+I6_2000000: step 34.7 ms (median 34.7) eval-only 13.6 ms peak 0.75 GiB (401 B/p) far 11749538
+T6_2000000: step 37.3 ms (median 37.3) eval-only 13.1 ms peak 0.75 GiB (402 B/p) far 11749538
+k6 N=2e6: tree vs input bitwise True rows differing 0
+T6_100000000_s: step 868.0 ms (median 869.0) peak 27.81 GiB (299 B/p) far 402173018
+I6_100000000_s: step 909.3 ms (median 909.4) peak 24.96 GiB (268 B/p) far 402173018
+ab4 done 16:39

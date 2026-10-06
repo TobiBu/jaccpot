@@ -880,6 +880,14 @@ class StrictRunMixin(_EngineBase):
             only the next ``strict_run_v2(carry="particles")`` call accepts; it
             carries the self-gravity at the returned positions, so that call needs
             neither a prepare nor an initial force evaluation.
+            ``JACCPOT_STRICT_CARRY_ORDER=tree`` (particles only; default
+            ``input``) carries the rows in the previous step's Morton order: no
+            per-step gather of the force back into input order and no inverse
+            permutation, and the tree's gathers read an almost sorted array; the
+            state is put back into input order once per call. The same values
+            (bitwise unless two particles share a Morton code). It needs an
+            external field that acts row by row, and it is not used with
+            ``return_history`` or a ``step_callback``.
         donate_state : bool
             ``carry="particles"`` only; off by default, so the input state is kept.
             When set, ``state``'s buffer is handed to the compiled scan, which
@@ -1259,6 +1267,115 @@ class StrictRunMixin(_EngineBase):
                 _emit_step(scan_x, state_new, jnp.asarray(True))
             return prepared_new, state_new, acceleration_new, acceleration_self_new
 
+        # The particle carry in TREE order (``JACCPOT_STRICT_CARRY_ORDER=tree``): the
+        # scan carries the particles in the previous step's Morton order, with their
+        # masses and input indices, so the force is never gathered back into input
+        # order and the tree's gathers read an almost sorted array (the permutation
+        # from one step's order to the next is close to the identity). The state
+        # goes back to input order once, when the call returns. Only where nothing
+        # sees a step's state from outside (no history, no step callback); the
+        # external field must act row by row (it sees the rows in tree order).
+        carry_order = env_choice(
+            "JACCPOT_STRICT_CARRY_ORDER", "input", ("input", "tree")
+        )
+        tree_order = (
+            particle_carry
+            and carry_order == "tree"
+            and self_eval_active
+            and diag_mode not in {"integrator_only", "eval_only"}
+            and eval_diag_mode == "full"
+            and not return_history
+            and step_callback is None
+        )
+
+        def _advance_tree_order(
+            prepared_now: PreparedStateLike,
+            state_now: Array,
+            acceleration_now: Array,
+            masses_now: Array,
+            ids_now: Array,
+        ) -> tuple[PreparedStateLike, Array, Array, Array, Array, Array]:
+            # `_advance` with the rows in the carry's order; returns the state, the
+            # accelerations, masses and input indices in the NEW tree order
+            position_new = (
+                state_now[:, 0]
+                + state_now[:, 1] * dt_arr
+                + 0.5 * acceleration_now * dt_arr**2
+            )
+            state_position = state_now.at[:, 0].set(position_new)
+            if not isinstance(prepared_now, LargeNPreparedState):
+                raise RuntimeError(
+                    "strict_run_v2 reached the large-N refresh with a "
+                    f"{type(prepared_now).__name__}: an internal invariant"
+                )
+            prepared_new = self._refresh_large_n_same_topology(
+                prepared_now,
+                state_position[:, 0, :],
+                masses_now,
+                bounds=None,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                runtime_overrides_override=None,
+                fused_device_mode=bool(self._strict_fused_mode_active),
+            )
+            if prepared_new is None:
+                raise RuntimeError(
+                    "strict velocity-Verlet refresh failed: topology/profile mismatch"
+                )
+            # row j of the tree is row perm[j] of the carry
+            perm = jnp.asarray(
+                prepared_new.tree.topology.particle_indices, dtype=INDEX_DTYPE
+            )
+            acceleration_self_new = jnp.asarray(
+                evaluate_large_n_state(
+                    self,
+                    prepared_new,
+                    target_indices=None,
+                    return_potential=False,
+                    max_acc_derivative_order=0,
+                    sorted_output=True,
+                ),
+                dtype=state_now.dtype,
+            )
+            # The tree's own sorted positions and masses are this very gather
+            # (``x[perm]``), already alive through the near field: reused, they
+            # cost no second copy. Velocities, the old acceleration and the input
+            # indices follow the permutation here.
+            state_sorted = jnp.stack(
+                [
+                    jnp.asarray(prepared_new.positions_sorted, state_now.dtype),
+                    state_position[:, 1][perm],
+                ],
+                axis=1,
+            )
+            acceleration_prev = acceleration_now[perm]
+            masses_new = jnp.asarray(prepared_new.masses_sorted, masses_now.dtype)
+            ids_new = ids_now[perm]
+            if add_external and external_acceleration_fn is not None:
+                acceleration_new = acceleration_self_new + jnp.asarray(
+                    external_acceleration_fn(state_sorted),
+                    dtype=state_now.dtype,
+                )
+            else:
+                acceleration_new = acceleration_self_new
+            state_new = _velocity_verlet_kick_drifted(
+                state_sorted,
+                acceleration_prev,
+                acceleration_new,
+                dt_arr,
+            )
+            if rematerialize_between_refresh:
+                state_new = jnp.asarray(state_new, dtype=state_now.dtype)
+            return (
+                prepared_new,
+                state_new,
+                acceleration_new,
+                acceleration_self_new,
+                masses_new,
+                ids_new,
+            )
+
         if self._strict_fused_mode_active and particle_carry:
             # handed over in a box the callee empties: a local here would keep the
             # concrete state (and its far list) alive through the whole scan
@@ -1274,6 +1391,7 @@ class StrictRunMixin(_EngineBase):
                 refresh_evaluate=_refresh_and_evaluate_endpoint,
                 capacity_ok=_static_target_block_capacity_ok,
                 evaluate_self=_evaluate_self,
+                advance_tree=_advance_tree_order if tree_order else None,
                 num_steps_i=num_steps_i,
                 cache_parts=(
                     float(dt),
@@ -1603,6 +1721,7 @@ class StrictRunMixin(_EngineBase):
         add_external: bool,
         external_acceleration_fn: Optional[Callable[[Array], Array]],
         donate_state: bool,
+        advance_tree: Optional[Callable[..., Any]] = None,
     ) -> tuple[Array, Any, Optional[Array]]:
         """The fused scan of ``strict_run_v2(carry="particles")``.
 
@@ -1671,6 +1790,11 @@ class StrictRunMixin(_EngineBase):
         donate_state : bool
             Hand ``state_arr``'s buffer to the scan (``strict_run_v2``'s
             ``donate_state``).
+        advance_tree : Optional[Callable[..., Any]]
+            ``strict_run_v2``'s tree-order step, or ``None``. Given, the scan
+            carries the rows in tree order with their masses and input indices
+            (``advance`` is then unused), and the final state and self-gravity
+            are put back into input order once, after the scan.
 
         Returns
         -------
@@ -1718,6 +1842,7 @@ class StrictRunMixin(_EngineBase):
                 template.key(),
                 bool(donate_state_i),
                 bool(donate_acc_i),
+                advance_tree is not None,
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
             runner = jit_cache.get(cache_key)
@@ -1741,15 +1866,33 @@ class StrictRunMixin(_EngineBase):
                 needs_initial: Array,
             ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
                 def _step(carry, scan_x):
-                    state_now, acc_now, _, ok_now, needs_now, done = carry
-                    prepared_new, state_new, acc_new, acc_self_new = advance(
-                        materialize_template(template),
-                        state_now,
-                        acc_now,
-                        masses_in,
-                        scan_x,
-                        emit=False,
-                    )
+                    state_now, acc_now, _, ok_now, needs_now, done = carry[:6]
+                    if advance_tree is not None:
+                        (
+                            prepared_new,
+                            state_new,
+                            acc_new,
+                            acc_self_new,
+                            masses_new,
+                            ids_new,
+                        ) = advance_tree(
+                            materialize_template(template),
+                            state_now,
+                            acc_now,
+                            carry[6],
+                            carry[7],
+                        )
+                        tree_rows: tuple = (masses_new, ids_new)
+                    else:
+                        prepared_new, state_new, acc_new, acc_self_new = advance(
+                            materialize_template(template),
+                            state_now,
+                            acc_now,
+                            masses_in,
+                            scan_x,
+                            emit=False,
+                        )
+                        tree_rows = ()
                     ok_new = ok_now & capacity_ok(prepared_new, after_refresh=True)
                     needs_new = jnp.maximum(needs_now, last_refresh_walk_needs(self))
                     # a segment that overflowed is re-run from its start, so the
@@ -1765,6 +1908,7 @@ class StrictRunMixin(_EngineBase):
                         ok_new,
                         needs_new,
                         done + ok_new.astype(jnp.int32),
+                        *tree_rows,
                     ), (state_new if return_history else None)
 
                 scan_xs = (
@@ -1772,7 +1916,14 @@ class StrictRunMixin(_EngineBase):
                     if emit_step is not None
                     else None
                 )
-                (state_f, _, acc_self_f, ok_f, needs_f, done_f), history = jax.lax.scan(
+                tree_rows0: tuple = ()
+                if advance_tree is not None:
+                    # the carry starts in input order: row i is particle i
+                    tree_rows0 = (
+                        masses_in,
+                        jnp.arange(masses_in.shape[0], dtype=INDEX_DTYPE),
+                    )
+                carry_f, history = jax.lax.scan(
                     _step,
                     (
                         state_initial,
@@ -1781,10 +1932,25 @@ class StrictRunMixin(_EngineBase):
                         ok_initial,
                         needs_initial,
                         jnp.zeros((), jnp.int32),
+                        *tree_rows0,
                     ),
                     xs=scan_xs,
                     length=int(n_steps),
                 )
+                state_f, _, acc_self_f, ok_f, needs_f, done_f = carry_f[:6]
+                if advance_tree is not None:
+                    # back to input order, once: row j is particle ids[j]
+                    ids_f = carry_f[7]
+                    state_f = (
+                        jnp.zeros_like(state_f)
+                        .at[ids_f]
+                        .set(state_f, unique_indices=True)
+                    )
+                    acc_self_f = (
+                        jnp.zeros_like(acc_self_f)
+                        .at[ids_f]
+                        .set(acc_self_f, unique_indices=True)
+                    )
                 return (state_f, acc_self_f, ok_f, needs_f, done_f), history
 
             donate = ((0,) if donate_state_i else ()) + ((1,) if donate_acc_i else ())

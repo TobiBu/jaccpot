@@ -36,7 +36,7 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot._env import env_int
+from jaccpot._env import env_choice, env_flag, env_int
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
@@ -151,6 +151,8 @@ def _round_kernel(
     far_cap: int,
     near_cap: int,
     queue_cap: int,
+    node_layout: str = "soa",
+    fused_emit: bool = False,
 ) -> None:
     """One block of the wavefront: MAC, emit, refine.
 
@@ -211,6 +213,16 @@ def _round_kernel(
         Near list capacity. Static.
     queue_cap : int
         Next-queue capacity. Static.
+    node_layout : str
+        ``"soa"``: the node fields in their own refs. ``"record"``: ``cent_ref`` is
+        a ``[nodes, 8]`` float32 record ``(cx, cy, cz, r, left, right, active, 0)``
+        with the integers bit-cast in (one 32-byte sector per node instead of
+        five), and the other node refs are unused. Static.
+    fused_emit : bool
+        Claim the next-queue slots of all four child pairs with ONE atomic per
+        block (not one per child), and touch the overflow flags only when this
+        block overflowed: three counter atomics per block instead of nine. The
+        same pairs, in a different slot order. Static.
 
     Returns
     -------
@@ -260,6 +272,8 @@ def _round_kernel(
             far_cap=far_cap,
             near_cap=near_cap,
             queue_cap=queue_cap,
+            node_layout=node_layout,
+            fused_emit=fused_emit,
         )
         return carry
 
@@ -289,6 +303,8 @@ def _round_block(
     far_cap: int,
     near_cap: int,
     queue_cap: int,
+    node_layout: str = "soa",
+    fused_emit: bool = False,
 ) -> None:
     """Body of one non-empty block (see :func:`_round_kernel`).
 
@@ -336,6 +352,16 @@ def _round_block(
         Near list capacity. Static.
     queue_cap : int
         Next-queue capacity. Static.
+    node_layout : str
+        ``"soa"``: the node fields in their own refs. ``"record"``: ``cent_ref`` is
+        a ``[nodes, 8]`` float32 record ``(cx, cy, cz, r, left, right, active, 0)``
+        with the integers bit-cast in (one 32-byte sector per node instead of
+        five), and the other node refs are unused. Static.
+    fused_emit : bool
+        Claim the next-queue slots of all four child pairs with ONE atomic per
+        block (not one per child), and touch the overflow flags only when this
+        block overflowed: three counter atomics per block instead of nine. The
+        same pairs, in a different slot order. Static.
 
     Returns
     -------
@@ -352,13 +378,26 @@ def _round_block(
     live = in_range & (a >= 0) & (b >= 0)
     a_s = jnp.where(live, a, jnp.zeros_like(a))
     b_s = jnp.where(live, b, jnp.zeros_like(b))
-    live = live & (active_ref[a_s] > 0) & (active_ref[b_s] > 0)
-    la = left_ref[a_s]
-    lb = left_ref[b_s]
-    ra = right_ref[a_s]
-    rb = right_ref[b_s]
-    rad_a = rad_ref[a_s]
-    rad_b = rad_ref[b_s]
+    if node_layout == "record":
+
+        def _int(n, col):
+            return lax.bitcast_convert_type(cent_ref[n, col], jnp.int32)
+
+        live = live & (_int(a_s, 6) > 0) & (_int(b_s, 6) > 0)
+        la = _int(a_s, 4)
+        lb = _int(b_s, 4)
+        ra = _int(a_s, 5)
+        rb = _int(b_s, 5)
+        rad_a = cent_ref[a_s, 3]
+        rad_b = cent_ref[b_s, 3]
+    else:
+        live = live & (active_ref[a_s] > 0) & (active_ref[b_s] > 0)
+        la = left_ref[a_s]
+        lb = left_ref[b_s]
+        ra = right_ref[a_s]
+        rb = right_ref[b_s]
+        rad_a = rad_ref[a_s]
+        rad_b = rad_ref[b_s]
     dx = cent_ref[b_s, 0] - cent_ref[a_s, 0]
     dy = cent_ref[b_s, 1] - cent_ref[a_s, 1]
     dz = cent_ref[b_s, 2] - cent_ref[a_s, 2]
@@ -389,12 +428,17 @@ def _round_block(
         out_b: KernelRef,
         counter: int,
         cap: int,
+        base: Optional[Array] = None,
     ) -> Array:
         # One atomic per program: the block claims sum(mask) slots and hands them
         # out by an in-block exclusive prefix sum (no per-lane counter contention).
+        # A given ``base``: the slots were claimed already (fused_emit).
         inc = jnp.where(mask, one, zero).astype(jnp.int32)
-        total = jnp.sum(inc).astype(jnp.int32)
-        base = plgpu.atomic_add(counters_out, (jnp.asarray(counter, jnp.int32),), total)
+        if base is None:
+            total = jnp.sum(inc).astype(jnp.int32)
+            base = plgpu.atomic_add(
+                counters_out, (jnp.asarray(counter, jnp.int32),), total
+            )
         slot = (base + jnp.cumsum(inc) - inc).astype(jnp.int32)
         ok = mask & (slot < cap)
         over = mask & (slot >= cap)
@@ -424,19 +468,40 @@ def _round_block(
     c3a = jnp.where(both & (~same), ra, neg1)
     c3b = jnp.where(both & (~same), rb, neg1)
     over_q = jnp.zeros_like(live)
-    for ca, cb in ((c0a, c0b), (c1a, c1b), (c2a, c2b), (c3a, c3b)):
-        m = refine & (ca >= 0) & (cb >= 0)
-        over_q = over_q | emit(m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap)
+    children = ((c0a, c0b), (c1a, c1b), (c2a, c2b), (c3a, c3b))
+    masks = [refine & (ca >= 0) & (cb >= 0) for ca, cb in children]
+    if fused_emit:
+        # one claim for all four children: child k's slots follow children < k's
+        sums = [jnp.sum(jnp.where(m, one, zero)).astype(jnp.int32) for m in masks]
+        base = plgpu.atomic_add(
+            counters_out,
+            (jnp.asarray(_C_NEXT, jnp.int32),),
+            sums[0] + sums[1] + sums[2] + sums[3],
+        )
+        for (ca, cb), m, n_k in zip(children, masks, sums):
+            over_q = over_q | emit(
+                m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap, base=base
+            )
+            base = base + n_k
+    else:
+        for (ca, cb), m in zip(children, masks):
+            over_q = over_q | emit(
+                m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap
+            )
     for slot_id, over in (
         (_C_OVF_FAR, over_far),
         (_C_OVF_NEAR, over_near),
         (_C_OVF_Q, over_q),
     ):
-        plgpu.atomic_max(
-            counters_out,
-            (jnp.asarray(slot_id, jnp.int32),),
-            jnp.max(over.astype(jnp.int32)),
-        )
+        flag = jnp.max(over.astype(jnp.int32))
+        if fused_emit:
+
+            @pl.when(flag > 0)
+            def _raise(slot_id=slot_id, flag=flag):
+                plgpu.atomic_max(counters_out, (jnp.asarray(slot_id, jnp.int32),), flag)
+
+        else:
+            plgpu.atomic_max(counters_out, (jnp.asarray(slot_id, jnp.int32),), flag)
 
 
 def _full(arr: Array) -> "pl.BlockSpec":
@@ -465,6 +530,8 @@ def mutual_walk_pallas(
     seed_a: Optional[Array] = None,
     seed_b: Optional[Array] = None,
     seed_count: Optional[Array] = None,
+    node_layout: Optional[str] = None,
+    fused_emit: Optional[bool] = None,
 ) -> PallasWalkResult:
     """Run the mutual walk, one Pallas launch per round.
 
@@ -523,6 +590,20 @@ def mutual_walk_pallas(
     seed_count : Optional[Array]
         Live prefix of the seed (a width, not a filter: dead slots past it are
         never read). ``None`` uses ``K``.
+    node_layout : Optional[str]
+        How a round reads the nodes: ``"soa"`` (left, right, radius, activity
+        and centre each from its own array: five 32-byte sectors per node) or
+        ``"record"`` (one 32-byte record per node, built once per walk: 12 more
+        bytes per node than the padded centres it replaces). The same MAC on the
+        same values, so the same pair sets. Float32 centres only (otherwise
+        ``"soa"``). ``None``: ``JACCPOT_WALK_NODE_LAYOUT``, default ``"record"``.
+    fused_emit : Optional[bool]
+        One counter atomic for all four child pairs of a block and overflow flags
+        only on overflow (three atomics per block instead of nine); the same
+        lists. ``None``: ``JACCPOT_WALK_FUSED_EMIT`` (``0``/``1``), default ``1``.
+        Both on by default since 2026-10-06: the walk alone (A100) 286 -> 96 ms at
+        1e8 particles and ~31 -> 15 ms at 8e6 (each alone: record 248 ms, fused
+        emit 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8.
 
     Returns
     -------
@@ -536,7 +617,8 @@ def mutual_walk_pallas(
     Raises
     ------
     ValueError
-        If the seed is longer than ``max_pair_queue`` or only one half is given.
+        If the seed is longer than ``max_pair_queue`` or only one half is given,
+        or ``node_layout`` is not ``"soa"`` or ``"record"``.
     """
     if (seed_a is None) != (seed_b is None):
         raise ValueError("seed_a and seed_b go together")
@@ -546,6 +628,16 @@ def mutual_walk_pallas(
             raise ValueError(
                 f"seed of {K} pairs exceeds max_pair_queue={int(max_pair_queue)}"
             )
+    if node_layout is None:
+        node_layout = env_choice(
+            "JACCPOT_WALK_NODE_LAYOUT", "record", ("soa", "record")
+        )
+    if node_layout not in ("soa", "record"):
+        raise ValueError(f"node_layout must be 'soa' or 'record', got {node_layout!r}")
+    if jnp.asarray(centers).dtype != jnp.float32:
+        node_layout = "soa"
+    if fused_emit is None:
+        fused_emit = env_flag("JACCPOT_WALK_FUSED_EMIT", True)
     # One jit around the whole walk, so an EAGER call creates the list and queue
     # buffers inside the program and the loop updates them in place. Called op by
     # op, the initial buffers were arguments of the while loop and stayed alive
@@ -571,6 +663,8 @@ def mutual_walk_pallas(
         num_warps=int(num_warps),
         max_rounds=int(max_rounds),
         rounds_per_check=int(rounds_per_check),
+        node_layout=str(node_layout),
+        fused_emit=bool(fused_emit),
     )
 
 
@@ -587,6 +681,8 @@ def mutual_walk_pallas(
         "num_warps",
         "max_rounds",
         "rounds_per_check",
+        "node_layout",
+        "fused_emit",
     ),
 )
 @jax.named_scope("fmm_walk")
@@ -611,6 +707,8 @@ def _mutual_walk_jit(
     num_warps: int,
     max_rounds: int,
     rounds_per_check: int,
+    node_layout: str = "soa",
+    fused_emit: bool = False,
 ) -> PallasWalkResult:
     """The body of :func:`mutual_walk_pallas` (validated arguments, static sizes).
 
@@ -654,6 +752,10 @@ def _mutual_walk_jit(
         Safety bound on the round loop.
     rounds_per_check : int
         Rounds per ``while_loop`` iteration.
+    node_layout : str
+        ``"soa"`` or ``"record"`` (see :func:`mutual_walk_pallas`).
+    fused_emit : bool
+        See :func:`mutual_walk_pallas`.
 
     Returns
     -------
@@ -673,6 +775,25 @@ def _mutual_walk_jit(
         else jnp.asarray(node_active).astype(idx)
     )
     theta_sq = jnp.asarray([float(theta) ** 2], dtype)
+    if node_layout == "record":
+        # one 32-byte sector per node: (cx, cy, cz, r, left, right, active, 0)
+        def _as_f32(x: Array) -> Array:
+            return lax.bitcast_convert_type(x.astype(idx), jnp.float32)[:, None]
+
+        cent = jnp.concatenate(
+            [
+                jnp.asarray(centers, jnp.float32),
+                rad.astype(jnp.float32)[:, None],
+                _as_f32(left),
+                _as_f32(right),
+                _as_f32(active),
+                jnp.zeros((nodes, 1), jnp.float32),
+            ],
+            axis=1,
+        )
+        tiny = jnp.zeros((1,), idx)
+        left = right = active = tiny
+        rad = jnp.zeros((1,), dtype)
     Q = int(max_pair_queue)
     blk = int(block)
     # programs per round: enough to fill the card, the kernel strides over the rest
@@ -689,6 +810,8 @@ def _mutual_walk_jit(
         far_cap=int(far_cap),
         near_cap=int(near_cap),
         queue_cap=Q,
+        node_layout=node_layout,
+        fused_emit=bool(fused_emit),
     )
 
     def one_round(

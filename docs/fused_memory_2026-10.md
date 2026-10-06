@@ -576,6 +576,103 @@ round-4 code) still fits 1.68e8 (33.68 GiB, 215 B/p, 2960 ms/step, one recovered
 p6 coefficient tables (2 x nodes x 49) are 8.7 GiB: order 6 costs ~5 % of the ceiling. Runs at the limit can pass
 order 5.
 
+## Round 6: the walk's atomics, a tiled near field, a tree-order carry (2026-10-06)
+
+Branch `perf/fused-round6`, on main `a7da8a6` (#366). Rows: `bench/results/fused_memory/round6/` (README there).
+One A100 40 GB (card 0, held by the guard between runs), jax 0.11.2, clipped Plummer, p6, theta 0.8,
+cell_min_level 8, `JACCPOT_STRICT_CARRY=particles`, unnamed caps, arena 0.88, frozen worktrees per arm.
+
+**Step 0: the gap at EQUAL accuracy** (`compare_jzfmm/`, interleaved with jz-fmm on the same card, targets and fp64
+reference; jz-fmm's time is a force including its tree, ours a full step). Round 5's 1.24x at 1e8 compared our
+3.4e-4 with jz-fmm's 4.8e-4. Measured at matching error:
+
+| N | jz-fmm (ms at rel-L2) | ours, main (p6) | ours, round 6 |
+| --- | --- | --- | --- |
+| 8e6 | p5 theta 0.8: 72.8 at 3.81e-4; p6 theta 0.8: 102.5 at 1.78e-4 | 93.5 at 4.33e-4 | 81.1 / 80.6 at 4.33e-4 (79.2 / 79.1 with the tree-order carry) |
+| 1e8 | p5 theta 0.8: 921.5 at 4.76e-4; p5 theta 0.7: 1183.3 at 3.65e-4; p6 theta 0.8: 1258.6 at 2.27e-4; p6 theta 0.7: 1621.1 at 1.37e-4 | 1155.7 at 3.36e-4 | 909.3 at 3.36e-4 (868.0 with the tree-order carry) |
+
+At 1e8 main was already level with jz-fmm's measured points at our accuracy (1156 against 1183 ms at 3.65e-4, our
+p90 4.9e-4 against its 7.1e-4); only jz-fmm's front interpolated between p5 and p6 (~1080 ms at 3.4e-4) was ahead.
+The real gap was at moderate N: 1.3x at 8e6 (jz-fmm ~71 ms at our 4.3e-4). jz-fmm's error grows with N at a fixed
+setting (p5 theta 0.8: 3.8e-4 at 8e6, 4.8e-4 at 1e8); ours shrinks (4.3e-4, 3.4e-4).
+
+**The walk: atomics, not memory.** The round kernel claimed every block's slots with nine atomics on one six-word
+counter array (far, near, four child pairs, three overflow flags), and read each node from five arrays. Two
+options, the same pair sets (counts, rounds, peak and order-free checksums of both lists equal; the unit tests
+compare the sets with the flat walk):
+
+* `fused_emit`: one claim for the four child pairs, the overflow flags only when the block overflowed: three
+  atomics per block instead of nine;
+* `node_layout="record"`: one 32-byte record per node `(cx, cy, cz, r, left, right, active, 0)`, built once per
+  walk (12 B/node more than the padded centres it replaces).
+
+Alone on the captured 1e8 tree (`tunes/w1e8.txt`, `w2_1e8.txt`, three interleaved rounds): 286.5 / 288.7 ms ->
+fused emit 166.5, record 247.8, both **96.0-96.4 ms (-66 %)**; at 8e6 the old walk is bimodal (21.5-33.9 ms), both
+options 14.6-15.3. In the step: 1155.1 / 1155.5 -> 954.2 / 953.0 ms at 1e8 and 93.5 / 93.7 -> 83.8 / 83.5 at 8e6,
+the force bitwise unchanged and the peak slightly lower (25.19 -> 24.96 GiB at 1e8). **Both are the default now**
+(`JACCPOT_WALK_NODE_LAYOUT=soa`, `JACCPOT_WALK_FUSED_EMIT=0` restore the old walk).
+
+**The near field is FP32-bound on its pair count, not latency-bound.** The plan's estimate (2.6e10 pairs at 1e8,
+30-50 ms of arithmetic against 286 measured) undercounted: the captured lists hold **6.25e10** particle pairs at 1e8
+(4.8e9 at 8e6; cell leaves of 14.9 / 10.5 particles, median 12 / 7, rows of 17.7 / 12.3 leaves). The scalar kernel
+runs 32-lane target tiles 43 % / 31 % full, and its 1.45e11 lane-evaluations in 0.29 s are ~5e11 per second -- the
+A100's FP32 issue rate at ~19 instructions per pair. Variants behind `source_tile` / `source_flags` /
+`target_classes` (`tunes/t*.txt`, alone on the captured 8e6 and 1e8 lists):
+
+| variant | 8e6 | 1e8 |
+| --- | --- | --- |
+| scalar loop, 32-lane targets (old) | 23.0 ms | 289-295 ms |
+| (16, 16) source tiles, sum per tile | 38.5 | 493 |
+| + 2D accumulation, one sum at the end (`a`) | 26.7 | 324 |
+| (16, 8) tiles, `a` | 21.0 | 261 |
+| + lean pair body (`l`: mask and -G folded into the masses, one select per pair) | 20.3 | 253 |
+| + runs of touching leaves merged (`r`) -- **the new default** | **19.7** | **245.6** |
+| one launch per occupancy class (target tiles 4-64 wide) | 20.7-27 | 253-341 |
+| operands loaded through 2D indices (`g`, no layout conversion) | 20.5 | 251 |
+
+So -14 % / -16 % alone: the gate (-40 %) is missed. Smaller target tiles fill more lanes but pay the same per-pair
+instructions plus per-tile overhead, and a 2D load changed nothing (Triton had already avoided the conversion). The
+sums are tree sums now: the fp64 error of the near sums themselves 3.4e-7 -> 1.5e-7 (8e6) and 1.1e-7 -> 7.6e-8
+(1e8); the force's rel-L2 is unchanged at four digits on the clipped draw (4.333e-4, 3.364e-4) and the disc
+(0.3574), 8.286e-4 -> 8.285e-4 on the unclipped 2e6 draw. In the step: -45 ms at 1e8 (913 -> 868 with the tree-order
+carry), -3.7 ms at 8e6. **The default now** (`JACCPOT_NEARFIELD_SOURCE_TILE=0` restores the scalar loop). The lever
+left is the pair count itself (leaf size and the MAC), or symmetric pairs, which need a scatter of the reactions.
+
+**The tree-order carry** (`JACCPOT_STRICT_CARRY_ORDER=tree`, particles carry only, opt-in). The scan carries the rows in
+the previous step's Morton order with their masses and input indices; the force is never gathered back (the
+evaluation's new `sorted_output`), the inverse permutation is never built, the tree's gathers read an almost sorted
+array, and the state goes back to input order once per call. **Bitwise** against the input-order carry over 9 steps
+at 2e6 and 8e6 (0 rows differing; A-vs-A control bitwise too; `carry_bitwise/`); ties of the 63-bit Morton code keep
+the carry's order instead of the input's, which would differ (a few pairs per step in the core at 1e8, none at these
+sizes). 1e8: 954 -> 913 ms (-41 ms) on the walk defaults, 909 -> 868 ms on all of round 6; 8e6: -1.3 ms. **But +30 B
+per particle at 1e8** (24.96 -> 27.81 GiB): the kick can no longer update the state in place (24 B/p) and the carry
+holds the masses and indices. Neither an optimization barrier after the force (28.55 GiB, +6 ms) nor reusing the
+tree's own sorted positions and masses (no change) recovered it, so it stays opt-in; it also needs an external field
+that acts row by row and is not used with `return_history` or a step callback.
+
+**The step, interleaved A/B** (`step_ab/`, frozen `k3`, env toggles; B = main's paths):
+
+| N | B | + walk | + tree-order carry | + near field |
+| --- | --- | --- | --- | --- |
+| 8e6 | 93.5 / 93.7 ms | 83.8 / 83.5 | 82.5 / 82.5 | **78.8 / 78.8** |
+| 1e8 | 1155.1 / 1155.5 ms | 954.2 / 953.0 | 913.0 / 914.0 | **867.7 / 868.2** |
+| peak at 1e8 | 25.19 GiB | 24.96 | 27.81 | 27.81 |
+
+The defaults as merged (frozen `k6`, `final/`; main = `base`): 8e6 81.1 / 80.6 ms (79.2 / 79.1 with the
+tree-order carry), 1e8 909.3 ms at 24.96 GiB (868.0 at 27.81), 2e6 30.0 -> 26.5 ms (23.9), 2e5 10.0 -> 10.6 ms
+(10.7; medians 11.9 / 10.6 / 13.0: launch-bound and noisy at this size); the force alone at 1e8 382.6 -> 338.3 ms,
+rel-L2 3.364e-4.
+
+**Other distributions** (`ics/`, main against the new defaults, step ms): unclipped Plummer 2e6 at cell_min_level 6
+(the long-row case) 136.7 -> 126.6 (round 5: 135.6; the gate held), at level 8 39.1 -> 32.7, at 8e6 88.1 -> 73.6;
+the disc at 8e6 81.8 -> 70.0 (force 35.6 -> 26.8 ms, rel-L2 unchanged).
+
+**Where a step goes now** (round-6 defaults + tree-order carry, trace without command buffers, kernel ms per step,
+8e6 / 1e8; `ics/stages_*.txt`): near 19.5 / 244, M2L 14.4 / 139, tree 7.9 / 105, lists 8.2 / 101, walk 8.5 / 92,
+COM radii 5.3 / 51, upward 4.3 / 38, L2P 2.7 / 31, L2L 2.9 / 23, the step's copies and integrator ~6 / 68. The near
+field and the M2L (~40 % at 1e8) now issue FP32 at the card's rate; what is left above a few percent is data
+movement: the tree build (cub sort 18 ms, scatters ~20 at 1e8), the list placement (four passes) and rank (~70 of the 101 ms), the COM radii.
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
@@ -593,13 +690,19 @@ Two follow-ups stand between the fused lane and the 25M disc+bulge production ro
   scan. Its force-scale estimate already takes the softening, and the mesh lane was in class with it on this IC,
   so measure whether it alone fixes the bulge centre before building the distance floor.
 
-Then (updated after round 5):
+Then (updated after round 6):
 
-* **Speed, by the 1e8 profile** (p6 cml8, ~1190 ms of kernels): the walk (287 ms) and the near field (286) are
-  half the step; then the lists (143, the far placement 82 before the 4 passes), M2L (137 at p6), the tree build
-  (94), a per-step un-permute gather of the forces (f32[1e8, 3], 40 ms: carrying the state in tree order between
-  steps would drop it), COM radii (51; its kernel is 24 of it, the rest the per-pass gathers and segment max) and
-  the upward (37).
+* **Speed, by the 1e8 profile** (round-6 defaults + tree-order carry, ~900 ms of kernels): the near field (244 ms)
+  and the M2L (139) issue FP32 at the card's rate, so they shrink only with less work -- fewer near pairs (leaf
+  size, the MAC; 6.25e10 at 1e8) or symmetric pairs (each computed once; needs a deterministic scatter of the
+  reactions). The rest is data movement: the tree build (105: cub sort 18, the leaf/ancestor scatters ~20), the
+  lists (101: the far placement in four passes and the rank, ~70; a walk that emits pairs already grouped by
+  target would remove both), the walk (92, after round 6's -66 %), COM radii (51; the kernel 25, the per-pass
+  gathers and segment max the rest), the step's copies and integrator (~68: a 22 ms device-to-device copy and the
+  kick fusion).
+* **The tree-order carry's memory** (+30 B/p at 1e8, the state no longer updated in place plus the carried indices)
+  keeps it opt-in for 4.5 % of the step; a carry that permutes the state into the buffer the next tree build
+  frees would take the time without the bytes.
 * **cell_min_level per IC.** Level 6 saves 6-19 % (and 6-33 % memory) on bounded distributions and costs 3.5x on
   the unclipped draw at 2e6. An adaptive cut (split a cell leaf whose particles are spread wide relative to its
   neighbours) would take the gain without the outlier leaf; the library default (`None`, unconstrained) should
@@ -610,7 +713,7 @@ Then (updated after round 5):
   on jax 0.11.2 first (+5 % peak at 1e8 on the same code).
 * **The Pallas Triton backend is deprecated** in jax 0.11.2: every kernel will need its Mosaic GPU form before
   JAX drops Triton.
-* **Production.** Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` and `donate_state`; the int32 index
-  default is in (#361, yggdrax #84).
+* **Production.** Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` and `donate_state` (and, with a row-wise
+  external field, `JACCPOT_STRICT_CARRY_ORDER=tree`); the int32 index default is in (#361, yggdrax #84).
 * Still open: a segment retry for the multi-GPU `FusedRollout`, and the GPU-only unit test failures that predate
   0.11.2 (10 in the Pallas unit files on an A100, two of them on ARCHITECTURE section 9's list).

@@ -1,0 +1,33 @@
+N=8000000 leaves 878592 (live 763545) leaf_width 64 near entries 9414078 (capacity 14680064) with_potential False chunk 64
+  particles per live leaf: mean 10.5 pct[50, 90, 99, 100] [ 7. 26. 57. 64.]
+  row entries per live leaf: mean 12.3 pct[50, 90, 99, 100] [ 15.  25.  38. 110.]
+  particle pairs 4.813e+09
+  Bt=16: target-lane fill 0.50
+  Bt=32: target-lane fill 0.31
+  Bs=8: source-lane fill 0.85
+  Bs=16: source-lane fill 0.74
+  Bs=32: source-lane fill 0.53
+  Bt 32 Bs  0 warps 1    : min    23.54 ms median    41.51  max|d|/max|ref| 0.00e+00 bitwise True  rel-L2 vs fp64 list 3.422e-07
+  Bt 16 Bs  0 warps 1    : min    35.06 ms median    35.36  max|d|/max|ref| 0.00e+00 bitwise True  rel-L2 vs fp64 list 3.422e-07
+  Bt 16 Bs 16 warps 1    : min    38.54 ms median    38.98  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.450e-07
+  Bt 16 Bs 16 warps 1 p  : min    39.16 ms median    39.47  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.450e-07
+  Bt 16 Bs 16 warps 1 a  : min    26.65 ms median    26.85  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.272e-07
+  Bt 16 Bs 16 warps 1 ap : min    25.75 ms median    25.85  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.272e-07
+  Bt 16 Bs 16 warps 1 r  : min    37.81 ms median    38.07  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.464e-07
+  Bt 16 Bs 16 warps 1 ar : min    24.36 ms median    24.51  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.508e-07
+  Bt 32 Bs 16 warps 1    : min    48.49 ms median    49.09  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.450e-07
+  Bt 32 Bs 16 warps 1 a  : min    35.90 ms median    36.01  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.272e-07
+  Bt 32 Bs 32 warps 1 a  : min    55.59 ms median    55.82  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.252e-07
+  Bt 32 Bs 32 warps 2 a  : min    50.24 ms median    50.77  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.252e-07
+  Bt 32 Bs 32 warps 2 ar : min    42.93 ms median    43.05  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.409e-07
+  Bt 16 Bs 32 warps 1 ar : min    34.61 ms median    34.71  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.409e-07
+  Bt 16 Bs 32 warps 2 ar : min    30.98 ms median    31.16  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.409e-07
+  Bt 32 Bs 16 warps 2 ar : min    29.23 ms median    29.39  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.508e-07
+  Bt 16 Bs  8 warps 1 a  : min    21.03 ms median    21.07  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.266e-07
+  Bt  8 Bs 16 warps 1 a  : min    24.99 ms median    25.01  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.272e-07
+  Bt  8 Bs 32 warps 1 ar : min    29.79 ms median    29.93  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.409e-07
+  Bt  8 Bs 64 warps 2 ar : min    42.91 ms median    43.11  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.365e-07
+  Bt 16 Bs 64 warps 2 ar : min    49.71 ms median    50.16  max|d|/max|ref| 2.31e-07 bitwise False  rel-L2 vs fp64 list 1.365e-07
+  Bt 32 Bs 32 warps 4    : min    75.98 ms median    76.94  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.381e-07
+  Bt 64 Bs 16 warps 2 a  : min    51.69 ms median    51.96  max|d|/max|ref| 3.08e-07 bitwise False  rel-L2 vs fp64 list 1.272e-07
+  Bt 32 Bs  0 warps 1    : min    23.01 ms median    23.33  max|d|/max|ref| 0.00e+00 bitwise True  rel-L2 vs fp64 list 3.422e-07

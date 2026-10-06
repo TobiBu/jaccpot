@@ -1,0 +1,13 @@
+itest start 13:18
+......                                                                   [100%]
+=============================== warnings summary ===============================
+tests/integration/test_strict_run_v2_particle_carry.py: 12 warnings
+  /export/home/tbuck/jaccpot-r6-k3/tests/integration/test_strict_run_v2_donation.py:72: DeprecationWarning: Legacy expanse-style kwargs are deprecated in jaccpot.FastMultipoleMethod. Use preset/basis/advanced config objects instead.
+    return FastMultipoleMethod(
+
+tests/integration/test_strict_run_v2_particle_carry.py: 797 warnings
+  /export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/pallas/pallas_call.py:926: DeprecationWarning: The Pallas Triton backend is deprecated and will be removed in a future JAX version. To keep using Pallas on GPU, please migrate to the Mosaic GPU backend. To keep using Triton, switch to the official Triton bindings and jax_triton.
+    return rule(ctx, *in_nodes, compiler_params=compiler_params, **params)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+chain4 done 13:30

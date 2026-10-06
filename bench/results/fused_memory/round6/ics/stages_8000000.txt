@@ -1,0 +1,15 @@
+30006 instructions with op_name from 3 dump file(s)
+== /device:GPU:0: kernel time    80.64 ms/call, busy    80.64, window    85.83, launches 1208
+   fmm_near                      19.49 ms   24.2 %  launches     12   [nearfield_leafpair_csr_direct_first_t16_c64_w64_s8alr 19.13, loop_pad_fusion_3 0.18, loop_maximum_fusion_1 0.13, MemcpyD2D 0.02]
+   fmm_downward                  14.39 ms   17.8 %  launches      2   [m2l_real_csr_lanes_p6_k32 14.38, loop_slice_subtract_fusion 0.01]
+   fmm_walk                       8.51 ms   10.6 %  launches    261   [mutual_walk_round_b64 7.73, loop_minimum_fusion_14 0.15, loop_dynamic_update_slice_fusion 0.15, loop_concatenate_fusion_1 0.09]
+   fmm_lists                      8.21 ms   10.2 %  launches     33   [directed_csr_place 3.16, directed_csr_rank_k32 2.19, input_scatter_fusion_7 0.78, directed_csr_place__1 0.51]
+   fmm_tree                       7.92 ms    9.8 %  launches    163   [void cub::_V_300200_SM_500_600_700_800_900_1000_1010_1200::d 1.63, input_scatter_fusion_8 1.03, input_scatter_fusion_17 0.74, input_scatter_fusion_16 0.62]
+   fmm_com_radii                  5.32 ms    6.6 %  launches    205   [com_radii_table_l8_b16_k8 2.45, input_scatter_fusion 1.07, loop_select_fusion 0.32, loop_concatenate_fusion 0.29]
+   unmapped                       4.51 ms    5.6 %  launches    244   [MemcpyD2D 2.18, loop_add_multiply_slice_fusion 1.49, loop_slice_fusion_4 0.41, loop_slice_fusion_5 0.11]
+   fmm_upward                     4.34 ms    5.4 %  launches     75   [m2m_real_lanes_p6_k32 2.30, p2m_real_block_p6_b16_c8 1.09, loop_broadcast_fusion_14 0.50, loop_convert_fusion_4 0.25]
+   fmm_l2l                        2.86 ms    3.5 %  launches     41   [l2l_real_lanes_p6_k32 2.86]
+   fmm_l2p                        2.72 ms    3.4 %  launches     59   [loop_add_slice_fusion 0.78, loop_multiply_select_slice_subtract_fusion 0.63, loop_dynamic_update_slice_fusion_16 0.39, loop_gather_select_fusion_2 0.25]
+   unscoped                       1.92 ms    2.4 %  launches     30   [loop_gather_fusion_2 0.55, loop_dynamic_update_slice_fusion_18 0.35, loop_dynamic_update_slice_fusion_17 0.35, loop_add_fusion_10 0.29]
+   fmm_mac_extents                0.47 ms    0.6 %  launches     80   [loop_gather_select_fusion 0.11, loop_add_gather_fusion_1 0.10, input_reduce_fusion_3 0.07, input_reduce_fusion_1 0.05]
+   no_hlo_op (memcpy/memset)      0.00 ms    0.0 %  launches      1   [MemcpyD2H 0.00, MemcpyH2D 0.00]

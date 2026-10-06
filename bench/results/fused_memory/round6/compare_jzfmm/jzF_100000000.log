@@ -1,0 +1,6 @@
+!! running on busy GPU(s) [0]; timings are NOT for the record
+[jzfmm plummer_clipped100000000] devices=[0] jax 0.11.1 jzfmm ? jztree ? [CudaDevice(id=0)]
+[jzfmm plummer_clipped100000000] fp64 direct reference on 4096 targets (cached): 0.0 s
+[jzfmm plummer_clipped100000000] leaf32 p6 th0.8: peak 32.391 GiB (348 B/p), nvidia-smi max 36020 MiB, temp 25.686 GiB
+[jzfmm plummer_clipped100000000] leaf32 p6 th0.8: min 1258.64 ms (IQR 5.67) aggL2 2.274e-04 p90 3.422e-04 med 6.943e-05 direct nanN leaves None planes None launches - flags=['loadavg>=8 (22.6)', 'other-gpus-busy (100%)']
+[jzfmm plummer_clipped100000000] wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/4e79cfff-6b30-497e-8630-4d6d2e67c890/scratchpad/r6/rows/jzF_100000000.json

@@ -36,7 +36,7 @@ what removes the per-slot ``lax.cond`` of the rectangle kernel.
 from __future__ import annotations
 
 import functools
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -44,7 +44,7 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
-from jaccpot._env import env_choice, env_int
+from jaccpot._env import env_choice, env_int, env_text
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import (
@@ -588,6 +588,8 @@ def _nearfield_leafpair_csr_sorted_kernel(
     include_self: bool,
     direct: bool,
     num_out: int,
+    source_tile: int = 0,
+    source_flags: str = "",
 ) -> None:
     """:func:`_nearfield_leafpair_csr_kernel` reading the SORTED particle array.
 
@@ -642,6 +644,23 @@ def _nearfield_leafpair_csr_sorted_kernel(
     num_out : int
         ``4`` with the potential, ``3`` without (the potential is then not
         accumulated at all; x, y, z are computed op for op as with it). Static.
+    source_tile : int
+        ``0``: one source particle per loop iteration, a scalar load each (the
+        table kernel's order). ``Bs > 0``: a source leaf in vector tiles of
+        ``Bs`` particles, a ``(Bt, Bs)`` block of pairs per iteration summed over
+        its sources. The sources of a block are added as one tree sum, so the
+        row sum is a different single-precision rounding. Static.
+    source_flags : str
+        With ``source_tile``, any of: ``p`` load the next row entry's leaf range one
+        iteration ahead (the same sums); ``a`` accumulate ``(Bt, Bs)`` partials and
+        sum over the sources once at the end, not per tile; ``r`` merge
+        consecutive row entries whose particle ranges touch into one range (and
+        prefetch); ``l`` a leaner pair body (the source mask and ``-G`` folded into
+        the masses once per tile, one select per pair: the diagonal adds exact
+        zeros to the acceleration); ``g`` the tile's operands loaded straight into
+        its 2D layout (2D index arrays) instead of 1D vectors broadcast against
+        each other. ``a``, ``r`` and ``l`` change the single-precision rounding.
+        Static.
 
     Returns
     -------
@@ -721,14 +740,156 @@ def _nearfield_leafpair_csr_sorted_kernel(
             part = lax.fori_loop(0, scount, _lane_body, (zero,) * num_out)
             return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
 
+        if source_tile:
+            bs = int(source_tile)
+            s_lane = lax.broadcasted_iota(jnp.int32, (bs,), 0)
+            acc2d = "a" in source_flags and not wide
+            lean = "l" in source_flags
+            gather2d = "g" in source_flags
+            if acc2d:
+                acc0 = tuple(jnp.zeros((bt, bs), tx.dtype) for _ in range(num_out))
+            if gather2d:
+                # the tile's operands loaded straight into the (Bt, Bs) layout: the
+                # targets once, the sources per tile through a 2D index (each lane
+                # its own row; the repeats hit the cache), instead of 1D vectors
+                # broadcast against each other through a layout conversion
+                s_lane2 = lax.broadcasted_iota(jnp.int32, (bt, bs), 1)
+                t_rows2 = tstart + off + lax.broadcasted_iota(jnp.int32, (bt, bs), 0)
+                tx2 = pm_ref[t_rows2, 0]
+                ty2 = pm_ref[t_rows2, 1]
+                tz2 = pm_ref[t_rows2, 2]
+
+            def _leaf_pass(sid, acc, exclude_lane=None, rng=None):  # noqa: F811
+                # Bs sources per iteration, read as vectors. A tile may run past
+                # the range (into the next leaf's particles or the table's zero
+                # padding, never past it: the table holds Wpad >= Bs extra rows);
+                # those sources are masked like the targets past the count.
+                if rng is None:
+                    sstart = leaf_start_ref[sid]
+                    scount = leaf_count_ref[sid]
+                else:
+                    sstart, scount = rng
+
+                def _block(b, acc):
+                    j0 = b * bs
+                    if gather2d:
+                        j = j0 + s_lane2  # (Bt, Bs)
+                        srows2 = sstart + j
+                        sm = pm_ref[srows2, 3]
+                        dx = tx2 - pm_ref[srows2, 0]
+                        dy = ty2 - pm_ref[srows2, 1]
+                        dz = tz2 - pm_ref[srows2, 2]
+                    else:
+                        srows = pl.ds(sstart + j0, bs)
+                        sx = pm_ref[srows, 0]
+                        sy = pm_ref[srows, 1]
+                        sz = pm_ref[srows, 2]
+                        sm = pm_ref[srows, 3]
+                        j = j0 + s_lane
+                        dx = tx[:, None] - sx[None, :]
+                        dy = ty[:, None] - sy[None, :]
+                        dz = tz[:, None] - sz[None, :]
+                    r_sq = dx * dx + dy * dy + dz * dz
+                    dist_sq = r_sq + soft
+                    if lean:
+                        # a source past the range weighs nothing (its -G m is masked
+                        # once per tile, not per pair); a pair at distance zero (the
+                        # diagonal) adds dx = dy = dz = 0 to the acceleration and
+                        # gets 1/r = 1 (an unmasked 1/eps^3 could overflow); dead
+                        # target lanes are not stored
+                        gm = jnp.where(j < scount, -g_value * sm, 0.0)
+                        safe_dist_sq = jnp.where(r_sq > 0.0, dist_sq, 1.0)
+                        inv_r = lax.rsqrt(safe_dist_sq)
+                        inv_r_m = inv_r * (gm if gather2d else gm[None, :])
+                        scale = (inv_r * inv_r) * inv_r_m
+                        terms = (scale * dx, scale * dy, scale * dz)
+                        if num_out == 4:
+                            if exclude_lane is not None:
+                                same = (
+                                    exclude_lane[:, None] == j
+                                    if gather2d
+                                    else exclude_lane[:, None] == j[None, :]
+                                )
+                                inv_r_m = jnp.where(same, 0.0, inv_r_m)
+                            terms = terms + (inv_r_m,)
+                    else:
+                        j2 = j if gather2d else j[None, :]
+                        active = tvalid[:, None] & (j2 < scount)
+                        if exclude_lane is not None:
+                            active = active & (exclude_lane[:, None] != j2)
+                        safe_dist_sq = jnp.where(active, dist_sq, 1.0)
+                        inv_r = lax.rsqrt(safe_dist_sq)
+                        inv_r = jnp.where(active, inv_r, 0.0)
+                        inv_r_m = inv_r * (sm if gather2d else sm[None, :])
+                        scale = -g_value * (inv_r * inv_r) * inv_r_m
+                        terms = (scale * dx, scale * dy, scale * dz)
+                        if num_out == 4:
+                            terms = terms + (-g_value * inv_r_m,)
+                    if acc2d:
+                        # (Bt, Bs) partials; summed over the sources once, at the end
+                        return tuple(a + t for a, t in zip(acc, terms))
+                    return tuple(a + jnp.sum(t, axis=1) for a, t in zip(acc, terms))
+
+                n_blocks = (scount + (bs - 1)) // bs
+                if not wide:
+                    return lax.fori_loop(0, n_blocks, _block, acc)
+                part = lax.fori_loop(0, n_blocks, _block, (zero,) * num_out)
+                return tuple(a + q.astype(accum_dtype) for a, q in zip(acc, part))
+
         start = chunk_start_ref[c]
         cnt = chunk_count_ref[c]
 
-        def _slot_body(s, acc):
-            sid = neighbors_ref[start + s]
-            return _leaf_pass(sid, acc)
+        if source_tile and ("p" in source_flags or "r" in source_flags):
+            # the next entry's leaf range is loaded one iteration ahead, so its
+            # dependent loads (neighbour id, then start and count) overlap this
+            # entry's pairs instead of stalling the next iteration
+            last_entry = neighbors_ref.shape[0] - 1
 
-        acc = lax.fori_loop(0, cnt, _slot_body, acc0)
+            def _range_of(s):
+                e = jnp.clip(start + s, 0, last_entry)
+                sid = neighbors_ref[e]
+                return leaf_start_ref[sid], leaf_count_ref[sid]
+
+            if "r" in source_flags:
+                # Runs: a row lists leaves in Morton order, and neighbouring leaves
+                # are often adjacent particle ranges. Consecutive entries whose
+                # ranges touch are one range, run in full tiles; a range is
+                # summed when the next entry does not continue it.
+                def _slot_body(s, carry):
+                    acc, rs, rl, cur = carry
+                    ss, sc = cur
+                    nxt = _range_of(jnp.minimum(s + 1, cnt - 1))
+                    joins = ss == rs + rl
+                    acc = lax.cond(
+                        joins,
+                        lambda a: a,
+                        lambda a: _leaf_pass(None, a, rng=(rs, rl)),
+                        acc,
+                    )
+                    rs = jnp.where(joins, rs, ss)
+                    rl = jnp.where(joins, rl + sc, sc)
+                    return acc, rs, rl, nxt
+
+                zero_i = jnp.zeros((), tcount.dtype)
+                acc, rs, rl, _ = lax.fori_loop(
+                    0, cnt, _slot_body, (acc0, zero_i, zero_i, _range_of(0))
+                )
+                acc = _leaf_pass(None, acc, rng=(rs, rl))
+            else:
+
+                def _slot_body(s, carry):
+                    acc, cur = carry
+                    nxt = _range_of(jnp.minimum(s + 1, cnt - 1))
+                    return _leaf_pass(None, acc, rng=cur), nxt
+
+                acc, _ = lax.fori_loop(0, cnt, _slot_body, (acc0, _range_of(0)))
+        else:
+
+            def _slot_body(s, acc):
+                sid = neighbors_ref[start + s]
+                return _leaf_pass(sid, acc)
+
+            acc = lax.fori_loop(0, cnt, _slot_body, acc0)
 
         if include_self:
 
@@ -737,6 +898,8 @@ def _nearfield_leafpair_csr_sorted_kernel(
 
             acc = lax.cond(chunk_first_ref[c] != 0, _self_pass, lambda acc: acc, acc)
 
+        if source_tile and acc2d:
+            acc = tuple(jnp.sum(a, axis=1) for a in acc)
         if wide and out_dtype != accum_dtype:
             acc = tuple(a.astype(out_dtype) for a in acc)
         if out_block is not None:
@@ -778,6 +941,9 @@ def _sorted_pallas_call(
     num_stages: int,
     interpret: bool,
     name: str,
+    source_tile: int = 0,
+    source_flags: str = "",
+    outs_in: Optional[list] = None,
 ) -> Any:
     """One launch of :func:`_nearfield_leafpair_csr_sorted_kernel` over ``chunk_leaf``.
 
@@ -827,6 +993,14 @@ def _sorted_pallas_call(
         Pallas interpret mode.
     name : str
         Kernel name.
+    source_tile : int
+        Sources per vector tile, ``0`` = the scalar loop (see the kernel).
+    source_flags : str
+        Options of the source tiles (see the kernel).
+    outs_in : Optional[list]
+        Direct mode: the ``num_out`` particle-order outputs to store into (aliased,
+        so a launch over another set of leaves adds its rows to an earlier
+        launch's); ``None`` = fresh zeros.
 
     Returns
     -------
@@ -845,6 +1019,8 @@ def _sorted_pallas_call(
             include_self=include_self,
             direct=direct,
             num_out=num_out,
+            source_tile=source_tile,
+            source_flags=source_flags,
         )
 
     def _full(arr: Array) -> pl.BlockSpec:
@@ -869,7 +1045,11 @@ def _sorted_pallas_call(
     ]
     extra: dict[str, Any] = {}
     if direct:
-        zeros = [jnp.zeros((int(num_rows),), partial_dtype) for _ in range(num_out)]
+        zeros = (
+            [jnp.zeros((int(num_rows),), partial_dtype) for _ in range(num_out)]
+            if outs_in is None
+            else list(outs_in)
+        )
         in_specs += [_full(z) for z in zeros]
         out_specs: Any = [_full(z) for z in zeros]
         out_shape: Any = [jax.ShapeDtypeStruct(z.shape, z.dtype) for z in zeros]
@@ -903,6 +1083,7 @@ def _sorted_inputs(
     num_warps: int | None,
     softening_sq: Array,
     G: Array,
+    source_tile: int = 0,
 ) -> tuple[Any, ...]:
     """The shared ``(N + Wpad, 4)`` particle table and the launch geometry.
 
@@ -926,6 +1107,10 @@ def _sorted_inputs(
         Scalar squared softening.
     G : Array
         Scalar gravitational constant.
+    source_tile : int
+        Sources per vector tile (``0`` = scalar loads): the table is padded by at
+        least this many zero rows, so a tile that starts in the last leaf stays
+        inside it.
 
     Returns
     -------
@@ -941,7 +1126,7 @@ def _sorted_inputs(
     pm = jnp.concatenate(
         [positions_sorted, jnp.asarray(masses_sorted, dtype=dtype)[:, None]], axis=1
     )
-    pm = jnp.pad(pm, ((0, width_pad), (0, 0)))
+    pm = jnp.pad(pm, ((0, max(width_pad, int(source_tile))), (0, 0)))
     if num_warps is None:
         num_warps = max(1, bt // 32)
     return (
@@ -1087,6 +1272,18 @@ def nearfield_leafpair_csr_sorted_pallas(
     return out
 
 
+#: The direct near field's default kernel (2026-10-06): sources in vector tiles of 8,
+#: (16, 8) pair tiles accumulated in 2D and summed once (``a``), the lean pair body
+#: (``l``), touching leaves merged into runs (``r``), 16-lane target tiles. Alone on
+#: the A100 at 8e6 / 1e8 particles (clipped Plummer, cell leaves of ~10-15 of 64):
+#: 23.0 -> 19.7 ms and 291 -> 246 ms; the fp64 error of the near sums themselves
+#: 3.4e-7 -> 1.5e-7 and 1.1e-7 -> 7.6e-8 (tree sums); the force's rel-L2 unchanged at
+#: four digits. The kernel issues FP32 at the card's rate either way: the pair count
+#: (6.3e10 at 1e8), not latency, sets its time.
+DIRECT_SOURCE_TILE = 8
+DIRECT_SOURCE_FLAGS = "alr"
+DIRECT_TILED_TARGET_SUBTILE = 16
+
 #: Entries of a near-field row that its own program runs in ``whole`` mode
 #: (:func:`nearfield_leafpair_csr_sorted_direct_pallas`); the rest of a longer row is
 #: split into pieces of this many. Above every row of the standard configurations
@@ -1136,6 +1333,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     interpret: bool = False,
     with_potential: bool = False,
     row_limit: int | None = None,
+    source_tile: int | None = None,
+    source_flags: str | None = None,
+    target_classes: Sequence[int] | None = None,
 ) -> tuple[Array, Array | None]:
     """The CSR near field straight into particle order: no per-leaf partials.
 
@@ -1202,7 +1402,8 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     num_stages : int
         As :func:`nearfield_leafpair_csr_pallas`.
     target_subtile : int | None
-        As :func:`nearfield_leafpair_csr_pallas`.
+        As :func:`nearfield_leafpair_csr_pallas`; with a source tile ``None`` is
+        :data:`DIRECT_TILED_TARGET_SUBTILE`.
     interpret : bool
         Pallas interpret mode.
     with_potential : bool
@@ -1211,6 +1412,22 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         ``whole`` mode: entries of a row its own program runs (the rest in
         pieces of this many). ``None``: ``JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT``,
         default :data:`DIRECT_ROW_LIMIT`. Static.
+    source_tile : int | None
+        Sources per vector tile of the kernel, ``0`` = one scalar source per
+        iteration (see :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
+        ``JACCPOT_NEARFIELD_SOURCE_TILE``, default :data:`DIRECT_SOURCE_TILE`. Static.
+    source_flags : str | None
+        With a source tile, the kernel's options (``a``, ``g``, ``l``, ``p``, ``r``; see
+        :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
+        ``JACCPOT_NEARFIELD_SOURCE_FLAGS``, default :data:`DIRECT_SOURCE_FLAGS`.
+        Static.
+    target_classes : Sequence[int] | None
+        With a source tile: target tile widths (powers of two), one launch per
+        width over the leaves whose particle count needs it (the smallest width
+        that holds the leaf; the widest also takes the leaves past it, in
+        several subtiles). Empty: one launch at ``target_subtile``. ``None``:
+        ``JACCPOT_NEARFIELD_TARGET_CLASSES`` (comma-separated), default empty.
+        Static.
 
     Returns
     -------
@@ -1222,6 +1439,10 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     ------
     RuntimeError
         If Pallas or its Triton backend could not be imported.
+    ValueError
+        If ``source_tile`` is not ``0`` or a power of two, ``source_flags``
+        holds a letter other than ``a``, ``g``, ``l``, ``p``, ``r``, or a target class is
+        not a power of two.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -1240,6 +1461,28 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     counts = jnp.asarray(counts, idx)
     row_start = jnp.asarray(offsets, idx)[:num_leaves]
     neighbors = jnp.asarray(neighbors, dtype=idx)
+    if source_tile is None:
+        source_tile = env_int(
+            "JACCPOT_NEARFIELD_SOURCE_TILE", DIRECT_SOURCE_TILE, minimum=0
+        )
+    source_tile = int(source_tile)
+    if source_tile & (source_tile - 1):
+        raise ValueError(f"source_tile must be 0 or a power of two, got {source_tile}")
+    if target_classes is None:
+        raw = env_text("JACCPOT_NEARFIELD_TARGET_CLASSES", "").strip()
+        target_classes = tuple(int(t) for t in raw.split(",") if t.strip())
+    classes = tuple(sorted({int(t) for t in target_classes})) if source_tile else ()
+    if any(t < 1 or t & (t - 1) for t in classes):
+        raise ValueError(f"target_classes must be powers of two, got {target_classes}")
+    if source_flags is None:
+        source_flags = env_text("JACCPOT_NEARFIELD_SOURCE_FLAGS", DIRECT_SOURCE_FLAGS)
+    source_flags = "".join(sorted(set(source_flags))) if source_tile else ""
+    if set(source_flags) - set("aglpr"):
+        raise ValueError(
+            f"source_flags takes the letters a, g, l, p, r; got {source_flags!r}"
+        )
+    if source_tile and target_subtile is None:
+        target_subtile = DIRECT_TILED_TARGET_SUBTILE
     pm, start_i, count_i, soft, g, bt, width_pad, num_warps = _sorted_inputs(
         positions_sorted,
         masses_sorted,
@@ -1250,6 +1493,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         num_warps,
         softening_sq,
         G,
+        source_tile=source_tile,
     )
     common = dict(
         bt=bt,
@@ -1260,6 +1504,8 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         num_warps=num_warps,
         num_stages=num_stages,
         interpret=interpret,
+        source_tile=source_tile,
+        source_flags=source_flags,
     )
     whole_rows = (
         env_choice("JACCPOT_NEARFIELD_DIRECT_ROWS", "whole", ("whole", "chunked"))
@@ -1272,27 +1518,85 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     # entries a row's own program runs; the rest of the row goes in pieces of it
     piece = max(int(row_limit), chunk) if whole_rows else chunk
     piece_i = jnp.asarray(piece, idx)
-    tag = f"t{bt}_c{chunk}_w{leaf_width}{'_pot' if with_potential else ''}"
+    tag = (
+        f"t{bt}_c{chunk}_w{leaf_width}{f'_s{source_tile}' if source_tile else ''}"
+        f"{source_flags}"
+        f"{'_pot' if with_potential else ''}"
+    )
+    # the widest tile any launch reads past a leaf's start: the table's padding
+    if classes and max(classes) > width_pad:
+        raise ValueError(
+            f"target classes {classes} exceed the padded leaf width {width_pad}"
+        )
     # 1. each row up to ``piece`` entries (all of it, when shorter) + self, stored
     # in particle order
-    outs = _sorted_pallas_call(
-        pm,
-        start_i,
-        count_i,
-        neighbors,
-        jnp.arange(num_leaves, dtype=idx),
-        row_start,
-        jnp.minimum(counts, piece_i),
-        jnp.ones((num_leaves,), idx),
-        soft,
-        g,
-        include_self=True,
-        direct=True,
-        num_rows=n,
-        name=f"nearfield_leafpair_csr_direct_first_{tag}",
-        **common,
-    )
-    outs = list(outs)
+    if classes:
+        # one launch per occupancy class, each with a target tile as wide as its
+        # leaves need (a 32-lane tile on a 7-particle leaf idles 25 lanes); every
+        # launch walks only its class's leaves (a compacted list; the programs past
+        # the class's count exit at once) and stores into the same outputs
+        outs = None
+        cls = jnp.searchsorted(
+            jnp.asarray(classes[:-1], jnp.int32),
+            count_i,
+            side="left",
+            method=searchsorted_method(),
+        )
+        leaf_ids = jnp.arange(num_leaves, dtype=idx)
+        for k, bt_k in enumerate(classes):
+            member = (cls == k) & (count_i > 0)
+            slot = jnp.cumsum(member.astype(idx)) - 1
+            lst = (
+                jnp.full((num_leaves,), -1, idx)
+                .at[jnp.where(member, slot, num_leaves)]
+                .set(leaf_ids, mode="drop")
+            )
+            safe = jnp.maximum(lst, 0)
+            # the widest class may hold leaves wider than its tile: more subtiles
+            n_sub_k = 1 if k < len(classes) - 1 else -(-width_pad // bt_k)
+            outs = _sorted_pallas_call(
+                pm,
+                start_i,
+                count_i,
+                neighbors,
+                lst,
+                row_start[safe],
+                jnp.where(lst >= 0, jnp.minimum(counts[safe], piece_i), 0),
+                jnp.ones((num_leaves,), idx),
+                soft,
+                g,
+                include_self=True,
+                direct=True,
+                num_rows=n,
+                name=f"nearfield_leafpair_csr_direct_first_{tag}_cls{bt_k}",
+                outs_in=outs,
+                **dict(
+                    common,
+                    bt=int(bt_k),
+                    n_sub=int(n_sub_k),
+                    num_warps=max(1, min(4, int(bt_k) * source_tile // 512)),
+                ),
+            )
+            outs = list(outs)
+    else:
+        outs = _sorted_pallas_call(
+            pm,
+            start_i,
+            count_i,
+            neighbors,
+            jnp.arange(num_leaves, dtype=idx),
+            row_start,
+            jnp.minimum(counts, piece_i),
+            jnp.ones((num_leaves,), idx),
+            soft,
+            g,
+            include_self=True,
+            direct=True,
+            num_rows=n,
+            name=f"nearfield_leafpair_csr_direct_first_{tag}",
+            **common,
+        )
+        outs = list(outs)
     # 2. the rows' remaining pieces: partials, scatter-added onto the outputs
     capacity = leafpair_extra_chunk_capacity(int(neighbors.shape[0]), piece)
 
