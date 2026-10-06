@@ -1,0 +1,39 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=144000000 live leaves 9118578 -> leaf capacity 10486784
+  [   87.0s] before_prepare                     in-use   2.68 GiB  peak   3.25 GiB  
+  [   87.3s] prepare:start                      in-use   6.97 GiB  peak   8.58 GiB  
+  [   87.3s] tree+upward:start                  in-use   6.97 GiB  peak   8.58 GiB  
+  [  124.4s] tree+upward:end                    in-use  16.45 GiB  peak  24.72 GiB  
+  [  124.4s] dual+downward:start                in-use  16.45 GiB  peak  24.72 GiB  
+  [  127.6s] walk+lists:start                   in-use  16.89 GiB  peak  24.72 GiB  
+  [  129.2s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [  131.0s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  131.0s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [  132.8s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  132.8s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [  134.6s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  134.6s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [  136.5s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  136.5s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 8388608, 'far_cap': 65536, 'near_cap': 1048576}
+  [  138.5s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  138.5s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 16777216, 'far_cap': 65536, 'near_cap': 1048576}
+  [  140.3s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  140.3s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 33554432, 'far_cap': 65536, 'near_cap': 1048576}
+  [  142.4s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  142.4s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 67108864, 'far_cap': 65536, 'near_cap': 1048576}
+  [  144.6s] walk:end                           in-use  17.27 GiB  peak  24.72 GiB  
+  [  144.6s] walk:start                         in-use  17.26 GiB  peak  24.72 GiB  {'queue': 67108864, 'far_cap': 418906112, 'near_cap': 125829120}
+  [  146.8s] walk:end                           in-use  21.32 GiB  peak  24.72 GiB  
+  [  150.3s] walk+lists:end                     in-use  21.25 GiB  peak  30.23 GiB  
+  [  150.3s] downward:start                     in-use  21.25 GiB  peak  30.23 GiB  
+W1006 03:55:43.695139  684366 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 3.83GiB (rounded to 4110819328) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1006 03:55:43.695858  684366 bfc_allocator.cc:609] **********__*******************************************________**********************************___
+  [  176.4s] downward:end                       in-use  21.40 GiB  peak  30.23 GiB  
+  [  176.4s] dual+downward:end                  in-use  20.96 GiB  peak  30.23 GiB  
+  [  177.6s] prepare:end                        in-use  20.01 GiB  peak  30.23 GiB  
+  [  339.2s] after_scan_compile                 in-use   6.97 GiB  peak  30.23 GiB  
+  [  350.5s] after_scan_timing                  in-use   6.97 GiB  peak  30.23 GiB  
+scan min 2561.22 ms/step
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r12/rows/r5_p6_144000000.json

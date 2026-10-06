@@ -18,6 +18,7 @@ Record: `docs/fused_memory_2026-10.md`, section "Round 5". The bench is `bench/f
 | `long_rows/` | cell_min_level 8 against 6 after the near-field row limit; `trace_c6_stages.txt` puts the unclipped 2e6 step in the CSR rank kernel | 596b987 |
 | `cml/` | cell_min_level 8 against 6 with all of round 5, every case including 1e8 | 6d97fe0 |
 | `allocator_ab/` | 1e8 step with jax 0.11.2's allocator spatial partitioning on (`on_*`) against off (`off_*`) | bdf0674 |
+| `ceiling/` | one-card ceiling on jax 0.11.2 with `--donate-state`: `r4_p5_168` (round-4 code, p5) and `r5_p6_*` (round 5, p6) | 041956c / 6c2b439 |
 | `rank_scan_ab/` | 1e8 step: `f` = 596b987 with 4 passes, `g` = 6d97fe0 (long-row scan outside the cond), `h` = bdf0674 (inside) | as named |
 
 `f_s1` in `rank_scan_ab/` died in jax 0.11.2's BFC allocator: `Check failed: central_gap_ == kInvalidChunkHandle ... spatial partitioning expects one central gap`, while freeing a buffer during the eager prepare. It is 1 in ~120 runs on 0.11.2; see the record.

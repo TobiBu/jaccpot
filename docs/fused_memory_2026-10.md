@@ -569,6 +569,13 @@ on by default with preallocation; `--xla_gpu_enable_allocator_spatial_partitioni
 (1e8 step 1147.9 / 1146.0 ms on, 1147.1 / 1148.3 off, peak 25.185 GiB both; `allocator_ab/`), so the bench turns it
 off when it preallocates, and production runs with a preallocated arena should set it too.
 
+**The one-card ceiling on jax 0.11.2** (`ceiling/`, `--donate-state`, arena 0.88): round 4's configuration (p5,
+round-4 code) still fits 1.68e8 (33.68 GiB, 215 B/p, 2960 ms/step, one recovered allocator retry; 33.45 GiB on
+0.10.2). The new default, p6 with round 5, fits 1.60e8 (33.34 GiB, 224 B/p, 2667 ms/step, one recovered retry;
+1.44e8 30.23 GiB at 2561 ms, 1.52e8 31.76 GiB at 2551 ms) and runs out at 1.68e8, in the eager prepare, where the
+p6 coefficient tables (2 x nodes x 49) are 8.7 GiB: order 6 costs ~5 % of the ceiling. Runs at the limit can pass
+order 5.
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded

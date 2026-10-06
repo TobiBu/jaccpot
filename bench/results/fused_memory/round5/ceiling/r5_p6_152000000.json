@@ -1,0 +1,913 @@
+{
+ "mode": "budget",
+ "n": 152000000,
+ "ic": "plummer_clipped",
+ "seed": 0,
+ "leaf": 64,
+ "theta": 0.8,
+ "order": 6,
+ "cell_min_level": 8,
+ "caps": "unnamed",
+ "donate": true,
+ "cap_env": {
+  "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": null,
+  "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": null
+ },
+ "xla_flags": "--xla_gpu_enable_allocator_spatial_partitioning=false --xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUSTOM_CALL --xla_gpu_graph_min_graph_size=2",
+ "mem_fraction": "0.88",
+ "preallocate": "true",
+ "rmax": 20.0,
+ "worktree": "/export/home/tbuck/jaccpot-r5-wt",
+ "yggdrax_worktree": "/export/home/tbuck/yggdrax-r2-head",
+ "device": "cuda:0",
+ "cuda_visible": "6",
+ "live_leaves": 9533400,
+ "leaf_capacity": 10963968,
+ "softening": 1e-07,
+ "dt": 0.01,
+ "prepare_events": [
+  {
+   "label": "before_prepare",
+   "t": 65.6175610087812,
+   "in_use": 3040095232,
+   "peak": 3682562304,
+   "limit": 37318819840,
+   "largest_free": 33670722048
+  },
+  {
+   "label": "prepare:start",
+   "t": 65.91169361770153,
+   "in_use": 7904095488,
+   "peak": 9728095488,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 65.91203193925321,
+   "in_use": 7904095488,
+   "peak": 9728095488,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 104.8182626273483,
+   "in_use": 18655242496,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 104.81873045861721,
+   "in_use": 18655242496,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 107.64931533113122,
+   "in_use": 19006089472,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 109.11529163643718,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 524288,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 110.87477879598737,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 110.87630491517484,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 1048576,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 112.59403466247022,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 112.59549350850284,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 2097152,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 114.31856546364725,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 114.32004596106708,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 4194304,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 116.06827309541404,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 116.06970570236444,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 8388608,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 117.9701266605407,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 117.9714431669563,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 16777216,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 119.78802001290023,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 119.78964201919734,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 33554432,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 121.87590811401606,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 121.87743507139385,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 67108864,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 124.02102512307465,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 124.02294252999127,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 67108864,
+   "far_cap": 439353344,
+   "near_cap": 132120576
+  },
+  {
+   "label": "walk:end",
+   "t": 126.24667595885694,
+   "in_use": 24084995840,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 12482019840
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 129.8231267556548,
+   "in_use": 23884872704,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "downward:start",
+   "t": 129.8235036265105,
+   "in_use": 23884872704,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "downward:end",
+   "t": 156.5527399070561,
+   "in_use": 24060296448,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 156.55585094355047,
+   "in_use": 23764269312,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "prepare:end",
+   "t": 157.74770769663155,
+   "in_use": 22707121152,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  }
+ ],
+ "scan_compile_s": 259.132802400738,
+ "scan_contention": {
+  "devices": [
+   6
+  ],
+  "n_samples": 11,
+  "duration_s": 11.035807371139526,
+  "foreign_pids_on_devices": [],
+  "own_util_max": {
+   "6": 100
+  },
+  "other_gpu_util_max": 100,
+  "loadavg1_max": 25.59765625,
+  "loadavg1_min": 25.0439453125,
+  "cores": 64,
+  "contaminated": false,
+  "flags": [
+   "loadavg>=8 (25.6)",
+   "other-gpus-busy (100%)"
+  ]
+ },
+ "step_ms": {
+  "min": 2551.107196137309,
+  "median": 2598.127735313028,
+  "samples": [
+   2551.107196137309,
+   2645.148274488747
+  ]
+ },
+ "peak_after_scan_gib": 31.762250661849976,
+ "scan_events": [
+  {
+   "label": "start",
+   "t": 0.0001418422907590866,
+   "in_use": 95232,
+   "peak": 95232,
+   "limit": 37318819840,
+   "largest_free": 37318722048
+  },
+  {
+   "label": "before_prepare",
+   "t": 65.6175610087812,
+   "in_use": 3040095232,
+   "peak": 3682562304,
+   "limit": 37318819840,
+   "largest_free": 33670722048
+  },
+  {
+   "label": "prepare:start",
+   "t": 65.91169361770153,
+   "in_use": 7904095488,
+   "peak": 9728095488,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 65.91203193925321,
+   "in_use": 7904095488,
+   "peak": 9728095488,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 104.8182626273483,
+   "in_use": 18655242496,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 104.81873045861721,
+   "in_use": 18655242496,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 107.64931533113122,
+   "in_use": 19006089472,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 109.11529163643718,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 524288,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 110.87477879598737,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 110.87630491517484,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 1048576,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 112.59403466247022,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 112.59549350850284,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 2097152,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 114.31856546364725,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 114.32004596106708,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 4194304,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 116.06827309541404,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 116.06970570236444,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 8388608,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 117.9701266605407,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 117.9714431669563,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 16777216,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 119.78802001290023,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 119.78964201919734,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 33554432,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 121.87590811401606,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 121.87743507139385,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 67108864,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 124.02102512307465,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 124.02294252999127,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 67108864,
+   "far_cap": 439353344,
+   "near_cap": 132120576
+  },
+  {
+   "label": "walk:end",
+   "t": 126.24667595885694,
+   "in_use": 24084995840,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 12482019840
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 129.8231267556548,
+   "in_use": 23884872704,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "downward:start",
+   "t": 129.8235036265105,
+   "in_use": 23884872704,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "downward:end",
+   "t": 156.5527399070561,
+   "in_use": 24060296448,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 156.55585094355047,
+   "in_use": 23764269312,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "prepare:end",
+   "t": 157.74770769663155,
+   "in_use": 22707121152,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "after_scan_compile",
+   "t": 325.2033402826637,
+   "in_use": 7904095744,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "after_scan_timing",
+   "t": 336.477753425017,
+   "in_use": 7904095744,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  }
+ ],
+ "counts": {
+  "far_pair_count": 585189166,
+  "total_neighbors": 175802468,
+  "peak_wavefront": 59727362,
+  "max_neighbors_observed": 125,
+  "rounds": 75,
+  "compact_far_pair_capacity": 878706688,
+  "near_edge_capacity": 264241152,
+  "queue_capacity": 67108864,
+  "far_named": false,
+  "near_edge_named": false,
+  "grew": [
+   "max_pair_queue 524288->1048576",
+   "max_pair_queue 1048576->2097152",
+   "max_pair_queue 2097152->4194304",
+   "max_pair_queue 4194304->8388608",
+   "max_pair_queue 8388608->16777216",
+   "max_pair_queue 16777216->33554432",
+   "max_pair_queue 33554432->67108864",
+   "compact_far_pair_capacity 131072->878706688",
+   "near_edge_capacity 2097152->264241152"
+  ]
+ },
+ "events": [
+  {
+   "label": "start",
+   "t": 0.0001418422907590866,
+   "in_use": 95232,
+   "peak": 95232,
+   "limit": 37318819840,
+   "largest_free": 37318722048
+  },
+  {
+   "label": "before_prepare",
+   "t": 65.6175610087812,
+   "in_use": 3040095232,
+   "peak": 3682562304,
+   "limit": 37318819840,
+   "largest_free": 33670722048
+  },
+  {
+   "label": "prepare:start",
+   "t": 65.91169361770153,
+   "in_use": 7904095488,
+   "peak": 9728095488,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 65.91203193925321,
+   "in_use": 7904095488,
+   "peak": 9728095488,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 104.8182626273483,
+   "in_use": 18655242496,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 104.81873045861721,
+   "in_use": 18655242496,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 107.64931533113122,
+   "in_use": 19006089472,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 109.11529163643718,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 524288,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 110.87477879598737,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 110.87630491517484,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 1048576,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 112.59403466247022,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 112.59549350850284,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 2097152,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 114.31856546364725,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 114.32004596106708,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 4194304,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 116.06827309541404,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 116.06970570236444,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 8388608,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 117.9701266605407,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 117.9714431669563,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 16777216,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 119.78802001290023,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 119.78964201919734,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 33554432,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 121.87590811401606,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 121.87743507139385,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 67108864,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 124.02102512307465,
+   "in_use": 19486455552,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592
+  },
+  {
+   "label": "walk:start",
+   "t": 124.02294252999127,
+   "in_use": 19477540352,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 15996846592,
+   "queue": 67108864,
+   "far_cap": 439353344,
+   "near_cap": 132120576
+  },
+  {
+   "label": "walk:end",
+   "t": 126.24667595885694,
+   "in_use": 24084995840,
+   "peak": 28007533056,
+   "limit": 37318819840,
+   "largest_free": 12482019840
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 129.8231267556548,
+   "in_use": 23884872704,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "downward:start",
+   "t": 129.8235036265105,
+   "in_use": 23884872704,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "downward:end",
+   "t": 156.5527399070561,
+   "in_use": 24060296448,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 156.55585094355047,
+   "in_use": 23764269312,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "prepare:end",
+   "t": 157.74770769663155,
+   "in_use": 22707121152,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 7910228480
+  },
+  {
+   "label": "after_scan_compile",
+   "t": 325.2033402826637,
+   "in_use": 7904095744,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  },
+  {
+   "label": "after_scan_timing",
+   "t": 336.477753425017,
+   "in_use": 7904095744,
+   "peak": 34104456960,
+   "limit": 37318819840,
+   "largest_free": 26374722048
+  }
+ ],
+ "final_peak_gib": 31.762250661849976
+}
