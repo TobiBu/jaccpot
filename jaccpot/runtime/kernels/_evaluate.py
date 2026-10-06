@@ -38,6 +38,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree
 
 from jaccpot._env import env_flag
+from jaccpot._searchsorted import searchsorted_method
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -1433,7 +1434,7 @@ def _map_targets_to_leaf_positions(
     ends = leaf_ranges[:, 1]
     leaf_pos = (
         jnp.searchsorted(
-            starts, target_sorted_indices, side="right", method="scan_unrolled"
+            starts, target_sorted_indices, side="right", method=searchsorted_method()
         )
         - 1
     )

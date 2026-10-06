@@ -11,6 +11,7 @@ from jaxtyping import Array
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
+from jaccpot._searchsorted import searchsorted_method
 from jaccpot.nearfield._fast_lane import (
     compute_leaf_p2p_accelerations_radix_fast_lane,
     compute_leaf_p2p_accelerations_radix_payload_pairs_only,
@@ -289,7 +290,7 @@ def build_large_n_target_owned_blocks(
         block_offsets[1:],
         block_ids,
         side="right",
-        method="scan_unrolled",
+        method=searchsorted_method(),
     )
     local_block_idx = block_ids - block_offsets[block_target_leaf_ids]
     edge_start = offsets[block_target_leaf_ids] + local_block_idx * as_index(k)

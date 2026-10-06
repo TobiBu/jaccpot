@@ -44,6 +44,7 @@ from yggdrax.grouped_interactions import (
     GroupedInteractionBuffers,
 )
 
+from jaccpot._searchsorted import searchsorted_method
 from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_from_z_solidfmm_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
@@ -507,7 +508,7 @@ def _pair_class_ids_from_offsets(
         Class id per entry of ``pair_indices``.
     """
     return jnp.searchsorted(
-        class_offsets[1:], pair_indices, side="right", method="scan_unrolled"
+        class_offsets[1:], pair_indices, side="right", method=searchsorted_method()
     ).astype(INDEX_DTYPE)
 
 

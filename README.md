@@ -236,7 +236,7 @@ first: rel-L2 **0.45** against an fp64 direct sum on a 17.8M-particle disc acros
 looking healthy. Measured in pure JAX (`bench/repro_jax_ragged_all_to_all_forward.py`,
 jax 0.9.0): 36/40 calls corrupt under donation, 3/40 under allocator churn, **0/40
 with identical buffers** — a run-it-twice reproducibility check cannot see it. Fixed
-in the 0.9.1 GPU plugin (XLA `4e0cc7e356`); verified clean on 0.9.1 and 0.10.2.
+in the 0.9.1 GPU plugin (XLA `4e0cc7e356`); verified clean on 0.9.1, 0.10.2 and 0.11.2.
 
 Since 2026-09-04 `halo_exchange="auto"` gates the **forward** as well as the gradient
 path: below 0.9.1 (and on CPU) it resolves to the `all_gather` exchange (`"buf"`,

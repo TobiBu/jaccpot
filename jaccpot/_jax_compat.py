@@ -3,8 +3,8 @@
 Why this module exists: ``jax.core`` is not public. It is absent from
 ``jax.__all__``, its contents live in ``jax._src.core``, and there is no
 sanctioned replacement on the supported range -- ``jax.extend.core.Tracer`` does
-not exist in jax 0.10.2, which is the floor and effectively the ceiling
-``pyproject.toml`` pins, for reasons written out in full there.
+not exist on the pinned range (re-checked on 0.11.2, the floor ``pyproject.toml``
+pins, for reasons written out in full there).
 
 So the ``jax.core.Tracer`` references this module replaces were each two things
 at once: a type-checker error (20 of them, audit E.4 bucket B) and an unpinned

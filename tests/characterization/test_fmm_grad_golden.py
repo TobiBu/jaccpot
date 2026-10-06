@@ -109,6 +109,11 @@ INERT_ATOL = 1.0e-12
 # For ``grad_masses`` this statistic *is* the elementwise one -- a scalar per
 # particle has no components to normalise across -- so nothing is loosened there;
 # it is written once and applied to both arrays for symmetry.
+#
+# jax 0.11.2 (2026-10-05) moved ``clu_real_n128_p4`` on CPU by exactly the A100
+# figures above (1.7e-14 / 2.0e-13): XLA:CPU now sums it in the A100's order, so
+# particle 57's z-component broke gate 1b the way it breaks it on a GPU. Its golden
+# was regenerated on CPU under 0.11.2; the other five cases still pass both gates.
 INERT_PER_PARTICLE_RTOL = 1.0e-12
 
 # Physics anchor: grad(FMM) vs grad(direct sum). Keyed by expansion order, because

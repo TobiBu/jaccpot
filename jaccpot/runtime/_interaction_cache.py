@@ -34,6 +34,7 @@ from yggdrax.tree import Tree
 
 from jaccpot._env import env_flag, env_float
 from jaccpot._jax_compat import Tracer
+from jaccpot._searchsorted import searchsorted_method
 
 # `_adaptive_policy` reaches only `fmm_caches` and `fmm_constants`, both UPSTREAM of
 # this module in ARCHITECTURE §8's DAG (`fmm_constants -> fmm_caches -> kernels ->
@@ -2050,12 +2051,12 @@ def _directed_csr_from_canonical(
     # rows' low halves: the same pairs stably by b (a stays ascending per b)
     b_t, a_t = jax.lax.sort((b_s, a_s), num_keys=1, is_stable=True)
     rows = jnp.arange(R + 1, dtype=idx)
-    start_hi = jnp.searchsorted(a_s, rows, side="left", method="scan_unrolled").astype(
-        idx
-    )
-    start_lo = jnp.searchsorted(b_t, rows, side="left", method="scan_unrolled").astype(
-        idx
-    )
+    start_hi = jnp.searchsorted(
+        a_s, rows, side="left", method=searchsorted_method()
+    ).astype(idx)
+    start_lo = jnp.searchsorted(
+        b_t, rows, side="left", method=searchsorted_method()
+    ).astype(idx)
     n_hi = start_hi[1:] - start_hi[:-1]
     n_lo = start_lo[1:] - start_lo[:-1]
     counts = (n_lo + n_hi).astype(idx)
@@ -2311,7 +2312,7 @@ def _flat_walk_lists(
         sorted_key,
         jnp.arange(num_leaves + 1, dtype=idx),
         side="left",
-        method="scan_unrolled",
+        method=searchsorted_method(),
     ).astype(idx)
     counts = offsets[1:] - offsets[:-1]
     return (

@@ -63,6 +63,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jaxtyping import Array
 
+from jaccpot._searchsorted import searchsorted_method
 from jaccpot.operators.real_dehnen_q import compute_real_B_matrix_multipole
 from jaccpot.operators.real_harmonics import (
     sh_offset,
@@ -491,7 +492,7 @@ def csr_by_target(
         sorted_key,
         jnp.arange(int(total_nodes) + 1, dtype=jnp.int32),
         side="left",
-        method="scan_unrolled",
+        method=searchsorted_method(),
     ).astype(jnp.int32)
     counts = offsets[1:] - offsets[:-1]
     return src_sorted, offsets[:-1], counts.astype(jnp.int32)
@@ -520,7 +521,7 @@ def targets_from_csr_offsets(row_offsets: Array, num_entries: int) -> Array:
     """
     off = jnp.asarray(row_offsets)
     pos = jnp.arange(int(num_entries), dtype=off.dtype)
-    row = jnp.searchsorted(off, pos, side="right", method="scan_unrolled").astype(
+    row = jnp.searchsorted(off, pos, side="right", method=searchsorted_method()).astype(
         off.dtype
     ) - jnp.asarray(1, off.dtype)
     return jnp.where(pos < off[-1], row, jnp.asarray(-1, off.dtype))

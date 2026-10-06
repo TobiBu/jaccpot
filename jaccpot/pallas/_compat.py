@@ -42,7 +42,7 @@ PALLAS_CALL_TAKES_BACKEND = "backend" in inspect.signature(pallas_call).paramete
 #:
 #: Aliased here, in the compat module, for the same reason
 #: ``PALLAS_CALL_TAKES_BACKEND`` lives here: JAX moves this name around and there is
-#: no ``pallas.Ref``. On the pinned range (``jax>=0.10.2,<0.11``) the public spelling
+#: no ``pallas.Ref``. On the pinned range (``jax>=0.11.2,<0.12``) the public spelling
 #: is ``jax.Ref``, which resolves to ``jax._src.core.Ref``; if it moves again, this
 #: line changes and the ~68 annotated parameters do not.
 #:

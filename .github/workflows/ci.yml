@@ -76,9 +76,9 @@ jobs:
     # Hard cap so a memory-bomb / hung-worker never burns the 6h workflow
     # ceiling again (an OOM-killed xdist worker makes the job hang otherwise).
     #
-    # 50 -> 60. The cap's job is to catch the ~2.6x CPU slowdown that is the whole
-    # reason the JAX ceiling is <0.11, so it has to sit BELOW that and ABOVE the
-    # real spread. Both bounds are now measured rather than assumed:
+    # 50 -> 60. The cap's job is to catch the ~2.6x CPU slowdown that kept the JAX
+    # floor at 0.10.2 through 0.11.0 (gone in 0.11.2, the floor since 2026-10-05; see
+    # pyproject.toml), so it has to sit BELOW that and ABOVE the real spread. Both bounds are now measured rather than assumed:
     #
     #   warm on main (merge of #77)          26 min
     #   PR branches, Tier 1 (10 PRs)         30, 36, 39, 42, 42, 43, 43, 44, 45 min
@@ -472,7 +472,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        # 3.12 only since the JAX floor moved to 0.11.2 (2026-10-05): every 0.11.x
+        # requires Python >= 3.12, so the 3.11 leg could no longer install, and 3.13
+        # is test-full's interpreter.
+        python-version: ["3.12"]
         # The three-way split the note above prescribes. `runtime` is carved out
         # because `test-full` already treats it as its own shard and it is the
         # heaviest third; `rest` is everything outside `tests/unit`, which is
@@ -667,8 +670,8 @@ jobs:
       - name: Install package + dev tools + nornax
         # ORDER IS LOAD-BEARING, for the reason pyproject.toml already records for
         # yggdrax: a bare `pip install git+...` resolves JAX unconstrained, and the
-        # `<0.11` ceiling in `pip install -e ".[dev]"` is what downgrades it back.
-        # nornax's own floor is jax>=0.8.0, so the resulting 0.10.2 satisfies it.
+        # `<0.12` ceiling in `pip install -e ".[dev]"` is what brings it back into range.
+        # nornax's own floor is jax>=0.8.0, so the resulting 0.11.x satisfies it.
         #
         # nornax is TRACKED UNPINNED on purpose. A pinned SHA gives a reproducible build
         # that by construction can never tell you the protocol drifted, which is the one
@@ -919,7 +922,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
 
       - name: Install package + dev tools
