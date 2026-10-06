@@ -248,23 +248,27 @@ def _consecutive_case(seed, *, W):
 
 
 @pytest.mark.parametrize(
-    "W, subtile, source_tile, flags, with_potential",
+    "W, subtile, source_tile, flags, with_potential, classes",
     [
-        (8, None, 4, "", True),
-        (8, 4, 8, "p", False),
-        (6, 4, 2, "a", True),  # W padded to 8 lanes
-        (16, 8, 4, "r", True),
-        (16, 16, 32, "apr", True),  # source tile wider than a leaf
-        (8, 8, 4, "ar", False),
+        (8, None, 4, "", True, ()),
+        (8, 4, 8, "p", False, ()),
+        (6, 4, 2, "a", True, ()),  # W padded to 8 lanes
+        (16, 8, 4, "r", True, ()),
+        (16, 16, 32, "apr", True, ()),  # source tile wider than a leaf
+        (8, 8, 4, "ar", False, ()),
+        (16, None, 8, "al", True, (4, 8, 16)),  # one launch per occupancy class
+        (16, None, 4, "alr", False, (2, 8)),  # the widest class in two subtiles
+        (8, None, 8, "l", True, (8,)),
     ],
 )
 @pytest.mark.parametrize("row_limit", [1 << 20, 2])
 def test_source_tiles_equal_the_scalar_loop(
-    W, subtile, source_tile, flags, with_potential, row_limit
+    W, subtile, source_tile, flags, with_potential, classes, row_limit
 ):
     """Vector source tiles: the scalar loop's values to single-precision round-off
     (a tile is summed as a tree), with and without the pieces of long rows, on rows
-    whose leaves are consecutive (runs merge) and on random rows."""
+    whose leaves are consecutive (runs merge) and on random rows; per-class launches
+    the one-launch tiled kernel's values exactly."""
     for c in (
         _case(7, num_live=9, num_pad=3, W=W, n_dead=2, max_row=6, empty_rows=(2,)),
         _consecutive_case(11, W=W),
@@ -292,8 +296,21 @@ def test_source_tiles_equal_the_scalar_loop(
             *args, source_tile=0, **common
         )
         acc1, pot1 = nearfield_leafpair_csr_sorted_direct_pallas(
-            *args, source_tile=source_tile, source_flags=flags, **common
+            *args,
+            source_tile=source_tile,
+            source_flags=flags,
+            target_classes=classes,
+            **common,
         )
+        if classes:
+            one, _ = nearfield_leafpair_csr_sorted_direct_pallas(
+                *args,
+                source_tile=source_tile,
+                source_flags=flags,
+                target_classes=(),
+                **common,
+            )
+            assert np.array_equal(np.asarray(acc1), np.asarray(one))
         acc0, acc1 = np.asarray(acc0), np.asarray(acc1)
         assert np.any(acc0)
         n_dead = 2
@@ -313,6 +330,7 @@ def test_source_tiles_equal_the_scalar_loop(
 
 
 def test_source_flags_are_validated():
+    """Bad tile options are refused, naming the option."""
     c = _case(7, num_live=4, num_pad=0, W=4, n_dead=0, max_row=2)
     with pytest.raises(ValueError, match="source_flags"):
         nearfield_leafpair_csr_sorted_direct_pallas(
@@ -346,4 +364,21 @@ def test_source_flags_are_validated():
             chunk=2,
             interpret=True,
             source_tile=6,
+        )
+    with pytest.raises(ValueError, match="powers of two"):
+        nearfield_leafpair_csr_sorted_direct_pallas(
+            c["pos"],
+            c["mass"],
+            c["starts"],
+            c["counts"],
+            c["nbr"],
+            c["offsets"],
+            c["row_counts"],
+            leaf_width=4,
+            softening_sq=jnp.float32(0.01),
+            G=jnp.float32(1.0),
+            chunk=2,
+            interpret=True,
+            source_tile=4,
+            target_classes=(3,),
         )

@@ -3,8 +3,10 @@
 usage: python bench/nearfield_kernel_tune.py CAPTURE.npz --variants 32:0:1 16:16:1 ...
 
 ``CAPTURE.npz`` (+ ``CAPTURE.json``) comes from ``bench/nearfield_capture.py``. A
-variant is ``target_subtile:source_tile:num_warps[:flags]`` (``source_tile`` 0 = the
-scalar source loop; ``flags`` = the kernel's ``source_flags``, letters a, p, r). Each variant runs ``nearfield_leafpair_csr_sorted_direct_pallas``
+variant is ``target_subtile:source_tile:num_warps[:flags[:classes]]`` (``source_tile``
+0 = the scalar source loop; ``flags`` = the kernel's ``source_flags``, letters a, l, p,
+r; ``classes`` = ``target_classes`` joined by ``-``, e.g. ``4-8-16-32-64``). Each
+variant runs ``nearfield_leafpair_csr_sorted_direct_pallas``
 jitted with the captured static options; the first variant is the reference for
 the max relative difference, and every variant is scored against an fp64 sum of
 the SAME interaction list (row + self) on ``--check`` random particles.
@@ -81,7 +83,7 @@ soft = jnp.asarray(meta["softening_sq"], dev["positions"].dtype)
 G = jnp.asarray(meta["G"], dev["positions"].dtype)
 
 
-def make(bt: int, bs: int, warps: int, pf: str):
+def make(bt: int, bs: int, warps: int, pf: str, classes: tuple):
     @jax.jit
     def f(pos, mass, ls, lc, nb, off, cnt):
         return nearfield_leafpair_csr_sorted_direct_pallas(
@@ -98,6 +100,7 @@ def make(bt: int, bs: int, warps: int, pf: str):
             num_warps=warps,
             source_tile=bs,
             source_flags=pf,
+            target_classes=classes,
             **static,
         )
 
@@ -145,12 +148,13 @@ for v in args.variants:
     parts = v.split(":")
     bt, bs, w = (int(t) for t in parts[:3])
     pf = parts[3] if len(parts) > 3 else ""
-    f = make(bt, bs, w, pf)
+    cl = tuple(int(t) for t in parts[4].split("-")) if len(parts) > 4 else ()
+    f = make(bt, bs, w, pf, cl)
     try:
         acc, _ = jax.block_until_ready(f(*ins))
     except Exception as exc:  # noqa: BLE001
         print(
-            f"  Bt {bt:2d} Bs {bs:2d} warps {w} {pf:3s}: FAILED {str(exc)[:300]}",
+            f"  Bt {bt:2d} Bs {bs:2d} warps {w} {pf:4s} {'-'.join(map(str, cl)) or '-':12s}: FAILED {str(exc)[:300]}",
             flush=True,
         )
         continue
@@ -165,7 +169,7 @@ for v in args.variants:
     scale = np.abs(ref).max()
     err = np.linalg.norm(a[pick].astype(np.float64) - truth) / tnorm
     print(
-        f"  Bt {bt:2d} Bs {bs:2d} warps {w} {pf:3s}: min {1e3 * min(ts):8.2f} ms median "
+        f"  Bt {bt:2d} Bs {bs:2d} warps {w} {pf:4s} {'-'.join(map(str, cl)) or '-':12s}: min {1e3 * min(ts):8.2f} ms median "
         f"{1e3 * np.median(ts):8.2f}  max|d|/max|ref| {np.abs(a - ref).max() / scale:.2e} "
         f"bitwise {np.array_equal(a, ref)}  rel-L2 vs fp64 list {err:.3e}",
         flush=True,
