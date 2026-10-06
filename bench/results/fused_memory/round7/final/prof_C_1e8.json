@@ -1,0 +1,1134 @@
+{
+ "mode": "budget",
+ "n": 100000000,
+ "ic": "plummer_clipped",
+ "seed": 0,
+ "leaf": 64,
+ "theta": 0.8,
+ "order": 6,
+ "cell_min_level": 8,
+ "caps": "unnamed",
+ "donate": true,
+ "cap_env": {
+  "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": null,
+  "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": null
+ },
+ "xla_flags": "--xla_gpu_enable_allocator_spatial_partitioning=false --xla_gpu_enable_command_buffer= --xla_dump_to=/tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/final/dump_1e8 --xla_dump_hlo_as_text --xla_dump_hlo_module_re=.*_compiled_runner.*",
+ "mem_fraction": "0.88",
+ "preallocate": "true",
+ "rmax": 20.0,
+ "worktree": "/export/home/tbuck/jaccpot-r7-a8",
+ "yggdrax_worktree": "/export/home/tbuck/yggdrax-r7-y1",
+ "device": "cuda:0",
+ "cuda_visible": "0",
+ "live_leaves": 6699460,
+ "leaf_capacity": 7704576,
+ "softening": 1e-07,
+ "dt": 0.01,
+ "prepare_events": [
+  {
+   "label": "before_prepare",
+   "t": 43.37676041573286,
+   "in_use": 2000095232,
+   "peak": 2434249984,
+   "limit": 37318819840,
+   "largest_free": 34918722048
+  },
+  {
+   "label": "prepare:start",
+   "t": 43.71629180572927,
+   "in_use": 5200095488,
+   "peak": 6400095488,
+   "limit": 37318819840,
+   "largest_free": 30118722048
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 43.71665760874748,
+   "in_use": 5200095488,
+   "peak": 6400095488,
+   "limit": 37318819840,
+   "largest_free": 30118722048
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 81.51401692070067,
+   "in_use": 12628633344,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 81.51533601619303,
+   "in_use": 12628633344,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 84.99845622107387,
+   "in_use": 12875179776,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 86.65075714699924,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 524288,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 88.41877288371325,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 88.42018744163215,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 1048576,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 90.20381922088563,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 90.20530365593731,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 2097152,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 91.9703815318644,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 91.97272334434092,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 4194304,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 93.754130480811,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 93.75580478087068,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 8388608,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 95.72209982573986,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 95.72384104505181,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 16777216,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 97.5066400282085,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 97.50819230638444,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 33554432,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 99.41640166006982,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 99.41811661049724,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 67108864,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 101.29338342882693,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 101.2955630607903,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 67108864,
+   "far_cap": 301989888,
+   "near_cap": 89128960
+  },
+  {
+   "label": "walk:end",
+   "t": 103.15033220686018,
+   "in_use": 16353057024,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 20436062720
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 106.1495649330318,
+   "in_use": 16287924224,
+   "peak": 22064958976,
+   "limit": 37318819840,
+   "largest_free": 17307111936
+  },
+  {
+   "label": "downward:start",
+   "t": 106.1503464858979,
+   "in_use": 16287924224,
+   "peak": 22064958976,
+   "limit": 37318819840,
+   "largest_free": 17307111936
+  },
+  {
+   "label": "downward:end",
+   "t": 122.17315514571965,
+   "in_use": 19431391488,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 122.17643894441426,
+   "in_use": 19184845056,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "prepare:end",
+   "t": 123.32800122909248,
+   "in_use": 18406842368,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  }
+ ],
+ "scan_compile_s": 223.36773168295622,
+ "scan_contention": {
+  "devices": [
+   0
+  ],
+  "n_samples": 4,
+  "duration_s": 3.5470681190490723,
+  "foreign_pids_on_devices": [],
+  "own_util_max": {
+   "0": 100
+  },
+  "other_gpu_util_max": 100,
+  "loadavg1_max": 40.38134765625,
+  "loadavg1_min": 40.38134765625,
+  "cores": 64,
+  "contaminated": false,
+  "flags": [
+   "loadavg>=8 (40.4)",
+   "other-gpus-busy (100%)"
+  ]
+ },
+ "step_ms": {
+  "min": 813.0474966019392,
+  "median": 813.4024534374475,
+  "samples": [
+   813.7574102729559,
+   813.0474966019392
+  ]
+ },
+ "peak_after_scan_gib": 24.777265548706055,
+ "scan_events": [
+  {
+   "label": "start",
+   "t": 0.00014970079064369202,
+   "in_use": 95232,
+   "peak": 95232,
+   "limit": 37318819840,
+   "largest_free": 37318722048
+  },
+  {
+   "label": "before_prepare",
+   "t": 43.37676041573286,
+   "in_use": 2000095232,
+   "peak": 2434249984,
+   "limit": 37318819840,
+   "largest_free": 34918722048
+  },
+  {
+   "label": "prepare:start",
+   "t": 43.71629180572927,
+   "in_use": 5200095488,
+   "peak": 6400095488,
+   "limit": 37318819840,
+   "largest_free": 30118722048
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 43.71665760874748,
+   "in_use": 5200095488,
+   "peak": 6400095488,
+   "limit": 37318819840,
+   "largest_free": 30118722048
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 81.51401692070067,
+   "in_use": 12628633344,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 81.51533601619303,
+   "in_use": 12628633344,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 84.99845622107387,
+   "in_use": 12875179776,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 86.65075714699924,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 524288,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 88.41877288371325,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 88.42018744163215,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 1048576,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 90.20381922088563,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 90.20530365593731,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 2097152,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 91.9703815318644,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 91.97272334434092,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 4194304,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 93.754130480811,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 93.75580478087068,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 8388608,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 95.72209982573986,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 95.72384104505181,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 16777216,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 97.5066400282085,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 97.50819230638444,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 33554432,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 99.41640166006982,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 99.41811661049724,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 67108864,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 101.29338342882693,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 101.2955630607903,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 67108864,
+   "far_cap": 301989888,
+   "near_cap": 89128960
+  },
+  {
+   "label": "walk:end",
+   "t": 103.15033220686018,
+   "in_use": 16353057024,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 20436062720
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 106.1495649330318,
+   "in_use": 16287924224,
+   "peak": 22064958976,
+   "limit": 37318819840,
+   "largest_free": 17307111936
+  },
+  {
+   "label": "downward:start",
+   "t": 106.1503464858979,
+   "in_use": 16287924224,
+   "peak": 22064958976,
+   "limit": 37318819840,
+   "largest_free": 17307111936
+  },
+  {
+   "label": "downward:end",
+   "t": 122.17315514571965,
+   "in_use": 19431391488,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 122.17643894441426,
+   "in_use": 19184845056,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "prepare:end",
+   "t": 123.32800122909248,
+   "in_use": 18406842368,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "after_scan_compile",
+   "t": 267.0072430036962,
+   "in_use": 7600095744,
+   "peak": 26604385536,
+   "limit": 37318819840,
+   "largest_free": 24118722048
+  },
+  {
+   "label": "after_scan_timing",
+   "t": 270.554915741086,
+   "in_use": 7600095744,
+   "peak": 26604386304,
+   "limit": 37318819840,
+   "largest_free": 25318722048
+  }
+ ],
+ "trace": {
+  "dir": "/tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/final/trace_1e8",
+  "steps": 2
+ },
+ "counts": {
+  "far_pair_count": 402173018,
+  "total_neighbors": 118669704,
+  "peak_wavefront": 39370708,
+  "max_neighbors_observed": 121,
+  "rounds": 72,
+  "compact_far_pair_capacity": 603979776,
+  "near_edge_capacity": 178257920,
+  "queue_capacity": 67108864,
+  "far_named": false,
+  "near_edge_named": false,
+  "grew": [
+   "max_pair_queue 524288->1048576",
+   "max_pair_queue 1048576->2097152",
+   "max_pair_queue 2097152->4194304",
+   "max_pair_queue 4194304->8388608",
+   "max_pair_queue 8388608->16777216",
+   "max_pair_queue 16777216->33554432",
+   "max_pair_queue 33554432->67108864",
+   "compact_far_pair_capacity 131072->603979776",
+   "near_edge_capacity 2097152->178257920"
+  ]
+ },
+ "eval_buffer_assignment": {
+  "error": "no buffer-assignment dump"
+ },
+ "runner_buffer_assignment": {
+  "file": "module_1255.jit__compiled_runner.sm_8.0_gpu_after_optimizations-buffer-assignment.txt",
+  "total_gib": 21.424414799548686,
+  "top": [
+   {
+    "id": "allocation 347",
+    "gib": 14.346361428499222,
+    "kind": "size 15404288288, page 0, preallocated-temp:",
+    "largest_values": [
+     "<16077 loop_broadcast_fusion.14 @0> (size=3020193596,offset=3020193792): f32[15409151,49]{1,0}",
+     "<16078 pallas_call.448 @0> (size=3020193596,offset=3020193792): f32[15409151,49]{1,0}",
+     "<16192 pallas_call.449 @0> (size=3020193596,offset=3020193792): f32[755048399]{0}"
+    ]
+   },
+   {
+    "id": "allocation 0",
+    "gib": 2.2351741790771484,
+    "kind": "size 2400000000, page 0, maybe-live-out:",
+    "largest_values": [
+     "<15737 loop_dynamic_update_slice_fusion.17 @0> (size=2400000000,offset=0): f32[100000000,2,3]{2,1,0}",
+     "<16348 loop_dynamic_update_slice_fusion.16 @0> (size=2400000000,offset=0): f32[100000000,2,3]{2,1,0}",
+     "<16355 copy.599 @0> (size=2400000000,offset=0): f32[100000000,2,3]{2,1,0}"
+    ]
+   },
+   {
+    "id": "allocation 1",
+    "gib": 2.2351741790771484,
+    "kind": "size 2400000000, page 0, parameter 0, shape |f32[100000000,2,3]| at ShapeIndex {}:",
+    "largest_values": [
+     "<16354 state_initial.1 @0> (size=2400000000,offset=0): f32[100000000,2,3]{2,1,0}"
+    ]
+   },
+   {
+    "id": "allocation 2",
+    "gib": 1.1175870895385742,
+    "kind": "size 1200000000, page 0, maybe-live-out:",
+    "largest_values": [
+     "<15739 loop_broadcast_fusion.12 @0> (size=1200000000,offset=0): f32[100000000,3]{1,0}",
+     "<16347 input_scatter_fusion.6 @0> (size=1200000000,offset=0): f32[100000000,3]{1,0}",
+     "<16358 loop_broadcast_fusion.23 @0> (size=1200000000,offset=0): f32[100000000,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 3",
+    "gib": 1.1175870895385742,
+    "kind": "size 1200000000, page 0, parameter 1, shape |f32[100000000,3]| at ShapeIndex {}:",
+    "largest_values": [
+     "<16356 acceleration_initial.1 @0> (size=1200000000,offset=0): f32[100000000,3]{1,0}"
+    ]
+   },
+   {
+    "id": "allocation 4",
+    "gib": 0.3725290298461914,
+    "kind": "size 400000000, page 0, parameter 2, shape |f32[100000000]| at ShapeIndex {}:",
+    "largest_values": [
+     "<16364 masses_in.1 @0> (size=400000000,offset=0): f32[100000000]{0}"
+    ]
+   },
+   {
+    "id": "allocation 30",
+    "gib": 3.725290298461914e-08,
+    "kind": "size 40, page 0, output shape is |(f32[100000000,2,3], f32[100000000,3], pred[], s32[7], s32[])|, maybe-live-out:",
+    "largest_values": [
+     "<16366 tuple.49.0{} @0> (size=40,offset=0): (f32[100000000,2,3]{2,1,0}, f32[100000000,3]{1,0}, pred[], s32[7]{0}, s32[])"
+    ]
+   },
+   {
+    "id": "allocation 37",
+    "gib": 2.60770320892334e-08,
+    "kind": "size 28, page 0, maybe-live-out:",
+    "largest_values": [
+     "<16350 loop_concatenate_fusion.2 @0> (size=28,offset=0): s32[7]{0}",
+     "<16361 loop_broadcast_fusion.24 @0> (size=28,offset=0): s32[7]{0}",
+     "<16520 arg_tuple.47{5} (phi) @0> (size=28,offset=0): s32[7]{0}"
+    ]
+   },
+   {
+    "id": "allocation 146",
+    "gib": 1.4901161193847656e-08,
+    "kind": "size 16, page 0, thread-local:",
+    "largest_values": [
+     "<36 tuple.4.0{} @0> (size=16,offset=0): (s32[], s64[])"
+    ]
+   },
+   {
+    "id": "allocation 125",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, constant:",
+    "largest_values": [
+     "<16352 constant_678_0 @0> (size=8,offset=0): s64[]"
+    ]
+   },
+   {
+    "id": "allocation 126",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, constant:",
+    "largest_values": [
+     "<16003 constant_654_0 @0> (size=8,offset=0): s64[]"
+    ]
+   },
+   {
+    "id": "allocation 147",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<316 input_0.81 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 148",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<317 carry_0.81 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 149",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<318 cumsum.293.0 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 150",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<319 input_0.82 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 151",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<320 carry_0.82 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 152",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<321 cumsum.294.0 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 153",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<286 input_0.71 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 154",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<287 carry_0.71 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 155",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<288 cumsum.283.0 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 156",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<289 input_0.72 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 157",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<290 carry_0.72 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 158",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<291 cumsum.284.0 @0> (size=8,offset=0): f64[]"
+    ]
+   },
+   {
+    "id": "allocation 159",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<61 reduce_sum.23 @0> (size=8,offset=0): s64[]"
+    ]
+   },
+   {
+    "id": "allocation 160",
+    "gib": 7.450580596923828e-09,
+    "kind": "size 8, page 0, thread-local:",
+    "largest_values": [
+     "<62 reduce_sum.27 @0> (size=8,offset=0): s64[]"
+    ]
+   }
+  ]
+ },
+ "events": [
+  {
+   "label": "start",
+   "t": 0.00014970079064369202,
+   "in_use": 95232,
+   "peak": 95232,
+   "limit": 37318819840,
+   "largest_free": 37318722048
+  },
+  {
+   "label": "before_prepare",
+   "t": 43.37676041573286,
+   "in_use": 2000095232,
+   "peak": 2434249984,
+   "limit": 37318819840,
+   "largest_free": 34918722048
+  },
+  {
+   "label": "prepare:start",
+   "t": 43.71629180572927,
+   "in_use": 5200095488,
+   "peak": 6400095488,
+   "limit": 37318819840,
+   "largest_free": 30118722048
+  },
+  {
+   "label": "tree+upward:start",
+   "t": 43.71665760874748,
+   "in_use": 5200095488,
+   "peak": 6400095488,
+   "limit": 37318819840,
+   "largest_free": 30118722048
+  },
+  {
+   "label": "tree+upward:end",
+   "t": 81.51401692070067,
+   "in_use": 12628633344,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "dual+downward:start",
+   "t": 81.51533601619303,
+   "in_use": 12628633344,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk+lists:start",
+   "t": 84.99845622107387,
+   "in_use": 12875179776,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 86.65075714699924,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 524288,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 88.41877288371325,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 88.42018744163215,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 1048576,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 90.20381922088563,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 90.20530365593731,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 2097152,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 91.9703815318644,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 91.97272334434092,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 4194304,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 93.754130480811,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 93.75580478087068,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 8388608,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 95.72209982573986,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 95.72384104505181,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 16777216,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 97.5066400282085,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 97.50819230638444,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 33554432,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 99.41640166006982,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 99.41811661049724,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 67108864,
+   "far_cap": 65536,
+   "near_cap": 1048576
+  },
+  {
+   "label": "walk:end",
+   "t": 101.29338342882693,
+   "in_use": 13146050816,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824
+  },
+  {
+   "label": "walk:start",
+   "t": 101.2955630607903,
+   "in_use": 13137135616,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 22851981824,
+   "queue": 67108864,
+   "far_cap": 301989888,
+   "near_cap": 89128960
+  },
+  {
+   "label": "walk:end",
+   "t": 103.15033220686018,
+   "in_use": 16353057024,
+   "peak": 19139024128,
+   "limit": 37318819840,
+   "largest_free": 20436062720
+  },
+  {
+   "label": "walk+lists:end",
+   "t": 106.1495649330318,
+   "in_use": 16287924224,
+   "peak": 22064958976,
+   "limit": 37318819840,
+   "largest_free": 17307111936
+  },
+  {
+   "label": "downward:start",
+   "t": 106.1503464858979,
+   "in_use": 16287924224,
+   "peak": 22064958976,
+   "limit": 37318819840,
+   "largest_free": 17307111936
+  },
+  {
+   "label": "downward:end",
+   "t": 122.17315514571965,
+   "in_use": 19431391488,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "dual+downward:end",
+   "t": 122.17643894441426,
+   "in_use": 19184845056,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "prepare:end",
+   "t": 123.32800122909248,
+   "in_use": 18406842368,
+   "peak": 25471779072,
+   "limit": 37318819840,
+   "largest_free": 8246530560
+  },
+  {
+   "label": "after_scan_compile",
+   "t": 267.0072430036962,
+   "in_use": 7600095744,
+   "peak": 26604385536,
+   "limit": 37318819840,
+   "largest_free": 24118722048
+  },
+  {
+   "label": "after_scan_timing",
+   "t": 270.554915741086,
+   "in_use": 7600095744,
+   "peak": 26604386304,
+   "limit": 37318819840,
+   "largest_free": 25318722048
+  }
+ ],
+ "final_peak_gib": 24.777265548706055
+}

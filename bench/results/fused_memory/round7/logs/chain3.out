@@ -1,0 +1,7 @@
+acc_B_8e6: eval-only 30.1 ms rel-L2 4.333e-04 p90 6.242e-04 n_ref 4096 peak 2.10 GiB (282 B/p) far 39093974
+acc_L_8e6: eval-only 30.9 ms rel-L2 4.333e-04 p90 6.243e-04 n_ref 4096 peak 2.10 GiB (282 B/p) far 39093974
+ab_B2_8e6_1: step 80.9 ms (median 80.9) peak 2.37 GiB (318 B/p) far 39093974
+ab_L_8e6_1: step 75.9 ms (median 76.1) peak 2.37 GiB (318 B/p) far 39093974
+ab_B2_8e6_2: step 80.9 ms (median 81.1) peak 2.37 GiB (318 B/p) far 39093974
+ab_L_8e6_2: step 76.1 ms (median 76.2) peak 2.37 GiB (318 B/p) far 39093974
+chain3 done 20:38:28

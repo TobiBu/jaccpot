@@ -1,0 +1,9 @@
+bit_C: step 32.3 ms (median 32.3) eval-only 9.8 ms peak 0.75 GiB (400 B/p) far 11749538
+bit_C2: step 30.0 ms (median 30.0) eval-only 10.2 ms peak 0.75 GiB (400 B/p) far 11749538
+bitwise C vs C2: True max 0.000e+00
+C_8e6_t1: step 73.4 ms (median 73.5) peak 2.37 GiB (318 B/p) far 39093974
+C2_8e6_t1: step 74.7 ms (median 74.8) peak 2.37 GiB (318 B/p) far 39093974
+C_8e6_t2: step 73.1 ms (median 73.5) peak 2.37 GiB (318 B/p) far 39093974
+C2_8e6_t2: step 74.5 ms (median 74.6) peak 2.37 GiB (318 B/p) far 39093974
+C2_1e8_s: step 825.4 ms (median 829.2) peak 23.97 GiB (257 B/p) far 402173018
+chain9 done 23:44:14

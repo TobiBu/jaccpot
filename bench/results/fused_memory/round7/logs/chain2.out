@@ -1,0 +1,48 @@
+== atomics probe
+RELAXED_ATOMICS True
+add acq_rel  float32 : counts OK old-values OK
+add acq_rel  int32   : counts WRONG old-values WRONG
+add relaxed  float32 : counts OK old-values OK
+add relaxed  int32   : counts OK old-values OK
+max acq_rel : OK
+max relaxed : OK
+speed add acq_rel: 1.965 ms for 33554432 atomics (17.1 G/s)
+speed add relaxed: 1.808 ms for 33554432 atomics (18.6 G/s)
+== lists tune c8_lists0
+/tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/c8_lists0.npz: W 29360128 live 19546987 rows 1757183 options {'num_rows': 1757183, 'row_offset': 0, 'pad_source': -1, 'slices': 1}
+  base                                     min  10.645 ms  median  10.669 ms  reference
+  relaxed=1                                min  10.618 ms  median  10.702 ms  bitwise
+  rank_rows=4                              min  12.043 ms  median  12.060 ms  bitwise
+  rank_rows=8                              min  12.174 ms  median  12.213 ms  bitwise
+  rank_rows=16,lanes=16                    min  13.750 ms  median  13.865 ms  bitwise
+  rank_rows=8,rank_warps=2                 min  13.918 ms  median  14.026 ms  bitwise
+  relaxed=1,rank_rows=8                    min  10.268 ms  median  10.302 ms  bitwise
+  slices=2,relaxed=1                       min   6.043 ms  median   6.057 ms  bitwise
+== lists tune c8_lists1
+/tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/c8_lists1.npz: W 7340032 live 4707039 rows 878592 options {'num_rows': 878592, 'row_offset': 878591, 'pad_source': 0, 'slices': 1}
+  base                                     min   2.384 ms  median   2.424 ms  reference
+  relaxed=1                                min   2.277 ms  median   2.287 ms  bitwise
+  rank_rows=4                              min   3.045 ms  median   3.066 ms  bitwise
+  rank_rows=8                              min   3.357 ms  median   3.379 ms  bitwise
+  rank_rows=16,lanes=16                    min   3.703 ms  median   3.718 ms  bitwise
+  rank_rows=8,rank_warps=2                 min   4.382 ms  median   4.404 ms  bitwise
+  relaxed=1,rank_rows=8                    min   3.247 ms  median   3.256 ms  bitwise
+  slices=2,relaxed=1                       min   2.292 ms  median   2.295 ms  bitwise
+bit_B1: step 27.2 ms (median 27.2) eval-only 13.2 ms peak 0.73 GiB (392 B/p) far 11749538
+bit_G: step 28.5 ms (median 28.5) eval-only 10.4 ms peak 0.75 GiB (402 B/p) far 11749538
+bit_B2: step 30.7 ms (median 30.7) eval-only 13.1 ms peak 0.74 GiB (396 B/p) far 11749538
+bit_Y: step 36.1 ms (median 36.1) eval-only 13.2 ms peak 0.73 GiB (394 B/p) far 11749538
+bit_F: step 27.0 ms (median 27.0) eval-only 10.5 ms peak 0.73 GiB (392 B/p) far 11749538
+bitwise B1 vs B2: True max 0.000e+00
+bitwise B1 vs G: True max 0.000e+00
+bitwise B1 vs Y: True max 0.000e+00
+bitwise B1 vs F: True max 0.000e+00
+ab_B_8e6_1: step 81.1 ms (median 81.2) peak 2.37 GiB (318 B/p) far 39093974
+ab_G_8e6_1: step 79.8 ms (median 79.9) peak 2.37 GiB (318 B/p) far 39093974
+ab_Y_8e6_1: step 79.3 ms (median 79.5) peak 2.36 GiB (317 B/p) far 39093974
+ab_F_8e6_1: step 84.3 ms (median 92.5) peak 2.37 GiB (318 B/p) far 39093974
+ab_B_8e6_2: step 87.3 ms (median 88.2) peak 2.38 GiB (319 B/p) far 39093974
+ab_G_8e6_2: step 80.0 ms (median 80.9) peak 2.38 GiB (320 B/p) far 39093974
+ab_Y_8e6_2: step 83.2 ms (median 83.9) peak 2.38 GiB (319 B/p) far 39093974
+ab_F_8e6_2: step 80.3 ms (median 80.4) peak 2.36 GiB (317 B/p) far 39093974
+chain2 done 20:20:23

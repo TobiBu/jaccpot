@@ -1,0 +1,11 @@
+{
+ "with_potential": false,
+ "leaf_width": 64,
+ "softening_sq": 9.9999998245167e-15,
+ "G": 1.0,
+ "chunk": 64,
+ "num_warps": null,
+ "num_stages": 1,
+ "target_subtile": null,
+ "interpret": false
+}

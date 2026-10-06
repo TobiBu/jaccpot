@@ -1,0 +1,7 @@
+{
+ "leaf_cap": 64,
+ "internal": "exact",
+ "num_levels": 42,
+ "kernel": "pallas",
+ "variant": "table"
+}

@@ -673,6 +673,107 @@ COM radii 5.3 / 51, upward 4.3 / 38, L2P 2.7 / 31, L2L 2.9 / 23, the step's copi
 field and the M2L (~40 % at 1e8) now issue FP32 at the card's rate; what is left above a few percent is data
 movement: the tree build (cub sort 18 ms, scatters ~20 at 1e8), the list placement (four passes) and rank (~70 of the 101 ms), the COM radii.
 
+## Round 7: the force's way back to input order, a Cartesian L2P, the tree's level tables (2026-10-06)
+
+Branch `perf/fused-round7`, on main `6cca378` (#367); yggdrax `perf/tree-depth-levels` on main `bad5445`. Rows:
+`bench/results/fused_memory/round7/` (README there). The round-6 setup: one A100 40 GB (card 0, held by the guard
+between runs), jax 0.11.2, clipped Plummer, p6, theta 0.8, cell_min_level 8, `JACCPOT_STRICT_CARRY=particles`,
+unnamed caps, arena 0.88, frozen worktrees per arm, interleaved A/B.
+
+**Step 0: where the data movement goes -- and two misreadings.** Main profiled at 8e6 and 1e8 with the input-order
+carry as merged (round 6's table had the tree-order carry), every kernel named by the HLO instruction that launched it
+and its source line (`step0/kernels_*.txt`). Two things that table had wrong:
+
+* `bench/analyse_trace_by_stage.py` mapped instruction names across ALL dumped modules, first module wins, so
+  `_compiled_runner_start`'s names shadowed `_compiled_runner`'s and some kernels landed in the wrong stage. It now
+  looks each kernel up in its own module (the trace's `hlo_module`; a module dumped twice keeps its last compile).
+* the "kick fusion" (17.6 ms at 1e8) is the **L2P**: XLA drops the metadata of that multi-output fusion, so it read
+  as unmapped; its body is the jvp-transpose of `evaluate_local_real`. A fusion without metadata now takes the
+  op_name most of its body carries. The L2P is 4.4 ms at 8e6 and ~52 ms at 1e8, not 2.7 / 31.
+
+The rows that were far from their floors (kernel ms per step, 8e6 / 1e8; floors at ~1.3 TB/s):
+
+| what | 8e6 | 1e8 | why |
+| --- | --- | --- | --- |
+| the force back to input order, `acc[inverse_permutation]` | 2.44 | 39.7 | XLA fused near + far INTO the gather: four random sector reads per particle (floor 0.3 / 3.4) |
+| the inverse permutation (a scatter of N int32) | 0.40 | 16.3 | it only fed that gather |
+| L2P (spherical angles + reverse-mode autodiff, XLA, 2^21-particle chunks) | 4.4 | 52 | ~500 flops per particle |
+| far-list placement / rank | 3.15 / 2.19 | 45.6 / 20.3 | one pass at 8e6, four at 1e8 |
+| COM radii: kernel / per-chunk segment scan + scatter | 2.45 / 2.9 | 24.7 / 27 | |
+| tree: node-level histogram (scatter-add into 64 bins) | 1.03 | 10.3 | every node on a few counters |
+| tree: depths by pointer doubling (22-25 `fori_loop` rounds, two carry copies each) | 0.74 | 9.6 | |
+| tree: cub sort of the 64-bit Morton keys | 1.5 | 16.9 | at its floor |
+
+**What changed** (each arm interleaved against main at 8e6, two rounds, `step_ab/`; "bitwise" = the state after 4
+steps at 2e6 equal to main's, with a main-vs-main control, `bitwise/`):
+
+* **The force goes back by a scatter** through the sort permutation (`out[perm[i]] = acc_sorted[i]`, unique
+  indices): the sum fuses into the scatter's contiguous reads and the inverse permutation becomes dead code. 8e6
+  81.0 -> 79.3 ms; bitwise; no extra peak. An optimization barrier before the gather (the sum materialised) got 1.2 of
+  the 1.7 ms for +10 B/p at 2e6. `JACCPOT_FASTLANE_UNPERMUTE=gather` restores the gather.
+* **A Pallas L2P** (`jaccpot/pallas/l2p_real.py`, the default where Pallas lowers; `JACCPOT_L2P_KERNEL=xla` restores
+  XLA): one particle per lane, the gradient from the Cartesian recurrence of the complex inner solid harmonics
+  (no Condon-Shortley phase, `1/(n+m)!`, the basis of `evaluate_local_real`) and the identities
+  `d_z Y_n^m = Y_{n-1}^m`, `(d_x - i d_y) Y_n^m = Y_{n-1}^{m-1}` (`-conj(Y_{n-1}^1)` at m = 0),
+  `(d_x + i d_y) Y_n^m = -Y_{n-1}^{m+1}` -- harmonics to degree p-1, no square root, no division by the radius.
+  The same gradient to 1.9e-15 (float64) / 1.2e-6 (float32) relative. 8e6 step 80.8 -> 75.3 ms with the scatter
+  (-3.8 for the L2P); force rel-L2 4.333e-4 unchanged (p90 6.242 -> 6.243e-4), the force alone 30.1 -> 28.4 ms. A
+  leaf-major form (a program per 16 leaves, their particles 8 lanes at a time) ran its tiles ~1/3 full on cell leaves:
+  -3.7 in the step but a slower force (30.9), dropped. The particle's leaf came from a per-particle array
+  (`jnp.repeat` of the leaf counts and a gather: 0.38 ms at 8e6, 9.0 at 1e8, 8 B/p at the 1e8 peak). The kernel now
+  bisects its block's window of leaf ends instead (a block of 128 particles lies in at most 128 consecutive leaves,
+  from the leaf of its first particle, one `searchsorted` per block): bitwise; 8e6 73.2 / 73.2 -> 72.6 / 72.5 ms,
+  1e8 805.7 -> 803.1 ms and 24.78 -> 23.97 GiB. Counting the window's ends per lane (a 128 x 128 compare) cost more
+  than the array: 74.5-74.9 ms at 8e6, 825.4 at 1e8.
+* **yggdrax: the tree's level tables from the level sort.** The stable sort of the node levels (which
+  `nodes_by_level` needed anyway) gives the level offsets by `searchsorted` -- no histogram -- and the depth doubling
+  runs 8 unrolled rounds (depth up to 256; the tables hold 64 levels) instead of a 22-25-round loop. Bitwise (trees
+  equal on CPU; the step state equal on the GPU). 8e6 81.1 -> 79.3 ms (round 1; round 2 ran under a host load of 82
+  on 64 cores -- a CPU test suite of ours -- and is not counted); tree 6.4 -> 4.3 ms at 8e6 and 90 -> 52 at 1e8
+  (the inverse permutation's scatter left with the gather above).
+* **COM radii:** blocks whose ancestors are all past the root read no particles, and 32 leaves a program (alone on
+  the 8e6 tree: 5.43 -> 5.07 ms); bitwise. In the step 5.35 -> 4.90 ms (8e6), 51.7 -> 47.5 (1e8).
+* **Lists:** the CSR route reads the walk's pairs without a masked copy, and the placement's scratch list no longer
+  shares its fill with the output (XLA merged the two fills, then copied the one into both aliased operands); both
+  bitwise. 8.1 -> 7.8 ms (8e6), 99.9 -> 95.8 (1e8).
+
+**What did not work** (`tunes/`, `logs/`):
+
+* **Relaxed atomics.** Pallas lowers every atomic as acq_rel at GPU scope; a relaxed primitive (a copy of the
+  lowering with `MemSemantic.RELAXED`) raised the placement's atomic rate only 17.1 -> 18.6 G/s, and the far-list build
+  not at all at one pass. Dropped. The probe found the cause of the "int32 vector atomics do nothing" trap: the lowering
+  picks the integer opcode by `isinstance(val.type, IntegerType)`, which a vector (a ranked tensor) never is, so a
+  vector int32 `atomic_add` is emitted as a FLOAT add on the int bits. Testing the element type fixes it.
+* **More placement passes at 8e6:** alone, 2-4 passes take the far list 6.8 -> 6.2 ms; in the step 2 / 4 passes give
+  -0.3 / -0.2 ms. Left at one pass below 4M rows.
+* **A row-parallel rank** (several rows side by side, a `(rows, K, K)` compare): alone, the far-list build 10.6 ->
+  12.0-13.9 ms and the near 2.4 -> 3.0-4.4 (single rounds). Dropped.
+* **COM radii folded by atomic max** (the run reduction in the kernel, one atomic max per run per block): exact in any
+  order, but every block that spans a top node raises it: 6.0 / 9.3 / 28.9 ms alone at 16 / 32 / 64 leaves a block,
+  against 5.4 for the scan and scatter (5.1 at 32 leaves). Dropped.
+
+**The tree-order carry no longer pays.** With the scatter the input-order carry lost what made the tree-order carry
+fast: 8e6 72.9 / 73.2 against 73.0 / 73.2 ms (+20 B/p), 1e8 801.6 against 805.7 ms (+3.5 GiB, 24.78 -> 28.27). It
+stays opt-in; Step 4 of the plan (its memory) is moot.
+
+**The defaults as of this round** (`final/`; main = `base`, the round = frozen `a8` + yggdrax `y1`, then `a10` =
+`a8` + the bisecting L2P, interleaved with `a8` in chain 10):
+
+| N | main | round 7 (`a8`) | round 7 (`a10`, as merged) | jz-fmm at its nearest error (force incl. tree) |
+| --- | --- | --- | --- | --- |
+| 8e6 | 81.1 / 80.7 ms at 4.333e-4 | 73.0 / 73.2 at 4.333e-4 (force 24.9 ms) | **72.6 / 72.5** | p5 theta 0.8: 74.2 / 73.6 ms at 3.81e-4 |
+| 1e8 | 911.2 ms, 24.96 GiB | 805.7 ms, 24.78 GiB, rel-L2 3.364e-4 (force 278.5 ms) | **803.1 ms, 23.97 GiB** | p5 theta 0.7: 1183.8 ms at 3.65e-4 |
+
+At 8e6 the full step is now level with jz-fmm's force (round 6: 1.12x behind), -10 % against main; at 1e8 1.47x
+ahead, -12 % against main and 1 GiB less. Everything but the L2P is bitwise against main (`bitwise/`, `B1` vs `X`);
+the L2P forms are bitwise against each other (`C` vs `C2`, `C3`). At 2e6 the round's peak is main's (393 against
+392 B/p; 400 with the per-particle leaf array).
+
+**Where a step goes now** (`final/stages_*.txt`, the `a8` profile, kernel ms, 8e6 / 1e8): near 19.6 / 246, M2L 14.4 /
+140, lists 7.8 / 96, walk 8.4 / 90, tree 4.3 / 52, COM radii 4.9 / 48, upward 3.8 / 34, L2L 2.9 / 23, L2P 1.2 / 19.6
+(of it the per-particle leaf array `a10` removed: 0.38 / 9.0), the scatter back to input order 1.3 / 18.6, the
+integrator's state updates ~1.5 / ~17. Kernel time 80.3 -> 72.7 ms (8e6), 915 -> 808 (1e8).
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
@@ -690,19 +791,17 @@ Two follow-ups stand between the fused lane and the 25M disc+bulge production ro
   scan. Its force-scale estimate already takes the softening, and the mesh lane was in class with it on this IC,
   so measure whether it alone fixes the bulge centre before building the distance floor.
 
-Then (updated after round 6):
+Then (updated after round 7):
 
-* **Speed, by the 1e8 profile** (round-6 defaults + tree-order carry, ~900 ms of kernels): the near field (244 ms)
-  and the M2L (139) issue FP32 at the card's rate, so they shrink only with less work -- fewer near pairs (leaf
-  size, the MAC; 6.25e10 at 1e8) or symmetric pairs (each computed once; needs a deterministic scatter of the
-  reactions). The rest is data movement: the tree build (105: cub sort 18, the leaf/ancestor scatters ~20), the
-  lists (101: the far placement in four passes and the rank, ~70; a walk that emits pairs already grouped by
-  target would remove both), the walk (92, after round 6's -66 %), COM radii (51; the kernel 25, the per-pass
-  gathers and segment max the rest), the step's copies and integrator (~68: a 22 ms device-to-device copy and the
-  kick fusion).
-* **The tree-order carry's memory** (+30 B/p at 1e8, the state no longer updated in place plus the carried indices)
-  keeps it opt-in for 4.5 % of the step; a carry that permutes the state into the buffer the next tree build
-  frees would take the time without the bytes.
+* **Speed, by the 1e8 profile** (round-7 defaults, ~808 ms of kernels): the near field (246 ms) and the M2L (140)
+  issue FP32 at the card's rate, so they shrink only with less work -- fewer near pairs (leaf size, the MAC; 6.25e10
+  at 1e8) or symmetric pairs (each computed once; needs a deterministic scatter of the reactions). The rest: the lists
+  (96: four placement passes and the rank; a walk that emits pairs already grouped by target would remove both), the
+  walk (90), the tree (52: cub sort 17, the positions' and masses' gathers ~19), COM radii (48), the scatter back to
+  input order (18.6, random 12-byte rows), the integrator's column updates of the `[N, 2, 3]` state (~17, ~1 ms of
+  it above its floor at 8e6). At 8e6 the step is level with jz-fmm's force; the next lever there is the same list.
+* **The tree-order carry** no longer pays (round 7: -4 ms at 1e8 for +3.5 GiB); it can go unless a row-wise
+  external field wants it for another reason.
 * **cell_min_level per IC.** Level 6 saves 6-19 % (and 6-33 % memory) on bounded distributions and costs 3.5x on
   the unclipped draw at 2e6. An adaptive cut (split a cell leaf whose particles are spread wide relative to its
   neighbours) would take the gain without the outlier leaf; the library default (`None`, unconstrained) should

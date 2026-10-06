@@ -1,0 +1,19 @@
+[capture] saved /tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/d8_comr.npz
+[capture] saved /tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/d8_walk.npz
+[capture] saved /tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/d8_lists0.npz (count 19546987)
+[capture] saved /tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/d8_lists1.npz (count 4707039)
+[capture] saved /tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/d8.npz: positions (8000000, 3) float32, masses (8000000,) float32, leaf_start (878592,) int32, leaf_count (878592,) int32, neighbors (14680064,) int32, offsets (878593,) int32, counts (878592,) int32
+nodes 1757183 particles 8000000 options {'leaf_cap': 64, 'internal': 'exact', 'num_levels': 42, 'kernel': 'pallas'}
+  table                            reference
+  fold                             bitwise
+  fold:block=32                    bitwise
+  fold:block=64                    bitwise
+  table:block=32                   bitwise
+  chain                            bitwise
+  table                            min per round   8.283   5.524   5.434
+  fold                             min per round  10.047   5.985   6.011
+  fold:block=32                    min per round  15.934   9.284   9.282
+  fold:block=64                    min per round  28.885  28.848  28.919
+  table:block=32                   min per round   5.076   5.074   5.071
+  chain                            min per round  12.342  12.352  12.322
+chain7 done 21:49:49

@@ -1,0 +1,20 @@
+bit_X: step 35.6 ms (median 35.6) eval-only 10.5 ms peak 0.73 GiB (394 B/p) far 11749538
+bitwise B1 vs X (round 7 without the L2P): True max 0.000e+00
+C_8e6_f: eval-only 24.9 ms rel-L2 4.333e-04 p90 6.243e-04 n_ref 4096 peak 2.09 GiB (281 B/p) far 39093974
+B_8e6_s1: step 81.1 ms (median 81.3) peak 2.37 GiB (318 B/p) far 39093974
+C_8e6_s1: step 73.0 ms (median 73.1) peak 2.37 GiB (318 B/p) far 39093974
+T_8e6_s1: step 72.9 ms (median 72.9) peak 2.52 GiB (338 B/p) far 39093974
+jz_8e6_1: force 74.2 ms (median 74.6) aggL2 3.806e-04 p90 7.165e-04 n_ref 4096 peak 1.86 GiB (249 B/p)
+B_8e6_s2: step 80.7 ms (median 81.0) peak 2.37 GiB (318 B/p) far 39093974
+C_8e6_s2: step 73.2 ms (median 73.2) peak 2.37 GiB (318 B/p) far 39093974
+T_8e6_s2: step 73.2 ms (median 73.4) peak 2.52 GiB (338 B/p) far 39093974
+jz_8e6_2: force 73.6 ms (median 73.7) aggL2 3.806e-04 p90 7.165e-04 n_ref 4096 peak 1.86 GiB (249 B/p)
+prof_C_8e6: step 75.5 ms (median 76.5) peak 2.37 GiB (318 B/p) far 39093974
+8e6 done 22:26:32
+B_1e8_s: step 911.2 ms (median 914.9) peak 24.96 GiB (268 B/p) far 402173018
+C_1e8_s: step 805.7 ms (median 808.3) peak 24.78 GiB (266 B/p) far 402173018
+T_1e8_s: step 801.6 ms (median 803.2) peak 28.27 GiB (304 B/p) far 402173018
+C_1e8_f: eval-only 278.5 ms rel-L2 3.364e-04 p90 4.911e-04 n_ref 4096 peak 20.36 GiB (219 B/p) far 402173018
+jz_1e8: force 1183.8 ms (median 1186.3) aggL2 3.648e-04 p90 7.108e-04 n_ref 4096 peak 25.35 GiB (272 B/p)
+prof_C_1e8: step 813.0 ms (median 813.4) peak 24.78 GiB (266 B/p) far 402173018
+chain8 done 22:48:47
