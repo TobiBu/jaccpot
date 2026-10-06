@@ -45,6 +45,7 @@ from jaccpot._jax_compat import Tracer
 # this file undocumentable: pydoclint refuses a Parameters section for a signature
 # with missing hints (DOC106/107), so 70 violations sat behind one missing import.
 from ._adaptive_policy import AdaptivePolicyState
+from .dtypes import require_index_capacity
 
 __all__ = [
     "POLICY_IDENTITY_UNCACHEABLE",
@@ -2437,13 +2438,19 @@ def _build_flat_walk_artifacts_strict_streamed(
     Raises
     ------
     ValueError
-        If a capacity is not even / positive.
+        If a capacity is not even / positive, or (int32 indices) reaches 2^31.
     RuntimeError
         Eager far or near overflow of a named cap (or of an unnamed one past its
         ceiling), or a queue that will not fit within the retry ceiling.
     """
     from yggdrax._interactions_impl import _build_mac_extents
     from yggdrax.interactions import dual_tree_walk_mutual
+
+    require_index_capacity(
+        far_pairs=int(compact_far_pair_capacity),
+        near_edges=int(near_edge_capacity),
+        pair_queue=int(max_pair_queue or 0),
+    )
 
     walk_backend = strict_walk_backend()
     deterministic_rows = strict_walk_deterministic_rows()
