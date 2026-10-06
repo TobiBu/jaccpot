@@ -41,7 +41,12 @@ def _sets(res):
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("theta", _THETAS)
-def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta):
+@pytest.mark.parametrize(
+    "node_layout, fused_emit", [("soa", False), ("record", False), ("record", True)]
+)
+def test_pallas_walk_lists_equal_the_flat_walk_as_sets(
+    kind, theta, node_layout, fused_emit
+):
     # Interpret-mode cost tracks the PAIR count, not n: 800 particles at leaf 4 ran
     # SLOWER than 4000 at leaf 16 (more leaves -> 43k far pairs). The typecheck job is
     # handled by trimming the grid above, not by shrinking here.
@@ -96,6 +101,8 @@ def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta):
         node_active=active,
         block=64,
         interpret=True,
+        node_layout=node_layout,
+        fused_emit=fused_emit,
     )
     assert not (
         bool(got.queue_overflow) or bool(got.far_overflow) or bool(got.near_overflow)
@@ -115,7 +122,8 @@ def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta):
     assert int(got.peak_wavefront) == int(ref.peak_wavefront)
 
 
-def test_pallas_walk_flags_overflow():
+@pytest.mark.parametrize("fused_emit", [False, True])
+def test_pallas_walk_flags_overflow(fused_emit):
     n = 3000
     P = jnp.asarray(_plummer(n, 5), jnp.float32)
     M = jnp.ones((n,), jnp.float32)
@@ -142,6 +150,7 @@ def test_pallas_walk_flags_overflow():
         near_cap=1 << 16,
         block=64,
         interpret=True,
+        fused_emit=fused_emit,
     )
     assert bool(small.far_overflow) and not bool(small.near_overflow)
     # A full far list does not stop the walk: it reports what the list needed,
@@ -158,6 +167,7 @@ def test_pallas_walk_flags_overflow():
         near_cap=1 << 16,
         block=64,
         interpret=True,
+        fused_emit=fused_emit,
     )
     assert not bool(fits.far_overflow) and int(fits.far_count) > 256
     assert int(small.far_needed) == int(fits.far_count)
@@ -176,6 +186,7 @@ def test_pallas_walk_flags_overflow():
         near_cap=1 << 16,
         block=64,
         interpret=True,
+        fused_emit=fused_emit,
     )
     assert bool(tiny_q.queue_overflow)
 

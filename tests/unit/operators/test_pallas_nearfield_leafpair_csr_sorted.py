@@ -230,3 +230,120 @@ def test_whole_rows_past_the_limit_go_in_pieces(row_limit, monkeypatch):
             fits[starts[leaf] : starts[leaf] + counts[leaf]] = True
     assert np.array_equal(lim[fits], full[fits])
     assert int(row_counts.max()) > row_limit  # some row really goes in pieces
+
+
+def _consecutive_case(seed, *, W):
+    """``_case`` with rows of CONSECUTIVE leaves, so source runs really merge."""
+    c = _case(seed, num_live=9, num_pad=3, W=W, n_dead=2, max_row=6, empty_rows=(2,))
+    row_counts = np.asarray(c["row_counts"])
+    rows = []
+    for leaf in range(c["L"]):
+        others = [x for x in range(9) if x != leaf]
+        k = int(row_counts[leaf])
+        lo = (leaf * 3) % max(1, len(others) - k + 1)
+        rows.append(np.asarray(others[lo : lo + k], np.int32))
+    nbr = np.concatenate(rows + [np.zeros(5, np.int32)])
+    assert int(np.sum(np.diff(nbr[: int(row_counts.sum())]) == 1)) >= 10
+    return dict(c, nbr=jnp.asarray(nbr))
+
+
+@pytest.mark.parametrize(
+    "W, subtile, source_tile, flags, with_potential",
+    [
+        (8, None, 4, "", True),
+        (8, 4, 8, "p", False),
+        (6, 4, 2, "a", True),  # W padded to 8 lanes
+        (16, 8, 4, "r", True),
+        (16, 16, 32, "apr", True),  # source tile wider than a leaf
+        (8, 8, 4, "ar", False),
+    ],
+)
+@pytest.mark.parametrize("row_limit", [1 << 20, 2])
+def test_source_tiles_equal_the_scalar_loop(
+    W, subtile, source_tile, flags, with_potential, row_limit
+):
+    """Vector source tiles: the scalar loop's values to single-precision round-off
+    (a tile is summed as a tree), with and without the pieces of long rows, on rows
+    whose leaves are consecutive (runs merge) and on random rows."""
+    for c in (
+        _case(7, num_live=9, num_pad=3, W=W, n_dead=2, max_row=6, empty_rows=(2,)),
+        _consecutive_case(11, W=W),
+    ):
+        args = (
+            c["pos"],
+            c["mass"],
+            c["starts"],
+            c["counts"],
+            c["nbr"],
+            c["offsets"],
+            c["row_counts"],
+        )
+        common = dict(
+            leaf_width=W,
+            softening_sq=jnp.float32(0.05**2),
+            G=jnp.float32(1.3),
+            chunk=1,
+            target_subtile=subtile,
+            interpret=True,
+            with_potential=with_potential,
+            row_limit=row_limit,
+        )
+        acc0, pot0 = nearfield_leafpair_csr_sorted_direct_pallas(
+            *args, source_tile=0, **common
+        )
+        acc1, pot1 = nearfield_leafpair_csr_sorted_direct_pallas(
+            *args, source_tile=source_tile, source_flags=flags, **common
+        )
+        acc0, acc1 = np.asarray(acc0), np.asarray(acc1)
+        assert np.any(acc0)
+        n_dead = 2
+        assert not np.any(acc1[-n_dead:])
+        # absolute round-off on the scale of the largest force: a component can
+        # be a small difference of large terms
+        np.testing.assert_allclose(
+            acc1, acc0, rtol=2e-6, atol=2e-6 * float(np.abs(acc0).max())
+        )
+        if with_potential:
+            pot0 = np.asarray(pot0)
+            np.testing.assert_allclose(
+                np.asarray(pot1), pot0, rtol=2e-6, atol=2e-6 * float(np.abs(pot0).max())
+            )
+        else:
+            assert pot1 is None
+
+
+def test_source_flags_are_validated():
+    c = _case(7, num_live=4, num_pad=0, W=4, n_dead=0, max_row=2)
+    with pytest.raises(ValueError, match="source_flags"):
+        nearfield_leafpair_csr_sorted_direct_pallas(
+            c["pos"],
+            c["mass"],
+            c["starts"],
+            c["counts"],
+            c["nbr"],
+            c["offsets"],
+            c["row_counts"],
+            leaf_width=4,
+            softening_sq=jnp.float32(0.01),
+            G=jnp.float32(1.0),
+            chunk=2,
+            interpret=True,
+            source_tile=4,
+            source_flags="x",
+        )
+    with pytest.raises(ValueError, match="power of two"):
+        nearfield_leafpair_csr_sorted_direct_pallas(
+            c["pos"],
+            c["mass"],
+            c["starts"],
+            c["counts"],
+            c["nbr"],
+            c["offsets"],
+            c["row_counts"],
+            leaf_width=4,
+            softening_sq=jnp.float32(0.01),
+            G=jnp.float32(1.0),
+            chunk=2,
+            interpret=True,
+            source_tile=6,
+        )
