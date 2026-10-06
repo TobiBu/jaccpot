@@ -36,7 +36,6 @@ what removes the per-slot ``lax.cond`` of the rectangle kernel.
 from __future__ import annotations
 
 import functools
-import os
 from typing import Any, NamedTuple, Optional, Sequence
 
 import jax
@@ -45,7 +44,7 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
-from jaccpot._env import env_choice, env_int
+from jaccpot._env import env_choice, env_int, env_text
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import (
@@ -1273,6 +1272,18 @@ def nearfield_leafpair_csr_sorted_pallas(
     return out
 
 
+#: The direct near field's default kernel (2026-10-06): sources in vector tiles of 8,
+#: (16, 8) pair tiles accumulated in 2D and summed once (``a``), the lean pair body
+#: (``l``), touching leaves merged into runs (``r``), 16-lane target tiles. Alone on
+#: the A100 at 8e6 / 1e8 particles (clipped Plummer, cell leaves of ~10-15 of 64):
+#: 23.0 -> 19.7 ms and 291 -> 246 ms; the fp64 error of the near sums themselves
+#: 3.4e-7 -> 1.5e-7 and 1.1e-7 -> 7.6e-8 (tree sums); the force's rel-L2 unchanged at
+#: four digits. The kernel issues FP32 at the card's rate either way: the pair count
+#: (6.3e10 at 1e8), not latency, sets its time.
+DIRECT_SOURCE_TILE = 8
+DIRECT_SOURCE_FLAGS = "alr"
+DIRECT_TILED_TARGET_SUBTILE = 16
+
 #: Entries of a near-field row that its own program runs in ``whole`` mode
 #: (:func:`nearfield_leafpair_csr_sorted_direct_pallas`); the rest of a longer row is
 #: split into pieces of this many. Above every row of the standard configurations
@@ -1391,7 +1402,8 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     num_stages : int
         As :func:`nearfield_leafpair_csr_pallas`.
     target_subtile : int | None
-        As :func:`nearfield_leafpair_csr_pallas`.
+        As :func:`nearfield_leafpair_csr_pallas`; with a source tile ``None`` is
+        :data:`DIRECT_TILED_TARGET_SUBTILE`.
     interpret : bool
         Pallas interpret mode.
     with_potential : bool
@@ -1403,11 +1415,12 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     source_tile : int | None
         Sources per vector tile of the kernel, ``0`` = one scalar source per
         iteration (see :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
-        ``JACCPOT_NEARFIELD_SOURCE_TILE``, default ``0``. Static.
+        ``JACCPOT_NEARFIELD_SOURCE_TILE``, default :data:`DIRECT_SOURCE_TILE`. Static.
     source_flags : str | None
         With a source tile, the kernel's options (``a``, ``g``, ``l``, ``p``, ``r``; see
         :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
-        ``JACCPOT_NEARFIELD_SOURCE_FLAGS``, default ``""``. Static.
+        ``JACCPOT_NEARFIELD_SOURCE_FLAGS``, default :data:`DIRECT_SOURCE_FLAGS`.
+        Static.
     target_classes : Sequence[int] | None
         With a source tile: target tile widths (powers of two), one launch per
         width over the leaves whose particle count needs it (the smallest width
@@ -1449,23 +1462,27 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     row_start = jnp.asarray(offsets, idx)[:num_leaves]
     neighbors = jnp.asarray(neighbors, dtype=idx)
     if source_tile is None:
-        source_tile = env_int("JACCPOT_NEARFIELD_SOURCE_TILE", 0, minimum=0)
+        source_tile = env_int(
+            "JACCPOT_NEARFIELD_SOURCE_TILE", DIRECT_SOURCE_TILE, minimum=0
+        )
     source_tile = int(source_tile)
     if source_tile & (source_tile - 1):
         raise ValueError(f"source_tile must be 0 or a power of two, got {source_tile}")
     if target_classes is None:
-        raw = os.environ.get("JACCPOT_NEARFIELD_TARGET_CLASSES", "").strip()
+        raw = env_text("JACCPOT_NEARFIELD_TARGET_CLASSES", "").strip()
         target_classes = tuple(int(t) for t in raw.split(",") if t.strip())
     classes = tuple(sorted({int(t) for t in target_classes})) if source_tile else ()
     if any(t < 1 or t & (t - 1) for t in classes):
         raise ValueError(f"target_classes must be powers of two, got {target_classes}")
     if source_flags is None:
-        source_flags = os.environ.get("JACCPOT_NEARFIELD_SOURCE_FLAGS", "")
+        source_flags = env_text("JACCPOT_NEARFIELD_SOURCE_FLAGS", DIRECT_SOURCE_FLAGS)
     source_flags = "".join(sorted(set(source_flags))) if source_tile else ""
     if set(source_flags) - set("aglpr"):
         raise ValueError(
             f"source_flags takes the letters a, g, l, p, r; got {source_flags!r}"
         )
+    if source_tile and target_subtile is None:
+        target_subtile = DIRECT_TILED_TARGET_SUBTILE
     pm, start_i, count_i, soft, g, bt, width_pad, num_warps = _sorted_inputs(
         positions_sorted,
         masses_sorted,

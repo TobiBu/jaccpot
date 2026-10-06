@@ -159,6 +159,7 @@ def test_direct_equals_the_table_kernel_in_particle_order(
         c["row_counts"],
         leaf_width=W,
         with_potential=with_potential,
+        source_tile=0,  # the scalar loop: the table kernel's sums, op for op
         **common,
     )
     n = c["pos"].shape[0]
@@ -214,10 +215,10 @@ def test_whole_rows_past_the_limit_go_in_pieces(row_limit, monkeypatch):
         c["row_counts"],
     )
     full, _ = nearfield_leafpair_csr_sorted_direct_pallas(
-        *args, row_limit=1 << 20, **common
+        *args, row_limit=1 << 20, source_tile=0, **common
     )
     lim, _ = nearfield_leafpair_csr_sorted_direct_pallas(
-        *args, row_limit=row_limit, **common
+        *args, row_limit=row_limit, source_tile=0, **common
     )
     full, lim = np.asarray(full), np.asarray(lim)
     np.testing.assert_allclose(lim, full, rtol=2e-6, atol=1e-6)
@@ -384,3 +385,47 @@ def test_source_flags_are_validated():
             source_tile=4,
             target_classes=(3,),
         )
+
+
+def test_the_default_is_the_tiled_kernel(monkeypatch):
+    """No options and no environment: 8-source tiles, flags ``alr``, 16-lane
+    targets -- the same bits as asking for them."""
+    from jaccpot.pallas import nearfield_leafpair_csr as mod
+
+    for var in (
+        "JACCPOT_NEARFIELD_SOURCE_TILE",
+        "JACCPOT_NEARFIELD_SOURCE_FLAGS",
+        "JACCPOT_NEARFIELD_TARGET_CLASSES",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    c = _case(7, num_live=9, num_pad=3, W=16, n_dead=2, max_row=6, empty_rows=(2,))
+    args = (
+        c["pos"],
+        c["mass"],
+        c["starts"],
+        c["counts"],
+        c["nbr"],
+        c["offsets"],
+        c["row_counts"],
+    )
+    common = dict(
+        leaf_width=16,
+        softening_sq=jnp.float32(0.05**2),
+        G=jnp.float32(1.3),
+        chunk=4,
+        interpret=True,
+        with_potential=True,
+    )
+    got = nearfield_leafpair_csr_sorted_direct_pallas(*args, **common)
+    want = nearfield_leafpair_csr_sorted_direct_pallas(
+        *args,
+        source_tile=mod.DIRECT_SOURCE_TILE,
+        source_flags=mod.DIRECT_SOURCE_FLAGS,
+        target_subtile=mod.DIRECT_TILED_TARGET_SUBTILE,
+        **common,
+    )
+    scalar = nearfield_leafpair_csr_sorted_direct_pallas(*args, source_tile=0, **common)
+    assert (mod.DIRECT_SOURCE_TILE, mod.DIRECT_SOURCE_FLAGS) == (8, "alr")
+    for g, w, s in zip(got, want, scalar):
+        assert np.array_equal(np.asarray(g), np.asarray(w))
+        assert not np.array_equal(np.asarray(g), np.asarray(s))  # non-vacuous

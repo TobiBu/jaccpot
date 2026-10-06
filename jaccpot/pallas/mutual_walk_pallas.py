@@ -596,11 +596,14 @@ def mutual_walk_pallas(
         ``"record"`` (one 32-byte record per node, built once per walk: 12 more
         bytes per node than the padded centres it replaces). The same MAC on the
         same values, so the same pair sets. Float32 centres only (otherwise
-        ``"soa"``). ``None``: ``JACCPOT_WALK_NODE_LAYOUT``, default ``"soa"``.
+        ``"soa"``). ``None``: ``JACCPOT_WALK_NODE_LAYOUT``, default ``"record"``.
     fused_emit : Optional[bool]
         One counter atomic for all four child pairs of a block and overflow flags
         only on overflow (three atomics per block instead of nine); the same
-        lists. ``None``: ``JACCPOT_WALK_FUSED_EMIT`` (``0``/``1``), default ``0``.
+        lists. ``None``: ``JACCPOT_WALK_FUSED_EMIT`` (``0``/``1``), default ``1``.
+        Both on by default since 2026-10-06: the walk alone (A100) 286 -> 96 ms at
+        1e8 particles and ~31 -> 15 ms at 8e6 (each alone: record 248 ms, fused
+        emit 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8.
 
     Returns
     -------
@@ -626,13 +629,15 @@ def mutual_walk_pallas(
                 f"seed of {K} pairs exceeds max_pair_queue={int(max_pair_queue)}"
             )
     if node_layout is None:
-        node_layout = env_choice("JACCPOT_WALK_NODE_LAYOUT", "soa", ("soa", "record"))
+        node_layout = env_choice(
+            "JACCPOT_WALK_NODE_LAYOUT", "record", ("soa", "record")
+        )
     if node_layout not in ("soa", "record"):
         raise ValueError(f"node_layout must be 'soa' or 'record', got {node_layout!r}")
     if jnp.asarray(centers).dtype != jnp.float32:
         node_layout = "soa"
     if fused_emit is None:
-        fused_emit = env_flag("JACCPOT_WALK_FUSED_EMIT", False)
+        fused_emit = env_flag("JACCPOT_WALK_FUSED_EMIT", True)
     # One jit around the whole walk, so an EAGER call creates the list and queue
     # buffers inside the program and the loop updates them in place. Called op by
     # op, the initial buffers were arguments of the while loop and stayed alive
