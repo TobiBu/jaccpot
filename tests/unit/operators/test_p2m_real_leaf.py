@@ -75,3 +75,67 @@ def test_pallas_leaf_p2m_matches_the_batched_reference(order, dtype):
     for l in np.flatnonzero(~empty)[:20]:
         a, b = ranges[l]
         assert np.isclose(g[ni + l, 0], mass_np[a : b + 1].sum(), rtol=tol * 10)
+
+
+@pytest.mark.parametrize("order", trim([5, 4]))
+@pytest.mark.parametrize("block, chunk", [(4, 4), (3, 8), (8, 16)])
+def test_blocked_p2m_matches_the_per_leaf_kernel(order, block, chunk):
+    # several leaves per program, ``chunk`` lanes per leaf at a time: the same
+    # coefficients up to float32 summation order, internal and empty rows zero;
+    # a block of 3 is rounded to 4 and the leaf count is not a multiple of it
+    n, leaf = 3000, 16
+    P = jnp.asarray(_plummer(n, 3), jnp.float32)
+    M = jnp.asarray(np.random.default_rng(4).uniform(0.5, 1.5, n), jnp.float32)
+    topo, ps, ms, inv = build_static_cells_tree(
+        P, M, infer_bounds(P), leaf_size=leaf, leaf_capacity=1021, return_reordered=True
+    )
+    ni = int(topo.left_child.shape[0])
+    tot = int(topo.parent.shape[0])
+    com = jnp.asarray(compute_tree_mass_moments(topo, ps, ms).center_of_mass)
+    kw = dict(
+        order=order,
+        num_internal=ni,
+        total_nodes=tot,
+        leaf_width=leaf,
+        interpret=True,
+    )
+    ref = np.asarray(
+        p2m_real_leaves_pallas(ps, ms, com[ni:], topo.node_ranges[ni:], block=0, **kw)
+    )
+    got = np.asarray(
+        p2m_real_leaves_pallas(
+            ps, ms, com[ni:], topo.node_ranges[ni:], block=block, chunk=chunk, **kw
+        )
+    )
+    assert got.shape == ref.shape
+    assert np.all(got[:ni] == 0)
+    ranges = np.asarray(topo.node_ranges)[ni:]
+    empty = ranges[:, 1] < ranges[:, 0]
+    assert empty.any() and np.all(got[ni:][empty] == 0)
+    scale = np.maximum(np.abs(ref).max(axis=1, keepdims=True), 1e-12)
+    assert np.allclose(got / scale, ref / scale, rtol=0, atol=2e-6)
+
+
+def test_blocked_p2m_with_the_full_leaf_width_is_the_per_leaf_sum():
+    # one chunk of the leaf width per leaf: every row is the same lane sum, bit for bit
+    n, leaf = 2000, 16
+    P = jnp.asarray(_plummer(n, 5), jnp.float32)
+    M = jnp.asarray(np.random.default_rng(6).uniform(0.5, 1.5, n), jnp.float32)
+    topo, ps, ms, inv = build_static_cells_tree(
+        P, M, infer_bounds(P), leaf_size=leaf, leaf_capacity=512, return_reordered=True
+    )
+    ni = int(topo.left_child.shape[0])
+    tot = int(topo.parent.shape[0])
+    com = jnp.asarray(compute_tree_mass_moments(topo, ps, ms).center_of_mass)
+    kw = dict(
+        order=5, num_internal=ni, total_nodes=tot, leaf_width=leaf, interpret=True
+    )
+    ref = np.asarray(
+        p2m_real_leaves_pallas(ps, ms, com[ni:], topo.node_ranges[ni:], block=0, **kw)
+    )
+    got = np.asarray(
+        p2m_real_leaves_pallas(
+            ps, ms, com[ni:], topo.node_ranges[ni:], block=2, chunk=leaf, **kw
+        )
+    )
+    assert np.array_equal(got, ref)

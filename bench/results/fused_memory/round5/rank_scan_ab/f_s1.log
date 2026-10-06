@@ -1,0 +1,86 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=100000000 live leaves 6699460 -> leaf capacity 7704576
+  [   76.1s] before_prepare                     in-use   1.86 GiB  peak   2.32 GiB  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+F1006 02:50:30.563837  621063 bfc_allocator.cc:1065] Check failed: central_gap_ == kInvalidChunkHandle (40 vs. 18446744073709551615) spatial partitioning expects one central gap
+*** Check failure stack trace: ***
+    @     0x743609bac944  absl::lts_20260526::log_internal::LogMessage::SendToLog()
+    @     0x743609bac8c6  absl::lts_20260526::log_internal::LogMessage::Flush()
+    @     0x7435ff94d1ea  tsl::BFCAllocator::InsertFreeChunk()
+    @     0x7435ff952ae0  tsl::BFCAllocator::DeallocateRawInternal()
+    @     0x7435ff95271c  tsl::BFCAllocator::DeallocateRaw()
+    @     0x7435fe06a437  stream_executor::TfAllocatorAdapter::Deallocate()
+    @     0x7435fe06b87b  stream_executor::MultiDeviceAdapter::Deallocate()
+    @     0x7435fdfb54b5  xla::AllocatedRawSEDeviceMemory::~AllocatedRawSEDeviceMemory()
+    @     0x7435fdfb5422  tsl::AsyncValue::MakeTypeInfo<>()::{lambda()#1}::__invoke()
+    @     0x7435fdf04fe1  tsl::AsyncValue::Destroy()
+    @     0x7435fdfb0731  xla::PjRtStreamExecutorRawBuffer::~PjRtStreamExecutorRawBuffer()
+    @     0x7435fe01acc7  xla::PjRtRawBufferInterface::DecrefAfter()
+    @     0x7435fe0072c3  xla::AbstractTrackedDeviceBuffer::Delete()
+    @     0x7435fdfebe8c  xla::CommonPjRtBufferImpl::Delete()
+    @     0x7435fdfec139  xla::CommonPjRtBufferImpl::~CommonPjRtBufferImpl()
+    @     0x7435fdf1c5f9  PJRT_Buffer::~PJRT_Buffer()
+    @     0x7435fdf1c504  pjrt::PJRT_Buffer_Destroy()
+    @     0x7436dbd19860  std::_Function_handler<>::_M_invoke()
+    @     0x7436dbcfeb53  xla::PjRtCApiBuffer::~PjRtCApiBuffer()
+    @     0x7436dbcfebde  xla::PjRtCApiBuffer::~PjRtCApiBuffer()
+    @     0x7436dbc81b29  absl::lts_20260526::inlined_vector_internal::Storage<>::DestroyContents()
+    @     0x7436dbc80fd9  xla::ifrt::PjRtArray::~PjRtArray()
+    @     0x7436dbc8109e  xla::ifrt::PjRtArray::~PjRtArray()
+    @     0x7436dfce2642  jax::(anonymous namespace)::PjitFunction::Call()
+    @     0x7436dfcde38f  PjitFunction_tp_vectorcall
+    @           0x5db2ee  _PyEval_EvalFrameDefault
+    @           0x5d55eb  PyEval_EvalCode
+    @           0x608852  (unknown)
+    @           0x6b50d3  (unknown)
+    @           0x6b4e3a  _PyRun_SimpleFileObject
+    @           0x6b4c6f  _PyRun_AnyFileObject
+    @           0x6bccd5  Py_RunMain
+    @           0x6bc7bd  Py_BytesMain
+    @     0x743866e2a1ca  (unknown)
+    @     0x743866e2a28b  __libc_start_main
+    @           0x657a05  _start
+timeout: the monitored command dumped core

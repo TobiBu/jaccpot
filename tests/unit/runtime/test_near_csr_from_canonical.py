@@ -239,3 +239,89 @@ def test_pallas_route_equals_the_sorted_route_on_gpu(monkeypatch):
     assert int(want[3].max()) > 1000  # the hub row spans many tiles
     for g, w in zip(got, want):
         assert np.array_equal(g, w)
+
+
+@pytest.mark.parametrize("slices", [2, 3, 40, 1000])
+def test_sliced_placement_is_the_same_csr(slices):
+    # the placement in passes over row ranges (cache locality at large N): the rank
+    # pass orders every row afterwards, so the arrays are the one-pass build's to
+    # the bit -- including more slices than rows (the empty passes place nothing)
+    from jaccpot.pallas.csr_place import directed_csr_pallas
+
+    num_leaves, n_pairs, width = 40, 150, 200
+    rng = np.random.default_rng(11)
+    num_internal = num_leaves - 1
+    na, nb = _pairs(rng, num_leaves, n_pairs, num_internal)
+    pad = width - n_pairs
+    a = jnp.asarray(np.concatenate([na, np.full(pad, 7)]), jnp.int32)
+    b = jnp.asarray(np.concatenate([nb, np.full(pad, 3)]), jnp.int32)
+    kw = dict(
+        num_rows=num_leaves,
+        row_offset=num_internal,
+        pad_source=-1,
+        idx=jnp.int32,
+        interpret=True,
+    )
+    one = directed_csr_pallas(a, b, jnp.asarray(n_pairs, jnp.int32), **kw)
+    many = directed_csr_pallas(
+        a, b, jnp.asarray(n_pairs, jnp.int32), slices=slices, **kw
+    )
+    for x, y in zip(one, many):
+        assert np.array_equal(np.asarray(x), np.asarray(y))
+    ref_n, ref_o, _ = _reference(
+        np.asarray(a),
+        np.asarray(b),
+        n_pairs,
+        width=width,
+        num_internal=num_internal,
+        num_leaves=num_leaves,
+    )
+    assert np.array_equal(np.asarray(many[1]), ref_o)
+    live = int(ref_o[-1])
+    assert np.array_equal(np.asarray(many[0])[:live], ref_n[:live])
+
+
+@pytest.mark.parametrize("long_batch, long_split", [(2, 3), (64, 1), (1, 8)])
+def test_long_rows_ranked_across_programs_are_the_same_csr(long_batch, long_split):
+    # rows past ``long_row`` are ranked with their tiles spread over programs, in
+    # batches of long rows: the same permutation as one program per row, to the bit
+    # (4-lane tiles so that rows of 5-12 entries are "long" here; several batches)
+    from jaccpot.pallas.csr_place import directed_csr_pallas
+
+    num_leaves, n_pairs, width = 12, 60, 64
+    rng = np.random.default_rng(13)
+    num_internal = num_leaves - 1
+    na, nb = _pairs(rng, num_leaves, n_pairs, num_internal)
+    pad = width - n_pairs
+    a = jnp.asarray(np.concatenate([na, np.full(pad, 7)]), jnp.int32)
+    b = jnp.asarray(np.concatenate([nb, np.full(pad, 3)]), jnp.int32)
+    kw = dict(
+        num_rows=num_leaves,
+        row_offset=num_internal,
+        pad_source=-1,
+        idx=jnp.int32,
+        interpret=True,
+        lanes=4,
+    )
+    count = jnp.asarray(n_pairs, jnp.int32)
+    one = directed_csr_pallas(a, b, count, long_row=1 << 20, **kw)
+    split = directed_csr_pallas(
+        a, b, count, long_row=4, long_batch=long_batch, long_split=long_split, **kw
+    )
+    for x, y in zip(one, split):
+        assert np.array_equal(np.asarray(x), np.asarray(y))
+    counts = np.asarray(split[2])
+    n_long = int((counts > 4).sum())
+    assert (
+        n_long > 1
+    )  # the long path really ran (in several batches when long_batch < n_long)
+    ref_n, ref_o, _ = _reference(
+        np.asarray(a),
+        np.asarray(b),
+        n_pairs,
+        width=width,
+        num_internal=num_internal,
+        num_leaves=num_leaves,
+    )
+    live = int(ref_o[-1])
+    assert np.array_equal(np.asarray(split[0])[:live], ref_n[:live])

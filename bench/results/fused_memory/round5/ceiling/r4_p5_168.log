@@ -1,0 +1,40 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=168000000 live leaves 10341069 -> leaf capacity 11892736
+  [   80.0s] before_prepare                     in-use   3.13 GiB  peak   3.79 GiB  
+  [   80.2s] prepare:start                      in-use   8.14 GiB  peak  10.01 GiB  
+  [   80.2s] tree+upward:start                  in-use   8.14 GiB  peak  10.01 GiB  
+  [  101.7s] tree+upward:end                    in-use  17.88 GiB  peak  27.31 GiB  
+  [  101.7s] dual+downward:start                in-use  17.88 GiB  peak  27.31 GiB  
+  [  105.1s] walk+lists:start                   in-use  18.34 GiB  peak  27.31 GiB  
+  [  106.8s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [  108.7s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  108.7s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [  110.5s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  110.5s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [  112.3s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  112.3s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [  114.0s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  114.0s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 8388608, 'far_cap': 65536, 'near_cap': 1048576}
+  [  115.8s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  115.9s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 16777216, 'far_cap': 65536, 'near_cap': 1048576}
+  [  117.8s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  117.8s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 33554432, 'far_cap': 65536, 'near_cap': 1048576}
+  [  119.9s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  119.9s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 67108864, 'far_cap': 65536, 'near_cap': 1048576}
+  [  122.1s] walk:end                           in-use  18.82 GiB  peak  27.31 GiB  
+  [  122.1s] walk:start                         in-use  18.81 GiB  peak  27.31 GiB  {'queue': 67108864, 'far_cap': 478674944, 'near_cap': 144703488}
+  [  124.4s] walk:end                           in-use  23.51 GiB  peak  27.31 GiB  
+  [  127.4s] walk+lists:end                     in-use  23.29 GiB  peak  33.68 GiB  
+  [  127.4s] downward:start                     in-use  23.29 GiB  peak  33.68 GiB  
+W1006 03:47:35.187819  676957 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 3.19GiB (rounded to 3425107968) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1006 03:47:35.188548  676957 bfc_allocator.cc:609] ***********_*********************************************************************************_______
+  [  144.7s] downward:end                       in-use  23.47 GiB  peak  33.68 GiB  
+  [  144.7s] dual+downward:end                  in-use  23.07 GiB  peak  33.68 GiB  
+  [  145.9s] prepare:end                        in-use  23.17 GiB  peak  33.68 GiB  
+W1006 03:49:06.343850  676957 hlo_rematerialization.cc:3363] Can't reduce memory use below 30.92GiB (33201678850 bytes) by rematerialization; only reduced to 34.97GiB (37545917225 bytes), down from 38.23GiB (41048646477 bytes) originally
+  [  248.5s] after_scan_compile                 in-use   8.14 GiB  peak  33.68 GiB  
+  [  261.1s] after_scan_timing                  in-use   8.14 GiB  peak  33.68 GiB  
+scan min 2960.01 ms/step
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/6c36057b-f12d-4913-ac8f-1827ce65faa4/scratchpad/r12/rows/r4_p5_168.json

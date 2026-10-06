@@ -1,0 +1,126 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=168000000 live leaves 10341069 -> leaf capacity 11892736
+  [   72.9s] before_prepare                     in-use   3.13 GiB  peak   3.79 GiB  
+  [   73.3s] prepare:start                      in-use   8.14 GiB  peak  10.01 GiB  
+  [   73.3s] tree+upward:start                  in-use   8.14 GiB  peak  10.01 GiB  
+  [  111.9s] tree+upward:end                    in-use  19.00 GiB  peak  28.32 GiB  
+  [  111.9s] dual+downward:start                in-use  19.00 GiB  peak  28.32 GiB  
+  [  115.2s] walk+lists:start                   in-use  19.45 GiB  peak  28.32 GiB  
+  [  116.9s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [  118.6s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  118.6s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [  120.3s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  120.3s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [  122.1s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  122.1s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [  123.8s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  123.8s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 8388608, 'far_cap': 65536, 'near_cap': 1048576}
+  [  125.7s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  125.7s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 16777216, 'far_cap': 65536, 'near_cap': 1048576}
+  [  127.5s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  127.5s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 33554432, 'far_cap': 65536, 'near_cap': 1048576}
+  [  129.6s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  129.6s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 67108864, 'far_cap': 65536, 'near_cap': 1048576}
+  [  131.7s] walk:end                           in-use  19.88 GiB  peak  28.32 GiB  
+  [  131.8s] walk:start                         in-use  19.87 GiB  peak  28.32 GiB  {'queue': 67108864, 'far_cap': 478674944, 'near_cap': 144703488}
+  [  134.0s] walk:end                           in-use  24.51 GiB  peak  28.32 GiB  
+W1006 03:52:07.620543  681494 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 5.35GiB (rounded to 5744104704) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1006 03:52:07.621075  681494 bfc_allocator.cc:609] ***************************************************************************************_____________
+Traceback (most recent call last):
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/fmm_prepare.py", line 4203, in prepare_state
+    return self._prepare_state_uncaught(positions, masses, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/fmm_prepare.py", line 4376, in _prepare_state_uncaught
+    return prepare_large_n_state(
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/source_info_util.py", line 288, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/_large_n_pipeline.py", line 1381, in prepare_large_n_state
+    ) = _build_tree_and_dual_downward_artifacts(
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/_large_n_pipeline.py", line 1135, in _build_tree_and_dual_downward_artifacts
+    fmm._prepare_state_tree_upward_and_dual_downward(
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/fmm_prepare.py", line 1216, in _prepare_state_tree_upward_and_dual_downward
+    dual_downward_artifacts = self._prepare_state_dual_and_downward(
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/fmm_prepare.py", line 1411, in _prepare_state_dual_and_downward
+    return self._prepare_state_dual_and_downward_strict_streamed_fast(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/bench/fused_memory_budget.py", line 312, in wrapper
+    out = orig(*a, **k)
+          ^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/fmm_prepare.py", line 3732, in _prepare_state_dual_and_downward_strict_streamed_fast
+    dual_artifacts, cache_entry = _build_dual_tree_artifacts(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/_interaction_cache.py", line 3580, in _build_dual_tree_artifacts
+    _build_dual_tree_artifacts_split_strict_streamed(
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/_interaction_cache.py", line 1233, in _build_dual_tree_artifacts_split_strict_streamed
+    return _build_flat_walk_artifacts_strict_streamed(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/bench/fused_memory_budget.py", line 312, in wrapper
+    out = orig(*a, **k)
+          ^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/_interaction_cache.py", line 2772, in _build_flat_walk_artifacts_strict_streamed
+    report["max_neighbors_observed"] = int(jnp.max(counts)) if num_leaves else 0
+                                       ^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/array.py", line 299, in __int__
+    return self._value.__int__()
+           ^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/profiler.py", line 420, in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/array.py", line 637, in _value
+    npy_value, did_copy = self._single_device_array_to_np_array_did_copy()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 5.35GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit__reduce_max']
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/export/home/tbuck/jaccpot-r5-wt/bench/fused_memory_budget.py", line 949, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/bench/fused_memory_budget.py", line 938, in main
+    run_budget(result)
+  File "/export/home/tbuck/jaccpot-r5-wt/bench/fused_memory_budget.py", line 715, in run_budget
+    state, prep, _ = run(state0, None, 1)
+                     ^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/bench/fused_memory_budget.py", line 695, in run
+    out = solver.strict_run_v2(
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/solver.py", line 2043, in strict_run_v2
+    return self._impl.strict_run_v2(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/fmm_strict_run.py", line 1049, in strict_run_v2
+    prepared_curr = self.prepare_state(
+                    ^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/bench/fused_memory_budget.py", line 312, in wrapper
+    out = orig(*a, **k)
+          ^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jaxtyping/_decorator.py", line 541, in wrapped_fn
+    return wrapped_fn_impl(args, kwargs, bound, memos)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jaxtyping/_decorator.py", line 465, in wrapped_fn_impl
+    out = fn(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/fmm_prepare.py", line 4218, in prepare_state
+    reraise_with_capacity_report(
+  File "/export/home/tbuck/jaccpot-r5-wt/jaccpot/runtime/capacity_diagnostics.py", line 358, in reraise_with_capacity_report
+    raise RuntimeError("\n".join(lines)) from exc
+RuntimeError: jaccpot could not fit N=168000000 with preset='large_n_gpu', leaf_size=64, max_order=6, dtype=<class 'jax.numpy.float32'>.
+Device: 29.48 GiB in use of 34.76 GiB.
+Largest statically-sized buffers for this configuration:
+  14517.50 GiB  fast-lane source payload (num_leaves x max_neighbors_per_leaf x leaf)
+           sized by: leaf_size, or JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB to decline it
+   1451.75 GiB  far-field interaction buffer (total_nodes x max_interactions_per_node)
+           sized by: TraversalOverrides(max_interactions_per_node=...)
+    181.47 GiB  near-field neighbour buffer (num_leaves x max_neighbors_per_leaf)
+           sized by: TraversalOverrides(max_neighbors_per_leaf=...)
+     11.34 GiB  leaf-major particle payload (num_leaves x leaf x 4)
+           sized by: leaf_size
+      8.68 GiB  multipole + local coefficients (2 x total_nodes x (p+1)^2)
+           sized by: max_order
+What usually fits: preset='large_n_gpu' with leaf_size=256 keeps the fast-lane payload and the near-field neighbour buffer bounded (it is the path built for this N); raising leaf_size shrinks num_leaves and every per-leaf buffer with it, at some accuracy cost. To change ONE traversal capacity without disturbing the preset's other tuning, pass jaccpot.TraversalOverrides(...) rather than a full DualTreeTraversalConfig.

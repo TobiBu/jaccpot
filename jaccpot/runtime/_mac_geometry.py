@@ -231,6 +231,7 @@ def com_mac_geometry(
         internal=str(internal),
         num_levels=None if num_levels is None else int(num_levels),
         kernel=_com_radii_kernel(),
+        variant=_com_radii_variant(),
     )
     centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
     num_nodes = int(radii.shape[0])
@@ -258,7 +259,38 @@ def _com_radii_kernel() -> str:
     return "pallas" if pallas_cascade_level_supported() else "xla"
 
 
-@partial(jax.jit, static_argnames=("leaf_cap", "internal", "num_levels", "kernel"))
+def _com_radii_variant() -> str:
+    """``JACCPOT_COM_RADII_VARIANT``: ``table`` (default) or ``chain``.
+
+    ``table`` gathers each pass's ancestors first and reads the particles a few
+    lanes at a time; ``chain`` is the kernel that walks the ancestors itself over
+    the leaf capacity's lanes. The same radii to the bit; timed alone on the 8e6 and
+    1e8 cell trees (A100, 2026-10-05): 11.4 -> 4.8 ms and 78 -> 36.5 ms.
+
+    Returns
+    -------
+    str
+        The variant :func:`_com_radii` runs.
+    """
+    from jaccpot._env import env_choice
+
+    return env_choice("JACCPOT_COM_RADII_VARIANT", "table", ("table", "chain"))
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "leaf_cap",
+        "internal",
+        "num_levels",
+        "kernel",
+        "block",
+        "chunk",
+        "num_warps",
+        "variant",
+        "lanes",
+    ),
+)
 def _com_radii(
     node_ranges: Array,
     left_child: Array,
@@ -271,6 +303,11 @@ def _com_radii(
     internal: str,
     num_levels: Optional[int],
     kernel: str = "xla",
+    block: int = 16,
+    chunk: int = 8,
+    num_warps: int = 4,
+    variant: str = "table",
+    lanes: int = 8,
 ) -> Array:
     """The radii of :func:`com_mac_geometry`, one jitted program.
 
@@ -297,7 +334,23 @@ def _com_radii(
     kernel : str
         ``"xla"`` (one ``(L, w)`` reduction per level), ``"pallas"`` or
         ``"interpret"`` (:mod:`jaccpot.pallas.com_radii_leaf`: each leaf's
-        particles read once per chunk of eight levels). Exact mode only. Static.
+        particles read once per chunk of ``chunk`` levels). Exact mode only.
+        Static.
+    block : int
+        Leaves per Pallas program (a power of two). Static.
+    chunk : int
+        Ancestor levels per pass over the particles. Static.
+    num_warps : int
+        Warps per Pallas program. Static.
+    variant : str
+        ``"chain"``: the kernel walks each leaf's ancestors itself, over the leaf
+        capacity's lanes (:func:`~jaccpot.pallas.com_radii_leaf.com_radii_chunk_pallas`).
+        ``"table"``: the ancestors are gathered first and the kernel reads the
+        particles ``lanes`` at a time
+        (:func:`~jaccpot.pallas.com_radii_leaf.com_radii_table_pallas`). The same
+        radii to the bit. Static.
+    lanes : int
+        Particles per leaf per iteration of the ``"table"`` kernel. Static.
 
     Returns
     -------
@@ -338,9 +391,11 @@ def _com_radii(
         # then, per chunk, the runs of equal ancestor reduced and their ends
         # scattered as below, and one square root per node at the end (sqrt is
         # monotone: the max of the distances).
-        from jaccpot.pallas.com_radii_leaf import com_radii_chunk_pallas
+        from jaccpot.pallas.com_radii_leaf import (
+            com_radii_chunk_pallas,
+            com_radii_table_pallas,
+        )
 
-        chunk = 8
         counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
         drop = jnp.asarray(num_nodes, INDEX_DTYPE)
 
@@ -349,19 +404,48 @@ def _com_radii(
             kb, vb = b
             return kb, jnp.where(ka == kb, jnp.maximum(va, vb), vb)
 
+        def _up(node: Array) -> Array:
+            parent_of = parent[jnp.where(node >= 0, node, 0)]
+            return jnp.where((node >= 0) & (parent_of >= 0), parent_of, -1).astype(
+                node.dtype
+            )
+
         def _chunk(_, carry):
             r2, anc = carry
-            d2, ancs, nxt = com_radii_chunk_pallas(
-                positions_sorted,
-                centers,
-                parent,
-                leaf_ranges[:, 0],
-                counts,
-                anc,
-                leaf_cap=w,
-                levels=chunk,
-                interpret=kernel == "interpret",
-            )
+            if variant == "table":
+                # the chunk's ancestors by pointer jumping, one gather per level
+                # over all leaves (the same table the chain kernel emits), so the
+                # kernel's loads do not wait on each other
+                cols = [anc]
+                for _j in range(chunk - 1):
+                    cols.append(_up(cols[-1]))
+                ancs = jnp.stack(cols, axis=1)
+                nxt = _up(cols[-1])
+                d2 = com_radii_table_pallas(
+                    positions_sorted,
+                    centers,
+                    leaf_ranges[:, 0],
+                    counts,
+                    ancs,
+                    lanes=lanes,
+                    block=block,
+                    num_warps=num_warps,
+                    interpret=kernel == "interpret",
+                )
+            else:
+                d2, ancs, nxt = com_radii_chunk_pallas(
+                    positions_sorted,
+                    centers,
+                    parent,
+                    leaf_ranges[:, 0],
+                    counts,
+                    anc,
+                    leaf_cap=w,
+                    levels=chunk,
+                    block=block,
+                    num_warps=num_warps,
+                    interpret=kernel == "interpret",
+                )
             live = ancs >= 0
             _, run = lax.associative_scan(_seg2, (ancs, d2), axis=0)
             last = (

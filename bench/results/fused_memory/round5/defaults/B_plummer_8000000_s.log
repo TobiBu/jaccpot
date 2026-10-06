@@ -1,0 +1,23 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=8000000 live leaves 404447 -> leaf capacity 465920
+  [   10.1s] before_prepare                     in-use   0.15 GiB  peak   0.21 GiB  
+  [   10.4s] prepare:start                      in-use   0.39 GiB  peak   0.48 GiB  
+  [   10.5s] tree+upward:start                  in-use   0.39 GiB  peak   0.48 GiB  
+  [   54.8s] tree+upward:end                    in-use   0.82 GiB  peak   1.38 GiB  
+  [   54.8s] dual+downward:start                in-use   0.82 GiB  peak   1.38 GiB  
+  [   60.2s] walk+lists:start                   in-use   0.84 GiB  peak   1.38 GiB  
+  [   64.1s] walk:start                         in-use   0.86 GiB  peak   1.38 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [   66.9s] walk:end                           in-use   0.87 GiB  peak   1.38 GiB  
+  [   66.9s] walk:start                         in-use   0.86 GiB  peak   1.38 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [   70.0s] walk:end                           in-use   0.87 GiB  peak   1.38 GiB  
+  [   70.0s] walk:start                         in-use   0.86 GiB  peak   1.38 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [   72.9s] walk:end                           in-use   0.87 GiB  peak   1.38 GiB  
+  [   72.9s] walk:start                         in-use   0.86 GiB  peak   1.38 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [   78.6s] walk:end                           in-use   0.87 GiB  peak   1.38 GiB  
+  [   78.6s] walk:start                         in-use   0.86 GiB  peak   1.38 GiB  {'queue': 4194304, 'far_cap': 16777216, 'near_cap': 9961472}
+  [   84.1s] walk:end                           in-use   1.08 GiB  peak   1.38 GiB  
+  [   86.7s] walk+lists:end                     in-use   1.05 GiB  peak   1.44 GiB  
+  [   86.7s] downward:start                     in-use   1.05 GiB  peak   1.44 GiB  
+  [  103.8s] downward:end                       in-use   1.18 GiB  peak   1.44 GiB  
+  [  103.8s] dual+downward:end                  in-use   1.17 GiB  peak   1.44 GiB  
+  [  106.3s] prepare:end                        in-use   1.18 GiB  peak   1.44 GiB  

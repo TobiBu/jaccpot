@@ -1,0 +1,41 @@
+N=8000000 cml=6: live leaves 472243, capacity 543744, nodes 1087487, tree levels 34
+  p5 block   0 chunk   0 warps 0: min   10.44 ms median   12.10  max row-scaled diff vs first 0.0e+00
+  p5 block   4 chunk  16 warps 4: min    5.06 ms median    5.10  max row-scaled diff vs first 1.1e-07
+  p5 block   8 chunk  16 warps 4: min    1.71 ms median    1.71  max row-scaled diff vs first 1.1e-07
+  p5 block  16 chunk  16 warps 4: min    1.94 ms median    2.01  max row-scaled diff vs first 1.1e-07
+  p5 block   8 chunk   8 warps 4: min    4.17 ms median    4.17  max row-scaled diff vs first 1.1e-07
+  p5 block  16 chunk   8 warps 4: min    1.57 ms median    1.57  max row-scaled diff vs first 1.1e-07
+  p5 block  32 chunk   8 warps 4: min    1.76 ms median    1.77  max row-scaled diff vs first 1.1e-07
+  p5 block   8 chunk  16 warps 2: min    1.85 ms median    1.86  max row-scaled diff vs first 1.1e-07
+  p5 block  16 chunk  16 warps 8: min    2.09 ms median    2.50  max row-scaled diff vs first 1.1e-07
+N=8000000 cml=6: live leaves 472243, capacity 543744, nodes 1087487, tree levels 34
+  p6 block   0 chunk   0 warps 0: min    8.97 ms median    9.02  max row-scaled diff vs first 0.0e+00
+  p6 block   4 chunk  16 warps 4: min    7.63 ms median    7.68  max row-scaled diff vs first 1.1e-07
+  p6 block   8 chunk  16 warps 4: min    2.62 ms median    2.64  max row-scaled diff vs first 1.1e-07
+  p6 block  16 chunk  16 warps 4: min    3.04 ms median    3.05  max row-scaled diff vs first 1.1e-07
+  p6 block   8 chunk   8 warps 4: min    6.36 ms median    6.38  max row-scaled diff vs first 1.1e-07
+  p6 block  16 chunk   8 warps 4: min    2.44 ms median    2.45  max row-scaled diff vs first 1.1e-07
+  p6 block  32 chunk   8 warps 4: min    2.70 ms median    2.96  max row-scaled diff vs first 1.1e-07
+  p6 block   8 chunk  16 warps 2: min    2.96 ms median    2.98  max row-scaled diff vs first 1.1e-07
+  p6 block  16 chunk  16 warps 8: min    3.02 ms median    3.04  max row-scaled diff vs first 1.1e-07
+N=100000000 cml=6: live leaves 5497014, capacity 6322176, nodes 12644351, tree levels 37
+  p5 block   0 chunk   0 warps 0: min   66.12 ms median   66.53  max row-scaled diff vs first 0.0e+00
+  p5 block   4 chunk  16 warps 4: min   32.56 ms median   52.81  max row-scaled diff vs first 1.1e-07
+  p5 block   8 chunk  16 warps 4: min   18.48 ms median   18.54  max row-scaled diff vs first 1.1e-07
+  p5 block  16 chunk  16 warps 4: min   16.90 ms median   20.37  max row-scaled diff vs first 1.1e-07
+  p5 block   8 chunk   8 warps 4: min   27.20 ms median   47.73  max row-scaled diff vs first 1.1e-07
+  p5 block  16 chunk   8 warps 4: min   16.75 ms median   16.79  max row-scaled diff vs first 1.1e-07
+  p5 block  32 chunk   8 warps 4: min   17.93 ms median   17.94  max row-scaled diff vs first 1.1e-07
+  p5 block   8 chunk  16 warps 2: min   13.50 ms median   19.99  max row-scaled diff vs first 1.1e-07
+  p5 block  16 chunk  16 warps 8: min   16.59 ms median   22.23  max row-scaled diff vs first 1.1e-07
+N=100000000 cml=6: live leaves 5497014, capacity 6322176, nodes 12644351, tree levels 37
+  p6 block   0 chunk   0 warps 0: min   56.13 ms median   56.33  max row-scaled diff vs first 0.0e+00
+  p6 block   4 chunk  16 warps 4: min   49.06 ms median   49.16  max row-scaled diff vs first 1.1e-07
+  p6 block   8 chunk  16 warps 4: min   17.83 ms median   29.06  max row-scaled diff vs first 1.1e-07
+  p6 block  16 chunk  16 warps 4: min   20.00 ms median   31.00  max row-scaled diff vs first 1.1e-07
+  p6 block   8 chunk   8 warps 4: min   40.72 ms median   41.36  max row-scaled diff vs first 1.1e-07
+  p6 block  16 chunk   8 warps 4: min   26.58 ms median   26.60  max row-scaled diff vs first 1.1e-07
+  p6 block  32 chunk   8 warps 4: min   28.67 ms median   29.05  max row-scaled diff vs first 1.1e-07
+  p6 block   8 chunk  16 warps 2: min   32.60 ms median   32.93  max row-scaled diff vs first 1.1e-07
+  p6 block  16 chunk  16 warps 8: min   30.35 ms median   30.52  max row-scaled diff vs first 1.1e-07
+p2m tune done 18:13
