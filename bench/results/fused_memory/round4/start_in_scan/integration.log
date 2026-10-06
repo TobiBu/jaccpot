@@ -1,0 +1,42 @@
+ss.........................                                              [100%]
+=============================== warnings summary ===============================
+tests/integration/test_strict_run_v2_donate_state.py::test_a_mid_run_overflow_is_rerun_from_the_start[False]
+tests/integration/test_strict_run_v2_donate_state.py::test_a_mid_run_overflow_is_rerun_from_the_start[False]
+tests/integration/test_strict_run_v2_donate_state.py::test_a_mid_run_overflow_is_rerun_from_the_start[True]
+tests/integration/test_strict_run_v2_donate_state.py::test_without_donation_the_input_state_is_kept
+tests/integration/test_strict_run_v2_donate_state.py::test_donate_state_needs_the_particle_carry
+  /export/home/tbuck/jaccpot-r4-init/tests/integration/test_strict_run_v2_donate_state.py:73: DeprecationWarning: Legacy expanse-style kwargs are deprecated in jaccpot.FastMultipoleMethod. Use preset/basis/advanced config objects instead.
+    return FastMultipoleMethod(
+
+tests/integration/test_strict_run_v2_donation.py: 7 warnings
+tests/integration/test_strict_run_v2_particle_carry.py: 9 warnings
+  /export/home/tbuck/jaccpot-r4-init/tests/integration/test_strict_run_v2_donation.py:72: DeprecationWarning: Legacy expanse-style kwargs are deprecated in jaccpot.FastMultipoleMethod. Use preset/basis/advanced config objects instead.
+    return FastMultipoleMethod(
+
+tests/integration/test_strict_run_v2_donation.py::test_the_eval_closure_donates_only_when_asked
+  /export/home/tbuck/jaccpot/.venv/lib/python3.12/site-packages/jax/_src/interpreters/mlir.py:1365: UserWarning: Some donated buffers were not usable: int64[4095,2], float32[20000], int64[20000], float32[4095,3], float32[4095,25], int64[2049], int64[262144], int64[2048], int64[2048].
+  See an explanation at https://docs.jax.dev/en/latest/faq.html#buffer-donation.
+    warnings.warn("Some donated buffers were not usable:"
+
+tests/integration/test_strict_run_v2_masses.py::test_a_second_call_with_new_masses_uses_them
+tests/integration/test_strict_run_v2_masses.py::test_a_second_call_with_new_masses_uses_them
+tests/integration/test_strict_run_v2_masses.py::test_a_second_call_with_new_masses_uses_them
+  /export/home/tbuck/jaccpot-r4-init/tests/integration/test_strict_run_v2_masses.py:60: DeprecationWarning: Legacy expanse-style kwargs are deprecated in jaccpot.FastMultipoleMethod. Use preset/basis/advanced config objects instead.
+    return FastMultipoleMethod(
+
+tests/integration/test_strict_run_v2_refresh_capacity.py::test_strict_run_v2_refresh_keeps_full_neighbor_lists[dual_walk]
+tests/integration/test_strict_run_v2_refresh_capacity.py::test_strict_run_v2_refresh_keeps_full_neighbor_lists[flat_walk]
+  /export/home/tbuck/jaccpot-r4-init/tests/integration/test_strict_run_v2_refresh_capacity.py:92: DeprecationWarning: Legacy expanse-style kwargs are deprecated in jaccpot.FastMultipoleMethod. Use preset/basis/advanced config objects instead.
+    solver = FastMultipoleMethod(
+
+tests/integration/test_strict_run_v2_segment_retry.py::test_an_outgrown_segment_is_replanned_once_and_matches_a_fitting_run
+tests/integration/test_strict_run_v2_segment_retry.py::test_an_outgrown_segment_is_replanned_once_and_matches_a_fitting_run
+tests/integration/test_strict_run_v2_segment_retry.py::test_an_outgrown_segment_is_replanned_once_and_matches_a_fitting_run
+tests/integration/test_strict_run_v2_segment_retry.py::test_the_retry_can_be_switched_off
+tests/integration/test_strict_run_v2_segment_retry.py::test_a_named_cap_is_never_widened
+tests/integration/test_strict_run_v2_segment_retry.py::test_a_named_cap_is_never_widened
+  /export/home/tbuck/jaccpot-r4-init/tests/integration/test_strict_run_v2_segment_retry.py:72: DeprecationWarning: Legacy expanse-style kwargs are deprecated in jaccpot.FastMultipoleMethod. Use preset/basis/advanced config objects instead.
+    return FastMultipoleMethod(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+25 passed, 2 skipped, 33 warnings in 1624.40s (0:27:04)

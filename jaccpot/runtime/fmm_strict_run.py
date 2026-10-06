@@ -31,6 +31,7 @@ from .fmm_state import (
     _PrepareStateTreeUpwardArtifacts,
     _RuntimeExecutionOverrides,
     _TopologyReuseEntry,
+    _velocity_verlet_kick_drifted,
     _velocity_verlet_state_update,
 )
 from .kernels._downward_prep import _far_pair_coo_from
@@ -798,6 +799,7 @@ class StrictRunMixin(_EngineBase):
         step_callback_stride: int = 1,
         donate_prepared_state: bool = False,
         carry: Optional[str] = None,
+        donate_state: bool = False,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -878,6 +880,15 @@ class StrictRunMixin(_EngineBase):
             only the next ``strict_run_v2(carry="particles")`` call accepts; it
             carries the self-gravity at the returned positions, so that call needs
             neither a prepare nor an initial force evaluation.
+        donate_state : bool
+            ``carry="particles"`` only; off by default, so the input state is kept.
+            When set, ``state``'s buffer is handed to the compiled scan, which
+            writes the returned state into it instead of allocating a second copy
+            (24 B per particle at the scan's peak). The passed ``state`` is
+            CONSUMED -- its array is deleted -- so pass the returned state to the
+            next call. A capacity retry re-runs the segment from its start, so the
+            call keeps a host copy of the start state (one device-to-host copy
+            per call, only when donating).
 
         Returns
         -------
@@ -897,7 +908,8 @@ class StrictRunMixin(_EngineBase):
         ValueError
             If ``num_steps`` is not positive, or ``refresh_every`` is not 1; if
             ``carry="particles"`` is asked of a lane that cannot rebuild the state
-            from its shapes, or a :class:`StrictParticleCarry` comes without it.
+            from its shapes, or a :class:`StrictParticleCarry` comes without it;
+            if ``donate_state`` is asked without ``carry="particles"``.
         Exception
             Re-raised unchanged when the fused scan fails and the host-segment
             fallback IS allowed -- the caller sees the underlying failure rather
@@ -916,6 +928,11 @@ class StrictRunMixin(_EngineBase):
         )
         if carry_mode not in ("state", "particles"):
             raise ValueError(f"carry must be 'state' or 'particles', got {carry!r}")
+        if donate_state and carry_mode != "particles":
+            raise ValueError(
+                "donate_state needs carry='particles' (the state carry donates its "
+                "prepared state instead: donate_prepared_state)"
+            )
         handle_in = (
             prepared_state if isinstance(prepared_state, StrictParticleCarry) else None
         )
@@ -1081,19 +1098,31 @@ class StrictRunMixin(_EngineBase):
                 dtype=state_in.dtype,
             )
 
+        particle_run = bool(self._strict_fused_mode_active) and particle_carry
+        acceleration_self_current: Optional[Array]
         if not self_eval_active:
             acceleration_self_current = jnp.zeros_like(state_arr[:, 0, :])
         elif initial_self_acceleration is None and handle_in is not None:
             acceleration_self_current = jnp.asarray(
                 handle_in.self_acceleration, dtype=state_arr.dtype
             )
+        elif initial_self_acceleration is None and particle_run:
+            # the particle scan evaluates it itself, as its first refresh, once
+            # the prepared state is freed: bitwise the eager evaluation, whose
+            # temporary block next to the whole prepared state was the first
+            # allocation to fail from 1.36e8 particles on (a fragmented arena)
+            acceleration_self_current = None
         elif initial_self_acceleration is None:
             acceleration_self_current = _evaluate_self(prepared_curr, state_arr)
         else:
             acceleration_self_current = jnp.asarray(
                 initial_self_acceleration, dtype=state_arr.dtype
             )
-        if add_external and external_acceleration_fn is not None:
+        if particle_run:
+            # the particle run builds its own from the self-gravity, per attempt:
+            # a total built here would only sit in the arena through the scan
+            acceleration_current = None
+        elif add_external and external_acceleration_fn is not None:
             acceleration_current = acceleration_self_current + jnp.asarray(
                 external_acceleration_fn(state_arr), dtype=state_arr.dtype
             )
@@ -1168,12 +1197,34 @@ class StrictRunMixin(_EngineBase):
                     )
             return prepared_new, _evaluate_self(prepared_new, state_position)
 
+        def _emit_step(step_index: Array, state_new: Array, fire: Array) -> None:
+            # Fire-and-forget streaming hook (e.g. render). Gated by stride (and by
+            # ``fire``) via lax.cond so it only fires + only computes its on-device
+            # reduction on emit steps. Returns a dummy int so both cond branches
+            # match; the result is discarded and the scan carry is untouched.
+            assert step_callback is not None
+
+            def _emit(_):
+                step_callback(step_index, state_new)
+                return jnp.int32(0)
+
+            def _skip(_):
+                return jnp.int32(0)
+
+            jax.lax.cond(
+                fire & ((step_index % jnp.int32(step_callback_stride)) == jnp.int32(0)),
+                _emit,
+                _skip,
+                operand=None,
+            )
+
         def _advance(
             prepared_now: PreparedStateLike,
             state_now: Array,
             acceleration_now: Array,
             masses_in: Array,
             scan_x: Any,
+            emit: bool = True,
         ) -> tuple[PreparedStateLike, Array, Array, Array]:
             # one velocity-Verlet step of the fused scan: drift, refresh + self
             # force at the new positions, kick; shared by both carries
@@ -1193,33 +1244,19 @@ class StrictRunMixin(_EngineBase):
                 )
             else:
                 acceleration_new = acceleration_self_new
-            state_new = _velocity_verlet_state_update(
-                state_now,
+            # kick the drifted state: its positions are the drift's own (the full
+            # update recomputed them from the old positions, which then had to
+            # outlive the in-place drift for the whole step)
+            state_new = _velocity_verlet_kick_drifted(
+                state_position,
                 acceleration_now,
                 acceleration_new,
                 dt_arr,
             )
             if rematerialize_between_refresh:
                 state_new = jnp.asarray(state_new, dtype=state_now.dtype)
-            if step_callback is not None:
-                # Fire-and-forget streaming hook (e.g. render). Gated by stride
-                # via lax.cond so it only fires + only computes its on-device
-                # reduction on emit steps. Returns a dummy int so both cond
-                # branches match; the result is discarded and the scan carry is
-                # untouched.
-                def _emit(_):
-                    step_callback(scan_x, state_new)
-                    return jnp.int32(0)
-
-                def _skip(_):
-                    return jnp.int32(0)
-
-                jax.lax.cond(
-                    (scan_x % jnp.int32(step_callback_stride)) == jnp.int32(0),
-                    _emit,
-                    _skip,
-                    operand=None,
-                )
+            if emit and step_callback is not None:
+                _emit_step(scan_x, state_new, jnp.asarray(True))
             return prepared_new, state_new, acceleration_new, acceleration_self_new
 
         if self._strict_fused_mode_active and particle_carry:
@@ -1232,9 +1269,9 @@ class StrictRunMixin(_EngineBase):
                 handle_in=handle_in,
                 state_arr=state_arr,
                 masses_arr=masses_arr,
-                acceleration_current=acceleration_current,
                 acceleration_self_current=acceleration_self_current,
                 advance=_advance,
+                refresh_evaluate=_refresh_and_evaluate_endpoint,
                 capacity_ok=_static_target_block_capacity_ok,
                 evaluate_self=_evaluate_self,
                 num_steps_i=num_steps_i,
@@ -1260,6 +1297,7 @@ class StrictRunMixin(_EngineBase):
                 ),
                 return_history=bool(return_history),
                 step_callback=step_callback,
+                emit_step=_emit_step if step_callback is not None else None,
                 leaf_size=int(leaf_size),
                 max_order=int(max_order),
                 theta=theta,
@@ -1267,6 +1305,7 @@ class StrictRunMixin(_EngineBase):
                 initial_self_acceleration=initial_self_acceleration,
                 add_external=bool(add_external),
                 external_acceleration_fn=external_acceleration_fn,
+                donate_state=bool(donate_state),
             )
         elif self._strict_fused_mode_active:
             from jaccpot.runtime.capacity_guard import (
@@ -1546,15 +1585,16 @@ class StrictRunMixin(_EngineBase):
         handle_in: Optional[Any],
         state_arr: Array,
         masses_arr: Array,
-        acceleration_current: Array,
-        acceleration_self_current: Array,
+        acceleration_self_current: Optional[Array],
         advance: Callable[..., Any],
+        refresh_evaluate: Callable[..., Any],
         capacity_ok: Callable[..., Array],
         evaluate_self: Callable[..., Array],
         num_steps_i: int,
         cache_parts: tuple,
         return_history: bool,
         step_callback: Optional[Callable[[Array, Array], None]],
+        emit_step: Optional[Callable[[Array, Array, Array], None]],
         leaf_size: int,
         max_order: int,
         theta: Optional[float],
@@ -1562,14 +1602,20 @@ class StrictRunMixin(_EngineBase):
         initial_self_acceleration: Optional[Array],
         add_external: bool,
         external_acceleration_fn: Optional[Callable[[Array], Array]],
+        donate_state: bool,
     ) -> tuple[Array, Any, Optional[Array]]:
         """The fused scan of ``strict_run_v2(carry="particles")``.
 
         The scan carries ``(state, acceleration, self acceleration, ok, walk
-        needs)``; each step materialises the prepared state from its shape
-        template (:mod:`jaccpot.runtime.strict_carry`) and refreshes it from the
-        drifted positions, as the state carry does. The concrete prepared state
+        needs, steps that fitted)``; each step materialises the prepared state
+        from its shape template (:mod:`jaccpot.runtime.strict_carry`) and
+        refreshes it from the drifted positions, as the state carry does. The concrete prepared state
         (if any) is dropped before the scan, so it and the far list are freed.
+
+        A segment whose refresh overflows a list is re-run once from its start
+        with re-planned caps (the stream stops at the failed step, so it never
+        sees a failed step's state). ``donate_state`` hands the start state to the
+        scan, so a host copy of it is kept for that re-run.
 
         Parameters
         ----------
@@ -1583,14 +1629,16 @@ class StrictRunMixin(_EngineBase):
             ``[N, 2, 3]`` start state.
         masses_arr : Array
             ``[N]`` masses.
-        acceleration_current : Array
-            Total acceleration at the start: rebuilt per attempt from
-            ``acceleration_self_current`` (plus the external field), and donated
-            to the scan when this call owns it, so it is not read here.
-        acceleration_self_current : Array
-            Self-gravity at the start.
+        acceleration_self_current : Optional[Array]
+            Self-gravity at the start; the total acceleration is built from it
+            (plus the external field) per attempt, and donated to the scan when
+            this call owns it. ``None``: the scan evaluates it itself, as a
+            refresh at the start positions before its first step.
         advance : Callable[..., Any]
             ``strict_run_v2``'s step body.
+        refresh_evaluate : Callable[..., Any]
+            ``strict_run_v2``'s refresh + self-force at given positions (the
+            step's own), for the scan's start force.
         capacity_ok : Callable[..., Array]
             ``strict_run_v2``'s capacity verdict on a (refreshed) state.
         evaluate_self : Callable[..., Array]
@@ -1603,6 +1651,9 @@ class StrictRunMixin(_EngineBase):
             Stack every step's state.
         step_callback : Optional[Callable[[Array, Array], None]]
             Streaming hook (feeds the step index).
+        emit_step : Optional[Callable[[Array, Array, Array], None]]
+            ``strict_run_v2``'s stride-gated emitter ``(step, state, fire)``: the
+            scan fires it only for steps whose refresh fitted.
         leaf_size : int
             Leaf target (re-prepare on a segment retry).
         max_order : int
@@ -1617,6 +1668,9 @@ class StrictRunMixin(_EngineBase):
             Whether an external field is added.
         external_acceleration_fn : Optional[Callable[[Array], Array]]
             The external field.
+        donate_state : bool
+            Hand ``state_arr``'s buffer to the scan (``strict_run_v2``'s
+            ``donate_state``).
 
         Returns
         -------
@@ -1646,7 +1700,9 @@ class StrictRunMixin(_EngineBase):
                 )
             return shape_template(replace(prepared, compact_far_pairs=None))
 
-        def _runner_for(template: Any) -> Callable:
+        def _runner_for(
+            template: Any, n_steps: int, donate_state_i: bool, donate_acc_i: bool
+        ) -> Callable:
             # the cells lane's level bound is stashed by the eager prepare
             static_upward_num_levels = self._resolve_upward_num_levels(None)
             cache_key = (
@@ -1655,12 +1711,13 @@ class StrictRunMixin(_EngineBase):
                 str(state_arr.dtype),
                 tuple(int(v) for v in masses_arr.shape),
                 str(masses_arr.dtype),
-                num_steps_i,
+                int(n_steps),
                 *cache_parts,
                 static_upward_num_levels,
                 _walk_caps_key(getattr(self, "_strict_fused_validated_caps", None)),
                 template.key(),
-                bool(donate_acceleration),
+                bool(donate_state_i),
+                bool(donate_acc_i),
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
             runner = jit_cache.get(cache_key)
@@ -1673,70 +1730,138 @@ class StrictRunMixin(_EngineBase):
             # when this call built it: its buffer becomes the self-gravity output,
             # and the total acceleration (which the caller never reads) is no
             # output at all -- two (N, 3) arrays fewer next to the scan's block.
-            @partial(jax.jit, donate_argnums=(1,) if donate_acceleration else ())
+            # The state is donated on request (``donate_state``) or when it is
+            # this call's own copy (a retry's): its buffer becomes the result.
+            def _scan(
+                state_initial: Array,
+                acceleration_initial: Array,
+                acc_self_initial: Array,
+                masses_in: Array,
+                ok_initial: Array,
+                needs_initial: Array,
+            ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
+                def _step(carry, scan_x):
+                    state_now, acc_now, _, ok_now, needs_now, done = carry
+                    prepared_new, state_new, acc_new, acc_self_new = advance(
+                        materialize_template(template),
+                        state_now,
+                        acc_now,
+                        masses_in,
+                        scan_x,
+                        emit=False,
+                    )
+                    ok_new = ok_now & capacity_ok(prepared_new, after_refresh=True)
+                    needs_new = jnp.maximum(needs_now, last_refresh_walk_needs(self))
+                    # a segment that overflowed is re-run from its start, so the
+                    # carry is NOT frozen (keeping the step's old state for a
+                    # where() held 36 B per particle through every step); only
+                    # the stream stops, so it never sees a failed step's state
+                    if emit_step is not None:
+                        emit_step(scan_x, state_new, ok_new)
+                    return (
+                        state_new,
+                        acc_new,
+                        acc_self_new,
+                        ok_new,
+                        needs_new,
+                        done + ok_new.astype(jnp.int32),
+                    ), (state_new if return_history else None)
+
+                scan_xs = (
+                    jnp.arange(n_steps, dtype=jnp.int32)
+                    if emit_step is not None
+                    else None
+                )
+                (state_f, _, acc_self_f, ok_f, needs_f, done_f), history = jax.lax.scan(
+                    _step,
+                    (
+                        state_initial,
+                        acceleration_initial,
+                        acc_self_initial,
+                        ok_initial,
+                        needs_initial,
+                        jnp.zeros((), jnp.int32),
+                    ),
+                    xs=scan_xs,
+                    length=int(n_steps),
+                )
+                return (state_f, acc_self_f, ok_f, needs_f, done_f), history
+
+            donate = ((0,) if donate_state_i else ()) + ((1,) if donate_acc_i else ())
+
+            @partial(jax.jit, donate_argnums=donate)
             def _compiled_runner(
                 state_initial: Array,
                 acceleration_initial: Array,
                 masses_in: Array,
                 ok_initial: Array,
-            ) -> tuple[tuple[Array, Array, Array, Array], Optional[Array]]:
-                def _step(carry, scan_x):
-                    state_now, acceleration_now, _, ok_now, needs_now = carry
-                    prepared_new, state_new, acceleration_new, acc_self_new = advance(
-                        materialize_template(template),
-                        state_now,
-                        acceleration_now,
-                        masses_in,
-                        scan_x,
-                    )
-                    ok_new = ok_now & capacity_ok(prepared_new, after_refresh=True)
-                    needs_new = jnp.maximum(needs_now, last_refresh_walk_needs(self))
-                    return (
-                        state_new,
-                        acceleration_new,
-                        acc_self_new,
-                        ok_new,
-                        needs_new,
-                    ), (state_new if return_history else None)
-
-                scan_xs = (
-                    jnp.arange(num_steps_i, dtype=jnp.int32)
-                    if step_callback is not None
-                    else None
-                )
+            ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
                 # the self-gravity slot is written by every step (num_steps >= 1)
-                (state_f, _, acc_self_f, ok_f, needs_f), history = jax.lax.scan(
-                    _step,
-                    (
-                        state_initial,
-                        acceleration_initial,
-                        jnp.zeros_like(acceleration_initial),
-                        ok_initial,
-                        jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
-                    ),
-                    xs=scan_xs,
-                    length=num_steps_i,
+                return _scan(
+                    state_initial,
+                    acceleration_initial,
+                    jnp.zeros_like(acceleration_initial),
+                    masses_in,
+                    ok_initial,
+                    jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
                 )
-                return (state_f, acc_self_f, ok_f, needs_f), history
 
             jit_cache[cache_key] = _compiled_runner
             self._strict_fused_jit_function_cache = jit_cache
             return _compiled_runner
 
+        def _start_force_for(template: Any) -> Callable:
+            # The start positions' self-gravity, as the steps' own refresh: its
+            # OWN small program, run after the prepared state is freed and before
+            # the scan. Inside the scan's program XLA overlapped it with the first
+            # step (a one-step scan is inlined), doubling the temporary block.
+            static_upward_num_levels = self._resolve_upward_num_levels(None)
+            cache_key = (
+                "strict_particle_start_force",
+                tuple(int(v) for v in state_arr.shape),
+                str(state_arr.dtype),
+                *cache_parts,
+                static_upward_num_levels,
+                _walk_caps_key(getattr(self, "_strict_fused_validated_caps", None)),
+                template.key(),
+            )
+            jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
+            fn = jit_cache.get(cache_key)
+            if fn is not None:
+                return fn
+            self._strict_fused_traced_caps = None
+
+            # named so the dumps' ``*_compiled_runner*`` selection includes it
+            @jax.jit
+            def _compiled_runner_start(
+                state_initial: Array, masses_in: Array, ok_initial: Array
+            ) -> tuple[Array, Array, Array]:
+                prepared0, acc_self0 = refresh_evaluate(
+                    materialize_template(template), state_initial, masses_in
+                )
+                ok0 = ok_initial & capacity_ok(prepared0, after_refresh=True)
+                needs0 = jnp.maximum(
+                    jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+                    last_refresh_walk_needs(self),
+                )
+                return acc_self0, ok0, needs0
+
+            jit_cache[cache_key] = _compiled_runner_start
+            self._strict_fused_jit_function_cache = jit_cache
+            return _compiled_runner_start
+
         external_active = bool(add_external) and external_acceleration_fn is not None
         # the self-gravity is this call's own (evaluated here, or zeros) unless it
         # came from the caller or from the handle: only then may it be donated
         self_owned = handle_in is None and initial_self_acceleration is None
-        donate_acceleration = external_active or self_owned
-        del acceleration_current  # rebuilt per attempt: a donated one is gone
 
-        def _initial_acceleration(acc_self: Array) -> Array:
-            acc_self = jnp.asarray(acc_self, dtype=state_arr.dtype)
+        def _initial_acceleration(acc_self: Array, state_now: Array) -> Array:
+            acc_self = jnp.asarray(acc_self, dtype=state_now.dtype)
             if not external_active:
                 return acc_self
             assert external_acceleration_fn is not None
             return acc_self + jnp.asarray(
-                external_acceleration_fn(state_arr), dtype=state_arr.dtype
+                external_acceleration_fn(state_now), dtype=state_now.dtype
             )
 
         prepared_curr = prepared_box.pop() if prepared_box else None
@@ -1759,16 +1884,49 @@ class StrictRunMixin(_EngineBase):
         self._prepared_state_cache_value = None
         self._prepared_state_cache_positions = None
         self._prepared_state_cache_masses = None
+        retry_enabled = env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True)
+        start_host: Optional[np.ndarray] = None
+        if donate_state and retry_enabled:
+            # the scan consumes the start state, and a capacity retry re-runs the
+            # segment from it: keep it on the host (one copy per call, only when
+            # donating -- the scan itself stays as lean as it can be)
+            start_host = np.asarray(jax.device_get(state_arr))
         try:
             retried = False
+            state_now = state_arr
+            acc_self_now: Optional[Array] = acceleration_self_current
+            del acceleration_self_current
+            acc_self_owned = self_owned
+            # evaluated by the start program (the first call's start, owned)
+            in_scan_force = acc_self_now is None
+            donate_state_now = bool(donate_state)
             while True:
-                runner = _runner_for(template)
-                (state_out, acc_self_out, ok_all, walk_needs), history_out = runner(
-                    state_arr,
-                    _initial_acceleration(acceleration_self_current),
-                    masses_arr,
-                    ok_initial,
-                )
+                ran_scan = True
+                if in_scan_force:
+                    acc_self_now, ok_initial, walk_needs = _start_force_for(template)(
+                        state_now, masses_arr, ok_initial
+                    )
+                    acc_self_owned = True
+                    if not bool(np.asarray(jax.device_get(ok_initial))):
+                        # the start itself overflows: no scan, straight to a retry
+                        ran_scan = False
+                        ok_all, done = ok_initial, jnp.zeros((), jnp.int32)
+                        state_out = acc_self_out = history_out = None
+                if ran_scan:
+                    runner = _runner_for(
+                        template,
+                        num_steps_i,
+                        donate_state_now,
+                        external_active or acc_self_owned,
+                    )
+                    assert acc_self_now is not None
+                    acc0 = _initial_acceleration(acc_self_now, state_now)
+                    if acc_self_owned and not external_active:
+                        acc_self_now = None  # it is acc0, which the call consumes
+                    (state_out, acc_self_out, ok_all, walk_needs, done), history_out = (
+                        runner(state_now, acc0, masses_arr, ok_initial)
+                    )
+                    del acc0
                 self._strict_static_target_block_capacity_ok = bool(
                     np.asarray(jax.device_get(ok_all))
                 )
@@ -1780,21 +1938,29 @@ class StrictRunMixin(_EngineBase):
                     )
                     return state_out, handle, history_out
                 needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
-                # segment retry, as for the state carry: re-plan the walk caps from
-                # what the segment needed, re-prepare at the segment's START
+                # diagnostics: the steps the failed segment completed
+                self._strict_particle_failed_step = int(
+                    np.asarray(jax.device_get(done))
+                )
+                # segment retry: re-plan the walk caps from what the segment
+                # needed, re-prepare at the segment's START, run it once more
                 if (
                     retried
-                    or not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True)
+                    or not retry_enabled
                     or not self._replan_walk_caps_from_needs(needs)
                 ):
                     self._raise_scan_capacity_saturated(needs)
                 retried = True
                 del state_out, history_out, acc_self_out
+                if donate_state_now and ran_scan:
+                    assert start_host is not None
+                    state_now = jax.device_put(start_host, masses_arr.sharding)
+                    donate_state_now = True  # our own copy
                 replanned_peak = int(
                     (self._strict_fused_validated_caps or {}).get("peak_wavefront", 0)
                 )
                 prepared = self.prepare_state(
-                    state_arr[:, 0, :],
+                    state_now[:, 0, :],
                     masses_arr,
                     leaf_size=int(leaf_size),
                     max_order=int(max_order),
@@ -1808,8 +1974,12 @@ class StrictRunMixin(_EngineBase):
                     int(validated.get("peak_wavefront") or 0), replanned_peak
                 )
                 self._strict_fused_validated_caps = validated
-                if initial_self_acceleration is None and handle_in is None:
-                    acceleration_self_current = evaluate_self(prepared, state_arr)
+                if in_scan_force:
+                    acc_self_now = None  # the start program evaluates it again
+                elif acc_self_now is None:
+                    # consumed by the failed segment: the same self-gravity
+                    # again, from the same positions
+                    acc_self_now = evaluate_self(prepared, state_now)
                 template = _template_of(prepared)
                 self._strict_fused_traced_caps = None
                 ok_initial = jnp.asarray(capacity_ok(prepared))

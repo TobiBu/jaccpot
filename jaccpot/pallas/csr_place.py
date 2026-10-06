@@ -87,9 +87,10 @@ def _place_kernel(
     Parameters
     ----------
     a_ref : KernelRef
-        Whole ``[Wp]`` lower rows (``a - row_offset``), padded to the grid.
+        Whole ``[W]`` lower node of each canonical pair (read as is: the tail
+        program's lanes past ``count`` are masked, never loaded out of range).
     b_ref : KernelRef
-        Whole ``[Wp]`` upper rows.
+        Whole ``[W]`` upper node.
     off_ref : KernelRef
         Whole ``[R + 1]`` row offsets.
     count_ref : KernelRef
@@ -125,28 +126,33 @@ def _place_kernel(
 
             @pl.when(i0 + k < count)
             def _(k: int = k) -> None:
-                ra = a_ref[i0 + k]
-                rb = b_ref[i0 + k]
+                na = a_ref[i0 + k]
+                nb = b_ref[i0 + k]
+                ra = na - row_offset
+                rb = nb - row_offset
                 old_hi = plgpu.atomic_add(cursor_ref, (ra,), one)
                 old_lo = plgpu.atomic_add(cursor_ref, (rb,), one)
                 hi = off_ref[ra] + old_hi.astype(off_ref.dtype)
                 lo = off_ref[rb] + old_lo.astype(off_ref.dtype)
-                src_ref[hi] = (rb + row_offset).astype(src_ref.dtype)
-                src_ref[lo] = (ra + row_offset).astype(src_ref.dtype)
+                src_ref[hi] = nb.astype(src_ref.dtype)
+                src_ref[lo] = na.astype(src_ref.dtype)
 
         return
     lane = lax.broadcasted_iota(jnp.int32, (block,), 0)
-    live = (i0 + lane) < count
-    ra = jnp.where(live, a_ref[pl.ds(i0, block)], 0)
-    rb = jnp.where(live, b_ref[pl.ds(i0, block)], 0)
+    live = (i0 + lane) < count  # count <= W: the live lanes are in range
+    i = jnp.where(live, i0 + lane, 0)
+    na = a_ref[i]
+    nb = b_ref[i]
+    ra = jnp.where(live, na - row_offset, 0)
+    rb = jnp.where(live, nb - row_offset, 0)
     one = jnp.ones((block,), cursor_ref.dtype)
     old_hi = plgpu.atomic_add(cursor_ref, (ra,), one, mask=live)
     old_lo = plgpu.atomic_add(cursor_ref, (rb,), one, mask=live)
     past = 2 * width + lane  # dead lanes point past the list (never written)
     hi = jnp.where(live, off_ref[ra] + old_hi.astype(off_ref.dtype), past)
     lo = jnp.where(live, off_ref[rb] + old_lo.astype(off_ref.dtype), past)
-    plgpu.store(src_ref.at[hi], (rb + row_offset).astype(src_ref.dtype), mask=live)
-    plgpu.store(src_ref.at[lo], (ra + row_offset).astype(src_ref.dtype), mask=live)
+    plgpu.store(src_ref.at[hi], nb.astype(src_ref.dtype), mask=live)
+    plgpu.store(src_ref.at[lo], na.astype(src_ref.dtype), mask=live)
 
 
 def _rank_kernel(
@@ -223,8 +229,8 @@ def _rank_kernel(
 
 
 def directed_csr_pallas(
-    rows_a: Array,
-    rows_b: Array,
+    nodes_a: Array,
+    nodes_b: Array,
     count: Array,
     *,
     num_rows: int,
@@ -242,11 +248,11 @@ def directed_csr_pallas(
 
     Parameters
     ----------
-    rows_a : Array
-        ``[W]`` lower row of each canonical pair (``a - row_offset``); only the
-        live prefix is read.
-    rows_b : Array
-        ``[W]`` upper row.
+    nodes_a : Array
+        ``[W]`` lower node of each canonical pair (row ``a - row_offset``); only
+        the live prefix is read.
+    nodes_b : Array
+        ``[W]`` upper node.
     count : Array
         Live canonical pairs (clipped to ``W``).
     num_rows : int
@@ -283,25 +289,24 @@ def directed_csr_pallas(
     """
     if pl is None:
         raise RuntimeError("jax.experimental.pallas is not available")
-    W = int(rows_a.shape[0])
+    W = int(nodes_a.shape[0])
     R = int(num_rows)
     B = 8 if interpret else int(block)
+    a = jnp.asarray(nodes_a, idx)
+    b = jnp.asarray(nodes_b, idx)
     n_live = jnp.minimum(jnp.asarray(count, idx), jnp.asarray(W, idx))
     live = jnp.arange(W, dtype=idx) < n_live
-    ra = jnp.where(live, jnp.asarray(rows_a, idx), R)
-    rb = jnp.where(live, jnp.asarray(rows_b, idx), R)
-    # counts: exact integer scatter-adds; the dead slots (row R) are dropped
+    ro = jnp.asarray(int(row_offset), idx)
+    # counts: exact integer scatter-adds, the row computed inside the scatter
+    # (no (W,) row arrays beside the pairs); the dead slots (row R) are dropped
     counts = (
         jnp.zeros((R,), idx)
-        .at[ra]
+        .at[jnp.where(live, a - ro, R)]
         .add(jnp.ones((W,), idx), mode="drop")
-        .at[rb]
+        .at[jnp.where(live, b - ro, R)]
         .add(jnp.ones((W,), idx), mode="drop")
     )
     offsets = jnp.concatenate([jnp.zeros((1,), idx), jnp.cumsum(counts).astype(idx)])
-    Wp = -(-W // B) * B
-    a_p = jnp.pad(ra, (0, Wp - W))
-    b_p = jnp.pad(rb, (0, Wp - W))
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
@@ -324,8 +329,8 @@ def directed_csr_pallas(
     )
     _, unsorted = pl.pallas_call(
         place,
-        grid=(Wp // B,),
-        in_specs=[_full(a_p), _full(b_p), _full(offsets), _full(count_arr)]
+        grid=(-(-W // B),),
+        in_specs=[_full(a), _full(b), _full(offsets), _full(count_arr)]
         + [_full(cursor0), _full(unsorted0)],
         out_specs=[_full(cursor0), _full(unsorted0)],
         out_shape=[
@@ -336,7 +341,7 @@ def directed_csr_pallas(
         interpret=bool(interpret),
         name="directed_csr_place",
         **backend_kwargs,
-    )(a_p, b_p, offsets, count_arr, cursor0, unsorted0)
+    )(a, b, offsets, count_arr, cursor0, unsorted0)
     out0 = jnp.full((2 * W,), int(pad_source), idx)
     P = max(1, int(rows_per_program))
     rank = functools.partial(

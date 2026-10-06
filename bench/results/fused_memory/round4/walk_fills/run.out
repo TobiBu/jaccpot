@@ -1,0 +1,28 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-fill card 3 22:45 others: 4249 MiB
+F1: prepare 1.93 GiB (259 B/p) eval 1.93 (259 B/p) step 2.19 (294 B/p) | force 29.5 ms step 101.2 ms | far 39093974 near 9414078 | rel-L2 None
+done 22:48
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-fill card 3 22:48 others: 4249 MiB
+FD: prepare 2.21 GiB (296 B/p) eval - step 2.21 (296 B/p) | force - ms step 101.9 ms | far 39093974 near 9414078 | rel-L2 None
+done 22:51
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-fill card 3 22:51 others: 4249 MiB
+FD128: prepare 26.19 GiB (220 B/p) eval - step 26.19 (220 B/p) | force - ms step 2026.1 ms | far 504168620 near 150099422 | rel-L2 None
+done 22:54
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-fill card 3 22:54 others: 4249 MiB
+f152ds: prepare 30.62 GiB (216 B/p) eval - step 30.62 (216 B/p) | force - ms step 2496.9 ms | far 585189166 near 175802468 | rel-L2 None
+f160ds: prepare 32.20 GiB (216 B/p) eval - step 32.20 (216 B/p) | force - ms step 2628.9 ms | far 612053982 near 184147666 | rel-L2 None
+f168ds: prepare 33.45 GiB (214 B/p) eval - step 33.45 (214 B/p) | force - ms step 2704.2 ms | far 637929868 near 192412072 | rel-L2 None
+f176ds: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 5.57GiB. [tf-allocator-allocation-error=''] [executable_name=
+Error: jaccpot could not fit N=176000000 with preset='large_n_gpu', leaf_size=64, max_order=5, dtype=<class 'jax.numpy.float32'
+done 23:11

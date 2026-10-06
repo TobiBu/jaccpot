@@ -88,9 +88,9 @@ def _p2m_leaf_kernel(
     Parameters
     ----------
     pos_ref : KernelRef
-        Whole sorted position table padded by ``width`` rows, ``[n + W, 3]``.
+        Whole sorted position table ``[n, 3]``.
     mass_ref : KernelRef
-        Whole sorted mass table, padded likewise, ``[n + W]``.
+        Whole sorted mass table ``[n]``.
     start_ref : KernelRef
         First particle of each leaf ``[L]`` (``n`` for empty leaves).
     count_ref : KernelRef
@@ -122,14 +122,17 @@ def _p2m_leaf_kernel(
     leaf = pl.program_id(0)
     start = start_ref[leaf]
     count = count_ref[leaf]
-    lanes = pl.ds(start, width)
     dtype = out_ref.dtype
-    x = pos_ref[lanes, 0] - cent_ref[leaf, 0]
-    y = pos_ref[lanes, 1] - cent_ref[leaf, 1]
-    z = pos_ref[lanes, 2] - cent_ref[leaf, 2]
     lane = lax.broadcasted_iota(jnp.int32, (width,), 0)
     valid = lane < count
-    mass = jnp.where(valid, mass_ref[lanes], jnp.asarray(0.0, dtype))
+    # gathered, not a pl.ds window: the window needed copies of the position and
+    # mass tables padded by W rows (16 B per particle at the step's upward peak);
+    # dead lanes read row 0 and carry zero mass
+    idx = jnp.where(valid, start + lane, 0)
+    x = pos_ref[idx, 0] - cent_ref[leaf, 0]
+    y = pos_ref[idx, 1] - cent_ref[leaf, 1]
+    z = pos_ref[idx, 2] - cent_ref[leaf, 2]
+    mass = jnp.where(valid, mass_ref[idx], jnp.asarray(0.0, dtype))
     cidx = lax.broadcasted_iota(jnp.int32, (coeff_pad,), 0)
     out = jnp.zeros((coeff_pad,), dtype)
     # a generator, so each U_n^m is reduced as soon as it is formed (the trace
@@ -281,8 +284,8 @@ def p2m_real_leaves_pallas(
     n = int(positions_sorted.shape[0])
     L = int(leaf_ranges.shape[0])
     w = int(leaf_width)
-    pos = jnp.pad(jnp.asarray(positions_sorted, dtype), ((0, w), (0, 0)))
-    mass = jnp.pad(jnp.asarray(masses_sorted, dtype), (0, w))
+    pos = jnp.asarray(positions_sorted, dtype)
+    mass = jnp.asarray(masses_sorted, dtype)
     ranges = jnp.asarray(leaf_ranges)
     counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0).astype(jnp.int32)
     starts = jnp.where(counts > 0, ranges[:, 0], n).astype(jnp.int32)

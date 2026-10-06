@@ -120,6 +120,12 @@ def _args() -> argparse.Namespace:
     )
     ap.add_argument("--no-scan", action="store_true")
     ap.add_argument(
+        "--donate-state",
+        action="store_true",
+        help="pass donate_state=True (carry='particles' only): the scan writes the "
+        "returned state into the input state's buffer",
+    )
+    ap.add_argument(
         "--skip-eval",
         action="store_true",
         help="go straight to strict_run_v2 (one prepare, then the scan: a production "
@@ -683,6 +689,7 @@ def run_budget(result: dict) -> None:
             add_external=ext is not None,
             external_acceleration_fn=ext,
             **({} if ARGS.no_donate else {"donate_prepared_state": True}),
+            **({"donate_state": True} if ARGS.donate_state else {}),
         )
         jax.block_until_ready(out[0])
         return out
@@ -774,13 +781,27 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
             ARGS.n, ARGS.accuracy_targets, replace=False
         )
     )
-    ref = direct_accelerations(
-        np.asarray(pos, np.float64),
-        np.asarray(mass, np.float64),
-        G=1.0,
-        softening=soft,
-        target_indices=idx,
+    # the harness's reference cache (codes/jzfmm_force_eval.py writes and reads the
+    # same file): one fp64 direct sum per (IC, N, softening, targets) for every code
+    cache = os.path.join(
+        os.environ.get(
+            "BENCH_DIR", "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu"
+        ),
+        "artifacts",
+        "reference",
+        f"direct_fp64_{ARGS.ic}{ARGS.n}_soft{soft:g}_ref{len(idx)}_seed12345.npy",
     )
+    if os.path.exists(cache):
+        ref = np.load(cache)
+        result["accuracy_reference"] = cache
+    else:
+        ref = direct_accelerations(
+            np.asarray(pos, np.float64),
+            np.asarray(mass, np.float64),
+            G=1.0,
+            softening=soft,
+            target_indices=idx,
+        )
     got = a_host[idx]
     err = np.linalg.norm(got - ref, axis=1) / np.maximum(
         np.linalg.norm(ref, axis=1), 1e-300

@@ -2028,8 +2028,8 @@ def _directed_csr_from_canonical(
         from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
 
         sources, offsets, counts = directed_csr_pallas(
-            jnp.asarray(a, idx) - jnp.asarray(row_offset, idx),
-            jnp.asarray(b, idx) - jnp.asarray(row_offset, idx),
+            a,
+            b,
             jnp.sum(jnp.asarray(live, idx)),
             num_rows=R,
             row_offset=int(row_offset),

@@ -2111,6 +2111,8 @@ class FMMEngine(
         self._strict_fused_profile_key_misses = 0
         self._strict_fused_fallback_count = 0
         self._strict_fused_last_fallback_reason = ""
+        # steps the last particle-carry segment that overflowed had completed
+        self._strict_particle_failed_step = -1
         self._strict_fused_device_refresh_route_count = 0
         self._strict_fused_planner_bypassed_count = 0
         self._strict_velocity_verlet_acceleration_carry_active = False

@@ -1,0 +1,30 @@
+card 3
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-don card 3 20:44 others: 4249 MiB
+R1: prepare 1.88 GiB (252 B/p) eval 1.90 (255 B/p) step 2.38 (319 B/p) | force 31.5 ms step 103.5 ms | far 39093974 near 9414078 | rel-L2 None
+done 20:46
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r3-don card 3 20:46 others: 4249 MiB
+D2: prepare 1.92 GiB (257 B/p) eval 1.92 (257 B/p) step 2.26 (303 B/p) | force 36.7 ms step 103.7 ms | far 39093974 near 9414078 | rel-L2 None
+done 20:49
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-don card 3 20:49 others: 4249 MiB
+R2: prepare 1.91 GiB (256 B/p) eval 1.93 (259 B/p) step 2.28 (306 B/p) | force 30.1 ms step 103.5 ms | far 39093974 near 9414078 | rel-L2 None
+done 20:52
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-don card 3 20:52 others: 4249 MiB
+RS: prepare 1.88 GiB (253 B/p) eval 1.90 (255 B/p) step 2.28 (306 B/p) | force 41.0 ms step 102.9 ms | far 39093974 near 9414078 | rel-L2 None
+done 20:54
+sitecustomize: could not repoint jaccpot finder: No module named '__editable___jaccpot_0_0_1_finder'
+sitecustomize: could not repoint yggdrax finder: No module named '__editable___yggdrax_0_0_1_finder'
+state: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+force: equal=True rows_diff=0/8000000 (0.0000 %) max_rel=0.000e+00
+ygg /export/home/tbuck/yggdrax-r2-head jaccpot /export/home/tbuck/jaccpot-r4-don card 3 20:54 others: 4249 MiB
+c136_off: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.47GiB. [tf-allocator-allocation-error=''] [executable_name=
+Error: strict fused velocity-Verlet scan failed while host fallback is disallowed
+c136_on: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.47GiB. [executable_name='jit__fastlane_body'] [tf-allocator
+c136_ds: no row
+Error: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 6.47GiB. [tf-allocator-allocation-error=''] [executable_name=
+done 21:02
