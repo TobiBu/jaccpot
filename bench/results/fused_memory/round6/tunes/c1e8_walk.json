@@ -1,0 +1,7 @@
+{
+ "max_pair_queue": 524288,
+ "far_cap": 65536,
+ "near_cap": 1048576,
+ "interpret": false,
+ "theta": 0.8
+}

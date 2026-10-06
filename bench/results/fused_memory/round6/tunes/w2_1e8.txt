@@ -1,0 +1,10 @@
+nodes 15409151 theta 0.8 queue 67108864 far_cap 603979776 near_cap 178257920 (row: far 402173018 near 118669704 rounds 72 peak 39370708)
+  soa:64:2:2048       : min   284.97 ms median   287.96  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  record:64:2:2048:1  : min    96.19 ms median    96.64  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  record:128:4:2048:1 : min    96.48 ms median    96.66  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  soa:64:2:2048       : min   286.36 ms median   289.69  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  record:64:2:2048:1  : min    96.19 ms median    96.49  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  record:128:4:2048:1 : min    96.19 ms median    96.39  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  soa:64:2:2048       : min   286.33 ms median   290.04  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  record:64:2:2048:1  : min    96.43 ms median    96.51  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True
+  record:128:4:2048:1 : min    96.34 ms median    96.63  far 201086509 near 59334852 rounds 72 peak 39370708 overflow False  same-lists-as-first True

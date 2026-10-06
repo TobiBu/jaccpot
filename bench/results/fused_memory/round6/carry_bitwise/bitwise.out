@@ -1,0 +1,8 @@
+I1_2000000: step 28.5 ms (median 28.5) eval-only 15.3 ms peak 0.74 GiB (395 B/p) far 11749538
+T1_2000000: step 27.9 ms (median 27.9) eval-only 16.5 ms peak 0.73 GiB (391 B/p) far 11749538
+I2_2000000: step 35.9 ms (median 35.9) eval-only 15.3 ms peak 0.74 GiB (399 B/p) far 11749538
+N=2000000: input vs input bitwise True (max 0.000e+00); tree vs input bitwise True (max 0.000e+00, rows differing 0)
+I1_8000000: step 84.2 ms (median 84.2) eval-only 34.3 ms peak 2.43 GiB (326 B/p) far 39093974
+T1_8000000: step 82.8 ms (median 82.8) eval-only 46.9 ms peak 2.65 GiB (356 B/p) far 39093974
+I2_8000000: step 84.2 ms (median 84.2) eval-only 44.6 ms peak 2.43 GiB (326 B/p) far 39093974
+N=8000000: input vs input bitwise True (max 0.000e+00); tree vs input bitwise True (max 0.000e+00, rows differing 0)

@@ -1,0 +1,13 @@
+ab5 start 16:39
+D_8000000_s1: step 81.1 ms (median 81.6) peak 2.38 GiB (320 B/p) far 39093974
+DT_8000000_s1: step 79.2 ms (median 79.5) peak 2.48 GiB (333 B/p) far 39093974
+D_8000000_s2: step 80.6 ms (median 80.8) peak 2.37 GiB (318 B/p) far 39093974
+DT_8000000_s2: step 79.1 ms (median 79.1) peak 2.48 GiB (333 B/p) far 39093974
+B_2000000_s: step 30.0 ms (median 30.2) peak 0.73 GiB (395 B/p) far 11749538
+B_200000_s: step 10.0 ms (median 11.9) peak 0.13 GiB (676 B/p) far 1876324
+D_2000000_s: step 26.5 ms (median 26.6) peak 0.74 GiB (395 B/p) far 11749538
+D_200000_s: step 10.6 ms (median 10.6) peak 0.13 GiB (676 B/p) far 1876324
+DT_2000000_s: step 23.9 ms (median 25.2) peak 0.73 GiB (395 B/p) far 11749538
+DT_200000_s: step 10.7 ms (median 13.0) peak 0.13 GiB (677 B/p) far 1876324
+D_100000000_f: eval-only 338.3 ms rel-L2 3.364e-04 p90 4.911e-04 n_ref 4096 peak 20.27 GiB (218 B/p) far 402173018
+ab5 done 17:21

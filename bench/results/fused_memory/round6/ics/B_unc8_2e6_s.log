@@ -1,0 +1,27 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=2000000 live leaves 102648 -> leaf capacity 118784
+  [    1.7s] before_prepare                     in-use   0.03 GiB  peak   0.08 GiB  
+  [    1.9s] prepare:start                      in-use   0.10 GiB  peak   0.12 GiB  
+  [    1.9s] tree+upward:start                  in-use   0.10 GiB  peak   0.12 GiB  
+  [   39.2s] tree+upward:end                    in-use   0.21 GiB  peak   0.34 GiB  
+  [   39.2s] dual+downward:start                in-use   0.21 GiB  peak   0.34 GiB  
+  [   42.1s] walk+lists:start                   in-use   0.22 GiB  peak   0.34 GiB  
+  [   43.7s] walk:start                         in-use   0.22 GiB  peak   0.34 GiB  {'queue': 262144, 'far_cap': 65536, 'near_cap': 1048576}
+  [   45.6s] walk:end                           in-use   0.23 GiB  peak   0.34 GiB  
+  [   45.6s] walk:start                         in-use   0.22 GiB  peak   0.34 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [   47.4s] walk:end                           in-use   0.23 GiB  peak   0.34 GiB  
+  [   47.4s] walk:start                         in-use   0.22 GiB  peak   0.34 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [   49.2s] walk:end                           in-use   0.23 GiB  peak   0.34 GiB  
+  [   49.2s] walk:start                         in-use   0.22 GiB  peak   0.34 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [   50.9s] walk:end                           in-use   0.23 GiB  peak   0.34 GiB  
+  [   50.9s] walk:start                         in-use   0.22 GiB  peak   0.34 GiB  {'queue': 2097152, 'far_cap': 8388608, 'near_cap': 4194304}
+  [   52.8s] walk:end                           in-use   0.32 GiB  peak   0.36 GiB  
+  [   54.2s] walk+lists:end                     in-use   0.32 GiB  peak   0.51 GiB  
+  [   54.2s] downward:start                     in-use   0.32 GiB  peak   0.51 GiB  
+  [   70.4s] downward:end                       in-use   0.36 GiB  peak   0.51 GiB  
+  [   70.4s] dual+downward:end                  in-use   0.36 GiB  peak   0.51 GiB  
+  [   71.7s] prepare:end                        in-use   0.37 GiB  peak   0.51 GiB  
+  [  222.6s] after_scan_compile                 in-use   0.14 GiB  peak   0.79 GiB  
+  [  224.0s] after_scan_timing                  in-use   0.14 GiB  peak   0.79 GiB  
+scan min 39.11 ms/step
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/4e79cfff-6b30-497e-8630-4d6d2e67c890/scratchpad/r6/ics/B_unc8_2e6_s.json

@@ -1,0 +1,34 @@
+N=100000000 leaves 7704576 (live 6699460) leaf_width 64 near entries 118669704 (capacity 178257920) with_potential False chunk 64
+  particles per live leaf: mean 14.9 pct[50, 90, 99, 100] [12. 32. 59. 64.]
+  row entries per live leaf: mean 17.7 pct[50, 90, 99, 100] [ 20.  26.  41. 121.]
+  particle pairs 6.252e+10
+  Bt=16: target-lane fill 0.64
+  Bt=32: target-lane fill 0.43
+  Bs=8: source-lane fill 0.85
+  Bs=16: source-lane fill 0.74
+  Bs=32: source-lane fill 0.54
+  Bt 32 Bs  0 warps 1      -           : min   291.01 ms median   291.88  max|d|/max|ref| 0.00e+00 bitwise True  rel-L2 vs fp64 list 1.079e-07
+  Bt 16 Bs  8 warps 1 a    -           : min   259.92 ms median   260.25  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.964e-08
+  Bt 16 Bs  8 warps 1 al   -           : min   253.47 ms median   253.70  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.964e-08
+
+  %gather.116 = s32[7704576,1]{1,0} gather(%constant.83, %broadcast.38), offset_dims={1}, collapsed_slice_dims={}, start_index_map={0}, index_vector_dim=1, slice_sizes={1}, metadata={op_name="jit(f)/jit(searchsorted)/jit(_searchsorted_scan_impl)/vmap(jit(_searchsorted_scan_impl))/eval_jaxpr/gather" stack_frame_id=41}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1s:
+
+  %gather.116 = s32[7704576,1]{1,0} gather(%constant.83, %broadcast.38), offset_dims={1}, collapsed_slice_dims={}, start_index_map={0}, index_vector_dim=1, slice_sizes={1}, metadata={op_name="jit(f)/jit(searchsorted)/jit(_searchsorted_scan_impl)/vmap(jit(_searchsorted_scan_impl))/eval_jaxpr/gather" stack_frame_id=41}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+  Bt 32 Bs  8 warps 1 al   4-8-16-32-64: min   270.74 ms median   271.04  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.964e-08
+  Bt 32 Bs  8 warps 1 al   8-16-32-64  : min   264.92 ms median   265.18  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.964e-08
+  Bt 32 Bs  8 warps 1 al   4-8-16-64   : min   340.63 ms median   341.19  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.964e-08
+  Bt 32 Bs 16 warps 1 al   4-8-16-32-64: min   311.04 ms median   311.95  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.268e-08
+  Bt 32 Bs  4 warps 1 al   4-8-16-32-64: min   252.83 ms median   253.12  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.928e-08
+  Bt 32 Bs  8 warps 1 alr  4-8-16-32-64: min   263.49 ms median   263.81  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 7.632e-08
+  Bt 32 Bs  8 warps 1 alp  4-8-16-32-64: min   267.67 ms median   267.94  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.964e-08
+  Bt 32 Bs  8 warps 1 a    4-8-16-32-64: min   289.68 ms median   289.92  max|d|/max|ref| 1.02e-07 bitwise False  rel-L2 vs fp64 list 8.964e-08
+  Bt 32 Bs  0 warps 1      -           : min   291.65 ms median   293.92  max|d|/max|ref| 0.00e+00 bitwise True  rel-L2 vs fp64 list 1.079e-07
