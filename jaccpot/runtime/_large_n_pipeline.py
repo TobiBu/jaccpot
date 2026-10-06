@@ -2113,6 +2113,7 @@ def evaluate_large_n_state(
     target_indices: Optional[Array],
     return_potential: bool,
     max_acc_derivative_order: int,
+    sorted_output: bool = False,
 ) -> Any:
     """Evaluate large-N prepared state for the full particle set.
 
@@ -2134,6 +2135,12 @@ def evaluate_large_n_state(
         rather than the fast lane.
     max_acc_derivative_order : int
         Must be ``0``; acceleration derivatives are not wired on this lane.
+    sorted_output : bool
+        Return the accelerations in the tree's (Morton) order, row ``j`` for the
+        particle ``state.tree.particle_indices[j]`` of the input, instead of
+        gathering them back into input order: the gather and the inverse
+        permutation it reads are not computed at all. Fast-lane accelerations
+        only.
 
     Returns
     -------
@@ -2145,8 +2152,9 @@ def evaluate_large_n_state(
     ------
     NotImplementedError
         If ``target_indices`` is given, or ``max_acc_derivative_order`` is
-        non-zero. Both are unimplemented rather than invalid, so they raise
-        loudly instead of silently ignoring the request.
+        non-zero, or ``sorted_output`` off the fast-lane acceleration route. All
+        are unimplemented rather than invalid, so they raise loudly instead of
+        silently ignoring the request.
     RuntimeError
         If the state was not prepared with ``nearfield_mode='bucketed'``, or
         carries no radix fast-lane payload. A wiring fault, not user input.
@@ -2240,6 +2248,7 @@ def evaluate_large_n_state(
             output_dtype = state_prepared.working_dtype
         if eval_diag_mode == "zero":
             return jnp.zeros_like(state_prepared.positions_sorted).astype(output_dtype)
+        keep_sorted = bool(sorted_output)
 
         # far-field evaluation layout: "particle" (default) evaluates every particle
         # in its own leaf's expansion, chunk by chunk; "leaf" sweeps padded
@@ -2300,6 +2309,8 @@ def evaluate_large_n_state(
                 )
             else:
                 accelerations_sorted = near_acc + far_acc
+            if keep_sorted:
+                return jnp.asarray(accelerations_sorted).astype(output_dtype)
             return jnp.asarray(accelerations_sorted)[
                 state_in.inverse_permutation
             ].astype(output_dtype)
@@ -2321,11 +2332,17 @@ def evaluate_large_n_state(
                 bool(getattr(fmm, "use_pallas", False)),
                 l2p_layout,
                 int(l2p_chunk),
+                keep_sorted,
             ),
         )
         if compiled is not None:
             return compiled(state_prepared)
         return _fastlane_body(state_prepared)
+
+    if sorted_output:
+        raise NotImplementedError(
+            "sorted_output is wired on the radix fast-lane acceleration route only"
+        )
 
     nearfield_edge_chunk_size = int(state_prepared.nearfield_edge_chunk_size)
     eval_out = _evaluate_tree_compiled_impl(

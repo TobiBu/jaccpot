@@ -614,7 +614,8 @@ def mutual_walk_pallas(
     Raises
     ------
     ValueError
-        If the seed is longer than ``max_pair_queue`` or only one half is given.
+        If the seed is longer than ``max_pair_queue`` or only one half is given,
+        or ``node_layout`` is not ``"soa"`` or ``"record"``.
     """
     if (seed_a is None) != (seed_b is None):
         raise ValueError("seed_a and seed_b go together")

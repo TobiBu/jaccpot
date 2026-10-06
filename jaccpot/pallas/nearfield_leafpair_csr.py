@@ -1360,6 +1360,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     ------
     RuntimeError
         If Pallas or its Triton backend could not be imported.
+    ValueError
+        If ``source_tile`` is not ``0`` or a power of two, or ``source_flags``
+        holds a letter other than ``a``, ``p``, ``r``.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -1387,7 +1390,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         source_flags = os.environ.get("JACCPOT_NEARFIELD_SOURCE_FLAGS", "")
     source_flags = "".join(sorted(set(source_flags))) if source_tile else ""
     if set(source_flags) - set("apr"):
-        raise ValueError(f"source_flags takes the letters a, p, r; got {source_flags!r}")
+        raise ValueError(
+            f"source_flags takes the letters a, p, r; got {source_flags!r}"
+        )
     pm, start_i, count_i, soft, g, bt, width_pad, num_warps = _sorted_inputs(
         positions_sorted,
         masses_sorted,

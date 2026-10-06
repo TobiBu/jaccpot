@@ -49,19 +49,27 @@ if args.stats:
     lc = lcount[live]
     rows = counts[live]
     q = [50, 90, 99, 100]
-    print(f"  particles per live leaf: mean {lc.mean():.1f} pct{q} {np.percentile(lc, q)}")
-    print(f"  row entries per live leaf: mean {rows.mean():.1f} pct{q} {np.percentile(rows, q)}")
+    print(
+        f"  particles per live leaf: mean {lc.mean():.1f} pct{q} {np.percentile(lc, q)}"
+    )
+    print(
+        f"  row entries per live leaf: mean {rows.mean():.1f} pct{q} {np.percentile(rows, q)}"
+    )
     src = lcount[nbr[: int(counts.sum())]] if counts.sum() else np.zeros(0)
     # pairs: targets x sources over rows, plus self
     tgt = np.repeat(lcount, counts)
-    pairs = float(np.sum(tgt.astype(np.float64) * src)) + float(np.sum(lc.astype(np.float64) ** 2))
+    pairs = float(np.sum(tgt.astype(np.float64) * src)) + float(
+        np.sum(lc.astype(np.float64) ** 2)
+    )
     print(f"  particle pairs {pairs:.3e}", flush=True)
     for bt in (16, 32):
         sub = np.ceil(lc / bt)
         print(f"  Bt={bt}: target-lane fill {lc.sum() / (sub.sum() * bt):.2f}")
     for bs in (8, 16, 32):
         blocks = np.ceil(src / bs)
-        print(f"  Bs={bs}: source-lane fill {src.sum() / max(blocks.sum() * bs, 1):.2f}")
+        print(
+            f"  Bs={bs}: source-lane fill {src.sum() / max(blocks.sum() * bs, 1):.2f}"
+        )
 
 dev = {k: jnp.asarray(v) for k, v in data.items()}
 static = {
@@ -98,13 +106,23 @@ def make(bt: int, bs: int, warps: int, pf: str):
 
 ins = tuple(
     dev[k]
-    for k in ("positions", "masses", "leaf_start", "leaf_count", "neighbors", "offsets", "counts")
+    for k in (
+        "positions",
+        "masses",
+        "leaf_start",
+        "leaf_count",
+        "neighbors",
+        "offsets",
+        "counts",
+    )
 )
 
 # fp64 truth of the same list on random particles
 rng = np.random.default_rng(1)
 leaf_of = np.searchsorted(starts, np.arange(n), side="right") - 1
-pick = rng.choice(np.flatnonzero(lcount[np.clip(leaf_of, 0, None)] > 0), args.check, replace=False)
+pick = rng.choice(
+    np.flatnonzero(lcount[np.clip(leaf_of, 0, None)] > 0), args.check, replace=False
+)
 P = data["positions"].astype(np.float64)
 M = data["masses"].astype(np.float64)
 eps2 = float(meta["softening_sq"])
@@ -113,7 +131,9 @@ truth = np.zeros((args.check, 3))
 for i, p in enumerate(pick):
     lf = leaf_of[p]
     src_leaves = np.concatenate([nbr[offsets[lf] : offsets[lf] + counts[lf]], [lf]])
-    idx = np.concatenate([np.arange(starts[s], starts[s] + lcount[s]) for s in src_leaves])
+    idx = np.concatenate(
+        [np.arange(starts[s], starts[s] + lcount[s]) for s in src_leaves]
+    )
     idx = idx[idx != p]
     d = P[p] - P[idx]
     r2 = np.sum(d * d, 1) + eps2
@@ -129,7 +149,10 @@ for v in args.variants:
     try:
         acc, _ = jax.block_until_ready(f(*ins))
     except Exception as exc:  # noqa: BLE001
-        print(f"  Bt {bt:2d} Bs {bs:2d} warps {w} {pf:3s}: FAILED {str(exc)[:300]}", flush=True)
+        print(
+            f"  Bt {bt:2d} Bs {bs:2d} warps {w} {pf:3s}: FAILED {str(exc)[:300]}",
+            flush=True,
+        )
         continue
     ts = []
     for _ in range(args.reps):

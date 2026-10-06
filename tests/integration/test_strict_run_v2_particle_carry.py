@@ -9,7 +9,9 @@ Pinned here (GPU, the fused strict lane):
 * chaining through the returned handle is one long run, and the handle's
   self-gravity is the force at the returned positions;
 * the call leaves less resident (no prepared state, no far list kept);
-* the handle is refused where it does not belong.
+* the handle is refused where it does not belong;
+* the tree-order carry (``JACCPOT_STRICT_CARRY_ORDER=tree``) is the input-order
+  carry: the same states and handle, back in input order.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ def _env(monkeypatch):
         "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP",
         "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD",
         "JACCPOT_STRICT_CARRY",
+        "JACCPOT_STRICT_CARRY_ORDER",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -177,3 +180,36 @@ def test_the_handle_is_refused_where_it_does_not_belong():
         _run(solver, out, masses, steps=1, carry="state", prepared=handle)
     with pytest.raises(ValueError):
         _run(solver, out[:-1], masses[:-1], steps=1, carry="particles", prepared=handle)
+
+
+def test_the_tree_order_carry_is_the_input_order_carry(monkeypatch):
+    """The scan carries the rows in Morton order and puts them back once: the same
+    trajectory as the input-order carry -- bitwise unless two particles share a
+    Morton code (ties keep the carry's order) -- and the same handle, chained."""
+    state, masses = _state()
+    a, ha, _ = _run(_solver(), state, masses, steps=3, carry="particles")
+    a2, ha2, _ = _run(_solver(), state, masses, steps=3, carry="particles")
+    monkeypatch.setenv("JACCPOT_STRICT_CARRY_ORDER", "tree")
+    solver = _solver()
+    b, hb, _ = _run(solver, state, masses, steps=3, carry="particles")
+    # non-vacuous: the runner that ran is the tree-order one
+    keys = list(solver._impl._strict_fused_jit_function_cache)
+    runner_keys = [k for k in keys if k[0] == "strict_velocity_verlet_particles"]
+    assert runner_keys and all(k[-1] is True for k in runner_keys)
+    for got, ref, ref2 in (
+        (b, a, a2),
+        (hb.self_acceleration, ha.self_acceleration, ha2.self_acceleration),
+    ):
+        control = _maxdiff(ref2, ref)
+        if control == 0.0:
+            assert np.array_equal(np.asarray(got), np.asarray(ref))
+        else:
+            assert _maxdiff(got, ref) <= 10.0 * control
+    # chained through the handle, still one run
+    mid, handle, _ = _run(solver, state, masses, steps=2, carry="particles")
+    end, _, _ = _run(solver, mid, masses, steps=1, carry="particles", prepared=handle)
+    control = _maxdiff(a2, a)
+    if control == 0.0:
+        assert np.array_equal(np.asarray(end), np.asarray(a))
+    else:
+        assert _maxdiff(end, a) <= 10.0 * control
