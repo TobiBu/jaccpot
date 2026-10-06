@@ -2134,7 +2134,7 @@ def _evaluate_prepared_tree_targets(
 # LAYOUT (leaf-major locals, so the gather is a slice), not the fusion boundary.
 
 
-@partial(jax.jit, static_argnames=("order", "chunk"))
+@partial(jax.jit, static_argnames=("order", "chunk", "kernel"))
 @jax.named_scope("fmm_l2p")
 def _evaluate_local_expansions_particle_major(
     local_data: LocalExpansionData,
@@ -2144,6 +2144,7 @@ def _evaluate_local_expansions_particle_major(
     node_ranges: Int[Array, "nodes 2"],
     order: int,
     chunk: int,
+    kernel: str = "xla",
 ) -> Array:
     """Real-basis far-field gradient at every particle, in particle order, in chunks.
 
@@ -2174,6 +2175,11 @@ def _evaluate_local_expansions_particle_major(
         Expansion order ``p``.
     chunk : int
         Particles per chunk. Static.
+    kernel : str
+        ``"xla"`` (the chunked ``vmap`` of :func:`evaluate_local_real_with_grad`),
+        ``"pallas"`` or ``"interpret"`` (:mod:`jaccpot.pallas.l2p_real`: one
+        particle per lane, the gradient by the Cartesian recurrence of the solid
+        harmonics -- the same to float rounding). Forward only. Static.
 
     Returns
     -------
@@ -2195,6 +2201,20 @@ def _evaluate_local_expansions_particle_major(
         return jnp.zeros((n, 3), dtype=dtype)
     leaf_ranges = node_ranges[leaf_nodes]
     counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+    if kernel in ("pallas", "interpret"):
+        from jaccpot.pallas.l2p_real import l2p_real_particles_pallas
+
+        grads = l2p_real_particles_pallas(
+            local_data.coefficients,
+            local_data.centers,
+            positions,
+            jnp.asarray(leaf_nodes, INDEX_DTYPE),
+            jnp.asarray(leaf_ranges[:, 0], INDEX_DTYPE),
+            jnp.asarray(counts, INDEX_DTYPE),
+            order=int(order),
+            interpret=kernel == "interpret",
+        )
+        return grads.astype(dtype)
     leaf_of = jnp.repeat(
         jnp.arange(num_leaves, dtype=INDEX_DTYPE), counts, total_repeat_length=n
     )

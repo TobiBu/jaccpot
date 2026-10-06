@@ -2257,6 +2257,22 @@ def evaluate_large_n_state(
         # equal forces at 8e6 on an A100 (docs/fused_memory_2026-10.md, round 2)
         l2p_layout = env_choice("JACCPOT_L2P_LAYOUT", "particle", ("leaf", "particle"))
         l2p_chunk = env_int("JACCPOT_L2P_PARTICLE_CHUNK", 1 << 21, minimum=1)
+        # the particle-major L2P's kernel: "pallas" (sm_80+ default,
+        # jaccpot.pallas.l2p_real) or the XLA vmap of the autodiff form
+        l2p_kernel = env_choice(
+            "JACCPOT_L2P_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
+        )
+        # how the force returns to input order: "scatter" (default; each sorted
+        # row to its input row) or "gather" (through the inverse permutation)
+        unpermute = env_choice(
+            "JACCPOT_FASTLANE_UNPERMUTE", "scatter", ("scatter", "gather")
+        )
+        if l2p_kernel == "auto":
+            from jaccpot.pallas.cascade_real_level import (
+                pallas_cascade_level_supported,
+            )
+
+            l2p_kernel = "pallas" if pallas_cascade_level_supported() else "xla"
 
         def _fastlane_body(state_in: Any) -> Array:
             if bool(disable_near_eval):
@@ -2283,6 +2299,7 @@ def evaluate_large_n_state(
                     ),
                     order=local_order,
                     chunk=l2p_chunk,
+                    kernel=l2p_kernel,
                 )
                 far_acc = -float(getattr(fmm, "G")) * far_grad
             else:
@@ -2311,9 +2328,29 @@ def evaluate_large_n_state(
                 accelerations_sorted = near_acc + far_acc
             if keep_sorted:
                 return jnp.asarray(accelerations_sorted).astype(output_dtype)
-            return jnp.asarray(accelerations_sorted)[
-                state_in.inverse_permutation
-            ].astype(output_dtype)
+            accelerations_sorted = jnp.asarray(accelerations_sorted)
+            if unpermute == "scatter":
+                # each sorted row to its input row through the sort permutation:
+                # the sum fuses into the scatter's contiguous reads, and the
+                # inverse permutation is not needed. The gather form, with the sum
+                # fused into it, read the near field's three component arrays and
+                # the far field at a random index per particle: 2.44 ms at 8e6 and
+                # 39.7 ms at 1e8 on an A100 (+ the inverse's scatter, 16 ms at 1e8).
+                # Materialising the sum before the gather (an optimization barrier)
+                # recovered 1.2 of the 1.8 ms at 8e6, for +10 B/p of peak at 2e6.
+                perm = jnp.asarray(state_in.tree.particle_indices, dtype=INDEX_DTYPE)
+                return (
+                    jnp.zeros(accelerations_sorted.shape, output_dtype)
+                    .at[perm]
+                    .set(
+                        accelerations_sorted.astype(output_dtype),
+                        unique_indices=True,
+                        mode="promise_in_bounds",
+                    )
+                )
+            return accelerations_sorted[state_in.inverse_permutation].astype(
+                output_dtype
+            )
 
         compiled = _large_n_fastlane_eval_fn(
             fmm,
@@ -2332,6 +2369,8 @@ def evaluate_large_n_state(
                 bool(getattr(fmm, "use_pallas", False)),
                 l2p_layout,
                 int(l2p_chunk),
+                l2p_kernel,
+                unpermute,
                 keep_sorted,
             ),
         )

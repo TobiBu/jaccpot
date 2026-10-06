@@ -300,7 +300,12 @@ def _com_radii_table_kernel(
             new.append(jnp.maximum(acc[j], jnp.max(jnp.where(valid, d2, zero), axis=1)))
         return tuple(new)
 
-    trips = (jnp.max(count) + (lanes - 1)) // lanes
+    # a block whose ancestors are all past the root (the deep chunks of shallow
+    # leaves) reads no particles: its row is zero either way
+    any_live = functools.reduce(
+        jnp.maximum, [jnp.max(lv.astype(jnp.int32)) for lv in lives]
+    )
+    trips = jnp.where(any_live > 0, (jnp.max(count) + (lanes - 1)) // lanes, 0)
     zero_row = jnp.zeros(start.shape, pos_ref.dtype)
     acc = lax.fori_loop(0, trips, body, tuple(zero_row for _ in range(levels)))
     for j in range(levels):

@@ -457,7 +457,10 @@ def directed_csr_pallas(
 
     count_arr = jnp.reshape(n_live, (1,))
     cursor0 = jnp.zeros((R,), jnp.float32)
-    unsorted0 = jnp.zeros((2 * W,), idx)
+    # never read (the rank reads the placed slots only); its fill differs from the
+    # output's so XLA does not merge the two fills into one buffer it then copies
+    # into both aliased operands (near lists pad with 0: 2 x 680 MB at 1e8)
+    unsorted0 = jnp.full((2 * W,), int(pad_source) + 1, idx)
     S = max(1, min(int(slices), R))
     bounds = [(R * k) // S for k in range(S + 1)]
     cursor, unsorted = cursor0, unsorted0
