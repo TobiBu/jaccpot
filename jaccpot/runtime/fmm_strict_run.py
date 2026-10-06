@@ -1338,6 +1338,27 @@ class StrictRunMixin(_EngineBase):
                 ),
                 dtype=state_now.dtype,
             )
+            # The carry takes the new order only once the force is done. Gathered
+            # as soon as the permutation existed, the permuted copies (state,
+            # acceleration, masses, indices: 44 B per particle) lived through the
+            # walk and the lists, the step's peak: +30 B/p at 1e8.
+            (
+                acceleration_self_new,
+                state_position,
+                acceleration_now,
+                masses_now,
+                ids_now,
+                perm,
+            ) = jax.lax.optimization_barrier(
+                (
+                    acceleration_self_new,
+                    state_position,
+                    acceleration_now,
+                    masses_now,
+                    ids_now,
+                    perm,
+                )
+            )
             state_sorted = state_position[perm]
             acceleration_prev = acceleration_now[perm]
             masses_new = masses_now[perm]
