@@ -31,6 +31,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.operators.real_harmonic_derivatives import real_harmonic_lowering_matrix
 from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
 from jaccpot.runtime._level_shapes import level_batch_width as _level_batch_width
 from jaccpot.runtime._level_shapes import (
@@ -45,6 +46,7 @@ __all__ = [
     "RealTreeUpwardData",
     "prepare_real_upward_sweep",
     "aggregate_m2m_real_by_level",
+    "prepare_real_source_motion_multipoles",
 ]
 
 _DEFAULT_LEAF_BATCH_SIZE = 2048
@@ -104,6 +106,8 @@ def _p2m_leaves_real(
     num_internal: int,
     total_nodes: int,
     leaf_batch_size: int,
+    velocities_sorted: Optional[Array] = None,
+    time_derivative_order: int = 0,
 ) -> Array:
     """Leaf P2M in the Dehnen real basis (mirror of ``_p2m_leaves_complex``).
 
@@ -139,6 +143,15 @@ def _p2m_leaves_real(
     leaf_batch_size : int
         Leaves processed per scan step. Static under ``jit``; a tuning knob only,
         it does not change the result because each leaf's sum is independent.
+    velocities_sorted : Optional[Array]
+        Particle velocities ``[N, 3]`` in the same order. Read only when
+        ``time_derivative_order > 0``.
+    time_derivative_order : int
+        ``k``: return the k-th time derivative of the leaf multipoles for
+        particles moving on straight lines at fixed centres,
+        ``sum_j m_j (v_j . grad)^k U(x_j - c)``, through the exact lowering
+        operator (:mod:`jaccpot.operators.real_harmonic_derivatives`). ``0`` (the
+        default) is the plain P2M, on an unchanged code path. Static.
 
     Returns
     -------
@@ -155,6 +168,11 @@ def _p2m_leaves_real(
     p = int(order)
     if p < 0:
         raise ValueError("order must be >= 0")
+    k_time = int(time_derivative_order)
+    if k_time < 0:
+        raise ValueError("time_derivative_order must be >= 0")
+    if k_time > 0 and velocities_sorted is None:
+        raise ValueError("time_derivative_order > 0 needs velocities_sorted")
     num_internal = int(num_internal)
     total_nodes = int(total_nodes)
     coeffs = sh_size(p)
@@ -189,6 +207,29 @@ def _p2m_leaves_real(
 
     leaf_vm = jax.vmap(leaf_accumulate, in_axes=(0, 0, 0))
 
+    if k_time > 0:
+        dtype_v = jnp.result_type(dtype, velocities_sorted.dtype)
+        lowering_t = [
+            jnp.asarray(real_harmonic_lowering_matrix(p, axis).T, dtype=dtype_v)
+            for axis in range(3)
+        ]
+
+        def leaf_accumulate_moving(
+            pos_i: Array, mass_i: Array, center_i: Array, vel_i: Array
+        ) -> Array:
+            # (v . grad)^k of m U(x - c), applied to every particle's coefficients:
+            # d/d axis U = A_axis U, so one step is sum_a v_a (W @ A_a^T)
+            out = _p2m_real_batch(pos_i - center_i, mass_i)
+            for _ in range(k_time):
+                out = (
+                    vel_i[:, 0:1] * (out @ lowering_t[0])
+                    + vel_i[:, 1:2] * (out @ lowering_t[1])
+                    + vel_i[:, 2:3] * (out @ lowering_t[2])
+                )
+            return out
+
+        leaf_vm_moving = jax.vmap(leaf_accumulate_moving, in_axes=(0, 0, 0, 0))
+
     def body(state: Array, step_idx: Array) -> tuple[Array, None]:
         start = step_idx * batch
         batch_nodes = lax.dynamic_slice_in_dim(leaf_nodes, start, batch, axis=0)
@@ -210,7 +251,12 @@ def _p2m_leaves_real(
         masses = masses_sorted[safe_idx]
         masses = jnp.where(valid_particle, masses, 0.0)
 
-        contribs = leaf_vm(pos, masses, centers[safe_nodes])
+        if k_time > 0:
+            vel = velocities_sorted[safe_idx]
+            vel = jnp.where(valid_particle[..., None], vel, 0.0)
+            contribs = leaf_vm_moving(pos, masses, centers[safe_nodes], vel)
+        else:
+            contribs = leaf_vm(pos, masses, centers[safe_nodes])
         leaf_coeffs = jnp.sum(contribs, axis=1).astype(state.dtype)
         # Padded slots write nowhere. They used to write the stale value back to
         # ``num_internal`` -- the first leaf -- in the same scatter as that leaf's
@@ -373,6 +419,106 @@ def aggregate_m2m_real_by_level(
     internal_level_count = max(int(num_levels) - 1, 0)
     result = lax.fori_loop(0, internal_level_count, level_body, packed_ext)
     return result[: packed.shape[0]]
+
+
+def prepare_real_source_motion_multipoles(
+    tree: Tree,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    velocities_sorted: Array,
+    *,
+    max_order: int,
+    centers: Array,
+    time_derivative_order: int,
+    max_leaf_size: int,
+    leaf_batch_size: Optional[int] = None,
+) -> Array:
+    """The k-th time derivative of every node's real multipole, straight-line motion.
+
+    ``M_k(node) = sum_j m_j (v_j . grad)^k U(x_j - c_node)`` for particles moving
+    as ``x_j + v_j t`` about FROZEN centres ``c`` -- the real-basis counterpart of
+    :func:`~jaccpot.upward.solidfmm_complex_tree_expansions.prepare_solidfmm_complex_source_motion_multipoles`.
+    The leaves come from :func:`_p2m_leaves_real` with ``time_derivative_order``;
+    M2M is linear in the coefficients at fixed geometry, so the ordinary real
+    cascade (:func:`aggregate_m2m_real_by_level`) carries them up the tree. Forward
+    only; this is the jerk / time-derivative path, not the hot step.
+
+    Parameters
+    ----------
+    tree : Tree
+        Built tree.
+    positions_sorted : Array
+        Particle positions ``[N, 3]`` in tree order.
+    masses_sorted : Array
+        Particle masses ``[N]`` in tree order.
+    velocities_sorted : Array
+        Particle velocities ``[N, 3]`` in tree order.
+    max_order : int
+        Expansion order ``p``.
+    centers : Array
+        Frozen per-node expansion centres ``[total_nodes, 3]`` -- the centres of
+        the multipoles being differentiated.
+    time_derivative_order : int
+        ``k >= 1``.
+    max_leaf_size : int
+        Padded leaf width.
+    leaf_batch_size : Optional[int]
+        Leaves per scan step in the leaf P2M; a tuning knob only.
+
+    Returns
+    -------
+    Array
+        Packed real coefficients ``[total_nodes, (p+1)^2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``time_derivative_order`` is not positive.
+    """
+    p = int(max_order)
+    k_time = int(time_derivative_order)
+    if k_time < 1:
+        raise ValueError("time_derivative_order must be >= 1")
+    total_nodes = int(jnp.asarray(tree.parent).shape[0])
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    num_leaves = max(total_nodes - num_internal, 0)
+    centers = jnp.asarray(centers)
+    level_offsets = get_level_offsets(tree)
+    nodes_by_level = get_nodes_by_level(tree)
+    num_levels = max(int(level_offsets.shape[0] - 1), 1)
+    packed = _p2m_leaves_real(
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        positions_sorted,
+        masses_sorted,
+        centers,
+        order=p,
+        max_leaf_size=int(max_leaf_size),
+        num_internal=num_internal,
+        total_nodes=total_nodes,
+        leaf_batch_size=(
+            max(1, min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE))
+            if leaf_batch_size is None
+            else int(leaf_batch_size)
+        ),
+        velocities_sorted=velocities_sorted,
+        time_derivative_order=k_time,
+    )
+    if num_internal == 0:
+        return packed
+    return aggregate_m2m_real_by_level(
+        packed,
+        centers,
+        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
+        jnp.asarray(level_offsets, dtype=INDEX_DTYPE),
+        order=p,
+        num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=_level_batch_width(
+            level_offsets, total_nodes=total_nodes, num_internal=num_internal
+        ),
+    )
 
 
 def prepare_real_upward_sweep(
