@@ -38,7 +38,7 @@ On `main` at 6cca378 (2026-10-06):
 
 | Phase | PR | What | Gates | State |
 | --- | --- | --- | --- | --- |
-| P0 | | CI: each test once per push; shard partition checked; this record | CI | open |
+| P0 | #369 | CI: each test once per push; shard partition checked; this record | CI 16/16 | open |
 
 ### P0: CI runs each test once
 
@@ -68,3 +68,25 @@ The changes:
   Pallas grids to one case whenever type checks were on. It now trims only under
   `JACCPOT_TEST_TRIM_GRIDS=1`, a local opt-in that no CI job sets. Otherwise turning the
   checks on in `test-full` would have dropped those cases from CI.
+
+**Measured on the PR's CI run (16/16 green):** runner time about 3.2 h per push, down from
+about 5.2 h. The longest job is 36 min (`test-full (unit)`, now with type checks), down
+from 66.5 min (`test-runtime-typecheck`).
+
+| job | min |
+| --- | --- |
+| test-full (unit) | 35.9 |
+| test-full (integration) | 26.9 |
+| test-full (unit-runtime) | 20.7 |
+| test-full (unit-runtime-mac) | 19.2 |
+| test-cross-repo-nornax | 19.5 |
+| test-distributed-mutual | 15.3 |
+| test-distributed-tier | 13.8 |
+| test-distributed-criterion | 7.4 |
+| test-full (characterization) | 7.4 |
+| test-py-floor | 6.9 |
+| test-full (mutual-static-device) | 6.5 |
+| test-cross-repo-nornax-distributed | 3.9 |
+| test-partition | 2.7 |
+| benchmark-guard, lint | 2.4, 2.1 |
+
