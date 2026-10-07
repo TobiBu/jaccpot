@@ -40,7 +40,8 @@ On `main` at 6cca378 (2026-10-06):
 | --- | --- | --- | --- | --- |
 | P0 | #369 | CI: each test once per push; shard partition checked; this record | CI 16/16 | open |
 | P1 | #370 | Safety net: Odisseo contract test, lane goldens, inventory, gradient twins on real, GPU pins; leaf-P2M padding fix | CPU suite | open |
-| J | | Real-basis jerk and time derivatives; exact real derivative tower | CPU suite | in progress |
+| J | #371 | Real-basis jerk and time derivatives; exact real derivative tower | CPU suite | open |
+| X1 | | Treecode walk (single-GPU + distributed), `jaccpot/experimental`, `_large_n_farfield` | CPU suite, distributed tier | open |
 
 ### P0: CI runs each test once
 
@@ -192,4 +193,31 @@ after X3 and J have removed or ported the 22 tests that need them. No mass edit 
 The jerk / time-derivative tests in `test_solver_api.py` now run on both bases. The
 source-motion multipoles are also checked against central finite differences at frozen
 centres, an oracle that does not need the complex basis.
+
+### X1: treecode, experimental, dead far field (-9.6k lines)
+
+**Removed:**
+- the per-leaf treecode walk, in both of its opt-ins: the single-GPU env switch and
+  `DistributedFMMConfig(local_walk="treecode")`. Its box MAC is dynamically unstable, it
+  took no pair policy, and the flat walk replaced it;
+- `jaccpot/experimental/`, the `experimental` pytest marker, and everything that kept the
+  prototypes out of the default run;
+- `runtime/_large_n_farfield.py`, which had no importer;
+- the radix benchmark worker and the three scripts that drove it.
+
+Naming the removed walk (the env switch, or `local_walk="treecode"`) now raises with a
+removal message.
+
+**Tests:**
+- Deleted, tag (a): the treecode tests, the experimental tests, the `_large_n_farfield`
+  contract, the worker symbol test, and `test_octree_fmm_scaffolding.py`. That file was
+  module-marked experimental, so it never ran by default; its subject is X2's.
+- Converted: two tests now assert the removal errors.
+- Not found by the inventory: four tests reached the treecode only through monkeypatching
+  or config. They were found by grepping for the removed names.
+
+**Gates:** CPU suite 2,334 passed and 162 skipped (the one failure is the stale local
+nornax checkout); distributed driver and Dehnen-criterion tests on two forced devices,
+10 passed; `test_shards.py check` 2,562 tests in exactly one shard each. The two-card
+GPU gate is still to run.
 
