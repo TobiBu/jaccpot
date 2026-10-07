@@ -28,6 +28,7 @@ from jax import lax
 from jaxtyping import Array
 
 from jaccpot.operators.dtypes import floor_squared_radius
+from jaccpot.operators.real_harmonic_derivatives import lower_real_coefficients
 from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 from jaccpot.runtime.grad_options import analytic_l2p_vjp_enabled
 
@@ -562,8 +563,16 @@ def evaluate_local_real_derivative_tower(
     :func:`~jaccpot.operators.symmetric_tensors.symmetric_multi_indices_3d`.
     ``D0`` has shape ``(1,)`` and holds the potential.
 
-    This mirrors :func:`evaluate_local_complex_derivative_tower` (also autodiff
-    based) so downstream L2P code can consume either basis's tower identically.
+    EXACT AT EVERY OFFSET. Each component is the expansion of the LOWERED
+    coefficients, ``d^alpha phi = (A_alpha^T F) . U(delta)``
+    (:mod:`jaccpot.operators.real_harmonic_derivatives`), evaluated by
+    :func:`evaluate_local_real`. The tower used to differentiate the polar form with
+    nested ``jax.jacfwd``; its floored ``r`` and ``rho`` dropped the curvature at
+    ``delta = 0`` and on the z-axis (measured: the U_2^0 Hessian at 0 had diagonal
+    (0, 0, 1.5) instead of (-1/2, -1/2, 1); D2 / D3 jumped by up to 0.5 / 1.5 for
+    unit coefficients), and a target alone in its leaf sits exactly on the leaf's
+    centre of mass. ``_evaluate_local_real_derivative_tower_autodiff`` keeps the old
+    form as a test oracle at generic offsets.
 
     Parameters
     ----------
@@ -595,6 +604,56 @@ def evaluate_local_real_derivative_tower(
     k_max = int(max_derivative_order)
     if k_max < 0:
         raise ValueError("max_derivative_order must be non-negative")
+    coeffs = jnp.asarray(local_coeffs)
+    d = jnp.asarray(delta)
+
+    def phi(f: Array) -> Array:
+        return evaluate_local_real(f, d, order=p)
+
+    out: list[Array] = [jnp.reshape(phi(coeffs), (1,))]
+    for k in range(1, k_max + 1):
+        lowered = jnp.stack(
+            [
+                lower_real_coefficients(coeffs, alpha, order=p)
+                for alpha in symmetric_multi_indices_3d(k)
+            ]
+        )
+        # ``d`` is not batched, so the harmonics are evaluated once per point.
+        out.append(jax.vmap(phi)(lowered))
+    return tuple(out)
+
+
+def _evaluate_local_real_derivative_tower_autodiff(
+    local_coeffs: Array,
+    delta: Array,
+    *,
+    order: int,
+    max_derivative_order: int,
+) -> Tuple[Array, ...]:
+    """The previous tower: nested ``jax.jacfwd`` through the polar form.
+
+    Correct at generic offsets and kept as the oracle the exact tower is tested
+    against there; WRONG for derivatives of order >= 2 at ``delta = 0`` and on the
+    z-axis (see :func:`evaluate_local_real_derivative_tower`). Not for production.
+
+    Parameters
+    ----------
+    local_coeffs : Array
+        Packed real local coefficients.
+    delta : Array
+        Offset ``centre - eval_point``.
+    order : int
+        Expansion order ``p``.
+    max_derivative_order : int
+        Highest derivative order ``K`` to return.
+
+    Returns
+    -------
+    Tuple[Array, ...]
+        ``D0..DK`` in the layout of :func:`evaluate_local_real_derivative_tower`.
+    """
+    p = int(order)
+    k_max = int(max_derivative_order)
 
     def phi(d: Array) -> Array:
         return evaluate_local_real(local_coeffs, d, order=p)
