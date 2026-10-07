@@ -913,6 +913,7 @@ class FastMultipoleMethod:
                     "dehnen_radius_scale", advanced_cfg.dehnen_radius_scale
                 )
             ),
+            softening_floor=float(advanced_cfg.softening_floor),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,

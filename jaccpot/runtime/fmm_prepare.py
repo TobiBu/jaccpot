@@ -1486,6 +1486,7 @@ class PrepareMixin(_EngineBase):
             refine_local=refine_local_val,
             max_refine_levels=max_refine_levels_val,
             aspect_threshold=aspect_threshold_val,
+            separation_floor=self._walk_separation_floor(),
             pair_policy_identity=pair_policy_cache_identity(
                 pair_policy=pair_policy,
                 policy_state=policy_state,
@@ -1577,6 +1578,7 @@ class PrepareMixin(_EngineBase):
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             walk_geometry,
+            separation_floor=self._walk_separation_floor(),
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,
@@ -3732,6 +3734,7 @@ class PrepareMixin(_EngineBase):
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             walk_geometry,
+            separation_floor=self._walk_separation_floor(),
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
             strict_max_neighbors_per_leaf_override=strict_nbr_override,

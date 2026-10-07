@@ -1022,6 +1022,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
@@ -1098,6 +1099,10 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     extra_overflow : Optional[Array]
         An upstream capacity flag treated like the walk's own -- today the
         cell-leaf partition's ``leaf_capacity``.
+
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units), ``0`` for none; the
+        flat walk applies it, the other walks raise.
 
     Returns
     -------
@@ -1207,6 +1212,14 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         if flat_walk_explicit:
             raise RuntimeError(flat_walk_blocker)
         flat_walk_enabled = False
+    if not flat_walk_enabled and _walk_separation_floor(separation_floor) > 0.0:
+        raise RuntimeError(
+            "softening_floor (a separation floor on accepted far pairs) is applied "
+            "by the strict fused lane's flat walk only, and this configuration "
+            "takes another walk"
+            + (f" ({flat_walk_blocker})" if flat_walk_blocker else "")
+            + "."
+        )
     if flat_walk_enabled:
         assert compact_far_pair_capacity is not None
         floor = dict(flat_walk_capacity_floor or {})
@@ -1246,6 +1259,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             extra_overflow=extra_overflow,
             far_floor=0 if far_named else far_floor,
             near_floor=0 if near_edge_named else near_floor,
+            separation_floor=separation_floor,
         )
     if treecode_enabled:
         if pair_policy is not None or policy_state is not None:
@@ -3327,6 +3341,7 @@ def _interaction_cache_key(
     max_refine_levels: Optional[int],
     aspect_threshold: Optional[float],
     pair_policy_identity: str,
+    separation_floor: float = 0.0,
 ) -> Optional[str]:
     """Return a hash for the interaction list of a tree/theta configuration.
 
@@ -3375,6 +3390,10 @@ def _interaction_cache_key(
         default on purpose: a silent default is how the criterion came to be
         missing from this key. See :func:`pair_policy_cache_identity`.
 
+    separation_floor : float
+        The walk's separation floor (length units); part of the key, since it
+        changes the lists.
+
     Returns
     -------
     Optional[str]
@@ -3413,6 +3432,10 @@ def _interaction_cache_key(
     dehnen_scale_bytes = np.asarray(
         float(dehnen_radius_scale), dtype=np.float64
     ).tobytes()
+    if float(separation_floor) > 0.0:
+        dehnen_scale_bytes += b"floor" + np.asarray(
+            float(separation_floor), dtype=np.float64
+        ).tobytes()
     basis_bytes = str(expansion_basis).encode("utf8")
     center_mode_bytes = str(center_mode).encode("utf8")
     if traversal_config is not None:
@@ -3455,6 +3478,7 @@ def _build_dual_tree_artifacts(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     cache_key: Optional[str],
     cache_entry: Optional[_InteractionCacheEntry],
     max_pair_queue: Optional[int],
@@ -3561,6 +3585,10 @@ def _build_dual_tree_artifacts(
         An upstream capacity flag treated like the walk's own; forwarded to the
         strict streamed builder as ``extra_overflow``.
 
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units), ``0`` for none. Only
+        the strict fused lane's flat walk applies it; any other walk raises.
+
     Returns
     -------
     tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]
@@ -3615,6 +3643,7 @@ def _build_dual_tree_artifacts(
                 grouped_interactions=grouped_interactions,
                 need_traversal_result=need_traversal_result,
             )
+        strict_streamed_split = False
         if use_split_build:
             strict_streamed_split = bool(
                 fail_fast
@@ -3624,6 +3653,15 @@ def _build_dual_tree_artifacts(
                 and not bool(grouped_interactions)
                 and not bool(need_traversal_result)
             )
+        if _walk_separation_floor(separation_floor) > 0.0 and not (
+            use_split_build and strict_streamed_split
+        ):
+            raise RuntimeError(
+                "softening_floor (a separation floor on accepted far pairs) is "
+                "applied by the strict fused lane's flat walk only; this prepare "
+                "takes another dual-tree build."
+            )
+        if use_split_build:
             split_artifacts = (
                 _build_dual_tree_artifacts_split_strict_streamed(
                     tree=tree,
@@ -3642,6 +3680,7 @@ def _build_dual_tree_artifacts(
                     ),
                     flat_walk_capacity_floor=strict_flat_walk_capacity_floor,
                     extra_overflow=strict_extra_overflow,
+                    separation_floor=separation_floor,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(

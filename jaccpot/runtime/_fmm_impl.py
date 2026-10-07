@@ -308,6 +308,9 @@ class FMMEngine(
         rather than in a group because it straddles traversal and accuracy.
     dehnen_radius_scale : float
         Scale applied to node radii in the Dehnen MAC.
+    softening_floor : float
+        Minimum gap of an accepted far pair, in softening lengths (see
+        :class:`jaccpot.config.FMMAdvancedConfig`). ``0``: none.
     interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
         Called once per dual-tree retry, when the traversal overflows its pair
         capacity and re-runs with a larger one. Purely observational -- use it to
@@ -413,6 +416,7 @@ class FMMEngine(
         # before the traversal sees it. See the alias.
         mac_type: MACTypeInput = "bh",
         dehnen_radius_scale: float = 1.0,
+        softening_floor: float = 0.0,
         # DualTreeTraversalConfig (replace all four capacities), or a
         # TraversalOverrides / mapping of named capacities (merge onto the
         # preset's resolved sizing). See normalize_traversal_config_request.
@@ -567,6 +571,9 @@ class FMMEngine(
             precompute_grouped_class_segments=precompute_grouped_class_segments,
             upward_leaf_batch_size=upward_leaf_batch_size,
         )
+        if float(softening_floor) < 0.0:
+            raise ValueError("softening_floor must be >= 0")
+        self.softening_floor = float(softening_floor)
         self._resolve_tree_options(
             dehnen_radius_scale=dehnen_radius_scale,
             host_refine_mode=host_refine_mode,
@@ -1118,6 +1125,23 @@ class FMMEngine(
         )
         if self.upward_leaf_batch_size is not None and self.upward_leaf_batch_size <= 0:
             raise ValueError("upward_leaf_batch_size must be > 0 when provided")
+
+    def _walk_separation_floor(self) -> float:
+        """The walk's separation floor in length units: ``softening_floor`` x softening.
+
+        ``JACCPOT_WALK_SEPARATION_FLOOR`` (an absolute length) stands in when the
+        option is ``0``, for experiments.
+
+        Returns
+        -------
+        float
+            The floor; ``0`` for none.
+        """
+        from jaccpot.runtime._interaction_cache import _walk_separation_floor
+
+        return _walk_separation_floor(
+            float(getattr(self, "softening_floor", 0.0)) * float(self.softening)
+        )
 
     def _resolve_tree_options(
         self,
