@@ -31,6 +31,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.operators._precision import HIGHEST
 from jaccpot.operators.real_harmonic_derivatives import real_harmonic_lowering_matrix
 from jaccpot.operators.real_harmonics import m2m_real, p2m_real_direct, sh_size
 from jaccpot.runtime._level_shapes import level_batch_width as _level_batch_width
@@ -218,13 +219,15 @@ def _p2m_leaves_real(
             pos_i: Array, mass_i: Array, center_i: Array, vel_i: Array
         ) -> Array:
             # (v . grad)^k of m U(x - c), applied to every particle's coefficients:
-            # d/d axis U = A_axis U, so one step is sum_a v_a (W @ A_a^T)
+            # d/d axis U = A_axis U, so one step is sum_a v_a (W @ A_a^T). Full
+            # fp32 precision: XLA lowers fp32 matmuls to TF32 on Ampere+ by default
+            # (see operators/_precision.py).
             out = _p2m_real_batch(pos_i - center_i, mass_i)
             for _ in range(k_time):
-                out = (
-                    vel_i[:, 0:1] * (out @ lowering_t[0])
-                    + vel_i[:, 1:2] * (out @ lowering_t[1])
-                    + vel_i[:, 2:3] * (out @ lowering_t[2])
+                out = sum(
+                    vel_i[:, a : a + 1]
+                    * jnp.matmul(out, lowering_t[a], precision=HIGHEST)
+                    for a in range(3)
                 )
             return out
 

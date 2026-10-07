@@ -33,6 +33,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
+from ._precision import highest_matmul_precision
 from ._sh_indexing import sh_index, sh_size
 
 __all__ = ["lower_real_coefficients", "real_harmonic_lowering_matrix"]
@@ -82,7 +83,7 @@ def _multi_index_matrix(order: int, alpha: tuple[int, int, int]) -> np.ndarray:
     out = np.eye(sh_size(order))
     for axis, power in enumerate(alpha):
         for _ in range(int(power)):
-            out = out @ _lowering_matrix(order, axis)
+            out = np.matmul(out, _lowering_matrix(order, axis))
     out.setflags(write=False)
     return out
 
@@ -116,6 +117,7 @@ def real_harmonic_lowering_matrix(order: int, axis: int) -> np.ndarray:
     return _lowering_matrix(int(order), int(axis))
 
 
+@highest_matmul_precision
 def lower_real_coefficients(
     coeffs: Array, alpha: tuple[int, int, int], *, order: int
 ) -> Array:
