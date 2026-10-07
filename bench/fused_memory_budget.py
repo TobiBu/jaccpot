@@ -180,6 +180,31 @@ def _args() -> argparse.Namespace:
         choices=("ferrers3", "wendland_c2", "plummer"),
         help="pair softening kernel (jaccpot.softening); the reference uses the same",
     )
+    ap.add_argument(
+        "--mac-type",
+        default="dehnen",
+        choices=("dehnen", "dehnen_error"),
+        help="multipole acceptance: the geometric Dehnen MAC, or Dehnen (2014) eq "
+        "(16a) evaluated per pair inside the flat walk",
+    )
+    ap.add_argument(
+        "--adaptive-eps",
+        type=float,
+        default=None,
+        help="eq (16)'s relative force-accuracy target (mandatory with dehnen_error)",
+    )
+    ap.add_argument(
+        "--mac-force-scale-mode",
+        default="paper_fb",
+        help="per-node force scale of eq (16): paper_fb = eq (16b)'s f_b prepass "
+        "(the mesh lane's), paper = eq (16a)'s |a_b| prepass",
+    )
+    ap.add_argument(
+        "--error-arrays",
+        action="store_true",
+        help="with --accuracy-targets: also score da/f (f = sum G m / r^2, fp64) and "
+        "save every target's errors next to --out (<out>.err.npz)",
+    )
     ap.add_argument("--env", nargs="*", default=[], metavar="KEY=VAL")
     ap.add_argument("--out", required=True)
     return ap.parse_args()
@@ -608,9 +633,18 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
                 if _TRAV
                 else RuntimePolicyConfig()
             ),
-            mac_type="dehnen",
+            mac_type=str(ARGS.mac_type),
         ),
         fixed_order=ARGS.order,
+        **(
+            dict(
+                adaptive_eps=float(ARGS.adaptive_eps),
+                adaptive_error_model="dehnen_paper",
+                mac_force_scale_mode=str(ARGS.mac_force_scale_mode),
+            )
+            if ARGS.mac_type == "dehnen_error"
+            else {}
+        ),
     )
 
 
@@ -840,6 +874,38 @@ def _direct_kernel_fp64(pos, mass, idx, soft: float, kernel: str):
     return np.concatenate(out)
 
 
+def _force_scale_reference(pos, mass, soft: float, idx, acc_cache: str) -> np.ndarray:
+    """``f_b = sum_{a != b} G m_a / (|x_a - x_b|^2 + eps^2)`` at the targets, fp64.
+
+    Dehnen (2014) eq (4)'s force scale (softened like the force), the
+    denominator of the scaled error ``da/f`` his eq (16b) controls. Cached next to
+    the acceleration reference.
+    """
+    cache = acc_cache.replace("direct_fp64_", "fscale_fp64_")
+    if os.path.exists(cache):
+        return np.load(cache)
+    import jax
+
+    @jax.jit
+    def _block(tp, tg, sp, sm, sg):
+        d = tp[:, None, :] - sp[None, :, :]
+        r2 = jnp.sum(d * d, axis=-1) + soft**2
+        w = jnp.where(tg[:, None] == sg[None, :], 0.0, sm[None, :] / r2)
+        return jnp.sum(w, axis=1)
+
+    p64 = jnp.asarray(np.asarray(pos, np.float64))
+    m64 = jnp.asarray(np.asarray(mass, np.float64))
+    gid = jnp.arange(p64.shape[0], dtype=jnp.int64)
+    ti = jnp.asarray(np.asarray(idx, np.int64))
+    block = max(1, (1 << 30) // max(int(p64.shape[0]) * 8, 1))
+    out = np.empty(len(idx), np.float64)
+    for a in range(0, len(idx), block):
+        b = min(a + block, len(idx))
+        out[a:b] = np.asarray(_block(p64[ti[a:b]], ti[a:b], p64, m64, gid))
+    np.save(cache, out)
+    return out
+
+
 def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
     """fp64 direct-sum score of the eager force (``--accuracy-targets``)."""
     if a_host is None:
@@ -883,6 +949,8 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
             softening=soft,
             target_indices=idx,
         )
+        if ARGS.error_arrays:
+            np.save(cache, ref)  # the distribution runs reuse 16k-target references
     got = a_host[idx]
     err = np.linalg.norm(got - ref, axis=1) / np.maximum(
         np.linalg.norm(ref, axis=1), 1e-300
@@ -892,8 +960,29 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
         rel_l2=float(np.linalg.norm(got - ref) / np.linalg.norm(ref)),
         median=float(np.median(err)),
         p90=float(np.percentile(err, 90)),
+        p99=float(np.percentile(err, 99)),
+        p999=float(np.percentile(err, 99.9)),
         max=float(err.max()),
     )
+    if ARGS.error_arrays:
+        f = _force_scale_reference(pos, mass, soft, idx, cache)
+        err_f = np.linalg.norm(got - ref, axis=1) / np.maximum(f, 1e-300)
+        result["accuracy"]["scaled"] = dict(
+            median=float(np.median(err_f)),
+            p90=float(np.percentile(err_f, 90)),
+            p99=float(np.percentile(err_f, 99)),
+            p999=float(np.percentile(err_f, 99.9)),
+            max=float(err_f.max()),
+        )
+        np.savez(
+            os.path.splitext(ARGS.out)[0] + ".err.npz",
+            idx=idx,
+            da_over_a=err,
+            da_over_f=err_f,
+            a_ref_norm=np.linalg.norm(ref, axis=1),
+            f=f,
+            r=np.linalg.norm(np.asarray(pos)[idx], axis=1),
+        )
     print(
         f"accuracy vs fp64 direct ({len(idx)} targets): {result['accuracy']}",
         flush=True,
