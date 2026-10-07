@@ -303,7 +303,7 @@ def _com_radii(
     internal: str,
     num_levels: Optional[int],
     kernel: str = "xla",
-    block: int = 16,
+    block: int = 32,
     chunk: int = 8,
     num_warps: int = 4,
     variant: str = "table",
@@ -337,7 +337,8 @@ def _com_radii(
         particles read once per chunk of ``chunk`` levels). Exact mode only.
         Static.
     block : int
-        Leaves per Pallas program (a power of two). Static.
+        Leaves per Pallas program (a power of two). Static. 32: the table kernel
+        alone on the 8e6 cell tree (A100, 2026-10-06) 5.43 ms at 16, 5.07 at 32.
     chunk : int
         Ancestor levels per pass over the particles. Static.
     num_warps : int

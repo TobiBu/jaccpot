@@ -1,0 +1,43 @@
+== lists tune (interleaved) c8_lists0
+/tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/c8_lists0.npz: W 29360128 live 19546987 rows 1757183 options {'num_rows': 1757183, 'row_offset': 0, 'pad_source': -1, 'slices': 1}
+  base                                     reference
+  slices=2                                 bitwise
+  slices=3                                 bitwise
+  slices=4                                 bitwise
+  slices=6                                 bitwise
+  relaxed=1                                bitwise
+  slices=2,relaxed=1                       bitwise
+  slices=4,relaxed=1                       bitwise
+  base                                     min per round  10.668   6.746   6.892  | median   6.789 ms
+  slices=2                                 min per round   8.727   6.285   6.300  | median   6.301 ms
+  slices=3                                 min per round   8.749   6.156   6.187  | median   6.192 ms
+  slices=4                                 min per round   8.964   6.223   6.256  | median   6.239 ms
+  slices=6                                 min per round   9.512   6.687   6.640  | median   6.691 ms
+  relaxed=1                                min per round   8.973   6.819   6.824  | median   6.855 ms
+  slices=2,relaxed=1                       min per round   6.146   6.138   6.156  | median   6.172 ms
+  slices=4,relaxed=1                       min per round   5.881   5.970   5.886  | median   5.904 ms
+== lists tune (interleaved) c8_lists1
+/tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/cap/c8_lists1.npz: W 7340032 live 4707039 rows 878592 options {'num_rows': 878592, 'row_offset': 878591, 'pad_source': 0, 'slices': 1}
+  base                                     reference
+  slices=2                                 bitwise
+  slices=3                                 bitwise
+  slices=4                                 bitwise
+  slices=6                                 bitwise
+  relaxed=1                                bitwise
+  slices=2,relaxed=1                       bitwise
+  slices=4,relaxed=1                       bitwise
+  base                                     min per round   2.385   2.407   1.493  | median   1.501 ms
+  slices=2                                 min per round   2.395   2.443   1.495  | median   1.499 ms
+  slices=3                                 min per round   2.458   2.482   1.517  | median   1.526 ms
+  slices=4                                 min per round   2.546   2.569   1.557  | median   1.588 ms
+  slices=6                                 min per round   2.675   2.730   1.645  | median   1.649 ms
+  relaxed=1                                min per round   2.301   2.335   1.450  | median   1.479 ms
+  slices=2,relaxed=1                       min per round   2.317   2.325   1.422  | median   1.440 ms
+  slices=4,relaxed=1                       min per round   2.394   1.469   1.471  | median   1.473 ms
+ab_B3_8e6_1: step 80.6 ms (median 80.9) peak 2.37 GiB (318 B/p) far 39093974
+ab_S2_8e6_1: step 80.4 ms (median 80.5) peak 2.37 GiB (318 B/p) far 39093974
+ab_S4_8e6_1: step 80.4 ms (median 80.4) peak 2.37 GiB (318 B/p) far 39093974
+ab_B3_8e6_2: step 80.7 ms (median 80.9) peak 2.37 GiB (318 B/p) far 39093974
+ab_S2_8e6_2: step 80.2 ms (median 80.4) peak 2.37 GiB (318 B/p) far 39093974
+ab_S4_8e6_2: step 80.6 ms (median 80.7) peak 2.37 GiB (318 B/p) far 39093974
+chain4 done 21:02:19

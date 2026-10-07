@@ -40,21 +40,60 @@ import re
 
 
 def _op_names(hdir: str, module_glob: str) -> dict:
-    op_name = {}
+    """``{module name: {instruction: op_name}}``; ``""`` holds every module's names.
+
+    Instruction names repeat across modules (``_compiled_runner_start`` and
+    ``_compiled_runner`` both have an ``input_scatter_fusion.8``), so a kernel is
+    looked up in its OWN module, which the trace names in ``args.hlo_module``; a
+    module dumped twice keeps its last compile. The merged ``""`` map (first module
+    wins) is only the fallback for events without a module.
+    """
+    per: dict = {}
     inst_re = re.compile(r"^\s*(?:ROOT\s+)?%?([\w.\-]+)\s*=.*?metadata=\{([^}]*)\}")
     name_re = re.compile(r'op_name="([^"]*)"')
     files = sorted(glob.glob(f"{hdir}/{module_glob}after_optimizations.txt"))
     assert files, f"no after_optimizations dump matching {module_glob} in {hdir}"
+    merged: dict = {}
+    head_re = re.compile(r"^%?([\w.\-]+) \(.*\) -> .*\{\s*$")
+    any_re = re.compile(r"^\s*(?:ROOT\s+)?%?([\w.\-]+)\s*=(.*)$")
+    calls_re = re.compile(r"calls=%?([\w.\-]+)")
     for path in files:
+        module = path.split("/")[-1].split(".", 1)[1].split(".sm_")[0]
+        names: dict = {}
+        body_names: dict = collections.defaultdict(collections.Counter)
+        calls: dict = {}
+        comp = None
         for line in open(path):
-            m = inst_re.match(line)
+            h = head_re.match(line)
+            if h:
+                comp = h.group(1)
+                continue
+            if line.startswith("}"):
+                comp = None
+                continue
+            m = any_re.match(line)
             if not m:
                 continue
             n = name_re.search(m.group(2))
             if n:
-                op_name.setdefault(m.group(1), n.group(1))
-    print(f"{len(op_name)} instructions with op_name from {len(files)} dump file(s)")
-    return op_name
+                names.setdefault(m.group(1), n.group(1))
+                if comp is not None:
+                    body_names[comp][n.group(1)] += 1
+            c = calls_re.search(m.group(2))
+            if c:
+                calls.setdefault(m.group(1), c.group(1))
+        # a fusion without metadata of its own (XLA drops it on some multi-output
+        # fusions): the op_name most of its body carries -- the L2P's jvp fusion
+        # read as "unmapped" this way, and was taken for the integrator's kick
+        for inst, comp_name in calls.items():
+            if inst not in names and body_names.get(comp_name):
+                names[inst] = body_names[comp_name].most_common(1)[0][0]
+        for k, v in names.items():
+            merged.setdefault(k, v)
+        per[module] = names  # sorted: the last compile of a module wins
+    per[""] = merged
+    print(f"{len(merged)} instructions with op_name from {len(files)} dump file(s)")
+    return per
 
 
 def _scope(path: str, scope_re: re.Pattern, default: str) -> str:
@@ -80,7 +119,8 @@ def trace(args: argparse.Namespace) -> None:
         top = collections.defaultdict(collections.Counter)
         for e in xs:
             hop = e.get("args", {}).get("hlo_op", "")
-            path = op_name.get(hop, "")
+            names = op_name.get(e.get("args", {}).get("hlo_module", ""), op_name[""])
+            path = names.get(hop, "")
             if hop.startswith("command_buffer"):
                 key = "IN_CUDA_GRAPH"
             elif not hop:
@@ -128,6 +168,8 @@ def buffers(args: argparse.Namespace) -> None:
     scope_re = re.compile(args.scope_re)
     files = sorted(glob.glob(f"{args.hlo_dir}/{args.module_re}buffer-assignment.txt"))
     assert files, f"no buffer-assignment dump matching {args.module_re}"
+    module = files[-1].split("/")[-1].split(".", 1)[1].split(".sm_")[0]
+    module_names = op_name.get(module, op_name[""])
     val_re = re.compile(
         r"value: <\d+ ([\w.\-]+)(?:\{[^}]*\})? @\d+> \(size=(\d+),offset=(\d+)\): (\S+)"
     )
@@ -145,7 +187,7 @@ def buffers(args: argparse.Namespace) -> None:
                         int(m.group(2)),
                         inst,
                         m.group(4),
-                        _scope(op_name.get(inst, ""), scope_re, "unscoped"),
+                        _scope(module_names.get(inst, ""), scope_re, "unscoped"),
                     )
                 )
     if not values:

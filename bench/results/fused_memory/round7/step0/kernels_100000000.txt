@@ -1,0 +1,646 @@
+== /device:GPU:0: kernel 915.05 ms/call
+== fmm_near: 245.67 ms, 10 launches
+    241.59 ms x1.0   pallas_call.492                        4671.0 MiB floor   3.77 ms  (f32[100000000]{0}, f32[100000000]{0}, f32[100000000]{0}) custom-call(%loop_pad_fusion.4, 
+              jaccpot/pallas/nearfield_leafpair_csr.py:1061 _sorted_pallas_call
+      2.30 ms x1.0   loop_pad_fusion.4                      3051.8 MiB floor   2.46 ms  f32[100000064,4]{1,0} fusion(%loop_gather_select_fusion#0, %loop_gather_fusion.5), kind=kL
+              jaccpot/pallas/nearfield_leafpair_csr.py:1129 _sorted_inputs
+              jaccpot/pallas/nearfield_leafpair_csr.py:1127 _sorted_inputs
+      1.56 ms x1.0   loop_maximum_fusion.1                  2040.0 MiB floor   1.65 ms  s32[178257920]{0} fusion(%loop_broadcast_fusion.7, %cond.3.clone#0, %wrapped_slice.7), kin
+              jaccpot/nearfield/_fast_lane.py:1707 compute_leaf_p2p_accelerations_radix_fast_lane
+              jaccpot/nearfield/_fast_lane.py:1738 compute_leaf_p2p_accelerations_radix_fast_lane
+      0.14 ms x1.0   loop_add_maximum_minimum_fusion.1       293.9 MiB floor   0.24 ms  (s32[7704576,1]{1,0}, s32[7704576,1]{1,0}, s32[7704576]{0}) fusion(%input_scatter_fusion.1
+              jaccpot/pallas/nearfield_leafpair_csr.py:1134 _sorted_inputs
+              jaccpot/pallas/nearfield_leafpair_csr.py:1127 _sorted_inputs
+      0.08 ms in 6 launches below 0.1 ms (floor 4.74)
+== fmm_downward: 140.39 ms, 2 launches
+    140.20 ms x1.0   pallas_call.491                        8417.2 MiB floor   6.79 ms  f32[15409151,49]{1,0} custom-call(%bitcast.701.0, %loop_pad_fusion.1, %cond.1.clone#0, %lo
+              jaccpot/pallas/m2l_real_csr_lanes.py:451 m2l_real_csr_lanes_pallas
+              jaccpot/pallas/m2l_real_csr_lanes.py:424 m2l_real_csr_lanes_pallas
+      0.18 ms x1.0   loop_slice_subtract_fusion              238.8 MiB floor   0.19 ms  (s32[15409151]{0}, s32[15409151]{0}) fusion(%loop_reduce_window_fusion.21, %loop_add_fusio
+              jaccpot/pallas/m2l_real_csr.py:473 csr_by_target
+              jaccpot/pallas/m2l_real_csr.py:473 csr_by_target
+      0.00 ms in 0 launches below 0.1 ms (floor 0.00)
+== unmapped: 107.05 ms, 594 launches
+     39.73 ms x1.0   loop_gather_fusion.4                   4196.2 MiB floor   3.38 ms  f32[100000000,1,3]{2,1,0} fusion(%while.170#1, %cond.16#2, %cond.16#1, %cond.16#0, %input_
+              jaccpot/runtime/_large_n_pipeline.py:2314 evaluate_large_n_state.<locals>._fastlane_body
+              jaccpot/runtime/_large_n_pipeline.py:2265 evaluate_large_n_state.<locals>._fastlane_body
+     17.92 ms x48.0  loop_add_multiply_slice_fusion         3096.3 MiB floor 119.88 ms  (f32[2097152,1]{1,0}, f32[2097152,1]{1,0}, f32[2097152]{0}, f32[2097152]{0}, f32[2097152]{
+      6.06 ms x1.0   loop_dynamic_update_slice_fusion.17    8010.9 MiB floor   6.46 ms  f32[100000000,2,3]{2,1,0} fusion(%loop_dynamic_update_slice_fusion.18, %wrapped_slice, %co
+              jaccpot/runtime/fmm_state.py:183 _velocity_verlet_kick_drifted
+              jaccpot/runtime/fmm_state.py:175 _velocity_verlet_kick_drifted
+      4.39 ms x48.0  loop_slice_fusion.9                    2968.3 MiB floor 114.92 ms  (f32[2097152,1]{1,0}, f32[2097152,1]{1,0}) fusion(%loop_add_multiply_slice_fusion#5, %loop
+      4.37 ms x1.0   loop_broadcast_fusion.14               2880.3 MiB floor   2.32 ms  f32[15409151,49]{1,0} fusion(), kind=kLoop, calls=%fused_broadcast.14, backend_config={"de
+      4.35 ms x1.0   loop_dynamic_update_slice_fusion.18    5722.0 MiB floor   4.62 ms  f32[100000000,2,3]{2,1,0} fusion(%arg_tuple.53#1, %loop_add_fusion.11), kind=kLoop, calls=
+              jaccpot/runtime/fmm_strict_run.py:1244 StrictRunMixin.strict_run_v2.<locals>._advance
+              jaccpot/runtime/fmm_strict_run.py:1245 StrictRunMixin.strict_run_v2.<locals>._advance
+      3.45 ms x1.0   loop_add_fusion.11                     4577.6 MiB floor   3.69 ms  f32[100000000,3]{1,0} fusion(%copy.585, %arg_tuple.53#1), kind=kLoop, calls=%fused_add.11
+              jaccpot/runtime/fmm_strict_run.py:1240 StrictRunMixin.strict_run_v2.<locals>._advance
+              jaccpot/runtime/fmm_strict_run.py:1245 StrictRunMixin.strict_run_v2.<locals>._advance
+      2.65 ms x1.0   wrapped_slice                          3433.2 MiB floor   2.77 ms  f32[100000000,1,3]{2,1,0} fusion(%loop_dynamic_update_slice_fusion.18), kind=kLoop, calls=
+              jaccpot/runtime/fmm_state.py:175 _velocity_verlet_kick_drifted
+      2.39 ms x25.0  copy.384                                117.6 MiB floor   2.37 ms  s32[15409151]{0} copy(%loop_add_gather_fusion#0)
+      2.29 ms x25.0  copy.383                                117.6 MiB floor   2.37 ms  s32[15409151]{0} copy(%bitcast.1.0)
+      1.74 ms x1.0   copy.585                               2288.8 MiB floor   1.85 ms  f32[100000000,3]{1,0} copy(%arg_tuple.53#2)
+      1.74 ms x1.0   copy.593                               2288.8 MiB floor   1.85 ms  f32[100000000,3]{1,0} copy(%bitcast.722.0)
+      1.73 ms x0.5   copy.614                               4577.6 MiB floor   1.85 ms  f32[100000000,2,3]{2,1,0} copy(%state_initial.1)
+      1.63 ms x1.0   input_reduce_fusion.17                 1145.0 MiB floor   0.92 ms  (f32[25000,3]{1,0}, f32[25000,3]{1,0}) fusion(%loop_add_fusion.11), kind=kInput, calls=%fu
+              runtime/kernels/_evaluate.py:163 _infer_bounds
+              runtime/kernels/_evaluate.py:162 _infer_bounds
+      1.34 ms x1.0   loop_slice_fusion.10                   1668.9 MiB floor   1.35 ms  f64[6250000,1,3]{2,1,0} fusion(%loop_gather_fusion.5, %loop_gather_select_fusion#0), kind=
+      1.04 ms x1.0   copy.559                               1360.0 MiB floor   1.10 ms  s32[178257920]{0} copy(%loop_broadcast_fusion.7)
+      1.03 ms x1.0   copy.562                               1360.0 MiB floor   1.10 ms  s32[178257920]{0} copy(%loop_broadcast_fusion.7)
+      0.86 ms x0.5   copy.615                               2288.8 MiB floor   0.92 ms  f32[100000000,3]{1,0} copy(%acceleration_initial.1)
+      0.67 ms x7.0   copy.455                                117.6 MiB floor   0.66 ms  s32[15409151]{0} copy(%input_add_gather_reduce_fusion#2)
+      0.64 ms x7.0   copy.454                                117.6 MiB floor   0.66 ms  s32[15409151]{0} copy(%bitcast.4.0)
+      0.63 ms x7.0   copy.442                                117.6 MiB floor   0.66 ms  s32[15409151]{0} copy(%arg_tuple.26#0)
+      0.59 ms x1.0   copy.566                                762.9 MiB floor   0.62 ms  f32[100000000]{0} copy(%loop_broadcast_fusion.13)
+      0.58 ms x1.0   copy.567                                762.9 MiB floor   0.62 ms  f32[100000000]{0} copy(%loop_broadcast_fusion.13)
+      0.57 ms x1.0   copy.372                                762.9 MiB floor   0.62 ms  s32[100000000]{0} copy(%loop_broadcast_fusion.4)
+      0.46 ms x1.0   loop_broadcast_fusion.7                 680.0 MiB floor   0.55 ms  s32[178257920]{0} fusion(), kind=kLoop, calls=%fused_broadcast.7
+              jaccpot/runtime/_interaction_cache.py:2719 _build_flat_walk_artifacts_strict_streamed
+              jaccpot/runtime/_interaction_cache.py:2524 _build_flat_walk_artifacts_strict_streamed
+      0.39 ms x0.5   loop_broadcast_fusion.23               1144.4 MiB floor   0.46 ms  f32[100000000,3]{1,0} fusion(), kind=kLoop, calls=%fused_broadcast.23
+              jaccpot/runtime/fmm_strict_run.py:1969 StrictRunMixin._strict_particle_carry_run.<locals>._runner_for.<locals>._compiled_runner
+              jaccpot/runtime/fmm_strict_run.py:1966 StrictRunMixin._strict_particle_carry_run.<locals>._runner_for.<locals>._compiled_runner
+      0.32 ms x1.0   loop_slice_fusion.11                    429.2 MiB floor   0.35 ms  f64[6250000,1]{1,0} fusion(%loop_gather_select_fusion#0), kind=kLoop, calls=%fused_slice.1
+      0.31 ms x1.0   loop_slice_fusion.13                    405.3 MiB floor   0.33 ms  s32[6250000,1]{1,0} fusion(%input_scatter_fusion.9), kind=kLoop, calls=%fused_slice.13, ba
+      0.26 ms x1.0   loop_add_fusion.14                      295.0 MiB floor   0.24 ms  f64[390625,16,3]{2,1,0} fusion(%loop_slice_fusion.19, %loop_slice_fusion.10), kind=kLoop, 
+      0.26 ms x1.0   loop_broadcast_fusion.13                381.5 MiB floor   0.31 ms  f32[100000000]{0} fusion(), kind=kLoop, calls=%fused_broadcast.13, backend_config={"device
+      0.26 ms x1.0   loop_broadcast_fusion.4                 381.5 MiB floor   0.31 ms  s32[100000000]{0} fusion(), kind=kLoop, calls=%fused_broadcast.4, backend_config={"device_
+      0.13 ms x1.0   loop_reduce_window_fusion.21            117.6 MiB floor   0.09 ms  s32[963072,16]{1,0} fusion(%input_scatter_fusion.6), kind=kLoop, calls=%fused_reduce_windo
+      0.13 ms x1.0   loop_slice_fusion.14                    152.0 MiB floor   0.12 ms  f64[390625,1,3]{2,1,0} fusion(%loop_slice_fusion.10), kind=kLoop, calls=%fused_slice.14, b
+      0.12 ms x48.0  input_reduce_fusion.10                    0.0 MiB floor   0.00 ms  pred[] fusion(), kind=kInput, calls=%fused_reduce.10
+              jaccpot/operators/real_p2m_l2p.py:333 evaluate_local_real
+              jaccpot/operators/real_p2m_l2p.py:305 evaluate_local_real
+      0.11 ms x48.0  input_reduce_fusion.11                    0.0 MiB floor   0.00 ms  pred[] fusion(), kind=kInput, calls=%fused_reduce.11
+              jaccpot/operators/real_p2m_l2p.py:330 evaluate_local_real
+              jaccpot/operators/real_p2m_l2p.py:305 evaluate_local_real
+      1.90 ms in 306 launches below 0.1 ms (floor 1.05)
+== fmm_lists: 99.91 ms, 36 launches
+     20.32 ms x1.0   pallas_call.17                         6970.8 MiB floor   5.62 ms  s32[603979776]{0} custom-call(%pallas_call.9#1, %input_concatenate_fusion.19, %loop_broadc
+              jaccpot/pallas/csr_place.py:500 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+     14.84 ms x1.0   pallas_call.0                          7088.3 MiB floor   5.72 ms  (f32[15409151]{0}, s32[603979776]{0}) custom-call(%loop_select_fusion.12, %loop_select_fus
+              jaccpot/pallas/csr_place.py:474 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+     11.68 ms x1.0   pallas_call.6                          7088.3 MiB floor   5.72 ms  (f32[15409151]{0}, s32[603979776]{0}) custom-call(%loop_select_fusion.12, %loop_select_fus
+              jaccpot/pallas/csr_place.py:474 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+     10.54 ms x1.0   pallas_call.3                          7088.3 MiB floor   5.72 ms  (f32[15409151]{0}, s32[603979776]{0}) custom-call(%loop_select_fusion.12, %loop_select_fus
+              jaccpot/pallas/csr_place.py:474 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      8.58 ms x1.0   pallas_call.9                          7088.3 MiB floor   5.72 ms  (f32[15409151]{0}, s32[603979776]{0}) custom-call(%loop_select_fusion.12, %loop_select_fus
+              jaccpot/pallas/csr_place.py:474 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      6.16 ms x1.0   pallas_call.11                         2128.2 MiB floor   1.72 ms  (f32[7704576]{0}, s32[178257920]{0}) custom-call(%loop_select_fusion.14, %loop_select_fusi
+              jaccpot/pallas/csr_place.py:474 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      4.43 ms x1.0   input_scatter_fusion.6                 1269.6 MiB floor   1.02 ms  s32[15409151]{0} fusion(%input_scatter_fusion.7, %loop_select_fusion.13, %loop_minimum_fus
+              jaccpot/pallas/csr_place.py:445 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      4.35 ms x1.0   pallas_call.19                         2069.4 MiB floor   1.67 ms  s32[178257920]{0} custom-call(%pallas_call.14#1, %input_concatenate_fusion.15, %copy.562),
+              jaccpot/pallas/csr_place.py:500 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      4.32 ms x1.0   pallas_call.14                         2128.2 MiB floor   1.72 ms  (f32[7704576]{0}, s32[178257920]{0}) custom-call(%loop_select_fusion.14, %loop_select_fusi
+              jaccpot/pallas/csr_place.py:474 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      4.32 ms x1.0   input_scatter_fusion.7                 1269.6 MiB floor   1.02 ms  s32[15409151]{0} fusion(%copy.493, %loop_select_fusion.12, %loop_minimum_fusion.16), kind=
+              jaccpot/pallas/csr_place.py:443 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      1.73 ms x1.0   loop_select_fusion.12                  2304.0 MiB floor   1.86 ms  s32[301989888]{0} fusion(%while.26#5, %loop_add_and_minimum_fusion#2), kind=kLoop, calls=%
+              jaccpot/runtime/_interaction_cache.py:2269 _flat_walk_lists
+              jaccpot/pallas/nearfield_leafpair_csr.py:1486 nearfield_leafpair_csr_sorted_direct_pallas
+      1.72 ms x1.0   loop_select_fusion.13                  2304.0 MiB floor   1.86 ms  s32[301989888]{0} fusion(%while.26#6, %loop_add_and_minimum_fusion#2), kind=kLoop, calls=%
+              jaccpot/runtime/_interaction_cache.py:2270 _flat_walk_lists
+              jaccpot/pallas/nearfield_leafpair_csr.py:1486 nearfield_leafpair_csr_sorted_direct_pallas
+      1.57 ms x1.0   loop_broadcast_fusion.3                2304.0 MiB floor   1.86 ms  s32[603979776]{0} fusion(), kind=kLoop, calls=%fused_broadcast.3
+              jaccpot/pallas/csr_place.py:489 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      1.56 ms x1.0   loop_broadcast_fusion.8                2304.0 MiB floor   1.86 ms  s32[603979776]{0} fusion(), kind=kLoop, calls=%fused_broadcast.8
+              jaccpot/pallas/csr_place.py:460 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      1.14 ms x1.0   input_scatter_fusion.11                 398.8 MiB floor   0.32 ms  s32[7704576]{0} fusion(%loop_broadcast_select_fusion#1, %loop_select_fusion.14, %loop_mini
+              jaccpot/pallas/csr_place.py:443 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      1.13 ms x1.0   input_scatter_fusion.10                 398.8 MiB floor   0.32 ms  s32[7704576]{0} fusion(%input_scatter_fusion.11, %loop_select_fusion.15, %loop_minimum_fus
+              jaccpot/pallas/csr_place.py:445 directed_csr_pallas
+              jaccpot/pallas/csr_place.py:441 directed_csr_pallas
+      0.52 ms x1.0   loop_select_fusion.14                   680.0 MiB floor   0.55 ms  s32[89128960]{0} fusion(%while.26#7, %loop_add_and_minimum_fusion#3), kind=kLoop, calls=%f
+              jaccpot/runtime/_interaction_cache.py:2307 _flat_walk_lists
+              jaccpot/pallas/nearfield_leafpair_csr.py:1486 nearfield_leafpair_csr_sorted_direct_pallas
+      0.51 ms x1.0   loop_select_fusion.15                   680.0 MiB floor   0.55 ms  s32[89128960]{0} fusion(%while.26#8, %loop_add_and_minimum_fusion#3), kind=kLoop, calls=%f
+              jaccpot/runtime/_interaction_cache.py:2308 _flat_walk_lists
+              jaccpot/pallas/nearfield_leafpair_csr.py:1486 nearfield_leafpair_csr_sorted_direct_pallas
+      0.14 ms x1.0   input_reduce_fusion.13                    0.1 MiB floor   0.00 ms  s64[18432]{0} fusion(%loop_add_and_minimum_fusion#2), kind=kCustom, calls=%fused_reduce.13
+              jaccpot/runtime/_interaction_cache.py:2066 _directed_csr_from_canonical
+              jaccpot/runtime/_interaction_cache.py:2063 _directed_csr_from_canonical
+      0.38 ms in 17 launches below 0.1 ms (floor 10.00)
+== fmm_walk: 90.45 ms, 261 launches
+      7.49 ms x5.0   pallas_call.223                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      7.37 ms x5.0   pallas_call.215                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      6.70 ms x5.0   pallas_call.207                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      6.64 ms x5.0   pallas_call.239                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      6.41 ms x5.0   pallas_call.231                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      6.33 ms x5.0   pallas_call.199                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      5.75 ms x5.0   pallas_call.247                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      5.52 ms x5.0   pallas_call.191                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      4.87 ms x5.0   pallas_call.183                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      4.69 ms x5.0   pallas_call.255                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      4.61 ms x5.0   pallas_call.263                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      4.32 ms x5.0   pallas_call.175                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      4.14 ms x5.0   pallas_call.271                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      4.07 ms x5.0   pallas_call.295                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      3.92 ms x5.0   pallas_call.287                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      3.74 ms x5.0   pallas_call.279                        7974.3 MiB floor  32.16 ms  (s32[301989888]{0}, s32[301989888]{0}, s32[89128960]{0}, s32[89128960]{0}, s32[67108864]{0
+              jaccpot/pallas/mutual_walk_pallas.py:850 _mutual_walk_jit.<locals>.one_round
+      0.81 ms x1.0   loop_concatenate_fusion.1              1116.8 MiB floor   0.90 ms  f32[15409151,8]{1,0} fusion(%loop_convert_fusion.4, %while.120#1, %loop_select_fusion.24#0
+              jaccpot/pallas/mutual_walk_pallas.py:783 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.78 ms x1.0   loop_broadcast_fusion.19               1152.0 MiB floor   0.93 ms  s32[301989888]{0} fusion(), kind=kLoop, calls=%fused_broadcast.19
+              jaccpot/pallas/mutual_walk_pallas.py:887 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.78 ms x1.0   loop_broadcast_fusion.20               1152.0 MiB floor   0.93 ms  s32[301989888]{0} fusion(), kind=kLoop, calls=%fused_broadcast.20
+              jaccpot/pallas/mutual_walk_pallas.py:888 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.23 ms x1.0   loop_broadcast_fusion.22                340.0 MiB floor   0.27 ms  s32[89128960]{0} fusion(), kind=kLoop, calls=%fused_broadcast.22
+              jaccpot/pallas/mutual_walk_pallas.py:890 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.23 ms x1.0   loop_broadcast_fusion.21                340.0 MiB floor   0.27 ms  s32[89128960]{0} fusion(), kind=kLoop, calls=%fused_broadcast.21
+              jaccpot/pallas/mutual_walk_pallas.py:889 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.18 ms x1.0   loop_pad_fusion.3                       256.0 MiB floor   0.21 ms  s32[67108864]{0} fusion(%input_reduce_fusion.21#1), kind=kLoop, calls=%fused_pad.3
+              jaccpot/pallas/mutual_walk_pallas.py:868 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.18 ms x1.0   loop_broadcast_fusion.17                256.0 MiB floor   0.21 ms  s32[67108864]{0} fusion(), kind=kLoop, calls=%fused_broadcast.17
+              jaccpot/pallas/mutual_walk_pallas.py:884 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.17 ms x1.0   loop_broadcast_fusion.18                256.0 MiB floor   0.21 ms  s32[67108864]{0} fusion(), kind=kLoop, calls=%fused_broadcast.18
+              jaccpot/pallas/mutual_walk_pallas.py:885 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.17 ms x1.0   loop_pad_fusion.2                       256.0 MiB floor   0.21 ms  s32[67108864]{0} fusion(%input_reduce_fusion.21#1), kind=kLoop, calls=%fused_pad.2
+              jaccpot/pallas/mutual_walk_pallas.py:867 _mutual_walk_jit
+              jaccpot/runtime/_interaction_cache.py:2697 _build_flat_walk_artifacts_strict_streamed
+      0.34 ms in 172 launches below 0.1 ms (floor 43.35)
+== fmm_tree: 90.21 ms, 169 launches
+     16.89 ms x20.0  custom-call.2                          3458.7 MiB floor  55.80 ms  (u64[100000000]{0}, s32[100000000]{0}, u8[1226683903]{0}) custom-call(%loop_or_fusion, %wr
+              yggdrax-r6-main/yggdrax/_tree_impl.py:318 _morton_sort
+     16.31 ms x1.0   input_scatter_fusion.13                1144.4 MiB floor   0.92 ms  s32[100000000]{0} fusion(%empty.1, %loop_gather_select_fusion#1), kind=kInput, calls=%fuse
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1152 inverse_permutation
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1150 inverse_permutation
+     10.34 ms x1.0   input_scatter_fusion.8                   73.5 MiB floor   0.06 ms  s32[64]{0} fusion(%loop_broadcast_fusion.6, %while.100#2, %input_broadcast_compare_reduce_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1549 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      9.73 ms x1.0   loop_gather_fusion.5                   2670.3 MiB floor   2.15 ms  f32[100000000,1,3]{2,1,0} fusion(%loop_add_fusion.11, %loop_gather_select_fusion#1), kind=
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1292 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      9.20 ms x1.0   loop_gather_select_fusion              2670.3 MiB floor   2.15 ms  (f32[100000000,1]{1,0}, s32[100000000]{0}, s32[100000000]{0}) fusion(%arg_tuple.53#7, %cus
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1293 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      4.92 ms x25.0  loop_add_gather_fusion                  235.1 MiB floor   4.74 ms  (s32[15409151]{0}, s32[15409151,1]{1,0}) fusion(%arg_tuple.2#2, %arg_tuple.2#1), kind=kLoo
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1530 _build_tree_from_leaf_partitions.<locals>._depth_body
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1531 _build_tree_from_leaf_partitions.<locals>._depth_body
+      2.35 ms x1.0   loop_compare_maximum_fusion             858.3 MiB floor   0.69 ms  (pred[100000000]{0}, s32[100000000,1]{1,0}) fusion(%input_concatenate_fusion.17), kind=kLo
+              yggdrax-r6-main/yggdrax/_cell_partition.py:183 adaptive_cell_leaf_partition
+              yggdrax-r6-main/yggdrax/_cell_partition.py:178 adaptive_cell_leaf_partition
+      2.32 ms x1.0   loop_or_fusion                         3051.8 MiB floor   2.46 ms  u64[100000000]{0} fusion(%loop_broadcast_fusion.12, %loop_subtract_fusion.1#0, %loop_add_f
+              yggdrax-r6-main/yggdrax/morton.py:77 morton_encode_impl
+              yggdrax-r6-main/yggdrax/morton.py:70 morton_encode_impl
+      1.30 ms x12.0  custom-call.3                           533.9 MiB floor   5.17 ms  (s32[15409151]{0}, s64[15409151]{0}, u8[190054911]{0}) custom-call(%while.100#2, %wrapped_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1554 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      1.06 ms x1.0   input_concatenate_fusion.18            1335.1 MiB floor   1.08 ms  pred[100000000]{0} fusion(%loop_compare_maximum_fusion#0, %loop_compare_maximum_fusion#1, 
+              yggdrax-r6-main/yggdrax/_cell_partition.py:187 adaptive_cell_leaf_partition
+              yggdrax-r6-main/yggdrax/_cell_partition.py:178 adaptive_cell_leaf_partition
+      0.89 ms x1.0   input_concatenate_fusion.17            1144.4 MiB floor   0.92 ms  s32[100000064]{0} fusion(%custom-call.2#0), kind=kInput, calls=%fused_concatenate.19
+              yggdrax-r6-main/yggdrax/_cell_partition.py:175 adaptive_cell_leaf_partition
+              yggdrax-r6-main/yggdrax/_cell_partition.py:178 adaptive_cell_leaf_partition
+      0.78 ms x1.0   loop_broadcast_fusion.12               1144.4 MiB floor   0.92 ms  f32[100000000,3]{1,0} fusion(), kind=kLoop, calls=%fused_broadcast.12
+              yggdrax-r6-main/yggdrax/morton.py:70 morton_encode_impl
+              yggdrax-r6-main/yggdrax/morton.py:70 morton_encode_impl
+      0.68 ms x1.0   input_scatter_fusion.16                 917.1 MiB floor   0.74 ms  s32[7704576]{0} fusion(%copy.370, %input_add_reduce_fusion#0, %loop_broadcast_fusion.4, %i
+              yggdrax-r6-main/yggdrax/_cell_partition.py:214 adaptive_cell_leaf_partition
+              yggdrax-r6-main/yggdrax/_cell_partition.py:178 adaptive_cell_leaf_partition
+      0.51 ms x1.0   input_broadcast_compare_reduce_selec    558.4 MiB floor   0.45 ms  (s32[15409151]{0}, s32[15409151]{0}, s32[15409151]{0}, (s32[2437]{0}, s64[2437]{0}), s32[1
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1522 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.48 ms x1.0   input_add_reduce_fusion                 500.8 MiB floor   0.40 ms  (s32[6250000,16]{1,0}, s64[10000]{0}) fusion(%input_concatenate_fusion.18, %loop_add_fusio
+              yggdrax-r6-main/yggdrax/_cell_partition.py:191 adaptive_cell_leaf_partition
+              yggdrax-r6-main/yggdrax/_cell_partition.py:178 adaptive_cell_leaf_partition
+      0.39 ms x1.0   loop_broadcast_select_fusion            909.9 MiB floor   0.73 ms  (u64[7704576]{0}, s32[7704576]{0}) fusion(%custom-call.2#0, %loop_broadcast_fusion.11, %in
+              yggdrax-r6-main/yggdrax/_tree_impl.py:849 build_static_cells_tree
+              yggdrax-r6-main/yggdrax/_tree_impl.py:830 build_static_cells_tree
+      0.28 ms x1.0   loop_and_xor_fusion.6                   227.8 MiB floor   0.18 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.26 ms x1.0   loop_and_xor_fusion.7                   213.1 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.26 ms x1.0   loop_select_fusion.19                   257.2 MiB floor   0.21 ms  s32[7704575]{0} fusion(%loop_and_xor_fusion.6#1, %loop_and_fusion.4, %loop_and_xor_fusion.
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1399 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.26 ms x1.0   wrapped_iota                            381.5 MiB floor   0.31 ms  s32[100000000]{0} fusion(), kind=kLoop, calls=%wrapped_iota_computation
+              yggdrax-r6-main/yggdrax/_tree_impl.py:317 _morton_sort
+              yggdrax-r6-main/yggdrax/_tree_impl.py:318 _morton_sort
+      0.24 ms x1.0   loop_select_xor_fusion                  315.9 MiB floor   0.25 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_s
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.24 ms x1.0   loop_select_xor_fusion.5                315.9 MiB floor   0.25 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_s
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.24 ms x1.0   loop_select_xor_fusion.4                315.9 MiB floor   0.25 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_s
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.24 ms x1.0   loop_select_xor_fusion.3                315.9 MiB floor   0.25 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_s
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.24 ms x1.0   loop_select_xor_fusion.2                315.9 MiB floor   0.25 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_s
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.23 ms x1.0   loop_select_fusion.24                   286.6 MiB floor   0.23 ms  (s32[7704575]{0}, s32[7704575]{0}) fusion(%loop_add_fusion.12, %loop_compare_select_fusion
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1430 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.23 ms x1.0   loop_select_xor_fusion.1                301.3 MiB floor   0.24 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_s
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.22 ms x1.0   loop_compare_xor_fusion.5               279.2 MiB floor   0.23 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.22 ms x1.0   loop_compare_xor_fusion.4               279.2 MiB floor   0.23 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.22 ms x1.0   loop_compare_xor_fusion                 279.2 MiB floor   0.23 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.22 ms x1.0   loop_compare_xor_fusion.1               279.2 MiB floor   0.23 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.22 ms x1.0   loop_compare_xor_fusion.2               279.2 MiB floor   0.23 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.22 ms x1.0   loop_compare_xor_fusion.3               279.2 MiB floor   0.23 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.21 ms x1.0   loop_select_fusion.21                   257.2 MiB floor   0.21 ms  s32[7704575]{0} fusion(%loop_and_xor_fusion.10#1, %loop_and_fusion.6, %loop_and_xor_fusion
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1399 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.21 ms x1.0   loop_compare_select_fusion.9            242.5 MiB floor   0.20 ms  (pred[7704575]{0}, s32[7704575]{0}) fusion(%loop_gather_xor_fusion#0, %loop_gather_xor_fus
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1419 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.21 ms x1.0   loop_select_fusion.22                   257.2 MiB floor   0.21 ms  s32[7704575]{0} fusion(%loop_and_xor_fusion.12#1, %loop_and_fusion.7, %loop_and_xor_fusion
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1399 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.21 ms x1.0   loop_select_fusion.20                   257.2 MiB floor   0.21 ms  s32[7704575]{0} fusion(%loop_and_xor_fusion.8#1, %loop_and_fusion.5, %loop_and_xor_fusion.
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1399 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.21 ms x1.0   loop_and_xor_fusion.1                   264.5 MiB floor   0.21 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.20 ms x1.0   loop_select_xor_fusion.7                257.2 MiB floor   0.21 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_selec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.20 ms x1.0   loop_select_fusion.23                   249.8 MiB floor   0.20 ms  s32[7704575]{0} fusion(%loop_and_xor_fusion.14#1, %loop_and_fusion.10, %loop_select_xor_fu
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1399 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.20 ms x1.0   loop_select_fusion.18                   242.5 MiB floor   0.20 ms  s32[7704575]{0} fusion(%loop_and_xor_fusion.4#1, %loop_and_fusion.3, %loop_and_xor_fusion.
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1399 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.19 ms x1.0   loop_and_xor_fusion                     249.8 MiB floor   0.20 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_gather_xor_fusion#1, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.19 ms x1.0   loop_add_fusion.12                      242.5 MiB floor   0.20 ms  s32[7704575]{0} fusion(%loop_select_xor_fusion.6#1, %loop_and_xor_fusion.15#1, %loop_selec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1401 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.19 ms x1.0   loop_and_fusion.5                       220.4 MiB floor   0.18 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_and_xor_fusion.7#0, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.18 ms x1.0   loop_and_xor_fusion.12                  227.8 MiB floor   0.18 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.18 ms x1.0   loop_and_xor_fusion.10                  227.8 MiB floor   0.18 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.18 ms x1.0   loop_and_xor_fusion.8                   227.8 MiB floor   0.18 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.18 ms x1.0   loop_and_fusion.6                       220.4 MiB floor   0.18 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_and_xor_fusion.9#0, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.18 ms x1.0   loop_and_fusion.8                       220.4 MiB floor   0.18 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_and_xor_fusion.13#0, %loop_broadcast
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.18 ms x1.0   loop_and_fusion.7                       220.4 MiB floor   0.18 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_and_xor_fusion.11#0, %loop_broadcast
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.18 ms x1.0   loop_and_fusion.4                       220.4 MiB floor   0.18 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_and_xor_fusion.5#0, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.17 ms x1.0   loop_and_fusion.10                      213.1 MiB floor   0.17 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_select_xor_fusion.7#0, %loop_broadca
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.17 ms x1.0   loop_and_xor_fusion.14                  220.4 MiB floor   0.18 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.17 ms x1.0   loop_and_fusion.3                       205.7 MiB floor   0.17 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_and_xor_fusion.3#0, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.17 ms x1.0   loop_and_xor_fusion.11                  213.1 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.17 ms x1.0   loop_and_xor_fusion.13                  213.1 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.17 ms x1.0   loop_and_xor_fusion.9                   213.1 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.17 ms x1.0   loop_add_xor_fusion                     220.4 MiB floor   0.18 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_selec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.17 ms x1.0   loop_and_xor_fusion.15                  213.1 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.17 ms x1.0   loop_and_xor_fusion.4                   213.1 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.17 ms x1.0   loop_and_xor_fusion.5                   213.1 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.16 ms x1.0   loop_and_fusion.2                       191.0 MiB floor   0.15 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_and_xor_fusion.2#0, %loop_broadcast_
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.16 ms x1.0   loop_gather_xor_fusion                  205.7 MiB floor   0.17 ms  (u64[7704575,1]{1,0}, u64[7704575,1]{1,0}) fusion(%loop_broadcast_select_fusion#0, %loop_a
+              yggdrax-r6-main/yggdrax/_tree_impl.py:370 _lcp_codes_only
+      0.16 ms x1.0   loop_and_xor_fusion.3                   198.4 MiB floor   0.16 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.15 ms x1.0   loop_and_fusion.9                       183.7 MiB floor   0.15 ms  pred[7704575]{0} fusion(%loop_select_fusion.16, %loop_add_xor_fusion#0, %loop_add_xor_fusi
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1397 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.15 ms x1.0   loop_select_fusion.16                   176.3 MiB floor   0.14 ms  s32[7704575]{0} fusion(%loop_select_xor_fusion.6#0, %loop_select_xor_fusion.6#1, %loop_bro
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1379 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.15 ms x1.0   loop_and_xor_fusion.2                   183.7 MiB floor   0.15 ms  (u64[7704575,1]{1,0}, pred[7704575]{0}) fusion(%loop_broadcast_select_fusion#0, %loop_sele
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.13 ms x1.0   loop_select_xor_fusion.6                147.0 MiB floor   0.12 ms  (u64[7704575,1]{1,0}, s32[7704575]{0}) fusion(%loop_broadcast_select_fusion#0), kind=kLoop
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1371 _build_tree_from_leaf_partitions.<locals>._delta_vec
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1366 _build_tree_from_leaf_partitions.<locals>._delta_vec
+      0.12 ms x1.0   loop_and_fusion.11                      139.6 MiB floor   0.11 ms  pred[7704575]{0} fusion(%loop_compare_select_fusion.9#1, %loop_and_xor_fusion#0, %loop_add
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1419 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.12 ms x1.0   input_scatter_fusion.15                 147.0 MiB floor   0.12 ms  s32[15409151]{0} fusion(%loop_broadcast_fusion.2, %loop_select_fusion.24#1), kind=kInput, 
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1494 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.11 ms x1.0   input_scatter_fusion.14                 147.0 MiB floor   0.12 ms  s32[15409151]{0} fusion(%input_scatter_fusion.15, %loop_select_fusion.24#0), kind=kInput, 
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1495 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      0.10 ms x1.0   input_scatter_fusion.12                 323.3 MiB floor   0.26 ms  s32[15409151,2]{1,0} fusion(%loop_broadcast_fusion.5, %loop_add_fusion.12, %loop_broadcast
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1508 _build_tree_from_leaf_partitions
+              yggdrax-r6-main/yggdrax/_tree_impl.py:1541 _build_tree_from_leaf_partitions
+      1.36 ms in 43 launches below 0.1 ms (floor 1.19)
+== fmm_com_radii: 51.68 ms, 256 launches
+     24.68 ms x6.0   pallas_call.46                         1849.8 MiB floor   8.95 ms  f32[7704576,8]{1,0} custom-call(%arg_tuple.6#6, %arg_tuple.6#7, %bitcast.31.0, %arg_tuple.
+              jaccpot/pallas/com_radii_leaf.py:383 com_radii_table_pallas
+              jaccpot/pallas/com_radii_leaf.py:366 com_radii_table_pallas
+      8.18 ms x6.0   input_scatter_fusion                    749.5 MiB floor   3.63 ms  f32[15409151]{0} fusion(%arg_tuple.6#1, %loop_and_fusion.1, %loop_concatenate_fusion, %pal
+              jaccpot/runtime/_mac_geometry.py:455 _com_radii.<locals>._chunk
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      2.59 ms x6.0   loop_select_fusion                      558.4 MiB floor   2.70 ms  f32[1926144,8]{1,0} fusion(%loop_compare_fusion.3, %pallas_call.46, %loop_concatenate_fusi
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+      2.45 ms x6.0   loop_concatenate_fusion                 521.7 MiB floor   2.52 ms  s32[7704576,8]{1,0} fusion(%copy.435, %loop_and_gather_fusion.5#1, %loop_gather_fusion, %l
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      1.47 ms x6.0   input_concatenate_fusion                352.7 MiB floor   1.71 ms  f32[963072,8]{1,0} fusion(%loop_select_fusion, %input_concatenate_fusion.1, %input_concate
+              jaccpot/runtime/_mac_geometry.py:450 _com_radii.<locals>._chunk
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      1.32 ms x6.0   loop_and_fusion.1                       293.9 MiB floor   1.42 ms  pred[7704576,8]{1,0} fusion(%loop_concatenate_fusion), kind=kLoop, calls=%fused_and.1
+              jaccpot/runtime/_mac_geometry.py:452 _com_radii.<locals>._chunk
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      1.30 ms x6.0   loop_compare_fusion.4                   249.8 MiB floor   1.21 ms  pred[1926143,8]{1,0} fusion(%loop_concatenate_fusion), kind=kLoop, calls=%fused_compare.4
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+      1.25 ms x6.0   loop_compare_fusion.3                   264.5 MiB floor   1.28 ms  pred[3852288,8]{1,0} fusion(%loop_concatenate_fusion), kind=kLoop, calls=%fused_compare.3
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+      0.80 ms x6.0   input_concatenate_fusion.1              330.7 MiB floor   1.60 ms  f32[481536,8]{1,0} fusion(%loop_compare_fusion.5, %loop_select_fusion, %input_concatenate_
+              jaccpot/runtime/_mac_geometry.py:450 _com_radii.<locals>._chunk
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      0.69 ms x6.0   loop_select_fusion.1                    315.9 MiB floor   1.53 ms  f32[481536,8]{1,0} fusion(%loop_compare_fusion.5, %loop_select_fusion, %loop_concatenate_f
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+      0.62 ms x6.0   loop_compare_fusion.5                   242.5 MiB floor   1.17 ms  pred[963072,8]{1,0} fusion(%loop_concatenate_fusion), kind=kLoop, calls=%fused_compare.5
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+      0.52 ms x6.0   loop_and_gather_fusion.4                161.6 MiB floor   0.78 ms  (s32[7704576,1]{1,0}, pred[7704576]{0}) fusion(%arg_tuple.6#3, %loop_and_gather_fusion.5#0
+              jaccpot/runtime/_mac_geometry.py:408 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.51 ms x6.0   loop_and_gather_fusion.2                161.6 MiB floor   0.78 ms  (s32[7704576,1]{1,0}, pred[7704576]{0}) fusion(%arg_tuple.6#3, %loop_and_gather_fusion.3#0
+              jaccpot/runtime/_mac_geometry.py:408 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.50 ms x6.0   loop_and_gather_fusion.3                161.6 MiB floor   0.78 ms  (s32[7704576,1]{1,0}, pred[7704576]{0}) fusion(%arg_tuple.6#3, %loop_and_gather_fusion.4#0
+              jaccpot/runtime/_mac_geometry.py:408 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.50 ms x6.0   loop_and_select_fusion                  161.6 MiB floor   0.78 ms  (s32[7704576]{0}, pred[7704576]{0}) fusion(%loop_and_gather_fusion#0, %arg_tuple.6#3, %loo
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.50 ms x6.0   loop_and_gather_fusion.1                161.6 MiB floor   0.78 ms  (s32[7704576,1]{1,0}, pred[7704576]{0}) fusion(%arg_tuple.6#3, %loop_and_gather_fusion.2#0
+              jaccpot/runtime/_mac_geometry.py:408 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.50 ms x6.0   loop_and_gather_fusion                  161.6 MiB floor   0.78 ms  (s32[7704576,1]{1,0}, pred[7704576]{0}) fusion(%arg_tuple.6#3, %loop_and_gather_fusion.1#0
+              jaccpot/runtime/_mac_geometry.py:408 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.48 ms x6.0   loop_and_gather_fusion.5                154.3 MiB floor   0.75 ms  (s32[7704576,1]{1,0}, pred[7704576]{0}) fusion(%arg_tuple.6#3, %loop_gather_fusion, %copy.
+              jaccpot/runtime/_mac_geometry.py:408 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.44 ms x6.0   input_concatenate_fusion.2              264.5 MiB floor   1.28 ms  f32[240768,8]{1,0} fusion(%loop_select_fusion.1, %input_concatenate_fusion.3, %input_conca
+              jaccpot/runtime/_mac_geometry.py:450 _com_radii.<locals>._chunk
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      0.43 ms x6.0   wrapped_slice.4                          88.2 MiB floor   0.43 ms  s32[7704576,1]{1,0} fusion(%arg_tuple.6#4), kind=kLoop, calls=%wrapped_slice_computation.4
+              jaccpot/runtime/_mac_geometry.py:427 _com_radii.<locals>._chunk
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      0.31 ms x6.0   loop_gather_fusion                      117.6 MiB floor   0.57 ms  s32[7704576,1]{1,0} fusion(%arg_tuple.6#3, %copy.435), kind=kLoop, calls=%fused_gather
+              jaccpot/runtime/_mac_geometry.py:408 _com_radii.<locals>._up
+              jaccpot/runtime/_mac_geometry.py:409 _com_radii.<locals>._up
+      0.22 ms x6.0   input_concatenate_fusion.3              259.0 MiB floor   1.25 ms  f32[120384,8]{1,0} fusion(%loop_compare_fusion.6, %loop_select_fusion.1, %input_concatenat
+              jaccpot/runtime/_mac_geometry.py:450 _com_radii.<locals>._chunk
+              jaccpot/runtime/_mac_geometry.py:422 _com_radii.<locals>._chunk
+      0.21 ms x6.0   loop_select_fusion.2                    255.3 MiB floor   1.24 ms  f32[120384,8]{1,0} fusion(%loop_compare_fusion.6, %loop_select_fusion.1, %loop_concatenate
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+      0.21 ms x6.0   copy.435                                 58.8 MiB floor   0.28 ms  s32[7704576]{0} copy(%arg_tuple.6#2)
+              jaccpot/runtime/_mac_geometry.py:223 com_mac_geometry
+      0.19 ms x6.0   loop_compare_fusion.6                   237.0 MiB floor   1.15 ms  pred[240768,8]{1,0} fusion(%loop_concatenate_fusion), kind=kLoop, calls=%fused_compare.6
+              jaccpot/runtime/_mac_geometry.py:405 _com_radii.<locals>._seg2
+      0.83 ms in 106 launches below 0.1 ms (floor 18.56)
+== fmm_upward: 33.13 ms, 74 launches
+     11.65 ms x1.0   pallas_call.446                        7433.4 MiB floor   6.00 ms  f32[15409151,49]{1,0} custom-call(%bitcast.612.0, %bitcast.586.0, %input_concatenate_fusio
+              jaccpot/pallas/p2m_real_leaf.py:470 p2m_real_leaves_pallas
+              jaccpot/pallas/p2m_real_leaf.py:428 p2m_real_leaves_pallas
+      2.38 ms x1.0   loop_convert_fusion.4                  2227.4 MiB floor   1.80 ms  f32[15409151,1,3]{2,1,0} fusion(%loop_gather_fusion.5, %loop_gather_select_fusion#0, %loop
+              yggdrax-r6-main/yggdrax/tree_moments.py:810 compute_tree_mass_moments
+              yggdrax-r6-main/yggdrax/tree_moments.py:794 compute_tree_mass_moments
+      1.66 ms x1.0   pallas_call.458                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.457, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.51 ms x1.0   pallas_call.455                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.454, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.14 ms x1.0   pallas_call.457                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.456, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.07 ms x1.0   pallas_call.490                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.489, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.00 ms x1.0   pallas_call.461                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.460, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.87 ms x1.0   pallas_call.459                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.458, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.86 ms x1.0   pallas_call.467                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.466, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.85 ms x1.0   pallas_call.460                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.459, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.80 ms x1.0   pallas_call.456                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.455, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.77 ms x1.0   pallas_call.489                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.488, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.75 ms x1.0   pallas_call.454                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.453, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.73 ms x1.0   pallas_call.468                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.467, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.68 ms x1.0   loop_compare_subtract_fusion            811.2 MiB floor   0.65 ms  (pred[15409151]{0}, f64[15409151,1]{1,0}) fusion(%input_broadcast_compare_reduce_select_fu
+              yggdrax-r6-main/yggdrax/tree_moments.py:806 compute_tree_mass_moments
+              yggdrax-r6-main/yggdrax/tree_moments.py:794 compute_tree_mass_moments
+      0.61 ms x1.0   pallas_call.469                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.468, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.54 ms x1.0   pallas_call.462                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.461, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.53 ms x1.0   pallas_call.464                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.463, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.48 ms x1.0   pallas_call.463                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.462, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.48 ms x1.0   pallas_call.466                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.465, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.47 ms x1.0   pallas_call.470                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.469, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.34 ms x1.0   pallas_call.471                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.470, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.32 ms x1.0   loop_pad_fusion.1                       411.5 MiB floor   0.33 ms  f32[15409151,4]{1,0} fusion(%loop_convert_fusion.4), kind=kLoop, calls=%fused_pad.1
+              jaccpot/pallas/cascade_real_lanes.py:486 m2m_real_levels_lanes_pallas
+              jaccpot/pallas/cascade_real_lanes.py:514 m2m_real_levels_lanes_pallas
+      0.30 ms x1.0   pallas_call.465                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.464, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.24 ms x1.0   pallas_call.472                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.471, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.16 ms x1.0   pallas_call.473                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.472, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.15 ms x1.0   pallas_call.488                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.487, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.14 ms x1.0   loop_pad_fusion.5                       186.2 MiB floor   0.15 ms  s32[17992328]{0} fusion(%custom-call.3#1), kind=kLoop, calls=%fused_pad.5
+              jaccpot/pallas/cascade_real_lanes.py:482 m2m_real_levels_lanes_pallas
+              jaccpot/pallas/cascade_real_lanes.py:514 m2m_real_levels_lanes_pallas
+      0.14 ms x1.0   wrapped_slice.3                         264.5 MiB floor   0.21 ms  f32[7704576,1,3]{2,1,0} fusion(%loop_convert_fusion.4), kind=kLoop, calls=%wrapped_slice_c
+              jaccpot/upward/real_tree_expansions.py:484 prepare_real_upward_sweep
+              jaccpot/upward/real_tree_expansions.py:446 prepare_real_upward_sweep
+      0.12 ms x1.0   pallas_call.474                        6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.473, %loop_pad_fusion.1, %loop_select_fusion.24
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.40 ms in 44 launches below 0.1 ms (floor 98.85)
+== fmm_l2p: 29.36 ms, 582 launches
+      8.76 ms x48.0  loop_add_slice_fusion                  3072.3 MiB floor 118.95 ms  (f32[2097152]{0}, f32[2097152,1]{1,0}) fusion(%loop_slice_fusion.9#0, %loop_slice_fusion.9
+              jaccpot/operators/real_p2m_l2p.py:330 evaluate_local_real
+              jaccpot/operators/real_p2m_l2p.py:305 evaluate_local_real
+      6.99 ms x48.0  loop_multiply_select_slice_subtract_   3040.3 MiB floor 117.71 ms  (f32[2097152]{0}, f32[2097152]{0}, f32[2097152,1]{1,0}, f32[2097152,1]{1,0}, f32[2097152,1
+              jaccpot/operators/real_p2m_l2p.py:393 evaluate_local_real
+              jaccpot/operators/real_p2m_l2p.py:305 evaluate_local_real
+      4.86 ms x48.0  loop_dynamic_update_slice_fusion.16    2370.8 MiB floor  91.79 ms  f32[100000000,3]{1,0} fusion(%arg_tuple.13#1, %loop_subtract_fusion, %loop_add_multiply_sl
+              runtime/kernels/_evaluate.py:2217 _evaluate_local_expansions_particle_major.<locals>._chunk
+              runtime/kernels/_evaluate.py:2209 _evaluate_local_expansions_particle_major.<locals>._chunk
+      2.76 ms x48.0  loop_add_divide_maximum_select_fusio     72.0 MiB floor   2.79 ms  (f32[2097152,1]{1,0}, f32[2097152]{0}, f32[2097152,1]{1,0}, f32[2097152]{0}, f32[2097152]{
+              jaccpot/operators/real_p2m_l2p.py:337 evaluate_local_real
+              jaccpot/operators/real_p2m_l2p.py:305 evaluate_local_real
+      2.00 ms x48.0  loop_subtract_fusion                   1352.8 MiB floor  52.37 ms  f32[2097152,1,3]{2,1,0} fusion(%arg_tuple.13#5, %arg_tuple.13#4, %loop_select_fusion.11, %
+              runtime/kernels/_evaluate.py:2212 _evaluate_local_expansions_particle_major.<locals>._chunk
+              runtime/kernels/_evaluate.py:2209 _evaluate_local_expansions_particle_major.<locals>._chunk
+      0.90 ms x1.0   loop_add_fusion.13                      786.8 MiB floor   0.63 ms  s32[6250000,16]{1,0} fusion(%input_scatter_fusion.9, %loop_add_fusion.16), kind=kLoop, cal
+              runtime/kernels/_evaluate.py:2198 _evaluate_local_expansions_particle_major
+              jaccpot/runtime/_large_n_pipeline.py:2287 evaluate_large_n_state.<locals>._fastlane_body
+      0.70 ms x48.0  loop_gather_fusion.2                    418.9 MiB floor  16.22 ms  s32[2097152,1]{1,0} fusion(%arg_tuple.13#3, %arg_tuple.13#2, %loop_convert_fusion.3), kind
+              runtime/kernels/_evaluate.py:2211 _evaluate_local_expansions_particle_major.<locals>._chunk
+              runtime/kernels/_evaluate.py:2209 _evaluate_local_expansions_particle_major.<locals>._chunk
+      0.57 ms x1.0   loop_select_fusion.17                   762.9 MiB floor   0.62 ms  s32[100000000,1]{1,0} fusion(%loop_gather_select_fusion#2), kind=kLoop, calls=%fused_selec
+              runtime/kernels/_evaluate.py:2198 _evaluate_local_expansions_particle_major
+              jaccpot/runtime/_large_n_pipeline.py:2287 evaluate_large_n_state.<locals>._fastlane_body
+      0.41 ms x1.0   input_scatter_fusion.9                  852.9 MiB floor   0.69 ms  s32[100000000]{0} fusion(%copy.372, %loop_broadcast_fusion.11, %input_reduce_reduce_window
+              runtime/kernels/_evaluate.py:2198 _evaluate_local_expansions_particle_major
+              jaccpot/runtime/_large_n_pipeline.py:2287 evaluate_large_n_state.<locals>._fastlane_body
+      0.34 ms x48.0  loop_select_fusion.11                    16.0 MiB floor   0.62 ms  s32[2097152]{0} fusion(%loop_gather_fusion.2), kind=kLoop, calls=%fused_select.11
+              runtime/kernels/_evaluate.py:2215 _evaluate_local_expansions_particle_major.<locals>._chunk
+              runtime/kernels/_evaluate.py:2209 _evaluate_local_expansions_particle_major.<locals>._chunk
+      0.32 ms x48.0  loop_gather_fusion.3                     97.4 MiB floor   3.77 ms  pred[2097152,1]{1,0} fusion(%arg_tuple.13#7, %loop_convert_fusion.3), kind=kLoop, calls=%f
+              runtime/kernels/_evaluate.py:2216 _evaluate_local_expansions_particle_major.<locals>._chunk
+              runtime/kernels/_evaluate.py:2209 _evaluate_local_expansions_particle_major.<locals>._chunk
+      0.15 ms x1.0   loop_compare_fusion.9                    95.4 MiB floor   0.08 ms  pred[100000000]{0} fusion(%input_reduce_fusion.22), kind=kLoop, calls=%fused_compare.9
+              runtime/kernels/_evaluate.py:2201 _evaluate_local_expansions_particle_major
+              jaccpot/runtime/_large_n_pipeline.py:2287 evaluate_large_n_state.<locals>._fastlane_body
+      0.13 ms x48.0  loop_exponential_fusion                   0.0 MiB floor   0.00 ms  f32[13]{0} fusion(), kind=kLoop, calls=%fused_exponential
+              jaccpot/operators/_sh_indexing.py:146 _factorial_table_jax
+              jaccpot/operators/_sh_indexing.py:145 _factorial_table_jax
+      0.13 ms x48.0  loop_divide_fusion                        0.0 MiB floor   0.00 ms  (f32[], f32[], f32[], f32[], f32[], /*index=5*/f32[]) fusion(%loop_exponential_fusion), ki
+              jaccpot/operators/real_p2m_l2p.py:354 evaluate_local_real
+              jaccpot/operators/real_p2m_l2p.py:305 evaluate_local_real
+      0.13 ms x48.0  loop_add_fusion.10                        0.0 MiB floor   0.00 ms  s64[] fusion(%arg_tuple.13#0), kind=kLoop, calls=%fused_add.10, control-predecessors={%loo
+              runtime/kernels/_evaluate.py:2219 _evaluate_local_expansions_particle_major
+      0.12 ms x48.0  loop_convert_fusion.3                     0.0 MiB floor   0.00 ms  s32[] fusion(%arg_tuple.13#0), kind=kLoop, calls=%fused_convert.3
+              runtime/kernels/_evaluate.py:2210 _evaluate_local_expansions_particle_major.<locals>._chunk
+              runtime/kernels/_evaluate.py:2209 _evaluate_local_expansions_particle_major.<locals>._chunk
+      0.10 ms in 2 launches below 0.1 ms (floor 0.05)
+== fmm_l2l: 23.23 ms, 44 launches
+      3.00 ms x1.0   pallas_call.53                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.52, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      2.77 ms x1.0   pallas_call.56                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.55, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.74 ms x1.0   pallas_call.50                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.49, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.49 ms x1.0   pallas_call.20                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%bitcast.719.0, %loop_pad_fusion.1, %input_scatter_fusion.14
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.47 ms x1.0   pallas_call.52                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.51, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.37 ms x1.0   pallas_call.55                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.54, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.28 ms x1.0   pallas_call.43                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.42, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.10 ms x1.0   pallas_call.42                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.41, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.88 ms x1.0   pallas_call.41                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.40, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.87 ms x1.0   pallas_call.49                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.48, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.87 ms x1.0   pallas_call.47                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.45, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.77 ms x1.0   pallas_call.51                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.50, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.72 ms x1.0   pallas_call.54                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.53, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.68 ms x1.0   pallas_call.40                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.39, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.48 ms x1.0   pallas_call.39                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.38, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.47 ms x1.0   pallas_call.48                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.47, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.45 ms x1.0   pallas_call.45                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.44, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.43 ms x1.0   pallas_call.21                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.20, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.32 ms x1.0   pallas_call.38                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.37, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.26 ms x1.0   pallas_call.44                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.43, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.21 ms x1.0   pallas_call.37                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.36, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      0.14 ms x1.0   pallas_call.36                         6123.1 MiB floor   4.94 ms  f32[755048399]{0} custom-call(%pallas_call.35, %loop_pad_fusion.1, %input_scatter_fusion.1
+              jaccpot/pallas/cascade_real_lanes.py:395 _lanes_level_call
+      1.48 ms in 22 launches below 0.1 ms (floor 108.66)
+== fmm_mac_extents: 3.97 ms, 66 launches
+      1.56 ms x7.0   input_add_gather_reduce_fusion          235.1 MiB floor   1.33 ms  (pred[2437]{0}, s32[15409151,1]{1,0}, s32[15409151]{0}) fusion(%arg_tuple.18#0, %arg_tuple
+              yggdrax-r6-main/yggdrax/tree.py:1421 node_levels_from_parent.<locals>.body_fn
+              yggdrax-r6-main/yggdrax/tree.py:1420 node_levels_from_parent.<locals>.body_fn
+      1.45 ms x7.0   input_reduce_select_fusion              293.9 MiB floor   1.66 ms  (pred[2437]{0}, f32[15409151]{0}, pred[2437]{0}) fusion(%arg_tuple.26#1, %arg_tuple.26#3, 
+              yggdrax-r6-main/yggdrax/_interactions_impl.py:972 _propagate_extents.<locals>.body_fn
+      0.84 ms x7.0   loop_gather_fusion.1                    117.6 MiB floor   0.66 ms  s32[15409151,1]{1,0} fusion(%copy.442), kind=kLoop, calls=%fused_gather.1
+              yggdrax-r6-main/yggdrax/_interactions_impl.py:968 _propagate_extents.<locals>.body_fn
+              yggdrax-r6-main/yggdrax/_interactions_impl.py:972 _propagate_extents.<locals>.body_fn
+      0.12 ms in 45 launches below 0.1 ms (floor 3.84)
+== no_hlo_op: 0.00 ms, 2 launches
+      0.00 ms in 2 launches below 0.1 ms (floor 0.00)

@@ -1,0 +1,15 @@
+24150 instructions with op_name from 2 dump file(s)
+== /device:GPU:0: kernel time   915.05 ms/call, busy   915.05, window   921.91, launches 2095
+   fmm_near                     245.67 ms   26.8 %  launches     11   [nearfield_leafpair_csr_direct_first_t16_c64_w64_s8alr 241.59, loop_pad_fusion_4 2.30, loop_maximum_fusion_1 1.56, loop_add_maximum_minimum_fusion_1 0.14, MemcpyD2D 0.05, wrapped_iota_2 0.02]
+   fmm_downward                 140.39 ms   15.3 %  launches      2   [m2l_real_csr_lanes_p6_k32 140.20, loop_slice_subtract_fusion 0.18]
+   fmm_lists                     98.80 ms   10.8 %  launches     38   [directed_csr_rank_k32__1 20.32, directed_csr_place_s0__1 14.84, directed_csr_place_s2 11.68, directed_csr_place_s1__1 10.54, input_scatter_fusion_7 8.75, directed_csr_place_s3 8.58]
+   fmm_walk                      90.45 ms    9.9 %  launches    261   [mutual_walk_round_b64 86.58, loop_concatenate_fusion_1 0.81, loop_broadcast_fusion_19 0.78, loop_broadcast_fusion_20 0.78, loop_broadcast_fusion_22 0.23, loop_broadcast_fusion_21 0.23]
+   fmm_tree                      88.99 ms    9.7 %  launches    167   [void cub::_V_300200_SM_500_600_700_800_900_1000_1010_1200::d 18.01, input_scatter_fusion_13 16.31, input_scatter_fusion_8 10.34, loop_gather_fusion_5 9.73, loop_gather_select_fusion 9.20, loop_add_gather_fusion 4.92]
+   unscoped                      60.66 ms    6.6 %  launches     32   [loop_gather_fusion_4 39.73, loop_dynamic_update_slice_fusion_17 6.06, loop_dynamic_update_slice_fusion_18 4.35, loop_add_fusion_11 3.45, wrapped_slice 2.65, input_reduce_fusion_17 1.63]
+   fmm_com_radii                 53.21 ms    5.8 %  launches    250   [com_radii_table_l8_b16_k8 24.68, input_scatter_fusion 8.18, loop_select_fusion 2.59, loop_and_gather_fusion_4 2.53, loop_concatenate_fusion 2.45, loop_broadcast_fusion_3 1.57]
+   unmapped                      47.16 ms    5.2 %  launches    561   [loop_add_multiply_slice_fusion 17.92, MemcpyD2D 17.16, loop_slice_fusion_9 4.39, loop_broadcast_fusion_14 4.37, loop_slice_fusion_10 1.34, loop_slice_fusion_11 0.32]
+   fmm_upward                    33.13 ms    3.6 %  launches     74   [m2m_real_lanes_p6_k32 17.68, p2m_real_block_p6_b16_c8 11.65, loop_convert_fusion_4 2.38, loop_compare_subtract_fusion 0.68, loop_pad_fusion_1 0.32, loop_pad_fusion_5 0.14]
+   fmm_l2p                       29.40 ms    3.2 %  launches    587   [loop_add_slice_fusion 8.76, loop_multiply_select_slice_subtract_fusion 6.99, loop_dynamic_update_slice_fusion_16 4.86, loop_add_divide_maximum_select_fusion 2.76, loop_subtract_fusion 2.00, loop_add_fusion_13 0.90]
+   fmm_l2l                       23.23 ms    2.5 %  launches     44   [l2l_real_lanes_p6_k32 23.23]
+   fmm_mac_extents                3.97 ms    0.4 %  launches     66   [input_add_gather_reduce_fusion 1.56, input_reduce_select_fusion 1.45, loop_gather_fusion_1 0.84, input_reduce_fusion_1 0.06, MemcpyD2H 0.04, wrapped_or 0.02]
+   no_hlo_op (memcpy/memset)      0.00 ms    0.0 %  launches      1   [MemcpyD2H 0.00, MemcpyH2D 0.00]

@@ -1,0 +1,45 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=2000000 live leaves 257129 -> leaf capacity 295936
+  [    8.7s] before_prepare                     in-use   0.03 GiB  peak   0.08 GiB  
+  [    8.7s] prepare:start                      in-use   0.03 GiB  peak   0.08 GiB  
+  [    8.7s] tree+upward:start                  in-use   0.03 GiB  peak   0.08 GiB  
+  [   49.8s] tree+upward:end                    in-use   0.23 GiB  peak   0.47 GiB  
+  [   49.8s] dual+downward:start                in-use   0.23 GiB  peak   0.47 GiB  
+  [   52.3s] walk+lists:start                   in-use   0.24 GiB  peak   0.47 GiB  
+  [   53.9s] walk:start                         in-use   0.25 GiB  peak   0.47 GiB  {'queue': 262144, 'far_cap': 65536, 'near_cap': 1048576}
+  [   55.8s] walk:end                           in-use   0.27 GiB  peak   0.47 GiB  
+  [   55.8s] walk:start                         in-use   0.25 GiB  peak   0.47 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [   57.7s] walk:end                           in-use   0.27 GiB  peak   0.47 GiB  
+  [   57.7s] walk:start                         in-use   0.25 GiB  peak   0.47 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [   59.6s] walk:end                           in-use   0.27 GiB  peak   0.47 GiB  
+  [   59.6s] walk:start                         in-use   0.25 GiB  peak   0.47 GiB  {'queue': 1048576, 'far_cap': 8912896, 'near_cap': 2097152}
+  [   61.5s] walk:end                           in-use   0.34 GiB  peak   0.47 GiB  
+  [   63.3s] walk+lists:end                     in-use   0.34 GiB  peak   0.50 GiB  
+  [   63.3s] downward:start                     in-use   0.34 GiB  peak   0.50 GiB  
+  [   79.6s] downward:end                       in-use   0.45 GiB  peak   0.66 GiB  
+  [   79.6s] dual+downward:end                  in-use   0.44 GiB  peak   0.66 GiB  
+  [   80.8s] prepare:end                        in-use   0.42 GiB  peak   0.66 GiB  
+  [   80.8s] after_prepare                      in-use   0.42 GiB  peak   0.66 GiB  
+  [   87.4s] after_eval_compile                 in-use   0.44 GiB  peak   0.66 GiB  
+  [   89.0s] after_eval_timing                  in-use   0.42 GiB  peak   0.66 GiB  
+eval-only min 10.24 ms
+  [   89.1s] prepare:start                      in-use   0.18 GiB  peak   0.66 GiB  
+  [   89.1s] tree+upward:start                  in-use   0.18 GiB  peak   0.66 GiB  
+  [  120.6s] tree+upward:end                    in-use   0.31 GiB  peak   0.66 GiB  
+  [  120.6s] dual+downward:start                in-use   0.31 GiB  peak   0.66 GiB  
+  [  120.6s] walk+lists:start                   in-use   0.32 GiB  peak   0.66 GiB  
+  [  121.2s] walk:start                         in-use   0.33 GiB  peak   0.66 GiB  {'queue': 262144, 'far_cap': 8912896, 'near_cap': 2097152}
+  [  123.0s] walk:end                           in-use   0.41 GiB  peak   0.66 GiB  
+  [  123.0s] walk:start                         in-use   0.33 GiB  peak   0.66 GiB  {'queue': 524288, 'far_cap': 8912896, 'near_cap': 2097152}
+  [  125.1s] walk:end                           in-use   0.41 GiB  peak   0.66 GiB  
+  [  125.1s] walk:start                         in-use   0.33 GiB  peak   0.66 GiB  {'queue': 1048576, 'far_cap': 8912896, 'near_cap': 2097152}
+  [  125.1s] walk:end                           in-use   0.41 GiB  peak   0.66 GiB  
+  [  125.1s] walk+lists:end                     in-use   0.42 GiB  peak   0.66 GiB  
+  [  125.1s] downward:start                     in-use   0.42 GiB  peak   0.66 GiB  
+  [  128.8s] downward:end                       in-use   0.53 GiB  peak   0.75 GiB  
+  [  128.8s] dual+downward:end                  in-use   0.52 GiB  peak   0.75 GiB  
+  [  128.8s] prepare:end                        in-use   0.51 GiB  peak   0.75 GiB  
+  [  256.4s] after_scan_compile                 in-use   0.14 GiB  peak   0.75 GiB  
+  [  257.8s] after_scan_timing                  in-use   0.15 GiB  peak   0.75 GiB  
+scan min 30.02 ms/step
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/0f544149-3b57-4277-8c67-aa8871b28ca5/scratchpad/r7/bit/bit_C2.json

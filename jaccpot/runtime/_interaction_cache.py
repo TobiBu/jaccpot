@@ -2266,8 +2266,8 @@ def _flat_walk_lists(
     num_leaves = total_nodes - num_internal
     # --- far pairs: directed, interleaved, prefix-live, capacity-width ---
     far_live = jnp.arange(far_width, dtype=idx) < far_count
-    fa = jnp.where(far_live, _fit_width(far_a, far_width, -1), -1).astype(idx)
-    fb = jnp.where(far_live, _fit_width(far_b, far_width, -1), -1).astype(idx)
+    fa = _fit_width(far_a, far_width, -1).astype(idx)
+    fb = _fit_width(far_b, far_width, -1).astype(idx)
     if deterministic and total_nodes > 0:
         # the directed list already in CSR order (target, then source ascending):
         # the M2L reads it without sorting it again (TargetSortedFarPairs), and
@@ -2287,6 +2287,10 @@ def _flat_walk_lists(
             with_targets=False,
         )
     else:
+        # the CSR builders above read the live prefix only; here the dead slots
+        # are part of the list and must be -1
+        fa = jnp.where(far_live, fa, -1)
+        fb = jnp.where(far_live, fb, -1)
         far_sources = jnp.stack([fb, fa], axis=1).reshape((2 * far_width,))
         far_targets = jnp.stack([fa, fb], axis=1).reshape((2 * far_width,))
     # The flat walk assigns no order tags (they were all -1, 2W int32 of them:
@@ -2304,9 +2308,10 @@ def _flat_walk_lists(
 
     # --- near pairs: directed, one stable sort by target leaf, CSR ---
     near_live = jnp.arange(near_width, dtype=idx) < near_count
-    na = jnp.where(near_live, _fit_width(near_a, near_width, 0), 0).astype(idx)
-    nb = jnp.where(near_live, _fit_width(near_b, near_width, 0), 0).astype(idx)
+    na = _fit_width(near_a, near_width, 0).astype(idx)
+    nb = _fit_width(near_b, near_width, 0).astype(idx)
     if deterministic and num_leaves > 0:
+        # the CSR builder reads the live prefix only (no masked copy of the pairs)
         neighbors, offsets, counts = _near_csr_from_canonical(
             na,
             nb,
@@ -2324,6 +2329,8 @@ def _flat_walk_lists(
             offsets,
             counts,
         )
+    na = jnp.where(near_live, na, 0)
+    nb = jnp.where(near_live, nb, 0)
     tgt = jnp.concatenate([na, nb])
     src = jnp.concatenate([nb, na])
     valid = jnp.concatenate([near_live, near_live])

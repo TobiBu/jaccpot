@@ -93,3 +93,78 @@ def test_particle_major_equals_leaf_major(n_live, n_rows, pad, chunk):
     # dead rows (past every leaf's particles) are zero
     assert not np.any(part[n_live:])
     assert np.any(part[:n_live])
+
+
+@pytest.mark.parametrize("dtype, tol", [(jnp.float64, 1e-13), (jnp.float32, 1e-5)])
+@pytest.mark.parametrize("order", [1, 4, 6])
+def test_pallas_cartesian_l2p_equals_the_autodiff_l2p(dtype, tol, order):
+    """The Pallas particle kernel (interpret mode; gradient by the Cartesian
+    recurrence of the solid harmonics) gives the autodiff gradient of the
+    spherical-angle form to float rounding: the same function, other operations.
+    Empty padding leaves, dead rows past the leaves' particles (zero), a block
+    past the last particle."""
+    import jaccpot.runtime.kernels._evaluate as ev
+
+    global _ORDER
+    saved, _ORDER = _ORDER, order
+    try:
+        local, positions, leaf_nodes, ranges = _case(11, 187, 200, 2)
+    finally:
+        _ORDER = saved
+    local = LocalExpansionData(
+        order=order,
+        centers=local.centers.astype(dtype),
+        coefficients=local.coefficients.astype(dtype),
+    )
+    positions = positions.astype(dtype)
+    kw = dict(leaf_nodes=leaf_nodes, node_ranges=ranges, order=order, chunk=64)
+    ref = np.asarray(
+        ev._evaluate_local_expansions_particle_major(local, positions, **kw)
+    )
+    got = np.asarray(
+        ev._evaluate_local_expansions_particle_major(
+            local, positions, kernel="interpret", **kw
+        )
+    )
+    assert got.dtype == ref.dtype
+    scale = float(np.abs(ref).max())
+    np.testing.assert_allclose(got, ref, rtol=0, atol=tol * scale)
+    assert not np.any(got[187:])
+    assert np.any(got[:187])
+
+
+@pytest.mark.parametrize("block", [32, 64])
+def test_pallas_l2p_finds_each_particles_leaf_in_its_block(block):
+    """The kernel finds each particle's leaf from its block's first leaf (no
+    per-particle leaf array): blocks of 32 / 64 particles over leaves of 1-8 (up to
+    32 leaves a block), empty padding leaves and dead rows at the end."""
+    from jaccpot.pallas.l2p_real import l2p_real_particles_pallas
+
+    local, positions, leaf_nodes, ranges = _case(5, 187, 200, 3)
+    lr = ranges[leaf_nodes]
+    counts = jnp.maximum(lr[:, 1] - lr[:, 0] + 1, 0)
+    ref = np.asarray(
+        _evaluate_local_expansions_particle_major(
+            local,
+            positions,
+            leaf_nodes=leaf_nodes,
+            node_ranges=ranges,
+            order=_ORDER,
+            chunk=64,
+            kernel="interpret",
+        )
+    )
+    got = np.asarray(
+        l2p_real_particles_pallas(
+            local.coefficients,
+            local.centers,
+            positions,
+            leaf_nodes,
+            lr[:, 0],
+            counts,
+            order=_ORDER,
+            block=block,
+            interpret=True,
+        )
+    )
+    assert np.array_equal(got, ref)
