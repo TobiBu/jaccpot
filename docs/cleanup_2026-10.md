@@ -109,6 +109,13 @@ clustered N = 512, against a direct-sum anchor.
 - The large-N lane is float32-only, so its gate is rel-L2 <= 1e-5. Measured: forcing
   `--xla_cpu_max_isa=AVX2` reproduces the golden bitwise; forcing `SSE4_2` moves it by
   1e-7 to 5e-7.
+- **The first lane goldens recorded a bug, found two commits later and fixed here.**
+  `_p2m_leaves_real` dropped the first leaf's multipole whenever its scan batch was
+  wider than the leaf count, which the `large_n_gpu` preset (batch 2048) causes on any
+  tree with fewer than 2048 leaves. It shows up on the pure-JAX real upward (CPU and
+  pre-Ampere GPUs); the A100's Pallas P2M is not affected. The fix moves the large-N
+  lane's direct-sum error on the golden case from 1.05e-3 to 3.9e-4. The two float32
+  lane goldens were regenerated after it. The other 35 goldens did not move.
 
 **Inventory** (`bench/cleanup_inventory.py`). It covers one full CPU run of
 `tests/unit tests/integration tests/characterization` with per-test coverage contexts:

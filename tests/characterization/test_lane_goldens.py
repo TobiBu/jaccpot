@@ -50,7 +50,7 @@ N = 512
 LEAF, ORDER, THETA = 16, 4, 0.6
 FLOAT32_GATE_REL_L2 = 1.0e-5
 FLOAT64_GATE = dict(rtol=1.0e-12, atol=1.0e-12)
-# FMM vs direct sum. Observed: large-N 1.05e-3, block-step 5.0e-4.
+# FMM vs direct sum. Observed: large-N 3.9e-4, block-step 5.0e-4.
 ANCHOR_REL_L2 = 1.0e-2
 
 # The fused lane's switches as Odisseo and the benches set them today (the cleanup
