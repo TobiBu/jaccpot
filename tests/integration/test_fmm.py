@@ -1569,7 +1569,7 @@ def test_nearfield_bucketed_matches_baseline(
         theta=0.6,
         softening=1e-3,
         working_dtype=dtype,
-        expansion_basis="solidfmm",
+        expansion_basis="complex",
         farfield=FarFieldConfig(
             rotation="solidfmm", grouped_interactions=True, mode="class_major"
         ),
@@ -2662,7 +2662,7 @@ def test_prepare_state_reuses_grouped_buffers_from_cache():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
+        expansion_basis="complex",
         farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=True),
         mac_type="dehnen",
     )
@@ -2704,7 +2704,7 @@ def test_prepare_state_reuses_grouped_class_segments_from_cache():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
+        expansion_basis="complex",
         farfield=FarFieldConfig(
             rotation="solidfmm",
             grouped_interactions=True,
@@ -2751,7 +2751,7 @@ def test_prepare_state_cache_key_respects_center_mode():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
+        expansion_basis="complex",
         farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         mac_type="dehnen",
     )
@@ -2843,7 +2843,7 @@ def test_solidfmm_float32_uses_complex64_locals():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
+        expansion_basis="complex",
         farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
     )
@@ -2876,7 +2876,7 @@ def test_solidfmm_float64_uses_complex128_locals():
             theta=0.6,
             softening=1e-3,
             working_dtype=jnp.float64,
-            expansion_basis="solidfmm",
+            expansion_basis="complex",
             farfield=FarFieldConfig(rotation="solidfmm"),
             mac_type="dehnen",
         )
@@ -3339,7 +3339,7 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
+        expansion_basis="complex",
         farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         fixed_order=3,
@@ -3414,7 +3414,7 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="solidfmm",
+        expansion_basis="complex",
         farfield=FarFieldConfig(
             rotation="solidfmm", grouped_interactions=True, mode="pair_grouped"
         ),

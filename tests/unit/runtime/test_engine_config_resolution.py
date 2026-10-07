@@ -248,3 +248,30 @@ class TestBooleanCoercion:
             ).prepare_stage_memory_split_enabled
             is True
         )
+
+
+@pytest.mark.parametrize(
+    "kwargs, mode",
+    [
+        ({"expansion_basis": "solidfmm"}, "real"),
+        ({"expansion_basis": "complex"}, "complex"),
+        ({"expansion_basis": "solidfmm", "basis_impl": "complex_object"}, "complex"),
+        ({"expansion_basis": "solidfmm", "basis_impl": "real_object"}, "real"),
+    ],
+)
+def test_the_spherical_harmonic_family_defaults_to_the_real_basis(kwargs, mode):
+    """``"solidfmm"`` without a basis object is REAL (cleanup 2026-10, D1).
+
+    It used to be complex, so every engine built as ``expansion_basis="solidfmm"``
+    ran the basis the public API had already stopped defaulting to. Naming
+    ``"complex"``, or passing a basis object, still selects explicitly.
+    """
+    from jaccpot.basis import ComplexSHBasis, RealSHBasis
+
+    objects = {"complex_object": ComplexSHBasis(), "real_object": RealSHBasis()}
+    resolved = {
+        k: objects.get(v, v) if k == "basis_impl" else v for k, v in kwargs.items()
+    }
+    engine = FMMEngine(**resolved)
+    assert engine.expansion_basis == "solidfmm"
+    assert engine._solidfmm_basis_mode() == mode
