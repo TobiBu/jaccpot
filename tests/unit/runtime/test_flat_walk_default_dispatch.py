@@ -2,8 +2,8 @@
 
 ``_build_dual_tree_artifacts_split_strict_streamed`` (``runtime/_interaction_cache.py``)
 routes to the flat-emission walk unless ``JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=0``.
-A configuration the flat walk cannot carry -- the treecode walk requested, a MAC
-other than bh/dehnen, a solver-owned pair policy, the non-flat far-pair layout --
+A configuration the flat walk cannot carry -- a MAC other than bh/dehnen, a
+solver-owned pair policy, the non-flat far-pair layout --
 falls back to the dual walk QUIETLY while the flag is merely defaulted, and RAISES
 when the flag was set to ``1`` explicitly (the caller asked for a walk it cannot
 have). Capacities the caller did not name grow eagerly from their floor and the
@@ -125,25 +125,14 @@ def test_flag_zero_takes_the_dual_walk(monkeypatch, tree_and_geometry):
 
 @pytest.mark.parametrize(
     "blocker",
-    ["treecode", "mac", "layout"],
+    ["mac", "layout"],
 )
 def test_defaulted_flag_falls_back_and_explicit_flag_raises(
     monkeypatch, tree_and_geometry, blocker
 ):
     tree, geometry = tree_and_geometry
     mac_type = "dehnen"
-    if blocker == "treecode":
-        # the treecode graft is exercised elsewhere; here only the routing
-        # matters, so its builder is replaced by one that returns a known
-        # (correctly typed) artifacts object built by the dual walk.
-        monkeypatch.setenv(_FLAG, "0")
-        sentinel = _seam(tree, geometry)
-        monkeypatch.delenv(_FLAG)
-        monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
-        monkeypatch.setattr(
-            ic, "_build_treecode_artifacts_strict_streamed", lambda **k: sentinel
-        )
-    elif blocker == "mac":
+    if blocker == "mac":
         mac_type = "engblom"
     else:
         monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "0")
@@ -152,10 +141,7 @@ def test_defaulted_flag_falls_back_and_explicit_flag_raises(
     # defaulted: quiet fallback, the flat builder is never entered
     out = _seam(tree, geometry, mac_type=mac_type)
     assert flat["n"] == 0
-    if blocker == "treecode":
-        assert out is sentinel
-    else:
-        assert int(out.compact_far_pairs.far_pair_count) > 0 or blocker == "layout"
+    assert int(out.compact_far_pairs.far_pair_count) > 0 or blocker == "layout"
 
     # explicit: the caller asked for a walk it cannot have
     monkeypatch.setenv(_FLAG, "1")
