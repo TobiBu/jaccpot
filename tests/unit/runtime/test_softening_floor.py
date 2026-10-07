@@ -83,22 +83,25 @@ def test_floor_is_part_of_the_cache_key():
     assert len({base, a, b}) == 3
 
 
-def _plummer_with_cluster(n, n_cluster, cluster_radius, cluster_mass, seed=0):
+def _plummer_with_cluster(
+    n, n_cluster, cluster_radius, cluster_mass, seed=0, r_clip=20.0
+):
     rng = np.random.default_rng(seed)
     x = rng.uniform(0.0, 1.0, size=n)
     r = 1.0 / np.sqrt(x ** (-2.0 / 3.0) - 1.0)
-    r = np.minimum(r, 20.0)
+    r = np.minimum(r, r_clip)
     mu = rng.uniform(-1.0, 1.0, size=n)
     phi = rng.uniform(0.0, 2.0 * np.pi, size=n)
     st = np.sqrt(1.0 - mu * mu)
     pos = np.stack([r * st * np.cos(phi), r * st * np.sin(phi), r * mu], 1)
     mass = np.full(n, (1.0 - cluster_mass) / (n - n_cluster))
-    # the cluster: a uniform ball well inside one softening length, at the centre
-    u = rng.normal(size=(n_cluster, 3))
-    u /= np.linalg.norm(u, axis=1, keepdims=True)
-    u *= cluster_radius * rng.uniform(size=(n_cluster, 1)) ** (1.0 / 3.0)
-    pos[:n_cluster] = u
-    mass[:n_cluster] = cluster_mass / n_cluster
+    if n_cluster:
+        # the cluster: a uniform ball inside one softening length, at the centre
+        u = rng.normal(size=(n_cluster, 3))
+        u /= np.linalg.norm(u, axis=1, keepdims=True)
+        u *= cluster_radius * rng.uniform(size=(n_cluster, 1)) ** (1.0 / 3.0)
+        pos[:n_cluster] = u
+        mass[:n_cluster] = cluster_mass / n_cluster
     return pos.astype(np.float32), mass.astype(np.float32)
 
 
@@ -178,24 +181,30 @@ def _rel(got, ref):
 
 @pytest.mark.skipif(not _GPU, reason="the strict fused large-N lane is GPU-only")
 def test_a_cluster_smaller_than_epsilon_is_near_field(monkeypatch):
-    eps = 0.05
-    n_cluster = 2048
+    # The box must resolve the cluster into leaves that pass the MAC against each
+    # other: inside the r <= 20 clip a 0.005-wide cluster stays below the Morton
+    # grid, its leaves overlap, and no pair inside it is ever far.
+    eps = 0.3
+    n_cluster = 4096
     pos, mass = _plummer_with_cluster(
-        _N, n_cluster, cluster_radius=0.05 * eps, cluster_mass=0.02
+        _N, n_cluster, cluster_radius=eps / 3.0, cluster_mass=0.05, r_clip=3.0
     )
     rng = np.random.default_rng(1)
     idx = np.concatenate(
-        [np.arange(0, n_cluster, 16), rng.choice(np.arange(n_cluster, _N), 384)]
+        [np.arange(0, n_cluster, 16), rng.choice(np.arange(n_cluster, _N), 512)]
     )
     ref = _direct(pos, mass, idx, eps)
     bare = _rel(_force(monkeypatch, pos, mass, eps, 0.0)[idx], ref)
     floored = _rel(_force(monkeypatch, pos, mass, eps, 5.0)[idx], ref)
-    in_cluster = idx < n_cluster
-    # without the floor the cluster's sub-cells are far pairs at Newton's law,
-    # thousands of times the softened pull between them
-    assert np.median(bare[in_cluster]) > 1.0, np.median(bare[in_cluster])
-    assert floored[in_cluster].max() < 1e-2, floored[in_cluster].max()
-    assert np.median(floored[~in_cluster]) < 1e-3, np.median(floored[~in_cluster])
+    inner = idx < n_cluster
+    # Measured on an A100 (2026-10-07): cluster median / max 0.15 / 4.0 without
+    # the floor -- its sub-cells pull on each other with Newton's law -- and
+    # 1.3e-4 / 4.9e-4 with it; the rest of the sphere 2.5e-2 -> 7.7e-4 (median).
+    assert np.median(bare[inner]) > 0.05 and bare[inner].max() > 1.0
+    assert np.median(floored[inner]) < 1e-3, np.median(floored[inner])
+    assert floored[inner].max() < 2e-3, floored[inner].max()
+    assert np.median(floored[~inner]) < 3e-3, np.median(floored[~inner])
+    assert np.median(bare[~inner]) > 10.0 * np.median(floored[~inner])
 
 
 @pytest.mark.skipif(not _GPU, reason="the strict fused large-N lane is GPU-only")

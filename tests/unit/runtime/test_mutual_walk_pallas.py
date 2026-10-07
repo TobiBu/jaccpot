@@ -213,8 +213,13 @@ def test_walk_backend_flag_parsing(monkeypatch):
         strict_walk_deterministic_rows,
     )
 
+    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_WALK", raising=False)
-    assert strict_walk_backend() == "flat"
+    monkeypatch.delenv("JACCPOT_WALK_PALLAS_INTERPRET", raising=False)
+    # unset: the Pallas walk wherever it lowers (an Ampere+ GPU), else yggdrax's
+    default = "pallas" if pallas_m2l_real_csr_supported() else "flat"
+    assert strict_walk_backend() == default
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK", "Pallas")
     assert strict_walk_backend() == "pallas"
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK", "cuda")
