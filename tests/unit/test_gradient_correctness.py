@@ -68,6 +68,7 @@ def _directional_fd_vs_ad(loss_fn, x, direction, eps=1e-6):
         ("complex", 0.4, 64, 2, 16, 0),  # shallow, low order: near-field only
         ("complex", 0.6, 64, 4, 4, 1),  # deep: non-empty M2L reverse path
         ("real", 0.6, 64, 4, 4, 1),  # deep real basis: rotation-angle M2L
+        ("real", 0.4, 64, 2, 16, 0),  # shallow, low order: near-field only
     ],
 )
 def test_fd_vs_ad_positions(basis, theta, n, order, leaf, min_far):
@@ -114,8 +115,9 @@ def test_fd_vs_ad_masses(basis):
     assert rel < 1e-4, f"FD-vs-AD rel-err {rel:.3e} (fd={fd:.3e}, ad={ad:.3e})"
 
 
+@pytest.mark.parametrize("basis", ["complex", "real"])
 @pytest.mark.parametrize("softening", [1e-2, 0.0])
-def test_no_nan_near_coincident(softening):
+def test_no_nan_near_coincident(softening, basis):
     """Near-coincident particles must not produce NaN/inf gradients."""
     n = 48
     rng = np.random.default_rng(5)
@@ -124,7 +126,7 @@ def test_no_nan_near_coincident(softening):
     positions = jnp.asarray(pos, dtype=jnp.float64)
     masses = jnp.asarray(rng.uniform(0.5, 1.5, size=(n,)), dtype=jnp.float64)
     fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.6, G=1.0, softening=softening
+        basis=basis, use_pallas=False, theta=0.6, G=1.0, softening=softening
     )
     state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=8)
 
@@ -170,7 +172,8 @@ def _num_rho_zero_m2l_pairs(state):
     return int(np.sum(delta[:, 0] ** 2 + delta[:, 1] ** 2 == 0.0))
 
 
-def test_degenerate_azimuth_subgradient_is_correct():
+@pytest.mark.parametrize("basis", ["complex", "real"])
+def test_degenerate_azimuth_subgradient_is_correct(basis):
     """At rho == 0 the zeroed azimuth cotangent must not drop a real term.
 
     ``_angles_from_delta_solidfmm`` returns a zero cotangent for the azimuth when
@@ -192,7 +195,7 @@ def test_degenerate_azimuth_subgradient_is_correct():
 
     positions, masses = _z_stacked_clusters()
     fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.7, G=1.0, softening=1e-2
+        basis=basis, use_pallas=False, theta=0.7, G=1.0, softening=1e-2
     )
     state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=8)
 
@@ -238,7 +241,8 @@ def test_degenerate_azimuth_subgradient_is_correct():
     )
 
 
-def test_no_nan_axis_aligned_grid():
+@pytest.mark.parametrize("basis", ["complex", "real"])
+def test_no_nan_axis_aligned_grid(basis):
     """A regular lattice keeps gradients finite.
 
     NOTE: this does NOT exercise the rho == 0 rotation-angle guard, despite what
@@ -263,7 +267,7 @@ def test_no_nan_axis_aligned_grid():
     positions = jnp.asarray(coords, dtype=jnp.float64)
     masses = jnp.ones((positions.shape[0],), dtype=jnp.float64)
     fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.7, G=1.0, softening=1e-2
+        basis=basis, use_pallas=False, theta=0.7, G=1.0, softening=1e-2
     )
     state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=8)
 
@@ -284,11 +288,12 @@ def test_rejects_non_solidfmm_basis():
         fmm.differentiable_accelerations(state, positions, masses)
 
 
-def test_reorders_to_original_particle_order():
+@pytest.mark.parametrize("basis", ["complex", "real"])
+def test_reorders_to_original_particle_order(basis):
     """Output is aligned with the original (unsorted) input order."""
     positions, masses = _system(80, seed=9)
     fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.4, G=1.0, softening=1e-2
+        basis=basis, use_pallas=False, theta=0.4, G=1.0, softening=1e-2
     )
     state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=16)
     a = fmm.differentiable_accelerations(state, positions, masses)
