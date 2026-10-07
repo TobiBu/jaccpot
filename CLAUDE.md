@@ -74,11 +74,9 @@ PRs:
 ## Workflow
 
 - Feature branch, finalise via PR. Never commit to `main`.
-- **Test-first for production library code.** `examples/`, `bench/`, and anything under
-  `jaccpot/experimental/` are exempt — that distinction is deliberate, do not "fix" it. The
-  `experimental` marker deselects the *tests* (`tests/experimental/`), which is what keeps
-  `jaccpot/experimental/` out of the default run; it is also omitted from coverage in
-  `pyproject.toml`.
+- **Test-first for production library code.** `examples/` and `bench/` are exempt — that
+  distinction is deliberate, do not "fix" it. (`jaccpot/experimental/` and its opt-in
+  `experimental` marker were removed in the 2026-10 cleanup.)
 - Atomic commits, conventional-commit format (`feat:`, `fix:`, `refactor:`, `test:`,
   `docs:`, `perf:`, `build:`, `ci:`). One logical change per commit so `git bisect` and
   review work.
@@ -117,13 +115,12 @@ unscoped hook with no baseline is red on day one over violations it was never ca
 Widening the scope means documenting that backlog first.
 
 `pytest -q` is not the whole suite: the `addopts` in `pyproject.toml` add
-`-m "not experimental"` and `--ignore=tests/perf`, so the octree/treecode prototypes and the
-performance assertions are opt-in (`pytest -m experimental`, `pytest tests/perf`).
+`--ignore=tests/perf`, so the performance assertions are opt-in (`pytest tests/perf`).
 
 Faster inner loop while iterating:
 
 ```bash
-pytest -n 2 -m "not slow and not experimental"      # the fast subset (local only)
+pytest -n 2 -m "not slow"                           # the fast subset (local only)
 JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit    # jaxtyping + beartype runtime checks
 JACCPOT_RUNTIME_TYPECHECK=1 JACCPOT_TEST_TRIM_GRIDS=1 pytest -q tests/unit  # same, Pallas grids cut to one case
 ```
@@ -194,7 +191,6 @@ jaccpot/mutual/        momentum-conserving path — a SECOND lane beside the thr
 jaccpot/pallas/        fused Pallas kernels + custom_vjp
 jaccpot/runtime/       orchestration, config resolution, lane selection, kernel dispatch
 jaccpot/distributed/   domain decomposition, halo exchange, collectives
-jaccpot/experimental/  octree/treecode prototypes — NOT production, opt-in marker only
 
 tests/unit/            does the function do what its docstring says
 tests/integration/     end-to-end paths
@@ -205,7 +201,6 @@ tests/distributed/     multi-GPU; every file skips below 2 devices. CI runs it o
                        host devices (`test-distributed-tier`, `-criterion`); not a tier
                        you can rely on locally without the same XLA_FLAGS.
 tests/perf/            performance assertions
-tests/experimental/    prototypes; deselected by default
 
 No test files live directly under `tests/` — only `conftest.py` and `slow_tests.txt`.
 `slow_tests.txt` marks tests `slow` **by node id**, so moving or renaming a test file

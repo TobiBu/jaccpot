@@ -116,11 +116,7 @@ if NORNAX_ROOT is not None and str(NORNAX_ROOT) not in sys.path:
 # The per-module `skipif` guards stay as they are. They name the yggdrax PR they
 # need, which is more actionable than this message for the case they cover, and
 # nothing here makes them wrong -- only redundant.
-#
-# `jaccpot/experimental/` is excluded for the same reason it is excluded
-# everywhere else: it is not production, and its tests are opt-in.
 _JACCPOT_PACKAGE = REPO_ROOT / "jaccpot"
-_NOT_PRODUCTION = "experimental"
 
 
 def _is_type_checking_test(test: ast.expr) -> bool:
@@ -205,8 +201,6 @@ def _yggdrax_symbols_jaccpot_imports(
     """
     required: dict[str, set[str]] = {}
     for path in sorted(package_root.rglob("*.py")):
-        if _NOT_PRODUCTION in path.parts:
-            continue
         try:
             module_ast = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError):  # pragma: no cover - unreadable source

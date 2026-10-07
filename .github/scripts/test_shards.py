@@ -4,8 +4,7 @@ The workflow asks this file for a job's arguments
 (``python .github/scripts/test_shards.py args <shard>``) instead of spelling them
 out, and the ``test-partition`` job runs ``check``: every shard is collected
 separately, and the shards must be pairwise disjoint and together cover exactly
-the default collection (``-m "not experimental"``, ``tests/perf`` excluded by
-``addopts``). A test directory or file that appears, moves or disappears then
+the default collection (``tests/perf`` excluded by ``addopts``). A test directory or file that appears, moves or disappears then
 either lands in a shard or turns that job red -- before, the partition was
 checked by hand-counted comments in ``ci.yml``, which drifted.
 
@@ -74,7 +73,7 @@ SHARDS: dict[str, list[str]] = {
     "distributed-tier": [
         "tests/distributed",
         "-m",
-        "not experimental and not distributed_criterion",
+        "not distributed_criterion",
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
 }
@@ -90,7 +89,7 @@ EXTRA: dict[str, list[str]] = {
     ],
 }
 
-_UNIVERSE = ["tests", "-m", "not experimental"]
+_UNIVERSE = ["tests"]
 
 
 def _selection(name: str) -> list[str]:

@@ -142,7 +142,7 @@ jobs:
         # (`branch = true`); `--cov-branch` here could not override it either way.
         run: |
           mapfile -t selection < <(python .github/scripts/test_shards.py args "${{ matrix.shard }}")
-          pytest -n 2 --dist loadgroup -m "not experimental" "${selection[@]}" \
+          pytest -n 2 --dist loadgroup "${selection[@]}" \
             --durations=60 \
             --cov=jaccpot \
             --cov-report=xml --cov-report=term:skip-covered
@@ -190,7 +190,7 @@ jobs:
       - name: Goldens and API contract on Python 3.12
         run: |
           mapfile -t selection < <(python .github/scripts/test_shards.py args py-floor)
-          pytest -n 2 -m "not experimental" "${selection[@]}" --durations=20
+          pytest -n 2 "${selection[@]}" --durations=20
 
   test-partition:
     # Collects every shard in `.github/scripts/test_shards.py` and the default

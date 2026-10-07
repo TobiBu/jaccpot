@@ -150,16 +150,6 @@ def test_only_the_try_body_is_guarded(tmp_path: pathlib.Path) -> None:
     }
 
 
-def test_the_scan_skips_experimental(tmp_path: pathlib.Path) -> None:
-    """`jaccpot/experimental/` is not production and is not a requirement."""
-    package = tmp_path / "jaccpot"
-    (package / "experimental").mkdir(parents=True)
-    (package / "experimental" / "proto.py").write_text(
-        "from yggdrax.octree_uvwx import something\n"
-    )
-    assert _yggdrax_symbols_jaccpot_imports(package) == {}
-
-
 def test_a_missing_symbol_is_reported_by_name() -> None:
     """A name yggdrax does not define comes back as a dotted string."""
     missing = _missing_yggdrax_symbols({"yggdrax.dtypes": {"INDEX_DTYPE", "nope"}})
