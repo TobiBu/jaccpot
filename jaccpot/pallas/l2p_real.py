@@ -9,8 +9,15 @@ Plummer clipped, cell_min_level 8): ~4.4 ms per step at 8e6, ~52 ms at 1e8, for
 ~500 flops per particle.
 
 Here a program owns ``P`` consecutive (tree-ordered) particles, each lane reads its
-own leaf's expansion (lanes of one leaf hit the same rows) and the gradient comes
-from the Cartesian recurrence of the complex inner solid harmonics
+own leaf's expansion (lanes of one leaf hit the same rows), and the expansion is
+evaluated in the SAME basis the M2L / L2L produce its coefficients in: the real
+inner solid harmonics ``U_n^m`` of :mod:`jaccpot.operators.real_p2m_l2p` (Dehnen
+normalisation, no sqrt 2), contracted with the local coefficients exactly as
+``evaluate_local_real`` does. Only the way ``U_n^m(delta)`` is computed changes:
+every ``r^n P_n^m(cos t) e^{i m phi}`` is a homogeneous polynomial in ``(x, y, z)``,
+so it is built by the recurrences of the complex inner solid harmonics in Cartesian
+coordinates instead of from spherical angles -- a rewrite of the same functions,
+not a Cartesian expansion. The harmonics are
 ``Y_n^m = r^n P_n^m(cos t) e^{i m phi} / (n+m)!`` (no Condon-Shortley phase, the
 basis of ``evaluate_local_real``: ``U_n^m = Re Y_n^|m|`` for ``m >= 0``, ``Im`` for
 ``m < 0``)::

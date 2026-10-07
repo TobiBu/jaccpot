@@ -712,8 +712,10 @@ steps at 2e6 equal to main's, with a main-vs-main control, `bitwise/`):
   81.0 -> 79.3 ms; bitwise; no extra peak. An optimization barrier before the gather (the sum materialised) got 1.2 of
   the 1.7 ms for +10 B/p at 2e6. `JACCPOT_FASTLANE_UNPERMUTE=gather` restores the gather.
 * **A Pallas L2P** (`jaccpot/pallas/l2p_real.py`, the default where Pallas lowers; `JACCPOT_L2P_KERNEL=xla` restores
-  XLA): one particle per lane, the gradient from the Cartesian recurrence of the complex inner solid harmonics
-  (no Condon-Shortley phase, `1/(n+m)!`, the basis of `evaluate_local_real`) and the identities
+  XLA): one particle per lane. It evaluates the same real solid harmonics the M2L's coefficients are defined in --
+  only computed as polynomials in `(x, y, z)` by the recurrences of the complex inner solid harmonics (no
+  Condon-Shortley phase, `1/(n+m)!`, the basis of `evaluate_local_real`) instead of from spherical angles, which is a
+  rewrite of the same functions, not a Cartesian expansion -- and the gradient from the identities
   `d_z Y_n^m = Y_{n-1}^m`, `(d_x - i d_y) Y_n^m = Y_{n-1}^{m-1}` (`-conj(Y_{n-1}^1)` at m = 0),
   `(d_x + i d_y) Y_n^m = -Y_{n-1}^{m+1}` -- harmonics to degree p-1, no square root, no division by the radius.
   The same gradient to 1.9e-15 (float64) / 1.2e-6 (float32) relative. 8e6 step 80.8 -> 75.3 ms with the scatter
