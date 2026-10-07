@@ -153,6 +153,7 @@ def _round_kernel(
     queue_cap: int,
     node_layout: str = "soa",
     fused_emit: bool = False,
+    use_floor: bool = False,
 ) -> None:
     """One block of the wavefront: MAC, emit, refine.
 
@@ -175,7 +176,7 @@ def _round_kernel(
     active_ref : KernelRef
         Node activity ``[nodes]`` (``int32`` 0/1).
     theta_ref : KernelRef
-        ``theta^2`` ``[1]``.
+        ``[theta^2, separation floor]``.
     far_a_ref : KernelRef
         Far list, first node ``[far_cap]``; aliased to ``far_a_out``.
     far_b_ref : KernelRef
@@ -223,6 +224,10 @@ def _round_kernel(
         block (not one per child), and touch the overflow flags only when this
         block overflowed: three counter atomics per block instead of nine. The
         same pairs, in a different slot order. Static.
+    use_floor : bool
+        Also require ``d >= r_a + r_b + floor`` (``theta_ref[1]``, the separation
+        floor): no particle of an accepted pair closer than the floor to one of the
+        other node (the radii are exact centre-of-mass radii). Static.
 
     Returns
     -------
@@ -274,6 +279,7 @@ def _round_kernel(
             queue_cap=queue_cap,
             node_layout=node_layout,
             fused_emit=fused_emit,
+            use_floor=use_floor,
         )
         return carry
 
@@ -305,6 +311,7 @@ def _round_block(
     queue_cap: int,
     node_layout: str = "soa",
     fused_emit: bool = False,
+    use_floor: bool = False,
 ) -> None:
     """Body of one non-empty block (see :func:`_round_kernel`).
 
@@ -327,7 +334,7 @@ def _round_block(
     active_ref : KernelRef
         Node activity ``[nodes]`` (``int32`` 0/1).
     theta_ref : KernelRef
-        ``theta^2`` ``[1]``.
+        ``[theta^2, separation floor]``.
     far_a_out : KernelRef
         Far list, first node; written in place.
     far_b_out : KernelRef
@@ -362,6 +369,10 @@ def _round_block(
         block (not one per child), and touch the overflow flags only when this
         block overflowed: three counter atomics per block instead of nine. The
         same pairs, in a different slot order. Static.
+    use_floor : bool
+        Also require ``d >= r_a + r_b + floor`` (``theta_ref[1]``, the separation
+        floor): no particle of an accepted pair closer than the floor to one of the
+        other node (the radii are exact centre-of-mass radii). Static.
 
     Returns
     -------
@@ -406,6 +417,9 @@ def _round_block(
     rsum = rad_a + rad_b
     theta_sq = theta_ref[0]
     accept = live & (~same) & (d2 > 0.0) & (rsum * rsum <= theta_sq * d2)
+    if use_floor:
+        reach = rsum + theta_ref[1]
+        accept = accept & (reach * reach <= d2)
     a_leaf = la < 0
     b_leaf = lb < 0
     both_leaf = a_leaf & b_leaf
@@ -532,6 +546,7 @@ def mutual_walk_pallas(
     seed_count: Optional[Array] = None,
     node_layout: Optional[str] = None,
     fused_emit: Optional[bool] = None,
+    separation_floor: float = 0.0,
 ) -> PallasWalkResult:
     """Run the mutual walk, one Pallas launch per round.
 
@@ -604,6 +619,11 @@ def mutual_walk_pallas(
         Both on by default since 2026-10-06: the walk alone (A100) 286 -> 96 ms at
         1e8 particles and ~31 -> 15 ms at 8e6 (each alone: record 248 ms, fused
         emit 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8.
+    separation_floor : float
+        Accept a pair only if also ``|c_b - c_a| >= r_a + r_b + separation_floor``,
+        so no far interaction acts between particles closer than the floor (the
+        far field is the unsoftened expansion; the floor keeps it out of the
+        softening's reach). ``0`` (default): no floor, the kernel unchanged. Static.
 
     Returns
     -------
@@ -665,6 +685,7 @@ def mutual_walk_pallas(
         rounds_per_check=int(rounds_per_check),
         node_layout=str(node_layout),
         fused_emit=bool(fused_emit),
+        separation_floor=float(separation_floor),
     )
 
 
@@ -683,6 +704,7 @@ def mutual_walk_pallas(
         "rounds_per_check",
         "node_layout",
         "fused_emit",
+        "separation_floor",
     ),
 )
 @jax.named_scope("fmm_walk")
@@ -709,6 +731,7 @@ def _mutual_walk_jit(
     rounds_per_check: int,
     node_layout: str = "soa",
     fused_emit: bool = False,
+    separation_floor: float = 0.0,
 ) -> PallasWalkResult:
     """The body of :func:`mutual_walk_pallas` (validated arguments, static sizes).
 
@@ -757,6 +780,9 @@ def _mutual_walk_jit(
     fused_emit : bool
         See :func:`mutual_walk_pallas`.
 
+    separation_floor : float
+        See :func:`mutual_walk_pallas`. Static.
+
     Returns
     -------
     PallasWalkResult
@@ -774,7 +800,8 @@ def _mutual_walk_jit(
         if node_active is None
         else jnp.asarray(node_active).astype(idx)
     )
-    theta_sq = jnp.asarray([float(theta) ** 2], dtype)
+    # [theta^2, separation floor]: the kernel reads the floor only with use_floor
+    theta_sq = jnp.asarray([float(theta) ** 2, float(separation_floor)], dtype)
     if node_layout == "record":
         # one 32-byte sector per node: (cx, cy, cz, r, left, right, active, 0)
         def _as_f32(x: Array) -> Array:
@@ -812,6 +839,7 @@ def _mutual_walk_jit(
         queue_cap=Q,
         node_layout=node_layout,
         fused_emit=bool(fused_emit),
+        use_floor=float(separation_floor) > 0.0,
     )
 
     def one_round(

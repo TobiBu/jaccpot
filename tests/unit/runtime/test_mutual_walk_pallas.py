@@ -224,3 +224,77 @@ def test_walk_backend_flag_parsing(monkeypatch):
     assert strict_walk_deterministic_rows()
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", "off")
     assert not strict_walk_deterministic_rows()
+
+
+@pytest.mark.parametrize("floor", [0.05, 0.3])
+def test_separation_floor_keeps_every_far_pair_apart_in_both_walks(floor):
+    # The softening floor: an accepted far pair also needs |c_b - c_a| >= r_a + r_b +
+    # floor (exact COM radii, so no two particles of the pair are closer than the
+    # floor). The Pallas walk and yggdrax's flat walk keep the same SETS with it,
+    # every accepted pair honours it, and it moves work from the far to the near
+    # list (a floor that changed nothing would make the test vacuous).
+    n, leaf, theta = 4000, 16, 0.8
+    P = jnp.asarray(_plummer(n, 5), jnp.float32)
+    M = jnp.ones((n,), jnp.float32)
+    topo, ps, ms, inv = build_static_cells_tree(
+        P, M, infer_bounds(P), leaf_size=leaf, leaf_capacity=1024, return_reordered=True
+    )
+    com = compute_tree_mass_moments(topo, ps, ms).center_of_mass
+    geom = com_mac_geometry(topo, ps, com, leaf_cap=leaf)
+    ni = int(topo.left_child.shape[0])
+    tot = int(topo.parent.shape[0])
+    idx = topo.parent.dtype
+    left = jnp.concatenate([topo.left_child, jnp.full((tot - ni,), -1, idx)])
+    right = jnp.concatenate([topo.right_child, jnp.full((tot - ni,), -1, idx)])
+    ranges = np.asarray(topo.node_ranges)
+    active = jnp.asarray(ranges[:, 1] >= ranges[:, 0])
+    root = jnp.argmin(topo.parent).astype(idx)
+    kw = dict(max_pair_queue=1 << 15, far_cap=1 << 17, near_cap=1 << 17, node_active=active)
+    base = dual_tree_walk_mutual(
+        left, right, geom.center, geom.radius, theta, root, mac_type="dehnen", **kw
+    )
+    ref = dual_tree_walk_mutual(
+        left,
+        right,
+        geom.center,
+        geom.radius,
+        theta,
+        root,
+        mac_type="dehnen",
+        separation_floor=floor,
+        **kw,
+    )
+    got = mutual_walk_pallas(
+        left,
+        right,
+        geom.center,
+        geom.radius,
+        theta,
+        root,
+        block=64,
+        interpret=True,
+        separation_floor=floor,
+        **kw,
+    )
+    for res in (base, ref, got):
+        assert not (
+            bool(res.queue_overflow) or bool(res.far_overflow) or bool(res.near_overflow)
+        )
+    far_r, near_r = _sets(ref)
+    far_g, near_g = _sets(got)
+    assert far_g == far_r and near_g == near_r
+    assert int(ref.far_count) < int(base.far_count), "vacuous: the floor changed nothing"
+    assert int(ref.near_count) > int(base.near_count)
+    a = np.asarray([p[0] for p in far_r]); b = np.asarray([p[1] for p in far_r])
+    c = np.asarray(geom.center, np.float64); r = np.asarray(geom.radius, np.float64)
+    gap = np.linalg.norm(c[b] - c[a], axis=1) - r[a] - r[b]
+    assert gap.min() >= floor * (1 - 1e-5)
+    # and, with the exact radii, the closest particles of every far pair
+    pos = np.asarray(ps, np.float64)
+    worst = np.inf
+    for i in np.argsort(gap)[:50]:
+        pa = pos[ranges[a[i], 0] : ranges[a[i], 1] + 1]
+        pb = pos[ranges[b[i], 0] : ranges[b[i], 1] + 1]
+        dmin = np.min(np.linalg.norm(pa[:, None, :] - pb[None, :, :], axis=-1))
+        worst = min(worst, dmin)
+    assert worst >= floor * (1 - 1e-5)
