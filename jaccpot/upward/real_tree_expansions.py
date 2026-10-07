@@ -212,9 +212,13 @@ def _p2m_leaves_real(
 
         contribs = leaf_vm(pos, masses, centers[safe_nodes])
         leaf_coeffs = jnp.sum(contribs, axis=1).astype(state.dtype)
-        current = state[safe_nodes]
-        updates = jnp.where(valid_leaf[:, None], leaf_coeffs, current)
-        return state.at[safe_nodes].set(updates), None
+        # Padded slots write nowhere. They used to write the stale value back to
+        # ``num_internal`` -- the first leaf -- in the same scatter as that leaf's
+        # own result whenever both fell in one batch (leaf_batch_size >
+        # num_leaves); with duplicate indices either write may win, and on CPU the
+        # stale zero did.
+        write_nodes = jnp.where(valid_leaf, batch_nodes, as_index(total_nodes))
+        return state.at[write_nodes].set(leaf_coeffs, mode="drop"), None
 
     packed, _ = lax.scan(body, packed, jnp.arange(steps, dtype=INDEX_DTYPE))
     return packed
