@@ -39,7 +39,8 @@ On `main` at 6cca378 (2026-10-06):
 | Phase | PR | What | Gates | State |
 | --- | --- | --- | --- | --- |
 | P0 | #369 | CI: each test once per push; shard partition checked; this record | CI 16/16 | open |
-| P1 | | Safety net: Odisseo contract test, lane goldens, inventory, gradient twins on real, GPU pins | CPU suite | in progress |
+| P1 | #370 | Safety net: Odisseo contract test, lane goldens, inventory, gradient twins on real, GPU pins; leaf-P2M padding fix | CPU suite | open |
+| J | | Real-basis jerk and time derivatives; exact real derivative tower | CPU suite | in progress |
 
 ### P0: CI runs each test once
 
@@ -162,4 +163,33 @@ So D1 flips only the implicit default (an engine without `basis_impl` runs real)
 warns on an explicit `"solidfmm"` / `"complex"`. Mapping those names to real waits for C,
 after X3 and J have removed or ported the 22 tests that need them. No mass edit of the
 ~290 `"solidfmm"` call sites is needed before then.
+
+### J: jerk and time derivatives on the real basis
+
+**Two defects on the default basis, both fixed.**
+- `jerk_mode="accurate"` and `compute_accelerations_with_time_derivatives` raised a
+  TypeError on `basis="real"`, because only complex source-motion multipoles existed.
+  nornax's jaccpot adapter defaults to `"accurate"`.
+- The real derivative tower (`evaluate_local_real_derivative_tower`) was wrong at
+  `delta = 0` and on the z-axis. Measured at order 4 with unit coefficients, D2 jumped
+  by up to 0.5 and D3 by up to 1.5, and the U_2^0 Hessian at the centre had diagonal
+  (0, 0, 1.5) instead of (-1/2, -1/2, 1). A single-particle leaf puts its target
+  exactly on the centre.
+
+**What changed.**
+- `operators/real_harmonic_derivatives.py` holds the exact lowering operator: a
+  Cartesian derivative maps `U_n^m` onto degree `n - 1` with coefficients 0, +-1/2, +-1.
+  The rules were fitted from the code's own harmonics (residual 2e-15) and are tested
+  against the Jacobian up to order 7.
+- The tower is now `d^alpha phi = (A_alpha^T F) . U`, exact at every offset.
+- `prepare_real_source_motion_multipoles` builds `d^k M / dt^k` with a lowered leaf P2M
+  plus the ordinary real M2M; M2L and L2L run unchanged on them.
+
+**Measured** at N = 96, leaf 4, p = 4, theta 0.6 (106 M2L pairs):
+- real and complex agree to 8e-18 on the jerk and <= 6e-18 on D1-D3;
+- both are at 4.338e-4 against direct summation.
+
+The jerk / time-derivative tests in `test_solver_api.py` now run on both bases. The
+source-motion multipoles are also checked against central finite differences at frozen
+centres, an oracle that does not need the complex basis.
 
