@@ -161,6 +161,16 @@ def _args() -> argparse.Namespace:
         metavar="NPZ",
         help="save the first eval's force and the final scan state (bitwise A/B)",
     )
+    ap.add_argument(
+        "--use-pallas",
+        default="auto",
+        choices=("auto", "on", "off"),
+        help="FastMultipoleMethod(use_pallas=...). off moves the NEAR FIELD to its "
+        "pure-JAX rectangle / target-block route (the one pre-Ampere GPUs and "
+        "ODISSEO_FMM_USE_PALLAS=0 take); the walk, M2L, cascade, COM-radii and P2M "
+        "kernels keep their own sm_80 checks, so the fully Pallas-free route is the "
+        "CPU one (tests/characterization/test_lane_goldens.py)",
+    )
     ap.add_argument("--dt", type=float, default=None)
     ap.add_argument("--drift-steps", default="0,50,100")
     ap.add_argument("--softening", type=float, default=None)
@@ -571,6 +581,7 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
         G=1.0,
         softening=soft,
         working_dtype=jnp.float32,
+        use_pallas={"auto": None, "on": True, "off": False}[ARGS.use_pallas],
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(
                 mode="static_radix",
