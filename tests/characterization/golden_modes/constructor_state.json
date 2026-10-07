@@ -296,9 +296,6 @@
   "autotune_m2l": {
    "autotune_m2l_chunk": "True"
   },
-  "backend_octree": {
-   "execution_backend": "'octree'"
-  },
   "backend_radix": {
    "execution_backend": "'radix'"
   },

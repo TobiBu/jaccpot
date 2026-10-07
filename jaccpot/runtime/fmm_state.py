@@ -2,10 +2,10 @@
 
 Extracted from _fmm_impl.py (Phase 2d): the resolved-config dataclasses and
 resolution, tree-build artifacts + builders, FMMPreparedState (the pytree
-passed between prepare/evaluate) + its artifact NamedTuples and octree
-builders, and the strict-refresh diag helpers. Sibling of _fmm_impl at the
-runtime level to avoid the fmm/ package-init cycle; depends on kernels +
-fmm_constants/fmm_caches + tree/octree helpers, never the engine class.
+passed between prepare/evaluate) + its artifact NamedTuples, and the
+strict-refresh diag helpers. Sibling of _fmm_impl at the runtime level to avoid
+the fmm/ package-init cycle; depends on kernels + fmm_constants/fmm_caches +
+tree helpers, never the engine class.
 To be subdivided into fmm/{resolved_config,tree_build,prepared_state}.py once
 the engine class is dissolved.
 """
@@ -25,7 +25,6 @@ from jaxtyping import Array, DTypeLike
 from yggdrax import build_tree
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
-    CompactTaggedOctreeFarPairs,
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
     DualTreeWalkResult,
@@ -40,18 +39,6 @@ from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from ..config import FMMPreset
 from ._interaction_cache import _InteractionCacheEntry
-from ._octree_adapter import OctreeExecutionData
-from ._octree_fmm import (
-    OctreeSolidFMMComplexMultipoles,
-    OctreeSolidFMMDownwardPlan,
-    accumulate_octree_solidfmm_m2l,
-    build_octree_downward_plan,
-    build_octree_interaction_plan,
-    build_octree_interaction_plan_from_native_pairs,
-    build_octree_upward_plan,
-    prepare_octree_solidfmm_complex_multipoles,
-    propagate_octree_solidfmm_l2l,
-)
 from .dtypes import INDEX_DTYPE
 from .fmm_presets import FMMPresetConfig
 
@@ -65,7 +52,6 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
 from .kernels.core import (
     ExpansionBasis,
     _FarPairCOO,
-    _infer_order_from_coeff_count,
     _max_leaf_size_from_tree,
 )
 
@@ -923,6 +909,11 @@ def _restore_static_leaf_size(tree: Tree) -> Tree:
     place the FMM runtime obtains a tree, so one coercion covers every jitted
     entry point that later sees the prepared state.
 
+    Since the 2026-10 cleanup (X2) the single-GPU solver refuses
+    ``tree_type="octree"``, and on 2026-10-07 no radix, kd-tree or octree build
+    through this function handed it an array leaf size, so this is now insurance
+    rather than a live fix.
+
     Parameters
     ----------
     tree : Tree
@@ -1053,15 +1044,9 @@ class FMMPreparedState:
     force_scale_nodes : Optional[Array]
         Per-node force scale for the adaptive acceptance test.
     execution_backend : str
-        ``"radix"`` or ``"octree"``. *(static)*; selects which of the two
-        artifact families evaluation reads.
-    octree : Optional[OctreeExecutionData]
-        Octree view of ``tree``; ``None`` on the radix backend.
-    octree_upward : Optional[OctreeSolidFMMComplexMultipoles]
-        Octree-native upward artifacts. Dropped under minimum-memory on the same
-        terms as ``upward``.
-    octree_downward : Optional[OctreeSolidFMMDownwardPlan]
-        Octree-native downward plan.
+        Always ``"radix"`` *(static)*. The octree execution backend, and the
+        octree artifact fields that went with it, were removed in the 2026-10
+        cleanup; the tag stays because diagnostics read it.
     """
 
     tree: Tree
@@ -1086,9 +1071,6 @@ class FMMPreparedState:
     nearfield_chunk_unique_indices: Optional[Array]
     force_scale_nodes: Optional[Array]
     execution_backend: str = "radix"
-    octree: Optional[OctreeExecutionData] = None
-    octree_upward: Optional[OctreeSolidFMMComplexMultipoles] = None
-    octree_downward: Optional[OctreeSolidFMMDownwardPlan] = None
 
     @property
     def positions_sorted(self: "FMMPreparedState") -> Array:
@@ -1179,9 +1161,6 @@ class FMMPreparedState:
             self.nearfield_chunk_group_ids,
             self.nearfield_chunk_unique_indices,
             self.force_scale_nodes,
-            self.octree,
-            self.octree_upward,
-            self.octree_downward,
         )
         aux = (
             int(self.max_leaf_size),
@@ -1224,9 +1203,6 @@ class FMMPreparedState:
             nearfield_chunk_group_ids,
             nearfield_chunk_unique_indices,
             force_scale_nodes,
-            octree,
-            octree_upward,
-            octree_downward,
         ) = children
         return cls(
             tree=tree,
@@ -1251,9 +1227,6 @@ class FMMPreparedState:
             nearfield_chunk_unique_indices=nearfield_chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
             execution_backend=str(execution_backend),
-            octree=octree,
-            octree_upward=octree_upward,
-            octree_downward=octree_downward,
         )
 
 
@@ -1346,47 +1319,6 @@ class _PrepareStateDualDownwardArtifacts(NamedTuple):
     cache_entry: Optional[_InteractionCacheEntry]
 
 
-def _build_octree_upward_artifacts(
-    *,
-    octree: Optional[OctreeExecutionData],
-    positions_sorted: Array,
-    masses_sorted: Array,
-    expansion_basis: ExpansionBasis,
-    max_order: int,
-) -> Optional[OctreeSolidFMMComplexMultipoles]:
-    """Build octree-native upward artifacts when the execution tree exposes them.
-
-    Parameters
-    ----------
-    octree : Optional[OctreeExecutionData]
-        Octree view of the tree; ``None`` short-circuits to ``None``.
-    positions_sorted : Array
-        Particle positions ``[N, 3]`` in Morton order.
-    masses_sorted : Array
-        Particle masses ``[N]`` in the same order.
-    expansion_basis : ExpansionBasis
-        Only ``"solidfmm"`` has an octree-native upward pass; anything else
-        short-circuits.
-    max_order : int
-        Expansion order ``p``.
-
-    Returns
-    -------
-    Optional[OctreeSolidFMMComplexMultipoles]
-        The octree multipoles, or ``None`` when either precondition fails.
-    """
-
-    if octree is None or expansion_basis != "solidfmm":
-        return None
-    plan = build_octree_upward_plan(octree)
-    return prepare_octree_solidfmm_complex_multipoles(
-        plan,
-        positions_sorted,
-        masses_sorted,
-        max_order=int(max_order),
-    )
-
-
 def _prepared_state_upward_payload(
     *,
     upward: TreeUpwardData,
@@ -1416,196 +1348,6 @@ def _prepared_state_upward_payload(
     if str(memory_objective).strip().lower() == "minimum_memory":
         return None
     return upward
-
-
-def _prepared_state_octree_upward_payload(
-    *,
-    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
-    memory_objective: str,
-) -> Optional[OctreeSolidFMMComplexMultipoles]:
-    """Return the octree-upward payload to retain in prepared state.
-
-    The octree counterpart of :func:`_prepared_state_upward_payload`, dropping on
-    the same condition and for the same reason.
-
-    Parameters
-    ----------
-    octree_upward : Optional[OctreeSolidFMMComplexMultipoles]
-        The octree upward bundle, if one was built.
-    memory_objective : str
-        Only ``"minimum_memory"`` drops the payload.
-
-    Returns
-    -------
-    Optional[OctreeSolidFMMComplexMultipoles]
-        ``octree_upward``, or ``None`` under minimum memory.
-    """
-
-    if str(memory_objective).strip().lower() == "minimum_memory":
-        return None
-    return octree_upward
-
-
-def _build_octree_downward_artifacts(
-    *,
-    octree: Optional[OctreeExecutionData],
-    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
-    interactions: Optional[NodeInteractionList],
-    native_far_pairs: Optional[CompactTaggedOctreeFarPairs],
-    execution_backend: str,
-) -> Optional[OctreeSolidFMMDownwardPlan]:
-    """Build octree-native downward scaffolding when prepared octree data exists.
-
-    Builds the interaction plan from whichever source is available: native far
-    pairs on the octree backend, otherwise the radix interaction list translated
-    into octree space. With neither, there is nothing to plan and this returns
-    ``None``.
-
-    Parameters
-    ----------
-    octree : Optional[OctreeExecutionData]
-        Octree view of the tree.
-    octree_upward : Optional[OctreeSolidFMMComplexMultipoles]
-        Octree multipoles; required, since the plan is built against them.
-    interactions : Optional[NodeInteractionList]
-        Radix interaction list, used when native pairs are unavailable.
-    native_far_pairs : Optional[CompactTaggedOctreeFarPairs]
-        Octree-native far pairs; preferred, but only on the octree backend.
-    execution_backend : str
-        Which backend is active; gates the native-pairs branch.
-
-    Returns
-    -------
-    Optional[OctreeSolidFMMDownwardPlan]
-        The downward plan, or ``None`` when the octree data or a pair source is
-        missing.
-    """
-
-    if octree is None or octree_upward is None:
-        return None
-    if execution_backend == "octree" and native_far_pairs is not None:
-        interaction_plan = build_octree_interaction_plan_from_native_pairs(
-            octree,
-            native_far_pairs,
-        )
-    elif interactions is not None:
-        interaction_plan = build_octree_interaction_plan(octree, interactions)
-    else:
-        return None
-    return build_octree_downward_plan(octree, octree_upward, interaction_plan)
-
-
-def _finalize_octree_downward_artifacts(
-    *,
-    octree: Optional[OctreeExecutionData],
-    octree_upward: Optional[OctreeSolidFMMComplexMultipoles],
-    octree_downward: Optional[OctreeSolidFMMDownwardPlan],
-    expansion_basis: ExpansionBasis,
-    execution_backend: str,
-    m2l_chunk_size: Optional[int],
-) -> Optional[OctreeSolidFMMDownwardPlan]:
-    """Run octree-native M2L/L2L when the narrow octree backend is active.
-
-    "Narrow" because every one of five conditions must hold; any miss returns
-    ``octree_downward`` untouched rather than raising, so this is safe to call
-    unconditionally.
-
-    Parameters
-    ----------
-    octree : Optional[OctreeExecutionData]
-        Octree view of the tree.
-    octree_upward : Optional[OctreeSolidFMMComplexMultipoles]
-        Octree multipoles, the M2L sources.
-    octree_downward : Optional[OctreeSolidFMMDownwardPlan]
-        The plan to run, and the value returned unchanged when a condition
-        fails.
-    expansion_basis : ExpansionBasis
-        Must be ``"solidfmm"``.
-    execution_backend : str
-        Must be ``"octree"``.
-    m2l_chunk_size : Optional[int]
-        Pairs per M2L chunk; ``None`` takes 4096.
-
-    Returns
-    -------
-    Optional[OctreeSolidFMMDownwardPlan]
-        The plan with M2L accumulated and L2L propagated, or the input plan
-        unchanged.
-    """
-
-    if (
-        execution_backend != "octree"
-        or expansion_basis != "solidfmm"
-        or octree is None
-        or octree_upward is None
-        or octree_downward is None
-    ):
-        return octree_downward
-    accumulated = accumulate_octree_solidfmm_m2l(
-        octree_downward,
-        octree_upward,
-        chunk_size=4096 if m2l_chunk_size is None else int(m2l_chunk_size),
-    )
-    return propagate_octree_solidfmm_l2l(accumulated, octree)
-
-
-def _octree_farfield_eval_inputs(
-    state: Any,
-) -> tuple[Optional[LocalExpansionData], Optional[Array], Optional[Array]]:
-    """Far-field eval overrides that make the octree backend evaluate its OWN locals.
-
-    For ``execution_backend == "octree"`` the octree upward/M2L/L2L pass fills octree-node-
-    space local expansions (``state.octree_downward``), but the default far-field eval
-    evaluates the radix locals. Passing these three overrides into the full-particle eval
-    path evaluates the OCTREE locals at each particle instead. The near-field is already
-    octree-native (``state.nearfield_interop``) and needs no override.
-
-    The three outputs share the octree node-id space, and ``state.octree.node_ranges`` index
-    into ``state.positions_sorted`` in the same (radix-Morton) order -- ``state.octree`` is
-    derived from ``state.tree`` via ``build_octree_execution_data`` (which asserts root-range
-    equality) -- so no re-permutation is needed. Returns ``(None, None, None)`` for non-octree
-    backends or when the octree downward pass was not run.
-
-    Parameters
-    ----------
-    state : Any
-        A prepared state. Typed ``Any`` because one of the two call sites passes
-        ``PreparedStateLike``, so this must accept a ``LargeNPreparedState`` as
-        well as an :class:`FMMPreparedState` -- and that union is defined in the
-        engine module, which this one must not import (ARCHITECTURE §1). The
-        ``getattr`` defaults below are what actually make both safe: a state
-        lacking the octree attributes takes the ``(None, None, None)`` branch
-        rather than raising.
-
-    Returns
-    -------
-    tuple[Optional[LocalExpansionData], Optional[Array], Optional[Array]]
-        ``(farfield_local_data, farfield_leaf_nodes, farfield_node_ranges)``,
-        all three in octree node-id space, or ``(None, None, None)``. All three
-        are ``None`` together -- callers may test any one of them.
-    """
-    if (
-        str(getattr(state, "execution_backend", "radix")).strip().lower() != "octree"
-        or getattr(state, "octree", None) is None
-        or getattr(state, "octree_downward", None) is None
-    ):
-        return None, None, None
-    downward = state.octree_downward
-    coefficients = jnp.asarray(downward.locals_packed)
-    farfield_local_data = LocalExpansionData(
-        # Infer order from the (static) coefficient width. downward.order can be a
-        # traced pytree leaf when compute_accelerations is jitted, so concretizing it
-        # with int(...) raises ConcretizationTypeError; coefficients.shape[-1] is static.
-        order=_infer_order_from_coeff_count(
-            coeff_count=int(coefficients.shape[-1]),
-            expansion_basis="solidfmm",
-        ),
-        centers=jnp.asarray(downward.centers),
-        coefficients=coefficients,
-    )
-    farfield_leaf_nodes = jnp.asarray(state.octree.leaf_nodes, dtype=INDEX_DTYPE)
-    farfield_node_ranges = jnp.asarray(state.octree.node_ranges, dtype=INDEX_DTYPE)
-    return farfield_local_data, farfield_leaf_nodes, farfield_node_ranges
 
 
 class _PrepareStateFarPairPlan(NamedTuple):

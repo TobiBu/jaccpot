@@ -460,8 +460,8 @@ def _leafpair_accel_analytic_vjp(
         Source leaf id per (target leaf, block, slot); reshaped to
         ``[num_leaves, num_slots]`` here. ``farleaves`` rather than ``leaves`` for
         the reason ``_large_n_blocks.py`` records: this rectangle tracks the
-        far-field leaf view, which the octree backend separates from the
-        near-field leaf table.
+        far-field leaf view, which the octree backend (removed in the 2026-10
+        cleanup) separated from the near-field leaf table.
     source_valid : Bool[Array, 'farleaves blocks blocksize']
         Validity mask with the same shape as ``source_leaf_ids``.
     cotangent : Float[Array, 'n 3']

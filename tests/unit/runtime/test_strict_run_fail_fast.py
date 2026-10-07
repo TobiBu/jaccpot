@@ -8,9 +8,10 @@ they touch a device**: the four rejection guards and the profile-key accounting.
 
 The finding that made this possible is worth stating, because F33 has been
 recorded as GPU-blocked since it was filed:
-`_is_large_n_gpu_production_profile` checks **four config values** --
-``preset="large_n_gpu"``, ``tree_type="radix"``, ``expansion_basis="solidfmm"``,
-``execution_backend != "octree"`` -- and **no backend at all**. So the strict
+`_is_large_n_gpu_production_profile` checks **three config values** --
+``preset="large_n_gpu"``, ``tree_type="radix"``, ``expansion_basis="solidfmm"``
+(a fourth, ``execution_backend != "octree"``, went with the octree backend in the
+2026-10 cleanup) -- and **no backend at all**. So the strict
 lane's whole entry path opens on CPU with two constructor arguments. That is the
 same shape as F27 (`preset`, not hardware) and the third time in this audit that
 "needs a GPU" turned out to mean "needs the right profile".

@@ -17,8 +17,6 @@ from yggdrax.interactions import (
     DualTreeTraversalConfig,
     MACType,
     NodeInteractionList,
-    build_octree_native_far_pairs,
-    build_octree_native_neighbor_lists,
 )
 from yggdrax.tree import Tree
 
@@ -34,14 +32,9 @@ from ._adaptive_policy import (
     per_node_mac_radius,
     source_error_proxy_by_order_from_multipoles,
 )
-from ._octree_adapter import build_octree_execution_data_with_status
 from .fmm_caches import _contains_tracer
 from .fmm_state import (
     FMMPreparedState,
-    _build_octree_downward_artifacts,
-    _build_octree_upward_artifacts,
-    _finalize_octree_downward_artifacts,
-    _prepared_state_octree_upward_payload,
     _prepared_state_upward_payload,
     _PrepareStateTreeUpwardArtifacts,
 )
@@ -1009,37 +1002,9 @@ class PolicyMixin(_EngineBase):
                 aspect_threshold_val=aspect_threshold_val,
                 allow_stateful_cache=False,
             )
-            prepass_execution_backend = self._resolve_execution_backend()
-            if prepass_execution_backend == "octree":
-                prepass_octree, prepass_octree_native = (
-                    build_octree_execution_data_with_status(low_tree_artifacts.tree)
-                )
-            else:
-                prepass_octree, prepass_octree_native = None, False
-            # See the main prepared-state path: only build native-octree interaction
-            # lists when the octree view is non-degenerate; otherwise far/near come from
-            # the consistent compat lists on the fallback (binary) tree.
-            prepass_octree_native_neighbors = None
-            if (
-                prepass_execution_backend == "octree"
-                and prepass_octree is not None
-                and prepass_octree_native
-            ):
-                prepass_octree_native_neighbors = build_octree_native_neighbor_lists(
-                    low_tree_artifacts.tree,
-                    low_tree_artifacts.upward.geometry,
-                    theta=theta_val,
-                    mac_type=self.mac_type,
-                    dehnen_radius_scale=self.dehnen_radius_scale,
-                    max_pair_queue=self.max_pair_queue,
-                    process_block=self.pair_process_block,
-                    traversal_config=runtime_traversal_config,
-                )
             prepass_nearfield_interop = _build_nearfield_interop_data(
                 low_tree_artifacts.tree,
                 dual_downward_artifacts.neighbor_list,
-                octree=prepass_octree,
-                native_neighbors=prepass_octree_native_neighbors,
             )
             nearfield_artifacts = self._prepare_state_nearfield_artifacts(
                 neighbor_list=dual_downward_artifacts.neighbor_list,
@@ -1048,36 +1013,6 @@ class PolicyMixin(_EngineBase):
                 num_particles=int(low_tree_artifacts.positions_sorted.shape[0]),
                 cache_entry=dual_downward_artifacts.cache_entry,
                 allow_stateful_cache=False,
-            )
-            prepass_octree_upward = _build_octree_upward_artifacts(
-                octree=prepass_octree,
-                positions_sorted=low_tree_artifacts.positions_sorted,
-                masses_sorted=low_tree_artifacts.masses_sorted,
-                expansion_basis=self.expansion_basis,
-                max_order=int(low_order),
-            )
-            prepass_octree_native_far_pairs = None
-            if (
-                prepass_execution_backend == "octree"
-                and prepass_octree is not None
-                and prepass_octree_native
-            ):
-                prepass_octree_native_far_pairs = build_octree_native_far_pairs(
-                    low_tree_artifacts.tree,
-                    low_tree_artifacts.upward.geometry,
-                    theta=theta_val,
-                    mac_type=self.mac_type,
-                    dehnen_radius_scale=self.dehnen_radius_scale,
-                    max_pair_queue=self.max_pair_queue,
-                    process_block=self.pair_process_block,
-                    traversal_config=runtime_traversal_config,
-                )
-            prepass_octree_downward = _build_octree_downward_artifacts(
-                octree=prepass_octree,
-                octree_upward=prepass_octree_upward,
-                interactions=dual_downward_artifacts.interactions,
-                native_far_pairs=prepass_octree_native_far_pairs,
-                execution_backend=prepass_execution_backend,
             )
             prepass_state = FMMPreparedState(
                 tree=low_tree_artifacts.tree,
@@ -1104,20 +1039,6 @@ class PolicyMixin(_EngineBase):
                 nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
                 nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
                 force_scale_nodes=None,
-                execution_backend=prepass_execution_backend,
-                octree=prepass_octree,
-                octree_upward=_prepared_state_octree_upward_payload(
-                    octree_upward=prepass_octree_upward,
-                    memory_objective=self.memory_objective,
-                ),
-                octree_downward=_finalize_octree_downward_artifacts(
-                    octree=prepass_octree,
-                    octree_upward=prepass_octree_upward,
-                    octree_downward=prepass_octree_downward,
-                    expansion_basis=self.expansion_basis,
-                    execution_backend=prepass_execution_backend,
-                    m2l_chunk_size=runtime_m2l_chunk_size,
-                ),
             )
             prepass_acc = self.evaluate_prepared_state(
                 prepass_state,

@@ -50,7 +50,7 @@ from ._nearfield_fastlane import (
 )
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
-from .fmm_state import FMMPreparedState, _octree_farfield_eval_inputs
+from .fmm_state import FMMPreparedState
 from .grad_options import grad_option_overrides, resolve_grad_options
 from .kernels.core import (
     NearfieldInteropData,
@@ -400,13 +400,6 @@ class EvaluateMixin(_EngineBase):
         use_full_eval_for_targets = bool(return_potential) and (
             resolved_target_indices is not None
         )
-        # Octree backend: evaluate the octree-native far-field locals (the near-field is
-        # already octree-native). Only the full-particle path honours these overrides.
-        (
-            octree_farfield_local_data,
-            octree_farfield_leaf_nodes,
-            octree_farfield_node_ranges,
-        ) = _octree_farfield_eval_inputs(state)
         if (
             resolved_target_indices is None
             or tracing_targets
@@ -420,9 +413,9 @@ class EvaluateMixin(_EngineBase):
                 downward=state.downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=octree_farfield_local_data,
-                farfield_leaf_nodes=octree_farfield_leaf_nodes,
-                farfield_node_ranges=octree_farfield_node_ranges,
+                farfield_local_data=None,
+                farfield_leaf_nodes=None,
+                farfield_node_ranges=None,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,
@@ -663,12 +656,6 @@ class EvaluateMixin(_EngineBase):
         tracing_targets = isinstance(positions_sorted_arr, Tracer) or isinstance(
             resolved_target_indices, Tracer
         )
-        # Octree backend: evaluate octree-native far-field locals (full path only).
-        (
-            octree_farfield_local_data,
-            octree_farfield_leaf_nodes,
-            octree_farfield_node_ranges,
-        ) = _octree_farfield_eval_inputs(state)
         if resolved_target_indices is None or tracing_targets:
             evaluation = _evaluate_prepared_tree(
                 fmm=self,
@@ -678,9 +665,9 @@ class EvaluateMixin(_EngineBase):
                 downward=downward,
                 neighbor_list=state.neighbor_list,
                 nearfield_interop=state.nearfield_interop,
-                farfield_local_data=octree_farfield_local_data,
-                farfield_leaf_nodes=octree_farfield_leaf_nodes,
-                farfield_node_ranges=octree_farfield_node_ranges,
+                farfield_local_data=None,
+                farfield_leaf_nodes=None,
+                farfield_node_ranges=None,
                 nearfield_target_leaf_ids=state.nearfield_target_leaf_ids,
                 nearfield_source_leaf_ids=state.nearfield_source_leaf_ids,
                 nearfield_valid_pairs=state.nearfield_valid_pairs,

@@ -17,12 +17,7 @@ from yggdrax.interactions import (
     build_interactions_and_neighbors,
 )
 
-from jaccpot import (
-    FastMultipoleMethod,
-    FMMAdvancedConfig,
-    RuntimePolicyConfig,
-    TreeConfig,
-)
+from jaccpot import FastMultipoleMethod
 
 
 def _sync(value):
@@ -128,32 +123,6 @@ def main() -> None:
                 working_dtype=jnp.float32,
                 tree_type="kdtree",
                 target_leaf_particles=32,
-            ),
-        ),
-        (
-            "octree-radix-backend",
-            FastMultipoleMethod(
-                preset="fast",
-                basis="solidfmm",
-                theta=0.6,
-                working_dtype=jnp.float32,
-                advanced=FMMAdvancedConfig(
-                    tree=TreeConfig(tree_type="octree"),
-                    runtime=RuntimePolicyConfig(execution_backend="radix"),
-                ),
-            ),
-        ),
-        (
-            "octree-native-backend",
-            FastMultipoleMethod(
-                preset="fast",
-                basis="solidfmm",
-                theta=0.6,
-                working_dtype=jnp.float32,
-                advanced=FMMAdvancedConfig(
-                    tree=TreeConfig(tree_type="octree"),
-                    runtime=RuntimePolicyConfig(execution_backend="octree"),
-                ),
             ),
         ),
     ]
