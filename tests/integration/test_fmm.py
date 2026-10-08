@@ -140,7 +140,7 @@ def test_multipole_accuracy_improves_with_order():
     eval_point = jnp.array([3.0, 0.5, -1.0])
 
     # Reference direct sum at eval point
-    a_ref = fmm.direct_sum(pos, mass, eval_point, softening_kernel="plummer")
+    a_ref = fmm.direct_sum(pos, mass, eval_point)
 
     # Expansions around CoM
     exp0 = FMMEngine.compute_expansion(pos, mass, order=0)
@@ -1267,7 +1267,7 @@ def test_far_field_accuracy_order3_vs_order4():
     fmm = FMMEngine(G=1.0, softening=0.0, softening_kernel="plummer")
     eval_point = jnp.array([6.0, -3.0, 2.0])
 
-    a_ref = fmm.direct_sum(pos, mass, eval_point, softening_kernel="plummer")
+    a_ref = fmm.direct_sum(pos, mass, eval_point)
 
     exp3 = FMMEngine.compute_expansion(pos, mass, order=3)
     exp4 = FMMEngine.compute_expansion(pos, mass, order=4)

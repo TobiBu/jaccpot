@@ -2285,6 +2285,7 @@ def compute_gravitational_acceleration(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
     *,
+    softening_kernel: Optional[str] = None,
     bounds: Optional[Tuple[Array, Array]] = None,
     leaf_size: int = 16,
     max_order: int = 2,
@@ -2307,7 +2308,9 @@ def compute_gravitational_acceleration(
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
-        Plummer softening length.
+        Plummer-equivalent softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     bounds : Optional[Tuple[Array, Array]]
         Optional explicit domain bounds used during tree construction.
     leaf_size : int
@@ -2328,6 +2331,7 @@ def compute_gravitational_acceleration(
         theta=theta,
         G=G,
         softening=softening,
+        softening_kernel=softening_kernel,
     )
     return fmm.compute_accelerations(
         positions,
@@ -2346,6 +2350,7 @@ def compute_gravitational_potential(
     eval_points: Array,
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Compute gravitational potential at evaluation points.
 
@@ -2365,7 +2370,9 @@ def compute_gravitational_potential(
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
-        Plummer softening length.
+        Plummer-equivalent softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -2379,4 +2386,5 @@ def compute_gravitational_potential(
         eval_points,
         G=G,
         softening=softening,
+        softening_kernel=softening_kernel,
     )
