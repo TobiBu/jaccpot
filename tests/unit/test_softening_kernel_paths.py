@@ -49,6 +49,19 @@ from jaccpot.softening import pair_factors, softening_params_np, support_radius
 
 jax.config.update("jax_enable_x64", True)
 
+
+def _native_or_skip(interpret):
+    """Native Triton lowering needs an Ampere+ GPU; interpret mode runs anywhere."""
+    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
+    if not interpret and not pallas_m2l_real_csr_supported():
+        pytest.skip("native Pallas GPU lowering not available here")
+
+
+# Native fp64 Triton sums in another order than the interpreter
+def _tol(interpret):
+    return 1e-12 if interpret else 1e-10
+
 _COMPACT = ("ferrers3", "wendland_c2")
 _EPS = 0.35  # Plummer-equivalent; h = 0.86 / 1.05 against unit-normal positions
 _G = 1.3
@@ -210,9 +223,11 @@ def _csr_case(seed, L=7, W=6, p_edge=0.5):
     )
 
 
+@pytest.mark.parametrize("interpret", [True, False])
 @pytest.mark.parametrize("kernel", _COMPACT)
 @pytest.mark.parametrize("chunk", [2, 5])
-def test_csr_table_kernel_and_its_reverse(kernel, chunk):
+def test_csr_table_kernel_and_its_reverse(kernel, chunk, interpret):
+    _native_or_skip(interpret)
     pos, mass, mask, nbr, offsets, counts = _csr_case(2)
     L = int(pos.shape[0])
     tab = build_leafpair_chunk_table(
@@ -228,9 +243,9 @@ def test_csr_table_kernel_and_its_reverse(kernel, chunk):
     )
     got = nearfield_leafpair_csr_pallas(
         pos, mass, mask, nbr, tab, softening_sq=soft, G=G, chunk=chunk,
-        interpret=True, softening_kernel=kernel,
+        interpret=interpret, softening_kernel=kernel,
     )
-    assert _rel(got, want) < 1e-12
+    assert _rel(got, want) < _tol(interpret)
 
     rng = np.random.default_rng(9)
     cot = jnp.asarray(rng.standard_normal(want.shape)).at[..., 3].set(0.0)
@@ -243,7 +258,7 @@ def test_csr_table_kernel_and_its_reverse(kernel, chunk):
 
     def cvjp(p, m, s, g):
         return nearfield_leafpair_csr_pallas_cvjp(
-            p, m, mask, nbr, tab, s, g, chunk, None, 1, None, True, "input", True,
+            p, m, mask, nbr, tab, s, g, chunk, None, 1, None, interpret, "input", True,
             None, kernel,
         )
 
@@ -254,11 +269,15 @@ def test_csr_table_kernel_and_its_reverse(kernel, chunk):
     assert abs(float(vr(cot)[2])) > 0  # the softening cotangent is live
 
 
+@pytest.mark.parametrize("interpret", [True, False])
 @pytest.mark.parametrize("kernel", _COMPACT)
 @pytest.mark.parametrize(
     "source_tile, flags", [(0, None), (4, ""), (4, "l"), (8, "alr"), (4, "alg")]
 )
-def test_csr_sorted_direct_in_every_source_tile_mode(kernel, source_tile, flags):
+def test_csr_sorted_direct_in_every_source_tile_mode(
+    kernel, source_tile, flags, interpret
+):
+    _native_or_skip(interpret)
     from tests.unit.operators.test_pallas_nearfield_leafpair_csr_sorted import _case
 
     W = 8
@@ -269,7 +288,7 @@ def test_csr_sorted_direct_in_every_source_tile_mode(kernel, source_tile, flags)
     acc, pot = nearfield_leafpair_csr_sorted_direct_pallas(
         pos64, mass64, c["starts"], c["counts"], c["nbr"], c["offsets"],
         c["row_counts"], leaf_width=W, softening_sq=soft, G=G, chunk=1,
-        interpret=True, with_potential=True, source_tile=source_tile,
+        interpret=interpret, with_potential=True, source_tile=source_tile,
         source_flags=flags, softening_kernel=kernel,
     )
     want = nearfield_leafpair_csr_jax(
@@ -284,13 +303,15 @@ def test_csr_sorted_direct_in_every_source_tile_mode(kernel, source_tile, flags)
     flat = np.zeros((n, 4))
     for leaf in range(c["L"]):
         flat[starts[leaf] : starts[leaf] + counts[leaf]] = want[leaf, : counts[leaf]]
-    assert _rel(acc, flat[:, :3]) < 1e-12
-    assert _rel(pot, flat[:, 3]) < 1e-12
+    assert _rel(acc, flat[:, :3]) < _tol(interpret)
+    assert _rel(pot, flat[:, 3]) < _tol(interpret)
 
 
+@pytest.mark.parametrize("interpret", [True, False])
 @pytest.mark.parametrize("kernel", _COMPACT)
 @pytest.mark.parametrize("include_self", [False, True])
-def test_rectangle_and_pairs_kernels(kernel, include_self):
+def test_rectangle_and_pairs_kernels(kernel, include_self, interpret):
+    _native_or_skip(interpret)
     pos, mass, mask, ids, valid = _leaf_case(4)
     args = (
         jnp.asarray(pos),
@@ -301,12 +322,14 @@ def test_rectangle_and_pairs_kernels(kernel, include_self):
     )
     kw = dict(softening_sq=jnp.asarray(_EPS**2), G=jnp.asarray(_G), softening_kernel=kernel)
     want = nearfield_leafpair_jax(*args, include_self=include_self, **kw)
-    got = nearfield_leafpair_pallas(*args, interpret=True, include_self=include_self, **kw)
-    assert _rel(got, want) < 1e-12
-    got_c = nearfield_leafpair_pallas(
-        *args, interpret=True, include_self=include_self, source_chunk=2, **kw
+    got = nearfield_leafpair_pallas(
+        *args, interpret=interpret, include_self=include_self, **kw
     )
-    assert _rel(got_c, want) < 1e-12
+    assert _rel(got, want) < _tol(interpret)
+    got_c = nearfield_leafpair_pallas(
+        *args, interpret=interpret, include_self=include_self, source_chunk=2, **kw
+    )
+    assert _rel(got_c, want) < _tol(interpret)
     # the pairs lane: materialised source blocks
     rng = np.random.default_rng(6)
     tp = jnp.asarray(rng.standard_normal((5, 8, 3)))
@@ -315,12 +338,14 @@ def test_rectangle_and_pairs_kernels(kernel, include_self):
     sm = jnp.asarray(np.abs(rng.standard_normal((5, 9))) + 0.1)
     smk = jnp.asarray(rng.random((5, 9)) > 0.2)
     want_p = nearfield_fused_leaf_jax(tp, tm, sp, sm, smk, **kw)
-    got_p = nearfield_fused_leaf_pallas(tp, tm, sp, sm, smk, interpret=True, **kw)
-    assert _rel(got_p, want_p) < 1e-12
+    got_p = nearfield_fused_leaf_pallas(tp, tm, sp, sm, smk, interpret=interpret, **kw)
+    assert _rel(got_p, want_p) < _tol(interpret)
 
 
+@pytest.mark.parametrize("interpret", [True, False])
 @pytest.mark.parametrize("kernel", _COMPACT)
-def test_fast_lane_analytic_reverse_matches_its_tiled_twin(kernel):
+def test_fast_lane_analytic_reverse_matches_its_tiled_twin(kernel, interpret):
+    _native_or_skip(interpret)
     from jaccpot.nearfield import _fast_lane as fast_lane
     from jaccpot.nearfield import near_field as nf
 
@@ -346,7 +371,7 @@ def test_fast_lane_analytic_reverse_matches_its_tiled_twin(kernel):
         return fast_lane._radix_fast_lane_prepacked_accel_cvjp(
             lp, lm, positions, sids.astype(f8), svalid.astype(f8),
             leaf_mask.astype(f8), leaf_particle_idx.astype(f8), s, g,
-            None, 1, None, True, 2, 2, False, None, kernel,
+            None, 1, None, interpret, 2, 2, False, None, kernel,
         )
 
     def ref(lp, lm, s, g):
@@ -421,3 +446,60 @@ def test_targeted_time_derivatives_match_finite_differences(kernel):
     assert _rel(jerk, fd1) < 1e-7
     assert _rel(snap, fd2) < 1e-6
     assert _rel(crackle, fd3) < 1e-5
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("kernel", _COMPACT)
+@pytest.mark.parametrize("exclude_diagonal,emit_b", [(False, True), (True, False)])
+def test_mutual_tile_and_its_analytic_reverse(kernel, exclude_diagonal, emit_b, interpret):
+    from jaccpot.pallas.nearfield_mutual import (
+        mutual_leafpair_block_cvjp,
+        mutual_leafpair_block_jax,
+        pallas_nearfield_mutual_supported,
+    )
+
+    if not interpret and not pallas_nearfield_mutual_supported():
+        pytest.skip("native mutual Pallas lowering not available here")
+    rng = np.random.default_rng(2)
+    f8 = jnp.float64
+    pairs, slots, k_max = 5, 8, 3
+    xa = jnp.asarray(rng.normal(0.0, 0.5, (pairs, slots, 3)), f8)
+    # b blocks overlap a: plenty of pairs inside the support (h ~ 0.86 / 1.05)
+    xb = jnp.asarray(rng.normal(0.3, 0.5, (pairs, slots, 3)), f8)
+    if exclude_diagonal:
+        xb = xa
+    va = jnp.asarray(rng.random((pairs, slots)) > 0.25, f8)
+    vb = va if exclude_diagonal else jnp.asarray(rng.random((pairs, slots)) > 0.25, f8)
+    ma = jnp.asarray(rng.uniform(0.5, 1.5, (pairs, slots)), f8) * va
+    mb = ma if exclude_diagonal else jnp.asarray(rng.uniform(0.5, 1.5, (pairs, slots)), f8) * vb
+    ra = jnp.asarray(rng.integers(0, k_max + 1, (pairs, slots)), f8)
+    rb = ra if exclude_diagonal else jnp.asarray(rng.integers(0, k_max + 1, (pairs, slots)), f8)
+    lw = jnp.asarray([1.0, 0.5, 0.25, 0.125], f8)
+    soft, G = jnp.asarray(_EPS**2, f8), jnp.asarray(_G, f8)
+
+    def custom(xa_, ma_, xb_, mb_, lw_, s_, g_):
+        return mutual_leafpair_block_cvjp(
+            xa_, ma_, va, xb_, mb_, vb, ra, rb, lw_, s_, g_, k_max + 1,
+            exclude_diagonal, emit_b, interpret, kernel,
+        )
+
+    def twin(xa_, ma_, xb_, mb_, lw_, s_, g_):
+        return mutual_leafpair_block_jax(
+            xa_, ma_, va, xb_, mb_, vb, ra, rb, lw_, s_, g_,
+            exclude_diagonal=exclude_diagonal, emit_b=emit_b, softening_kernel=kernel,
+        )
+
+    args = (xa, ma, xb, mb, lw, soft, G)
+    out_c, vc = jax.vjp(custom, *args)
+    out_t, vt = jax.vjp(twin, *args)
+    for a, b in zip(out_c, out_t):
+        assert _rel(a, b) < _tol(interpret)
+    cot = tuple(jnp.asarray(rng.standard_normal(o.shape), f8) for o in out_t)
+    for got, want in zip(vc(cot), vt(cot)):
+        assert _rel(got, want) < 1e-9
+    # the twin really is the compact kernel (not Plummer)
+    plummer = mutual_leafpair_block_jax(
+        xa, ma, va, xb, mb, vb, ra, rb, lw, soft, G,
+        exclude_diagonal=exclude_diagonal, emit_b=emit_b, softening_kernel="plummer",
+    )
+    assert _rel(out_t[0], plummer[0]) > 1e-3
