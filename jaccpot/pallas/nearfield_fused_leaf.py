@@ -23,7 +23,7 @@ the pure-JAX reference ``_pair_contributions_batched``.
 from __future__ import annotations
 
 from functools import partial
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +32,11 @@ from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
 from jaccpot.pallas._compat import KernelRef
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params_from_sq,
+)
 
 try:
     from jax.experimental import pallas as pl
@@ -165,7 +170,7 @@ def pallas_nearfield_fused_supported() -> bool:
     return float(compute_capability) >= 8.0
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=("softening_kernel",))
 def nearfield_fused_leaf_jax(
     target_positions: Array,
     target_mask: Array,
@@ -174,6 +179,7 @@ def nearfield_fused_leaf_jax(
     source_mask: Array,
     *,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     G: Array,
 ) -> Array:
     """Reference leaf-major fused near-field update in pure JAX.
@@ -197,6 +203,8 @@ def nearfield_fused_leaf_jax(
         ``[num_leaves, K]`` boolean validity of each flattened source.
     softening_sq : Array
         Scalar *squared* Plummer softening, added to every squared separation.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Scalar gravitational constant, applied as a plain multiplier.
 
@@ -222,13 +230,13 @@ def nearfield_fused_leaf_jax(
     """
 
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
-    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+    r2 = jnp.sum(diff * diff, axis=-1)
     pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
 
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-    inv_r = lax.rsqrt(safe_dist_sq)
-    inv_r = jnp.where(pair_mask, inv_r, 0.0)
-    inv_dist3 = inv_r * inv_r * inv_r
+    params = softening_params_from_sq(softening_kernel, softening_sq, r2.dtype)
+    inv_dist3, inv_r, _ = masked_pair_factors(
+        r2, pair_mask, params, softening_kernel, potential=True
+    )
 
     weighted = inv_dist3 * source_masses[:, None, :]
     accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
@@ -246,11 +254,12 @@ def _nearfield_fused_leaf_kernel(
     source_positions_ref: KernelRef,
     source_masses_ref: KernelRef,
     source_mask_ref: KernelRef,
-    softening_sq_ref: KernelRef,
+    softening_ref: KernelRef,
     g_ref: KernelRef,
     out_ref: KernelRef,
     *,
     num_sources: int,
+    softening_kernel: str = "plummer",
 ) -> None:
     """Fused near-field update for one target leaf (vector of W_t targets).
 
@@ -271,7 +280,7 @@ def _nearfield_fused_leaf_kernel(
     source_mask_ref : KernelRef
         Which source lanes are real, shape ``(1, K)``. Padding is masked out of the
         accumulation rather than skipped, keeping the trip count static.
-    softening_sq_ref : KernelRef
+    softening_ref : KernelRef
         Squared softening length, shape ``(1,)``. Pre-squared by the caller so the
         kernel adds it directly to the squared separation.
     g_ref : KernelRef
@@ -282,6 +291,8 @@ def _nearfield_fused_leaf_kernel(
     num_sources : int
         Source lane count. Static, since it is the reduction trip count.
 
+    softening_kernel : str
+        The pair kernel, static (:mod:`jaccpot.softening`).
     Returns
     -------
     None
@@ -292,7 +303,7 @@ def _nearfield_fused_leaf_kernel(
     tx = target_positions_ref[0, :, 0]
     ty = target_positions_ref[0, :, 1]
     tz = target_positions_ref[0, :, 2]
-    soft = softening_sq_ref[0]
+    soft = (softening_ref[0], softening_ref[1])
     g_value = g_ref[0]
 
     zero = jnp.zeros_like(tx)
@@ -309,12 +320,11 @@ def _nearfield_fused_leaf_kernel(
         dx = tx - sx
         dy = ty - sy
         dz = tz - sz
-        dist_sq = dx * dx + dy * dy + dz * dz + soft
+        r2 = dx * dx + dy * dy + dz * dz
         active = tvalid & svalid  # (W_t,), broadcast scalar svalid
-        safe_dist_sq = jnp.where(active, dist_sq, 1.0)
-        inv_r = lax.rsqrt(safe_dist_sq)
-        inv_r = jnp.where(active, inv_r, 0.0)
-        inv_dist3 = inv_r * inv_r * inv_r  # already 0 where inactive
+        inv_dist3, inv_r, _ = masked_pair_factors(  # 0 where inactive
+            r2, active, soft, softening_kernel, potential=True
+        )
 
         scale = -g_value * inv_dist3 * sm
         acc_x = acc_x + scale * dx
@@ -374,6 +384,7 @@ def nearfield_fused_leaf_pallas(
     source_mask: Bool[Array, "srcleaves srcslots"],
     *,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     G: Array,
     num_warps: int | None = None,
     num_stages: int = 1,
@@ -405,6 +416,8 @@ def nearfield_fused_leaf_pallas(
         Which source slots are real, shape ``(num_leaves, K)``.
     softening_sq : Array
         Scalar squared softening length -- squared by the caller, not here.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Scalar gravitational constant.
     num_warps : int | None
@@ -440,7 +453,8 @@ def nearfield_fused_leaf_pallas(
     target_mask = jnp.asarray(target_mask, dtype=bool)
     source_mask = jnp.asarray(source_mask, dtype=bool)
     source_masses = jnp.asarray(source_masses, dtype=dtype)
-    softening_sq_arr = jnp.asarray([softening_sq], dtype=dtype)
+    softening_kernel = resolve_softening_kernel(softening_kernel)
+    softening_sq_arr = softening_params_from_sq(softening_kernel, softening_sq, dtype)
     g_arr = jnp.asarray([G], dtype=dtype)
 
     if target_positions.ndim != 3 or target_positions.shape[-1] != 3:
@@ -485,7 +499,9 @@ def nearfield_fused_leaf_pallas(
         num_warps = max(1, bt // 32)
 
     def _kernel(*refs):
-        return _nearfield_fused_leaf_kernel(*refs, num_sources=num_sources)
+        return _nearfield_fused_leaf_kernel(
+            *refs, num_sources=num_sources, softening_kernel=softening_kernel
+        )
 
     kernel = pl.pallas_call(
         _kernel,
@@ -496,7 +512,7 @@ def nearfield_fused_leaf_pallas(
             pl.BlockSpec((1, num_sources, _POS_WIDTH), lambda leaf, sub: (leaf, 0, 0)),
             pl.BlockSpec((1, num_sources), lambda leaf, sub: (leaf, 0)),
             pl.BlockSpec((1, num_sources), lambda leaf, sub: (leaf, 0)),
-            pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+            pl.BlockSpec((2,), lambda leaf, sub: (0,)),
             pl.BlockSpec((1,), lambda leaf, sub: (0,)),
         ],
         out_specs=pl.BlockSpec((1, bt, _OUT_WIDTH), lambda leaf, sub: (leaf, sub, 0)),
@@ -529,6 +545,7 @@ def nearfield_fused_leaf(
     source_mask: Array,
     *,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     G: Array,
     prefer_pallas: bool = True,
     interpret: bool = False,
@@ -552,6 +569,8 @@ def nearfield_fused_leaf(
         Which source slots are real, shape ``(num_leaves, K)``.
     softening_sq : Array
         Scalar squared softening length -- squared by the caller, not here.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Scalar gravitational constant.
     prefer_pallas : bool
@@ -583,6 +602,7 @@ def nearfield_fused_leaf(
             source_masses,
             source_mask,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             G=G,
             num_warps=num_warps,
             num_stages=num_stages,
@@ -596,6 +616,7 @@ def nearfield_fused_leaf(
         source_masses,
         source_mask,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=G,
     )
 
@@ -631,7 +652,8 @@ def nearfield_fused_leaf_backend(*, prefer_pallas: bool = True) -> str:
 # ---------------------------------------------------------------------------
 
 
-@partial(jax.jit, static_argnames=("include_self",))
+@partial(jax.jit, static_argnames=(
+        "softening_kernel","include_self",))
 @jaxtyped(typechecker=beartype)
 def nearfield_leafpair_jax(
     leaf_positions: Array,
@@ -641,6 +663,7 @@ def nearfield_leafpair_jax(
     source_valid: Bool[Array, "leaves srcslots"],
     *,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     G: Array,
     include_self: bool = False,
 ) -> Array:
@@ -668,6 +691,8 @@ def nearfield_leafpair_jax(
         ``[num_leaves, S]`` validity of each source slot.
     softening_sq : Array
         Scalar *squared* Plummer softening, added to every squared separation.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Scalar gravitational constant, applied as a plain multiplier.
     include_self : bool
@@ -733,11 +758,12 @@ def nearfield_leafpair_jax(
 
     # target (L, W_t, 1, 1, 3) vs source (L, 1, S, W_s, 3)
     diff = leaf_positions[:, :, None, None, :] - src_pos[:, None, :, :, :]
-    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq  # (L, W_t, S, W_s)
+    r2 = jnp.sum(diff * diff, axis=-1)  # (L, W_t, S, W_s)
     pair_mask = leaf_mask[:, :, None, None] & src_valid[:, None, :, :]
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, 1.0)
-    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-    inv_dist3 = inv_r * inv_r * inv_r
+    params = softening_params_from_sq(softening_kernel, softening_sq, r2.dtype)
+    inv_dist3, inv_r, _ = masked_pair_factors(
+        r2, pair_mask, params, softening_kernel, potential=True
+    )
     weighted = inv_dist3 * src_mass[:, None, :, :]
     accels = -G * jnp.sum(weighted[..., None] * diff, axis=(2, 3))  # (L, W_t, 3)
     potentials = -G * jnp.sum(inv_r * src_mass[:, None, :, :], axis=(2, 3))
@@ -745,10 +771,12 @@ def nearfield_leafpair_jax(
         width = int(leaf_positions.shape[1])
         identity = jnp.eye(width, dtype=bool)
         diff_s = leaf_positions[:, :, None, :] - leaf_positions[:, None, :, :]
-        dist_sq_s = jnp.sum(diff_s * diff_s, axis=-1) + softening_sq  # (L, W, W)
+        r2_s = jnp.sum(diff_s * diff_s, axis=-1)  # (L, W, W)
         mask_s = leaf_mask[:, :, None] & leaf_mask[:, None, :] & (~identity)
-        inv_r_s = jnp.where(mask_s, lax.rsqrt(jnp.where(mask_s, dist_sq_s, 1.0)), 0.0)
-        weighted_s = inv_r_s * inv_r_s * inv_r_s * leaf_masses[:, None, :]
+        inv3_s, inv_r_s, _ = masked_pair_factors(
+            r2_s, mask_s, params, softening_kernel, potential=True
+        )
+        weighted_s = inv3_s * leaf_masses[:, None, :]
         accels = accels - G * jnp.sum(weighted_s[..., None] * diff_s, axis=2)
         potentials = potentials - G * jnp.sum(inv_r_s * leaf_masses[:, None, :], axis=2)
     accels = jnp.where(leaf_mask[..., None], accels, 0.0)
@@ -797,7 +825,7 @@ def _nearfield_leafpair_kernel(
     src_table_mask_ref: KernelRef,
     source_leaf_ids_ref: KernelRef,
     source_valid_ref: KernelRef,
-    softening_sq_ref: KernelRef,
+    softening_ref: KernelRef,
     g_ref: KernelRef,
     out_ref: KernelRef,
     *,
@@ -807,6 +835,7 @@ def _nearfield_leafpair_kernel(
     out_dtype: Any = None,
     include_self: bool = False,
     self_on_first_chunk_only: bool = False,
+    softening_kernel: str = "plummer",
 ) -> None:
     """Leaf-pair near-field update for one target subtile (vector of Bt targets).
 
@@ -838,7 +867,7 @@ def _nearfield_leafpair_kernel(
         Which of the ``S`` slots hold a real source leaf, shape ``(1, S)``. Invalid
         slots are skipped with ``lax.cond``, so a heavily padded slot tensor costs
         only a per-slot predicate.
-    softening_sq_ref : KernelRef
+    softening_ref : KernelRef
         Squared softening length, shape ``(1,)``.
     g_ref : KernelRef
         Gravitational constant, shape ``(1,)``.
@@ -892,6 +921,8 @@ def _nearfield_leafpair_kernel(
         pass on chunk 0 only; otherwise it would be counted ``n_chunks`` times.
         Static; the single-pass grid leaves it False.
 
+    softening_kernel : str
+        The pair kernel, static (:mod:`jaccpot.softening`).
     Returns
     -------
     None
@@ -902,7 +933,7 @@ def _nearfield_leafpair_kernel(
     tx = target_positions_ref[0, :, 0]
     ty = target_positions_ref[0, :, 1]
     tz = target_positions_ref[0, :, 2]
-    soft = softening_sq_ref[0]
+    soft = (softening_ref[0], softening_ref[1])
     g_value = g_ref[0]
 
     zero = jnp.zeros_like(tx)
@@ -928,14 +959,13 @@ def _nearfield_leafpair_kernel(
             dx = tx - sx
             dy = ty - sy
             dz = tz - sz
-            dist_sq = dx * dx + dy * dy + dz * dz + soft
+            r2 = dx * dx + dy * dy + dz * dz
             active = tvalid & lane_valid
             if exclude_lane is not None:
                 active = active & (exclude_lane != j)
-            safe_dist_sq = jnp.where(active, dist_sq, 1.0)
-            inv_r = lax.rsqrt(safe_dist_sq)
-            inv_r = jnp.where(active, inv_r, 0.0)
-            inv_dist3 = inv_r * inv_r * inv_r
+            inv_dist3, inv_r, _ = masked_pair_factors(
+                r2, active, soft, softening_kernel, potential=True
+            )
             scale = -g_value * inv_dist3 * sm
             acc_x = acc_x + scale * dx
             acc_y = acc_y + scale * dy
@@ -1006,6 +1036,7 @@ def nearfield_leafpair_pallas(
     source_valid: Bool[Array, "leaves srcslots"],
     *,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     G: Array,
     num_warps: int | None = None,
     num_stages: int = 1,
@@ -1052,6 +1083,8 @@ def nearfield_leafpair_pallas(
         Which slots hold a real source leaf, shape ``(num_leaves, S)``.
     softening_sq : Array
         Scalar squared softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Scalar gravitational constant.
     num_warps : int | None
@@ -1110,7 +1143,8 @@ def nearfield_leafpair_pallas(
     leaf_mask = jnp.asarray(leaf_mask, dtype=bool)
     source_leaf_ids = jnp.asarray(source_leaf_ids)
     source_valid = jnp.asarray(source_valid, dtype=bool)
-    softening_sq_arr = jnp.asarray([softening_sq], dtype=dtype)
+    softening_kernel = resolve_softening_kernel(softening_kernel)
+    softening_sq_arr = softening_params_from_sq(softening_kernel, softening_sq, dtype)
     g_arr = jnp.asarray([G], dtype=dtype)
     include_self = bool(include_self)
     self_tag = "_self" if include_self else ""
@@ -1165,6 +1199,7 @@ def nearfield_leafpair_pallas(
                 leaf_width=leaf_width,
                 accum_dtype=accum_dtype,
                 include_self=include_self,
+                softening_kernel=softening_kernel,
             )
 
         kernel = pl.pallas_call(
@@ -1181,7 +1216,7 @@ def nearfield_leafpair_pallas(
                 pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub: (0, 0)),
                 pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
                 pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
-                pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+                pl.BlockSpec((2,), lambda leaf, sub: (0,)),
                 pl.BlockSpec((1,), lambda leaf, sub: (0,)),
             ],
             out_specs=pl.BlockSpec(
@@ -1234,6 +1269,7 @@ def nearfield_leafpair_pallas(
             include_self=include_self,
             # counted once, on chunk 0, not n_chunks times
             self_on_first_chunk_only=True,
+            softening_kernel=softening_kernel,
         )
 
     kernel = pl.pallas_call(
@@ -1251,7 +1287,7 @@ def nearfield_leafpair_pallas(
             pl.BlockSpec((num_leaves, leaf_width), lambda leaf, sub, c: (0, 0)),
             pl.BlockSpec((1, chunk), lambda leaf, sub, c: (leaf, c)),
             pl.BlockSpec((1, chunk), lambda leaf, sub, c: (leaf, c)),
-            pl.BlockSpec((1,), lambda leaf, sub, c: (0,)),
+            pl.BlockSpec((2,), lambda leaf, sub, c: (0,)),
             pl.BlockSpec((1,), lambda leaf, sub, c: (0,)),
         ],
         out_specs=pl.BlockSpec(
@@ -1295,6 +1331,7 @@ def nearfield_leafpair_pallas_decoupled(
     source_valid: Bool[Array, "leaves srcslots"],
     *,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     G: Array,
     num_warps: int | None = None,
     num_stages: int = 1,
@@ -1331,6 +1368,8 @@ def nearfield_leafpair_pallas_decoupled(
         Which slots are real, shape ``(num_targets, S)``.
     softening_sq : Array
         Scalar squared softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Scalar gravitational constant.
     num_warps : int | None
@@ -1377,7 +1416,8 @@ def nearfield_leafpair_pallas_decoupled(
     source_mask = jnp.asarray(source_mask, dtype=bool)
     source_leaf_ids = jnp.asarray(source_leaf_ids)
     source_valid = jnp.asarray(source_valid, dtype=bool)
-    softening_sq_arr = jnp.asarray([softening_sq], dtype=dtype)
+    softening_kernel = resolve_softening_kernel(softening_kernel)
+    softening_sq_arr = softening_params_from_sq(softening_kernel, softening_sq, dtype)
     g_arr = jnp.asarray([G], dtype=dtype)
 
     if target_positions.ndim != 3 or target_positions.shape[-1] != 3:
@@ -1467,6 +1507,7 @@ def nearfield_leafpair_pallas_decoupled(
             num_source_slots=num_source_slots,
             leaf_width=leaf_width,
             accum_dtype=accum_dtype,
+            softening_kernel=softening_kernel,
         )
 
     kernel = pl.pallas_call(
@@ -1483,7 +1524,7 @@ def nearfield_leafpair_pallas_decoupled(
             pl.BlockSpec((num_sources, leaf_width), lambda leaf, sub: (0, 0)),
             pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
             pl.BlockSpec((1, num_source_slots), lambda leaf, sub: (leaf, 0)),
-            pl.BlockSpec((1,), lambda leaf, sub: (0,)),
+            pl.BlockSpec((2,), lambda leaf, sub: (0,)),
             pl.BlockSpec((1,), lambda leaf, sub: (0,)),
         ],
         out_specs=pl.BlockSpec((1, bt, _OUT_WIDTH), lambda leaf, sub: (leaf, sub, 0)),
@@ -1536,7 +1577,7 @@ def nearfield_leafpair_pallas_decoupled(
 # (tests/unit/test_custom_vjp_parity.py). Do not add a second grad-path caller.
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11))
 def nearfield_fused_leaf_pallas_cvjp(
     target_positions: Array,
     target_mask_f: Array,
@@ -1549,6 +1590,7 @@ def nearfield_fused_leaf_pallas_cvjp(
     num_stages: int,
     target_subtile: int | None,
     interpret: bool,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Differentiable fused leaf-major near-field (pairs lane); see module comment.
 
@@ -1578,6 +1620,8 @@ def nearfield_fused_leaf_pallas_cvjp(
         Targets per program. ``nondiff_argnums``.
     interpret : bool
         Interpret mode. ``nondiff_argnums``.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`). ``nondiff_argnums``.
 
     Returns
     -------
@@ -1592,6 +1636,7 @@ def nearfield_fused_leaf_pallas_cvjp(
         source_masses,
         source_mask_f > 0.5,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=G,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -1612,6 +1657,7 @@ def _nearfield_fused_leaf_cvjp_fwd(
     num_stages,
     target_subtile,
     interpret,
+    softening_kernel=None,
 ):
     out = nearfield_fused_leaf_pallas(
         target_positions,
@@ -1620,6 +1666,7 @@ def _nearfield_fused_leaf_cvjp_fwd(
         source_masses,
         source_mask_f > 0.5,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=G,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -1639,7 +1686,13 @@ def _nearfield_fused_leaf_cvjp_fwd(
 
 
 def _nearfield_fused_leaf_cvjp_bwd(
-    num_warps, num_stages, target_subtile, interpret, residual, cotangent
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+    softening_kernel,
+    residual,
+    cotangent,
 ):
     (
         target_positions,
@@ -1659,7 +1712,14 @@ def _nearfield_fused_leaf_cvjp_bwd(
     # d/dG. Only the masks are discrete.
     def _twin(tp, sp, sm, soft, g):
         return nearfield_fused_leaf_jax(
-            tp, target_mask, sp, sm, source_mask, softening_sq=soft, G=g
+            tp,
+            target_mask,
+            sp,
+            sm,
+            source_mask,
+            softening_sq=soft,
+            softening_kernel=softening_kernel,
+            G=g,
         )
 
     _, vjp_fn = jax.vjp(
@@ -1682,7 +1742,7 @@ nearfield_fused_leaf_pallas_cvjp.defvjp(
 )
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11))
 def nearfield_leafpair_pallas_cvjp(
     leaf_positions: Array,
     leaf_masses: Array,
@@ -1695,6 +1755,7 @@ def nearfield_leafpair_pallas_cvjp(
     num_stages: int,
     target_subtile: int | None,
     interpret: bool,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Differentiable leaf-pair (prepacked production lane) near-field.
 
@@ -1727,6 +1788,8 @@ def nearfield_leafpair_pallas_cvjp(
         Targets per program. ``nondiff_argnums``.
     interpret : bool
         Interpret mode. ``nondiff_argnums``.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`). ``nondiff_argnums``.
 
     Returns
     -------
@@ -1741,6 +1804,7 @@ def nearfield_leafpair_pallas_cvjp(
         jnp.round(source_leaf_ids_f).astype(jnp.int32),
         source_valid_f > 0.5,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=G,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -1761,6 +1825,7 @@ def _nearfield_leafpair_cvjp_fwd(
     num_stages,
     target_subtile,
     interpret,
+    softening_kernel=None,
 ):
     out = nearfield_leafpair_pallas(
         leaf_positions,
@@ -1769,6 +1834,7 @@ def _nearfield_leafpair_cvjp_fwd(
         jnp.round(source_leaf_ids_f).astype(jnp.int32),
         source_valid_f > 0.5,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=G,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -1788,7 +1854,13 @@ def _nearfield_leafpair_cvjp_fwd(
 
 
 def _nearfield_leafpair_cvjp_bwd(
-    num_warps, num_stages, target_subtile, interpret, residual, cotangent
+    num_warps,
+    num_stages,
+    target_subtile,
+    interpret,
+    softening_kernel,
+    residual,
+    cotangent,
 ):
     (
         leaf_positions,
@@ -1813,6 +1885,7 @@ def _nearfield_leafpair_cvjp_bwd(
             source_leaf_ids,
             source_valid,
             softening_sq=soft,
+            softening_kernel=softening_kernel,
             G=g,
         )
 

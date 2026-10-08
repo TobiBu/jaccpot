@@ -11,6 +11,8 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Float, jaxtyped
 
+from jaccpot.softening import pair_factors, resolve_softening_kernel, softening_params
+
 
 class MultipoleExpansion(NamedTuple):
     """Multipole coefficients around a shared expansion center.
@@ -287,7 +289,7 @@ def evaluate_expansion(
     return -grad_phi
 
 
-@partial(jax.jit, static_argnums=())
+@partial(jax.jit, static_argnames=("softening_kernel",))
 @jaxtyped(typechecker=beartype)
 def direct_sum(
     positions: Float[Array, "n 3"],
@@ -296,6 +298,7 @@ def direct_sum(
     *,
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Compute gravitational acceleration via O(N) direct summation.
     O(N) for one evaluation point, so O(N^2) to evaluate at every particle. Exact
@@ -316,7 +319,9 @@ def direct_sum(
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
-        Plummer softening length.
+        Plummer-equivalent softening length (see :mod:`jaccpot.softening`).
+    softening_kernel : Optional[str]
+        The pair kernel; ``None`` gives the default. Static.
 
     Returns
     -------
@@ -324,13 +329,18 @@ def direct_sum(
         Acceleration at ``eval_point``.
     """
 
+    kernel = resolve_softening_kernel(softening_kernel)
     r_vec = eval_point - positions
     dist_sq = jnp.sum(r_vec**2, axis=1, keepdims=True)
-    r = jnp.sqrt(dist_sq + softening**2)
-    return -G * jnp.sum(masses[:, None] * r_vec / (r**3), axis=0)
+    if kernel == "plummer":
+        r = jnp.sqrt(dist_sq + softening**2)
+        return -G * jnp.sum(masses[:, None] * r_vec / (r**3), axis=0)
+    params = softening_params(kernel, softening, dist_sq.dtype)
+    g = pair_factors(dist_sq, params, kernel)[0]
+    return -G * jnp.sum(masses[:, None] * r_vec * g, axis=0)
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=("softening_kernel",))
 @jaxtyped(typechecker=beartype)
 def compute_gravitational_potential(
     positions: Float[Array, "n 3"],
@@ -338,6 +348,7 @@ def compute_gravitational_potential(
     eval_points: Float[Array, "points 3"],
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Compute gravitational potential at ``eval_points`` with direct sums.
     Vectorised over ``eval_points``, unlike :func:`direct_sum`, which takes one
@@ -359,7 +370,9 @@ def compute_gravitational_potential(
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
-        Plummer softening length.
+        Plummer-equivalent softening length (see :mod:`jaccpot.softening`).
+    softening_kernel : Optional[str]
+        The pair kernel; ``None`` gives the default. Static.
 
     Returns
     -------
@@ -367,10 +380,17 @@ def compute_gravitational_potential(
         ``(m,)`` potentials.
     """
 
+    kernel = resolve_softening_kernel(softening_kernel)
+
     def compute_potential(eval_point: Array) -> Array:
         r_vec = eval_point - positions
-        r = jnp.sqrt(jnp.sum(r_vec**2, axis=1) + softening**2)
-        return -G * jnp.sum(masses / (r + 1e-10))
+        dist_sq = jnp.sum(r_vec**2, axis=1)
+        if kernel == "plummer":
+            r = jnp.sqrt(dist_sq + softening**2)
+            return -G * jnp.sum(masses / (r + 1e-10))
+        params = softening_params(kernel, softening, dist_sq.dtype)
+        psi = pair_factors(dist_sq, params, kernel, potential=True)[1]
+        return -G * jnp.sum(masses * psi)
 
     return jax.vmap(compute_potential)(eval_points)
 

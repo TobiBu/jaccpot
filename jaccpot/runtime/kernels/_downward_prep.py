@@ -303,6 +303,7 @@ def _prepare_solidfmm_downward_interaction_inputs(
     traversal_config: Optional[DualTreeTraversalConfig],
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
 ) -> _SolidFMMDownwardInteractionInputs:
     """Resolve interaction storage and far-pair arrays for downward prep.
 
@@ -332,6 +333,8 @@ def _prepare_solidfmm_downward_interaction_inputs(
         Callback invoked when the traversal retries with a larger capacity.
     dehnen_radius_scale : float
         Scale applied to node radii by the Dehnen criteria.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
 
     Returns
     -------
@@ -347,6 +350,7 @@ def _prepare_solidfmm_downward_interaction_inputs(
             theta=theta,
             mac_type=mac_type,
             dehnen_radius_scale=dehnen_radius_scale,
+            separation_floor=separation_floor,
             traversal_config=traversal_config,
             retry_logger=retry_logger,
         )

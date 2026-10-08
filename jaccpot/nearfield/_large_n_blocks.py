@@ -20,7 +20,7 @@ unchanged.
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -100,7 +100,7 @@ __all__ = ["compute_leaf_p2p_accelerations_target_block_pairs_only"]
 # other.
 
 
-@jax.jit
+@partial(jax.jit, static_argnames=("softening_kernel",))
 @jaxtyped(typechecker=beartype)
 def _compute_leaf_p2p_prepared_large_n_self_only_impl(
     positions: Float[Array, "n 3"],
@@ -111,6 +111,7 @@ def _compute_leaf_p2p_prepared_large_n_self_only_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Self-leaf portion of the specialized large-N accel-only kernel.
 
@@ -142,6 +143,8 @@ def _compute_leaf_p2p_prepared_large_n_self_only_impl(
     softening_sq : Array
         Plummer softening **squared**. Squared, not linear -- passing the
         softening length itself gives a silently over-softened force.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -157,6 +160,7 @@ def _compute_leaf_p2p_prepared_large_n_self_only_impl(
         leaf_masses,
         leaf_mask,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=g_const,
         compute_potential=False,
     )
@@ -171,6 +175,7 @@ def _compute_leaf_p2p_prepared_large_n_self_only_impl(
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "edge_chunk_size",
         "chunks_per_superchunk",
         "chunk_scan_batch_size",
@@ -195,6 +200,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     edge_chunk_size: int,
     chunks_per_superchunk: int,
     chunk_scan_batch_size: int = 1,
@@ -237,6 +243,8 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     edge_chunk_size : int
         Edges per chunk. Static under ``jit``; batching only.
     chunks_per_superchunk : int
@@ -324,6 +332,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
             src_mass,
             src_mask,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             G=g_const,
             compute_potential=False,
         )
@@ -489,6 +498,7 @@ def _accumulate_target_block_tile_sequence(
     *,
     g_const: Array,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     tile_unroll: int,
     skip_empty_tiles: bool = False,
     componentwise_pairs: bool = False,
@@ -525,6 +535,8 @@ def _accumulate_target_block_tile_sequence(
         Gravitational constant, pre-cast to the working dtype.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     tile_unroll : int
         Unroll factor for the tile scan. Static under ``jit``; batching only.
     skip_empty_tiles : bool
@@ -595,6 +607,7 @@ def _accumulate_target_block_tile_sequence(
                 flat_src_mass,
                 flat_src_mask,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 G=g_const,
                 compute_potential=False,
             )
@@ -707,6 +720,7 @@ def _compute_target_block_pairs_from_source_tiles(
     *,
     g_const: Array,
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int,
     target_block_tile_scan_unroll: int,
     target_block_batch_scan_unroll: int,
@@ -742,6 +756,8 @@ def _compute_target_block_pairs_from_source_tiles(
         Gravitational constant, pre-cast to the working dtype.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
         Target leaves per scan step. Static under ``jit``; batching only.
     target_block_tile_scan_unroll : int
@@ -806,6 +822,7 @@ def _compute_target_block_pairs_from_source_tiles(
             leaf_mask,
             g_const=g_const,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             tile_unroll=tile_unroll,
             skip_empty_tiles=bool(skip_empty_tiles),
             componentwise_pairs=bool(componentwise_pairs),
@@ -861,6 +878,7 @@ def _compute_target_block_pairs_from_source_tiles(
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "target_leaf_batch_size",
         "target_block_tile_size",
         "target_block_tile_scan_unroll",
@@ -881,6 +899,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int,
     target_block_tile_size: int,
     target_block_tile_scan_unroll: int,
@@ -921,6 +940,8 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
         Target leaves per scan step. Static under ``jit``; batching only.
     target_block_tile_size : int
@@ -1010,6 +1031,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
             leaf_mask,
             g_const=g_const,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             tile_unroll=tile_unroll,
         )
         return jnp.where(target_active[:, None, None], target_leaf_acc, 0.0)
@@ -1034,6 +1056,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "target_leaf_batch_size",
         "target_block_tile_size",
         "target_block_tile_scan_unroll",
@@ -1055,6 +1078,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int,
     target_block_tile_size: int,
     target_block_tile_scan_unroll: int,
@@ -1097,6 +1121,8 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
         Target leaves per scan step. Static under ``jit``; batching only.
     target_block_tile_size : int
@@ -1198,6 +1224,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
         leaf_particle_idx,
         g_const=g_const,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         target_leaf_batch_size=target_leaf_batch_size,
         target_block_tile_scan_unroll=target_block_tile_scan_unroll,
         target_block_batch_scan_unroll=target_block_batch_scan_unroll,
@@ -1209,6 +1236,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "target_leaf_batch_size",
         "target_block_tile_size",
         "target_block_tile_scan_unroll",
@@ -1229,6 +1257,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int,
     target_block_tile_size: int,
     target_block_tile_scan_unroll: int,
@@ -1272,6 +1301,8 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
         Target leaves per scan step. Static under ``jit``; batching only.
     target_block_tile_size : int
@@ -1333,6 +1364,7 @@ def _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_tiled_impl(
         leaf_particle_idx,
         g_const=g_const,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         target_leaf_batch_size=target_leaf_batch_size,
         target_block_tile_scan_unroll=target_block_tile_scan_unroll,
         target_block_batch_scan_unroll=target_block_batch_scan_unroll,
@@ -1351,6 +1383,7 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
     *,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int = 32,
     target_block_tile_size: int = 8,
     target_block_tile_scan_unroll: int = 1,
@@ -1390,6 +1423,8 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
     softening : float
         Plummer softening **length** (squared internally). Must be a concrete
         Python float, not a tracer. Default ``0.0``.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
         Target leaves per scan step. Static under ``jit``; batching only.
     target_block_tile_size : int
@@ -1444,6 +1479,7 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         target_leaf_batch_size=int(target_leaf_batch_size),
         target_block_tile_size=int(target_block_tile_size),
         target_block_tile_scan_unroll=int(target_block_tile_scan_unroll),
@@ -1466,6 +1502,7 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "target_leaf_batch_size",
         "target_block_tile_size",
         "target_block_tile_scan_unroll",
@@ -1485,6 +1522,7 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_target_blocks_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int,
     target_block_tile_size: int,
     target_block_tile_scan_unroll: int,
@@ -1526,6 +1564,8 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_target_blocks_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
         Target leaves per scan step. Static under ``jit``; batching only.
     target_block_tile_size : int
@@ -1548,6 +1588,7 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_target_blocks_impl(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
     )
     pair_acc = _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl(
         positions,
@@ -1561,6 +1602,7 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_target_blocks_impl(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         target_leaf_batch_size=target_leaf_batch_size,
         target_block_tile_size=target_block_tile_size,
         target_block_tile_scan_unroll=target_block_tile_scan_unroll,
@@ -1572,6 +1614,7 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_target_blocks_impl(
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "edge_chunk_size",
         "chunks_per_superchunk",
         "chunk_scan_batch_size",
@@ -1596,6 +1639,7 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     edge_chunk_size: int,
     chunks_per_superchunk: int,
     chunk_scan_batch_size: int = 1,
@@ -1638,6 +1682,8 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     edge_chunk_size : int
         Edges per chunk. Static under ``jit``; batching only.
     chunks_per_superchunk : int
@@ -1673,6 +1719,7 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_impl(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
     )
     pair_acc = _compute_leaf_p2p_prepared_large_n_pairs_only_impl(
         positions,
@@ -1685,6 +1732,7 @@ def _compute_leaf_p2p_prepared_large_n_accel_only_impl(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         edge_chunk_size=edge_chunk_size,
         chunks_per_superchunk=chunks_per_superchunk,
         chunk_scan_batch_size=chunk_scan_batch_size,

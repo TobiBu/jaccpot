@@ -707,6 +707,7 @@ class SweepsMixin(_EngineBase):
                 adaptive_order=adaptive_order_val,
                 p_gears=p_gears_val,
                 dehnen_radius_scale=dehnen_scale_val,
+                separation_floor=self._walk_separation_floor(),
                 use_pallas=self.use_pallas,
                 timing_recorder=timing_recorder,
             )

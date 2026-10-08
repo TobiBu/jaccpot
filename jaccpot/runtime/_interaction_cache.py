@@ -442,6 +442,7 @@ def _dual_tree_build_raw(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
@@ -533,6 +534,7 @@ def _dual_tree_build_raw(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=current_max_pair_queue,
                 process_block=current_pair_process_block,
                 traversal_config=current_traversal_config,
@@ -574,6 +576,7 @@ def _dual_tree_build_raw(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=current_max_pair_queue,
                 process_block=current_pair_process_block,
                 traversal_config=current_traversal_config,
@@ -752,6 +755,7 @@ def _build_dual_tree_artifacts_split(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
@@ -830,6 +834,7 @@ def _build_dual_tree_artifacts_split(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=max_pair_queue,
                 process_block=pair_process_block,
                 traversal_config=traversal_config,
@@ -854,6 +859,7 @@ def _build_dual_tree_artifacts_split(
             ),
             mac_type=mac_type,
             dehnen_radius_scale=dehnen_radius_scale,
+            separation_floor=separation_floor,
             max_pair_queue=max_pair_queue,
             process_block=pair_process_block,
             traversal_config=traversal_config,
@@ -878,6 +884,7 @@ def _build_dual_tree_artifacts_split(
             ),
             mac_type=mac_type,
             dehnen_radius_scale=dehnen_radius_scale,
+            separation_floor=separation_floor,
             max_pair_queue=max_pair_queue,
             process_block=pair_process_block,
             traversal_config=traversal_config,
@@ -1212,14 +1219,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         if flat_walk_explicit:
             raise RuntimeError(flat_walk_blocker)
         flat_walk_enabled = False
-    if not flat_walk_enabled and _walk_separation_floor(separation_floor) > 0.0:
-        raise RuntimeError(
-            "softening_floor (a separation floor on accepted far pairs) is applied "
-            "by the strict fused lane's flat walk only, and this configuration "
-            "takes another walk"
-            + (f" ({flat_walk_blocker})" if flat_walk_blocker else "")
-            + "."
-        )
     if flat_walk_enabled:
         assert compact_far_pair_capacity is not None
         floor = dict(flat_walk_capacity_floor or {})
@@ -1275,6 +1274,12 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 "the criterion would be silently replaced by the geometric MAC. "
                 "Unset the env flag, or use mac_type='dehnen'."
             )
+        if _walk_separation_floor(separation_floor) > 0.0:
+            raise RuntimeError(
+                "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK has no separation floor "
+                "(softening_floor, or a compact softening kernel's support); "
+                "unset the flag or pass softening_floor=0."
+            )
         return _build_treecode_artifacts_strict_streamed(
             tree=tree,
             geometry=geometry,
@@ -1326,6 +1331,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_interactions_per_node=max_interactions_per_node,
                 max_neighbors_per_leaf=max_neighbors_per_leaf,
                 max_pair_queue=attempt_queue,
@@ -3653,14 +3659,6 @@ def _build_dual_tree_artifacts(
                 and not bool(grouped_interactions)
                 and not bool(need_traversal_result)
             )
-        if _walk_separation_floor(separation_floor) > 0.0 and not (
-            use_split_build and strict_streamed_split
-        ):
-            raise RuntimeError(
-                "softening_floor (a separation floor on accepted far pairs) is "
-                "applied by the strict fused lane's flat walk only; this prepare "
-                "takes another dual-tree build."
-            )
         if use_split_build:
             split_artifacts = (
                 _build_dual_tree_artifacts_split_strict_streamed(
@@ -3669,6 +3667,7 @@ def _build_dual_tree_artifacts(
                     theta=theta,
                     mac_type=mac_type,
                     dehnen_radius_scale=dehnen_radius_scale,
+                    separation_floor=separation_floor,
                     max_pair_queue=max_pair_queue,
                     pair_process_block=pair_process_block,
                     traversal_config=traversal_config,
@@ -3680,7 +3679,6 @@ def _build_dual_tree_artifacts(
                     ),
                     flat_walk_capacity_floor=strict_flat_walk_capacity_floor,
                     extra_overflow=strict_extra_overflow,
-                    separation_floor=separation_floor,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(
@@ -3689,6 +3687,7 @@ def _build_dual_tree_artifacts(
                     theta=theta,
                     mac_type=mac_type,
                     dehnen_radius_scale=dehnen_radius_scale,
+                    separation_floor=separation_floor,
                     max_pair_queue=max_pair_queue,
                     pair_process_block=pair_process_block,
                     traversal_config=traversal_config,
@@ -3749,6 +3748,7 @@ def _build_dual_tree_artifacts(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=max_pair_queue,
                 pair_process_block=pair_process_block,
                 traversal_config=traversal_config,

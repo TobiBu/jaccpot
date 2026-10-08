@@ -163,6 +163,7 @@ __all__ = [
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "target_leaf_batch_size",
         "source_slot_tile_size",
         "source_slot_scan_unroll",
@@ -181,6 +182,7 @@ def _compute_radix_fast_lane_payload_pairs_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int,
     source_slot_tile_size: int,
     source_slot_scan_unroll: int,
@@ -217,6 +219,8 @@ def _compute_radix_fast_lane_payload_pairs_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
         Target leaves per scan step. Static under ``jit``; batching only.
     source_slot_tile_size : int
@@ -341,6 +345,7 @@ def _compute_radix_fast_lane_payload_pairs_impl(
                 flat_src_mass,
                 flat_src_mask,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 G=g_const,
                 compute_potential=False,
             )
@@ -385,6 +390,7 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
 ) -> Tuple[Array, Array]:
     """Self-leaf accel + potential portion of the large-N kernel.
 
@@ -416,6 +422,8 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
         Gravitational constant, cast to ``positions.dtype`` internally.
     softening_sq : Array
         Plummer softening **squared**, not the softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -434,6 +442,7 @@ def _compute_leaf_p2p_prepared_large_n_self_only_with_potential_impl(
         leaf_masses,
         leaf_mask,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=g_const,
         compute_potential=True,
     )
@@ -469,6 +478,7 @@ def _radix_fast_lane_pairs_pallas(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: Literal[False],
     num_warps: Optional[int] = ...,
     num_stages: int = ...,
@@ -488,6 +498,7 @@ def _radix_fast_lane_pairs_pallas(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: Literal[True],
     num_warps: Optional[int] = ...,
     num_stages: int = ...,
@@ -507,6 +518,7 @@ def _radix_fast_lane_pairs_pallas(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: bool,
     num_warps: Optional[int] = None,
     num_stages: int = 1,
@@ -543,6 +555,8 @@ def _radix_fast_lane_pairs_pallas(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     compute_potential : bool
         Also return per-particle potentials. Static under ``jit``.
     num_warps : Optional[int]
@@ -600,6 +614,7 @@ def _radix_fast_lane_pairs_pallas(
         src_mass,
         src_mask_flat,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=g_const,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -637,6 +652,7 @@ def _radix_fast_lane_prepacked_pallas(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: Literal[False],
     num_warps: Optional[int] = ...,
     num_stages: int = ...,
@@ -658,6 +674,7 @@ def _radix_fast_lane_prepacked_pallas(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: Literal[True],
     num_warps: Optional[int] = ...,
     num_stages: int = ...,
@@ -679,6 +696,7 @@ def _radix_fast_lane_prepacked_pallas(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: bool,
     num_warps: Optional[int] = None,
     num_stages: int = 1,
@@ -720,6 +738,8 @@ def _radix_fast_lane_prepacked_pallas(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     compute_potential : bool
         Also return per-particle potentials. Static under ``jit``.
     num_warps : Optional[int]
@@ -778,6 +798,7 @@ def _radix_fast_lane_prepacked_pallas(
         source_leaf_ids_flat,
         source_valid_flat,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=g_const,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -844,6 +865,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: Literal[False] = ...,
     num_warps: Optional[int] = ...,
     num_stages: int = ...,
@@ -867,6 +889,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: Literal[True],
     num_warps: Optional[int] = ...,
     num_stages: int = ...,
@@ -890,6 +913,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     compute_potential: bool = False,
     num_warps: Optional[int] = None,
     num_stages: int = 1,
@@ -942,6 +966,8 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     compute_potential : bool
         Also return per-particle potentials. Static under ``jit``; default ``False``.
     num_warps : Optional[int]
@@ -1008,6 +1034,7 @@ def _radix_fast_lane_prepacked_pallas_decoupled(
         source_leaf_ids_flat,
         source_valid_flat,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=g_const,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -1104,7 +1131,7 @@ def _leaf_layout_gather_bwd(residual, g):
 _leaf_layout_gather.defvjp(_leaf_layout_gather_fwd, _leaf_layout_gather_bwd)
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
+@partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17))
 @jaxtyped(typechecker=beartype)
 def _radix_fast_lane_prepacked_accel_cvjp(
     leaf_positions: Float[Array, "leaves w 3"],
@@ -1124,6 +1151,7 @@ def _radix_fast_lane_prepacked_accel_cvjp(
     rev_block_tile: int,
     rev_skip_empty: bool,
     rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Differentiable prepacked-lane near field: Pallas forward, tiled-twin reverse.
 
@@ -1150,7 +1178,7 @@ def _radix_fast_lane_prepacked_accel_cvjp(
     materialises per-tile pair tensors, so small ``rev_*`` tiles keep it bounded.
 
     All arguments are positional because this is a ``jax.custom_vjp`` primal;
-    ``nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16)`` marks everything from
+    ``nondiff_argnums=(9, ..., 17)`` marks everything from
     ``num_warps`` on as non-differentiable, so those must not be passed by keyword.
     The ``*_f`` suffixes mark the integer/boolean tables that were cast to float to
     cross the ``custom_vjp`` boundary without acquiring a tangent.
@@ -1196,6 +1224,9 @@ def _radix_fast_lane_prepacked_accel_cvjp(
         Precomputed tier plan from ``build_leafpair_reverse_tiers`` -- groups of
         target leaves sharing a slot width, so a low-occupancy leaf does not pay
         the global maximum. ``None`` runs untiered. Non-differentiable.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+        Non-differentiable.
 
     Returns
     -------
@@ -1212,6 +1243,7 @@ def _radix_fast_lane_prepacked_accel_cvjp(
         positions,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         compute_potential=False,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -1296,6 +1328,7 @@ def _radix_fast_lane_prepacked_accel_fwd(
     rev_block_tile: int,
     rev_skip_empty: bool,
     rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+    softening_kernel: Optional[str] = None,
 ) -> Tuple[Array, _LeafPairReverseResidual]:
     out = _radix_fast_lane_prepacked_accel_cvjp(
         leaf_positions,
@@ -1315,6 +1348,7 @@ def _radix_fast_lane_prepacked_accel_fwd(
         rev_block_tile,
         rev_skip_empty,
         rev_tiers,
+        softening_kernel,
     )
     residual = (
         leaf_positions,
@@ -1342,6 +1376,7 @@ def _radix_fast_lane_prepacked_accel_bwd(
     rev_block_tile: int,
     rev_skip_empty: bool,
     rev_tiers: Optional[Tuple[Tuple[Tuple[int, ...], int], ...]],
+    softening_kernel: Optional[str],
     residual: _LeafPairReverseResidual,
     cotangent: Float[Array, "n 3"],
 ) -> Tuple[Array, ...]:
@@ -1374,6 +1409,7 @@ def _radix_fast_lane_prepacked_accel_bwd(
             source_valid_f > 0.5,
             cotangent,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             G=G,
             leaf_batch=int(rev_leaf_batch),
             slot_tile=int(rev_block_tile),
@@ -1421,6 +1457,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
+    softening_kernel: Optional[str] = ...,
     return_potential: Literal[False] = ...,
     use_pallas: bool = ...,
     differentiable: bool = ...,
@@ -1437,6 +1474,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
+    softening_kernel: Optional[str] = ...,
     return_potential: Literal[True],
     use_pallas: bool = ...,
     differentiable: bool = ...,
@@ -1453,6 +1491,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_kernel: Optional[str] = None,
     return_potential: bool = False,
     use_pallas: bool = False,
     differentiable: bool = False,
@@ -1493,6 +1532,8 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     softening : float
         Plummer softening **length** (squared internally). Must be a concrete
         Python float, not a tracer. Default ``0.0``.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     return_potential : bool
         Also return per-particle potentials. Static under ``jit``.
     use_pallas : bool
@@ -1652,6 +1693,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             positions,
             G=G,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             compute_potential=want_potential,
             num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
             num_stages=pallas_num_stages,
@@ -1672,6 +1714,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 leaf_particle_idx,
                 G=G,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
             )
         else:
             self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
@@ -1682,6 +1725,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 leaf_particle_idx,
                 G=G,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
             )
     if diag_mode == "self_only":
         if want_potential:
@@ -1727,6 +1771,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             kernel_opts = dict(
                 leaf_width=width,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 G=jnp.asarray(G, dtype=dtype),
                 chunk=chunk,
                 num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
@@ -1812,6 +1857,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 nbr_leaf,
                 table,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 G=jnp.asarray(G, dtype=dtype),
                 chunk=chunk,
                 num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
@@ -1844,6 +1890,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             source_particle_mask,
             G=G,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             compute_potential=want_potential,
             num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
             num_stages=pallas_num_stages,
@@ -1912,6 +1959,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                     rev_block_tile,
                     bool(reverse_options.skip_empty_tiles),
                     rev_tiers,
+                    softening_kernel,
                 )
             prepacked_result = _radix_fast_lane_prepacked_pallas(
                 source_leaf_ids_padded,
@@ -1923,6 +1971,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 positions,
                 G=G,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 compute_potential=want_potential,
                 num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
                 num_stages=pallas_num_stages,
@@ -1974,6 +2023,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 leaf_particle_idx,
                 G=G,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 target_leaf_batch_size=int(payload.batch_tile_t),
                 target_block_tile_size=int(fallback_block_tile_size),
                 target_block_tile_scan_unroll=int(tile_scan_unroll),
@@ -2006,6 +2056,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         source_slot_valid_mask,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         target_leaf_batch_size=int(payload.batch_tile_t),
         source_slot_tile_size=int(source_slot_tile_size),
         source_slot_scan_unroll=int(source_slot_scan_unroll),
@@ -2022,6 +2073,7 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_kernel: Optional[str] = None,
     use_pallas: bool = False,
 ) -> Array:
     """Evaluate payload pair contributions without intra-leaf self work.
@@ -2052,6 +2104,8 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
         Plummer softening **length**; defaults to 0. Squared here, which is the
         opposite convention from the ``softening_sq`` arguments elsewhere in this
         module -- passing an already-squared value softens by its square.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     use_pallas : bool
         Request the fused Pallas lane; defaults to ``False``. A request, not a
         guarantee: it falls through to the scan lane unless
@@ -2093,6 +2147,7 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
                 source_particle_mask,
                 G=G,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 compute_potential=False,
                 num_warps=(_env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0) or None),
                 num_stages=max(1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1)),
@@ -2122,6 +2177,7 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
         source_slot_valid_mask,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         target_leaf_batch_size=int(payload.batch_tile_t),
         source_slot_tile_size=int(source_slot_tile_size),
         source_slot_scan_unroll=int(source_slot_scan_unroll),

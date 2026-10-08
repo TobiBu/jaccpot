@@ -228,6 +228,7 @@ def collect_radix_fast_lane_counters(
     jax.jit,
     static_argnums=(12,),
     static_argnames=(
+        "softening_kernel",
         "return_potential",
         "collect_neighbor_pairs",
         "nearfield_mode",
@@ -252,6 +253,7 @@ def _compute_leaf_p2p_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     return_potential: bool,
     collect_neighbor_pairs: bool,
     nearfield_mode: str,
@@ -311,6 +313,8 @@ def _compute_leaf_p2p_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     return_potential : bool
         Also return per-particle potentials. Static under ``jit``.
     collect_neighbor_pairs : bool
@@ -359,6 +363,7 @@ def _compute_leaf_p2p_impl(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         return_potential=return_potential,
         collect_neighbor_pairs=collect_neighbor_pairs,
         nearfield_mode=nearfield_mode,
@@ -370,6 +375,7 @@ def _compute_leaf_p2p_impl(
 @partial(
     jax.jit,
     static_argnames=(
+        "softening_kernel",
         "return_potential",
         "collect_neighbor_pairs",
         "nearfield_mode",
@@ -395,6 +401,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
     *,
     G: Union[float, Array],
     softening_sq: Array,
+    softening_kernel: Optional[str] = None,
     return_potential: bool,
     collect_neighbor_pairs: bool,
     nearfield_mode: str,
@@ -454,6 +461,8 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
         Gravitational constant.
     softening_sq : Array
         Squared Plummer softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     return_potential : bool
         Also return per-particle potentials. Static under ``jit``.
     collect_neighbor_pairs : bool
@@ -498,6 +507,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
         leaf_masses,
         leaf_mask,
         softening_sq=soft_sq,
+        softening_kernel=softening_kernel,
         G=g_const,
         compute_potential=return_potential,
     )
@@ -560,6 +570,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                                 src_mass,
                                 src_mask,
                                 softening_sq=soft_sq,
+                                softening_kernel=softening_kernel,
                                 G=g_const,
                                 compute_potential=True,
                             )
@@ -631,6 +642,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                                 src_mass,
                                 src_mask,
                                 softening_sq=soft_sq,
+                                softening_kernel=softening_kernel,
                                 G=g_const,
                                 compute_potential=True,
                             )
@@ -691,6 +703,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                                 valid_edge,
                                 soft_sq,
                                 g_const,
+                                softening_kernel,
                             )
                             return _scatter_vectors_with_schedule(
                                 acc_in,
@@ -748,6 +761,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                                 valid_edge,
                                 soft_sq,
                                 g_const,
+                                softening_kernel,
                             )
                             return _scatter_contributions(
                                 acc_in,
@@ -796,6 +810,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                         source_mass,
                         source_mask,
                         softening_sq=soft_sq,
+                        softening_kernel=softening_kernel,
                         G=g_const,
                         compute_potential=True,
                     )
@@ -848,6 +863,7 @@ def _compute_leaf_p2p_from_prepared_leaf_data_impl(
                         source_mass,
                         source_mask,
                         softening_sq=soft_sq,
+                        softening_kernel=softening_kernel,
                         G=g_const,
                         compute_potential=False,
                     )
@@ -924,6 +940,7 @@ def compute_leaf_p2p_accelerations(
     *,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_kernel: Optional[str] = None,
     max_leaf_size: Optional[int] = None,
     return_potential: bool = False,
     collect_neighbor_pairs: bool = False,
@@ -975,6 +992,8 @@ def compute_leaf_p2p_accelerations(
     softening : float
         Plummer softening length. Squared host-side via ``float(softening)``, so
         it must be a concrete Python float, not a tracer.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     max_leaf_size : Optional[int]
         Static bound on per-leaf particle count. **Required under ``jit``**: when
         it is ``None`` the code reads the true maximum with ``.item()``, which
@@ -1244,6 +1263,7 @@ def compute_leaf_p2p_accelerations(
             int(max_leaf_size),
             G=G,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             return_potential=return_potential,
             collect_neighbor_pairs=collect_neighbor_pairs,
             nearfield_mode=nearfield_mode,
@@ -1278,6 +1298,7 @@ def compute_leaf_p2p_accelerations(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         return_potential=return_potential,
         collect_neighbor_pairs=collect_neighbor_pairs,
         nearfield_mode=nearfield_mode,
@@ -1295,6 +1316,7 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
     *,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_kernel: Optional[str] = None,
     edge_chunk_size: int = 256,
     precomputed_target_leaf_ids: Optional[Int[Array, "pairs"]] = None,
     precomputed_source_leaf_ids: Optional[Int[Array, "pairs"]] = None,
@@ -1350,6 +1372,8 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
     softening : float
         Plummer softening **length** (squared internally). Must be a concrete
         Python float, not a tracer. Default ``0.0``.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     edge_chunk_size : int
         Edge-chunk width for the edge-list path. Default ``256``.
     precomputed_target_leaf_ids : Optional[Int[Array, 'pairs']]
@@ -1535,6 +1559,7 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
             leaf_particle_idx,
             G=G,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
         )
         pair_acc = (
             _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
@@ -1550,6 +1575,7 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
                 leaf_particle_idx,
                 G=G,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 target_leaf_batch_size=target_leaf_batch_size,
                 target_block_tile_size=target_block_tile_size,
                 target_block_tile_scan_unroll=target_block_tile_scan_unroll,
@@ -1580,6 +1606,7 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
                 leaf_particle_idx,
                 G=G,
                 softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
                 target_leaf_batch_size=target_leaf_batch_size,
                 target_block_tile_size=target_block_tile_size,
                 target_block_tile_scan_unroll=target_block_tile_scan_unroll,
@@ -1601,6 +1628,7 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
             leaf_particle_idx,
             G=G,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             target_leaf_batch_size=target_leaf_batch_size,
             target_block_tile_size=target_block_tile_size,
             target_block_tile_scan_unroll=target_block_tile_scan_unroll,
@@ -1618,6 +1646,7 @@ def compute_leaf_p2p_accelerations_large_n_accel_only(
         leaf_particle_idx,
         G=G,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         edge_chunk_size=int(edge_chunk_size),
         chunks_per_superchunk=delayed_scatter_chunks_per_superchunk,
         chunk_scan_batch_size=chunk_scan_batch_size,

@@ -589,13 +589,15 @@ class FMMAdvancedConfig:
         rather than in a group because it straddles traversal and accuracy.
     dehnen_radius_scale : float
         Scale applied to node radii in the Dehnen MAC.
-    softening_floor : float
+    softening_floor : Optional[float]
         Minimum gap of an accepted far pair, in softening lengths: the walk accepts
         nodes ``A``, ``B`` only if also ``|c_B - c_A| - r_A - r_B >=
         softening_floor * softening``, so no far interaction acts between
-        particles closer than that. The far field is the UNSOFTENED expansion;
-        this keeps it out of the softening kernel's reach. ``0`` (default): no
-        floor. The strict fused lane's flat walk only.
+        particles closer than that. The far field is the UNSOFTENED expansion, so
+        with a compact kernel a floor at its support makes it exact. ``None``
+        (default): the kernel's support factor (``315/128`` for ``"ferrers3"``,
+        ``3`` for ``"wendland_c2"``) and ``0`` for Plummer, which is never
+        Newtonian. ``0``: no floor.
     """
 
     tree: TreeConfig = TreeConfig()
@@ -604,7 +606,7 @@ class FMMAdvancedConfig:
     runtime: RuntimePolicyConfig = RuntimePolicyConfig()
     mac_type: Optional[str] = None
     dehnen_radius_scale: float = 1.0
-    softening_floor: float = 0.0
+    softening_floor: Optional[float] = None
 
 
 __all__ = [

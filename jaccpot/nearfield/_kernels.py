@@ -32,6 +32,11 @@ from jax import lax
 from jaxtyping import Array, Bool, Float, jaxtyped
 
 from jaccpot._env import env_int
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params_from_sq,
+)
 from jaccpot.runtime.grad_options import analytic_p2p_vjp_enabled
 
 from .grad import _pair_accel_cvjp
@@ -51,6 +56,7 @@ def _self_contributions(
     mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
+    softening_kernel: Optional[str] = None,
     G: Array,
     compute_potential: Literal[True],
 ) -> Tuple[Array, Array]: ...
@@ -63,6 +69,7 @@ def _self_contributions(
     mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
+    softening_kernel: Optional[str] = None,
     G: Array,
     compute_potential: Literal[False],
 ) -> Tuple[Array, None]: ...
@@ -75,6 +82,7 @@ def _self_contributions(
     mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
+    softening_kernel: Optional[str] = None,
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]: ...
@@ -87,6 +95,7 @@ def _self_contributions(
     mask: Bool[Array, "leaves w"],
     *,
     softening_sq: Union[float, Array],
+    softening_kernel: Optional[str] = None,
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
@@ -114,6 +123,8 @@ def _self_contributions(
     softening_sq : Union[float, Array]
         Plummer softening **squared**, added to every squared separation. A
         scalar applies to all leaves.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Gravitational constant. An array, not a float, so it can be traced.
     compute_potential : bool
@@ -133,17 +144,17 @@ def _self_contributions(
     dtype = leaf_positions.dtype
     leaf_size = leaf_positions.shape[1]
     identity = jnp.eye(leaf_size, dtype=bool)
+    params = softening_params_from_sq(softening_kernel, softening_sq, dtype)
 
     def compute_single(args: tuple[Array, Array, Array]) -> tuple[Array, Array]:
         positions_leaf, masses_leaf, mask_leaf = args
         diff = positions_leaf[:, None, :] - positions_leaf[None, :, :]
-        dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+        r2 = jnp.sum(diff * diff, axis=-1)
 
         pair_mask = mask_leaf[:, None] & mask_leaf[None, :] & (~identity)
-        safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-        inv_r = lax.rsqrt(safe_dist_sq)
-        inv_r = jnp.where(pair_mask, inv_r, 0.0)
-        inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+        inv_dist3, inv_r, _ = masked_pair_factors(
+            r2, pair_mask, params, softening_kernel, potential=True
+        )
 
         weighted = inv_dist3[:, :, None] * masses_leaf[None, :, None]
         accel_leaf = -G * jnp.sum(weighted * diff, axis=1)
@@ -239,6 +250,7 @@ def _pair_contributions(
     source_mask: Bool[Array, "sw"],
     *,
     softening_sq: Union[float, Array],
+    softening_kernel: Optional[str] = None,
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
@@ -268,6 +280,8 @@ def _pair_contributions(
         rather than ``0 * inf``.
     softening_sq : Union[float, Array]
         Squared Plummer softening length, added to every squared separation.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Gravitational constant.
     compute_potential : bool
@@ -286,17 +300,16 @@ def _pair_contributions(
     source_active = source_mask
     mass_effective = jnp.where(source_active, source_mass, 0.0)
 
-    soft = softening_sq
+    params = softening_params_from_sq(softening_kernel, softening_sq, dtype)
 
     def when_valid(pos: Array) -> tuple[Array, Array]:
         diff = pos - source_pos
-        dist_sq = jnp.sum(diff * diff, axis=1) + soft
+        r2 = jnp.sum(diff * diff, axis=1)
         mask_src = source_active
 
-        safe_dist_sq = jnp.where(mask_src, dist_sq, jnp.ones_like(dist_sq))
-        inv_r = lax.rsqrt(safe_dist_sq)
-        inv_r = jnp.where(mask_src, inv_r, 0.0)
-        inv_dist3 = jnp.where(mask_src, inv_r * inv_r * inv_r, 0.0)
+        inv_dist3, inv_r, _ = masked_pair_factors(
+            r2, mask_src, params, softening_kernel, potential=True
+        )
 
         weighted = inv_dist3[:, None] * mass_effective[:, None]
         accel = -G * jnp.sum(weighted * diff, axis=0)
@@ -337,7 +350,7 @@ def _pair_contributions(
     return accels, None
 
 
-@partial(jax.jit, static_argnames=("compute_potential",))
+@partial(jax.jit, static_argnames=("compute_potential", "softening_kernel"))
 @jaxtyped(typechecker=beartype)
 def _pair_contributions_batched(
     target_positions: Float[Array, "pairs w 3"],
@@ -347,6 +360,7 @@ def _pair_contributions_batched(
     source_mask: Bool[Array, "pairs sw"],
     *,
     softening_sq: Union[float, Array],
+    softening_kernel: Optional[str] = None,
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
@@ -380,6 +394,8 @@ def _pair_contributions_batched(
         rather than ``0 * inf``.
     softening_sq : Union[float, Array]
         Squared Plummer softening length, added to every squared separation.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Gravitational constant.
     compute_potential : bool
@@ -405,16 +421,17 @@ def _pair_contributions_batched(
             source_mask.astype(dtype),
             jnp.asarray(softening_sq, dtype=dtype),
             jnp.asarray(G, dtype=dtype),
+            resolve_softening_kernel(softening_kernel),
         )
         return accels, None
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
-    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+    r2 = jnp.sum(diff * diff, axis=-1)
     pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
 
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-    inv_r = lax.rsqrt(safe_dist_sq)
-    inv_r = jnp.where(pair_mask, inv_r, 0.0)
-    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+    params = softening_params_from_sq(softening_kernel, softening_sq, r2.dtype)
+    inv_dist3, inv_r, _ = masked_pair_factors(
+        r2, pair_mask, params, softening_kernel, potential=True
+    )
 
     weighted = inv_dist3 * source_masses[:, None, :]
     accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
@@ -428,7 +445,7 @@ def _pair_contributions_batched(
     return accels, None
 
 
-@partial(jax.jit, static_argnames=("compute_potential",))
+@partial(jax.jit, static_argnames=("compute_potential", "softening_kernel"))
 @jaxtyped(typechecker=beartype)
 def _pair_contributions_batched_componentwise(
     target_positions: Float[Array, "pairs w 3"],
@@ -438,6 +455,7 @@ def _pair_contributions_batched_componentwise(
     source_mask: Bool[Array, "pairs sw"],
     *,
     softening_sq: Union[float, Array],
+    softening_kernel: Optional[str] = None,
     G: Array,
     compute_potential: bool,
 ) -> Tuple[Array, Optional[Array]]:
@@ -466,6 +484,8 @@ def _pair_contributions_batched_componentwise(
         rather than ``0 * inf``.
     softening_sq : Union[float, Array]
         Squared Plummer softening length, added to every squared separation.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : Array
         Gravitational constant.
     compute_potential : bool
@@ -480,12 +500,14 @@ def _pair_contributions_batched_componentwise(
     dx = target_positions[:, :, None, 0] - source_positions[:, None, :, 0]
     dy = target_positions[:, :, None, 1] - source_positions[:, None, :, 1]
     dz = target_positions[:, :, None, 2] - source_positions[:, None, :, 2]
-    dist_sq = dx * dx + dy * dy + dz * dz + softening_sq
+    r2 = dx * dx + dy * dy + dz * dz
     pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
 
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-    weighted = inv_r * inv_r * inv_r * source_masses[:, None, :]
+    params = softening_params_from_sq(softening_kernel, softening_sq, r2.dtype)
+    inv_dist3, inv_r, _ = masked_pair_factors(
+        r2, pair_mask, params, softening_kernel, potential=True
+    )
+    weighted = inv_dist3 * source_masses[:, None, :]
     accel_x = -G * jnp.sum(weighted * dx, axis=2)
     accel_y = -G * jnp.sum(weighted * dy, axis=2)
     accel_z = -G * jnp.sum(weighted * dz, axis=2)
@@ -509,6 +531,7 @@ def _bucketed_chunk_pair_accels(
     valid_edge: Array,
     softening_sq: Array,
     G: Array,
+    softening_kernel: Optional[str] = None,
 ) -> Tuple[Array, Array]:
     """Gather one edge chunk's leaf tensors and evaluate its near-field pair block.
 
@@ -547,6 +570,8 @@ def _bucketed_chunk_pair_accels(
         reverse rule closes over no tracer.
     G : Array
         Gravitational constant, an array for the same reason.
+    softening_kernel : Optional[str]
+        The pair kernel; static under the ``jax.checkpoint`` wrapper.
 
     Returns
     -------
@@ -566,10 +591,13 @@ def _bucketed_chunk_pair_accels(
         source_masses,
         source_mask,
         softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
         G=G,
         compute_potential=False,
     )
     return pair_acc, target_mask
 
 
-_bucketed_chunk_pair_accels_remat = jax.checkpoint(_bucketed_chunk_pair_accels)
+_bucketed_chunk_pair_accels_remat = jax.checkpoint(
+    _bucketed_chunk_pair_accels, static_argnums=(8,)
+)

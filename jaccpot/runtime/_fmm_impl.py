@@ -127,6 +127,7 @@ from .kernels.core import (  # noqa: F401
     _prepare_solidfmm_downward_sweep,
 )
 from .reference import compute_gravitational_potential as reference_compute_potential
+from jaccpot.softening import resolve_softening_kernel, support_factor
 
 # RE-EXPORTS. The names below are imported for other modules to reach through
 # this one, and are unused *here*. Holding references makes that a fact the
@@ -308,9 +309,12 @@ class FMMEngine(
         rather than in a group because it straddles traversal and accuracy.
     dehnen_radius_scale : float
         Scale applied to node radii in the Dehnen MAC.
-    softening_floor : float
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    softening_floor : Optional[float]
         Minimum gap of an accepted far pair, in softening lengths (see
-        :class:`jaccpot.config.FMMAdvancedConfig`). ``0``: none.
+        :class:`jaccpot.config.FMMAdvancedConfig`). ``None``: the kernel's
+        support factor (``0`` for Plummer); ``0``: none.
     interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
         Called once per dual-tree retry, when the traversal overflows its pair
         capacity and re-runs with a larger one. Purely observational -- use it to
@@ -416,7 +420,8 @@ class FMMEngine(
         # before the traversal sees it. See the alias.
         mac_type: MACTypeInput = "bh",
         dehnen_radius_scale: float = 1.0,
-        softening_floor: float = 0.0,
+        softening_kernel: Optional[str] = None,
+        softening_floor: Optional[float] = None,
         # DualTreeTraversalConfig (replace all four capacities), or a
         # TraversalOverrides / mapping of named capacities (merge onto the
         # preset's resolved sizing). See normalize_traversal_config_request.
@@ -571,9 +576,12 @@ class FMMEngine(
             precompute_grouped_class_segments=precompute_grouped_class_segments,
             upward_leaf_batch_size=upward_leaf_batch_size,
         )
-        if float(softening_floor) < 0.0:
+        self.softening_kernel = resolve_softening_kernel(softening_kernel)
+        if softening_floor is not None and float(softening_floor) < 0.0:
             raise ValueError("softening_floor must be >= 0")
-        self.softening_floor = float(softening_floor)
+        self.softening_floor = (
+            None if softening_floor is None else float(softening_floor)
+        )
         self._resolve_tree_options(
             dehnen_radius_scale=dehnen_radius_scale,
             host_refine_mode=host_refine_mode,
@@ -1129,8 +1137,10 @@ class FMMEngine(
     def _walk_separation_floor(self) -> float:
         """The walk's separation floor in length units: ``softening_floor`` x softening.
 
+        An unset ``softening_floor`` takes the kernel's support factor, so a compact
+        kernel's far field is exact; Plummer gets none.
         ``JACCPOT_WALK_SEPARATION_FLOOR`` (an absolute length) stands in when the
-        option is ``0``, for experiments.
+        result is ``0``, for experiments.
 
         Returns
         -------
@@ -1139,9 +1149,10 @@ class FMMEngine(
         """
         from jaccpot.runtime._interaction_cache import _walk_separation_floor
 
-        return _walk_separation_floor(
-            float(getattr(self, "softening_floor", 0.0)) * float(self.softening)
-        )
+        factor = getattr(self, "softening_floor", None)
+        if factor is None:
+            factor = support_factor(getattr(self, "softening_kernel", "plummer"))
+        return _walk_separation_floor(float(factor) * float(self.softening))
 
     def _resolve_tree_options(
         self,

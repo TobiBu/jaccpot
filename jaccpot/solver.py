@@ -37,6 +37,7 @@ from .runtime.fmm import FMMEngine as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 from .runtime.strict_carry import StrictParticleCarry
+from .softening import resolve_softening_kernel
 
 
 def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
@@ -646,7 +647,15 @@ class FastMultipoleMethod:
     G : float
         Gravitational constant.
     softening : float
-        Plummer softening length for the near-field kernel.
+        Softening length, Plummer-equivalent for every kernel (see
+        :mod:`jaccpot.softening`): a compact kernel's support is
+        ``support_factor(kernel) * softening``.
+    softening_kernel : Optional[str]
+        ``"ferrers3"``, ``"wendland_c2"`` or ``"plummer"``; ``None`` gives
+        :data:`jaccpot.softening.DEFAULT_SOFTENING_KERNEL`. The compact kernels are
+        exactly Newtonian past their support, and the walk then keeps every far
+        pair at least that far apart (``FMMAdvancedConfig.softening_floor``), so the
+        far field carries no softening error.
     precision : Optional[Literal['fp32', 'fp64']]
         Convenience spelling of ``working_dtype``. Passing both is an error unless
         they agree; ``"fp64"`` additionally requires ``jax_enable_x64``.
@@ -709,6 +718,7 @@ class FastMultipoleMethod:
         theta: float = 0.6,
         G: float = 1.0,
         softening: float = 1e-3,
+        softening_kernel: Optional[str] = None,
         precision: Optional[Literal["fp32", "fp64"]] = None,
         working_dtype: Optional[DTypeLike] = None,
         advanced: Optional[FMMAdvancedConfig] = None,
@@ -771,6 +781,7 @@ class FastMultipoleMethod:
             theta=float(theta),
             G=float(G),
             softening=float(softening),
+            softening_kernel=resolve_softening_kernel(softening_kernel),
             working_dtype=working_dtype,
             expansion_basis=runtime_basis,
             basis_impl=basis_resolution.basis_impl,
@@ -913,7 +924,11 @@ class FastMultipoleMethod:
                     "dehnen_radius_scale", advanced_cfg.dehnen_radius_scale
                 )
             ),
-            softening_floor=float(advanced_cfg.softening_floor),
+            softening_floor=(
+                None
+                if advanced_cfg.softening_floor is None
+                else float(advanced_cfg.softening_floor)
+            ),
             use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,

@@ -2731,6 +2731,7 @@ def _make_fn(
                         # tier's static slot width from; here the mask is a tracer
                         # built inside shard_map, so the reverse runs untiered.
                         None,
+                        softening_kernel,
                     )
                 else:
                     pair_acc = _radix_fast_lane_prepacked_pallas(

@@ -38,6 +38,7 @@ behind next to the kernel it wraps.
 from __future__ import annotations
 
 import warnings
+from functools import partial
 from collections import OrderedDict
 from typing import Any, Optional, Union
 
@@ -51,6 +52,12 @@ from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot._env import env_float, env_int
+from jaccpot.softening import (
+    masked_pair_factors,
+    pair_softening_sq_derivative,
+    resolve_softening_kernel,
+    softening_params_from_sq,
+)
 
 __all__ = [
     "build_leafpair_reverse_tiers",
@@ -418,6 +425,7 @@ def _leafpair_accel_analytic_vjp(
     occupancy_sort: bool = False,
     tiers: Optional[Tuple[Tuple[Any, int], ...]] = None,
     parameter_cotangents: bool = False,
+    softening_kernel: Optional[str] = None,
 ) -> Tuple[Array, ...]:
     """Analytic reverse of the leaf-pair near field in **O(N) memory**.
 
@@ -497,6 +505,10 @@ def _leafpair_accel_analytic_vjp(
         ``softbar = (3/2) G sum m r^-5 (c . diff)``. Off by default so the two
         existing callers keep their two-tuple.
 
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`). A compact kernel contracts
+        ``-G m (g I + (1/r) dg/dr r r^T)`` and its ``dg/d(eps^2)``; Plummer keeps
+        the expressions above bit for bit.
     Returns
     -------
     Tuple[Array, ...]
@@ -523,6 +535,9 @@ def _leafpair_accel_analytic_vjp(
     # caller (e.g. the distributed shard_map body) trips it.
     G = jnp.asarray(G, dtype)
     softening_sq = jnp.asarray(softening_sq, dtype)
+    kernel = resolve_softening_kernel(softening_kernel)
+    plummer = kernel == "plummer"
+    kparams = softening_params_from_sq(kernel, softening_sq, dtype)
 
     slot_ids = jnp.reshape(source_leaf_ids, (num_leaves, num_slots))
     slot_valid = jnp.reshape(source_valid, (num_leaves, num_slots))
@@ -621,20 +636,40 @@ def _leafpair_accel_analytic_vjp(
 
                     # (B, T, Wt, Ws, 3)
                     diff = tgt_pos[:, None, :, None, :] - src_pos[:, :, None, :, :]
-                    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
                     pair_mask = tgt_mask[:, None, :, None] & src_mask[:, :, None, :]
-                    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-                    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-                    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
-                    inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
-
                     cot_b = cot_t[:, None, :, None, :]  # (B, 1, Wt, 1, 3)
                     cd = jnp.sum(cot_b * diff, axis=-1)  # (B, T, Wt, Ws)
                     m = src_mass[:, :, None, :, None]  # (B, T, 1, Ws, 1)
-                    pair = m * (
-                        inv_dist3[..., None] * cot_b
-                        - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
-                    )
+                    if plummer:
+                        dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+                        safe_dist_sq = jnp.where(
+                            pair_mask, dist_sq, jnp.ones_like(dist_sq)
+                        )
+                        inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
+                        inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+                        inv_dist5 = jnp.where(
+                            pair_mask, inv_dist3 * inv_r * inv_r, 0.0
+                        )
+                        pair = m * (
+                            inv_dist3[..., None] * cot_b
+                            - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
+                        )
+                    else:
+                        r2 = jnp.sum(diff * diff, axis=-1)
+                        inv_dist3, _, dgr = masked_pair_factors(
+                            r2, pair_mask, kparams, kernel, derivative=True
+                        )
+                        dgde = jnp.where(
+                            pair_mask,
+                            pair_softening_sq_derivative(
+                                jnp.where(pair_mask, r2, 1.0), kparams, kernel
+                            ),
+                            0.0,
+                        )
+                        pair = m * (
+                            inv_dist3[..., None] * cot_b
+                            + dgr[..., None] * cd[..., None] * diff
+                        )
 
                     # Target side: sum over sources (slots and their particles).
                     tgt_contrib = -G * jnp.sum(pair, axis=(1, 3))  # (B, Wt, 3)
@@ -656,7 +691,10 @@ def _leafpair_accel_analytic_vjp(
                         # masking; `m * cd` is the product the mass cotangent reduces.
                         m_cd = src_mass[:, :, None, :] * cd  # (B, T, Wt, Ws)
                         g_in = g_in - jnp.sum(m_cd * inv_dist3)
-                        soft_in = soft_in + 1.5 * G * jnp.sum(m_cd * inv_dist5)
+                        if plummer:
+                            soft_in = soft_in + 1.5 * G * jnp.sum(m_cd * inv_dist5)
+                        else:
+                            soft_in = soft_in - G * jnp.sum(m_cd * dgde)
 
                     return (
                         pos_in.at[safe_src].add(src_contrib),
@@ -726,6 +764,7 @@ def _pair_accel_masked_accels(
     source_mask: Bool[Array, "pairs sw"],
     softening_sq: Union[float, Array],
     G: Array,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Accel-only batched pair contributions (matches the accel output of
     :func:`_pair_contributions_batched`).
@@ -744,9 +783,11 @@ def _pair_accel_masked_accels(
     source_mask : Bool[Array, 'pairs sw']
         ``(B, Ws)`` boolean source validity.
     softening_sq : Union[float, Array]
-        Squared Plummer softening length.
+        Squared Plummer-equivalent softening length.
     G : Array
         Gravitational constant.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -754,11 +795,10 @@ def _pair_accel_masked_accels(
         ``(B, Wt, 3)`` accelerations, zero on masked targets.
     """
     diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
-    dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
+    r2 = jnp.sum(diff * diff, axis=-1)
     pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
-    safe_dist_sq = jnp.where(pair_mask, dist_sq, jnp.ones_like(dist_sq))
-    inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
-    inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
+    params = softening_params_from_sq(softening_kernel, softening_sq, r2.dtype)
+    inv_dist3 = masked_pair_factors(r2, pair_mask, params, softening_kernel)[0]
     weighted = inv_dist3 * source_masses[:, None, :]
     accels = -G * jnp.sum(weighted[..., None] * diff, axis=2)
     return jnp.where(target_mask[..., None], accels, 0.0)
@@ -809,6 +849,58 @@ def _pair_accel_pair_terms(
     return diff, inv_dist3, inv_dist5
 
 
+def _pair_accel_kernel_terms(
+    target_positions: Float[Array, "pairs w 3"],
+    source_positions: Float[Array, "pairs sw 3"],
+    target_mask: Bool[Array, "pairs w"],
+    source_mask: Bool[Array, "pairs sw"],
+    softening_sq: Union[float, Array],
+    softening_kernel: str,
+) -> Tuple[Array, Array, Array, Array]:
+    """``(diff, g, (1/r) dg/dr, dg/d(eps^2))`` for a compact softening kernel.
+
+    The general form of :func:`_pair_accel_pair_terms`, which stays the Plummer
+    path so its reverse is unchanged bit for bit: there ``g = r^-3`` and ``(1/r)
+    dg/dr = -3 r^-5``.
+
+    Parameters
+    ----------
+    target_positions : Float[Array, 'pairs w 3']
+        ``(B, Wt, 3)`` target positions.
+    source_positions : Float[Array, 'pairs sw 3']
+        ``(B, Ws, 3)`` source positions.
+    target_mask : Bool[Array, 'pairs w']
+        ``(B, Wt)`` boolean target validity.
+    source_mask : Bool[Array, 'pairs sw']
+        ``(B, Ws)`` boolean source validity.
+    softening_sq : Union[float, Array]
+        Squared Plummer-equivalent softening length.
+    softening_kernel : str
+        The pair kernel.
+
+    Returns
+    -------
+    Tuple[Array, Array, Array, Array]
+        Shapes ``(B, Wt, Ws, 3)`` then ``(B, Wt, Ws)`` three times; masked pairs
+        are exactly zero.
+    """
+    diff = target_positions[:, :, None, :] - source_positions[:, None, :, :]
+    r2 = jnp.sum(diff * diff, axis=-1)
+    pair_mask = target_mask[:, :, None] & source_mask[:, None, :]
+    params = softening_params_from_sq(softening_kernel, softening_sq, r2.dtype)
+    g, _, dg = masked_pair_factors(
+        r2, pair_mask, params, softening_kernel, derivative=True
+    )
+    dgde = jnp.where(
+        pair_mask,
+        pair_softening_sq_derivative(
+            jnp.where(pair_mask, r2, 1.0), params, softening_kernel
+        ),
+        0.0,
+    )
+    return diff, g, dg, dgde
+
+
 # The residual `_pair_accel_cvjp_fwd` saves, spelled out. Seven entries and no pair
 # intermediates: the O(B*Wt*Ws) terms are rematerialized in the reverse instead, which is
 # the decision the comment inside `_fwd` measures at 52.14 GiB. So the annotation's job here
@@ -830,7 +922,7 @@ _PairAccelReverseResidual = Tuple[
 ]
 
 
-@jax.custom_vjp
+@partial(jax.custom_vjp, nondiff_argnums=(7,))
 def _pair_accel_cvjp(
     target_positions: Float[Array, "pairs w 3"],
     source_positions: Float[Array, "pairs sw 3"],
@@ -839,6 +931,7 @@ def _pair_accel_cvjp(
     source_mask_f: Float[Array, "pairs sw"],
     softening_sq: Array,
     G: Array,
+    softening_kernel: str = "plummer",
 ) -> Array:
     """Accel-only batched near-field pair kernel with an analytic reverse rule.
 
@@ -867,9 +960,12 @@ def _pair_accel_cvjp(
     source_mask_f : Float[Array, 'pairs sw']
         ``(B, Ws)`` source validity, same encoding.
     softening_sq : Array
-        Squared Plummer softening length.
+        Squared Plummer-equivalent softening length.
     G : Array
         Gravitational constant.
+    softening_kernel : str
+        The pair kernel, static (a ``nondiff_argnums`` entry). For a compact
+        kernel the reverse contracts ``-G m (g I + (1/r) dg/dr r r^T)`` instead.
 
     Returns
     -------
@@ -886,6 +982,7 @@ def _pair_accel_cvjp(
         source_mask,
         softening_sq,
         G,
+        softening_kernel,
     )
 
 
@@ -897,6 +994,7 @@ def _pair_accel_cvjp_fwd(
     source_mask_f: Float[Array, "pairs sw"],
     softening_sq: Array,
     G: Array,
+    softening_kernel: str = "plummer",
 ) -> Tuple[Array, _PairAccelReverseResidual]:
     # The residual carries only the O(B*W) INPUTS; the O(B*Wt*Ws) pair
     # intermediates are rematerialized in the reverse pass. Storing
@@ -917,6 +1015,7 @@ def _pair_accel_cvjp_fwd(
         source_mask_f > 0.5,
         softening_sq,
         G,
+        softening_kernel,
     )
     residual = (
         target_positions,
@@ -931,6 +1030,7 @@ def _pair_accel_cvjp_fwd(
 
 
 def _pair_accel_cvjp_bwd(
+    softening_kernel: str,
     residual: _PairAccelReverseResidual,
     cotangent: Float[Array, "pairs w 3"],
 ) -> Tuple[Array, ...]:
@@ -943,25 +1043,42 @@ def _pair_accel_cvjp_bwd(
         softening_sq,
         G,
     ) = residual
-    # Rematerialize the pair intermediates the forward deliberately did not save
-    # (see _pair_accel_cvjp_fwd). Same expressions, so the analytic reverse below
-    # is unchanged bit-for-bit.
-    diff, inv_dist3, inv_dist5 = _pair_accel_pair_terms(
-        target_positions,
-        source_positions,
-        target_mask_f > 0.5,
-        source_mask_f > 0.5,
-        softening_sq,
-    )
     # Forward masks accels by target_mask, so mask the incoming cotangent alike.
     cot = jnp.where(target_mask_f[..., None] > 0.5, cotangent, 0.0)  # (B, Wt, 3)
-    cd = jnp.sum(cot[:, :, None, :] * diff, axis=-1)  # (B, Wt, Ws) = c_t · r_ts
     m = source_masses[:, None, :, None]  # (B, 1, Ws, 1)
-    # per-pair P_{t,s,l} = m_s [ inv_dist3 c_{t,l} - 3 inv_dist5 (c_t·r) r_l ]
-    pair = m * (
-        inv_dist3[..., None] * cot[:, :, None, :]
-        - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
-    )  # (B, Wt, Ws, 3)
+    plummer = resolve_softening_kernel(softening_kernel) == "plummer"
+    if plummer:
+        # Rematerialize the pair intermediates the forward deliberately did not
+        # save (see _pair_accel_cvjp_fwd). Same expressions, so the analytic
+        # reverse below is unchanged bit-for-bit.
+        diff, inv_dist3, inv_dist5 = _pair_accel_pair_terms(
+            target_positions,
+            source_positions,
+            target_mask_f > 0.5,
+            source_mask_f > 0.5,
+            softening_sq,
+        )
+        cd = jnp.sum(cot[:, :, None, :] * diff, axis=-1)  # (B, Wt, Ws) = c_t · r_ts
+        # per-pair P_{t,s,l} = m_s [ inv_dist3 c_{t,l} - 3 inv_dist5 (c_t·r) r_l ]
+        pair = m * (
+            inv_dist3[..., None] * cot[:, :, None, :]
+            - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
+        )  # (B, Wt, Ws, 3)
+    else:
+        # The same contraction with the kernel's g and (1/r) dg/dr.
+        diff, inv_dist3, dg, dgde = _pair_accel_kernel_terms(
+            target_positions,
+            source_positions,
+            target_mask_f > 0.5,
+            source_mask_f > 0.5,
+            softening_sq,
+            softening_kernel,
+        )
+        cd = jnp.sum(cot[:, :, None, :] * diff, axis=-1)
+        pair = m * (
+            inv_dist3[..., None] * cot[:, :, None, :]
+            + dg[..., None] * cd[..., None] * diff
+        )
     target_positions_bar = -G * jnp.sum(pair, axis=2)  # sum over sources
     source_positions_bar = G * jnp.sum(pair, axis=1)  # sum over targets (3rd law)
     source_masses_bar = -G * jnp.sum(inv_dist3 * cd, axis=1)  # sum over targets
@@ -976,7 +1093,11 @@ def _pair_accel_cvjp_bwd(
     # d/dG (the same defect jaccpot#319 fixed in the mutual Pallas kernel).
     m_cd = source_masses[:, None, :] * cd  # (B, Wt, Ws)
     G_bar = -jnp.sum(m_cd * inv_dist3)
-    softening_bar = 1.5 * G * jnp.sum(m_cd * inv_dist5)
+    if plummer:
+        softening_bar = 1.5 * G * jnp.sum(m_cd * inv_dist5)
+    else:
+        # d a_t / d(eps^2) = -G sum_s m_s diff dg/d(eps^2)
+        softening_bar = -G * jnp.sum(m_cd * dgde)
     # Masks are discrete and get zero cotangents; they travel as floats so the zero
     # is an ordinary float zero rather than a float0.
     return (
