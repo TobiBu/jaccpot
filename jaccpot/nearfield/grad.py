@@ -932,7 +932,7 @@ def _pair_accel_cvjp(
     source_mask_f: Float[Array, "pairs sw"],
     softening_sq: Array,
     G: Array,
-    softening_kernel: str = "plummer",
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Accel-only batched near-field pair kernel with an analytic reverse rule.
 
@@ -995,7 +995,7 @@ def _pair_accel_cvjp_fwd(
     source_mask_f: Float[Array, "pairs sw"],
     softening_sq: Array,
     G: Array,
-    softening_kernel: str = "plummer",
+    softening_kernel: Optional[str] = None,
 ) -> Tuple[Array, _PairAccelReverseResidual]:
     # The residual carries only the O(B*W) INPUTS; the O(B*Wt*Ws) pair
     # intermediates are rematerialized in the reverse pass. Storing

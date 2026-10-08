@@ -105,7 +105,7 @@ def test_compute_expansion_orders():
 
 def test_evaluate_expansion_consistency():
     """evaluate_expansion gives consistent results across orders."""
-    fmm = FMMEngine(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0, softening_kernel="plummer")
     positions = jnp.array(
         [
             [0.0, 0.0, 0.0],
@@ -136,11 +136,11 @@ def test_multipole_accuracy_improves_with_order():
     pos = 0.1 * jax.random.normal(key, (n, 3))
     mass = jnp.ones((n,))
 
-    fmm = FMMEngine(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0, softening_kernel="plummer")
     eval_point = jnp.array([3.0, 0.5, -1.0])
 
     # Reference direct sum at eval point
-    a_ref = fmm.direct_sum(pos, mass, eval_point)
+    a_ref = fmm.direct_sum(pos, mass, eval_point, softening_kernel="plummer")
 
     # Expansions around CoM
     exp0 = FMMEngine.compute_expansion(pos, mass, order=0)
@@ -216,7 +216,7 @@ def test_direct_acceleration():
 
     # Compute acceleration
     accelerations = compute_gravitational_acceleration(
-        positions, masses, G=G, softening=softening
+        positions, masses, G=G, softening=softening, softening_kernel="plummer"
     )
 
     # First particle should be accelerated in +x direction
@@ -234,7 +234,7 @@ def test_prepare_state_fixed_depth_tree():
     masses = jnp.ones((n,))
     fmm = FMMEngine(
         theta=0.6,
-        tree=TreeConfig(mode="fixed_depth", leaf_target=8),
+        tree=TreeConfig(mode="fixed_depth", leaf_target=8), softening_kernel="plummer",
     )
 
     state = fmm.prepare_state(
@@ -279,7 +279,7 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
         tree=TreeConfig(mode="static_radix"),
-        fixed_order=2,
+        fixed_order=2, softening_kernel="plummer",
     )
     state = fmm.prepare_state(
         positions,
@@ -358,7 +358,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
         fixed_order=2,
     )
 
-    fmm = FMMEngine(**kwargs)
+    fmm = FMMEngine(**kwargs, softening_kernel="plummer")
     state = fmm.prepare_state(positions, masses, leaf_size=128, max_order=2)
     refreshed = fmm.refresh_prepared_state(
         state,
@@ -369,7 +369,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     )
     diagnostics = fmm.get_runtime_diagnostics()
 
-    fresh_fmm = FMMEngine(**kwargs)
+    fresh_fmm = FMMEngine(**kwargs, softening_kernel="plummer")
     fresh = fresh_fmm.prepare_state(moved, masses, leaf_size=128, max_order=2)
 
     assert diagnostics["large_n_same_topology_refresh_hits"] >= 1
@@ -476,7 +476,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
     )
 
     monkeypatch.setenv("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "off")
-    fmm_off = FMMEngine(**kwargs)
+    fmm_off = FMMEngine(**kwargs, softening_kernel="plummer")
     state_off = fmm_off.prepare_state(positions, masses, leaf_size=128, max_order=2)
     refreshed_off = fmm_off.refresh_prepared_state(
         state_off,
@@ -489,7 +489,7 @@ def test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics(monkeypat
 
     monkeypatch.setenv("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "on")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    fmm_on = FMMEngine(**kwargs)
+    fmm_on = FMMEngine(**kwargs, softening_kernel="plummer")
     state_on = fmm_on.prepare_state(positions, masses, leaf_size=128, max_order=2)
     refreshed_on = fmm_on.refresh_prepared_state(
         state_on,
@@ -560,7 +560,7 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
-        fixed_order=2,
+        fixed_order=2, softening_kernel="plummer",
     )
     state0, acc0 = fmm.strict_prepare_refresh_and_evaluate(
         None,
@@ -635,7 +635,7 @@ def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
-        fixed_order=2,
+        fixed_order=2, softening_kernel="plummer",
     )
     with pytest.raises(RuntimeError, match="exact cap profile key match"):
         _ = fmm.prepare_state(positions, masses, leaf_size=128, max_order=2)
@@ -690,7 +690,7 @@ def test_strict_run_v2_api(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
-        fixed_order=2,
+        fixed_order=2, softening_kernel="plummer",
     )
 
     state_out, prepared_out, history = fmm.strict_run_v2(
@@ -756,7 +756,7 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
     )
-    fmm = FMMEngine(**kwargs)
+    fmm = FMMEngine(**kwargs, softening_kernel="plummer")
     state_out, prepared_out, history = fmm.strict_run_v2(
         state=state0,
         masses=masses,
@@ -774,7 +774,7 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
     assert diagnostics["strict_fused_fallback_count"] == 0
     assert diagnostics["strict_self_force_endpoint_evaluations"] == 1
 
-    fresh_fmm = FMMEngine(**kwargs)
+    fresh_fmm = FMMEngine(**kwargs, softening_kernel="plummer")
     fresh = fresh_fmm.prepare_state(
         state_out[:, 0, :], masses, leaf_size=128, max_order=2
     )
@@ -827,7 +827,7 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
-        fixed_order=2,
+        fixed_order=2, softening_kernel="plummer",
     )
     with pytest.raises(
         Exception,
@@ -849,7 +849,7 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
 def test_capacity_fixed_depth_tree_mode_is_removed():
     with pytest.raises(ValueError, match="tree_build_mode"):
         FMMEngine(
-            tree=TreeConfig(mode="capacity_fixed_depth"),
+            tree=TreeConfig(mode="capacity_fixed_depth"), softening_kernel="plummer",
         )
 
 
@@ -888,7 +888,7 @@ def test_compute_accelerations_fixed_depth_matches_direct():
         theta=theta,
         G=G,
         softening=softening,
-        tree=TreeConfig(mode="fixed_depth", leaf_target=2),
+        tree=TreeConfig(mode="fixed_depth", leaf_target=2), softening_kernel="plummer",
     )
     acc, pot = fmm.compute_accelerations(
         positions,
@@ -927,7 +927,7 @@ def test_compute_accelerations_refined_tree_matches_non_refined():
             theta=theta,
             G=G,
             softening=softening,
-            tree=TreeConfig(mode="fixed_depth", leaf_target=target_leaf_particles),
+            tree=TreeConfig(mode="fixed_depth", leaf_target=target_leaf_particles), softening_kernel="plummer",
         )
         acc, pot = fmm.compute_accelerations(
             positions,
@@ -965,7 +965,7 @@ def test_compute_accelerations_fixed_depth_jitted_matches_eager():
             theta=0.7,
             G=1.1,
             softening=0.02,
-            tree=TreeConfig(mode="fixed_depth", leaf_target=2),
+            tree=TreeConfig(mode="fixed_depth", leaf_target=2), softening_kernel="plummer",
         )
         acc, pot = fmm.compute_accelerations(
             positions,
@@ -990,7 +990,7 @@ def test_acceleration_magnitude():
     positions = jnp.array([[0.0, 0.0, 0.0]])
     masses = jnp.array([1.0])
 
-    fmm = FMMEngine(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0, softening_kernel="plummer")
 
     # Points at distance 1 and 2
     point1 = jnp.array([1.0, 0.0, 0.0])
@@ -1024,7 +1024,7 @@ def test_gravitational_potential():
     softening = 0.0
 
     potential = compute_gravitational_potential(
-        positions, masses, eval_points, G=G, softening=softening
+        positions, masses, eval_points, G=G, softening=softening, softening_kernel="plummer"
     )
 
     # Potential should be -G*M/r = -1.0
@@ -1044,7 +1044,7 @@ def test_softening():
 
     # With softening
     accelerations = compute_gravitational_acceleration(
-        positions, masses, G=1.0, softening=0.1
+        positions, masses, G=1.0, softening=0.1, softening_kernel="plummer"
     )
 
     # Should not have NaN or Inf
@@ -1066,7 +1066,7 @@ def test_zero_mass():
     masses = jnp.array([1.0, 0.0])
 
     accelerations = compute_gravitational_acceleration(
-        positions, masses, G=1.0, softening=0.0
+        positions, masses, G=1.0, softening=0.0, softening_kernel="plummer"
     )
 
     # Should not have NaN or Inf
@@ -1145,7 +1145,7 @@ def test_prepare_downward_sweep_matches_module_helper():
         leaf_size=DEFAULT_TEST_LEAF_SIZE,
     )
 
-    fmm = FMMEngine(theta=0.4)
+    fmm = FMMEngine(theta=0.4, softening_kernel="plummer")
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1226,8 +1226,8 @@ def test_fmm_dense_downward_matches_sparse_path():
     )
 
     kwargs = dict(bounds=bounds, leaf_size=2, max_order=2, theta=0.6)
-    fmm_sparse = FMMEngine(theta=0.6, use_dense_interactions=False)
-    fmm_dense = FMMEngine(theta=0.6, use_dense_interactions=True)
+    fmm_sparse = FMMEngine(theta=0.6, use_dense_interactions=False, softening_kernel="plummer")
+    fmm_dense = FMMEngine(theta=0.6, use_dense_interactions=True, softening_kernel="plummer")
 
     state_sparse = fmm_sparse.prepare_state(positions, masses, **kwargs)
     state_dense = fmm_dense.prepare_state(positions, masses, **kwargs)
@@ -1245,10 +1245,10 @@ def test_far_field_accuracy_order3_vs_order4():
     pos = 0.1 * jax.random.normal(key, (n, 3))
     mass = jax.random.uniform(key, (n,), minval=0.5, maxval=1.5)
 
-    fmm = FMMEngine(G=1.0, softening=0.0)
+    fmm = FMMEngine(G=1.0, softening=0.0, softening_kernel="plummer")
     eval_point = jnp.array([6.0, -3.0, 2.0])
 
-    a_ref = fmm.direct_sum(pos, mass, eval_point)
+    a_ref = fmm.direct_sum(pos, mass, eval_point, softening_kernel="plummer")
 
     exp3 = FMMEngine.compute_expansion(pos, mass, order=3)
     exp4 = FMMEngine.compute_expansion(pos, mass, order=4)
@@ -1288,7 +1288,7 @@ def test_evaluate_tree_matches_direct_sum_all_near_field():
     geometry = compute_tree_geometry(tree, pos_sorted)
     neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=5.0)
 
-    fmm = FMMEngine(theta=5.0, G=1.3, softening=0.05)
+    fmm = FMMEngine(theta=5.0, G=1.3, softening=0.05, softening_kernel="plummer")
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1349,7 +1349,7 @@ def test_evaluate_tree_far_field_accuracy():
     geometry = compute_tree_geometry(tree, pos_sorted)
     neighbor_list = build_leaf_neighbor_lists(tree, geometry, theta=0.4)
 
-    fmm = FMMEngine(theta=0.4, G=1.0, softening=0.01)
+    fmm = FMMEngine(theta=0.4, G=1.0, softening=0.01, softening_kernel="plummer")
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1406,7 +1406,7 @@ def test_fmm_pipeline_matches_direct_sum():
     )
     masses = jnp.array([1.0, 1.2, 0.9, 1.1], dtype=jnp.float64)
 
-    fmm = FMMEngine(theta=5.0, G=1.3, softening=0.05)
+    fmm = FMMEngine(theta=5.0, G=1.3, softening=0.05, softening_kernel="plummer")
     acc_class, pot_class = fmm.compute_accelerations(
         positions,
         masses,
@@ -1421,7 +1421,7 @@ def test_fmm_pipeline_matches_direct_sum():
         G=1.3,
         softening=0.05,
         leaf_size=2,
-        return_potential=True,
+        return_potential=True, softening_kernel="plummer",
     )
 
     direct_acc, direct_pot = _direct_sum(
@@ -1467,7 +1467,7 @@ def test_evaluate_tree_compiled_matches_eager():
         return_reordered=True,
     )
 
-    fmm = FMMEngine(theta=0.7, G=1.0, softening=0.02)
+    fmm = FMMEngine(theta=0.7, G=1.0, softening=0.02, softening_kernel="plummer")
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,
@@ -1580,11 +1580,11 @@ def test_nearfield_bucketed_matches_baseline(
 
     fmm_baseline = FMMEngine(
         nearfield=NearFieldConfig(mode="baseline"),
-        **base_kwargs,
+        **base_kwargs, softening_kernel="plummer",
     )
     fmm_bucketed = FMMEngine(
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=chunk_size),
-        **base_kwargs,
+        **base_kwargs, softening_kernel="plummer",
     )
 
     acc_baseline = fmm_baseline.compute_accelerations(
@@ -1659,7 +1659,7 @@ def test_nearfield_precomputed_leaf_pairs_matches_inline_mapping():
         softening=1e-3,
         max_leaf_size=16,
         nearfield_mode="bucketed",
-        edge_chunk_size=64,
+        edge_chunk_size=64, softening_kernel="plummer",
     )
     acc_precomputed = compute_leaf_p2p_accelerations(
         tree,
@@ -1672,7 +1672,7 @@ def test_nearfield_precomputed_leaf_pairs_matches_inline_mapping():
         edge_chunk_size=64,
         precomputed_target_leaf_ids=tgt_leaf,
         precomputed_source_leaf_ids=src_leaf,
-        precomputed_valid_pairs=valid,
+        precomputed_valid_pairs=valid, softening_kernel="plummer",
     )
 
     assert np.allclose(
@@ -1735,7 +1735,7 @@ def test_nearfield_precomputed_bucketed_scatter_matches_inline():
         edge_chunk_size=64,
         precomputed_target_leaf_ids=tgt_leaf,
         precomputed_source_leaf_ids=src_leaf,
-        precomputed_valid_pairs=valid,
+        precomputed_valid_pairs=valid, softening_kernel="plummer",
     )
     acc_precomputed = compute_leaf_p2p_accelerations(
         tree,
@@ -1751,7 +1751,7 @@ def test_nearfield_precomputed_bucketed_scatter_matches_inline():
         precomputed_valid_pairs=valid,
         precomputed_chunk_sort_indices=sort_idx,
         precomputed_chunk_group_ids=group_ids,
-        precomputed_chunk_unique_indices=unique_indices,
+        precomputed_chunk_unique_indices=unique_indices, softening_kernel="plummer",
     )
 
     assert np.allclose(
@@ -1790,7 +1790,7 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
         working_dtype=jnp.float32,
     )
 
-    fmm = FMMEngine(**kwargs)
+    fmm = FMMEngine(**kwargs, softening_kernel="plummer")
     state = fmm.prepare_state(
         positions,
         masses,
@@ -1855,7 +1855,7 @@ def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         farfield=FarFieldConfig(grouped_interactions=False),
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     state = fmm.prepare_state(
         positions,
@@ -1918,7 +1918,7 @@ def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         farfield=FarFieldConfig(grouped_interactions=False),
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     state = fmm.prepare_state(
         positions,
@@ -1965,7 +1965,7 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         farfield=FarFieldConfig(grouped_interactions=False),
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     state = fmm.prepare_state(
         positions,
@@ -2021,7 +2021,7 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
             target_block_batch_scan_unroll=int(
                 state.nearfield_target_block_batch_scan_unroll
             ),
-            target_block_overflow_fast_max_blocks=131072,
+            target_block_overflow_fast_max_blocks=131072, softening_kernel="plummer",
         )
     )
     fallback_overflow_acc = np.asarray(
@@ -2066,7 +2066,7 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
             target_block_batch_scan_unroll=int(
                 state.nearfield_target_block_batch_scan_unroll
             ),
-            target_block_overflow_fast_max_blocks=1,
+            target_block_overflow_fast_max_blocks=1, softening_kernel="plummer",
         )
     )
 
@@ -2136,8 +2136,8 @@ def test_radix_fast_lane_fixed_seed_repeatability(monkeypatch):
         farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
-    fmm_a = FMMEngine(**kwargs)
-    fmm_b = FMMEngine(**kwargs)
+    fmm_a = FMMEngine(**kwargs, softening_kernel="plummer")
+    fmm_b = FMMEngine(**kwargs, softening_kernel="plummer")
 
     state_a = fmm_a.prepare_state(
         positions_a,
@@ -2206,7 +2206,7 @@ def test_prepare_state_reuses_cached_interactions_when_inputs_match():
     fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     state_first = fmm.prepare_state(
         positions,
@@ -2251,7 +2251,7 @@ def test_compute_accelerations_reuses_prepared_state_when_enabled():
     fmm = FMMEngine(
         theta=0.6,
         softening=1e-3,
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     with mock.patch.object(
         fmm, "prepare_state", wraps=fmm.prepare_state
@@ -2289,7 +2289,7 @@ def test_compute_accelerations_reuse_cache_invalidates_on_parameter_and_value_ch
     fmm = FMMEngine(
         theta=0.55,
         softening=1e-3,
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     with mock.patch.object(
         fmm, "prepare_state", wraps=fmm.prepare_state
@@ -2333,7 +2333,7 @@ def test_compute_accelerations_reuses_prepared_state_for_value_equal_copies():
     fmm = FMMEngine(
         theta=0.55,
         softening=1e-3,
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     with mock.patch.object(
         fmm, "prepare_state", wraps=fmm.prepare_state
@@ -2377,7 +2377,7 @@ def test_prepare_state_precomputes_bucketed_scatter_schedule():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
+        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64), softening_kernel="plummer",
     )
     state = fmm.prepare_state(
         positions,
@@ -2412,7 +2412,7 @@ def test_prepare_state_cache_respects_theta_changes():
     fmm = FMMEngine(
         theta=0.5,
         softening=1e-3,
-        working_dtype=jnp.float32,
+        working_dtype=jnp.float32, softening_kernel="plummer",
     )
     fmm.prepare_state(
         positions,
@@ -2453,7 +2453,7 @@ def test_prepare_state_cache_respects_dehnen_radius_scale_changes():
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
-        dehnen_radius_scale=1.0,
+        dehnen_radius_scale=1.0, softening_kernel="plummer",
     )
     fmm.prepare_state(
         positions,
@@ -2505,7 +2505,7 @@ def test_prepare_state_cache_respects_traversal_config_changes():
         theta=0.55,
         softening=5e-4,
         working_dtype=jnp.float32,
-        runtime_policy=RuntimePolicyConfig(traversal_config=config_a),
+        runtime_policy=RuntimePolicyConfig(traversal_config=config_a), softening_kernel="plummer",
     )
     fmm.prepare_state(
         positions,
@@ -2554,7 +2554,7 @@ def test_prepare_state_reuses_topology_when_morton_order_stable():
         softening=1e-3,
         working_dtype=jnp.float32,
         reuse_topology=True,
-        rebuild_every=3,
+        rebuild_every=3, softening_kernel="plummer",
     )
     state_first = fmm.prepare_state(
         base_positions,
@@ -2606,7 +2606,7 @@ def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
         softening=1e-3,
         working_dtype=jnp.float32,
         reuse_topology=True,
-        rebuild_every=2,
+        rebuild_every=2, softening_kernel="plummer",
     )
     state_first = fmm.prepare_state(
         base_positions,
@@ -2664,7 +2664,7 @@ def test_prepare_state_reuses_grouped_buffers_from_cache():
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=True),
-        mac_type="dehnen",
+        mac_type="dehnen", softening_kernel="plummer",
     )
     fmm.prepare_state(
         positions,
@@ -2711,7 +2711,7 @@ def test_prepare_state_reuses_grouped_class_segments_from_cache():
             mode="class_major",
             m2l_chunk_size=128,
         ),
-        mac_type="dehnen",
+        mac_type="dehnen", softening_kernel="plummer",
     )
     fmm.prepare_state(
         positions,
@@ -2753,7 +2753,7 @@ def test_prepare_state_cache_key_respects_center_mode():
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
-        mac_type="dehnen",
+        mac_type="dehnen", softening_kernel="plummer",
     )
     # The cache-key-vs-center_mode behaviour depends on the adaptive resolver
     # setting center_mode="aabb" when grouped_interactions flips on. That is an
@@ -2792,7 +2792,7 @@ def test_fast_preset_sets_lbvh_defaults():
     positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
     masses = jnp.ones((num_particles,), dtype=jnp.float32)
 
-    fmm = FMMEngine(preset="fast", theta=0.6, softening=1e-3)
+    fmm = FMMEngine(preset="fast", theta=0.6, softening=1e-3, softening_kernel="plummer")
 
     assert fmm.tree_build_mode == "lbvh"
     assert fmm.target_leaf_particles == 64
@@ -2813,7 +2813,7 @@ def test_fast_preset_sets_lbvh_defaults():
 def test_fast_preset_allows_explicit_overrides():
     fmm = FMMEngine(
         preset=FMMPreset.FAST,
-        tree=TreeConfig(mode="lbvh", leaf_target=12, refine_local=True),
+        tree=TreeConfig(mode="lbvh", leaf_target=12, refine_local=True), softening_kernel="plummer",
     )
 
     assert fmm.tree_build_mode == "lbvh"
@@ -2823,7 +2823,7 @@ def test_fast_preset_allows_explicit_overrides():
 
 
 def test_fast_preset_defaults_to_auto_jit_tree_policy():
-    fmm = FMMEngine(preset=FMMPreset.FAST)
+    fmm = FMMEngine(preset=FMMPreset.FAST, softening_kernel="plummer")
     assert fmm._jit_tree_default == "auto"
 
 
@@ -2845,7 +2845,7 @@ def test_solidfmm_float32_uses_complex64_locals():
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
-        mac_type="dehnen",
+        mac_type="dehnen", softening_kernel="plummer",
     )
     state = fmm.prepare_state(
         positions,
@@ -2878,7 +2878,7 @@ def test_solidfmm_float64_uses_complex128_locals():
             working_dtype=jnp.float64,
             expansion_basis="solidfmm",
             farfield=FarFieldConfig(rotation="solidfmm"),
-            mac_type="dehnen",
+            mac_type="dehnen", softening_kernel="plummer",
         )
         state = fmm.prepare_state(
             positions,
@@ -2978,7 +2978,7 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
             mac_type="dehnen",
             tree=TreeConfig(mode="lbvh"),
             fixed_order=4,
-            fixed_max_leaf_size=_CHUNKED_M2L_LEAF_SIZE,
+            fixed_max_leaf_size=_CHUNKED_M2L_LEAF_SIZE, softening_kernel="plummer",
         )
 
     def accelerations(*, chunk_size, dtype):
@@ -3181,7 +3181,7 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
-        mac_type="dehnen",
+        mac_type="dehnen", softening_kernel="plummer",
     )
     # This test exercises the adaptive large-CPU runtime policy, which is the
     # non-default opt-out path: the production default is static fixed sizing
@@ -3210,7 +3210,7 @@ def test_fast_preset_adaptive_class_major_threshold():
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
-        mac_type="dehnen",
+        mac_type="dehnen", softening_kernel="plummer",
     )
     # Adaptive class-major farfield policy is the non-default opt-out path;
     # static fixed sizing (the production default) skips it. Disable it here so
@@ -3232,7 +3232,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
-        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=256),
+        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=256), softening_kernel="plummer",
     )
     monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
 
@@ -3269,7 +3269,7 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
-        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=128),
+        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=128), softening_kernel="plummer",
     )
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
 
@@ -3310,7 +3310,7 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm", m2l_chunk_size=2048),
         mac_type="dehnen",
-        runtime_policy=RuntimePolicyConfig(traversal_config=cfg),
+        runtime_policy=RuntimePolicyConfig(traversal_config=cfg), softening_kernel="plummer",
     )
 
     overrides = fmm._resolve_runtime_execution_overrides(
@@ -3342,7 +3342,7 @@ def test_solidfmm_grouped_interactions_matches_sparse_path():
         expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
-        fixed_order=3,
+        fixed_order=3, softening_kernel="plummer",
     )
 
     bounds = (
@@ -3419,7 +3419,7 @@ def test_solidfmm_grouped_class_major_matches_pair_grouped():
             rotation="solidfmm", grouped_interactions=True, mode="pair_grouped"
         ),
         mac_type="dehnen",
-        fixed_order=3,
+        fixed_order=3, softening_kernel="plummer",
     )
 
     bounds = (
@@ -3510,13 +3510,13 @@ def test_solidfmm_basis_rejects_non_solidfmm_rotation():
     ):
         FMMEngine(
             expansion_basis="solidfmm",
-            farfield=FarFieldConfig(rotation="cached"),
+            farfield=FarFieldConfig(rotation="cached"), softening_kernel="plummer",
         )
 
 
 def test_dehnen_radius_scale_must_be_positive():
     with pytest.raises(ValueError, match="dehnen_radius_scale must be > 0"):
-        FMMEngine(dehnen_radius_scale=0.0)
+        FMMEngine(dehnen_radius_scale=0.0, softening_kernel="plummer")
 
 
 def test_nearfield_mode_validation():
@@ -3524,11 +3524,11 @@ def test_nearfield_mode_validation():
         ValueError, match="nearfield_mode must be 'auto', 'baseline', or 'bucketed'"
     ):
         FMMEngine(
-            nearfield=NearFieldConfig(mode="unknown"),
+            nearfield=NearFieldConfig(mode="unknown"), softening_kernel="plummer",
         )
     with pytest.raises(ValueError, match="nearfield_edge_chunk_size must be positive"):
         FMMEngine(
-            nearfield=NearFieldConfig(edge_chunk_size=0),
+            nearfield=NearFieldConfig(edge_chunk_size=0), softening_kernel="plummer",
         )
 
 
@@ -3568,7 +3568,7 @@ def test_solidfmm_dehnen_accuracy_improves_with_order():
                 farfield=FarFieldConfig(rotation="solidfmm"),
                 mac_type="dehnen",
                 fixed_order=order,
-                fixed_max_leaf_size=16,
+                fixed_max_leaf_size=16, softening_kernel="plummer",
             )
             accelerations = np.asarray(
                 fmm.compute_accelerations(

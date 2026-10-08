@@ -76,8 +76,16 @@ def test_jax_reference_matches_manual():
     tp, tmask, sp, sm, smask = _random_inputs(seed=1)
     soft = 0.05**2
     G = 1.25
+    # _manual_reference is the Plummer sum
     ref = nearfield_fused_leaf_jax(
-        tp, tmask, sp, sm, smask, softening_sq=jnp.float32(soft), G=jnp.float32(G)
+        tp,
+        tmask,
+        sp,
+        sm,
+        smask,
+        softening_sq=jnp.float32(soft),
+        G=jnp.float32(G),
+        softening_kernel="plummer",
     )
     manual = _manual_reference(tp, tmask, sp, sm, smask, softening_sq=soft, G=G)
     assert np.allclose(np.asarray(ref), manual, rtol=1e-4, atol=1e-5)

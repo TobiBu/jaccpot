@@ -4521,18 +4521,13 @@ class PrepareMixin(_EngineBase):
         # interaction list on the same (fallback) tree, matching the near field.
         octree_native_neighbors = None
         if execution_backend == "octree" and octree is not None and octree_native:
-            if self._walk_separation_floor() > 0.0:
-                raise NotImplementedError(
-                    "the native octree lists have no separation floor, which a "
-                    "compact softening kernel needs (softening_floor); use the "
-                    "radix backend, softening_floor=0 or softening_kernel='plummer'."
-                )
             octree_native_neighbors = build_octree_native_neighbor_lists(
                 tree_artifacts.tree,
                 tree_artifacts.upward.geometry,
                 theta=theta_val,
                 mac_type=mac_type_val,
                 dehnen_radius_scale=self.dehnen_radius_scale,
+                separation_floor=self._walk_separation_floor(),
                 max_pair_queue=self.max_pair_queue,
                 process_block=self.pair_process_block,
                 traversal_config=runtime_traversal_config,
@@ -4621,6 +4616,7 @@ class PrepareMixin(_EngineBase):
                 theta=theta_val,
                 mac_type=mac_type_val,
                 dehnen_radius_scale=self.dehnen_radius_scale,
+                separation_floor=self._walk_separation_floor(),
                 max_pair_queue=self.max_pair_queue,
                 process_block=self.pair_process_block,
                 traversal_config=runtime_traversal_config,

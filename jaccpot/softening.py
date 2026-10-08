@@ -147,7 +147,9 @@ def softening_params(kernel: str, softening: Any, dtype: Any = None) -> Any:
 
     ``[eps^2, 0]`` for Plummer, ``[h^2, 1/h^2]`` for ``"ferrers3"`` and
     ``[h^2, 1/h]`` for ``"wendland_c2"``. ``softening = 0`` gives Newton for every
-    kernel (``1/h`` is then ``inf``, which the clip absorbs for ``r > 0``).
+    kernel: the second scalar is then a large FINITE number (``1/h`` floored at the
+    dtype's smallest normal), never ``inf``, so a reverse pass that multiplies a zero
+    cotangent by it stays zero, and :func:`pair_factors` selects ``c = 1``.
 
     Parameters
     ----------
@@ -168,9 +170,10 @@ def softening_params(kernel: str, softening: Any, dtype: Any = None) -> Any:
     if name == "plummer":
         return jnp.stack([eps * eps, jnp.zeros_like(eps)])
     h = jnp.asarray(_SUPPORT_FACTOR[name], dtype=eps.dtype) * eps
+    tiny = jnp.asarray(jnp.finfo(eps.dtype).tiny, dtype=eps.dtype)
     if name == "ferrers3":
-        return jnp.stack([h * h, 1.0 / (h * h)])
-    return jnp.stack([h * h, 1.0 / h])
+        return jnp.stack([h * h, 1.0 / jnp.maximum(h * h, tiny)])
+    return jnp.stack([h * h, 1.0 / jnp.maximum(h, jnp.sqrt(tiny))])
 
 
 def softening_params_np(kernel: str, softening: float) -> np.ndarray:
@@ -193,7 +196,8 @@ def softening_params_np(kernel: str, softening: float) -> np.ndarray:
     if name == "plummer":
         return np.array([eps * eps, 0.0])
     h = _SUPPORT_FACTOR[name] * eps
-    inv = np.inf if h == 0.0 else (1.0 / (h * h) if name == "ferrers3" else 1.0 / h)
+    tiny = np.finfo(np.float64).tiny
+    inv = 1.0 / max(h * h, tiny) if name == "ferrers3" else 1.0 / max(h, np.sqrt(tiny))
     return np.array([h * h, inv])
 
 
@@ -263,6 +267,8 @@ def pair_factors(
     else:
         c = xp.minimum(xp.sqrt(r2) * p1, 1.0)
         rg, rpsi, rd = _WENDLAND_G, _WENDLAND_PSI, _WENDLAND_D
+    # zero softening: Newton; a select (not a product) so no tangent is scaled
+    c = xp.where(p0 > 0.0, c, 1.0)
     one_minus = 1.0 - c
     g = (1.0 + one_minus * _horner(c, rg)) * s3
     psi = (1.0 + one_minus * _horner(c, rpsi)) * s if potential else None
@@ -314,6 +320,7 @@ def pair_softening_sq_derivative(
     else:
         c = xp.minimum(xp.sqrt(r2) * p1, 1.0)
         rh = _WENDLAND_H
+    c = xp.where(p0 > 0.0, c, 1.0)
     k = _SUPPORT_FACTOR[name]
     return -0.5 * k * k * (1.0 - c) * _horner(c, rh) * s * s * s * s * s
 

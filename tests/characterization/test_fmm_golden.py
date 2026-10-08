@@ -229,7 +229,7 @@ def _build_fmm(basis: str) -> FastMultipoleMethod:
                     max_neighbors_per_leaf=1 << 16,
                 )
             )
-        ),
+        ), softening_kernel="plummer",
     )
 
 
@@ -318,7 +318,7 @@ def _build_fmm_with_modes(basis, farfield_mode, nearfield_mode):
             ),
             farfield=farfield,
             nearfield=nearfield,
-        ),
+        ), softening_kernel="plummer",
     )
 
 

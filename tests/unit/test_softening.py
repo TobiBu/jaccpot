@@ -197,3 +197,18 @@ def test_masked_factors_zero_inactive_and_match_unmasked(kernel):
         a, b = np.asarray(a), np.asarray(b)
         assert np.all(a[~np.asarray(active)] == 0.0)
         np.testing.assert_allclose(a[np.asarray(active)], b[np.asarray(active)], rtol=1e-6)
+
+
+@pytest.mark.parametrize("kernel", SOFTENING_KERNELS)
+def test_zero_softening_has_finite_gradients_in_both_modes(kernel):
+    """softening = 0 is Newton for every kernel, with finite reverse AND forward modes."""
+    params = softening_params(kernel, 0.0, jnp.float32)
+    r = jnp.asarray([1e-3, 0.4, 3.0, 2e3], jnp.float32)
+
+    def g_of_r(x):
+        return jnp.sum(pair_factors(x * x, params, kernel, potential=True)[0])
+
+    rev = jax.grad(g_of_r)(r)
+    fwd = jax.jvp(g_of_r, (r,), (jnp.full_like(r, 7.0),))[1]
+    assert np.all(np.isfinite(np.asarray(rev))) and np.isfinite(float(fwd))
+    np.testing.assert_allclose(np.asarray(rev), np.asarray(-3.0 * r**-4), rtol=1e-5)
