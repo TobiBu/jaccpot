@@ -50,9 +50,26 @@ These override any instruction to "clean up", "optimise", or "simplify":
 - **Do not add, remove, or bump dependencies** without asking. The `black` and `isort` pins
   are deliberately equal to the pre-commit hook revs; unpinning them makes CI and local
   formatting disagree.
-- **Do not weaken a test, relax a tolerance, or delete a test.** Ever.
+- **Do not weaken a test, relax a tolerance, or delete a test.** Ever. (The one sanctioned
+  exception is the cleanup project below, and only under its tagging rule.)
 - **Do not rename anything public** without asking.
 - **Do not reformat files you are not otherwise touching.**
+
+### Cleanup project 2026-10 (temporary; reverted in its final phase)
+
+The maintainer approved removing the complex and Cartesian bases and the superseded slow
+and memory-heavy paths (octree backend, grouped/class-major far field, autotune and adaptive
+sizing, legacy strict APIs, superseded kernel variants, treecode), and trimming the test
+suite. The record is `docs/cleanup_2026-10.md`. While it runs, and only in its `cleanup/*`
+PRs:
+
+- A test may be deleted only if the PR's table tags it as (a) its subject was deleted,
+  (b) merged into a named test that keeps the assertion, or (c) a duplicate of a named owner
+  test. Tolerances are still never relaxed, and no lane loses its last direct-sum oracle.
+- A deletion-only diff (code with no remaining importer, plus its tests) is exempt from the
+  ~400-line split rule. Behaviour changes are not.
+- The public removals listed in the record are approved; any other public rename still
+  needs asking.
 
 ## Workflow
 
@@ -106,8 +123,9 @@ performance assertions are opt-in (`pytest -m experimental`, `pytest tests/perf`
 Faster inner loop while iterating:
 
 ```bash
-pytest -n 2 -m "not slow and not experimental"      # the CI smoke subset
+pytest -n 2 -m "not slow and not experimental"      # the fast subset (local only)
 JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit    # jaxtyping + beartype runtime checks
+JACCPOT_RUNTIME_TYPECHECK=1 JACCPOT_TEST_TRIM_GRIDS=1 pytest -q tests/unit  # same, Pallas grids cut to one case
 ```
 
 Coverage is measured and uploaded in CI (`--cov=jaccpot --cov-branch`), but there is no
@@ -183,15 +201,21 @@ tests/integration/     end-to-end paths
 tests/characterization/ golden references — the tripwire for silent numerics changes
                        (forward accelerations + gradients, each with an inertness
                        gate and a direct-sum physics anchor)
-tests/distributed/     multi-GPU; every file skips below 2 devices, so CPU CI collects
-                       and skips them. Not a tier you can rely on locally.
+tests/distributed/     multi-GPU; every file skips below 2 devices. CI runs it on forced
+                       host devices (`test-distributed-tier`, `-criterion`); not a tier
+                       you can rely on locally without the same XLA_FLAGS.
 tests/perf/            performance assertions
 tests/experimental/    prototypes; deselected by default
 
 No test files live directly under `tests/` — only `conftest.py` and `slow_tests.txt`.
 `slow_tests.txt` marks tests `slow` **by node id**, so moving or renaming a test file
-silently un-marks its entries and pushes them into the smoke leg; update it in the same
-change and check the collected counts under `-m "not slow"` are unchanged.
+silently un-marks its entries; update it in the same change and check the collected counts
+under `-m "not slow"` are unchanged.
+
+Which CI job runs which tests is defined once, in `.github/scripts/test_shards.py`; the
+`test-partition` job fails if two shards overlap or a collected test is in none. A new test
+directory or a file that needs its own job goes there, and
+`python .github/scripts/test_shards.py check` says whether the partition still holds.
 
 bench/                 profiling, audits, microbenchmarks, ci_benchmark_guard.py
 docs/                  design notes, audits, profiling records
