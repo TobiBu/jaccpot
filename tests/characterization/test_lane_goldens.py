@@ -128,6 +128,7 @@ def _large_n_solver():
             mac_type="dehnen",
         ),
         fixed_order=ORDER,
+        softening_kernel="plummer",
     )
 
 
@@ -205,6 +206,7 @@ def test_blockstep_lane_golden():
         max_order=ORDER,
         leaf_size=LEAF,
         basis="real",
+        softening_kernel="plummer",
     )
     force.prepare(p, m)
     accel = np.asarray(force.total_accelerations(p, m))
