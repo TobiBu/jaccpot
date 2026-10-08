@@ -61,7 +61,8 @@ def _np_factors(kernel, r, eps=1.0):
 
 
 def test_names_default_and_support_factors():
-    assert resolve_softening_kernel(None) == DEFAULT_SOFTENING_KERNEL
+    assert DEFAULT_SOFTENING_KERNEL == "ferrers3"
+    assert resolve_softening_kernel(None) == "ferrers3"
     assert resolve_softening_kernel(" Wendland_C2 ") == "wendland_c2"
     with pytest.raises(ValueError, match="softening_kernel"):
         resolve_softening_kernel("spline")

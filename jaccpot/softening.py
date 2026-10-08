@@ -59,7 +59,7 @@ from jax import lax
 SofteningKernel = Literal["ferrers3", "wendland_c2", "plummer"]
 
 #: The kernel every entry point uses when none is named.
-DEFAULT_SOFTENING_KERNEL: SofteningKernel = "plummer"
+DEFAULT_SOFTENING_KERNEL: SofteningKernel = "ferrers3"
 
 #: Every accepted kernel name.
 SOFTENING_KERNELS: tuple[SofteningKernel, ...] = ("ferrers3", "wendland_c2", "plummer")
