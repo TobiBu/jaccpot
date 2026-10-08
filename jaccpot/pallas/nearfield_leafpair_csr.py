@@ -59,6 +59,7 @@ from jaccpot.softening import (
     pair_softening_sq_derivative,
     resolve_softening_kernel,
     softening_params_from_sq,
+    support_factor,
 )
 
 try:
@@ -105,6 +106,44 @@ class LeafPairChunkTable(NamedTuple):
     start: Array
     count: Array
     is_first: Array
+
+
+def _force_scale_term(
+    r_sq: Array, soft: Array, active: Array, mass: Array, softening_kernel: str
+) -> Array:
+    """One pair's share of eq (16b)'s force scale, ``m / (r^2 + eps^2)`` (times G).
+
+    The cancellation-free ``f_b = sum_a G m_a / (|x_a - x_b|^2 + eps^2)`` that
+    Dehnen's criterion puts on its right-hand side, in exactly the form of the
+    eager estimator (:func:`~jaccpot.runtime._adaptive_policy.estimate_particle_force_scale`):
+    ``eps`` is the Plummer-equivalent softening whatever the pair kernel. The
+    kernels' ``soft`` operand is ``eps^2`` for Plummer and ``h^2 = (k eps)^2`` for
+    a compact kernel, so ``eps^2 = soft / k^2`` with the kernel's static support
+    factor ``k``.
+
+    Parameters
+    ----------
+    r_sq : Array
+        Squared pair distance.
+    soft : Array
+        The kernel's first softening parameter (``eps^2`` or ``h^2``).
+    active : Array
+        Live pairs (self and padding excluded by the caller).
+    mass : Array
+        Source mass.
+    softening_kernel : str
+        The pair kernel, static.
+
+    Returns
+    -------
+    Array
+        ``m / (r^2 + eps^2)`` on live pairs, zero elsewhere.
+    """
+    k = support_factor(softening_kernel)
+    eps_sq = soft if k == 0.0 else soft * (1.0 / (k * k))
+    d2 = r_sq + eps_sq
+    ok = active & (d2 > 0.0)
+    return jnp.where(ok, mass / jnp.where(ok, d2, 1.0), 0.0)
 
 
 def leafpair_chunk_capacity(edge_capacity: int, num_leaves: int, chunk: int) -> int:
@@ -608,6 +647,7 @@ def _nearfield_leafpair_csr_sorted_kernel(
     source_tile: int = 0,
     source_flags: str = "",
     softening_kernel: str = "plummer",
+    fourth: str = "potential",
 ) -> None:
     """:func:`_nearfield_leafpair_csr_kernel` reading the SORTED particle array.
 
@@ -683,6 +723,10 @@ def _nearfield_leafpair_csr_sorted_kernel(
         Static.
     softening_kernel : str
         The pair kernel, static (:mod:`jaccpot.softening`).
+    fourth : str
+        What the fourth output lane holds when ``num_out == 4``: ``"potential"``
+        (``-G m psi``) or ``"force_scale"`` (eq (16b)'s ``G m / (r^2 + eps^2)``,
+        self excluded, see :func:`_force_scale_term`). Static.
 
     Returns
     -------
@@ -753,7 +797,14 @@ def _nearfield_leafpair_csr_sorted_kernel(
                     acc[2] + scale * dz,
                 )
                 if num_out == 4:
-                    new = new + (acc[3] - g_value * inv_r * sm,)
+                    if fourth == "force_scale":
+                        new = new + (
+                            acc[3]
+                            + g_value
+                            * _force_scale_term(r2, soft, active, sm, softening_kernel),
+                        )
+                    else:
+                        new = new + (acc[3] - g_value * inv_r * sm,)
                 return new
 
             scount = leaf_count_ref[sid]
@@ -824,12 +875,24 @@ def _nearfield_leafpair_csr_sorted_kernel(
                             active,
                             soft_params,
                             softening_kernel,
-                            potential=num_out == 4,
+                            potential=num_out == 4 and fourth == "potential",
                         )
                         gm = -g_value * (sm if gather2d else sm[None, :])
                         scale = g_k * gm
                         terms = (scale * dx, scale * dy, scale * dz)
-                        if num_out == 4:
+                        if num_out == 4 and fourth == "force_scale":
+                            live = active
+                            if exclude_lane is not None:
+                                live = live & (exclude_lane[:, None] != j2)
+                            fb = g_value * _force_scale_term(
+                                r_sq,
+                                soft,
+                                live,
+                                sm if gather2d else sm[None, :],
+                                softening_kernel,
+                            )
+                            terms = terms + (fb,)
+                        elif num_out == 4:
                             pot = psi_k * gm
                             if exclude_lane is not None:
                                 pot = jnp.where(exclude_lane[:, None] == j2, 0.0, pot)
@@ -854,7 +917,13 @@ def _nearfield_leafpair_csr_sorted_kernel(
                                     else exclude_lane[:, None] == j[None, :]
                                 )
                                 inv_r_m = jnp.where(same, 0.0, inv_r_m)
-                            terms = terms + (inv_r_m,)
+                            if fourth == "force_scale":
+                                # G m / (r^2 + eps^2) = -(1/r) (-G m / r); the
+                                # diagonal is excluded above, a coincident pair
+                                # (1/r = 1 here) only lowers the scale
+                                terms = terms + (-(inv_r * inv_r_m),)
+                            else:
+                                terms = terms + (inv_r_m,)
                     else:
                         j2 = j if gather2d else j[None, :]
                         active = tvalid[:, None] & (j2 < scount)
@@ -866,7 +935,9 @@ def _nearfield_leafpair_csr_sorted_kernel(
                         inv_r_m = inv_r * (sm if gather2d else sm[None, :])
                         scale = -g_value * (inv_r * inv_r) * inv_r_m
                         terms = (scale * dx, scale * dy, scale * dz)
-                        if num_out == 4:
+                        if num_out == 4 and fourth == "force_scale":
+                            terms = terms + (g_value * inv_r * inv_r_m,)
+                        elif num_out == 4:
                             terms = terms + (-g_value * inv_r_m,)
                     if acc2d:
                         # (Bt, Bs) partials; summed over the sources once, at the end
@@ -988,6 +1059,7 @@ def _sorted_pallas_call(
     source_flags: str = "",
     outs_in: Optional[list] = None,
     softening_kernel: str = "plummer",
+    fourth: str = "potential",
 ) -> Any:
     """One launch of :func:`_nearfield_leafpair_csr_sorted_kernel` over ``chunk_leaf``.
 
@@ -1048,6 +1120,8 @@ def _sorted_pallas_call(
 
     softening_kernel : str
         The pair kernel, static.
+    fourth : str
+        The fourth lane's content (``"potential"`` / ``"force_scale"``), static.
 
     Returns
     -------
@@ -1069,6 +1143,7 @@ def _sorted_pallas_call(
             source_tile=source_tile,
             source_flags=source_flags,
             softening_kernel=softening_kernel,
+            fourth=fourth,
         )
 
     def _full(arr: Array) -> pl.BlockSpec:
@@ -1389,6 +1464,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     target_subtile: int | None = None,
     interpret: bool = False,
     with_potential: bool = False,
+    with_force_scale: bool = False,
     row_limit: int | None = None,
     source_tile: int | None = None,
     source_flags: str | None = None,
@@ -1466,6 +1542,11 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         Pallas interpret mode.
     with_potential : bool
         Also accumulate and return the potential. Static.
+    with_force_scale : bool
+        Instead of the potential, accumulate and return eq (16b)'s near-field
+        force scale ``sum G m / (r^2 + eps^2)`` over the same pairs (self excluded):
+        the near half of Dehnen's cancellation-free ``f_b``, at one extra
+        multiply-add per pair. Exclusive with ``with_potential``. Static.
     row_limit : int | None
         ``whole`` mode: entries of a row its own program runs (the rest in
         pieces of this many). ``None``: ``JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT``,
@@ -1492,8 +1573,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     Returns
     -------
     tuple[Array, Array | None]
-        ``(N, 3)`` accelerations and the ``(N,)`` potential (``None`` without
-        ``with_potential``); zero on rows no leaf holds.
+        ``(N, 3)`` accelerations and the ``(N,)`` fourth lane -- the potential with
+        ``with_potential``, the near-field force scale with ``with_force_scale``,
+        ``None`` with neither; zero on rows no leaf holds.
 
     Raises
     ------
@@ -1503,6 +1585,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         If ``source_tile`` is not ``0`` or a power of two, ``source_flags``
         holds a letter other than ``a``, ``g``, ``l``, ``p``, ``r``, or a target class is
         not a power of two.
+        Also if both ``with_potential`` and ``with_force_scale`` are set.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -1511,10 +1594,13 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     n = int(positions_sorted.shape[0])
     num_leaves = int(leaf_start.shape[0])
     leaf_width = int(leaf_width)
-    num_out = 4 if with_potential else 3
+    if with_potential and with_force_scale:
+        raise ValueError("with_potential and with_force_scale share the fourth lane")
+    fourth_lane = bool(with_potential or with_force_scale)
+    num_out = 4 if fourth_lane else 3
     if num_leaves == 0 or leaf_width == 0 or n == 0:
         acc = jnp.zeros((n, 3), dtype)
-        return acc, (jnp.zeros((n,), dtype) if with_potential else None)
+        return acc, (jnp.zeros((n,), dtype) if fourth_lane else None)
     idx = jnp.asarray(counts).dtype
     chunk = max(1, int(chunk))
     chunk_i = jnp.asarray(chunk, idx)
@@ -1568,6 +1654,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         source_tile=source_tile,
         source_flags=source_flags,
         softening_kernel=resolve_softening_kernel(softening_kernel),
+        fourth="force_scale" if with_force_scale else "potential",
     )
     whole_rows = (
         env_choice("JACCPOT_NEARFIELD_DIRECT_ROWS", "whole", ("whole", "chunked"))
@@ -1584,6 +1671,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         f"t{bt}_c{chunk}_w{leaf_width}{f'_s{source_tile}' if source_tile else ''}"
         f"{source_flags}"
         f"{'_pot' if with_potential else ''}"
+        f"{'_fb' if with_force_scale else ''}"
     )
     # the widest tile any launch reads past a leaf's start: the table's padding
     if classes and max(classes) > width_pad:
@@ -1707,7 +1795,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         else:
             outs = _rest(outs)
     acc = jnp.stack(outs[:3], axis=1)
-    return acc, (outs[3] if with_potential else None)
+    return acc, (outs[3] if fourth_lane else None)
 
 
 @jaxtyped(typechecker=beartype)
