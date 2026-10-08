@@ -128,22 +128,12 @@ def test_both_walk_flags_set_is_refused(monkeypatch):
         _force(monkeypatch, _N, 64, flat=True)
 
 
-def test_treecode_flag_alone_wins_over_the_defaulted_flat_walk(monkeypatch):
-    calls = {"flat": 0, "treecode": 0}
-    real_flat = ic._build_flat_walk_artifacts_strict_streamed
-    real_tree = ic._build_treecode_artifacts_strict_streamed
+def test_the_removed_treecode_flag_is_refused(monkeypatch):
+    """The treecode walk is gone (cleanup 2026-10); its env switch must raise.
 
-    def count_flat(*a, **k):
-        calls["flat"] += 1
-        return real_flat(*a, **k)
-
-    def count_tree(*a, **k):
-        calls["treecode"] += 1
-        return real_tree(*a, **k)
-
-    monkeypatch.setattr(ic, "_build_flat_walk_artifacts_strict_streamed", count_flat)
-    monkeypatch.setattr(ic, "_build_treecode_artifacts_strict_streamed", count_tree)
+    Silently running the default walk under a switch that asked for another one is
+    the failure mode this guards against.
+    """
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
-    acc, _ = _force(monkeypatch, _N, 64, flat=None)
-    assert calls["flat"] == 0 and calls["treecode"] >= 1, calls
-    assert np.all(np.isfinite(acc))
+    with pytest.raises(RuntimeError, match="TREECODE_WALK was removed"):
+        _force(monkeypatch, _N, 64, flat=None)

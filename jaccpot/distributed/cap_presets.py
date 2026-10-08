@@ -46,8 +46,6 @@ CAP_FIELDS = (
     "cross_max_interactions_per_node",
     "cross_max_neighbors_per_leaf",
     "cross_max_pair_queue",
-    "treecode_near_cap",
-    "treecode_far_cap",
     "cross_far_cap",
 )
 

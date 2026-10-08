@@ -318,11 +318,16 @@ def test_the_criterion_without_a_tolerance_is_refused():
     _expect("requires adaptive_eps", mac_type="dehnen_error")
 
 
-def test_the_treecode_walk_cannot_carry_the_criterion():
-    """The fast-lane local walk takes no pair policy, so it must not be offered."""
+def test_the_removed_treecode_walk_is_refused():
+    """The treecode local walk is gone (cleanup 2026-10); naming it must raise.
+
+    It used to be refused only together with the criterion, because it took no
+    pair policy; now it is refused outright, with a message naming the removal
+    rather than a silent fall-back to the dual-tree walk.
+    """
 
     _expect(
-        "needs local_walk='dual_tree'",
+        "treecode' local walk was removed",
         mac_type="dehnen_error",
         adaptive_eps=_EPS,
         local_walk="treecode",

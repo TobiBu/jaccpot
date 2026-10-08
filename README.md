@@ -683,7 +683,6 @@ If a performance change is intentional, refresh the baseline:
 - `examples/adaptive_vs_fixed_benchmark.ipynb`: adaptive-order vs fixed-order comparison
 - `examples/benchmark_gpu_radix_runtime.ipynb`: GPU/radix runtime and memory-pressure deep dive
 - `examples/benchmark_gpu_single_n_memory.ipynb`: interactive single-`N` GPU memory probe with plots/tables
-- `examples/benchmark_gpu_n_ladder_production.py`: production-oriented large-`N` parameter sweep
 - `examples/time_derivatives_demo.ipynb`: usage plus direct-sum accuracy checks for jerk, snap, and crackle
 - `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate`, including analytic source-motion behavior
 - `examples/real_sh_adaptive_order.ipynb`: real-basis adaptive-order demo

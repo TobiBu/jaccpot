@@ -157,7 +157,7 @@ native-mode-noqa-location = "definition"
 # excluding them a manual run over `.` reports every violation four times over
 # (measured against the old baseline: 409 of 521 file entries, ~13k of 14.7k
 # violations) and the result churns as worktrees come and go.
-exclude = '\.git|\.venv|\.claude|build|dist|jaccpot/experimental'
+exclude = '\.git|\.venv|\.claude|build|dist'
 
 # The upstream default is `true`, and that made this hook VACUOUS for the whole
 # Tier 2.5 docstring programme: it skips argument and return checking on any
@@ -192,10 +192,6 @@ skip-checking-short-docstrings = false
 # same backlog argument applies -- `tests/`, `bench/` and `examples/` have never
 # been checked and would swamp the signal.
 include = ["jaccpot"]
-# `experimental/` is opt-in prototype code, excluded here for the same reason
-# `[tool.coverage.run].omit` excludes it and the `experimental` marker deselects
-# its tests. Listed as the package, not a glob -- see the note on `omit` below.
-exclude = ["jaccpot/experimental"]
 # Resolve the sibling `yggdrax` checkout. Relative to this file, so it is the
 # documented layout (ARCHITECTURE: "Sibling codebases ... yggdrax") rather
 # than one machine's paths, and it is the same assumption
@@ -228,7 +224,6 @@ minversion = "7.4"
 testpaths = ["tests"]
 markers = [
     "slow: long-running / compile-heavy test (deselect with -m 'not slow')",
-    "experimental: exercises experimental, non-production FMM code (octree/treecode prototypes); deselected by default, run explicitly with -m experimental",
     # One distributed FMM evaluation is ~190 s of COMPILATION on a forced-CPU mesh,
     # and that cost is flat in N, leaf size and expansion order (measured), so it is
     # per-CONFIGURATION and cannot be shrunk by making the problem smaller. The
@@ -245,10 +240,7 @@ markers = [
 # via pytest-xdist. On a 72-core host this cuts wall-clock from ~25 min to ~2 min;
 # a fixed `-n 32` measured marginally faster there. Override with `-n 0` to run
 # serially (e.g. for pdb/`-x` debugging, which xdist does not support).
-# `-m "not experimental"` keeps the everyday run on the production (radix real
-# fast-lane) paths; the long-compile octree/treecode prototypes are opt-in via
-# `pytest -m experimental`.
-addopts = "-q --strict-markers --ignore=tests/perf -n auto -m \"not experimental\""
+addopts = "-q --strict-markers --ignore=tests/perf -n auto"
 
 [tool.coverage.run]
 source = ["jaccpot"]
@@ -263,50 +255,6 @@ source = ["jaccpot"]
 # this off -- setting it True here enables branch coverage regardless of the
 # flag, so it has to change here.)
 branch = true
-omit = [
-  # Opt-in experimental prototypes, listed INDIVIDUALLY rather than as
-  # `jaccpot/experimental/*`, because that glob was hiding a module the default
-  # suite fully covers. Measured:
-  #
-  #   octree_fmm_uvwx.py    0%    reached only under `pytest -m experimental`
-  #   treecode_far_near.py  0%    the stated reason was UNTRUE -- see below
-  #   treecode_walk.py    100%    NOT omitted -- see below
-  #
-  # `treecode_walk.py` is the pure-JAX reference that
-  # `tests/unit/operators/test_pallas_treecode_walk.py` checks the Pallas walk
-  # against. That test is neither `experimental`- nor `slow`-marked, so it runs on
-  # every commit and covers the module 62/62 statements. Omitting it understated
-  # coverage and, worse, the stated reason for omitting it was untrue.
-  #
-  # Keeping this an explicit list means a new file under `jaccpot/experimental/`
-  # is measured until someone decides otherwise -- which is the right default,
-  # since the failure this replaces was a glob quietly absorbing covered code.
-  "jaccpot/experimental/octree_fmm_uvwx.py",
-  # `treecode_far_near.py` used to be omitted here, on the stated grounds that it
-  # is "reached only from the distributed treecode lane (`local_walk="treecode"`),
-  # whose test skips below 2 devices, so CPU CI never enters it". Untrue on both
-  # counts, and this is the THIRD entry in this list whose reason did not survive
-  # being checked -- the two above are the others.
-  #
-  #   * There is a second caller, and it is single-device:
-  #     `_interaction_cache.py:1058`, gated by the env var
-  #     JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK, not by device count.
-  #   * The module runs on CPU in seconds. `tests/experimental/` already had three
-  #     passing CPU tests for it, deselected by the `experimental` marker, and
-  #     `tests/unit/runtime/test_treecode_production_seam.py` now exercises the
-  #     production entry on every commit (audit F35).
-  #
-  # Removed, so the one production option that reaches `experimental/` is measured
-  # like any other module rather than being invisible by assertion.
-  # `jaccpot/pallas/m2l_real_fused.py` used to be omitted here too, on the stated
-  # grounds that it "has no interpret path, so CPU CI structurally cannot reach
-  # it". That was untrue, and it is the same failure this list already documents
-  # one entry above: an omit hiding a well-covered module behind a wrong reason.
-  # Measured on CPU, from `tests/unit/operators/test_m2l_real_fused_pallas.py` and
-  # `tests/unit/test_custom_vjp_parity.py` alone: 191 statements, 12 missed, 92%.
-  # Both suites call `m2l_real_fused_pallas(..., interpret=True)` and say so in
-  # their module docstrings. Removed, so the module is measured like any other.
-]
 
 [tool.coverage.report]
 show_missing = true
