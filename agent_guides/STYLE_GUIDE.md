@@ -212,7 +212,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule. `chunkflat` also stands alone, for the arrays of ONE chunk in `_m2l.py:_chunk_segment_scatter_add`, where it is the fixed `chunk_size` width shared by the contributions, their target indices and their validity mask |
-| `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
+| `farleaves` | the **far-field** leaf view, which is not `leaves`: they differed on the octree backend (removed in the 2026-10 cleanup) |
 | `crossleaves` | the CROSS-domain near view in `distributed/_force_scale.py`, which is not `leaves` either: it degenerates to length 1 when a rank has no cross neighbours |
 | `coarse` | the remote coarse (LET) tree's nodes, which are a different tree from the local `nodes` |
 | `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
@@ -320,10 +320,11 @@ spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments,
 
 **`farleaves` exists because of a mistake worth not repeating.** `leaf_nodes` in
 `runtime/kernels/_evaluate.py` was annotated `leaves`, sharing the axis with
-`nearfield_leaf_nodes`. That equality holds for the radix tree and fails on the octree
-execution backend (5 against 3), and it broke 7 tests the moment a decorator made the
-annotation enforced. The shapes had been derived from 64 captured calls -- through
-`test_near_field.py` and `tests/integration/`, neither of which enters that backend. **Capture
+`nearfield_leaf_nodes`. That equality holds for the radix tree and failed on the octree
+execution backend (5 against 3; removed in the 2026-10 cleanup), and it broke 7 tests the
+moment a decorator made the annotation enforced. The shapes had been derived from 64 captured
+calls -- through `test_near_field.py` and `tests/integration/`, neither of which entered that
+backend. **Capture
 coverage bounds annotation validity:** an axis equality observed in every call you recorded is
 only as strong as the lanes you recorded.
 
@@ -511,22 +512,15 @@ Keep the seams in the layout clean and the import graph acyclic:
   `runtime/`: `jaccpot/_env.py` is the sanctioned reader for **any** layer, and seven modules
   outside `runtime/` use it. See the note at the end of this section.
 - `distributed/` — decomposition, halo exchange, collectives.
-- `experimental/` — prototypes. Not production, not held to production standards, and not
-  **eagerly** imported by production paths. That last word is load-bearing and the claim is
-  now tested: `tests/unit/test_experimental_is_not_on_an_import_path.py` asserts it in a
-  clean subprocess per package. It was false until audit G.5's second edge was fixed —
-  `import jaccpot` was clean while `import jaccpot.pallas` pulled in
-  `experimental/treecode_walk`, a prose guarantee that held at the entry point and failed
-  one package down. Deliberate **lazy** reach-ins remain: `runtime/_interaction_cache.py`
-  imports `treecode_far_near` inside a function when `local_walk="treecode"` is selected,
-  which G.5 accepted as a bounded exposure.
+- (`experimental/`, the octree/treecode prototypes, was removed in the 2026-10 cleanup
+  together with the production reach-ins into it; `docs/cleanup_2026-10.md`, X1.)
 
 Physics must not live in a utility module; runtime policy must not leak into operators. If
 you find yourself importing "up" that list, report it rather than adding the import.
 
 **Existing upward imports, and which of them are deliberate.** The rule above is about not
-adding new ones. **Seven** such relationships exist, across **eleven** import statements
-(`nearfield/near_field.py` alone has six), and they are not equivalent. The four
+adding new ones. **Five** such relationships exist, across **nine** import statements
+(`nearfield/near_field.py` alone has six), and they are not equivalent. The two
 substantive ones first:
 
 - `operators/real_harmonics.py` and `nearfield/near_field.py` both import
@@ -539,16 +533,6 @@ substantive ones first:
   no forward-only benefit. Do not "fix" this: replacing it with dependency injection is
   what the `GradConfig`/`ContextVar` mechanism exists to avoid, and the fields it backs go
   silently inert if the gate stops being readable from where it is read.
-- `pallas/treecode_walk_pallas.py` imports the `TreecodeLeafLists` **NamedTuple** from
-  `experimental/treecode_walk.py`. A data type, not logic, and the kernel's only consumer is
-  `experimental/treecode_far_near.py` — so this is an accelerated twin of a prototype that
-  happens to live one directory up, rather than production reaching into `experimental/`.
-- `runtime/_interaction_cache.py` imports `experimental/treecode_far_near.py` (function-local)
-  from `_build_treecode_artifacts_strict_streamed`, which `distributed/fmm.py` calls for
-  `local_walk="treecode"`. This one **is** production depending on `experimental/`. It is
-  reachable only with >= 2 devices, so CI never enters it; that makes it the weakest-covered
-  production option in the tree, not merely a style wrinkle. Measured: that module sits at
-  **0%** coverage.
 
 And three that the earlier count missed. None is a new violation to fix; they are listed so a
 reader auditing the layering does not have to rediscover them:

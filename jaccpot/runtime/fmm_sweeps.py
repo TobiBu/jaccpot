@@ -335,7 +335,6 @@ class SweepsMixin(_EngineBase):
             than ``"com"``; or, with int32 indices, if the particle count or the
             nodes x coefficients reach the int32 range.
         """
-        self._ensure_execution_backend_supported(tree=tree)
         node_ranges = getattr(tree, "node_ranges", None)
         require_index_capacity(
             particles=int(jnp.shape(positions_sorted)[0]),
@@ -626,8 +625,6 @@ class SweepsMixin(_EngineBase):
         TreeDownwardData
             Interactions plus the local expansions they produced.
         """
-        self._ensure_execution_backend_supported(tree=tree)
-
         theta_val = float(self.theta if theta is None else theta)
         # Resolve BEFORE the traversal sees it. Both branches: an explicitly
         # passed "dehnen_error" needs the same mapping as the solver default,

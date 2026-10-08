@@ -32,7 +32,6 @@ and scripts, each with a clear job.
 
 ## Benchmark Scripts
 
-- [`benchmark_gpu_n_ladder_production.py`](/export/home/tbuck/jaccpot/examples/benchmark_gpu_n_ladder_production.py)
   Production-oriented large-`N` parameter sweep. Writes recommendation tables to
   [`bench/results/n_ladder_production/`](../bench/results/n_ladder_production).
 - [`profile_prepare_residuals.py`](/export/home/tbuck/jaccpot/examples/profile_prepare_residuals.py)

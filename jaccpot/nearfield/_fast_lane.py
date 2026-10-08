@@ -143,21 +143,20 @@ __all__ = [
 # rather than rediscovered. `_large_n_blocks.py` takes the SAME two arrays as
 # `block_source_leaf_ids_padded`/`block_valid_mask_padded` and names their leading axis
 # `farleaves`, because that rectangle tracks the FAR-field leaf view, which the octree
-# backend separates from the near-field leaf table (the section 4.3 incident, 5 against
-# 3). Here the two were observed equal at six distinct extents -- including four from the
-# octree lane -- and that is exactly the evidence section 4.3 says not to promote: the
-# `farleaves` mistake was 64 honest captures agreeing. `farleaves` binds freely, since
-# nothing else in these signatures uses it, so what is asserted is that the ids and their
-# mask agree with each other in all three axes. That is measured, and it is all that is.
+# backend (removed in the 2026-10 cleanup) separated from the near-field leaf table (the
+# section 4.3 incident, 5 against 3). Here the two were observed equal at six distinct
+# extents -- including four from the octree lane -- and that is exactly the evidence
+# section 4.3 says not to promote: the `farleaves` mistake was 64 honest captures
+# agreeing. `farleaves` binds freely, since nothing else in these signatures uses it, so
+# what is asserted is that the ids and their mask agree with each other in all three
+# axes. That is measured, and it is all that is.
 #
-# THE OCTREE LANE IS UNREACHABLE FROM ANY TEST, which is worth stating rather than
-# leaving as an absence. `_radix_fast_lane_prepacked_pallas` is called from
-# `experimental/octree_fmm_uvwx.py`, but `_octree_near_field`'s `pallas_interpret` knob is
-# never plumbed out to `octree_fmm_accelerations`, so on CPU that call site always falls
-# through to the pure-JAX branch and on GPU there is no CI leg. The extents above come
+# THE OCTREE LANE THAT SUPPLIED SOME OF THOSE EXTENTS IS GONE: its caller of
+# `_radix_fast_lane_prepacked_pallas`, `experimental/octree_fmm_uvwx.py`, went in the
+# 2026-10 cleanup (X1), and the octree execution backend with it (X2). Those extents came
 # from calling `_octree_near_field(..., use_pallas=True, pallas_interpret=True)` directly;
-# all three of its `near_mode` branches build `src_ids_3d` and `unit_pidx` with the same
-# leading axis, which is why the octree lane cannot falsify these annotations.
+# all three of its `near_mode` branches built `src_ids_3d` and `unit_pidx` with the same
+# leading axis, so they stand as measurements of these annotations.
 
 
 @partial(

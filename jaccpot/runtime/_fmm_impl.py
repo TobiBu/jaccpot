@@ -62,7 +62,7 @@ from yggdrax.interactions import (  # noqa: F401
     DualTreeTraversalConfig,
     build_interactions_and_neighbors,
 )
-from yggdrax.tree import Tree, TreeType, available_tree_types
+from yggdrax.tree import TreeType, available_tree_types
 
 from jaccpot.config import (
     FarFieldConfig,
@@ -257,11 +257,13 @@ class FMMEngine(
         Dtype the sweeps compute in. ``None`` resolves against the device later
         rather than here.
     expansion_basis : ExpansionBasis
-        Expansion algebra. ``"cartesian"`` or ``"solidfmm"``; ``"complex"`` is
-        accepted as an alias and normalised to ``"solidfmm"``.
+        Expansion algebra. ``"cartesian"`` or ``"solidfmm"`` (the spherical-harmonic
+        family, real or complex); ``"complex"`` is accepted and selects the complex
+        basis explicitly.
     basis_impl : Optional[Any]
-        The basis object, when one exists. ``None`` for bases the runtime implements
-        internally rather than through the interface.
+        The basis object. For ``"solidfmm"`` without one, the REAL basis is used
+        (cleanup 2026-10, phase D1; it used to default to complex);
+        ``"complex"`` without one uses the complex basis. ``None`` for Cartesian.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide", which
         selects ``"rot_scale"`` for the real basis.
@@ -694,6 +696,14 @@ class FMMEngine(
             If the expansion basis is not 'cartesian' or 'solidfmm'.
         """
         basis_norm = str(expansion_basis).strip().lower()
+        if basis_impl is None and basis_norm in ("solidfmm", "complex"):
+            # The spherical-harmonic family without a basis object: real unless
+            # complex was named. Before 2026-10 both meant complex, which made
+            # every engine built as ``expansion_basis="solidfmm"`` run the basis
+            # the public API had already stopped defaulting to.
+            from jaccpot.basis import ComplexSHBasis, RealSHBasis
+
+            basis_impl = ComplexSHBasis() if basis_norm == "complex" else RealSHBasis()
         if basis_norm == "complex":
             basis_norm = "solidfmm"
         if basis_norm not in ("cartesian", "solidfmm"):
@@ -969,7 +979,9 @@ class FMMEngine(
         ------
         ValueError
             If any lane string is unrecognised, or the edge chunk size is not
-            positive -- same messages as before the extraction.
+            positive -- same messages as before the extraction. Also if
+            ``execution_backend`` names the octree backend, which was removed in
+            the 2026-10 cleanup.
         """
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
@@ -978,8 +990,18 @@ class FMMEngine(
         if runtime_path_norm not in ("auto", "large_n"):
             raise ValueError("runtime_path must be 'auto' or 'large_n'")
         execution_backend_norm = str(execution_backend).strip().lower()
-        if execution_backend_norm not in ("auto", "radix", "octree"):
-            raise ValueError("execution_backend must be 'auto', 'radix', or 'octree'")
+        if execution_backend_norm == "octree":
+            # The octree execution backend (complex basis only, ~3x behind radix, no
+            # production caller) was removed in the 2026-10 cleanup
+            # (docs/cleanup_2026-10.md, X2). Naming it raises rather than silently
+            # running radix, so an old config cannot measure the wrong thing.
+            raise ValueError(
+                "execution_backend='octree' is no longer available: the octree "
+                "execution backend was removed in the 2026-10 cleanup "
+                "(docs/cleanup_2026-10.md, X2). Use 'auto' or 'radix'."
+            )
+        if execution_backend_norm not in ("auto", "radix"):
+            raise ValueError("execution_backend must be 'auto' or 'radix'")
         if int(nearfield_edge_chunk_size) <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
@@ -1183,7 +1205,9 @@ class FMMEngine(
         Raises
         ------
         ValueError
-            If ``host_refine_mode`` or ``tree_type`` is outside its documented domain.
+            If ``host_refine_mode`` or ``tree_type`` is outside its documented domain,
+            including ``tree_type="octree"``, which this solver no longer accepts
+            since the octree execution backend was removed (2026-10 cleanup).
         """
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
@@ -1197,7 +1221,16 @@ class FMMEngine(
             refine_mode_norm = "off"
         self.host_refine_mode = refine_mode_norm
         tree_type_norm = str(tree_type).strip().lower()
-        supported_tree_types = set(available_tree_types())
+        if tree_type_norm == "octree":
+            # yggdrax still builds octrees, but this solver's octree path went with
+            # the octree execution backend in the 2026-10 cleanup
+            # (docs/cleanup_2026-10.md, X2).
+            raise ValueError(
+                "tree_type='octree' is no longer available on the single-GPU solver: "
+                "the octree execution backend was removed in the 2026-10 cleanup "
+                "(docs/cleanup_2026-10.md, X2). Use 'radix' (the default) or 'kdtree'."
+            )
+        supported_tree_types = set(available_tree_types()) - {"octree"}
         if tree_type_norm not in supported_tree_types:
             supported_txt = ", ".join(sorted(supported_tree_types))
             raise ValueError(
@@ -1747,7 +1780,6 @@ class FMMEngine(
             str(self.preset).strip().lower() == "large_n_gpu"
             and str(self.tree_type).strip().lower() == "radix"
             and str(self.expansion_basis).strip().lower() == "solidfmm"
-            and str(self.execution_backend).strip().lower() != "octree"
         )
 
     def _resolve_static_sizing_flags(
@@ -1809,9 +1841,9 @@ class FMMEngine(
     def _is_large_n_gpu_production_profile(self) -> bool:
         """Whether this solver should run the canonical large-N GPU contract.
 
-        All four conditions must hold: the ``large_n_gpu`` preset, a radix tree,
-        the solidfmm basis and a non-octree backend. A cached attribute, when
-        present, overrides the live check.
+        All three conditions must hold: the ``large_n_gpu`` preset, a radix tree
+        and the solidfmm basis. A cached attribute, when present, overrides the
+        live check.
 
         Returns
         -------
@@ -1827,7 +1859,6 @@ class FMMEngine(
                     str(self.preset).strip().lower() == "large_n_gpu"
                     and str(self.tree_type).strip().lower() == "radix"
                     and str(self.expansion_basis).strip().lower() == "solidfmm"
-                    and str(self.execution_backend).strip().lower() != "octree"
                 ),
             )
         )
@@ -1915,61 +1946,6 @@ class FMMEngine(
                 streamed_far_pairs=self.streamed_far_pairs,
             )
         )
-
-    def _resolve_execution_backend(self) -> str:
-        """Resolve the active FMM execution backend without altering tree choice.
-
-        Returns
-        -------
-        str
-            The configured backend, with ``"auto"`` resolved to ``"radix"``.
-            Deliberately does not touch ``tree_type`` -- backend and tree family
-            are independent choices, and only the ``"octree"`` backend constrains
-            the tree (see :meth:`_ensure_execution_backend_supported`).
-        """
-        if self.execution_backend == "auto":
-            return "radix"
-        return self.execution_backend
-
-    def _ensure_execution_backend_supported(
-        self, *, tree: Optional[Tree] = None
-    ) -> str:
-        """Validate execution backends that are available for the current tree.
-
-        Only ``"octree"`` has requirements; every other backend returns
-        immediately.
-
-        Parameters
-        ----------
-        tree : Optional[Tree]
-            Tree whose ``tree_type`` is checked. ``None`` falls back to the
-            engine's configured ``tree_type``.
-
-        Returns
-        -------
-        str
-            The validated backend name.
-
-        Raises
-        ------
-        ValueError
-            If the ``"octree"`` backend is paired with a non-octree tree.
-        NotImplementedError
-            If the ``"octree"`` backend is paired with a basis other than
-            ``"solidfmm"``.
-        """
-        backend = self._resolve_execution_backend()
-        if backend != "octree":
-            return backend
-
-        tree_type = getattr(tree, "tree_type", self.tree_type)
-        if str(tree_type).strip().lower() != "octree":
-            raise ValueError("execution_backend='octree' requires an octree tree_type")
-        if self.expansion_basis != "solidfmm":
-            raise NotImplementedError(
-                "execution_backend='octree' currently supports basis='solidfmm' only"
-            )
-        return backend
 
     @property
     def recent_retry_events(

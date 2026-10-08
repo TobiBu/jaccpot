@@ -1125,8 +1125,8 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     ValueError
         If the request is inconsistent with what this lane can produce.
     RuntimeError
-        On a capacity overflow this lane cannot grow out of, and when the
-        treecode walk is asked to carry a solver-owned pair policy it cannot.
+        On a capacity overflow this lane cannot grow out of, and when the removed
+        treecode walk's env switch is set.
     Exception
         Re-raised unchanged when the retry loop sees a failure it does not
         recognise as a capacity overflow -- it grows capacities only for the two
@@ -1168,18 +1168,27 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP must be positive"
             )
 
-    # Opt-in: build far/near from the device-resident per-leaf treecode walk
-    # instead of the host-iterated yggdrax dual-tree walk (kills the walk launch
-    # storm). Default off -> no behaviour change. See _build_treecode_artifacts.
-    treecode_enabled = os.environ.get(
-        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "0"
-    ) not in ("0", "false", "False", "off", "OFF")
+    # The per-leaf treecode walk this env switch selected was removed in the
+    # 2026-10 cleanup (docs/cleanup_2026-10.md, X1): its box MAC is dynamically
+    # unstable (docs/treecode_mac_stability.md) and the flat walk replaced it.
+    # Refuse loudly rather than run the default walk under a switch that asked
+    # for another one.
+    if os.environ.get("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "0") not in (
+        "0",
+        "false",
+        "False",
+        "off",
+        "OFF",
+    ):
+        raise RuntimeError(
+            "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK was removed (cleanup "
+            "2026-10): the treecode walk is gone; unset the variable."
+        )
     # DEFAULT since 2026-09-10: yggdrax's flat-emission wavefront walk with the
     # dual walk's own MAC extents -- the same lists as sets at a fraction of the
     # per-step cost (leaf-64 step at N=200k: 177 -> 63 ms). Set
     # JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=0 for the traced dual walk. A
-    # configuration the flat walk cannot carry (the treecode walk requested, a
-    # solver-owned pair policy, a MAC other than bh/dehnen, the non-flat far-pair
+    # configuration the flat walk cannot carry (a solver-owned pair policy, a MAC other than bh/dehnen, the non-flat far-pair
     # layout) falls back to the dual walk quietly while the flag is merely
     # defaulted; an EXPLICIT "1" against such a configuration raises, because then
     # the caller asked for a walk it cannot have and silence would hand it the
@@ -1195,12 +1204,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     )
     flat_walk_blocker: Optional[str] = None
     if flat_walk_enabled:
-        if treecode_enabled:
-            flat_walk_blocker = (
-                "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK and "
-                "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK are both set; pick one walk."
-            )
-        elif pair_policy is not None or policy_state is not None:
+        if pair_policy is not None or policy_state is not None:
             flat_walk_blocker = (
                 "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK cannot carry a solver-owned "
                 "pair policy (mac_type='dehnen_error' / adaptive_error_model="
@@ -1263,35 +1267,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             near_floor=0 if near_edge_named else near_floor,
             separation_floor=separation_floor,
         )
-    if treecode_enabled:
-        if pair_policy is not None or policy_state is not None:
-            # The treecode walk evaluates its own device-resident `_mac_ok` from
-            # per-node extents; there is no seam for a solver-owned pair policy.
-            # Running it anyway would answer the geometric MAC while the caller
-            # asked for the Dehnen mass-dependent one, and cost nothing visible.
-            raise RuntimeError(
-                "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK cannot carry a "
-                "solver-owned pair policy (mac_type='dehnen_error' / "
-                "adaptive_error_model='dehnen_paper'): its acceptance test is a "
-                "per-node geometric extent comparison with no policy seam, so "
-                "the criterion would be silently replaced by the geometric MAC. "
-                "Unset the env flag, or use mac_type='dehnen'."
-            )
-        if _walk_separation_floor(separation_floor) > 0.0:
-            raise RuntimeError(
-                "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK has no separation floor "
-                "(softening_floor, or a compact softening kernel's support); "
-                "unset the flag or pass softening_floor=0."
-            )
-        return _build_treecode_artifacts_strict_streamed(
-            tree=tree,
-            geometry=geometry,
-            theta=theta,
-            mac_type=mac_type,
-            dehnen_radius_scale=dehnen_radius_scale,
-            compact_far_pair_capacity=compact_far_pair_capacity,
-        )
-
     # Re-plan on a capacity overflow instead of surfacing it. The generic
     # `_build_dual_tree_artifacts` has retried since it was written; this strict
     # streamed path -- the one `large_n_gpu`/static_radix actually takes -- never
@@ -1430,384 +1405,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             except Exception:  # pragma: no cover - diagnostics only
                 pass
         capacity_report(report)
-    return _DualTreeArtifacts(
-        interactions=None,
-        neighbor_list=neighbor_list,
-        traversal_result=None,
-        compact_far_pairs=compact_far_pairs,
-        dense_buffers=None,
-        grouped_buffers=None,
-        grouped_segment_starts=None,
-        grouped_segment_lengths=None,
-        grouped_segment_class_ids=None,
-        grouped_segment_sort_permutation=None,
-        grouped_segment_group_ids=None,
-        grouped_segment_unique_targets=None,
-        grouped_chunk_size=None,
-    )
-
-
-def _treecode_neighbor_list(
-    prod: Any,
-    *,
-    num_leaves: int,
-    num_internal: int,
-    idx_dtype: Any,
-) -> NodeNeighborList:
-    """Full yggdrax ``NodeNeighborList`` from the treecode producer's near CSR.
-
-    The radix fast lane reads only ``leaf_indices``/``offsets``/``neighbors``/
-    ``counts`` and rebuilds target-owned blocks + particle-order maps itself, so the
-    remaining fields are cheap valid placeholders (``target_block_size=0``, i.e. no
-    prebuilt blocks; ``neighbor_leaf_positions`` empty). This is validated end-to-end
-    against direct N-body by tests/experimental/test_treecode_graft_solidfmm.py.
-
-    Parameters
-    ----------
-    prod : Any
-        Treecode walk product. ``Any`` because it is the walk's own result type,
-        which this module does not otherwise name.
-    num_leaves : int
-        Leaf count.
-    num_internal : int
-        Internal-node count; leaf ids start after these.
-    idx_dtype : Any
-        Index dtype for the rebuilt arrays.
-
-    Returns
-    -------
-    NodeNeighborList
-        A complete list, with the placeholder fields described above.
-    """
-    return NodeNeighborList(
-        offsets=prod.near_offsets,
-        neighbors=prod.near_neighbors,
-        leaf_indices=prod.near_leaf_indices,
-        counts=prod.near_counts,
-        particle_order_leaf_indices=prod.near_leaf_indices,
-        particle_order_to_native_leaf=jnp.arange(num_leaves, dtype=idx_dtype),
-        neighbor_leaf_positions=jnp.zeros((num_leaves, 0), dtype=idx_dtype),
-        target_block_leaf_ids=jnp.zeros((0,), dtype=idx_dtype),
-        target_block_source_leaf_ids=jnp.zeros((0, 0), dtype=idx_dtype),
-        target_block_valid_mask=jnp.zeros((0, 0), dtype=bool),
-        target_block_offsets=jnp.zeros((num_leaves + 1,), dtype=idx_dtype),
-        target_block_size=0,
-    )
-
-
-def _raise_if_true(flag: Any, message: str) -> None:
-    """Raise ``message`` if ``flag`` is true, under jit (via callback) or eagerly.
-
-    Under a trace the check cannot be a Python ``if``, so it goes through
-    ``jax.debug.callback`` -- which means the raise happens at EXECUTION time,
-    not trace time, and does not abort tracing.
-
-    Parameters
-    ----------
-    flag : Any
-        Condition. Typed ``Any`` because whether it is a tracer is precisely
-        what this function branches on.
-    message : str
-        Text of the ``RuntimeError``.
-
-    Raises
-    ------
-    RuntimeError
-        When ``flag`` is true.
-    """
-    if isinstance(flag, Tracer):
-
-        def _callback(value):
-            if bool(value):
-                raise RuntimeError(message)
-
-        jax.debug.callback(_callback, flag)
-    elif bool(flag):
-        raise RuntimeError(message)
-
-
-def _treecode_mac_extents(
-    geometry: TreeGeometry,
-    parent: Array,
-    num_internal: int,
-    mac_type: MACType,
-    dehnen_radius_scale: float,
-    dtype: Any,
-) -> Array:
-    """Per-node MAC extents matching the yggdrax dual-tree exactly.
-
-    Same recipe as ``_interactions_impl`` (bh: box ``max_extent``; dehnen/engblom:
-    bounding-sphere ``radius``), propagated to effective far/leaf extents and, for
-    dehnen, scaled by ``dehnen_radius_scale``. The treecode ``_mac_ok`` uses the same
-    ``(r_t + r_s)^2 <= theta^2 d^2`` sum form as bh/dehnen, so feeding these extents
-    reproduces the dual-tree's far/near acceptance (accuracy-profile parity).
-
-    STABILITY NOTE: the box ``max_extent`` (bh) systematically UNDER-bounds the true
-    source radius; the bounding-sphere ``radius`` (dehnen) is the correct (upper) bound
-    (the sphere circumscribes the box). Feeding the smaller box extent makes the MAC
-    over-accept far pairs -> bh runs at an effectively coarser opening angle than the
-    requested theta -> a coherent non-conservative force bias that accumulates into
-    secular heating over a multi-step integration (even though geometry is recomputed
-    fresh each step). Prefer the sphere (dehnen) extents for multi-step integration; see
-    :func:`_build_treecode_artifacts_strict_streamed` and docs/treecode_mac_stability.md.
-
-    Parameters
-    ----------
-    geometry : TreeGeometry
-        Source of box extents and bounding-sphere radii.
-    parent : Array
-        Parent index per node, for propagating extents upward.
-    num_internal : int
-        Internal-node count.
-    mac_type : MACType
-        Selects the extent recipe -- box ``max_extent`` for bh, bounding-sphere
-        ``radius`` for dehnen/engblom. See the stability note above: these are
-        not interchangeable.
-    dehnen_radius_scale : float
-        Applied to the dehnen radii only.
-    dtype : Any
-        Output dtype.
-
-    Returns
-    -------
-    Array
-        Per-node effective extents the treecode ``_mac_ok`` consumes.
-    """
-    from yggdrax._interactions_impl import (
-        _compute_effective_extents,
-        _compute_leaf_effective_extents,
-    )
-
-    use_sphere = str(mac_type) in ("dehnen", "engblom")
-    base = jnp.asarray(
-        geometry.radius if use_sphere else geometry.max_extent, dtype=dtype
-    )
-    eff_far = _compute_effective_extents(parent, base)
-    eff_leaf = _compute_leaf_effective_extents(parent, base, int(num_internal))
-    if str(mac_type) == "dehnen":
-        scale = jnp.asarray(dehnen_radius_scale, dtype=dtype)
-        eff_far = scale * eff_far
-        eff_leaf = scale * eff_leaf
-    node_idx = jnp.arange(base.shape[0])
-    return jnp.where(node_idx >= int(num_internal), eff_leaf, eff_far)
-
-
-def _build_treecode_artifacts_strict_streamed(
-    *,
-    tree: Tree,
-    geometry: TreeGeometry,
-    theta: float,
-    mac_type: MACType,
-    dehnen_radius_scale: float,
-    compact_far_pair_capacity: Optional[int],
-    near_cap: Optional[int] = None,
-) -> _DualTreeArtifacts:
-    """Strict fast-lane far/near build from the per-leaf treecode walk.
-
-    Device-resident replacement for
-    :func:`_build_dual_tree_artifacts_split_strict_streamed`'s yggdrax walk call,
-    gated by ``JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK`` (default off). The treecode
-    yields a different-but-equally-valid interaction set (per-leaf, split-source): far
-    targets are always leaves, so the downstream solidfmm L2L cascade acts as a no-op
-    (internal locals stay zero -> no double-count). See
-    :mod:`jaccpot.experimental.treecode_far_near` and ``benchmark_a100/WALK_SPEC.md``.
-
-    ``mac_extents`` uses the treecode's OWN MAC (env
-    ``JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC``, default ``dual``), selected via
-    :func:`_treecode_mac_extents`:
-
-      * ``dual`` (DEFAULT): reproduce the configured dual-tree ``mac_type`` extents
-        exactly (for the large-N preset that is ``dehnen`` -> per-node bounding-SPHERE
-        radius, ``dehnen_radius_scale``-scaled). This is the physically correct
-        multipole-radius bound and gives ACCURACY-PROFILE PARITY with the validated
-        dual-tree walk.
-      * ``bh``: the treecode's own Barnes-Hut MAC using the axis-aligned box
-        ``max_extent`` (box half-width).
-      * ``dehnen`` / ``engblom``: force those sphere extents regardless of ``mac_type``.
-
-    WHY ``dual``/dehnen IS THE DEFAULT (dynamic-stability finding, 2026-07-14):
-      NOTE this is NOT a stale-geometry bug. Every refresh re-Morton-sorts the particles
-      and recomputes ALL node quantities -- centers, bounding-sphere radii, box extents,
-      multipoles, far/near lists -- from the CURRENT positions (see
-      ``rebuild_static_radix_tree_from_template``, ``use_morton_geometry=False``). Only
-      the tree SHAPE is frozen (node index-ranges, leaf count, buffer capacities) to keep
-      array shapes constant / avoid recompilation. The bug is a bound-TIGHTNESS issue,
-      present on every (freshly recomputed) step:
-
-      The box ``bh`` extent is CHEAPER (smaller extent -> MAC passes more readily ->
-      fewer far/M2L pairs -> faster) and STATICALLY looks as accurate as dehnen (t=0 force
-      parity vs the dual-tree/direct N-body ~0.03%). But the box ``max_extent`` (max axis
-      half-width) is a systematic UNDER-bound of the true source multipole radius: the
-      bounding sphere always circumscribes the box (~sqrt(3)x larger for an isotropic
-      cloud, more when anisotropic). Feeding the smaller box extent into
-      ``(r_t + r_s)^2 <= theta^2 d^2`` makes the MAC accept pairs at smaller ``d`` than the
-      sphere would -> bh effectively runs at a COARSER opening angle than the requested
-      ``theta`` -> the far field is systematically under-resolved. As an instantaneous
-      magnitude that is tiny, but it is a COHERENT, NON-GRADIENT force bias, and
-      velocity-Verlet does not conserve energy under a non-conservative force, so it
-      ACCUMULATES into secular heating over steps (200k/order-4: max|v| 7 -> 20 -> 142 ->
-      >1000 over 300 steps; total energy diverges). The dehnen bounding-SPHERE radius is
-      the correct bound, keeps every accepted pair inside the ``theta`` budget, and
-      reproduces the dual-tree acceptance -> stable: max|v| and dKE/dLz track the dual-tree
-      baseline to <1% over 300 steps. Cost: a modest slowdown (deeper acceptance -> more
-      M2L pairs). Set the env knob to ``bh`` ONLY for single-shot / static force
-      evaluations where per-step accumulation cannot occur. See
-      ``benchmark_a100/WALK_SPEC.md`` and ``docs/treecode_mac_stability.md``.
-
-    Overflow of any per-leaf / flat capacity is surfaced as a ``RuntimeError`` in the
-    EAGER prepare pass; inside the traced velocity-Verlet scan the check is skipped (a
-    per-step ``jax.debug.callback`` would serialize the device-resident scan), so the
-    auto-sized per-leaf caps (>= total node count) plus generous flat caps must stay
-    overflow-proof for the whole trajectory.
-
-    Parameters
-    ----------
-    tree : Tree
-        Built tree.
-    geometry : TreeGeometry
-        Node centres and radii the MAC is evaluated against.
-    theta : float
-        Opening angle.
-    mac_type : MACType
-        Geometric criterion, already mapped to a yggdrax literal.
-    dehnen_radius_scale : float
-        Radius inflation for the Dehnen MAC.
-    compact_far_pair_capacity : Optional[int]
-        Fixed capacity for the compact far-pair arrays; ``None`` auto-sizes from
-        the tree.
-    near_cap : Optional[int]
-        Per-leaf near-list capacity; ``None`` auto-sizes likewise.
-
-    Returns
-    -------
-    _DualTreeArtifacts
-        Compact far pairs plus a neighbour list rebuilt by
-        :func:`_treecode_neighbor_list`.
-    """
-    from jaccpot.experimental.treecode_far_near import (
-        build_treecode_far_pairs_and_neighbors,
-    )
-
-    topo = tree.topology
-    # Derive counts from STATIC shapes (scan-compatible): inside the strict
-    # velocity-Verlet scan the tree is re-fed as a tracer, so int(topo.num_internal_nodes)
-    # (a traced value) raises ConcretizationTypeError. left_child has shape
-    # [num_internal] and parent has shape [total_nodes]; both are static.
-    num_internal = int(topo.left_child.shape[0])
-    total_nodes = int(topo.parent.shape[0])
-    num_leaves = total_nodes - num_internal
-    idx = topo.parent.dtype
-
-    left_full = jnp.concatenate(
-        [jnp.asarray(topo.left_child, idx), jnp.full((num_leaves,), -1, idx)]
-    )
-    right_full = jnp.concatenate(
-        [jnp.asarray(topo.right_child, idx), jnp.full((num_leaves,), -1, idx)]
-    )
-    leaf_nodes = jnp.arange(num_internal, total_nodes, dtype=idx)
-    root_idx = jnp.argmin(topo.parent).astype(idx)
-
-    centers = jnp.asarray(geometry.center)
-    # Default ``dual`` (reproduce the configured dual-tree MAC extents, i.e. the dehnen
-    # bounding-SPHERE radius for the large-N preset). ``bh`` (box max_extent) is faster
-    # but DYNAMICALLY UNSTABLE: the box half-width systematically UNDER-bounds the true
-    # source multipole radius (sphere circumscribes box) -> the MAC runs at an effectively
-    # coarser opening angle than the requested theta -> a coherent non-conservative force
-    # bias that velocity-Verlet accumulates into secular heating (blows up over steps).
-    # Geometry is recomputed fresh every step; this is a bound-tightness bug, not stale
-    # geometry (see the docstring above + docs/treecode_mac_stability.md). ``bh`` is safe
-    # only for single-shot/static force evaluations.
-    tc_mac = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_TREECODE_MAC", "dual").strip()
-    walk_mac_type = mac_type if tc_mac == "dual" else tc_mac
-    mac_extents = _treecode_mac_extents(
-        geometry,
-        topo.parent,
-        num_internal,
-        walk_mac_type,
-        dehnen_radius_scale,
-        centers.dtype,
-    )
-
-    def _env_int(name, default):
-        return int(os.environ.get(name, str(default)))
-
-    # Auto-size the treecode caps from the tree so the walk runs zero-config
-    # (explicit env overrides still win). A leaf's far/near list can never exceed
-    # the node count, so 4*num_leaves (>= total_nodes ~ 2*num_leaves for a binary
-    # radix tree) makes per-leaf overflow impossible while staying modest memory.
-    # near_cap defaults to the downstream neighbor-edge capacity (the treecode's
-    # bh-MAC near split feeds the same near-field buffer, so this is the correct
-    # bound); far_cap is the compact far-pair capacity. Defaults chosen so the
-    # 200k/order4 fast lane runs without hand-tuning (old fixed 2048/256/1<<20
-    # overflowed on the bh-MAC near split).
-    auto_per_leaf = max(4096, 4 * int(num_leaves))
-    neighbor_edge_cap = _env_int(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", 1 << 21
-    )
-    max_far = _env_int(
-        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF", auto_per_leaf
-    )
-    max_near = _env_int(
-        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_PER_LEAF", auto_per_leaf
-    )
-    max_stack = _env_int("JACCPOT_STATIC_STRICT_FUSED_TREECODE_STACK", 512)
-    # An explicit ``near_cap`` (right-sized by the caller, e.g. the distributed driver
-    # to ~max_neighbors_per_leaf * num_leaves) overrides the env/1<<21 default. The
-    # 1<<21 default keeps the single-GPU fast lane byte-identical when no cap is passed;
-    # the fixed 2M buffer both wastes the downstream neighbour build and can SILENTLY
-    # truncate at very large N (the overflow guard below is eager-only). Callers that
-    # trace this (shard_map) should pass an explicit, validated ``near_cap``.
-    if near_cap is not None:
-        near_cap = int(near_cap)
-    else:
-        near_cap = _env_int(
-            "JACCPOT_STATIC_STRICT_FUSED_TREECODE_NEAR_CAP", neighbor_edge_cap
-        )
-    far_cap = int(compact_far_pair_capacity) if compact_far_pair_capacity else 131072
-
-    prod = build_treecode_far_pairs_and_neighbors(
-        leaf_nodes,
-        centers,
-        mac_extents,
-        left_full,
-        right_full,
-        jnp.asarray(float(theta) * float(theta), centers.dtype),
-        root_idx,
-        num_internal=num_internal,
-        max_far=max_far,
-        max_near=max_near,
-        max_stack=max_stack,
-        max_iters=total_nodes + 1,
-        far_pair_capacity=far_cap,
-        near_capacity=near_cap,
-        idx_dtype=idx,
-    )
-    # Overflow guard: EAGER-ONLY. Inside the device-resident velocity-Verlet
-    # scan `prod.overflow` is a tracer, and _raise_if_true would emit a
-    # jax.debug.callback -- an ordered per-step host round-trip that serializes
-    # the scan and starves the GPU (the whole fused runner is otherwise
-    # device-resident). We skip it in the traced path: the auto-sized per-leaf
-    # caps (max_far/max_near = 4*num_leaves >= total_nodes) make per-leaf
-    # overflow structurally impossible, and the eager prepare pass (concrete
-    # `prod.overflow`) validates the flat far/near caps once before the scan is
-    # compiled. See docs/phase5_m2l_a100_findings_and_padding_plan.md.
-    if not isinstance(prod.overflow, Tracer):
-        _raise_if_true(
-            prod.overflow,
-            "treecode walk overflowed a capacity (far/near per-leaf, stack, or "
-            "flat far/near cap). Raise JACCPOT_STATIC_STRICT_FUSED_TREECODE_FAR_PER_LEAF"
-            " / NEAR_PER_LEAF / STACK / NEAR_CAP or COMPACT_FAR_PAIR_CAP.",
-        )
-
-    compact_far_pairs = CompactTaggedFarPairs(
-        sources=prod.far_sources,
-        targets=prod.far_targets,
-        tags=prod.far_tags,
-        far_pair_count=prod.far_pair_count,
-    )
-    neighbor_list = _treecode_neighbor_list(
-        prod, num_leaves=num_leaves, num_internal=num_internal, idx_dtype=idx
-    )
     return _DualTreeArtifacts(
         interactions=None,
         neighbor_list=neighbor_list,
@@ -2470,8 +2067,8 @@ def _build_flat_walk_artifacts_strict_streamed(
       the three flags saturate ``far_pair_count`` to the capacity, which trips
       the strict runner's existing ``far_pair_count < capacity`` arm of the
       saturation guard (``fmm_strict_run.py``), so a truncated refresh is fatal
-      rather than silent. The capacity report is ALWAYS emitted (the treecode
-      graft's early return left that guard dark) and carries ``peak_wavefront``
+      rather than silent. The capacity report is ALWAYS emitted (the removed
+      treecode graft's early return left that guard dark) and carries ``peak_wavefront``
       so the traced queue can be sized from data.
     * width: an UNNAMED list is built, eagerly, at ``_tight_list_capacity`` of the
       count the walk measured (``flat_walk_cap_headroom`` x count, granule-rounded,
@@ -3517,7 +3114,7 @@ def _build_dual_tree_artifacts(
     """Construct or reuse dual-tree traversal products for a tree.
 
     The top of this module: resolve the cache, choose a build strategy (split,
-    strict-streamed, treecode, or the single traversal), construct whichever
+    strict-streamed, or the single traversal), construct whichever
     buffers the caller asked for, and hand back an entry to store.
 
     Parameters

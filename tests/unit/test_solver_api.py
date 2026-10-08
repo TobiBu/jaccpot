@@ -58,26 +58,6 @@ def _sample_velocities(n: int = 64):
     )
 
 
-@pytest.fixture(scope="module")
-def octree_backend_prepared_state():
-    positions, masses = _sample_problem(n=40)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-    )
-    return fmm, state
-
-
 def _direct_sum_jerk(
     positions: jnp.ndarray,
     masses: jnp.ndarray,
@@ -525,11 +505,10 @@ def test_execution_backend_flows_from_advanced_config():
         preset=FMMPreset.FAST,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
             runtime=RuntimePolicyConfig(execution_backend="radix"),
         ),
     )
-    assert fmm._impl.tree_type == "octree"
+    assert fmm._impl.tree_type == "radix"
     assert fmm._impl.execution_backend == "radix"
 
 
@@ -539,7 +518,6 @@ def test_prepare_state_records_resolved_execution_backend():
         preset=FMMPreset.FAST,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
             runtime=RuntimePolicyConfig(execution_backend="auto"),
         ),
     )
@@ -554,422 +532,29 @@ def test_prepare_state_records_resolved_execution_backend():
     assert state.execution_backend == "radix"
 
 
-def test_explicit_octree_execution_backend_prepares_state(
-    octree_backend_prepared_state,
-):
-    _, state = octree_backend_prepared_state
+def test_explicit_octree_execution_backend_raises_removal_error():
+    """The octree execution backend is gone (cleanup 2026-10); naming it must raise.
 
-    assert state.execution_backend == "octree"
-    assert state.octree is not None
-    assert state.octree_upward is not None
-    assert state.octree_downward is not None
-
-
-def test_octree_prepare_state_exposes_octree_execution_view():
-    positions, masses = _sample_problem(n=24)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=2,
-    )
-
-    assert state.tree.tree_type == "octree"
-    assert state.octree is not None
-    assert int(state.octree.num_valid_nodes) > 0
-    assert state.octree.radix_node_to_oct.shape[0] == state.tree.parent.shape[0]
-    assert state.octree.radix_leaf_to_oct.shape[0] == state.tree.num_leaves
-    assert state.octree.box_centers.shape == (state.octree.valid_mask.shape[0], 3)
-    assert state.octree.box_half_extents.shape == (state.octree.valid_mask.shape[0], 3)
-    assert state.nearfield_interop is not None
-    assert np.array_equal(
-        np.asarray(state.nearfield_interop.leaf_nodes),
-        np.asarray(state.neighbor_list.leaf_indices),
-    )
-    assert state.nearfield_interop.node_ranges.shape[0] == state.tree.parent.shape[0]
-    assert int(np.asarray(state.nearfield_interop.counts).sum()) == int(
-        np.asarray(state.neighbor_list.counts).sum()
-    )
-    native_map = np.asarray(state.nearfield_interop.particle_order_to_native_leaf)
-    assert native_map.shape == (state.tree.num_leaves,)
-    assert np.array_equal(np.sort(native_map), np.arange(state.tree.num_leaves))
-
-
-def test_octree_solver_matches_radix_prepare_path():
-    positions, masses = _sample_problem(n=48)
-    radix = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
-    )
-    octree = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
-    )
-
-    acc_radix = radix.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=2,
-    )
-    acc_octree = octree.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=2,
-    )
-
-    assert np.allclose(
-        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
-    )
-
-
-def test_octree_execution_backend_matches_radix_on_octree_tree():
-    positions, masses = _sample_problem(n=32)
-    radix = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="radix"),
-        ),
-    )
-    octree = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-
-    acc_radix = radix.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=2,
-    )
-    acc_octree = octree.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=2,
-    )
-
-    assert np.allclose(
-        np.asarray(acc_octree), np.asarray(acc_radix), rtol=1e-5, atol=1e-5
-    )
-
-
-def test_octree_execution_backend_supports_baseline_nearfield_mode():
-    positions, masses = _sample_problem(n=24)
-    octree = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-            nearfield=NearFieldConfig(mode="baseline"),
-        ),
-    )
-
-    acc_octree = octree.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=2,
-    )
-
-    assert octree.nearfield_mode == "baseline"
-    assert acc_octree.shape == positions.shape
-    assert np.isfinite(np.asarray(acc_octree)).all()
-
-
-def test_octree_execution_backend_supports_class_major_farfield_mode():
-    positions, masses = _sample_problem(n=24)
-    octree = FastMultipoleMethod(
-        preset=FMMPreset.BALANCED,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
-            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=256),
-        ),
-    )
-
-    acc_octree = octree.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=2,
-    )
-
-    assert octree.farfield_mode == "class_major"
-    assert bool(octree.grouped_interactions) is True
-    assert acc_octree.shape == positions.shape
-    assert np.isfinite(np.asarray(acc_octree)).all()
-
-
-def test_octree_execution_backend_exposes_native_nearfield_view(
-    octree_backend_prepared_state,
-):
-    _, state = octree_backend_prepared_state
-
-    assert state.octree is not None
-    assert state.nearfield_interop is not None
-    leaf_nodes = np.asarray(state.nearfield_interop.leaf_nodes)
-    native_map = np.asarray(state.nearfield_interop.particle_order_to_native_leaf)
-    assert state.nearfield_interop.node_ranges.shape[0] == state.octree.parent.shape[0]
-    assert leaf_nodes.ndim == 1
-    assert np.all(leaf_nodes >= 0)
-    assert np.all(leaf_nodes < state.nearfield_interop.node_ranges.shape[0])
-    assert native_map.shape == leaf_nodes.shape
-    assert np.array_equal(np.sort(native_map), np.arange(leaf_nodes.shape[0]))
-    assert state.nearfield_interop.leaf_particle_indices is not None
-    assert state.nearfield_interop.leaf_particle_mask is not None
-    assert state.nearfield_interop.particle_to_leaf_position is not None
-    assert state.nearfield_interop.neighbor_leaf_positions is not None
-
-
-def test_octree_execution_backend_target_indices_match_full_prepared_state(
-    octree_backend_prepared_state,
-):
-    fmm, state = octree_backend_prepared_state
-    full_acc, full_pot = fmm.evaluate_prepared_state(state, return_potential=True)
-    assert state.nearfield_interop is not None
-    for target_indices in (
-        jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32),
-        jnp.asarray([9, 3, 9, 0], dtype=jnp.int32),
-    ):
-        target_acc, target_pot = fmm.evaluate_prepared_state(
-            state,
-            target_indices=target_indices,
-            return_potential=True,
-        )
-        np_idx = np.asarray(target_indices)
-        assert target_acc.shape == (target_indices.shape[0], 3)
-        assert target_pot.shape == (target_indices.shape[0],)
-        assert np.allclose(
-            np.asarray(target_acc),
-            np.asarray(full_acc)[np_idx],
-            rtol=1e-5,
-            atol=1e-5,
-        )
-        assert np.allclose(
-            np.asarray(target_pot),
-            np.asarray(full_pot)[np_idx],
-            rtol=1e-5,
-            atol=1e-5,
-        )
-
-
-def test_octree_execution_backend_prepared_state_jit_targets_match_eager(
-    octree_backend_prepared_state,
-):
-    fmm, state = octree_backend_prepared_state
-    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
-
-    jit_eval = jax.jit(
-        lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
-    )
-    acc_jit = jit_eval(state, target_indices)
-    acc_ref = fmm.evaluate_prepared_state(state, target_indices=target_indices)
-
-    assert acc_jit.shape == (target_indices.shape[0], 3)
-    assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
-
-
-def _pytree_metadata_holding_arrays(value):
-    """Return ``(path, node type, metadata)`` for every array in pytree metadata.
-
-    Metadata (a pytree node's aux data) is the treedef, and the treedef is part
-    of every ``jax.jit`` cache key -- so it has to be hashable and cheaply
-    comparable, which a JAX array is not. This walks the structure rather than
-    the leaves, because that is where the offending value hides: it is invisible
-    to ``jax.tree.leaves`` by construction.
-
-    Parameters
-    ----------
-    value : Any
-        Any pytree.
-
-    Returns
-    -------
-    list
-        One ``(path, node type name, repr of the metadata)`` triple per node
-        whose metadata reaches a JAX array. Empty when the structure is clean.
+    The config itself still constructs, so an old caller gets the removal message
+    from the solver rather than a silent radix run.
     """
-
-    def _reaches_array(meta, depth=0):
-        if isinstance(meta, jax.Array) or isinstance(meta, np.ndarray):
-            return True
-        if depth > 4:
-            return False
-        if isinstance(meta, (tuple, list, set, frozenset)):
-            return any(_reaches_array(item, depth + 1) for item in meta)
-        if isinstance(meta, dict):
-            return any(_reaches_array(item, depth + 1) for item in meta.values())
-        return False
-
-    def _walk(treedef, path):
-        found = []
-        node_data = treedef.node_data()
-        if node_data is not None and _reaches_array(node_data[1]):
-            found.append((path, node_data[0].__name__, repr(node_data[1])[:200]))
-        for index, child in enumerate(treedef.children()):
-            found.extend(_walk(child, f"{path}.{index}"))
-        return found
-
-    return _walk(jax.tree_util.tree_structure(value), "state")
-
-
-def test_octree_execution_backend_prepared_state_metadata_holds_no_arrays(
-    octree_backend_prepared_state,
-):
-    """The prepared state's treedef must not carry a JAX array anywhere.
-
-    The octree build path used to leak one: yggdrax dispatches the adaptive
-    build to a jitted helper whose result object carries the topology's fields
-    as ordinary children, so the static ``leaf_size=8`` came back out as
-    ``Array(8, dtype=int64, weak_type=True)`` -- and yggdrax's tree flatten files
-    ``leaf_size`` as *aux*. Two independently prepared states then held two
-    distinct ``Array(8)`` objects, and comparing their treedefs under an
-    enclosing trace staged a ``bool[]`` tracer instead of returning a bool.
-
-    Asserted on the structure rather than by provoking the failure, so it does
-    not depend on which other tests warmed which jit cache first.
-    """
-
-    _, state = octree_backend_prepared_state
-
-    assert _pytree_metadata_holding_arrays(state) == []
-
-
-def test_octree_execution_backend_two_prepared_states_are_jittable(
-    octree_backend_prepared_state,
-):
-    """A second, independently built octree state must still trace.
-
-    The direct form of the failure the test above pins structurally: the first
-    ``jax.jit`` fills the evaluation kernel's cache with a treedef whose
-    metadata holds one ``Array(8)``, and the second's lookup compares that
-    against a *different* ``Array(8)`` object -- past the identity fast path,
-    into ``Array.__eq__``, with a trace live. It surfaced in CI as ``ValueError:
-    Exception raised while checking equality of metadata fields of pytree``.
-
-    Both states are built here rather than shared, because one state reused
-    twice holds the same array object in both treedefs and the identity check
-    hides the defect. Each state gets its own ``jax.jit`` wrapper for the same
-    reason in the other direction: one shared wrapper turns the second call into
-    an outer cache hit, which never re-enters the evaluation kernel and so never
-    performs the comparison this is about.
-    """
-
-    fmm, first_state = octree_backend_prepared_state
-    positions, masses = _sample_problem(n=40)
-    second_state = fmm.prepare_state(positions, masses, leaf_size=8, max_order=3)
-    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
-
-    def evaluate(state, indices):
-        return jax.jit(
-            lambda st, idx: fmm.evaluate_prepared_state(st, target_indices=idx)
-        )(state, indices)
-
-    first_acc = evaluate(first_state, target_indices)
-    second_acc = evaluate(second_state, target_indices)
-
-    assert first_acc.shape == (target_indices.shape[0], 3)
-    assert np.allclose(np.asarray(first_acc), np.asarray(second_acc))
-
-
-def test_octree_execution_backend_prepared_state_eager_matches_compiled(
-    octree_backend_prepared_state,
-):
-    fmm, state = octree_backend_prepared_state
-    target_indices = jnp.asarray([0, 5, 9, 10, 33], dtype=jnp.int32)
-
-    full_acc_compiled, full_pot_compiled = fmm.evaluate_prepared_state(
-        state,
-        return_potential=True,
-        jit_traversal=True,
-    )
-    full_acc_eager, full_pot_eager = fmm.evaluate_prepared_state(
-        state,
-        return_potential=True,
-        jit_traversal=False,
-    )
-    target_acc_compiled, target_pot_compiled = fmm.evaluate_prepared_state(
-        state,
-        target_indices=target_indices,
-        return_potential=True,
-        jit_traversal=True,
-    )
-    target_acc_eager, target_pot_eager = fmm.evaluate_prepared_state(
-        state,
-        target_indices=target_indices,
-        return_potential=True,
-        jit_traversal=False,
-    )
-
-    assert np.allclose(
-        np.asarray(full_acc_compiled),
-        np.asarray(full_acc_eager),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-    assert np.allclose(
-        np.asarray(full_pot_compiled),
-        np.asarray(full_pot_eager),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-    assert np.allclose(
-        np.asarray(target_acc_compiled),
-        np.asarray(target_acc_eager),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-    assert np.allclose(
-        np.asarray(target_pot_compiled),
-        np.asarray(target_pot_eager),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-
-def test_octree_execution_backend_prepared_state_jit_targets_with_potential(
-    octree_backend_prepared_state,
-):
-    fmm, state = octree_backend_prepared_state
-    target_indices = jnp.asarray([0, 7, 11, 23, 31], dtype=jnp.int32)
-
-    jit_eval = jax.jit(
-        lambda st, idx: fmm.evaluate_prepared_state(
-            st,
-            target_indices=idx,
-            return_potential=True,
+    runtime = RuntimePolicyConfig(execution_backend="octree")
+    with pytest.raises(ValueError, match="octree execution backend was removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(runtime=runtime),
         )
-    )
-    acc_jit, pot_jit = jit_eval(state, target_indices)
-    acc_ref, pot_ref = fmm.evaluate_prepared_state(
-        state,
-        target_indices=target_indices,
-        return_potential=True,
-    )
 
-    assert acc_jit.shape == (target_indices.shape[0], 3)
-    assert pot_jit.shape == (target_indices.shape[0],)
-    assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
-    assert np.allclose(np.asarray(pot_jit), np.asarray(pot_ref), rtol=1e-5, atol=1e-5)
+
+def test_octree_tree_type_raises_removal_error():
+    """``tree_type="octree"`` went with the octree execution backend; it must raise."""
+    with pytest.raises(ValueError, match="octree execution backend was removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
+        )
 
 
 def test_basis_complex_alias_matches_solidfmm():
@@ -1241,11 +826,12 @@ def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
 
 
-def test_compute_accelerations_returns_acc_derivatives_when_requested():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_returns_acc_derivatives_when_requested(basis):
     positions, masses = _sample_problem(n=48)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
-        basis="solidfmm",
+        basis=basis,
     )
     acc, derivatives = fmm.compute_accelerations(
         positions,
@@ -1259,7 +845,8 @@ def test_compute_accelerations_returns_acc_derivatives_when_requested():
     assert derivatives[0].shape == (positions.shape[0], 3, 3)
 
 
-def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_and_jerk_matches_direct_sum_small_n(basis):
     """Jerk matches direct summation in the NEAR-FIELD-ONLY regime.
 
     ``theta=1e-4`` with ``leaf_size=12`` accepts **no** M2L pairs at this N, so
@@ -1275,7 +862,7 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
     acc_fmm, jerk_fmm = fmm.compute_accelerations_and_jerk(
         positions,
@@ -1300,7 +887,8 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
     assert rel < 5e-2
 
 
-def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter(basis):
     """``jerk_mode="accurate"`` matches direct summation, near-field-only regime.
 
     Same caveat as
@@ -1316,7 +904,7 @@ def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
     _, jerk_acc = fmm.compute_accelerations_and_jerk(
         positions,
@@ -1352,7 +940,8 @@ def _far_pair_count(state) -> int:
     return 0
 
 
-def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged(basis):
     """``"accurate"`` beats ``"fast_approx"`` against direct summation -- measured.
 
     The two direct-sum jerk tests above both run at ``theta=1e-4``, which accepts
@@ -1389,7 +978,7 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     velocities = _sample_velocities(n=n)
 
     # Anti-vacuity guard: the same parameters must actually accept M2L pairs.
-    probe = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis="solidfmm")
+    probe = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis=basis)
     far_pairs = _far_pair_count(
         probe.prepare_state(
             positions, masses, max_order=order, leaf_size=leaf_size, theta=theta
@@ -1405,7 +994,7 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
 
     errors = {}
     for mode in ("fast_approx", "accurate"):
-        fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis="solidfmm")
+        fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis=basis)
         kwargs = dict(leaf_size=leaf_size, max_order=order, theta=theta, jerk_mode=mode)
         if mode == "accurate":
             kwargs["jerk_fd_dt"] = 1e-3
@@ -1427,14 +1016,15 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     )
 
 
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
 def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, basis: str
 ):
     positions, masses = _sample_problem(n=20)
     velocities = _sample_velocities(n=20)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
 
     def _forbidden(*args, **kwargs):
@@ -1458,14 +1048,15 @@ def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
     assert jerk.shape == positions.shape
 
 
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
 def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, basis: str
 ):
     positions, masses = _sample_problem(n=20)
     velocities = _sample_velocities(n=20)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
 
     def _forbidden(*args, **kwargs):
@@ -1540,13 +1131,14 @@ def test_compute_accelerations_and_jerk_invalid_mode_raises():
         )
 
 
-def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum(basis):
     n = 12
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
     acc, derivs = fmm.compute_accelerations_with_time_derivatives(
         positions,
@@ -1639,74 +1231,6 @@ def test_clear_runtime_caches_resets_runtime_state():
     assert fmm._impl._prepared_state_cache_value is not None
     fmm.clear_runtime_caches(clear_jax_compilation=False)
     assert fmm._impl._prepared_state_cache_value is None
-
-
-def test_octree_reuse_prepared_state_uses_cache_without_topology_reuse(monkeypatch):
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-
-    acc_first = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-        reuse_prepared_state=True,
-    )
-
-    cached_state = fmm._impl._prepared_state_cache_value
-    assert cached_state is not None
-    assert cached_state.execution_backend == "octree"
-    assert fmm.recent_topology_reused is False
-
-    def fail_prepare_state(*args, **kwargs):
-        raise AssertionError("prepare_state should not run when octree cache is reused")
-
-    monkeypatch.setattr(fmm._impl, "prepare_state", fail_prepare_state)
-    acc_second = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-        reuse_prepared_state=True,
-    )
-
-    assert fmm._impl._prepared_state_cache_value is cached_state
-    assert fmm.recent_topology_reused is False
-    assert np.allclose(
-        np.asarray(acc_second), np.asarray(acc_first), rtol=1e-5, atol=1e-5
-    )
-
-
-def test_octree_clear_runtime_caches_resets_prepared_state_cache():
-    positions, masses = _sample_problem(n=72)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            tree=TreeConfig(tree_type="octree"),
-            runtime=RuntimePolicyConfig(execution_backend="octree"),
-        ),
-    )
-    _ = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=8,
-        max_order=3,
-        reuse_prepared_state=True,
-    )
-
-    assert fmm._impl._prepared_state_cache_value is not None
-    assert fmm._impl._prepared_state_cache_value.execution_backend == "octree"
-    fmm.clear_runtime_caches(clear_jax_compilation=False)
-    assert fmm._impl._prepared_state_cache_value is None
-    assert fmm.recent_topology_reused is False
 
 
 def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():

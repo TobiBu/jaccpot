@@ -2636,8 +2636,6 @@ def can_use_large_n_prepare_path(
         return False
     if str(getattr(fmm, "expansion_basis", "")).strip().lower() != "solidfmm":
         return False
-    if str(getattr(fmm, "execution_backend", "auto")).strip().lower() == "octree":
-        return False
     if bool(getattr(fmm, "adaptive_order", False)):
         return False
     if bool(getattr(fmm, "mixed_order_farfield", False)):

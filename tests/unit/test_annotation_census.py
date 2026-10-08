@@ -159,22 +159,6 @@ def test_a_decorated_function_is_vacuous_until_some_parameter_has_a_shape():
     assert census.vacuous_decorated == 1
 
 
-def test_experimental_is_excluded_by_default_as_everywhere_else_in_the_audit():
-    """`jaccpot/experimental/` is prototype code, deselected and uncovered."""
-    included = annotation_census._iter_module_paths(
-        annotation_census.PACKAGE_ROOT, include_experimental=False
-    )
-    assert included, "the package walk found no modules at all"
-    assert not any("experimental" in p.parts for p in included)
-
-    with_experimental = annotation_census._iter_module_paths(
-        annotation_census.PACKAGE_ROOT, include_experimental=True
-    )
-    assert any(
-        "experimental" in p.parts for p in with_experimental
-    ), "jaccpot/experimental/ was not found, so the exclusion above proves nothing"
-
-
 def test_an_empty_walk_is_refused_rather_than_reported_as_zero():
     """A zero census reads as a finished burn-down, which is the worst wrong answer.
 

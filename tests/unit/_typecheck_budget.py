@@ -1,18 +1,19 @@
-"""Trim expensive parametrisations under ``JACCPOT_RUNTIME_TYPECHECK=1``.
+"""Optionally trim expensive parametrisations for a quick local typecheck run.
 
-WHY. ``test-runtime-typecheck`` runs the whole of ``tests/unit`` with jaxtyping
-and beartype enforcement at ``-n 2`` under a 60 minute cap, and on ``main`` it
-already takes **56-58 minutes** (measured from three consecutive runs, 2026-09-08
-to 09-10). It passes by under two minutes. Anything a branch adds there lands on
-a job with no headroom: the sub-10 ms branch added roughly five minutes of
-interpret-mode Pallas tests and the job hit the cap at 92 %.
+WHY THIS EXISTED. ``test-runtime-typecheck`` used to run the whole of
+``tests/unit`` a second time, with jaxtyping and beartype enforcement, at ``-n 2``
+under a 60 minute cap, and it took 56-58 minutes on ``main`` (2026-09-08 to
+09-10). This helper shrank a handful of interpret-mode Pallas grids to one case
+there so the job fitted.
 
-WHAT THIS DOES NOT DO. It does not skip tests. That job exists to catch calls
-that die at the signature -- including two vacuous tests that reported coverage
-while asserting nothing -- so every test still RUNS there and every signature is
-still called. Only the grid shrinks: one case instead of the full product. The
-other jobs (``test-full``, ``test-mac-runtime``, ``test-smoke``) run the whole
-grid for its results, which is what they are for.
+WHAT IT DOES NOW. CI no longer has that job: runtime type checks ride on the
+sharded ``test-full`` run, which runs every grid in full, under the checks, once.
+So nothing in CI trims. ``JACCPOT_TEST_TRIM_GRIDS=1`` keeps the old behaviour as
+an explicit opt-in for a quick local pass (``JACCPOT_RUNTIME_TYPECHECK=1
+JACCPOT_TEST_TRIM_GRIDS=1 pytest tests/unit``): every test still RUNS and every
+signature is still called, only the grid shrinks to its first case. It is keyed on
+its own variable, not on the typecheck switch, so turning the checks on never
+quietly drops cases.
 
 WHY NOT SHRINK THE PROBLEM INSTEAD. Tried and rejected: interpret-mode Pallas
 cost tracks the PAIR count, not the particle count, so 800 particles at leaf 4
@@ -26,28 +27,28 @@ from __future__ import annotations
 import os
 from typing import Sequence, TypeVar
 
-__all__ = ["RUNTIME_TYPECHECK", "trim"]
+__all__ = ["TRIM_GRIDS", "trim"]
 
 T = TypeVar("T")
 
-#: True inside the ``test-runtime-typecheck`` job.
-RUNTIME_TYPECHECK = os.environ.get("JACCPOT_RUNTIME_TYPECHECK") == "1"
+#: True when ``JACCPOT_TEST_TRIM_GRIDS=1`` (a local opt-in; never set in CI).
+TRIM_GRIDS = os.environ.get("JACCPOT_TEST_TRIM_GRIDS") == "1"
 
 
 def trim(values: Sequence[T], *, keep: int = 1) -> list[T]:
-    """The full sequence normally; its first ``keep`` entries under typechecking.
+    """The full sequence normally; its first ``keep`` entries when trimming.
 
     Parameters
     ----------
     values : Sequence[T]
-        Parametrisation values, most representative FIRST -- that is the one the
-        typecheck job keeps.
+        Parametrisation values, most representative FIRST -- that is the one a
+        trimmed run keeps.
     keep : int
-        How many to keep there.
+        How many to keep when ``JACCPOT_TEST_TRIM_GRIDS=1``.
 
     Returns
     -------
     list[T]
         ``list(values)``, or its first ``keep`` entries.
     """
-    return list(values[: int(keep)]) if RUNTIME_TYPECHECK else list(values)
+    return list(values[: int(keep)]) if TRIM_GRIDS else list(values)

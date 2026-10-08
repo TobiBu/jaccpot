@@ -337,9 +337,12 @@ change.
 ## 8. Dependency DAG and the import-cycle rule
 
 ```
-fmm_constants -> fmm_caches -> kernels -> {_interaction_cache, _large_n_pipeline,
-  _octree_*} -> fmm_state -> _fmm_impl (engine) -> runtime/fmm -> solver -> __init__
+fmm_constants -> fmm_caches -> kernels -> {_interaction_cache, _large_n_pipeline}
+  -> fmm_state -> _fmm_impl (engine) -> runtime/fmm -> solver -> __init__
 ```
+
+(The `_octree_*` modules left this chain with the octree execution backend in the
+2026-10 cleanup; `docs/cleanup_2026-10.md`, X2.)
 
 `distributed/` and `experimental/` depend only on `kernels/` (not the engine).
 

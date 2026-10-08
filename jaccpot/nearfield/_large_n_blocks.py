@@ -72,12 +72,13 @@ __all__ = ["compute_leaf_p2p_accelerations_target_block_pairs_only"]
 # measurements: the offsets track the FAR-field leaf view, radix 3 leaves -> 4 offsets
 # against octree 5 -> 6. That view is not this signature's `leaves`, which is the
 # near-field padded table, so writing `leaves+1` here would assert an equality the
-# octree backend falsifies -- the `farleaves` mistake of section 4.3, verbatim, which
-# cost 7 tests when it was made in `_evaluate.py`. Nor can the honest spelling be used:
-# jaxtyping evaluates a symbolic axis in PARAMETER ORDER, `block_offsets` precedes the
-# leaf table, and a symbolic dim cannot be the thing that introduces its own name --
-# `AnnotationError: Cannot process symbolic axis 'leaves+1' as some axis names have not
-# been resolved`, which is how this was found rather than guessed.
+# octree backend (removed in the 2026-10 cleanup) falsified -- the `farleaves` mistake
+# of section 4.3, verbatim, which cost 7 tests when it was made in `_evaluate.py`. Nor
+# can the honest spelling be used: jaxtyping evaluates a symbolic axis in PARAMETER
+# ORDER, `block_offsets` precedes the leaf table, and a symbolic dim cannot be the thing
+# that introduces its own name -- `AnnotationError: Cannot process symbolic axis
+# 'leaves+1' as some axis names have not been resolved`, which is how this was found
+# rather than guessed.
 #
 # Same reasoning puts `farleaves` on the prepacked rectangle instead of `leaves`. It
 # binds freely there -- nothing else in that signature uses it -- so what is asserted

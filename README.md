@@ -30,7 +30,6 @@ Tree construction and traversal artifacts are provided by the companion package
 - Optional Pallas acceleration for the real-basis z-translation hotspot
 - Modular runtime with grouped/dense interaction pathways
 - Near-field and far-field execution paths with optional prepared state reuse
-- Explicit octree execution backend for `basis="solidfmm"`
 - **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
 - **Momentum-conserving (mutual) force** for block-step individual timesteps — `sum_i m_i a_i` cancels to round-off instead of to the truncation error (see [Momentum-Conserving FMM](#momentum-conserving-fmm))
 - Differentiable direct-sum helper via JAX autodiff, retained as the exact-gradient oracle
@@ -161,46 +160,14 @@ coupler.prepare(primitive_state, masses)  # full source tree
 acc_active = coupler.accelerations(primitive_state, active_indices=active)
 ```
 
-## Octree Backend
+## Octree Backend (removed)
 
-The default runtime path remains radix-oriented. To request explicit octree
-execution, configure both the tree type and runtime backend:
-
-```python
-from jaccpot import (
-    FastMultipoleMethod,
-    FMMAdvancedConfig,
-    RuntimePolicyConfig,
-    TreeConfig,
-)
-
-solver = FastMultipoleMethod(
-    preset="fast",
-    basis="solidfmm",
-    advanced=FMMAdvancedConfig(
-        tree=TreeConfig(tree_type="octree"),
-        runtime=RuntimePolicyConfig(execution_backend="octree"),
-    ),
-)
-```
-
-Current practical scope:
-
-- the octree backend is validated for `basis="solidfmm"`
-- prepared-state evaluation supports full outputs, target subsets, potentials,
-  JIT/eager traversal, and prepared-state cache reuse
-- non-default runtime modes such as baseline nearfield and class-major
-  farfield are covered in the solver tests
-
-Still worth keeping in mind:
-
-- `execution_backend="auto"` may still resolve to the radix backend
-- topology reuse remains radix-only
-- validation is currently most reliable on the preferred project validation GPU
-
-Example:
-
-- [examples/compare_yggdrax_jaccpot_prepare.py](examples/compare_yggdrax_jaccpot_prepare.py)
+The octree execution backend (`RuntimePolicyConfig(execution_backend="octree")`,
+complex basis only, about 3x behind radix, no production caller) was removed in the
+2026-10 cleanup ([docs/cleanup_2026-10.md](docs/cleanup_2026-10.md), X2). Configs
+that name it still construct, but the solver raises a `ValueError` on
+`execution_backend="octree"` or `TreeConfig(tree_type="octree")`. Radix is the only
+single-GPU execution backend.
 
 ## Basis Selection
 
@@ -683,7 +650,6 @@ If a performance change is intentional, refresh the baseline:
 - `examples/adaptive_vs_fixed_benchmark.ipynb`: adaptive-order vs fixed-order comparison
 - `examples/benchmark_gpu_radix_runtime.ipynb`: GPU/radix runtime and memory-pressure deep dive
 - `examples/benchmark_gpu_single_n_memory.ipynb`: interactive single-`N` GPU memory probe with plots/tables
-- `examples/benchmark_gpu_n_ladder_production.py`: production-oriented large-`N` parameter sweep
 - `examples/time_derivatives_demo.ipynb`: usage plus direct-sum accuracy checks for jerk, snap, and crackle
 - `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate`, including analytic source-motion behavior
 - `examples/real_sh_adaptive_order.ipynb`: real-basis adaptive-order demo

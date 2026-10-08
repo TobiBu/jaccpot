@@ -50,18 +50,33 @@ These override any instruction to "clean up", "optimise", or "simplify":
 - **Do not add, remove, or bump dependencies** without asking. The `black` and `isort` pins
   are deliberately equal to the pre-commit hook revs; unpinning them makes CI and local
   formatting disagree.
-- **Do not weaken a test, relax a tolerance, or delete a test.** Ever.
+- **Do not weaken a test, relax a tolerance, or delete a test.** Ever. (The one sanctioned
+  exception is the cleanup project below, and only under its tagging rule.)
 - **Do not rename anything public** without asking.
 - **Do not reformat files you are not otherwise touching.**
+
+### Cleanup project 2026-10 (temporary; reverted in its final phase)
+
+The maintainer approved removing the complex and Cartesian bases and the superseded slow
+and memory-heavy paths (octree backend, grouped/class-major far field, autotune and adaptive
+sizing, legacy strict APIs, superseded kernel variants, treecode), and trimming the test
+suite. The record is `docs/cleanup_2026-10.md`. While it runs, and only in its `cleanup/*`
+PRs:
+
+- A test may be deleted only if the PR's table tags it as (a) its subject was deleted,
+  (b) merged into a named test that keeps the assertion, or (c) a duplicate of a named owner
+  test. Tolerances are still never relaxed, and no lane loses its last direct-sum oracle.
+- A deletion-only diff (code with no remaining importer, plus its tests) is exempt from the
+  ~400-line split rule. Behaviour changes are not.
+- The public removals listed in the record are approved; any other public rename still
+  needs asking.
 
 ## Workflow
 
 - Feature branch, finalise via PR. Never commit to `main`.
-- **Test-first for production library code.** `examples/`, `bench/`, and anything under
-  `jaccpot/experimental/` are exempt — that distinction is deliberate, do not "fix" it. The
-  `experimental` marker deselects the *tests* (`tests/experimental/`), which is what keeps
-  `jaccpot/experimental/` out of the default run; it is also omitted from coverage in
-  `pyproject.toml`.
+- **Test-first for production library code.** `examples/` and `bench/` are exempt — that
+  distinction is deliberate, do not "fix" it. (`jaccpot/experimental/` and its opt-in
+  `experimental` marker were removed in the 2026-10 cleanup.)
 - Atomic commits, conventional-commit format (`feat:`, `fix:`, `refactor:`, `test:`,
   `docs:`, `perf:`, `build:`, `ci:`). One logical change per commit so `git bisect` and
   review work.
@@ -100,14 +115,14 @@ unscoped hook with no baseline is red on day one over violations it was never ca
 Widening the scope means documenting that backlog first.
 
 `pytest -q` is not the whole suite: the `addopts` in `pyproject.toml` add
-`-m "not experimental"` and `--ignore=tests/perf`, so the octree/treecode prototypes and the
-performance assertions are opt-in (`pytest -m experimental`, `pytest tests/perf`).
+`--ignore=tests/perf`, so the performance assertions are opt-in (`pytest tests/perf`).
 
 Faster inner loop while iterating:
 
 ```bash
-pytest -n 2 -m "not slow and not experimental"      # the CI smoke subset
+pytest -n 2 -m "not slow"                           # the fast subset (local only)
 JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit    # jaxtyping + beartype runtime checks
+JACCPOT_RUNTIME_TYPECHECK=1 JACCPOT_TEST_TRIM_GRIDS=1 pytest -q tests/unit  # same, Pallas grids cut to one case
 ```
 
 Coverage is measured and uploaded in CI (`--cov=jaccpot --cov-branch`), but there is no
@@ -176,22 +191,26 @@ jaccpot/mutual/        momentum-conserving path — a SECOND lane beside the thr
 jaccpot/pallas/        fused Pallas kernels + custom_vjp
 jaccpot/runtime/       orchestration, config resolution, lane selection, kernel dispatch
 jaccpot/distributed/   domain decomposition, halo exchange, collectives
-jaccpot/experimental/  octree/treecode prototypes — NOT production, opt-in marker only
 
 tests/unit/            does the function do what its docstring says
 tests/integration/     end-to-end paths
 tests/characterization/ golden references — the tripwire for silent numerics changes
                        (forward accelerations + gradients, each with an inertness
                        gate and a direct-sum physics anchor)
-tests/distributed/     multi-GPU; every file skips below 2 devices, so CPU CI collects
-                       and skips them. Not a tier you can rely on locally.
+tests/distributed/     multi-GPU; every file skips below 2 devices. CI runs it on forced
+                       host devices (`test-distributed-tier`, `-criterion`); not a tier
+                       you can rely on locally without the same XLA_FLAGS.
 tests/perf/            performance assertions
-tests/experimental/    prototypes; deselected by default
 
 No test files live directly under `tests/` — only `conftest.py` and `slow_tests.txt`.
 `slow_tests.txt` marks tests `slow` **by node id**, so moving or renaming a test file
-silently un-marks its entries and pushes them into the smoke leg; update it in the same
-change and check the collected counts under `-m "not slow"` are unchanged.
+silently un-marks its entries; update it in the same change and check the collected counts
+under `-m "not slow"` are unchanged.
+
+Which CI job runs which tests is defined once, in `.github/scripts/test_shards.py`; the
+`test-partition` job fails if two shards overlap or a collected test is in none. A new test
+directory or a file that needs its own job goes there, and
+`python .github/scripts/test_shards.py check` says whether the partition still holds.
 
 bench/                 profiling, audits, microbenchmarks, ci_benchmark_guard.py
 docs/                  design notes, audits, profiling records

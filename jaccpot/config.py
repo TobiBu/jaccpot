@@ -33,6 +33,10 @@ GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
 #: ``"minimum_memory"`` is what ``FMMPreset.LARGE_N_GPU`` canonicalizes to, and is
 #: what makes galaxy-scale runs fit. Public: exported from ``jaccpot``.
 MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
+#: ``"octree"`` stays in the alias only so that an old config naming it still
+#: constructs (and type-checks); the solver then raises, because the octree
+#: execution backend was removed in the 2026-10 cleanup (docs/cleanup_2026-10.md,
+#: X2). ``"auto"`` and ``"radix"`` both run the radix backend.
 FMMExecutionBackend = Literal["auto", "radix", "octree"]
 
 #: Multipole acceptance criteria a **caller** may ask for -- a strict superset of
@@ -115,7 +119,8 @@ class TreeConfig:
     ----------
     tree_type : Optional[str]
         Yggdrax tree family, e.g. ``"radix"`` (the production default) or
-        ``"kdtree"``.
+        ``"kdtree"``. ``"octree"`` is refused by the single-GPU solver since the
+        octree execution backend was removed in the 2026-10 cleanup.
     mode : Optional[str]
         Builder selector, ``"lbvh"`` or ``"fixed_depth"``.
     leaf_target : Optional[int]
@@ -375,8 +380,9 @@ class RuntimePolicyConfig:
     Attributes
     ----------
     execution_backend : FMMExecutionBackend
-        ``"auto"``, ``"radix"`` or ``"octree"``. ``"auto"`` may choose; an explicit
-        request is honoured or fails loudly, never silently substituted.
+        ``"auto"`` or ``"radix"``; both run the radix backend. ``"octree"`` still
+        constructs, but the solver raises on it: the octree execution backend was
+        removed in the 2026-10 cleanup.
     host_refine_mode : str
         Whether leaf refinement runs on the host, on device, or by policy.
     fail_fast : bool

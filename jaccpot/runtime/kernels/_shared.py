@@ -48,10 +48,10 @@ def _normalize_strict_refresh_detail_diag_mode(raw: object) -> str:
 class NearfieldInteropData(NamedTuple):
     """Explicit shared leaf/node view used to interoperate with nearfield code.
 
-    Built by ``_evaluate.py`` along one of two routes -- an octree route and the
-    radix/default route -- which is what the four optional fields are about:
-    the octree route populates all of them, the radix route leaves the first
-    three ``None``. Consumers must branch on ``None`` rather than assume presence.
+    Built by ``_evaluate.py``. The four optional fields date from a second, octree
+    route that populated all of them; it went with the octree execution backend
+    in the 2026-10 cleanup, and the remaining radix route leaves the first three
+    ``None``. Consumers must branch on ``None`` rather than assume presence.
 
     The neighbour lists are CSR: leaf ``i``'s neighbour node ids are
     ``neighbors[offsets[i] : offsets[i] + counts[i]]``.
@@ -74,8 +74,8 @@ class NearfieldInteropData(NamedTuple):
         today. Use it anyway: it is what the derivation code bounds validity by,
         and the redundancy is an observation, not a stated contract.
     particle_order_node_ranges : Array
-        Node ranges in particle order. In **both** current constructors this is
-        the same array as ``node_ranges``; the field is kept separate so a future
+        Node ranges in particle order. In the current constructor this is the
+        same array as ``node_ranges``; the field is kept separate so a future
         route can diverge, so do not rely on the identity.
     particle_order_leaf_indices : Array
         Leaf index of each particle, in particle order.
@@ -94,7 +94,7 @@ class NearfieldInteropData(NamedTuple):
         Inverse of ``leaf_particle_indices``, or ``None`` alongside it.
     neighbor_leaf_positions : Optional[Array]
         ``[num_leaves, max_neighbors]`` neighbours as leaf positions, padded with
-        ``-1``. Optional by type but populated on both routes -- derived from
+        ``-1``. Optional by type but always populated -- derived from
         ``neighbors`` when the source list does not carry it. The ``-1`` padding
         must be masked, not clipped: it is a sentinel, and as a Python-negative
         index it would silently wrap to the last leaf.

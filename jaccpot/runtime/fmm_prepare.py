@@ -26,8 +26,6 @@ from yggdrax.interactions import (
     MACType,
     NodeInteractionList,
     NodeNeighborList,
-    build_octree_native_far_pairs,
-    build_octree_native_neighbor_lists,
 )
 from yggdrax.morton import morton_encode
 from yggdrax.tree import (
@@ -79,7 +77,6 @@ from ._nearfield_cache import (
     nearfield_from_cache,
     with_nearfield_cache_artifacts,
 )
-from ._octree_adapter import build_octree_execution_data_with_status
 from .capacity_diagnostics import (
     is_capacity_failure,
     reraise_with_capacity_report,
@@ -98,13 +95,9 @@ from .fmm_state import (
     FMMPreparedState,
     TreeBuilderConfig,
     _bucket_far_pairs_by_level_split,
-    _build_octree_downward_artifacts,
-    _build_octree_upward_artifacts,
     _build_tree_with_config,
     _empty_interaction_storage_like,
-    _finalize_octree_downward_artifacts,
     _GeometryReuseEntry,
-    _prepared_state_octree_upward_payload,
     _prepared_state_upward_payload,
     _PrepareStateDualDownwardArtifacts,
     _PrepareStateFarPairPlan,
@@ -1075,8 +1068,8 @@ class PrepareMixin(_EngineBase):
             and self._interaction_cache is not None
         )
         # Under the COM MAC geometry the walk never reads the box geometry (only
-        # the dehnen_error policy and the octree lanes do), and on a cell-leaf
-        # tree its level loop is nodes x depth work: build it lazily instead.
+        # the dehnen_error policy does), and on a cell-leaf tree its level loop
+        # is nodes x depth work: build it lazily instead.
         # The mode is asked with the strict fused lane's default, as its walk
         # resolves it (`_strict_walk_geometry`): asked bare it said "aabb" there,
         # and the eager prepare built the box geometry every time -- its (L, 3, w)
@@ -3480,9 +3473,8 @@ class PrepareMixin(_EngineBase):
         bool
             True on a static-radix COM tree whose walk geometry resolves to
             ``"com"`` (with the strict fused lane's default), outside the
-            paper-style force scale and the octree backend -- the walk then never
-            reads the box geometry, and ``_strict_walk_geometry`` builds it lazily
-            if a caller does.
+            paper-style force scale -- the walk then never reads the box geometry,
+            and ``_strict_walk_geometry`` builds it lazily if a caller does.
         """
         default = "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
         return (
@@ -3490,7 +3482,6 @@ class PrepareMixin(_EngineBase):
             and str(center_mode).strip().lower() == "com"
             and mac_geometry_mode(default) == "com"
             and not self._uses_paper_style_force_scale()
-            and str(getattr(self, "execution_backend", "")) != "octree"
         )
 
     def _strict_walk_geometry(self, tree_artifacts: Any) -> tuple[Any, Any]:
@@ -4500,90 +4491,10 @@ class PrepareMixin(_EngineBase):
                 ),
             )
 
-        execution_backend = self._resolve_execution_backend()
-        tree_type_norm = (
-            str(getattr(tree_artifacts.tree, "tree_type", "")).strip().lower()
-        )
-        build_octree_payload = (
-            execution_backend == "octree" or tree_type_norm == "octree"
-        )
-        if build_octree_payload:
-            octree, octree_native = build_octree_execution_data_with_status(
-                tree_artifacts.tree
-            )
-        else:
-            octree, octree_native = None, False
-        # Only build the native-octree interaction lists when the octree view is
-        # actually native (non-degenerate). On a degenerate octree (build_octree_
-        # execution_data fell back to the binary tree), the native walk would produce
-        # far pairs in a node space inconsistent with `octree`/the near list -> gaps +
-        # double-counts; leaving native_far_pairs=None routes far through the compat
-        # interaction list on the same (fallback) tree, matching the near field.
-        octree_native_neighbors = None
-        if execution_backend == "octree" and octree is not None and octree_native:
-            octree_native_neighbors = build_octree_native_neighbor_lists(
-                tree_artifacts.tree,
-                tree_artifacts.upward.geometry,
-                theta=theta_val,
-                mac_type=mac_type_val,
-                dehnen_radius_scale=self.dehnen_radius_scale,
-                separation_floor=self._walk_separation_floor(),
-                max_pair_queue=self.max_pair_queue,
-                process_block=self.pair_process_block,
-                traversal_config=runtime_traversal_config,
-            )
         nearfield_interop = _build_nearfield_interop_data(
             tree_artifacts.tree,
             dual_downward_artifacts.neighbor_list,
-            octree=None,
-            native_neighbors=None,
         )
-        if (
-            execution_backend == "octree"
-            and nearfield_interop.leaf_particle_indices is None
-        ):
-            leaf_nodes_nf = jnp.asarray(nearfield_interop.leaf_nodes, dtype=INDEX_DTYPE)
-            node_ranges_nf = jnp.asarray(
-                nearfield_interop.particle_order_node_ranges,
-                dtype=INDEX_DTYPE,
-            )
-            leaf_ranges_nf = node_ranges_nf[leaf_nodes_nf]
-            counts_nf = leaf_ranges_nf[:, 1] - leaf_ranges_nf[:, 0] + 1
-            width_nf = int(jnp.max(counts_nf)) if int(leaf_nodes_nf.shape[0]) > 0 else 0
-            if width_nf > 0:
-                offsets_nf = jnp.arange(width_nf, dtype=INDEX_DTYPE)
-                leaf_particle_indices_nf = (
-                    leaf_ranges_nf[:, 0][:, None] + offsets_nf[None, :]
-                )
-                leaf_particle_mask_nf = offsets_nf[None, :] < counts_nf[:, None]
-                particle_to_leaf_position_nf = jnp.zeros(
-                    (int(positions_arr.shape[0]),),
-                    dtype=INDEX_DTYPE,
-                )
-                particle_to_leaf_position_nf = particle_to_leaf_position_nf.at[
-                    leaf_particle_indices_nf[leaf_particle_mask_nf]
-                ].set(
-                    jnp.repeat(
-                        jnp.arange(int(leaf_nodes_nf.shape[0]), dtype=INDEX_DTYPE),
-                        counts_nf.astype(INDEX_DTYPE),
-                    )
-                )
-            else:
-                leaf_particle_indices_nf = jnp.zeros(
-                    (int(leaf_nodes_nf.shape[0]), 0), dtype=INDEX_DTYPE
-                )
-                leaf_particle_mask_nf = jnp.zeros(
-                    (int(leaf_nodes_nf.shape[0]), 0), dtype=bool
-                )
-                particle_to_leaf_position_nf = jnp.zeros(
-                    (int(positions_arr.shape[0]),),
-                    dtype=INDEX_DTYPE,
-                )
-            nearfield_interop = nearfield_interop._replace(
-                leaf_particle_indices=leaf_particle_indices_nf,
-                leaf_particle_mask=leaf_particle_mask_nf,
-                particle_to_leaf_position=particle_to_leaf_position_nf,
-            )
         nearfield_artifacts = self._prepare_state_nearfield_artifacts(
             neighbor_list=dual_downward_artifacts.neighbor_list,
             nearfield_interop=nearfield_interop,
@@ -4601,34 +4512,6 @@ class PrepareMixin(_EngineBase):
             f"chunk_group_ids={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_group_ids))} "
             f"chunk_unique_indices={_format_nbytes(_estimate_payload_nbytes(nearfield_artifacts.chunk_unique_indices))}"
         )
-        octree_upward = _build_octree_upward_artifacts(
-            octree=octree,
-            positions_sorted=tree_artifacts.positions_sorted,
-            masses_sorted=tree_artifacts.masses_sorted,
-            expansion_basis=self.expansion_basis,
-            max_order=int(max_order),
-        )
-        octree_native_far_pairs = None
-        if execution_backend == "octree" and octree is not None and octree_native:
-            octree_native_far_pairs = build_octree_native_far_pairs(
-                tree_artifacts.tree,
-                tree_artifacts.upward.geometry,
-                theta=theta_val,
-                mac_type=mac_type_val,
-                dehnen_radius_scale=self.dehnen_radius_scale,
-                separation_floor=self._walk_separation_floor(),
-                max_pair_queue=self.max_pair_queue,
-                process_block=self.pair_process_block,
-                traversal_config=runtime_traversal_config,
-            )
-        octree_downward = _build_octree_downward_artifacts(
-            octree=octree,
-            octree_upward=octree_upward,
-            interactions=dual_downward_artifacts.interactions,
-            native_far_pairs=octree_native_far_pairs,
-            execution_backend=execution_backend,
-        )
-
         return FMMPreparedState(
             tree=tree_artifacts.tree,
             upward=_prepared_state_upward_payload(
@@ -4654,18 +4537,4 @@ class PrepareMixin(_EngineBase):
             nearfield_chunk_group_ids=nearfield_artifacts.chunk_group_ids,
             nearfield_chunk_unique_indices=nearfield_artifacts.chunk_unique_indices,
             force_scale_nodes=force_scale_nodes,
-            execution_backend=execution_backend,
-            octree=octree,
-            octree_upward=_prepared_state_octree_upward_payload(
-                octree_upward=octree_upward,
-                memory_objective=self.memory_objective,
-            ),
-            octree_downward=_finalize_octree_downward_artifacts(
-                octree=octree,
-                octree_upward=octree_upward,
-                octree_downward=octree_downward,
-                expansion_basis=self.expansion_basis,
-                execution_backend=execution_backend,
-                m2l_chunk_size=runtime_m2l_chunk_size,
-            ),
         )
