@@ -368,6 +368,7 @@ def mutual_near_field_forces(
 
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+
     Returns
     -------
     Array

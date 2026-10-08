@@ -1047,6 +1047,7 @@ def _sorted_pallas_call(
 
     softening_kernel : str
         The pair kernel, static.
+
     Returns
     -------
     Any
@@ -1161,6 +1162,7 @@ def _sorted_inputs(
 
     softening_kernel : str
         The pair kernel; picks the ``(2,)`` softening parameters.
+
     Returns
     -------
     tuple[Any, ...]

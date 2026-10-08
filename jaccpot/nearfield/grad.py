@@ -509,6 +509,7 @@ def _leafpair_accel_analytic_vjp(
         The pair kernel (:mod:`jaccpot.softening`). A compact kernel contracts
         ``-G m (g I + (1/r) dg/dr r r^T)`` and its ``dg/d(eps^2)``; Plummer keeps
         the expressions above bit for bit.
+
     Returns
     -------
     Tuple[Array, ...]

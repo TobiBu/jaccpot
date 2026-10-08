@@ -1484,6 +1484,7 @@ def _chunked_pallas_nearfield_accumulate(
 
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+
     Returns
     -------
     jax.Array

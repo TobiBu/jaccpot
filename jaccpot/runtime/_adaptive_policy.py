@@ -2327,6 +2327,7 @@ def build_adaptive_policy_state(
     separation_floor : float
         Minimum gap of an accepted pair (length units); see the field on
         :class:`AdaptivePolicyState`. ``0`` (default): none.
+
     Returns
     -------
     AdaptivePolicyState

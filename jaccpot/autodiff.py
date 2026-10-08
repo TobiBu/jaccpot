@@ -73,6 +73,7 @@ def direct_sum_gravitational_acceleration(
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
         ``softening`` is the Plummer-equivalent length for every kernel.
+
     Returns
     -------
     Array

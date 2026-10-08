@@ -1428,6 +1428,7 @@ def make_cross_hook(
         Minimum gap of an accepted far pair in every export and receiver walk
         (length units); a compact softening kernel's support, so the unsoftened
         cross far field is exact. ``0`` (default): none. Static.
+
     Returns
     -------
     Callable
@@ -2172,6 +2173,7 @@ def cross_near_acceleration(
 
     softening_kernel:
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+
     Returns
     -------
     Array

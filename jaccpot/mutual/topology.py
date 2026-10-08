@@ -482,6 +482,7 @@ def build_mutual_topology_from_tree(
 
     separation_floor : float
         Minimum gap of an accepted far pair (length units); ``0`` for none.
+
     Returns
     -------
     MutualTopology
@@ -609,6 +610,7 @@ def build_mutual_topology(
 
     separation_floor : float
         Minimum gap of an accepted far pair (length units); ``0`` for none.
+
     Returns
     -------
     Tuple[MutualTopology, Any]
@@ -626,13 +628,13 @@ def build_mutual_topology(
         leaf_size=int(leaf_size),
         max_order=int(order),
         theta=float(theta),
-        separation_floor=float(separation_floor),
     )
     topology = build_mutual_topology_from_tree(
         state.tree,
         np.asarray(state.positions_sorted),
         np.asarray(state.masses_sorted),
         theta=float(theta),
+        separation_floor=float(separation_floor),
         order=int(order),
     )
     return topology, state

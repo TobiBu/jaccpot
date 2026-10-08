@@ -68,6 +68,7 @@ EXPECTED_FMM_INIT_KWARGS = {
     "theta",
     "G",
     "softening",
+    "softening_kernel",
     "precision",
     "working_dtype",
     "advanced",

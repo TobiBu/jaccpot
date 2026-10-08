@@ -293,6 +293,7 @@ def _nearfield_fused_leaf_kernel(
 
     softening_kernel : str
         The pair kernel, static (:mod:`jaccpot.softening`).
+
     Returns
     -------
     None
@@ -923,6 +924,7 @@ def _nearfield_leafpair_kernel(
 
     softening_kernel : str
         The pair kernel, static (:mod:`jaccpot.softening`).
+
     Returns
     -------
     None

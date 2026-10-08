@@ -263,7 +263,7 @@ def _block_tile(
     mb: Float[Array, "slots"],
     vb_f: Float[Array, "slots"],
     weight: Optional[Float[Array, "slots slots"]],
-    soft_params: tuple[Array, Array],
+    soft_params: tuple[Float[Array, ""], Float[Array, ""]],
     g_value: Array,
     *,
     exclude_diagonal: bool,
@@ -299,7 +299,7 @@ def _block_tile(
     weight : Optional[Float[Array, 'slots slots']]
         ``(S, S)`` level weight from :func:`_pair_weight_tile`, or ``None`` for
         unit weights.
-    soft_params : tuple[Array, Array]
+    soft_params : tuple[Float[Array, ''], Float[Array, '']]
         The two softening scalars of
         :func:`jaccpot.softening.softening_params_from_sq` (``(eps^2, 0)`` for
         Plummer).
@@ -412,6 +412,7 @@ def _mutual_leafpair_kernel(
 
     softening_kernel : str
         The pair kernel, static (:mod:`jaccpot.softening`).
+
     Returns
     -------
     None
@@ -464,7 +465,7 @@ def _block_vjp_tiles(
     mb: Float[Array, "slots"],
     vb_f: Float[Array, "slots"],
     weight: Optional[Float[Array, "slots slots"]],
-    soft_params: tuple[Array, Array],
+    soft_params: tuple[Float[Array, ""], Float[Array, ""]],
     g_value: Array,
     fa_bar_xyz: tuple[
         Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]
@@ -546,7 +547,7 @@ def _block_vjp_tiles(
         ``(S,)`` leaf-B validity mask, same encoding.
     weight : Optional[Float[Array, 'slots slots']]
         ``(S, S)`` level weight, or ``None`` for unit weights.
-    soft_params : tuple[Array, Array]
+    soft_params : tuple[Float[Array, ''], Float[Array, '']]
         The two softening scalars, as in :func:`_block_tile`.
     g_value : Array
         Gravitational constant, scalar.
@@ -566,6 +567,7 @@ def _block_vjp_tiles(
         The pair kernel, static. A compact kernel uses its ``g``, ``(1/r) dg/dr``
         and ``dg/d(eps^2)`` where Plummer has ``r^-3``, ``-3 r^-5`` and
         ``-1.5 r^-5``.
+
     Returns
     -------
     tuple[tuple[Array, Array, Array], Array, tuple[Array, Array, Array], Array, Optional[Array], Array, Array]
@@ -757,6 +759,7 @@ def _mutual_leafpair_vjp_kernel(
 
     softening_kernel : str
         The pair kernel, static (:mod:`jaccpot.softening`).
+
     Returns
     -------
     None
@@ -942,6 +945,7 @@ def mutual_leafpair_block_jax(
 
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+
     Returns
     -------
     tuple[Array, Array]
@@ -1068,6 +1072,7 @@ def mutual_leafpair_block_pallas(
 
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+
     Returns
     -------
     tuple[Array, Array]
@@ -1212,6 +1217,7 @@ def mutual_leafpair_block_vjp_pallas(
 
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+
     Returns
     -------
     tuple[Array, Array, Array, Array, Optional[Array], Array, Array]
