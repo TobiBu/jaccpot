@@ -1621,11 +1621,12 @@ def prepare_large_n_state(
     # fixed shape (zero-recompile). Grows monotonically across eager refreshes.
     resolved_cap_attr = "_large_n_fused_static_target_blocks_resolved_cap"
     cached_static_cap = int(getattr(fmm, resolved_cap_attr, 0) or 0)
-    from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_enabled
+    from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
 
     # The CSR near-field lane reads the neighbour CSR directly; the rectangle
     # becomes a one-block placeholder (selects the prepacked layout, never read).
-    csr_lane = bool(_nearfield_csr_lane_enabled())
+    # Only when the near field is on Pallas: the pure-JAX route reads the rectangle.
+    csr_lane = _nearfield_csr_lane_active(bool(getattr(fmm, "use_pallas", False)))
     if bool(traced_target_block_payload):
         effective_static_cap = (
             cached_static_cap

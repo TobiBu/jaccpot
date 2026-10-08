@@ -22,7 +22,18 @@ S4b    the same through the large-N lane and its grad plan, with Odisseo's
        large-N env overrides, 2e4
 S5     ``BlockStepFMM`` with Odisseo's ``BlockStepOptions`` defaults (jax
        backend, leaf 64, static shapes, device topology), 20 base steps at 2e4
+M1     two cards: ``distributed/fmm.py`` built as Odisseo's mesh lane builds it
+       (``MeshOptions`` defaults: leaf 512, theta 0.7, p6, rcb), one force at
+       131,072, in input order
+M2     two cards: ``bench/multigpu_rollout_gate.py`` (``FusedRollout``,
+       repartitioned on device) at 1e5, 17 steps, repartition every 8: positions
+       at steps 1, 16 and 17
+M3     two cards: ``DistributedBlockStepFMM`` (jax backend, cross_theta 0.5), 4
+       base steps at 8192
 =====  ===========================================================================
+
+The M pins need two cards (``autocvd -n 2``) and are recorded separately:
+``record --pins M1,M2,M3``.
 
 Usage (book the card with autocvd first; the org rule)::
 
@@ -49,6 +60,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT_DEFAULT = "/export/scratch/tbuck/dce_pins"
 PINS = ("S1", "S2", "S3", "S4", "S4b", "S5")
+PINS_TWO_CARD = ("M1", "M2", "M3")
 
 
 # --------------------------------------------------------------------- cases
@@ -255,7 +267,161 @@ def case_s5(out: Path) -> dict:
     return {"momentum_drift": float(np.linalg.norm(p1 - p0)), "n": n}
 
 
+def _need_two_devices() -> None:
+    import jax
+
+    if jax.local_device_count() < 2:
+        raise RuntimeError("the M pins need two cards: book them with autocvd -n 2")
+
+
+def case_m1(out: Path) -> dict:
+    """``distributed/fmm.py`` as Odisseo's mesh lane builds it."""
+    _need_two_devices()
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+    from yggdrax.distributed import make_mesh
+
+    from jaccpot.distributed.fmm import (
+        DIAG_FIELDS,
+        DistributedFMMConfig,
+        make_force_evaluator,
+        partition_for_devices,
+        scatter_to_input_order,
+    )
+
+    ndev, leaf = 2, 512
+    n = ndev * leaf * 128  # the mesh lane wants N = ndev * k * leaf: no padding rows
+    pos, _, mass = _plummer(n)
+    part = partition_for_devices(pos, mass, ndev, leaf_size=leaf, partitioner="rcb")
+    cap = int(part["cap"])
+    # odisseo.mesh_coupling.integrate_mesh with MeshOptions() defaults
+    cfg = DistributedFMMConfig(
+        leaf_size=leaf,
+        theta=0.7,
+        order=6,
+        softening=1e-3,
+        G=1.0,
+        m2l_chunk=65_536,
+        nearfield_chunk=512,
+        nearfield_accum="wide",
+        mac_type="dehnen",
+        adaptive_eps=None,
+        mac_cross_criterion=True,
+    ).resolved_for(cap, ndev)
+    mesh = make_mesh(ndev)
+    evaluate = make_force_evaluator(
+        cfg, ndev, cap, mesh, jit=True, halo_exchange="auto"
+    )
+    x = jax.device_put(
+        jnp.asarray(part["pos_flat"]), NamedSharding(mesh, P("gpus", None))
+    )
+    m = jax.device_put(jnp.asarray(part["mass_flat"]), NamedSharding(mesh, P("gpus")))
+    a_raw, gid, diag = evaluate(
+        x, m, jnp.asarray(part["gid_flat"]), jnp.asarray(part["counts"])
+    )
+    acc = scatter_to_input_order(np.asarray(a_raw), np.asarray(gid), n)
+    d = np.asarray(diag)
+    overflow = {
+        name: float(d[:, i].sum())
+        for i, name in enumerate(DIAG_FIELDS)
+        if name.endswith("overflow") and i < d.shape[1]
+    }
+    # fp64 direct sum on 1024 targets (informative; the pin is the array)
+    targets = np.random.default_rng(3).choice(n, 1024, replace=False)
+    p64, m64 = pos.astype(np.float64), mass.astype(np.float64)
+    ref = np.empty((targets.size, 3))
+    for s in range(0, targets.size, 32):
+        t = targets[s : s + 32]
+        dx = p64[None, :, :] - p64[t, None, :]
+        r2 = np.sum(dx * dx, -1) + 1e-6
+        ref[s : s + 32] = np.sum(m64[None, :, None] * dx * r2[..., None] ** -1.5, 1)
+    rel = float(np.linalg.norm(acc[targets] - ref) / np.linalg.norm(ref))
+    np.savez(out, acc=acc)
+    return {"n": n, "cap": cap, "rel_l2": rel, "overflow": overflow}
+
+
+def case_m2(out: Path) -> dict:
+    """The fused two-card rollout gate, short: the forward, the cross field and the
+    on-device repartition all feed the positions it dumps."""
+    _need_two_devices()
+    import numpy as np
+
+    n, steps, every = 100_000, 17, 8
+    gate_dir = out.parent / f"{out.stem}_gate"
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    env = dict(
+        os.environ,
+        GATE_MODE="mesh",
+        GATE_N=str(n),
+        GATE_STEPS=str(steps),
+        GATE_EVERY=str(every),
+        GATE_OUT=str(gate_dir),
+    )
+    # The gate selects XLA's NCCL ragged exchange (fused.RAGGED_EXCHANGE_XLA_FLAG);
+    # from jax 0.11 XLA refuses that fallback unless it is allowed explicitly.
+    allow = "--xla_gpu_allow_ragged_all_to_all_nccl_send_recv_fallback=true"
+    if allow.split("=")[0] not in env.get("XLA_FLAGS", ""):
+        env["XLA_FLAGS"] = (env.get("XLA_FLAGS", "") + " " + allow).strip()
+    subprocess.run(
+        [sys.executable, str(HERE / "multigpu_rollout_gate.py")], env=env, check=True
+    )
+    arrays = {
+        f"positions_step{k}": np.load(gate_dir / f"positions_step{k}.npy")
+        for k in (1, 16, 17)
+    }
+    np.savez(out, **arrays)
+    result = json.loads((gate_dir / f"gate_mesh_every{every}.json").read_text())
+    return {
+        "n": n,
+        "probes": result["probes"],
+        "repartitions": result["repartitions"],
+        "moved_total": result["moved_total"],
+    }
+
+
+def case_m3(out: Path) -> dict:
+    """``DistributedBlockStepFMM``: the distributed mutual lane, block steps."""
+    _need_two_devices()
+    import jax.numpy as jnp
+    import numpy as np
+
+    from jaccpot import DistributedBlockStepFMM
+    from jaccpot.mutual.force import MutualCapacities
+
+    n = 8192
+    pos, vel, mass = _plummer(n)
+    # explicit: the heuristic's depth (16) is too shallow for the clipped Plummer core
+    caps = MutualCapacities(near=16384, far=16384, depth=32, width=1024, queue=1 << 17)
+    force = DistributedBlockStepFMM(
+        softening=1e-3,
+        k_max=2,
+        theta=0.5,
+        cross_theta=0.5,
+        max_order=4,
+        G=1.0,
+        leaf_size=32,
+        backend="jax",
+        ndev=2,
+        caps=caps,
+    )
+    x, v, m = jnp.asarray(pos), jnp.asarray(vel), jnp.asarray(mass)
+    rung = jnp.asarray(np.arange(n) % 3, jnp.int32)
+    force.prepare(x, m)
+    for _ in range(4):
+        x, v, _ = force.advance_base_step(x, v, m, rung=rung, dt_max=1e-3)
+    p0 = np.sum(mass[:, None].astype(np.float64) * vel, axis=0)
+    p1 = np.sum(mass[:, None].astype(np.float64) * np.asarray(v, np.float64), axis=0)
+    np.savez(out, positions=np.asarray(x), velocities=np.asarray(v))
+    return {"momentum_drift": float(np.linalg.norm(p1 - p0)), "n": n}
+
+
 CASES = {
+    "M1": case_m1,
+    "M2": case_m2,
+    "M3": case_m3,
     "S1": case_s1,
     "S2": case_s2,
     "S3": case_s3,
@@ -324,8 +490,13 @@ def _compare(args) -> int:
     ref, new = root / args.ref, root / args.new
     env = root / args.envelope if args.envelope else None
     report, ok = {}, True
+    wanted = args.pins.split(",")
+    for pin in wanted:
+        if not (ref / f"{pin}.npz").exists():
+            report[pin] = {"missing_in_ref": True}
+            ok = False
     for npz in sorted(ref.glob("*.npz")):
-        if npz.name.endswith(".bench.npz"):
+        if npz.name.endswith(".bench.npz") or npz.stem not in wanted:
             continue
         pin = npz.stem
         if not (new / npz.name).exists():
@@ -378,6 +549,9 @@ def main(argv: list[str]) -> int:
     cmp_.add_argument("ref")
     cmp_.add_argument("new")
     cmp_.add_argument("--envelope", default=None)
+    cmp_.add_argument(
+        "--pins", default=",".join(PINS), help="M1,M2,M3 for the two-card set"
+    )
     cmp_.add_argument("--root", default=ROOT_DEFAULT)
     cmp_.add_argument("--json", default=None)
     args = ap.parse_args(argv)

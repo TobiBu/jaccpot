@@ -1,0 +1,323 @@
+{
+ "cards": {
+  "single": "A100 40GB, GPU 3 (psaegert's ~4 GB job, user-approved)",
+  "two": "A100 40GB x2, GPUs 2+3 (psaegert's ~4 GB jobs; user rule: untimed runs)"
+ },
+ "deterministic_ops": true,
+ "library": "cleanup/fix-nopallas-near 0353eca (P1 + J + X1 + X2 + the no-Pallas near-field fix)",
+ "notes": {
+  "M2": "not recorded: the fused two-card rollout hangs in its first force under jax 0.11.2 on main and on this branch alike (3 x 1 h timeouts, one device spinning); with fused.RAGGED_EXCHANGE_XLA_FLAG alone XLA raises 'RaggedAllToAll fallback to NCCL is not allowed'. A separate issue.",
+  "S2": "changes by design: rel-L2 0.113 -> 1.60e-3; fix-0353eca is the new S2 reference (A-vs-A bitwise)"
+ },
+ "s2_new_reference_a_vs_a": {
+  "S2": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 50000,
+     "rel_l2": 0.0016039132731990044
+    },
+    "ref": {
+     "n": 50000,
+     "rel_l2": 0.0016039132731990044
+    }
+   }
+  }
+ },
+ "single_card_vs_main": {
+  "S1": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 200000,
+     "rel_l2": 0.0007763741703274087
+    },
+    "ref": {
+     "n": 200000,
+     "rel_l2": 0.0007763741703274087
+    }
+   },
+   "pass": true
+  },
+  "S2": {
+   "arrays": {
+    "force": {
+     "bitwise": false,
+     "max_abs": 0.5277977734804153,
+     "rel_l2": 0.11320359306323578
+    },
+    "state": {
+     "bitwise": false,
+     "max_abs": 0.045468516647815704,
+     "rel_l2": 0.0013523131163906581
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 50000,
+     "rel_l2": 0.0016039132731990044
+    },
+    "ref": {
+     "n": 50000,
+     "rel_l2": 0.11287816606795525
+    }
+   },
+   "pass": false
+  },
+  "S3": {
+   "arrays": {
+    "acc_100000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "acc_30000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n100000": "ok",
+     "n30000": "ok"
+    },
+    "ref": {
+     "n100000": "ok",
+     "n30000": "ok"
+    }
+   },
+   "pass": true
+  },
+  "S4": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.03852462768555,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.03852462768555,
+     "n": 20000
+    }
+   },
+   "pass": true
+  },
+  "S4b": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.03477096557617,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.03477096557617,
+     "n": 20000
+    }
+   },
+   "pass": true
+  },
+  "S5": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 2.5013924498148238e-09,
+     "n": 20000
+    },
+    "ref": {
+     "momentum_drift": 2.5013924498148238e-09,
+     "n": 20000
+    }
+   },
+   "pass": true
+  }
+ },
+ "tag": "fix-0353eca",
+ "two_card_a_vs_a_at_main": {
+  "M1": {
+   "arrays": {
+    "acc": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "cap": 65536,
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.00018535420297534109
+    },
+    "ref": {
+     "cap": 65536,
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.00018535420297534109
+    }
+   }
+  },
+  "M3": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    },
+    "ref": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    }
+   }
+  }
+ },
+ "two_card_vs_main": {
+  "M1": {
+   "arrays": {
+    "acc": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "cap": 65536,
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.00018535420297534109
+    },
+    "ref": {
+     "cap": 65536,
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.00018535420297534109
+    }
+   },
+   "pass": true
+  },
+  "M3": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    },
+    "ref": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    }
+   },
+   "pass": true
+  }
+ }
+}

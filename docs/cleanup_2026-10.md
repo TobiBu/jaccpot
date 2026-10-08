@@ -38,12 +38,13 @@ On `main` at 6cca378 (2026-10-06):
 
 | Phase | PR | What | Gates | State |
 | --- | --- | --- | --- | --- |
-| P0 | #369 | CI: each test once per push; shard partition checked; this record | CI 16/16 | open |
-| P1 | #370 | Safety net: Odisseo contract test, lane goldens, inventory, gradient twins on real, GPU pins; leaf-P2M padding fix | CPU suite | open |
-| J | #371 | Real-basis jerk and time derivatives; exact real derivative tower | CPU suite | open |
-| X1 | #372 | Treecode walk (single-GPU + distributed), `jaccpot/experimental`, `_large_n_farfield` | CPU suite, distributed tier, GPU pins | open |
-| X2 | | Octree execution backend | CPU suite, GPU pins | open |
-| D1 | | Spherical-harmonic family without a basis object runs real | targeted CPU, GPU pins | open |
+| P0 | #369 | CI: each test once per push; shard partition checked; this record | CI 16/16 | merged |
+| P1 | #370 | Safety net: Odisseo contract test, lane goldens, inventory, gradient twins on real, GPU pins; leaf-P2M padding fix | CPU suite | merged |
+| J | #371 | Real-basis jerk and time derivatives; exact real derivative tower | CPU suite | merged |
+| X1 | #372 | Treecode walk (single-GPU + distributed), `jaccpot/experimental`, `_large_n_farfield` | CPU suite, distributed tier, GPU pins | merged |
+| X2 | #373 | Octree execution backend | CPU suite, GPU pins | merged |
+| D1 | #374 | Spherical-harmonic family without a basis object runs real | targeted CPU, GPU pins | merged |
+| fix | | The large-N lane's no-Pallas near field read the CSR lane's placeholder; two-card pins M1-M3 | targeted CPU, GPU pins (two-card: M1, M3) | open |
 
 ### P0: CI runs each test once
 
@@ -247,9 +248,9 @@ Three things the pins showed about `main`:
 - **The large-N lane's no-Pallas near field is wrong (S2).** At 5e4 the Pallas near field
   gives rel-L2 1.6e-3 and the no-Pallas route 0.113, with identical far and near lists
   (668,306 / 51,294 pairs); 56 % of the particles are off by more than 1 %. This is the
-  route pre-Ampere GPUs and `ODISSEO_FMM_USE_PALLAS=0` take. The CPU lane golden (N =
-  512, leaf 16) is fine. Open for the maintainer: fix it, or drop the pre-Ampere large-N
-  route.
+  route `use_pallas=False` and `ODISSEO_FMM_USE_PALLAS=0` take on an Ampere card. The
+  CPU lane golden (N = 512, leaf 16) is fine. Fixed; see "Fix: the no-Pallas near field"
+  below.
 - **The suspected break of the default constructor is not real (S3).**
   `FastMultipoleMethod()` on a GPU at 1e5 runs. The grouped auto-enable test does not
   fire under static sizing.
@@ -277,3 +278,57 @@ tree type, which the distributed lane can use, is untouched.
 - **Gates:** CPU suite 2,316 passed and 162 skipped (the one failure is the stale local
   nornax checkout); `test_shards.py check` 2,541 tests; GPU pins bitwise.
 
+### Fix: the no-Pallas near field read the CSR lane's placeholder
+
+**Cause.** When the CSR row-chunk near field runs, the prepare shrinks the near-field
+rectangle to a one-block placeholder, and the strict runner and the multi-GPU overflow
+flag skip the rectangle's capacity guard. Those three read only the hardware switch,
+`_nearfield_csr_lane_enabled()`: the env var, or "an Ampere card is present". The
+evaluation also needs the near field on Pallas. So with `use_pallas=False` on an A100,
+the switch was on, the prepare built the placeholder and the guard was off. The pure-JAX
+route then evaluated each leaf's near field from a single block of source leaves. Pre-Ampere
+cards were not affected, since the switch is off there. The CPU golden missed it for the
+same reason.
+
+**Fix.** `_nearfield_csr_lane_active(use_pallas)` in `nearfield/_fast_lane.py` is now the
+one predicate that the prepare, the strict runner's guard, `distributed/fused.py` and the
+evaluation all use. It requires the switch, the near field on Pallas (a supported GPU or
+interpret mode) and the self-leaf fold. On the Pallas path it is the same condition as
+before.
+
+**Measured:**
+- CPU, the lane-golden case with the switch forced on and Odisseo's block size: rel-L2
+  0.53 before the fix and 3.9e-4 after, bitwise equal to the switch-off run. This is now
+  `tests/unit/runtime/test_nearfield_csr_lane_consistency.py`.
+- A100, pin S2: rel-L2 0.113 before and 1.60e-3 after. The Pallas near field gives
+  1.6e-3 on the same case.
+- The other single-card pins (S1, S3, S4, S4b, S5) are bitwise unchanged against
+  `main`. The S2 reference for later phases is now this branch's, and its A-vs-A control
+  is bitwise. Summary: `bench/results/dce/pins_fix-0353eca.json`.
+
+**Two-card pins (gate G3).** These are new in `bench/dce_pins.py` (`record --pins
+M1,M2,M3`, compare with `--pins M1,M2,M3`). They ran on two A100s (GPUs 2+3), which were
+shared with another user's ~4 GB jobs; these runs are untimed.
+
+| pin | lane | result |
+| --- | --- | --- |
+| M1 | `distributed/fmm.py` as Odisseo's mesh lane builds it (`MeshOptions` defaults: leaf 512, theta 0.7, p6, rcb), one force at 131,072 | rel-L2 1.85e-4 vs fp64 direct, no overflow; bitwise vs `main` |
+| M2 | `bench/multigpu_rollout_gate.py`, 1e5, 17 steps, repartition every 8 | **not recorded**, see below |
+| M3 | `DistributedBlockStepFMM` (jax backend, cross_theta 0.5), 4 base steps at 8192 | momentum drift 6.9e-10; bitwise vs `main` |
+
+The A-vs-A control at `main` is bitwise for M1 and M3. So X1's distributed changes and
+this fix leave the mesh lane and the distributed block-step lane bitwise unchanged.
+
+**The fused two-card lane does not run on jax 0.11.2 (M2). This is on `main` too, and it
+is not part of this cleanup.**
+- With `fused.RAGGED_EXCHANGE_XLA_FLAG`, the NCCL exchange jaccpot recommends, XLA
+  raises: "RaggedAllToAll fallback to NCCL is not allowed".
+- With the fallback allowed (`--xla_gpu_allow_ragged_all_to_all_nccl_send_recv_fallback=true`,
+  which M2 now sets), the rollout hangs in its first force. One device spins at 99 % and
+  the other idles. This happened on the `main` arm, its control and this branch alike,
+  three times, each until the 1 h timeout.
+- `bench/distributed_gate.py`'s target ran without the flag: four tests passed, then
+  `test_forward_survives_a_gradient` hung the same way.
+
+To be investigated separately. Until then, the fused multi-GPU lane (`FusedRollout`) has
+no GPU gate on jax 0.11.2.

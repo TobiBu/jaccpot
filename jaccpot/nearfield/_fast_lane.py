@@ -98,6 +98,39 @@ def _nearfield_csr_lane_enabled() -> bool:
     return bool(pallas_m2l_real_csr_supported())
 
 
+def _nearfield_csr_lane_active(use_pallas: bool) -> bool:
+    """Whether the CSR near-field lane will really run for this solver.
+
+    :func:`_nearfield_csr_lane_enabled` is the switch; the lane also needs the
+    near field on Pallas (``use_pallas`` on a supported GPU, or interpret mode)
+    and the self-leaf fold. The prepare shrinks the rectangle to a placeholder,
+    and the strict runners drop its capacity guard, only when this is ``True``:
+    with ``use_pallas=False`` on an Ampere card the switch alone is on, and the
+    pure-JAX route read the one-block placeholder (rel-L2 0.113 against direct
+    summation at 5e4 on an A100, 2026-10-08).
+
+    Parameters
+    ----------
+    use_pallas : bool
+        The solver's ``use_pallas``.
+
+    Returns
+    -------
+    bool
+        ``True`` when the near-field evaluation takes the CSR lane, given a
+        neighbour list and the prepacked source layout.
+    """
+    if not bool(use_pallas) or not _nearfield_csr_lane_enabled():
+        return False
+    if not _env_flag("JACCPOT_NEARFIELD_LEAFPAIR_FOLD_SELF", True):
+        return False
+    if _env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False):
+        return True
+    from jaccpot.pallas.nearfield_fused_leaf import pallas_nearfield_fused_supported
+
+    return bool(pallas_nearfield_fused_supported())
+
+
 __all__ = [
     "compute_leaf_p2p_accelerations_radix_fast_lane",
     "compute_leaf_p2p_accelerations_radix_payload_pairs_only",
@@ -1620,11 +1653,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     # no rectangle), which is what keeps the cell-tree gradient off the
     # neighbour-capped rectangle payload; the potential half has no reverse, so
     # a differentiable potential request falls through to the older lanes.
+    # The prepare and the capacity guards decide with the same predicate.
     csr_lane = (
         neighbor_list is not None
-        and pallas_prepacked
-        and fold_self_flag
-        and _nearfield_csr_lane_enabled()
+        and has_prepacked_sources
+        and _nearfield_csr_lane_active(use_pallas)
         and not (differentiable and want_potential)
     )
     fold_self = csr_lane or (
