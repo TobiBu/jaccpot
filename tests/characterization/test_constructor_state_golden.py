@@ -61,7 +61,6 @@ _VIA_FACADE = "__via_facade__"
 CONFIGS: dict[str, dict[str, Any]] = {
     # --- basis, which selects entire kernel families ---
     "cartesian_default": {},
-    "solidfmm_complex": {"expansion_basis": "solidfmm"},
     "solidfmm_real": {"expansion_basis": "solidfmm", "basis_impl": RealSHBasis()},
     "solidfmm_explicit_complex": {
         "expansion_basis": "solidfmm",
@@ -133,8 +132,9 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "runtime_path_large_n": {"runtime_path": "large_n"},
     "backend_radix": {"runtime_policy": RuntimePolicyConfig(execution_backend="radix")},
     "grouped_interactions": {
+        # complex only: grouped M2L needs AABB centres the real upward rejects
         "farfield": FarFieldConfig(grouped_interactions=True),
-        "expansion_basis": "solidfmm",
+        "expansion_basis": "complex",
     },
     "mixed_order": {
         "farfield": FarFieldConfig(mixed_order=True, mixed_order_min_order=2)

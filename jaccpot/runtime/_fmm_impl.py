@@ -256,11 +256,13 @@ class FMMEngine(
         Dtype the sweeps compute in. ``None`` resolves against the device later
         rather than here.
     expansion_basis : ExpansionBasis
-        Expansion algebra. ``"cartesian"`` or ``"solidfmm"``; ``"complex"`` is
-        accepted as an alias and normalised to ``"solidfmm"``.
+        Expansion algebra. ``"cartesian"`` or ``"solidfmm"`` (the spherical-harmonic
+        family, real or complex); ``"complex"`` is accepted and selects the complex
+        basis explicitly.
     basis_impl : Optional[Any]
-        The basis object, when one exists. ``None`` for bases the runtime implements
-        internally rather than through the interface.
+        The basis object. For ``"solidfmm"`` without one, the REAL basis is used
+        (cleanup 2026-10, phase D1; it used to default to complex);
+        ``"complex"`` without one uses the complex basis. ``None`` for Cartesian.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide", which
         selects ``"rot_scale"`` for the real basis.
@@ -679,6 +681,14 @@ class FMMEngine(
             If the expansion basis is not 'cartesian' or 'solidfmm'.
         """
         basis_norm = str(expansion_basis).strip().lower()
+        if basis_impl is None and basis_norm in ("solidfmm", "complex"):
+            # The spherical-harmonic family without a basis object: real unless
+            # complex was named. Before 2026-10 both meant complex, which made
+            # every engine built as ``expansion_basis="solidfmm"`` run the basis
+            # the public API had already stopped defaulting to.
+            from jaccpot.basis import ComplexSHBasis, RealSHBasis
+
+            basis_impl = ComplexSHBasis() if basis_norm == "complex" else RealSHBasis()
         if basis_norm == "complex":
             basis_norm = "solidfmm"
         if basis_norm not in ("cartesian", "solidfmm"):

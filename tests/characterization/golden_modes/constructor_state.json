@@ -348,6 +348,7 @@
   },
   "grouped_interactions": {
    "_explicit_grouped_interactions": "True",
+   "basis_impl": "ComplexSHBasis(p_max=32, name='complex', coefficient_ordering='ell-major, m=-ell..+ell (packed complex SH)', runtime_expansion_basis='solidfmm')",
    "expansion_basis": "'solidfmm'",
    "grouped_interactions": "True"
   },
@@ -493,9 +494,6 @@
   },
   "runtime_path_large_n": {
    "runtime_path": "'large_n'"
-  },
-  "solidfmm_complex": {
-   "expansion_basis": "'solidfmm'"
   },
   "solidfmm_explicit_complex": {
    "basis_impl": "ComplexSHBasis(p_max=32, name='complex', coefficient_ordering='ell-major, m=-ell..+ell (packed complex SH)', runtime_expansion_basis='solidfmm')",

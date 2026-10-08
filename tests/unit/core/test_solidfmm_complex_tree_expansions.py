@@ -362,7 +362,7 @@ def test_solidfmm_downward_source_motion_locals_match_finite_difference():
         explicit_centers=centers,
     )
 
-    fmm = FMMEngine(expansion_basis="solidfmm")
+    fmm = FMMEngine(expansion_basis="complex")
     base_down = fmm.prepare_downward_sweep(
         tree,
         _as_tree_upward_data(base),
@@ -536,7 +536,7 @@ def test_solidfmm_downward_second_time_derivative_locals_match_finite_difference
         time_derivative_order=2,
     )
 
-    fmm = FMMEngine(expansion_basis="solidfmm")
+    fmm = FMMEngine(expansion_basis="complex")
     base_down = fmm.prepare_downward_sweep(
         tree,
         _as_tree_upward_data(base),
