@@ -165,12 +165,15 @@ class SweepsMixin(_EngineBase):
             Acceleration at ``eval_point``.
         """
 
+        # The softened multipole terms are Plummer's. A compact kernel is exactly
+        # Newtonian past its support, which is where an expansion is evaluated.
+        plummer = getattr(self, "softening_kernel", "plummer") == "plummer"
         return reference_evaluate_expansion(
             expansion,
             order=order,
             eval_point=eval_point,
             G=self.G,
-            softening=self.softening,
+            softening=self.softening if plummer else 0.0,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -211,6 +214,7 @@ class SweepsMixin(_EngineBase):
             eval_point,
             G=self.G,
             softening=self.softening,
+            softening_kernel=getattr(self, "softening_kernel", None),
         )
 
     def _resolve_upward_num_levels(self, tree: Tree) -> Optional[int]:

@@ -37,6 +37,12 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params,
+)
+
 __all__ = [
     "mutual_near_field_forces",
     "resolve_near_chunk_size",
@@ -183,6 +189,7 @@ def _block_forces(
     *,
     softening: float,
     G: float,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Return ``F[c, i, j] = G m_i m_j dr_ij / r_ij^3`` for a batch of blocks.
 
@@ -206,9 +213,12 @@ def _block_forces(
         ``(chunk, S, S)`` level weights from :func:`_pair_weights`, or ``None``
         for unit weights.
     softening : float
-        Plummer softening length.
+        Plummer-equivalent softening length.
     G : float
         Gravitational constant.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+        ``r^-3`` below becomes the kernel's ``g``.
 
     Returns
     -------
@@ -217,12 +227,19 @@ def _block_forces(
         are exactly zero.
     """
     dr = x_b[:, None, :, :] - x_a[:, :, None, :]
-    r2 = jnp.sum(dr * dr, axis=-1) + jnp.asarray(softening, dtype=dr.dtype) ** 2
-    # Double-`where`: the guarded r2 is substituted *before* the reciprocal so the
-    # reverse pass never evaluates d(r^-3)/d(r2) at an invalid pair. A single
-    # trailing `where` would still produce a NaN cotangent from the masked branch.
-    safe_r2 = jnp.where(valid, r2, jnp.ones_like(r2))
-    inv_r3 = jnp.where(valid, safe_r2 ** (-1.5), jnp.zeros_like(r2))
+    kernel = resolve_softening_kernel(softening_kernel)
+    if kernel == "plummer":
+        r2 = jnp.sum(dr * dr, axis=-1) + jnp.asarray(softening, dtype=dr.dtype) ** 2
+        # Double-`where`: the guarded r2 is substituted *before* the reciprocal so
+        # the reverse pass never evaluates d(r^-3)/d(r2) at an invalid pair. A
+        # single trailing `where` would still produce a NaN cotangent from the
+        # masked branch.
+        safe_r2 = jnp.where(valid, r2, jnp.ones_like(r2))
+        inv_r3 = jnp.where(valid, safe_r2 ** (-1.5), jnp.zeros_like(r2))
+    else:
+        # masked_pair_factors substitutes before the kernel too (the same guard)
+        params = softening_params(kernel, softening, dr.dtype)
+        inv_r3 = masked_pair_factors(jnp.sum(dr * dr, axis=-1), valid, params, kernel)[0]
     scale = jnp.asarray(G, dtype=dr.dtype) * m_a[:, :, None] * m_b[:, None, :] * inv_r3
     if weights is not None:
         scale = scale * weights.astype(scale.dtype)
@@ -283,6 +300,7 @@ def mutual_near_field_forces(
     use_pallas: bool = False,
     interpret: bool = False,
     skip_padded_chunks: bool = False,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Return the mutual near-field **force** on every particle.
 
@@ -348,6 +366,8 @@ def mutual_near_field_forces(
         it is per-branch rather than a global improvement, and the default stays
         off because ``"jax"`` is the default backend.
 
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     Returns
     -------
     Array
@@ -448,6 +468,7 @@ def mutual_near_field_forces(
             bool(exclude_diagonal),
             bool(emit_b),
             bool(interpret),
+            resolve_softening_kernel(softening_kernel),
         )
         return pa, pb, f_a, f_b
 
@@ -500,7 +521,8 @@ def mutual_near_field_forces(
             pair_valid = pair_valid & ~jnp.eye(max_leaf_size, dtype=bool)[None, :, :]
             weights = _pair_weights(r, r, level_weights)
             block = _block_forces(
-                x, m, x, m, pair_valid, weights, softening=softening, G=G
+                x, m, x, m, pair_valid, weights, softening=softening, G=G,
+                softening_kernel=softening_kernel,
             )
             contrib = jnp.where(valid_slot[..., None], jnp.sum(block, axis=2), 0.0)
             return acc.at[particles].add(contrib.astype(acc.dtype)), None
@@ -542,7 +564,8 @@ def mutual_near_field_forces(
         pair_valid = va[:, :, None] & vb[:, None, :]
         weights = _pair_weights(ra, rb, level_weights)
         block = _block_forces(
-            xa, ma, xb, mb, pair_valid, weights, softening=softening, G=G
+            xa, ma, xb, mb, pair_valid, weights, softening=softening, G=G,
+                softening_kernel=softening_kernel,
         )
         # One evaluation, two applications: the `b` side is the *negation* of the
         # same tensor, never an independent recomputation.

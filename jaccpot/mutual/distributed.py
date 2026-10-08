@@ -109,6 +109,12 @@ from yggdrax.distributed.sharding import AXIS_NAME
 from yggdrax.dtypes import INDEX_DTYPE
 
 from jaccpot.mutual.device_topology import leaf_blocks
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params,
+    support_factor,
+)
 
 __all__ = [
     "DistributedMutualConfig",
@@ -188,7 +194,18 @@ class _NearAsNeighbors(NamedTuple):
     neighbor_indices: Array
 
 
-def _tile_forces(pos_a, mass_a, ok_a, pos_b, mass_b, ok_b, softening, g, weights=None):
+def _tile_forces(
+    pos_a,
+    mass_a,
+    ok_a,
+    pos_b,
+    mass_b,
+    ok_b,
+    softening,
+    g,
+    weights=None,
+    softening_kernel=None,
+):
     """Antisymmetric leaf-pair block: force on every a-particle and every b-particle.
 
     One evaluation, two applications -- the ``b`` side is the negation of the same
@@ -221,6 +238,8 @@ def _tile_forces(pos_a, mass_a, ok_a, pos_b, mass_b, ok_b, softening, g, weights
         Gravitational constant.
     weights:
         ``(k, w, w)`` per-pair level weight, or ``None`` for unit weights.
+    softening_kernel:
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -228,9 +247,14 @@ def _tile_forces(pos_a, mass_a, ok_a, pos_b, mass_b, ok_b, softening, g, weights
         ``(f_a, f_b)``, each ``(k, w, 3)``.
     """
     d = pos_b[:, None, :, :] - pos_a[:, :, None, :]
-    r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, d.dtype) ** 2
     pair_ok = ok_a[:, :, None] & ok_b[:, None, :]
-    inv3 = jnp.where(pair_ok, r2 ** (-1.5), 0.0)
+    kernel = resolve_softening_kernel(softening_kernel)
+    if kernel == "plummer":
+        r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, d.dtype) ** 2
+        inv3 = jnp.where(pair_ok, r2 ** (-1.5), 0.0)
+    else:
+        params = softening_params(kernel, softening, d.dtype)
+        inv3 = masked_pair_factors(jnp.sum(d * d, axis=-1), pair_ok, params, kernel)[0]
     if weights is not None:
         inv3 = inv3 * weights
     # shared[k, i, j] is the geometric factor for the (i, j) pair; both sides read it.
@@ -361,6 +385,7 @@ def distributed_mutual_accelerations(
     local_acceleration: Array,
     *,
     softening: float,
+    softening_kernel: Optional[str] = None,
     g: float = 1.0,
     ndev: int,
     leaf_width: int,
@@ -409,7 +434,9 @@ def distributed_mutual_accelerations(
     local_acceleration:
         ``(n, 3)`` acceleration from this domain's own pairs.
     softening:
-        Plummer softening length.
+        Plummer-equivalent softening length.
+    softening_kernel:
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     g:
         Gravitational constant.
     ndev:
@@ -540,6 +567,15 @@ def distributed_mutual_accelerations(
         k_max = int(level_weights.shape[0]) - 1
 
     do_far = float(cross_theta) > 0.0
+    if do_far and support_factor(resolve_softening_kernel(softening_kernel)) > 0.0:
+        # The cross walk (yggdrax dual_tree_walk_cross_mutual) has no separation
+        # floor, so a compact kernel's unsoftened cross far field would carry the
+        # softening error the floor removes everywhere else.
+        raise NotImplementedError(
+            "cross_theta > 0 with a compact softening kernel needs a separation "
+            "floor in the cross walk, which it does not have yet; use "
+            "cross_theta=0 (exact cross interactions) or softening_kernel='plummer'."
+        )
     if do_far and (
         node_multipoles is None or expansion_centers is None or tree_arrays is None
     ):
@@ -776,6 +812,7 @@ def distributed_mutual_accelerations(
         softening,
         g,
         weights=near_w,
+        softening_kernel=softening_kernel,
     )
     acc = local_acceleration.at[jnp.where(oka, ia, n_local)].add(
         jnp.where(oka[..., None], f_a, 0.0), mode="drop"
@@ -1006,7 +1043,9 @@ class DistributedMutualConfig:
         one or drop the interaction, and either quietly integrates the wrong
         equations. Clamping makes it silent; this makes it a configuration error.
     softening : float
-        Plummer softening length, shared by both halves.
+        Plummer-equivalent softening length, shared by both halves.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     g : float
         Gravitational constant.
     caps : Optional[MutualCapacities]
@@ -1062,6 +1101,7 @@ class DistributedMutualConfig:
     order: int = 4
     k_max: Optional[int] = None
     softening: float = 1e-3
+    softening_kernel: Optional[str] = None
     g: float = 1.0
     caps: Optional[Any] = None
     cross_theta: float = 0.0
@@ -1642,6 +1682,7 @@ def make_distributed_mutual_evaluator(
             leaf_size=leaf,
             caps=caps,
             softening=float(cfg.softening),
+            softening_kernel=cfg.softening_kernel,
             G=float(cfg.g),
             use_pallas=use_pallas,
             pallas_interpret=bool(cfg.pallas_interpret),
@@ -1703,6 +1744,7 @@ def make_distributed_mutual_evaluator(
             root,
             local_acc,
             softening=float(cfg.softening),
+            softening_kernel=cfg.softening_kernel,
             g=float(cfg.g),
             ndev=ndev,
             leaf_width=leaf,

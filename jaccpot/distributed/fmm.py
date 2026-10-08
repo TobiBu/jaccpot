@@ -77,6 +77,7 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
+from jaccpot.softening import resolve_softening_kernel, support_factor
 from jaccpot.config import MACTypeInput
 from jaccpot.distributed._force_scale import (
     DISTRIBUTED_FORCE_SCALE_MODES,
@@ -675,6 +676,11 @@ class DistributedFMMConfig:
     # the fastest point at every N.
     leaf_size: int = 64
     softening: float = 0.02
+    # The pair kernel (jaccpot.softening; None gives the default) and the walk's
+    # separation floor in softening lengths (None: the kernel's support, which
+    # makes a compact kernel's unsoftened far field exact; 0 for Plummer).
+    softening_kernel: Optional[str] = None
+    softening_floor: Optional[float] = None
     G: float = 1.0
     rotation: str = "solidfmm"
     # dehnen bounding-SPHERE MAC extents (the correct multipole-radius bound, matching
@@ -1420,6 +1426,7 @@ def _chunked_pallas_nearfield_accumulate(
     G: Any,
     softening_sq: jax.Array,
     accum: str = "input",
+    softening_kernel: Optional[str] = None,
 ) -> jax.Array:
     """Fused-Pallas near field over blocks of TARGET leaves (bounded peak memory).
 
@@ -1475,6 +1482,8 @@ def _chunked_pallas_nearfield_accumulate(
     softening_sq : jax.Array
         Squared Plummer softening length.
 
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     Returns
     -------
     jax.Array
@@ -1525,6 +1534,7 @@ def _chunked_pallas_nearfield_accumulate(
             tgt_idx,
             G=G,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
         )
 
         # per-block densification built DIRECTLY from the CSR (no [num_edges] window):
@@ -1552,6 +1562,7 @@ def _chunked_pallas_nearfield_accumulate(
             concat_pos,
             G=G,
             softening_sq=softening_sq,
+            softening_kernel=softening_kernel,
             compute_potential=False,
             accum="wide" if _accum == "wide" else "input",
         )
@@ -1816,6 +1827,12 @@ def _make_fn(
     leaf = config.leaf_size
     G = config.G
     soft = config.softening
+    soft_kernel = resolve_softening_kernel(config.softening_kernel)
+    soft_floor = float(soft) * (
+        support_factor(soft_kernel)
+        if config.softening_floor is None
+        else float(config.softening_floor)
+    )
     rot = config.rotation
     theta = config.theta
     is_real = str(config.basis).strip().lower() == "real"
@@ -2088,6 +2105,12 @@ def _make_fn(
                 tc_far_cap = max(
                     1 << 14, int(config.max_interactions_per_node) * num_leaves
                 )
+            if soft_floor > 0.0:
+                raise NotImplementedError(
+                    "local_walk='treecode' has no separation floor; a compact "
+                    "softening kernel needs one (use local_walk='dual_tree', or "
+                    "softening_floor=0)."
+                )
             _art = _build_treecode_artifacts_strict_streamed(
                 tree=tree,
                 geometry=geom,
@@ -2119,6 +2142,7 @@ def _make_fn(
                 theta=theta,
                 traversal_config=cfg,
                 mac_type=mac,
+                separation_floor=soft_floor,
                 return_result=True,
             )
 
@@ -2230,6 +2254,7 @@ def _make_fn(
             max_interactions_per_node=KC,
             max_neighbors_per_leaf=KN,
             max_pair_queue=x_queue,
+            separation_floor=soft_floor,
         )
 
         # Right-sized cross-far slice. The walk sizes `interaction_sources` at
@@ -2343,6 +2368,7 @@ def _make_fn(
                 # Static: the exact per-leaf maximum is a host read, and inside
                 # ``shard_map`` every value is abstract. The leaf capacity bounds it.
                 max_leaf_size=leaf,
+                separation_floor=soft_floor,
             )
             prepass_res = self_res
             inter, nbr, self_res = build_interactions_and_neighbors(
@@ -2351,6 +2377,7 @@ def _make_fn(
                 theta=theta,
                 traversal_config=cfg,
                 mac_type=mac,
+                separation_floor=soft_floor,
                 pair_policy=adaptive_pair_policy,
                 policy_state=policy_state,
                 return_result=True,
@@ -2406,6 +2433,7 @@ def _make_fn(
                     max_interactions_per_node=KC,
                     max_neighbors_per_leaf=KN,
                     max_pair_queue=x_queue,
+                    separation_floor=soft_floor,
                     pair_policy=adaptive_cross_pair_policy,
                     policy_state=cross_state,
                 )
@@ -2665,6 +2693,7 @@ def _make_fn(
                     block=int(config.nearfield_chunk),
                     G=G,
                     softening_sq=soft2_a,
+                    softening_kernel=soft_kernel,
                 )
             else:
                 self_acc = _compute_leaf_p2p_prepared_large_n_self_only_impl(
@@ -2675,6 +2704,7 @@ def _make_fn(
                     safe_idx,
                     G=G,
                     softening_sq=soft2_a,
+                    softening_kernel=soft_kernel,
                 )
                 # Densify the combined CSR (offsets/src_s/counts, sorted by target) into a
                 # padded [u_leaves, S_near] source-leaf-id table + validity mask.
@@ -2731,7 +2761,7 @@ def _make_fn(
                         # tier's static slot width from; here the mask is a tracer
                         # built inside shard_map, so the reverse runs untiered.
                         None,
-                        softening_kernel,
+                        soft_kernel,
                     )
                 else:
                     pair_acc = _radix_fast_lane_prepacked_pallas(
@@ -2744,6 +2774,7 @@ def _make_fn(
                         concat_pos,
                         G=G,
                         softening_sq=soft2_a,
+                        softening_kernel=soft_kernel,
                         compute_potential=False,
                     )
                 near_full = self_acc + pair_acc
@@ -2755,6 +2786,7 @@ def _make_fn(
                 concat_mass,
                 G=G,
                 softening=soft,
+                softening_kernel=soft_kernel,
                 nearfield_mode="baseline",
                 node_ranges_override=jnp.zeros((u_leaves + 1, 2), INDEX_DTYPE),
                 leaf_nodes_override=jnp.arange(u_leaves, dtype=INDEX_DTYPE),

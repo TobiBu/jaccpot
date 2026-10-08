@@ -35,6 +35,8 @@ from jax import lax
 from jax.typing import ArrayLike
 from jaxtyping import Array
 
+from jaccpot.softening import resolve_softening_kernel, support_factor
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime
     # `force` imports this module, so these are annotation-only here.
     from jaccpot.mutual.force import MutualCapacities, MutualFMMState
@@ -324,6 +326,8 @@ def build_mutual_state_device(
     leaf_size: int,
     caps: "MutualCapacities",
     softening: float,
+    softening_kernel: Optional[str] = None,
+    softening_floor: Optional[float] = None,
     G: float = 1.0,
     use_pallas: bool = False,
     near_chunk_size: Optional[int] = None,
@@ -389,7 +393,13 @@ def build_mutual_state_device(
     caps : MutualCapacities
         Fixed capacities; every output shape comes from these.
     softening : float
-        Plummer softening length.
+        Plummer-equivalent softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    softening_floor : Optional[float]
+        Minimum gap of an accepted far pair in softening lengths; ``None`` gives
+        the kernel's support factor (``0`` for Plummer), so a compact kernel's
+        unsoftened far field is exact.
     G : float
         Gravitational constant. Default ``1.0``.
     use_pallas : bool
@@ -458,6 +468,10 @@ def build_mutual_state_device(
         leaf_of_particle,
         depth_cap=int(caps.depth) + 1,
     )
+    kernel = resolve_softening_kernel(softening_kernel)
+    floor = (
+        support_factor(kernel) if softening_floor is None else float(softening_floor)
+    ) * float(softening)
     walk = dual_tree_walk_mutual(
         lc_full,
         rc_full,
@@ -468,6 +482,7 @@ def build_mutual_state_device(
         max_pair_queue=int(max_pair_queue),
         far_cap=int(caps.far),
         near_cap=int(caps.near),
+        separation_floor=floor,
     )
 
     depth = node_depths(parent, root, depth_cap=int(caps.depth) + 1)
@@ -543,6 +558,7 @@ def build_mutual_state_device(
         forward_permutation=jnp.argsort(inverse_permutation).astype(index_dtype),
         inverse_permutation=inverse_permutation,
         softening=float(softening),
+        softening_kernel=kernel,
         G=float(G),
         order=int(order),
         use_pallas=bool(use_pallas),

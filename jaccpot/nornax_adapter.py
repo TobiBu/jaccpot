@@ -82,6 +82,7 @@ from jaccpot.mutual.force import (
     resolve_mutual_capacities,
 )
 from jaccpot.mutual.topology import build_mutual_topology_from_tree
+from jaccpot.softening import resolve_softening_kernel, support_radius
 
 __all__ = [
     "BlockStepFMM",
@@ -257,7 +258,9 @@ class BlockStepFMM:
     Parameters
     ----------
     softening : float
-        Plummer softening ``1 / (r^2 + eps^2)^{3/2}``.
+        Plummer-equivalent softening length (:mod:`jaccpot.softening`).
+    softening_kernel : Optional[str]
+        The pair kernel; ``None`` gives the default.
     k_max : int
         Highest block-step rung. Levels run ``0 .. k_max``.
     theta : float
@@ -324,6 +327,7 @@ class BlockStepFMM:
         *,
         softening: float,
         k_max: int,
+        softening_kernel: Optional[str] = None,
         theta: float = 0.6,
         max_order: int = 4,
         G: float = 1.0,
@@ -356,6 +360,7 @@ class BlockStepFMM:
         self.theta = float(theta)
         self.max_order = int(max_order)
         self.softening = float(softening)
+        self.softening_kernel = resolve_softening_kernel(softening_kernel)
         self.G = float(G)
         self.k_max = int(k_max)
         self.basis = basis
@@ -465,6 +470,7 @@ class BlockStepFMM:
             np.asarray(prepared.masses_sorted),
             theta=self.theta,
             order=self.max_order,
+            separation_floor=support_radius(self.softening_kernel, self.softening),
         )
         if self.static_shapes and self._caps is None:
             # Only the host lane asks for drift headroom. It rebuilds an LBVH
@@ -475,6 +481,7 @@ class BlockStepFMM:
         self._state = build_mutual_state(
             topology,
             softening=self.softening,
+            softening_kernel=self.softening_kernel,
             G=self.G,
             use_pallas=(self.backend == "pallas"),
             near_chunk_size=self.near_chunk_size,
@@ -556,6 +563,9 @@ class BlockStepFMM:
                     np.asarray(sorted_masses),
                     theta=self.theta,
                     order=self.max_order,
+                    separation_floor=support_radius(
+                        self.softening_kernel, self.softening
+                    ),
                 )
             )
         # The generous depth bound `resolve_mutual_capacities` applies exists for
@@ -677,6 +687,7 @@ class BlockStepFMM:
                 leaf_size=self.leaf_size,
                 caps=self._caps._replace(queue=queue),
                 softening=self.softening,
+                softening_kernel=self.softening_kernel,
                 G=self.G,
                 max_pair_queue=queue,
             )
@@ -838,6 +849,7 @@ class BlockStepFMM:
             order=self.max_order,
             leaf_size=self.leaf_size,
             softening=self.softening,
+            softening_kernel=self.softening_kernel,
             G=self.G,
             use_pallas=(self.backend == "pallas"),
             near_chunk_size=self.near_chunk_size,
@@ -1468,7 +1480,10 @@ class DistributedBlockStepFMM:
     Parameters
     ----------
     softening : float
-        Plummer softening ``1 / (r^2 + eps^2)^{3/2}``, shared by both halves.
+        Plummer-equivalent softening length (:mod:`jaccpot.softening`), shared
+        by both halves.
+    softening_kernel : Optional[str]
+        The pair kernel; ``None`` gives the default.
     k_max : int
         Highest block-step rung. Levels run ``0 .. k_max``.
     theta : float
@@ -1549,6 +1564,7 @@ class DistributedBlockStepFMM:
         *,
         softening: float,
         k_max: int,
+        softening_kernel: Optional[str] = None,
         theta: float = 0.5,
         cross_theta: float = 0.0,
         max_order: int = 4,
@@ -1582,6 +1598,7 @@ class DistributedBlockStepFMM:
 
         self.k_max = int(k_max)
         self.softening = float(softening)
+        self.softening_kernel = resolve_softening_kernel(softening_kernel)
         self.theta = float(theta)
         self.cross_theta = float(cross_theta)
         self.max_order = int(max_order)
@@ -1598,6 +1615,7 @@ class DistributedBlockStepFMM:
             order=int(max_order),
             k_max=int(k_max) if bool(validate_rung) else None,
             softening=float(softening),
+            softening_kernel=self.softening_kernel,
             g=float(G),
             caps=caps,
             backend=backend,

@@ -41,6 +41,12 @@ from jax import lax
 from jaxtyping import Array, Bool, Float, jaxtyped
 
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
+from jaccpot.softening import (
+    masked_pair_factors,
+    pair_softening_sq_derivative,
+    resolve_softening_kernel,
+    softening_params_from_sq,
+)
 
 try:
     from jax.experimental import pallas as pl
@@ -257,10 +263,11 @@ def _block_tile(
     mb: Float[Array, "slots"],
     vb_f: Float[Array, "slots"],
     weight: Optional[Float[Array, "slots slots"]],
-    softening_sq: Array,
+    soft_params: tuple[Array, Array],
     g_value: Array,
     *,
     exclude_diagonal: bool,
+    softening_kernel: str = "plummer",
 ) -> tuple[Array, Array, Array]:
     """Return the ``(S, S)`` per-component force tiles for one leaf pair.
 
@@ -292,12 +299,16 @@ def _block_tile(
     weight : Optional[Float[Array, 'slots slots']]
         ``(S, S)`` level weight from :func:`_pair_weight_tile`, or ``None`` for
         unit weights.
-    softening_sq : Array
-        Squared Plummer softening length, scalar.
+    soft_params : tuple[Array, Array]
+        The two softening scalars of
+        :func:`jaccpot.softening.softening_params_from_sq` (``(eps^2, 0)`` for
+        Plummer).
     g_value : Array
         Gravitational constant, scalar.
     exclude_diagonal : bool
         Drop ``i == j``, for a leaf paired with itself.
+    softening_kernel : str
+        The pair kernel, static.
 
     Returns
     -------
@@ -310,7 +321,6 @@ def _block_tile(
     dx = bx[None, :] - ax[:, None]
     dy = by[None, :] - ay[:, None]
     dz = bz[None, :] - az[:, None]
-    r2 = dx * dx + dy * dy + dz * dz + softening_sq
 
     valid = (va_f[:, None] > 0.5) & (vb_f[None, :] > 0.5)
     if exclude_diagonal:
@@ -318,14 +328,20 @@ def _block_tile(
         cols = lax.broadcasted_iota(jnp.int32, valid.shape, 1)
         valid = valid & (rows != cols)
 
-    # Double-`where`: the guarded r2 is substituted *before* the reciprocal, so
-    # neither the forward nor the analytic reverse ever evaluates r^-3 (or its
-    # derivative) at a masked pair. A trailing `where` alone would still let a
-    # NaN through the cotangent.
-    safe_r2 = jnp.where(valid, r2, jnp.ones_like(r2))
-    inv_r = lax.rsqrt(safe_r2)
-    inv_r = jnp.where(valid, inv_r, jnp.zeros_like(inv_r))
-    inv_r3 = inv_r * inv_r * inv_r
+    if softening_kernel == "plummer":
+        r2 = dx * dx + dy * dy + dz * dz + soft_params[0]
+        # Double-`where`: the guarded r2 is substituted *before* the reciprocal, so
+        # neither the forward nor the analytic reverse ever evaluates r^-3 (or its
+        # derivative) at a masked pair. A trailing `where` alone would still let a
+        # NaN through the cotangent.
+        safe_r2 = jnp.where(valid, r2, jnp.ones_like(r2))
+        inv_r = lax.rsqrt(safe_r2)
+        inv_r = jnp.where(valid, inv_r, jnp.zeros_like(inv_r))
+        inv_r3 = inv_r * inv_r * inv_r
+    else:
+        inv_r3 = masked_pair_factors(
+            dx * dx + dy * dy + dz * dz, valid, soft_params, softening_kernel
+        )[0]
 
     scale = g_value * ma[:, None] * mb[None, :] * inv_r3
     if weight is not None:
@@ -351,6 +367,7 @@ def _mutual_leafpair_kernel(
     num_levels: int,
     exclude_diagonal: bool,
     emit_b: bool,
+    softening_kernel: str = "plummer",
 ) -> None:
     """One leaf pair: evaluate the block once, emit ``+F`` and ``-F``.
     Evaluating once and emitting both signs is what makes momentum cancel
@@ -378,7 +395,7 @@ def _mutual_leafpair_kernel(
     lw_ref : KernelRef
         Level-weight table.
     soft_ref : KernelRef
-        Squared softening length.
+        ``(2,)`` softening parameters (``[eps^2, 0]`` for Plummer).
     g_ref : KernelRef
         Gravitational constant.
     fa_ref : KernelRef
@@ -393,6 +410,8 @@ def _mutual_leafpair_kernel(
     emit_b : bool
         Also produce the ``b``-side output.
 
+    softening_kernel : str
+        The pair kernel, static (:mod:`jaccpot.softening`).
     Returns
     -------
     None
@@ -413,9 +432,10 @@ def _mutual_leafpair_kernel(
         mb_ref[0],
         vb_ref[0],
         weight,
-        soft_ref[0],
+        (soft_ref[0], soft_ref[1]),
         g_ref[0],
         exclude_diagonal=exclude_diagonal,
+        softening_kernel=softening_kernel,
     )
     zero = jnp.zeros_like(ma_ref[0])
     fa_ref[0, :, 0] = jnp.sum(fx, axis=1)
@@ -444,7 +464,7 @@ def _block_vjp_tiles(
     mb: Float[Array, "slots"],
     vb_f: Float[Array, "slots"],
     weight: Optional[Float[Array, "slots slots"]],
-    softening_sq: Array,
+    soft_params: tuple[Array, Array],
     g_value: Array,
     fa_bar_xyz: tuple[
         Float[Array, "slots"], Float[Array, "slots"], Float[Array, "slots"]
@@ -455,6 +475,7 @@ def _block_vjp_tiles(
     *,
     exclude_diagonal: bool,
     level_hits: Optional[Bool[Array, "levels slots slots"]] = None,
+    softening_kernel: str = "plummer",
 ) -> tuple[
     tuple[Array, Array, Array],
     Array,
@@ -525,8 +546,8 @@ def _block_vjp_tiles(
         ``(S,)`` leaf-B validity mask, same encoding.
     weight : Optional[Float[Array, 'slots slots']]
         ``(S, S)`` level weight, or ``None`` for unit weights.
-    softening_sq : Array
-        Squared Plummer softening length, scalar.
+    soft_params : tuple[Array, Array]
+        The two softening scalars, as in :func:`_block_tile`.
     g_value : Array
         Gravitational constant, scalar.
     fa_bar_xyz : tuple[Float[Array, 'slots'], Float[Array, 'slots'], Float[Array, 'slots']]
@@ -541,6 +562,10 @@ def _block_vjp_tiles(
         when ``weight`` is given; the level-weight cotangent is contracted
         against it. ``None`` with unit weights.
 
+    softening_kernel : str
+        The pair kernel, static. A compact kernel uses its ``g``, ``(1/r) dg/dr``
+        and ``dg/d(eps^2)`` where Plummer has ``r^-3``, ``-3 r^-5`` and
+        ``-1.5 r^-5``.
     Returns
     -------
     tuple[tuple[Array, Array, Array], Array, tuple[Array, Array, Array], Array, Optional[Array], Array, Array]
@@ -555,7 +580,6 @@ def _block_vjp_tiles(
     dx = bx_pos[None, :] - ax[:, None]
     dy = by_pos[None, :] - ay[:, None]
     dz = bz_pos[None, :] - az[:, None]
-    r2 = dx * dx + dy * dy + dz * dz + softening_sq
 
     valid = (va_f[:, None] > 0.5) & (vb_f[None, :] > 0.5)
     if exclude_diagonal:
@@ -563,10 +587,25 @@ def _block_vjp_tiles(
         cols = lax.broadcasted_iota(jnp.int32, valid.shape, 1)
         valid = valid & (rows != cols)
 
-    safe_r2 = jnp.where(valid, r2, jnp.ones_like(r2))
-    inv_r = lax.rsqrt(safe_r2)
-    inv_r = jnp.where(valid, inv_r, jnp.zeros_like(inv_r))
-    inv_r3 = inv_r * inv_r * inv_r
+    plummer = softening_kernel == "plummer"
+    if plummer:
+        r2 = dx * dx + dy * dy + dz * dz + soft_params[0]
+        safe_r2 = jnp.where(valid, r2, jnp.ones_like(r2))
+        inv_r = lax.rsqrt(safe_r2)
+        inv_r = jnp.where(valid, inv_r, jnp.zeros_like(inv_r))
+        inv_r3 = inv_r * inv_r * inv_r
+    else:
+        r2 = dx * dx + dy * dy + dz * dz
+        inv_r3, _, dgr = masked_pair_factors(
+            r2, valid, soft_params, softening_kernel, derivative=True
+        )
+        dgde = jnp.where(
+            valid,
+            pair_softening_sq_derivative(
+                jnp.where(valid, r2, 1.0), soft_params, softening_kernel
+            ),
+            0.0,
+        )
 
     # `pair` is m_i m_j r^-3; `base` is G w r^-3 (what the mass cotangents need);
     # `scale` is the full G w m_i m_j r^-3 prefactor of the forward.
@@ -584,7 +623,14 @@ def _block_vjp_tiles(
     bz = faz[:, None] - fbz[None, :]
 
     dot = dx * bx + dy * by + dz * bz
-    radial = jnp.where(valid, -3.0 * scale * dot / safe_r2, jnp.zeros_like(dot))
+    if plummer:
+        radial = jnp.where(valid, -3.0 * scale * dot / safe_r2, jnp.zeros_like(dot))
+    else:
+        # (scale / g) (1/r) dg/dr dot: the same tile with the kernel's derivative
+        wmm = g_value * ma[:, None] * mb[None, :]
+        if weight is not None:
+            wmm = wmm * weight
+        radial = wmm * dgr * dot
 
     drbar_x = scale * bx + radial * dx
     drbar_y = scale * by + radial * dy
@@ -619,7 +665,10 @@ def _block_vjp_tiles(
         g_bar = jnp.sum(jnp.sum(pair * dot, axis=1), axis=0)
     # d f_ij / d(soft) = -(3/2) s_ij dr_ij / r_ij^2, and `radial` is
     # -3 s_ij dot_ij / r_ij^2 (zero on masked pairs), so this is half its sum.
-    soft_bar = 0.5 * jnp.sum(jnp.sum(radial, axis=1), axis=0)
+    if plummer:
+        soft_bar = 0.5 * jnp.sum(jnp.sum(radial, axis=1), axis=0)
+    else:
+        soft_bar = jnp.sum(jnp.sum(wmm * dgde * dot, axis=1), axis=0)
     return xa_bar, ma_bar, xb_bar, mb_bar, lw_bar, soft_bar, g_bar
 
 
@@ -648,6 +697,7 @@ def _mutual_leafpair_vjp_kernel(
     levels_width: int,
     exclude_diagonal: bool,
     emit_b: bool,
+    softening_kernel: str = "plummer",
 ) -> None:
     """One leaf pair's analytic reverse, tile-bounded like the forward.
 
@@ -673,7 +723,7 @@ def _mutual_leafpair_vjp_kernel(
     lw_ref : KernelRef
         Level-weight table.
     soft_ref : KernelRef
-        Squared softening length.
+        ``(2,)`` softening parameters (``[eps^2, 0]`` for Plummer).
     g_ref : KernelRef
         Gravitational constant.
     fa_bar_ref : KernelRef
@@ -705,6 +755,8 @@ def _mutual_leafpair_vjp_kernel(
     emit_b : bool
         Also produce the ``b``-side output.
 
+    softening_kernel : str
+        The pair kernel, static (:mod:`jaccpot.softening`).
     Returns
     -------
     None
@@ -734,12 +786,13 @@ def _mutual_leafpair_vjp_kernel(
         mb_ref[0],
         vb_ref[0],
         weight,
-        soft_ref[0],
+        (soft_ref[0], soft_ref[1]),
         g_ref[0],
         fa_bar_xyz,
         fb_bar_xyz,
         exclude_diagonal=exclude_diagonal,
         level_hits=level_hits,
+        softening_kernel=softening_kernel,
     )
     zero = jnp.zeros_like(ma_bar)
     for lane in range(3):
@@ -849,6 +902,7 @@ def mutual_leafpair_block_jax(
     *,
     exclude_diagonal: bool = False,
     emit_b: bool = True,
+    softening_kernel: Optional[str] = None,
 ) -> tuple[Array, Array]:
     """Pure-jnp twin of the kernel: the correctness and AD oracle.
 
@@ -886,12 +940,17 @@ def mutual_leafpair_block_jax(
     emit_b : bool
         Also produce the ``b``-side output.
 
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     Returns
     -------
     tuple[Array, Array]
         ``(F_a, F_b)``, each ``(pairs, slots, 3)``.
     """
     num_levels = 0 if level_weights is None else int(level_weights.shape[0])
+    kernel = resolve_softening_kernel(softening_kernel)
+    sp = softening_params_from_sq(kernel, softening_sq, ma.dtype)
+    soft_params = (sp[0], sp[1])
 
     def one(
         xa_i: Array,
@@ -916,9 +975,10 @@ def mutual_leafpair_block_jax(
             mb_i,
             vb_i,
             weight,
-            softening_sq,
+            soft_params,
             g_value,
             exclude_diagonal=exclude_diagonal,
+            softening_kernel=kernel,
         )
         f_a = jnp.stack(
             [jnp.sum(fx, axis=1), jnp.sum(fy, axis=1), jnp.sum(fz, axis=1)], axis=-1
@@ -962,6 +1022,7 @@ def mutual_leafpair_block_pallas(
     emit_b: bool = True,
     interpret: bool = False,
     backend: str = "triton",
+    softening_kernel: Optional[str] = None,
 ) -> tuple[Array, Array]:
     """One Pallas program per leaf pair; same semantics as the jnp twin.
     Not differentiable on its own -- ``pallas_call`` has no JVP or transpose
@@ -1005,6 +1066,8 @@ def mutual_leafpair_block_pallas(
     backend : str
         Pallas lowering backend.
 
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     Returns
     -------
     tuple[Array, Array]
@@ -1026,7 +1089,8 @@ def mutual_leafpair_block_pallas(
 
     xa_p, ma_p, va_p, ra_p = _pad_inputs(xa, ma, va_f, rung_a_f, width, dtype)
     xb_p, mb_p, vb_p, rb_p = _pad_inputs(xb, mb, vb_f, rung_b_f, width, dtype)
-    soft = jnp.asarray(softening_sq, dtype=dtype).reshape((1,))
+    softening_kernel = resolve_softening_kernel(softening_kernel)
+    soft = softening_params_from_sq(softening_kernel, softening_sq, dtype)
     gval = jnp.asarray(g_value, dtype=dtype).reshape((1,))
 
     kernel = functools.partial(
@@ -1034,6 +1098,7 @@ def mutual_leafpair_block_pallas(
         num_levels=num_levels,
         exclude_diagonal=bool(exclude_diagonal),
         emit_b=bool(emit_b),
+        softening_kernel=softening_kernel,
     )
 
     def bs_vec(cols: int) -> "pl.BlockSpec":
@@ -1094,6 +1159,7 @@ def mutual_leafpair_block_vjp_pallas(
     emit_b: bool = True,
     interpret: bool = False,
     backend: str = "triton",
+    softening_kernel: Optional[str] = None,
 ) -> tuple[Array, Array, Array, Array, Optional[Array], Array, Array]:
     """Hand-written analytic reverse, one Pallas program per leaf pair.
 
@@ -1144,6 +1210,8 @@ def mutual_leafpair_block_vjp_pallas(
     backend : str
         Pallas lowering backend.
 
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     Returns
     -------
     tuple[Array, Array, Array, Array, Optional[Array], Array, Array]
@@ -1179,7 +1247,8 @@ def mutual_leafpair_block_vjp_pallas(
     pad = width - slots
     fa_bar_p = jnp.pad(fa_bar, ((0, 0), (0, pad), (0, _VEC_WIDTH - 3))).astype(dtype)
     fb_bar_p = jnp.pad(fb_bar, ((0, 0), (0, pad), (0, _VEC_WIDTH - 3))).astype(dtype)
-    soft = jnp.asarray(softening_sq, dtype=dtype).reshape((1,))
+    softening_kernel = resolve_softening_kernel(softening_kernel)
+    soft = softening_params_from_sq(softening_kernel, softening_sq, dtype)
     gval = jnp.asarray(g_value, dtype=dtype).reshape((1,))
 
     kernel = functools.partial(
@@ -1188,6 +1257,7 @@ def mutual_leafpair_block_vjp_pallas(
         levels_width=levels_width,
         exclude_diagonal=bool(exclude_diagonal),
         emit_b=bool(emit_b),
+        softening_kernel=softening_kernel,
     )
 
     def bs_vec(cols: int) -> "pl.BlockSpec":
@@ -1279,7 +1349,7 @@ def mutual_leafpair_block_vjp_pallas(
 # ---------------------------------------------------------------------------
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(11, 12, 13, 14, 15))
 @jaxtyped(typechecker=beartype)
 def mutual_leafpair_block_cvjp(
     xa: Float[Array, "pairs w 3"],
@@ -1297,6 +1367,7 @@ def mutual_leafpair_block_cvjp(
     exclude_diagonal: bool,
     emit_b: bool,
     interpret: bool,
+    softening_kernel: Optional[str] = None,
 ) -> tuple[Array, Array]:
     """Differentiable mutual leaf-pair block: Pallas forward, analytic reverse.
     This is the entry point callers should use: it is the ``custom_vjp`` that
@@ -1341,6 +1412,8 @@ def mutual_leafpair_block_cvjp(
         Also produce the ``b``-side output.
     interpret : bool
         Run the kernels in interpret mode.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`). ``nondiff_argnums``.
 
     Returns
     -------
@@ -1362,6 +1435,7 @@ def mutual_leafpair_block_cvjp(
         exclude_diagonal=bool(exclude_diagonal),
         emit_b=bool(emit_b),
         interpret=bool(interpret),
+        softening_kernel=softening_kernel,
     )
 
 
@@ -1381,6 +1455,7 @@ def _mutual_leafpair_block_cvjp_fwd(
     exclude_diagonal: bool,
     emit_b: bool,
     interpret: bool,
+    softening_kernel: Optional[str] = None,
 ) -> tuple[tuple[Array, Array], tuple[Array, ...]]:
     out = mutual_leafpair_block_pallas(
         xa,
@@ -1397,6 +1472,7 @@ def _mutual_leafpair_block_cvjp_fwd(
         exclude_diagonal=bool(exclude_diagonal),
         emit_b=bool(emit_b),
         interpret=bool(interpret),
+        softening_kernel=softening_kernel,
     )
     # Residual is O(pairs * S), not O(pairs * S^2): the block tile is rebuilt in
     # the reverse kernel rather than stored. Under the caller's `lax.scan` these
@@ -1423,6 +1499,7 @@ def _mutual_leafpair_block_cvjp_bwd(
     exclude_diagonal: bool,
     emit_b: bool,
     interpret: bool,
+    softening_kernel: Optional[str],
     residual: tuple[Array, ...],
     cotangent: tuple[Array, Array],
 ) -> tuple[Array, ...]:
@@ -1458,6 +1535,7 @@ def _mutual_leafpair_block_cvjp_bwd(
             exclude_diagonal=bool(exclude_diagonal),
             emit_b=bool(emit_b),
             interpret=bool(interpret),
+            softening_kernel=softening_kernel,
         )
     )
     # Masks and rungs are discrete: they take zero cotangents. They travel as

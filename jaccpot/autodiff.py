@@ -8,6 +8,12 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array, Float
 
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params,
+)
+
 
 def direct_sum_gravitational_acceleration(
     positions: Float[Array, "n 3"],
@@ -19,6 +25,7 @@ def direct_sum_gravitational_acceleration(
     bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
     leaf_size: int = 16,
     max_order: int = 4,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Gravitational accelerations by direct O(N^2) summation, differentiably.
 
@@ -63,6 +70,9 @@ def direct_sum_gravitational_acceleration(
         **Ignored.** There is no expansion here, so there is no truncation error --
         which is precisely what makes this a usable oracle.
 
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+        ``softening`` is the Plummer-equivalent length for every kernel.
     Returns
     -------
     Array
@@ -88,9 +98,15 @@ def direct_sum_gravitational_acceleration(
     del theta, bounds, leaf_size, max_order
 
     diffs = positions[:, None, :] - positions[None, :, :]
-    dist2 = jnp.sum(diffs * diffs, axis=-1) + softening**2
-    inv_dist = jnp.where(dist2 > 0, jnp.power(dist2, -0.5), 0.0)
-    inv_dist3 = inv_dist**3
+    kernel = resolve_softening_kernel(softening_kernel)
+    if kernel == "plummer":
+        dist2 = jnp.sum(diffs * diffs, axis=-1) + softening**2
+        inv_dist = jnp.where(dist2 > 0, jnp.power(dist2, -0.5), 0.0)
+        inv_dist3 = inv_dist**3
+    else:
+        r2 = jnp.sum(diffs * diffs, axis=-1)
+        params = softening_params(kernel, softening, positions.dtype)
+        inv_dist3 = masked_pair_factors(r2, r2 > 0, params, kernel)[0]
     weights = masses[None, :] * inv_dist3
     weights = weights * (1.0 - jnp.eye(positions.shape[0], dtype=positions.dtype))
     return -G * jnp.einsum(
