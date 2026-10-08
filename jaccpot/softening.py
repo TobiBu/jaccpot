@@ -325,7 +325,9 @@ def pair_softening_sq_derivative(
     return -0.5 * k * k * (1.0 - c) * _horner(c, rh) * s * s * s * s * s
 
 
-def softening_params_from_sq(kernel: Optional[str], softening_sq: Any, dtype: Any = None) -> Any:
+def softening_params_from_sq(
+    kernel: Optional[str], softening_sq: Any, dtype: Any = None
+) -> Any:
     """:func:`softening_params` from a SQUARED softening, as the kernels carry it.
 
     Plummer keeps ``softening_sq`` itself as ``p0``, so its pair arithmetic is
