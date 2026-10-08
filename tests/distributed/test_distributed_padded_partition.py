@@ -58,6 +58,9 @@ _PER = 57
 #: ``cross_far_pairs`` is what caught that.
 _LEAF = 8
 
+# Plummer: this module's direct-sum references are Plummer-softened, so every
+# config and near-field call pins softening_kernel="plummer" (the default is ferrers3).
+
 
 def _direct(all_pos, all_mass, G, soft):
     """Exact softened acceleration on every particle from every other.
@@ -122,7 +125,7 @@ def test_padded_partition_matches_direct(drop):
     """
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
-    config = DistributedFMMConfig(leaf_size=_LEAF)
+    config = DistributedFMMConfig(softening_kernel="plummer", leaf_size=_LEAF)
 
     padded_pts, padded_mass = _clusters(ndev, _PER)
     if drop:
@@ -191,7 +194,7 @@ def test_padding_permutes_the_device_row_order():
     """
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
-    config = DistributedFMMConfig(leaf_size=_LEAF)
+    config = DistributedFMMConfig(softening_kernel="plummer", leaf_size=_LEAF)
     pts, mass = _clusters(ndev, _PER)
     part = partition_for_devices(pts, mass, ndev, leaf_size=_LEAF)
     assert _padding_rows(part) > 0, "this test needs a padded partition"

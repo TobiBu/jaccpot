@@ -106,8 +106,11 @@ def _system(seed=9):
 
 
 def _model(**kw):
+    # Plummer: the conformance oracle (nornax's MutualDirectSumGravity) and the
+    # energy below are Plummer-softened.
     return DistributedBlockStepFMM(
         softening=SOFT,
+        softening_kernel=kw.pop("softening_kernel", "plummer"),
         k_max=K_MAX,
         theta=kw.pop("theta", 0.5),
         cross_theta=kw.pop("cross_theta", 0.0),

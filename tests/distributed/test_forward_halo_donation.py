@@ -51,6 +51,9 @@ LEAF = 8
 STEPS = 6
 SOFT = 0.05
 
+# Plummer: this module's direct-sum references are Plummer-softened, so every
+# config and near-field call pins softening_kernel="plummer" (the default is ferrers3).
+
 
 def _clusters(ndev: int, per: int, seed: int = 4):
     """``ndev`` spatially separated clusters, so the cross-domain halo carries mass."""
@@ -77,7 +80,9 @@ def _rel_l2(a, b):
 
 def _evaluator_and_partition(halo_exchange):
     config = dataclasses.replace(
-        DistributedFMMConfig(leaf_size=LEAF, softening=SOFT),
+        DistributedFMMConfig(
+            softening_kernel="plummer", leaf_size=LEAF, softening=SOFT
+        ),
         nearfield_backend="baseline",
         local_walk="dual_tree",
     )
