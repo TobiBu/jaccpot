@@ -1320,7 +1320,7 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
         basis="solidfmm",
     )
     assert fmm._impl.tree_type == "radix"
-    assert fmm._impl.tree_build_mode == "lbvh"
+    assert fmm._impl.tree_build_mode == "static_radix"
     assert fmm._impl.grouped_interactions is False
     assert fmm._impl.nearfield_mode == "bucketed"
     assert fmm._impl.precompute_nearfield_scatter_schedules is False

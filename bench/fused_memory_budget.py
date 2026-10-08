@@ -105,6 +105,12 @@ def _args() -> argparse.Namespace:
         help="leaf capacity = this x the live cell leaves, in steps of 1024",
     )
     ap.add_argument("--caps", default="bench", choices=("bench", "named", "unnamed"))
+    ap.add_argument(
+        "--library-defaults",
+        action="store_true",
+        help="drop the harness's fused-lane switches that are library defaults since "
+        "the 2026-10 cleanup (D2), so the run checks those defaults",
+    )
     ap.add_argument("--far-cap", type=int, default=0)
     ap.add_argument("--near-cap", type=int, default=0)
     ap.add_argument("--steps", type=int, default=3, help="scan steps per timed call")
@@ -236,6 +242,24 @@ if ARGS.caps == "named":
     os.environ[_CAP_VARS[1]] = str(int(ARGS.near_cap))
 elif ARGS.caps == "unnamed":
     for v in _CAP_VARS:
+        os.environ.pop(v, None)
+if ARGS.library_defaults:
+    # What Odisseo's env block and the harness set that the library now defaults to
+    # (D2). The caps, the payload budget and the index precision stay the harness's.
+    for v in (
+        "JACCPOT_STATIC_STRICT_GPU_MODE",
+        "JACCPOT_STATIC_STRICT_FUSED_MODE",
+        "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH",
+        "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
+        "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK",
+        "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS",
+        "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET",
+        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS",
+        "JACCPOT_LARGE_N_TARGET_BLOCK_SIZE",
+        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
+        "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED",
+        "JACCPOT_LARGE_N_COMPILED_STATE_MODE",  # read nowhere; the harness sets it
+    ):
         os.environ.pop(v, None)
 _TRAV = dict(
     (FAST_LANE_ENV_BY_LEAF.get(ARGS.leaf) or {}).get("_traversal_overrides", {})

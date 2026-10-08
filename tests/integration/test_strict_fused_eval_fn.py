@@ -78,9 +78,10 @@ def test_requires_fused_mode_to_be_active(strict_env, monkeypatch):
 
     It names both switches in its message rather than failing obscurely later,
     which is the behaviour worth pinning -- a benchmark that cannot run should
-    say which flag would let it.
+    say which flag would let it. Fused mode is the default since the 2026-10
+    cleanup, so this switches it off explicitly.
     """
-    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_MODE", raising=False)
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "off")
     fmm = _engine()
     assert not fmm._strict_fused_mode_enabled
     positions, masses = _particles()

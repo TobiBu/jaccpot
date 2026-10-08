@@ -21,8 +21,6 @@ steps (that false alarm cost half a day).
 
 from __future__ import annotations
 
-import os
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -42,7 +40,6 @@ _FUSED_ENV = {
     "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK": "1",
     "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
     "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "131072",
-    "JACCPOT_LARGE_N_COMPILED_STATE_MODE": "on",
     "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED": "1",
 }
 

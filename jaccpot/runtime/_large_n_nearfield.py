@@ -46,7 +46,10 @@ __all__ = [
     "resolve_large_n_execution_config",
 ]
 
-_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 32
+# 4 since 2026-10 (cleanup D2; Odisseo's value since 2026-07): the rectangle is
+# ceil(longest row / block) blocks of `block` source leaves, at least 8 blocks, so 32
+# left 256 slots per target leaf even where a leaf has a handful of neighbours.
+_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE = 4
 _LARGE_N_NEARFIELD_DIAG_MODES = frozenset(
     ("full", "self_only", "pairs_only", "overflow_only", "zero")
 )
@@ -131,7 +134,7 @@ def resolve_large_n_execution_config(
 
     The production large-N GPU radix/solidfmm path is locked to radix fast-lane
     execution. If no valid explicit target block size is provided via
-    ``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE``, the fast lane defaults to block size 32.
+    ``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE``, the fast lane defaults to block size 4.
 
     Parameters
     ----------

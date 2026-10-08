@@ -69,7 +69,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot import FastMultipoleMethod
+from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, TreeConfig
 from jaccpot.autodiff import direct_sum_gravitational_acceleration
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 
@@ -339,17 +339,35 @@ def test_the_pairs_layout_is_rejected_rather_than_silently_dropped() -> None:
 def test_discarded_far_pairs_are_rejected_rather_than_differentiated_as_constant() -> (
     None
 ):
-    """Without ``retain_far_pairs_for_grad`` the reverse must refuse, not freeze the far field."""
+    """Without ``retain_far_pairs_for_grad`` the reverse must refuse, not freeze the far field.
+
+    The ``lbvh`` tree discards the far-pair list. The ``static_radix`` tree that
+    ``large_n_gpu`` builds since the 2026-10 cleanup (D2) keeps it for its strict
+    lane, so there the reverse runs through the real far field instead.
+    """
     positions, masses, _ = _problem()
-    fmm = FastMultipoleMethod(preset="large_n_gpu", G=_G, softening=_SOFTENING)
-    previous = os.environ.get(_PAYLOAD_CAP_ENV)
-    os.environ[_PAYLOAD_CAP_ENV] = "0"
-    try:
-        state = fmm.prepare_state(positions, masses, leaf_size=_LEAF, max_order=_ORDER)
-    finally:
-        if previous is None:
-            os.environ.pop(_PAYLOAD_CAP_ENV, None)
-        else:
-            os.environ[_PAYLOAD_CAP_ENV] = previous
+    states = {}
+    for mode in ("lbvh", "static_radix"):
+        fmm = FastMultipoleMethod(
+            preset="large_n_gpu",
+            G=_G,
+            softening=_SOFTENING,
+            advanced=FMMAdvancedConfig(tree=TreeConfig(mode=mode)),
+        )
+        previous = os.environ.get(_PAYLOAD_CAP_ENV)
+        os.environ[_PAYLOAD_CAP_ENV] = "0"
+        try:
+            states[mode] = (
+                fmm,
+                fmm.prepare_state(positions, masses, leaf_size=_LEAF, max_order=_ORDER),
+            )
+        finally:
+            if previous is None:
+                os.environ.pop(_PAYLOAD_CAP_ENV, None)
+            else:
+                os.environ[_PAYLOAD_CAP_ENV] = previous
+    fmm, state = states["lbvh"]
+    assert state.compact_far_pairs is None
     with pytest.raises(RuntimeError, match="compact_far_pairs"):
         fmm.differentiable_accelerations(state, positions, masses)
+    assert states["static_radix"][1].compact_far_pairs is not None

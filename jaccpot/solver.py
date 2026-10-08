@@ -65,7 +65,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             tree=replace(
                 cfg.tree,
                 tree_type="radix",
-                mode="lbvh",
+                mode="static_radix",
                 leaf_target=64,
                 refine_local=False,
                 max_refine_levels=0,

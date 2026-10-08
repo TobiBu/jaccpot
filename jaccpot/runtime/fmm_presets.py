@@ -106,7 +106,8 @@ _LARGE_N_GPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
 
 _LARGE_N_GPU_PRESET = FMMPresetConfig(
     name=FMMPreset.LARGE_N_GPU,
-    tree_build_mode="lbvh",
+    # static_radix since 2026-10 (cleanup D2): the fused strict lane needs it
+    tree_build_mode="static_radix",
     target_leaf_particles=64,
     refine_local=False,
     max_refine_levels=0,
