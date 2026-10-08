@@ -1241,11 +1241,12 @@ def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
 
 
-def test_compute_accelerations_returns_acc_derivatives_when_requested():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_returns_acc_derivatives_when_requested(basis):
     positions, masses = _sample_problem(n=48)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
-        basis="solidfmm",
+        basis=basis,
     )
     acc, derivatives = fmm.compute_accelerations(
         positions,
@@ -1259,7 +1260,8 @@ def test_compute_accelerations_returns_acc_derivatives_when_requested():
     assert derivatives[0].shape == (positions.shape[0], 3, 3)
 
 
-def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_and_jerk_matches_direct_sum_small_n(basis):
     """Jerk matches direct summation in the NEAR-FIELD-ONLY regime.
 
     ``theta=1e-4`` with ``leaf_size=12`` accepts **no** M2L pairs at this N, so
@@ -1275,7 +1277,7 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
     acc_fmm, jerk_fmm = fmm.compute_accelerations_and_jerk(
         positions,
@@ -1300,7 +1302,8 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
     assert rel < 5e-2
 
 
-def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter(basis):
     """``jerk_mode="accurate"`` matches direct summation, near-field-only regime.
 
     Same caveat as
@@ -1316,7 +1319,7 @@ def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
     _, jerk_acc = fmm.compute_accelerations_and_jerk(
         positions,
@@ -1352,7 +1355,8 @@ def _far_pair_count(state) -> int:
     return 0
 
 
-def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged(basis):
     """``"accurate"`` beats ``"fast_approx"`` against direct summation -- measured.
 
     The two direct-sum jerk tests above both run at ``theta=1e-4``, which accepts
@@ -1389,7 +1393,7 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     velocities = _sample_velocities(n=n)
 
     # Anti-vacuity guard: the same parameters must actually accept M2L pairs.
-    probe = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis="solidfmm")
+    probe = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis=basis)
     far_pairs = _far_pair_count(
         probe.prepare_state(
             positions, masses, max_order=order, leaf_size=leaf_size, theta=theta
@@ -1405,7 +1409,7 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
 
     errors = {}
     for mode in ("fast_approx", "accurate"):
-        fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis="solidfmm")
+        fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis=basis)
         kwargs = dict(leaf_size=leaf_size, max_order=order, theta=theta, jerk_mode=mode)
         if mode == "accurate":
             kwargs["jerk_fd_dt"] = 1e-3
@@ -1427,14 +1431,15 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     )
 
 
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
 def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, basis: str
 ):
     positions, masses = _sample_problem(n=20)
     velocities = _sample_velocities(n=20)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
 
     def _forbidden(*args, **kwargs):
@@ -1458,14 +1463,15 @@ def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
     assert jerk.shape == positions.shape
 
 
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
 def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, basis: str
 ):
     positions, masses = _sample_problem(n=20)
     velocities = _sample_velocities(n=20)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
 
     def _forbidden(*args, **kwargs):
@@ -1540,13 +1546,14 @@ def test_compute_accelerations_and_jerk_invalid_mode_raises():
         )
 
 
-def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
+@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum(basis):
     n = 12
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
-        basis="solidfmm",
+        basis=basis,
     )
     acc, derivs = fmm.compute_accelerations_with_time_derivatives(
         positions,

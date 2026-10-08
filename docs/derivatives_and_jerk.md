@@ -14,7 +14,8 @@ limits:
 - the general time-derivative API currently accepts only `mode="accurate"`
   and raises for other mode strings.
 - public acceleration spatial derivatives
-  (`max_acc_derivative_order > 0`) currently require `basis="solidfmm"`.
+  (`max_acc_derivative_order > 0`) work on the spherical-harmonic bases: `"real"`
+  (the default) and `"solidfmm"`/`"complex"`, not on `"cartesian"`.
 - public time derivatives above crackle (`max_time_derivative_order > 3`) are
   not implemented yet.
 - all of these paths work both on full solves and on prepared-state/subset
@@ -40,8 +41,14 @@ For `max_acc_derivative_order = 1`:
 
 Current support:
 
-- enabled for `basis="solidfmm"`
+- enabled for `basis="real"` (default) and `basis="solidfmm"`
 - requesting derivatives with `basis="cartesian"` raises `NotImplementedError`
+- exact at every offset on the real basis, including a target sitting on its
+  expansion centre (a single-particle leaf) or on the centre's z-axis: the tower
+  lowers the coefficients with the exact Cartesian-derivative operator of the real
+  harmonics (`jaccpot/operators/real_harmonic_derivatives.py`) instead of
+  differentiating the polar form, which lost the curvature there before
+  2026-10
 - intended for prepared-state reuse as well as one-shot solves
 
 ## Time-Derivative APIs
@@ -88,12 +95,27 @@ For the currently supported public orders:
 
 - analytic far-field source-motion jerk via source-motion multipole/local
   contractions (`dM -> dL`) plus convective far-field and exact near-field terms
-- no finite-difference solves for `solidfmm` basis
-- `jerk_fd_dt` is only used as a fallback path for non-`solidfmm` configurations
+- no finite-difference solves on the spherical-harmonic bases (`real` and
+  `solidfmm`)
+- `jerk_fd_dt` is only used by the finite-difference fallback of
+  `basis="cartesian"`
 - slower than `fast_approx`, but typically faster than finite-difference
   accurate-mode equivalents
-- optimized implementation: builds source-motion multipoles directly for fixed
-  prepared centers (avoids rebuilding full complex upward bundles)
+- builds the source-motion multipoles `d^k M / dt^k` directly for the prepared
+  (frozen) centres -- a lowered leaf P2M plus the ordinary M2M -- and runs them
+  through the ordinary M2L / L2L, which are linear at fixed geometry. On the real
+  basis this is `prepare_real_source_motion_multipoles`
+  (`jaccpot/upward/real_tree_expansions.py`); real and complex agree to round-off
+  (8e-18 relative on the jerk at N = 96, p = 4, theta 0.6)
+
+### What the time derivatives mean
+
+All of these are `D_t^n a` for particles moving on straight lines, `x + v t`,
+with the tree, the expansion centres, the interaction lists and the expansion
+orders frozen at the prepared state. Accelerations of the particles themselves do
+not enter: snap and crackle here are the straight-line terms only. A direct-sum
+reference that includes the relative-acceleration terms (as nornax's
+`DirectForce` does for Hermite-6/8) differs from them by those terms.
 
 ## Higher-Order Time-Derivative Scope
 
@@ -103,8 +125,8 @@ For the currently supported public orders:
   - order 3: crackle
 - `mode="accurate"` is currently the only accepted public mode for the general
   time-derivative API.
-- the far-field higher time-derivative assembler currently requires
-  `basis="solidfmm"`
+- the far-field higher time-derivative assembler works on the spherical-harmonic
+  bases (`real`, `solidfmm`); `cartesian` is not supported
 - orders above 3 are not implemented yet
 - higher-order source-motion multipole kernels are implemented internally and
   feed the public runtime assembler
@@ -127,7 +149,7 @@ General recommendation:
 
 - Derivative and jerk paths are JAX-jit compatible and GPU-friendly.
 - `accurate` jerk mode adds extra far-field source-motion contractions by design.
-- `accurate` mode for `solidfmm` reuses prepared interactions and topology.
+- `accurate` mode reuses prepared interactions and topology.
 - prepared-state target subsets are supported for jerk and higher total time
   derivatives, which is useful for split-step / active-particle integrators.
 - Run:

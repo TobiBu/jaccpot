@@ -19,6 +19,7 @@ from yggdrax.tree_moments import compute_tree_mass_moments
 from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.operators.symmetric_tensors import contract_symmetric_one_axis_3d
+from jaccpot.upward.real_tree_expansions import prepare_real_source_motion_multipoles
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_source_motion_multipoles,
 )
@@ -1123,18 +1124,33 @@ class DerivativesMixin(_EngineBase):
         mass_moments = compute_tree_mass_moments(
             state.tree, state.positions_sorted, state.masses_sorted
         )
+        real_basis = self._solidfmm_basis_mode() == "real"
         for k in range(1, k_max + 1):
-            source_motion_packed = prepare_solidfmm_complex_source_motion_multipoles(
-                state.tree,
-                state.positions_sorted,
-                state.masses_sorted,
-                vel_sorted,
-                max_order=int(state.downward.locals.order),
-                centers=centers,
-                time_derivative_order=k,
-                max_leaf_size=int(state.max_leaf_size),
-                rotation=self.complex_rotation,
-            )
+            if real_basis:
+                source_motion_packed = prepare_real_source_motion_multipoles(
+                    state.tree,
+                    state.positions_sorted,
+                    state.masses_sorted,
+                    vel_sorted,
+                    max_order=int(state.downward.locals.order),
+                    centers=centers,
+                    time_derivative_order=k,
+                    max_leaf_size=int(state.max_leaf_size),
+                )
+            else:
+                source_motion_packed = (
+                    prepare_solidfmm_complex_source_motion_multipoles(
+                        state.tree,
+                        state.positions_sorted,
+                        state.masses_sorted,
+                        vel_sorted,
+                        max_order=int(state.downward.locals.order),
+                        centers=centers,
+                        time_derivative_order=k,
+                        max_leaf_size=int(state.max_leaf_size),
+                        rotation=self.complex_rotation,
+                    )
+                )
             source_motion_upward = TreeUpwardData(
                 geometry=geometry,
                 mass_moments=mass_moments,
