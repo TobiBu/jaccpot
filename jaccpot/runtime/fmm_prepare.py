@@ -77,6 +77,7 @@ from ._nearfield_cache import (
     nearfield_from_cache,
     with_nearfield_cache_artifacts,
 )
+from ._walk_criterion import FlatWalkCriterion
 from .capacity_diagnostics import (
     is_capacity_failure,
     reraise_with_capacity_report,
@@ -1403,6 +1404,8 @@ class PrepareMixin(_EngineBase):
                 self._refresh_dual_planner_steady_timing_bypass_count += 1
             return self._prepare_state_dual_and_downward_strict_streamed_fast(
                 cross_far=cross_far,
+                force_scale_nodes=force_scale_nodes,
+                walk_criterion_active=bool(use_paper_fixed_policy),
                 tree_artifacts=tree_artifacts,
                 theta_val=theta_val,
                 mac_type_val=mac_type_val,
@@ -2181,13 +2184,10 @@ class PrepareMixin(_EngineBase):
             and not bool(need_traversal_result)
             and not adaptive_order_active
             and not mixed_order_farfield_active
-            # `_prepare_state_dual_and_downward_strict_streamed_fast` hardcodes
-            # `pair_policy=None`, so this lane cannot carry the Dehnen criterion --
-            # it would run the geometric MAC underneath a caller that asked for the
-            # criterion, cheaper and with no signal. Until the forcing below was
-            # dropped, `need_traversal_result` happened to exclude paper mode here;
-            # relying on that again would be relying on an accident.
-            and not bool(use_paper_fixed_policy)
+            # The Dehnen criterion rides this lane INSIDE the flat walk: the fast
+            # path hands the walk a `FlatWalkCriterion` (eq 16a per pair, from a
+            # per-node table) instead of a pair policy, and the builder raises if
+            # the flat walk is unavailable rather than run the geometric MAC.
             and (
                 not bool(traced_prepare_inputs)
                 or bool(strict_fused_device_only_hot_path)
@@ -3668,6 +3668,8 @@ class PrepareMixin(_EngineBase):
         retain_interactions: bool = False,
         suppress_host_side_effects: bool = False,
         cross_far: Optional[tuple] = None,
+        force_scale_nodes: Optional[Array] = None,
+        walk_criterion_active: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Strict static fast path with compact streamed far-pairs only.
 
@@ -3700,6 +3702,13 @@ class PrepareMixin(_EngineBase):
             multipoles and expansion centres, and the cross far pairs as indices into
             ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
             cascade serves both. ``None`` (default) is the single-domain lane.
+        force_scale_nodes : Optional[Array]
+            Per-node force scale ``min_b f_b`` of eq (16a); required with
+            ``walk_criterion_active``.
+        walk_criterion_active : bool
+            ``mac_type='dehnen_error'``: accept far pairs by eq (16a) inside the
+            flat walk (:class:`~jaccpot.runtime._walk_criterion.FlatWalkCriterion`)
+            at threshold ``adaptive_eps * force_scale_nodes``.
 
         Returns
         -------
@@ -3722,9 +3731,35 @@ class PrepareMixin(_EngineBase):
             suppress_host_side_effects=suppress_host_side_effects,
         )
         walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
+        walk_criterion = None
+        if walk_criterion_active:
+            if force_scale_nodes is None:
+                # eps * 1 is a different criterion that accepts far more: refuse
+                # rather than run it (the policy's trap 14)
+                raise RuntimeError(
+                    "mac_type='dehnen_error' on the strict fused lane needs the "
+                    "per-node force scale of eq (16a); none was resolved"
+                )
+            upward = tree_artifacts.upward
+            mult_dtype = jnp.asarray(upward.multipoles.packed).dtype
+            walk_criterion = FlatWalkCriterion(
+                multipole_packed=upward.multipoles.packed,
+                mass=upward.mass_moments.mass,
+                # the policy's threshold, `max(eps * f, 1e-24)` (exact Dehnen mode:
+                # no normalisation of the scale)
+                threshold=jnp.maximum(
+                    jnp.asarray(float(self.adaptive_eps), mult_dtype)
+                    * jnp.asarray(force_scale_nodes, mult_dtype),
+                    jnp.asarray(1e-24, mult_dtype),
+                ),
+                order=int(upward.multipoles.order),
+                theta_max=float(self.mac_theta_max),
+                gravitational_constant=float(self.G),
+            )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             walk_geometry,
+            walk_criterion=walk_criterion,
             separation_floor=self._walk_separation_floor(),
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,

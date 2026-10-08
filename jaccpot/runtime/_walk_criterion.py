@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from typing import Any, Sequence
+from typing import Any, NamedTuple, Sequence
 
 import jax.numpy as jnp
 from jaxtyping import Array
@@ -276,4 +276,61 @@ class DehnenWalkAccept:
             dist_sq=dist_sq,
             order=int(self.order),
             theta_max=jnp.asarray(data["theta_max"], dist_sq.dtype),
+        )
+
+
+class FlatWalkCriterion(NamedTuple):
+    """What the fused lane hands its flat-walk builder to accept by eq (16a).
+
+    The table is built INSIDE the builder from the walk's own MAC extents (for
+    leaves the depth-padded proxy), so the criterion and the walk's refinement
+    read the same radii. A Python-side carrier, never a ``jit`` argument: ``order``
+    must stay a Python int.
+
+    Attributes
+    ----------
+    multipole_packed : Array
+        ``[nodes, (p+1)^2]`` real-basis multipoles about the walk centres (COM).
+    mass : Array
+        ``[nodes]`` node masses.
+    threshold : Array
+        ``[nodes]`` acceptance threshold ``eps * min_b f_b`` (a force).
+    order : int
+        Expansion order ``p``.
+    theta_max : float
+        eq (16a)'s convergence bound (the paper's 1).
+    gravitational_constant : float
+        ``G``.
+    """
+
+    multipole_packed: Array
+    mass: Array
+    threshold: Array
+    order: int
+    theta_max: float = 1.0
+    gravitational_constant: float = 1.0
+
+    def table(self, radius: Array) -> Array:
+        """The walk table on the given MAC radii.
+
+        Parameters
+        ----------
+        radius : Array
+            ``[nodes]`` the walk's MAC extents.
+
+        Returns
+        -------
+        Array
+            ``[nodes, W]`` (:func:`dehnen_walk_table`), in the radii's dtype.
+        """
+        return jnp.asarray(
+            dehnen_walk_table(
+                multipole_packed=self.multipole_packed,
+                mass=self.mass,
+                radius=radius,
+                threshold=self.threshold,
+                gravitational_constant=float(self.gravitational_constant),
+                order=int(self.order),
+            ),
+            jnp.asarray(radius).dtype,
         )

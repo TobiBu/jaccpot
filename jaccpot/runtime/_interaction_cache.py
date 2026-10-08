@@ -46,6 +46,7 @@ from jaccpot._searchsorted import searchsorted_method
 # this file undocumentable: pydoclint refuses a Parameters section for a signature
 # with missing hints (DOC106/107), so 70 violations sat behind one missing import.
 from ._adaptive_policy import AdaptivePolicyState
+from ._walk_criterion import DehnenWalkAccept, FlatWalkCriterion
 from .dtypes import require_index_capacity
 
 __all__ = [
@@ -1043,6 +1044,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     max_neighbors_per_leaf_override: Optional[int] = None,
     flat_walk_capacity_floor: Optional[dict] = None,
     extra_overflow: Optional[Array] = None,
+    walk_criterion: Optional[FlatWalkCriterion] = None,
 ) -> _DualTreeArtifacts:
     """Strict static fast-lane: single compact shared far+near build call.
 
@@ -1113,6 +1115,10 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     extra_overflow : Optional[Array]
         An upstream capacity flag treated like the walk's own -- today the
         cell-leaf partition's ``leaf_capacity``.
+    walk_criterion : Optional[FlatWalkCriterion]
+        eq (16a) inside the flat walk (``mac_type='dehnen_error'``). Refused
+        together with a pair policy, and raised on rather than dropped when the
+        flat walk is unavailable.
 
     Returns
     -------
@@ -1203,6 +1209,10 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         "OFF",
     )
     flat_walk_blocker: Optional[str] = None
+    if walk_criterion is not None and (
+        pair_policy is not None or policy_state is not None
+    ):
+        raise ValueError("give the flat walk a walk_criterion OR a pair policy")
     if flat_walk_enabled:
         if pair_policy is not None or policy_state is not None:
             flat_walk_blocker = (
@@ -1222,6 +1232,14 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK needs the flat compact "
                 "far-pair layout (JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS=1)."
             )
+    if walk_criterion is not None and not flat_walk_enabled:
+        # The dual walk below has no seam for the in-walk criterion: falling back
+        # would run the geometric MAC under a caller that asked for eq (16a).
+        raise RuntimeError(
+            "mac_type='dehnen_error' on the strict fused lane runs eq (16a) inside "
+            "the flat walk, which is unavailable here: "
+            + (flat_walk_blocker or "JACCPOT_STATIC_STRICT_FUSED_FLAT_WALK=0")
+        )
     if flat_walk_blocker is not None:
         if flat_walk_explicit:
             raise RuntimeError(flat_walk_blocker)
@@ -1266,6 +1284,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             far_floor=0 if far_named else far_floor,
             near_floor=0 if near_edge_named else near_floor,
             separation_floor=separation_floor,
+            walk_criterion=walk_criterion,
         )
     # Re-plan on a capacity overflow instead of surfacing it. The generic
     # `_build_dual_tree_artifacts` has retried since it was written; this strict
@@ -2030,6 +2049,7 @@ def _build_flat_walk_artifacts_strict_streamed(
     far_floor: int = 0,
     near_floor: int = 0,
     separation_floor: float = 0.0,
+    walk_criterion: Optional[FlatWalkCriterion] = None,
 ) -> _DualTreeArtifacts:
     """Far pairs and leaf neighbours from yggdrax's flat-emission wavefront walk.
 
@@ -2121,6 +2141,10 @@ def _build_flat_walk_artifacts_strict_streamed(
     separation_floor : float
         Minimum gap ``|c_b - c_a| - r_a - r_b`` of an accepted far pair (length
         units), ``0`` for none; see :func:`_walk_separation_floor`.
+    walk_criterion : Optional[FlatWalkCriterion]
+        Accept by Dehnen's eq (16a) instead of the opening angle: the table is
+        built here on ``mac_extents`` and both walks evaluate the same symmetrised
+        per-pair test (:mod:`jaccpot.runtime._walk_criterion`).
 
     Returns
     -------
@@ -2187,6 +2211,12 @@ def _build_flat_walk_artifacts_strict_streamed(
             float(dehnen_radius_scale),
         )
     mac_extents = jnp.asarray(mac_extents, dtype=centers.dtype)
+    # mac_type='dehnen_error': eq (16a) replaces the opening angle inside the
+    # walk, read from a per-node table built on the walk's OWN extents
+    error_table = None
+    if walk_criterion is not None:
+        with jax.named_scope("fmm_walk_criterion_table"):
+            error_table = walk_criterion.table(mac_extents)
     # A capacity-padded leaf partition (cell leaves) carries EMPTY nodes: one
     # centre, radius zero. Left in the walk they fail the MAC against each
     # other and flood the near list (30M edges at N=2e5), so they are dead
@@ -2230,6 +2260,15 @@ def _build_flat_walk_artifacts_strict_streamed(
                 node_active=node_active,
                 interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
                 separation_floor=floor,
+                **(
+                    {}
+                    if walk_criterion is None
+                    else {
+                        "error_table": error_table,
+                        "error_order": int(walk_criterion.order),
+                        "theta_max": float(walk_criterion.theta_max),
+                    }
+                ),
             )
         else:
             walk = dual_tree_walk_mutual(
@@ -2245,6 +2284,19 @@ def _build_flat_walk_artifacts_strict_streamed(
                 mac_type=str(mac_type),
                 node_active=node_active,
                 **({"separation_floor": floor} if floor > 0.0 else {}),
+                **(
+                    {}
+                    if walk_criterion is None
+                    else {
+                        "pair_accept": DehnenWalkAccept(int(walk_criterion.order)),
+                        "pair_accept_data": {
+                            "table": error_table,
+                            "theta_max": jnp.asarray(
+                                float(walk_criterion.theta_max), centers.dtype
+                            ),
+                        },
+                    }
+                ),
             )
         traced = isinstance(walk.queue_overflow, Tracer)
         if traced:
@@ -3110,6 +3162,7 @@ def _build_dual_tree_artifacts(
     strict_max_neighbors_per_leaf_override: Optional[int] = None,
     strict_flat_walk_capacity_floor: Optional[dict] = None,
     strict_extra_overflow: Optional[Array] = None,
+    walk_criterion: Optional[FlatWalkCriterion] = None,
 ) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree.
 
@@ -3193,6 +3246,10 @@ def _build_dual_tree_artifacts(
     strict_extra_overflow : Optional[Array]
         An upstream capacity flag treated like the walk's own; forwarded to the
         strict streamed builder as ``extra_overflow``.
+    walk_criterion : Optional[FlatWalkCriterion]
+        ``mac_type='dehnen_error'`` on the strict fused lane: eq (16a) evaluated
+        inside the flat walk. Only the strict streamed split build carries it; any
+        other route raises rather than run the geometric MAC instead.
 
     Returns
     -------
@@ -3204,6 +3261,10 @@ def _build_dual_tree_artifacts(
     ------
     ValueError
         If the requested combination of buffers and lanes is inconsistent.
+    RuntimeError
+        If ``walk_criterion`` is given but the build does not take the strict
+        streamed flat walk, the only route that evaluates it.
+
     """
 
     cache_out = cache_entry
@@ -3258,6 +3319,14 @@ def _build_dual_tree_artifacts(
                 and not bool(grouped_interactions)
                 and not bool(need_traversal_result)
             )
+        if walk_criterion is not None and not (
+            use_split_build and strict_streamed_split
+        ):
+            raise RuntimeError(
+                "the in-walk eq (16a) criterion runs only on the strict streamed "
+                "split build (the fused lane's flat walk); this build took another "
+                "route and would apply the geometric MAC instead"
+            )
         if use_split_build:
             split_artifacts = (
                 _build_dual_tree_artifacts_split_strict_streamed(
@@ -3278,6 +3347,7 @@ def _build_dual_tree_artifacts(
                     ),
                     flat_walk_capacity_floor=strict_flat_walk_capacity_floor,
                     extra_overflow=strict_extra_overflow,
+                    walk_criterion=walk_criterion,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(
