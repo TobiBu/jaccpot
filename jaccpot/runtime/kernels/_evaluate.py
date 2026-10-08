@@ -31,10 +31,7 @@ from beartype import beartype
 from beartype.typing import Tuple
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
-from yggdrax.interactions import (
-    NodeNeighborList,
-    OctreeNativeNeighborList,
-)
+from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
 from jaccpot._env import env_flag
@@ -75,7 +72,6 @@ from jaccpot.operators.real_harmonics import (
 )
 from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
 
-from .._octree_adapter import OctreeExecutionData
 from ..dtypes import INDEX_DTYPE, as_index
 from ._shared import (
     ExpansionBasis,
@@ -310,8 +306,9 @@ def _resolve_evaluation_node_views(
     """Resolve shared nearfield views and optional backend-specific farfield views.
 
     Nearfield continues to use the shared radix-oriented neighbor/leaf layout.
-    Farfield may override that view, which is how the octree backend evaluates
-    octree-native locals without rewriting nearfield plumbing yet.
+    Farfield may override that view. The octree execution backend was the
+    override's only producer and went in the 2026-10 cleanup, so every caller in
+    the package now passes ``None``.
 
     Parameters
     ----------
@@ -354,195 +351,26 @@ def _resolve_evaluation_node_views(
 def _build_nearfield_interop_data(
     tree: Tree,
     neighbor_list: NodeNeighborList,
-    *,
-    octree: Optional[OctreeExecutionData] = None,
-    native_neighbors: Optional[OctreeNativeNeighborList] = None,
 ) -> NearfieldInteropData:
     """Build the explicit leaf/node view shared by current nearfield helpers.
 
-    The source-of-truth leaf ordering comes from ``neighbor_list``. For octree
-    trees, yggdrax now emits that neighbor list in octree-native order while
-    still exposing the particle-order leaf mapping needed for target lookup.
+    The source-of-truth leaf ordering comes from ``neighbor_list``. The octree
+    route that also lived here (an octree-native neighbour list with explicit
+    per-leaf membership) went with the octree execution backend in the 2026-10
+    cleanup, so this is the radix route only.
 
     Parameters
     ----------
     tree : Tree
         Built tree, supplying node ranges.
     neighbor_list : NodeNeighborList
-        Leaf ordering and neighbour lists. Used even on the octree path, for the
-        particle-order leaf mapping the native list does not carry.
-    octree : Optional[OctreeExecutionData]
-        Octree metadata. Required when ``native_neighbors`` is given, since the
-        carrier lookup is built over the octree's node count.
-    native_neighbors : Optional[OctreeNativeNeighborList]
-        Octree-native neighbour list. ``None`` takes the radix path.
+        Leaf ordering and neighbour lists.
 
     Returns
     -------
     NearfieldInteropData
         The explicit leaf/node view the near-field helpers consume.
-
-    Raises
-    ------
-    ValueError
-        If ``native_neighbors`` was given without ``octree``.
     """
-    if native_neighbors is not None:
-        if octree is None:
-            raise ValueError("native octree nearfield data requires octree metadata")
-        leaf_nodes = jnp.asarray(native_neighbors.leaf_indices, dtype=INDEX_DTYPE)
-        native_offsets = jnp.asarray(native_neighbors.offsets, dtype=INDEX_DTYPE)
-        native_neighbors_flat = jnp.asarray(
-            native_neighbors.neighbors, dtype=INDEX_DTYPE
-        )
-        native_counts = jnp.asarray(native_neighbors.counts, dtype=INDEX_DTYPE)
-        leaf_count = int(leaf_nodes.shape[0])
-        radix_leaf_nodes = jnp.asarray(
-            getattr(
-                neighbor_list,
-                "particle_order_leaf_indices",
-                neighbor_list.leaf_indices,
-            ),
-            dtype=INDEX_DTYPE,
-        )
-        radix_leaf_ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[
-            radix_leaf_nodes
-        ]
-        radix_leaf_counts = radix_leaf_ranges[:, 1] - radix_leaf_ranges[:, 0] + 1
-        carrier_lookup = jnp.full(
-            (octree.parent.shape[0],),
-            -1,
-            dtype=INDEX_DTYPE,
-        )
-        carrier_lookup = carrier_lookup.at[leaf_nodes].set(
-            jnp.arange(leaf_count, dtype=INDEX_DTYPE)
-        )
-        radix_carrier_pos = carrier_lookup[
-            jnp.asarray(octree.radix_leaf_to_oct, dtype=INDEX_DTYPE)
-        ]
-        carrier_particle_counts = jax.ops.segment_sum(
-            radix_leaf_counts.astype(INDEX_DTYPE),
-            radix_carrier_pos,
-            leaf_count,
-        )
-        max_particles = int(jnp.max(carrier_particle_counts)) if leaf_count > 0 else 0
-
-        if max_particles > 0:
-            max_radix_leaf_particles = int(jnp.max(radix_leaf_counts))
-            local_offsets = jnp.arange(max_radix_leaf_particles, dtype=INDEX_DTYPE)
-            radix_particle_idx = (
-                radix_leaf_ranges[:, 0][:, None] + local_offsets[None, :]
-            )
-            radix_particle_valid = local_offsets[None, :] < radix_leaf_counts[:, None]
-            flat_particle_idx = radix_particle_idx.reshape(-1)
-            flat_valid = radix_particle_valid.reshape(-1)
-            flat_carrier_pos = jnp.repeat(radix_carrier_pos, max_radix_leaf_particles)
-            safe_carrier_pos = jnp.where(flat_valid, flat_carrier_pos, leaf_count)
-            order = jnp.argsort(safe_carrier_pos, stable=True)
-            sorted_valid = flat_valid[order]
-            sorted_carrier = safe_carrier_pos[order]
-            sorted_particle_idx = flat_particle_idx[order]
-            valid_int = sorted_valid.astype(INDEX_DTYPE)
-            running = jnp.cumsum(valid_int, dtype=INDEX_DTYPE) - valid_int
-            changed = jnp.concatenate(
-                [
-                    jnp.ones((1,), dtype=bool),
-                    sorted_carrier[1:] != sorted_carrier[:-1],
-                ]
-            )
-            group_starts = jnp.where(
-                sorted_valid & changed,
-                running,
-                jnp.zeros_like(running),
-            )
-            group_starts = jnp.maximum.accumulate(group_starts)
-            sorted_slots = running - group_starts
-            row = jnp.where(sorted_valid, sorted_carrier, leaf_count)
-            col = jnp.where(sorted_valid, sorted_slots, 0)
-            leaf_particle_indices = jnp.zeros(
-                (leaf_count + 1, max_particles),
-                dtype=INDEX_DTYPE,
-            )
-            leaf_particle_mask = jnp.zeros((leaf_count + 1, max_particles), dtype=bool)
-            leaf_particle_indices = leaf_particle_indices.at[row, col].set(
-                jnp.where(sorted_valid, sorted_particle_idx, 0),
-                mode="drop",
-            )
-            leaf_particle_mask = leaf_particle_mask.at[row, col].set(
-                sorted_valid,
-                mode="drop",
-            )
-            leaf_particle_indices = leaf_particle_indices[:leaf_count]
-            leaf_particle_mask = leaf_particle_mask[:leaf_count]
-            particle_to_leaf_position = jnp.zeros(
-                (tree.positions_sorted.shape[0],),
-                dtype=INDEX_DTYPE,
-            )
-            particle_to_leaf_position = particle_to_leaf_position.at[
-                flat_particle_idx[flat_valid]
-            ].set(flat_carrier_pos[flat_valid])
-        else:
-            leaf_particle_indices = jnp.zeros((leaf_count, 0), dtype=INDEX_DTYPE)
-            leaf_particle_mask = jnp.zeros((leaf_count, 0), dtype=bool)
-            particle_to_leaf_position = jnp.zeros(
-                (tree.positions_sorted.shape[0],),
-                dtype=INDEX_DTYPE,
-            )
-
-        native_neighbor_leaf_positions = getattr(
-            native_neighbors,
-            "neighbor_leaf_positions",
-            None,
-        )
-        if native_neighbor_leaf_positions is not None:
-            neighbor_leaf_positions = jnp.asarray(
-                native_neighbor_leaf_positions,
-                dtype=INDEX_DTYPE,
-            )
-        else:
-            if leaf_count > 0:
-                max_nbr = int(jnp.max(native_counts))
-            else:
-                max_nbr = 0
-            if max_nbr > 0:
-                nbr_offsets = jnp.arange(max_nbr, dtype=INDEX_DTYPE)
-                nbr_idx = native_offsets[:-1, None] + nbr_offsets[None, :]
-                nbr_valid = nbr_offsets[None, :] < native_counts[:, None]
-                nbr_safe_idx = jnp.where(nbr_valid, nbr_idx, 0)
-                nbr_nodes = native_neighbors_flat[nbr_safe_idx]
-                neighbor_leaf_positions = carrier_lookup[nbr_nodes]
-                neighbor_leaf_positions = jnp.where(
-                    nbr_valid,
-                    neighbor_leaf_positions,
-                    jnp.asarray(-1, dtype=INDEX_DTYPE),
-                )
-            else:
-                neighbor_leaf_positions = jnp.zeros((leaf_count, 0), dtype=INDEX_DTYPE)
-
-        oct_node_ranges = jnp.asarray(octree.node_ranges, dtype=INDEX_DTYPE)
-        particle_order_leaf_indices = jnp.asarray(
-            native_neighbors.particle_order_leaf_indices,
-            dtype=INDEX_DTYPE,
-        )
-        return NearfieldInteropData(
-            leaf_nodes=leaf_nodes,
-            node_ranges=oct_node_ranges,
-            offsets=native_offsets,
-            neighbors=native_neighbors_flat,
-            counts=native_counts,
-            particle_order_node_ranges=oct_node_ranges,
-            particle_order_leaf_indices=particle_order_leaf_indices,
-            particle_order_to_native_leaf=jnp.asarray(
-                native_neighbors.particle_order_to_native_leaf,
-                dtype=INDEX_DTYPE,
-            ),
-            leaf_particle_indices=leaf_particle_indices,
-            leaf_particle_mask=leaf_particle_mask,
-            particle_to_leaf_position=particle_to_leaf_position,
-            neighbor_leaf_positions=neighbor_leaf_positions,
-        )
-
-    del octree
     leaf_indices = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
     particle_order_leaf_indices = jnp.asarray(
         getattr(
@@ -809,12 +637,13 @@ def _evaluate_tree_compiled_impl(
     nearfield_leaf_particle_indices: Int[Array, "_ _"],
     nearfield_leaf_particle_mask: Bool[Array, "_ _"],
     # `farleaves`, NOT `leaves`. The far-field leaf view is a DIFFERENT axis from
-    # the near-field one above: on the octree execution backend `leaf_nodes` is
-    # length 5 where `nearfield_leaf_nodes` is 3. Binding both to `leaves` asserted
+    # the near-field one above: on the octree execution backend (removed in the
+    # 2026-10 cleanup) `leaf_nodes` was length 5 where `nearfield_leaf_nodes` was
+    # 3. Binding both to `leaves` asserted
     # an equality that holds only for the radix tree, and broke 7 octree tests --
     # caught by the decorator this commit adds, on its first full run. The 64
     # captured calls that sized every other axis here came from `test_near_field.py`
-    # and `tests/integration/`, neither of which enters the octree backend, so the
+    # and `tests/integration/`, neither of which entered the octree backend, so the
     # equality looked safe and was not.
     leaf_nodes: Int[Array, "farleaves"],
     node_ranges: Int[Array, "_ 2"],

@@ -132,9 +132,6 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "nearfield_bucketed": {"nearfield": NearFieldConfig(mode="bucketed")},
     "runtime_path_large_n": {"runtime_path": "large_n"},
     "backend_radix": {"runtime_policy": RuntimePolicyConfig(execution_backend="radix")},
-    "backend_octree": {
-        "runtime_policy": RuntimePolicyConfig(execution_backend="octree")
-    },
     "grouped_interactions": {
         "farfield": FarFieldConfig(grouped_interactions=True),
         "expansion_basis": "solidfmm",

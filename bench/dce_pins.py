@@ -16,10 +16,12 @@ S2     the same lane at 5e4 with ``--use-pallas off`` (the near field's pure-JAX
        rectangle / target-block route)
 S3     ``FastMultipoleMethod()`` defaults at 3e4 and 1e5 (a raise is recorded as
        the pin)
-S4     Odisseo's differentiable lane: d/dpos and d/dmass of a weighted force sum
-       through ``differentiable_accelerations`` with the large-N grad plan, 2e4
-S5     ``BlockStepFMM`` on device (pallas backend, static shapes, device
-       topology), 20 base steps at 2e4
+S4     Odisseo's differentiable lane below its large-N profile (preset "fast"):
+       d/dpos and d/dmass of a weighted force sum, 2e4
+S4b    the same through the large-N lane and its grad plan, with Odisseo's
+       large-N env overrides, 2e4
+S5     ``BlockStepFMM`` with Odisseo's ``BlockStepOptions`` defaults (jax
+       backend, leaf 64, static shapes, device topology), 20 base steps at 2e4
 =====  ===========================================================================
 
 Usage (book the card with autocvd first; the org rule)::
@@ -46,7 +48,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT_DEFAULT = "/export/scratch/tbuck/dce_pins"
-PINS = ("S1", "S2", "S3", "S4", "S5")
+PINS = ("S1", "S2", "S3", "S4", "S4b", "S5")
 
 
 # --------------------------------------------------------------------- cases
@@ -134,10 +136,66 @@ def case_s3(out: Path) -> dict:
     return meta
 
 
-def case_s4(out: Path) -> dict:
+def _grad_pin(out: Path, solver, n: int, plan_fn=None) -> dict:
+    """d/dpos and d/dmass of a fixed weighting of the forces, through
+    ``differentiable_accelerations`` (Odisseo's differentiable lane)."""
     import jax
     import jax.numpy as jnp
     import numpy as np
+
+    pos, _, mass = _plummer(n)
+    p = jnp.asarray(pos)
+    m = jnp.asarray(mass)
+    prepared = solver.prepare_state(p, m, leaf_size=32, max_order=4, theta=0.6)
+    plan = None if plan_fn is None else plan_fn(solver, prepared)
+    w = jnp.asarray(np.random.default_rng(2).normal(size=(n, 3)), jnp.float32)
+
+    def loss(x, mm):
+        acc = solver.differentiable_accelerations(prepared, x, mm, grad_plan=plan)
+        return jnp.sum(acc * w)
+
+    value, (g_pos, g_mass) = jax.value_and_grad(loss, argnums=(0, 1))(p, m)
+    np.savez(out, g_pos=np.asarray(g_pos), g_mass=np.asarray(g_mass))
+    return {"loss": float(value), "n": n}
+
+
+def case_s4(out: Path) -> dict:
+    """Odisseo's differentiable lane below its large-N profile: preset "fast"."""
+    import jax.numpy as jnp
+
+    from jaccpot import FarFieldConfig, FastMultipoleMethod, FMMAdvancedConfig
+
+    solver = FastMultipoleMethod(
+        preset="fast",
+        basis="real",
+        theta=0.6,
+        G=1.0,
+        softening=1e-3,
+        working_dtype=jnp.float32,
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode="auto", retain_far_pairs_for_grad=True),
+            mac_type="dehnen",
+        ),
+    )
+    return _grad_pin(out, solver, 20_000)
+
+
+def case_s4b(out: Path) -> dict:
+    """The large-N differentiable lane, with Odisseo's large-N env overrides."""
+    import os
+
+    sys.path.insert(
+        0,
+        os.environ.get(
+            "BENCH_DIR",
+            "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu",
+        ),
+    )
+    from codes.compare_force import apply_fast_lane_env
+
+    n = 20_000
+    apply_fast_lane_env(n)  # what Odisseo sets for its large_n_gpu profile
+    import jax.numpy as jnp
 
     from jaccpot import (
         FarFieldConfig,
@@ -148,8 +206,6 @@ def case_s4(out: Path) -> dict:
     )
     from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
 
-    n = 20_000
-    pos, _, mass = _plummer(n)
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
         basis="real",
@@ -164,22 +220,11 @@ def case_s4(out: Path) -> dict:
             mac_type="dehnen",
         ),
     )
-    p = jnp.asarray(pos)
-    m = jnp.asarray(mass)
-    prepared = solver.prepare_state(p, m, leaf_size=32, max_order=4, theta=0.6)
-    plan = prepare_large_n_grad_plan(solver, prepared)
-    w = jnp.asarray(np.random.default_rng(2).normal(size=(n, 3)), jnp.float32)
-
-    def loss(x, mm):
-        acc = solver.differentiable_accelerations(prepared, x, mm, grad_plan=plan)
-        return jnp.sum(acc * w)
-
-    value, (g_pos, g_mass) = jax.value_and_grad(loss, argnums=(0, 1))(p, m)
-    np.savez(out, g_pos=np.asarray(g_pos), g_mass=np.asarray(g_mass))
-    return {"loss": float(value), "n": n}
+    return _grad_pin(out, solver, n, plan_fn=prepare_large_n_grad_plan)
 
 
 def case_s5(out: Path) -> dict:
+    """``BlockStepFMM`` with Odisseo's ``BlockStepOptions`` defaults, on device."""
     import jax.numpy as jnp
     import numpy as np
 
@@ -194,8 +239,8 @@ def case_s5(out: Path) -> dict:
         max_order=4,
         G=1.0,
         basis="real",
-        backend="pallas",
-        leaf_size=32,
+        backend="jax",
+        leaf_size=64,
         static_shapes=True,
         topology_backend="device",
     )
@@ -210,7 +255,14 @@ def case_s5(out: Path) -> dict:
     return {"momentum_drift": float(np.linalg.norm(p1 - p0)), "n": n}
 
 
-CASES = {"S1": case_s1, "S2": case_s2, "S3": case_s3, "S4": case_s4, "S5": case_s5}
+CASES = {
+    "S1": case_s1,
+    "S2": case_s2,
+    "S3": case_s3,
+    "S4": case_s4,
+    "S4b": case_s4b,
+    "S5": case_s5,
+}
 
 
 # --------------------------------------------------------------------- driver

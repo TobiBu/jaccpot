@@ -1,0 +1,178 @@
+{
+ "a_vs_a": {
+  "S1": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 200000,
+     "rel_l2": 0.0007763741703274087
+    },
+    "ref": {
+     "n": 200000,
+     "rel_l2": 0.0007763741703274087
+    }
+   }
+  },
+  "S2": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 50000,
+     "rel_l2": 0.11287816606795525
+    },
+    "ref": {
+     "n": 50000,
+     "rel_l2": 0.11287816606795525
+    }
+   }
+  },
+  "S3": {
+   "arrays": {
+    "acc_100000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "acc_30000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n100000": "ok",
+     "n30000": "ok"
+    },
+    "ref": {
+     "n100000": "ok",
+     "n30000": "ok"
+    }
+   }
+  },
+  "S4": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.03852462768555,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.03852462768555,
+     "n": 20000
+    }
+   }
+  },
+  "S4b": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.03477096557617,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.03477096557617,
+     "n": 20000
+    }
+   }
+  },
+  "S5": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 2.5013924498148238e-09,
+     "n": 20000
+    },
+    "ref": {
+     "momentum_drift": 2.5013924498148238e-09,
+     "n": 20000
+    }
+   }
+  }
+ },
+ "card": "A100 40GB (GPU 3, shared with another user's ~4.8 GB job, user-approved)",
+ "deterministic_ops": true,
+ "library": "jaccpot main 3a4bfc7 (frozen worktree; only bench/dce_pins.py and bench/fused_memory_budget.py --use-pallas copied in)",
+ "pins": {
+  "S1": {
+   "n": 200000,
+   "rel_l2": 0.0007763741703274087
+  },
+  "S2": {
+   "n": 50000,
+   "rel_l2": 0.11287816606795525
+  },
+  "S3": {
+   "n100000": "ok",
+   "n30000": "ok"
+  },
+  "S4": {
+   "loss": 54.03852462768555,
+   "n": 20000
+  },
+  "S4b": {
+   "loss": 54.03477096557617,
+   "n": 20000
+  },
+  "S5": {
+   "momentum_drift": 2.5013924498148238e-09,
+   "n": 20000
+  }
+ },
+ "tag": "main-3a4bfc7"
+}

@@ -1,8 +1,7 @@
 """CLI profiler for jaccpot prepare_state residual timing.
 
-This script mirrors the deep residual notebook profiling and adds explicit
-timing buckets for octree-specific tail work that happens after the current
-dual/downward helper returns.
+This script mirrors the deep residual notebook profiling. (Its octree tail
+buckets went with the octree execution backend in the 2026-10 cleanup.)
 
 Run with:
     JAX_ENABLE_X64=1 micromamba run -n odisseo python \
@@ -274,10 +273,6 @@ def profile_prepare_residuals(
         (_rt_mod, "_propagate_solidfmm_locals_to_children", "L2L"),
         (_rt_mod, "_propagate_real_locals_to_children", "L2L"),
         (_rt_mod, "_build_nearfield_interop_data", "nearfield_interop"),
-        (_rt_mod, "build_octree_native_neighbor_lists", "octree_native_neighbors"),
-        (_rt_mod, "build_octree_native_far_pairs", "octree_native_far_pairs"),
-        (_rt_mod, "_build_octree_downward_artifacts", "octree_downward_plan"),
-        (_rt_mod, "_finalize_octree_downward_artifacts", "octree_downward_finalize"),
         (fmm._impl, "_prepare_state_nearfield_artifacts", "nearfield_artifacts"),
         (fmm._impl, "_prepare_leaf_neighbor_pairs_safe", "nearfield_pairs"),
         (
@@ -334,12 +329,6 @@ def profile_prepare_residuals(
         + row.get("nearfield_pairs_ms", 0.0)
         + row.get("nearfield_scatter_ms", 0.0)
     )
-    octree_tail_total = (
-        row.get("octree_native_neighbors_ms", 0.0)
-        + row.get("octree_native_far_pairs_ms", 0.0)
-        + row.get("octree_downward_plan_ms", 0.0)
-        + row.get("octree_downward_finalize_ms", 0.0)
-    )
 
     row["operator_sum_ms"] = p2m_ms + m2m_ms + m2l_ms + l2l_ms
     row["residual_target_ms"] = max(
@@ -385,7 +374,6 @@ def profile_prepare_residuals(
         0.0,
     )
     row["nearfield_total_ms"] = nearfield_total
-    row["octree_tail_total_ms"] = octree_tail_total
 
     explained = (
         row.get("tree_build_lowlevel_ms", 0.0)
@@ -393,7 +381,6 @@ def profile_prepare_residuals(
         + row.get("dual_tree_artifacts_ms", 0.0)
         + row["downward_non_operator_est_ms"]
         + nearfield_total
-        + octree_tail_total
     )
     row["residual_unexplained_ms"] = max(row["residual_target_ms"] - explained, 0.0)
     return row
@@ -416,13 +403,13 @@ def _parse_args() -> argparse.Namespace:
         "--tree-type",
         type=str,
         default="radix",
-        choices=["radix", "octree", "kdtree"],
+        choices=["radix", "kdtree"],
     )
     parser.add_argument(
         "--execution-backend",
         type=str,
         default="radix",
-        choices=["radix", "octree"],
+        choices=["radix"],
     )
     parser.add_argument(
         "--dtype",
@@ -496,7 +483,6 @@ def main() -> None:
         "downward_support_profiled_ms",
         "downward_support_residual_ms",
         "nearfield_total_ms",
-        "octree_tail_total_ms",
         "residual_unexplained_ms",
     ]
     print(" ".join(columns))

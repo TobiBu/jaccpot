@@ -119,7 +119,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | file | |
 |---|---|
 | `adaptive_traversal_design.md` | Why the solver-specific adaptive-traversal concepts moved out of yggdrax. |
-| `octree_fmm_task_list.md` | **[current]** Octree-native FMM status and the remaining work items. |
+| `octree_fmm_task_list.md` | **[closed]** Octree-native FMM status and work items. The backend was removed in the 2026-10 cleanup (`cleanup_2026-10.md`, X2). |
 | `octree_status_2026-03-15.md` | **[superseded]** Archived handoff, moved here from the repository root. |
 
 ## Audits, handoffs, and process

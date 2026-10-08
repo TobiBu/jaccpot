@@ -212,7 +212,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `edges` | entries of the flattened neighbour list |
 | `pairs` | entries of a precomputed leaf-pair schedule |
 | `chunks`, `chunkflat` | the 2-D chunked scatter schedule. `chunkflat` also stands alone, for the arrays of ONE chunk in `_m2l.py:_chunk_segment_scatter_add`, where it is the fixed `chunk_size` width shared by the contributions, their target indices and their validity mask |
-| `farleaves` | the **far-field** leaf view, which is not `leaves`: they differ on the octree backend |
+| `farleaves` | the **far-field** leaf view, which is not `leaves`: they differed on the octree backend (removed in the 2026-10 cleanup) |
 | `crossleaves` | the CROSS-domain near view in `distributed/_force_scale.py`, which is not `leaves` either: it degenerates to length 1 when a rank has no cross neighbours |
 | `coarse` | the remote coarse (LET) tree's nodes, which are a different tree from the local `nodes` |
 | `blocks`, `blocksize` | target blocks and the block size (`JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`) |
@@ -320,10 +320,11 @@ spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments,
 
 **`farleaves` exists because of a mistake worth not repeating.** `leaf_nodes` in
 `runtime/kernels/_evaluate.py` was annotated `leaves`, sharing the axis with
-`nearfield_leaf_nodes`. That equality holds for the radix tree and fails on the octree
-execution backend (5 against 3), and it broke 7 tests the moment a decorator made the
-annotation enforced. The shapes had been derived from 64 captured calls -- through
-`test_near_field.py` and `tests/integration/`, neither of which enters that backend. **Capture
+`nearfield_leaf_nodes`. That equality holds for the radix tree and failed on the octree
+execution backend (5 against 3; removed in the 2026-10 cleanup), and it broke 7 tests the
+moment a decorator made the annotation enforced. The shapes had been derived from 64 captured
+calls -- through `test_near_field.py` and `tests/integration/`, neither of which entered that
+backend. **Capture
 coverage bounds annotation validity:** an axis equality observed in every call you recorded is
 only as strong as the lanes you recorded.
 

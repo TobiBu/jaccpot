@@ -84,7 +84,8 @@ repos:
         #     blocks    target blocks; extent never observed non-zero
         #     blocksize the target block size, `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE`
         #     farleaves the FAR-field leaf view, which is not the near-field one:
-        #               they differ on the octree backend (5 vs 3)
+        #               they differed on the octree backend (5 vs 3), which
+        #               was removed in the 2026-10 cleanup
         #     rows      a dense operator's OUTPUT extent, in the two generic
         #               matvec helpers only. Not a tree or particle quantity: the
         #               same helper is applied to three different operators at
