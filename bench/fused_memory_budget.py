@@ -164,6 +164,12 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--dt", type=float, default=None)
     ap.add_argument("--drift-steps", default="0,50,100")
     ap.add_argument("--softening", type=float, default=None)
+    ap.add_argument(
+        "--softening-kernel",
+        default=None,
+        choices=("ferrers3", "wendland_c2", "plummer"),
+        help="pair softening kernel (jaccpot.softening); the reference uses the same",
+    )
     ap.add_argument("--env", nargs="*", default=[], metavar="KEY=VAL")
     ap.add_argument("--out", required=True)
     return ap.parse_args()
@@ -570,6 +576,7 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
         theta=ARGS.theta,
         G=1.0,
         softening=soft,
+        softening_kernel=ARGS.softening_kernel,
         working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(
@@ -786,11 +793,51 @@ def run_budget(result: dict) -> None:
     _accuracy(result, pos, mass, soft, a_host)
 
 
+def _direct_kernel_fp64(pos, mass, idx, soft: float, kernel: str):
+    """fp64 direct sum with a compact softening kernel at the targets ``idx``.
+
+    The harness's ``common.reference`` is Plummer only; this is the same chunked
+    sum (self excluded by index) through :func:`jaccpot.softening.pair_factors`.
+    """
+    from jaccpot.softening import pair_factors, softening_params
+
+    p = jnp.asarray(pos, jnp.float64)
+    m = jnp.asarray(mass, jnp.float64)
+    n = int(p.shape[0])
+    chunk = 1 << 18
+    npad = -(-n // chunk) * chunk
+    sp = jnp.zeros((npad, 3), jnp.float64).at[:n].set(p).reshape(-1, chunk, 3)
+    sm = jnp.zeros((npad,), jnp.float64).at[:n].set(m).reshape(-1, chunk)
+    sid = jnp.arange(npad).reshape(-1, chunk)
+    params = softening_params(kernel, soft, jnp.float64)
+
+    @jax.jit
+    def block(tp, tid):
+        def body(c, acc):
+            d = tp[:, None, :] - sp[c][None, :, :]
+            r2 = jnp.sum(d * d, axis=-1)
+            g = pair_factors(jnp.where(r2 > 0, r2, 1.0), params, kernel)[0]
+            w = jnp.where(tid[:, None] == sid[c][None, :], 0.0, g * sm[c][None, :])
+            return acc - jnp.einsum("ij,ijk->ik", w, d)
+
+        return jax.lax.fori_loop(0, sp.shape[0], body, jnp.zeros_like(tp))
+
+    out = []
+    for b in range(0, len(idx), 256):
+        ib = jnp.asarray(idx[b : b + 256])
+        out.append(np.asarray(block(p[ib], ib)))
+    return np.concatenate(out)
+
+
 def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
     """fp64 direct-sum score of the eager force (``--accuracy-targets``)."""
     if a_host is None:
         return
     from common.reference import direct_accelerations
+
+    from jaccpot.softening import resolve_softening_kernel
+
+    kernel = resolve_softening_kernel(ARGS.softening_kernel)
 
     result["peak_before_accuracy_gib"] = _mem()["peak"] / GIB
     idx = np.sort(
@@ -806,10 +853,16 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
         ),
         "artifacts",
         "reference",
-        f"direct_fp64_{ARGS.ic}{ARGS.n}_soft{soft:g}_ref{len(idx)}_seed12345.npy",
+        f"direct_fp64_{ARGS.ic}{ARGS.n}_soft{soft:g}"
+        f"{'' if kernel == 'plummer' else '_' + kernel}_ref{len(idx)}_seed12345.npy",
     )
     if os.path.exists(cache):
         ref = np.load(cache)
+        result["accuracy_reference"] = cache
+    elif kernel != "plummer":
+        ref = _direct_kernel_fp64(pos, mass, idx, soft, kernel)
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        np.save(cache, ref)
         result["accuracy_reference"] = cache
     else:
         ref = direct_accelerations(
