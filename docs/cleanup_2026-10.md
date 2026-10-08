@@ -41,7 +41,9 @@ On `main` at 6cca378 (2026-10-06):
 | P0 | #369 | CI: each test once per push; shard partition checked; this record | CI 16/16 | open |
 | P1 | #370 | Safety net: Odisseo contract test, lane goldens, inventory, gradient twins on real, GPU pins; leaf-P2M padding fix | CPU suite | open |
 | J | #371 | Real-basis jerk and time derivatives; exact real derivative tower | CPU suite | open |
-| X1 | | Treecode walk (single-GPU + distributed), `jaccpot/experimental`, `_large_n_farfield` | CPU suite, distributed tier | open |
+| X1 | #372 | Treecode walk (single-GPU + distributed), `jaccpot/experimental`, `_large_n_farfield` | CPU suite, distributed tier, GPU pins | open |
+| X2 | | Octree execution backend | CPU suite, GPU pins | open |
+| D1 | | Spherical-harmonic family without a basis object runs real | targeted CPU, GPU pins | open |
 
 ### P0: CI runs each test once
 
@@ -220,4 +222,58 @@ removal message.
 nornax checkout); distributed driver and Dehnen-criterion tests on two forced devices,
 10 passed; `test_shards.py check` 2,562 tests in exactly one shard each. The two-card
 GPU gate is still to run.
+
+### GPU pins (gate G2)
+
+Recorded at `main` 3a4bfc7 from a frozen worktree whose library is untouched; only
+`bench/dce_pins.py` and the `--use-pallas` option of `bench/fused_memory_budget.py`
+were copied in. One A100, deterministic GPU ops. The card was shared with another user's
+~4.8 GB job, as the maintainer approved, since no card was free. Summary:
+`bench/results/dce/pins_main-3a4bfc7.json`.
+
+| pin | lane | result |
+| --- | --- | --- |
+| S1 | fused `strict_run_v2`, clipped Plummer 2e5, bench defaults | rel-L2 7.76e-4 vs fp64 direct |
+| S2 | the same lane at 5e4, near field off Pallas | rel-L2 **0.113**, see below |
+| S3 | `FastMultipoleMethod()` defaults at 3e4 and 1e5 | runs |
+| S4 | Odisseo's differentiable lane, preset `fast`, 2e4 | gradients |
+| S4b | the large-N differentiable lane with Odisseo's env overrides, 2e4 | gradients |
+| S5 | `BlockStepFMM` with Odisseo's defaults, 20 base steps, 2e4 | momentum drift 2.5e-9 |
+
+**The A-vs-A control is bitwise for every array of every pin**, so a phase passes only if
+it reproduces them bitwise. Passed bitwise: the stack top (P1 + J + X1 + X2) and D1.
+
+Three things the pins showed about `main`:
+- **The large-N lane's no-Pallas near field is wrong (S2).** At 5e4 the Pallas near field
+  gives rel-L2 1.6e-3 and the no-Pallas route 0.113, with identical far and near lists
+  (668,306 / 51,294 pairs); 56 % of the particles are off by more than 1 %. This is the
+  route pre-Ampere GPUs and `ODISSEO_FMM_USE_PALLAS=0` take. The CPU lane golden (N =
+  512, leaf 16) is fine. Open for the maintainer: fix it, or drop the pre-Ampere large-N
+  route.
+- **The suspected break of the default constructor is not real (S3).**
+  `FastMultipoleMethod()` on a GPU at 1e5 runs. The grouped auto-enable test does not
+  fire under static sizing.
+- **`BlockStepFMM(backend="pallas")` at leaf 32 fails Triton lowering** (an array of
+  shape (3,)). Odisseo's default `backend="jax"` is what S5 pins.
+
+### X2: the octree execution backend
+
+**Removed:**
+- `runtime/_octree_fmm.py` and `runtime/_octree_adapter.py`;
+- the octree fields of `FMMPreparedState` (and their pytree entries) and the octree
+  artifact builders in `fmm_state.py`;
+- the octree prepass in `fmm_policy.py`;
+- the octree branches in `fmm_prepare.py`, `kernels/_evaluate.py`, `fmm_evaluate.py`
+  and `_fmm_impl.py`.
+
+The backend was complex-basis-only, about 3x behind radix, and had no production caller.
+`execution_backend="octree"`, and `tree_type="octree"` on the single-GPU solver, now raise
+with a removal message; the config fields stay so old configs construct. yggdrax's octree
+tree type, which the distributed lane can use, is untouched.
+
+**Tests:**
+- Deleted, tag (a): the 16 octree tests in `test_solver_api.py`,
+  `test_octree_fmm_axis_contracts.py`, and the `backend_octree` constructor-state case.
+- **Gates:** CPU suite 2,316 passed and 162 skipped (the one failure is the stale local
+  nornax checkout); `test_shards.py check` 2,541 tests; GPU pins bitwise.
 
