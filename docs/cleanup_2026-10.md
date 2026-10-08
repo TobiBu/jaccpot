@@ -332,3 +332,30 @@ is not part of this cleanup.**
 
 To be investigated separately. Until then, the fused multi-GPU lane (`FusedRollout`) has
 no GPU gate on jax 0.11.2.
+
+### Pin baseline re-recorded at 15ceca4
+
+#375 made `ferrers3` the default softening kernel, so the 3a4bfc7 pins no longer describe
+`main`. They were re-recorded from a frozen worktree at `main` 15ceca4 (after #375 and
+#376; yggdrax 9372332), with an A-vs-A control. The control is **bitwise for every array
+of every pin** (S1-S5, M1, M3). Later phases compare against `main-15ceca4` with
+`--envelope main-15ceca4-b`. Summary: `bench/results/dce/pins_main-15ceca4.json`.
+
+Two pin changes:
+- **M1's reference uses the lane's own kernel.** Its direct sum was Plummer. With
+  `ferrers3` it measured the kernel difference (6.7e-3), not the FMM error.
+- **M3 asks for Plummer explicitly.** `cross_theta > 0` with a compact kernel raises by
+  design, since the cross walk has no separation floor yet. Plummer keeps the cross-M2L
+  path pinned.
+
+What moved against 3a4bfc7, as the rel-L2 of the pinned arrays:
+
+| pin | moved | why |
+| --- | --- | --- |
+| S1 | 1.7e-8 | softening 1e-7: the kernel barely matters; error vs fp64 direct unchanged (7.76e-4) |
+| S2 | 0.113 | #376; error 0.113 -> 1.60e-3 |
+| S3 | 2.0e-2 (3e4), 3.7e-2 (1e5) | default softening 1e-3: `ferrers3` instead of Plummer |
+| S4, S4b | 6.9e-2 (d/dmass), 0.19 (d/dpos) | softening 1e-3, kernel change |
+| S5 | 2.1e-4 (velocities) | `BlockStepFMM` follows the default kernel |
+| M1 | 3.7e-2 | kernel change; error vs a matching direct sum 1.854e-4 -> 1.853e-4 |
+| M3 | bitwise | Plummer explicitly: #375 left the Plummer distributed mutual path unchanged |
