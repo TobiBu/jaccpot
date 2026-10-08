@@ -1,0 +1,266 @@
+"""Per-step pieces of Dehnen's eq (16b) force scale on the fused lane, by tree level.
+
+The criterion's threshold for a node is ``eps * min_{b in node} f_b`` with the
+cancellation-free ``f_b = sum_a G m_a / (|x_a - x_b|^2 + eps^2)``. On the fused
+lane ``f_b`` is a by-product of the previous step's force: its near half from the
+near-field kernel's force-scale lane, its far half from the far pairs as monopoles
+pushed down the tree. Two reductions over the tree turn those into what the walk
+needs, and both must stay cheap at 1e8 particles:
+
+* :func:`ancestor_sum_by_level` -- each node's own far contribution plus all its
+  ancestors', so a leaf holds the complete far term of its particles. The serial
+  ``accumulate_own_down_parent_chain`` (one scatter per internal node, ~4e5 at
+  25M) is replaced by a top-down pass over the tree's own level tables.
+* :func:`subtree_min_by_level` -- the minimum of a per-leaf value over each node's
+  subtree, deepest level first.
+
+Both walk ``nodes_by_level`` / ``level_offsets`` exactly as the M2M pass does
+(``aggregate_m2m_real_by_level``): static ``level_batch_width`` slots with the
+same clamp guard, ~40 small vectorised steps and no extra memory beyond the
+``[total_nodes]`` value.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+from jax import lax
+from jaxtyping import Array
+from yggdrax.dtypes import INDEX_DTYPE, as_index
+
+__all__ = [
+    "ancestor_sum_by_level",
+    "far_force_scale_own",
+    "subtree_min_by_level",
+]
+
+
+def _level_windows(
+    nodes_by_level: Array, level_offsets: Array, batch_width: int
+) -> tuple[Array, Array, Array]:
+    level_offsets = jnp.asarray(level_offsets, dtype=INDEX_DTYPE)
+    # padded so the widest window is always in range: `dynamic_slice_in_dim`
+    # CLAMPS an out-of-range start (see aggregate_m2m_real_by_level)
+    nodes = jnp.concatenate(
+        [
+            jnp.asarray(nodes_by_level, dtype=INDEX_DTYPE),
+            jnp.full((batch_width,), -1, dtype=INDEX_DTYPE),
+        ]
+    )
+    slot = jnp.arange(batch_width, dtype=INDEX_DTYPE)
+    return level_offsets, nodes, slot
+
+
+def _level_nodes(
+    level_idx: Array,
+    level_offsets: Array,
+    nodes: Array,
+    slot: Array,
+    batch_width: int,
+    num_internal: int,
+) -> tuple[Array, Array]:
+    start = level_offsets[level_idx]
+    count = level_offsets[level_idx + 1] - start
+    batch = lax.dynamic_slice_in_dim(nodes, start, batch_width, axis=0)
+    ok = (slot < count) & (batch >= as_index(0)) & (batch < as_index(num_internal))
+    return batch, ok
+
+
+def subtree_min_by_level(
+    values: Array,
+    left_child: Array,
+    right_child: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    *,
+    num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
+) -> Array:
+    """Each internal node's value becomes the minimum over its children, deepest first.
+
+    Parameters
+    ----------
+    values : Array
+        ``[total_nodes]``; the leaves' entries are the inputs (``+inf`` for an
+        empty leaf), the internal entries are overwritten.
+    left_child : Array
+        Left child per internal node, ``[num_internal]`` (``-1`` none).
+    right_child : Array
+        Right child per internal node.
+    parent : Array
+        ``[total_nodes]`` parent per node; a child counts only along its true
+        parent edge (see :func:`ancestor_sum_by_level`).
+    nodes_by_level : Array
+        Internal nodes grouped by level (``yggdrax.tree.get_nodes_by_level``).
+    level_offsets : Array
+        Level starts into ``nodes_by_level`` (``get_level_offsets``).
+    num_internal : int
+        Internal node count. Static.
+    num_levels : int
+        Levels in the tables. Static.
+    level_batch_width : int
+        Slot width per level (``jaccpot.runtime._level_shapes.level_batch_width``).
+        Static.
+
+    Returns
+    -------
+    Array
+        ``[total_nodes]``: the leaves unchanged, every internal node the minimum
+        over the leaves below it.
+    """
+    if int(num_internal) <= 0:
+        return values
+    bw = int(max(level_batch_width, 1))
+    offsets, nodes, slot = _level_windows(nodes_by_level, level_offsets, bw)
+    left = jnp.asarray(left_child, dtype=INDEX_DTYPE)
+    right = jnp.asarray(right_child, dtype=INDEX_DTYPE)
+    par = jnp.asarray(parent, dtype=INDEX_DTYPE)
+    inf = jnp.asarray(jnp.inf, values.dtype)
+    dead = as_index(values.shape[0])
+    state = jnp.concatenate([values, jnp.full((1,), inf, values.dtype)])
+
+    def body(rev: Array, st: Array) -> Array:
+        level_idx = as_index((num_levels - 2) - rev)
+        batch, ok = _level_nodes(level_idx, offsets, nodes, slot, bw, num_internal)
+        safe = jnp.where(ok, batch, as_index(0))
+        lc, rc = left[safe], right[safe]
+        lc_s, rc_s = jnp.maximum(lc, 0), jnp.maximum(rc, 0)
+        lv = jnp.where((lc >= 0) & (par[lc_s] == safe), st[lc_s], inf)
+        rv = jnp.where((rc >= 0) & (par[rc_s] == safe), st[rc_s], inf)
+        return st.at[jnp.where(ok, batch, dead)].set(jnp.minimum(lv, rv))
+
+    state = lax.fori_loop(0, max(int(num_levels) - 1, 0), body, state)
+    return state[: values.shape[0]]
+
+
+def ancestor_sum_by_level(
+    own: Array,
+    left_child: Array,
+    right_child: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    *,
+    num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
+) -> Array:
+    """Each node's own value plus all of its ancestors', top-down by level.
+
+    The level-order replacement for ``accumulate_own_down_parent_chain``: a node is
+    final once its parent's level is done, so each level adds its (final) values
+    onto its children. A value moves only along a TRUE parent edge
+    (``parent[child] == node``): the dead internal nodes of a capacity-padded cell
+    partition list children they do not own (150 of 2047 nodes at N=3000), and
+    pushing through those would count a contribution twice.
+
+    Parameters
+    ----------
+    own : Array
+        ``[total_nodes]`` per-node contributions.
+    left_child : Array
+        Left child per internal node, ``[num_internal]`` (``-1`` none).
+    right_child : Array
+        Right child per internal node.
+    parent : Array
+        ``[total_nodes]`` parent per node (``-1`` for the root).
+    nodes_by_level : Array
+        Internal nodes grouped by level.
+    level_offsets : Array
+        Level starts into ``nodes_by_level``.
+    num_internal : int
+        Internal node count. Static.
+    num_levels : int
+        Levels in the tables. Static.
+    level_batch_width : int
+        Slot width per level. Static.
+
+    Returns
+    -------
+    Array
+        ``[total_nodes]`` sums over each node's ancestor chain, the node included.
+    """
+    if int(num_internal) <= 0:
+        return own
+    bw = int(max(level_batch_width, 1))
+    offsets, nodes, slot = _level_windows(nodes_by_level, level_offsets, bw)
+    left = jnp.asarray(left_child, dtype=INDEX_DTYPE)
+    right = jnp.asarray(right_child, dtype=INDEX_DTYPE)
+    par = jnp.asarray(parent, dtype=INDEX_DTYPE)
+    dead = as_index(own.shape[0])
+    state = jnp.concatenate([own, jnp.zeros((1,), own.dtype)])
+
+    def body(level: Array, st: Array) -> Array:
+        level_idx = as_index(level)
+        batch, ok = _level_nodes(level_idx, offsets, nodes, slot, bw, num_internal)
+        safe = jnp.where(ok, batch, as_index(0))
+        val = jnp.where(ok, st[safe], jnp.zeros((), own.dtype))
+        lc, rc = left[safe], right[safe]
+        l_ok = ok & (lc >= 0) & (par[jnp.maximum(lc, 0)] == safe)
+        r_ok = ok & (rc >= 0) & (par[jnp.maximum(rc, 0)] == safe)
+        st = st.at[jnp.where(l_ok, lc, dead)].add(val)
+        return st.at[jnp.where(r_ok, rc, dead)].add(val)
+
+    state = lax.fori_loop(0, max(int(num_levels) - 1, 0), body, state)
+    return state[: own.shape[0]]
+
+
+def far_force_scale_own(
+    *,
+    sources: Array,
+    targets: Array,
+    live: Array,
+    node_mass: Array,
+    node_centers: Array,
+    node_radii: Array,
+    gravitational_constant: float,
+    softening_sq: Array,
+    num_nodes: int,
+) -> Array:
+    """Each node's own far term of eq (16b), from the directed far pairs.
+
+    The eager estimator's form (``_far_field_force_scale_by_node``): every far pair
+    ``(A -> B)`` adds ``G M_A / ((|c_A - c_B| + rho_B)^2 + eps^2)`` to node B -- a
+    lower bound on ``G M_A / |x_a - x_b|^2`` for every particle of B, so the scale
+    errs low (stricter, never looser). One segment-sum over the list.
+
+    Parameters
+    ----------
+    sources : Array
+        Source node per directed far pair.
+    targets : Array
+        Target node per directed far pair.
+    live : Array
+        Live pairs (the list's prefix).
+    node_mass : Array
+        ``[nodes]`` node masses.
+    node_centers : Array
+        ``[nodes, 3]`` the walk centres.
+    node_radii : Array
+        ``[nodes]`` the walk radii.
+    gravitational_constant : float
+        ``G``.
+    softening_sq : Array
+        ``eps^2``, the Plummer-equivalent softening squared.
+    num_nodes : int
+        Node count. Static.
+
+    Returns
+    -------
+    Array
+        ``[num_nodes]`` own far contributions (before the push-down).
+    """
+    src = jnp.maximum(jnp.asarray(sources, INDEX_DTYPE), 0)
+    tgt = jnp.maximum(jnp.asarray(targets, INDEX_DTYPE), 0)
+    dtype = node_mass.dtype
+    delta = node_centers[src] - node_centers[tgt]
+    reach = jnp.sqrt(jnp.sum(delta * delta, axis=1)) + node_radii[tgt]
+    contrib = (
+        jnp.asarray(gravitational_constant, dtype)
+        * node_mass[src]
+        / (reach * reach + jnp.asarray(softening_sq, dtype))
+    )
+    contrib = jnp.where(live & (reach > 0), contrib, jnp.zeros((), dtype))
+    return jax.ops.segment_sum(contrib, tgt, num_segments=int(num_nodes))
