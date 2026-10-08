@@ -50,6 +50,9 @@ pytestmark = pytest.mark.skipif(
 #: moved twice.
 _LEAF = 8
 
+# Plummer: this module's direct-sum references are Plummer-softened, so every
+# config and near-field call pins softening_kernel="plummer" (the default is ferrers3).
+
 
 def _direct(all_pos, all_mass, G, soft):
     diff = all_pos[:, None, :] - all_pos[None, :, :]
@@ -102,7 +105,7 @@ def test_driver_matches_direct():
 
     # Defaults are the converged fast-lane config (real basis + dehnen MAC,
     # order=3, theta=0.4 for both walks, leaf=8, soft=0.02).
-    config = DistributedFMMConfig(leaf_size=_LEAF)
+    config = DistributedFMMConfig(softening_kernel="plummer", leaf_size=_LEAF)
 
     result = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -135,7 +138,9 @@ def test_driver_real_basis_matches_direct():
     mesh = make_mesh(ndev)
     per = 64
     pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig(basis="real", mac_type="bh", leaf_size=_LEAF)
+    config = DistributedFMMConfig(
+        softening_kernel="plummer", basis="real", mac_type="bh", leaf_size=_LEAF
+    )
 
     result = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -162,7 +167,9 @@ def test_driver_solidfmm_matches_direct():
     mesh = make_mesh(ndev)
     per = 64
     pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig(basis="solidfmm", mac_type="bh", leaf_size=_LEAF)
+    config = DistributedFMMConfig(
+        softening_kernel="plummer", basis="solidfmm", mac_type="bh", leaf_size=_LEAF
+    )
 
     result = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -185,7 +192,7 @@ def test_driver_jit_matches_eager():
     mesh = make_mesh(ndev)
     per = 64
     pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig(leaf_size=_LEAF)
+    config = DistributedFMMConfig(softening_kernel="plummer", leaf_size=_LEAF)
 
     eager = distributed_fmm_accelerations(
         pts, mass, config=config, mesh=mesh, jit=False
@@ -225,7 +232,7 @@ def test_driver_auto_scale_caps():
     per = 64
     pts, mass = _separated_clusters(ndev, per)
     tiny = dataclasses.replace(
-        DistributedFMMConfig(leaf_size=_LEAF),
+        DistributedFMMConfig(softening_kernel="plummer", leaf_size=_LEAF),
         nearfield_backend="baseline",  # pallas is GPU-only; CI runs on CPU
         max_pair_queue=64,
         cross_max_pair_queue=64,

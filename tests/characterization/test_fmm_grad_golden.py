@@ -243,6 +243,7 @@ def _fmm_gradients(basis: str, order: int, positions, masses):
         theta=0.5,
         G=G_CONST,
         softening=SOFTENING,
+        softening_kernel="plummer",
     )
     state = fmm.prepare_state(positions, masses, max_order=order, leaf_size=LEAF_SIZE)
     weights = _cotangent(int(positions.shape[0]))
@@ -268,7 +269,7 @@ def _direct_sum_gradients(positions, masses):
         return jnp.sum(
             weights
             * direct_sum_gravitational_acceleration(
-                pos, mass, G=G_CONST, softening=SOFTENING
+                pos, mass, G=G_CONST, softening=SOFTENING, softening_kernel="plummer"
             )
         )
 
@@ -428,7 +429,12 @@ def test_grad_golden_leaf_size_is_what_makes_the_far_field_nonempty() -> None:
     """
     positions, masses = _make_inputs("uniform", 128)
     fmm = FastMultipoleMethod(
-        basis="real", use_pallas=False, theta=0.5, G=G_CONST, softening=SOFTENING
+        basis="real",
+        use_pallas=False,
+        theta=0.5,
+        G=G_CONST,
+        softening=SOFTENING,
+        softening_kernel="plummer",
     )
     deep = fmm.prepare_state(positions, masses, max_order=2, leaf_size=LEAF_SIZE)
     shallow = fmm.prepare_state(positions, masses, max_order=2, leaf_size=16)

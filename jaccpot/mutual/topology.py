@@ -271,6 +271,7 @@ def _dual_traverse(
     right_child: np.ndarray,
     theta: float,
     root: int,
+    separation_floor: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Symmetric dual-tree walk: canonical far node pairs and near leaf pairs.
 
@@ -304,6 +305,10 @@ def _dual_traverse(
         Opening angle of the mutual MAC, ``theta * |c_b - c_a| > r_a + r_b``.
     root : int
         Index of the root node; the walk starts from ``(root, root)``.
+    separation_floor : float
+        Refuse a far pair unless also ``|c_b - c_a| - r_a - r_b >=
+        separation_floor``; ``0`` (default) adds no test. A compact softening
+        kernel's support makes the unsoftened far field exact.
 
     Returns
     -------
@@ -333,6 +338,8 @@ def _dual_traverse(
         # separated from itself, and admitting it would drop the whole subtree's
         # internal interactions.
         accepted = (a != b) & (theta * dist > radii[a] + radii[b])
+        if separation_floor > 0.0:
+            accepted &= dist - radii[a] - radii[b] >= separation_floor
         if accepted.any():
             far_a.append(a[accepted])
             far_b.append(b[accepted])
@@ -447,6 +454,7 @@ def build_mutual_topology_from_tree(
     *,
     theta: float,
     order: int,
+    separation_floor: float = 0.0,
 ) -> MutualTopology:
     """Build a :class:`MutualTopology` from a prebuilt yggdrax tree.
 
@@ -471,6 +479,9 @@ def build_mutual_topology_from_tree(
         Opening angle of the mutual MAC.
     order : int
         Expansion order recorded on the topology.
+
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
 
     Returns
     -------
@@ -517,7 +528,14 @@ def build_mutual_topology_from_tree(
         radii[node] = float(np.sqrt(np.einsum("ij,ij->i", offsets, offsets)).max())
 
     far_a, far_b, near_a, near_b = _dual_traverse(
-        centers, radii, num_internal, left_child, right_child, float(theta), root
+        centers,
+        radii,
+        num_internal,
+        left_child,
+        right_child,
+        float(theta),
+        root,
+        separation_floor=float(separation_floor),
     )
 
     leaf_nodes = np.flatnonzero(
@@ -562,6 +580,7 @@ def build_mutual_topology(
     order: int = 4,
     leaf_size: int = 16,
     solver: Optional[Any] = None,
+    separation_floor: float = 0.0,
 ) -> Tuple[MutualTopology, Any]:
     """Build a tree with jaccpot's production builder, then a mutual topology.
 
@@ -589,6 +608,9 @@ def build_mutual_topology(
     solver : Optional[Any]
         Reuse an existing solver instead of constructing one.
 
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
+
     Returns
     -------
     Tuple[MutualTopology, Any]
@@ -612,6 +634,7 @@ def build_mutual_topology(
         np.asarray(state.positions_sorted),
         np.asarray(state.masses_sorted),
         theta=float(theta),
+        separation_floor=float(separation_floor),
         order=int(order),
     )
     return topology, state

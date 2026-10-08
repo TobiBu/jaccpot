@@ -615,6 +615,7 @@ def evaluate_large_n_nearfield_fast_lane(
                     payload=state.radix_fast_payload,
                     G=getattr(fmm, "G"),
                     softening=float(getattr(fmm, "softening")),
+                    softening_kernel=getattr(fmm, "softening_kernel", None),
                     return_potential=True,
                     use_pallas=True,
                     neighbor_list=state.neighbor_list,
@@ -636,6 +637,7 @@ def evaluate_large_n_nearfield_fast_lane(
             live_masses,
             G=getattr(fmm, "G"),
             softening=float(getattr(fmm, "softening")),
+            softening_kernel=getattr(fmm, "softening_kernel", None),
             max_leaf_size=int(state.max_leaf_size),
             return_potential=True,
             nearfield_mode=str(state.nearfield_mode),
@@ -667,6 +669,7 @@ def evaluate_large_n_nearfield_fast_lane(
             payload=state.radix_fast_payload,
             G=getattr(fmm, "G"),
             softening=float(getattr(fmm, "softening")),
+            softening_kernel=getattr(fmm, "softening_kernel", None),
             return_potential=False,
             use_pallas=use_pallas,
             differentiable=differentiable,
@@ -687,6 +690,7 @@ def evaluate_large_n_nearfield_fast_lane(
             payload=overflow_payload,
             G=getattr(fmm, "G"),
             softening=float(getattr(fmm, "softening")),
+            softening_kernel=getattr(fmm, "softening_kernel", None),
             use_pallas=use_pallas,
         )
 
@@ -711,6 +715,7 @@ def evaluate_large_n_nearfield_fast_lane(
         state.nearfield_target_block_valid_mask,
         G=getattr(fmm, "G"),
         softening=float(getattr(fmm, "softening")),
+        softening_kernel=getattr(fmm, "softening_kernel", None),
         target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
         target_block_tile_size=int(state.nearfield_target_block_tile_size),
         target_block_tile_scan_unroll=int(

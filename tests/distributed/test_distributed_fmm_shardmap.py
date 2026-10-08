@@ -106,6 +106,9 @@ _LEAF = 8
 _G = 1.0
 _SOFT = 0.02
 
+# Plummer: this module's direct-sum references are Plummer-softened, so every
+# config and near-field call pins softening_kernel="plummer" (the default is ferrers3).
+
 
 def _direct(all_pos, all_mass, G, soft):
     diff = all_pos[:, None, :] - all_pos[None, :, :]
@@ -378,6 +381,7 @@ def test_distributed_fmm_shardmap_matches_direct():
             lm,
             G=_G,
             softening=_SOFT,
+            softening_kernel="plummer",
             nearfield_mode="baseline",
             node_ranges_override=jnp.zeros((ul_s + 1, 2), INDEX_DTYPE),
             leaf_nodes_override=jnp.arange(ul_s, dtype=INDEX_DTYPE),
@@ -401,6 +405,7 @@ def test_distributed_fmm_shardmap_matches_direct():
             concat_mass,
             G=_G,
             softening=_SOFT,
+            softening_kernel="plummer",
             nearfield_mode="baseline",
             node_ranges_override=jnp.zeros((u_leaves + 1, 2), INDEX_DTYPE),
             leaf_nodes_override=jnp.arange(u_leaves, dtype=INDEX_DTYPE),

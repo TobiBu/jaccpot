@@ -230,6 +230,7 @@ def _build_fmm(basis: str) -> FastMultipoleMethod:
                 )
             )
         ),
+        softening_kernel="plummer",
     )
 
 
@@ -319,6 +320,7 @@ def _build_fmm_with_modes(basis, farfield_mode, nearfield_mode):
             farfield=farfield,
             nearfield=nearfield,
         ),
+        softening_kernel="plummer",
     )
 
 

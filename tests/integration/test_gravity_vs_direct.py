@@ -83,6 +83,7 @@ def test_fmm_acceleration_matches_direct_sum(dtype, rel_tol: float, abs_tol: flo
                 )
             )
         ),
+        softening_kernel="plummer",
     )
 
     acc_fmm = np.asarray(

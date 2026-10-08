@@ -1246,6 +1246,7 @@ def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
         seed_a: Optional[Array] = None,
         seed_b: Optional[Array] = None,
         seed_count: Optional[Array] = None,
+        separation_floor: float = 0.0,
     ) -> Any:
         from jaccpot._env import env_flag
         from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
@@ -1266,6 +1267,7 @@ def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
             seed_b=seed_b,
             seed_count=seed_count,
             interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
+            separation_floor=float(separation_floor),
         )
 
     return pallas_walk
@@ -1374,6 +1376,7 @@ def make_cross_hook(
     near_theta: Optional[float] = None,
     export_theta: Optional[float] = None,
     two_sided: Optional[bool] = None,
+    separation_floor: float = 0.0,
 ) -> Callable[[Any], Optional[tuple]]:
     """Build the ``cross_hook`` for a mesh of ``ndev`` devices.
 
@@ -1421,6 +1424,11 @@ def make_cross_hook(
         receiver's internal nodes instead of every cell collecting its own list.
         ``None`` reads ``JACCPOT_CROSS_TWO_SIDED`` (default on). Static.
 
+    separation_floor:
+        Minimum gap of an accepted far pair in every export and receiver walk
+        (length units); a compact softening kernel's support, so the unsoftened
+        cross far field is exact. ``0`` (default): none. Static.
+
     Returns
     -------
     Callable
@@ -1429,6 +1437,18 @@ def make_cross_hook(
     """
     cap = caps if caps is not None else CrossCapacities()
     walk_fn = cross_walk_fn(mac_type)
+    floor = float(separation_floor)
+    if floor > 0.0:
+        # Every cross walk -- export, receiver, near import -- runs through
+        # `walk_fn` (or yggdrax's mutual walk when it is None), so the floor is
+        # applied once, here, to all of them.
+        from yggdrax.interactions import dual_tree_walk_mutual
+
+        inner_walk = walk_fn if walk_fn is not None else dual_tree_walk_mutual
+
+        def walk_fn(*args: Any, **kwargs: Any) -> Any:
+            return inner_walk(*args, separation_floor=floor, **kwargs)
+
     two_sided = _cross_two_sided() if two_sided is None else bool(two_sided)
     symmetric = two_sided and _symmetric_exchange_enabled(
         two_sided=two_sided,
@@ -1593,6 +1613,7 @@ def make_cross_hook(
                 extent_source=jnp.asarray(geom.radius)[f_safe],
                 valid_pairs=f_live,
                 different_nodes=jnp.ones_like(f_live),
+                separation_floor=floor,
             )
             # Walk centres vs expansion centres. Under the COM geometry these are
             # the SAME array and both numbers must read 0 -- that is the check the
@@ -1625,6 +1646,7 @@ def make_cross_hook(
                 extent_source=jnp.asarray(geom.radius)[n_safe],
                 valid_pairs=n_live,
                 different_nodes=jnp.ones_like(n_live),
+                separation_floor=floor,
             )
             record["export_near_live"] = jnp.sum(n_live)
             record["export_near_mac_fail"] = jnp.sum(n_live & ~ok_n)
@@ -1709,6 +1731,7 @@ def make_cross_hook(
                 extent_source=combined_rad[sb_],
                 valid_pairs=s_live,
                 different_nodes=jnp.ones_like(s_live),
+                separation_floor=floor,
             )
             record["seed_live"] = jnp.sum(s_live)
             record["seed_mac_fail"] = jnp.sum(s_live & ~ok_r)
@@ -2107,6 +2130,7 @@ def cross_near_acceleration(
     chunk: int = 64,
     interpret: bool = False,
     accum: Optional[str] = None,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Acceleration on local particles from the IMPORTED leaves, as its own term.
 
@@ -2149,6 +2173,9 @@ def cross_near_acceleration(
         near terms widen together. Before this knob existed the cross term was
         pinned to ``"input"`` whatever the local lane did, which made it the one
         fp32-only reduction in an otherwise widened force.
+
+    softening_kernel:
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -2240,6 +2267,7 @@ def cross_near_acceleration(
         include_self=False,  # the local self term is already in the force
         num_target_leaves=L,
         accum=str(accum),
+        softening_kernel=softening_kernel,
     )
     acc = out[..., :3]
     # The scatter below is a PERMUTATION, not a reduction: every live particle sits

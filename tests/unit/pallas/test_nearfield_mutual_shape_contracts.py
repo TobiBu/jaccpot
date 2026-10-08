@@ -307,7 +307,8 @@ def _tile_args(slots: int = SLOTS):
         "mb": jnp.ones((slots,), dtype=dtype),
         "vb_f": jnp.ones((slots,), dtype=dtype),
         "weight": None,
-        "softening_sq": jnp.asarray(1e-4, dtype=dtype),
+        # the tiles take the two softening scalars (eps^2, 0 for Plummer)
+        "soft_params": (jnp.asarray(1e-4, dtype=dtype), jnp.asarray(0.0, dtype=dtype)),
         "g_value": jnp.asarray(1.0, dtype=dtype),
         "exclude_diagonal": False,
     }

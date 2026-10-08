@@ -449,6 +449,7 @@ def fused_force_step(
             int(psort.shape[0]),
             int(jnp.asarray(tree.left_child).shape[0]),
             softening_sq=jnp.asarray(engine.softening, acceleration.dtype) ** 2,
+            softening_kernel=getattr(engine, "softening_kernel", None),
             G=jnp.asarray(engine.G, acceleration.dtype),
         )
     return refreshed, acceleration

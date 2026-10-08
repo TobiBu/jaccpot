@@ -111,6 +111,9 @@ class AdaptivePolicyState(NamedTuple):
         Newton constant -- see the note on the field itself.
     mac_theta_max : float
         Geometric cap on the opening angle -- see the note on the field itself.
+    separation_floor : float
+        Minimum gap of an accepted pair in length units -- see the note on the
+        field itself.
     """
 
     source_error_proxy_by_order: Array
@@ -142,6 +145,11 @@ class AdaptivePolicyState(NamedTuple):
     #: under an assumption of convergence, so it under-predicts there. 1.0
     #: reproduces eq (16a) verbatim; a smaller value is a disclosed deviation.
     mac_theta_max: float = 1.0
+    #: Minimum gap ``|c_B - c_A| - e_A - e_B`` of an accepted pair, in length units
+    #: (the walk's extents). The policy replaces the walk's geometric decision, so
+    #: a separation floor (a compact softening kernel's support) has to be applied
+    #: here too or the unsoftened far field reaches inside the kernel. 0: none.
+    separation_floor: float = 0.0
 
 
 def adaptive_policy_tolerance(
@@ -2285,6 +2293,7 @@ def build_adaptive_policy_state(
     gravitational_constant: float = 1.0,
     mac_theta_max: float = 1.0,
     max_leaf_size: Optional[int] = None,
+    separation_floor: float = 0.0,
 ) -> AdaptivePolicyState:
     """Build the solver-owned adaptive traversal state from upward data.
 
@@ -2317,6 +2326,10 @@ def build_adaptive_policy_state(
         ``None`` (default) lets it read the exact maximum off the device, which
         raises inside ``jit``/``shard_map``; the distributed lane passes its leaf
         capacity.
+
+    separation_floor : float
+        Minimum gap of an accepted pair (length units); see the field on
+        :class:`AdaptivePolicyState`. ``0`` (default): none.
 
     Returns
     -------
@@ -2443,6 +2456,7 @@ def build_adaptive_policy_state(
         error_model_code=error_model_code_arr,
         gravitational_constant=float(gravitational_constant),
         mac_theta_max=float(mac_theta_max),
+        separation_floor=float(separation_floor),
     )
 
 
@@ -2619,6 +2633,11 @@ def _adaptive_pair_policy_impl(
         operand=None,
     )
     accept_mask = valid_pairs & different_nodes & accept_gate & pass_any
+    # The state crosses jit as a pytree, so the floor may be a tracer: a select,
+    # not a Python branch, and a no-op at 0 whatever the extents.
+    floor = jnp.asarray(getattr(policy_state, "separation_floor", 0.0), dist_sq.dtype)
+    reach = extent_target + extent_source + floor
+    accept_mask = accept_mask & ((floor <= 0.0) | (reach * reach <= dist_sq))
     tags = jnp.where(accept_mask, raw_tags, -jnp.ones_like(raw_tags))
 
     actions = jnp.full(valid_pairs.shape, _ACTION_REFINE, dtype=jnp.int32)

@@ -71,6 +71,11 @@ from jaccpot.operators.real_harmonics import (
     evaluate_local_real_with_grad,
 )
 from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params_from_sq,
+)
 
 from ..dtypes import INDEX_DTYPE, as_index
 from ._shared import (
@@ -576,6 +581,7 @@ def _prepare_tree_evaluation_inputs(
         "order",
         "G",
         "softening",
+        "softening_kernel",
         "expansion_basis",
         "nearfield_mode",
         "nearfield_edge_chunk_size",
@@ -678,6 +684,7 @@ def _evaluate_tree_compiled_impl(
     *,
     G: float,
     softening: float,
+    softening_kernel: Optional[str] = None,
     order: int,
     expansion_basis: ExpansionBasis,
     max_leaf_size: int,
@@ -775,7 +782,9 @@ def _evaluate_tree_compiled_impl(
     G : float
         Gravitational constant. Static.
     softening : float
-        Plummer softening length. Static.
+        Plummer-equivalent softening length. Static.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`). Static.
     order : int
         Expansion order ``p``. Static.
     expansion_basis : ExpansionBasis
@@ -880,6 +889,7 @@ def _evaluate_tree_compiled_impl(
             masses,
             G=G,
             softening=softening,
+            softening_kernel=softening_kernel,
             edge_chunk_size=nearfield_edge_chunk_size,
             precomputed_target_leaf_ids=(
                 precomputed_target_leaf_ids if use_precomputed else None
@@ -942,6 +952,7 @@ def _evaluate_tree_compiled_impl(
             masses,
             G=G,
             softening=softening,
+            softening_kernel=softening_kernel,
             max_leaf_size=max_leaf_size,
             return_potential=return_potential,
             nearfield_mode=nearfield_mode,
@@ -1148,6 +1159,7 @@ def _evaluate_prepared_tree(
             masses_sorted,
             G=fmm.G,
             softening=fmm.softening,
+            softening_kernel=fmm.softening_kernel,
             max_leaf_size=max_leaf_size,
             return_potential=return_potential,
             nearfield_mode=nearfield_mode,
@@ -1410,6 +1422,85 @@ def _build_target_nearfield_source_index_matrix(
     return padded, unique_mask
 
 
+def _targeted_nearfield_compact(
+    *,
+    diff: Array,
+    src_mass: Array,
+    source_mask: Array,
+    g_const: Array,
+    softening_sq: Array,
+    kernel: str,
+    vel_diff: Optional[Array],
+    return_potential: bool,
+    return_jerk: bool,
+    return_snap: bool,
+    return_crackle: bool,
+) -> tuple[Array, Optional[Array], Optional[Array], Optional[Array], Optional[Array]]:
+    """:func:`_compute_targeted_nearfield` for a compact softening kernel.
+
+    The pair acceleration ``-G m d g(|d|^2)`` and its first three derivatives along
+    ``d(t) = d + v t`` (what the Plummer closed forms are), by nested ``jax.jvp``.
+
+    Parameters
+    ----------
+    diff : Array
+        ``(T, S, 3)`` target minus source positions.
+    src_mass : Array
+        ``(T, S)`` source masses.
+    source_mask : Array
+        ``(T, S)`` live sources.
+    g_const : Array
+        Gravitational constant.
+    softening_sq : Array
+        Squared Plummer-equivalent softening.
+    kernel : str
+        A compact kernel name.
+    vel_diff : Optional[Array]
+        ``(T, S, 3)`` target minus source velocities; needed by the derivatives.
+    return_potential : bool
+        Also return the potential.
+    return_jerk : bool
+        Also return the first time derivative.
+    return_snap : bool
+        Also return the second.
+    return_crackle : bool
+        Also return the third.
+
+    Returns
+    -------
+    tuple[Array, Optional[Array], Optional[Array], Optional[Array], Optional[Array]]
+        ``(acceleration, potential, jerk, snap, crackle)`` as there.
+    """
+    params = softening_params_from_sq(kernel, softening_sq, diff.dtype)
+
+    def acc_of(d: Array) -> Array:
+        r2 = jnp.sum(d * d, axis=-1)
+        g = masked_pair_factors(r2, source_mask, params, kernel)[0]
+        return -g_const * jnp.sum((g * src_mass)[..., None] * d, axis=1)
+
+    def along(f: Any) -> Any:
+        def df(d: Array) -> Array:
+            return jax.jvp(f, (d,), (vel_diff,))[1]
+
+        return df
+
+    near_acc = acc_of(diff)
+    jerk = snap = crackle = None
+    if return_jerk or return_snap or return_crackle:
+        d1 = along(acc_of)
+        jerk = d1(diff) if return_jerk else None
+        if return_snap or return_crackle:
+            d2 = along(d1)
+            snap = d2(diff) if return_snap else None
+            crackle = along(d2)(diff) if return_crackle else None
+    pot = None
+    if return_potential:
+        r2 = jnp.sum(diff * diff, axis=-1)
+        psi = masked_pair_factors(r2, source_mask, params, kernel, potential=True)[1]
+        pot = -g_const * jnp.sum(psi * src_mass, axis=1)
+    return near_acc, pot, jerk, snap, crackle
+
+
 @jaxtyped(typechecker=beartype)
 def _compute_targeted_nearfield(
     *,
@@ -1425,6 +1516,7 @@ def _compute_targeted_nearfield(
     return_jerk: bool = False,
     return_snap: bool = False,
     return_crackle: bool = False,
+    softening_kernel: Optional[str] = None,
 ) -> tuple[Array, Optional[Array], Optional[Array], Optional[Array], Optional[Array]]:
     """Compute near-field contributions for target particles only.
 
@@ -1447,7 +1539,7 @@ def _compute_targeted_nearfield(
     G : Union[float, Array]
         Gravitational constant. Accepts an array so it can be traced.
     softening : float
-        Plummer softening length; enters squared.
+        Plummer-equivalent softening length; enters squared.
     return_potential : bool
         Also return the potential.
     velocities_sorted : Optional[Array]
@@ -1459,6 +1551,10 @@ def _compute_targeted_nearfield(
         Also return the second.
     return_crackle : bool
         Also return the third.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`). Plummer keeps the closed forms
+        below; a compact kernel differentiates its pair force along the straight
+        line ``d + v t`` by nested forward mode, which is the same derivative.
 
     Returns
     -------
@@ -1517,6 +1613,26 @@ def _compute_targeted_nearfield(
     src_pos = positions_sorted[source_indices]
     src_mass = masses_sorted[source_indices]
     diff = target_positions[:, None, :] - src_pos
+    kernel = resolve_softening_kernel(softening_kernel)
+    if kernel != "plummer":
+        return _targeted_nearfield_compact(
+            diff=diff,
+            src_mass=src_mass,
+            source_mask=source_mask,
+            g_const=g_const,
+            softening_sq=softening_sq,
+            kernel=kernel,
+            vel_diff=(
+                target_velocities[:, None, :]  # type: ignore[index]
+                - velocities_sorted[source_indices]  # type: ignore[index]
+                if (return_jerk or return_snap or return_crackle)
+                else None
+            ),
+            return_potential=return_potential,
+            return_jerk=return_jerk,
+            return_snap=return_snap,
+            return_crackle=return_crackle,
+        )
     dist_sq = jnp.sum(diff * diff, axis=-1) + softening_sq
     eps = jnp.finfo(positions_sorted.dtype).eps
     one = jnp.asarray(1.0, dtype=dtype)
@@ -1901,6 +2017,7 @@ def _evaluate_prepared_tree_targets(
         source_mask=near_source_mask,
         G=g_const,
         softening=float(fmm.softening),
+        softening_kernel=fmm.softening_kernel,
         return_potential=return_potential,
     )
     far_grad, far_potential_pre, far_derivatives = (

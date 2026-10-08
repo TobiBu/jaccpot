@@ -212,6 +212,7 @@ def test_payload_handles_a_tree_with_no_cross_leaf_neighbours():
         payload=payload,
         G=fmm._impl.G,
         softening=float(fmm._impl.softening),
+        softening_kernel="plummer",  # the reference below is the Plummer sum
         use_pallas=False,
         differentiable=True,
     )

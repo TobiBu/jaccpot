@@ -68,6 +68,9 @@ _PER_DEVICE = 64
 _SOFT = 0.02
 _G = 1.0
 
+# Plummer: this module's direct-sum references are Plummer-softened, so every
+# config and near-field call pins softening_kernel="plummer" (the default is ferrers3).
+
 
 def _separated_clusters(ndev, per, seed=4):
     """``ndev`` spatially separated clusters in a long box.
@@ -96,7 +99,14 @@ def _direct(pos, mass):
 
 def _run(pos, mass, partitioner):
     config = dataclasses.replace(
-        DistributedFMMConfig(softening=_SOFT, G=_G, leaf_size=8, order=4, theta=0.4),
+        DistributedFMMConfig(
+            softening_kernel="plummer",
+            softening=_SOFT,
+            G=_G,
+            leaf_size=8,
+            order=4,
+            theta=0.4,
+        ),
         partitioner=partitioner,
     )
     return distributed_fmm_accelerations(

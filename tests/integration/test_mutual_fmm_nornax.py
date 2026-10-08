@@ -88,7 +88,7 @@ def test_adapter_satisfies_the_mutual_force_model_protocols():
     ``runtime_checkable`` -- widening it would have made ``isinstance`` reject
     every existing implementation.
     """
-    fmm = BlockStepFMM(softening=SOFTENING, k_max=2)
+    fmm = BlockStepFMM(softening=SOFTENING, k_max=2, softening_kernel="plummer")
     assert isinstance(fmm, MutualForceModel)
     assert isinstance(fmm, FusedMutualForceModel)
 
@@ -140,7 +140,12 @@ def test_total_force_matches_the_direct_sum_oracle():
     )
     oracle = MutualDirectSumGravity(G=1.0, softening=SOFTENING)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=0.7, max_order=6, leaf_size=16
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.7,
+        max_order=6,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
 
@@ -167,7 +172,12 @@ def test_single_rung_leapfrog_rollout_conserves_momentum():
     n = 256
     positions, velocities, masses = _system(n, seed=2)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=0, theta=0.9, max_order=4, leaf_size=16
+        softening=SOFTENING,
+        k_max=0,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
 
@@ -197,7 +207,12 @@ def test_multi_rung_block_rollout_conserves_momentum():
         np.random.default_rng(4).integers(0, k_max + 1, n), dtype=jnp.int32
     )
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     assert fused_boundary_model(fmm, k_max) is fmm
@@ -226,7 +241,12 @@ def test_rung_assignment_round_trips_through_the_adapter():
     n, k_max = 512, 2
     positions, _, masses = _system(n, seed=5)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     acc = fmm.total_accelerations(positions, masses)
@@ -323,7 +343,7 @@ def test_adapter_advertises_traced_level_weights_to_nornax():
     ``level_weights`` parameter would silently cost the trace-size win -- this is
     the test that would catch it.
     """
-    fmm = BlockStepFMM(softening=SOFTENING, k_max=2)
+    fmm = BlockStepFMM(softening=SOFTENING, k_max=2, softening_kernel="plummer")
     assert supports_traced_level_weights(fmm)
     # And the static-only spelling of the same backend must decline it, or the
     # comparison in the parity test below would not compare two paths.
@@ -348,7 +368,12 @@ def test_nornax_scanned_and_unrolled_fused_paths_agree_on_the_fmm_force():
         np.random.default_rng(11).integers(0, k_max + 1, n), dtype=jnp.int32
     )
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     state = BlockStepState(
@@ -395,7 +420,7 @@ def test_adapter_is_selected_for_the_fused_path():
     path -- correct, but paying one traversal per active level, which is the whole
     cost the fused primitive exists to avoid.
     """
-    fmm = BlockStepFMM(softening=SOFTENING, k_max=2)
+    fmm = BlockStepFMM(softening=SOFTENING, k_max=2, softening_kernel="plummer")
     assert isinstance(fmm, FusedMutualForceModel)
     assert fused_boundary_model(fmm, 2) is fmm
     # A model whose k_max disagrees is a misconfiguration, not a fallback: its
@@ -421,7 +446,12 @@ def test_nornax_fused_path_matches_its_per_level_path_on_the_fmm_force():
         np.random.default_rng(7).integers(0, k_max + 1, n), dtype=jnp.int32
     )
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     state = BlockStepState(
@@ -464,7 +494,12 @@ def test_jaccpot_base_step_matches_nornax_fused_base_step():
         np.random.default_rng(9).integers(0, k_max + 1, n), dtype=jnp.int32
     )
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=0.9, max_order=4, leaf_size=16
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     state = BlockStepState(
@@ -540,6 +575,7 @@ def _device_fmm(k_max, *, theta=0.6, leaf_size=16):
         max_order=4,
         leaf_size=leaf_size,
         topology_backend="device",
+        softening_kernel="plummer",
     )
 
 
@@ -917,6 +953,7 @@ def test_the_adapter_passes_nornax_conformance_kit(backend):
         max_order=4,
         leaf_size=16,
         topology_backend=backend,
+        softening_kernel="plummer",
     )
     state = fmm.prepare(positions, masses)
     assert int(state.num_far_pairs) > 0, "no far pairs: the oracle check is vacuous"
@@ -997,7 +1034,12 @@ def _rollout_gradient_system(seed):
     k_max = 2
     positions, velocities, masses = _two_clumps(seed=seed)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=k_max, theta=0.6, max_order=4, leaf_size=16
+        softening=SOFTENING,
+        k_max=k_max,
+        theta=0.6,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     assert int(fmm.state.num_far_pairs) > 0, "no far pairs: a direct sum in disguise"

@@ -78,6 +78,7 @@ from jaccpot.operators.complex_ops import (  # noqa: F401
     enforce_conjugate_symmetry_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size  # noqa: F401
+from jaccpot.softening import resolve_softening_kernel, support_factor
 
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
 from ._interaction_cache import _InteractionCacheEntry, _RefreshDualPlannerHint
@@ -310,6 +311,12 @@ class FMMEngine(
         rather than in a group because it straddles traversal and accuracy.
     dehnen_radius_scale : float
         Scale applied to node radii in the Dehnen MAC.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    softening_floor : Optional[float]
+        Minimum gap of an accepted far pair, in softening lengths (see
+        :class:`jaccpot.config.FMMAdvancedConfig`). ``None``: the kernel's
+        support factor (``0`` for Plummer); ``0``: none.
     interaction_retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
         Called once per dual-tree retry, when the traversal overflows its pair
         capacity and re-runs with a larger one. Purely observational -- use it to
@@ -415,6 +422,8 @@ class FMMEngine(
         # before the traversal sees it. See the alias.
         mac_type: MACTypeInput = "bh",
         dehnen_radius_scale: float = 1.0,
+        softening_kernel: Optional[str] = None,
+        softening_floor: Optional[float] = None,
         # DualTreeTraversalConfig (replace all four capacities), or a
         # TraversalOverrides / mapping of named capacities (merge onto the
         # preset's resolved sizing). See normalize_traversal_config_request.
@@ -568,6 +577,12 @@ class FMMEngine(
             nearfield_schedule_item_cap=nearfield_schedule_item_cap,
             precompute_grouped_class_segments=precompute_grouped_class_segments,
             upward_leaf_batch_size=upward_leaf_batch_size,
+        )
+        self.softening_kernel = resolve_softening_kernel(softening_kernel)
+        if softening_floor is not None and float(softening_floor) < 0.0:
+            raise ValueError("softening_floor must be >= 0")
+        self.softening_floor = (
+            None if softening_floor is None else float(softening_floor)
         )
         self._resolve_tree_options(
             dehnen_radius_scale=dehnen_radius_scale,
@@ -1140,6 +1155,26 @@ class FMMEngine(
         )
         if self.upward_leaf_batch_size is not None and self.upward_leaf_batch_size <= 0:
             raise ValueError("upward_leaf_batch_size must be > 0 when provided")
+
+    def _walk_separation_floor(self) -> float:
+        """The walk's separation floor in length units: ``softening_floor`` x softening.
+
+        An unset ``softening_floor`` takes the kernel's support factor, so a compact
+        kernel's far field is exact; Plummer gets none.
+        ``JACCPOT_WALK_SEPARATION_FLOOR`` (an absolute length) stands in when the
+        result is ``0``, for experiments.
+
+        Returns
+        -------
+        float
+            The floor; ``0`` for none.
+        """
+        from jaccpot.runtime._interaction_cache import _walk_separation_floor
+
+        factor = getattr(self, "softening_floor", None)
+        if factor is None:
+            factor = support_factor(getattr(self, "softening_kernel", "plummer"))
+        return _walk_separation_floor(float(factor) * float(self.softening))
 
     def _resolve_tree_options(
         self,
@@ -2226,6 +2261,7 @@ def compute_gravitational_acceleration(
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
     *,
+    softening_kernel: Optional[str] = None,
     bounds: Optional[Tuple[Array, Array]] = None,
     leaf_size: int = 16,
     max_order: int = 2,
@@ -2248,7 +2284,9 @@ def compute_gravitational_acceleration(
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
-        Plummer softening length.
+        Plummer-equivalent softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     bounds : Optional[Tuple[Array, Array]]
         Optional explicit domain bounds used during tree construction.
     leaf_size : int
@@ -2269,6 +2307,7 @@ def compute_gravitational_acceleration(
         theta=theta,
         G=G,
         softening=softening,
+        softening_kernel=softening_kernel,
     )
     return fmm.compute_accelerations(
         positions,
@@ -2287,6 +2326,7 @@ def compute_gravitational_potential(
     eval_points: Array,
     G: Union[float, Array] = 1.0,
     softening: Union[float, Array] = 0.0,
+    softening_kernel: Optional[str] = None,
 ) -> Array:
     """Compute gravitational potential at evaluation points.
 
@@ -2306,7 +2346,9 @@ def compute_gravitational_potential(
     G : Union[float, Array]
         Gravitational constant.
     softening : Union[float, Array]
-        Plummer softening length.
+        Plummer-equivalent softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -2320,4 +2362,5 @@ def compute_gravitational_potential(
         eval_points,
         G=G,
         softening=softening,
+        softening_kernel=softening_kernel,
     )

@@ -117,6 +117,8 @@ needs_halo_payload = pytest.mark.skipif(
     reason=f"the level-weighted cross lane needs {_needs_payload}",
 )
 
+# The direct-sum references in this module are Plummer-softened, so every config
+# and call below pins softening_kernel="plummer" (the library default is ferrers3).
 SOFT = 1e-2
 LEAF = 4
 PER_DEV = 16
@@ -234,6 +236,7 @@ def _run(nd, caps=None, dead_leaves=0):
             jnp.asarray(0, dtype=jnp.int32),
             local[0],
             softening=SOFT,
+            softening_kernel="plummer",
             ndev=nd,
             leaf_width=LEAF,
             **c,
@@ -339,6 +342,7 @@ def _driver_config(theta=0.0, cross_theta=0.0, leaf_size=None):
         theta=theta,
         order=4,
         softening=SOFT,
+        softening_kernel="plummer",
         cross_theta=cross_theta,
     )
 
@@ -465,6 +469,7 @@ def test_the_driver_names_which_half_starved():
             theta=0.0,
             order=4,
             softening=SOFT,
+            softening_kernel="plummer",
             caps=MutualCapacities(near=1, far=1, depth=4, width=4, queue=64),
         ),
         ndev=nd,
@@ -507,6 +512,7 @@ def _cross_only(pos, mass, nd, *, cross_theta, order, far_recv_capacity=None):
         cross_theta=cross_theta,
         order=order,
         softening=SOFT,
+        softening_kernel="plummer",
         far_recv_capacity=far_recv_capacity,
     )
     return distributed_mutual_fmm(
@@ -815,6 +821,7 @@ def _weighted_evaluator(pos, mass, nd, *, theta, cross_theta, leaf_size, **cfgkw
         cross_theta=cross_theta,
         order=4,
         softening=SOFT,
+        softening_kernel="plummer",
         k_max=_RUNG_KMAX,
         **cfgkw,
     )
@@ -1092,7 +1099,12 @@ def test_a_rung_above_k_max_is_refused_rather_than_clamped():
             rung=jnp.asarray(rung),
             level_weights=jnp.ones(3),
             config=DistributedMutualConfig(
-                leaf_size=DRIVER_LEAF, theta=0.0, order=4, softening=SOFT, k_max=2
+                leaf_size=DRIVER_LEAF,
+                theta=0.0,
+                order=4,
+                softening=SOFT,
+                softening_kernel="plummer",
+                k_max=2,
             ),
             ndev=_ndev(),
         )
@@ -1113,7 +1125,12 @@ def test_a_weight_table_that_disagrees_with_k_max_is_refused():
             rung=jnp.zeros(len(mass), dtype=jnp.int32),
             level_weights=jnp.ones(5),
             config=DistributedMutualConfig(
-                leaf_size=DRIVER_LEAF, theta=0.0, order=4, softening=SOFT, k_max=2
+                leaf_size=DRIVER_LEAF,
+                theta=0.0,
+                order=4,
+                softening=SOFT,
+                softening_kernel="plummer",
+                k_max=2,
             ),
             ndev=_ndev(),
         )
@@ -1191,6 +1208,7 @@ def test_the_cross_far_level_uses_the_REMOTE_endpoints_rung():
         cross_theta=1.0,
         order=4,
         softening=SOFT,
+        softening_kernel="plummer",
         k_max=k_max,
         partitioner="rcb",
     )
@@ -1339,7 +1357,10 @@ def test_an_unknown_backend_is_refused():
             jnp.asarray(pos),
             jnp.asarray(mass),
             config=DistributedMutualConfig(
-                leaf_size=DRIVER_LEAF, softening=SOFT, backend="triton"
+                leaf_size=DRIVER_LEAF,
+                softening=SOFT,
+                softening_kernel="plummer",
+                backend="triton",
             ),
             ndev=_ndev(),
         )

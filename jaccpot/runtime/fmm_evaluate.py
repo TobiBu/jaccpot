@@ -258,6 +258,7 @@ class EvaluateMixin(_EngineBase):
                     eval_point,
                     G=self.G,
                     softening=self.softening,
+                    softening_kernel=self.softening_kernel,
                 )
             )(target_positions)
         if reuse_prepared_state:
@@ -1313,6 +1314,7 @@ class EvaluateMixin(_EngineBase):
             payload=payload,
             G=self.G,
             softening=float(self.softening),
+            softening_kernel=self.softening_kernel,
             return_potential=False,
             use_pallas=bool(getattr(self, "use_pallas", False)),
             differentiable=True,
@@ -1485,6 +1487,7 @@ class EvaluateMixin(_EngineBase):
                 masses,
                 G=self.G,
                 softening=self.softening,
+                softening_kernel=self.softening_kernel,
                 max_leaf_size=resolved_max_leaf,
                 return_potential=return_potential,
                 nearfield_mode=nearfield_mode,
@@ -1733,6 +1736,7 @@ class EvaluateMixin(_EngineBase):
             jnp.zeros((setup.leaf_nodes.shape[0], 0, 0), dtype=bool),
             G=self.G,
             softening=self.softening,
+            softening_kernel=self.softening_kernel,
             order=order,
             expansion_basis=self.expansion_basis,
             max_leaf_size=setup.max_leaf_size,

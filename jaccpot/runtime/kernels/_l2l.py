@@ -668,6 +668,7 @@ def _prepare_solidfmm_downward_sweep(
     adaptive_order: bool = False,
     p_gears: tuple[int, ...] = tuple(),
     dehnen_radius_scale: float = 1.0,
+    separation_floor: float = 0.0,
     use_pallas: bool = False,
     timing_recorder: Optional[Callable[[str, float], None]] = None,
 ) -> TreeDownwardData:
@@ -753,6 +754,8 @@ def _prepare_solidfmm_downward_sweep(
         Candidate orders for ``adaptive_order``.
     dehnen_radius_scale : float
         Node-radius scale for the Dehnen criteria.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
     use_pallas : bool
         Allow the Pallas M2L lanes.
     timing_recorder : Optional[Callable[[str, float], None]]
@@ -782,6 +785,7 @@ def _prepare_solidfmm_downward_sweep(
         traversal_config=traversal_config,
         retry_logger=retry_logger,
         dehnen_radius_scale=dehnen_radius_scale,
+        separation_floor=separation_floor,
     )
     interactions = interaction_inputs.interactions
     src = interaction_inputs.src

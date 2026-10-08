@@ -40,6 +40,11 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array
 
 from jaccpot.distributed.fused import AXIS_NAME, global_mesh_bounds
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params,
+)
 
 __all__ = [
     "FusedRollout",
@@ -335,6 +340,7 @@ def make_reference_direct_force(
     G: float = 1.0,
     softening: float = 0.0,
     axis_name: str = AXIS_NAME,
+    softening_kernel: Optional[str] = None,
 ) -> ForceFn:
     """An all-pairs direct-sum force whose answer does not depend on the partition.
 
@@ -350,15 +356,18 @@ def make_reference_direct_force(
     G : float
         Gravitational constant.
     softening : float
-        Plummer softening length.
+        Plummer-equivalent softening length.
     axis_name : str
         Mesh axis.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
     ForceFn
         ``force(positions, masses, count, ids) -> (acceleration, overflow=False)``.
     """
+    kernel = resolve_softening_kernel(softening_kernel)
 
     def body(x: Array, m: Array, count: Array, ids: Array) -> tuple:
         live = jnp.arange(x.shape[0]) < count[0]
@@ -369,8 +378,13 @@ def make_reference_direct_force(
         order = jnp.argsort(jnp.where(gs >= 0, gs, big), stable=True)
         xs, ms = xs[order], ms[order]
         d = xs[None, :, :] - x[:, None, :]
-        r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, x.dtype) ** 2
-        inv = jnp.where(r2 > 0, r2 ** jnp.asarray(-1.5, x.dtype), 0.0)
+        if kernel == "plummer":
+            r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, x.dtype) ** 2
+            inv = jnp.where(r2 > 0, r2 ** jnp.asarray(-1.5, x.dtype), 0.0)
+        else:
+            r2 = jnp.sum(d * d, axis=-1)
+            params = softening_params(kernel, softening, x.dtype)
+            inv = masked_pair_factors(r2, r2 > 0, params, kernel)[0]
         # HIGHEST: on Ampere an fp32 einsum defaults to TF32 (~10-bit mantissa), which
         # would make the reference less accurate than the lane it checks
         acc = jnp.asarray(G, x.dtype) * jnp.einsum(
@@ -520,6 +534,9 @@ def setup_fused_force(
             near_sink=sink,
             near_theta=near_theta,
             axis_name=axis_name,
+            # the local walks' floor (a compact kernel's support): the cross
+            # walks must keep their far pairs as far apart
+            separation_floor=getattr(solver, "_impl", solver)._walk_separation_floor(),
         )
     evaluator = make_fused_force_evaluator(
         solver,

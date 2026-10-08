@@ -442,6 +442,7 @@ def _dual_tree_build_raw(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
@@ -475,6 +476,8 @@ def _dual_tree_build_raw(
         ``PolicyMixin._mac_type_for_traversal``.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
     max_pair_queue : Optional[int]
         Cap on the pending-pair queue; ``None`` lets the traversal size it.
     pair_process_block : Optional[int]
@@ -533,6 +536,7 @@ def _dual_tree_build_raw(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=current_max_pair_queue,
                 process_block=current_pair_process_block,
                 traversal_config=current_traversal_config,
@@ -574,6 +578,7 @@ def _dual_tree_build_raw(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=current_max_pair_queue,
                 process_block=current_pair_process_block,
                 traversal_config=current_traversal_config,
@@ -752,6 +757,7 @@ def _build_dual_tree_artifacts_split(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
@@ -782,6 +788,8 @@ def _build_dual_tree_artifacts_split(
         Geometric criterion, already mapped to a yggdrax literal.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
     max_pair_queue : Optional[int]
         Cap on the pending-pair queue; ``None`` lets the traversal size it.
     pair_process_block : Optional[int]
@@ -830,6 +838,7 @@ def _build_dual_tree_artifacts_split(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=max_pair_queue,
                 process_block=pair_process_block,
                 traversal_config=traversal_config,
@@ -854,6 +863,7 @@ def _build_dual_tree_artifacts_split(
             ),
             mac_type=mac_type,
             dehnen_radius_scale=dehnen_radius_scale,
+            separation_floor=separation_floor,
             max_pair_queue=max_pair_queue,
             process_block=pair_process_block,
             traversal_config=traversal_config,
@@ -878,6 +888,7 @@ def _build_dual_tree_artifacts_split(
             ),
             mac_type=mac_type,
             dehnen_radius_scale=dehnen_radius_scale,
+            separation_floor=separation_floor,
             max_pair_queue=max_pair_queue,
             process_block=pair_process_block,
             traversal_config=traversal_config,
@@ -1022,6 +1033,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
@@ -1073,6 +1085,9 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         Geometric criterion, already mapped to a yggdrax literal.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units), ``0`` for none; the
+        flat walk applies it, the other walks raise.
     max_pair_queue : Optional[int]
         Cap on the pending-pair queue; ``None`` lets the traversal size it.
     pair_process_block : Optional[int]
@@ -1250,6 +1265,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             extra_overflow=extra_overflow,
             far_floor=0 if far_named else far_floor,
             near_floor=0 if near_edge_named else near_floor,
+            separation_floor=separation_floor,
         )
     # Re-plan on a capacity overflow instead of surfacing it. The generic
     # `_build_dual_tree_artifacts` has retried since it was written; this strict
@@ -1293,6 +1309,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_interactions_per_node=max_interactions_per_node,
                 max_neighbors_per_leaf=max_neighbors_per_leaf,
                 max_pair_queue=attempt_queue,
@@ -1969,6 +1986,33 @@ def _flat_walk_lists(
     )
 
 
+def _walk_separation_floor(given: float) -> float:
+    """The walk's separation floor: ``given``, or ``JACCPOT_WALK_SEPARATION_FLOOR``.
+
+    An accepted far pair must have ``|c_b - c_a| >= r_a + r_b + floor``: no far
+    interaction between particles closer than ``floor``, where the unsoftened
+    far field would stand in for a softened force. The environment knob (an
+    absolute length, read at trace time) overrides a zero ``given`` for
+    experiments.
+
+    Parameters
+    ----------
+    given : float
+        The caller's floor (length units), ``0`` for none.
+
+    Returns
+    -------
+    float
+        The floor the walk applies.
+    """
+    from jaccpot._env import env_text
+
+    raw = env_text("JACCPOT_WALK_SEPARATION_FLOOR", "")
+    if float(given) <= 0.0 and raw:
+        return max(0.0, float(raw))
+    return max(0.0, float(given))
+
+
 def _build_flat_walk_artifacts_strict_streamed(
     *,
     tree: Tree,
@@ -1985,6 +2029,7 @@ def _build_flat_walk_artifacts_strict_streamed(
     extra_overflow: Optional[Array] = None,
     far_floor: int = 0,
     near_floor: int = 0,
+    separation_floor: float = 0.0,
 ) -> _DualTreeArtifacts:
     """Far pairs and leaf neighbours from yggdrax's flat-emission wavefront walk.
 
@@ -2073,6 +2118,9 @@ def _build_flat_walk_artifacts_strict_streamed(
         its shapes).
     near_floor : int
         Same for the near list.
+    separation_floor : float
+        Minimum gap ``|c_b - c_a| - r_a - r_b`` of an accepted far pair (length
+        units), ``0`` for none; see :func:`_walk_separation_floor`.
 
     Returns
     -------
@@ -2151,6 +2199,7 @@ def _build_flat_walk_artifacts_strict_streamed(
         _STRICT_STREAMED_QUEUE_FLOOR if max_pair_queue is None else int(max_pair_queue)
     )
     headroom = flat_walk_cap_headroom()
+    floor = _walk_separation_floor(separation_floor)
     grew: list[str] = []
     walk = None
     traced = False
@@ -2180,6 +2229,7 @@ def _build_flat_walk_artifacts_strict_streamed(
                 near_cap=near_cap,
                 node_active=node_active,
                 interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
+                separation_floor=floor,
             )
         else:
             walk = dual_tree_walk_mutual(
@@ -2194,6 +2244,7 @@ def _build_flat_walk_artifacts_strict_streamed(
                 near_cap=near_cap,
                 mac_type=str(mac_type),
                 node_active=node_active,
+                **({"separation_floor": floor} if floor > 0.0 else {}),
             )
         traced = isinstance(walk.queue_overflow, Tracer)
         if traced:
@@ -2896,6 +2947,7 @@ def _interaction_cache_key(
     max_refine_levels: Optional[int],
     aspect_threshold: Optional[float],
     pair_policy_identity: str,
+    separation_floor: float = 0.0,
 ) -> Optional[str]:
     """Return a hash for the interaction list of a tree/theta configuration.
 
@@ -2944,6 +2996,10 @@ def _interaction_cache_key(
         default on purpose: a silent default is how the criterion came to be
         missing from this key. See :func:`pair_policy_cache_identity`.
 
+    separation_floor : float
+        The walk's separation floor (length units); part of the key, since it
+        changes the lists.
+
     Returns
     -------
     Optional[str]
@@ -2982,6 +3038,10 @@ def _interaction_cache_key(
     dehnen_scale_bytes = np.asarray(
         float(dehnen_radius_scale), dtype=np.float64
     ).tobytes()
+    if float(separation_floor) > 0.0:
+        dehnen_scale_bytes += (
+            b"floor" + np.asarray(float(separation_floor), dtype=np.float64).tobytes()
+        )
     basis_bytes = str(expansion_basis).encode("utf8")
     center_mode_bytes = str(center_mode).encode("utf8")
     if traversal_config is not None:
@@ -3024,6 +3084,7 @@ def _build_dual_tree_artifacts(
     theta: float,
     mac_type: MACType,
     dehnen_radius_scale: float,
+    separation_floor: float = 0.0,
     cache_key: Optional[str],
     cache_entry: Optional[_InteractionCacheEntry],
     max_pair_queue: Optional[int],
@@ -3073,6 +3134,9 @@ def _build_dual_tree_artifacts(
         ``PolicyMixin._mac_type_for_traversal``.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units), ``0`` for none. Only
+        the strict fused lane's flat walk applies it; any other walk raises.
     cache_key : Optional[str]
         Interaction-cache key; ``None`` disables both lookup and store.
     cache_entry : Optional[_InteractionCacheEntry]
@@ -3184,6 +3248,7 @@ def _build_dual_tree_artifacts(
                 grouped_interactions=grouped_interactions,
                 need_traversal_result=need_traversal_result,
             )
+        strict_streamed_split = False
         if use_split_build:
             strict_streamed_split = bool(
                 fail_fast
@@ -3193,6 +3258,7 @@ def _build_dual_tree_artifacts(
                 and not bool(grouped_interactions)
                 and not bool(need_traversal_result)
             )
+        if use_split_build:
             split_artifacts = (
                 _build_dual_tree_artifacts_split_strict_streamed(
                     tree=tree,
@@ -3200,6 +3266,7 @@ def _build_dual_tree_artifacts(
                     theta=theta,
                     mac_type=mac_type,
                     dehnen_radius_scale=dehnen_radius_scale,
+                    separation_floor=separation_floor,
                     max_pair_queue=max_pair_queue,
                     pair_process_block=pair_process_block,
                     traversal_config=traversal_config,
@@ -3219,6 +3286,7 @@ def _build_dual_tree_artifacts(
                     theta=theta,
                     mac_type=mac_type,
                     dehnen_radius_scale=dehnen_radius_scale,
+                    separation_floor=separation_floor,
                     max_pair_queue=max_pair_queue,
                     pair_process_block=pair_process_block,
                     traversal_config=traversal_config,
@@ -3279,6 +3347,7 @@ def _build_dual_tree_artifacts(
                 theta=theta,
                 mac_type=mac_type,
                 dehnen_radius_scale=dehnen_radius_scale,
+                separation_floor=separation_floor,
                 max_pair_queue=max_pair_queue,
                 pair_process_block=pair_process_block,
                 traversal_config=traversal_config,

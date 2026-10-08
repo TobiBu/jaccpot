@@ -84,6 +84,8 @@ _LEAF = 4
 _THETA = 0.5
 _ORDER = 4
 _PER_DEVICE = 256
+# Plummer: the direct sums below are Plummer-softened, so the configs pin it
+# (the library default kernel is ferrers3).
 _SOFTENING = 0.02
 
 #: An ``eps`` at which the criterion accepts a real far field on this IC AND clears the
@@ -133,6 +135,7 @@ def _run(mesh, pts, mass, **kwargs):
             order=_ORDER,
             theta=_THETA,
             softening=_SOFTENING,
+            softening_kernel="plummer",
             **kwargs,
         )
         result = distributed_fmm_accelerations(
@@ -291,6 +294,7 @@ def _expect(match: str, **kwargs):
         order=_ORDER,
         theta=_THETA,
         softening=_SOFTENING,
+        softening_kernel="plummer",
         **kwargs,
     )
     with pytest.raises(ValueError, match=match):
@@ -371,6 +375,7 @@ def _evaluators(ndev, mesh, part, **kwargs):
         order=_ORDER,
         theta=_THETA,
         softening=_SOFTENING,
+        softening_kernel="plummer",
         nearfield_backend="baseline",
         **kwargs,
     )

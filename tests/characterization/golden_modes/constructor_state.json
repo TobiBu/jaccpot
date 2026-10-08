@@ -271,6 +271,8 @@
   "reuse_topology": "False",
   "runtime_path": "'auto'",
   "softening": "1e-12",
+  "softening_floor": "None",
+  "softening_kernel": "'ferrers3'",
   "streamed_far_pairs": "False",
   "target_leaf_particles": "32",
   "theta": "0.5",

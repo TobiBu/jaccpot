@@ -60,6 +60,7 @@ from jaccpot.mutual.farfield import (
 )
 from jaccpot.mutual.nearfield import mutual_near_field_forces
 from jaccpot.mutual.topology import MutualTopology
+from jaccpot.softening import resolve_softening_kernel
 
 __all__ = [
     "MutualCapacities",
@@ -338,6 +339,8 @@ class MutualFMMState:
     num_particles_ : int
         Particle count, as aux data. Trailing underscore because
         ``num_particles`` is the property that reads it.
+    softening_kernel : str
+        The near-field pair kernel (:mod:`jaccpot.softening`); static.
     num_near_pairs : Array
         Live entries in the near pair list. Read this, **not**
         ``near_a.shape[0]``, which is the capacity once padded.
@@ -367,6 +370,7 @@ class MutualFMMState:
     near_chunk_size: Optional[int] = None
     pallas_interpret: bool = False
     num_particles_: int = 0
+    softening_kernel: str = "plummer"
     # Occupancy counters. These are 0-d *arrays*, i.e. pytree children, not aux
     # data -- deliberately. Aux data is part of the treedef and therefore part of
     # the jit cache key, so a counter that changes every rebuild would re-key the
@@ -452,6 +456,7 @@ def build_mutual_state(
     topology: MutualTopology,
     *,
     softening: float,
+    softening_kernel: Optional[str] = None,
     G: float = 1.0,
     use_pallas: bool = False,
     near_chunk_size: Optional[int] = None,
@@ -479,7 +484,9 @@ def build_mutual_state(
     topology : MutualTopology
         Frozen host-side topology: leaves, pair lists and the Morton permutation.
     softening : float
-        Plummer softening length handed to the near-field kernel.
+        Plummer-equivalent softening length handed to the near-field kernel.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     G : float
         Gravitational constant. Default ``1.0``.
     use_pallas : bool
@@ -582,6 +589,7 @@ def build_mutual_state(
         forward_permutation=jnp.asarray(topo.forward_permutation, dtype=index_dtype),
         inverse_permutation=jnp.asarray(topo.inverse_permutation, dtype=index_dtype),
         softening=float(softening),
+        softening_kernel=resolve_softening_kernel(softening_kernel),
         G=float(G),
         order=int(topo.order),
         use_pallas=bool(use_pallas),
@@ -630,6 +638,7 @@ _STATE_AUX = (
     "near_chunk_size",
     "pallas_interpret",
     "num_particles_",
+    "softening_kernel",
 )
 _TREE_CHILDREN = (
     "leaf_nodes",
@@ -1042,6 +1051,7 @@ def mutual_weighted_accelerations(
         near_valid=state.near_valid,
         self_leaves=state.self_leaves,
         softening=state.softening,
+        softening_kernel=state.softening_kernel,
         G=state.G,
         rung=rung_sorted,
         level_weights=level_weights,
