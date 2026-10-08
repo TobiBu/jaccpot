@@ -783,7 +783,7 @@ def _local_overflow(refreshed: Any, engine: Any = None) -> Array:
     Array
         Boolean scalar for this device, ``True`` when something saturated.
     """
-    from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_enabled
+    from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
     from jaccpot.runtime.capacity_guard import (
         fused_state_capacity_ok,
         last_refresh_capacity_ok,
@@ -792,7 +792,11 @@ def _local_overflow(refreshed: Any, engine: Any = None) -> Array:
     ok = fused_state_capacity_ok(
         refreshed,
         traced_caps=getattr(engine, "_strict_fused_traced_caps", None),
-        rectangle_guard_active=not bool(_nearfield_csr_lane_enabled()),
+        # without an engine the solver's use_pallas is unknown: keep the switch's
+        # verdict, as before
+        rectangle_guard_active=not _nearfield_csr_lane_active(
+            True if engine is None else bool(getattr(engine, "use_pallas", False))
+        ),
     )
     # the RETURNED state carries the cached far-pair placeholder in the fresh-rebuild
     # mode, so the verdict on the lists this refresh built comes from the engine
