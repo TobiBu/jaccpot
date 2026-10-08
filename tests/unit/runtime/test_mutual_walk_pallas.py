@@ -208,12 +208,11 @@ def test_lex_sorted_orders_by_target_then_source_in_both_branches():
 
 
 def test_walk_backend_flag_parsing(monkeypatch):
+    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
     from jaccpot.runtime._interaction_cache import (
         strict_walk_backend,
         strict_walk_deterministic_rows,
     )
-
-    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_WALK", raising=False)
     monkeypatch.delenv("JACCPOT_WALK_PALLAS_INTERPRET", raising=False)
@@ -254,7 +253,9 @@ def test_separation_floor_keeps_every_far_pair_apart_in_both_walks(floor):
     ranges = np.asarray(topo.node_ranges)
     active = jnp.asarray(ranges[:, 1] >= ranges[:, 0])
     root = jnp.argmin(topo.parent).astype(idx)
-    kw = dict(max_pair_queue=1 << 15, far_cap=1 << 17, near_cap=1 << 17, node_active=active)
+    kw = dict(
+        max_pair_queue=1 << 15, far_cap=1 << 17, near_cap=1 << 17, node_active=active
+    )
     base = dual_tree_walk_mutual(
         left, right, geom.center, geom.radius, theta, root, mac_type="dehnen", **kw
     )
@@ -283,15 +284,21 @@ def test_separation_floor_keeps_every_far_pair_apart_in_both_walks(floor):
     )
     for res in (base, ref, got):
         assert not (
-            bool(res.queue_overflow) or bool(res.far_overflow) or bool(res.near_overflow)
+            bool(res.queue_overflow)
+            or bool(res.far_overflow)
+            or bool(res.near_overflow)
         )
     far_r, near_r = _sets(ref)
     far_g, near_g = _sets(got)
     assert far_g == far_r and near_g == near_r
-    assert int(ref.far_count) < int(base.far_count), "vacuous: the floor changed nothing"
+    assert int(ref.far_count) < int(
+        base.far_count
+    ), "vacuous: the floor changed nothing"
     assert int(ref.near_count) > int(base.near_count)
-    a = np.asarray([p[0] for p in far_r]); b = np.asarray([p[1] for p in far_r])
-    c = np.asarray(geom.center, np.float64); r = np.asarray(geom.radius, np.float64)
+    a = np.asarray([p[0] for p in far_r])
+    b = np.asarray([p[1] for p in far_r])
+    c = np.asarray(geom.center, np.float64)
+    r = np.asarray(geom.radius, np.float64)
     gap = np.linalg.norm(c[b] - c[a], axis=1) - r[a] - r[b]
     assert gap.min() >= floor * (1 - 1e-5)
     # and, with the exact radii, the closest particles of every far pair

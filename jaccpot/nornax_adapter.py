@@ -259,10 +259,10 @@ class BlockStepFMM:
     ----------
     softening : float
         Plummer-equivalent softening length (:mod:`jaccpot.softening`).
-    softening_kernel : Optional[str]
-        The pair kernel; ``None`` gives the default.
     k_max : int
         Highest block-step rung. Levels run ``0 .. k_max``.
+    softening_kernel : Optional[str]
+        The pair kernel; ``None`` gives the default.
     theta : float
         Multipole acceptance parameter of the mutual MAC
         ``theta * |c_B - c_A| > R_A + R_B``. Sets the force accuracy; it has no
@@ -1482,10 +1482,10 @@ class DistributedBlockStepFMM:
     softening : float
         Plummer-equivalent softening length (:mod:`jaccpot.softening`), shared
         by both halves.
-    softening_kernel : Optional[str]
-        The pair kernel; ``None`` gives the default.
     k_max : int
         Highest block-step rung. Levels run ``0 .. k_max``.
+    softening_kernel : Optional[str]
+        The pair kernel; ``None`` gives the default.
     theta : float
         INTRA-domain opening angle. Sets the force accuracy within a domain; it has
         no effect on momentum conservation, which is structural.

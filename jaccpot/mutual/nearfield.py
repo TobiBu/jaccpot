@@ -239,7 +239,9 @@ def _block_forces(
     else:
         # masked_pair_factors substitutes before the kernel too (the same guard)
         params = softening_params(kernel, softening, dr.dtype)
-        inv_r3 = masked_pair_factors(jnp.sum(dr * dr, axis=-1), valid, params, kernel)[0]
+        inv_r3 = masked_pair_factors(jnp.sum(dr * dr, axis=-1), valid, params, kernel)[
+            0
+        ]
     scale = jnp.asarray(G, dtype=dr.dtype) * m_a[:, :, None] * m_b[:, None, :] * inv_r3
     if weights is not None:
         scale = scale * weights.astype(scale.dtype)
@@ -522,7 +524,14 @@ def mutual_near_field_forces(
             pair_valid = pair_valid & ~jnp.eye(max_leaf_size, dtype=bool)[None, :, :]
             weights = _pair_weights(r, r, level_weights)
             block = _block_forces(
-                x, m, x, m, pair_valid, weights, softening=softening, G=G,
+                x,
+                m,
+                x,
+                m,
+                pair_valid,
+                weights,
+                softening=softening,
+                G=G,
                 softening_kernel=softening_kernel,
             )
             contrib = jnp.where(valid_slot[..., None], jnp.sum(block, axis=2), 0.0)
@@ -565,8 +574,15 @@ def mutual_near_field_forces(
         pair_valid = va[:, :, None] & vb[:, None, :]
         weights = _pair_weights(ra, rb, level_weights)
         block = _block_forces(
-            xa, ma, xb, mb, pair_valid, weights, softening=softening, G=G,
-                softening_kernel=softening_kernel,
+            xa,
+            ma,
+            xb,
+            mb,
+            pair_valid,
+            weights,
+            softening=softening,
+            G=G,
+            softening_kernel=softening_kernel,
         )
         # One evaluation, two applications: the `b` side is the *negation* of the
         # same tensor, never an independent recomputation.

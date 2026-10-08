@@ -62,6 +62,7 @@ def _native_or_skip(interpret):
 def _tol(interpret):
     return 1e-12 if interpret else 1e-10
 
+
 _COMPACT = ("ferrers3", "wendland_c2")
 _EPS = 0.35  # Plummer-equivalent; h = 0.86 / 1.05 against unit-normal positions
 _G = 1.3
@@ -179,8 +180,13 @@ def test_generic_jnp_kernels_and_their_reverse(kernel):
     sa, spot = _self_contributions(pos_l, m_l, mk_l, **kw)
     ids = np.zeros((3, 1), np.int32)
     want = _twin_reference(
-        np.asarray(pos_l), np.asarray(m_l), np.asarray(mk_l), ids,
-        np.zeros((3, 1), bool), kernel, True,
+        np.asarray(pos_l),
+        np.asarray(m_l),
+        np.asarray(mk_l),
+        ids,
+        np.zeros((3, 1), bool),
+        kernel,
+        True,
     )
     assert _rel(sa, want[..., :3]) < 1e-12 and _rel(spot, want[..., 3]) < 1e-12
     # the batched rule's analytic reverse (positions, masses, softening, G)
@@ -238,12 +244,27 @@ def test_csr_table_kernel_and_its_reverse(kernel, chunk, interpret):
     )
     soft, G = jnp.asarray(_EPS**2), jnp.asarray(_G)
     want = nearfield_leafpair_csr_jax(
-        pos, mass, mask, nbr, offsets, counts,
-        softening_sq=soft, G=G, softening_kernel=kernel,
+        pos,
+        mass,
+        mask,
+        nbr,
+        offsets,
+        counts,
+        softening_sq=soft,
+        G=G,
+        softening_kernel=kernel,
     )
     got = nearfield_leafpair_csr_pallas(
-        pos, mass, mask, nbr, tab, softening_sq=soft, G=G, chunk=chunk,
-        interpret=interpret, softening_kernel=kernel,
+        pos,
+        mass,
+        mask,
+        nbr,
+        tab,
+        softening_sq=soft,
+        G=G,
+        chunk=chunk,
+        interpret=interpret,
+        softening_kernel=kernel,
     )
     assert _rel(got, want) < _tol(interpret)
 
@@ -252,14 +273,35 @@ def test_csr_table_kernel_and_its_reverse(kernel, chunk, interpret):
 
     def ref(p, m, s, g):
         return nearfield_leafpair_csr_jax(
-            p, m, mask, nbr, offsets, counts, softening_sq=s, G=g,
+            p,
+            m,
+            mask,
+            nbr,
+            offsets,
+            counts,
+            softening_sq=s,
+            G=g,
             softening_kernel=kernel,
         )
 
     def cvjp(p, m, s, g):
         return nearfield_leafpair_csr_pallas_cvjp(
-            p, m, mask, nbr, tab, s, g, chunk, None, 1, None, interpret, "input", True,
-            None, kernel,
+            p,
+            m,
+            mask,
+            nbr,
+            tab,
+            s,
+            g,
+            chunk,
+            None,
+            1,
+            None,
+            interpret,
+            "input",
+            True,
+            None,
+            kernel,
         )
 
     _, vr = jax.vjp(ref, pos, mass, soft, G)
@@ -286,16 +328,33 @@ def test_csr_sorted_direct_in_every_source_tile_mode(
     mass64 = jnp.asarray(c["mass"], jnp.float64)
     soft, G = jnp.asarray(_EPS**2), jnp.asarray(_G)
     acc, pot = nearfield_leafpair_csr_sorted_direct_pallas(
-        pos64, mass64, c["starts"], c["counts"], c["nbr"], c["offsets"],
-        c["row_counts"], leaf_width=W, softening_sq=soft, G=G, chunk=1,
-        interpret=interpret, with_potential=True, source_tile=source_tile,
-        source_flags=flags, softening_kernel=kernel,
+        pos64,
+        mass64,
+        c["starts"],
+        c["counts"],
+        c["nbr"],
+        c["offsets"],
+        c["row_counts"],
+        leaf_width=W,
+        softening_sq=soft,
+        G=G,
+        chunk=1,
+        interpret=interpret,
+        with_potential=True,
+        source_tile=source_tile,
+        source_flags=flags,
+        softening_kernel=kernel,
     )
     want = nearfield_leafpair_csr_jax(
         jnp.asarray(c["leaf_pos"], jnp.float64),
         jnp.asarray(c["leaf_mass"], jnp.float64),
-        c["mask"], c["nbr"], c["offsets"], c["row_counts"],
-        softening_sq=soft, G=G, softening_kernel=kernel,
+        c["mask"],
+        c["nbr"],
+        c["offsets"],
+        c["row_counts"],
+        softening_sq=soft,
+        G=G,
+        softening_kernel=kernel,
     )
     want = np.asarray(want)
     counts, starts = np.asarray(c["counts"]), np.asarray(c["starts"])
@@ -320,7 +379,9 @@ def test_rectangle_and_pairs_kernels(kernel, include_self, interpret):
         jnp.asarray(ids, jnp.int32),
         jnp.asarray(valid),
     )
-    kw = dict(softening_sq=jnp.asarray(_EPS**2), G=jnp.asarray(_G), softening_kernel=kernel)
+    kw = dict(
+        softening_sq=jnp.asarray(_EPS**2), G=jnp.asarray(_G), softening_kernel=kernel
+    )
     want = nearfield_leafpair_jax(*args, include_self=include_self, **kw)
     got = nearfield_leafpair_pallas(
         *args, interpret=interpret, include_self=include_self, **kw
@@ -359,7 +420,10 @@ def test_fast_lane_analytic_reverse_matches_its_tiled_twin(kernel, interpret):
     leaf_mask = jnp.ones((num_leaves, width), bool)
     positions = jnp.asarray(rng.normal(size=(n, 3)), f8)
     masses = jnp.asarray(rng.uniform(0.5, 1.5, size=n), f8)
-    leaf_positions, leaf_masses = positions[leaf_particle_idx], masses[leaf_particle_idx]
+    leaf_positions, leaf_masses = (
+        positions[leaf_particle_idx],
+        masses[leaf_particle_idx],
+    )
     sids = jnp.asarray(
         rng.integers(0, num_leaves, size=(num_leaves, max_blocks, block_size)),
         nf.INDEX_DTYPE,
@@ -369,18 +433,45 @@ def test_fast_lane_analytic_reverse_matches_its_tiled_twin(kernel, interpret):
 
     def custom(lp, lm, s, g):
         return fast_lane._radix_fast_lane_prepacked_accel_cvjp(
-            lp, lm, positions, sids.astype(f8), svalid.astype(f8),
-            leaf_mask.astype(f8), leaf_particle_idx.astype(f8), s, g,
-            None, 1, None, interpret, 2, 2, False, None, kernel,
+            lp,
+            lm,
+            positions,
+            sids.astype(f8),
+            svalid.astype(f8),
+            leaf_mask.astype(f8),
+            leaf_particle_idx.astype(f8),
+            s,
+            g,
+            None,
+            1,
+            None,
+            interpret,
+            2,
+            2,
+            False,
+            None,
+            kernel,
         )
 
     def ref(lp, lm, s, g):
         return nf._compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl(
-            positions, sids, svalid, lp, lm, leaf_mask, leaf_particle_idx,
-            G=g, softening_sq=s, softening_kernel=kernel,
-            target_leaf_batch_size=2, target_block_tile_size=2,
-            target_block_tile_scan_unroll=1, target_block_batch_scan_unroll=1,
-            occupancy_sort=False, skip_empty_tiles=False, componentwise_pairs=False,
+            positions,
+            sids,
+            svalid,
+            lp,
+            lm,
+            leaf_mask,
+            leaf_particle_idx,
+            G=g,
+            softening_sq=s,
+            softening_kernel=kernel,
+            target_leaf_batch_size=2,
+            target_block_tile_size=2,
+            target_block_tile_scan_unroll=1,
+            target_block_batch_scan_unroll=1,
+            occupancy_sort=False,
+            skip_empty_tiles=False,
+            componentwise_pairs=False,
         )
 
     args = (leaf_positions, leaf_masses, soft, G)
@@ -417,18 +508,34 @@ def test_targeted_time_derivatives_match_finite_differences(kernel):
 
     def acc_at(dt):
         out = _compute_targeted_nearfield(
-            positions_sorted=pos + dt * vel, masses_sorted=mass,
-            target_sorted_indices=tgt, source_indices=src, source_mask=smask,
-            G=_G, softening=_EPS, return_potential=False, softening_kernel=kernel,
+            positions_sorted=pos + dt * vel,
+            masses_sorted=mass,
+            target_sorted_indices=tgt,
+            source_indices=src,
+            source_mask=smask,
+            G=_G,
+            softening=_EPS,
+            return_potential=False,
+            softening_kernel=kernel,
         )
         return np.asarray(out[0])
 
     a, _, jerk, snap, crackle = _compute_targeted_nearfield(
-        positions_sorted=pos, masses_sorted=mass, target_sorted_indices=tgt,
-        source_indices=src, source_mask=smask, G=_G, softening=_EPS,
-        return_potential=False, velocities_sorted=vel, return_jerk=True,
-        return_snap=True, return_crackle=True, softening_kernel=kernel,
+        positions_sorted=pos,
+        masses_sorted=mass,
+        target_sorted_indices=tgt,
+        source_indices=src,
+        source_mask=smask,
+        G=_G,
+        softening=_EPS,
+        return_potential=False,
+        velocities_sorted=vel,
+        return_jerk=True,
+        return_snap=True,
+        return_crackle=True,
+        softening_kernel=kernel,
     )
+
     def fds(h):
         f = {k: acc_at(k * h) for k in (-2, -1, 0, 1, 2)}
         return (
@@ -451,7 +558,9 @@ def test_targeted_time_derivatives_match_finite_differences(kernel):
 @pytest.mark.parametrize("interpret", [True, False])
 @pytest.mark.parametrize("kernel", _COMPACT)
 @pytest.mark.parametrize("exclude_diagonal,emit_b", [(False, True), (True, False)])
-def test_mutual_tile_and_its_analytic_reverse(kernel, exclude_diagonal, emit_b, interpret):
+def test_mutual_tile_and_its_analytic_reverse(
+    kernel, exclude_diagonal, emit_b, interpret
+):
     from jaccpot.pallas.nearfield_mutual import (
         mutual_leafpair_block_cvjp,
         mutual_leafpair_block_jax,
@@ -471,22 +580,56 @@ def test_mutual_tile_and_its_analytic_reverse(kernel, exclude_diagonal, emit_b, 
     va = jnp.asarray(rng.random((pairs, slots)) > 0.25, f8)
     vb = va if exclude_diagonal else jnp.asarray(rng.random((pairs, slots)) > 0.25, f8)
     ma = jnp.asarray(rng.uniform(0.5, 1.5, (pairs, slots)), f8) * va
-    mb = ma if exclude_diagonal else jnp.asarray(rng.uniform(0.5, 1.5, (pairs, slots)), f8) * vb
+    mb = (
+        ma
+        if exclude_diagonal
+        else jnp.asarray(rng.uniform(0.5, 1.5, (pairs, slots)), f8) * vb
+    )
     ra = jnp.asarray(rng.integers(0, k_max + 1, (pairs, slots)), f8)
-    rb = ra if exclude_diagonal else jnp.asarray(rng.integers(0, k_max + 1, (pairs, slots)), f8)
+    rb = (
+        ra
+        if exclude_diagonal
+        else jnp.asarray(rng.integers(0, k_max + 1, (pairs, slots)), f8)
+    )
     lw = jnp.asarray([1.0, 0.5, 0.25, 0.125], f8)
     soft, G = jnp.asarray(_EPS**2, f8), jnp.asarray(_G, f8)
 
     def custom(xa_, ma_, xb_, mb_, lw_, s_, g_):
         return mutual_leafpair_block_cvjp(
-            xa_, ma_, va, xb_, mb_, vb, ra, rb, lw_, s_, g_, k_max + 1,
-            exclude_diagonal, emit_b, interpret, kernel,
+            xa_,
+            ma_,
+            va,
+            xb_,
+            mb_,
+            vb,
+            ra,
+            rb,
+            lw_,
+            s_,
+            g_,
+            k_max + 1,
+            exclude_diagonal,
+            emit_b,
+            interpret,
+            kernel,
         )
 
     def twin(xa_, ma_, xb_, mb_, lw_, s_, g_):
         return mutual_leafpair_block_jax(
-            xa_, ma_, va, xb_, mb_, vb, ra, rb, lw_, s_, g_,
-            exclude_diagonal=exclude_diagonal, emit_b=emit_b, softening_kernel=kernel,
+            xa_,
+            ma_,
+            va,
+            xb_,
+            mb_,
+            vb,
+            ra,
+            rb,
+            lw_,
+            s_,
+            g_,
+            exclude_diagonal=exclude_diagonal,
+            emit_b=emit_b,
+            softening_kernel=kernel,
         )
 
     args = (xa, ma, xb, mb, lw, soft, G)
@@ -499,7 +642,19 @@ def test_mutual_tile_and_its_analytic_reverse(kernel, exclude_diagonal, emit_b, 
         assert _rel(got, want) < 1e-9
     # the twin really is the compact kernel (not Plummer)
     plummer = mutual_leafpair_block_jax(
-        xa, ma, va, xb, mb, vb, ra, rb, lw, soft, G,
-        exclude_diagonal=exclude_diagonal, emit_b=emit_b, softening_kernel="plummer",
+        xa,
+        ma,
+        va,
+        xb,
+        mb,
+        vb,
+        ra,
+        rb,
+        lw,
+        soft,
+        G,
+        exclude_diagonal=exclude_diagonal,
+        emit_b=emit_b,
+        softening_kernel="plummer",
     )
     assert _rel(out_t[0], plummer[0]) > 1e-3

@@ -1442,10 +1442,13 @@ def make_cross_hook(
         # Every cross walk -- export, receiver, near import -- runs through
         # `walk_fn` (or yggdrax's mutual walk when it is None), so the floor is
         # applied once, here, to all of them.
+        from yggdrax.interactions import dual_tree_walk_mutual
+
         inner_walk = walk_fn if walk_fn is not None else dual_tree_walk_mutual
 
         def walk_fn(*args: Any, **kwargs: Any) -> Any:
             return inner_walk(*args, separation_floor=floor, **kwargs)
+
     two_sided = _cross_two_sided() if two_sided is None else bool(two_sided)
     symmetric = two_sided and _symmetric_exchange_enabled(
         two_sided=two_sided,

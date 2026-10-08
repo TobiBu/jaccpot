@@ -39,12 +39,12 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxtyping import Array
 
+from jaccpot.distributed.fused import AXIS_NAME, global_mesh_bounds
 from jaccpot.softening import (
     masked_pair_factors,
     resolve_softening_kernel,
     softening_params,
 )
-from jaccpot.distributed.fused import AXIS_NAME, global_mesh_bounds
 
 __all__ = [
     "FusedRollout",

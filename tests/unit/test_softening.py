@@ -37,7 +37,9 @@ _COMPACT = tuple(_DENSITY)
 
 
 def _mass(kernel, q):
-    return quad(lambda s: 4.0 * np.pi * s * s * _DENSITY[kernel](s), 0.0, min(q, 1.0))[0]
+    return quad(lambda s: 4.0 * np.pi * s * s * _DENSITY[kernel](s), 0.0, min(q, 1.0))[
+        0
+    ]
 
 
 def _psi(kernel, q):
@@ -102,7 +104,9 @@ def test_newton_past_the_support_bitwise_and_finite_at_zero(kernel, dtype):
     eps = 0.37
     h = support_radius(kernel, eps)
     # strictly past h; AT h, sqrt(h^2)/h may round below 1 and leave a 1-ulp tail
-    r2 = jnp.asarray([(1.0001 * h) ** 2, (1.5 * h) ** 2, 40.0 * h * h, 0.0, h * h], dtype)
+    r2 = jnp.asarray(
+        [(1.0001 * h) ** 2, (1.5 * h) ** 2, 40.0 * h * h, 0.0, h * h], dtype
+    )
     params = softening_params(kernel, eps, dtype)
     g, psi, dg = pair_factors(r2, params, kernel, potential=True, derivative=True)
     s = jax.lax.rsqrt(r2[:3])
@@ -130,8 +134,12 @@ def test_plummer_is_the_historical_form():
     eps = 0.21
     r2 = np.array([0.0, 1e-4, 0.05, 2.0])
     g, psi, dg = pair_factors(
-        r2, softening_params_np("plummer", eps), "plummer",
-        potential=True, derivative=True, xp=np,
+        r2,
+        softening_params_np("plummer", eps),
+        "plummer",
+        potential=True,
+        derivative=True,
+        xp=np,
     )
     d2 = r2 + eps * eps
     np.testing.assert_allclose(g, d2**-1.5, rtol=1e-14)
@@ -196,7 +204,9 @@ def test_masked_factors_zero_inactive_and_match_unmasked(kernel):
     for a, b in ((g, g0), (psi, psi0), (dg, dg0)):
         a, b = np.asarray(a), np.asarray(b)
         assert np.all(a[~np.asarray(active)] == 0.0)
-        np.testing.assert_allclose(a[np.asarray(active)], b[np.asarray(active)], rtol=1e-6)
+        np.testing.assert_allclose(
+            a[np.asarray(active)], b[np.asarray(active)], rtol=1e-6
+        )
 
 
 @pytest.mark.parametrize("kernel", SOFTENING_KERNELS)

@@ -32,12 +32,12 @@ from jax import lax
 from jaxtyping import Array, Bool, Float, jaxtyped
 
 from jaccpot._env import env_int
+from jaccpot.runtime.grad_options import analytic_p2p_vjp_enabled
 from jaccpot.softening import (
     masked_pair_factors,
     resolve_softening_kernel,
     softening_params_from_sq,
 )
-from jaccpot.runtime.grad_options import analytic_p2p_vjp_enabled
 
 from .grad import _pair_accel_cvjp
 

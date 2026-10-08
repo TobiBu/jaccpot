@@ -111,6 +111,9 @@ class AdaptivePolicyState(NamedTuple):
         Newton constant -- see the note on the field itself.
     mac_theta_max : float
         Geometric cap on the opening angle -- see the note on the field itself.
+    separation_floor : float
+        Minimum gap of an accepted pair in length units -- see the note on the
+        field itself.
     """
 
     source_error_proxy_by_order: Array

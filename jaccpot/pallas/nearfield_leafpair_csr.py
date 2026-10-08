@@ -44,13 +44,6 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
-from jaccpot.softening import (
-    masked_pair_factors,
-    pair_softening_sq_derivative,
-    resolve_softening_kernel,
-    softening_params_from_sq,
-)
-
 from jaccpot._env import env_choice, env_int, env_text
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.pallas._compat import KernelRef
@@ -60,6 +53,12 @@ from jaccpot.pallas.nearfield_fused_leaf import (
     _require_shape,
     _resolve_accum_dtype,
     _resolve_subtile,
+)
+from jaccpot.softening import (
+    masked_pair_factors,
+    pair_softening_sq_derivative,
+    resolve_softening_kernel,
+    softening_params_from_sq,
 )
 
 try:
@@ -444,6 +443,8 @@ def nearfield_leafpair_csr_pallas(
         The chunk table must cover only rows below this bound. A chunk naming a
         higher row is dropped by the ``segment_sum``, as an out-of-range row is
         today; nothing can check that here because the table is traced.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -1248,6 +1249,8 @@ def nearfield_leafpair_csr_sorted_pallas(
         As :func:`nearfield_leafpair_csr_pallas`.
     include_self : bool
         As :func:`nearfield_leafpair_csr_pallas`.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -1483,6 +1486,8 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         several subtiles). Empty: one launch at ``target_subtile``. ``None``:
         ``JACCPOT_NEARFIELD_TARGET_CLASSES`` (comma-separated), default empty.
         Static.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -2058,6 +2063,8 @@ def nearfield_leafpair_csr_reverse_pallas(
         ``"input"`` or ``"wide"``, as the forward.
     include_self : bool
         Intra-leaf term on each leaf's first chunk.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
     Returns
     -------
@@ -2188,9 +2195,7 @@ def nearfield_leafpair_csr_reverse_pallas(
     return out[..., :3], out[..., 3], soft_bar, g_bar
 
 
-@functools.partial(
-    jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15)
-)
+@functools.partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15))
 def nearfield_leafpair_csr_pallas_cvjp(
     leaf_positions: Array,
     leaf_masses: Array,

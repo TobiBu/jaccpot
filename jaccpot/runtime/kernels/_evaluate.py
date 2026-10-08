@@ -39,11 +39,6 @@ from yggdrax.tree import Tree
 
 from jaccpot._env import env_flag
 from jaccpot._searchsorted import searchsorted_method
-from jaccpot.softening import (
-    masked_pair_factors,
-    resolve_softening_kernel,
-    softening_params_from_sq,
-)
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
@@ -79,6 +74,11 @@ from jaccpot.operators.real_harmonics import (
     evaluate_local_real_with_grad,
 )
 from jaccpot.operators.symmetric_tensors import component_lift_index_map_3d
+from jaccpot.softening import (
+    masked_pair_factors,
+    resolve_softening_kernel,
+    softening_params_from_sq,
+)
 
 from .._octree_adapter import OctreeExecutionData
 from ..dtypes import INDEX_DTYPE, as_index

@@ -336,11 +336,11 @@ class MutualFMMState:
         Pair-chunk size for the near kernel; ``None`` leaves it unchunked.
     pallas_interpret : bool
         Run the Pallas kernels in interpret mode (CPU debugging).
-    softening_kernel : str
-        The near-field pair kernel (:mod:`jaccpot.softening`); static.
     num_particles_ : int
         Particle count, as aux data. Trailing underscore because
         ``num_particles`` is the property that reads it.
+    softening_kernel : str
+        The near-field pair kernel (:mod:`jaccpot.softening`); static.
     num_near_pairs : Array
         Live entries in the near pair list. Read this, **not**
         ``near_a.shape[0]``, which is the capacity once padded.

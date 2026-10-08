@@ -38,8 +38,8 @@ behind next to the kernel it wraps.
 from __future__ import annotations
 
 import warnings
-from functools import partial
 from collections import OrderedDict
+from functools import partial
 from typing import Any, Optional, Union
 
 import jax
@@ -648,9 +648,7 @@ def _leafpair_accel_analytic_vjp(
                         )
                         inv_r = jnp.where(pair_mask, lax.rsqrt(safe_dist_sq), 0.0)
                         inv_dist3 = jnp.where(pair_mask, inv_r * inv_r * inv_r, 0.0)
-                        inv_dist5 = jnp.where(
-                            pair_mask, inv_dist3 * inv_r * inv_r, 0.0
-                        )
+                        inv_dist5 = jnp.where(pair_mask, inv_dist3 * inv_r * inv_r, 0.0)
                         pair = m * (
                             inv_dist3[..., None] * cot_b
                             - 3.0 * inv_dist5[..., None] * cd[..., None] * diff
@@ -856,7 +854,7 @@ def _pair_accel_kernel_terms(
     target_mask: Bool[Array, "pairs w"],
     source_mask: Bool[Array, "pairs sw"],
     softening_sq: Union[float, Array],
-    softening_kernel: str,
+    softening_kernel: Optional[str],
 ) -> Tuple[Array, Array, Array, Array]:
     """``(diff, g, (1/r) dg/dr, dg/d(eps^2))`` for a compact softening kernel.
 
@@ -876,7 +874,7 @@ def _pair_accel_kernel_terms(
         ``(B, Ws)`` boolean source validity.
     softening_sq : Union[float, Array]
         Squared Plummer-equivalent softening length.
-    softening_kernel : str
+    softening_kernel : Optional[str]
         The pair kernel.
 
     Returns
@@ -964,7 +962,7 @@ def _pair_accel_cvjp(
         Squared Plummer-equivalent softening length.
     G : Array
         Gravitational constant.
-    softening_kernel : str
+    softening_kernel : Optional[str]
         The pair kernel, static (a ``nondiff_argnums`` entry). For a compact
         kernel the reverse contracts ``-G m (g I + (1/r) dg/dr r r^T)`` instead.
 
@@ -1031,7 +1029,7 @@ def _pair_accel_cvjp_fwd(
 
 
 def _pair_accel_cvjp_bwd(
-    softening_kernel: str,
+    softening_kernel: Optional[str],
     residual: _PairAccelReverseResidual,
     cotangent: Float[Array, "pairs w 3"],
 ) -> Tuple[Array, ...]:

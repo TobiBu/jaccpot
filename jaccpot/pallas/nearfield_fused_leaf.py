@@ -653,8 +653,13 @@ def nearfield_fused_leaf_backend(*, prefer_pallas: bool = True) -> str:
 # ---------------------------------------------------------------------------
 
 
-@partial(jax.jit, static_argnames=(
-        "softening_kernel","include_self",))
+@partial(
+    jax.jit,
+    static_argnames=(
+        "softening_kernel",
+        "include_self",
+    ),
+)
 @jaxtyped(typechecker=beartype)
 def nearfield_leafpair_jax(
     leaf_positions: Array,

@@ -476,6 +476,8 @@ def _dual_tree_build_raw(
         ``PolicyMixin._mac_type_for_traversal``.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
     max_pair_queue : Optional[int]
         Cap on the pending-pair queue; ``None`` lets the traversal size it.
     pair_process_block : Optional[int]
@@ -786,6 +788,8 @@ def _build_dual_tree_artifacts_split(
         Geometric criterion, already mapped to a yggdrax literal.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units); ``0`` for none.
     max_pair_queue : Optional[int]
         Cap on the pending-pair queue; ``None`` lets the traversal size it.
     pair_process_block : Optional[int]
@@ -1081,6 +1085,9 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         Geometric criterion, already mapped to a yggdrax literal.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units), ``0`` for none; the
+        flat walk applies it, the other walks raise.
     max_pair_queue : Optional[int]
         Cap on the pending-pair queue; ``None`` lets the traversal size it.
     pair_process_block : Optional[int]
@@ -1106,10 +1113,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     extra_overflow : Optional[Array]
         An upstream capacity flag treated like the walk's own -- today the
         cell-leaf partition's ``leaf_capacity``.
-
-    separation_floor : float
-        Minimum gap of an accepted far pair (length units), ``0`` for none; the
-        flat walk applies it, the other walks raise.
 
     Returns
     -------
@@ -3439,9 +3442,9 @@ def _interaction_cache_key(
         float(dehnen_radius_scale), dtype=np.float64
     ).tobytes()
     if float(separation_floor) > 0.0:
-        dehnen_scale_bytes += b"floor" + np.asarray(
-            float(separation_floor), dtype=np.float64
-        ).tobytes()
+        dehnen_scale_bytes += (
+            b"floor" + np.asarray(float(separation_floor), dtype=np.float64).tobytes()
+        )
     basis_bytes = str(expansion_basis).encode("utf8")
     center_mode_bytes = str(center_mode).encode("utf8")
     if traversal_config is not None:
@@ -3534,6 +3537,9 @@ def _build_dual_tree_artifacts(
         ``PolicyMixin._mac_type_for_traversal``.
     dehnen_radius_scale : float
         Radius inflation for the Dehnen MAC.
+    separation_floor : float
+        Minimum gap of an accepted far pair (length units), ``0`` for none. Only
+        the strict fused lane's flat walk applies it; any other walk raises.
     cache_key : Optional[str]
         Interaction-cache key; ``None`` disables both lookup and store.
     cache_entry : Optional[_InteractionCacheEntry]
@@ -3590,10 +3596,6 @@ def _build_dual_tree_artifacts(
     strict_extra_overflow : Optional[Array]
         An upstream capacity flag treated like the walk's own; forwarded to the
         strict streamed builder as ``extra_overflow``.
-
-    separation_floor : float
-        Minimum gap of an accepted far pair (length units), ``0`` for none. Only
-        the strict fused lane's flat walk applies it; any other walk raises.
 
     Returns
     -------

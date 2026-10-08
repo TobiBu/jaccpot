@@ -108,12 +108,12 @@ def resolve_softening_kernel(kernel: Optional[str]) -> SofteningKernel:
     return name  # type: ignore[return-value]
 
 
-def support_factor(kernel: str) -> float:
+def support_factor(kernel: Optional[str]) -> float:
     """``h / softening`` for the kernel: ``315/128``, ``3`` or ``0`` (Plummer).
 
     Parameters
     ----------
-    kernel : str
+    kernel : Optional[str]
         A kernel name.
 
     Returns
@@ -124,12 +124,12 @@ def support_factor(kernel: str) -> float:
     return _SUPPORT_FACTOR[resolve_softening_kernel(kernel)]
 
 
-def support_radius(kernel: str, softening: float) -> float:
+def support_radius(kernel: Optional[str], softening: float) -> float:
     """The kernel's support ``h``; ``0`` for Plummer.
 
     Parameters
     ----------
-    kernel : str
+    kernel : Optional[str]
         A kernel name.
     softening : float
         The Plummer-equivalent softening length.
@@ -142,7 +142,7 @@ def support_radius(kernel: str, softening: float) -> float:
     return support_factor(kernel) * float(softening)
 
 
-def softening_params(kernel: str, softening: Any, dtype: Any = None) -> Any:
+def softening_params(kernel: Optional[str], softening: Any, dtype: Any = None) -> Any:
     """The two scalars the pair factors read, as a ``(2,)`` array.
 
     ``[eps^2, 0]`` for Plummer, ``[h^2, 1/h^2]`` for ``"ferrers3"`` and
@@ -153,7 +153,7 @@ def softening_params(kernel: str, softening: Any, dtype: Any = None) -> Any:
 
     Parameters
     ----------
-    kernel : str
+    kernel : Optional[str]
         A kernel name.
     softening : Any
         The Plummer-equivalent softening length (a float or a 0-d array).
@@ -176,19 +176,19 @@ def softening_params(kernel: str, softening: Any, dtype: Any = None) -> Any:
     return jnp.stack([h * h, 1.0 / jnp.maximum(h, jnp.sqrt(tiny))])
 
 
-def softening_params_np(kernel: str, softening: float) -> np.ndarray:
+def softening_params_np(kernel: Optional[str], softening: float) -> np.ndarray:
     """:func:`softening_params` in float64 NumPy, for host-side references.
 
     Parameters
     ----------
-    kernel : str
+    kernel : Optional[str]
         A kernel name.
     softening : float
         The Plummer-equivalent softening length.
 
     Returns
     -------
-    numpy.ndarray
+    np.ndarray
         ``(2,)`` float64.
     """
     name = resolve_softening_kernel(kernel)
@@ -211,7 +211,7 @@ def _horner(c: Any, coeffs: tuple[float, ...]) -> Any:
 def pair_factors(
     r2: Any,
     params: Any,
-    kernel: str,
+    kernel: Optional[str],
     *,
     potential: bool = False,
     derivative: bool = False,
@@ -230,7 +230,7 @@ def pair_factors(
     params : Any
         ``(p0, p1)`` from :func:`softening_params`; indexable, so a ``(2,)``
         array or a Pallas ref.
-    kernel : str
+    kernel : Optional[str]
         A kernel name (static).
     potential : bool
         Also return the potential factor ``psi``.
@@ -241,7 +241,7 @@ def pair_factors(
 
     Returns
     -------
-    tuple
+    tuple[Any, Optional[Any], Optional[Any]]
         ``(g, psi or None, dg or None)``.
     """
     name = resolve_softening_kernel(kernel)
@@ -277,7 +277,7 @@ def pair_factors(
 
 
 def pair_softening_sq_derivative(
-    r2: Any, params: Any, kernel: str, *, xp: Any = jnp
+    r2: Any, params: Any, kernel: Optional[str], *, xp: Any = jnp
 ) -> Any:
     """``d g / d(eps^2)`` at fixed separation, for reverse rules that return it.
 
@@ -291,7 +291,7 @@ def pair_softening_sq_derivative(
         Squared separations, softening NOT added.
     params : Any
         From :func:`softening_params` / :func:`softening_params_from_sq`.
-    kernel : str
+    kernel : Optional[str]
         A kernel name (static).
     xp : Any
         ``jax.numpy`` (default) or ``numpy``.
@@ -325,7 +325,7 @@ def pair_softening_sq_derivative(
     return -0.5 * k * k * (1.0 - c) * _horner(c, rh) * s * s * s * s * s
 
 
-def softening_params_from_sq(kernel: str, softening_sq: Any, dtype: Any = None) -> Any:
+def softening_params_from_sq(kernel: Optional[str], softening_sq: Any, dtype: Any = None) -> Any:
     """:func:`softening_params` from a SQUARED softening, as the kernels carry it.
 
     Plummer keeps ``softening_sq`` itself as ``p0``, so its pair arithmetic is
@@ -333,7 +333,7 @@ def softening_params_from_sq(kernel: str, softening_sq: Any, dtype: Any = None) 
 
     Parameters
     ----------
-    kernel : str
+    kernel : Optional[str]
         A kernel name.
     softening_sq : Any
         The squared Plummer-equivalent softening.
@@ -356,7 +356,7 @@ def masked_pair_factors(
     r2: Any,
     active: Any,
     params: Any,
-    kernel: str,
+    kernel: Optional[str],
     *,
     potential: bool = False,
     derivative: bool = False,
@@ -377,7 +377,7 @@ def masked_pair_factors(
         Boolean mask of live pairs, broadcastable to ``r2``.
     params : Any
         From :func:`softening_params` / :func:`softening_params_from_sq`.
-    kernel : str
+    kernel : Optional[str]
         A kernel name (static).
     potential : bool
         Also return ``psi``.
@@ -388,7 +388,7 @@ def masked_pair_factors(
 
     Returns
     -------
-    tuple
+    tuple[Any, Optional[Any], Optional[Any]]
         ``(g, psi or None, dg or None)``, zero on inactive pairs.
     """
     name = resolve_softening_kernel(kernel)

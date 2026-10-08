@@ -78,6 +78,7 @@ from jaccpot.operators.complex_ops import (  # noqa: F401
     enforce_conjugate_symmetry_batch,
 )
 from jaccpot.operators.real_harmonics import sh_size  # noqa: F401
+from jaccpot.softening import resolve_softening_kernel, support_factor
 
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
 from ._interaction_cache import _InteractionCacheEntry, _RefreshDualPlannerHint
@@ -127,7 +128,6 @@ from .kernels.core import (  # noqa: F401
     _prepare_solidfmm_downward_sweep,
 )
 from .reference import compute_gravitational_potential as reference_compute_potential
-from jaccpot.softening import resolve_softening_kernel, support_factor
 
 # RE-EXPORTS. The names below are imported for other modules to reach through
 # this one, and are unused *here*. Holding references makes that a fact the

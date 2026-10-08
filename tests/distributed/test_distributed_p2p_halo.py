@@ -72,7 +72,8 @@ def test_halo_source_p2p_matches_direct_sum():
         ),  # edge0 source = leaf node 1
         neighbor_counts_override=jnp.asarray([1, 0], INDEX_DTYPE),
         leaf_particle_indices_override=jnp.asarray(idx, INDEX_DTYPE),
-        leaf_particle_mask_override=jnp.asarray(m), softening_kernel="plummer",
+        leaf_particle_mask_override=jnp.asarray(m),
+        softening_kernel="plummer",
     )
     accel = np.asarray(accel)
 

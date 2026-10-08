@@ -75,7 +75,12 @@ def test_a_rigid_translation_does_not_change_the_topology():
     n = 2048
     positions, masses = _system(n, seed=3)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=1, theta=0.9, max_order=4, leaf_size=16, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=1,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     shifted_shape = int(fmm.state.near_a.shape[0]), int(fmm.state.far_a.shape[0])
@@ -90,7 +95,12 @@ def test_topology_shapes_drift_without_static_shapes():
     n = 2048
     positions, masses = _system(n, seed=4)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=1, theta=0.9, max_order=4, leaf_size=16, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=1,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     seen = set()
     for i, scale in enumerate((0.0, 1.0e-3, 1.0e-1)):
@@ -109,7 +119,8 @@ def test_static_shapes_hold_the_prepared_state_signature_across_rebuilds():
         theta=0.9,
         max_order=4,
         leaf_size=16,
-        static_shapes=True, softening_kernel="plummer",
+        static_shapes=True,
+        softening_kernel="plummer",
     )
 
     def signature(state):
@@ -144,7 +155,8 @@ def test_one_compiled_program_serves_every_rebuild():
         theta=0.9,
         max_order=4,
         leaf_size=16,
-        static_shapes=True, softening_kernel="plummer",
+        static_shapes=True,
+        softening_kernel="plummer",
     )
 
     @jax.jit
@@ -185,7 +197,8 @@ def test_capacity_overflow_raises_rather_than_truncating():
         theta=0.9,
         max_order=4,
         leaf_size=16,
-        caps=MutualCapacities(near=8, far=8, depth=8, width=8), softening_kernel="plummer",
+        caps=MutualCapacities(near=8, far=8, depth=8, width=8),
+        softening_kernel="plummer",
     )
     with pytest.raises(MutualCapacityOverflow, match="overflows its capacities"):
         fmm.prepare(positions, masses)
@@ -239,7 +252,9 @@ def _host_topology(positions, masses, *, theta, leaf, order):
     from jaccpot import FastMultipoleMethod
     from jaccpot.mutual.topology import build_mutual_topology_from_tree
 
-    solver = FastMultipoleMethod(preset="balanced", basis="real", softening_kernel="plummer")
+    solver = FastMultipoleMethod(
+        preset="balanced", basis="real", softening_kernel="plummer"
+    )
     prepared = solver.prepare_state(
         positions, masses, leaf_size=leaf, max_order=order, theta=theta
     )
@@ -272,7 +287,8 @@ def _device_state(topology, prepared, parent, root, *, theta, order, caps):
         leaf_size=int(topology.max_leaf_size),
         caps=caps,
         softening=SOFTENING,
-        G=1.0, softening_kernel="plummer",
+        G=1.0,
+        softening_kernel="plummer",
     )
 
 
@@ -386,7 +402,9 @@ def test_a_device_built_state_gives_the_same_force_and_gradient(n, theta, leaf, 
         positions, masses, theta=theta, leaf=leaf, order=order
     )
     caps = resolve_mutual_capacities(topology)
-    host = build_mutual_state(topology, softening=SOFTENING, G=1.0, caps=caps, softening_kernel="plummer")
+    host = build_mutual_state(
+        topology, softening=SOFTENING, G=1.0, caps=caps, softening_kernel="plummer"
+    )
     device = _device_state(
         topology, prepared, parent, root, theta=theta, order=order, caps=caps
     )
@@ -447,7 +465,9 @@ def test_topology_build_and_force_are_one_jitted_program():
 
     @jax.jit
     def build_and_force(sorted_positions, sorted_masses, p, m):
-        state = build_mutual_state_device(sorted_positions, sorted_masses, **static, softening_kernel="plummer")
+        state = build_mutual_state_device(
+            sorted_positions, sorted_masses, **static, softening_kernel="plummer"
+        )
         return mutual_weighted_accelerations(state, p, m)
 
     xs = jnp.asarray(prepared.positions_sorted)
@@ -456,7 +476,9 @@ def test_topology_build_and_force_are_one_jitted_program():
     build_and_force(xs, ms, positions, masses)
     assert build_and_force._cache_size() == 1
 
-    host = build_mutual_state(topology, softening=SOFTENING, G=1.0, caps=caps, softening_kernel="plummer")
+    host = build_mutual_state(
+        topology, softening=SOFTENING, G=1.0, caps=caps, softening_kernel="plummer"
+    )
     ref = mutual_weighted_accelerations(host, positions, masses)
     rel = float(jnp.linalg.norm(out - ref) / jnp.linalg.norm(ref))
     assert rel < 1.0e-14, f"jitted device build differs at {rel:.3e}"
@@ -488,7 +510,8 @@ def test_the_device_backend_matches_the_exact_sum_as_well_as_the_host_one():
         theta=theta,
         max_order=4,
         leaf_size=leaf,
-        static_shapes=True, softening_kernel="plummer",
+        static_shapes=True,
+        softening_kernel="plummer",
     )
     host.prepare(positions, masses)
     device = BlockStepFMM(
@@ -497,7 +520,8 @@ def test_the_device_backend_matches_the_exact_sum_as_well_as_the_host_one():
         theta=theta,
         max_order=4,
         leaf_size=leaf,
-        topology_backend="device", softening_kernel="plummer",
+        topology_backend="device",
+        softening_kernel="plummer",
     )
     device.prepare(positions, masses)
     assert not bool(device.state.topology_overflow)
@@ -542,7 +566,8 @@ def test_an_undersized_capacity_profile_is_raised_not_truncated():
         max_order=4,
         leaf_size=leaf,
         topology_backend="device",
-        caps=starved, softening_kernel="plummer",
+        caps=starved,
+        softening_kernel="plummer",
     )
     with pytest.raises(RuntimeError, match="overflowed its capacity profile"):
         model.prepare(positions, masses)
@@ -567,7 +592,8 @@ def test_a_rollout_with_the_tree_rebuilt_inside_the_scan_is_one_program():
         theta=theta,
         max_order=4,
         leaf_size=leaf,
-        topology_backend="device", softening_kernel="plummer",
+        topology_backend="device",
+        softening_kernel="plummer",
     )
     model.freeze_template(positions, masses)
 

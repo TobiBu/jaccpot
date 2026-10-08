@@ -78,7 +78,8 @@ def _run(near, local, n_local_particles):
             softening_sq=jnp.asarray(SOFT**2),
             G=jnp.asarray(G),
             chunk=8,
-            interpret=True, softening_kernel="plummer",
+            interpret=True,
+            softening_kernel="plummer",
         ),
         np.float64,
     )
@@ -224,7 +225,8 @@ def _run_fp32(near, local, n_local_particles, accum):
         G=jnp.asarray(G, jnp.float32),
         chunk=8,
         interpret=True,
-        accum=accum, softening_kernel="plummer",
+        accum=accum,
+        softening_kernel="plummer",
     )
     return out
 

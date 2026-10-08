@@ -113,7 +113,8 @@ def _build(
         topology,
         softening=softening,
         use_pallas=(backend == "pallas"),
-        pallas_interpret=bool(interpret), softening_kernel="plummer",
+        pallas_interpret=bool(interpret),
+        softening_kernel="plummer",
     )
     return positions, masses, topology, state
 
@@ -346,7 +347,12 @@ def test_cross_rung_pair_receives_equal_and_opposite_kick():
     masses = jnp.asarray([1.0, 3.0], dtype=jnp.float64)
     rung = jnp.asarray([0, 1], dtype=jnp.int32)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=1, theta=0.6, max_order=4, leaf_size=1, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=1,
+        theta=0.6,
+        max_order=4,
+        leaf_size=1,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
 
@@ -481,7 +487,12 @@ def test_boundary_kick_conserves_momentum():
     velocities = jnp.zeros_like(positions)
     rung = _rungs(n)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=K_MAX, theta=0.9, max_order=4, leaf_size=16, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=K_MAX,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     for s in range(n_sub(K_MAX) + 1):
@@ -601,7 +612,12 @@ def test_block_step_rollout_conserves_momentum_and_bounds_energy():
     )
     rung = _rungs(n, k_max=2, seed=6)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=2, theta=0.9, max_order=4, leaf_size=16, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=2,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
 
@@ -632,7 +648,12 @@ def test_rollout_gradient_finite_difference():
     velocities = jnp.zeros_like(positions)
     rung = _rungs(n, k_max=1, seed=9)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=1, theta=1.0, max_order=4, leaf_size=8, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=1,
+        theta=1.0,
+        max_order=4,
+        leaf_size=8,
+        softening_kernel="plummer",
     )
     topology_state = fmm.prepare(positions, masses)
     assert topology_state.num_far_pairs > 0
@@ -665,7 +686,9 @@ def test_pallas_backend_falls_back_without_a_supported_device():
     positions, masses, topology, jax_state = _build(
         512, theta=1.0, order=4, leaf_size=8
     )
-    pallas_state = build_mutual_state(topology, softening=SOFTENING, use_pallas=True, softening_kernel="plummer")
+    pallas_state = build_mutual_state(
+        topology, softening=SOFTENING, use_pallas=True, softening_kernel="plummer"
+    )
     assert topology.num_far_pairs > 0
     a_jax = mutual_accelerations(jax_state, positions, masses)
     a_pallas = mutual_accelerations(pallas_state, positions, masses)
@@ -688,7 +711,11 @@ def test_pallas_m2l_kernel_matches_pure_jax_in_interpret_mode():
     )
     assert topology.num_far_pairs > 0
     pallas_state = build_mutual_state(
-        topology, softening=SOFTENING, use_pallas=True, pallas_interpret=True, softening_kernel="plummer"
+        topology,
+        softening=SOFTENING,
+        use_pallas=True,
+        pallas_interpret=True,
+        softening_kernel="plummer",
     )
     a_jax = mutual_accelerations(jax_state, positions, masses)
     a_pallas = mutual_accelerations(pallas_state, positions, masses)
@@ -712,7 +739,11 @@ def test_pallas_backend_is_differentiable():
     )
     assert topology.num_far_pairs > 0
     pallas_state = build_mutual_state(
-        topology, softening=SOFTENING, use_pallas=True, pallas_interpret=True, softening_kernel="plummer"
+        topology,
+        softening=SOFTENING,
+        use_pallas=True,
+        pallas_interpret=True,
+        softening_kernel="plummer",
     )
 
     def loss(state, p):
@@ -753,7 +784,8 @@ def test_pallas_near_field_kernel_matches_pure_jax_in_interpret_mode():
             self_leaves=state.self_leaves,
             softening=SOFTENING,
             use_pallas=use_pallas,
-            interpret=interpret, softening_kernel="plummer",
+            interpret=interpret,
+            softening_kernel="plummer",
         )
 
     f_jax = near(False, False)
@@ -803,7 +835,8 @@ def test_pallas_near_field_kernel_actually_runs_in_interpret_mode(monkeypatch):
         self_leaves=state.self_leaves,
         softening=SOFTENING,
         use_pallas=True,
-        interpret=True, softening_kernel="plummer",
+        interpret=True,
+        softening_kernel="plummer",
     )
     # One launch for the intra-leaf blocks, one for the cross-leaf pairs.
     assert len(calls) >= 2
@@ -842,7 +875,8 @@ def test_pallas_near_field_analytic_reverse_matches_pure_jax():
             self_leaves=state.self_leaves,
             softening=SOFTENING,
             use_pallas=use_pallas,
-            interpret=interpret, softening_kernel="plummer",
+            interpret=interpret,
+            softening_kernel="plummer",
         )
         return jnp.sum(forces * weights)
 
@@ -884,7 +918,8 @@ def test_pallas_near_field_respects_level_weights():
             rung=rung,
             level_weights=level_weights,
             use_pallas=use_pallas,
-            interpret=interpret, softening_kernel="plummer",
+            interpret=interpret,
+            softening_kernel="plummer",
         )
 
     f_jax = near(False, False)
@@ -934,7 +969,9 @@ def test_far_field_chunk_padding_cannot_poison_the_expansion(monkeypatch):
     # A budget one short of the list guarantees two chunks and a partial tail.
     monkeypatch.setattr(farfield, "_M2L_BATCH_BUDGET", max(1, directed - 1))
 
-    state = build_mutual_state(topology, softening=SOFTENING, softening_kernel="plummer")
+    state = build_mutual_state(
+        topology, softening=SOFTENING, softening_kernel="plummer"
+    )
     accelerations = mutual_accelerations(state, positions, masses)
     assert jnp.all(jnp.isfinite(accelerations))
 
@@ -942,7 +979,9 @@ def test_far_field_chunk_padding_cannot_poison_the_expansion(monkeypatch):
     # the unpadded one, which never builds a degenerate slot in the first place.
     monkeypatch.setattr(farfield, "_M2L_BATCH_BUDGET", 1 << 16)
     reference = mutual_accelerations(
-        build_mutual_state(topology, softening=SOFTENING, softening_kernel="plummer"), positions, masses
+        build_mutual_state(topology, softening=SOFTENING, softening_kernel="plummer"),
+        positions,
+        masses,
     )
     assert jnp.all(jnp.isfinite(reference))
     error = float(
@@ -954,7 +993,9 @@ def test_far_field_chunk_padding_cannot_poison_the_expansion(monkeypatch):
 def test_rung_above_k_max_is_rejected():
     """A rung with no kick weight is a configuration error, not a NaN later on."""
     positions, masses = _system(128)
-    fmm = BlockStepFMM(softening=SOFTENING, k_max=1, leaf_size=16, softening_kernel="plummer")
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=1, leaf_size=16, softening_kernel="plummer"
+    )
     fmm.prepare(positions, masses)
     rung = jnp.asarray(np.arange(128) % 4, dtype=jnp.int32)
     with pytest.raises(ValueError, match="k_max"):
@@ -963,15 +1004,21 @@ def test_rung_above_k_max_is_rejected():
 
 def test_unsupported_basis_and_backend_are_rejected():
     with pytest.raises(ValueError, match="basis"):
-        BlockStepFMM(softening=SOFTENING, k_max=1, basis="cartesian", softening_kernel="plummer")
+        BlockStepFMM(
+            softening=SOFTENING, k_max=1, basis="cartesian", softening_kernel="plummer"
+        )
     with pytest.raises(ValueError, match="backend"):
-        BlockStepFMM(softening=SOFTENING, k_max=1, backend="cuda", softening_kernel="plummer")
+        BlockStepFMM(
+            softening=SOFTENING, k_max=1, backend="cuda", softening_kernel="plummer"
+        )
 
 
 def test_force_call_under_tracing_without_prepare_raises():
     """A traced call cannot build a host topology; say so instead of crashing."""
     positions, masses = _system(64)
-    fmm = BlockStepFMM(softening=SOFTENING, k_max=1, leaf_size=8, softening_kernel="plummer")
+    fmm = BlockStepFMM(
+        softening=SOFTENING, k_max=1, leaf_size=8, softening_kernel="plummer"
+    )
     rung = jnp.zeros(64, dtype=jnp.int32)
 
     @jax.jit
@@ -1053,7 +1100,12 @@ def test_boundary_kick_accepts_supplied_level_weights():
     rung = _rungs(n)
     dt_max = 0.05
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=K_MAX, theta=0.9, max_order=4, leaf_size=16, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=K_MAX,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     table = boundary_weight_table(K_MAX, dt_max, dtype=positions.dtype)
@@ -1104,7 +1156,12 @@ def test_boundary_kick_runs_under_jit_with_a_traced_boundary_index():
     rung = _rungs(n)
     dt_max = 0.05
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=K_MAX, theta=1.0, max_order=4, leaf_size=8, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=K_MAX,
+        theta=1.0,
+        max_order=4,
+        leaf_size=8,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
     table = boundary_weight_table(K_MAX, dt_max, dtype=positions.dtype)
@@ -1145,7 +1202,12 @@ def test_scanned_base_step_matches_the_unrolled_one():
     )
     rung = _rungs(n, k_max=2, seed=6)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=2, theta=0.9, max_order=4, leaf_size=16, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=2,
+        theta=0.9,
+        max_order=4,
+        leaf_size=16,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
 
@@ -1183,7 +1245,12 @@ def test_scanned_base_step_traces_one_boundary_kick_not_two_to_the_k():
     velocities = jnp.zeros_like(positions)
     rung = _rungs(n, k_max=3)
     fmm = BlockStepFMM(
-        softening=SOFTENING, k_max=3, theta=1.0, max_order=2, leaf_size=8, softening_kernel="plummer"
+        softening=SOFTENING,
+        k_max=3,
+        theta=1.0,
+        max_order=2,
+        leaf_size=8,
+        softening_kernel="plummer",
     )
     fmm.prepare(positions, masses)
 
@@ -1229,7 +1296,8 @@ def _dt_max_gradient(backend, interpret, *, seed=23):
         max_order=4,
         leaf_size=8,
         backend=backend,
-        pallas_interpret=interpret, softening_kernel="plummer",
+        pallas_interpret=interpret,
+        softening_kernel="plummer",
     )
     state = fmm.prepare(positions, masses)
     assert int(state.num_far_pairs) > 0, "no far pairs: the kick is a direct sum"

@@ -45,7 +45,8 @@ def _solver_with_capacity(*, basis: str) -> FastMultipoleMethod:
                     max_neighbors_per_leaf=65536,
                 )
             )
-        ), softening_kernel="plummer",
+        ),
+        softening_kernel="plummer",
     )
 
 
@@ -106,7 +107,11 @@ def test_real_basis_far_field_converges_with_order():
 
     def rel_err(order: int) -> float:
         fmm = FastMultipoleMethod(
-            preset="accurate", basis="real", theta=0.6, softening=soft, softening_kernel="plummer"
+            preset="accurate",
+            basis="real",
+            theta=0.6,
+            softening=soft,
+            softening_kernel="plummer",
         )
         acc = np.asarray(
             fmm.compute_accelerations(positions, masses, leaf_size=16, max_order=order)
@@ -313,7 +318,9 @@ def test_real_basis_acceleration_derivatives_match_complex():
     )
 
     def run(basis: str, k: int):
-        fmm = FastMultipoleMethod(preset="accurate", basis=basis, theta=0.4, softening_kernel="plummer")
+        fmm = FastMultipoleMethod(
+            preset="accurate", basis=basis, theta=0.4, softening_kernel="plummer"
+        )
         return fmm.compute_accelerations(
             positions, masses, leaf_size=16, max_order=4, max_acc_derivative_order=k
         )

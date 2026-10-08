@@ -77,7 +77,6 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
-from jaccpot.softening import resolve_softening_kernel, support_factor
 from jaccpot.config import MACTypeInput
 from jaccpot.distributed._force_scale import (
     DISTRIBUTED_FORCE_SCALE_MODES,
@@ -115,6 +114,7 @@ from jaccpot.runtime.kernels.core import (
     _evaluate_local_expansions_for_particles,
     _propagate_solidfmm_locals_by_level,
 )
+from jaccpot.softening import resolve_softening_kernel, support_factor
 from jaccpot.upward.real_tree_expansions import (
     aggregate_m2m_real_by_level,
     prepare_real_upward_sweep,

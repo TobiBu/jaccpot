@@ -82,7 +82,8 @@ def test_fmm_acceleration_matches_direct_sum(dtype, rel_tol: float, abs_tol: flo
                     max_neighbors_per_leaf=65536,
                 )
             )
-        ), softening_kernel="plummer",
+        ),
+        softening_kernel="plummer",
     )
 
     acc_fmm = np.asarray(
