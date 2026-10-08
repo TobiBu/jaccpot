@@ -1997,6 +1997,9 @@ def prepare_large_n_state(
         radix_fast_payload=radix_fast_payload,
         radix_overflow_payload=radix_overflow_payload,
         compact_far_pairs=getattr(dual_downward_artifacts, "compact_far_pairs", None),
+        force_scale_far_sorted=getattr(
+            dual_downward_artifacts, "force_scale_far_sorted", None
+        ),
     )
     _record_nf("_refresh_timing_nearfield_state_pack_seconds", substage_t0)
     if refresh_timing_active:

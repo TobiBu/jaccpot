@@ -22,6 +22,8 @@ same clamp guard, ~40 small vectorised steps and no extra memory beyond the
 
 from __future__ import annotations
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -31,6 +33,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 __all__ = [
     "ancestor_sum_by_level",
     "far_force_scale_own",
+    "far_force_scale_sorted",
     "subtree_min_by_level",
 ]
 
@@ -264,3 +267,104 @@ def far_force_scale_own(
     )
     contrib = jnp.where(live & (reach > 0), contrib, jnp.zeros((), dtype))
     return jax.ops.segment_sum(contrib, tgt, num_segments=int(num_nodes))
+
+
+def far_force_scale_sorted(
+    *,
+    tree: Any,
+    leaf_nodes: Array,
+    sources: Array,
+    targets: Array,
+    live: Array,
+    node_mass: Array,
+    node_centers: Array,
+    node_radii: Array,
+    gravitational_constant: float,
+    softening_sq: Array,
+    num_levels: int,
+    num_particles: int,
+) -> Array:
+    """The far half of eq (16b)'s ``f_b`` per SORTED particle, from one walk's lists.
+
+    :func:`far_force_scale_own` on the directed far pairs, pushed down the tree
+    with :func:`ancestor_sum_by_level`, and read at each particle's leaf. Leaves
+    hold contiguous particle ranges in ``leaf_nodes`` order (the neighbour list's
+    ``leaf_indices``), so the particle -> leaf map is the fast lane's
+    ``repeat`` over the leaf counts.
+
+    Parameters
+    ----------
+    tree : Any
+        The step's tree (``node_ranges``, ``parent``, children, level tables).
+    leaf_nodes : Array
+        ``[L]`` leaf node ids in particle order (``neighbor_list.leaf_indices``).
+    sources : Array
+        Source node per directed far pair.
+    targets : Array
+        Target node per directed far pair.
+    live : Array
+        Live pairs.
+    node_mass : Array
+        ``[nodes]`` node masses.
+    node_centers : Array
+        ``[nodes, 3]`` the walk centres.
+    node_radii : Array
+        ``[nodes]`` the walk radii.
+    gravitational_constant : float
+        ``G``.
+    softening_sq : Array
+        ``eps^2`` (Plummer-equivalent).
+    num_levels : int
+        Level-loop bound, the one the upward pass uses. Static.
+    num_particles : int
+        ``N``. Static.
+
+    Returns
+    -------
+    Array
+        ``[N]`` the far force scale in tree (sorted) order; zero past the leaves.
+    """
+    from yggdrax.tree import get_level_offsets, get_nodes_by_level
+
+    from jaccpot.runtime._level_shapes import level_batch_width
+
+    total = int(jnp.asarray(tree.parent).shape[0])
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    offsets = get_level_offsets(tree)
+    own = far_force_scale_own(
+        sources=sources,
+        targets=targets,
+        live=live,
+        node_mass=jnp.asarray(node_mass),
+        node_centers=jnp.asarray(node_centers),
+        node_radii=jnp.asarray(node_radii),
+        gravitational_constant=gravitational_constant,
+        softening_sq=softening_sq,
+        num_nodes=total,
+    )
+    total_far = ancestor_sum_by_level(
+        own,
+        tree.left_child,
+        tree.right_child,
+        tree.parent,
+        get_nodes_by_level(tree),
+        offsets,
+        num_internal=num_internal,
+        num_levels=int(num_levels),
+        level_batch_width=level_batch_width(
+            offsets, total_nodes=total, num_internal=num_internal
+        ),
+    )
+    leaves = jnp.asarray(leaf_nodes, dtype=INDEX_DTYPE)
+    ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaves]
+    counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
+    n = int(num_particles)
+    leaf_of = jnp.repeat(
+        jnp.arange(leaves.shape[0], dtype=INDEX_DTYPE),
+        counts,
+        total_repeat_length=n,
+    )
+    live_particle = jnp.arange(n, dtype=INDEX_DTYPE) < jnp.sum(counts)
+    return jnp.where(live_particle, total_far[leaves[leaf_of]], 0.0).astype(
+        node_mass.dtype
+    )

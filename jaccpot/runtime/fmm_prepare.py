@@ -31,6 +31,7 @@ from yggdrax.morton import morton_encode
 from yggdrax.tree import (
     RadixTree,
     Tree,
+    get_level_offsets,
     rebuild_static_radix_tree_from_template,
     reorder_particles_by_indices,
 )
@@ -56,6 +57,7 @@ from ._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_node_force_scale_from_sorted_magnitudes,
 )
+from ._force_scale_levels import far_force_scale_sorted
 from ._interaction_cache import (
     TargetSortedFarPairs,
     _build_dual_tree_artifacts,
@@ -3839,6 +3841,40 @@ class PrepareMixin(_EngineBase):
 
         src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
         tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+        force_scale_far_sorted = None
+        if walk_criterion is not None:
+            # eq (16b)'s far half for the NEXT step's thresholds, from this walk's
+            # lists: the refresh drops them before the evaluation, which adds the
+            # near half from the near-field kernel's force-scale lane
+            tree_now = tree_artifacts.tree
+            far_live = (
+                (src_far >= 0)
+                & (tgt_far >= 0)
+                & (
+                    jnp.arange(src_far.shape[0], dtype=INDEX_DTYPE)
+                    < jnp.asarray(compact_far_pairs.far_pair_count, INDEX_DTYPE)
+                )
+            )
+            num_levels_fb = self._resolve_upward_num_levels(tree_now)
+            if num_levels_fb is None:
+                num_levels_fb = int(get_level_offsets(tree_now).shape[0] - 1)
+            force_scale_far_sorted = far_force_scale_sorted(
+                tree=tree_now,
+                leaf_nodes=neighbor_list.leaf_indices,
+                sources=src_far,
+                targets=tgt_far,
+                live=far_live,
+                node_mass=tree_artifacts.upward.mass_moments.mass,
+                node_centers=walk_geometry.center,
+                node_radii=walk_geometry.radius,
+                gravitational_constant=float(self.G),
+                softening_sq=jnp.asarray(
+                    float(self.softening) ** 2,
+                    jnp.asarray(walk_geometry.radius).dtype,
+                ),
+                num_levels=int(num_levels_fb),
+                num_particles=int(jnp.asarray(tree_now.particle_indices).shape[0]),
+            )
         far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
         far_pairs_by_gear = _gear_pairs_for_autotune(
             compact_far_pairs, src_far, tgt_far
@@ -3899,6 +3935,7 @@ class PrepareMixin(_EngineBase):
             compact_far_pairs=compact_far_pairs,
             downward=downward,
             cache_entry=cache_entry,
+            force_scale_far_sorted=force_scale_far_sorted,
         )
 
     def _resolve_force_scale_nodes_for_prepare(
