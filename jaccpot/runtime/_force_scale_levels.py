@@ -34,6 +34,7 @@ __all__ = [
     "ancestor_sum_by_level",
     "far_force_scale_own",
     "far_force_scale_sorted",
+    "node_force_scale_min",
     "subtree_min_by_level",
 ]
 
@@ -367,4 +368,71 @@ def far_force_scale_sorted(
     live_particle = jnp.arange(n, dtype=INDEX_DTYPE) < jnp.sum(counts)
     return jnp.where(live_particle, total_far[leaves[leaf_of]], 0.0).astype(
         node_mass.dtype
+    )
+
+
+def node_force_scale_min(
+    *, tree: Any, force_scale_particles: Array, num_levels: int
+) -> Array:
+    """Per-node ``min_b f_b`` from a per-particle force scale in INPUT order.
+
+    What eq (16a)'s threshold needs for every node: the force scale carried from
+    the previous step's evaluation, sorted by this step's tree, reduced to each
+    leaf's minimum and then up the tree (:func:`subtree_min_by_level`). Empty
+    leaves get ``+inf`` (their nodes are dead in the walk anyway).
+
+    Parameters
+    ----------
+    tree : Any
+        This step's tree.
+    force_scale_particles : Array
+        ``[N]`` ``f_b`` per particle in input order.
+    num_levels : int
+        Level-loop bound (the upward pass's). Static.
+
+    Returns
+    -------
+    Array
+        ``[total_nodes]`` the minimum ``f_b`` over each node's particles.
+    """
+    from yggdrax.tree import get_level_offsets, get_nodes_by_level
+
+    from jaccpot.runtime._level_shapes import level_batch_width
+
+    total = int(jnp.asarray(tree.parent).shape[0])
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    perm = jnp.asarray(tree.particle_indices, dtype=INDEX_DTYPE)
+    scale = jnp.asarray(force_scale_particles)[perm]
+    n = int(scale.shape[0])
+    ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[num_internal:]
+    counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
+    # leaves in particle order (an empty leaf sorts last, its count is zero)
+    order = jnp.argsort(jnp.where(counts > 0, ranges[:, 0], n), stable=True)
+    leaf_of = order[
+        jnp.repeat(
+            jnp.arange(order.shape[0], dtype=INDEX_DTYPE),
+            counts[order],
+            total_repeat_length=n,
+        )
+    ]
+    live = jnp.arange(n, dtype=INDEX_DTYPE) < jnp.sum(counts)
+    inf = jnp.asarray(jnp.inf, scale.dtype)
+    leaf_min = jax.ops.segment_min(
+        jnp.where(live, scale, inf), leaf_of, num_segments=int(ranges.shape[0])
+    )
+    leaf_min = jnp.where(counts > 0, leaf_min, inf)
+    values = jnp.concatenate([jnp.full((num_internal,), inf, scale.dtype), leaf_min])
+    offsets = get_level_offsets(tree)
+    return subtree_min_by_level(
+        values,
+        tree.left_child,
+        tree.right_child,
+        tree.parent,
+        get_nodes_by_level(tree),
+        offsets,
+        num_internal=num_internal,
+        num_levels=int(num_levels),
+        level_batch_width=level_batch_width(
+            offsets, total_nodes=total, num_internal=num_internal
+        ),
     )

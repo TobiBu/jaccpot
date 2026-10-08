@@ -1896,11 +1896,10 @@ class PrepareMixin(_EngineBase):
         Raises
         ------
         RuntimeError
-            If the strict fused device-only lane is combined with a
-            configuration it cannot honour -- the Dehnen paper MAC, which needs a
-            solver-owned pair policy this lane does not carry, or a blocked
-            streamed fast lane. Both refuse loudly rather than degrading the
-            acceptance criterion silently (STYLE_GUIDE §9).
+            If the strict fused device-only lane cannot engage its streamed fast
+            lane: it refuses loudly rather than fall back to a slower path. (The
+            Dehnen paper MAC is no longer refused here: the fast lane evaluates it
+            inside the flat walk.)
         """
         # `dehnen_theta` evaluates the same criterion but has already folded it into
         # per-node opening angles (rescaled `geometry.radius`), so the traversal's
@@ -1911,27 +1910,13 @@ class PrepareMixin(_EngineBase):
             self._uses_paper_style_traversal_policy()
             and not self._uses_per_node_effective_theta()
         )
-        if (
-            bool(suppress_host_side_effects)
-            and bool(getattr(self, "_strict_fused_mode_active", False))
-            and bool(getattr(self, "_strict_fused_device_only", False))
-        ):
-            # This lane cannot carry a solver-owned pair policy, so the Dehnen
-            # mass-dependent MAC would silently degrade to the plain geometric
-            # MAC underneath it -- producing a different force with no signal to
-            # the caller, and quietly invalidating any measurement taken here.
-            # Refuse, in the same spirit as the streamed-fast-lane refusal below.
-            if use_paper_fixed_policy:
-                raise RuntimeError(
-                    "the strict fused device-only lane cannot carry the Dehnen "
-                    "paper MAC (mac_type='dehnen_error' / "
-                    "adaptive_error_model='dehnen_paper'): it requires a "
-                    "solver-owned pair policy, which this lane does not support. "
-                    "Silently falling back would run the geometric MAC instead. "
-                    "Use mac_type='dehnen' for this lane, or disable the strict "
-                    "fused device-only path."
-                )
-            use_paper_fixed_policy = False
+        # The strict fused device-only lane carries the Dehnen criterion INSIDE its
+        # flat walk (a `FlatWalkCriterion`: eq (16a) per pair from a node table),
+        # not as a solver-owned pair policy -- the traced refresh included, with
+        # the per-node force scale reduced from the f_b the previous step's
+        # evaluation carried. Neither silent fallback can happen: the strict fast
+        # path refuses a missing force scale (eps * 1 would be another criterion),
+        # and the device-only hot path refuses to leave the fast path at all.
 
         # A static-radix topology key describes the capacity-fixed tree shape,
         # not the current leaf membership, geometry, or MAC decisions. Reusing
@@ -3847,9 +3832,14 @@ class PrepareMixin(_EngineBase):
             # lists: the refresh drops them before the evaluation, which adds the
             # near half from the near-field kernel's force-scale lane
             tree_now = tree_artifacts.tree
+            # one target per pair: a target-sorted list (the CSR M2L lane's) keeps
+            # row offsets in `targets`
+            tgt_per_pair = jnp.asarray(
+                far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE
+            )
             far_live = (
                 (src_far >= 0)
-                & (tgt_far >= 0)
+                & (tgt_per_pair >= 0)
                 & (
                     jnp.arange(src_far.shape[0], dtype=INDEX_DTYPE)
                     < jnp.asarray(compact_far_pairs.far_pair_count, INDEX_DTYPE)
@@ -3862,7 +3852,7 @@ class PrepareMixin(_EngineBase):
                 tree=tree_now,
                 leaf_nodes=neighbor_list.leaf_indices,
                 sources=src_far,
-                targets=tgt_far,
+                targets=tgt_per_pair,
                 live=far_live,
                 node_mass=tree_artifacts.upward.mass_moments.mass,
                 node_centers=walk_geometry.center,
