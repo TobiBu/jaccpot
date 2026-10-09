@@ -5,11 +5,13 @@
 tables. Same lane body, loop bounds and summation order, so the result must be
 the same to the bit: on leaves of every occupancy, empty padding leaves at the
 end, rows past every leaf's particles (a shard's padding), a subtile that pads
-``W``, and chunks that split rows.
+``W``, and chunks that split rows. On a GPU, rows of three or more chunks agree
+to round-off only: their partials are added by unordered atomics.
 """
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -21,6 +23,22 @@ from jaccpot.pallas.nearfield_leafpair_csr import (
     nearfield_leafpair_csr_sorted_direct_pallas,
     nearfield_leafpair_csr_sorted_pallas,
 )
+
+
+def _bitwise_leaves(row_counts, chunk, *, ordered):
+    """Leaves whose sum is reproduced to the bit by a chunked kernel.
+
+    Pass 2 adds a row's chunk partials with a ``segment_sum``. On CPU it adds them
+    in chunk order, so every row agrees to the bit (``ordered``). On a GPU it is a
+    scatter of unordered atomics: two partials commute, three or more round in
+    arrival order, which changes run to run.
+    """
+    row_chunks = -(-np.asarray(row_counts) // chunk)
+    return np.ones(row_chunks.shape, bool) if ordered else row_chunks <= 2
+
+
+def _ordered_segment_sum():
+    return jax.default_backend() == "cpu"
 
 
 def _case(seed, *, num_live, num_pad, W, n_dead, max_row, empty_rows=()):
@@ -107,7 +125,9 @@ def test_sorted_ranges_equal_the_table_kernel(W, chunk, subtile, n_dead, accum):
     got = np.asarray(got)
     assert got.shape == ref.shape == (c["L"], W, 4)
     assert np.any(ref[:9]) and not np.any(ref[9:])  # padding leaves stay zero
-    assert np.array_equal(got, ref)
+    exact = _bitwise_leaves(c["row_counts"], chunk, ordered=_ordered_segment_sum())
+    np.testing.assert_allclose(got, ref, rtol=2e-6, atol=1e-6)
+    assert np.array_equal(got[exact], ref[exact])
 
 
 @pytest.mark.parametrize(
@@ -127,7 +147,8 @@ def test_direct_equals_the_table_kernel_in_particle_order(
 
     ``chunked``: on CPU the scatter of pass 2 adds a row's chunks in chunk
     order, which is the segment sum's order, so even rows of three or more
-    chunks agree to the bit here (on GPU both are unordered atomics).
+    chunks agree to the bit here; on a GPU both are unordered atomics
+    (``_bitwise_leaves``), so longer rows agree to single-precision round-off.
     ``whole``: one running sum per row, so rows of one chunk agree to the bit
     and longer rows to single-precision round-off.
     """
@@ -174,15 +195,17 @@ def test_direct_equals_the_table_kernel_in_particle_order(
     got = np.concatenate(
         [acc, np.asarray(pot)[:, None] if with_potential else want[:, 3:]], axis=1
     )
+    # particles of the leaves that keep the table's bits
+    row_counts = np.asarray(c["row_counts"])
     if rows == "chunked":
-        exact = np.ones(n, bool)
-    else:  # particles of leaves whose row is one chunk keep the table's bits
-        row_counts = np.asarray(c["row_counts"])
-        exact = np.zeros(n, bool)
-        for leaf in range(c["L"]):
-            if row_counts[leaf] <= chunk:
-                exact[starts[leaf] : starts[leaf] + counts[leaf]] = True
-        np.testing.assert_allclose(got, want, rtol=2e-6, atol=1e-6)
+        bitwise = _bitwise_leaves(row_counts, chunk, ordered=_ordered_segment_sum())
+    else:  # whole: one running sum per row, so rows of one chunk
+        bitwise = row_counts <= chunk
+    exact = np.zeros(n, bool)
+    for leaf in range(c["L"]):
+        if bitwise[leaf]:
+            exact[starts[leaf] : starts[leaf] + counts[leaf]] = True
+    np.testing.assert_allclose(got, want, rtol=2e-6, atol=1e-6)
     assert np.array_equal(got[exact], want[exact])
     if not with_potential:
         assert pot is None
@@ -271,7 +294,7 @@ def test_source_tiles_equal_the_scalar_loop(
     """Vector source tiles: the scalar loop's values to single-precision round-off
     (a tile is summed as a tree), with and without the pieces of long rows, on rows
     whose leaves are consecutive (runs merge) and on random rows; per-class launches
-    the one-launch tiled kernel's values exactly."""
+    the one-launch tiled kernel's values exactly on CPU, to round-off on a GPU."""
     for c in (
         _case(7, num_live=9, num_pad=3, W=W, n_dead=2, max_row=6, empty_rows=(2,)),
         _consecutive_case(11, W=W),
@@ -313,7 +336,15 @@ def test_source_tiles_equal_the_scalar_loop(
                 target_classes=(),
                 **common,
             )
-            assert np.array_equal(np.asarray(acc1), np.asarray(one))
+            acc1_np, one = np.asarray(acc1), np.asarray(one)
+            if jax.default_backend() == "cpu":
+                assert np.array_equal(acc1_np, one)
+            else:
+                # each class is its own launch shape, so its own compiled program,
+                # which may round differently on a GPU (each launch is reproducible
+                # run to run; measured on an A100: <= 0.5 ulp of the largest force)
+                tol = 2 * np.spacing(np.float32(np.abs(one).max()))
+                np.testing.assert_allclose(acc1_np, one, rtol=0, atol=tol)
         acc0, acc1 = np.asarray(acc0), np.asarray(acc1)
         assert np.any(acc0)
         n_dead = 2

@@ -121,18 +121,14 @@ def test_default_on_and_flag_zero_takes_the_dual_walk(monkeypatch):
     assert rel < 2e-5, rel
 
 
-def test_both_walk_flags_set_is_refused(monkeypatch):
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
-    with pytest.raises(RuntimeError, match="pick one walk"):
-        _force(monkeypatch, _N, 64, flat=True)
-
-
-def test_the_removed_treecode_flag_is_refused(monkeypatch):
-    """The treecode walk is gone (cleanup 2026-10); its env switch must raise.
+@pytest.mark.parametrize("flat", [None, True])
+def test_the_removed_treecode_flag_is_refused(monkeypatch, flat):
+    """The treecode walk is gone (cleanup 2026-10); its env switch must raise, also
+    next to an explicit flat-walk request (which used to raise "pick one walk").
 
     Silently running the default walk under a switch that asked for another one is
     the failure mode this guards against.
     """
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
     with pytest.raises(RuntimeError, match="TREECODE_WALK was removed"):
-        _force(monkeypatch, _N, 64, flat=None)
+        _force(monkeypatch, _N, 64, flat=flat)
