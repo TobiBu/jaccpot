@@ -39,6 +39,7 @@ from jaxtyping import Array
 from jaccpot._env import env_choice, env_flag, env_int
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+from jaccpot.runtime._walk_criterion import WALK_TABLE_POWER0, dehnen_pair_accept
 
 try:
     from jax.experimental import pallas as pl
@@ -132,6 +133,7 @@ def _round_kernel(
     rad_ref: KernelRef,
     active_ref: KernelRef,
     theta_ref: KernelRef,
+    err_ref: KernelRef,
     far_a_ref: KernelRef,
     far_b_ref: KernelRef,
     near_a_ref: KernelRef,
@@ -154,6 +156,7 @@ def _round_kernel(
     node_layout: str = "soa",
     fused_emit: bool = False,
     use_floor: bool = False,
+    error_order: int = 0,
 ) -> None:
     """One block of the wavefront: MAC, emit, refine.
 
@@ -176,7 +179,10 @@ def _round_kernel(
     active_ref : KernelRef
         Node activity ``[nodes]`` (``int32`` 0/1).
     theta_ref : KernelRef
-        ``[theta^2, separation floor]``.
+        ``[theta^2, separation floor, theta_max, 0]``.
+    err_ref : KernelRef
+        ``[nodes, W]`` eq (16a) table (:func:`~jaccpot.runtime._walk_criterion.dehnen_walk_table`)
+        when ``error_order > 0``; a dummy otherwise.
     far_a_ref : KernelRef
         Far list, first node ``[far_cap]``; aliased to ``far_a_out``.
     far_b_ref : KernelRef
@@ -228,6 +234,10 @@ def _round_kernel(
         Also require ``d >= r_a + r_b + floor`` (``theta_ref[1]``, the separation
         floor): no particle of an accepted pair closer than the floor to one of the
         other node (the radii are exact centre-of-mass radii). Static.
+    error_order : int
+        ``0``: the opening-angle test. ``p > 0``: Dehnen's eq (16a) at order ``p``
+        from ``err_ref`` instead (symmetrised; the convergence clause bounds by
+        ``theta_ref[2]``); ``theta`` is then unused. Static.
 
     Returns
     -------
@@ -265,6 +275,7 @@ def _round_kernel(
             rad_ref,
             active_ref,
             theta_ref,
+            err_ref,
             far_a_out,
             far_b_out,
             near_a_out,
@@ -280,6 +291,7 @@ def _round_kernel(
             node_layout=node_layout,
             fused_emit=fused_emit,
             use_floor=use_floor,
+            error_order=error_order,
         )
         return carry
 
@@ -296,6 +308,7 @@ def _round_block(
     rad_ref: KernelRef,
     active_ref: KernelRef,
     theta_ref: KernelRef,
+    err_ref: KernelRef,
     far_a_out: KernelRef,
     far_b_out: KernelRef,
     near_a_out: KernelRef,
@@ -312,6 +325,7 @@ def _round_block(
     node_layout: str = "soa",
     fused_emit: bool = False,
     use_floor: bool = False,
+    error_order: int = 0,
 ) -> None:
     """Body of one non-empty block (see :func:`_round_kernel`).
 
@@ -334,7 +348,9 @@ def _round_block(
     active_ref : KernelRef
         Node activity ``[nodes]`` (``int32`` 0/1).
     theta_ref : KernelRef
-        ``[theta^2, separation floor]``.
+        ``[theta^2, separation floor, theta_max, 0]``.
+    err_ref : KernelRef
+        ``[nodes, W]`` eq (16a) table when ``error_order > 0``; a dummy otherwise.
     far_a_out : KernelRef
         Far list, first node; written in place.
     far_b_out : KernelRef
@@ -373,6 +389,8 @@ def _round_block(
         Also require ``d >= r_a + r_b + floor`` (``theta_ref[1]``, the separation
         floor): no particle of an accepted pair closer than the floor to one of the
         other node (the radii are exact centre-of-mass radii). Static.
+    error_order : int
+        ``0``: the opening-angle test; ``p > 0``: eq (16a) from ``err_ref``. Static.
 
     Returns
     -------
@@ -415,8 +433,26 @@ def _round_block(
     d2 = dx * dx + dy * dy + dz * dz
     same = a_s == b_s
     rsum = rad_a + rad_b
-    theta_sq = theta_ref[0]
-    accept = live & (~same) & (d2 > 0.0) & (rsum * rsum <= theta_sq * d2)
+    if error_order > 0:
+        # eq (16a), both directions, from the two nodes' table rows; like the
+        # policy, no d > 0 guard (the convergence clause fails at d = 0)
+        cols = WALK_TABLE_POWER0 + int(error_order)
+        accept = (
+            live
+            & (~same)
+            & dehnen_pair_accept(
+                row_a=[err_ref[a_s, k] for k in range(cols)],
+                row_b=[err_ref[b_s, k] for k in range(cols)],
+                radius_a=rad_a,
+                radius_b=rad_b,
+                dist_sq=d2,
+                order=int(error_order),
+                theta_max=theta_ref[2],
+            )
+        )
+    else:
+        theta_sq = theta_ref[0]
+        accept = live & (~same) & (d2 > 0.0) & (rsum * rsum <= theta_sq * d2)
     if use_floor:
         reach = rsum + theta_ref[1]
         accept = accept & (reach * reach <= d2)
@@ -547,6 +583,9 @@ def mutual_walk_pallas(
     node_layout: Optional[str] = None,
     fused_emit: Optional[bool] = None,
     separation_floor: float = 0.0,
+    error_table: Optional[Array] = None,
+    error_order: int = 0,
+    theta_max: float = 1.0,
 ) -> PallasWalkResult:
     """Run the mutual walk, one Pallas launch per round.
 
@@ -624,6 +663,18 @@ def mutual_walk_pallas(
         so no far interaction acts between particles closer than the floor (the
         far field is the unsoftened expansion; the floor keeps it out of the
         softening's reach). ``0`` (default): no floor, the kernel unchanged. Static.
+    error_table : Optional[Array]
+        ``[nodes, W]`` table of Dehnen's eq (16a) inputs
+        (:func:`~jaccpot.runtime._walk_criterion.dehnen_walk_table`), traced.
+        Required when ``error_order > 0``.
+    error_order : int
+        ``0`` (default): the opening-angle test. ``p > 0``: accept by eq (16a) at
+        expansion order ``p`` instead -- the per-pair error estimate of eq (15),
+        symmetrised, against each node's threshold -- and ``theta`` is unused. The
+        near and refinement rules are unchanged. Static.
+    theta_max : float
+        The eq (16a) convergence clause, ``rho_a + rho_b < theta_max d`` (the
+        paper's 1). Read only with ``error_order > 0``.
 
     Returns
     -------
@@ -638,10 +689,21 @@ def mutual_walk_pallas(
     ------
     ValueError
         If the seed is longer than ``max_pair_queue`` or only one half is given,
-        or ``node_layout`` is not ``"soa"`` or ``"record"``.
+        ``node_layout`` is not ``"soa"`` or ``"record"``, or ``error_order > 0``
+        comes without an ``error_table`` wide enough for it.
     """
     if (seed_a is None) != (seed_b is None):
         raise ValueError("seed_a and seed_b go together")
+    if int(error_order) > 0:
+        if error_table is None:
+            raise ValueError("error_order > 0 needs an error_table")
+        if int(jnp.asarray(error_table).shape[1]) < WALK_TABLE_POWER0 + int(
+            error_order
+        ):
+            raise ValueError(
+                f"error_table has {int(jnp.asarray(error_table).shape[1])} columns, "
+                f"order {int(error_order)} needs {WALK_TABLE_POWER0 + int(error_order)}"
+            )
     if seed_a is not None:
         K = int(jnp.asarray(seed_a).shape[0])
         if K > int(max_pair_queue):
@@ -673,6 +735,7 @@ def mutual_walk_pallas(
         seed_a,
         seed_b,
         seed_count,
+        error_table if int(error_order) > 0 else None,
         theta=float(theta),
         max_pair_queue=int(max_pair_queue),
         far_cap=int(far_cap),
@@ -686,6 +749,8 @@ def mutual_walk_pallas(
         node_layout=str(node_layout),
         fused_emit=bool(fused_emit),
         separation_floor=float(separation_floor),
+        error_order=int(error_order),
+        theta_max=float(theta_max),
     )
 
 
@@ -705,6 +770,8 @@ def mutual_walk_pallas(
         "node_layout",
         "fused_emit",
         "separation_floor",
+        "error_order",
+        "theta_max",
     ),
 )
 @jax.named_scope("fmm_walk")
@@ -718,6 +785,7 @@ def _mutual_walk_jit(
     seed_a: Optional[Array],
     seed_b: Optional[Array],
     seed_count: Optional[Array],
+    error_table: Optional[Array],
     *,
     theta: float,
     max_pair_queue: int,
@@ -732,6 +800,8 @@ def _mutual_walk_jit(
     node_layout: str = "soa",
     fused_emit: bool = False,
     separation_floor: float = 0.0,
+    error_order: int = 0,
+    theta_max: float = 1.0,
 ) -> PallasWalkResult:
     """The body of :func:`mutual_walk_pallas` (validated arguments, static sizes).
 
@@ -755,6 +825,8 @@ def _mutual_walk_jit(
         Seed pairs, second nodes.
     seed_count : Optional[Array]
         Live seed prefix.
+    error_table : Optional[Array]
+        The eq (16a) table, or ``None`` with ``error_order == 0``.
     theta : float
         Opening angle.
     max_pair_queue : int
@@ -782,6 +854,10 @@ def _mutual_walk_jit(
 
     separation_floor : float
         See :func:`mutual_walk_pallas`. Static.
+    error_order : int
+        See :func:`mutual_walk_pallas`. Static.
+    theta_max : float
+        See :func:`mutual_walk_pallas`. Static.
 
     Returns
     -------
@@ -800,8 +876,16 @@ def _mutual_walk_jit(
         if node_active is None
         else jnp.asarray(node_active).astype(idx)
     )
-    # [theta^2, separation floor]: the kernel reads the floor only with use_floor
-    theta_sq = jnp.asarray([float(theta) ** 2, float(separation_floor)], dtype)
+    # [theta^2, separation floor, theta_max, 0]: the kernel reads the floor only
+    # with use_floor and theta_max only with error_order > 0
+    theta_sq = jnp.asarray(
+        [float(theta) ** 2, float(separation_floor), float(theta_max), 0.0], dtype
+    )
+    if error_order > 0:
+        assert error_table is not None  # checked by the wrapper
+        err = jnp.asarray(error_table, dtype)
+    else:
+        err = jnp.zeros((1, 8), dtype)
     if node_layout == "record":
         # one 32-byte sector per node: (cx, cy, cz, r, left, right, active, 0)
         def _as_f32(x: Array) -> Array:
@@ -840,6 +924,7 @@ def _mutual_walk_jit(
         node_layout=node_layout,
         fused_emit=bool(fused_emit),
         use_floor=float(separation_floor) > 0.0,
+        error_order=int(error_order),
     )
 
     def one_round(
@@ -864,6 +949,7 @@ def _mutual_walk_jit(
             rad,
             active,
             theta_sq,
+            err,
             far_a,
             far_b,
             near_a,

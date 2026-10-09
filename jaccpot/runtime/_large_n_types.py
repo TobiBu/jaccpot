@@ -580,6 +580,13 @@ class LargeNPreparedState:
     compact_far_pairs : Optional[CompactTaggedFarPairs]
         Compact far-pair list when the streamed far field retains one, else
         ``None``.
+    force_scale_far_sorted : Optional[Array]
+        ``mac_type='dehnen_error'`` on the strict fused lane only: the far half of
+        eq (16b)'s force scale ``f_b`` per SORTED particle -- this step's far pairs
+        as monopoles, pushed down the tree -- computed in the prepare from the
+        lists that the refresh drops before evaluation. The evaluation adds the
+        near half (the near-field kernel's force-scale lane) and hands ``f_b`` to
+        the next step's thresholds. ``None`` everywhere else.
     """
 
     tree: Tree
@@ -635,6 +642,7 @@ class LargeNPreparedState:
     radix_fast_payload: Optional[RadixFastNearfieldPayload] = None
     radix_overflow_payload: Optional[RadixFastNearfieldPayload] = None
     compact_far_pairs: Optional[CompactTaggedFarPairs] = None
+    force_scale_far_sorted: Optional[Array] = None
 
     @property
     def positions_sorted(self: "LargeNPreparedState") -> Array:
@@ -700,6 +708,7 @@ class LargeNPreparedState:
             self.radix_overflow_payload,
             self.compact_far_pairs,
             self.force_scale_nodes,
+            self.force_scale_far_sorted,
         )
         aux = (
             int(self.nearfield_target_block_size),
@@ -898,6 +907,7 @@ class LargeNPreparedState:
             radix_fast_payload,
             *remaining_children,
         ) = children
+        force_scale_far_sorted = None
         if len(remaining_children) == 1:
             radix_overflow_payload = None
             compact_far_pairs = None
@@ -905,10 +915,17 @@ class LargeNPreparedState:
         elif len(remaining_children) == 2:
             radix_overflow_payload, force_scale_nodes = remaining_children
             compact_far_pairs = None
-        else:
+        elif len(remaining_children) == 3:
             radix_overflow_payload, compact_far_pairs, force_scale_nodes = (
                 remaining_children
             )
+        else:
+            (
+                radix_overflow_payload,
+                compact_far_pairs,
+                force_scale_nodes,
+                force_scale_far_sorted,
+            ) = remaining_children
         if local_order is None:
             local_order = int(getattr(local_data, "order", 0))
         return cls(
@@ -942,6 +959,7 @@ class LargeNPreparedState:
             topology_key=topology_key,
             retry_events=retry_events,
             force_scale_nodes=force_scale_nodes,
+            force_scale_far_sorted=force_scale_far_sorted,
             execution_backend=str(execution_backend),
             expansion_basis=str(expansion_basis),
             nearfield_mode=str(nearfield_mode),

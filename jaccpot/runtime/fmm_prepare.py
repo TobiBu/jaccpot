@@ -30,6 +30,7 @@ from yggdrax.morton import morton_encode
 from yggdrax.tree import (
     RadixTree,
     Tree,
+    get_level_offsets,
     rebuild_static_radix_tree_from_template,
     reorder_particles_by_indices,
 )
@@ -55,6 +56,7 @@ from ._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_node_force_scale_from_sorted_magnitudes,
 )
+from ._force_scale_levels import far_force_scale_sorted, node_force_scale_min_sorted
 from ._interaction_cache import (
     TargetSortedFarPairs,
     _build_dual_tree_artifacts,
@@ -76,6 +78,7 @@ from ._nearfield_cache import (
     nearfield_from_cache,
     with_nearfield_cache_artifacts,
 )
+from ._walk_criterion import FlatWalkCriterion
 from .capacity_diagnostics import (
     is_capacity_failure,
     reraise_with_capacity_report,
@@ -1391,6 +1394,8 @@ class PrepareMixin(_EngineBase):
                 self._refresh_dual_planner_steady_timing_bypass_count += 1
             return self._prepare_state_dual_and_downward_strict_streamed_fast(
                 cross_far=cross_far,
+                force_scale_nodes=force_scale_nodes,
+                walk_criterion_active=bool(use_paper_fixed_policy),
                 tree_artifacts=tree_artifacts,
                 theta_val=theta_val,
                 mac_type_val=mac_type_val,
@@ -1847,11 +1852,10 @@ class PrepareMixin(_EngineBase):
         Raises
         ------
         RuntimeError
-            If the strict fused device-only lane is combined with a
-            configuration it cannot honour -- the Dehnen paper MAC, which needs a
-            solver-owned pair policy this lane does not carry, or a blocked
-            streamed fast lane. Both refuse loudly rather than degrading the
-            acceptance criterion silently (STYLE_GUIDE §9).
+            If the strict fused device-only lane cannot engage its streamed fast
+            lane: it refuses loudly rather than fall back to a slower path. (The
+            Dehnen paper MAC is no longer refused here: the fast lane evaluates it
+            inside the flat walk.)
         """
         # `dehnen_theta` evaluates the same criterion but has already folded it into
         # per-node opening angles (rescaled `geometry.radius`), so the traversal's
@@ -1862,27 +1866,13 @@ class PrepareMixin(_EngineBase):
             self._uses_paper_style_traversal_policy()
             and not self._uses_per_node_effective_theta()
         )
-        if (
-            bool(suppress_host_side_effects)
-            and bool(getattr(self, "_strict_fused_mode_active", False))
-            and bool(getattr(self, "_strict_fused_device_only", False))
-        ):
-            # This lane cannot carry a solver-owned pair policy, so the Dehnen
-            # mass-dependent MAC would silently degrade to the plain geometric
-            # MAC underneath it -- producing a different force with no signal to
-            # the caller, and quietly invalidating any measurement taken here.
-            # Refuse, in the same spirit as the streamed-fast-lane refusal below.
-            if use_paper_fixed_policy:
-                raise RuntimeError(
-                    "the strict fused device-only lane cannot carry the Dehnen "
-                    "paper MAC (mac_type='dehnen_error' / "
-                    "adaptive_error_model='dehnen_paper'): it requires a "
-                    "solver-owned pair policy, which this lane does not support. "
-                    "Silently falling back would run the geometric MAC instead. "
-                    "Use mac_type='dehnen' for this lane, or disable the strict "
-                    "fused device-only path."
-                )
-            use_paper_fixed_policy = False
+        # The strict fused device-only lane carries the Dehnen criterion INSIDE its
+        # flat walk (a `FlatWalkCriterion`: eq (16a) per pair from a node table),
+        # not as a solver-owned pair policy -- the traced refresh included, with
+        # the per-node force scale reduced from the f_b the previous step's
+        # evaluation carried. Neither silent fallback can happen: the strict fast
+        # path refuses a missing force scale (eps * 1 would be another criterion),
+        # and the device-only hot path refuses to leave the fast path at all.
 
         # A static-radix topology key describes the capacity-fixed tree shape,
         # not the current leaf membership, geometry, or MAC decisions. Reusing
@@ -2132,13 +2122,10 @@ class PrepareMixin(_EngineBase):
             and not bool(need_traversal_result)
             and not adaptive_order_active
             and not mixed_order_farfield_active
-            # `_prepare_state_dual_and_downward_strict_streamed_fast` hardcodes
-            # `pair_policy=None`, so this lane cannot carry the Dehnen criterion --
-            # it would run the geometric MAC underneath a caller that asked for the
-            # criterion, cheaper and with no signal. Until the forcing below was
-            # dropped, `need_traversal_result` happened to exclude paper mode here;
-            # relying on that again would be relying on an accident.
-            and not bool(use_paper_fixed_policy)
+            # The Dehnen criterion rides this lane INSIDE the flat walk: the fast
+            # path hands the walk a `FlatWalkCriterion` (eq 16a per pair, from a
+            # per-node table) instead of a pair policy, and the builder raises if
+            # the flat walk is unavailable rather than run the geometric MAC.
             and (
                 not bool(traced_prepare_inputs)
                 or bool(strict_fused_device_only_hot_path)
@@ -3520,6 +3507,8 @@ class PrepareMixin(_EngineBase):
         retain_interactions: bool = False,
         suppress_host_side_effects: bool = False,
         cross_far: Optional[tuple] = None,
+        force_scale_nodes: Optional[Array] = None,
+        walk_criterion_active: bool = False,
     ) -> _PrepareStateDualDownwardArtifacts:
         """Strict static fast path with compact streamed far-pairs only.
 
@@ -3550,6 +3539,13 @@ class PrepareMixin(_EngineBase):
             multipoles and expansion centres, and the cross far pairs as indices into
             ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
             cascade serves both. ``None`` (default) is the single-domain lane.
+        force_scale_nodes : Optional[Array]
+            Per-node force scale ``min_b f_b`` of eq (16a); required with
+            ``walk_criterion_active``.
+        walk_criterion_active : bool
+            ``mac_type='dehnen_error'``: accept far pairs by eq (16a) inside the
+            flat walk (:class:`~jaccpot.runtime._walk_criterion.FlatWalkCriterion`)
+            at threshold ``adaptive_eps * force_scale_nodes``.
 
         Returns
         -------
@@ -3572,9 +3568,35 @@ class PrepareMixin(_EngineBase):
             suppress_host_side_effects=suppress_host_side_effects,
         )
         walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
+        walk_criterion = None
+        if walk_criterion_active:
+            if force_scale_nodes is None:
+                # eps * 1 is a different criterion that accepts far more: refuse
+                # rather than run it (the policy's trap 14)
+                raise RuntimeError(
+                    "mac_type='dehnen_error' on the strict fused lane needs the "
+                    "per-node force scale of eq (16a); none was resolved"
+                )
+            upward = tree_artifacts.upward
+            mult_dtype = jnp.asarray(upward.multipoles.packed).dtype
+            walk_criterion = FlatWalkCriterion(
+                multipole_packed=upward.multipoles.packed,
+                mass=upward.mass_moments.mass,
+                # the policy's threshold, `max(eps * f, 1e-24)` (exact Dehnen mode:
+                # no normalisation of the scale)
+                threshold=jnp.maximum(
+                    jnp.asarray(float(self.adaptive_eps), mult_dtype)
+                    * jnp.asarray(force_scale_nodes, mult_dtype),
+                    jnp.asarray(1e-24, mult_dtype),
+                ),
+                order=int(upward.multipoles.order),
+                theta_max=float(self.mac_theta_max),
+                gravitational_constant=float(self.G),
+            )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             walk_geometry,
+            walk_criterion=walk_criterion,
             separation_floor=self._walk_separation_floor(),
             geometry_factory=geometry_factory,
             strict_capacity_report=_strict_capacity_report,
@@ -3636,6 +3658,30 @@ class PrepareMixin(_EngineBase):
 
         src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
         tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
+        force_scale_far_sorted = None
+        if walk_criterion is not None:
+            # eq (16b)'s far half for the NEXT step's thresholds, from this walk's
+            # lists: the refresh drops them before the evaluation, which adds the
+            # near half from the near-field kernel's force-scale lane
+            tree_now = tree_artifacts.tree
+            num_levels_fb = self._resolve_upward_num_levels(tree_now)
+            if num_levels_fb is None:
+                num_levels_fb = int(get_level_offsets(tree_now).shape[0] - 1)
+            force_scale_far_sorted = far_force_scale_sorted(
+                tree=tree_now,
+                leaf_nodes=neighbor_list.leaf_indices,
+                far_pairs=compact_far_pairs,
+                node_mass=tree_artifacts.upward.mass_moments.mass,
+                node_centers=walk_geometry.center,
+                node_radii=walk_geometry.radius,
+                gravitational_constant=float(self.G),
+                softening_sq=jnp.asarray(
+                    float(self.softening) ** 2,
+                    jnp.asarray(walk_geometry.radius).dtype,
+                ),
+                num_levels=int(num_levels_fb),
+                num_particles=int(jnp.asarray(tree_now.particle_indices).shape[0]),
+            )
         far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
         far_pairs_by_gear = _gear_pairs_for_autotune(
             compact_far_pairs, src_far, tgt_far
@@ -3687,7 +3733,153 @@ class PrepareMixin(_EngineBase):
             compact_far_pairs=compact_far_pairs,
             downward=downward,
             cache_entry=cache_entry,
+            force_scale_far_sorted=force_scale_far_sorted,
         )
+
+    def _fused_force_scale_seed(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+    ) -> Array:
+        """Eq (16b)'s ``f_b`` per sorted particle, from the fused lane's own kernels.
+
+        The first step's force scale for ``mac_type='dehnen_error'`` on the strict
+        fused lane: what every later step gets as a by-product of its force, here
+        from one GEOMETRIC flat walk at the lane's opening angle. The near half
+        is the direct CSR kernel's force-scale lane over its near pairs (the
+        XLA estimator where the CSR lane cannot run); the far half is its far
+        pairs as monopoles, pushed down the tree. No downward sweep, no criterion.
+
+        It replaces the general ``paper_fb`` prepass on this lane, which walks at
+        ``theta = 0.5`` (``_force_scale_prepass_theta``) and builds the downward
+        sweep: ~4x the lists of theta 0.8, too many next to the criterion's own at
+        1e8. The estimate errs LOW (the prepass's own table: median 0.93 of exact at
+        theta 0.7), so the first step is slightly stricter, never looser.
+        ``mac_force_scale_prepass_theta`` sets the walk's theta; else 0.8.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            The eager prepare's tree and upward pass.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for the walk.
+
+        Returns
+        -------
+        Array
+            ``[N]`` ``f_b`` in the tree's order.
+
+        Raises
+        ------
+        RuntimeError
+            If the walk returned no far or no near list (a wiring fault).
+        """
+        from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
+
+        tree = tree_artifacts.tree
+        override = getattr(self, "mac_force_scale_prepass_theta", None)
+        theta_seed = 0.8 if override is None else float(override)
+        walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
+        dual_artifacts, _ = _build_dual_tree_artifacts(
+            tree,
+            walk_geometry,
+            separation_floor=self._walk_separation_floor(),
+            geometry_factory=geometry_factory,
+            theta=theta_seed,
+            mac_type="dehnen",
+            dehnen_radius_scale=self.dehnen_radius_scale,
+            cache_key=None,
+            cache_entry=None,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            retry_logger=None,
+            fail_fast=True,
+            use_dense_interactions=False,
+            need_traversal_result=False,
+            need_compact_far_pairs=True,
+            need_node_interactions=False,
+            allow_split_build=True,
+            pair_policy=None,
+            policy_state=None,
+            jit_traversal=True,
+            timing_callback=None,
+            planner_hint=_RefreshDualPlannerHint(
+                use_split_build=True,
+                suppress_substage_timing=True,
+            ),
+        )
+        unpacked = self._unpack_dual_tree_artifacts(dual_artifacts)
+        neighbor_list, compact_far_pairs = unpacked[1], unpacked[3]
+        del dual_artifacts, unpacked
+        if compact_far_pairs is None or neighbor_list is None:
+            raise RuntimeError(
+                "the fused force-scale seed needs the walk's far and near lists"
+            )
+        dtype = jnp.asarray(tree_artifacts.positions_sorted).dtype
+        eps_sq = jnp.asarray(float(self.softening) ** 2, dtype)
+        num_levels = self._resolve_upward_num_levels(tree)
+        if num_levels is None:
+            num_levels = int(get_level_offsets(tree).shape[0] - 1)
+        n = int(jnp.asarray(tree.particle_indices).shape[0])
+        far = far_force_scale_sorted(
+            tree=tree,
+            leaf_nodes=neighbor_list.leaf_indices,
+            far_pairs=compact_far_pairs,
+            node_mass=tree_artifacts.upward.mass_moments.mass,
+            node_centers=walk_geometry.center,
+            node_radii=walk_geometry.radius,
+            gravitational_constant=float(self.G),
+            softening_sq=eps_sq,
+            num_levels=int(num_levels),
+            num_particles=n,
+        )
+        del compact_far_pairs
+        leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+        counts = jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE)
+        neighbors = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+        if _nearfield_csr_lane_active(bool(getattr(self, "use_pallas", False))):
+            from jaccpot._env import env_flag, env_int
+            from jaccpot.pallas.nearfield_leafpair_csr import (
+                nearfield_leafpair_csr_sorted_direct_pallas,
+            )
+
+            ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
+            _, near = nearfield_leafpair_csr_sorted_direct_pallas(
+                jnp.asarray(tree_artifacts.positions_sorted),
+                jnp.asarray(tree_artifacts.masses_sorted),
+                ranges[:, 0],
+                jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0),
+                jnp.maximum(neighbors - leaf_nodes[0], 0),
+                offsets,
+                counts,
+                leaf_width=int(tree_artifacts.leaf_cap),
+                softening_sq=eps_sq,
+                G=jnp.asarray(float(self.G), dtype),
+                chunk=max(1, env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64)),
+                interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+                with_force_scale=True,
+                softening_kernel=getattr(self, "softening_kernel", None),
+            )
+        else:
+            from jaccpot.runtime._adaptive_policy import _near_field_force_scale
+
+            near = _near_field_force_scale(
+                positions=jnp.asarray(tree_artifacts.positions_sorted),
+                masses=jnp.asarray(tree_artifacts.masses_sorted, dtype),
+                node_ranges=jnp.asarray(tree.node_ranges, dtype=jnp.int32),
+                neighbor_offsets=offsets,
+                neighbor_counts=counts,
+                neighbor_leaf_indices=leaf_nodes,
+                neighbor_indices=neighbors,
+                leaf_cap=int(tree_artifacts.leaf_cap),
+                g=jnp.asarray(float(self.G), dtype),
+                eps_sq=eps_sq,
+                chunk=32,
+            )
+        return (jnp.asarray(near, dtype) + jnp.asarray(far, dtype)).astype(dtype)
 
     def _resolve_force_scale_nodes_for_prepare(
         self,
@@ -3708,6 +3900,7 @@ class PrepareMixin(_EngineBase):
         refine_local_val: bool,
         max_refine_levels_val: int,
         aspect_threshold_val: float,
+        fused_seed: bool = False,
     ) -> Optional[Array]:
         """Resolve the per-node force scale the acceptance criterion needs.
 
@@ -3777,6 +3970,10 @@ class PrepareMixin(_EngineBase):
             Refinement depth cap forwarded to the prepass builders.
         aspect_threshold_val : float
             Aspect-ratio threshold forwarded to the prepass builders.
+        fused_seed : bool
+            A fused device-mode prepare: with the fused lane's criterion the
+            force scale comes from ``_fused_force_scale_seed`` (its own kernels),
+            not the general prepass. Off everywhere else.
 
         Returns
         -------
@@ -3814,6 +4011,28 @@ class PrepareMixin(_EngineBase):
                     f"got shape {tuple(supplied.shape)}"
                 )
             force_scale_nodes = supplied
+        elif (
+            use_paper_force_scale
+            and bool(fused_seed)
+            and self._flat_walk_criterion_active()
+        ):
+            # The fused lane: eq (16b)'s f_b from its own kernels, recomputed at every
+            # eager prepare (a cached scale belongs to other positions), and reduced
+            # by level rather than by the serial per-node loop.
+            fb_sorted = self._fused_force_scale_seed(
+                tree_artifacts=tree_artifacts,
+                runtime_traversal_config=runtime_traversal_config,
+            )
+            num_levels = self._resolve_upward_num_levels(tree_artifacts.tree)
+            if num_levels is None:
+                num_levels = int(get_level_offsets(tree_artifacts.tree).shape[0] - 1)
+            force_scale_nodes = node_force_scale_min_sorted(
+                tree=tree_artifacts.tree,
+                force_scale_sorted=fb_sorted,
+                num_levels=int(num_levels),
+            ).astype(positions_arr.dtype)
+            self._last_force_scale_nodes = force_scale_nodes
+            self._last_force_scale_particles = fb_sorted
         elif use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes

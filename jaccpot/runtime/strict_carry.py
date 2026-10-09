@@ -23,7 +23,7 @@ gone too.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -91,11 +91,16 @@ class StrictParticleCarry:
         call's initial force.
     num_particles : int
         ``N``.
+    force_scale : Optional[Array]
+        ``mac_type='dehnen_error'``: eq (16b)'s ``f_b`` per particle (input order)
+        at the returned state -- the next call's first thresholds. ``None``
+        otherwise.
     """
 
     template: PreparedShapeTemplate
     self_acceleration: Array
     num_particles: int
+    force_scale: Optional[Array] = None
 
 
 def shape_template(prepared: Any) -> PreparedShapeTemplate:

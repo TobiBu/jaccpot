@@ -1308,6 +1308,11 @@ class _PrepareStateDualDownwardArtifacts(NamedTuple):
     cache_entry : Optional[_InteractionCacheEntry]
         Interaction-cache entry this phase used or created; ``None`` when the
         cache is off or missed.
+    force_scale_far_sorted : Optional[Array]
+        ``mac_type='dehnen_error'`` on the strict fused lane: the far half of eq
+        (16b)'s ``f_b`` per sorted particle, from this build's far pairs (see
+        :func:`jaccpot.runtime._force_scale_levels.far_force_scale_sorted`).
+        ``None`` everywhere else.
     """
 
     interactions: Optional[NodeInteractionList]
@@ -1316,6 +1321,7 @@ class _PrepareStateDualDownwardArtifacts(NamedTuple):
     compact_far_pairs: Optional[CompactTaggedFarPairs]
     downward: TreeDownwardData
     cache_entry: Optional[_InteractionCacheEntry]
+    force_scale_far_sorted: Optional[Array] = None
 
 
 def _prepared_state_upward_payload(

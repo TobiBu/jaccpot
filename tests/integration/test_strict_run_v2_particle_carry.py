@@ -101,6 +101,8 @@ def test_a_step_reads_no_carried_state_leaf(monkeypatch):
         jnp.zeros_like(s1[:, 0]),
         jnp.asarray(True),
         jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+        # the force-scale slot: None (no leaf) unless mac_type='dehnen_error'
+        None,
     )
     f = captured["f"]
     closed = jax.make_jaxpr(lambda c: f(c, None)[0])(carry)
