@@ -22,6 +22,7 @@ same clamp guard, ~40 small vectorised steps and no extra memory beyond the
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import jax
@@ -271,13 +272,15 @@ def far_force_scale_own(
     return jax.ops.segment_sum(contrib, tgt, num_segments=int(num_nodes))
 
 
+#: far pairs per chunk of the per-step far force scale (bounds its temporaries)
+_FAR_PAIR_CHUNK = 1 << 22
+
+
 def far_force_scale_sorted(
     *,
     tree: Any,
     leaf_nodes: Array,
-    sources: Array,
-    targets: Array,
-    live: Array,
+    far_pairs: Any,
     node_mass: Array,
     node_centers: Array,
     node_radii: Array,
@@ -300,12 +303,10 @@ def far_force_scale_sorted(
         The step's tree (``node_ranges``, ``parent``, children, level tables).
     leaf_nodes : Array
         ``[L]`` leaf node ids in particle order (``neighbor_list.leaf_indices``).
-    sources : Array
-        Source node per directed far pair.
-    targets : Array
-        Target node per directed far pair.
-    live : Array
-        Live pairs.
+    far_pairs : Any
+        The walk's directed far list (``CompactTaggedFarPairs``, or its
+        target-sorted subclass whose ``targets`` are CSR row offsets); its live
+        prefix is ``far_pair_count``. Expanded inside the compiled program.
     node_mass : Array
         ``[nodes]`` node masses.
     node_centers : Array
@@ -333,41 +334,141 @@ def far_force_scale_sorted(
     total = int(jnp.asarray(tree.parent).shape[0])
     num_internal = int(jnp.asarray(tree.left_child).shape[0])
     offsets = get_level_offsets(tree)
-    own = far_force_scale_own(
-        sources=sources,
-        targets=targets,
-        live=live,
-        node_mass=jnp.asarray(node_mass),
-        node_centers=jnp.asarray(node_centers),
-        node_radii=jnp.asarray(node_radii),
-        gravitational_constant=gravitational_constant,
-        softening_sq=softening_sq,
-        num_nodes=total,
-    )
-    total_far = ancestor_sum_by_level(
-        own,
-        tree.left_child,
-        tree.right_child,
-        tree.parent,
-        get_nodes_by_level(tree),
-        offsets,
+    # one fused program: run eagerly, op by op, every per-pair gather over the far
+    # list was its own temporary (~0.25 GiB at 2e6 on top of the prepare's peak)
+    return _far_force_scale_sorted_jit(
+        jnp.asarray(tree.parent, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        jnp.asarray(get_nodes_by_level(tree), dtype=INDEX_DTYPE),
+        jnp.asarray(offsets, dtype=INDEX_DTYPE),
+        jnp.asarray(leaf_nodes, dtype=INDEX_DTYPE),
+        jnp.asarray(far_pairs.sources, dtype=INDEX_DTYPE),
+        jnp.asarray(far_pairs.targets, dtype=INDEX_DTYPE),
+        jnp.asarray(far_pairs.far_pair_count, dtype=INDEX_DTYPE),
+        jnp.asarray(node_mass),
+        jnp.asarray(node_centers),
+        jnp.asarray(node_radii),
+        jnp.asarray(softening_sq),
+        gravitational_constant=float(gravitational_constant),
         num_internal=num_internal,
+        total_nodes=total,
         num_levels=int(num_levels),
         level_batch_width=level_batch_width(
             offsets, total_nodes=total, num_internal=num_internal
         ),
+        num_particles=int(num_particles),
+        target_sorted=_is_target_sorted(far_pairs),
     )
-    leaves = jnp.asarray(leaf_nodes, dtype=INDEX_DTYPE)
-    ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaves]
+
+
+def _is_target_sorted(far_pairs: Any) -> bool:
+    from jaccpot.runtime._interaction_cache import TargetSortedFarPairs
+
+    return isinstance(far_pairs, TargetSortedFarPairs)
+
+
+@partial(
+    jax.jit,
+    static_argnames=(
+        "target_sorted",
+        "gravitational_constant",
+        "num_internal",
+        "total_nodes",
+        "num_levels",
+        "level_batch_width",
+        "num_particles",
+    ),
+)
+def _far_force_scale_sorted_jit(
+    parent: Array,
+    left_child: Array,
+    right_child: Array,
+    node_ranges: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    leaf_nodes: Array,
+    sources: Array,
+    targets_raw: Array,
+    far_pair_count: Array,
+    node_mass: Array,
+    node_centers: Array,
+    node_radii: Array,
+    softening_sq: Array,
+    *,
+    target_sorted: bool,
+    gravitational_constant: float,
+    num_internal: int,
+    total_nodes: int,
+    num_levels: int,
+    level_batch_width: int,
+    num_particles: int,
+) -> Array:
+    # The pairs in fixed chunks, so no per-pair temporary is ever list-sized: at
+    # eps 1e-5 on the 2e6 disc the whole-list form still added 0.30 GiB to the
+    # prepare's peak (targets, mask, contributions over 24M pairs), and the list
+    # grows with N.
+    num_pairs = int(sources.shape[0])
+    chunk = max(1, min(num_pairs, _FAR_PAIR_CHUNK))
+    num_chunks = -(-num_pairs // chunk) if num_pairs else 0
+    dtype = node_mass.dtype
+    g = jnp.asarray(gravitational_constant, dtype)
+    soft = jnp.asarray(softening_sq, dtype)
+    lane = jnp.arange(chunk, dtype=INDEX_DTYPE)
+    live_end = targets_raw[-1].astype(INDEX_DTYPE) if target_sorted else jnp.asarray(0)
+
+    def _chunk(i: Array, own: Array) -> Array:
+        start = i * chunk
+        # a clamped window (the last chunk) re-reads entries of the previous one:
+        # they are masked by their absolute position, never counted twice
+        first = jnp.minimum(start, max(num_pairs - chunk, 0))
+        pos = first + lane
+        src = lax.dynamic_slice_in_dim(sources, first, chunk)
+        if target_sorted:
+            row = jnp.searchsorted(targets_raw, pos, side="right").astype(
+                INDEX_DTYPE
+            ) - jnp.asarray(1, INDEX_DTYPE)
+            tgt = jnp.where(pos < live_end, row, jnp.asarray(-1, INDEX_DTYPE))
+        else:
+            tgt = lax.dynamic_slice_in_dim(targets_raw, first, chunk)
+        live = (
+            (pos >= start)
+            & (pos < num_pairs)
+            & (pos < far_pair_count)
+            & (src >= 0)
+            & (tgt >= 0)
+        )
+        src_s = jnp.maximum(src, 0)
+        tgt_s = jnp.maximum(tgt, 0)
+        delta = node_centers[src_s] - node_centers[tgt_s]
+        reach = jnp.sqrt(jnp.sum(delta * delta, axis=1)) + node_radii[tgt_s]
+        contrib = g * node_mass[src_s] / (reach * reach + soft)
+        contrib = jnp.where(live & (reach > 0), contrib, jnp.zeros((), dtype))
+        return own + jax.ops.segment_sum(contrib, tgt_s, num_segments=int(total_nodes))
+
+    own = lax.fori_loop(0, num_chunks, _chunk, jnp.zeros((int(total_nodes),), dtype))
+    total_far = ancestor_sum_by_level(
+        own,
+        left_child,
+        right_child,
+        parent,
+        nodes_by_level,
+        level_offsets,
+        num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+    )
+    ranges = node_ranges[leaf_nodes]
     counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
     n = int(num_particles)
     leaf_of = jnp.repeat(
-        jnp.arange(leaves.shape[0], dtype=INDEX_DTYPE),
+        jnp.arange(leaf_nodes.shape[0], dtype=INDEX_DTYPE),
         counts,
         total_repeat_length=n,
     )
     live_particle = jnp.arange(n, dtype=INDEX_DTYPE) < jnp.sum(counts)
-    return jnp.where(live_particle, total_far[leaves[leaf_of]], 0.0).astype(
+    return jnp.where(live_particle, total_far[leaf_nodes[leaf_of]], 0.0).astype(
         node_mass.dtype
     )
 
@@ -434,9 +535,39 @@ def node_force_scale_min_sorted(
 
     total = int(jnp.asarray(tree.parent).shape[0])
     num_internal = int(jnp.asarray(tree.left_child).shape[0])
-    scale = jnp.asarray(force_scale_sorted)
+    offsets = get_level_offsets(tree)
+    return _node_force_scale_min_sorted_jit(
+        jnp.asarray(force_scale_sorted),
+        jnp.asarray(tree.parent, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.left_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.right_child, dtype=INDEX_DTYPE),
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        jnp.asarray(get_nodes_by_level(tree), dtype=INDEX_DTYPE),
+        jnp.asarray(offsets, dtype=INDEX_DTYPE),
+        num_internal=num_internal,
+        num_levels=int(num_levels),
+        level_batch_width=level_batch_width(
+            offsets, total_nodes=total, num_internal=num_internal
+        ),
+    )
+
+
+@partial(jax.jit, static_argnames=("num_internal", "num_levels", "level_batch_width"))
+def _node_force_scale_min_sorted_jit(
+    scale: Array,
+    parent: Array,
+    left_child: Array,
+    right_child: Array,
+    node_ranges: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    *,
+    num_internal: int,
+    num_levels: int,
+    level_batch_width: int,
+) -> Array:
     n = int(scale.shape[0])
-    ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[num_internal:]
+    ranges = node_ranges[num_internal:]
     counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
     # leaves in particle order (an empty leaf sorts last, its count is zero)
     order = jnp.argsort(jnp.where(counts > 0, ranges[:, 0], n), stable=True)
@@ -454,17 +585,14 @@ def node_force_scale_min_sorted(
     )
     leaf_min = jnp.where(counts > 0, leaf_min, inf)
     values = jnp.concatenate([jnp.full((num_internal,), inf, scale.dtype), leaf_min])
-    offsets = get_level_offsets(tree)
     return subtree_min_by_level(
         values,
-        tree.left_child,
-        tree.right_child,
-        tree.parent,
-        get_nodes_by_level(tree),
-        offsets,
+        left_child,
+        right_child,
+        parent,
+        nodes_by_level,
+        level_offsets,
         num_internal=num_internal,
-        num_levels=int(num_levels),
-        level_batch_width=level_batch_width(
-            offsets, total_nodes=total, num_internal=num_internal
-        ),
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
     )

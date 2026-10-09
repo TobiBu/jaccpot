@@ -168,3 +168,62 @@ def test_far_term_pushed_down_equals_the_eager_estimator_formula():
     np.testing.assert_allclose(np.asarray(own), own_ref, rtol=1e-12, atol=1e-300)
     got = np.asarray(ancestor_sum_by_level(own, **_tables(topo)))
     np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-300)
+
+
+@pytest.mark.parametrize("target_sorted", [False, True])
+@pytest.mark.parametrize("chunk", [7, 1000, 1 << 22])
+def test_the_chunked_far_term_equals_the_whole_list_one(monkeypatch, target_sorted, chunk):
+    """The far term walks its list in fixed chunks; a non-dividing chunk (the last
+    window clamped back over the previous one) must count every pair once, for the
+    COO list and for the target-sorted one whose ``targets`` are CSR offsets."""
+    from yggdrax.interactions import CompactTaggedFarPairs
+    from yggdrax.tree_moments import compute_tree_mass_moments
+
+    from jaccpot.runtime import _force_scale_levels as fsl
+    from jaccpot.runtime._interaction_cache import TargetSortedFarPairs
+    from jaccpot.runtime._mac_geometry import com_mac_geometry
+
+    topo, ps, ms = _tree("buckets", n=2000)
+    mm = compute_tree_mass_moments(topo, ps, ms)
+    geom = com_mac_geometry(topo, ps, mm.center_of_mass, leaf_cap=16)
+    total = int(topo.parent.shape[0])
+    rng = np.random.default_rng(5)
+    live_n, pad = 3001, 37
+    src = rng.integers(0, total, live_n)
+    tgt = rng.integers(0, total, live_n)
+    if target_sorted:
+        order = np.argsort(tgt, kind="stable")
+        src, tgt = src[order], tgt[order]
+        offsets = np.searchsorted(tgt, np.arange(total + 1), side="left")
+        pairs = TargetSortedFarPairs(
+            sources=jnp.asarray(np.concatenate([src, -np.ones(pad, int)]), jnp.int32),
+            targets=jnp.asarray(offsets, jnp.int32),
+            tags=jnp.zeros((live_n + pad,), jnp.int32),
+            far_pair_count=jnp.asarray(live_n, jnp.int32),
+        )
+    else:
+        pairs = CompactTaggedFarPairs(
+            sources=jnp.asarray(np.concatenate([src, -np.ones(pad, int)]), jnp.int32),
+            targets=jnp.asarray(np.concatenate([tgt, -np.ones(pad, int)]), jnp.int32),
+            tags=jnp.zeros((live_n + pad,), jnp.int32),
+            far_pair_count=jnp.asarray(live_n, jnp.int32),
+        )
+    leaves = jnp.arange(int(topo.left_child.shape[0]), total, dtype=jnp.int32)
+    kw = dict(
+        tree=topo,
+        leaf_nodes=leaves,
+        far_pairs=pairs,
+        node_mass=jnp.asarray(mm.mass),
+        node_centers=geom.center,
+        node_radii=geom.radius,
+        gravitational_constant=1.3,
+        softening_sq=jnp.asarray(1e-3),
+        num_levels=int(get_level_offsets(topo).shape[0] - 1),
+        num_particles=int(ps.shape[0]),
+    )
+    monkeypatch.setattr(fsl, "_FAR_PAIR_CHUNK", 1 << 30)
+    whole = np.asarray(fsl.far_force_scale_sorted(**kw))
+    monkeypatch.setattr(fsl, "_FAR_PAIR_CHUNK", chunk)
+    got = np.asarray(fsl.far_force_scale_sorted(**kw))
+    assert whole.max() > 0
+    np.testing.assert_allclose(got, whole, rtol=1e-12, atol=0.0)

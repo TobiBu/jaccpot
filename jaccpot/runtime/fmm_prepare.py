@@ -3832,28 +3832,13 @@ class PrepareMixin(_EngineBase):
             # lists: the refresh drops them before the evaluation, which adds the
             # near half from the near-field kernel's force-scale lane
             tree_now = tree_artifacts.tree
-            # one target per pair: a target-sorted list (the CSR M2L lane's) keeps
-            # row offsets in `targets`
-            tgt_per_pair = jnp.asarray(
-                far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE
-            )
-            far_live = (
-                (src_far >= 0)
-                & (tgt_per_pair >= 0)
-                & (
-                    jnp.arange(src_far.shape[0], dtype=INDEX_DTYPE)
-                    < jnp.asarray(compact_far_pairs.far_pair_count, INDEX_DTYPE)
-                )
-            )
             num_levels_fb = self._resolve_upward_num_levels(tree_now)
             if num_levels_fb is None:
                 num_levels_fb = int(get_level_offsets(tree_now).shape[0] - 1)
             force_scale_far_sorted = far_force_scale_sorted(
                 tree=tree_now,
                 leaf_nodes=neighbor_list.leaf_indices,
-                sources=src_far,
-                targets=tgt_per_pair,
-                live=far_live,
+                far_pairs=compact_far_pairs,
                 node_mass=tree_artifacts.upward.mass_moments.mass,
                 node_centers=walk_geometry.center,
                 node_radii=walk_geometry.radius,
@@ -4019,22 +4004,10 @@ class PrepareMixin(_EngineBase):
         if num_levels is None:
             num_levels = int(get_level_offsets(tree).shape[0] - 1)
         n = int(jnp.asarray(tree.particle_indices).shape[0])
-        src = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
-        tgt = jnp.asarray(far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE)
-        live = (
-            (src >= 0)
-            & (tgt >= 0)
-            & (
-                jnp.arange(src.shape[0], dtype=INDEX_DTYPE)
-                < jnp.asarray(compact_far_pairs.far_pair_count, INDEX_DTYPE)
-            )
-        )
         far = far_force_scale_sorted(
             tree=tree,
             leaf_nodes=neighbor_list.leaf_indices,
-            sources=src,
-            targets=tgt,
-            live=live,
+            far_pairs=compact_far_pairs,
             node_mass=tree_artifacts.upward.mass_moments.mass,
             node_centers=walk_geometry.center,
             node_radii=walk_geometry.radius,
@@ -4043,7 +4016,7 @@ class PrepareMixin(_EngineBase):
             num_levels=int(num_levels),
             num_particles=n,
         )
-        del compact_far_pairs, src, tgt, live
+        del compact_far_pairs
         leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
         offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
         counts = jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE)
