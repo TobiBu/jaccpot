@@ -28,7 +28,7 @@ Tree construction and traversal artifacts are provided by the companion package
 - Adaptive-order far-field evaluation with fixed `p_gears` buckets
 - Optional topology reuse for multiple nearby timesteps
 - Optional Pallas acceleration for the real-basis z-translation hotspot
-- Modular runtime with grouped/dense interaction pathways
+- Modular runtime with flat (streamed or materialised) and dense interaction pathways
 - Near-field and far-field execution paths with optional prepared state reuse
 - **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
 - **Momentum-conserving (mutual) force** for block-step individual timesteps — `sum_i m_i a_i` cancels to round-off instead of to the truncation error (see [Momentum-Conserving FMM](#momentum-conserving-fmm))
