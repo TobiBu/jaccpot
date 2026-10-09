@@ -172,7 +172,9 @@ def test_far_term_pushed_down_equals_the_eager_estimator_formula():
 
 @pytest.mark.parametrize("target_sorted", [False, True])
 @pytest.mark.parametrize("chunk", [7, 1000, 1 << 22])
-def test_the_chunked_far_term_equals_the_whole_list_one(monkeypatch, target_sorted, chunk):
+def test_the_chunked_far_term_equals_the_whole_list_one(
+    monkeypatch, target_sorted, chunk
+):
     """The far term walks its list in fixed chunks; a non-dividing chunk (the last
     window clamped back over the previous one) must count every pair once, for the
     COO list and for the target-sorted one whose ``targets`` are CSR offsets."""
