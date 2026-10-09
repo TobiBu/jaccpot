@@ -434,7 +434,10 @@ displacements onto a lattice and applies one representative displacement per cla
 Fix: static sizing no longer inherits the adaptive auto-grouping rewrite (it is an
 adaptive rewrite, which that branch exists to skip), and an *explicit*
 `grouped_interactions=True` now resolves `farfield_mode` and couples `aabb` exactly
-as the adaptive branch does.
+as the adaptive branch does. (Since superseded: the grouped far field and the AABB
+centres went in the 2026-10 cleanup, X3, and the adaptive branch with
+`JACCPOT_STATIC_RUNTIME_FIXED_SIZING` in X4, so the resolver now has one, static,
+branch.)
 
 **Why nothing caught A–D:** the largest real particle count in the suite is n=1500;
 the `num_particles=1000000` references only unit-test chunk-size resolvers, and the
