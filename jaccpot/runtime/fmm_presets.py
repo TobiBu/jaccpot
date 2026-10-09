@@ -122,7 +122,7 @@ _LARGE_N_GPU_PRESET = FMMPresetConfig(
     jit_traversal=True,
     description=(
         "Large-N GPU preset prioritizing stable memory behavior and high "
-        "throughput on streamed/grouped far-field execution."
+        "throughput on streamed far-field execution."
     ),
 )
 

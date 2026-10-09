@@ -74,7 +74,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             farfield=replace(
                 cfg.farfield,
                 mode="auto",
-                grouped_interactions=False,
                 rotation="solidfmm",
                 m2l_chunk_size=None,
                 l2l_chunk_size=None,
@@ -101,8 +100,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 retain_traversal_result=False,
                 retain_interactions=False,
                 autotune_m2l_chunk=True,
-                precompute_grouped_class_segments=False,
-                grouped_schedule_budget_bytes=8 * 1024 * 1024,
                 upward_leaf_batch_size=_LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE,
             ),
             mac_type="dehnen",
@@ -383,7 +380,9 @@ class _LegacyRuntimeOverrides(NamedTuple):
         Acceptance criterion; defaults to ``"dehnen"`` for the solidfmm basis
         and ``"bh"`` otherwise. Legacy name: ``mac_type``.
     grouped_interactions : Optional[bool]
-        Grouped traversal toggle. Legacy name: ``grouped_interactions``.
+        Grouped traversal toggle. Legacy name: ``grouped_interactions``. Only
+        ``None``/``False`` construct: the engine raises on ``True``, since the
+        grouped far field was removed in the 2026-10 cleanup (X3).
     farfield_mode : str
         Far-field interaction mode. Legacy name: ``farfield_mode``.
     nearfield_mode : str
@@ -2378,31 +2377,39 @@ class FastMultipoleMethod:
 
     @property
     def grouped_interactions(self: "FastMultipoleMethod") -> bool:
-        """Whether grouped interaction traversal is enabled."""
-        return bool(self._impl.grouped_interactions)
+        """Always ``False``: the grouped far field was removed (2026-10 cleanup, X3)."""
+        return False
 
     @grouped_interactions.setter
     def grouped_interactions(self: "FastMultipoleMethod", value: bool) -> None:
-        """Set grouped-interaction mode and mirror it into advanced config.
+        """Accept ``False`` (a no-op mirrored into ``advanced``); refuse ``True``.
 
-        Writing this marks the choice explicit in the engine, so later automatic
-        resolution will not override it, and mirrors it back into ``advanced`` so
-        the config keeps agreeing with the engine.
+        The grouped far field was removed in the 2026-10 cleanup
+        (docs/cleanup_2026-10.md, X3). The setter stays so old code that turns it
+        off keeps running; turning it on raises rather than silently running the
+        flat far field.
 
         Parameters
         ----------
         value : bool
-            Whether to group interactions during traversal.
+            Must be falsy.
+
+        Raises
+        ------
+        ValueError
+            If ``value`` is true.
         """
-        next_value = bool(value)
-        self._impl.grouped_interactions = next_value
-        if hasattr(self._impl, "_explicit_grouped_interactions"):
-            self._impl._explicit_grouped_interactions = True
+        if bool(value):
+            raise ValueError(
+                "grouped_interactions=True is no longer available: grouped "
+                "interactions were removed in the 2026-10 cleanup (X3); see "
+                "docs/cleanup_2026-10.md. The far field runs the flat pair list."
+            )
         self.advanced = replace(
             self.advanced,
             farfield=replace(
                 self.advanced.farfield,
-                grouped_interactions=next_value,
+                grouped_interactions=False,
             ),
         )
 

@@ -129,7 +129,7 @@ def test_prepare_solidfmm_upward_source_motion_optional_none():
         pos_sorted,
         mass_sorted,
         max_order=3,
-        center_mode="aabb",
+        center_mode="com",
     )
     assert upward.multipoles.source_motion_packed is None
 
@@ -144,7 +144,7 @@ def test_prepare_solidfmm_upward_source_motion_matches_finite_difference():
         pos_sorted,
         mass_sorted,
         max_order=order,
-        center_mode="aabb",
+        center_mode="com",
     )
     centers = base.multipoles.centers
     analytic = prepare_solidfmm_complex_upward_sweep(
@@ -187,7 +187,7 @@ def test_prepare_solidfmm_source_motion_multipoles_matches_upward_bundle():
         pos_sorted,
         mass_sorted,
         max_order=order,
-        center_mode="aabb",
+        center_mode="com",
     )
     centers = base.multipoles.centers
     bundle = prepare_solidfmm_complex_upward_sweep(
@@ -225,7 +225,7 @@ def test_prepare_solidfmm_second_time_derivative_multipoles_matches_fd():
         pos_sorted,
         mass_sorted,
         max_order=order,
-        center_mode="aabb",
+        center_mode="com",
     )
     centers = base.multipoles.centers
     got = prepare_solidfmm_complex_source_motion_multipoles(
@@ -333,7 +333,7 @@ def test_solidfmm_downward_source_motion_locals_match_finite_difference():
         pos_sorted,
         mass_sorted,
         max_order=order,
-        center_mode="aabb",
+        center_mode="com",
     )
     centers = base.multipoles.centers
     analytic = prepare_solidfmm_complex_upward_sweep(
@@ -425,7 +425,7 @@ def test_solidfmm_downward_source_motion_locals_when_the_tree_has_no_internal_no
     dt = jnp.asarray(1e-6, dtype=pos_sorted.dtype)
 
     base = prepare_solidfmm_complex_upward_sweep(
-        tree, pos_sorted, mass_sorted, max_order=order, center_mode="aabb"
+        tree, pos_sorted, mass_sorted, max_order=order, center_mode="com"
     )
     centers = base.multipoles.centers
     analytic = prepare_solidfmm_complex_upward_sweep(
@@ -523,7 +523,7 @@ def test_solidfmm_downward_second_time_derivative_locals_match_finite_difference
         pos_sorted,
         mass_sorted,
         max_order=order,
-        center_mode="aabb",
+        center_mode="com",
     )
     centers = base.multipoles.centers
     d2m = prepare_solidfmm_complex_source_motion_multipoles(

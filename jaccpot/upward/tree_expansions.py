@@ -41,7 +41,46 @@ from yggdrax.tree_moments import (
 
 from .tree_geometry import compute_tree_geometry_compiled
 
-_CENTER_MODES = ("com", "aabb", "explicit")
+#: Expansion-centre modes the upward sweeps accept. ``"explicit"`` is the test seam
+#: (caller-supplied centres). The AABB / geometric centres went with the grouped far
+#: field that needed them in the 2026-10 cleanup (docs/cleanup_2026-10.md, X3).
+_CENTER_MODES = ("com", "explicit")
+_REMOVED_CENTER_MODES = ("aabb", "geometric")
+
+
+def _resolve_center_mode(center_mode: str) -> str:
+    """Normalise an expansion-centre mode and refuse the removed and unknown ones.
+
+    Shared by every upward sweep that takes a ``center_mode``, so the removal
+    message is the same wherever an old caller reaches it.
+
+    Parameters
+    ----------
+    center_mode : str
+        ``"com"`` or ``"explicit"``, in any case.
+
+    Returns
+    -------
+    str
+        The lower-cased mode.
+
+    Raises
+    ------
+    ValueError
+        If the mode is ``"aabb"`` / ``"geometric"`` (removed in the 2026-10
+        cleanup, X3) or anything else outside :data:`_CENTER_MODES`.
+    """
+    mode = str(center_mode).strip().lower()
+    if mode in _REMOVED_CENTER_MODES:
+        raise ValueError(
+            f"center_mode={center_mode!r} is no longer available: the AABB "
+            "(geometric) expansion centres were removed in the 2026-10 cleanup "
+            "(X3); see docs/cleanup_2026-10.md. Use 'com' (the default) or "
+            "'explicit'."
+        )
+    if mode not in _CENTER_MODES:
+        raise ValueError(f"Unknown center_mode '{center_mode}'")
+    return mode
 
 
 class NodeMultipoleData(NamedTuple):
@@ -225,9 +264,10 @@ def compute_node_multipoles(
         Highest Cartesian multipole order to keep. Static under ``jit``: it fixes
         the packed coefficient count.
     center_mode : str
-        ``"com"`` uses each node's centre of mass, ``"aabb"`` uses the geometry
-        centre, and ``"explicit"`` consumes ``explicit_centers``. Static under
-        ``jit`` -- it selects a Python branch, not a traced one.
+        ``"com"`` uses each node's centre of mass and ``"explicit"`` consumes
+        ``explicit_centers``. Static under ``jit`` -- it selects a Python branch,
+        not a traced one. ``"aabb"`` raises: the geometric centres were removed in
+        the 2026-10 cleanup (X3).
     explicit_centers : Optional[Array]
         User-provided expansion centres ``[num_nodes, 3]``, required when
         ``center_mode == "explicit"`` and ignored otherwise.
@@ -243,10 +283,10 @@ def compute_node_multipoles(
     Raises
     ------
     ValueError
-        If ``center_mode`` is not one of ``"com"``, ``"aabb"``, ``"explicit"``;
-        or if ``center_mode == "explicit"`` and ``explicit_centers`` is missing
-        or is not ``[num_nodes, 3]``. All three are host-side checks on static
-        values, so they fire before tracing.
+        If ``center_mode`` is not ``"com"`` or ``"explicit"`` (``"aabb"`` gets a
+        removal message); or if ``center_mode == "explicit"`` and
+        ``explicit_centers`` is missing or is not ``[num_nodes, 3]``. All three
+        are host-side checks on static values, so they fire before tracing.
 
     Notes
     -----
@@ -263,9 +303,7 @@ def compute_node_multipoles(
     of the particle positions*, and that coupling **is carried all the way
     through** -- a ``"com"`` gradient is exact for the fixed-topology force, not
     an approximation that drops the centre-motion term. ``"explicit"`` has no
-    such coupling; ``"aabb"`` does have one, via the min/max subgradient of
-    :func:`~jaccpot.upward.tree_geometry.compute_tree_geometry_compiled`, which
-    is also a live function of the positions.
+    such coupling.
 
     The chain, for anyone tempted to insert a ``stop_gradient`` here:
     :meth:`~jaccpot.runtime.fmm_evaluate.EvaluateMixin.differentiable_accelerations`
@@ -308,9 +346,7 @@ def compute_node_multipoles(
     # is a behaviour change, not a documentation change, so it is not being
     # made in the same PR that adds annotations. See the pilot writeup.
 
-    mode = center_mode.lower()
-    if mode not in _CENTER_MODES:
-        raise ValueError(f"Unknown center_mode '{center_mode}'")
+    mode = _resolve_center_mode(center_mode)
 
     centers: Optional[Array]
     if mode == "explicit":
@@ -321,9 +357,6 @@ def compute_node_multipoles(
         if explicit_centers.shape != (tree.parent.shape[0], 3):
             raise ValueError("explicit_centers must have shape (num_nodes, 3)")
         centers = jnp.asarray(explicit_centers, dtype=positions_sorted.dtype)
-    elif mode == "aabb":
-        geom = compute_tree_geometry_compiled(tree, positions_sorted)
-        centers = geom.center
     else:
         centers = None
 
@@ -426,7 +459,7 @@ def prepare_upward_sweep(
     max_order : int
         Expansion order ``p``.
     center_mode : str
-        How expansion centres are chosen.
+        How expansion centres are chosen: ``"com"`` or ``"explicit"``.
     explicit_centers : Optional[Array]
         Caller-supplied centres, when ``center_mode`` asks for them.
     precomputed_geometry : Optional[TreeGeometry]
@@ -466,12 +499,10 @@ def prepare_upward_sweep(
     )
 
     total_nodes = tree.parent.shape[0]
-    mode = center_mode.lower()
+    mode = _resolve_center_mode(center_mode)
     if mode == "com":
         centers = mass_moments.center_of_mass
-    elif mode == "aabb":
-        centers = geometry.center
-    elif mode == "explicit":
+    else:
         if explicit_centers is None:
             raise ValueError(
                 "explicit_centers must be provided for 'explicit'",
@@ -479,8 +510,6 @@ def prepare_upward_sweep(
         if explicit_centers.shape != (total_nodes, 3):
             raise ValueError("explicit_centers must have shape (num_nodes, 3)")
         centers = explicit_centers
-    else:
-        raise ValueError(f"Unknown center_mode '{center_mode}'")
 
     centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
 

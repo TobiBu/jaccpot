@@ -46,7 +46,8 @@ On `main` at 6cca378 (2026-10-06):
 | D1 | #374 | Spherical-harmonic family without a basis object runs real | targeted CPU, GPU pins | merged |
 | fix | #376 | The large-N lane's no-Pallas near field read the CSR lane's placeholder; two-card pins M1-M3 | targeted CPU, GPU pins (two-card: M1, M3) | merged |
 | pins | #377 | GPU pins re-recorded at 15ceca4 after the softening kernels (#375) | A-vs-A bitwise | merged |
-| D2 | | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | open |
+| D2 | #378 | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | merged |
+| X3 | | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins (S1-S5, M1, M3) | open |
 
 ### P0: CI runs each test once
 
@@ -224,7 +225,7 @@ removal message.
 **Gates:** CPU suite 2,334 passed and 162 skipped (the one failure is the stale local
 nornax checkout); distributed driver and Dehnen-criterion tests on two forced devices,
 10 passed; `test_shards.py check` 2,562 tests in exactly one shard each. The two-card
-GPU gate is still to run.
+gate ran with #376: M1 and M3 are bitwise against `main`.
 
 ### GPU pins (gate G2)
 
@@ -432,3 +433,157 @@ With D2 and O2, which drops both and leaves the caps to the library, the 2e5 run
 4 steps, finite. There is no working baseline to compare it with bitwise. It runs the
 configuration the defaults gate above checks, with unnamed caps like pin S1.
 
+### X3: grouped / class-major far field and non-COM expansion centres
+
+**Removed** (library -2,653 / +338 lines; most of the additions are docstrings and
+the removal shims):
+- `runtime/kernels/_m2l.py` (-941): the grouped and class-major accumulators
+  (`_accumulate_solidfmm_m2l_grouped[_fullbatch|_chunked_scan|_class_major]`,
+  `_accumulate_solidfmm_m2l_class_major_chunked_scan`), the class-rotation-block
+  builder `_rotation_blocks_for_grouped_classes`, `_build_grouped_class_segments`,
+  `_pair_class_ids_from_offsets`, and the cached-kernel dispatch
+  (`_m2l_cached_kernel_dispatch`, `_m2l_complex_batch_cached_kernel`). The flat
+  full-batch and chunked-scan accumulators and `_chunk_segment_scatter_add` stay.
+  The `*_cached_blocks` operators in `operators/` and `pallas/m2l_complex_fused.py`
+  stay; only this module's import of them went.
+- `runtime/_interaction_cache.py` (-493): the grouped fields of the dual-tree
+  artifacts, cache entry and cache hit; the grouped buffer and class-segment builders;
+  `_without_grouped_class_segments`; the grouped arms of the raw build, the unpack and
+  the split predicate; the grouped term of the compiled planner route.
+- `runtime/fmm_caches.py` (-282): the grouped operator and segment caches, their six
+  `JACCPOT_GROUPED_*` knobs, the content-digest keys and `_M2L_FULLBATCH_MAX_PAIRS`.
+  `_clear_global_runtime_caches` stays; it now only clears JAX's compilation cache.
+- `runtime/fmm_prepare.py` (-214): the plan field `grouped_interactions_active` and
+  its uses, the two gatekeepers (`_should_precompute_grouped_class_segments`,
+  `_grouped_schedule_item_budget`), and the grouped and `farfield_mode` plumbing of the
+  dual/downward prepare. Where `and not grouped_interactions_active` gated the compact
+  streamed pairs, the split build, the strict streamed fast path or the minimum-memory
+  caps, only the term went: it was true on every surviving lane.
+- `runtime/kernels/_downward_prep.py`, `_l2l.py`, `fmm_sweeps.py` (-331): the grouped
+  lanes and parameters of the downward sweep (including `farfield_mode`, read only by
+  the grouped lane, and the `tree` / `upward` / `interactions` arguments of the
+  accumulate step, which only the grouped builder read), and the dead cached L2L
+  cascade (`l2l_grouped`, `mm_class_capacity`; no runtime caller passed it).
+  `_propagate_solidfmm_locals_by_level`'s call from `distributed/fmm.py` is unchanged.
+- `runtime/fmm_overrides.py` (-113): the resolver's grouped auto-enable (fast preset at
+  large CPU N; fast / `large_n_gpu` at large GPU N, adaptive sizing only), the class-major
+  threshold, and `JACCPOT_LARGE_N_FASTLANE_GEOMETRIC_CENTERS`. The resolver now returns
+  `farfield_mode="pair_grouped"` (the flat list; the name is historical) and
+  `center_mode="com"` on every path, which is what every non-grouped lane already got.
+- `runtime/fmm_evaluate.py` (-38): `force_ungrouped_farfield`, which forced the
+  flat far field on the grad path and has nothing left to force.
+- `_fmm_impl.py`, `fmm_state.py`, `fmm_constants.py`, `fmm_policy.py`,
+  `fmm_derivatives.py`, `fmm_strict_run.py`, `_large_n_*.py`, `_nearfield_cache.py`,
+  `kernels/{core,__init__}.py`, `fmm/__init__.py`: the grouped engine attributes, budgets
+  and contract lines, `_GROUPED_SCHEDULE_BUDGET_DEFAULT`,
+  `_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD`, `_RuntimeExecutionOverrides.grouped_interactions`,
+  `LargeNGradPlan.farfield_mode`, re-exports and constant grouped kwargs.
+- `upward/tree_expansions.py`, `upward/solidfmm_complex_tree_expansions.py`: the AABB
+  expansion centres. `center_mode` is `"com"` or `"explicit"` (the test seam).
+
+The grouped far field ran only on the complex basis (its AABB centres were refused by
+the real upward sweep), was opt-in except for the adaptive-sizing auto-enable, and was
+less accurate than the flat list (one representative rotation per displacement class;
+the residual did not shrink with order). No production lane reached it: Odisseo's
+lanes, the fused lane and both multi-GPU lanes run the flat list.
+
+**API shims** (the same pattern as X2's octree fields):
+- `FarFieldConfig.grouped_interactions` stays. `None`/`False` construct; `True` raises
+  `ValueError` ("grouped interactions were removed in the 2026-10 cleanup (X3)") at
+  construction. So does the legacy `FastMultipoleMethod(grouped_interactions=True)`.
+  The `fmm.grouped_interactions` getter returns `False`; the setter raises on `True` and
+  mirrors `False` into `advanced`.
+- `FarFieldConfig.mode`: `"auto"` and `"pair_grouped"` are accepted, as before, and both
+  run the flat list. The block-step lane's `preset="balanced"` names `"pair_grouped"`.
+  `"class_major"` (also via the legacy `farfield_mode=`) raises with a removal message.
+  It stays in `config.FarFieldMode` so an old config type-checks; the engine's own
+  alias drops it.
+- `RuntimePolicyConfig.precompute_grouped_class_segments` and
+  `.grouped_schedule_budget_bytes`, and their legacy kwargs, are accepted and ignored
+  (a non-positive budget no longer raises). They go in phase Z.
+- `center_mode="aabb"` / `"geometric"` raises in every upward sweep with a removal
+  message.
+
+**Tests:**
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| `test_fmm_golden.py::test_fmm_golden_execution_modes[cm_uni_solidfmm_n256_p4, cm_clu_…, pg_uni_…, pg_clu_…]` and their four `golden_modes/*.npz` | (a) | the `bkt_*` cases stay |
+| `test_fmm_golden.py::test_grouped_farfield_plateaus_in_order[pair_grouped, class_major]` | (a) | |
+| `tests/unit/runtime/test_grouped_m2l_basis_mode.py` (4 tests, 6 cases) | (a) | |
+| `tests/unit/runtime/test_grouped_class_id_alignment.py` (3) | (a) | |
+| `test_m2l_shape_contracts.py`: `test_matched_classes_still_build_their_blocks`, `test_class_deltas_shorter_than_class_keys_is_rejected`, `test_class_keys_shorter_than_class_deltas_is_rejected`, `test_a_class_key_of_the_wrong_width_is_rejected` | (a) | the `nodes`/`sh` and scatter contracts stay |
+| `test_fmm.py`: `test_prepare_state_reuses_grouped_buffers_from_cache`, `…_reuses_grouped_class_segments_from_cache`, `test_prepare_state_cache_key_respects_center_mode`, `test_fast_preset_adaptive_class_major_threshold`, `test_solidfmm_grouped_interactions_matches_sparse_path`, `test_solidfmm_grouped_class_major_matches_pair_grouped` | (a) | `center_mode` is constant now, so the key test has no second value to tell apart |
+| `test_solver_api.py`: `test_pair_grouped_mode_skips_class_major_schedule_precompute`, `test_minimum_memory_gpu_runtime_does_not_auto_enable_grouped_interactions`, `test_streamed_far_pairs_disables_grouped_interactions_runtime_override`, `test_without_grouped_class_segments_clears_cached_schedule_arrays` | (a) | |
+| `test_large_n_config_thresholds.py`: `test_grouped_interactions_implies_geometric_centers` (4 cases), `test_explicit_grouped_interactions_still_resolves_under_static_sizing`, `test_grad_works_with_grouped_interactions_requested` (also out of `slow_tests.txt`), `test_ungrouped_grad_path_is_a_valid_and_more_accurate_far_field` | (a) | the radix grad path keeps its direct-sum anchor in `test_fmm_grad_golden.py` and `test_grad_fmm_vs_directsum.py` |
+| `test_fastlane_geometric_centers.py::test_geometric_centers_knob_is_live` | (a) | GPU opt-in; `test_real_com_tracks_complex` stays |
+| `test_tree_expansions.py::test_compute_node_multipoles_aabb_uses_geometry_center` | (a) | |
+| `test_real_rot_scale_grouped.py::test_fastlane_grouped_l2l_cascade_matches_per_node` (3 cases) | (a) | the operator-level cached-block tests stay |
+| constructor-state matrix cases `farfield_class_major`, `grouped_interactions` | (a) | |
+
+No test was deleted under (b) or (c).
+
+Adapted: `test_fast_preset_adaptive_large_cpu_policy_applies` (the policy now resolves
+the flat list about COM centres), `test_nearfield_bucketed_matches_baseline` (default
+far field instead of class-major), `test_advanced_config_applies_to_runtime`,
+`test_large_n_gpu_preset_applies_memory_safe_gpu_defaults`,
+`test_large_n_gpu_profile_coerces_conflicting_runtime_knobs`,
+`test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs`,
+`test_runtime_memory_policy_fields_flow_to_runtime`,
+`test_accepts_legacy_expanse_kwargs_with_deprecation_warning`,
+`test_static_sizing_does_not_inherit_the_adaptive_grouped_rewrite` and
+`test_farfield_mode_never_resolves_to_auto_at_large_n` (now `== "pair_grouped"`, which
+is stricter), `test_prepare_upward_sweep_returns_consistent_data` (COM centres), and the
+seven source-motion tests in `test_solidfmm_complex_tree_expansions.py` that used AABB
+centres only as the base for `"explicit"` (now COM). Four tests that call internal
+builders lost their grouped keyword arguments.
+
+Added: seven shim tests in `test_solver_api.py` (`grouped_interactions=True` through the
+config, the legacy kwarg and the setter; `mode="class_major"` through both spellings;
+`"auto"` and `"pair_grouped"` construct; `preset="balanced"` constructs; the two policy
+fields are inert) and `test_removed_geometric_centres_raise_a_removal_error` (three
+spellings, three upward sweeps).
+
+**Goldens.** `golden/`, `golden_grad/` and `golden_lanes/` are byte-identical.
+`constructor_state.json` was regenerated; its diff is exactly: the two matrix cases;
+five base attributes (`_explicit_grouped_interactions`, `_fastlane_geometric_centers`,
+`grouped_interactions`, `grouped_schedule_budget_bytes`,
+`precompute_grouped_class_segments`) and their `preset_large_n_gpu` overrides; and the
+`large_n_gpu` preset description ("streamed/grouped" -> "streamed"). The distinctness
+check passes with the two cases gone.
+
+**Left for phase Z:** the notebooks that still name grouped knobs
+(`examples/benchmark_runtime_accuracy_copy.ipynb`,
+`benchmark_runtime_rtx2080_focused.ipynb`, `benchmark_runtime_large_N.ipynb`,
+`benchmark_gpu_radix_runtime.ipynb`, `benchmark_runtime_large_N_performance.ipynb`,
+`benchmark_runtime_large_N_accuracy.ipynb`); the two inert policy fields; the
+`grouped_interactions` config field and setter. `examples/benchmark_grouped_modes.py` is
+deleted. `examples/profile_prepare_memory_split.py` lost its grouped arguments but still
+does not import: it needs `examples/benchmark_gpu_radix_worker.py`, which X1 removed.
+
+**Gates:**
+- **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`): 2,354
+  passed, 187 skipped, 1 failed: the stale local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as before. An
+  earlier targeted run lost one xdist worker to a segfault inside XLA's CPU runtime
+  (`test_strict_prepare_refresh_and_evaluate_api_and_diagnostics`, on the loaded shared
+  host); the test passes alone and in the full run.
+- **Runtime type checks** (`JACCPOT_RUNTIME_TYPECHECK=1`, as the unit shards run in CI)
+  on every touched unit test file: green.
+- **Bitwise A/B against 483b810 on CPU:** 45 arrays equal. They are the forces and
+  potentials of 11 configurations (the default; fast and accurate on both bases;
+  balanced; an explicit `pair_grouped`; kd-tree; `dehnen_error`; `dehnen_paper`
+  adaptive order; `large_n_gpu` in fp32), a prepared state with a target subset, the
+  position and mass gradients through `differentiable_accelerations` on both bases,
+  and the runtime overrides that three presets resolve at three N on two backends.
+- **`test_shards.py check`:** 2,604 tests, each in exactly one shard. At 483b810 there
+  are 2,634; this phase deletes 41 cases and adds 11.
+- `bench/bench_fmm.py` and `bench/bench_real_vs_complex.py` run on CPU.
+- `bench/annotation_census.py`: shape-annotated array parameters 856 -> 837, bare
+  `Array` parameters 1,751 -> 1,683 (shaped share 32.8 % -> 33.2 %), `@jaxtyped`
+  functions 190 -> 183. Only deletions moved them.
+- **GPU pins** (frozen worktree at 1694005, against `main-15ceca4` with its A-vs-A control):
+  S1-S4b on one A100 and M1, M3 on two are **bitwise**.
+  - S5 (`BlockStepFMM`, 20 base steps) hit its 30 min per-pin timeout on the shared card.
+  - Rerun back to back with `main` on the same card, it took 26 min on X3 and 40 min on
+    `main`, and is bitwise equal to the pin. So the timeout was the card, not X3.

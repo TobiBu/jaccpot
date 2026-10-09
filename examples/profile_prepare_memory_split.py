@@ -240,8 +240,6 @@ def _resolved_prepare_context(impl: Any, *, num_particles: int) -> dict[str, Any
         "runtime_traversal_config": runtime_overrides.traversal_config,
         "runtime_m2l_chunk_size": runtime_overrides.m2l_chunk_size,
         "runtime_l2l_chunk_size": runtime_overrides.l2l_chunk_size,
-        "grouped_interactions": runtime_overrides.grouped_interactions,
-        "farfield_mode": runtime_overrides.farfield_mode,
         "upward_center_mode": runtime_overrides.center_mode,
         "refine_local_val": refine_local_val,
         "max_refine_levels_val": int(impl.max_refine_levels),
@@ -379,7 +377,6 @@ def _measure_prepare_stage_split(
         use_compact_streamed_pairs = (
             bool(impl.streamed_far_pairs)
             and not bool(impl.adaptive_order)
-            and not bool(ctx["grouped_interactions"])
             and not bool(impl.mixed_order_farfield)
             and not bool(impl.retain_interactions)
             and not bool(need_traversal_result)
@@ -403,7 +400,6 @@ def _measure_prepare_stage_split(
             need_traversal_result=need_traversal_result,
             need_compact_far_pairs=need_compact_far_pairs,
             need_node_interactions=need_node_interactions,
-            grouped_interactions=ctx["grouped_interactions"],
             pair_policy=pair_policy,
             policy_state=policy_state,
             jit_traversal=bool(impl._jit_traversal_default),
@@ -419,7 +415,6 @@ def _measure_prepare_stage_split(
         use_compact_streamed_pairs = (
             bool(impl.streamed_far_pairs)
             and not bool(impl.adaptive_order)
-            and not bool(ctx["grouped_interactions"])
             and not bool(impl.mixed_order_farfield)
             and not bool(impl.retain_interactions)
             and not bool(need_traversal_result)
@@ -433,7 +428,6 @@ def _measure_prepare_stage_split(
         )
         if not _can_split_dual_tree_build(
             split_enabled=True,
-            grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
         ):
             raise RuntimeError("split dual-tree build is not eligible for this config")
@@ -465,7 +459,6 @@ def _measure_prepare_stage_split(
         use_compact_streamed_pairs = (
             bool(impl.streamed_far_pairs)
             and not bool(impl.adaptive_order)
-            and not bool(ctx["grouped_interactions"])
             and not bool(impl.mixed_order_farfield)
             and not bool(impl.retain_interactions)
             and not bool(need_traversal_result)
@@ -477,7 +470,6 @@ def _measure_prepare_stage_split(
             return None
         if not _can_split_dual_tree_build(
             split_enabled=True,
-            grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
         ):
             raise RuntimeError(
@@ -505,7 +497,6 @@ def _measure_prepare_stage_split(
         )
         if not _can_split_dual_tree_build(
             split_enabled=True,
-            grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
         ):
             raise RuntimeError(
@@ -545,7 +536,6 @@ def _measure_prepare_stage_split(
         use_compact_streamed_pairs = (
             bool(impl.streamed_far_pairs)
             and not bool(impl.adaptive_order)
-            and not bool(ctx["grouped_interactions"])
             and not bool(impl.mixed_order_farfield)
             and not bool(impl.retain_interactions)
             and not bool(need_traversal_result)
@@ -555,7 +545,6 @@ def _measure_prepare_stage_split(
         ) or bool(use_compact_streamed_pairs)
         return _dual_tree_unpack_build_output(
             build_out=build_out,
-            grouped_interactions=ctx["grouped_interactions"],
             need_traversal_result=need_traversal_result,
             need_compact_far_pairs=need_compact_far_pairs,
         )
@@ -728,7 +717,6 @@ def _measure_prepare_stage_split(
         use_compact_streamed_pairs = (
             bool(impl.streamed_far_pairs)
             and not bool(impl.adaptive_order)
-            and not bool(ctx["grouped_interactions"])
             and not bool(impl.mixed_order_farfield)
             and not bool(impl.retain_interactions)
             and not bool(need_traversal_result)
@@ -754,16 +742,9 @@ def _measure_prepare_stage_split(
             retry_logger=lambda _event: None,
             fail_fast=impl.fail_fast,
             use_dense_interactions=use_dense_interactions_for_prepare,
-            grouped_interactions=ctx["grouped_interactions"],
-            grouped_chunk_size=ctx["runtime_m2l_chunk_size"],
             need_traversal_result=need_traversal_result,
             need_compact_far_pairs=need_compact_far_pairs,
             need_node_interactions=need_node_interactions,
-            precompute_grouped_class_segments=impl._should_precompute_grouped_class_segments(
-                grouped_chunk_size=ctx["runtime_m2l_chunk_size"],
-                farfield_mode=ctx["farfield_mode"],
-            ),
-            grouped_schedule_budget_bytes=impl._grouped_schedule_item_budget(),
             pair_policy=pair_policy,
             policy_state=policy_state,
             jit_traversal=bool(impl._jit_traversal_default),
@@ -807,13 +788,6 @@ def _measure_prepare_stage_split(
             traversal_result,
             compact_far_pairs,
             dense_buffers,
-            grouped_buffers,
-            grouped_segment_starts,
-            grouped_segment_lengths,
-            grouped_segment_class_ids,
-            grouped_segment_sort_permutation,
-            grouped_segment_group_ids,
-            grouped_segment_unique_targets,
         ) = impl._unpack_dual_tree_artifacts(raw_dual_artifacts)
 
         far_pair_plan = impl._prepare_state_plan_far_pairs_for_downward(
@@ -845,15 +819,6 @@ def _measure_prepare_stage_split(
             runtime_traversal_config=ctx["runtime_traversal_config"],
             record_retry=lambda _event: None,
             dense_buffers=dense_buffers,
-            grouped_interactions=ctx["grouped_interactions"],
-            grouped_buffers=grouped_buffers,
-            grouped_segment_starts=grouped_segment_starts,
-            grouped_segment_lengths=grouped_segment_lengths,
-            grouped_segment_class_ids=grouped_segment_class_ids,
-            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-            grouped_segment_group_ids=grouped_segment_group_ids,
-            grouped_segment_unique_targets=grouped_segment_unique_targets,
-            farfield_mode=ctx["farfield_mode"],
             far_pairs_coo=far_pair_plan.far_pairs_coo,
             far_pairs_by_gear=far_pair_plan.far_pairs_by_gear,
             adaptive_order=far_pair_plan.adaptive_order_for_downward,
@@ -903,13 +868,6 @@ def _measure_prepare_stage_split(
             _traversal_result,
             _compact_far_pairs,
             _dense_buffers,
-            _grouped_buffers,
-            _grouped_segment_starts,
-            _grouped_segment_lengths,
-            _grouped_segment_class_ids,
-            _grouped_segment_sort_permutation,
-            _grouped_segment_group_ids,
-            _grouped_segment_unique_targets,
         ) = impl._unpack_dual_tree_artifacts(raw_dual_artifacts)
         nearfield_interop = _build_nearfield_interop_data(
             tree_artifacts.tree,
@@ -971,8 +929,6 @@ def _measure_prepare_stage_split(
             runtime_traversal_config=ctx["runtime_traversal_config"],
             runtime_m2l_chunk_size=ctx["runtime_m2l_chunk_size"],
             runtime_l2l_chunk_size=ctx["runtime_l2l_chunk_size"],
-            grouped_interactions=ctx["grouped_interactions"],
-            farfield_mode=ctx["farfield_mode"],
             record_retry=lambda _event: None,
             refine_local_val=ctx["refine_local_val"],
             max_refine_levels_val=ctx["max_refine_levels_val"],

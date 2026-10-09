@@ -153,10 +153,11 @@ def resolve_large_n_execution_config(
     ------
     ValueError
         If the engine's configuration is not the locked fast-lane combination.
-        All five requirements are checked separately, so the message names the
+        All four requirements are checked separately, so the message names the
         one that failed: ``tree_type='radix'``, ``preset='large_n_gpu'``,
-        ``expansion_basis='solidfmm'``, ``working_dtype=float32`` and
-        ``grouped_interactions=False``.
+        ``expansion_basis='solidfmm'`` and ``working_dtype=float32``. (A fifth,
+        ``grouped_interactions=False``, always holds since the grouped far field
+        went in the 2026-10 cleanup, X3.)
     """
 
     nearfield_mode = "bucketed"
@@ -178,7 +179,6 @@ def resolve_large_n_execution_config(
     tree_type = str(getattr(fmm, "tree_type", "")).strip().lower()
     preset = str(getattr(fmm, "preset", "")).strip().lower()
     basis = str(getattr(fmm, "expansion_basis", "")).strip().lower()
-    grouped = bool(getattr(fmm, "grouped_interactions", False))
     working_dtype = jnp.dtype(getattr(fmm, "working_dtype", jnp.float32))
 
     if tree_type != "radix":
@@ -189,8 +189,6 @@ def resolve_large_n_execution_config(
         raise ValueError("radix_fast_lane requires expansion_basis='solidfmm'")
     if working_dtype != jnp.float32:
         raise ValueError("radix_fast_lane requires working_dtype=float32")
-    if grouped:
-        raise ValueError("radix_fast_lane requires grouped_interactions=False")
     if int(target_owned_block_size) <= 0:
         target_owned_block_size = int(_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE)
 

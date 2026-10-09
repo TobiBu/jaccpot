@@ -73,7 +73,7 @@ def main() -> None:
         max_refine_levels_val=int(impl.max_refine_levels),
         aspect_threshold_val=float(impl.aspect_threshold),
         jit_tree_override=solver.advanced.runtime.jit_tree,
-        upward_center_mode="aabb" if bool(impl.grouped_interactions) else "com",
+        upward_center_mode="com",
         allow_stateful_cache=False,
     )
     jax.block_until_ready(tree_artifacts.upward.multipoles.packed)
@@ -93,8 +93,6 @@ def main() -> None:
         runtime_traversal_config=runtime_overrides.traversal_config,
         runtime_m2l_chunk_size=runtime_overrides.m2l_chunk_size,
         runtime_l2l_chunk_size=runtime_overrides.l2l_chunk_size,
-        grouped_interactions=runtime_overrides.grouped_interactions,
-        farfield_mode=runtime_overrides.farfield_mode,
         record_retry=lambda _event: None,
         refine_local_val=bool(impl.refine_local),
         max_refine_levels_val=int(impl.max_refine_levels),

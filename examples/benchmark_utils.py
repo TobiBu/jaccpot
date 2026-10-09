@@ -140,7 +140,6 @@ def canonical_large_n_production_config(
         "leaf_target": int(leaf_target),
         "farfield_rotation": "solidfmm",
         "farfield_mode": "pair_grouped",
-        "grouped_interactions": False,
         "streamed_far_pairs": True,
         "mixed_order": False,
         "mixed_order_min_order": None,
@@ -167,7 +166,6 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
             "resolved_runtime_path": None,
             "resolved_memory_objective": None,
             "resolved_streamed_far_pairs": None,
-            "resolved_grouped_interactions": None,
             "resolved_retain_traversal_result": None,
             "resolved_retain_interactions": None,
             "resolved_large_n_memory_path_active": None,
@@ -180,10 +178,6 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
         .lower()
     )
     streamed_far_pairs = bool(getattr(impl, "streamed_far_pairs", False))
-    grouped_interactions = getattr(impl, "grouped_interactions", None)
-    grouped_interactions_bool = (
-        None if grouped_interactions is None else bool(grouped_interactions)
-    )
     retain_traversal_result = bool(getattr(impl, "retain_traversal_result", True))
     retain_interactions = bool(getattr(impl, "retain_interactions", True))
     active = (
@@ -191,13 +185,11 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
         and streamed_far_pairs
         and not retain_traversal_result
         and not retain_interactions
-        and not bool(grouped_interactions_bool)
     )
     return {
         "resolved_runtime_path": runtime_path,
         "resolved_memory_objective": memory_objective,
         "resolved_streamed_far_pairs": streamed_far_pairs,
-        "resolved_grouped_interactions": grouped_interactions_bool,
         "resolved_retain_traversal_result": retain_traversal_result,
         "resolved_retain_interactions": retain_interactions,
         "resolved_large_n_memory_path_active": bool(active),

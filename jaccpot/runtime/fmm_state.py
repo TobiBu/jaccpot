@@ -426,12 +426,12 @@ class _RuntimeExecutionOverrides(NamedTuple):
         M2L chunk override; ``None`` keeps the engine's.
     l2l_chunk_size : Optional[int]
         L2L chunk override; ``None`` keeps the engine's.
-    grouped_interactions : bool
-        Whether to group interactions during traversal.
     farfield_mode : str
-        Resolved far-field interaction mode.
+        Resolved far-field interaction mode. Always ``"pair_grouped"``, the flat
+        pair list, since the grouped far field went in the 2026-10 cleanup (X3).
     center_mode : str
-        How node centres are measured for the acceptance test.
+        Expansion-centre mode for the upward sweep. Always ``"com"`` since the
+        AABB expansion centres went in the same cleanup.
     refine_local_override : Optional[bool]
         Forces local refinement on or off; ``None`` keeps the tree config's.
     adaptive_applied : bool
@@ -443,7 +443,6 @@ class _RuntimeExecutionOverrides(NamedTuple):
     traversal_config: Optional[DualTreeTraversalConfig]
     m2l_chunk_size: Optional[int]
     l2l_chunk_size: Optional[int]
-    grouped_interactions: bool
     farfield_mode: str
     center_mode: str
     refine_local_override: Optional[bool]

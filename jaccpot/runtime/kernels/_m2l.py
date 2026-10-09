@@ -19,12 +19,12 @@ EQUIVALENCES THAT MUST HOLD (NUMERICS_AND_JAX §1, asserted in
 
 The Pallas kernels are execution accelerators, not different mathematics.
 
-THE FOUR ACCUMULATORS are four batchings of the same sum: full-batch, chunked
-scan, class-grouped and class-major. They must agree to reassociation only --
-G.11 was a 60x accuracy gap between two of them, caused by ``pair_grouped``
-gathering rotations with class ids from the wrong ordering, and it is exactly the
-kind of defect that hides in a family of near-duplicates. Do not "unify" them
-without re-running the grouped-mode goldens.
+THE TWO ACCUMULATORS are two batchings of the same sum over a flat pair list:
+full-batch and chunked scan. They must agree to reassociation only. There used to
+be four: the class-grouped and class-major batchings went with the grouped far
+field in the 2026-10 cleanup (X3). One of them was G.11, a 60x accuracy gap
+caused by ``pair_grouped`` gathering rotations with class ids from the wrong
+ordering -- exactly the kind of defect that hides in a family of near-duplicates.
 
 Split out of ``core.py`` (Tier 1.6, A.9 seam 2); every function body is unchanged.
 """
@@ -37,28 +37,19 @@ from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from beartype import beartype
 from jaxtyping import Array, Bool, Float, Inexact, Int, jaxtyped
-from yggdrax.grouped_interactions import (
-    GroupedInteractionBuffers,
-)
 
-from jaccpot._searchsorted import searchsorted_method
 from jaccpot.operators.complex_ops import (
     complex_rotation_blocks_from_z_solidfmm_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
     m2l_complex_fused_align_deltas,
     m2l_complex_reference_batch,
-    m2l_complex_reference_batch_cached_blocks,
     make_m2l_complex_fused_carry_axis_derivative,
 )
 from jaccpot.operators.m2l_real_rot_scale import (
     m2l_rot_scale_real_batch,
-    m2l_rot_scale_real_batch_cached_blocks,
     make_m2l_real_fused_carry_axis_derivative,
-    real_rotation_blocks_from_z_local_batch,
-    real_rotation_blocks_to_z_multipole_batch,
 )
 from jaccpot.runtime.grad_options import fused_m2l_pallas_enabled
 
@@ -105,15 +96,6 @@ def _complex_fused_carry_axis_derivative() -> Any:
 
 
 from ..dtypes import INDEX_DTYPE
-from ..fmm_caches import (
-    _M2L_FULLBATCH_MAX_PAIRS,
-    _grouped_operator_cache_get,
-    _grouped_operator_cache_key,
-    _grouped_operator_cache_put,
-    _grouped_segment_cache_get,
-    _grouped_segment_cache_key,
-    _grouped_segment_cache_put,
-)
 
 __all__: list[str] = []
 
@@ -156,242 +138,28 @@ def _m2l_complex_batch_kernel(
     )
 
 
-@partial(jax.jit, static_argnames=("order",))
-def _m2l_complex_batch_cached_kernel(
-    src_mult: Array,
-    deltas: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    *,
-    order: int,
-) -> Array:
-    """Vectorized complex M2L kernel using precomputed rotation blocks.
-
-    Same translation as :func:`_m2l_complex_batch_kernel`, with the rotation
-    blocks supplied rather than rebuilt per pair. That is the entire point of the
-    grouped path: pairs sharing a displacement class share their blocks.
-
-    Parameters
-    ----------
-    src_mult : Array
-        Complex multipole coefficients ``[N, (p+1)^2]``.
-    deltas : Array
-        Target-minus-source centre displacements ``[N, 3]``.
-    blocks_to_z : Array
-        Per-pair multipole world-to-z rotation blocks.
-    blocks_from_z : Array
-        Per-pair local z-to-world rotation blocks.
-    order : int
-        Expansion order ``p``. Static under ``jit``.
-
-    Returns
-    -------
-    Array
-        Complex local contributions ``[N, (p+1)^2]``.
-    """
-    return m2l_complex_reference_batch_cached_blocks(
-        src_mult,
-        deltas,
-        blocks_to_z,
-        blocks_from_z,
-        order=order,
-    )
-
-
-def _m2l_cached_kernel_dispatch(
-    src_mult: Array,
-    deltas: Array,
-    blocks_to_z: Array,
-    blocks_from_z: Array,
-    *,
-    order: int,
-    basis_mode: str,
-) -> Array:
-    """Apply precomputed rotation blocks in the complex or real basis.
-
-    ``basis_mode`` is a Python string (static under jit), so this branches at
-    trace time. The real branch uses the Dehnen no-sqrt2 cached kernel; the
-    complex branch is unchanged.
-
-    The blocks must have been built for the same basis this dispatches on --
-    neither kernel checks. See :func:`_accumulate_solidfmm_m2l_grouped` for what
-    a mismatch costs.
-
-    Parameters
-    ----------
-    src_mult : Array
-        Multipole coefficients in whichever basis ``basis_mode`` names.
-    deltas : Array
-        Target-minus-source centre displacements ``[N, 3]``.
-    blocks_to_z : Array
-        Multipole world-to-z rotation blocks, in the same basis.
-    blocks_from_z : Array
-        Local z-to-world rotation blocks, in the same basis.
-    order : int
-        Expansion order ``p``. Static.
-    basis_mode : str
-        ``"real"`` or anything else for complex. Static.
-
-    Returns
-    -------
-    Array
-        Local contributions, packed as the basis requires.
-    """
-    if str(basis_mode).strip().lower() == "real":
-        return m2l_rot_scale_real_batch_cached_blocks(
-            src_mult, deltas, blocks_to_z, blocks_from_z, order=order
-        )
-    return _m2l_complex_batch_cached_kernel(
-        src_mult, deltas, blocks_to_z, blocks_from_z, order=order
-    )
-
-
-# THE TWO AXES THIS MODULE NEEDED, AND WHY IT IS NOT A WHOLE-MODULE PASS.
+# WHY ONLY ONE AXIS IS ANNOTATED, AND WHY IT IS NOT A WHOLE-MODULE PASS.
 #
-# `bench/annotation_pilot.py` re-recorded on 2026-09-03 puts this module last on rate --
+# `bench/annotation_pilot.py` re-recorded on 2026-09-03 put this module last on rate --
 # 23 silent acceptances of 286 perturbations, 8%, on 18 measured functions -- which is the
-# August verdict confirmed: it is mostly validated already and converting all 92 bare
-# parameters would be effort spent where nothing is wrong. But the 23 are NOT spread
-# evenly, and where they sit is the argument for the two axes below.
+# August verdict confirmed: it is mostly validated already and converting every bare
+# parameter would be effort spent where nothing is wrong. Most of the 23 sat in the
+# grouped / class-major accumulators, which went in the 2026-10 cleanup (X3); of the
+# survivors, `_chunk_segment_scatter_add` and `_m2l_chunk_contributions` took 2 each.
 #
-#     _rotation_blocks_for_grouped_classes           5   class_keys accepted ALL FOUR
-#                                                        perturbations; class_deltas the
-#                                                        misalignment against it
-#     _accumulate_solidfmm_m2l_grouped_class_major   4   locals_coeffs, all four
-#     _pair_class_ids_from_offsets                   3
-#     _accumulate_solidfmm_m2l_grouped_chunked_scan  2
-#     _chunk_segment_scatter_add                     2
-#     _m2l_chunk_contributions                       2
-#
-# `classes` is G.11 expressed as a shape. The module docstring records G.11 as a 60x
-# accuracy gap between two of the four accumulators, caused by `pair_grouped` gathering
-# rotations with class ids from the WRONG ORDERING. Here `num_classes` is read from
-# `class_deltas` while `class_keys` is the cache identity, so a `class_keys` of a different
-# length keys the rotation cache on a different class count than the blocks it returns --
-# and nothing downstream can tell. Eight recorded calls, class axis shared in every one, at
-# three distinct extents: 7, 774 and 2487. The trailing 5 is a literal because the key width
-# was 5 in all eight, across three problem sizes and two orders; if yggdrax ever changes the
-# key layout this should fail loudly rather than mis-key a cache silently.
-#
-# `nodes` and `sh` tie the three arrays every batching takes. This is the family the module
-# docstring says not to unify -- four batchings of one sum -- so the annotation is the same
-# on all of them, which is what makes them comparable. Evidence is the strongest in the
-# module: ~50 recorded calls across the family share the leading axis of `locals_coeffs`,
-# `multip_packed` and `centers` at EIGHT distinct extents (5, 8, 13, 63, 127, 255, 511,
-# 1023), and the two packed arrays share the trailing axis at five (4, 9, 16, 25, 81).
+# `nodes` and `sh` tie the three arrays every batching takes, so the annotation is the same
+# on the full-batch and chunked accumulators, which is what makes them comparable.
+# Evidence: ~50 recorded calls across the (then four) accumulators shared the leading
+# axis of `locals_coeffs`, `multip_packed` and `centers` at EIGHT distinct extents (5, 8,
+# 13, 63, 127, 255, 511, 1023), and the two packed arrays shared the trailing axis at five
+# (4, 9, 16, 25, 81).
 #
 # `Inexact` and not `Float` on the packed pair: `basis_mode="complex"` is a live lane and
 # passes complex coefficients. Narrowing to `Float` is the mistake #293 made one module
 # over, where a real-basis-only recording cost 27 CI failures.
 #
-# `class_offsets` in `_pair_class_ids_from_offsets` stays rank-only. It is
-# `(num_classes + 1,)` and `classes` is bound by nothing else in that signature -- and even
-# if it were, the parameter precedes anything that could bind it, which jaxtyping cannot
-# evaluate. Rank alone still closes the extra-leading-axis case, which is what the pilot
-# found; the length case is left open and named here rather than annotated wrongly.
-#
 # The decorators go INSIDE `jax.jit` on the jitted accumulators, per the house order, so
 # beartype runs once per trace rather than per call on the production M2L path.
-@jaxtyped(typechecker=beartype)
-def _rotation_blocks_for_grouped_classes(
-    *,
-    order: int,
-    rotation: str,
-    class_keys: Int[Array, "classes 5"],
-    class_deltas: Float[Array, "classes 3"],
-    dtype: jnp.dtype,
-    basis_mode: str = "complex",
-) -> tuple[Array, Array]:
-    """Resolve rotation blocks for all grouped classes with cache reuse.
-
-    For ``basis_mode == "real"`` the Dehnen no-sqrt2 real rotation blocks are
-    built (multipole world->z and local z->world) and the ``rotation`` argument
-    is ignored (the real path has a single rotation construction).
-
-    Parameters
-    ----------
-    order : int
-        Expansion order ``p``; sets the block shape ``(p+1, 2p+1, 2p+1)``.
-    rotation : str
-        Rotation convention for the complex path. Ignored when ``basis_mode`` is
-        ``"real"``.
-    class_keys : Int[Array, 'classes 5']
-        Displacement-class keys, used as the cache identity.
-    class_deltas : Float[Array, 'classes 3']
-        One representative displacement per class ``[C, 3]``. Its length is the
-        class count.
-    dtype : jnp.dtype
-        Dtype to build the blocks in; take it from the multipoles so the cached
-        kernel does not have to promote.
-    basis_mode : str
-        ``"real"`` or ``"complex"``. Decides which rotation construction is used,
-        and therefore which cached kernel the blocks may be fed to.
-
-    Returns
-    -------
-    tuple[Array, Array]
-        ``(blocks_to_classes, blocks_from_classes)``, indexed by class id --
-        multipole world-to-z first, local z-to-world second.
-
-    Raises
-    ------
-    ValueError
-        If the rotation convention is not one this path can build blocks for.
-    """
-    num_classes = int(class_deltas.shape[0])
-    max_m = 2 * int(order) + 1
-    empty_shape = (0, int(order) + 1, max_m, max_m)
-    if num_classes == 0:
-        empty = jnp.zeros(empty_shape, dtype=dtype)
-        return empty, empty
-
-    real_basis = str(basis_mode).strip().lower() == "real"
-    cache_key = _grouped_operator_cache_key(
-        order=order,
-        rotation=("real" if real_basis else rotation),
-        dtype=dtype,
-        class_keys=class_keys,
-        class_deltas=class_deltas,
-    )
-    if cache_key is not None:
-        cached = _grouped_operator_cache_get(cache_key)
-        if cached is not None:
-            return cached
-
-    deltas = jnp.asarray(class_deltas)
-    if real_basis:
-        blocks_to = real_rotation_blocks_to_z_multipole_batch(
-            deltas, order=order, dtype=dtype
-        )
-        blocks_from = real_rotation_blocks_from_z_local_batch(
-            deltas, order=order, dtype=dtype
-        )
-        if cache_key is not None:
-            _grouped_operator_cache_put(cache_key, (blocks_to, blocks_from))
-        return blocks_to, blocks_from
-
-    if rotation == "solidfmm":
-        blocks_to = complex_rotation_blocks_to_z_solidfmm_batch(
-            deltas,
-            order=order,
-            basis="multipole",
-            dtype=dtype,
-        )
-        blocks_from = complex_rotation_blocks_from_z_solidfmm_batch(
-            deltas,
-            order=order,
-            basis="local",
-            dtype=dtype,
-        )
-    else:
-        raise ValueError(
-            "grouped operator cache currently supports rotation='solidfmm'"
-        )
-    if cache_key is not None:
-        _grouped_operator_cache_put(cache_key, (blocks_to, blocks_from))
-    return blocks_to, blocks_from
-
-
 @jaxtyped(typechecker=beartype)
 def _chunk_segment_scatter_add(
     local_accum: Inexact[Array, "nodes sh"],
@@ -409,7 +177,7 @@ def _chunk_segment_scatter_add(
     maximum index so they sort to the end and fall outside the scatter.
 
     The sort makes the summation order a deterministic function of the target
-    indices rather than of the pair order, which is what keeps the four
+    indices rather than of the pair order, which is what keeps the two
     accumulators agreeing to reassociation.
 
     Why a segmented ``associative_scan`` and an out-of-bounds sink, not
@@ -478,688 +246,6 @@ def _chunk_segment_scatter_add(
     rows_val = jnp.where(take[:, None], segment_prefix, 0)
     return local_accum.at[rows_tgt].add(
         rows_val, mode="drop", indices_are_sorted=True, unique_indices=True
-    )
-
-
-@jaxtyped(typechecker=beartype)
-def _pair_class_ids_from_offsets(
-    class_offsets: Int[Array, "_"], pair_indices: Int[Array, "_"]
-) -> Array:
-    """Class id of each pair, addressed in the class-sorted pair order.
-
-    ``class_sources`` / ``class_targets`` are stored sorted by class, so the
-    CSR offsets alone say which class a pair index belongs to: pair ``i`` is in
-    class ``c`` when ``class_offsets[c] <= i < class_offsets[c + 1]``.
-
-    This is deliberately not ``GroupedInteractionBuffers.class_ids``, which
-    yggdrax stores in the *original* (unsorted) pair order -- see
-    :func:`_accumulate_solidfmm_m2l_grouped`.
-
-    Parameters
-    ----------
-    class_offsets : Int[Array, '_']
-        CSR class boundaries, shape ``(num_classes + 1,)``, strictly increasing.
-    pair_indices : Int[Array, '_']
-        Indices into the class-sorted pair arrays.
-
-    Returns
-    -------
-    Array
-        Class id per entry of ``pair_indices``.
-    """
-    return jnp.searchsorted(
-        class_offsets[1:], pair_indices, side="right", method=searchsorted_method()
-    ).astype(INDEX_DTYPE)
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
-    donate_argnums=(0,),
-)
-@jaxtyped(typechecker=beartype)
-def _accumulate_solidfmm_m2l_grouped_chunked_scan(
-    locals_coeffs: Inexact[Array, "nodes sh"],
-    multip_packed: Inexact[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
-    src_sorted: Array,
-    tgt_sorted: Array,
-    class_offsets: Array,
-    blocks_to_classes: Array,
-    blocks_from_classes: Array,
-    *,
-    order: int,
-    total_nodes: int,
-    chunk_size: int,
-    basis_mode: str = "complex",
-) -> Array:
-    """Accumulate grouped solidfmm M2L contributions via chunked scan.
-
-    One of the four accumulators (module docstring). This is the grouped path's
-    bounded-memory form: pairs are already class-sorted, and the scan walks them
-    in fixed-width chunks so peak memory is set by ``chunk_size`` rather than by
-    the pair count. Its full-batch twin is
-    :func:`_accumulate_solidfmm_m2l_grouped_fullbatch`; they must agree to
-    reassociation only.
-
-    Parameters
-    ----------
-    locals_coeffs : Inexact[Array, 'nodes sh']
-        Local coefficient accumulator. Donated -- do not use the argument after
-        the call.
-    multip_packed : Inexact[Array, 'nodes sh']
-        Packed multipole coefficients for every node.
-    centers : Float[Array, 'nodes 3']
-        Node centres; the pair displacement is the difference of two rows.
-    src_sorted : Array
-        Source node index per pair, in class-sorted order.
-    tgt_sorted : Array
-        Target node index per pair, in the same order.
-    class_offsets : Array
-        CSR class boundaries, ``(num_classes + 1,)``. The pair's class comes from
-        these, not from ``class_ids`` -- see
-        :func:`_pair_class_ids_from_offsets`.
-    blocks_to_classes : Array
-        Per-class multipole world-to-z rotation blocks.
-    blocks_from_classes : Array
-        Per-class local z-to-world rotation blocks.
-    order : int
-        Expansion order ``p``. Static.
-    total_nodes : int
-        Node count, sizing the accumulator. Static.
-    chunk_size : int
-        Pairs per scan step. Static.
-    basis_mode : str
-        ``"real"`` or ``"complex"``. Static, and must match the basis the blocks
-        were built in.
-
-    Returns
-    -------
-    Array
-        The accumulated local coefficients.
-    """
-    pair_count = src_sorted.shape[0]
-    starts = jnp.arange(0, pair_count, chunk_size, dtype=INDEX_DTYPE)
-
-    def body(local_accum: Array, start_idx: Array) -> tuple[Array, None]:
-        offset = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-        idx = start_idx + offset
-        valid = idx < pair_count
-        safe_idx = jnp.where(valid, idx, 0)
-
-        src_chunk = src_sorted[safe_idx]
-        tgt_chunk = tgt_sorted[safe_idx]
-        cls_chunk = _pair_class_ids_from_offsets(class_offsets, safe_idx)
-        src_mult = multip_packed[src_chunk]
-        deltas = centers[tgt_chunk] - centers[src_chunk]
-        blocks_to = blocks_to_classes[cls_chunk]
-        blocks_from = blocks_from_classes[cls_chunk]
-
-        contribs = _m2l_cached_kernel_dispatch(
-            src_mult,
-            deltas,
-            blocks_to,
-            blocks_from,
-            order=order,
-            basis_mode=basis_mode,
-        ).astype(locals_coeffs.dtype)
-        local_accum = _chunk_segment_scatter_add(
-            local_accum,
-            contribs,
-            tgt_chunk,
-            valid,
-            chunk_size=chunk_size,
-        )
-        return local_accum, None
-
-    local_accum, _ = jax.lax.scan(body, locals_coeffs, starts)
-    return local_accum
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "total_nodes", "basis_mode"),
-    donate_argnums=(0,),
-)
-@jaxtyped(typechecker=beartype)
-def _accumulate_solidfmm_m2l_grouped_fullbatch(
-    locals_coeffs: Inexact[Array, "nodes sh"],
-    multip_packed: Inexact[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
-    src_sorted: Array,
-    tgt_sorted: Array,
-    class_offsets: Array,
-    blocks_to_classes: Array,
-    blocks_from_classes: Array,
-    *,
-    order: int,
-    total_nodes: int,
-    basis_mode: str = "complex",
-) -> Array:
-    """Accumulate grouped solidfmm M2L contributions in one full batch.
-
-    One of the four accumulators (module docstring). The grouped path's unchunked
-    form: every pair is translated at once, so there is no scan and no per-chunk
-    scatter, at the cost of holding all contributions live.
-    :func:`_accumulate_solidfmm_m2l_grouped` picks between this and the chunked
-    twin on pair count.
-
-    Parameters
-    ----------
-    locals_coeffs : Inexact[Array, 'nodes sh']
-        Local coefficient accumulator.
-    multip_packed : Inexact[Array, 'nodes sh']
-        Packed multipole coefficients for every node.
-    centers : Float[Array, 'nodes 3']
-        Node centres.
-    src_sorted : Array
-        Source node index per pair, class-sorted.
-    tgt_sorted : Array
-        Target node index per pair, same order.
-    class_offsets : Array
-        CSR class boundaries, ``(num_classes + 1,)``.
-    blocks_to_classes : Array
-        Per-class multipole world-to-z rotation blocks.
-    blocks_from_classes : Array
-        Per-class local z-to-world rotation blocks.
-    order : int
-        Expansion order ``p``. Static.
-    total_nodes : int
-        Node count, sizing the accumulator. Static.
-    basis_mode : str
-        ``"real"`` or ``"complex"``. Static, and must match the blocks.
-
-    Returns
-    -------
-    Array
-        The accumulated local coefficients.
-    """
-    src_mult = multip_packed[src_sorted]
-    deltas = centers[tgt_sorted] - centers[src_sorted]
-    class_ids_sorted = _pair_class_ids_from_offsets(
-        class_offsets,
-        jnp.arange(src_sorted.shape[0], dtype=INDEX_DTYPE),
-    )
-    blocks_to = blocks_to_classes[class_ids_sorted]
-    blocks_from = blocks_from_classes[class_ids_sorted]
-    contribs = _m2l_cached_kernel_dispatch(
-        src_mult,
-        deltas,
-        blocks_to,
-        blocks_from,
-        order=order,
-        basis_mode=basis_mode,
-    ).astype(locals_coeffs.dtype)
-    return locals_coeffs + jax.ops.segment_sum(contribs, tgt_sorted, total_nodes)
-
-
-def _build_grouped_class_segments(
-    grouped: GroupedInteractionBuffers,
-    *,
-    chunk_size: int,
-) -> tuple[Array, Array, Array]:
-    """Build compact class-major segment metadata for chunked execution.
-
-    Cuts the class-sorted pair list into segments no wider than ``chunk_size``,
-    each belonging to exactly one class. That single-class property is what lets
-    the class-major accumulators gather one rotation block per segment rather
-    than per pair.
-
-    Cached on the class layout and chunk size, since the result depends on
-    neither the multipoles nor the centres and a refresh at fixed topology can
-    reuse it.
-
-    Parameters
-    ----------
-    grouped : GroupedInteractionBuffers
-        Grouped pair buffers; supplies the class offsets and targets.
-    chunk_size : int
-        Maximum segment width. A class wider than this is split across several
-        segments.
-
-    Returns
-    -------
-    tuple[Array, Array, Array]
-        ``(segment_starts, segment_lengths, segment_class_ids)``, one entry per
-        segment.
-    """
-    cache_key = _grouped_segment_cache_key(
-        class_offsets=grouped.class_offsets,
-        class_targets=grouped.class_targets,
-        chunk_size=int(chunk_size),
-    )
-    if cache_key is not None:
-        cached = _grouped_segment_cache_get(cache_key)
-        if cached is not None:
-            return cached
-
-    class_offsets = np.asarray(jax.device_get(grouped.class_offsets), dtype=np.int64)
-    if class_offsets.size <= 1:
-        empty = jnp.zeros((0,), dtype=INDEX_DTYPE)
-        result = (empty, empty, empty)
-        if cache_key is not None:
-            _grouped_segment_cache_put(cache_key, result)
-        return result
-
-    starts: list[int] = []
-    lengths: list[int] = []
-    class_ids: list[int] = []
-    for class_idx in range(class_offsets.shape[0] - 1):
-        start = int(class_offsets[class_idx])
-        end = int(class_offsets[class_idx + 1])
-        while start < end:
-            seg_len = min(int(chunk_size), end - start)
-            starts.append(start)
-            lengths.append(seg_len)
-            class_ids.append(class_idx)
-            start += seg_len
-
-    if len(starts) == 0:
-        result = (
-            jnp.asarray(starts, dtype=INDEX_DTYPE),
-            jnp.asarray(lengths, dtype=INDEX_DTYPE),
-            jnp.asarray(class_ids, dtype=INDEX_DTYPE),
-        )
-        if cache_key is not None:
-            _grouped_segment_cache_put(cache_key, result)
-        return result
-
-    result = (
-        jnp.asarray(starts, dtype=INDEX_DTYPE),
-        jnp.asarray(lengths, dtype=INDEX_DTYPE),
-        jnp.asarray(class_ids, dtype=INDEX_DTYPE),
-    )
-    if cache_key is not None:
-        _grouped_segment_cache_put(cache_key, result)
-    return result
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "total_nodes", "chunk_size", "basis_mode"),
-    donate_argnums=(0,),
-)
-@jaxtyped(typechecker=beartype)
-def _accumulate_solidfmm_m2l_class_major_chunked_scan(
-    locals_coeffs: Inexact[Array, "nodes sh"],
-    multip_packed: Inexact[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
-    src_sorted: Array,
-    tgt_sorted: Array,
-    segment_starts: Array,
-    segment_lengths: Array,
-    segment_class_ids: Array,
-    blocks_to_classes: Array,
-    blocks_from_classes: Array,
-    *,
-    order: int,
-    total_nodes: int,
-    chunk_size: int,
-    basis_mode: str = "complex",
-) -> Array:
-    """Accumulate class-major grouped M2L contributions via chunked scan.
-
-    One of the four accumulators (module docstring). Where the grouped chunked
-    scan walks fixed-width chunks that may straddle classes, this walks the
-    segment table from :func:`_build_grouped_class_segments`, so every step has
-    exactly one class and reads exactly one pair of rotation blocks.
-
-    Parameters
-    ----------
-    locals_coeffs : Inexact[Array, 'nodes sh']
-        Local coefficient accumulator.
-    multip_packed : Inexact[Array, 'nodes sh']
-        Packed multipole coefficients for every node.
-    centers : Float[Array, 'nodes 3']
-        Node centres.
-    src_sorted : Array
-        Source node index per pair, class-sorted.
-    tgt_sorted : Array
-        Target node index per pair, same order.
-    segment_starts : Array
-        First pair index of each segment.
-    segment_lengths : Array
-        Pair count of each segment; at most ``chunk_size``.
-    segment_class_ids : Array
-        The one class id each segment belongs to.
-    blocks_to_classes : Array
-        Per-class multipole world-to-z rotation blocks.
-    blocks_from_classes : Array
-        Per-class local z-to-world rotation blocks.
-    order : int
-        Expansion order ``p``. Static.
-    total_nodes : int
-        Node count, sizing the accumulator. Static.
-    chunk_size : int
-        Segment width bound; sets the padded per-step shape. Static.
-    basis_mode : str
-        ``"real"`` or ``"complex"``. Static, and must match the blocks.
-
-    Returns
-    -------
-    Array
-        The accumulated local coefficients.
-    """
-    num_segments = segment_starts.shape[0]
-    if num_segments == 0:
-        return locals_coeffs
-
-    offsets = jnp.arange(chunk_size, dtype=INDEX_DTYPE)
-
-    def body(local_accum: Array, seg_idx: Array) -> tuple[Array, None]:
-        start = segment_starts[seg_idx]
-        seg_len = segment_lengths[seg_idx]
-        cls = segment_class_ids[seg_idx]
-        idx = start + offsets
-        valid = offsets < seg_len
-        safe_idx = jnp.where(valid, idx, 0)
-
-        src_chunk = src_sorted[safe_idx]
-        tgt_chunk = tgt_sorted[safe_idx]
-        src_mult = multip_packed[src_chunk]
-        deltas = centers[tgt_chunk] - centers[src_chunk]
-
-        block_to = blocks_to_classes[cls]
-        block_from = blocks_from_classes[cls]
-        blocks_to = jnp.broadcast_to(block_to, (chunk_size,) + block_to.shape)
-        blocks_from = jnp.broadcast_to(block_from, (chunk_size,) + block_from.shape)
-
-        contribs = _m2l_cached_kernel_dispatch(
-            src_mult,
-            deltas,
-            blocks_to,
-            blocks_from,
-            order=order,
-            basis_mode=basis_mode,
-        ).astype(locals_coeffs.dtype)
-        contribs = jnp.where(valid[:, None], contribs, 0)
-        masked_targets = jnp.where(valid, tgt_chunk, jnp.iinfo(INDEX_DTYPE).max)
-        sort_idx = jnp.argsort(masked_targets)
-        tgt_sorted_chunk = tgt_chunk[sort_idx]
-        contribs_sorted = contribs[sort_idx]
-        valid_sorted = valid[sort_idx]
-        prev_targets = jnp.concatenate(
-            [
-                jnp.asarray([-1], dtype=INDEX_DTYPE),
-                tgt_sorted_chunk[:-1],
-            ]
-        )
-        group_starts = valid_sorted & (
-            jnp.logical_not(jnp.roll(valid_sorted, 1))
-            | (tgt_sorted_chunk != prev_targets)
-        )
-        group_ids = jnp.cumsum(group_starts.astype(INDEX_DTYPE)) - 1
-        safe_group_ids = jnp.where(valid_sorted, group_ids, 0)
-        reduced = jax.ops.segment_sum(contribs_sorted, safe_group_ids, chunk_size)
-        unique_targets = jnp.where(valid_sorted, tgt_sorted_chunk, 0)
-        return local_accum.at[unique_targets].add(reduced), None
-
-    local_accum, _ = jax.lax.scan(
-        body,
-        locals_coeffs,
-        jnp.arange(num_segments, dtype=INDEX_DTYPE),
-    )
-    return local_accum
-
-
-@jaxtyped(typechecker=beartype)
-def _accumulate_solidfmm_m2l_grouped_class_major(
-    locals_coeffs: Inexact[Array, "nodes sh"],
-    multip_packed: Inexact[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
-    grouped: GroupedInteractionBuffers,
-    grouped_segment_starts: Optional[Array],
-    grouped_segment_lengths: Optional[Array],
-    grouped_segment_class_ids: Optional[Array],
-    grouped_segment_sort_permutation: Optional[Array],
-    grouped_segment_group_ids: Optional[Array],
-    grouped_segment_unique_targets: Optional[Array],
-    *,
-    order: int,
-    rotation: str,
-    total_nodes: int,
-    chunk_size: int,
-    basis_mode: str = "complex",
-) -> Array:
-    """Class-major grouped accumulation without per-pair operator gathers.
-
-    One of the four accumulators (module docstring), and the entry point to the
-    class-major pair: it builds or accepts the segment table, then hands off to
-    :func:`_accumulate_solidfmm_m2l_class_major_chunked_scan`. Non-solidfmm
-    rotations fall back to :func:`_accumulate_m2l_fullbatch`, which takes the
-    sparse per-pair path.
-
-    Parameters
-    ----------
-    locals_coeffs : Inexact[Array, 'nodes sh']
-        Local coefficient accumulator.
-    multip_packed : Inexact[Array, 'nodes sh']
-        Packed multipole coefficients for every node.
-    centers : Float[Array, 'nodes 3']
-        Node centres.
-    grouped : GroupedInteractionBuffers
-        Grouped pair buffers: class-sorted sources and targets, class offsets,
-        keys and representative displacements.
-    grouped_segment_starts : Optional[Array]
-        Precomputed segment starts; ``None`` builds the table here.
-    grouped_segment_lengths : Optional[Array]
-        Precomputed segment lengths.
-    grouped_segment_class_ids : Optional[Array]
-        Precomputed per-segment class ids.
-    grouped_segment_sort_permutation : Optional[Array]
-        Accepted and immediately discarded. Kept in the signature so callers can
-        pass a whole precomputed schedule without knowing which parts this
-        accumulator happens to use.
-    grouped_segment_group_ids : Optional[Array]
-        Accepted and discarded, as above.
-    grouped_segment_unique_targets : Optional[Array]
-        Accepted and discarded, as above.
-    order : int
-        Expansion order ``p``. Static.
-    rotation : str
-        Rotation convention. Anything but ``"solidfmm"`` takes the sparse
-        fallback.
-    total_nodes : int
-        Node count, sizing the accumulator. Static.
-    chunk_size : int
-        Segment width bound. Static.
-    basis_mode : str
-        ``"real"`` or ``"complex"``. Static.
-
-    Returns
-    -------
-    Array
-        The accumulated local coefficients.
-    """
-    del (
-        grouped_segment_sort_permutation,
-        grouped_segment_group_ids,
-        grouped_segment_unique_targets,
-    )
-
-    if rotation not in ("solidfmm",):
-        src = grouped.class_sources
-        tgt = grouped.class_targets
-        return _accumulate_m2l_fullbatch(
-            locals_coeffs,
-            multip_packed,
-            centers,
-            src,
-            tgt,
-            jnp.asarray(src.shape[0], dtype=INDEX_DTYPE),
-            order=order,
-            basis_mode=basis_mode,
-            rotation=rotation,
-            total_nodes=total_nodes,
-        )
-
-    blocks_to_classes, blocks_from_classes = _rotation_blocks_for_grouped_classes(
-        order=order,
-        rotation=rotation,
-        class_keys=jnp.asarray(grouped.class_keys, dtype=jnp.int32),
-        class_deltas=jnp.asarray(grouped.class_displacements),
-        dtype=multip_packed.dtype,
-        basis_mode=basis_mode,
-    )
-    if (
-        grouped_segment_starts is None
-        or grouped_segment_lengths is None
-        or grouped_segment_class_ids is None
-    ):
-        (
-            segment_starts,
-            segment_lengths,
-            segment_class_ids,
-        ) = _build_grouped_class_segments(
-            grouped,
-            chunk_size=int(chunk_size),
-        )
-    else:
-        segment_starts = jnp.asarray(grouped_segment_starts, dtype=INDEX_DTYPE)
-        segment_lengths = jnp.asarray(grouped_segment_lengths, dtype=INDEX_DTYPE)
-        segment_class_ids = jnp.asarray(grouped_segment_class_ids, dtype=INDEX_DTYPE)
-    return _accumulate_solidfmm_m2l_class_major_chunked_scan(
-        locals_coeffs,
-        multip_packed,
-        centers,
-        jnp.asarray(grouped.class_sources, dtype=INDEX_DTYPE),
-        jnp.asarray(grouped.class_targets, dtype=INDEX_DTYPE),
-        segment_starts,
-        segment_lengths,
-        segment_class_ids,
-        blocks_to_classes,
-        blocks_from_classes,
-        order=order,
-        total_nodes=total_nodes,
-        chunk_size=int(chunk_size),
-        basis_mode=basis_mode,
-    )
-
-
-@jaxtyped(typechecker=beartype)
-def _accumulate_solidfmm_m2l_grouped(
-    locals_coeffs: Inexact[Array, "nodes sh"],
-    multip_packed: Inexact[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
-    grouped: GroupedInteractionBuffers,
-    *,
-    order: int,
-    rotation: str,
-    total_nodes: int,
-    chunk_size: int,
-    basis_mode: str = "complex",
-) -> Array:
-    """Grouped M2L accumulation using cached class blocks and pair chunking.
-
-    The per-pair class id is derived from ``grouped.class_offsets`` rather than
-    read from ``grouped.class_ids``: yggdrax stores ``class_sources`` /
-    ``class_targets`` sorted by class but applies the inverse permutation to
-    ``class_ids``, so the two are not co-indexed and gathering blocks with
-    ``class_ids`` hands most pairs another class's rotation. This is the same
-    class assignment the class-major scan reads out of its segment table.
-
-    Builds the per-class rotation blocks once, then picks full-batch or chunked
-    scan on pair count. Both calls must be handed the same ``basis_mode`` as the
-    block construction: omitting it is silent, because both kernels default to
-    ``"complex"`` and will consume real-dtype blocks happily. The result is wrong
-    rather than an error -- 3.8e-01 relative between the two branches at order 4,
-    pinned by ``tests/unit/runtime/test_grouped_m2l_basis_mode.py``.
-
-    Parameters
-    ----------
-    locals_coeffs : Inexact[Array, 'nodes sh']
-        Local coefficient accumulator.
-    multip_packed : Inexact[Array, 'nodes sh']
-        Packed multipole coefficients for every node. Its dtype is what the
-        rotation blocks are built in.
-    centers : Float[Array, 'nodes 3']
-        Node centres.
-    grouped : GroupedInteractionBuffers
-        Grouped pair buffers.
-    order : int
-        Expansion order ``p``. Static.
-    rotation : str
-        Rotation convention. Anything but ``"solidfmm"`` takes the sparse
-        per-pair fallback rather than the grouped path.
-    total_nodes : int
-        Node count, sizing the accumulator. Static.
-    chunk_size : int
-        Pairs per scan step, and half of the full-batch cutoff -- the other half
-        being ``_M2L_FULLBATCH_MAX_PAIRS``. Static.
-    basis_mode : str
-        ``"real"`` or ``"complex"``. Static; see above for the cost of losing it.
-
-    Returns
-    -------
-    Array
-        The accumulated local coefficients.
-    """
-
-    if rotation not in ("solidfmm",):
-        # Keep existing sparse path semantics for other conventions.
-        src = grouped.class_sources
-        tgt = grouped.class_targets
-        return _accumulate_m2l_fullbatch(
-            locals_coeffs,
-            multip_packed,
-            centers,
-            src,
-            tgt,
-            jnp.asarray(src.shape[0], dtype=INDEX_DTYPE),
-            order=order,
-            basis_mode=basis_mode,
-            rotation=rotation,
-            total_nodes=total_nodes,
-        )
-
-    src_sorted = grouped.class_sources
-    tgt_sorted = grouped.class_targets
-    class_offsets = jnp.asarray(grouped.class_offsets, dtype=INDEX_DTYPE)
-    class_keys = jnp.asarray(grouped.class_keys, dtype=jnp.int32)
-    class_deltas = jnp.asarray(grouped.class_displacements)
-
-    blocks_to_classes, blocks_from_classes = _rotation_blocks_for_grouped_classes(
-        order=order,
-        rotation=rotation,
-        class_keys=class_keys,
-        class_deltas=class_deltas,
-        dtype=multip_packed.dtype,
-        basis_mode=basis_mode,
-    )
-    # The branch below is a pure batching choice: both accumulators must be handed
-    # the same ``basis_mode``, or the rotation blocks built above (real when
-    # ``basis_mode == "real"``) get applied by the other basis' cached kernel.
-    # Omitting it on either call is silent -- both kernels default to "complex" and
-    # happily consume real-dtype blocks, so the result is wrong rather than an error:
-    # measured 3.8e-01 relative between the two branches at order 4. Pinned by
-    # ``tests/unit/runtime/test_grouped_m2l_basis_mode.py``.
-    if int(src_sorted.shape[0]) <= min(int(chunk_size), _M2L_FULLBATCH_MAX_PAIRS):
-        return _accumulate_solidfmm_m2l_grouped_fullbatch(
-            locals_coeffs,
-            multip_packed,
-            centers,
-            src_sorted,
-            tgt_sorted,
-            class_offsets,
-            blocks_to_classes,
-            blocks_from_classes,
-            order=order,
-            total_nodes=total_nodes,
-            basis_mode=basis_mode,
-        )
-    return _accumulate_solidfmm_m2l_grouped_chunked_scan(
-        locals_coeffs,
-        multip_packed,
-        centers,
-        src_sorted,
-        tgt_sorted,
-        class_offsets,
-        blocks_to_classes,
-        blocks_from_classes,
-        order=order,
-        total_nodes=total_nodes,
-        chunk_size=int(chunk_size),
-        basis_mode=basis_mode,
     )
 
 
@@ -1672,9 +758,8 @@ def _accumulate_m2l_fullbatch(
     ``static_argname`` so XLA specialises the merged jit per basis to the exact
     HLO each single-basis kernel produced.
 
-    One of the four accumulators (module docstring), and the sparse per-pair one:
-    unlike the grouped pair it takes raw source/target indices with no class
-    structure, so it is also where non-solidfmm rotations end up.
+    One of the two accumulators (module docstring): it takes raw source/target
+    indices and applies the whole list in one batch.
 
     Parameters
     ----------
@@ -1714,9 +799,10 @@ def _accumulate_m2l_fullbatch(
     # Shares the gather + double-where + apply with the chunked scan below via
     # ``_m2l_chunk_contributions`` so the two paths cannot drift apart (the same
     # reasoning as ``_pair_accel_pair_terms`` in the near field). NOT wrapped in
-    # ``jax.checkpoint`` here: fullbatch only runs at pair_count <=
-    # _M2L_FULLBATCH_MAX_PAIRS, where the retained blocks are tens of MB, so remat
-    # would buy nothing and would perturb the small-N forward schedule.
+    # ``jax.checkpoint`` here: fullbatch only runs when the whole list fits in one
+    # chunk (``pair_count <= chunk_size``, the caller's switch), where the retained
+    # blocks are small, so remat would buy nothing and would perturb the small-N
+    # forward schedule.
     contribs = _m2l_chunk_contributions(
         multip_packed,
         centers,
@@ -1767,8 +853,7 @@ def _accumulate_m2l_chunked_scan(
     the static ``basis_mode`` seam; numerics-preserving (identical HLO per
     basis, single shared ``lax.scan`` body).
 
-    One of the four accumulators (module docstring): the sparse path's
-    bounded-memory form. Its scan body is rematerialized, which is what keeps the
+    One of the two accumulators (module docstring): the bounded-memory form. Its scan body is rematerialized, which is what keeps the
     reverse pass from retaining the rotation blocks per chunk -- see the comment
     on the ``jax.checkpoint`` below for the measured figures.
 

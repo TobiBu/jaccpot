@@ -32,6 +32,7 @@ from jaccpot.operators.complex_ops import (
 )
 from jaccpot.operators.real_harmonics import sh_size
 
+from .tree_expansions import _resolve_center_mode
 from .tree_geometry import compute_tree_geometry_compiled
 
 __all__ = [
@@ -51,7 +52,7 @@ class SolidFMMComplexNodeMultipoleData(NamedTuple):
         Expansion order ``p``. A Python ``int``, static under ``jit``.
     centers : Array
         ``[num_nodes, 3]`` expansion centres, real-valued. Which centre these are
-        depends on the sweep's ``center_mode`` -- centre of mass, AABB centre, or
+        depends on the sweep's ``center_mode`` -- centre of mass or
         caller-supplied -- so they are not interchangeable across modes.
     packed : Array
         ``[num_nodes, (p+1)^2]`` complex solid-harmonic coefficients in the
@@ -99,7 +100,6 @@ class SolidFMMComplexTreeUpwardData(NamedTuple):
     multipoles: SolidFMMComplexNodeMultipoleData
 
 
-_CENTER_MODES = ("com", "aabb", "explicit")
 _DEFAULT_LEAF_BATCH_SIZE = 2048
 
 
@@ -774,8 +774,9 @@ def prepare_solidfmm_complex_upward_sweep(
     max_order : int
         Expansion order ``p``. Static under ``jit``; default ``2``.
     center_mode : str
-        How node expansion centres are chosen -- ``"com"`` for the centre of mass.
-        Ignored when ``explicit_centers`` is given.
+        How node expansion centres are chosen -- ``"com"`` for the centre of mass,
+        ``"explicit"`` for ``explicit_centers``. ``"aabb"`` raises: the geometric
+        centres were removed in the 2026-10 cleanup (X3).
     explicit_centers : Optional[Array]
         Per-node centres ``[num_nodes, 3]`` to use instead of deriving them.
     max_leaf_size : Optional[int]
@@ -807,7 +808,8 @@ def prepare_solidfmm_complex_upward_sweep(
     Raises
     ------
     ValueError
-        If ``max_order`` is negative.
+        If ``max_order`` is negative, or ``center_mode`` is not ``"com"`` or
+        ``"explicit"`` (or ``"explicit"`` without valid ``explicit_centers``).
     """
 
     p = int(max_order)
@@ -855,12 +857,10 @@ def prepare_solidfmm_complex_upward_sweep(
     _upward_diag("mass moments done")
 
     total_nodes = int(tree.parent.shape[0])
-    mode = str(center_mode).strip().lower()
+    mode = _resolve_center_mode(center_mode)
     if mode == "com":
         centers = mass_moments.center_of_mass
-    elif mode == "aabb":
-        centers = geometry.center
-    elif mode == "explicit":
+    else:
         if explicit_centers is None:
             raise ValueError(
                 "explicit_centers must be provided for 'explicit'",
@@ -868,8 +868,6 @@ def prepare_solidfmm_complex_upward_sweep(
         if explicit_centers.shape != (total_nodes, 3):
             raise ValueError("explicit_centers must have shape (num_nodes, 3)")
         centers = explicit_centers
-    else:
-        raise ValueError(f"Unknown center_mode '{center_mode}'")
 
     centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
 

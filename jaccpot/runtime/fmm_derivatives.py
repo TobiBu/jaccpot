@@ -948,8 +948,6 @@ class DerivativesMixin(_EngineBase):
             interactions=state.interactions,
             m2l_chunk_size=runtime_overrides.m2l_chunk_size,
             l2l_chunk_size=runtime_overrides.l2l_chunk_size,
-            grouped_interactions=runtime_overrides.grouped_interactions,
-            farfield_mode=runtime_overrides.farfield_mode,
             dehnen_radius_scale=self.dehnen_radius_scale,
         )
         tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
@@ -1174,8 +1172,6 @@ class DerivativesMixin(_EngineBase):
                 interactions=state.interactions,
                 m2l_chunk_size=runtime_overrides.m2l_chunk_size,
                 l2l_chunk_size=runtime_overrides.l2l_chunk_size,
-                grouped_interactions=runtime_overrides.grouped_interactions,
-                farfield_mode=runtime_overrides.farfield_mode,
                 dehnen_radius_scale=self.dehnen_radius_scale,
             )
             locals_by_k.append(down_k.locals)

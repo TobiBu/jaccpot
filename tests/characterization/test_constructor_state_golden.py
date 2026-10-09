@@ -126,16 +126,10 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "streamed_far_pairs_off": {"farfield": FarFieldConfig(streamed_far_pairs=False)},
     "farfield_dense": {"use_dense_interactions": True},
     "farfield_pair_grouped": {"farfield": FarFieldConfig(mode="pair_grouped")},
-    "farfield_class_major": {"farfield": FarFieldConfig(mode="class_major")},
     "nearfield_baseline": {"nearfield": NearFieldConfig(mode="baseline")},
     "nearfield_bucketed": {"nearfield": NearFieldConfig(mode="bucketed")},
     "runtime_path_large_n": {"runtime_path": "large_n"},
     "backend_radix": {"runtime_policy": RuntimePolicyConfig(execution_backend="radix")},
-    "grouped_interactions": {
-        # complex only: grouped M2L needs AABB centres the real upward rejects
-        "farfield": FarFieldConfig(grouped_interactions=True),
-        "expansion_basis": "complex",
-    },
     "mixed_order": {
         "farfield": FarFieldConfig(mixed_order=True, mixed_order_min_order=2)
     },

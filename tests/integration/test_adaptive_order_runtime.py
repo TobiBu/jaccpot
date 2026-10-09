@@ -255,8 +255,6 @@ def test_dehnen_error_uses_adaptive_pair_policy(monkeypatch):
             runtime_traversal_config=_advanced_cfg().runtime.traversal_config,
             runtime_m2l_chunk_size=None,
             runtime_l2l_chunk_size=None,
-            grouped_interactions=False,
-            farfield_mode="pair_grouped",
             record_retry=lambda event: None,
             refine_local_val=False,
             max_refine_levels_val=0,

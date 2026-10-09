@@ -25,6 +25,11 @@ MEMORY_OBJECTIVE_DOC = (
 )
 
 Basis = Literal["cartesian", "solidfmm", "complex", "real"]
+#: ``"class_major"`` stays in the alias only so that an old config naming it still
+#: constructs (and type-checks); the solver then raises, because the class-major far
+#: field was removed with the grouped one in the 2026-10 cleanup
+#: (docs/cleanup_2026-10.md, X3). ``"auto"`` and ``"pair_grouped"`` both run the flat
+#: far-pair list.
 FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
@@ -179,23 +184,15 @@ class FarFieldConfig:
     Attributes
     ----------
     grouped_interactions : Optional[bool]
-        Group M2L pairs into displacement classes so one rotation block serves a
-        whole class. Requires geometric (not centre-of-mass) expansion centres,
-        because the classification quantises pair displacements onto a lattice and
-        applies one representative displacement per class.
-    mode : FarFieldMode
-        ``"auto"``, ``"pair_grouped"`` or ``"class_major"``. Must not be left at
-        ``"auto"`` by the time the grouped M2L runs -- an unresolved ``"auto"``
-        used to reach the kernel and raise.
-
-        ``"pair_grouped"`` and ``"class_major"`` are two batchings of one
-        computation and agree to reassociation; the choice between them is a
-        throughput one, not an accuracy one. Both are less accurate than the
-        ungrouped default, because grouping rotates by one representative lattice
-        displacement per class rather than by each pair's own direction. That
-        residual does not shrink with expansion order. Measured relative L2 versus
-        a direct sum (``preset="accurate"``, solidfmm, leaf 8, theta 0.5, uniform
-        N=256), orders 2 / 4 / 6:
+        Removed in the 2026-10 cleanup (docs/cleanup_2026-10.md, X3). ``None`` and
+        ``False`` construct; ``True`` raises at solver construction. Grouping put
+        M2L pairs into displacement classes so one rotation block served a whole
+        class; it needed geometric (AABB) expansion centres, and it was less
+        accurate than the flat pair list, because it rotated by one representative
+        lattice displacement per class rather than by each pair's own direction.
+        That residual did not shrink with expansion order. Measured relative L2
+        versus a direct sum (``preset="accurate"``, solidfmm, leaf 8, theta 0.5,
+        uniform N=256), orders 2 / 4 / 6:
 
         ==============  =========  =========  =========
         mode            p=2        p=4        p=6
@@ -203,6 +200,10 @@ class FarFieldConfig:
         default         7.230e-04  8.148e-05  1.128e-05
         grouped         8.927e-04  2.049e-04  1.887e-04
         ==============  =========  =========  =========
+    mode : FarFieldMode
+        ``"auto"`` or ``"pair_grouped"``; both run the flat far-pair list (the
+        name is historical). ``"class_major"`` raises at solver construction: it
+        was the grouped far field's other batching and went with it (X3).
     rotation : Optional[str]
         M2L rotation implementation, e.g. ``"solidfmm"`` or ``"cached"``.
     m2l_chunk_size : Optional[int]
@@ -418,9 +419,12 @@ class RuntimePolicyConfig:
         Measure and pick the M2L chunk size at prepare time. Off by default, and
         consequently the autotune path is thinly covered.
     precompute_grouped_class_segments : Optional[bool]
-        Build grouped-class segment tables at prepare time.
+        Ignored since the 2026-10 cleanup (X3), which removed the grouped far
+        field whose segment tables it built. Kept so old configs construct; it
+        goes in a later phase.
     grouped_schedule_budget_bytes : Optional[int]
-        Byte budget above which grouped-class precomputation is skipped.
+        Ignored since the 2026-10 cleanup (X3), like
+        ``precompute_grouped_class_segments``.
     nearfield_schedule_item_cap : Optional[int]
         Item cap above which the near-field scatter schedules fall back to being
         recomputed per evaluation.

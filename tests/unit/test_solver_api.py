@@ -192,13 +192,15 @@ def test_advanced_config_applies_to_runtime():
         preset=FMMPreset.BALANCED,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(mode="class_major", grouped_interactions=True),
+            farfield=FarFieldConfig(mode="pair_grouped"),
             nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=512),
             mac_type="engblom",
         ),
     )
-    assert fmm.farfield_mode == "class_major"
-    assert bool(fmm.grouped_interactions) is True
+    # The far-field mode used to be `class_major` with grouped interactions on;
+    # both went in the 2026-10 cleanup (X3), so the surviving explicit value is
+    # what flows through now.
+    assert fmm.farfield_mode == "pair_grouped"
     assert fmm.nearfield_mode == "bucketed"
     assert int(fmm.nearfield_edge_chunk_size) == 512
     assert fmm.mac_type == "engblom"
@@ -555,6 +557,98 @@ def test_octree_tree_type_raises_removal_error():
             basis="solidfmm",
             advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="octree")),
         )
+
+
+def test_grouped_interactions_true_raises_removal_error():
+    """The grouped far field is gone (cleanup 2026-10, X3); asking for it must raise.
+
+    ``FarFieldConfig`` still constructs with the field set, so an old caller gets the
+    removal message from the solver rather than a silent flat far field.
+    """
+    farfield = FarFieldConfig(grouped_interactions=True)
+    with pytest.raises(ValueError, match="grouped interactions were removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(farfield=farfield),
+        )
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_legacy_grouped_interactions_kwarg_true_raises_removal_error():
+    """The legacy ``grouped_interactions=`` kwarg reaches the same refusal."""
+    with pytest.raises(ValueError, match="grouped interactions were removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST, basis="solidfmm", grouped_interactions=True
+        )
+
+
+def test_grouped_interactions_setter_refuses_true_and_accepts_false():
+    """The property reads ``False``; setting ``True`` raises, ``False`` is a no-op."""
+    fmm = FastMultipoleMethod(preset=FMMPreset.FAST, basis="solidfmm")
+    assert fmm.grouped_interactions is False
+    with pytest.raises(ValueError, match="grouped interactions were removed"):
+        fmm.grouped_interactions = True
+    fmm.grouped_interactions = False
+    assert fmm.grouped_interactions is False
+    assert fmm.advanced.farfield.grouped_interactions is False
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_class_major_farfield_mode_raises_removal_error():
+    """``mode="class_major"`` went with the grouped far field; both spellings raise."""
+    farfield = FarFieldConfig(mode="class_major")
+    with pytest.raises(ValueError, match="class-major far field was removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(farfield=farfield),
+        )
+    with pytest.raises(ValueError, match="class-major far field was removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST, basis="solidfmm", farfield_mode="class_major"
+        )
+
+
+@pytest.mark.parametrize("mode", ["auto", "pair_grouped"])
+def test_surviving_farfield_modes_still_construct(mode):
+    """``"auto"`` and ``"pair_grouped"`` stay accepted; both run the flat pair list."""
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode=mode, grouped_interactions=False)
+        ),
+    )
+    assert fmm.farfield_mode == mode
+    assert fmm.grouped_interactions is False
+
+
+def test_balanced_preset_still_constructs_with_its_pair_grouped_mode():
+    """The block-step lane builds ``preset="balanced"``, whose far field names
+    ``mode="pair_grouped"`` (``nornax_adapter.py``, ``mutual/topology.py``)."""
+    fmm = FastMultipoleMethod(preset="balanced")
+    assert fmm.farfield_mode == "pair_grouped"
+
+
+def test_removed_grouped_runtime_policy_fields_are_inert():
+    """The two grouped-schedule policy fields still construct, and do nothing.
+
+    They go in a later phase; until then an old config naming them must not raise,
+    including the non-positive budget the engine used to reject.
+    """
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                precompute_grouped_class_segments=True,
+                grouped_schedule_budget_bytes=0,
+            )
+        ),
+    )
+    assert not hasattr(fmm._impl, "precompute_grouped_class_segments")
+    assert not hasattr(fmm._impl, "grouped_schedule_budget_bytes")
 
 
 def test_basis_complex_alias_matches_solidfmm():
@@ -1321,7 +1415,7 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     )
     assert fmm._impl.tree_type == "radix"
     assert fmm._impl.tree_build_mode == "static_radix"
-    assert fmm._impl.grouped_interactions is False
+    assert fmm._impl.farfield_mode == "pair_grouped"
     assert fmm._impl.nearfield_mode == "bucketed"
     assert fmm._impl.precompute_nearfield_scatter_schedules is False
     assert fmm._impl.streamed_far_pairs is True
@@ -1337,7 +1431,6 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.retain_interactions is False
     assert fmm._impl.autotune_m2l_chunk is True
     assert fmm._impl.memory_objective == "minimum_memory"
-    assert fmm._impl.precompute_grouped_class_segments is False
     assert fmm._impl.upward_leaf_batch_size == 2048
     assert fmm._impl.mac_type == "dehnen"
 
@@ -1359,8 +1452,6 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
                 mode="baseline", precompute_scatter_schedules=True
             ),
             farfield=FarFieldConfig(
-                mode="class_major",
-                grouped_interactions=True,
                 streamed_far_pairs=False,
                 mixed_order=True,
                 mixed_order_min_order=2,
@@ -1379,7 +1470,6 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
     assert impl.nearfield_mode == "bucketed"
     assert impl.precompute_nearfield_scatter_schedules is False
     assert impl.streamed_far_pairs is True
-    assert bool(impl.grouped_interactions) is False
     assert impl.farfield_mode == "pair_grouped"
     assert impl.mixed_order_farfield is False
     assert impl.mixed_order_min_order is None
@@ -1399,10 +1489,7 @@ def test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs():
             basis="solidfmm",
             advanced=FMMAdvancedConfig(
                 nearfield=NearFieldConfig(mode="baseline"),
-                farfield=FarFieldConfig(
-                    grouped_interactions=True,
-                    streamed_far_pairs=False,
-                ),
+                farfield=FarFieldConfig(streamed_far_pairs=False),
                 runtime=RuntimePolicyConfig(memory_objective="throughput"),
             ),
         )
@@ -1733,8 +1820,6 @@ def test_runtime_memory_policy_fields_flow_to_runtime():
             runtime=RuntimePolicyConfig(
                 memory_objective="minimum_memory",
                 memory_budget_bytes=123456,
-                precompute_grouped_class_segments=False,
-                grouped_schedule_budget_bytes=4096,
                 nearfield_schedule_item_cap=2048,
                 upward_leaf_batch_size=128,
             ),
@@ -1742,8 +1827,6 @@ def test_runtime_memory_policy_fields_flow_to_runtime():
     )
     assert fmm._impl.memory_objective == "minimum_memory"
     assert fmm._impl.memory_budget_bytes == 123456
-    assert fmm._impl.precompute_grouped_class_segments is False
-    assert fmm._impl.grouped_schedule_budget_bytes == 4096
     assert fmm._impl.nearfield_schedule_item_cap == 2048
     assert fmm._impl.upward_leaf_batch_size == 128
 
@@ -1799,51 +1882,6 @@ def test_solidfmm_upward_defaults_to_bounded_leaf_batch_size():
         )
 
     assert recorded == [expected_batch]
-
-
-def test_pair_grouped_mode_skips_class_major_schedule_precompute():
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(mode="pair_grouped", grouped_interactions=True),
-            runtime=RuntimePolicyConfig(precompute_grouped_class_segments=True),
-        ),
-    )
-
-    assert (
-        fmm._impl._should_precompute_grouped_class_segments(
-            grouped_chunk_size=4096,
-            farfield_mode="pair_grouped",
-        )
-        is False
-    )
-    assert (
-        fmm._impl._should_precompute_grouped_class_segments(
-            grouped_chunk_size=4096,
-            farfield_mode="class_major",
-        )
-        is True
-    )
-
-
-def test_minimum_memory_gpu_runtime_does_not_auto_enable_grouped_interactions():
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            runtime=RuntimePolicyConfig(memory_objective="minimum_memory"),
-        ),
-    )
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(jax, "default_backend", lambda: "gpu")
-        overrides = fmm._impl._resolve_runtime_execution_overrides(
-            num_particles=131072,
-        )
-
-    assert overrides.grouped_interactions is False
-    assert overrides.farfield_mode == "pair_grouped"
 
 
 def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
@@ -1904,29 +1942,6 @@ def test_tracing_traversal_config_caps_queue_and_process_block():
     assert int(capped.max_neighbors_per_leaf) == 512
 
 
-def test_streamed_far_pairs_disables_grouped_interactions_runtime_override():
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(
-                grouped_interactions=True,
-                mode="class_major",
-                streamed_far_pairs=True,
-            ),
-        ),
-    )
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(jax, "default_backend", lambda: "gpu")
-        overrides = fmm._impl._resolve_runtime_execution_overrides(
-            num_particles=524288,
-        )
-
-    assert overrides.grouped_interactions is False
-    assert overrides.farfield_mode == "pair_grouped"
-
-
 def test_capacity_retry_traversal_settings_clamp_interaction_growth():
     next_cfg, next_queue, next_block = (
         interaction_cache_private._next_retry_traversal_settings(
@@ -1944,45 +1959,6 @@ def test_capacity_retry_traversal_settings_clamp_interaction_growth():
     assert next_queue == 4_194_304
     assert next_block == 4096
     assert int(next_cfg.max_interactions_per_node) == 16_384
-
-
-def test_without_grouped_class_segments_clears_cached_schedule_arrays():
-    dummy = jnp.asarray([1, 2, 3], dtype=jnp.int32)
-    entry = interaction_cache_private._InteractionCacheEntry(
-        key="abc",
-        interactions="interactions",
-        neighbor_list="neighbors",
-        dual_tree_result="walk",
-        compact_far_pairs="compact",
-        grouped_buffers="grouped",
-        grouped_segment_starts=dummy,
-        grouped_segment_lengths=dummy,
-        grouped_segment_class_ids=dummy,
-        grouped_segment_sort_permutation=dummy,
-        grouped_segment_group_ids=dummy,
-        grouped_segment_unique_targets=dummy,
-        grouped_chunk_size=4096,
-        nearfield_target_leaf_ids=None,
-        nearfield_source_leaf_ids=None,
-        nearfield_valid_pairs=None,
-        nearfield_chunk_sort_indices=None,
-        nearfield_chunk_group_ids=None,
-        nearfield_chunk_unique_indices=None,
-        nearfield_mode=None,
-        nearfield_edge_chunk_size=None,
-        nearfield_leaf_cap=None,
-    )
-
-    trimmed = interaction_cache_private._without_grouped_class_segments(entry)
-
-    assert trimmed.grouped_buffers == "grouped"
-    assert trimmed.grouped_segment_starts is None
-    assert trimmed.grouped_segment_lengths is None
-    assert trimmed.grouped_segment_class_ids is None
-    assert trimmed.grouped_segment_sort_permutation is None
-    assert trimmed.grouped_segment_group_ids is None
-    assert trimmed.grouped_segment_unique_targets is None
-    assert trimmed.grouped_chunk_size is None
 
 
 def test_minimum_memory_objective_reduces_default_nearfield_schedule_cap():

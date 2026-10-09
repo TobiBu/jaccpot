@@ -17,7 +17,6 @@ from jaccpot.config import TRAVERSAL_OVERRIDE_FIELDS, TraversalOverrides
 
 from .fmm_caches import _contains_tracer
 from .fmm_constants import (
-    _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD,
     _GPU_LARGE_PARTICLE_THRESHOLD,
     _GPU_MAX_INTERACTIONS_PER_NODE,
     _GPU_MAX_NEIGHBORS_PER_LEAF,
@@ -381,7 +380,6 @@ class OverridesMixin(_EngineBase):
         n_particles: int,
         minimum_memory: bool,
         production_large_n: bool,
-        grouped_interactions: bool,
         honor_explicit_traversal: bool = False,
     ) -> Optional[DualTreeTraversalConfig]:
         """Apply the deterministic GPU traversal memory-safety caps.
@@ -407,9 +405,6 @@ class OverridesMixin(_EngineBase):
             ceilings.
         production_large_n : bool
             Whether this is the large-N production lane.
-        grouped_interactions : bool
-            Whether grouped traversal is active; it changes which buffers
-            dominate the footprint.
         honor_explicit_traversal : bool
             Whether a caller-supplied config should otherwise be left alone.
             Note these are memory-SAFETY clamps, so per the paragraph above they
@@ -550,7 +545,6 @@ class OverridesMixin(_EngineBase):
             and self.tree_type == "radix"
             and self.expansion_basis == "solidfmm"
             and bool(self.streamed_far_pairs)
-            and not bool(grouped_interactions)
             and bool(self.fail_fast)
             and not self._explicit_traversal_config
             and not self._explicit_max_pair_queue
@@ -615,13 +609,6 @@ class OverridesMixin(_EngineBase):
         traversal_config = self.traversal_config
         m2l_chunk_size = self.m2l_chunk_size
         l2l_chunk_size = self.l2l_chunk_size
-        grouped_interactions = (
-            False
-            if self.grouped_interactions is None
-            else bool(self.grouped_interactions)
-        )
-        farfield_mode = self.farfield_mode
-        center_mode = "com"
         refine_local_override: Optional[bool] = None
         adaptive_applied = False
 
@@ -634,12 +621,6 @@ class OverridesMixin(_EngineBase):
         minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
         large_cpu = (
             backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
-        )
-        class_major_cpu = (
-            backend_name == "cpu" and n_particles >= _CLASS_MAJOR_CPU_PARTICLE_THRESHOLD
-        )
-        class_major_gpu = (
-            backend_name == "gpu" and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
         )
 
         if self.host_refine_mode == "off":
@@ -663,73 +644,14 @@ class OverridesMixin(_EngineBase):
         ):
             traversal_config = _KDTREE_DEFAULT_TRAVERSAL_CONFIG
 
-        if (
-            not self._explicit_grouped_interactions
-            and self.preset == "fast"
-            and self.expansion_basis == "solidfmm"
-            and self.mac_type == "dehnen"
-            and self.tree_type == "radix"
-            and large_cpu
-            and not minimum_memory
-        ):
-            grouped_interactions = True
-        if (
-            not self._explicit_grouped_interactions
-            and self.preset in ("fast", "large_n_gpu")
-            and self.expansion_basis == "solidfmm"
-            and self.mac_type == "dehnen"
-            and self.tree_type == "radix"
-            and backend_name == "gpu"
-            and n_particles >= _GPU_LARGE_PARTICLE_THRESHOLD
-            and not minimum_memory
-        ):
-            grouped_interactions = True
-
-        if production_large_n:
-            grouped_interactions = False
-            farfield_mode = "pair_grouped"
-            # Opt-in geometric (box/aabb) centres for the real-basis fast lane,
-            # decoupled from grouped_interactions (which stays False here to keep
-            # the streamed pair_grouped near/far payload). Centres flow
-            # upward->M2L->L2L->L2P via upward.multipoles.centers. Default OFF.
-            if (
-                bool(getattr(self, "_fastlane_geometric_centers", False))
-                and self._solidfmm_basis_mode() == "real"
-            ):
-                center_mode = "aabb"
-
+        # The far field is the flat pair list about COM expansion centres on every
+        # lane: the grouped / class-major far field and the AABB centres it needed
+        # went in the 2026-10 cleanup (X3), and with them the policy's auto-enable
+        # of grouping (fast preset at large CPU N, fast / large_n_gpu at large GPU
+        # N) and the geometric-centre knob of the large-N fast lane.
         if static_runtime_fixed_sizing:
             # Static sizing mode: keep traversal/chunk execution knobs fixed to
             # constructor/global-input values and skip adaptive runtime rewrites.
-            if not self._explicit_grouped_interactions:
-                # Auto-enabling the grouped/class-major M2L above is itself an
-                # adaptive rewrite, so static sizing must not inherit it. It used
-                # to leak through at n >= _GPU_LARGE_PARTICLE_THRESHOLD and left
-                # two invariants broken: ``farfield_mode`` stayed at "auto" (the
-                # grouped branch of _solidfmm_downward_accumulate_from_multipoles
-                # rejects that, so prepare_state/compute_accelerations raised), and
-                # it was decoupled from the geometric centres the grouped
-                # classification requires -- that path quantises pair
-                # displacements onto a lattice and applies ONE representative
-                # displacement per class, which is only valid with
-                # ``center_mode="aabb"`` (see the adaptive branch below).
-                grouped_interactions = False
-            if self.streamed_far_pairs and grouped_interactions:
-                grouped_interactions = False
-            if grouped_interactions:
-                center_mode = "aabb"
-                if farfield_mode == "auto":
-                    farfield_mode = (
-                        "pair_grouped"
-                        if minimum_memory
-                        else (
-                            "class_major"
-                            if (class_major_cpu or class_major_gpu)
-                            else "pair_grouped"
-                        )
-                    )
-            else:
-                farfield_mode = "pair_grouped"
             # Deterministic GPU memory-safety traversal caps are NOT adaptive
             # rewrites -- they bound the streamed GPU traversal buffers on the
             # minimum-memory / large-N production lane and must still apply here,
@@ -744,7 +666,6 @@ class OverridesMixin(_EngineBase):
                 n_particles=n_particles,
                 minimum_memory=minimum_memory,
                 production_large_n=production_large_n,
-                grouped_interactions=grouped_interactions,
                 honor_explicit_traversal=True,
             )
             # Last, after every clamp: see the matching call on the adaptive
@@ -756,21 +677,11 @@ class OverridesMixin(_EngineBase):
                 traversal_config=traversal_config,
                 m2l_chunk_size=m2l_chunk_size,
                 l2l_chunk_size=l2l_chunk_size,
-                grouped_interactions=grouped_interactions,
-                farfield_mode=farfield_mode,
-                center_mode=center_mode,
+                farfield_mode="pair_grouped",
+                center_mode="com",
                 refine_local_override=refine_local_override,
                 adaptive_applied=False,
             )
-
-        if self.streamed_far_pairs and grouped_interactions:
-            # Streamed far-pair execution and grouped/class-major M2L are
-            # competing strategies. The grouped path overrides streaming in the
-            # downward sweep, so keeping both enabled only pays the grouped
-            # traversal/materialization cost while defeating the user's request
-            # for streamed execution.
-            grouped_interactions = False
-            farfield_mode = "pair_grouped"
 
         if (
             self.preset == "fast"
@@ -795,24 +706,10 @@ class OverridesMixin(_EngineBase):
             n_particles=n_particles,
             minimum_memory=minimum_memory,
             production_large_n=production_large_n,
-            grouped_interactions=grouped_interactions,
         )
         # Last, after every clamp: a capacity the caller named explicitly wins,
         # and one they did not name keeps the value resolved above for this N.
         traversal_config = self._apply_traversal_field_overrides(traversal_config)
-        if grouped_interactions:
-            center_mode = "aabb"
-            if farfield_mode == "auto":
-                if minimum_memory:
-                    farfield_mode = "pair_grouped"
-                else:
-                    farfield_mode = (
-                        "class_major"
-                        if (class_major_cpu or class_major_gpu)
-                        else "pair_grouped"
-                    )
-        else:
-            farfield_mode = "pair_grouped"
 
         if minimum_memory and not self._explicit_m2l_chunk_size:
             m2l_chunk_size = (
@@ -825,9 +722,8 @@ class OverridesMixin(_EngineBase):
             traversal_config=traversal_config,
             m2l_chunk_size=m2l_chunk_size,
             l2l_chunk_size=l2l_chunk_size,
-            grouped_interactions=grouped_interactions,
-            farfield_mode=farfield_mode,
-            center_mode=center_mode,
+            farfield_mode="pair_grouped",
+            center_mode="com",
             refine_local_override=refine_local_override,
             adaptive_applied=adaptive_applied,
         )

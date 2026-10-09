@@ -1,8 +1,9 @@
 """Benchmark the real (Dehnen) basis vs the complex/solidfmm basis.
 
 Runnable end-to-end comparison for the real-basis FMM work: correctness first
-(so timings are trustworthy), then compute wall-clock, the grouped/class-major
-and Pallas real M2L paths, and coefficient memory.
+(so timings are trustworthy), then compute wall-clock, the Pallas real M2L
+path, and coefficient memory. (The grouped/class-major arm went with the grouped
+far field in the 2026-10 cleanup, X3.)
 
 Free-GPU selection uses ``autocvd`` and MUST run before ``import jax`` (mirrors
 the other bench scripts). On CPU the script still runs (useful as a smoke test),
@@ -18,7 +19,7 @@ Common variations::
 
     python bench/bench_real_vs_complex.py --n 8000,50000,200000 --orders 4,6,8
     python bench/bench_real_vs_complex.py --gpu-select first        # pin GPU 0
-    python bench/bench_real_vs_complex.py --skip-grouped --skip-pallas
+    python bench/bench_real_vs_complex.py --skip-pallas
 
 What to look for
 ----------------
@@ -27,9 +28,6 @@ What to look for
 * Compute: ``real/solidfmm`` wall-clock ratio < 1 means real is faster; the CPU
   baseline was ~0.5-0.9x, and the gap is expected to widen on GPU (real is half
   the FLOPs/bandwidth of complex).
-* Grouped: ``pair_grouped``/``class_major`` should be faster than flat on GPU
-  (per-class cached rotations) -- but note grouped is an opt-in APPROXIMATION,
-  so the reported grouped rel-L2 is the accuracy you trade for the speed.
 * Pallas: ``use_pallas=True`` should beat pure-JAX for the real z-M2L core on
   GPU; on CPU it is identical (silent fallback).
 """
@@ -72,7 +70,6 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--correctness-n", type=int, default=1500)
     p.add_argument("--skip-correctness", action="store_true")
-    p.add_argument("--skip-grouped", action="store_true")
     p.add_argument("--skip-pallas", action="store_true")
     p.add_argument("--output", default=None, help="Write a markdown report here")
     return p.parse_args()
@@ -99,8 +96,7 @@ def main() -> None:
     import jax.numpy as jnp
     import numpy as np
 
-    from jaccpot import FastMultipoleMethod, FMMAdvancedConfig
-    from jaccpot.config import FarFieldConfig
+    from jaccpot import FastMultipoleMethod
     from jaccpot.operators.real_harmonics import sh_size
 
     dtype = jnp.float64 if args.dtype == "float64" else jnp.float32
@@ -136,23 +132,14 @@ def main() -> None:
     def build_solver(
         basis: str,
         *,
-        grouped: Optional[bool] = None,
-        mode: str = "auto",
         use_pallas: Optional[bool] = None,
     ) -> FastMultipoleMethod:
-        advanced = None
-        if grouped is not None:
-            advanced = FMMAdvancedConfig(
-                farfield=FarFieldConfig(grouped_interactions=grouped, mode=mode)
-            )
         kwargs: dict[str, Any] = dict(
             preset="accurate",
             basis=basis,
             theta=args.theta,
             softening=args.softening,
         )
-        if advanced is not None:
-            kwargs["advanced"] = advanced
         if use_pallas is not None:
             kwargs["use_pallas"] = use_pallas
         return FastMultipoleMethod(**kwargs)
@@ -240,42 +227,6 @@ def main() -> None:
                 f"| {ratio:.2f} |"
             )
     emit()
-
-    # ---- Grouped / class-major real path ----------------------------------
-    if not args.skip_grouped:
-        emit("## Real: flat vs grouped vs class-major (time + grouped rel-L2)")
-        emit()
-        emit(
-            "Grouped modes are an opt-in approximation (shared rotation per "
-            "interaction class); rel-L2 is the accuracy traded for speed."
-        )
-        emit()
-        emit("| N | order | flat (ms) | pair_grouped (ms) | class_major (ms) |")
-        emit("|--:|------:|----------:|------------------:|-----------------:|")
-        for n in ns:
-            pos, mass = make_positions(n, args.seed)
-            for order in orders:
-                variants = {
-                    "flat": build_solver("real"),
-                    "pair_grouped": build_solver(
-                        "real", grouped=True, mode="pair_grouped"
-                    ),
-                    "class_major": build_solver(
-                        "real", grouped=True, mode="class_major"
-                    ),
-                }
-                t = {}
-                for name, fmm in variants.items():
-                    try:
-                        t[name] = time_solver(fmm, pos, mass, order)
-                    except Exception as exc:  # pragma: no cover
-                        print(f"[bench] real {name} N={n} p={order} failed: {exc}")
-                        t[name] = float("nan")
-                emit(
-                    f"| {n} | {order} | {t['flat']*1e3:.1f} "
-                    f"| {t['pair_grouped']*1e3:.1f} | {t['class_major']*1e3:.1f} |"
-                )
-        emit()
 
     # ---- Pallas real z-M2L core -------------------------------------------
     if not args.skip_pallas:

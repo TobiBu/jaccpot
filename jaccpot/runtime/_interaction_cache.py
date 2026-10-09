@@ -16,7 +16,6 @@ from beartype.typing import Callable
 from jaxtyping import Array
 from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
 from yggdrax.geometry import TreeGeometry
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
     DualTreeRetryEvent,
@@ -76,22 +75,6 @@ class _DualTreeArtifacts:
         Compact tagged far pairs, or ``None`` when not requested.
     dense_buffers : Optional[DenseInteractionBuffers]
         Dense interaction buffers, or ``None`` when unused.
-    grouped_buffers : Optional[GroupedInteractionBuffers]
-        Grouped (class-major) interaction buffers, or ``None`` when unused.
-    grouped_segment_starts : Optional[Array]
-        Start offset of each grouped segment.
-    grouped_segment_lengths : Optional[Array]
-        Length of each grouped segment.
-    grouped_segment_class_ids : Optional[Array]
-        Class id of each grouped segment.
-    grouped_segment_sort_permutation : Optional[Array]
-        Permutation sorting segments into class-major order.
-    grouped_segment_group_ids : Optional[Array]
-        Group id of each grouped segment.
-    grouped_segment_unique_targets : Optional[Array]
-        Unique target nodes per grouped segment.
-    grouped_chunk_size : Optional[int]
-        Pairs per grouped chunk, or ``None`` for the default.
     cache_hit : bool
         Whether these artifacts came from the cache rather than a fresh build.
     """
@@ -101,14 +84,6 @@ class _DualTreeArtifacts:
     traversal_result: Optional[DualTreeWalkResult]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
     dense_buffers: Optional[DenseInteractionBuffers]
-    grouped_buffers: Optional[GroupedInteractionBuffers]
-    grouped_segment_starts: Optional[Array]
-    grouped_segment_lengths: Optional[Array]
-    grouped_segment_class_ids: Optional[Array]
-    grouped_segment_sort_permutation: Optional[Array]
-    grouped_segment_group_ids: Optional[Array]
-    grouped_segment_unique_targets: Optional[Array]
-    grouped_chunk_size: Optional[int]
     cache_hit: bool = False
 
 
@@ -127,22 +102,6 @@ class _InteractionCacheEntry(NamedTuple):
         Full walk result, or ``None`` when it was not retained.
     compact_far_pairs : Optional[CompactTaggedFarPairs]
         Compact tagged far pairs, or ``None`` when not requested.
-    grouped_buffers : Optional[GroupedInteractionBuffers]
-        Grouped (class-major) interaction buffers, or ``None`` when unused.
-    grouped_segment_starts : Optional[Array]
-        Start offset of each grouped segment.
-    grouped_segment_lengths : Optional[Array]
-        Length of each grouped segment.
-    grouped_segment_class_ids : Optional[Array]
-        Class id of each grouped segment.
-    grouped_segment_sort_permutation : Optional[Array]
-        Permutation sorting segments into class-major order.
-    grouped_segment_group_ids : Optional[Array]
-        Group id of each grouped segment.
-    grouped_segment_unique_targets : Optional[Array]
-        Unique target nodes per grouped segment.
-    grouped_chunk_size : Optional[int]
-        Pairs per grouped chunk, or ``None`` for the default.
     nearfield_target_leaf_ids : Optional[Array]
         Target leaf id per near-field pair.
     nearfield_source_leaf_ids : Optional[Array]
@@ -168,14 +127,6 @@ class _InteractionCacheEntry(NamedTuple):
     neighbor_list: NodeNeighborList
     dual_tree_result: Optional[DualTreeWalkResult]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
-    grouped_buffers: Optional[GroupedInteractionBuffers]
-    grouped_segment_starts: Optional[Array]
-    grouped_segment_lengths: Optional[Array]
-    grouped_segment_class_ids: Optional[Array]
-    grouped_segment_sort_permutation: Optional[Array]
-    grouped_segment_group_ids: Optional[Array]
-    grouped_segment_unique_targets: Optional[Array]
-    grouped_chunk_size: Optional[int]
     nearfield_target_leaf_ids: Optional[Array]
     nearfield_source_leaf_ids: Optional[Array]
     nearfield_valid_pairs: Optional[Array]
@@ -200,22 +151,6 @@ class _DualTreeCacheHit(NamedTuple):
         Full walk result, or ``None`` when it was not retained.
     compact_far_pairs : Optional[CompactTaggedFarPairs]
         Compact tagged far pairs, or ``None`` when not requested.
-    grouped_buffers : Optional[GroupedInteractionBuffers]
-        Grouped (class-major) interaction buffers, or ``None`` when unused.
-    grouped_segment_starts : Optional[Array]
-        Start offset of each grouped segment.
-    grouped_segment_lengths : Optional[Array]
-        Length of each grouped segment.
-    grouped_segment_class_ids : Optional[Array]
-        Class id of each grouped segment.
-    grouped_segment_sort_permutation : Optional[Array]
-        Permutation sorting segments into class-major order.
-    grouped_segment_group_ids : Optional[Array]
-        Group id of each grouped segment.
-    grouped_segment_unique_targets : Optional[Array]
-        Unique target nodes per grouped segment.
-    grouped_chunk_size_cached : Optional[int]
-        The chunk size the cached payload was built with.
     cache_out : Optional['_InteractionCacheEntry']
         Entry to write back, or ``None`` when nothing needs storing.
     """
@@ -224,14 +159,6 @@ class _DualTreeCacheHit(NamedTuple):
     neighbor_list: NodeNeighborList
     traversal_result: Optional[DualTreeWalkResult]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
-    grouped_buffers: Optional[GroupedInteractionBuffers]
-    grouped_segment_starts: Optional[Array]
-    grouped_segment_lengths: Optional[Array]
-    grouped_segment_class_ids: Optional[Array]
-    grouped_segment_sort_permutation: Optional[Array]
-    grouped_segment_group_ids: Optional[Array]
-    grouped_segment_unique_targets: Optional[Array]
-    grouped_chunk_size_cached: Optional[int]
     cache_out: Optional["_InteractionCacheEntry"]
 
 
@@ -254,7 +181,6 @@ class _RefreshDualPlannerHint(NamedTuple):
 def _compiled_refresh_dual_planner_route(
     *,
     allow_split_build_flag: Array,
-    grouped_interactions_flag: Array,
     need_traversal_result_flag: Array,
     leaf_count: Array,
     need_node_interactions_flag: Array,
@@ -276,8 +202,6 @@ def _compiled_refresh_dual_planner_route(
     ----------
     allow_split_build_flag : Array
         Traced flag: whether a split build is permitted.
-    grouped_interactions_flag : Array
-        Traced flag: whether grouped interactions are active.
     need_traversal_result_flag : Array
         See the module docstring.
     leaf_count : Array
@@ -295,11 +219,7 @@ def _compiled_refresh_dual_planner_route(
         The routing decisions as traced values, so the refresh path can branch without a host sync.
     """
 
-    use_split_build = (
-        allow_split_build_flag
-        & (~grouped_interactions_flag)
-        & (~need_traversal_result_flag)
-    )
+    use_split_build = allow_split_build_flag & (~need_traversal_result_flag)
     need_far_payload = (
         need_node_interactions_flag
         | need_compact_far_pairs_flag
@@ -312,47 +232,6 @@ def _compiled_refresh_dual_planner_route(
     return use_split_build, use_compact_shared_far_near, suppress_substage_timing
 
 
-def _without_grouped_class_segments(
-    entry: _InteractionCacheEntry,
-) -> _InteractionCacheEntry:
-    """Drop cached class-major schedule arrays from an interaction cache entry.
-
-    Parameters
-    ----------
-    entry : _InteractionCacheEntry
-        Cache entry being transformed.
-
-    Returns
-    -------
-    _InteractionCacheEntry
-        The entry with its class-major schedule arrays dropped.
-    """
-    return _InteractionCacheEntry(
-        key=entry.key,
-        interactions=entry.interactions,
-        neighbor_list=entry.neighbor_list,
-        dual_tree_result=entry.dual_tree_result,
-        compact_far_pairs=entry.compact_far_pairs,
-        grouped_buffers=entry.grouped_buffers,
-        grouped_segment_starts=None,
-        grouped_segment_lengths=None,
-        grouped_segment_class_ids=None,
-        grouped_segment_sort_permutation=None,
-        grouped_segment_group_ids=None,
-        grouped_segment_unique_targets=None,
-        grouped_chunk_size=None,
-        nearfield_target_leaf_ids=entry.nearfield_target_leaf_ids,
-        nearfield_source_leaf_ids=entry.nearfield_source_leaf_ids,
-        nearfield_valid_pairs=entry.nearfield_valid_pairs,
-        nearfield_chunk_sort_indices=entry.nearfield_chunk_sort_indices,
-        nearfield_chunk_group_ids=entry.nearfield_chunk_group_ids,
-        nearfield_chunk_unique_indices=entry.nearfield_chunk_unique_indices,
-        nearfield_mode=entry.nearfield_mode,
-        nearfield_edge_chunk_size=entry.nearfield_edge_chunk_size,
-        nearfield_leaf_cap=entry.nearfield_leaf_cap,
-    )
-
-
 def _dual_tree_cache_lookup(
     *,
     cache_key: Optional[str],
@@ -360,7 +239,6 @@ def _dual_tree_cache_lookup(
     need_traversal_result: bool,
     need_compact_far_pairs: bool,
     need_node_interactions: bool,
-    precompute_grouped_class_segments: bool,
 ) -> Optional[_DualTreeCacheHit]:
     """Return reusable cached dual-tree artifacts when available.
 
@@ -376,8 +254,6 @@ def _dual_tree_cache_lookup(
         Whether the compact tagged far-pair payload is required.
     need_node_interactions : bool
         Whether a node interaction list must be emitted.
-    precompute_grouped_class_segments : bool
-        Whether class-major schedules are materialised now.
 
     Returns
     -------
@@ -395,44 +271,12 @@ def _dual_tree_cache_lookup(
     ):
         return None
 
-    grouped_segment_starts = cache_entry.grouped_segment_starts
-    grouped_segment_lengths = cache_entry.grouped_segment_lengths
-    grouped_segment_class_ids = cache_entry.grouped_segment_class_ids
-    grouped_segment_sort_permutation = cache_entry.grouped_segment_sort_permutation
-    grouped_segment_group_ids = cache_entry.grouped_segment_group_ids
-    grouped_segment_unique_targets = cache_entry.grouped_segment_unique_targets
-    grouped_chunk_size_cached = cache_entry.grouped_chunk_size
-    cache_out: Optional[_InteractionCacheEntry] = cache_entry
-    if not precompute_grouped_class_segments and (
-        grouped_segment_starts is not None
-        or grouped_segment_lengths is not None
-        or grouped_segment_class_ids is not None
-        or grouped_segment_sort_permutation is not None
-        or grouped_segment_group_ids is not None
-        or grouped_segment_unique_targets is not None
-    ):
-        cache_out = _without_grouped_class_segments(cache_entry)
-        grouped_segment_starts = None
-        grouped_segment_lengths = None
-        grouped_segment_class_ids = None
-        grouped_segment_sort_permutation = None
-        grouped_segment_group_ids = None
-        grouped_segment_unique_targets = None
-        grouped_chunk_size_cached = None
     return _DualTreeCacheHit(
         interactions=cache_entry.interactions,
         neighbor_list=cache_entry.neighbor_list,
         traversal_result=cache_entry.dual_tree_result,
         compact_far_pairs=cache_entry.compact_far_pairs,
-        grouped_buffers=cache_entry.grouped_buffers,
-        grouped_segment_starts=grouped_segment_starts,
-        grouped_segment_lengths=grouped_segment_lengths,
-        grouped_segment_class_ids=grouped_segment_class_ids,
-        grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-        grouped_segment_group_ids=grouped_segment_group_ids,
-        grouped_segment_unique_targets=grouped_segment_unique_targets,
-        grouped_chunk_size_cached=grouped_chunk_size_cached,
-        cache_out=cache_out,
+        cache_out=cache_entry,
     )
 
 
@@ -452,7 +296,6 @@ def _dual_tree_build_raw(
     need_traversal_result: bool,
     need_compact_far_pairs: bool,
     need_node_interactions: bool,
-    grouped_interactions: bool,
     pair_policy: Optional[PairPolicy],
     policy_state: Optional[AdaptivePolicyState],
     jit_traversal: bool,
@@ -497,8 +340,6 @@ def _dual_tree_build_raw(
     need_node_interactions : bool
         Ask for a node interaction list. The streamed lane sets this ``False``
         and reads compact pairs instead.
-    grouped_interactions : bool
-        Group interactions by displacement class during the walk.
     pair_policy : Optional[PairPolicy]
         Solver-owned per-pair acceptance callable. ``None`` leaves the traversal
         running the geometric MAC alone -- that is the difference between the
@@ -544,10 +385,7 @@ def _dual_tree_build_raw(
                 retry_logger=retry_logger,
                 return_result=need_traversal_result,
                 return_compact_far_pairs=need_compact_far_pairs,
-                return_interactions=(
-                    bool(need_node_interactions) or bool(grouped_interactions)
-                ),
-                return_grouped=grouped_interactions,
+                return_interactions=bool(need_node_interactions),
                 pair_policy=pair_policy,
                 policy_state=policy_state,
             )
@@ -586,10 +424,7 @@ def _dual_tree_build_raw(
                 retry_logger=retry_logger,
                 return_result=need_traversal_result,
                 return_compact_far_pairs=need_compact_far_pairs,
-                return_interactions=(
-                    bool(need_node_interactions) or bool(grouped_interactions)
-                ),
-                return_grouped=grouped_interactions,
+                return_interactions=bool(need_node_interactions),
                 pair_policy=pair_policy,
                 policy_state=policy_state,
             )
@@ -636,7 +471,6 @@ def _dual_tree_build_raw(
 def _dual_tree_unpack_build_output(
     *,
     build_out: Any,
-    grouped_interactions: bool,
     need_traversal_result: bool,
     need_compact_far_pairs: bool,
 ) -> tuple[
@@ -644,7 +478,6 @@ def _dual_tree_unpack_build_output(
     NodeNeighborList,
     Optional[DualTreeWalkResult],
     Optional[CompactTaggedFarPairs],
-    Optional[GroupedInteractionBuffers],
 ]:
     """Normalize raw builder outputs into a fixed tuple.
 
@@ -652,8 +485,6 @@ def _dual_tree_unpack_build_output(
     ----------
     build_out : Any
         Raw tuple returned by the yggdrax builder.
-    grouped_interactions : bool
-        Whether the grouped class-major layout is in use.
     need_traversal_result : bool
         Whether the full walk result must be retained.
     need_compact_far_pairs : bool
@@ -661,36 +492,9 @@ def _dual_tree_unpack_build_output(
 
     Returns
     -------
-    tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs], Optional[GroupedInteractionBuffers]]
-        The raw builder output normalised to a fixed five-tuple, whichever optional payloads were requested.
+    tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs]]
+        The raw builder output normalised to a fixed four-tuple, whichever optional payloads were requested.
     """
-
-    if grouped_interactions:
-        if need_traversal_result and need_compact_far_pairs:
-            (
-                interactions,
-                neighbor_list,
-                traversal_result,
-                compact_far_pairs,
-                grouped_buffers,
-            ) = build_out
-        elif need_traversal_result:
-            interactions, neighbor_list, traversal_result, grouped_buffers = build_out
-            compact_far_pairs = None
-        elif need_compact_far_pairs:
-            interactions, neighbor_list, compact_far_pairs, grouped_buffers = build_out
-            traversal_result = None
-        else:
-            interactions, neighbor_list, grouped_buffers = build_out
-            traversal_result = None
-            compact_far_pairs = None
-        return (
-            interactions,
-            neighbor_list,
-            traversal_result,
-            compact_far_pairs,
-            grouped_buffers,
-        )
 
     if need_traversal_result and need_compact_far_pairs:
         interactions, neighbor_list, traversal_result, compact_far_pairs = build_out
@@ -704,13 +508,12 @@ def _dual_tree_unpack_build_output(
         interactions, neighbor_list = build_out
         traversal_result = None
         compact_far_pairs = None
-    return interactions, neighbor_list, traversal_result, compact_far_pairs, None
+    return interactions, neighbor_list, traversal_result, compact_far_pairs
 
 
 def _can_split_dual_tree_build(
     *,
     split_enabled: bool,
-    grouped_interactions: bool,
     need_traversal_result: bool,
 ) -> bool:
     """Return whether far/near traversal can be built in separate passes.
@@ -733,22 +536,17 @@ def _can_split_dual_tree_build(
     ----------
     split_enabled : bool
         Whether the caller permits a split build at all.
-    grouped_interactions : bool
-        Grouping needs the single combined walk, so it disqualifies the split.
     need_traversal_result : bool
-        The full walk result likewise only exists on the combined path.
+        The full walk result only exists on the combined path, so it
+        disqualifies the split.
 
     Returns
     -------
     bool
-        ``True`` only when all three allow it.
+        ``True`` only when both allow it.
     """
 
-    return (
-        bool(split_enabled)
-        and not bool(grouped_interactions)
-        and not bool(need_traversal_result)
-    )
+    return bool(split_enabled) and not bool(need_traversal_result)
 
 
 def _build_dual_tree_artifacts_split(
@@ -912,14 +710,6 @@ def _build_dual_tree_artifacts_split(
         traversal_result=None,
         compact_far_pairs=compact_far_pairs,
         dense_buffers=dense_buffers,
-        grouped_buffers=None,
-        grouped_segment_starts=None,
-        grouped_segment_lengths=None,
-        grouped_segment_class_ids=None,
-        grouped_segment_sort_permutation=None,
-        grouped_segment_group_ids=None,
-        grouped_segment_unique_targets=None,
-        grouped_chunk_size=None,
     )
 
 
@@ -1068,7 +858,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
 
     This path intentionally avoids generic split-builder host branching and
     callback plumbing. It is valid only for streamed compact far-pairs with no
-    dense/grouped/interactions payload requests.
+    dense/interactions payload requests.
 
     ``pair_policy``/``policy_state`` are forwarded rather than assumed absent:
     this branch is selected on payload shape (``fail_fast`` + compact far pairs),
@@ -1430,14 +1220,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         traversal_result=None,
         compact_far_pairs=compact_far_pairs,
         dense_buffers=None,
-        grouped_buffers=None,
-        grouped_segment_starts=None,
-        grouped_segment_lengths=None,
-        grouped_segment_class_ids=None,
-        grouped_segment_sort_permutation=None,
-        grouped_segment_group_ids=None,
-        grouped_segment_unique_targets=None,
-        grouped_chunk_size=None,
     )
 
 
@@ -2517,99 +2299,6 @@ def _build_flat_walk_artifacts_strict_streamed(
         traversal_result=None,
         compact_far_pairs=compact_far_pairs,
         dense_buffers=None,
-        grouped_buffers=None,
-        grouped_segment_starts=None,
-        grouped_segment_lengths=None,
-        grouped_segment_class_ids=None,
-        grouped_segment_sort_permutation=None,
-        grouped_segment_group_ids=None,
-        grouped_segment_unique_targets=None,
-        grouped_chunk_size=None,
-    )
-
-
-def _dual_tree_build_grouped_buffers(
-    *,
-    tree: Tree,
-    geometry: TreeGeometry,
-    interactions: Optional[NodeInteractionList],
-) -> GroupedInteractionBuffers:
-    """Materialize grouped interaction buffers from node interaction pairs.
-
-    Parameters
-    ----------
-    tree : Tree
-        Built tree.
-    geometry : TreeGeometry
-        Node centres and radii; the displacement classes are formed from these.
-    interactions : Optional[NodeInteractionList]
-        Far-field pairs to group.
-
-    Returns
-    -------
-    GroupedInteractionBuffers
-        Class-sorted sources and targets, class offsets, keys and representative
-        displacements.
-
-    Raises
-    ------
-    RuntimeError
-        If the interaction list is absent or cannot be grouped -- grouping is
-        requested explicitly, so failing is better than silently returning the
-        ungrouped form.
-    """
-
-    from yggdrax import interactions as _yggdrax_interactions
-
-    if interactions is None:
-        raise RuntimeError(
-            "grouped interaction preparation requires node interaction lists"
-        )
-    return _yggdrax_interactions.build_grouped_interactions_from_pairs(
-        tree,
-        geometry,
-        interactions.sources,
-        interactions.targets,
-        level_offsets=getattr(interactions, "level_offsets", None),
-    )
-
-
-def _dual_tree_build_grouped_class_segments(
-    *,
-    grouped_buffers: GroupedInteractionBuffers,
-    grouped_chunk_size: int,
-) -> tuple[Array, Array, Array, int]:
-    """Materialize class-major grouped schedule arrays.
-
-    Parameters
-    ----------
-    grouped_buffers : GroupedInteractionBuffers
-        See the module docstring.
-    grouped_chunk_size : int
-        Pairs per grouped chunk, or ``None`` for the default.
-
-    Returns
-    -------
-    tuple[Array, Array, Array, int]
-        ``(starts, lengths, class_ids, chunk_size)``: the class-major segment
-        schedule and the chunk size it was built for. Three arrays and an int, not
-        the six arrays ``_DualTreeArtifacts`` stores -- the caller derives the
-        remaining two from these.
-    """
-
-    from . import fmm as _runtime_fmm
-
-    grouped_segment_starts, grouped_segment_lengths, grouped_segment_class_ids = (
-        _runtime_fmm._build_grouped_class_segments(
-            grouped_buffers,
-            chunk_size=int(grouped_chunk_size),
-        )
-    )
-    return (
-        grouped_segment_starts,
-        grouped_segment_lengths,
-        grouped_segment_class_ids,
-        int(grouped_chunk_size),
     )
 
 
@@ -3145,13 +2834,9 @@ def _build_dual_tree_artifacts(
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
     fail_fast: bool,
     use_dense_interactions: bool,
-    grouped_interactions: bool,
-    grouped_chunk_size: Optional[int],
     need_traversal_result: bool,
     need_compact_far_pairs: bool,
     need_node_interactions: bool,
-    precompute_grouped_class_segments: bool,
-    grouped_schedule_budget_bytes: Optional[int],
     allow_split_build: bool = False,
     pair_policy: Optional[PairPolicy] = None,
     policy_state: Optional[AdaptivePolicyState] = None,
@@ -3207,20 +2892,12 @@ def _build_dual_tree_artifacts(
         Raise on a capacity overflow instead of retrying with more room.
     use_dense_interactions : bool
         Materialise the interaction list densely.
-    grouped_interactions : bool
-        Group interactions by displacement class.
-    grouped_chunk_size : Optional[int]
-        Pairs per grouped segment; ``None`` lets the builder choose.
     need_traversal_result : bool
         Retain the full walk result.
     need_compact_far_pairs : bool
         Produce compact tagged far pairs.
     need_node_interactions : bool
         Produce a node interaction list.
-    precompute_grouped_class_segments : bool
-        Build the class-major segment table up front.
-    grouped_schedule_budget_bytes : Optional[int]
-        Memory ceiling for that schedule; ``None`` is unbounded.
     allow_split_build : bool
         Permit the two-phase split build when
         :func:`_can_split_dual_tree_build` agrees.
@@ -3274,7 +2951,6 @@ def _build_dual_tree_artifacts(
         need_traversal_result=need_traversal_result,
         need_compact_far_pairs=need_compact_far_pairs,
         need_node_interactions=need_node_interactions,
-        precompute_grouped_class_segments=precompute_grouped_class_segments,
     )
     if cache_hit is not None:
         dual_tree_cache_hit = True
@@ -3282,14 +2958,6 @@ def _build_dual_tree_artifacts(
         neighbor_list = cache_hit.neighbor_list
         traversal_result = cache_hit.traversal_result
         compact_far_pairs = cache_hit.compact_far_pairs
-        grouped_buffers = cache_hit.grouped_buffers
-        grouped_segment_starts = cache_hit.grouped_segment_starts
-        grouped_segment_lengths = cache_hit.grouped_segment_lengths
-        grouped_segment_class_ids = cache_hit.grouped_segment_class_ids
-        grouped_segment_sort_permutation = cache_hit.grouped_segment_sort_permutation
-        grouped_segment_group_ids = cache_hit.grouped_segment_group_ids
-        grouped_segment_unique_targets = cache_hit.grouped_segment_unique_targets
-        grouped_chunk_size_cached = cache_hit.grouped_chunk_size_cached
         cache_out = cache_hit.cache_out
     else:
         dual_tree_cache_hit = False
@@ -3306,7 +2974,6 @@ def _build_dual_tree_artifacts(
         else:
             use_split_build = _can_split_dual_tree_build(
                 split_enabled=bool(allow_split_build),
-                grouped_interactions=grouped_interactions,
                 need_traversal_result=need_traversal_result,
             )
         strict_streamed_split = False
@@ -3316,7 +2983,6 @@ def _build_dual_tree_artifacts(
                 and bool(need_compact_far_pairs)
                 and not bool(need_node_interactions)
                 and not bool(use_dense_interactions)
-                and not bool(grouped_interactions)
                 and not bool(need_traversal_result)
             )
         if walk_criterion is not None and not (
@@ -3373,14 +3039,6 @@ def _build_dual_tree_artifacts(
             neighbor_list = split_artifacts.neighbor_list
             traversal_result = split_artifacts.traversal_result
             compact_far_pairs = split_artifacts.compact_far_pairs
-            grouped_buffers = split_artifacts.grouped_buffers
-            grouped_segment_starts = None
-            grouped_segment_lengths = None
-            grouped_segment_class_ids = None
-            grouped_segment_sort_permutation = None
-            grouped_segment_group_ids = None
-            grouped_segment_unique_targets = None
-            grouped_chunk_size_cached = None
             cache_out = (
                 _InteractionCacheEntry(
                     key=cache_key,
@@ -3388,14 +3046,6 @@ def _build_dual_tree_artifacts(
                     neighbor_list=neighbor_list,
                     dual_tree_result=traversal_result,
                     compact_far_pairs=compact_far_pairs,
-                    grouped_buffers=None,
-                    grouped_segment_starts=None,
-                    grouped_segment_lengths=None,
-                    grouped_segment_class_ids=None,
-                    grouped_segment_sort_permutation=None,
-                    grouped_segment_group_ids=None,
-                    grouped_segment_unique_targets=None,
-                    grouped_chunk_size=None,
                     nearfield_target_leaf_ids=None,
                     nearfield_source_leaf_ids=None,
                     nearfield_valid_pairs=None,
@@ -3426,7 +3076,6 @@ def _build_dual_tree_artifacts(
                 need_traversal_result=need_traversal_result,
                 need_compact_far_pairs=need_compact_far_pairs,
                 need_node_interactions=need_node_interactions,
-                grouped_interactions=grouped_interactions,
                 pair_policy=pair_policy,
                 policy_state=policy_state,
                 jit_traversal=jit_traversal,
@@ -3441,10 +3090,8 @@ def _build_dual_tree_artifacts(
                 neighbor_list,
                 traversal_result,
                 compact_far_pairs,
-                grouped_buffers,
             ) = _dual_tree_unpack_build_output(
                 build_out=build_out,
-                grouped_interactions=grouped_interactions,
                 need_traversal_result=need_traversal_result,
                 need_compact_far_pairs=need_compact_far_pairs,
             )
@@ -3455,14 +3102,6 @@ def _build_dual_tree_artifacts(
                     neighbor_list=neighbor_list,
                     dual_tree_result=traversal_result,
                     compact_far_pairs=compact_far_pairs,
-                    grouped_buffers=grouped_buffers if grouped_interactions else None,
-                    grouped_segment_starts=None,
-                    grouped_segment_lengths=None,
-                    grouped_segment_class_ids=None,
-                    grouped_segment_sort_permutation=None,
-                    grouped_segment_group_ids=None,
-                    grouped_segment_unique_targets=None,
-                    grouped_chunk_size=None,
                     nearfield_target_leaf_ids=None,
                     nearfield_source_leaf_ids=None,
                     nearfield_valid_pairs=None,
@@ -3476,118 +3115,6 @@ def _build_dual_tree_artifacts(
                 if cache_key is not None
                 else None
             )
-            grouped_segment_starts = None
-            grouped_segment_lengths = None
-            grouped_segment_class_ids = None
-            grouped_segment_sort_permutation = None
-            grouped_segment_group_ids = None
-            grouped_segment_unique_targets = None
-            grouped_chunk_size_cached = None
-            if not grouped_interactions:
-                grouped_buffers = None
-
-    if grouped_interactions and grouped_buffers is None:
-        grouped_buffers = _dual_tree_build_grouped_buffers(
-            tree=tree,
-            geometry=geometry,
-            interactions=interactions,
-        )
-        if cache_out is not None:
-            cache_out = _InteractionCacheEntry(
-                key=cache_out.key,
-                interactions=cache_out.interactions,
-                neighbor_list=cache_out.neighbor_list,
-                dual_tree_result=cache_out.dual_tree_result,
-                compact_far_pairs=cache_out.compact_far_pairs,
-                grouped_buffers=grouped_buffers,
-                grouped_segment_starts=cache_out.grouped_segment_starts,
-                grouped_segment_lengths=cache_out.grouped_segment_lengths,
-                grouped_segment_class_ids=cache_out.grouped_segment_class_ids,
-                grouped_segment_sort_permutation=cache_out.grouped_segment_sort_permutation,
-                grouped_segment_group_ids=cache_out.grouped_segment_group_ids,
-                grouped_segment_unique_targets=cache_out.grouped_segment_unique_targets,
-                grouped_chunk_size=cache_out.grouped_chunk_size,
-                nearfield_target_leaf_ids=cache_out.nearfield_target_leaf_ids,
-                nearfield_source_leaf_ids=cache_out.nearfield_source_leaf_ids,
-                nearfield_valid_pairs=cache_out.nearfield_valid_pairs,
-                nearfield_chunk_sort_indices=cache_out.nearfield_chunk_sort_indices,
-                nearfield_chunk_group_ids=cache_out.nearfield_chunk_group_ids,
-                nearfield_chunk_unique_indices=cache_out.nearfield_chunk_unique_indices,
-                nearfield_mode=cache_out.nearfield_mode,
-                nearfield_edge_chunk_size=cache_out.nearfield_edge_chunk_size,
-                nearfield_leaf_cap=cache_out.nearfield_leaf_cap,
-            )
-
-    if (
-        precompute_grouped_class_segments
-        and (
-            grouped_schedule_budget_bytes is None
-            or int(grouped_chunk_size or 0) <= 0
-            or (
-                grouped_buffers is not None
-                and (
-                    int(grouped_buffers.class_targets.shape[0])
-                    * 3
-                    * int(grouped_chunk_size or 1)
-                    * np.dtype(np.int32).itemsize
-                )
-                <= int(grouped_schedule_budget_bytes)
-            )
-        )
-        and (
-            grouped_interactions
-            and grouped_buffers is not None
-            and grouped_chunk_size is not None
-        )
-    ):
-        # These segment arrays are a pure execution aid for class-major grouped
-        # M2L. They are worth caching only when the schedule itself stays within
-        # budget; otherwise the raw grouped buffers are already the smaller
-        # resident representation.
-        needs_schedule = (
-            grouped_segment_starts is None
-            or grouped_segment_lengths is None
-            or grouped_segment_class_ids is None
-            or grouped_chunk_size_cached != int(grouped_chunk_size)
-        )
-        if needs_schedule:
-            (
-                grouped_segment_starts,
-                grouped_segment_lengths,
-                grouped_segment_class_ids,
-                grouped_chunk_size_cached,
-            ) = _dual_tree_build_grouped_class_segments(
-                grouped_buffers=grouped_buffers,
-                grouped_chunk_size=int(grouped_chunk_size),
-            )
-            grouped_segment_sort_permutation = None
-            grouped_segment_group_ids = None
-            grouped_segment_unique_targets = None
-            if cache_out is not None:
-                cache_out = _InteractionCacheEntry(
-                    key=cache_out.key,
-                    interactions=cache_out.interactions,
-                    neighbor_list=cache_out.neighbor_list,
-                    dual_tree_result=cache_out.dual_tree_result,
-                    compact_far_pairs=cache_out.compact_far_pairs,
-                    grouped_buffers=grouped_buffers,
-                    grouped_segment_starts=grouped_segment_starts,
-                    grouped_segment_lengths=grouped_segment_lengths,
-                    grouped_segment_class_ids=grouped_segment_class_ids,
-                    grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                    grouped_segment_group_ids=grouped_segment_group_ids,
-                    grouped_segment_unique_targets=grouped_segment_unique_targets,
-                    grouped_chunk_size=grouped_chunk_size_cached,
-                    nearfield_target_leaf_ids=cache_out.nearfield_target_leaf_ids,
-                    nearfield_source_leaf_ids=cache_out.nearfield_source_leaf_ids,
-                    nearfield_valid_pairs=cache_out.nearfield_valid_pairs,
-                    nearfield_chunk_sort_indices=cache_out.nearfield_chunk_sort_indices,
-                    nearfield_chunk_group_ids=cache_out.nearfield_chunk_group_ids,
-                    nearfield_chunk_unique_indices=cache_out.nearfield_chunk_unique_indices,
-                    nearfield_mode=cache_out.nearfield_mode,
-                    nearfield_edge_chunk_size=cache_out.nearfield_edge_chunk_size,
-                    nearfield_leaf_cap=cache_out.nearfield_leaf_cap,
-                )
 
     dense_buffers = _dual_tree_build_dense_buffers(
         tree=tree,
@@ -3602,14 +3129,6 @@ def _build_dual_tree_artifacts(
         traversal_result=traversal_result,
         compact_far_pairs=compact_far_pairs,
         dense_buffers=dense_buffers,
-        grouped_buffers=grouped_buffers,
-        grouped_segment_starts=grouped_segment_starts,
-        grouped_segment_lengths=grouped_segment_lengths,
-        grouped_segment_class_ids=grouped_segment_class_ids,
-        grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-        grouped_segment_group_ids=grouped_segment_group_ids,
-        grouped_segment_unique_targets=grouped_segment_unique_targets,
-        grouped_chunk_size=grouped_chunk_size_cached,
         cache_hit=bool(dual_tree_cache_hit),
     )
     return artifacts, cache_out

@@ -17,7 +17,6 @@ from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, Bool, Int, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
     DualTreeRetryEvent,
@@ -169,13 +168,15 @@ def _gear_pairs_for_autotune(
 class _DualDownwardPlan(NamedTuple):
     """Everything the dual/downward phase resolves before it builds anything.
 
-    Seventeen host-side decisions -- which traversal build to use, whether the
+    Sixteen host-side decisions -- which traversal build to use, whether the
     stateful interaction cache may be reused, which far-field payload shape the
     M2L feed needs, and whether the strict streamed fast lane is eligible --
     resolved together because they constrain each other. ARCHITECTURE §4 and the
     two bugs behind ``b462e45`` / ``dee46d6`` are both about *resolution order*
     here, which is the reason this is one bundle produced by one function rather
-    than flags set at their point of use.
+    than flags set at their point of use. (There were seventeen until the grouped
+    far field, and its ``grouped_interactions_active`` flag, went in the 2026-10
+    cleanup, X3.)
 
     ``runtime_traversal_config`` is carried through rather than merely read: the
     resolution can clamp it, and the clamped value is what the build must see.
@@ -187,7 +188,7 @@ class _DualDownwardPlan(NamedTuple):
 
     It did not hold for two independent reasons. This module already imports
     ``yggdrax.interactions`` at module scope, so the import it warned about was
-    present either way; and sixteen of the seventeen fields are plain booleans
+    present either way; and all but one of the fields are plain booleans
     that need no import at all -- every one of them is assigned a ``bool(...)``,
     a ``not``, or a comparison in ``_resolve_dual_downward_plan``. Only
     ``runtime_traversal_config`` needs a yggdrax name, and that name
@@ -200,8 +201,6 @@ class _DualDownwardPlan(NamedTuple):
     allow_split_build : bool
         Whether the prepare stage may split tree build and traversal into two
         device passes to cap peak memory.
-    grouped_interactions_active : bool
-        Whether the M2L feed uses the grouped (class-major) interaction layout.
     jit_traversal_for_prepare : bool
         Whether this build's traversal runs jitted.
     mixed_order_farfield_active : bool
@@ -237,7 +236,6 @@ class _DualDownwardPlan(NamedTuple):
 
     adaptive_order_active: bool
     allow_split_build: bool
-    grouped_interactions_active: bool
     jit_traversal_for_prepare: bool
     mixed_order_farfield_active: bool
     need_compact_far_pairs: bool
@@ -283,12 +281,13 @@ class _DualDownwardPlan(NamedTuple):
 #       question needs a solver built with an adaptive force-scale MAC, which is its own
 #       setup and its own change.
 #
-#   the grouped-segment family, sorted_codes, far_pairs_by_gear,
-#   target_indices, the topology-reuse family                       (16 parameters)
+#   sorted_codes, far_pairs_by_gear, target_indices,
+#   the topology-reuse family                (16 parameters, counted with the six
+#                                            grouped-segment ones the 2026-10
+#                                            cleanup removed, X3)
 #       Never exercised: `None` in all 194 captured calls across three test files. Not
 #       "fine" -- unmeasured, for the same reason as the tree-taking half of
-#       `_adaptive_policy`, and it needs a run that enters the grouped far-field and the
-#       topology-reuse lanes.
+#       `_adaptive_policy`, and it needs a run that enters the topology-reuse lanes.
 #
 #   target_leaf_ids / valid_pairs                                   (2 parameters)
 #       The one measured gap, and it is the family section 4.1 predicts -- this helper
@@ -1219,8 +1218,6 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            grouped_interactions=False,
-            farfield_mode=self.farfield_mode,
             record_retry=record_retry,
             refine_local_val=bool(refine_local_val),
             max_refine_levels_val=int(max_refine_levels_val),
@@ -1241,8 +1238,6 @@ class PrepareMixin(_EngineBase):
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
         runtime_m2l_chunk_size: Optional[int],
         runtime_l2l_chunk_size: Optional[int],
-        grouped_interactions: bool,
-        farfield_mode: str,
         record_retry: Callable[[DualTreeRetryEvent], None],
         refine_local_val: bool,
         max_refine_levels_val: int,
@@ -1257,9 +1252,9 @@ class PrepareMixin(_EngineBase):
         Memory note:
         The dominant warm prepare peak is usually the far-field payload that
         exists long enough to feed M2L: raw interactions or streamed COO pairs,
-        optional grouped layouts, and the downward locals buffer. Only the
+        and the downward locals buffer. Only the
         returned ``TreeDownwardData`` is meant to survive into prepared state;
-        grouped schedules and other M2L feed artifacts are transient and should
+        chunk schedules and other M2L feed artifacts are transient and should
         stay scoped to this helper.
 
         Parameters
@@ -1282,10 +1277,6 @@ class PrepareMixin(_EngineBase):
             M2L chunk size for this run, or None to autotune.
         runtime_l2l_chunk_size : Optional[int]
             L2L chunk size for this run, or None for the default.
-        grouped_interactions : bool
-            Whether the grouped class-major layout is in use.
-        farfield_mode : str
-            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
         record_retry : Callable[[DualTreeRetryEvent], None]
             Callback invoked when a traversal capacity retry occurs.
         refine_local_val : bool
@@ -1368,13 +1359,12 @@ class PrepareMixin(_EngineBase):
         pair_policy = None
         policy_state = None
         cache_key = None
-        # The 17 interdependent build decisions, resolved together -- see
+        # The 16 interdependent build decisions, resolved together -- see
         # `_DualDownwardPlan`. Unpacked back into locals so every expression
         # below reads exactly as it did before the extraction.
         (
             adaptive_order_active,
             allow_split_build,
-            grouped_interactions_active,
             jit_traversal_for_prepare,
             mixed_order_farfield_active,
             need_compact_far_pairs,
@@ -1394,8 +1384,6 @@ class PrepareMixin(_EngineBase):
             theta_val=theta_val,
             mac_type_val=mac_type_val,
             runtime_traversal_config=runtime_traversal_config,
-            grouped_interactions=grouped_interactions,
-            farfield_mode=farfield_mode,
             allow_stateful_cache=allow_stateful_cache,
             suppress_host_side_effects=suppress_host_side_effects,
         )
@@ -1416,7 +1404,6 @@ class PrepareMixin(_EngineBase):
                 runtime_m2l_chunk_size=runtime_m2l_chunk_size,
                 runtime_l2l_chunk_size=runtime_l2l_chunk_size,
                 record_retry=record_retry,
-                farfield_mode=farfield_mode,
                 retain_interactions=bool(retain_interactions_active),
                 suppress_host_side_effects=suppress_host_side_effects,
             )
@@ -1527,7 +1514,6 @@ class PrepareMixin(_EngineBase):
             plan=_DualDownwardPlan(
                 adaptive_order_active=adaptive_order_active,
                 allow_split_build=allow_split_build,
-                grouped_interactions_active=grouped_interactions_active,
                 jit_traversal_for_prepare=jit_traversal_for_prepare,
                 mixed_order_farfield_active=mixed_order_farfield_active,
                 need_compact_far_pairs=need_compact_far_pairs,
@@ -1603,16 +1589,9 @@ class PrepareMixin(_EngineBase):
             ),
             fail_fast=(self.fail_fast or strict_mode_active),
             use_dense_interactions=use_dense_interactions_for_prepare,
-            grouped_interactions=grouped_interactions,
-            grouped_chunk_size=runtime_m2l_chunk_size,
             need_traversal_result=need_traversal_result,
             need_compact_far_pairs=need_compact_far_pairs,
             need_node_interactions=need_node_interactions,
-            precompute_grouped_class_segments=self._should_precompute_grouped_class_segments(
-                grouped_chunk_size=runtime_m2l_chunk_size,
-                farfield_mode=farfield_mode,
-            ),
-            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
             allow_split_build=allow_split_build,
             pair_policy=pair_policy,
             policy_state=policy_state,
@@ -1638,13 +1617,6 @@ class PrepareMixin(_EngineBase):
             traversal_result,
             compact_far_pairs,
             dense_buffers,
-            grouped_buffers,
-            grouped_segment_starts,
-            grouped_segment_lengths,
-            grouped_segment_class_ids,
-            grouped_segment_sort_permutation,
-            grouped_segment_group_ids,
-            grouped_segment_unique_targets,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
         if not suppress_host_side_effects:
             far_pair_count_diag = None
@@ -1675,8 +1647,7 @@ class PrepareMixin(_EngineBase):
                 f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
                 f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
                 f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
-                f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))} "
-                f"grouped_buffers={_format_nbytes(_estimate_payload_nbytes(grouped_buffers))}"
+                f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))}"
             )
 
         strict_streamed_direct_far_pairs = bool(
@@ -1758,15 +1729,6 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             record_retry=record_retry,
             dense_buffers=dense_buffers,
-            grouped_interactions=grouped_interactions,
-            grouped_buffers=grouped_buffers,
-            grouped_segment_starts=grouped_segment_starts,
-            grouped_segment_lengths=grouped_segment_lengths,
-            grouped_segment_class_ids=grouped_segment_class_ids,
-            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-            grouped_segment_group_ids=grouped_segment_group_ids,
-            grouped_segment_unique_targets=grouped_segment_unique_targets,
-            farfield_mode=farfield_mode,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=adaptive_order_for_downward,
@@ -1853,12 +1815,10 @@ class PrepareMixin(_EngineBase):
         theta_val: float,
         mac_type_val: MACType,
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
-        grouped_interactions: bool,
-        farfield_mode: str,
         allow_stateful_cache: bool,
         suppress_host_side_effects: bool,
     ) -> _DualDownwardPlan:
-        """Resolve the dual/downward build plan: 17 interdependent host decisions.
+        """Resolve the dual/downward build plan: 16 interdependent host decisions.
 
         Extracted verbatim from :meth:`_prepare_state_dual_and_downward` (Tier
         1.7). Pure host-side policy -- it traces nothing and allocates no device
@@ -1879,10 +1839,6 @@ class PrepareMixin(_EngineBase):
         runtime_traversal_config : Optional[DualTreeTraversalConfig]
             Caller-resolved traversal capacities; may be clamped here, which is
             why the (possibly replaced) value is returned in the plan.
-        grouped_interactions : bool
-            Whether the grouped far-field layout was requested.
-        farfield_mode : str
-            Resolved far-field batching mode.
         allow_stateful_cache : bool
             Whether this call may reuse cached dual-tree artifacts.
         suppress_host_side_effects : bool
@@ -1891,7 +1847,7 @@ class PrepareMixin(_EngineBase):
         Returns
         -------
         _DualDownwardPlan
-            The 17 resolved decisions, in the order the bundle declares them.
+            The 16 resolved decisions, in the order the bundle declares them.
 
         Raises
         ------
@@ -1928,7 +1884,6 @@ class PrepareMixin(_EngineBase):
             and str(tree_artifacts.tree_mode) != "static_radix"
             and (not suppress_host_side_effects)
         )
-        grouped_interactions_active = bool(grouped_interactions)
         strict_fused_device_only_hot_path = (
             bool(suppress_host_side_effects)
             and bool(getattr(self, "_strict_fused_mode_active", False))
@@ -1992,7 +1947,6 @@ class PrepareMixin(_EngineBase):
             (bool(self.streamed_far_pairs) or bool(strict_fused_device_only_hot_path))
             and not bool(strict_fused_node_interactions_safe_path)
             and not adaptive_order_active
-            and not grouped_interactions_active
             and not mixed_order_farfield_active
             and not retain_interactions_active
             and not bool(need_traversal_result)
@@ -2012,8 +1966,8 @@ class PrepareMixin(_EngineBase):
             _prepare_diag(
                 "dual-tree start "
                 f"theta={theta_val:.3f} mac_type={mac_type_val} "
-                f"streamed={bool(self.streamed_far_pairs)} grouped={grouped_interactions_active} "
-                f"farfield_mode={farfield_mode} memory_objective={self.memory_objective} "
+                f"streamed={bool(self.streamed_far_pairs)} "
+                f"memory_objective={self.memory_objective} "
                 f"traversal_config={runtime_traversal_config} "
                 f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
                 f"need_node_interactions={bool(need_node_interactions)} "
@@ -2026,7 +1980,6 @@ class PrepareMixin(_EngineBase):
             and self.tree_type == "radix"
             and self.expansion_basis == "solidfmm"
             and bool(self.streamed_far_pairs)
-            and not grouped_interactions_active
         ):
             total_nodes = int(tree_artifacts.tree.parent.shape[0])
             num_internal = int(jnp.asarray(tree_artifacts.tree.left_child).shape[0])
@@ -2067,7 +2020,6 @@ class PrepareMixin(_EngineBase):
             # minimum-memory streamed GPU path; keep env opt-out for debugging.
             allow_split_build = bool(
                 self._streamed_minimum_memory_gpu_default_split_build
-                and not grouped_interactions_active
             )
         else:
             allow_split_build = bool(self._prepare_stage_memory_split_env_override)
@@ -2167,7 +2119,6 @@ class PrepareMixin(_EngineBase):
             strict_mode_active
             and bool(allow_split_build)
             and bool(use_compact_streamed_pairs)
-            and not grouped_interactions_active
             and not bool(need_traversal_result)
             and not adaptive_order_active
             and not mixed_order_farfield_active
@@ -2188,8 +2139,6 @@ class PrepareMixin(_EngineBase):
                 blockers.append("split_build_disabled")
             if not bool(use_compact_streamed_pairs):
                 blockers.append("compact_streamed_pairs_disabled")
-            if bool(grouped_interactions_active):
-                blockers.append("grouped_interactions_active")
             if bool(need_traversal_result):
                 blockers.append("traversal_result_required")
             if bool(adaptive_order_active):
@@ -2231,7 +2180,6 @@ class PrepareMixin(_EngineBase):
         return _DualDownwardPlan(
             adaptive_order_active=adaptive_order_active,
             allow_split_build=allow_split_build,
-            grouped_interactions_active=grouped_interactions_active,
             jit_traversal_for_prepare=jit_traversal_for_prepare,
             mixed_order_farfield_active=mixed_order_farfield_active,
             need_compact_far_pairs=need_compact_far_pairs,
@@ -2293,7 +2241,6 @@ class PrepareMixin(_EngineBase):
             cache hit.
         """
         allow_split_build = plan.allow_split_build
-        grouped_interactions_active = plan.grouped_interactions_active
         need_compact_far_pairs = plan.need_compact_far_pairs
         need_node_interactions = plan.need_node_interactions
         need_traversal_result = plan.need_traversal_result
@@ -2324,7 +2271,6 @@ class PrepareMixin(_EngineBase):
                 or (
                     strict_mode_active
                     and bool(allow_split_build)
-                    and not grouped_interactions_active
                     and not bool(need_traversal_result)
                     and not has_pair_policy
                     and not has_policy_state
@@ -2360,7 +2306,6 @@ class PrepareMixin(_EngineBase):
                         str(int(tree_artifacts.leaf_parameter)),
                         f"{float(theta_val):.12g}",
                         str(mac_type_val),
-                        str(grouped_interactions_active),
                         str(bool(need_traversal_result)),
                         str(bool(need_compact_far_pairs)),
                         str(bool(need_node_interactions)),
@@ -2386,9 +2331,6 @@ class PrepareMixin(_EngineBase):
                     ) = _compiled_refresh_dual_planner_route(
                         allow_split_build_flag=jnp.asarray(
                             bool(allow_split_build), dtype=jnp.bool_
-                        ),
-                        grouped_interactions_flag=jnp.asarray(
-                            grouped_interactions_active, dtype=jnp.bool_
                         ),
                         need_traversal_result_flag=jnp.asarray(
                             bool(need_traversal_result), dtype=jnp.bool_
@@ -3187,44 +3129,6 @@ class PrepareMixin(_EngineBase):
             base_cap = min(base_cap, budget_limited_cap)
         return int(base_cap)
 
-    def _should_precompute_grouped_class_segments(
-        self,
-        *,
-        grouped_chunk_size: Optional[int],
-        farfield_mode: str,
-    ) -> bool:
-        """Decide whether grouped class-major schedules should be materialized.
-
-        Parameters
-        ----------
-        grouped_chunk_size : Optional[int]
-            Chunk size for grouped interaction processing.
-        farfield_mode : str
-            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
-
-        Returns
-        -------
-        bool
-            Whether grouped class-major schedules should be materialised.
-        """
-        if grouped_chunk_size is None:
-            return False
-        if str(farfield_mode).strip().lower() != "class_major":
-            return False
-        if self.precompute_grouped_class_segments is not None:
-            return bool(self.precompute_grouped_class_segments)
-        return self.memory_objective != "minimum_memory"
-
-    def _grouped_schedule_item_budget(self) -> int:
-        """Return max bytes allowed for cached grouped schedule matrices.
-
-        Returns
-        -------
-        int
-            Maximum bytes allowed for cached grouped schedule matrices.
-        """
-        return int(self.grouped_schedule_budget_bytes)
-
     def _resolve_target_indices(
         self,
         *,
@@ -3283,13 +3187,6 @@ class PrepareMixin(_EngineBase):
         Optional[DualTreeWalkResult],
         Optional[CompactTaggedFarPairs],
         Optional[DenseInteractionBuffers],
-        Optional[GroupedInteractionBuffers],
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
-        Optional[Array],
     ]:
         """Unpack dual-tree artifacts for downward preparation and state export.
 
@@ -3300,11 +3197,10 @@ class PrepareMixin(_EngineBase):
 
         Returns
         -------
-        tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs], Optional[DenseInteractionBuffers], Optional[GroupedInteractionBuffers], Optional[Array], Optional[Array], Optional[Array], Optional[Array], Optional[Array], Optional[Array]]
-            The twelve dual-tree artifacts in the order the downward phase consumes
+        tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs], Optional[DenseInteractionBuffers]]
+            The five dual-tree artifacts in the order the downward phase consumes
             them: the interaction list (``None`` on the streamed path), the neighbour
-            list, the walk result, the compact far pairs, the dense and grouped
-            buffers, and the six grouped-segment arrays.
+            list, the walk result, the compact far pairs and the dense buffers.
         """
         return (
             dual_artifacts.interactions,
@@ -3312,13 +3208,6 @@ class PrepareMixin(_EngineBase):
             dual_artifacts.traversal_result,
             dual_artifacts.compact_far_pairs,
             dual_artifacts.dense_buffers,
-            dual_artifacts.grouped_buffers,
-            dual_artifacts.grouped_segment_starts,
-            dual_artifacts.grouped_segment_lengths,
-            dual_artifacts.grouped_segment_class_ids,
-            dual_artifacts.grouped_segment_sort_permutation,
-            dual_artifacts.grouped_segment_group_ids,
-            dual_artifacts.grouped_segment_unique_targets,
         )
 
     @jax.named_scope("fmm_downward")
@@ -3335,15 +3224,6 @@ class PrepareMixin(_EngineBase):
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
         record_retry: Callable[[DualTreeRetryEvent], None],
         dense_buffers: Optional[DenseInteractionBuffers],
-        grouped_interactions: bool,
-        grouped_buffers: Optional[GroupedInteractionBuffers],
-        grouped_segment_starts: Optional[Array],
-        grouped_segment_lengths: Optional[Array],
-        grouped_segment_class_ids: Optional[Array],
-        grouped_segment_sort_permutation: Optional[Array],
-        grouped_segment_group_ids: Optional[Array],
-        grouped_segment_unique_targets: Optional[Array],
-        farfield_mode: str,
         far_pairs_coo: Optional[_FarPairCOO] = None,
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: bool = False,
@@ -3375,24 +3255,6 @@ class PrepareMixin(_EngineBase):
             Callback invoked when a traversal capacity retry occurs.
         dense_buffers : Optional[DenseInteractionBuffers]
             Dense interaction buffers, or None when unused.
-        grouped_interactions : bool
-            Whether the grouped class-major layout is in use.
-        grouped_buffers : Optional[GroupedInteractionBuffers]
-            Grouped interaction buffers, or None when unused.
-        grouped_segment_starts : Optional[Array]
-            Start offset of each grouped segment.
-        grouped_segment_lengths : Optional[Array]
-            Length of each grouped segment.
-        grouped_segment_class_ids : Optional[Array]
-            Class id of each grouped segment.
-        grouped_segment_sort_permutation : Optional[Array]
-            Permutation sorting segments into class-major order.
-        grouped_segment_group_ids : Optional[Array]
-            Group id of each grouped segment.
-        grouped_segment_unique_targets : Optional[Array]
-            Unique target nodes per grouped segment.
-        farfield_mode : str
-            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
         far_pairs_coo : Optional[_FarPairCOO]
             Far pairs in coordinate form for the streamed feed.
         far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
@@ -3428,15 +3290,6 @@ class PrepareMixin(_EngineBase):
             traversal_config=runtime_traversal_config,
             retry_logger=record_retry,
             dense_buffers=dense_buffers,
-            grouped_interactions=grouped_interactions,
-            grouped_buffers=grouped_buffers,
-            grouped_segment_starts=grouped_segment_starts,
-            grouped_segment_lengths=grouped_segment_lengths,
-            grouped_segment_class_ids=grouped_segment_class_ids,
-            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-            grouped_segment_group_ids=grouped_segment_group_ids,
-            grouped_segment_unique_targets=grouped_segment_unique_targets,
-            farfield_mode=farfield_mode,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             n_targets=n_targets,
@@ -3651,7 +3504,6 @@ class PrepareMixin(_EngineBase):
         runtime_m2l_chunk_size: Optional[int],
         runtime_l2l_chunk_size: Optional[int],
         record_retry: Callable[[DualTreeRetryEvent], None],
-        farfield_mode: str,
         retain_interactions: bool = False,
         suppress_host_side_effects: bool = False,
         cross_far: Optional[tuple] = None,
@@ -3678,8 +3530,6 @@ class PrepareMixin(_EngineBase):
             L2L chunk size for this run, or None for the default.
         record_retry : Callable[[DualTreeRetryEvent], None]
             Callback invoked when a traversal capacity retry occurs.
-        farfield_mode : str
-            Far-field feed shape: ``auto``, ``pair_grouped`` or ``class_major``.
         retain_interactions : bool
             Whether the prepared state keeps its interaction list.
         suppress_host_side_effects : bool
@@ -3766,13 +3616,9 @@ class PrepareMixin(_EngineBase):
             retry_logger=None,
             fail_fast=True,
             use_dense_interactions=False,
-            grouped_interactions=False,
-            grouped_chunk_size=runtime_m2l_chunk_size,
             need_traversal_result=False,
             need_compact_far_pairs=True,
             need_node_interactions=False,
-            precompute_grouped_class_segments=False,
-            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
             allow_split_build=True,
             pair_policy=None,
             policy_state=None,
@@ -3789,25 +3635,11 @@ class PrepareMixin(_EngineBase):
             traversal_result,
             compact_far_pairs,
             dense_buffers,
-            grouped_buffers,
-            grouped_segment_starts,
-            grouped_segment_lengths,
-            grouped_segment_class_ids,
-            grouped_segment_sort_permutation,
-            grouped_segment_group_ids,
-            grouped_segment_unique_targets,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
         del (
             interactions,
             traversal_result,
             dense_buffers,
-            grouped_buffers,
-            grouped_segment_starts,
-            grouped_segment_lengths,
-            grouped_segment_class_ids,
-            grouped_segment_sort_permutation,
-            grouped_segment_group_ids,
-            grouped_segment_unique_targets,
         )
         if compact_far_pairs is None:
             raise RuntimeError(
@@ -3885,15 +3717,6 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             record_retry=record_retry,
             dense_buffers=None,
-            grouped_interactions=False,
-            grouped_buffers=None,
-            grouped_segment_starts=None,
-            grouped_segment_lengths=None,
-            grouped_segment_class_ids=None,
-            grouped_segment_sort_permutation=None,
-            grouped_segment_group_ids=None,
-            grouped_segment_unique_targets=None,
-            farfield_mode=farfield_mode,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=True,
@@ -4077,8 +3900,6 @@ class PrepareMixin(_EngineBase):
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
         runtime_m2l_chunk_size: Optional[int],
         runtime_l2l_chunk_size: Optional[int],
-        grouped_interactions: bool,
-        farfield_mode: str,
         record_retry: Callable[[DualTreeRetryEvent], None],
         refine_local_val: bool,
         max_refine_levels_val: int,
@@ -4143,10 +3964,6 @@ class PrepareMixin(_EngineBase):
             M2L chunk size forwarded to the prepass builders.
         runtime_l2l_chunk_size : Optional[int]
             L2L chunk size forwarded to the prepass builders.
-        grouped_interactions : bool
-            Grouped-interaction flag forwarded to the prepass builders.
-        farfield_mode : str
-            Far-field mode forwarded to the prepass builders.
         record_retry : Callable[[DualTreeRetryEvent], None]
             Sink for traversal retry events raised inside the prepass, so a
             capacity retry during the prepass is reported against the caller's
@@ -4304,8 +4121,6 @@ class PrepareMixin(_EngineBase):
                             runtime_traversal_config=runtime_traversal_config,
                             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
                             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                            grouped_interactions=grouped_interactions,
-                            farfield_mode=farfield_mode,
                             record_retry=record_retry,
                             refine_local_val=refine_local_val,
                             max_refine_levels_val=max_refine_levels_val,
@@ -4329,8 +4144,6 @@ class PrepareMixin(_EngineBase):
                             runtime_traversal_config=runtime_traversal_config,
                             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
                             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                            grouped_interactions=grouped_interactions,
-                            farfield_mode=farfield_mode,
                             record_retry=record_retry,
                             refine_local_val=refine_local_val,
                             max_refine_levels_val=max_refine_levels_val,
@@ -4571,8 +4384,6 @@ class PrepareMixin(_EngineBase):
         runtime_traversal_config = runtime_overrides.traversal_config
         runtime_m2l_chunk_size = runtime_overrides.m2l_chunk_size
         runtime_l2l_chunk_size = runtime_overrides.l2l_chunk_size
-        grouped_interactions = runtime_overrides.grouped_interactions
-        farfield_mode = runtime_overrides.farfield_mode
         upward_center_mode = runtime_overrides.center_mode
         if refine_local is None and runtime_overrides.refine_local_override is not None:
             refine_local_val = bool(runtime_overrides.refine_local_override)
@@ -4648,8 +4459,6 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            grouped_interactions=grouped_interactions,
-            farfield_mode=farfield_mode,
             record_retry=record_retry,
             refine_local_val=refine_local_val,
             max_refine_levels_val=max_refine_levels_val,
@@ -4682,10 +4491,8 @@ class PrepareMixin(_EngineBase):
             mac_type_val=mac_type_val,
             dehnen_radius_scale=self.dehnen_radius_scale,
             runtime_traversal_config=runtime_traversal_config,
-            grouped_interactions=grouped_interactions,
             runtime_m2l_chunk_size=runtime_m2l_chunk_size,
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-            farfield_mode=farfield_mode,
             record_retry=record_retry,
             refine_local_val=refine_local_val,
             max_refine_levels_val=max_refine_levels_val,
