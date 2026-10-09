@@ -533,6 +533,7 @@ def evaluate_large_n_nearfield_fast_lane(
     positions_sorted: Any = None,
     masses_sorted: Any = None,
     differentiable: bool = False,
+    return_force_scale: bool = False,
 ) -> Any:
     """Evaluate the radix fast-lane nearfield path (payload-driven).
 
@@ -561,6 +562,13 @@ def evaluate_large_n_nearfield_fast_lane(
         this ``False`` under ``jax.grad`` fails rather than silently
         approximating.
 
+    return_force_scale : bool
+        Return ``(acc, f_near)`` with eq (16b)'s near-field force scale per sorted
+        particle (the CSR direct kernel's fourth lane) for the fused lane's
+        per-step ``dehnen_error`` threshold. The overflow additions below are
+        acceleration only, so their pairs are missing from ``f_near``: the scale
+        errs low, i.e. the criterion stricter, never looser. Accelerations only.
+
     Returns
     -------
     Any
@@ -572,8 +580,13 @@ def evaluate_large_n_nearfield_fast_lane(
     RuntimeError
         If the prepared state carries no ``radix_fast_payload``. A wiring fault
         rather than user input, as above.
+    ValueError
+        If both ``return_potential`` and ``return_force_scale`` are set: they
+        share the near-field kernel's fourth lane.
     """
 
+    if bool(return_potential) and bool(return_force_scale):
+        raise ValueError("return_potential and return_force_scale are exclusive")
     use_pallas = bool(getattr(fmm, "use_pallas", False))
     # Resolve once: every read below goes through these, never through the state,
     # so a live-input gradient evaluation cannot silently pick up frozen arrays
@@ -654,8 +667,13 @@ def evaluate_large_n_nearfield_fast_lane(
         )
 
     diag_mode = normalize_large_n_nearfield_diag_mode()
+
+    def _with_scale(acc: Any, scale: Any) -> Any:
+        return (acc, scale) if return_force_scale else acc
+
     if diag_mode == "zero":
-        return jnp.zeros_like(live_positions)
+        zero = jnp.zeros_like(live_positions)
+        return _with_scale(zero, zero[:, 0])
 
     if state.radix_fast_payload is None:
         raise RuntimeError(
@@ -663,8 +681,9 @@ def evaluate_large_n_nearfield_fast_lane(
         )
 
     near_acc = jnp.zeros_like(live_positions)
+    near_scale = jnp.zeros_like(live_positions[:, 0])
     if diag_mode != "overflow_only":
-        near_acc = compute_leaf_p2p_accelerations_radix_fast_lane(
+        near_out = compute_leaf_p2p_accelerations_radix_fast_lane(
             positions_sorted=live_positions,
             masses_sorted=live_masses,
             payload=state.radix_fast_payload,
@@ -682,10 +701,15 @@ def evaluate_large_n_nearfield_fast_lane(
                     jnp.asarray(state.neighbor_list.leaf_indices)
                 ]
             ),
+            return_force_scale=bool(return_force_scale),
         )
+        if return_force_scale:
+            near_acc, near_scale = near_out
+        else:
+            near_acc = near_out
     overflow_payload = getattr(state, "radix_overflow_payload", None)
     if overflow_payload is not None and diag_mode in ("full", "overflow_only"):
-        return near_acc + compute_leaf_p2p_accelerations_radix_payload_pairs_only(
+        overflow_payload_acc = compute_leaf_p2p_accelerations_radix_payload_pairs_only(
             positions_sorted=live_positions,
             masses_sorted=live_masses,
             payload=overflow_payload,
@@ -694,6 +718,7 @@ def evaluate_large_n_nearfield_fast_lane(
             softening_kernel=getattr(fmm, "softening_kernel", None),
             use_pallas=use_pallas,
         )
+        return _with_scale(near_acc + overflow_payload_acc, near_scale)
 
     if (
         state.nearfield_target_block_offsets is None
@@ -703,7 +728,7 @@ def evaluate_large_n_nearfield_fast_lane(
         or int(state.nearfield_target_block_source_leaf_ids.size) == 0
         or diag_mode not in ("full", "overflow_only")
     ):
-        return near_acc
+        return _with_scale(near_acc, near_scale)
 
     overflow_acc = compute_leaf_p2p_accelerations_target_block_pairs_only(
         live_positions,
@@ -729,4 +754,4 @@ def evaluate_large_n_nearfield_fast_lane(
             state.nearfield_target_block_overflow_fast_max_blocks
         ),
     )
-    return near_acc + overflow_acc
+    return _with_scale(near_acc + overflow_acc, near_scale)

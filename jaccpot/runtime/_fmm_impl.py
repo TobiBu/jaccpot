@@ -1159,6 +1159,25 @@ class FMMEngine(
         if self.upward_leaf_batch_size is not None and self.upward_leaf_batch_size <= 0:
             raise ValueError("upward_leaf_batch_size must be > 0 when provided")
 
+    def _flat_walk_criterion_active(self) -> bool:
+        """Whether the strict fused lane runs Dehnen's eq (16a) inside its flat walk.
+
+        ``mac_type='dehnen_error'`` (the paper criterion at a fixed order): the
+        walk accepts by eq (16a) from a per-node table, with thresholds from eq
+        (16b)'s ``f_b``. The fused scan then carries ``f_b`` from each step's
+        evaluation to the next step's refresh.
+
+        Returns
+        -------
+        bool
+            True for the paper criterion at a fixed order, not folded into per-node
+            opening angles.
+        """
+        return (not bool(getattr(self, "adaptive_order", False))) and bool(
+            self._uses_paper_style_traversal_policy()
+            and not self._uses_per_node_effective_theta()
+        )
+
     def _walk_separation_floor(self) -> float:
         """The walk's separation floor in length units: ``softening_floor`` x softening.
 

@@ -310,3 +310,128 @@ def test_separation_floor_keeps_every_far_pair_apart_in_both_walks(floor):
         dmin = np.min(np.linalg.norm(pa[:, None, :] - pb[None, :, :], axis=-1))
         worst = min(worst, dmin)
     assert worst >= floor * (1 - 1e-5)
+
+
+@pytest.mark.parametrize(
+    "node_layout, dtype", [("record", "float32"), ("soa", "float64")]
+)
+@pytest.mark.parametrize("eps", [1e-2, 1e-4])
+def test_pallas_walk_with_eq16a_equals_the_flat_walk_with_it(node_layout, dtype, eps):
+    """``error_order > 0``: the Pallas walk accepts by Dehnen's eq (16a) from the walk
+    table, exactly as ``dual_tree_walk_mutual`` does with ``DehnenWalkAccept``."""
+    from jaccpot.runtime._walk_criterion import DehnenWalkAccept, dehnen_walk_table
+    from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
+
+    n, leaf, order = 4000, 16, 4
+    P = jnp.asarray(_plummer(n, 7), dtype)
+    M = jnp.full((n,), 1.0 / n, dtype)
+    # a full Tree (the upward sweep is typed for one; CI runs the type checks)
+    from yggdrax.tree import Tree
+
+    tree = Tree.from_particles(P, M, leaf_size=leaf, tree_type="radix")
+    topo = tree.topology
+    ps, ms = P[tree.particle_indices], M[tree.particle_indices]
+    com = compute_tree_mass_moments(topo, ps, ms).center_of_mass
+    geom = com_mac_geometry(topo, ps, com, leaf_cap=leaf)
+    upward = prepare_real_upward_sweep(
+        tree, ps, ms, max_order=order, max_leaf_size=leaf
+    )
+    ni = int(topo.left_child.shape[0])
+    tot = int(topo.parent.shape[0])
+    idx = topo.parent.dtype
+    left = jnp.concatenate([topo.left_child, jnp.full((tot - ni,), -1, idx)])
+    right = jnp.concatenate([topo.right_child, jnp.full((tot - ni,), -1, idx)])
+    ranges = np.asarray(topo.node_ranges)
+    spans = ranges[:, 1] >= ranges[:, 0]
+    active = jnp.asarray(spans)
+    root = jnp.argmin(topo.parent).astype(idx)
+    mass = np.asarray(compute_tree_mass_moments(topo, ps, ms).mass)
+    c = np.asarray(geom.center, np.float64)
+    # a smooth stand-in for eps * min f_b: the Plummer field strength at the node
+    fscale = 1.0 / (np.sum(c * c, axis=1) + 1.0)
+    table = dehnen_walk_table(
+        multipole_packed=upward.multipoles.packed,
+        mass=jnp.asarray(mass, dtype),
+        radius=geom.radius,
+        threshold=jnp.asarray(eps * fscale, dtype),
+        gravitational_constant=1.0,
+        order=order,
+    )
+    kw = dict(
+        max_pair_queue=1 << 15, far_cap=1 << 17, near_cap=1 << 17, node_active=active
+    )
+    ref = dual_tree_walk_mutual(
+        left,
+        right,
+        geom.center,
+        geom.radius,
+        0.5,
+        root,
+        pair_accept=DehnenWalkAccept(order),
+        pair_accept_data={"table": table, "theta_max": jnp.asarray(1.0, dtype)},
+        **kw,
+    )
+    got = mutual_walk_pallas(
+        left,
+        right,
+        geom.center,
+        geom.radius,
+        0.5,
+        root,
+        block=64,
+        interpret=True,
+        node_layout=node_layout,
+        error_table=table,
+        error_order=order,
+        theta_max=1.0,
+        **kw,
+    )
+    for res in (ref, got):
+        assert not (
+            bool(res.queue_overflow)
+            or bool(res.far_overflow)
+            or bool(res.near_overflow)
+        )
+    assert int(ref.far_count) > 0 and int(ref.near_count) > 0, "vacuous"
+    far_r, near_r = _sets(ref)
+    far_g, near_g = _sets(got)
+    assert far_g == far_r
+    assert near_g == near_r
+    assert int(got.rounds) == int(ref.rounds)
+    # the criterion is live: it differs from the geometric walk at the same theta
+    geo = dual_tree_walk_mutual(
+        left, right, geom.center, geom.radius, 0.5, root, mac_type="dehnen", **kw
+    )
+    assert _sets(geo)[0] != far_r
+
+
+def test_pallas_walk_refuses_an_order_without_a_wide_enough_table():
+    with pytest.raises(ValueError, match="error_table"):
+        mutual_walk_pallas(
+            jnp.full((3,), -1, jnp.int32),
+            jnp.full((3,), -1, jnp.int32),
+            jnp.zeros((3, 3), jnp.float32),
+            jnp.zeros((3,), jnp.float32),
+            0.5,
+            jnp.asarray(0, jnp.int32),
+            max_pair_queue=8,
+            far_cap=8,
+            near_cap=8,
+            interpret=True,
+            error_order=6,
+        )
+    with pytest.raises(ValueError, match="columns"):
+        mutual_walk_pallas(
+            jnp.full((3,), -1, jnp.int32),
+            jnp.full((3,), -1, jnp.int32),
+            jnp.zeros((3, 3), jnp.float32),
+            jnp.zeros((3,), jnp.float32),
+            0.5,
+            jnp.asarray(0, jnp.int32),
+            max_pair_queue=8,
+            far_cap=8,
+            near_cap=8,
+            interpret=True,
+            error_table=jnp.zeros((3, 4), jnp.float32),
+            error_order=6,
+        )

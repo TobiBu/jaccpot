@@ -17,7 +17,7 @@ import numpy as np
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
-from yggdrax.tree import RadixTree
+from yggdrax.tree import RadixTree, get_level_offsets
 
 from jaccpot._env import env_choice, env_flag
 
@@ -894,6 +894,18 @@ class StrictRunMixin(_EngineBase):
             and detail_diag_mode == "full"
             and eval_diag_mode != "zero"
         )
+        # mac_type='dehnen_error' on the fused lane: each step's walk takes eq
+        # (16a)'s thresholds from eq (16b)'s f_b of the previous step's evaluation,
+        # which the scan carries (input order). ``None`` in every other run, so the
+        # carries hold no extra array.
+        scale_carry = bool(self._strict_fused_mode_active) and bool(
+            self._flat_walk_criterion_active()
+        )
+        if scale_carry and (not self_eval_active or eval_diag_mode != "full"):
+            raise ValueError(
+                "mac_type='dehnen_error' on the fused lane needs the full self-force "
+                "evaluation: its thresholds come from that evaluation's force scale"
+            )
         self._strict_self_force_bootstrap_evaluations = int(self_eval_active)
         self._strict_self_force_endpoint_evaluations = (
             num_steps_i if self_eval_active else 0
@@ -969,6 +981,42 @@ class StrictRunMixin(_EngineBase):
                 dtype=state_in.dtype,
             )
 
+        def _evaluate_self_scaled(
+            prepared_in: PreparedStateLike, state_in: Array
+        ) -> tuple[Array, Optional[Array]]:
+            # `_evaluate_self`, plus eq (16b)'s f_b (input order) when the scan
+            # carries it; the same single evaluation, the force bitwise unchanged
+            if not scale_carry:
+                return _evaluate_self(prepared_in, state_in), None
+            if not isinstance(prepared_in, LargeNPreparedState):
+                raise RuntimeError(
+                    "the fused lane's force-scale evaluation needs the large-N state"
+                )
+            acc, scale = evaluate_large_n_state(
+                self,
+                prepared_in,
+                target_indices=None,
+                return_potential=False,
+                max_acc_derivative_order=0,
+                return_force_scale=True,
+            )
+            return (
+                jnp.asarray(acc, dtype=state_in.dtype),
+                jnp.asarray(scale, dtype=state_in.dtype),
+            )
+
+        def _force_scale_seed(prepared_in: Any) -> Optional[Array]:
+            # the first refresh's f_b: the eager prepare's eq (16b) prepass (its own
+            # tree's sorted order) back in input order, else one evaluation
+            if not scale_carry or prepared_in is None:
+                return None
+            fb_sorted = getattr(self, "_last_force_scale_particles", None)
+            perm = jnp.asarray(prepared_in.tree.particle_indices, dtype=INDEX_DTYPE)
+            if fb_sorted is not None and int(fb_sorted.shape[0]) == int(perm.shape[0]):
+                fb_sorted = jnp.asarray(fb_sorted, dtype=state_arr.dtype)
+                return jnp.zeros_like(fb_sorted).at[perm].set(fb_sorted)
+            return _evaluate_self_scaled(prepared_in, state_arr)[1]
+
         particle_run = bool(self._strict_fused_mode_active) and particle_carry
         acceleration_self_current: Optional[Array]
         if not self_eval_active:
@@ -1036,7 +1084,8 @@ class StrictRunMixin(_EngineBase):
             prepared_in: PreparedStateLike,
             state_position: Array,
             masses_in: Array,
-        ) -> tuple[PreparedStateLike, Array]:
+            scale_in: Optional[Array] = None,
+        ) -> tuple[PreparedStateLike, Array, Optional[Array]]:
             if diag_mode in {"integrator_only", "eval_only"}:
                 prepared_new = prepared_in
                 # no refresh in this trace: the capacity side channels must not
@@ -1063,12 +1112,14 @@ class StrictRunMixin(_EngineBase):
                     theta=theta,
                     runtime_overrides_override=None,
                     fused_device_mode=bool(self._strict_fused_mode_active),
+                    force_scale_particles=scale_in if scale_carry else None,
                 )
                 if prepared_new is None:
                     raise RuntimeError(
                         "strict velocity-Verlet refresh failed: topology/profile mismatch"
                     )
-            return prepared_new, _evaluate_self(prepared_new, state_position)
+            acc_self, scale_new = _evaluate_self_scaled(prepared_new, state_position)
+            return prepared_new, acc_self, scale_new
 
         def _emit_step(step_index: Array, state_new: Array, fire: Array) -> None:
             # Fire-and-forget streaming hook (e.g. render). Gated by stride (and by
@@ -1098,7 +1149,8 @@ class StrictRunMixin(_EngineBase):
             masses_in: Array,
             scan_x: Any,
             emit: bool = True,
-        ) -> tuple[PreparedStateLike, Array, Array, Array]:
+            scale_now: Optional[Array] = None,
+        ) -> tuple[PreparedStateLike, Array, Array, Array, Optional[Array]]:
             # one velocity-Verlet step of the fused scan: drift, refresh + self
             # force at the new positions, kick; shared by both carries
             position_new = (
@@ -1107,8 +1159,10 @@ class StrictRunMixin(_EngineBase):
                 + 0.5 * acceleration_now * dt_arr**2
             )
             state_position = state_now.at[:, 0].set(position_new)
-            prepared_new, acceleration_self_new = _refresh_and_evaluate_endpoint(
-                prepared_now, state_position, masses_in
+            prepared_new, acceleration_self_new, scale_new = (
+                _refresh_and_evaluate_endpoint(
+                    prepared_now, state_position, masses_in, scale_now
+                )
             )
             if add_external and external_acceleration_fn is not None:
                 acceleration_new = acceleration_self_new + jnp.asarray(
@@ -1130,7 +1184,13 @@ class StrictRunMixin(_EngineBase):
                 state_new = jnp.asarray(state_new, dtype=state_now.dtype)
             if emit and step_callback is not None:
                 _emit_step(scan_x, state_new, jnp.asarray(True))
-            return prepared_new, state_new, acceleration_new, acceleration_self_new
+            return (
+                prepared_new,
+                state_new,
+                acceleration_new,
+                acceleration_self_new,
+                scale_new,
+            )
 
         # The particle carry in TREE order (``JACCPOT_STRICT_CARRY_ORDER=tree``): the
         # scan carries the particles in the previous step's Morton order, with their
@@ -1151,6 +1211,8 @@ class StrictRunMixin(_EngineBase):
             and eval_diag_mode == "full"
             and not return_history
             and step_callback is None
+            # the force-scale carry rides the input order only
+            and not scale_carry
         )
 
         def _advance_tree_order(
@@ -1244,9 +1306,13 @@ class StrictRunMixin(_EngineBase):
         if self._strict_fused_mode_active and particle_carry:
             # handed over in a box the callee empties: a local here would keep the
             # concrete state (and its far list) alive through the whole scan
+            scale_seed = _force_scale_seed(prepared_curr) if handle_in is None else None
             prepared_box = [prepared_curr]
             prepared_curr = None
             state_curr, prepared_curr, history_out = self._strict_particle_carry_run(
+                scale_seed=scale_seed,
+                scale_carry=scale_carry,
+                force_scale_seed=_force_scale_seed,
                 prepared_box=prepared_box,
                 handle_in=handle_in,
                 state_arr=state_arr,
@@ -1259,6 +1325,7 @@ class StrictRunMixin(_EngineBase):
                 advance_tree=_advance_tree_order if tree_order else None,
                 num_steps_i=num_steps_i,
                 cache_parts=(
+                    bool(scale_carry),
                     float(dt),
                     int(leaf_size),
                     int(max_order),
@@ -1334,6 +1401,7 @@ class StrictRunMixin(_EngineBase):
                     # that changes them must not reuse a runner traced before it
                     _walk_caps_key(getattr(self, "_strict_fused_validated_caps", None)),
                     donate_carry,
+                    scale_carry,
                 )
                 jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
                 compiled_runner = jit_cache.get(cache_key)
@@ -1355,8 +1423,11 @@ class StrictRunMixin(_EngineBase):
                     state_initial: Array,
                     acceleration_initial: Array,
                     masses_in: Array,
+                    scale_initial: Optional[Array] = None,
                 ) -> tuple[
-                    tuple[LargeNPreparedState, Array, Array, Array, Array],
+                    tuple[
+                        LargeNPreparedState, Array, Array, Array, Array, Optional[Array]
+                    ],
                     Optional[Array],
                 ]:
                     def _step(carry, scan_x):
@@ -1366,9 +1437,17 @@ class StrictRunMixin(_EngineBase):
                             acceleration_now,
                             capacity_ok_now,
                             walk_needs_now,
+                            scale_now,
                         ) = carry
-                        prepared_new, state_new, acceleration_new, _ = _advance(
-                            prepared_now, state_now, acceleration_now, masses_in, scan_x
+                        prepared_new, state_new, acceleration_new, _, scale_new = (
+                            _advance(
+                                prepared_now,
+                                state_now,
+                                acceleration_now,
+                                masses_in,
+                                scan_x,
+                                scale_now=scale_now,
+                            )
                         )
                         capacity_ok_new = capacity_ok_now & (
                             _static_target_block_capacity_ok(
@@ -1386,6 +1465,7 @@ class StrictRunMixin(_EngineBase):
                             acceleration_new,
                             capacity_ok_new,
                             walk_needs_new,
+                            scale_new,
                         ), (state_new if return_history else None)
 
                     # Feed a per-step index only when a streaming callback needs it
@@ -1403,6 +1483,7 @@ class StrictRunMixin(_EngineBase):
                             acceleration_initial,
                             _static_target_block_capacity_ok(prepared_initial),
                             jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+                            scale_initial,
                         ),
                         xs=scan_xs,
                         length=num_steps_i,
@@ -1414,6 +1495,7 @@ class StrictRunMixin(_EngineBase):
 
             try:
                 retried = False
+                scale_curr = _force_scale_seed(prepared_curr)
                 while True:
                     # the far list is dead inside the scan (fresh rebuild): keep it
                     # out of the carry and put it back on the returned state
@@ -1446,11 +1528,13 @@ class StrictRunMixin(_EngineBase):
                         _,
                         capacity_ok_all,
                         walk_needs,
+                        _scale_out,
                     ), history_out = compiled_runner(
                         prepared_in,
                         state_arr,
                         jnp.asarray(acceleration_current, dtype=state_arr.dtype),
                         masses_arr,
+                        scale_curr,
                     )
                     del prepared_in
                     self._strict_static_target_block_capacity_ok = bool(
@@ -1501,6 +1585,7 @@ class StrictRunMixin(_EngineBase):
                         int(validated.get("peak_wavefront") or 0), replanned_peak
                     )
                     self._strict_fused_validated_caps = validated
+                    scale_curr = _force_scale_seed(prepared_curr)
                     # the starting force from the state the segment now starts from
                     # (the same field when the caller's state matched its positions)
                     if initial_self_acceleration is None:
@@ -1532,8 +1617,10 @@ class StrictRunMixin(_EngineBase):
                     + 0.5 * acceleration_now * dt_arr**2
                 )
                 state_position = state_curr.at[:, 0].set(position_new)
-                prepared_curr, acceleration_self_new = _refresh_and_evaluate_endpoint(
-                    prepared_curr, state_position, masses_arr
+                prepared_curr, acceleration_self_new, _ = (
+                    _refresh_and_evaluate_endpoint(
+                        prepared_curr, state_position, masses_arr
+                    )
                 )
                 if add_external and external_acceleration_fn is not None:
                     acceleration_new = acceleration_self_new + jnp.asarray(
@@ -1564,6 +1651,9 @@ class StrictRunMixin(_EngineBase):
     def _strict_particle_carry_run(
         self,
         *,
+        scale_seed: Optional[Array] = None,
+        scale_carry: bool = False,
+        force_scale_seed: Optional[Callable[[Any], Optional[Array]]] = None,
         prepared_box: list,
         handle_in: Optional[Any],
         state_arr: Array,
@@ -1603,6 +1693,15 @@ class StrictRunMixin(_EngineBase):
 
         Parameters
         ----------
+        scale_seed : Optional[Array]
+            ``mac_type='dehnen_error'``: eq (16b)'s ``f_b`` per particle (input
+            order) for the first refresh's thresholds -- the eager prepare's
+            prepass; ``None`` takes the handle's.
+        scale_carry : bool
+            Carry ``f_b`` through the scan (the criterion is on). Static.
+        force_scale_seed : Optional[Callable[[Any], Optional[Array]]]
+            Builds a seed from a concrete prepared state (a segment retry's
+            re-prepare).
         prepared_box : list
             ``[prepared]``: the concrete prepared state at ``state_arr``'s
             positions, or ``[None]`` when ``handle_in`` brings the template. The
@@ -1669,6 +1768,14 @@ class StrictRunMixin(_EngineBase):
             ``ValueError``; a failed scan under
             ``_strict_fused_disallow_host_segment_fallback`` a chained
             ``RuntimeError``, as the state carry does.
+
+        Raises
+        ------
+        RuntimeError
+            If the criterion is on and no force scale came from the eager prepare
+            or the handle, or as above for a failed scan.
+        Exception
+            Whatever the scan raised, unchanged, when the host fallback is allowed.
         """
         from jaccpot.runtime.capacity_guard import (
             WALK_NEEDS_FIELDS,
@@ -1729,9 +1836,15 @@ class StrictRunMixin(_EngineBase):
                 masses_in: Array,
                 ok_initial: Array,
                 needs_initial: Array,
-            ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
+                scale_initial: Optional[Array] = None,
+            ) -> tuple[
+                tuple[Array, Array, Array, Array, Array, Optional[Array]],
+                Optional[Array],
+            ]:
                 def _step(carry, scan_x):
-                    state_now, acc_now, _, ok_now, needs_now, done = carry[:6]
+                    state_now, acc_now, _, ok_now, needs_now, done, scale_now = carry[
+                        :7
+                    ]
                     if advance_tree is not None:
                         (
                             prepared_new,
@@ -1744,18 +1857,22 @@ class StrictRunMixin(_EngineBase):
                             materialize_template(template),
                             state_now,
                             acc_now,
-                            carry[6],
                             carry[7],
+                            carry[8],
                         )
                         tree_rows: tuple = (masses_new, ids_new)
+                        scale_new = scale_now  # never both (see tree_order)
                     else:
-                        prepared_new, state_new, acc_new, acc_self_new = advance(
-                            materialize_template(template),
-                            state_now,
-                            acc_now,
-                            masses_in,
-                            scan_x,
-                            emit=False,
+                        prepared_new, state_new, acc_new, acc_self_new, scale_new = (
+                            advance(
+                                materialize_template(template),
+                                state_now,
+                                acc_now,
+                                masses_in,
+                                scan_x,
+                                emit=False,
+                                scale_now=scale_now,
+                            )
                         )
                         tree_rows = ()
                     ok_new = ok_now & capacity_ok(prepared_new, after_refresh=True)
@@ -1773,6 +1890,7 @@ class StrictRunMixin(_EngineBase):
                         ok_new,
                         needs_new,
                         done + ok_new.astype(jnp.int32),
+                        scale_new,
                         *tree_rows,
                     ), (state_new if return_history else None)
 
@@ -1797,15 +1915,16 @@ class StrictRunMixin(_EngineBase):
                         ok_initial,
                         needs_initial,
                         jnp.zeros((), jnp.int32),
+                        scale_initial,
                         *tree_rows0,
                     ),
                     xs=scan_xs,
                     length=int(n_steps),
                 )
-                state_f, _, acc_self_f, ok_f, needs_f, done_f = carry_f[:6]
+                state_f, _, acc_self_f, ok_f, needs_f, done_f, scale_f = carry_f[:7]
                 if advance_tree is not None:
                     # back to input order, once: row j is particle ids[j]
-                    ids_f = carry_f[7]
+                    ids_f = carry_f[8]
                     state_f = (
                         jnp.zeros_like(state_f)
                         .at[ids_f]
@@ -1816,7 +1935,7 @@ class StrictRunMixin(_EngineBase):
                         .at[ids_f]
                         .set(acc_self_f, unique_indices=True)
                     )
-                return (state_f, acc_self_f, ok_f, needs_f, done_f), history
+                return (state_f, acc_self_f, ok_f, needs_f, done_f, scale_f), history
 
             donate = ((0,) if donate_state_i else ()) + ((1,) if donate_acc_i else ())
 
@@ -1826,7 +1945,11 @@ class StrictRunMixin(_EngineBase):
                 acceleration_initial: Array,
                 masses_in: Array,
                 ok_initial: Array,
-            ) -> tuple[tuple[Array, Array, Array, Array, Array], Optional[Array]]:
+                scale_initial: Optional[Array] = None,
+            ) -> tuple[
+                tuple[Array, Array, Array, Array, Array, Optional[Array]],
+                Optional[Array],
+            ]:
                 # the self-gravity slot is written by every step (num_steps >= 1)
                 return _scan(
                     state_initial,
@@ -1835,6 +1958,7 @@ class StrictRunMixin(_EngineBase):
                     masses_in,
                     ok_initial,
                     jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+                    scale_initial,
                 )
 
             jit_cache[cache_key] = _compiled_runner
@@ -1865,17 +1989,23 @@ class StrictRunMixin(_EngineBase):
             # named so the dumps' ``*_compiled_runner*`` selection includes it
             @jax.jit
             def _compiled_runner_start(
-                state_initial: Array, masses_in: Array, ok_initial: Array
-            ) -> tuple[Array, Array, Array]:
-                prepared0, acc_self0 = refresh_evaluate(
-                    materialize_template(template), state_initial, masses_in
+                state_initial: Array,
+                masses_in: Array,
+                ok_initial: Array,
+                scale_initial: Optional[Array] = None,
+            ) -> tuple[Array, Array, Array, Optional[Array]]:
+                prepared0, acc_self0, scale0 = refresh_evaluate(
+                    materialize_template(template),
+                    state_initial,
+                    masses_in,
+                    scale_initial,
                 )
                 ok0 = ok_initial & capacity_ok(prepared0, after_refresh=True)
                 needs0 = jnp.maximum(
                     jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
                     last_refresh_walk_needs(self),
                 )
-                return acc_self0, ok0, needs0
+                return acc_self0, ok0, needs0, scale0
 
             jit_cache[cache_key] = _compiled_runner_start
             self._strict_fused_jit_function_cache = jit_cache
@@ -1922,9 +2052,18 @@ class StrictRunMixin(_EngineBase):
             # segment from it: keep it on the host (one copy per call, only when
             # donating -- the scan itself stays as lean as it can be)
             start_host = np.asarray(jax.device_get(state_arr))
+        if handle_in is not None:
+            scale_seed = getattr(handle_in, "force_scale", None)
+        if scale_carry and scale_seed is None:
+            raise RuntimeError(
+                "mac_type='dehnen_error' on the fused lane needs a force scale to "
+                "start from: none came from the eager prepare or the handle (a handle "
+                "from a run without the criterion cannot continue one with it)"
+            )
         try:
             retried = False
             state_now = state_arr
+            scale_now: Optional[Array] = scale_seed
             acc_self_now: Optional[Array] = acceleration_self_current
             del acceleration_self_current
             acc_self_owned = self_owned
@@ -1934,15 +2073,15 @@ class StrictRunMixin(_EngineBase):
             while True:
                 ran_scan = True
                 if in_scan_force:
-                    acc_self_now, ok_initial, walk_needs = _start_force_for(template)(
-                        state_now, masses_arr, ok_initial
-                    )
+                    acc_self_now, ok_initial, walk_needs, scale_now = _start_force_for(
+                        template
+                    )(state_now, masses_arr, ok_initial, scale_now)
                     acc_self_owned = True
                     if not bool(np.asarray(jax.device_get(ok_initial))):
                         # the start itself overflows: no scan, straight to a retry
                         ran_scan = False
                         ok_all, done = ok_initial, jnp.zeros((), jnp.int32)
-                        state_out = acc_self_out = history_out = None
+                        state_out = acc_self_out = history_out = scale_out = None
                 if ran_scan:
                     runner = _runner_for(
                         template,
@@ -1954,8 +2093,15 @@ class StrictRunMixin(_EngineBase):
                     acc0 = _initial_acceleration(acc_self_now, state_now)
                     if acc_self_owned and not external_active:
                         acc_self_now = None  # it is acc0, which the call consumes
-                    (state_out, acc_self_out, ok_all, walk_needs, done), history_out = (
-                        runner(state_now, acc0, masses_arr, ok_initial)
+                    (
+                        state_out,
+                        acc_self_out,
+                        ok_all,
+                        walk_needs,
+                        done,
+                        scale_out,
+                    ), history_out = runner(
+                        state_now, acc0, masses_arr, ok_initial, scale_now
                     )
                     del acc0
                 self._strict_static_target_block_capacity_ok = bool(
@@ -1966,6 +2112,7 @@ class StrictRunMixin(_EngineBase):
                         template=template,
                         self_acceleration=acc_self_out,
                         num_particles=int(state_arr.shape[0]),
+                        force_scale=scale_out,
                     )
                     return state_out, handle, history_out
                 needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
@@ -2012,6 +2159,9 @@ class StrictRunMixin(_EngineBase):
                     # again, from the same positions
                     acc_self_now = evaluate_self(prepared, state_now)
                 template = _template_of(prepared)
+                if scale_carry and force_scale_seed is not None:
+                    # the re-prepare's own eq (16b) prepass at the segment's start
+                    scale_now = force_scale_seed(prepared)
                 self._strict_fused_traced_caps = None
                 ok_initial = jnp.asarray(capacity_ok(prepared))
                 del prepared
@@ -2162,6 +2312,7 @@ class StrictRunMixin(_EngineBase):
         fused_device_mode: bool = False,
         num_valid: Optional[Array] = None,
         cross_hook: Optional[Callable[[Any], None]] = None,
+        force_scale_particles: Optional[Array] = None,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged.
 
@@ -2206,6 +2357,11 @@ class StrictRunMixin(_EngineBase):
             ``(multipoles, centers, src, tgt)`` for the cross-domain far field, which the
             downward sweep concatenates behind the local nodes, or ``None``. ``None``
             (default) is the single-domain lane, bit-identical.
+        force_scale_particles : Optional[Array]
+            ``mac_type='dehnen_error'``: eq (16b)'s ``f_b`` per particle in input
+            order, carried from the previous step's evaluation. Reduced to the
+            per-node ``min_b f_b`` on this step's tree, it sets eq (16a)'s
+            thresholds for the walk. ``None`` (default) keeps the state's own.
 
         Returns
         -------
@@ -2588,10 +2744,22 @@ class StrictRunMixin(_EngineBase):
                 cache_entry=None,
             )
         else:
+            force_scale_nodes_now = prepared_state.force_scale_nodes
+            if force_scale_particles is not None:
+                from jaccpot.runtime._force_scale_levels import node_force_scale_min
+
+                levels_fb = self._resolve_upward_num_levels(tree_artifacts.tree)
+                if levels_fb is None:
+                    levels_fb = int(get_level_offsets(tree_artifacts.tree).shape[0] - 1)
+                force_scale_nodes_now = node_force_scale_min(
+                    tree=tree_artifacts.tree,
+                    force_scale_particles=force_scale_particles,
+                    num_levels=int(levels_fb),
+                )
             dual_downward_artifacts = self._prepare_state_dual_and_downward(
                 cross_far=cross_far,
                 tree_artifacts=tree_artifacts,
-                force_scale_nodes=prepared_state.force_scale_nodes,
+                force_scale_nodes=force_scale_nodes_now,
                 upward_center_mode=upward_center_mode,
                 theta_val=theta_val,
                 mac_type_val=mac_type_val,

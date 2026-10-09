@@ -1495,7 +1495,28 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     differentiable: bool = ...,
     reverse_options: Optional["LeafPairReverseOptions"] = ...,
     neighbor_list: Any = ...,
+    leaf_ranges: Any = ...,
+    return_force_scale: Literal[False] = ...,
 ) -> Array: ...
+
+
+@overload
+def compute_leaf_p2p_accelerations_radix_fast_lane(
+    *,
+    positions_sorted: Float[Array, "n 3"],
+    masses_sorted: Float[Array, "n"],
+    payload: Any,
+    G: Union[float, Array] = ...,
+    softening: float = ...,
+    softening_kernel: Optional[str] = ...,
+    return_potential: Literal[False] = ...,
+    use_pallas: bool = ...,
+    differentiable: bool = ...,
+    reverse_options: Optional["LeafPairReverseOptions"] = ...,
+    neighbor_list: Any = ...,
+    leaf_ranges: Any = ...,
+    return_force_scale: Literal[True],
+) -> Tuple[Array, Array]: ...
 
 
 @overload
@@ -1512,6 +1533,8 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     differentiable: bool = ...,
     reverse_options: Optional["LeafPairReverseOptions"] = ...,
     neighbor_list: Any = ...,
+    leaf_ranges: Any = ...,
+    return_force_scale: Literal[False] = ...,
 ) -> Tuple[Array, Array]: ...
 
 
@@ -1530,6 +1553,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     reverse_options: Optional["LeafPairReverseOptions"] = None,
     neighbor_list: Any = None,
     leaf_ranges: Any = None,
+    return_force_scale: bool = False,
 ) -> Union[Array, Tuple[Array, Array]]:
     """Payload-driven nearfield entry for the radix fast lane.
 
@@ -1592,6 +1616,14 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         per-leaf result and gathers it back (the table path's bits), ``table``
         is the gathered-table kernel.
 
+    return_force_scale : bool
+        Also return eq (16b)'s near-field force scale ``sum G m / (r^2 + eps^2)``
+        per sorted particle over the same pairs (self excluded), from the direct
+        CSR kernel's fourth lane: the near half of Dehnen's ``f_b`` for the fused
+        lane's per-step criterion. Only the CSR lane's direct layout has it; any
+        other route raises rather than return a scale without its near term.
+        Exclusive with ``return_potential``.
+
     Returns
     -------
     Union[Array, Tuple[Array, Array]]
@@ -1604,6 +1636,8 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         For a requested combination this lane does not implement, rather than
         silently substituting one it does -- ``"auto"`` may choose, an explicit
         request may not be quietly overridden (STYLE_GUIDE §9).
+    ValueError
+        If both ``return_potential`` and ``return_force_scale`` are set.
     """
     if reverse_options is None:
         from jaccpot.runtime.grad_options import resolve_grad_options
@@ -1614,6 +1648,9 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     positions = jnp.asarray(positions_sorted)
     masses = jnp.asarray(masses_sorted)
     want_potential = bool(return_potential)
+    want_force_scale = bool(return_force_scale)
+    if want_potential and want_force_scale:
+        raise ValueError("return_potential and return_force_scale are exclusive")
     dtype = positions.dtype
 
     target_particle_ids = jnp.asarray(payload.target_particle_ids, dtype=INDEX_DTYPE)
@@ -1668,6 +1705,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 
     # Potential is only implemented on the fused Pallas paths; otherwise the
     # caller falls back to the generic W x W path (preserving prior behavior).
+    if want_force_scale and not csr_lane:
+        raise NotImplementedError(
+            "return_force_scale needs the CSR near-field lane (its direct kernel "
+            "accumulates the force scale); this call takes another route"
+        )
     if want_potential and not (pallas_pairs or pallas_prepacked):
         raise NotImplementedError(
             "compute_leaf_p2p_accelerations_radix_fast_lane supports "
@@ -1677,7 +1719,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
 
     def _zeros_result():
         acc = jnp.zeros_like(positions)
-        if want_potential:
+        if want_potential or want_force_scale:
             return acc, jnp.zeros(positions.shape[:1], dtype=dtype)
         return acc
 
@@ -1790,6 +1832,12 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             layout = "table"
         if layout == "direct" and accum != "input":
             layout = "sorted"  # the direct lane accumulates in the input dtype
+        if want_force_scale and layout != "direct":
+            raise NotImplementedError(
+                "return_force_scale is accumulated by the direct CSR kernel only; "
+                f"this call resolved layout={layout!r} (differentiable, no leaf "
+                "ranges, JACCPOT_NEARFIELD_LAYOUT or accum='wide')"
+            )
         if layout != "table":
             from jaccpot.pallas.nearfield_leafpair_csr import (
                 nearfield_leafpair_csr_sorted_direct_pallas,
@@ -1821,10 +1869,11 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 offsets,
                 counts,
                 with_potential=want_potential,
+                with_force_scale=want_force_scale,
                 **kernel_opts,
             )
             pair_acc = pair_acc.astype(dtype)
-            if want_potential:
+            if want_potential or want_force_scale:
                 assert pair_pot is not None
                 return pair_acc, pair_pot.astype(dtype)
             return pair_acc

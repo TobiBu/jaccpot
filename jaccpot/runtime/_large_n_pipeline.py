@@ -907,6 +907,7 @@ def _build_tree_and_dual_downward_artifacts(
     disable_fused_tree_dual_prepare: bool,
     refresh_timing_active: bool,
     now: Callable[[], float],
+    fused_seed: bool = False,
 ) -> tuple[Optional[Any], Optional[Any], float]:
     """Build the tree/upward and dual/downward artifacts, fused or staged.
 
@@ -954,6 +955,10 @@ def _build_tree_and_dual_downward_artifacts(
         Whether refresh timing is being accumulated.
     now : Callable[[], float]
         The driver's clock, returning ``0.0`` when timing is inactive.
+    fused_seed : bool
+        A fused device-mode prepare (the strict runner's): the Dehnen criterion's
+        force scale is seeded from the fused lane's own kernels
+        (``_fused_force_scale_seed``) rather than the general prepass.
 
     Returns
     -------
@@ -1057,6 +1062,7 @@ def _build_tree_and_dual_downward_artifacts(
             force_scale_nodes = fmm._resolve_force_scale_nodes_for_prepare(
                 tree_artifacts=tree_artifacts,
                 supplied_force_scale=supplied_force_scale,
+                fused_seed=bool(fused_seed),
                 positions_arr=positions_arr,
                 masses_arr=masses_arr,
                 bounds=bounds,
@@ -1250,6 +1256,7 @@ def prepare_large_n_state(
         disable_fused_tree_dual_prepare=disable_fused_tree_dual_prepare,
         refresh_timing_active=refresh_timing_active,
         now=_now,
+        fused_seed=bool(fused_device_mode),
     )
 
     stage_t0 = _now()
@@ -1816,6 +1823,9 @@ def prepare_large_n_state(
         radix_fast_payload=radix_fast_payload,
         radix_overflow_payload=radix_overflow_payload,
         compact_far_pairs=getattr(dual_downward_artifacts, "compact_far_pairs", None),
+        force_scale_far_sorted=getattr(
+            dual_downward_artifacts, "force_scale_far_sorted", None
+        ),
     )
     _record_nf("_refresh_timing_nearfield_state_pack_seconds", substage_t0)
     if refresh_timing_active:
@@ -1934,6 +1944,7 @@ def evaluate_large_n_state(
     return_potential: bool,
     max_acc_derivative_order: int,
     sorted_output: bool = False,
+    return_force_scale: bool = False,
 ) -> Any:
     """Evaluate large-N prepared state for the full particle set.
 
@@ -1961,20 +1972,28 @@ def evaluate_large_n_state(
         gathering them back into input order: the gather and the inverse
         permutation it reads are not computed at all. Fast-lane accelerations
         only.
+    return_force_scale : bool
+        Also return eq (16b)'s force scale ``f_b`` per particle, in the same
+        order as the accelerations: the near half from the near-field kernel's
+        force-scale lane plus the far half the prepare stored on the state
+        (``force_scale_far_sorted``; zero when absent). The per-step threshold
+        of ``mac_type='dehnen_error'`` on the fused lane. Fast-lane accelerations
+        only.
 
     Returns
     -------
     Any
         Accelerations, or ``(accelerations, potentials)`` when
-        ``return_potential`` is set.
+        ``return_potential`` is set, or ``(accelerations, f_b)`` with
+        ``return_force_scale``.
 
     Raises
     ------
     NotImplementedError
         If ``target_indices`` is given, or ``max_acc_derivative_order`` is
-        non-zero, or ``sorted_output`` off the fast-lane acceleration route. All
-        are unimplemented rather than invalid, so they raise loudly instead of
-        silently ignoring the request.
+        non-zero, or ``sorted_output`` or ``return_force_scale`` off the
+        fast-lane acceleration route. All are unimplemented rather than invalid,
+        so they raise loudly instead of silently ignoring the request.
     RuntimeError
         If the state was not prepared with ``nearfield_mode='bucketed'``, or
         carries no radix fast-lane payload. A wiring fault, not user input.
@@ -2094,14 +2113,30 @@ def evaluate_large_n_state(
 
             l2p_kernel = "pallas" if pallas_cascade_level_supported() else "xla"
 
-        def _fastlane_body(state_in: Any) -> Array:
+        want_scale = bool(return_force_scale)
+
+        def _fastlane_body(state_in: Any) -> Any:
+            near_scale = jnp.zeros_like(state_in.positions_sorted[:, 0])
             if bool(disable_near_eval):
                 near_acc = jnp.zeros_like(state_in.positions_sorted)
+            elif want_scale:
+                near_acc, near_scale = evaluate_large_n_nearfield_fast_lane(
+                    fmm,
+                    state_in,
+                    return_potential=False,
+                    return_force_scale=True,
+                )
             else:
                 near_acc = evaluate_large_n_nearfield_fast_lane(
                     fmm,
                     state_in,
                     return_potential=False,
+                )
+            scale_sorted = None
+            if want_scale:
+                far_scale = getattr(state_in, "force_scale_far_sorted", None)
+                scale_sorted = (
+                    near_scale if far_scale is None else near_scale + far_scale
                 )
             if bool(disable_far_eval):
                 far_acc = jnp.zeros_like(state_in.positions_sorted)
@@ -2147,7 +2182,10 @@ def evaluate_large_n_state(
             else:
                 accelerations_sorted = near_acc + far_acc
             if keep_sorted:
-                return jnp.asarray(accelerations_sorted).astype(output_dtype)
+                acc_out = jnp.asarray(accelerations_sorted).astype(output_dtype)
+                if want_scale:
+                    return acc_out, jnp.asarray(scale_sorted).astype(output_dtype)
+                return acc_out
             accelerations_sorted = jnp.asarray(accelerations_sorted)
             if unpermute == "scatter":
                 # each sorted row to its input row through the sort permutation:
@@ -2159,7 +2197,7 @@ def evaluate_large_n_state(
                 # Materialising the sum before the gather (an optimization barrier)
                 # recovered 1.2 of the 1.8 ms at 8e6, for +10 B/p of peak at 2e6.
                 perm = jnp.asarray(state_in.tree.particle_indices, dtype=INDEX_DTYPE)
-                return (
+                acc_out = (
                     jnp.zeros(accelerations_sorted.shape, output_dtype)
                     .at[perm]
                     .set(
@@ -2168,9 +2206,26 @@ def evaluate_large_n_state(
                         mode="promise_in_bounds",
                     )
                 )
-            return accelerations_sorted[state_in.inverse_permutation].astype(
+                if want_scale:
+                    scale_out = (
+                        jnp.zeros(scale_sorted.shape, output_dtype)
+                        .at[perm]
+                        .set(
+                            scale_sorted.astype(output_dtype),
+                            unique_indices=True,
+                            mode="promise_in_bounds",
+                        )
+                    )
+                    return acc_out, scale_out
+                return acc_out
+            acc_out = accelerations_sorted[state_in.inverse_permutation].astype(
                 output_dtype
             )
+            if want_scale:
+                return acc_out, scale_sorted[state_in.inverse_permutation].astype(
+                    output_dtype
+                )
+            return acc_out
 
         compiled = _large_n_fastlane_eval_fn(
             fmm,
@@ -2193,6 +2248,7 @@ def evaluate_large_n_state(
                 l2p_kernel,
                 unpermute,
                 keep_sorted,
+                want_scale,
             ),
         )
         if compiled is not None:
@@ -2202,6 +2258,11 @@ def evaluate_large_n_state(
     if sorted_output:
         raise NotImplementedError(
             "sorted_output is wired on the radix fast-lane acceleration route only"
+        )
+    if return_force_scale:
+        raise NotImplementedError(
+            "return_force_scale is wired on the radix fast-lane acceleration route "
+            "only"
         )
 
     nearfield_edge_chunk_size = int(state_prepared.nearfield_edge_chunk_size)
