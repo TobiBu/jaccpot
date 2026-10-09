@@ -28,8 +28,8 @@ M1     two cards: ``distributed/fmm.py`` built as Odisseo's mesh lane builds it
 M2     two cards: ``bench/multigpu_rollout_gate.py`` (``FusedRollout``,
        repartitioned on device) at 1e5, 17 steps, repartition every 8: positions
        at steps 1, 16 and 17
-M3     two cards: ``DistributedBlockStepFMM`` (jax backend, cross_theta 0.5), 4
-       base steps at 8192
+M3     two cards: ``DistributedBlockStepFMM`` (jax backend, cross_theta 0.5,
+       Plummer), 4 base steps at 8192
 =====  ===========================================================================
 
 The M pins need two cards (``autocvd -n 2``) and are recorded separately:
@@ -329,18 +329,42 @@ def case_m1(out: Path) -> dict:
         for i, name in enumerate(DIAG_FIELDS)
         if name.endswith("overflow") and i < d.shape[1]
     }
-    # fp64 direct sum on 1024 targets (informative; the pin is the array)
+    # fp64 direct sum on 1024 targets with the lane's own softening kernel
+    # (informative; the pin is the array)
+    try:
+        from jaccpot.softening import (
+            pair_factors,
+            resolve_softening_kernel,
+            softening_params_np,
+        )
+
+        kernel = resolve_softening_kernel(None)
+    except ImportError:  # a tree from before the softening kernels: Plummer only
+        kernel = "plummer"
     targets = np.random.default_rng(3).choice(n, 1024, replace=False)
     p64, m64 = pos.astype(np.float64), mass.astype(np.float64)
     ref = np.empty((targets.size, 3))
     for s in range(0, targets.size, 32):
         t = targets[s : s + 32]
         dx = p64[None, :, :] - p64[t, None, :]
-        r2 = np.sum(dx * dx, -1) + 1e-6
-        ref[s : s + 32] = np.sum(m64[None, :, None] * dx * r2[..., None] ** -1.5, 1)
+        r2 = np.sum(dx * dx, -1)
+        self_pair = r2 == 0.0
+        r2 = np.where(self_pair, 1.0, r2)
+        if kernel == "plummer":
+            g = (r2 + 1e-6) ** -1.5
+        else:
+            g = pair_factors(r2, softening_params_np(kernel, 1e-3), kernel, xp=np)[0]
+        g = np.where(self_pair, 0.0, g)
+        ref[s : s + 32] = np.sum(m64[None, :, None] * dx * g[..., None], 1)
     rel = float(np.linalg.norm(acc[targets] - ref) / np.linalg.norm(ref))
     np.savez(out, acc=acc)
-    return {"n": n, "cap": cap, "rel_l2": rel, "overflow": overflow}
+    return {
+        "n": n,
+        "cap": cap,
+        "kernel": kernel,
+        "rel_l2": rel,
+        "overflow": overflow,
+    }
 
 
 def case_m2(out: Path) -> dict:
@@ -395,6 +419,13 @@ def case_m3(out: Path) -> dict:
     pos, vel, mass = _plummer(n)
     # explicit: the heuristic's depth (16) is too shallow for the clipped Plummer core
     caps = MutualCapacities(near=16384, far=16384, depth=32, width=1024, queue=1 << 17)
+    # Plummer, explicitly: cross_theta > 0 with a compact kernel raises (the cross
+    # walk has no separation floor yet), and this pin covers the cross M2L path
+    import inspect
+
+    kw = {}
+    if "softening_kernel" in inspect.signature(DistributedBlockStepFMM).parameters:
+        kw["softening_kernel"] = "plummer"
     force = DistributedBlockStepFMM(
         softening=1e-3,
         k_max=2,
@@ -406,6 +437,7 @@ def case_m3(out: Path) -> dict:
         backend="jax",
         ndev=2,
         caps=caps,
+        **kw,
     )
     x, v, m = jnp.asarray(pos), jnp.asarray(vel), jnp.asarray(mass)
     rung = jnp.asarray(np.arange(n) % 3, jnp.int32)

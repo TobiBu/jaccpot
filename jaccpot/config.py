@@ -97,9 +97,10 @@ class FMMPreset(str, Enum):
         low-memory streamed fast path (see :class:`RuntimePolicyConfig`).
         Measured at 1M particles: forward 2.5 s, forward+backward 69 s, 11 GB
         peak. It is not "more accurate than ``ACCURATE``": its bundle carries no
-        accuracy knob at all, and it shares ``FAST``'s tree settings exactly
-        (``lbvh``, 64 particles per leaf, no host-side refinement), differing
-        only in traversal capacities and in forcing ``jit_tree``.
+        accuracy knob at all. Since the 2026-10 cleanup it builds the
+        ``static_radix`` tree (64 particles per leaf, no host-side refinement)
+        that the fused strict lane (``strict_run_v2``) runs on; ``FAST`` keeps
+        ``lbvh``.
     """
 
     FAST = "fast"
@@ -122,7 +123,8 @@ class TreeConfig:
         ``"kdtree"``. ``"octree"`` is refused by the single-GPU solver since the
         octree execution backend was removed in the 2026-10 cleanup.
     mode : Optional[str]
-        Builder selector, ``"lbvh"`` or ``"fixed_depth"``.
+        Builder selector: ``"lbvh"``, ``"static_radix"`` (the ``large_n_gpu``
+        preset's default, required by the fused strict lane) or ``"fixed_depth"``.
     leaf_target : Optional[int]
         Desired particles per leaf for fixed-depth builds. Note this is a *target*;
         the achieved occupancy is padded to a static bound at prepare time.

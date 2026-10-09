@@ -1,0 +1,447 @@
+{
+ "a_vs_a": {
+  "M1": {
+   "arrays": {
+    "acc": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "cap": 65536,
+     "kernel": "ferrers3",
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.0001852711778779491
+    },
+    "ref": {
+     "cap": 65536,
+     "kernel": "ferrers3",
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.0001852711778779491
+    }
+   }
+  },
+  "M3": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    },
+    "ref": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    }
+   }
+  },
+  "S1": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    },
+    "ref": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    }
+   }
+  },
+  "S2": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 50000,
+     "rel_l2": 0.001603913653729269
+    },
+    "ref": {
+     "n": 50000,
+     "rel_l2": 0.001603913653729269
+    }
+   }
+  },
+  "S3": {
+   "arrays": {
+    "acc_100000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "acc_30000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n100000": "ok",
+     "n30000": "ok"
+    },
+    "ref": {
+     "n100000": "ok",
+     "n30000": "ok"
+    }
+   }
+  },
+  "S4": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.3372802734375,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.3372802734375,
+     "n": 20000
+    }
+   }
+  },
+  "S4b": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.333518981933594,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.333518981933594,
+     "n": 20000
+    }
+   }
+  },
+  "S5": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 2.244967659008715e-09,
+     "n": 20000
+    },
+    "ref": {
+     "momentum_drift": 2.244967659008715e-09,
+     "n": 20000
+    }
+   }
+  }
+ },
+ "cards": {
+  "single": "A100 40GB, GPU 3 (psaegert's ~4 GB job, user-approved)",
+  "two": "A100 40GB x2, GPUs 2+3 (psaegert's ~4 GB jobs; user rule: untimed runs)"
+ },
+ "control": "main-15ceca4-b",
+ "deterministic_ops": true,
+ "library": "jaccpot main 15ceca4 (after #375 softening kernels, ferrers3 default, and #376), frozen worktree; bench/dce_pins.py from cleanup/pins-15ceca4 (M1 matching-kernel reference, M3 Plummer); yggdrax main 9372332",
+ "moved_vs_main_3a4bfc7": {
+  "M1": {
+   "arrays": {
+    "acc": {
+     "bitwise": false,
+     "max_abs": 0.535097599029541,
+     "rel_l2": 0.036668443589261634
+    }
+   },
+   "meta": {
+    "new": {
+     "cap": 65536,
+     "kernel": "ferrers3",
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.0001852711778779491
+    },
+    "ref": {
+     "cap": 65536,
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.00018535420297534109
+    }
+   }
+  },
+  "M3": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    },
+    "ref": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    }
+   }
+  },
+  "S1": {
+   "arrays": {
+    "force": {
+     "bitwise": false,
+     "max_abs": 4.76837158203125e-07,
+     "rel_l2": 1.6513757262667968e-08
+    },
+    "state": {
+     "bitwise": false,
+     "max_abs": 1.7881393432617188e-07,
+     "rel_l2": 1.660138735508268e-09
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    },
+    "ref": {
+     "n": 200000,
+     "rel_l2": 0.0007763741703274087
+    }
+   }
+  },
+  "S2": {
+   "arrays": {
+    "force": {
+     "bitwise": false,
+     "max_abs": 0.5277978330850601,
+     "rel_l2": 0.1132035933764494
+    },
+    "state": {
+     "bitwise": false,
+     "max_abs": 0.04546854645013809,
+     "rel_l2": 0.0013523131277670378
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 50000,
+     "rel_l2": 0.001603913653729269
+    },
+    "ref": {
+     "n": 50000,
+     "rel_l2": 0.11287816606795525
+    }
+   }
+  },
+  "S3": {
+   "arrays": {
+    "acc_100000": {
+     "bitwise": false,
+     "max_abs": 0.6870982646942139,
+     "rel_l2": 0.03738475773957346
+    },
+    "acc_30000": {
+     "bitwise": false,
+     "max_abs": 0.4220242500305176,
+     "rel_l2": 0.020483292121234155
+    }
+   },
+   "meta": {
+    "new": {
+     "n100000": "ok",
+     "n30000": "ok"
+    },
+    "ref": {
+     "n100000": "ok",
+     "n30000": "ok"
+    }
+   }
+  },
+  "S4": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": false,
+     "max_abs": 15296.8046875,
+     "rel_l2": 0.06938378510777937
+    },
+    "g_pos": {
+     "bitwise": false,
+     "max_abs": 702.5947265625,
+     "rel_l2": 0.18547251738686713
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.3372802734375,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.03852462768555,
+     "n": 20000
+    }
+   }
+  },
+  "S4b": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": false,
+     "max_abs": 15296.8125,
+     "rel_l2": 0.06938357777430074
+    },
+    "g_pos": {
+     "bitwise": false,
+     "max_abs": 702.5947265625,
+     "rel_l2": 0.18547254231077406
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.333518981933594,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.03477096557617,
+     "n": 20000
+    }
+   }
+  },
+  "S5": {
+   "arrays": {
+    "positions": {
+     "bitwise": false,
+     "max_abs": 3.260374069213867e-05,
+     "rel_l2": 1.7941621020402762e-07
+    },
+    "velocities": {
+     "bitwise": false,
+     "max_abs": 0.008424162864685059,
+     "rel_l2": 0.00020890277590365324
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 2.244967659008715e-09,
+     "n": 20000
+    },
+    "ref": {
+     "momentum_drift": 2.5013924498148238e-09,
+     "n": 20000
+    }
+   }
+  }
+ },
+ "notes": {
+  "M1": "the reference now uses the lane's kernel: rel-L2 1.853e-4 (ferrers3) vs 1.854e-4 (Plummer at 3a4bfc7)",
+  "M2": "not recorded: the fused two-card rollout hangs on jax 0.11.2 (separate issue)",
+  "M3": "Plummer explicitly (cross_theta > 0 with a compact kernel raises by design); bitwise vs 3a4bfc7",
+  "why_moved": "#375 made ferrers3 the default softening kernel: pins at softening 1e-3 (S3, S4, S4b, S5, M1) moved by 2e-4 to 1.9e-1; S1/S2 run at 1e-7 where the kernel barely matters (S1 1.7e-8); S2 also carries #376 (0.113 -> 1.60e-3)"
+ },
+ "pins": [
+  "S1",
+  "S2",
+  "S3",
+  "S4",
+  "S4b",
+  "S5",
+  "M1",
+  "M3"
+ ],
+ "tag": "main-15ceca4"
+}

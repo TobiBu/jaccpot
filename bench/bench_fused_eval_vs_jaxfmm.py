@@ -40,7 +40,6 @@ def _set_fused_env(n_profile: str, far_pair_cap: str, neighbor_cap: str) -> None
         "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY": "1",
         "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
         "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": far_pair_cap,
-        "JACCPOT_LARGE_N_COMPILED_STATE_MODE": "on",
         "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED": "1",
         "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "64",
         "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": neighbor_cap,

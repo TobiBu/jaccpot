@@ -44,7 +44,9 @@ On `main` at 6cca378 (2026-10-06):
 | X1 | #372 | Treecode walk (single-GPU + distributed), `jaccpot/experimental`, `_large_n_farfield` | CPU suite, distributed tier, GPU pins | merged |
 | X2 | #373 | Octree execution backend | CPU suite, GPU pins | merged |
 | D1 | #374 | Spherical-harmonic family without a basis object runs real | targeted CPU, GPU pins | merged |
-| fix | | The large-N lane's no-Pallas near field read the CSR lane's placeholder; two-card pins M1-M3 | targeted CPU, GPU pins (two-card: M1, M3) | open |
+| fix | #376 | The large-N lane's no-Pallas near field read the CSR lane's placeholder; two-card pins M1-M3 | targeted CPU, GPU pins (two-card: M1, M3) | merged |
+| pins | #377 | GPU pins re-recorded at 15ceca4 after the softening kernels (#375) | A-vs-A bitwise | merged |
+| D2 | | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | open |
 
 ### P0: CI runs each test once
 
@@ -332,3 +334,101 @@ is not part of this cleanup.**
 
 To be investigated separately. Until then, the fused multi-GPU lane (`FusedRollout`) has
 no GPU gate on jax 0.11.2.
+
+### Pin baseline re-recorded at 15ceca4
+
+#375 made `ferrers3` the default softening kernel, so the 3a4bfc7 pins no longer describe
+`main`. They were re-recorded from a frozen worktree at `main` 15ceca4 (after #375 and
+#376; yggdrax 9372332), with an A-vs-A control. The control is **bitwise for every array
+of every pin** (S1-S5, M1, M3). Later phases compare against `main-15ceca4` with
+`--envelope main-15ceca4-b`. Summary: `bench/results/dce/pins_main-15ceca4.json`.
+
+Two pin changes:
+- **M1's reference uses the lane's own kernel.** Its direct sum was Plummer. With
+  `ferrers3` it measured the kernel difference (6.7e-3), not the FMM error.
+- **M3 asks for Plummer explicitly.** `cross_theta > 0` with a compact kernel raises by
+  design, since the cross walk has no separation floor yet. Plummer keeps the cross-M2L
+  path pinned.
+
+What moved against 3a4bfc7, as the rel-L2 of the pinned arrays:
+
+| pin | moved | why |
+| --- | --- | --- |
+| S1 | 1.7e-8 | softening 1e-7: the kernel barely matters; error vs fp64 direct unchanged (7.76e-4) |
+| S2 | 0.113 | #376; error 0.113 -> 1.60e-3 |
+| S3 | 2.0e-2 (3e4), 3.7e-2 (1e5) | default softening 1e-3: `ferrers3` instead of Plummer |
+| S4, S4b | 6.9e-2 (d/dmass), 0.19 (d/dpos) | softening 1e-3, kernel change |
+| S5 | 2.1e-4 (velocities) | `BlockStepFMM` follows the default kernel |
+| M1 | 3.7e-2 | kernel change; error vs a matching direct sum 1.854e-4 -> 1.853e-4 |
+| M3 | bitwise | Plummer explicitly: #375 left the Plummer distributed mutual path unchanged |
+
+### D2: the fused strict lane is the default
+
+Before this phase, the fused strict lane ran only when the caller set a dozen
+`JACCPOT_*` variables. Odisseo did this in `jaccpot_coupling.py` for N >= 200k with
+`large_n_gpu` + `static_radix`, and the bench harness did it with `apply_fast_lane_env`.
+Without them, `strict_run_v2` ran the host-driven loop, which is about 10x slower. And a
+default `static_radix` + `large_n_gpu` prepare raised: it required a recorded cap profile
+for exactly that (leaf, N) on disk.
+
+**A per-knob survey** (reader, default, effect; in the PR) showed that most of Odisseo's
+values were already the defaults. Only these changed:
+
+| knob | was | now | why |
+| --- | --- | --- | --- |
+| `JACCPOT_STATIC_STRICT_FUSED_MODE` | off | on | the switch; only `strict_run_v2` and the fused eval fn read it (the multi-GPU lane's `measure_shard_plan` needs the latter) |
+| `JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH` | 1 | 0 | with 1, the default static-radix prepare raised without a profile on disk |
+| `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE` | 32 | 4 | off the CSR lane only (pre-Ampere, CPU, `use_pallas=False`); 32 left at least 256 slots per target leaf |
+| `JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF` | 32 | auto | the same lane; `auto` sizes it from the densest leaf with 1.25 headroom |
+| `large_n_gpu` tree mode | `lbvh` | `static_radix` | the fused lane needs it (`fmm_presets.py`, `solver.py`) |
+
+**Not adopted, because the library's own default is better:**
+- the named 131,072 far-pair cap: a hard ceiling that raises at larger N, where the default
+  is sized from the count;
+- `PROFILE_SET=N`: it only restricts; empty means all N.
+
+`JACCPOT_LARGE_N_COMPILED_STATE_MODE` is read nowhere. It was removed from the tests and
+benches that set it.
+
+**Gates:**
+- **CPU suite:** one failure was the stale local nornax checkout, as before. The other was
+  `test_discarded_far_pairs_are_rejected_rather_than_differentiated_as_constant`. Its premise
+  (the default preset discards the far-pair list) is no longer true: the `static_radix` state
+  keeps it for its strict lane, so the reverse runs through the real far field. The test now
+  names `lbvh` for the refusal and asserts the retention on `static_radix`.
+- **Lane goldens** now run with every fused knob unset. They reproduce, within the float32
+  gate, the goldens recorded with the env set.
+- **Constructor-state golden:** regenerated. The diff is exactly the preset tree mode, fused
+  mode and the exact-profile flag.
+- **GPU, one A100, defaults gate** (`bench/fused_memory_budget.py --library-defaults` drops
+  every knob above): D2 with a clean env reproduces `main` 15ceca4 with the full harness env
+  **bitwise** (forces and final scan state) at 2e4, 2e5 and 8e6. Each default now equals
+  the value the env set, so the same code runs; the bitwise result confirms it. That is why
+  no interleaved timing A/B (G5) was run.
+- **Pins:** S1-S5 bitwise against `main-15ceca4`.
+- **Odisseo (G4), one A100, against `main`, D2, and D2 with Odisseo's env block removed
+  (O2):** identical on all three arms.
+  - `test_strict_velocity_verlet_policy`, `test_integration_api` and
+    `test_dynamics_direct_sum_agreement` pass.
+  - `test_blockstep_fmm` and `test_differentiable_fmm` exceed a 1 h per-file limit on
+    the shared card. On CPU against D2 + O2 they run complete: the differentiable file
+    passes in full.
+  - The block-step file has two failures, neither caused by D2 or O2:
+    - `test_the_pallas_backend_drops_most_of_the_dt_max_gradient` is a tripwire for an
+      upstream defect that has since been fixed: the Pallas gradient is now exact (AD/FD
+      1.0000). O2 replaces it with the exactness test on both backends.
+    - `test_one_compiled_program_survives_every_topology_rebuild` fails only in some
+      xdist orders and passes alone. This is a pre-existing isolation issue in Odisseo's
+      suite.
+
+**Odisseo's own production lane did not run on `main`.** At N >= 200k on a GPU, Odisseo's
+defaults (`large_n_gpu`, `static_radix`, the env block) raised on the A100, before and
+after D2, for two reasons:
+- The coupling's neighbour-edge autosize names `16 * N + 1` = 3,200,001. That is odd, and
+  the flat walk, the default since 2026-09-10, refuses odd caps.
+- With the autosize off, the block's named 131,072 far-pair cap overflows.
+
+With D2 and O2, which drops both and leaves the caps to the library, the 2e5 run completes:
+4 steps, finite. There is no working baseline to compare it with bitwise. It runs the
+configuration the defaults gate above checks, with unnamed caps like pin S1.
+

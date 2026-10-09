@@ -1532,8 +1532,11 @@ class FMMEngine(
         self._strict_cap_record_enabled: bool = str(
             os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        # Default off (2026-10, cleanup D2): with it on, the default static_radix +
+        # large_n_gpu prepare raised unless a recorded cap profile for exactly this
+        # (leaf, N) existed on disk. Every production caller turned it off.
         self._strict_cap_require_exact_profile_match: bool = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "1")
+            os.environ.get("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
         split_build_env_raw = os.environ.get(
             "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
@@ -1570,8 +1573,11 @@ class FMMEngine(
         self._strict_v2_profile_key_misses: int = 0
         self._strict_v2_fail_fast_reject_count: int = 0
         self._strict_v2_seen_profile_keys: set[str] = set()
+        # The fused strict lane is the default (2026-10, cleanup D2): strict_run_v2
+        # runs as one compiled scan, and the multi-GPU lane's fused eval fn works
+        # without an env var. "off" restores the host-driven strict loop.
         self._strict_fused_mode_raw: str = (
-            str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_MODE", "off"))
+            str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_MODE", "on"))
             .strip()
             .lower()
         )
