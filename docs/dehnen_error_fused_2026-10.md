@@ -108,6 +108,26 @@ peak is the prepare's, per particle:
   MAC's, so its step should cost about the geometric step plus eq 16a in the walk; eps 1e-5 has about 2.2x the lists.
   Both are inferences from list volumes, not timings.
 
+Rollout conservation, 1e6 particles of the same disc+bulge with its NFW halo as the external field:
+- `strict_run_v2` with the particle carry: 800 steps of dt 5e-4, t = 0.4, about 0.6 of an orbit at the disc scale
+  radius.
+- Every mark is measured with one meter, a geometric theta-0.4 potential (median 1.5e-7 off a direct sum).
+- `|dE|` is the largest energy excursion over the marks. `W` is the self-gravity energy; the halo holds 88% of the potential energy.
+- `|dL|` is the angular momentum change (the halo exerts no torque) over `sum m |r x v|`.
+- The imbalance is `|sum m a| / sum m |a|` of each MAC's own force.
+
+| MAC | max \|dE\|/\|W\| | \|dL\| at t = 0.4 | max imbalance |
+| --- | --- | --- | --- |
+| geometric theta 0.8 | 1.3e-6 | 7.1e-7 | 1.4e-8 |
+| geometric theta 0.5 | 2.1e-7 | 6.4e-8 | 5.3e-9 |
+| dehnen_error eps 1e-4 | 7.4e-7 | 5.5e-8 | 7.0e-9 |
+| dehnen_error eps 1e-5 | 2.9e-7 | 5.1e-8 | 4.3e-9 |
+
+- The carried force scale and the step-to-step lists inject no drift.
+- eps 1e-4 cuts theta 0.8's energy excursion 1.8x and conserves angular momentum 13x better.
+- eps 1e-5 sits with theta 0.5 at what is likely this setup's floor (time step, float32 state, meter).
+- Every MAC conserves momentum to round-off: the mutual walk's lists are symmetric.
+
 GPU rollout tests:
 - both carries run the criterion in the traced steps and agree;
 - the carried `f_b` matches a fresh evaluation at the same positions (median within 5%);
