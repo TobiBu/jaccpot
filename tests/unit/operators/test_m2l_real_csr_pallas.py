@@ -1,14 +1,18 @@
-"""Parity tests for the target-tiled (CSR) real-basis M2L Pallas kernel.
+"""Parity tests for the CSR real-basis M2L Pallas kernel and its shared algebra.
 
-``jaccpot.pallas.m2l_real_csr`` builds the rotations on chip from two angles and
-sums each target's far pairs inside one program. Pinned here, in interpret mode
-so it runs on CPU CI, against
+The CSR kernel is the pair-per-lane one
+(:func:`jaccpot.pallas.m2l_real_csr_lanes.m2l_real_csr_lanes_pallas`), which
+builds the rotations from two angles per pair and sums each target's far pairs
+inside one program. Until the 2026-10 cleanup (X5) these tests pinned the
+per-target kernel of ``jaccpot.pallas.m2l_real_csr``, which was removed; they now
+pin the lane kernel. Pinned here, in interpret mode so it runs on CPU CI, against
 
 * ``m2l_rot_scale_real_batch`` -- the pure-JAX rotate/scale M2L that is THE
   reference for every real M2L lane (rel err < 1e-10 at fp64, < 3e-4 at fp32,
   the tolerances of ``test_m2l_real_fused_pallas.py``), reduced per target with
   ``segment_sum``;
-* the kernel's own pure-jnp twin (``m2l_real_csr_jax``), a literal port.
+* the centred-layout pure-jnp twin (``m2l_real_csr_jax``), which the lane
+  kernel's own tests and custom VJP compare against.
 
 Cases: random CSR with empty targets and a padded ``-1`` tail, an
 ``active_pair_count`` shorter than the live prefix, on-axis deltas (``rho = 0``,
@@ -27,11 +31,10 @@ from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
 from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.pallas.m2l_real_csr import (
     csr_by_target,
-    m2l_real_csr_jax,
     m2l_real_csr_pair_jax,
-    m2l_real_csr_pallas,
     pallas_m2l_real_csr_supported,
 )
+from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
 
 
 def _case(order, dtype, *, n=12, pairs=40, seed=0, on_axis=False, pad=7):
@@ -111,7 +114,7 @@ def test_csr_pallas_interpret_matches_rot_scale_f64(order):
         pytest.skip("float64 disabled in this JAX runtime")
     mult, centers, src, tgt = _case(order, np.float64, seed=order)
     ref = _reference(mult, centers, src, tgt, order)
-    got = m2l_real_csr_pallas(
+    got = m2l_real_csr_lanes_pallas(
         jnp.asarray(mult),
         jnp.asarray(centers),
         jnp.asarray(src),
@@ -125,29 +128,6 @@ def test_csr_pallas_interpret_matches_rot_scale_f64(order):
     assert np.all(np.asarray(got)[-2:] == 0.0)
 
 
-@pytest.mark.parametrize("order", [2, 4])
-def test_csr_pallas_interpret_matches_twin_and_rot_scale_f32(order):
-    mult, centers, src, tgt = _case(order, np.float32, seed=10 + order)
-    ref = _reference(mult, centers, src, tgt, order)
-    got = m2l_real_csr_pallas(
-        jnp.asarray(mult),
-        jnp.asarray(centers),
-        jnp.asarray(src),
-        jnp.asarray(tgt),
-        order=order,
-        interpret=True,
-    )
-    twin = m2l_real_csr_jax(
-        jnp.asarray(mult),
-        jnp.asarray(centers),
-        jnp.asarray(src),
-        jnp.asarray(tgt),
-        order=order,
-    )
-    assert _relerr(got, ref) < 3e-4
-    assert _relerr(got, np.asarray(twin, np.float64)) < 1e-5
-
-
 def test_csr_pallas_interpret_active_pair_count_truncates():
     if not jax.config.jax_enable_x64:
         pytest.skip("float64 disabled in this JAX runtime")
@@ -155,7 +135,7 @@ def test_csr_pallas_interpret_active_pair_count_truncates():
     mult, centers, src, tgt = _case(order, np.float64, pairs=40, seed=5)
     active = 23
     ref = _reference(mult, centers, src, tgt, order, active=active)
-    got = m2l_real_csr_pallas(
+    got = m2l_real_csr_lanes_pallas(
         jnp.asarray(mult),
         jnp.asarray(centers),
         jnp.asarray(src),
@@ -175,7 +155,7 @@ def test_csr_pallas_interpret_on_axis_deltas_are_exact():
     mult, centers, src, tgt = _case(order, np.float64, seed=8, on_axis=True)
     ref = _reference(mult, centers, src, tgt, order)
     got = np.asarray(
-        m2l_real_csr_pallas(
+        m2l_real_csr_lanes_pallas(
             jnp.asarray(mult),
             jnp.asarray(centers),
             jnp.asarray(src),
@@ -193,7 +173,7 @@ def test_csr_pallas_under_jit_with_traced_active_count():
     order = 3
     mult, centers, src, tgt = _case(order, np.float32, seed=11)
     fn = jax.jit(
-        lambda m, c, s, t, a: m2l_real_csr_pallas(
+        lambda m, c, s, t, a: m2l_real_csr_lanes_pallas(
             m, c, s, t, order=order, active_pair_count=a, interpret=True
         )
     )
@@ -210,14 +190,14 @@ def test_csr_pallas_under_jit_with_traced_active_count():
 
 @pytest.mark.skipif(
     not pallas_m2l_real_csr_supported(),
-    reason="CSR M2L Pallas kernel needs an Ampere+ (sm_80) GPU",
+    reason="the CSR M2L Pallas kernel needs an Ampere+ (sm_80) GPU",
 )
 @pytest.mark.parametrize("order", [2, 4, 6])
 def test_csr_pallas_gpu_matches_rot_scale(order):
-    """The Triton lowering: dynamic-trip loop, row gathers by id, atan2, pow2 tiles."""
+    """The Triton lowering: per-row tiles of K lanes, row gathers by id, the angle recurrences."""
     mult, centers, src, tgt = _case(order, np.float32, n=40, pairs=400, seed=20 + order)
     ref = _reference(mult, centers, src, tgt, order)
-    got = m2l_real_csr_pallas(
+    got = m2l_real_csr_lanes_pallas(
         jnp.asarray(mult),
         jnp.asarray(centers),
         jnp.asarray(src),
@@ -235,7 +215,7 @@ def test_csr_pallas_gpu_matches_rot_scale(order):
 def test_csr_pallas_rejects_a_coefficient_count_of_another_order():
     mult, centers, src, tgt = _case(3, np.float32, seed=30)
     with pytest.raises(ValueError, match="coefficients"):
-        m2l_real_csr_pallas(
+        m2l_real_csr_lanes_pallas(
             jnp.asarray(mult),
             jnp.asarray(centers),
             jnp.asarray(src),
@@ -248,7 +228,7 @@ def test_csr_pallas_rejects_a_coefficient_count_of_another_order():
 def test_csr_pallas_rejects_misaligned_centers():
     mult, centers, src, tgt = _case(3, np.float32, seed=31)
     with pytest.raises(ValueError, match="centers"):
-        m2l_real_csr_pallas(
+        m2l_real_csr_lanes_pallas(
             jnp.asarray(mult),
             jnp.asarray(centers[:-1]),
             jnp.asarray(src),

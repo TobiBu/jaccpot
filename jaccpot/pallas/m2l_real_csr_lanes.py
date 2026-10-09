@@ -1,10 +1,10 @@
 """Real M2L over the target CSR, one PAIR PER LANE (plan sub-10ms, Phase 5).
 
-The per-pair kernel (:mod:`jaccpot.pallas.m2l_real_csr`) and the K-source
-tiled kernel (:mod:`jaccpot.pallas.m2l_real_csr_tiled`) both spread ONE pair's
-``(Bp, Wp)`` coefficient tile over the program's threads, so every rotation
-stage is a cross-thread reduction or a ``tl.dot`` with its layout
-conversions through shared memory. Measured on an A100 (order 5, fp32): the
+The per-pair kernel and the K-source tiled kernel this replaced (both removed in
+the 2026-10 cleanup, X5; :mod:`jaccpot.pallas.m2l_real_csr` keeps their shared
+algebra and twin) spread ONE pair's ``(Bp, Wp)`` coefficient tile over the
+program's threads, so every rotation stage is a cross-thread reduction or a
+``tl.dot`` with its layout conversions through shared memory. Measured on an A100 (order 5, fp32): the
 tiled kernel ran at the same speed with IEEE dots and with single-pass TF32
 tensor-core dots -- the arithmetic is not what costs; the data movement
 between the tiny tiles is.
@@ -355,7 +355,8 @@ def m2l_real_csr_lanes_pallas(
 ) -> Array:
     """Local increments from a flat far-pair list, one pair per lane.
 
-    Same contract as :func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_pallas`.
+    The reference is :func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_jax` (same
+    arguments, the per-pair twin reduced by target).
 
     Parameters
     ----------

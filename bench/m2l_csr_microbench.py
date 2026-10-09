@@ -1,9 +1,11 @@
-"""Go/no-go microbench for the CSR M2L Pallas kernel (plan "small leaves", gate G2a).
+"""Microbench for the CSR M2L Pallas kernel (plan "small leaves", gate G2a).
 
 Synthetic far-pair lists of 1M and 6M directed pairs over ``n`` nodes (the leaf
 64 / leaf 32 counts at N=200k), orders 4 and 6, fp32:
 
-* ``m2l_real_csr_pallas`` (one program per target, rotations on chip), jitted;
+* ``m2l_real_csr_lanes_pallas`` (one pair per lane, rotations on chip), jitted
+  -- the production kernel. Until the 2026-10 cleanup (X5) this timed the
+  per-target ``m2l_real_csr_pallas``, which that phase removed;
 * the pure-JAX chunked lane as production runs it -- ``m2l_rot_scale_real_batch``
   over 4096-pair chunks in a ``lax.scan`` with ``_chunk_segment_scatter_add`` --
   with ``JACCPOT_M2L_DEGREE_BATCHED`` off and on (the plan's 2.0 candidate, and
@@ -43,7 +45,7 @@ def main() -> None:
 
     from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
     from jaccpot.operators.real_harmonics import sh_size
-    from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
+    from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas
     from jaccpot.runtime.kernels._m2l import _chunk_segment_scatter_add
 
     dev = jax.devices()[0]
@@ -80,7 +82,7 @@ def main() -> None:
             counts = np.bincount(tgt, minlength=n)
 
             csr = jax.jit(
-                lambda m, c, s, t: m2l_real_csr_pallas(m, c, s, t, order=order)
+                lambda m, c, s, t: m2l_real_csr_lanes_pallas(m, c, s, t, order=order)
             )
             out_k, t_k, med_k = timed(csr, mult, centers, src_j, tgt_j)
 

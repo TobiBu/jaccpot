@@ -1,11 +1,12 @@
-"""One-node-per-lane M2M / L2L cascades against the level kernels (interpret mode, CPU).
+"""One-node-per-lane M2M / L2L cascades against the pure-JAX level loops (interpret mode, CPU).
 
-Same arguments, same result to round-off (different operation order: the lane
-kernels bake the rotation blocks into straight-line code and build ``r^k`` by
-repeated multiplication). Pinned on a real static-radix tree with lane counts
-that do and do not divide the level widths, on a degenerate edge (a child at its
-parent's centre: the identity translation), and under ``jax.jit``; plus the
-custom VJP's forward switch.
+The same result to round-off (different operation order: the lane kernels bake
+the rotation blocks into straight-line code and build ``r^k`` by repeated
+multiplication). Pinned on a real static-radix tree with lane counts that do and
+do not divide the level widths, on a degenerate edge (a child at its parent's
+centre: the identity translation), and under ``jax.jit``; plus the custom VJP's
+forward, which is this kernel, and the removed ``JACCPOT_CASCADE_KERNEL=level``.
+Until the 2026-10 cleanup (X5) the reference here was the level forward kernel.
 """
 
 from __future__ import annotations
@@ -22,11 +23,9 @@ from jaccpot.pallas.cascade_real_lanes import (
     l2l_real_levels_lanes_pallas,
     m2m_real_levels_lanes_pallas,
 )
-from jaccpot.pallas.cascade_real_level import (
-    l2l_real_levels_pallas,
-    l2l_real_levels_pallas_cvjp,
-    m2m_real_levels_pallas,
-)
+from jaccpot.pallas.cascade_real_level import l2l_real_levels_pallas_cvjp
+from jaccpot.runtime.kernels._l2l import _propagate_solidfmm_locals_by_level
+from jaccpot.upward.real_tree_expansions import aggregate_m2m_real_by_level
 from tests.unit._typecheck_budget import trim
 
 
@@ -68,7 +67,7 @@ def _close(got, ref):
 
 @pytest.mark.parametrize("order", trim([5, 3]))
 @pytest.mark.parametrize("k_lanes", trim([32, 7]))
-def test_m2m_lanes_match_the_level_kernel(tree_data, order, k_lanes):
+def test_m2m_lanes_match_the_level_loop(tree_data, order, k_lanes):
     topo, com, num_levels, width = tree_data
     num_internal = int(topo.left_child.shape[0])
     total = int(topo.parent.shape[0])
@@ -87,7 +86,8 @@ def test_m2m_lanes_match_the_level_kernel(tree_data, order, k_lanes):
         interpret=True,
     )
     args = (leaves, com, topo.left_child, topo.right_child, topo.nodes_by_level)
-    ref = m2m_real_levels_pallas(*args, topo.level_offsets, **kw)
+    loop_kw = {k: v for k, v in kw.items() if k != "interpret"}
+    ref = aggregate_m2m_real_by_level(*args, topo.level_offsets, **loop_kw)
     got = m2m_real_levels_lanes_pallas(*args, topo.level_offsets, k_lanes=k_lanes, **kw)
     assert np.array_equal(
         np.asarray(got)[num_internal:], np.asarray(leaves)[num_internal:]
@@ -98,7 +98,7 @@ def test_m2m_lanes_match_the_level_kernel(tree_data, order, k_lanes):
 
 @pytest.mark.parametrize("order", trim([5, 3]))
 @pytest.mark.parametrize("k_lanes", trim([32, 7]))
-def test_l2l_lanes_match_the_level_kernel(tree_data, order, k_lanes):
+def test_l2l_lanes_match_the_cascade(tree_data, order, k_lanes):
     topo, com, num_levels, width = tree_data
     total = int(topo.parent.shape[0])
     C = (order + 1) ** 2
@@ -110,14 +110,25 @@ def test_l2l_lanes_match_the_level_kernel(tree_data, order, k_lanes):
         order=order, num_levels=num_levels, level_batch_width=width, interpret=True
     )
     args = (locals0, com, topo.parent, topo.nodes_by_level, topo.level_offsets)
-    ref = l2l_real_levels_pallas(*args, **kw)
+    ref = _propagate_solidfmm_locals_by_level(
+        locals0 + 0.0,
+        com,
+        topo.left_child,
+        topo.right_child,
+        topo.node_level,  # donated by its jit
+        order=order,
+        rotation="solidfmm",
+        total_nodes=total,
+        basis_mode="real",
+        num_levels=num_levels - 1,
+    )
     got = l2l_real_levels_lanes_pallas(*args, k_lanes=k_lanes, **kw)
     _close(got, ref)
     assert np.array_equal(np.asarray(got)[0], np.asarray(locals0)[0])  # root kept
     assert not np.allclose(np.asarray(got), np.asarray(locals0))
 
 
-def test_lanes_jit_and_the_vjp_forward_switch(tree_data, monkeypatch):
+def test_lanes_jit_and_the_vjp_forward(tree_data, monkeypatch):
     topo, com, num_levels, width = tree_data
     total = int(topo.parent.shape[0])
     order = 3
@@ -158,9 +169,12 @@ def test_lanes_jit_and_the_vjp_forward_switch(tree_data, monkeypatch):
             )
         )
 
+    monkeypatch.delenv("JACCPOT_CASCADE_KERNEL", raising=False)
+    assert np.array_equal(cvjp(), lanes)
     monkeypatch.setenv("JACCPOT_CASCADE_KERNEL", "lanes")
     assert np.array_equal(cvjp(), lanes)
+    # the level forward kernel was removed (cleanup 2026-10, X5): asking for it
+    # raises rather than running the lane kernel under its name
     monkeypatch.setenv("JACCPOT_CASCADE_KERNEL", "level")
-    level = cvjp()
-    assert not np.array_equal(level, lanes)  # the switch selects a different kernel
-    _close(lanes, level)
+    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+        cvjp()

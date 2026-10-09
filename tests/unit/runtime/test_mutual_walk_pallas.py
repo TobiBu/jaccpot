@@ -41,12 +41,8 @@ def _sets(res):
 
 @pytest.mark.parametrize("kind", _KINDS)
 @pytest.mark.parametrize("theta", _THETAS)
-@pytest.mark.parametrize(
-    "node_layout, fused_emit", [("soa", False), ("record", False), ("record", True)]
-)
-def test_pallas_walk_lists_equal_the_flat_walk_as_sets(
-    kind, theta, node_layout, fused_emit
-):
+@pytest.mark.parametrize("node_layout", ["soa", "record"])
+def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta, node_layout):
     # Interpret-mode cost tracks the PAIR count, not n: 800 particles at leaf 4 ran
     # SLOWER than 4000 at leaf 16 (more leaves -> 43k far pairs). The typecheck job is
     # handled by trimming the grid above, not by shrinking here.
@@ -102,7 +98,6 @@ def test_pallas_walk_lists_equal_the_flat_walk_as_sets(
         block=64,
         interpret=True,
         node_layout=node_layout,
-        fused_emit=fused_emit,
     )
     assert not (
         bool(got.queue_overflow) or bool(got.far_overflow) or bool(got.near_overflow)
@@ -122,8 +117,7 @@ def test_pallas_walk_lists_equal_the_flat_walk_as_sets(
     assert int(got.peak_wavefront) == int(ref.peak_wavefront)
 
 
-@pytest.mark.parametrize("fused_emit", [False, True])
-def test_pallas_walk_flags_overflow(fused_emit):
+def test_pallas_walk_flags_overflow(monkeypatch):
     n = 3000
     P = jnp.asarray(_plummer(n, 5), jnp.float32)
     M = jnp.ones((n,), jnp.float32)
@@ -150,7 +144,6 @@ def test_pallas_walk_flags_overflow(fused_emit):
         near_cap=1 << 16,
         block=64,
         interpret=True,
-        fused_emit=fused_emit,
     )
     assert bool(small.far_overflow) and not bool(small.near_overflow)
     # A full far list does not stop the walk: it reports what the list needed,
@@ -167,7 +160,6 @@ def test_pallas_walk_flags_overflow(fused_emit):
         near_cap=1 << 16,
         block=64,
         interpret=True,
-        fused_emit=fused_emit,
     )
     assert not bool(fits.far_overflow) and int(fits.far_count) > 256
     assert int(small.far_needed) == int(fits.far_count)
@@ -186,9 +178,24 @@ def test_pallas_walk_flags_overflow(fused_emit):
         near_cap=1 << 16,
         block=64,
         interpret=True,
-        fused_emit=fused_emit,
     )
     assert bool(tiny_q.queue_overflow)
+    # the unfused emission was removed (2026-10 cleanup, X5): refused by name
+    monkeypatch.setenv("JACCPOT_WALK_FUSED_EMIT", "0")
+    with pytest.raises(ValueError, match="JACCPOT_WALK_FUSED_EMIT"):
+        mutual_walk_pallas(
+            left,
+            right,
+            geom.center,
+            geom.radius,
+            0.6,
+            root,
+            max_pair_queue=64,
+            far_cap=64,
+            near_cap=64,
+            block=64,
+            interpret=True,
+        )
 
 
 def test_lex_sorted_orders_by_target_then_source_in_both_branches():

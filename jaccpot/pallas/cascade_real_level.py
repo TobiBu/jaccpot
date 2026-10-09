@@ -1,4 +1,4 @@
-"""Real-basis M2M and L2L cascades as ONE Pallas launch per tree level (plan sub-10ms, Phase 3).
+"""Real-basis M2M and L2L cascades: the custom VJPs and their reverse kernels (plan sub-10ms, Phase 3).
 
 The level loops of the upward (``aggregate_m2m_real_by_level``) and downward
 (``_propagate_solidfmm_locals_by_level``) sweeps translate every node of a
@@ -6,12 +6,20 @@ level with the vectorised rotation operators, which XLA breaks into dozens of
 small fusions per level: ~0.8 ms per level, 66 ms for the 40-level radix tree
 over Morton-cell leaves at N = 2x10^5 (11 ms on the 13-level bucket tree).
 
-Here a level is one ``pallas_call``: one program per node of the level (a
-static batch of programs, the level's node count masked), each gathering its
-partner rows, rotating them onto the pair axis, applying the shift core along
-z and rotating back, then writing its own row with a dynamic store into the
+The forward of both cascades is the one-node-per-lane kernel of
+:mod:`jaccpot.pallas.cascade_real_lanes`, reached through the custom VJPs at the
+end of this module (:func:`m2m_real_levels_pallas_cvjp`,
+:func:`l2l_real_levels_pallas_cvjp`). The one-program-per-node level forward
+kernels this module started with were removed in the 2026-10 cleanup (X5); the
+lane kernel replaced them as the default in fused-memory round 2.
+
+What stays here is the reverse: a level is one ``pallas_call``, one program per
+node of the level (a static batch of programs, the level's node count masked),
+each gathering its partner rows, rotating them onto the pair axis, applying the
+shift core along z and rotating back (:func:`_translate_rows`, also the body of
+the pure-jnp pair twins), then writing its own row with a dynamic store into the
 coefficient array it aliases. The rotation halves are exactly the M2L CSR
-kernel's (:mod:`jaccpot.pallas.m2l_real_csr`) with one block swapped: the
+twin's (:mod:`jaccpot.pallas.m2l_real_csr`) with one block swapped: the
 alignment ``T`` is not orthogonal, so multipoles come back with ``T^-1``
 (per-degree inverse blocks, a constant table) and locals go in with ``T^-T``
 and come back with ``T^T`` (``real_rotations.py``); the cores differ too:
@@ -61,11 +69,9 @@ except Exception:  # pragma: no cover - import is environment-dependent
 __all__ = [
     "cascade_level_tables",
     "l2l_real_centred_pair_jax",
-    "l2l_real_levels_pallas",
     "l2l_real_levels_pallas_cvjp",
     "l2l_real_levels_reverse_pallas",
     "m2m_real_centred_pair_jax",
-    "m2m_real_levels_pallas",
     "m2m_real_levels_pallas_cvjp",
     "m2m_real_levels_reverse_pallas",
     "pallas_cascade_level_supported",
@@ -211,7 +217,7 @@ def _translate_rows(
         primal is bit-identical; only the derivative changes, and only where the
         unguarded form is singular: ``sqrt`` and ``arctan2`` at ``rho == 0`` or
         ``r == 0`` give ``0 * inf`` cotangents, which is a NaN. The reverse
-        kernels set this; the forward kernels keep the unguarded trace.
+        kernels set this; the pair twins keep the unguarded trace.
 
     Returns
     -------
@@ -323,157 +329,7 @@ def l2l_real_centred_pair_jax(
     return unpack_centred(out.reshape(1, -1), order=int(order))[0]
 
 
-# ------------------------------------------------------------------ level kernels
-
-
-def _m2m_level_kernel(
-    rows_ref: KernelRef,
-    cent_ref: KernelRef,
-    left_ref: KernelRef,
-    right_ref: KernelRef,
-    nbl_ref: KernelRef,
-    start_ref: KernelRef,
-    count_ref: KernelRef,
-    *table_and_out_refs: KernelRef,
-    bp: int,
-    wp: int,
-    num_internal: int,
-) -> None:
-    """One parent of the level: sum the M2M of its two children into its row.
-
-    Parameters
-    ----------
-    rows_ref : KernelRef
-        Whole centred coefficient table ``[nodes + 1, Bp*Wp]`` (row ``nodes`` is
-        the dead row invalid programs write).
-    cent_ref : KernelRef
-        Whole padded centre table ``[nodes + 1, 4]``.
-    left_ref : KernelRef
-        Left child per internal node ``[internal]``.
-    right_ref : KernelRef
-        Right child per internal node ``[internal]``.
-    nbl_ref : KernelRef
-        ``nodes_by_level`` padded with ``-1`` ``[nodes + batch]``.
-    start_ref : KernelRef
-        This level's start in ``nodes_by_level`` ``[1]``.
-    count_ref : KernelRef
-        This level's node count ``[1]``.
-    *table_and_out_refs : KernelRef
-        The constant tables (``_TABLE_KEYS`` then ``_CORE_KEYS``) and the
-        output ref ``[nodes + 1, Bp*Wp]`` aliased to ``rows_ref``.
-    bp : int
-        ``Bp``. Static.
-    wp : int
-        ``Wp``. Static.
-    num_internal : int
-        Internal node count. Static.
-
-    Returns
-    -------
-    None
-        Writes the parent's row.
-    """
-    n_tables = len(_TABLE_KEYS) + len(_CORE_KEYS)
-    table_refs = table_and_out_refs[:n_tables]
-    (out_ref,) = table_and_out_refs[n_tables:]
-    slot = pl.program_id(0)
-    start = start_ref[0]
-    count = count_ref[0]
-
-    # The grid is the widest level's width for EVERY level; programs past this
-    # level's count exit before touching the tables (47 launches x the widest
-    # level's work = 8.4 ms at N=2e5 without this, ~1 ms with it).
-    @pl.when(slot < count)
-    def _live():
-        t = {k: ref[...] for k, ref in zip((*_TABLE_KEYS, *_CORE_KEYS), table_refs)}
-        node = nbl_ref[start + slot]
-        valid = (node >= 0) & (node < num_internal)
-        node_safe = jnp.where(valid, node, 0)
-        px = cent_ref[node_safe, 0]
-        py = cent_ref[node_safe, 1]
-        pz = cent_ref[node_safe, 2]
-        acc = jnp.zeros((bp, wp), dtype=out_ref.dtype)
-        for child_ref in (left_ref, right_ref):
-            c = child_ref[node_safe]
-            c_valid = valid & (c >= 0)
-            c_safe = jnp.where(c_valid, c, 0)
-            rows = rows_ref[c_safe, :].reshape(bp, wp)
-            dx = cent_ref[c_safe, 0] - px
-            dy = cent_ref[c_safe, 1] - py
-            dz_ = cent_ref[c_safe, 2] - pz
-            contrib = _translate_rows(rows, (dx, dy, dz_), t, "m2m")
-            acc = acc + jnp.where(c_valid, contrib, 0.0)
-        dead = jnp.asarray(out_ref.shape[0] - 1, dtype=node.dtype)
-        target = jnp.where(valid, node_safe, dead)
-        out_ref[target, :] = acc.reshape(bp * wp).astype(out_ref.dtype)
-
-
-def _l2l_level_kernel(
-    rows_ref: KernelRef,
-    cent_ref: KernelRef,
-    parent_ref: KernelRef,
-    nbl_ref: KernelRef,
-    start_ref: KernelRef,
-    count_ref: KernelRef,
-    *table_and_out_refs: KernelRef,
-    bp: int,
-    wp: int,
-) -> None:
-    """One node of the level: add its parent's translated local to its own row.
-
-    Parameters
-    ----------
-    rows_ref : KernelRef
-        Whole centred local table ``[nodes + 1, Bp*Wp]``.
-    cent_ref : KernelRef
-        Whole padded centre table ``[nodes + 1, 4]``.
-    parent_ref : KernelRef
-        Parent per node ``[nodes]`` (``-1`` at the root).
-    nbl_ref : KernelRef
-        ``nodes_by_level`` padded with ``-1``.
-    start_ref : KernelRef
-        This level's start ``[1]``.
-    count_ref : KernelRef
-        This level's node count ``[1]``.
-    *table_and_out_refs : KernelRef
-        Constant tables (``_TABLE_KEYS`` then ``_CORE_KEYS``) and the
-        aliased output ref.
-    bp : int
-        ``Bp``. Static.
-    wp : int
-        ``Wp``. Static.
-
-    Returns
-    -------
-    None
-        Writes the node's row.
-    """
-    n_tables = len(_TABLE_KEYS) + len(_CORE_KEYS)
-    table_refs = table_and_out_refs[:n_tables]
-    (out_ref,) = table_and_out_refs[n_tables:]
-    slot = pl.program_id(0)
-    start = start_ref[0]
-    count = count_ref[0]
-
-    @pl.when(slot < count)  # see _m2m_level_kernel
-    def _live():
-        t = {k: ref[...] for k, ref in zip((*_TABLE_KEYS, *_CORE_KEYS), table_refs)}
-        node = nbl_ref[start + slot]
-        valid = node >= 0
-        node_safe = jnp.where(valid, node, 0)
-        par = parent_ref[node_safe]
-        valid = valid & (par >= 0)
-        par_safe = jnp.where(valid, par, 0)
-        rows = rows_ref[par_safe, :].reshape(bp, wp)
-        dx = cent_ref[par_safe, 0] - cent_ref[node_safe, 0]
-        dy = cent_ref[par_safe, 1] - cent_ref[node_safe, 1]
-        dz_ = cent_ref[par_safe, 2] - cent_ref[node_safe, 2]
-        contrib = _translate_rows(rows, (dx, dy, dz_), t, "l2l")
-        own = rows_ref[node_safe, :].reshape(bp, wp)
-        new = own + jnp.where(valid, contrib, 0.0)
-        dead = jnp.asarray(out_ref.shape[0] - 1, dtype=node.dtype)
-        target = jnp.where(valid, node_safe, dead)
-        out_ref[target, :] = new.reshape(bp * wp).astype(out_ref.dtype)
+# ----------------------------------------------------------------- launch helper
 
 
 def _full(arr: Array) -> "pl.BlockSpec":
@@ -481,267 +337,22 @@ def _full(arr: Array) -> "pl.BlockSpec":
     return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
 
-def _level_call(
-    kernel: Any,
-    operands: list,
-    *,
-    num_programs: int,
-    interpret: bool,
-    backend: str,
-    num_warps: int,
-    name: str,
-) -> Array:
-    """One level launch: whole-array refs, ``num_programs`` programs.
-
-    ``operands[0]`` is the coefficient table; it is aliased to the output, so
-    every row a program does not write keeps its value (programs read rows of
-    OTHER levels and write only their own, so the in-place update is safe).
-
-    Parameters
-    ----------
-    kernel : Any
-        The Pallas kernel to launch, already bound to its static arguments.
-    operands : list
-        Kernel operands; ``operands[0]`` is the aliased coefficient table.
-    num_programs : int
-        Programs in the 1-D grid.
-    interpret : bool
-        Run Pallas' reference interpreter instead of lowering.
-    backend : str
-        Pallas GPU lowering.
-    num_warps : int
-        Warps per program.
-    name : str
-        Kernel name, as it appears in a profile.
-
-    Returns
-    -------
-    Array
-        The updated coefficient table.
-    """
-    backend_kwargs = pallas_backend_kwargs(backend, interpret)
-    if "compiler_params" in backend_kwargs:
-        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
-            num_warps=int(num_warps)
-        )
-    rows = operands[0]
-    return pl.pallas_call(
-        kernel,
-        grid=(int(num_programs),),
-        in_specs=[_full(a) for a in operands],
-        out_specs=_full(rows),
-        out_shape=jax.ShapeDtypeStruct(rows.shape, rows.dtype),
-        input_output_aliases={0: 0},
-        interpret=bool(interpret),
-        name=name,
-        **backend_kwargs,
-    )(*operands)
-
-
-def m2m_real_levels_pallas(
-    packed: Array,
-    centers: Array,
-    left_child: Array,
-    right_child: Array,
-    nodes_by_level: Array,
-    level_offsets: Array,
-    *,
-    order: int,
-    num_internal: int,
-    num_levels: int,
-    level_batch_width: int,
-    interpret: bool = False,
-    backend: str = "triton",
-    num_warps: int = 4,
-) -> Array:
-    """Upward M2M cascade: one Pallas launch per internal level, deepest first.
-
-    Drop-in for :func:`jaccpot.upward.real_tree_expansions.aggregate_m2m_real_by_level`
-    (same arguments), agreeing with it to round-off.
-
-    Parameters
-    ----------
-    packed : Array
-        ``[nodes, C]`` packed multipoles with the leaves filled (P2M done).
-    centers : Array
-        ``[nodes, 3]`` expansion centres.
-    left_child : Array
-        ``[internal]`` left children.
-    right_child : Array
-        ``[internal]`` right children.
-    nodes_by_level : Array
-        Level-major node ids.
-    level_offsets : Array
-        ``[levels + 1]`` starts into ``nodes_by_level``.
-    order : int
-        Expansion order. Static.
-    num_internal : int
-        Internal node count. Static.
-    num_levels : int
-        Levels the loop covers (the deepest ``num_levels - 1`` internal levels). Static.
-    level_batch_width : int
-        Programs per level (>= the widest level). Static.
-    interpret : bool
-        Pallas interpret mode.
-    backend : str
-        Pallas GPU lowering.
-    num_warps : int
-        Warps per program.
-
-    Returns
-    -------
-    Array
-        ``[nodes, C]`` packed multipoles with the internal nodes filled.
-    """
-    p = int(order)
-    t = cascade_level_tables(p)
-    Bp, Wp = t["Bp"], t["Wp"]
-    dtype = packed.dtype
-    total = int(packed.shape[0])
-    if int(num_internal) <= 0:
-        return packed
-    tables = _core_tables_to_jnp(p, dtype)
-    table_arrays = [tables[k] for k in (*_TABLE_KEYS, *_CORE_KEYS)]
-    rows = pack_centred(packed, order=p)
-    rows = jnp.concatenate([rows, jnp.zeros((1, Bp * Wp), dtype)], axis=0)  # dead row
-    cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 1), (0, 1)))
-    width = int(max(level_batch_width, 1))
-    idx = level_offsets.dtype
-    nbl = jnp.concatenate(
-        [jnp.asarray(nodes_by_level, idx), jnp.full((width,), -1, idx)]
-    )
-    offs = jnp.asarray(level_offsets, idx)
-    kernel = functools.partial(
-        _m2m_level_kernel, bp=Bp, wp=Wp, num_internal=int(num_internal)
-    )
-
-    def body(rev: Array, rows_state: Array) -> Array:
-        level = (int(num_levels) - 2) - rev
-        start = offs[level][None]
-        count = (offs[level + 1] - offs[level])[None]
-        return _level_call(
-            kernel,
-            [
-                rows_state,
-                cent,
-                jnp.asarray(left_child, idx),
-                jnp.asarray(right_child, idx),
-                nbl,
-                start,
-                count,
-                *table_arrays,
-            ],
-            num_programs=width,
-            interpret=interpret,
-            backend=backend,
-            num_warps=num_warps,
-            name=f"m2m_real_level_p{p}",
-        )
-
-    # static trip count: unrolled so the per-level launches sit in the parent
-    # computation (graph-capturable) instead of a while body
-    rows = lax.fori_loop(0, max(int(num_levels) - 1, 0), body, rows, unroll=True)
-    return unpack_centred(rows[:total], order=p)
-
-
-def l2l_real_levels_pallas(
-    coeffs_local: Array,
-    centers: Array,
-    parent: Array,
-    nodes_by_level: Array,
-    level_offsets: Array,
-    *,
-    order: int,
-    num_levels: int,
-    level_batch_width: int,
-    interpret: bool = False,
-    backend: str = "triton",
-    num_warps: int = 4,
-) -> Array:
-    """Downward L2L cascade: one Pallas launch per level below the root, top first.
-
-    Parameters
-    ----------
-    coeffs_local : Array
-        ``[nodes, C]`` packed locals after M2L (every node carries its own level's
-        far field).
-    centers : Array
-        ``[nodes, 3]`` expansion centres.
-    parent : Array
-        ``[nodes]`` parent per node (``-1`` at the root).
-    nodes_by_level : Array
-        Level-major node ids.
-    level_offsets : Array
-        ``[levels + 1]`` starts into ``nodes_by_level``.
-    order : int
-        Expansion order. Static.
-    num_levels : int
-        Levels present (``max level + 1``). Static.
-    level_batch_width : int
-        Programs per level. Static.
-    interpret : bool
-        Pallas interpret mode.
-    backend : str
-        Pallas GPU lowering.
-    num_warps : int
-        Warps per program.
-
-    Returns
-    -------
-    Array
-        ``[nodes, C]`` packed locals with every ancestor's field cascaded down.
-    """
-    p = int(order)
-    t = cascade_level_tables(p)
-    Bp, Wp = t["Bp"], t["Wp"]
-    dtype = coeffs_local.dtype
-    total = int(coeffs_local.shape[0])
-    tables = _core_tables_to_jnp(p, dtype)
-    table_arrays = [tables[k] for k in (*_TABLE_KEYS, *_CORE_KEYS)]
-    rows = pack_centred(coeffs_local, order=p)
-    rows = jnp.concatenate([rows, jnp.zeros((1, Bp * Wp), dtype)], axis=0)
-    cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 1), (0, 1)))
-    width = int(max(level_batch_width, 1))
-    idx = level_offsets.dtype
-    nbl = jnp.concatenate(
-        [jnp.asarray(nodes_by_level, idx), jnp.full((width,), -1, idx)]
-    )
-    offs = jnp.asarray(level_offsets, idx)
-    par = jnp.asarray(parent, idx)
-    kernel = functools.partial(_l2l_level_kernel, bp=Bp, wp=Wp)
-
-    def body(level: Array, rows_state: Array) -> Array:
-        start = offs[level][None]
-        count = (offs[level + 1] - offs[level])[None]
-        return _level_call(
-            kernel,
-            [rows_state, cent, par, nbl, start, count, *table_arrays],
-            num_programs=width,
-            interpret=interpret,
-            backend=backend,
-            num_warps=num_warps,
-            name=f"l2l_real_level_p{p}",
-        )
-
-    # level 0 is the root (nothing above it); levels 1 .. num_levels-1 receive
-    rows = lax.fori_loop(1, max(int(num_levels), 1), body, rows, unroll=True)
-    return unpack_centred(rows[:total], order=p)
-
-
 # ------------------------------------------------------------- reverse kernels
 # Adjoints of the two cascades (plan fast-gradients, Phase 2). Each level is
 # linear in the coefficients at fixed geometry, so the coefficient half of the
 # adjoint is the transposed translate and the geometry half a contraction of
 # the cotangent with d(translate)/d(delta). Both come out of ONE ``jax.vjp`` of
-# the same ``_translate_rows`` body the forward runs (guarded, ``safe=True``),
-# traced inside the kernel: the transpose of a rotate/shift chain is the chain
-# of transposes, and JAX writes it. The pass structures swap:
+# the ``_translate_rows`` body (guarded, ``safe=True``), traced inside the kernel:
+# the transpose of a rotate/shift chain is the chain of transposes, and JAX writes
+# it. ``_translate_rows`` is the same translation as the lane forward to round-off
+# (the pair twins pin it against the reference operators). The pass structures
+# swap against the forward:
 #
 # * M2M reverse: top-down, one program per NODE, ``g[c] += J_c^T g[parent]``
-#   (the L2L kernel's shape) -- each node has one parent, so no two programs
+#   (the L2L forward's shape) -- each node has one parent, so no two programs
 #   write the same row;
 # * L2L reverse: bottom-up, one program per PARENT, ``g[p] += sum_c J_c^T g[c]``
-#   (the M2M kernel's shape) -- gathering the two children avoids two programs
+#   (the M2M forward's shape) -- gathering the two children avoids two programs
 #   adding into one parent row.
 #
 # The per-edge geometry cotangent is written to the CHILD's slot of a
@@ -832,7 +443,11 @@ def _m2m_rev_level_kernel(
     start = start_ref[0]
     count = count_ref[0]
 
-    @pl.when(slot < count)  # see _m2m_level_kernel
+    # The grid is the widest level's width for EVERY level; programs past this
+    # level's count exit before touching the tables (47 launches x the widest
+    # level's work = 8.4 ms at N=2e5 for the level forward this was built with,
+    # ~1 ms with the early exit).
+    @pl.when(slot < count)
     def _live():
         t = {k: ref[...] for k, ref in zip((*_TABLE_KEYS, *_CORE_KEYS), table_refs)}
         node = nbl_ref[start + slot]
@@ -1065,7 +680,7 @@ def m2m_real_levels_reverse_pallas(
     backend: str = "triton",
     num_warps: int = 4,
 ) -> tuple[Array, Array]:
-    """Adjoint of :func:`m2m_real_levels_pallas`: one Pallas launch per level, top down.
+    """Adjoint of the upward M2M cascade: one Pallas launch per level, top down.
 
     Parameters
     ----------
@@ -1169,7 +784,7 @@ def l2l_real_levels_reverse_pallas(
     backend: str = "triton",
     num_warps: int = 4,
 ) -> tuple[Array, Array]:
-    """Adjoint of :func:`l2l_real_levels_pallas`: one Pallas launch per level, bottom up.
+    """Adjoint of the downward L2L cascade: one Pallas launch per level, bottom up.
 
     Parameters
     ----------
@@ -1284,19 +899,28 @@ def l2l_real_levels_reverse_pallas(
 # arguments whose cotangents are ``None`` (symbolic zero).
 
 
-def _cascade_forward_kind() -> tuple[str, int]:
-    """``JACCPOT_CASCADE_KERNEL`` (``level`` | ``lanes``) and the lanes per program.
+def _cascade_lanes_k() -> int:
+    """``JACCPOT_CASCADE_LANES_K``: nodes per program of the lane forward kernels.
+
+    ``JACCPOT_CASCADE_KERNEL=level`` selected the one-program-per-node level
+    forward kernels, which the 2026-10 cleanup (X5) removed; it raises a
+    ``ValueError`` (:func:`jaccpot._env.env_reject_removed`). ``lanes`` (the
+    default) is accepted, and any other value warns and is ignored.
 
     Returns
     -------
-    tuple[str, int]
-        The forward kernel and ``JACCPOT_CASCADE_LANES_K`` (nodes per program of
-        the lane kernel).
+    int
+        Nodes per program (``k_lanes``) of
+        :func:`~jaccpot.pallas.cascade_real_lanes.m2m_real_levels_lanes_pallas`
+        and :func:`~jaccpot.pallas.cascade_real_lanes.l2l_real_levels_lanes_pallas`.
     """
-    from jaccpot._env import env_choice, env_int
+    from jaccpot._env import env_choice, env_int, env_reject_removed
 
-    kind = env_choice("JACCPOT_CASCADE_KERNEL", "lanes", ("level", "lanes"))
-    return kind, env_int("JACCPOT_CASCADE_LANES_K", 32, minimum=1)
+    env_reject_removed(
+        "JACCPOT_CASCADE_KERNEL", ("level",), phase="X5", default="lanes"
+    )
+    env_choice("JACCPOT_CASCADE_KERNEL", "lanes", ("lanes",))
+    return env_int("JACCPOT_CASCADE_LANES_K", 32, minimum=1)
 
 
 def _m2m_forward(
@@ -1308,47 +932,43 @@ def _m2m_forward(
     level_offsets: Array,
     **kw: Any,
 ) -> Array:
-    """The M2M custom VJP's forward: the level kernel or the one-node-per-lane kernel.
+    """The M2M custom VJP's forward: the one-node-per-lane kernel.
 
     Parameters
     ----------
     packed : Array
-        As :func:`m2m_real_levels_pallas`.
+        As :func:`m2m_real_levels_pallas_cvjp`.
     centers : Array
-        As :func:`m2m_real_levels_pallas`.
+        As :func:`m2m_real_levels_pallas_cvjp`.
     left_child : Array
-        As :func:`m2m_real_levels_pallas`.
+        As :func:`m2m_real_levels_pallas_cvjp`.
     right_child : Array
-        As :func:`m2m_real_levels_pallas`.
+        As :func:`m2m_real_levels_pallas_cvjp`.
     nodes_by_level : Array
-        As :func:`m2m_real_levels_pallas`.
+        As :func:`m2m_real_levels_pallas_cvjp`.
     level_offsets : Array
-        As :func:`m2m_real_levels_pallas`.
+        As :func:`m2m_real_levels_pallas_cvjp`.
     **kw : Any
-        Its keyword arguments (``num_warps`` is the level kernel's; the lane
-        kernel runs ``k / 32`` warps).
+        Its keyword arguments. ``num_warps`` is the reverse kernels'; the lane
+        kernel runs ``k / 32`` warps.
 
     Returns
     -------
     Array
         ``[nodes, C]`` packed multipoles with the internal nodes filled.
     """
-    kind, k = _cascade_forward_kind()
-    if kind == "lanes":
-        from jaccpot.pallas.cascade_real_lanes import m2m_real_levels_lanes_pallas
+    from jaccpot.pallas.cascade_real_lanes import m2m_real_levels_lanes_pallas
 
-        kw = dict(kw, k_lanes=k, num_warps=max(1, k // 32))
-        return m2m_real_levels_lanes_pallas(
-            packed,
-            centers,
-            left_child,
-            right_child,
-            nodes_by_level,
-            level_offsets,
-            **kw,
-        )
-    return m2m_real_levels_pallas(
-        packed, centers, left_child, right_child, nodes_by_level, level_offsets, **kw
+    k = _cascade_lanes_k()
+    kw = dict(kw, k_lanes=k, num_warps=max(1, k // 32))
+    return m2m_real_levels_lanes_pallas(
+        packed,
+        centers,
+        left_child,
+        right_child,
+        nodes_by_level,
+        level_offsets,
+        **kw,
     )
 
 
@@ -1360,37 +980,33 @@ def _l2l_forward(
     level_offsets: Array,
     **kw: Any,
 ) -> Array:
-    """The L2L custom VJP's forward: the level kernel or the one-node-per-lane kernel.
+    """The L2L custom VJP's forward: the one-node-per-lane kernel.
 
     Parameters
     ----------
     coeffs_local : Array
-        As :func:`l2l_real_levels_pallas`.
+        As :func:`l2l_real_levels_pallas_cvjp`.
     centers : Array
-        As :func:`l2l_real_levels_pallas`.
+        As :func:`l2l_real_levels_pallas_cvjp`.
     parent : Array
-        As :func:`l2l_real_levels_pallas`.
+        As :func:`l2l_real_levels_pallas_cvjp`.
     nodes_by_level : Array
-        As :func:`l2l_real_levels_pallas`.
+        As :func:`l2l_real_levels_pallas_cvjp`.
     level_offsets : Array
-        As :func:`l2l_real_levels_pallas`.
+        As :func:`l2l_real_levels_pallas_cvjp`.
     **kw : Any
-        Its keyword arguments (``num_warps`` is the level kernel's).
+        Its keyword arguments (``num_warps`` is the reverse kernels').
 
     Returns
     -------
     Array
         ``[nodes, C]`` packed locals, every ancestor's field cascaded down.
     """
-    kind, k = _cascade_forward_kind()
-    if kind == "lanes":
-        from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_pallas
+    from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_pallas
 
-        kw = dict(kw, k_lanes=k, num_warps=max(1, k // 32))
-        return l2l_real_levels_lanes_pallas(
-            coeffs_local, centers, parent, nodes_by_level, level_offsets, **kw
-        )
-    return l2l_real_levels_pallas(
+    k = _cascade_lanes_k()
+    kw = dict(kw, k_lanes=k, num_warps=max(1, k // 32))
+    return l2l_real_levels_lanes_pallas(
         coeffs_local, centers, parent, nodes_by_level, level_offsets, **kw
     )
 
@@ -1412,7 +1028,12 @@ def m2m_real_levels_pallas_cvjp(
     backend: str,
     num_warps: int,
 ) -> Array:
-    """Differentiable :func:`m2m_real_levels_pallas` (forward byte-identical).
+    """Upward M2M cascade through a custom VJP: the lane forward, the level reverse.
+
+    The forward is
+    :func:`~jaccpot.pallas.cascade_real_lanes.m2m_real_levels_lanes_pallas`
+    (``JACCPOT_CASCADE_LANES_K`` nodes per program), byte-identical to calling it;
+    the reverse is :func:`m2m_real_levels_reverse_pallas`.
 
     Parameters
     ----------
@@ -1443,7 +1064,8 @@ def m2m_real_levels_pallas_cvjp(
     backend : str
         Pallas GPU lowering. ``nondiff_argnums``.
     num_warps : int
-        Warps per program. ``nondiff_argnums``.
+        Warps per program of the reverse kernels (the lane forward runs
+        ``k / 32``). ``nondiff_argnums``.
 
     Returns
     -------
@@ -1550,7 +1172,12 @@ def l2l_real_levels_pallas_cvjp(
     backend: str,
     num_warps: int,
 ) -> Array:
-    """Differentiable :func:`l2l_real_levels_pallas` (forward byte-identical).
+    """Downward L2L cascade through a custom VJP: the lane forward, the level reverse.
+
+    The forward is
+    :func:`~jaccpot.pallas.cascade_real_lanes.l2l_real_levels_lanes_pallas`,
+    byte-identical to calling it; the reverse is
+    :func:`l2l_real_levels_reverse_pallas`.
 
     Parameters
     ----------
@@ -1579,7 +1206,8 @@ def l2l_real_levels_pallas_cvjp(
     backend : str
         Pallas GPU lowering. ``nondiff_argnums``.
     num_warps : int
-        Warps per program. ``nondiff_argnums``.
+        Warps per program of the reverse kernels (the lane forward runs
+        ``k / 32``). ``nondiff_argnums``.
 
     Returns
     -------

@@ -53,7 +53,7 @@ __all__: list[str] = []
 
 
 def _m2l_csr_pallas_active() -> bool:
-    """Whether the flat real-basis M2L runs the target-tiled CSR Pallas kernel.
+    """Whether the flat real-basis M2L runs the CSR Pallas lane kernel.
 
     Default on (since 2026-09-10; ``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0``
     restores the chunked pure-JAX lanes) and only where it can lower: an
@@ -63,7 +63,8 @@ def _m2l_csr_pallas_active() -> bool:
     Returns
     -------
     bool
-        True when :func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_pallas`
+        True when
+        :func:`jaccpot.pallas.m2l_real_csr_lanes.m2l_real_csr_lanes_pallas_cvjp`
         replaces the full-batch / chunked flat lanes for the real basis.
     """
     from jaccpot._env import env_flag
@@ -554,38 +555,43 @@ def _prepare_solidfmm_downward_child_inputs(
 
 
 @jax.named_scope("fmm_m2l")
-def _m2l_csr_kernel_choice() -> str:
-    """The CSR M2L kernel the flat real path runs: ``pair``, ``tiled`` or ``lanes``.
+def _check_m2l_csr_kernel_env() -> None:
+    """Refuse the removed CSR M2L kernels; the flat real path runs the lane kernel.
 
-    ``JACCPOT_M2L_CSR_KERNEL`` (plan sub-10ms Phase 5; ``JACCPOT_M2L_CSR_TILED=1``
-    is the older spelling of ``tiled``), default ``lanes`` (Phase 6, 2026-09-11;
-    18x the per-pair kernel). On a gradient path it is always ``lanes``: only that
-    kernel carries a custom_vjp (plan fast-gradients); the pair / tiled kernels
-    would hit pallas_call's generic JVP rule.
+    ``JACCPOT_M2L_CSR_KERNEL`` chose between the per-target ``pair`` kernel, the
+    K-source ``tiled`` one (``JACCPOT_M2L_CSR_TILED=1`` was its older spelling)
+    and ``lanes`` (Phase 6, 2026-09-11; 18x the per-pair kernel). The first two
+    were removed in the 2026-10 cleanup (X5): asking for either raises rather than
+    running the lane kernel under its name. ``lanes``, the default, is accepted;
+    it is also the only kernel with a custom_vjp, so the gradient path took it
+    regardless.
 
     Returns
     -------
-    str
-        The kernel name.
+    None
+        Returns only when no removed kernel is requested.
 
     Raises
     ------
     ValueError
-        If ``JACCPOT_M2L_CSR_KERNEL`` names no kernel.
+        If ``JACCPOT_M2L_CSR_KERNEL`` is ``pair`` or ``tiled``, if
+        ``JACCPOT_M2L_CSR_TILED`` is on, or if ``JACCPOT_M2L_CSR_KERNEL`` names no
+        kernel.
     """
-    from jaccpot._env import env_flag
-    from jaccpot.runtime.grad_options import on_grad_path
+    from jaccpot._env import env_reject_removed
 
+    env_reject_removed(
+        "JACCPOT_M2L_CSR_KERNEL", ("pair", "tiled"), phase="X5", default="lanes"
+    )
+    env_reject_removed(
+        "JACCPOT_M2L_CSR_TILED",
+        ("1", "true", "yes", "on"),
+        phase="X5",
+        default="the lanes kernel",
+    )
     which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
-    if not which:
-        which = "tiled" if env_flag("JACCPOT_M2L_CSR_TILED", False) else "lanes"
-    if which not in ("pair", "tiled", "lanes"):
-        raise ValueError(
-            f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected pair, tiled or lanes"
-        )
-    if which != "lanes" and on_grad_path():
-        which = "lanes"
-    return which
+    if which not in ("", "lanes"):
+        raise ValueError(f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected lanes")
 
 
 def _solidfmm_downward_accumulate_from_multipoles(
@@ -617,10 +623,10 @@ def _solidfmm_downward_accumulate_from_multipoles(
     chunk_size`` picks full-batch over a chunked scan. Both compute the same
     operator; they differ in how the pair list is blocked. A third lane for the
     real basis, the default on Ampere+ GPUs (:func:`_m2l_csr_pallas_active`),
-    hands the whole pair list to the target-tiled CSR Pallas kernel, which owns
-    one local row per program and so needs neither the chunked scan nor its
-    per-chunk scatter. (The grouped and class-major lanes went in the 2026-10
-    cleanup, X3.)
+    hands the whole pair list to the CSR Pallas lane kernel, which owns one
+    target row per program (one pair per lane) and so needs neither the chunked
+    scan nor its per-chunk scatter. (The grouped and class-major lanes went in
+    the 2026-10 cleanup, X3; the per-target and tiled CSR kernels in X5.)
 
     Parameters
     ----------
@@ -669,66 +675,37 @@ def _solidfmm_downward_accumulate_from_multipoles(
     """
 
     real_basis = str(basis_mode).strip().lower() == "real"
-    if targets_sorted and not (
-        real_basis and _m2l_csr_pallas_active() and _m2l_csr_kernel_choice() == "lanes"
-    ):
-        # only the lanes kernel reads a CSR as (sources, row offsets)
+    csr_lane = real_basis and _m2l_csr_pallas_active()
+    if csr_lane:
+        _check_m2l_csr_kernel_env()
+    if targets_sorted and not csr_lane:
+        # only the CSR lane kernel reads a CSR as (sources, row offsets)
         from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
 
         tgt = targets_from_csr_offsets(tgt, int(jnp.asarray(src).shape[0]))
         targets_sorted = False
 
-    if real_basis and _m2l_csr_pallas_active():
+    if csr_lane:
         from jaccpot._env import env_flag
-        from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
         from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas_cvjp
-        from jaccpot.pallas.m2l_real_csr_tiled import (
-            m2l_real_csr_tiled_pallas,
-            m2l_real_csr_tiled_supported,
-        )
 
         interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
-        which = _m2l_csr_kernel_choice()
-        if which == "lanes":
-            # the custom_vjp seam: the forward is the same launch, and the
-            # reverse runs the transposed (by-source) lane kernel
-            m2l_inc = m2l_real_csr_lanes_pallas_cvjp(
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                active_pair_count,
-                order,
-                int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
-                interpret,
-                "triton",
-                int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
-                n_targets,
-                bool(targets_sorted),
-            )
-        elif which == "tiled" and m2l_real_csr_tiled_supported(order):
-            m2l_inc = m2l_real_csr_tiled_pallas(
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                order=order,
-                active_pair_count=active_pair_count,
-                k_tile=int(os.environ.get("JACCPOT_M2L_CSR_TILE", "16")),
-                num_warps=int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "4")),
-                dot_algorithm=os.environ.get("JACCPOT_M2L_CSR_DOT", "ieee"),
-                interpret=interpret,
-            )
-        else:
-            m2l_inc = m2l_real_csr_pallas(
-                multipoles_coeffs,
-                centers,
-                src,
-                tgt,
-                order=order,
-                active_pair_count=active_pair_count,
-                interpret=interpret,
-            )
+        # the custom_vjp seam: the forward is the same launch, and the reverse
+        # runs the transposed (by-source) lane kernel
+        m2l_inc = m2l_real_csr_lanes_pallas_cvjp(
+            multipoles_coeffs,
+            centers,
+            src,
+            tgt,
+            active_pair_count,
+            order,
+            int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
+            interpret,
+            "triton",
+            int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
+            n_targets,
+            bool(targets_sorted),
+        )
         locals_updated = initial_locals_coeffs + m2l_inc
     elif pair_count <= chunk_size:
         locals_updated = _accumulate_m2l_fullbatch(

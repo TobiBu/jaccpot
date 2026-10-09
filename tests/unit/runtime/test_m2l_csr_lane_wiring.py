@@ -2,10 +2,13 @@
 
 ``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR`` (default ``1`` since 2026-09-10; ``0``
 restores the chunked pure-JAX lanes) routes the flat real-basis M2L of
-``_solidfmm_downward_accumulate_from_multipoles`` to
-:func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_pallas`. On CPU the kernel runs
-in interpret mode (``JACCPOT_M2L_CSR_INTERPRET=1``). A lane that is silently not
-reached would pass any parity check, so the kernel entry is counted.
+``_solidfmm_downward_accumulate_from_multipoles`` to the pair-per-lane kernel's
+custom VJP,
+:func:`jaccpot.pallas.m2l_real_csr_lanes.m2l_real_csr_lanes_pallas_cvjp`. On CPU
+the kernel runs in interpret mode (``JACCPOT_M2L_CSR_INTERPRET=1``). A lane that
+is silently not reached would pass any parity check, so the kernel entry is
+counted. The per-target and tiled kernels ``JACCPOT_M2L_CSR_KERNEL`` used to
+select were removed in the 2026-10 cleanup (X5); asking for them raises.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import numpy as np
 import pytest
 
 import jaccpot.pallas.m2l_real_csr as csr_mod
+import jaccpot.pallas.m2l_real_csr_lanes as lanes_mod
 from jaccpot.runtime.kernels._downward_prep import _m2l_csr_pallas_active
 
 
@@ -91,16 +95,15 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
     a_ref = solve()
 
     calls = {"n": 0}
-    real_kernel = csr_mod.m2l_real_csr_pallas
+    real_kernel = lanes_mod.m2l_real_csr_lanes_pallas_cvjp
 
     def counting(*a, **k):
         calls["n"] += 1
         return real_kernel(*a, **k)
 
-    monkeypatch.setattr(csr_mod, "m2l_real_csr_pallas", counting)
-    # the lane's default kernel is the pair-per-lane one (Phase 6); pin the
-    # per-pair kernel here so the counter sees the call
-    monkeypatch.setenv("JACCPOT_M2L_CSR_KERNEL", "pair")
+    # the lane reads the entry from its module at call time (a local import)
+    monkeypatch.setattr(lanes_mod, "m2l_real_csr_lanes_pallas_cvjp", counting)
+    monkeypatch.delenv("JACCPOT_M2L_CSR_KERNEL", raising=False)
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", "1")
     monkeypatch.setenv("JACCPOT_M2L_CSR_INTERPRET", "1")
     a_csr = solve()
@@ -108,3 +111,13 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
     rel = np.linalg.norm(a_csr - a_ref) / np.linalg.norm(a_ref)
     assert np.all(np.isfinite(a_csr))
     assert rel < 2e-5, rel
+    # the removed kernels are refused by name, not run as the lane kernel
+    for var, value in (
+        ("JACCPOT_M2L_CSR_KERNEL", "pair"),
+        ("JACCPOT_M2L_CSR_KERNEL", "tiled"),
+        ("JACCPOT_M2L_CSR_TILED", "1"),
+    ):
+        monkeypatch.setenv(var, value)
+        with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+            solve()
+        monkeypatch.delenv(var)

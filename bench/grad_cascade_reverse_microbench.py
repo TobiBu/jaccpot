@@ -8,9 +8,13 @@ per PARENT doing TWO ``jax.vjp`` traces of the translate body (both children) an
 geometry-cotangent stores, the M2M one is one program per NODE doing one -- so the suspect is
 register pressure / spilling in the doubled body, not arithmetic.
 
-This times the four level kernels standalone on the production tree shape, sweeping the warp
+This times the four kernels standalone on the production tree shape, sweeping the warp
 count, so the answer is a table rather than a guess. It builds the tree once with the same
-cell partition as the step and drives the kernels directly (no FMM, no grad).
+cell partition as the step and drives the kernels directly (no FMM, no grad). The
+forwards are the production one-node-per-lane kernels (``cascade_real_lanes``), with
+``k_lanes = 32 * warps`` as the custom VJP sets them; until the 2026-10 cleanup (X5)
+they were the level forward kernels, which that phase removed. The reverses are the
+level kernels.
 
     PYTHONPATH=$B/sitecustom_wt JACCPOT_WORKTREE=$PWD YGGDRAX_WORKTREE=... \
       $B/codes/run_when_idle.sh 36000 python bench/grad_cascade_reverse_microbench.py
@@ -59,10 +63,12 @@ def main() -> int:
     from yggdrax.morton import morton_encode
     from yggdrax.tree_moments import compute_tree_mass_moments
 
+    from jaccpot.pallas.cascade_real_lanes import (
+        l2l_real_levels_lanes_pallas,
+        m2m_real_levels_lanes_pallas,
+    )
     from jaccpot.pallas.cascade_real_level import (
-        l2l_real_levels_pallas,
         l2l_real_levels_reverse_pallas,
-        m2m_real_levels_pallas,
         m2m_real_levels_reverse_pallas,
     )
 
@@ -103,7 +109,7 @@ def main() -> int:
     common = dict(order=args.order, level_batch_width=width)
     variants = {
         "m2m_fwd": lambda w: jax.jit(
-            lambda x: m2m_real_levels_pallas(
+            lambda x: m2m_real_levels_lanes_pallas(
                 x,
                 com,
                 topo.left_child,
@@ -112,6 +118,7 @@ def main() -> int:
                 offs,
                 num_internal=num_internal,
                 num_levels=num_levels,
+                k_lanes=32 * w,
                 num_warps=w,
                 **common,
             )
@@ -131,13 +138,14 @@ def main() -> int:
             )
         ),
         "l2l_fwd": lambda w: jax.jit(
-            lambda x: l2l_real_levels_pallas(
+            lambda x: l2l_real_levels_lanes_pallas(
                 x,
                 com,
                 topo.parent,
                 topo.nodes_by_level,
                 offs,
                 num_levels=num_levels,
+                k_lanes=32 * w,
                 num_warps=w,
                 **common,
             )

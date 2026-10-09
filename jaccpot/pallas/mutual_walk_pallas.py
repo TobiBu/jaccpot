@@ -36,7 +36,7 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot._env import env_choice, env_flag, env_int
+from jaccpot._env import env_choice, env_int, env_reject_removed
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 from jaccpot.runtime._walk_criterion import WALK_TABLE_POWER0, dehnen_pair_accept
@@ -154,7 +154,6 @@ def _round_kernel(
     near_cap: int,
     queue_cap: int,
     node_layout: str = "soa",
-    fused_emit: bool = False,
     use_floor: bool = False,
     error_order: int = 0,
 ) -> None:
@@ -225,11 +224,6 @@ def _round_kernel(
         a ``[nodes, 8]`` float32 record ``(cx, cy, cz, r, left, right, active, 0)``
         with the integers bit-cast in (one 32-byte sector per node instead of
         five), and the other node refs are unused. Static.
-    fused_emit : bool
-        Claim the next-queue slots of all four child pairs with ONE atomic per
-        block (not one per child), and touch the overflow flags only when this
-        block overflowed: three counter atomics per block instead of nine. The
-        same pairs, in a different slot order. Static.
     use_floor : bool
         Also require ``d >= r_a + r_b + floor`` (``theta_ref[1]``, the separation
         floor): no particle of an accepted pair closer than the floor to one of the
@@ -289,7 +283,6 @@ def _round_kernel(
             near_cap=near_cap,
             queue_cap=queue_cap,
             node_layout=node_layout,
-            fused_emit=fused_emit,
             use_floor=use_floor,
             error_order=error_order,
         )
@@ -323,11 +316,15 @@ def _round_block(
     near_cap: int,
     queue_cap: int,
     node_layout: str = "soa",
-    fused_emit: bool = False,
     use_floor: bool = False,
     error_order: int = 0,
 ) -> None:
     """Body of one non-empty block (see :func:`_round_kernel`).
+
+    A block claims the next-queue slots of all four child pairs with ONE atomic
+    (not one per child) and touches the overflow flags only when it overflowed:
+    three counter atomics per block instead of nine. The unfused emission
+    (``JACCPOT_WALK_FUSED_EMIT=0``) was removed in the 2026-10 cleanup (X5).
 
     Parameters
     ----------
@@ -380,11 +377,6 @@ def _round_block(
         a ``[nodes, 8]`` float32 record ``(cx, cy, cz, r, left, right, active, 0)``
         with the integers bit-cast in (one 32-byte sector per node instead of
         five), and the other node refs are unused. Static.
-    fused_emit : bool
-        Claim the next-queue slots of all four child pairs with ONE atomic per
-        block (not one per child), and touch the overflow flags only when this
-        block overflowed: three counter atomics per block instead of nine. The
-        same pairs, in a different slot order. Static.
     use_floor : bool
         Also require ``d >= r_a + r_b + floor`` (``theta_ref[1]``, the separation
         floor): no particle of an accepted pair closer than the floor to one of the
@@ -482,7 +474,8 @@ def _round_block(
     ) -> Array:
         # One atomic per program: the block claims sum(mask) slots and hands them
         # out by an in-block exclusive prefix sum (no per-lane counter contention).
-        # A given ``base``: the slots were claimed already (fused_emit).
+        # A given ``base``: the slots were claimed already (the four child pairs
+        # share one claim).
         inc = jnp.where(mask, one, zero).astype(jnp.int32)
         if base is None:
             total = jnp.sum(inc).astype(jnp.int32)
@@ -520,37 +513,27 @@ def _round_block(
     over_q = jnp.zeros_like(live)
     children = ((c0a, c0b), (c1a, c1b), (c2a, c2b), (c3a, c3b))
     masks = [refine & (ca >= 0) & (cb >= 0) for ca, cb in children]
-    if fused_emit:
-        # one claim for all four children: child k's slots follow children < k's
-        sums = [jnp.sum(jnp.where(m, one, zero)).astype(jnp.int32) for m in masks]
-        base = plgpu.atomic_add(
-            counters_out,
-            (jnp.asarray(_C_NEXT, jnp.int32),),
-            sums[0] + sums[1] + sums[2] + sums[3],
+    # one claim for all four children: child k's slots follow children < k's
+    sums = [jnp.sum(jnp.where(m, one, zero)).astype(jnp.int32) for m in masks]
+    base = plgpu.atomic_add(
+        counters_out,
+        (jnp.asarray(_C_NEXT, jnp.int32),),
+        sums[0] + sums[1] + sums[2] + sums[3],
+    )
+    for (ca, cb), m, n_k in zip(children, masks, sums):
+        over_q = over_q | emit(
+            m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap, base=base
         )
-        for (ca, cb), m, n_k in zip(children, masks, sums):
-            over_q = over_q | emit(
-                m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap, base=base
-            )
-            base = base + n_k
-    else:
-        for (ca, cb), m in zip(children, masks):
-            over_q = over_q | emit(
-                m, ca, cb, next_a_out, next_b_out, _C_NEXT, queue_cap
-            )
+        base = base + n_k
     for slot_id, over in (
         (_C_OVF_FAR, over_far),
         (_C_OVF_NEAR, over_near),
         (_C_OVF_Q, over_q),
     ):
         flag = jnp.max(over.astype(jnp.int32))
-        if fused_emit:
 
-            @pl.when(flag > 0)
-            def _raise(slot_id=slot_id, flag=flag):
-                plgpu.atomic_max(counters_out, (jnp.asarray(slot_id, jnp.int32),), flag)
-
-        else:
+        @pl.when(flag > 0)
+        def _raise(slot_id=slot_id, flag=flag):
             plgpu.atomic_max(counters_out, (jnp.asarray(slot_id, jnp.int32),), flag)
 
 
@@ -581,7 +564,6 @@ def mutual_walk_pallas(
     seed_b: Optional[Array] = None,
     seed_count: Optional[Array] = None,
     node_layout: Optional[str] = None,
-    fused_emit: Optional[bool] = None,
     separation_floor: float = 0.0,
     error_table: Optional[Array] = None,
     error_order: int = 0,
@@ -651,13 +633,11 @@ def mutual_walk_pallas(
         bytes per node than the padded centres it replaces). The same MAC on the
         same values, so the same pair sets. Float32 centres only (otherwise
         ``"soa"``). ``None``: ``JACCPOT_WALK_NODE_LAYOUT``, default ``"record"``.
-    fused_emit : Optional[bool]
-        One counter atomic for all four child pairs of a block and overflow flags
-        only on overflow (three atomics per block instead of nine); the same
-        lists. ``None``: ``JACCPOT_WALK_FUSED_EMIT`` (``0``/``1``), default ``1``.
-        Both on by default since 2026-10-06: the walk alone (A100) 286 -> 96 ms at
-        1e8 particles and ~31 -> 15 ms at 8e6 (each alone: record 248 ms, fused
-        emit 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8.
+        The default since 2026-10-06, with the fused emission (one counter
+        atomic for the four child pairs of a block, the only emission since the
+        2026-10 cleanup, X5): the walk alone (A100) 286 -> 96 ms at 1e8
+        particles and ~31 -> 15 ms at 8e6 (each alone: record 248 ms, fused
+        emission 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8.
     separation_floor : float
         Accept a pair only if also ``|c_b - c_a| >= r_a + r_b + separation_floor``,
         so no far interaction acts between particles closer than the floor (the
@@ -689,8 +669,9 @@ def mutual_walk_pallas(
     ------
     ValueError
         If the seed is longer than ``max_pair_queue`` or only one half is given,
-        ``node_layout`` is not ``"soa"`` or ``"record"``, or ``error_order > 0``
-        comes without an ``error_table`` wide enough for it.
+        ``node_layout`` is not ``"soa"`` or ``"record"``, ``error_order > 0``
+        comes without an ``error_table`` wide enough for it, or
+        ``JACCPOT_WALK_FUSED_EMIT=0`` asks for the removed unfused emission.
     """
     if (seed_a is None) != (seed_b is None):
         raise ValueError("seed_a and seed_b go together")
@@ -714,12 +695,18 @@ def mutual_walk_pallas(
         node_layout = env_choice(
             "JACCPOT_WALK_NODE_LAYOUT", "record", ("soa", "record")
         )
+    # one counter atomic for the four child pairs of a block is the only emission
+    # since the 2026-10 cleanup (X5)
+    env_reject_removed(
+        "JACCPOT_WALK_FUSED_EMIT",
+        ("0", "false", "no", "off"),
+        phase="X5",
+        default="the fused emission",
+    )
     if node_layout not in ("soa", "record"):
         raise ValueError(f"node_layout must be 'soa' or 'record', got {node_layout!r}")
     if jnp.asarray(centers).dtype != jnp.float32:
         node_layout = "soa"
-    if fused_emit is None:
-        fused_emit = env_flag("JACCPOT_WALK_FUSED_EMIT", True)
     # One jit around the whole walk, so an EAGER call creates the list and queue
     # buffers inside the program and the loop updates them in place. Called op by
     # op, the initial buffers were arguments of the while loop and stayed alive
@@ -747,7 +734,6 @@ def mutual_walk_pallas(
         max_rounds=int(max_rounds),
         rounds_per_check=int(rounds_per_check),
         node_layout=str(node_layout),
-        fused_emit=bool(fused_emit),
         separation_floor=float(separation_floor),
         error_order=int(error_order),
         theta_max=float(theta_max),
@@ -768,7 +754,6 @@ def mutual_walk_pallas(
         "max_rounds",
         "rounds_per_check",
         "node_layout",
-        "fused_emit",
         "separation_floor",
         "error_order",
         "theta_max",
@@ -798,7 +783,6 @@ def _mutual_walk_jit(
     max_rounds: int,
     rounds_per_check: int,
     node_layout: str = "soa",
-    fused_emit: bool = False,
     separation_floor: float = 0.0,
     error_order: int = 0,
     theta_max: float = 1.0,
@@ -849,9 +833,6 @@ def _mutual_walk_jit(
         Rounds per ``while_loop`` iteration.
     node_layout : str
         ``"soa"`` or ``"record"`` (see :func:`mutual_walk_pallas`).
-    fused_emit : bool
-        See :func:`mutual_walk_pallas`.
-
     separation_floor : float
         See :func:`mutual_walk_pallas`. Static.
     error_order : int
@@ -922,7 +903,6 @@ def _mutual_walk_jit(
         near_cap=int(near_cap),
         queue_cap=Q,
         node_layout=node_layout,
-        fused_emit=bool(fused_emit),
         use_floor=float(separation_floor) > 0.0,
         error_order=int(error_order),
     )

@@ -1,21 +1,29 @@
-"""Target-tiled real-basis M2L Pallas kernel with on-chip rotations (CSR by target).
+"""Real-basis M2L over a far-pair list sorted by target (CSR): the shared algebra and helpers.
 
-One program per TARGET node. The program loops over that target's far-pair
-segment of a source list sorted by target (CSR), and for every source builds the
-whole rotate -> z-translate -> rotate-back M2L on chip from two angles, summing
-into one register-resident local row. It exists because the chunked pure-JAX
-lane (``runtime/kernels/_m2l.py``) is launch-bound: at N=200k, leaf 64 the far
-field is a 21k-launch/step storm (~130 ns per directed pair with nothing above
-27 ms in the kernel table), and the two shipped fused Pallas M2L shapes lose
-because they take the world<->z rotation blocks as ``(pairs, p+1, 2p+1, 2p+1)``
-HBM operands (32 KB per pair). Here nothing per pair is materialised: the
-program owns its output row, so there is no ``segment_sum`` scatter and no
-argsort per chunk, and the coefficient traffic is one ``(Cp,)`` row load per pair.
+The CSR Pallas M2L kernel is :mod:`jaccpot.pallas.m2l_real_csr_lanes` (one pair
+per lane, the default since plan sub-10ms Phase 6). This module holds what it,
+the cascade kernels and the tests share:
 
-Arithmetic, per pair, in the CENTRED padded layout of
-:func:`jaccpot.operators.m2l_real_rot_scale._centred_degree_maps` (degree ``l``
-occupies columns ``p-l .. p+l`` of a width ``2p+1`` row, so ``m`` sits at column
-``p+m`` for every degree at once):
+* the hardware gate :func:`pallas_m2l_real_csr_supported` (the real Pallas
+  kernels' common sm_80 predicate);
+* the CSR helpers :func:`csr_by_target` and :func:`targets_from_csr_offsets`;
+* the CENTRED padded layout (:func:`pack_centred` / :func:`unpack_centred`) and
+  the per-order constant tables (:func:`m2l_real_csr_tables`);
+* the per-pair rotate -> z-translate -> rotate-back M2L in that layout
+  (``_m2l_pair_rows``), its pure-jnp twin :func:`m2l_real_csr_pair_jax` and the
+  per-target reference :func:`m2l_real_csr_jax`, which the lane kernel's tests
+  and its custom VJP compare against.
+
+The first kernel built on this algebra ran one program per TARGET node, looping
+over the target's CSR segment with the pair's ``(Bp, Wp)`` tile spread over the
+program's threads (24 ns per pair on an A100 at order 5); a K-source tiled
+variant followed (8.5-11.7 ns). The lane kernel runs 1.3 ns per pair
+(``docs/sub10ms_2026-09.md``, Phase 5), and both were removed in the 2026-10
+cleanup (X5).
+
+Arithmetic, per pair, in the CENTRED padded layout (degree ``l`` occupies
+columns ``p-l .. p+l`` of a width ``2p+1`` row, so ``m`` sits at column ``p+m``
+for every degree at once; :func:`pack_centred`):
 
 * world -> z multipole block, degree ``l``: ``B_l Dz(-ax) B_l Dz(az)`` with
   ``az = atan2(x, y)``, ``ax = atan2(rho, z)`` (the conventions of
@@ -28,26 +36,16 @@ occupies columns ``p-l .. p+l`` of a width ``2p+1`` row, so ``m`` sits at column
   :func:`jaccpot.operators.real_harmonics.z_m2l_translation_tables`, the single
   source of truth, as the SEPARABLE dense form
   ``Z = Zsf * outer(rinv^(n+1), rinv^k)`` so the radius enters through two
-  ``(Cp,)`` power vectors (``exp(deg * log rinv)``, the form the fused kernel
-  lowers), not ``Cp^2`` transcendental calls.
+  ``(Cp,)`` power vectors (``exp(deg * log rinv)``), not ``Cp^2`` transcendental
+  calls.
 * z -> world local block = transpose of the multipole block
   (:func:`jaccpot.operators.real_rotations.real_rotation_from_z_axis_local`):
   ``Dz(-az) B_l^T Dz(ax) B_l^T``.
 
-The kernel works entirely in the centred ``(Bp, Wp)`` layout: the wrapper packs
-the multipole table into it once (an XLA gather over ``n`` rows) and unpacks the
-output once, so no per-pair pack/unpack matvec and no ``Cp x Cp`` table exist in
-the kernel -- the z-core preserves ``m`` and is a ``Bp x Bp`` degree operator
-per column. Every contraction is a broadcast-multiply + ``jnp.sum`` (no ``dot``,
-no TF32), as in :mod:`jaccpot.pallas.m2l_real_fused`. Padded lanes of every
-constant are exactly zero, so they are inert in every reduction.
-
-Forward only (the fused strict lane is forward-only); the pure-JAX lane stays the
-differentiable path, and the transverse-degeneracy JVP treatment of
-``m2l_rot_scale_real_batch`` is not needed here.
-
-HARDWARE: real Pallas GPU execution needs Ampere (sm_80+); ``interpret=True``
-runs the same arithmetic on CPU.
+The z-core preserves ``m`` and is a ``Bp x Bp`` degree operator per column.
+Every contraction is a broadcast-multiply + ``jnp.sum`` (no ``dot``, no TF32), as
+in :mod:`jaccpot.pallas.m2l_real_fused`. Padded lanes of every constant are
+exactly zero, so they are inert in every reduction.
 """
 
 from __future__ import annotations
@@ -59,8 +57,6 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import lax
-from jax.experimental import pallas as pl
 from jaxtyping import Array
 
 from jaccpot._searchsorted import searchsorted_method
@@ -70,7 +66,6 @@ from jaccpot.operators.real_harmonics import (
     sh_size,
     z_m2l_translation_tables,
 )
-from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
 
 __all__ = [
@@ -78,7 +73,6 @@ __all__ = [
     "m2l_real_csr_tables",
     "m2l_real_csr_pair_jax",
     "m2l_real_csr_jax",
-    "m2l_real_csr_pallas",
     "csr_by_target",
     "targets_from_csr_offsets",
     "pack_centred",
@@ -103,7 +97,7 @@ def pallas_m2l_real_csr_supported() -> bool:
     Returns
     -------
     bool
-        Whether the Triton lowering of this kernel can run here.
+        Whether the Triton lowering of the real Pallas kernels can run here.
     """
     return pallas_m2l_real_fused_supported()
 
@@ -115,7 +109,7 @@ def _next_pow2(n: int) -> int:
 
 @functools.lru_cache(maxsize=None)
 def m2l_real_csr_tables(order: int) -> dict:
-    """Compile-time constants of the kernel for one expansion order.
+    """Compile-time constants of the centred-layout M2L for one expansion order.
 
     Everything lives in the CENTRED ``(Bp, Wp)`` layout: row = degree ``l``,
     column ``p + m``; degrees ``> p`` and columns with ``|m| > p`` are padding
@@ -282,8 +276,9 @@ def unpack_centred(rows: Array, *, order: int) -> Array:
 
 
 # --------------------------------------------------------------------------- math
-# Every helper below is written for BOTH the Pallas kernel (values loaded from
-# refs) and the pure-jnp twin: plain broadcast-multiply + sum, no dot, no gather.
+# Every helper below is written for BOTH Pallas kernels (values loaded from refs:
+# the cascade reverse kernels use ``_bapply`` and ``_dz``) and the pure-jnp twin:
+# plain broadcast-multiply + sum, no dot, no gather.
 
 
 def _bapply(bstack: Array, rows: Array) -> Array:
@@ -384,7 +379,7 @@ def _m2l_pair_rows(rows: Array, delta3: tuple, t: dict[str, Array]) -> Array:
 
 
 def m2l_real_csr_pair_jax(multipoles: Array, deltas: Array, *, order: int) -> Array:
-    """Per-pair local contributions with this kernel's arithmetic (the twin).
+    """Per-pair local contributions in the centred-layout arithmetic (the twin).
 
     Parameters
     ----------
@@ -573,167 +568,3 @@ def m2l_real_csr_jax(
     contrib = m2l_real_csr_pair_jax(multipoles[s], deltas, order=order)
     contrib = jnp.where(valid[:, None], contrib, 0)
     return jax.ops.segment_sum(contrib, tt, num_segments=n)
-
-
-# -------------------------------------------------------------------- the kernel
-
-
-def _m2l_real_csr_kernel(
-    mult_ref: KernelRef,
-    cent_ref: KernelRef,
-    src_ref: KernelRef,
-    off_ref: KernelRef,
-    cnt_ref: KernelRef,
-    *table_and_out_refs: KernelRef,
-    bp: int,
-    wp: int,
-) -> None:
-    """One program per target: loop over its CSR segment, accumulate one local row.
-
-    Parameters
-    ----------
-    mult_ref : KernelRef
-        Whole centred multipole table ``[n, Bp*Wp]`` (gathered by source id).
-    cent_ref : KernelRef
-        Whole padded centre table ``[n, 4]``.
-    src_ref : KernelRef
-        Whole target-sorted source list ``[P]``.
-    off_ref : KernelRef
-        Segment start per target ``[n]``.
-    cnt_ref : KernelRef
-        Segment length per target ``[n]``.
-    *table_and_out_refs : KernelRef
-        The ``_TABLE_KEYS`` constants (whole arrays) followed by the output ref
-        ``[1, Bp*Wp]``.
-    bp : int
-        ``Bp``. Static.
-    wp : int
-        ``Wp``. Static.
-
-    Returns
-    -------
-    None
-        Writes the target's centred local row.
-    """
-    table_refs = table_and_out_refs[: len(_TABLE_KEYS)]
-    (out_ref,) = table_and_out_refs[len(_TABLE_KEYS) :]
-    t = {k: ref[...] for k, ref in zip(_TABLE_KEYS, table_refs)}
-    tgt = pl.program_id(0)
-    start = off_ref[tgt]
-    cnt = cnt_ref[tgt]
-    ctx = cent_ref[tgt, 0]
-    cty = cent_ref[tgt, 1]
-    ctz = cent_ref[tgt, 2]
-    acc0 = jnp.zeros((bp, wp), dtype=out_ref.dtype)
-
-    def body(k: Array, acc: Array) -> Array:
-        sid = src_ref[start + k]
-        rows = mult_ref[sid, :].reshape(bp, wp)
-        dx = ctx - cent_ref[sid, 0]
-        dy = cty - cent_ref[sid, 1]
-        dz_ = ctz - cent_ref[sid, 2]
-        return acc + _m2l_pair_rows(rows, (dx, dy, dz_), t)
-
-    acc = lax.fori_loop(0, cnt, body, acc0)
-    out_ref[0, :] = acc.reshape(bp * wp)
-
-
-def m2l_real_csr_pallas(
-    multipoles: Array,
-    centers: Array,
-    sources: Array,
-    targets: Array,
-    *,
-    order: int,
-    active_pair_count: Optional[Array] = None,
-    interpret: bool = False,
-    backend: str = "triton",
-    num_warps: int = 4,
-) -> Array:
-    """Local coefficient increments from a flat far-pair list, one Pallas program per target.
-
-    Parameters
-    ----------
-    multipoles : Array
-        ``[n, C]`` node multipoles (real basis).
-    centers : Array
-        ``[n, 3]`` node centres.
-    sources : Array
-        ``[P]`` source node ids; negative = padding.
-    targets : Array
-        ``[P]`` target node ids; negative = padding. Need NOT be sorted -- the
-        list is sorted by target here (one argsort of ``P`` keys).
-    order : int
-        Expansion order ``p``. Static.
-    active_pair_count : Optional[Array]
-        Live prefix length of the padded list; ``None`` = all non-negative.
-    interpret : bool
-        Pallas interpret mode (CPU semantics).
-    backend : str
-        Pallas GPU lowering, ``"triton"`` by default.
-    num_warps : int
-        Warps per program. The working tile is ``(Bp, Wp)`` = 128 elements at
-        p <= 7 and the two rotation stacks are 2 x ``Bp*Wp*Wp`` constants held in
-        registers, so 4 warps (128 threads) keeps the per-thread register count
-        low; 1 warp spilled.
-
-    Returns
-    -------
-    Array
-        ``[n, C]`` local increments, same dtype as ``multipoles``.
-
-    Raises
-    ------
-    ValueError
-        If ``multipoles`` does not carry ``(p+1)^2`` coefficients or ``centers``
-        is not ``(n, 3)`` aligned with it.
-    """
-    tb = m2l_real_csr_tables(int(order))
-    C, Bp, Wp = tb["C"], tb["Bp"], tb["Wp"]
-    mult = jnp.asarray(multipoles)
-    dtype = mult.dtype
-    n = int(mult.shape[0])
-    if int(mult.shape[1]) != C:
-        raise ValueError(f"multipoles must have {C} coefficients for order {order}")
-    cent = jnp.asarray(centers, dtype=dtype)
-    if cent.ndim != 2 or int(cent.shape[1]) != 3 or int(cent.shape[0]) != n:
-        raise ValueError("centers must have shape (n, 3) aligned with multipoles")
-    mult_c = pack_centred(mult, order=int(order))  # [n, Bp*Wp]
-    cent_p = jnp.pad(cent, ((0, 0), (0, 1)))
-    src_sorted, offsets, counts = csr_by_target(
-        sources, targets, total_nodes=n, active_pair_count=active_pair_count
-    )
-    P = int(src_sorted.shape[0])
-    if n == 0 or P == 0:
-        return jnp.zeros((n, C), dtype=dtype)
-    tables = _tables_to_jnp(int(order), dtype)
-    table_arrays = [tables[k] for k in _TABLE_KEYS]
-
-    def bs_full(arr: Array) -> pl.BlockSpec:
-        shp = tuple(arr.shape)
-        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
-
-    kernel = functools.partial(_m2l_real_csr_kernel, bp=Bp, wp=Wp)
-    backend_kwargs = pallas_backend_kwargs(backend, interpret)
-    if "compiler_params" in backend_kwargs:
-        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
-            num_warps=int(num_warps)
-        )
-    out_rows = pl.pallas_call(
-        kernel,
-        grid=(n,),
-        in_specs=[
-            bs_full(mult_c),
-            bs_full(cent_p),
-            bs_full(src_sorted),
-            bs_full(offsets),
-            bs_full(counts),
-            *[bs_full(a) for a in table_arrays],
-        ],
-        out_specs=pl.BlockSpec((1, Bp * Wp), lambda i: (i, 0)),
-        out_shape=jax.ShapeDtypeStruct((n, Bp * Wp), dtype),
-        interpret=bool(interpret),
-        **backend_kwargs,
-        name=f"m2l_real_csr_p{int(order)}",
-    )(mult_c, cent_p, src_sorted, offsets, counts, *table_arrays)
-    return unpack_centred(out_rows, order=int(order))

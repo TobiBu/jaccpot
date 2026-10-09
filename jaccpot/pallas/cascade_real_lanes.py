@@ -1,7 +1,8 @@
 """Real M2M / L2L cascades with ONE NODE PER LANE (fused-memory round 2, Phase 5).
 
-:mod:`jaccpot.pallas.cascade_real_level` runs one program per node of a level,
-the node's ``(Bp, Wp)`` centred tile spread over the program's threads, every
+The level forward kernels this replaced (one program per node of a level, removed
+in the 2026-10 cleanup, X5) spread the node's ``(Bp, Wp)`` centred tile over the
+program's threads, every
 program loading every constant table (``B``, ``B^-1`` and their transposes, the
 one-hot shift selectors: ~40 KB at order 5) and the grid as wide as the widest
 level for every level. Measured on an A100 at N = 8x10^6 (Plummer clipped, leaf
@@ -27,9 +28,11 @@ widest level over ``K``.
 
 Every lane stores only its own node's row (masked, out-of-range lanes), reading
 rows of the level above or below, so the in-place update of the aliased table
-is race-free, as for the level kernels. Forward only: the custom VJPs keep the
-level kernels' reverse passes, which read the forward's output as a residual
-(the two forwards agree to round-off -- different operation order).
+is race-free. Forward only: the custom VJPs of
+:mod:`jaccpot.pallas.cascade_real_level` pair it with that module's
+one-program-per-node reverse kernels, which read this forward's output as a
+residual (their ``_translate_rows`` body agrees with it to round-off -- a
+different operation order).
 """
 
 from __future__ import annotations
@@ -431,7 +434,7 @@ def m2m_real_levels_lanes_pallas(
     backend: str = "triton",
     num_warps: int = 1,
 ) -> Array:
-    """Upward M2M cascade, one node per lane: drop-in for ``m2m_real_levels_pallas``.
+    """Upward M2M cascade, one node per lane (the forward of ``m2m_real_levels_pallas_cvjp``).
 
     Parameters
     ----------
@@ -531,7 +534,7 @@ def l2l_real_levels_lanes_pallas(
     backend: str = "triton",
     num_warps: int = 1,
 ) -> Array:
-    """Downward L2L cascade, one node per lane: drop-in for ``l2l_real_levels_pallas``.
+    """Downward L2L cascade, one node per lane (the forward of ``l2l_real_levels_pallas_cvjp``).
 
     Parameters
     ----------

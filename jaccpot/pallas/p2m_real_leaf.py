@@ -1,4 +1,4 @@
-"""Leaf P2M in the Dehnen real basis as ONE Pallas launch: one program per leaf (plan sub-10ms, Phase 3).
+"""Leaf P2M in the Dehnen real basis as ONE Pallas launch (plan sub-10ms, Phase 3).
 
 ``_p2m_leaves_real`` evaluates ``p2m_real_direct`` under two ``vmap``s in
 batches of 4096 leaves: XLA turns the unrolled per-coefficient recurrence into
@@ -6,20 +6,21 @@ long chains of small fusions over ``(4096, 64)`` tiles and transposes the
 ``(leaves, particles, coeffs)`` tensor to reduce it -- 9.4 ms per step at
 N = 2x10^5 on 16k cell leaves (4 batches x ~2.3 ms), as much as the whole M2M.
 
-Here one program owns one leaf: it loads its (up to) ``W`` particles as lane
-vectors, evaluates the real regular solid harmonics ``U_n^m`` with the SAME
-recurrences as :func:`jaccpot.operators.real_p2m_l2p.p2m_real_direct`
+Here the leaves' particles are loaded as lane vectors, the real regular solid
+harmonics ``U_n^m`` evaluated with the SAME recurrences as
+:func:`jaccpot.operators.real_p2m_l2p.p2m_real_direct`
 (Chebyshev ``cos(m phi)``/``sin(m phi)``, Legendre ``P_n^m`` without the
 Condon-Shortley phase, ``1/(n+|m|)!`` normalisation, the same floored radii),
-and reduces ``mass * U_n^m`` over the lanes -- 36 lane reductions per leaf at
+and ``mass * U_n^m`` reduced over the lanes -- 36 lane reductions per leaf at
 ``p = 5``. Static loops, static factorials, no tables. Agrees with the
 reference to float32 summation order (the lane sum is a tree reduction).
 
-The forward's default is the BLOCKED form (:func:`_p2m_block_kernel`, 2026-10-05):
-cell leaves hold ~10-20 particles against a 64-lane capacity, so one program owns
-several leaves and walks each leaf's particles a few lanes at a time -- 3-6x faster,
-the same coefficients up to float32 summation order. ``JACCPOT_P2M_BLOCK=0``
-restores one program per leaf. The reverse kernel is per leaf.
+The forward is BLOCKED (:func:`_p2m_block_kernel`, 2026-10-05): cell leaves hold
+~10-20 particles against a 64-lane capacity, so one program owns several leaves
+and walks each leaf's particles a few lanes at a time -- 3-6x faster than the
+one-program-per-leaf forward it replaced, the same coefficients up to float32
+summation order. That per-leaf forward (``JACCPOT_P2M_BLOCK=0``) was removed in
+the 2026-10 cleanup (X5). The reverse kernel is per leaf.
 """
 
 from __future__ import annotations
@@ -64,8 +65,9 @@ def pallas_p2m_real_leaf_supported() -> bool:
     return pallas_m2l_real_csr_supported()
 
 
-#: Measured on an idle A100 (leaf 64 lanes, 16k cell leaves): the register
-#: allocation is sensitive to the warp count and the wrong one spills.
+#: Warps per program of the per-leaf REVERSE kernel. Measured on an idle A100 for
+#: the per-leaf forward it shared its shape with (leaf 64 lanes, 16k cell leaves):
+#: the register allocation is sensitive to the warp count and the wrong one spills.
 _DEFAULT_WARPS = {4: 2, 5: 4, 6: 2}
 
 #: Leaves per program and lanes per iteration of the blocked forward kernel
@@ -81,91 +83,6 @@ _BLOCK_WARPS = 4
 def _next_pow2(n: int) -> int:
     n = max(1, int(n))
     return 1 << (n - 1).bit_length()
-
-
-def _p2m_leaf_kernel(
-    pos_ref: KernelRef,
-    mass_ref: KernelRef,
-    start_ref: KernelRef,
-    count_ref: KernelRef,
-    cent_ref: KernelRef,
-    table_in: KernelRef,
-    out_ref: KernelRef,
-    *,
-    order: int,
-    width: int,
-    coeff_pad: int,
-    floor: float,
-    row_offset: int,
-) -> None:
-    """One leaf: ``M_n^m = sum_i m_i U_n^m(x_i - c)`` over its particle lanes.
-
-    Parameters
-    ----------
-    pos_ref : KernelRef
-        Whole sorted position table ``[n, 3]``.
-    mass_ref : KernelRef
-        Whole sorted mass table ``[n]``.
-    start_ref : KernelRef
-        First particle of each leaf ``[L]`` (``n`` for empty leaves).
-    count_ref : KernelRef
-        Particle count of each leaf ``[L]``.
-    cent_ref : KernelRef
-        Expansion centre of each leaf ``[L, 3]``.
-    table_in : KernelRef
-        The zeroed multipole table, aliased to ``out_ref`` (not read).
-    out_ref : KernelRef
-        **Output** the whole ``[total_nodes, C]`` table; this program writes the
-        leaf's row ``row_offset + leaf``.
-    order : int
-        Expansion order ``p``. Static.
-    width : int
-        Leaf capacity ``W`` (lanes). Static.
-    coeff_pad : int
-        Lanes of the coefficient vector (power of two >= ``(p+1)^2``). Static.
-    floor : float
-        The dtype's squared-radius floor (``squared_radius_floor``). Static.
-    row_offset : int
-        Table row of leaf 0 (the internal node count). Static.
-
-    Returns
-    -------
-    None
-        Writes the leaf's row.
-    """
-    p = int(order)
-    leaf = pl.program_id(0)
-    start = start_ref[leaf]
-    count = count_ref[leaf]
-    dtype = out_ref.dtype
-    lane = lax.broadcasted_iota(jnp.int32, (width,), 0)
-    valid = lane < count
-    # gathered, not a pl.ds window: the window needed copies of the position and
-    # mass tables padded by W rows (16 B per particle at the step's upward peak);
-    # dead lanes read row 0 and carry zero mass
-    idx = jnp.where(valid, start + lane, 0)
-    x = pos_ref[idx, 0] - cent_ref[leaf, 0]
-    y = pos_ref[idx, 1] - cent_ref[leaf, 1]
-    z = pos_ref[idx, 2] - cent_ref[leaf, 2]
-    mass = jnp.where(valid, mass_ref[idx], jnp.asarray(0.0, dtype))
-    cidx = lax.broadcasted_iota(jnp.int32, (coeff_pad,), 0)
-    out = jnp.zeros((coeff_pad,), dtype)
-    # a generator, so each U_n^m is reduced as soon as it is formed (the trace
-    # is the one the forward always had; the reverse consumes the same stream)
-    for idx_c, u in _regular_harmonics_lanes(x, y, z, order=p, floor=floor):
-        coef = jnp.sum(mass * u)
-        out = jnp.where(cidx == idx_c, coef, out)
-    # straight into the leaf's row of the table: a (1, C) block is not a power
-    # of two, so the C live lanes are a masked store (the padding lanes' columns
-    # lie past the row and are never written)
-    row = row_offset + leaf
-    n_rows, n_coeffs = out_ref.shape
-    del table_in
-    plgpu.store(
-        out_ref.at[row, cidx],
-        out,
-        mask=(cidx < n_coeffs) & (row < n_rows),
-    )
 
 
 def _p2m_block_kernel(
@@ -187,9 +104,10 @@ def _p2m_block_kernel(
 ) -> None:
     """``block`` leaves, their particles ``chunk`` lanes at a time.
 
-    The per-leaf kernel gives every leaf ``W`` lanes (the leaf capacity, 64) while
-    cell leaves hold ~10 particles, so ~85 % of its lanes carry zero mass; and its
-    36 lane reductions span warps. Here a program owns ``block`` leaves as rows of a
+    The per-leaf forward this replaced (removed in the 2026-10 cleanup, X5) gave
+    every leaf ``W`` lanes (the leaf capacity, 64) while cell leaves hold ~10
+    particles, so ~85 % of its lanes carried zero mass; and its 36 lane reductions
+    spanned warps. Here a program owns ``block`` leaves as rows of a
     ``(block, chunk)`` lane tile and loops over chunks up to the block's largest
     leaf, so the work follows the particle count, not the capacity. The
     coefficients are summed per row and carried in registers across chunks.
@@ -247,7 +165,7 @@ def _p2m_block_kernel(
     def body(k: Array, acc: tuple) -> tuple:
         off = k * chunk + lane
         valid = off < count[:, None]
-        # dead lanes read row 0 and carry zero mass (as the per-leaf kernel)
+        # dead lanes read row 0 and carry zero mass (as in the per-leaf reverse)
         idx = jnp.where(valid, start[:, None] + off, 0)
         x = pos_ref[idx, 0] - cx
         y = pos_ref[idx, 1] - cy
@@ -384,20 +302,19 @@ def p2m_real_leaves_pallas(
     total_nodes : int
         Node count of the returned table. Static.
     leaf_width : int
-        Leaf capacity (lanes per program). Static.
+        Leaf capacity. The blocked forward walks each leaf's own count and does
+        not read it; the custom VJP's per-leaf reverse runs this many lanes, and
+        the forward takes the same arguments. Static.
     interpret : bool
         Pallas interpret mode.
     backend : str
         Pallas GPU lowering.
     num_warps : int | None
-        Warps per program; ``None`` picks the measured best per order
-        (A100, 64 lanes, N=2e5 cell tree: p4 2 -> 0.22 ms, p5 4 -> 0.59 ms,
-        p6 2 -> 0.46 ms; the wrong count spills and costs 4-5x).
+        Warps per program; ``None``: ``_BLOCK_WARPS`` (4).
     block : int | None
-        ``0``: one program per leaf over ``leaf_width`` lanes. ``> 0``: that many
-        leaves per program, ``chunk`` lanes per leaf at a time
-        (:func:`_p2m_block_kernel`). ``None``: ``JACCPOT_P2M_BLOCK`` (default
-        :data:`P2M_BLOCK_DEFAULT`). Static.
+        Leaves per program (rounded up to a power of two), ``chunk`` lanes per
+        leaf at a time (:func:`_p2m_block_kernel`). ``None``:
+        ``JACCPOT_P2M_BLOCK`` (default :data:`P2M_BLOCK_DEFAULT`). Static.
     chunk : int | None
         Lanes per leaf per iteration of the blocked kernel; ``None``:
         ``JACCPOT_P2M_CHUNK`` (default :data:`P2M_CHUNK_DEFAULT`). Static.
@@ -406,53 +323,54 @@ def p2m_real_leaves_pallas(
     -------
     Array
         ``[total_nodes, (p+1)^2]`` packed multipoles, internal rows zero.
+
+    Raises
+    ------
+    ValueError
+        If ``block`` (or ``JACCPOT_P2M_BLOCK``) is ``0`` or negative: that
+        selected the one-program-per-leaf forward, removed in the 2026-10
+        cleanup (X5).
     """
     from jaccpot._env import env_int
 
     p = int(order)
     C = sh_size(p)
     cp = _next_pow2(C)
+    block_from_env = block is None
     if block is None:
-        block = env_int("JACCPOT_P2M_BLOCK", P2M_BLOCK_DEFAULT, minimum=0)
+        block = env_int("JACCPOT_P2M_BLOCK", P2M_BLOCK_DEFAULT)
+    if int(block) <= 0:
+        named = f"JACCPOT_P2M_BLOCK={block}" if block_from_env else f"block={block}"
+        raise ValueError(
+            f"{named} (one program per leaf) was removed in the 2026-10 cleanup "
+            f"(X5); the default is {P2M_BLOCK_DEFAULT} leaves per program."
+        )
     if chunk is None:
         chunk = env_int("JACCPOT_P2M_CHUNK", P2M_CHUNK_DEFAULT, minimum=1)
     if num_warps is None:
-        num_warps = _BLOCK_WARPS if int(block) > 0 else _DEFAULT_WARPS.get(p, 2)
+        num_warps = _BLOCK_WARPS
     dtype = jnp.result_type(positions_sorted.dtype, masses_sorted.dtype)
     n = int(positions_sorted.shape[0])
     L = int(leaf_ranges.shape[0])
-    w = int(leaf_width)
     pos = jnp.asarray(positions_sorted, dtype)
     mass = jnp.asarray(masses_sorted, dtype)
     ranges = jnp.asarray(leaf_ranges)
     counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0).astype(jnp.int32)
     starts = jnp.where(counts > 0, ranges[:, 0], n).astype(jnp.int32)
     cent = jnp.asarray(leaf_centers, dtype)
-    if int(block) > 0:
-        B = _next_pow2(int(block))
-        grid = (-(-L // B),)
-        kernel = functools.partial(
-            _p2m_block_kernel,
-            order=p,
-            block=B,
-            chunk=_next_pow2(int(chunk)),
-            coeff_pad=cp,
-            floor=float(squared_radius_floor(dtype)),
-            row_offset=int(num_internal),
-            num_leaves=L,
-        )
-        name = f"p2m_real_block_p{p}_b{B}_c{_next_pow2(int(chunk))}"
-    else:
-        grid = (L,)
-        kernel = functools.partial(
-            _p2m_leaf_kernel,
-            order=p,
-            width=w,
-            coeff_pad=cp,
-            floor=float(squared_radius_floor(dtype)),
-            row_offset=int(num_internal),
-        )
-        name = f"p2m_real_leaf_p{p}_w{w}"
+    B = _next_pow2(int(block))
+    grid = (-(-L // B),)
+    kernel = functools.partial(
+        _p2m_block_kernel,
+        order=p,
+        block=B,
+        chunk=_next_pow2(int(chunk)),
+        coeff_pad=cp,
+        floor=float(squared_radius_floor(dtype)),
+        row_offset=int(num_internal),
+        num_leaves=L,
+    )
+    name = f"p2m_real_block_p{p}_b{B}_c{_next_pow2(int(chunk))}"
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
@@ -496,7 +414,8 @@ def p2m_real_leaves_pallas(
 #     pos_bar_i  = m_i  grad_x [ sum_nm gbar_nm U_nm ]   (its gradient, per lane)
 #     c_bar      = - sum_i pos_bar_i
 #
-# One program per leaf as the forward; the position gradient is ``jax.vjp`` of the
+# One program per leaf over ``W`` lanes (the forward is blocked: see
+# ``_p2m_block_kernel``); the position gradient is ``jax.vjp`` of the
 # lane-wise contraction with the mass lanes as cotangent (lanes are independent,
 # so the lane-wise vjp IS the per-particle gradient), traced inside the kernel.
 # The block output ``(L, W, 4)`` is scattered onto the particles in XLA (every

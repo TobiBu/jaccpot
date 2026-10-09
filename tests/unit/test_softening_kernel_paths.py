@@ -314,7 +314,7 @@ def test_csr_table_kernel_and_its_reverse(kernel, chunk, interpret):
 @pytest.mark.parametrize("interpret", [True, False])
 @pytest.mark.parametrize("kernel", _COMPACT)
 @pytest.mark.parametrize(
-    "source_tile, flags", [(0, None), (4, ""), (4, "l"), (8, "alr"), (4, "alg")]
+    "source_tile, flags", [(0, None), (4, ""), (4, "l"), (8, "alr")]
 )
 def test_csr_sorted_direct_in_every_source_tile_mode(
     kernel, source_tile, flags, interpret

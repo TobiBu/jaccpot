@@ -96,7 +96,8 @@ _MUST_RUN_SM80 = (
 # derives the gated set from ONE module (test_transverse_degeneracy_jvp.py) and
 # fails on any fragment outside it. The sm_80 tests of the near-field self-fold
 # (test_pallas_nearfield_fused.py::test_leafpair_include_self_gpu_matches_reference)
-# and of the CSR M2L kernel (test_m2l_real_csr_pallas.py::test_csr_pallas_gpu_matches_rot_scale)
+# and of the CSR M2L lane kernel (test_m2l_real_csr_pallas.py::test_csr_pallas_gpu_matches_rot_scale,
+# re-pointed from the per-target kernel the 2026-10 cleanup removed)
 # therefore run under the ordinary GPU suite; widening the registry to several
 # modules is a separate change.
 

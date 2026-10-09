@@ -4,8 +4,9 @@ usage: python bench/walk_tune.py CAPTURE_walk.npz --row ROW.json --variants soa:
 
 ``CAPTURE_walk.npz`` (+ ``.json``) comes from ``bench/nearfield_capture.py``; the list
 and queue capacities are the ones the bench row ``ROW.json`` settled on (its
-``counts``). A variant is ``node_layout:block:num_warps:max_programs[:fused_emit]``
-(``fused_emit`` 0/1). Every variant
+``counts``). A variant is ``node_layout:block:num_warps:max_programs`` (the fifth
+``fused_emit`` field went with the unfused emission in the 2026-10 cleanup, X5).
+Every variant
 must find the same lists: the far and near counts, the rounds, the peak wavefront and
 two order-free checksums of each list (sum and sum of squares of ``a * 2^32 + b``
 modulo 2^64) are compared with the first variant.
@@ -55,7 +56,7 @@ def _sums(a, b, n):
     return jnp.sum(key), jnp.sum(key * key)
 
 
-def make(layout: str, block: int, warps: int, programs: int, fused: bool):
+def make(layout: str, block: int, warps: int, programs: int):
     os.environ["JACCPOT_WALK_MAX_PROGRAMS"] = str(programs)
     # the env var is read at trace time and is not a static argument of the walk's
     # inner jit, whose cache would otherwise hand back the previous grid
@@ -77,7 +78,6 @@ def make(layout: str, block: int, warps: int, programs: int, fused: bool):
             block=block,
             num_warps=warps,
             node_layout=layout,
-            fused_emit=fused,
         )
         return (
             r.far_count,
@@ -99,8 +99,7 @@ ref = None
 for v in args.variants:
     parts = v.split(":")
     layout, block, warps, programs = parts[:4]
-    fused = bool(int(parts[4])) if len(parts) > 4 else False
-    f = make(layout, int(block), int(warps), int(programs), fused)
+    f = make(layout, int(block), int(warps), int(programs))
     try:
         out = [np.asarray(x) for x in jax.block_until_ready(f(*ins))]
     except Exception as exc:  # noqa: BLE001
