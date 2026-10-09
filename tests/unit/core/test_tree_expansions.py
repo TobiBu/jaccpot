@@ -9,6 +9,9 @@ from yggdrax.tree_moments import (
     pack_multipole_expansions,
 )
 
+from jaccpot.upward.solidfmm_complex_tree_expansions import (
+    prepare_solidfmm_complex_upward_sweep,
+)
 from jaccpot.upward.tree_expansions import compute_node_multipoles, prepare_upward_sweep
 
 DEFAULT_TEST_LEAF_SIZE = 1
@@ -120,6 +123,25 @@ def test_compute_node_multipoles_rejects_unknown_mode():
             pos_sorted,
             mass_sorted,
             center_mode="nope",
+        )
+
+
+@pytest.mark.parametrize("mode", ["aabb", "AABB", "geometric"])
+def test_removed_geometric_centres_raise_a_removal_error(mode):
+    """AABB expansion centres went in the 2026-10 cleanup (X3); naming them must say so.
+
+    Every upward sweep that takes a ``center_mode`` shares the check, so all three
+    are asserted: an old caller gets the removal message, not an "unknown mode".
+    """
+    tree, pos_sorted, mass_sorted = _build_sample_tree()
+
+    with pytest.raises(ValueError, match="expansion centres were removed"):
+        compute_node_multipoles(tree, pos_sorted, mass_sorted, center_mode=mode)
+    with pytest.raises(ValueError, match="expansion centres were removed"):
+        prepare_upward_sweep(tree, pos_sorted, mass_sorted, center_mode=mode)
+    with pytest.raises(ValueError, match="expansion centres were removed"):
+        prepare_solidfmm_complex_upward_sweep(
+            tree, pos_sorted, mass_sorted, center_mode=mode
         )
 
 

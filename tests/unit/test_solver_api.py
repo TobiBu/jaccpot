@@ -559,6 +559,98 @@ def test_octree_tree_type_raises_removal_error():
         )
 
 
+def test_grouped_interactions_true_raises_removal_error():
+    """The grouped far field is gone (cleanup 2026-10, X3); asking for it must raise.
+
+    ``FarFieldConfig`` still constructs with the field set, so an old caller gets the
+    removal message from the solver rather than a silent flat far field.
+    """
+    farfield = FarFieldConfig(grouped_interactions=True)
+    with pytest.raises(ValueError, match="grouped interactions were removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(farfield=farfield),
+        )
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_legacy_grouped_interactions_kwarg_true_raises_removal_error():
+    """The legacy ``grouped_interactions=`` kwarg reaches the same refusal."""
+    with pytest.raises(ValueError, match="grouped interactions were removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST, basis="solidfmm", grouped_interactions=True
+        )
+
+
+def test_grouped_interactions_setter_refuses_true_and_accepts_false():
+    """The property reads ``False``; setting ``True`` raises, ``False`` is a no-op."""
+    fmm = FastMultipoleMethod(preset=FMMPreset.FAST, basis="solidfmm")
+    assert fmm.grouped_interactions is False
+    with pytest.raises(ValueError, match="grouped interactions were removed"):
+        fmm.grouped_interactions = True
+    fmm.grouped_interactions = False
+    assert fmm.grouped_interactions is False
+    assert fmm.advanced.farfield.grouped_interactions is False
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_class_major_farfield_mode_raises_removal_error():
+    """``mode="class_major"`` went with the grouped far field; both spellings raise."""
+    farfield = FarFieldConfig(mode="class_major")
+    with pytest.raises(ValueError, match="class-major far field was removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(farfield=farfield),
+        )
+    with pytest.raises(ValueError, match="class-major far field was removed"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST, basis="solidfmm", farfield_mode="class_major"
+        )
+
+
+@pytest.mark.parametrize("mode", ["auto", "pair_grouped"])
+def test_surviving_farfield_modes_still_construct(mode):
+    """``"auto"`` and ``"pair_grouped"`` stay accepted; both run the flat pair list."""
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode=mode, grouped_interactions=False)
+        ),
+    )
+    assert fmm.farfield_mode == mode
+    assert fmm.grouped_interactions is False
+
+
+def test_balanced_preset_still_constructs_with_its_pair_grouped_mode():
+    """The block-step lane builds ``preset="balanced"``, whose far field names
+    ``mode="pair_grouped"`` (``nornax_adapter.py``, ``mutual/topology.py``)."""
+    fmm = FastMultipoleMethod(preset="balanced")
+    assert fmm.farfield_mode == "pair_grouped"
+
+
+def test_removed_grouped_runtime_policy_fields_are_inert():
+    """The two grouped-schedule policy fields still construct, and do nothing.
+
+    They go in a later phase; until then an old config naming them must not raise,
+    including the non-positive budget the engine used to reject.
+    """
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                precompute_grouped_class_segments=True,
+                grouped_schedule_budget_bytes=0,
+            )
+        ),
+    )
+    assert not hasattr(fmm._impl, "precompute_grouped_class_segments")
+    assert not hasattr(fmm._impl, "grouped_schedule_budget_bytes")
+
+
 def test_basis_complex_alias_matches_solidfmm():
     positions, masses = _sample_problem(n=64)
     fmm_alias = FastMultipoleMethod(
