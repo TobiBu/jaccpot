@@ -89,4 +89,5 @@ missed; G1, G2 and G2a are met. Next lever: the traced walk's queue buffers (ygg
   utilisation reading; the queue scripts wait for 0 % and retry.
 * `JACCPOT_M2L_DEGREE_BATCHED` is read at trace time; a microbench that flips it must
   `jax.clear_caches()` or the second variant reuses the first trace (bit-identical output).
+  (The switch was removed in the 2026-10 cleanup, X5; the lesson holds for every trace-time knob.)
 * The `l2l_only` detail diag mode is inconsistent with the cumulative modes -- do not attribute from it.

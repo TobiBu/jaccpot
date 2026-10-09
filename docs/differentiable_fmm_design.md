@@ -256,7 +256,8 @@ near-field by default.**
    b/tri-linear in the rotation blocks; autodiff of the twin handles every input exactly.
    (Started with `bwd = grad(twin)` per the plan; the analytic adjoint-M2L is a later
    refinement only if the twin autodiff ever becomes a bottleneck — it is not: M2L+L2L
-   is ~0.08 ms of the forward, see the PR-1 table above.)
+   is ~0.08 ms of the forward, see the PR-1 table above.) The z-core kernel and its
+   `m2l_core_z_real_pallas_cvjp` were removed in the 2026-10 cleanup (X5).
 
 2. **Fast lane wired into dispatch + guard lifted.**
    `_m2l_{complex,real}_batch_kernel_fused_pallas` (`runtime/kernels/core.py`) route

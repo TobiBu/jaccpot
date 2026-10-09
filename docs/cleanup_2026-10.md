@@ -48,7 +48,8 @@ On `main` at 6cca378 (2026-10-06):
 | pins | #377 | GPU pins re-recorded at 15ceca4 after the softening kernels (#375) | A-vs-A bitwise | merged |
 | D2 | #378 | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | merged |
 | X3 | #380 | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins (S1-S5, M1, M3) | merged |
-| X4 | | M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the strict cap-profile file; `runtime_path` no longer a lane switch | CPU suite, shard partition, CPU bitwise A/B | open |
+| X4 | #383 | M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the strict cap-profile file; `runtime_path` no longer a lane switch | CPU suite, shard partition, CPU bitwise A/B, GPU pins (S1-S5, M1, M3) | merged |
+| X5 | | Superseded GPU kernel variants: cascade level forwards, CSR pair / tiled M2L, per-leaf P2M, near-field sorted layout / classes / `g` / lone `p` / chunked rows, unfused walk emission (X5a); COM radii chain, MAC radius bound, degree-batched rotation, z-core M2L, three small branches (X5b). Removed env values raise | CPU suite, shard partition, CPU bitwise A/B (interpret-mode Pallas included) | open |
 
 ### P0: CI runs each test once
 
@@ -818,3 +819,259 @@ change.
 - **GPU pins** (frozen worktree at 2896dae, against `main-15ceca4` with its A-vs-A
   control): S1-S5 on one A100 and M1, M3 on two are **bitwise**. #379 and yggdrax #89
   moved no pin either, so `main-15ceca4` stays the baseline.
+
+### X5: superseded GPU kernel variants
+
+Each switch keeps exactly its default branch, and every pure-JAX CPU / pre-Ampere
+fallback stays. A removed value no longer falls back to the default: it raises a
+`ValueError` naming the removal, through the new reader `jaccpot._env.env_reject_removed`
+("`NAME='v'` was removed in the 2026-10 cleanup (X5); the default is ... Unset the
+variable."). `_env`'s docstring records it as the one reader that raises. Where a knob
+is read at trace time inside a jitted function (most of these), the refusal fires on the
+next trace, which is when the removed value used to take effect.
+
+#### X5a: the fused single-GPU lane's kernels
+
+**Removed** (library -1,765 / +501 lines; the additions are the removal checks, their
+docstrings, and 44 lines of `_env.env_reject_removed`):
+
+1. **Cascade level forward kernels** (`pallas/cascade_real_level.py` -467 / +95,
+   `cascade_real_lanes.py` docstrings). `_m2m_level_kernel`, `_l2l_level_kernel`,
+   `_level_call`, `m2m_real_levels_pallas`, `l2l_real_levels_pallas` and the dispatch
+   in `_m2m_forward` / `_l2l_forward` (`_cascade_forward_kind` is now
+   `_cascade_lanes_k`). The custom VJPs' forward is the lane kernel only.
+2. **CSR M2L pair and tiled kernels** (-671 / +100). `pallas/m2l_real_csr_tiled.py`
+   (-380, whole); `_m2l_real_csr_kernel` and `m2l_real_csr_pallas` in
+   `pallas/m2l_real_csr.py`; the pair / tiled branches and the chooser
+   `_m2l_csr_kernel_choice` in `runtime/kernels/_downward_prep.py` (now
+   `_check_m2l_csr_kernel_env`). The tiled kernel's tuning knobs
+   `JACCPOT_M2L_CSR_TILE` / `_DOT` are read nowhere.
+3. **Per-leaf P2M forward** (`pallas/p2m_real_leaf.py` -138 / +57). `_p2m_leaf_kernel`
+   and the `block=0` branch; `leaf_width` stays in the signature (the reverse reads it).
+4. **Near-field direct-kernel variants and the `sorted` layout** (-425 / +158;
+   `pallas/nearfield_leafpair_csr.py`, `nearfield/_fast_lane.py`).
+   `nearfield_leafpair_csr_sorted_pallas` (the sorted ranges with per-chunk partials)
+   and its `_fast_lane` branch; the kernel's wide accumulator, which only that entry
+   passed; target classes (`target_classes=`, `JACCPOT_NEARFIELD_TARGET_CLASSES`); the
+   source flag `g` (2D-indexed operands); `p` without `r` (`p` alongside `r` is accepted
+   and adds nothing: `r` prefetches); chunked rows (`JACCPOT_NEARFIELD_DIRECT_ROWS`).
+5. **Unfused walk emission** (`pallas/mutual_walk_pallas.py` -57 / +37). The
+   per-child claims and unconditional overflow atomics, and the `fused_emit`
+   parameter of `mutual_walk_pallas`, `_mutual_walk_jit`, `_round_kernel` and
+   `_round_block`.
+
+**Values that now raise:** `JACCPOT_CASCADE_KERNEL=level`;
+`JACCPOT_M2L_CSR_KERNEL=pair|tiled`, `JACCPOT_M2L_CSR_TILED=1`;
+`JACCPOT_P2M_BLOCK=0` (and negative) and `block=0`;
+`JACCPOT_NEARFIELD_LAYOUT=sorted`, `JACCPOT_NEARFIELD_TARGET_CLASSES=<anything>`,
+`JACCPOT_NEARFIELD_DIRECT_ROWS=chunked`, `source_flags` / `JACCPOT_NEARFIELD_SOURCE_FLAGS`
+with `g` or with `p` but not `r`; `JACCPOT_WALK_FUSED_EMIT=0`.
+
+**Behaviour change:** `JACCPOT_NEARFIELD_ACCUM=wide` routed the fused lane's CSR near
+field to the `sorted` layout, because the direct kernel accumulates in the input dtype.
+It now runs the `table` layout, which carries the wide accumulator and is what the
+multi-GPU cross term runs for the same variable. The bitwise A/B below compares the
+two.
+
+**Kept:** the lane cascade forward and the level REVERSE kernels with everything they
+use (`_full`, `_level_call2`, `_translate_rows`, `_shift_core`, `cascade_level_tables`,
+`_core_tables_to_jnp`, the `*_centred_pair_jax` twins); `JACCPOT_CASCADE_PALLAS` (0 is
+the pure-JAX loops, the CPU path and `GradConfig.cascade_pallas`); in
+`m2l_real_csr.py` the CSR helpers, the centred layout and its tables, the per-pair
+algebra, both twins and `pallas_m2l_real_csr_supported` (the sm_80 gate the other real
+Pallas kernels and their lanes import); `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR`; `_DEFAULT_WARPS` and the per-leaf P2M
+reverse; the near field's scalar source loop (the bitwise bridge between the direct
+kernel and the table kernel), the `table` layout (forced on differentiable calls and
+without leaf ranges; `distributed/cross.py` calls it directly; its custom VJP is the
+grad lane), the blocked output path (the pieces of rows past `row_limit`);
+`node_layout="soa"` (the only fp64 walk layout).
+
+**Tests** (deleted or merged: 37 cases; re-anchored or re-pointed: 44; only renamed: 19;
+added: 11):
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| `test_cascade_real_level.py`: `test_m2m_levels_interpret_matches_the_level_loop`, `test_l2l_levels_interpret_matches_the_cascade`, `test_levels_are_jittable` (5) | (b) | moved onto the lane kernel in place, same ids and tolerances; still the forward-vs-loop anchors |
+| `test_cascade_real_lanes.py::test_m2m_lanes_match_the_level_kernel`, `test_l2l_lanes_match_the_level_kernel` (8) | (b) | now `test_m2m_lanes_match_the_level_loop` / `test_l2l_lanes_match_the_cascade`: the same cases and tolerance against `aggregate_m2m_real_by_level` / `_propagate_solidfmm_locals_by_level` |
+| `test_cascade_real_lanes.py::test_lanes_jit_and_the_vjp_forward_switch` | (b) | now `test_lanes_jit_and_the_vjp_forward`: the `level` half asserts the removal |
+| `test_m2l_real_csr_tiled.py` (5) | (a) | |
+| `test_m2l_real_csr_pallas.py::test_csr_pallas_interpret_matches_twin_and_rot_scale_f32` (2) | (c) | `test_m2l_real_csr_lanes.py::test_lanes_match_the_reference_on_ragged_rows` (fp32 vs the twin, orders 2, 3, 5, 6) and `test_csr_pair_twin_matches_rot_scale_f64` (the twin vs rot-scale) |
+| `test_m2l_real_csr_pallas.py`: `..._interpret_matches_rot_scale_f64` (5), `..._active_pair_count_truncates`, `..._on_axis_deltas_are_exact`, `..._under_jit_with_traced_active_count`, `..._gpu_matches_rot_scale` (3, GPU), `..._rejects_a_coefficient_count_of_another_order`, `..._rejects_misaligned_centers` | (b) | re-pointed to `m2l_real_csr_lanes_pallas`, same ids and tolerances: no lane test asserted fp64 1e-10 against rot-scale, on-axis exactness at fp64, a traced active count under `jit` or the input validation |
+| `test_m2l_csr_lane_wiring.py::test_csr_lane_is_taken_and_matches_the_chunked_lane` | adapted | counts `m2l_real_csr_lanes_pallas_cvjp` (the only CPU wiring test of the lane; it pinned `KERNEL=pair`); also asserts the three removed values raise |
+| `test_p2m_real_leaf.py::test_blocked_p2m_matches_the_per_leaf_kernel` (6) | (b) | now `test_blocked_p2m_matches_the_batched_reference`, against `_p2m_leaves_real` at the same atol 2e-6 (measured 1.55e-6 at p5, 1.19e-6 at p4) |
+| `test_p2m_real_leaf.py::test_blocked_p2m_with_the_full_leaf_width_is_the_per_leaf_sum` | (a) | |
+| `test_pallas_nearfield_leafpair_csr_sorted.py::test_sorted_ranges_equal_the_table_kernel` (4) | (a) | the table kernel's `accum="wide"` keeps `test_pallas_nearfield_leafpair_csr.py`'s test |
+| `...::test_direct_equals_the_table_kernel_in_particle_order[chunked-*]` (4) | (a) | the `[whole-*]` cases stay, without the `rows` parameter |
+| `...::test_source_tiles_equal_the_scalar_loop`, cases `(8, 4, 8, "p")`, `(16, 8, 8, "alg")`, `(16, None, 4, "aglr", (4, 16))` (6) | (a) | the three other class cases keep their flags in one launch (b); the rest lose only the `classes` id |
+| `...::test_source_flags_are_validated`, `test_the_default_is_the_tiled_kernel` | adapted | the class check is gone; the removed flags are asserted to raise |
+| `test_softening_kernel_paths.py::test_csr_sorted_direct_in_every_source_tile_mode[4-alg-*]` (4), `test_nearfield_force_scale_lane.py::test_force_scale_lane_equals_the_near_pair_sum[4-alg-*]` (6) | (a) | the `l` and `alr` cases stay |
+| `test_mutual_walk_pallas.py::test_pallas_walk_lists_equal_the_flat_walk_as_sets[record-False-*]` (4) | (b) | `[record-*]` (was `[record-True-*]`); `[soa-False-*]` is now `[soa-*]`, fused |
+| `test_mutual_walk_pallas.py::test_pallas_walk_flags_overflow[False]` | (a) | `[True]` stays, unparametrised, and asserts the removal |
+
+Added: `test_env_readers.py::TestEnvRejectRemoved` (2 tests, 6 cases);
+`test_p2m_real_leaf.py::test_the_removed_per_leaf_forward_raises[0, -1]`;
+`test_pallas_nearfield_leafpair_csr_sorted.py::test_the_removed_layout_options_raise`
+(2); `test_nearfield_csr_lane_consistency.py::test_wide_accumulation_runs_the_table_layout`
+(the CSR lane in interpret mode on the lane golden's solver: `wide` enters the table
+kernel and not the direct one, within 1e-5 of the default and within 1e-2 of direct
+summation; `LAYOUT=sorted` raises). No test asserted that `wide` still evaluates.
+
+**Bench:** `grad_cascade_reverse_microbench.py` times the lane forwards
+(`k_lanes = 32 x warps`, as the custom VJP sets them) instead of the level forwards;
+`m2l_csr_microbench.py` times `m2l_real_csr_lanes_pallas`; `nearfield_kernel_tune.py`
+lost the `classes` field (its scalar default stays); `walk_tune.py` lost the
+`fused_emit` field; `gpu_gate.py`'s comment names the re-pointed CSR test.
+
+#### X5b: mutual, MAC, COM and rotation
+
+**Removed** (library -1,038 / +225 lines):
+
+6. **COM radii chain kernel** (`pallas/com_radii_leaf.py` -196 / +21, with item 7 in
+   `runtime/_mac_geometry.py` -170 / +63). `_com_radii_chunk_kernel`,
+   `com_radii_chunk_pallas`, `_com_radii_variant` and `_com_radii`'s `variant`.
+7. **MAC radius bound.** `mac_radius_mode`, `_node_depths` (in `_mac_geometry.py`;
+   `mutual/topology.py`'s live `_node_depths` is untouched), the bound branch of
+   `_com_radii`, `_MAC_RADIUS_*`, and the `internal=` parameter of `com_mac_geometry`
+   and `_com_radii`. Radii are exact on every node.
+8. **Degree-batched rotation** (`operators/m2l_real_rot_scale.py` -198 / +29).
+   `_degree_batched`, `_centred_degree_maps`, `_padded_dz`, `_rotate_degree_batched`, the
+   branches in the two single-pair rotations, and four imports only they used. The
+   switch was reachable (env only) from every lane, the mesh lane and the mutual jax
+   M2L included; its default branch is unchanged.
+9. **The z-core Pallas M2L** (-401 / +46). `pallas/m2l_core_z_real.py` (-357, whole,
+   with `m2l_core_z_real_pallas[_cvjp]` and `pallas_m2l_real_supported`); the `zcore`
+   lane of `mutual/farfield.py`; the package export. `pallas_m2l_real_supported` (a
+   gpu/tpu backend check) had no library user left; its two other users, one example
+   and one bench section, asked whether `use_pallas` does anything for the real basis,
+   which is the sm_80 gate `pallas_m2l_real_csr_supported` -- they use that now, so the
+   gpu/tpu check was not moved. Docstrings in `operators/real_translations.py`,
+   `m2l_real_rot_scale.py` and `runtime/kernels/_m2l.py` no longer name the kernel.
+10. **Three small branches** (-73 / +66): the gather unpermute of the fast lane
+    (`runtime/_large_n_pipeline.py`; `unpermute` also left the compiled evaluation's
+    cache key); the direct leaf flatten of `_evaluate_local_expansions_for_particles`
+    (`runtime/kernels/_evaluate.py`; wrong for non-full leaves); the unsorted Pallas walk
+    rows (`runtime/_interaction_cache.py`: `strict_walk_deterministic_rows` is gone, the
+    rows are always sorted, `_reject_nondeterministic_walk_rows` refuses the switch).
+
+**Values that now raise:** `JACCPOT_COM_RADII_VARIANT=chain`;
+`JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS=bound` (and any value but `exact`, as before);
+`JACCPOT_M2L_DEGREE_BATCHED=1`; `JACCPOT_MUTUAL_M2L=zcore` (where the variable is read,
+i.e. with `use_pallas`); `JACCPOT_FASTLANE_UNPERMUTE=gather`;
+`JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN=1`;
+`JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC=0`.
+
+**Kept:** `pallas/com_radii_leaf.py`'s table kernel, `_next_pow2` and
+`JACCPOT_COM_RADII_KERNEL` (auto: Pallas on Ampere, XLA on CPU); the unrolled
+per-degree rotations; the pure-JAX `m2l_core_z_real` operator; `JACCPOT_MUTUAL_M2L`'s
+`auto` / `jax` / `fused`; the `JACCPOT_L2P_LAYOUT` leaf branch (the mesh lane, the grad
+path and complex coefficients reach it; phase C); `LOCAL_EVAL_FLAT_ANALYTIC`,
+`DTYPE_PRESERVE` and `ORDER4_UNROLLED` (complex only; phase C).
+
+**Tests** (deleted: 15 cases; re-anchored: 6; moved or renamed: 3; added: 5):
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| `test_mac_geometry_com.py`: `test_com_geometry_bounds_every_node_and_is_exact_on_leaves[bound]`, `test_com_geometry_is_jittable[bound]` | (a) | the `[exact]` cases stay, unparametrised |
+| `test_mac_geometry_com.py::test_internal_mode_is_validated` | (a) | the `internal=` parameter is gone; `test_mode_knob` asserts the env refusal |
+| `test_mac_geometry_com.py::test_mode_knob` | adapted | the bound-vs-exact lines became: `exact` equals `com_mac_geometry`, `bound` raises |
+| `test_mac_geometry_com.py::test_the_ancestor_table_kernel_is_the_chain_kernel` (6) | (b) | now `test_the_table_kernel_tiling_does_not_move_a_bit`: the table kernel at the same `(lanes, block)` tilings equals its default tiling to the bit. The survey proposed (a) with `test_pallas_chunks_equal_the_level_passes` as owner, but that test runs only the default tiling, and the multi-trip tilings had no other test |
+| `test_shared_env_switches.py::TestTheDegreeBatchedSwitchIsReadAtCallTime`: `test_it_is_off_by_default`, `test_setting_it_after_import_is_honoured` | (a) | replaced by `TestTheDegreeBatchedSwitchWasRemoved::test_setting_it_after_import_raises` |
+| `...::test_the_module_captures_no_env_value_at_import` | (b) | moved, unchanged, to `TestTheDegreeBatchedSwitchWasRemoved` |
+| `test_shared_env_switches.py::TestTheTwoRotationPathsAgree::test_batched_matches_unrolled_at_the_noise_floor` | (a) | |
+| `test_pallas_m2l_core_z_real.py` (5) | (a) | |
+| `test_custom_vjp_parity.py::test_m2l_core_z_pallas_custom_vjp_matches_twin` (4) | (a) | the fused real M2L keeps its cvjp parity test |
+| `test_mutual_walk_pallas.py::test_walk_backend_flag_parsing` | adapted | the deterministic half asserts the removal |
+
+Added: `test_mac_geometry_com.py::test_the_removed_chain_variant_raises`,
+`test_shared_env_switches.py::TestTheDegreeBatchedSwitchWasRemoved::test_setting_it_after_import_raises`,
+`test_mutual_fmm.py::test_the_removed_zcore_lane_raises`,
+`test_large_n_fast_path_policy.py::test_the_removed_gather_unpermute_raises`,
+`test_l2p_particle_major.py::test_the_removed_leaf_flatten_switch_raises` (on a shape no
+other test in that module traces, since the function is jitted).
+
+**Bench and examples:** `com_radii_tune.py` lost the `chain` variant and ignores a
+capture's `internal` / `variant`; `m2l_csr_microbench.py` lost the degree-batched arm;
+`bench_mutual_backends.py` lost the `pallas-zcore` lane; `bench_real_vs_complex.py` and
+`examples/pallas_m2l_speed.py` use `pallas_m2l_real_csr_supported`;
+`profile_large_n_nearfield_stages.py`'s B5 note says the flag is gone.
+
+**Docs:** `momentum_conserving_fmm.md` (the `zcore` lane and the degree-batched flag),
+`differentiable_fmm_design.md`, `agent_guides/STYLE_GUIDE.md` (the z-core import it
+listed as an open layering question), and annotations in the round records
+`fused_memory_2026-10.md`, `sub10ms_2026-09.md`, `small_leaves_2026-09.md` where they
+say a removed value "restores" something. ARCHITECTURE.md and README.md named none of
+the removed switches. The other plan and audit documents stay as written.
+
+#### X5 gates
+
+- **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`, at
+  9979288): 2,293 passed, 198 skipped, 1 failed: the stale local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as before.
+- **Runtime type checks** (`JACCPOT_RUNTIME_TYPECHECK=1`) on the 16 touched unit test
+  files: 255 passed, 48 skipped.
+- **Distributed tiers** on four forced host devices (`tests/distributed` and
+  `test_mutual_distributed.py`, `-n 6`): 95 passed, 3 skipped (two opt-in upstream
+  checks and one sm_80-only case).
+- **Bitwise A/B against 3d002fe on CPU** (a `git archive` export): 338 arrays equal, and
+  the diagnostic rows (fused mode active, no fallback, in every large-N run). The
+  arrays:
+  - forces and potentials of 10 configurations on the general path: the default; fast
+    and accurate on both bases; balanced; kd-tree; `dehnen_error`; `dehnen_paper`
+    adaptive order; `large_n_gpu` in fp32;
+  - a prepared state with a target subset; position and mass gradients through
+    `differentiable_accelerations` on both bases; the real rotate/scale M2L at orders
+    2, 4 and 6 (the degree-batched switch's default branch);
+  - the large-N lane on CPU with the GPU gate opened (N = 2048): prepare + evaluate, a
+    same-topology refresh, two `strict_prepare_refresh_and_evaluate` calls, the fused
+    `strict_run_v2` state after 3 steps, and the prepacked differentiable lane's
+    forces and position / mass gradients;
+  - the same lane with every surviving Pallas kernel in interpret mode (N = 768,
+    `use_pallas=True`, the prepacked payload), twice: without and with
+    `JACCPOT_NEARFIELD_LEAFPAIR_CSR=1`. A counting run confirmed what the second one
+    enters: the blocked P2M, both lane cascades, the CSR lane M2L, the direct near
+    field, the Pallas walk and, in the fused scan, the COM radii table kernel (the
+    L2P kernel and the differentiable lane run in the same interpret environment);
+  - `JACCPOT_NEARFIELD_ACCUM=wide` through the CSR lane in interpret mode: the
+    `sorted` layout at 3d002fe and the `table` layout here give the same bits;
+  - kernel level, in fp32 and fp64: the lane cascades through their custom VJPs at
+    orders 3 and 5 (forward and both reverse halves) and at `k_lanes=7`; the CSR lane
+    M2L at orders 2 and 5 (forward, both reverse halves); the blocked P2M at orders 4
+    and 5 (default and `block=4, chunk=4`, and the three reverse halves); the direct
+    near field in nine configurations (the default; the scalar loop; source tiles 4
+    with no flags, `a`, `r`, `l`; 8 with `alr`; 32 with `apr`; row limit 2), each for
+    the acceleration, the potential and the force scale, at two leaf widths; the table
+    kernel with `input` and `wide` accumulation; the COM radii from the XLA passes and
+    from the table kernel; the Pallas walk's sorted far and near lists, counts, rounds
+    and peak wavefront in both node layouts;
+  - the block-step lane: `BlockStepFMM(backend="jax")` at N = 512 and
+    `backend="pallas", pallas_interpret=True` at N = 256 -- the total accelerations and
+    one base step's positions and velocities;
+  - a supplement of 12 arrays for the L2L reverse with live internal locals (in the
+    main run the internal locals were zero, so its centre cotangent was zero on both
+    sides).
+- **`test_shards.py check`:** 2,554 tests, each in exactly one shard. At 3d002fe there
+  are 2,590; this phase deletes 52 cases and adds 16 (53 more are renamed).
+- **Goldens.** `golden/`, `golden_grad/`, `golden_lanes/` and `golden_modes/` are
+  byte-identical; `constructor_state.json` did not change and was not regenerated.
+- `import jaccpot` and all 123 modules import; no file in `jaccpot/`, `tests/`,
+  `bench/`, `examples/` or `notebooks/` imports a removed name (only prose mentions
+  remain). pre-commit is clean on every changed file.
+- `bench/annotation_census.py`: shape-annotated array parameters 833 (unchanged), bare
+  `Array` parameters 1,761 -> 1,701 (shaped share 32.1 % -> 32.9 %), `@jaxtyped`
+  functions 183 (unchanged). Only deletions moved them.
+- **Benches on CPU:** `bench_real_vs_complex.py` (run from a copy: the script prepends
+  the sibling `../yggdrax` checkout, which here is not the yggdrax under test) and
+  `bench_mutual_backends.py --sizes 1000` run. The GPU-only scripts
+  (`grad_cascade_reverse_microbench.py`, `m2l_csr_microbench.py`,
+  `nearfield_kernel_tune.py`, `walk_tune.py`, `com_radii_tune.py`) compile and their
+  jaccpot imports resolve; they were not run.
+- **GPU pins:** not run in this phase's implementation (no GPU was used). Only
+  non-default branches went; the pins are the gate before merge.
+
+**Left for phase Z:**
+- `bench/cleanup_inventory.py`'s `kernel_variants` family still lists the removed files
+  and functions, as the earlier families do: it is the record of what the phases
+  removed.
+- Odisseo's `tools/walltime_ab_compare.py` sets `JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN=1`
+  in one arm; that arm now raises. Out of this repo.
+- `bench/results/` keeps profiles that name the removed kernels.

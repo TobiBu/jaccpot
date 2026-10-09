@@ -541,9 +541,11 @@ reader auditing the layering does not have to rediscover them:
   sites. This is the production Pallas near-field path (`_radix_fast_lane_prepacked_accel_cvjp`,
   see ARCHITECTURE §7), and function-local is the deliberate "defer the heavy Pallas import"
   pattern named at the end of this section. Deliberate.
-- `operators/m2l_real_rot_scale.py` imports `pallas/m2l_core_z_real.py` (function-local). This
-  is the one that is genuinely arguable: this section defines `operators/` as pure algebra, and
-  an accelerator import is not algebra. Left as-is pending a decision, not endorsed.
+- `operators/m2l_real_rot_scale.py` imported `pallas/m2l_core_z_real.py` (function-local), the
+  one that was genuinely arguable: this section defines `operators/` as pure algebra, and an
+  accelerator import is not algebra. Settled: audit G.3 removed the import
+  (`tests/unit/test_operators_do_not_import_pallas.py` pins it), and the z-core module went in
+  the 2026-10 cleanup (X5).
 - `basis/complex_sh.py` imports `operators/{complex_ops,real_harmonics}`. Within the single
   "mathematical algebra" tier this section defines, so benign.
 

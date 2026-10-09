@@ -540,7 +540,7 @@ unconstrained, which is worse than either on outliers.
 | CSR placement in passes over row ranges, one per 4M rows (`8978dcd`, `4d15ff8`) | 1 pass (unchanged) | 1180 -> 1142 ms step (4 passes) | bitwise |
 
 In the step (p6, cell_min_level 8, jax 0.11.2, interleaved, frozen trees; old = `JACCPOT_P2M_BLOCK=0
-JACCPOT_COM_RADII_VARIANT=chain`):
+JACCPOT_COM_RADII_VARIANT=chain`, both removed in the 2026-10 cleanup, X5):
 
 | N | old kernels | new kernels | + 4 placement passes | rel-L2 old / new | peak |
 | --- | --- | --- | --- | --- | --- |
@@ -610,7 +610,8 @@ Alone on the captured 1e8 tree (`tunes/w1e8.txt`, `w2_1e8.txt`, three interleave
 fused emit 166.5, record 247.8, both **96.0-96.4 ms (-66 %)**; at 8e6 the old walk is bimodal (21.5-33.9 ms), both
 options 14.6-15.3. In the step: 1155.1 / 1155.5 -> 954.2 / 953.0 ms at 1e8 and 93.5 / 93.7 -> 83.8 / 83.5 at 8e6,
 the force bitwise unchanged and the peak slightly lower (25.19 -> 24.96 GiB at 1e8). **Both are the default now**
-(`JACCPOT_WALK_NODE_LAYOUT=soa`, `JACCPOT_WALK_FUSED_EMIT=0` restore the old walk).
+(`JACCPOT_WALK_NODE_LAYOUT=soa` restores the five-array node reads; `JACCPOT_WALK_FUSED_EMIT=0`, which restored
+the nine atomics, was removed in the 2026-10 cleanup, X5).
 
 **The near field is FP32-bound on its pair count, not latency-bound.** The plan's estimate (2.6e10 pairs at 1e8,
 30-50 ms of arithmetic against 286 measured) undercounted: the captured lists hold **6.25e10** particle pairs at 1e8
@@ -710,7 +711,8 @@ steps at 2e6 equal to main's, with a main-vs-main control, `bitwise/`):
 * **The force goes back by a scatter** through the sort permutation (`out[perm[i]] = acc_sorted[i]`, unique
   indices): the sum fuses into the scatter's contiguous reads and the inverse permutation becomes dead code. 8e6
   81.0 -> 79.3 ms; bitwise; no extra peak. An optimization barrier before the gather (the sum materialised) got 1.2 of
-  the 1.7 ms for +10 B/p at 2e6. `JACCPOT_FASTLANE_UNPERMUTE=gather` restores the gather.
+  the 1.7 ms for +10 B/p at 2e6. (`JACCPOT_FASTLANE_UNPERMUTE=gather`, which restored the gather, was removed in
+the 2026-10 cleanup, X5.)
 * **A Pallas L2P** (`jaccpot/pallas/l2p_real.py`, the default where Pallas lowers; `JACCPOT_L2P_KERNEL=xla` restores
   XLA): one particle per lane. It evaluates the same real solid harmonics the M2L's coefficients are defined in --
   only computed as polynomials in `(x, y, z)` by the recurrences of the complex inner solid harmonics (no
