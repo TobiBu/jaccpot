@@ -89,6 +89,25 @@ At eps 1e-5 the criterion beats theta 0.5 on every error measure, on the worst p
 lists: Dehnen 2014's narrow distribution, reproduced on the disc. Its prepare peak is the criterion walk's own lists;
 the force-scale work adds nothing on top. Timings at 1e8 are pending (no free card).
 
+The full 25,165,824-particle disc+bulge IC, same settings (`bench/fused_memory_budget.py --n 25165824 --ic disc`);
+peak is the prepare's, per particle:
+
+| MAC | rel-L2 | p99.9 | max | max da/f | far pairs | near leaf pairs | peak |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| geometric theta 0.8 | 4.1e-4 | 3.2e-3 | 1.2e-2 | 1.1e-2 | 95.6M | 37.9M | 205 B/p |
+| geometric theta 0.5 | 2.0e-5 | 1.7e-4 | 4.7e-4 | 4.4e-4 | 389.6M | 123.4M | 430 B/p |
+| dehnen_error eps 1e-4 | 1.5e-4 | 8.7e-4 | 1.3e-3 | 4.9e-4 | 93.9M | 37.7M | 219 B/p |
+| dehnen_error eps 1e-5 | 2.3e-5 | 1.3e-4 | 1.9e-4 | 3.9e-5 | 216.6M | 81.7M | 305 B/p |
+
+- **eps 1e-4 against theta 0.8:** the same lists (98-99%), with 2.8x lower rel-L2, 9x lower max error and 22x lower
+  max da/f. At 2e6 the same eps needed 38% more far pairs; per particle the criterion's lists shrink with N
+  (eps 1e-5: 12.0 far pairs per particle at 2e6, 8.6 at 25M), while the geometric MAC's stay flat (3.7, 3.8).
+- **eps 1e-5 against theta 0.5:** a rel-L2 16% higher and a lower tail (p99.9 0.76x, max 0.41x, max da/f 0.09x), from
+  56% of the far pairs and 66% of the near pairs, at 71% of the memory.
+- At 1e8 these peaks are 22 GB (eps 1e-4) and 31 GB (eps 1e-5) on a 40 GB A100. eps 1e-4's lists match the geometric
+  MAC's, so its step should cost about the geometric step plus eq 16a in the walk; eps 1e-5 has about 2.2x the lists.
+  Both are inferences from list volumes, not timings.
+
 GPU rollout tests:
 - both carries run the criterion in the traced steps and agree;
 - the carried `f_b` matches a fresh evaluation at the same positions (median within 5%);
