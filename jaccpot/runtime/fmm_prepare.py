@@ -4083,6 +4083,7 @@ class PrepareMixin(_EngineBase):
         refine_local_val: bool,
         max_refine_levels_val: int,
         aspect_threshold_val: float,
+        fused_seed: bool = False,
     ) -> Optional[Array]:
         """Resolve the per-node force scale the acceptance criterion needs.
 
@@ -4157,6 +4158,10 @@ class PrepareMixin(_EngineBase):
         aspect_threshold_val : float
             Aspect-ratio threshold forwarded to the prepass builders.
 
+        fused_seed : bool
+            A fused device-mode prepare: with the fused lane's criterion the
+            force scale comes from ``_fused_force_scale_seed`` (its own kernels),
+            not the general prepass. Off everywhere else.
         Returns
         -------
         Optional[Array]
@@ -4195,10 +4200,7 @@ class PrepareMixin(_EngineBase):
             force_scale_nodes = supplied
         elif (
             use_paper_force_scale
-            and bool(
-                getattr(self, "_strict_fused_mode_active", False)
-                or getattr(self, "_strict_fused_mode_enabled", False)
-            )
+            and bool(fused_seed)
             and self._flat_walk_criterion_active()
         ):
             # The fused lane: eq (16b)'s f_b from its own kernels, recomputed at every

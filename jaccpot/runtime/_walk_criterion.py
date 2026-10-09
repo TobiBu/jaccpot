@@ -56,6 +56,7 @@ __all__ = [
     "WALK_TABLE_GM",
     "WALK_TABLE_THRESHOLD",
     "DehnenWalkAccept",
+    "FlatWalkCriterion",
     "dehnen_pair_accept",
     "dehnen_walk_table",
     "walk_table_width",

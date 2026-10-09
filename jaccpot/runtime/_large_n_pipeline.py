@@ -1045,6 +1045,7 @@ def _build_tree_and_dual_downward_artifacts(
     disable_fused_tree_dual_prepare: bool,
     refresh_timing_active: bool,
     now: Callable[[], float],
+    fused_seed: bool = False,
 ) -> tuple[Optional[Any], Optional[Any], float]:
     """Build the tree/upward and dual/downward artifacts, fused or staged.
 
@@ -1092,6 +1093,10 @@ def _build_tree_and_dual_downward_artifacts(
         Whether refresh timing is being accumulated.
     now : Callable[[], float]
         The driver's clock, returning ``0.0`` when timing is inactive.
+    fused_seed : bool
+        A fused device-mode prepare (the strict runner's): the Dehnen criterion's
+        force scale is seeded from the fused lane's own kernels
+        (``_fused_force_scale_seed``) rather than the general prepass.
 
     Returns
     -------
@@ -1195,6 +1200,7 @@ def _build_tree_and_dual_downward_artifacts(
             force_scale_nodes = fmm._resolve_force_scale_nodes_for_prepare(
                 tree_artifacts=tree_artifacts,
                 supplied_force_scale=supplied_force_scale,
+                fused_seed=bool(fused_seed),
                 positions_arr=positions_arr,
                 masses_arr=masses_arr,
                 bounds=bounds,
@@ -1392,6 +1398,7 @@ def prepare_large_n_state(
         disable_fused_tree_dual_prepare=disable_fused_tree_dual_prepare,
         refresh_timing_active=refresh_timing_active,
         now=_now,
+        fused_seed=bool(fused_device_mode),
     )
 
     stage_t0 = _now()
