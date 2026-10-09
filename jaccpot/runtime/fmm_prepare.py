@@ -57,7 +57,7 @@ from ._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_node_force_scale_from_sorted_magnitudes,
 )
-from ._force_scale_levels import far_force_scale_sorted
+from ._force_scale_levels import far_force_scale_sorted, node_force_scale_min_sorted
 from ._interaction_cache import (
     TargetSortedFarPairs,
     _build_dual_tree_artifacts,
@@ -3928,6 +3928,167 @@ class PrepareMixin(_EngineBase):
             force_scale_far_sorted=force_scale_far_sorted,
         )
 
+    def _fused_force_scale_seed(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        runtime_traversal_config: Optional[DualTreeTraversalConfig],
+    ) -> Array:
+        """Eq (16b)'s ``f_b`` per sorted particle, from the fused lane's own kernels.
+
+        The first step's force scale for ``mac_type='dehnen_error'`` on the strict
+        fused lane: what every later step gets as a by-product of its force, here
+        from one GEOMETRIC flat walk at the lane's opening angle. The near half
+        is the direct CSR kernel's force-scale lane over its near pairs (the
+        XLA estimator where the CSR lane cannot run); the far half is its far
+        pairs as monopoles, pushed down the tree. No downward sweep, no criterion.
+
+        It replaces the general ``paper_fb`` prepass on this lane, which walks at
+        ``theta = 0.5`` (``_force_scale_prepass_theta``) and builds the downward
+        sweep: ~4x the lists of theta 0.8, too many next to the criterion's own at
+        1e8. The estimate errs LOW (the prepass's own table: median 0.93 of exact at
+        theta 0.7), so the first step is slightly stricter, never looser.
+        ``mac_force_scale_prepass_theta`` sets the walk's theta; else 0.8.
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            The eager prepare's tree and upward pass.
+        runtime_traversal_config : Optional[DualTreeTraversalConfig]
+            Traversal capacities for the walk.
+
+        Returns
+        -------
+        Array
+            ``[N]`` ``f_b`` in the tree's order.
+
+        Raises
+        ------
+        RuntimeError
+            If the walk returned no far or no near list (a wiring fault).
+        """
+        from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
+
+        tree = tree_artifacts.tree
+        override = getattr(self, "mac_force_scale_prepass_theta", None)
+        theta_seed = 0.8 if override is None else float(override)
+        walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
+        dual_artifacts, _ = _build_dual_tree_artifacts(
+            tree,
+            walk_geometry,
+            separation_floor=self._walk_separation_floor(),
+            geometry_factory=geometry_factory,
+            theta=theta_seed,
+            mac_type="dehnen",
+            dehnen_radius_scale=self.dehnen_radius_scale,
+            cache_key=None,
+            cache_entry=None,
+            max_pair_queue=self.max_pair_queue,
+            pair_process_block=self.pair_process_block,
+            traversal_config=runtime_traversal_config,
+            retry_logger=None,
+            fail_fast=True,
+            use_dense_interactions=False,
+            grouped_interactions=False,
+            grouped_chunk_size=None,
+            need_traversal_result=False,
+            need_compact_far_pairs=True,
+            need_node_interactions=False,
+            precompute_grouped_class_segments=False,
+            grouped_schedule_budget_bytes=self._grouped_schedule_item_budget(),
+            allow_split_build=True,
+            pair_policy=None,
+            policy_state=None,
+            jit_traversal=True,
+            timing_callback=None,
+            planner_hint=_RefreshDualPlannerHint(
+                use_split_build=True,
+                suppress_substage_timing=True,
+            ),
+        )
+        unpacked = self._unpack_dual_tree_artifacts(dual_artifacts)
+        neighbor_list, compact_far_pairs = unpacked[1], unpacked[3]
+        del dual_artifacts, unpacked
+        if compact_far_pairs is None or neighbor_list is None:
+            raise RuntimeError(
+                "the fused force-scale seed needs the walk's far and near lists"
+            )
+        dtype = jnp.asarray(tree_artifacts.positions_sorted).dtype
+        eps_sq = jnp.asarray(float(self.softening) ** 2, dtype)
+        num_levels = self._resolve_upward_num_levels(tree)
+        if num_levels is None:
+            num_levels = int(get_level_offsets(tree).shape[0] - 1)
+        n = int(jnp.asarray(tree.particle_indices).shape[0])
+        src = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
+        tgt = jnp.asarray(far_pair_targets(compact_far_pairs), dtype=INDEX_DTYPE)
+        live = (
+            (src >= 0)
+            & (tgt >= 0)
+            & (
+                jnp.arange(src.shape[0], dtype=INDEX_DTYPE)
+                < jnp.asarray(compact_far_pairs.far_pair_count, INDEX_DTYPE)
+            )
+        )
+        far = far_force_scale_sorted(
+            tree=tree,
+            leaf_nodes=neighbor_list.leaf_indices,
+            sources=src,
+            targets=tgt,
+            live=live,
+            node_mass=tree_artifacts.upward.mass_moments.mass,
+            node_centers=walk_geometry.center,
+            node_radii=walk_geometry.radius,
+            gravitational_constant=float(self.G),
+            softening_sq=eps_sq,
+            num_levels=int(num_levels),
+            num_particles=n,
+        )
+        del compact_far_pairs, src, tgt, live
+        leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+        offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+        counts = jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE)
+        neighbors = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+        if _nearfield_csr_lane_active(bool(getattr(self, "use_pallas", False))):
+            from jaccpot._env import env_flag, env_int
+            from jaccpot.pallas.nearfield_leafpair_csr import (
+                nearfield_leafpair_csr_sorted_direct_pallas,
+            )
+
+            ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
+            _, near = nearfield_leafpair_csr_sorted_direct_pallas(
+                jnp.asarray(tree_artifacts.positions_sorted),
+                jnp.asarray(tree_artifacts.masses_sorted),
+                ranges[:, 0],
+                jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0),
+                jnp.maximum(neighbors - leaf_nodes[0], 0),
+                offsets,
+                counts,
+                leaf_width=int(tree_artifacts.leaf_cap),
+                softening_sq=eps_sq,
+                G=jnp.asarray(float(self.G), dtype),
+                chunk=max(1, env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64)),
+                interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+                with_force_scale=True,
+                softening_kernel=getattr(self, "softening_kernel", None),
+            )
+        else:
+            from jaccpot.runtime._adaptive_policy import _near_field_force_scale
+
+            near = _near_field_force_scale(
+                positions=jnp.asarray(tree_artifacts.positions_sorted),
+                masses=jnp.asarray(tree_artifacts.masses_sorted, dtype),
+                node_ranges=jnp.asarray(tree.node_ranges, dtype=jnp.int32),
+                neighbor_offsets=offsets,
+                neighbor_counts=counts,
+                neighbor_leaf_indices=leaf_nodes,
+                neighbor_indices=neighbors,
+                leaf_cap=int(tree_artifacts.leaf_cap),
+                g=jnp.asarray(float(self.G), dtype),
+                eps_sq=eps_sq,
+                chunk=32,
+            )
+        return (jnp.asarray(near, dtype) + jnp.asarray(far, dtype)).astype(dtype)
+
     def _resolve_force_scale_nodes_for_prepare(
         self,
         *,
@@ -4059,6 +4220,31 @@ class PrepareMixin(_EngineBase):
                     f"got shape {tuple(supplied.shape)}"
                 )
             force_scale_nodes = supplied
+        elif (
+            use_paper_force_scale
+            and bool(
+                getattr(self, "_strict_fused_mode_active", False)
+                or getattr(self, "_strict_fused_mode_enabled", False)
+            )
+            and self._flat_walk_criterion_active()
+        ):
+            # The fused lane: eq (16b)'s f_b from its own kernels, recomputed at every
+            # eager prepare (a cached scale belongs to other positions), and reduced
+            # by level rather than by the serial per-node loop.
+            fb_sorted = self._fused_force_scale_seed(
+                tree_artifacts=tree_artifacts,
+                runtime_traversal_config=runtime_traversal_config,
+            )
+            num_levels = self._resolve_upward_num_levels(tree_artifacts.tree)
+            if num_levels is None:
+                num_levels = int(get_level_offsets(tree_artifacts.tree).shape[0] - 1)
+            force_scale_nodes = node_force_scale_min_sorted(
+                tree=tree_artifacts.tree,
+                force_scale_sorted=fb_sorted,
+                num_levels=int(num_levels),
+            ).astype(positions_arr.dtype)
+            self._last_force_scale_nodes = force_scale_nodes
+            self._last_force_scale_particles = fb_sorted
         elif use_paper_force_scale:
             node_count = int(tree_artifacts.tree.parent.shape[0])
             previous_force_scale = self._last_force_scale_nodes

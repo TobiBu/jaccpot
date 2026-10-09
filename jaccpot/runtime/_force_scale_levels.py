@@ -35,6 +35,7 @@ __all__ = [
     "far_force_scale_own",
     "far_force_scale_sorted",
     "node_force_scale_min",
+    "node_force_scale_min_sorted",
     "subtree_min_by_level",
 ]
 
@@ -377,9 +378,8 @@ def node_force_scale_min(
     """Per-node ``min_b f_b`` from a per-particle force scale in INPUT order.
 
     What eq (16a)'s threshold needs for every node: the force scale carried from
-    the previous step's evaluation, sorted by this step's tree, reduced to each
-    leaf's minimum and then up the tree (:func:`subtree_min_by_level`). Empty
-    leaves get ``+inf`` (their nodes are dead in the walk anyway).
+    the previous step's evaluation, sorted by this step's tree, then
+    :func:`node_force_scale_min_sorted`.
 
     Parameters
     ----------
@@ -395,14 +395,46 @@ def node_force_scale_min(
     Array
         ``[total_nodes]`` the minimum ``f_b`` over each node's particles.
     """
+    perm = jnp.asarray(tree.particle_indices, dtype=INDEX_DTYPE)
+    return node_force_scale_min_sorted(
+        tree=tree,
+        force_scale_sorted=jnp.asarray(force_scale_particles)[perm],
+        num_levels=num_levels,
+    )
+
+
+def node_force_scale_min_sorted(
+    *, tree: Any, force_scale_sorted: Array, num_levels: int
+) -> Array:
+    """Per-node ``min_b f_b`` from a per-particle force scale in the tree's order.
+
+    Each leaf's minimum over its particle range, then up the tree
+    (:func:`subtree_min_by_level`). Empty leaves get ``+inf`` (their nodes are
+    dead in the walk anyway). The level-order replacement, on the fused lane, of
+    ``compute_node_force_scale_from_sorted_magnitudes``'s serial loop over the
+    internal nodes.
+
+    Parameters
+    ----------
+    tree : Any
+        The tree whose order ``force_scale_sorted`` is in.
+    force_scale_sorted : Array
+        ``[N]`` ``f_b`` per sorted particle.
+    num_levels : int
+        Level-loop bound (the upward pass's). Static.
+
+    Returns
+    -------
+    Array
+        ``[total_nodes]`` the minimum ``f_b`` over each node's particles.
+    """
     from yggdrax.tree import get_level_offsets, get_nodes_by_level
 
     from jaccpot.runtime._level_shapes import level_batch_width
 
     total = int(jnp.asarray(tree.parent).shape[0])
     num_internal = int(jnp.asarray(tree.left_child).shape[0])
-    perm = jnp.asarray(tree.particle_indices, dtype=INDEX_DTYPE)
-    scale = jnp.asarray(force_scale_particles)[perm]
+    scale = jnp.asarray(force_scale_sorted)
     n = int(scale.shape[0])
     ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[num_internal:]
     counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)

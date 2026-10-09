@@ -213,3 +213,43 @@ def test_the_geometric_prepare_stores_no_force_scale(monkeypatch):
         max_order=ORDER,
     )
     assert prepared.force_scale_far_sorted is None
+
+
+def test_the_fused_lane_seeds_its_force_scale_from_its_own_kernels(monkeypatch):
+    """The first step's f_b comes from one geometric flat walk at the lane's theta
+    and the fused kernels, not the general paper_fb prepass (theta 0.5 plus a
+    downward sweep: ~4x the lists at 1e8). It lower-bounds the exact f_b and is
+    tight."""
+    from jaccpot.runtime import fmm_policy
+
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    for key, value in {**_STRICT_FUSED_ENV, **_FLAGS}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", str(N))
+
+    def _tripwire(*args, **kwargs):
+        raise AssertionError("the general f_b prepass ran on the fused lane")
+
+    monkeypatch.setattr(
+        fmm_policy.PolicyMixin,
+        "_compute_force_scale_fb_prepass_from_tree_artifacts",
+        _tripwire,
+        raising=False,
+    )
+    positions, masses = _make_inputs("clustered", N)
+    solver = _dehnen_solver("ferrers3", 1e-3)
+    prepared = solver._impl.prepare_state(
+        jnp.asarray(positions, jnp.float32),
+        jnp.asarray(masses, jnp.float32),
+        leaf_size=LEAF,
+        max_order=ORDER,
+        fused_device_mode=True,
+    )
+    seed = np.asarray(solver._impl._last_force_scale_particles, np.float64)
+    total, _ = _sorted_scales(prepared, SOFTENING)
+    ratio = seed / total
+    assert seed.shape == total.shape
+    assert ratio.max() <= 1.0 + 1e-4, float(ratio.max())
+    assert np.median(ratio) > 0.8, float(np.median(ratio))
+    nodes = np.asarray(solver._impl._last_force_scale_nodes)
+    assert nodes.shape == (int(prepared.tree.parent.shape[0]),)
