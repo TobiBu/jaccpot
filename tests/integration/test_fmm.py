@@ -7,7 +7,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import yggdrax.interactions as tree_interactions_module
 from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.geometry import compute_tree_geometry
 from yggdrax.interactions import DualTreeTraversalConfig, build_leaf_neighbor_lists
@@ -1590,9 +1589,7 @@ def test_nearfield_bucketed_matches_baseline(
         softening=1e-3,
         working_dtype=dtype,
         expansion_basis="complex",
-        farfield=FarFieldConfig(
-            rotation="solidfmm", grouped_interactions=True, mode="class_major"
-        ),
+        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         fixed_order=3,
         fixed_max_leaf_size=16,
@@ -2687,149 +2684,6 @@ def test_prepare_state_rebuilds_topology_after_rebuild_every_steps():
     assert fmm.recent_topology_reused is False
 
 
-def test_prepare_state_reuses_grouped_buffers_from_cache():
-    key = jax.random.PRNGKey(808)
-    num_particles = 64
-    positions = jax.random.uniform(
-        key,
-        (num_particles, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
-
-    fmm = FMMEngine(
-        theta=0.6,
-        softening=1e-3,
-        working_dtype=jnp.float32,
-        expansion_basis="complex",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=True),
-        mac_type="dehnen",
-        softening_kernel="plummer",
-    )
-    fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=4,
-        jit_tree=False,
-    )
-
-    with mock.patch.object(
-        tree_interactions_module,
-        "build_grouped_interactions_from_pairs",
-        side_effect=AssertionError("should reuse grouped buffers from cache"),
-    ):
-        fmm.prepare_state(
-            positions,
-            masses,
-            leaf_size=16,
-            max_order=4,
-            jit_tree=False,
-        )
-
-
-def test_prepare_state_reuses_grouped_class_segments_from_cache():
-    key = jax.random.PRNGKey(810)
-    num_particles = 96
-    positions = jax.random.uniform(
-        key,
-        (num_particles, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
-
-    fmm = FMMEngine(
-        theta=0.6,
-        softening=1e-3,
-        working_dtype=jnp.float32,
-        expansion_basis="complex",
-        farfield=FarFieldConfig(
-            rotation="solidfmm",
-            grouped_interactions=True,
-            mode="class_major",
-            m2l_chunk_size=128,
-        ),
-        mac_type="dehnen",
-        softening_kernel="plummer",
-    )
-    fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=4,
-        jit_tree=False,
-    )
-
-    with mock.patch.object(
-        fmm_module,
-        "_build_grouped_class_segments",
-        side_effect=AssertionError("should reuse grouped class segments from cache"),
-    ):
-        fmm.prepare_state(
-            positions,
-            masses,
-            leaf_size=16,
-            max_order=4,
-            jit_tree=False,
-        )
-
-
-def test_prepare_state_cache_key_respects_center_mode():
-    key = jax.random.PRNGKey(809)
-    num_particles = 64
-    positions = jax.random.uniform(
-        key,
-        (num_particles, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
-
-    fmm = FMMEngine(
-        theta=0.6,
-        softening=1e-3,
-        working_dtype=jnp.float32,
-        expansion_basis="complex",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
-        mac_type="dehnen",
-        softening_kernel="plummer",
-    )
-    # The cache-key-vs-center_mode behaviour depends on the adaptive resolver
-    # setting center_mode="aabb" when grouped_interactions flips on. That is an
-    # adaptive rewrite which the production-default static fixed sizing skips, so
-    # disable it here to exercise the center_mode-sensitive cache-key path.
-    fmm._static_runtime_fixed_sizing = False
-    fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=4,
-        jit_tree=False,
-    )
-
-    fmm.grouped_interactions = True
-    fmm._explicit_grouped_interactions = True
-    with mock.patch.object(
-        fmm_module,
-        "build_interactions_and_neighbors",
-        wraps=fmm_module.build_interactions_and_neighbors,
-    ) as spy_build:
-        fmm.prepare_state(
-            positions,
-            masses,
-            leaf_size=16,
-            max_order=4,
-            jit_tree=False,
-        )
-
-    assert spy_build.call_count == 1
-
-
 def test_fast_preset_sets_lbvh_defaults():
     key = jax.random.PRNGKey(111)
     num_particles = 48
@@ -3250,32 +3104,11 @@ def test_fast_preset_adaptive_large_cpu_policy_applies():
     assert overrides.traversal_config is not None
     assert overrides.traversal_config.process_block == 4096
     assert overrides.traversal_config.max_interactions_per_node == 65536
-    assert overrides.grouped_interactions is True
+    # The policy used to auto-enable the grouped far field here, with AABB centres;
+    # both went in the 2026-10 cleanup (X3), so the flat list about COM centres runs.
     assert overrides.farfield_mode == "pair_grouped"
-    assert overrides.center_mode == "aabb"
+    assert overrides.center_mode == "com"
     assert overrides.refine_local_override is False
-
-
-def test_fast_preset_adaptive_class_major_threshold():
-    fmm = FMMEngine(
-        preset=FMMPreset.FAST,
-        expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
-        mac_type="dehnen",
-        softening_kernel="plummer",
-    )
-    # Adaptive class-major farfield policy is the non-default opt-out path;
-    # static fixed sizing (the production default) skips it. Disable it here so
-    # the adaptive threshold behaviour is resolved and asserted.
-    fmm._static_runtime_fixed_sizing = False
-
-    overrides = fmm._resolve_runtime_execution_overrides(
-        num_particles=262144,
-        backend="cpu",
-    )
-
-    assert overrides.grouped_interactions is True
-    assert overrides.farfield_mode == "class_major"
 
 
 def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
@@ -3376,155 +3209,6 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
     assert overrides.adaptive_applied is False
     assert overrides.traversal_config is cfg
     assert overrides.m2l_chunk_size == 2048
-
-
-def test_solidfmm_grouped_interactions_matches_sparse_path():
-    key = jax.random.PRNGKey(23)
-    num_particles = 128
-    positions = jax.random.uniform(
-        key,
-        (num_particles, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
-
-    fmm = FMMEngine(
-        theta=0.6,
-        softening=1e-3,
-        working_dtype=jnp.float32,
-        expansion_basis="complex",
-        farfield=FarFieldConfig(rotation="solidfmm"),
-        mac_type="dehnen",
-        fixed_order=3,
-        softening_kernel="plummer",
-    )
-
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0], dtype=jnp.float32),
-        jnp.array([1.0, 1.0, 1.0], dtype=jnp.float32),
-    )
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        leaf_size=16,
-        return_reordered=True,
-    )
-    upward = fmm.prepare_upward_sweep(
-        tree,
-        pos_sorted,
-        mass_sorted,
-        max_order=3,
-        center_mode="aabb",
-    )
-    downward_sparse = fmm.prepare_downward_sweep(
-        tree,
-        upward,
-        theta=0.6,
-        grouped_interactions=False,
-    )
-    downward_grouped = fmm.prepare_downward_sweep(
-        tree,
-        upward,
-        theta=0.6,
-        interactions=downward_sparse.interactions,
-        grouped_interactions=True,
-    )
-
-    assert np.allclose(
-        np.asarray(downward_grouped.locals.coefficients),
-        np.asarray(downward_sparse.locals.coefficients),
-        rtol=1e-5,
-        atol=1e-5,
-    )
-
-
-def test_solidfmm_grouped_class_major_matches_pair_grouped():
-    """The two grouped far-field modes are one computation, differently batched.
-
-    They share the class rotation blocks and the per-pair displacement, so they
-    must agree to reassociation. This used to be asserted at 112 particles with
-    ``leaf_size=16`` and ``theta=0.6``, which produces **zero** far pairs -- the
-    assertion compared two all-zero local arrays and could not fail. It missed
-    G.11 (``docs/refactor_audit_2026-08.md``): ``pair_grouped`` gathered its
-    rotation with ``class_ids``, which yggdrax stores in the original rather than
-    the class-sorted pair order, so ~70% of pairs were rotated by another class.
-    At the sizes below that put the two modes a relative L2 of ~1.0 apart.
-
-    The far-pair count is asserted explicitly so it can never go vacuous again.
-    """
-    key = jax.random.PRNGKey(31)
-    num_particles = 512
-    positions = jax.random.uniform(
-        key,
-        (num_particles, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jnp.abs(jax.random.normal(key, (num_particles,), dtype=jnp.float32)) + 1.0
-
-    fmm = FMMEngine(
-        theta=0.6,
-        softening=1e-3,
-        working_dtype=jnp.float32,
-        expansion_basis="complex",
-        farfield=FarFieldConfig(
-            rotation="solidfmm", grouped_interactions=True, mode="pair_grouped"
-        ),
-        mac_type="dehnen",
-        fixed_order=3,
-        softening_kernel="plummer",
-    )
-
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0], dtype=jnp.float32),
-        jnp.array([1.0, 1.0, 1.0], dtype=jnp.float32),
-    )
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        leaf_size=8,
-        return_reordered=True,
-    )
-    upward = fmm.prepare_upward_sweep(
-        tree,
-        pos_sorted,
-        mass_sorted,
-        max_order=3,
-        center_mode="aabb",
-    )
-    downward_pair = fmm.prepare_downward_sweep(
-        tree,
-        upward,
-        theta=0.6,
-        grouped_interactions=True,
-        farfield_mode="pair_grouped",
-    )
-    downward_class = fmm.prepare_downward_sweep(
-        tree,
-        upward,
-        theta=0.6,
-        interactions=downward_pair.interactions,
-        grouped_interactions=True,
-        farfield_mode="class_major",
-    )
-
-    far_pairs = int(downward_pair.interactions.sources.shape[0])
-    assert far_pairs > 0, "vacuous: no far pairs, so the M2L modes ran on nothing"
-
-    pair_locals = np.asarray(downward_pair.locals.coefficients)
-    class_locals = np.asarray(downward_class.locals.coefficients)
-    # Relative, not absolute: the local coefficients here are O(1e2), so the old
-    # atol=1e-5 would have been the only binding term.
-    rel_l2 = np.linalg.norm(pair_locals - class_locals) / np.linalg.norm(class_locals)
-    assert rel_l2 < 1e-6, (
-        f"grouped far-field modes disagree at rel-L2 {rel_l2:.3e} over "
-        f"{far_pairs} far pairs; they are the same computation, differently batched"
-    )
 
 
 def _benchmark_like_distribution(

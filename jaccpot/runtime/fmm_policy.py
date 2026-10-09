@@ -759,8 +759,6 @@ class PolicyMixin(_EngineBase):
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
         runtime_m2l_chunk_size: Optional[int],
         runtime_l2l_chunk_size: Optional[int],
-        grouped_interactions: bool,
-        farfield_mode: str,
         record_retry: Callable[[DualTreeRetryEvent], None],
         refine_local_val: bool,
         max_refine_levels_val: int,
@@ -791,10 +789,6 @@ class PolicyMixin(_EngineBase):
             applies no expansions.
         runtime_l2l_chunk_size : Optional[int]
             L2L chunk size, likewise.
-        grouped_interactions : bool
-            Whether the prepass traversal groups interactions.
-        farfield_mode : str
-            Far-field mode for the prepass traversal.
         record_retry : Callable[[DualTreeRetryEvent], None]
             Sink for traversal retry events, so a retry inside the prepass is
             still visible in the outer call's diagnostics.
@@ -837,8 +831,6 @@ class PolicyMixin(_EngineBase):
                 runtime_traversal_config=runtime_traversal_config,
                 runtime_m2l_chunk_size=runtime_m2l_chunk_size,
                 runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                grouped_interactions=grouped_interactions,
-                farfield_mode=farfield_mode,
                 record_retry=record_retry,
                 refine_local_val=refine_local_val,
                 max_refine_levels_val=max_refine_levels_val,
@@ -900,8 +892,6 @@ class PolicyMixin(_EngineBase):
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
         runtime_m2l_chunk_size: Optional[int],
         runtime_l2l_chunk_size: Optional[int],
-        grouped_interactions: bool,
-        farfield_mode: str,
         record_retry: Callable[[DualTreeRetryEvent], None],
         refine_local_val: bool,
         max_refine_levels_val: int,
@@ -932,10 +922,6 @@ class PolicyMixin(_EngineBase):
             M2L chunk size for the prepass evaluation.
         runtime_l2l_chunk_size : Optional[int]
             L2L chunk size for the prepass evaluation.
-        grouped_interactions : bool
-            Whether the prepass traversal groups interactions.
-        farfield_mode : str
-            Far-field mode for the prepass.
         record_retry : Callable[[DualTreeRetryEvent], None]
             Sink for traversal retry events raised inside the prepass.
         refine_local_val : bool
@@ -994,8 +980,6 @@ class PolicyMixin(_EngineBase):
                 runtime_traversal_config=runtime_traversal_config,
                 runtime_m2l_chunk_size=runtime_m2l_chunk_size,
                 runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                grouped_interactions=grouped_interactions,
-                farfield_mode=farfield_mode,
                 record_retry=record_retry,
                 refine_local_val=refine_local_val,
                 max_refine_levels_val=max_refine_levels_val,

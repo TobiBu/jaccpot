@@ -89,23 +89,6 @@ def test_compute_node_multipoles_high_order_matches_direct():
     assert jnp.allclose(result.packed, expected)
 
 
-def test_compute_node_multipoles_aabb_uses_geometry_center():
-    from yggdrax.geometry import compute_tree_geometry
-
-    tree, pos_sorted, mass_sorted = _build_sample_tree()
-    geom = compute_tree_geometry(tree, pos_sorted)
-
-    result = compute_node_multipoles(
-        tree,
-        pos_sorted,
-        mass_sorted,
-        max_order=1,
-        center_mode="aabb",
-    )
-
-    assert jnp.allclose(result.centers, geom.center)
-
-
 def test_compute_node_multipoles_explicit_requires_centers():
     tree, pos_sorted, mass_sorted = _build_sample_tree()
 
@@ -141,6 +124,12 @@ def test_compute_node_multipoles_rejects_unknown_mode():
 
 
 def test_prepare_upward_sweep_returns_consistent_data():
+    """Geometry, mass moments and multipoles agree with the direct builders.
+
+    Expanded about the centres of mass, the production centres. This used AABB
+    centres until they went in the 2026-10 cleanup (X3), so the geometry and the
+    expansion centres are now two different checks.
+    """
     from yggdrax.geometry import compute_tree_geometry
     from yggdrax.tree_moments import compute_tree_mass_moments
 
@@ -151,7 +140,7 @@ def test_prepare_upward_sweep_returns_consistent_data():
         pos_sorted,
         mass_sorted,
         max_order=2,
-        center_mode="aabb",
+        center_mode="com",
     )
 
     geom = compute_tree_geometry(tree, pos_sorted)
@@ -162,14 +151,14 @@ def test_prepare_upward_sweep_returns_consistent_data():
         prepared.mass_moments.center_of_mass,
         mass_moments.center_of_mass,
     )
-    assert jnp.allclose(prepared.multipoles.centers, geom.center)
+    assert jnp.allclose(prepared.multipoles.centers, mass_moments.center_of_mass)
     assert prepared.multipoles.order == 2
 
     direct = compute_tree_multipole_moments(
         tree,
         pos_sorted,
         mass_sorted,
-        expansion_centers=geom.center,
+        expansion_centers=mass_moments.center_of_mass,
     )
     direct_packed = pack_multipole_expansions(direct, max_order=2)
     assert jnp.allclose(prepared.multipoles.packed, direct_packed)

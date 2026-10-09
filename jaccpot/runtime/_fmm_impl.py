@@ -89,10 +89,7 @@ from .fmm_caches import (
     _m2l_autotune_payload,
     _restore_m2l_autotune_payload,
 )
-from .fmm_constants import (
-    _GROUPED_SCHEDULE_BUDGET_DEFAULT,
-    _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE,
-)
+from .fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 from .fmm_derivatives import DerivativesMixin
 from .fmm_diagnostics import DiagnosticsMixin
 from .fmm_evaluate import EvaluateMixin
@@ -150,10 +147,52 @@ _REEXPORTS = (
     sh_size,
 )
 
-FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
+#: Both values run the flat far-pair list. ``"class_major"`` went with the grouped
+#: far field in the 2026-10 cleanup (docs/cleanup_2026-10.md, X3); naming it raises
+#: in :func:`_reject_removed_farfield_options`.
+FarFieldMode = Literal["auto", "pair_grouped"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]
 PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
+
+
+def _reject_removed_farfield_options(farfield: FarFieldConfig) -> None:
+    """Refuse the far-field options the 2026-10 cleanup removed (X3).
+
+    The grouped far field (``grouped_interactions=True``) and its class-major
+    batching (``mode="class_major"``) were removed in the 2026-10 cleanup
+    (docs/cleanup_2026-10.md, X3): no production lane used them, they were less
+    accurate than the flat pair list (one representative rotation per
+    displacement class) and they needed the AABB expansion centres that went with
+    them. The config fields stay so old
+    configs construct; naming a removed value raises here rather than silently
+    running the flat far field, so an old config cannot measure the wrong thing.
+    Runs first in ``__init__``, before any typed helper sees the value.
+
+    Parameters
+    ----------
+    farfield : FarFieldConfig
+        The far-field group as the caller passed it.
+
+    Raises
+    ------
+    ValueError
+        If ``grouped_interactions`` is true or ``mode`` is ``"class_major"``.
+    """
+    if bool(farfield.grouped_interactions):
+        raise ValueError(
+            "FarFieldConfig(grouped_interactions=True) is no longer available: "
+            "grouped interactions were removed in the 2026-10 cleanup (X3); see "
+            "docs/cleanup_2026-10.md. Leave it unset or False -- the far field "
+            "runs the flat pair list."
+        )
+    if str(farfield.mode).strip().lower() == "class_major":
+        raise ValueError(
+            "FarFieldConfig(mode='class_major') is no longer available: the "
+            "class-major far field was removed in the 2026-10 cleanup (X3); see "
+            "docs/cleanup_2026-10.md. Use 'auto' or 'pair_grouped' (both run the "
+            "flat pair list)."
+        )
 
 
 def derive_split_build_default(
@@ -336,9 +375,11 @@ class FMMEngine(
         Pin the maximum leaf size, bypassing preset selection.
 
     farfield : Optional[FarFieldConfig]
-        The far-field group: grouping mode, rotation, the M2L/L2L chunk sizes,
+        The far-field group: mode, rotation, the M2L/L2L chunk sizes,
         streamed far pairs, mixed-order settings and gradient retention.
-        ``None`` means ``FarFieldConfig()``.
+        ``None`` means ``FarFieldConfig()``. ``grouped_interactions=True`` and
+        ``mode="class_major"`` raise: the grouped far field was removed in the
+        2026-10 cleanup (X3).
 
         Three names differ (``mode``, ``rotation``, ``mixed_order``) and one
         **default** does: ``FarFieldConfig.rotation`` is ``None`` where this
@@ -464,7 +505,7 @@ class FMMEngine(
         # defaulted to "solidfmm". Resolved here exactly as the facade already
         # resolves it at `solver.py:445-447` -- None means "not overridden".
         _ff = FarFieldConfig() if farfield is None else farfield
-        grouped_interactions = _ff.grouped_interactions
+        _reject_removed_farfield_options(_ff)
         farfield_mode = _ff.mode
         complex_rotation = "solidfmm" if _ff.rotation is None else _ff.rotation
         m2l_chunk_size = _ff.m2l_chunk_size
@@ -522,8 +563,8 @@ class FMMEngine(
         retain_interactions = _policy.retain_interactions
         prepare_stage_memory_split_enabled = _policy.prepare_stage_memory_split_enabled
         autotune_m2l_chunk = _policy.autotune_m2l_chunk
-        precompute_grouped_class_segments = _policy.precompute_grouped_class_segments
-        grouped_schedule_budget_bytes = _policy.grouped_schedule_budget_bytes
+        # `precompute_grouped_class_segments` and `grouped_schedule_budget_bytes`
+        # are ignored since the grouped far field went (2026-10 cleanup, X3).
         nearfield_schedule_item_cap = _policy.nearfield_schedule_item_cap
         upward_leaf_batch_size = _policy.upward_leaf_batch_size
 
@@ -573,9 +614,7 @@ class FMMEngine(
             autotune_m2l_chunk=autotune_m2l_chunk,
         )
         self._resolve_schedule_budgets(
-            grouped_schedule_budget_bytes=grouped_schedule_budget_bytes,
             nearfield_schedule_item_cap=nearfield_schedule_item_cap,
-            precompute_grouped_class_segments=precompute_grouped_class_segments,
             upward_leaf_batch_size=upward_leaf_batch_size,
         )
         self.softening_kernel = resolve_softening_kernel(softening_kernel)
@@ -646,7 +685,6 @@ class FMMEngine(
             traversal_config=traversal_config,
             max_pair_queue=max_pair_queue,
             pair_process_block=pair_process_block,
-            grouped_interactions=grouped_interactions,
             fixed_order=fixed_order,
             fixed_max_leaf_size=fixed_max_leaf_size,
         )
@@ -920,10 +958,8 @@ class FMMEngine(
             raise ValueError("complex_rotation must be 'solidfmm'")
         self.complex_rotation = rotation_norm
         farfield_mode_norm = str(farfield_mode).strip().lower()
-        if farfield_mode_norm not in ("auto", "pair_grouped", "class_major"):
-            raise ValueError(
-                "farfield_mode must be 'auto', 'pair_grouped', or 'class_major'"
-            )
+        if farfield_mode_norm not in ("auto", "pair_grouped"):
+            raise ValueError("farfield_mode must be 'auto' or 'pair_grouped'")
         self.farfield_mode = farfield_mode_norm
         self._explicit_streamed_far_pairs = streamed_far_pairs is not None
         self.streamed_far_pairs = bool(streamed_far_pairs)
@@ -1097,23 +1133,19 @@ class FMMEngine(
     def _resolve_schedule_budgets(
         self,
         *,
-        grouped_schedule_budget_bytes: Optional[int],
         nearfield_schedule_item_cap: Optional[int],
-        precompute_grouped_class_segments: Optional[bool],
         upward_leaf_batch_size: Optional[int],
     ) -> None:
-        """Resolve the grouped/near-field schedule budgets and the upward batch size.
+        """Resolve the near-field schedule budget and the upward batch size.
 
         Extracted verbatim from ``__init__`` lines 571-597 (audit 2.1 step 3),
         called in the original position so the resolution order is unchanged.
+        The grouped-schedule half went with the grouped far field (2026-10
+        cleanup, X3).
 
         Parameters
         ----------
-        grouped_schedule_budget_bytes : Optional[int]
-            Passed through from ``__init__`` unchanged.
         nearfield_schedule_item_cap : Optional[int]
-            Passed through from ``__init__`` unchanged.
-        precompute_grouped_class_segments : Optional[bool]
             Passed through from ``__init__`` unchanged.
         upward_leaf_batch_size : Optional[int]
             Passed through from ``__init__`` unchanged.
@@ -1126,20 +1158,8 @@ class FMMEngine(
         Raises
         ------
         ValueError
-            If a schedule budget, item cap or batch size is not positive.
+            If the item cap or batch size is not positive.
         """
-        self.precompute_grouped_class_segments = (
-            None
-            if precompute_grouped_class_segments is None
-            else bool(precompute_grouped_class_segments)
-        )
-        self.grouped_schedule_budget_bytes = (
-            _GROUPED_SCHEDULE_BUDGET_DEFAULT
-            if grouped_schedule_budget_bytes is None
-            else int(grouped_schedule_budget_bytes)
-        )
-        if self.grouped_schedule_budget_bytes <= 0:
-            raise ValueError("grouped_schedule_budget_bytes must be positive")
         self.nearfield_schedule_item_cap = (
             None
             if nearfield_schedule_item_cap is None
@@ -1707,7 +1727,6 @@ class FMMEngine(
         traversal_config: Optional[DualTreeTraversalConfig],
         max_pair_queue: Optional[int],
         pair_process_block: Optional[int],
-        grouped_interactions: Optional[bool],
         fixed_order: Optional[int],
         fixed_max_leaf_size: Optional[int],
     ) -> None:
@@ -1728,8 +1747,6 @@ class FMMEngine(
         max_pair_queue : Optional[int]
             Passed through from ``__init__`` unchanged.
         pair_process_block : Optional[int]
-            Passed through from ``__init__`` unchanged.
-        grouped_interactions : Optional[bool]
             Passed through from ``__init__`` unchanged.
         fixed_order : Optional[int]
             Passed through from ``__init__`` unchanged.
@@ -1758,8 +1775,6 @@ class FMMEngine(
         self._explicit_traversal_config = traversal_config is not None
         self._explicit_max_pair_queue = max_pair_queue is not None
         self._explicit_pair_process_block = pair_process_block is not None
-        self._explicit_grouped_interactions = grouped_interactions is not None
-        self.grouped_interactions = grouped_interactions
 
     def _resolve_derived_lane_flags(self) -> None:
         """Derive the two cross-cutting lane flags from the already-resolved config.
@@ -1793,7 +1808,7 @@ class FMMEngine(
         *,
         retain_far_pairs_for_grad: bool,
     ) -> None:
-        """Resolve static runtime sizing, grad far-pair retention and fast-lane centres.
+        """Resolve static runtime sizing and the grad far-pair retention flag.
 
         Extracted verbatim from ``__init__`` lines 1036-1069 (audit 2.1 step 2).
         Called in the original position, so the resolution order is unchanged --
@@ -1825,22 +1840,6 @@ class FMMEngine(
         # production forward and its memory profile are untouched.
         self.retain_far_pairs_for_grad: bool = bool(retain_far_pairs_for_grad) or str(
             os.environ.get("JACCPOT_RETAIN_FAR_PAIRS_FOR_GRAD", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        # Opt-in geometric (box/aabb) centres for the real-basis large-N fast lane,
-        # decoupled from grouped_interactions. This selects center_mode="aabb" in the
-        # production fast lane (see _resolve_runtime_execution_overrides) for the real
-        # (Dehnen) basis only, without engaging grouped_interactions (so the streamed
-        # pair_grouped near/far payload is unchanged). Default OFF: the fast lane keeps
-        # its data-dependent COM centres. This is enabling infrastructure -- box centres
-        # quantise far-field displacements into interaction classes, a prerequisite for
-        # class-cached far-field kernels. NB such caching is only effective on a REGULAR
-        # cell grid (e.g. a uniform octree); the radix binary tree's box centres do not
-        # grid-quantise, so class-cached grouping does NOT transfer to this lane
-        # (measured: the distinct-class count explodes past any fixed capacity at
-        # production N). On its own the knob is speed-neutral and ~2x looser (still
-        # ~1e-3 in forces) vs COM.
-        self._fastlane_geometric_centers: bool = str(
-            os.environ.get("JACCPOT_LARGE_N_FASTLANE_GEOMETRIC_CENTERS", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._apply_large_n_gpu_production_contract()
 
@@ -1895,13 +1894,6 @@ class FMMEngine(
                 FutureWarning,
                 stacklevel=2,
             )
-        if bool(self.grouped_interactions):
-            warnings.warn(
-                "large_n_gpu production profile disables grouped_interactions "
-                "to keep streamed pair_grouped execution.",
-                FutureWarning,
-                stacklevel=2,
-            )
         if self._explicit_streamed_far_pairs and not bool(self.streamed_far_pairs):
             warnings.warn(
                 "large_n_gpu production profile enables streamed_far_pairs "
@@ -1914,8 +1906,6 @@ class FMMEngine(
         self.runtime_path = "large_n"
         self.memory_objective = "minimum_memory"  # type: ignore[assignment]
         self.streamed_far_pairs = True
-        self.grouped_interactions = False
-        self._explicit_grouped_interactions = False
         self.farfield_mode = "pair_grouped"
 
         # Keep near-field on the radix fast-lane compatible bucketed path.
@@ -1929,7 +1919,6 @@ class FMMEngine(
         self.enable_interaction_cache = True
         self.retain_traversal_result = False
         self.retain_interactions = False
-        self.precompute_grouped_class_segments = False
         if self.upward_leaf_batch_size is None:
             self.upward_leaf_batch_size = _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 

@@ -23,10 +23,6 @@ import jax
 import jax.numpy as jnp
 from beartype.typing import Callable
 from jaxtyping import Array
-from yggdrax.grouped_interactions import (
-    GroupedInteractionBuffers,
-    build_grouped_interactions,
-)
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
@@ -51,8 +47,6 @@ from ..dtypes import INDEX_DTYPE, complex_dtype_for_real
 from ._m2l import (
     _accumulate_m2l_chunked_scan,
     _accumulate_m2l_fullbatch,
-    _accumulate_solidfmm_m2l_grouped,
-    _accumulate_solidfmm_m2l_grouped_class_major,
 )
 
 __all__: list[str] = []
@@ -599,9 +593,6 @@ def _solidfmm_downward_accumulate_from_multipoles(
     multipoles_coeffs: Array,
     *,
     n_targets: Optional[int] = None,
-    tree: Tree,
-    upward: TreeUpwardData,
-    interactions: NodeInteractionList,
     centers: Array,
     src: Array,
     tgt: Array,
@@ -611,37 +602,25 @@ def _solidfmm_downward_accumulate_from_multipoles(
     rotation_mode: str,
     total_nodes: int,
     chunk_size: int,
-    grouped_interactions: bool,
-    grouped_buffers: Optional[GroupedInteractionBuffers],
-    grouped_segment_starts: Optional[Array],
-    grouped_segment_lengths: Optional[Array],
-    grouped_segment_class_ids: Optional[Array],
-    grouped_segment_sort_permutation: Optional[Array],
-    grouped_segment_group_ids: Optional[Array],
-    grouped_segment_unique_targets: Optional[Array],
-    farfield_mode: str,
     basis_mode: str = "complex",
     m2l_impl: str = "rot_scale",
     targets_sorted: bool = False,
 ) -> Array:
     """Run one solidfmm M2L accumulation pass plus symmetry enforcement.
 
-    Both the complex and real (Dehnen no-sqrt2) bases share the grouped /
-    class-major / flat dispatch; ``basis_mode`` selects the cached rotation
-    blocks and translation kernel (see :func:`_m2l_cached_kernel_dispatch`). The
-    non-grouped path uses the dedicated real flat kernels for ``basis_mode ==
-    "real"``. Real coefficients carry no conjugate symmetry, so the complex
-    symmetry-enforcement step is skipped for the real basis.
+    Both the complex and real (Dehnen no-sqrt2) bases run the flat pair list;
+    ``basis_mode`` selects the translation kernel. Real coefficients carry no
+    conjugate symmetry, so the complex symmetry-enforcement step is skipped for
+    the real basis.
 
-    Four lanes, selected without any traced branching: ``grouped_interactions``
-    picks grouped over flat, ``farfield_mode`` picks class-major over pair-grouped
-    within grouped, and on the flat path ``pair_count <= chunk_size`` picks
-    full-batch over a chunked scan. All four compute the same operator; they
-    differ in how the pair list is blocked. A fifth flat lane for the real
-    basis, the default on Ampere+ GPUs
-    (:func:`_m2l_csr_pallas_active`), hands the whole pair list to the
-    target-tiled CSR Pallas kernel, which owns one local row per program and so
-    needs neither the chunked scan nor its per-chunk scatter.
+    Two lanes, selected without any traced branching: ``pair_count <=
+    chunk_size`` picks full-batch over a chunked scan. Both compute the same
+    operator; they differ in how the pair list is blocked. A third lane for the
+    real basis, the default on Ampere+ GPUs (:func:`_m2l_csr_pallas_active`),
+    hands the whole pair list to the target-tiled CSR Pallas kernel, which owns
+    one local row per program and so needs neither the chunked scan nor its
+    per-chunk scatter. (The grouped and class-major lanes went in the 2026-10
+    cleanup, X3.)
 
     Parameters
     ----------
@@ -654,12 +633,6 @@ def _solidfmm_downward_accumulate_from_multipoles(
         all. Set to the local node count when cross-domain sources sit behind the
         local ones, so the M2L output stays local-only and adds to the local
         expansions.
-    tree : Tree
-        Tree being swept; used to build grouped buffers on demand.
-    upward : TreeUpwardData
-        Upward-pass result; its ``geometry`` feeds the grouped builder.
-    interactions : NodeInteractionList
-        Interaction list, used when grouped buffers must be built here.
     centers : Array
         Per-node expansion centres.
     src : Array
@@ -678,24 +651,6 @@ def _solidfmm_downward_accumulate_from_multipoles(
         Node count, i.e. the scatter extent.
     chunk_size : int
         Pairs per chunk, and the threshold that selects the chunked lane.
-    grouped_interactions : bool
-        Use the grouped lanes rather than the flat ones.
-    grouped_buffers : Optional[GroupedInteractionBuffers]
-        Pre-built grouped buffers; built here from ``tree`` when ``None``.
-    grouped_segment_starts : Optional[Array]
-        Class-major segment start offsets.
-    grouped_segment_lengths : Optional[Array]
-        Class-major segment lengths.
-    grouped_segment_class_ids : Optional[Array]
-        Translation class of each segment.
-    grouped_segment_sort_permutation : Optional[Array]
-        Permutation that sorts segments into class-major order.
-    grouped_segment_group_ids : Optional[Array]
-        Group each segment belongs to.
-    grouped_segment_unique_targets : Optional[Array]
-        Distinct target nodes per segment.
-    farfield_mode : str
-        ``"pair_grouped"`` or ``"class_major"``; only read on the grouped path.
     basis_mode : str
         ``"complex"`` or ``"real"``. Also decides whether conjugate-symmetry
         enforcement runs afterwards -- real coefficients have no such symmetry.
@@ -711,20 +666,11 @@ def _solidfmm_downward_accumulate_from_multipoles(
     Array
         Updated local coefficients, with conjugate symmetry re-enforced on the
         complex basis and returned as-is on the real basis.
-
-    Raises
-    ------
-    ValueError
-        If ``farfield_mode`` is neither ``"pair_grouped"`` nor ``"class_major"``
-        on the grouped path.
     """
 
     real_basis = str(basis_mode).strip().lower() == "real"
     if targets_sorted and not (
-        not grouped_interactions
-        and real_basis
-        and _m2l_csr_pallas_active()
-        and _m2l_csr_kernel_choice() == "lanes"
+        real_basis and _m2l_csr_pallas_active() and _m2l_csr_kernel_choice() == "lanes"
     ):
         # only the lanes kernel reads a CSR as (sources, row offsets)
         from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
@@ -732,127 +678,87 @@ def _solidfmm_downward_accumulate_from_multipoles(
         tgt = targets_from_csr_offsets(tgt, int(jnp.asarray(src).shape[0]))
         targets_sorted = False
 
-    if grouped_interactions:
-        grouped = (
-            grouped_buffers
-            if grouped_buffers is not None
-            else build_grouped_interactions(tree, upward.geometry, interactions)
+    if real_basis and _m2l_csr_pallas_active():
+        from jaccpot._env import env_flag
+        from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
+        from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas_cvjp
+        from jaccpot.pallas.m2l_real_csr_tiled import (
+            m2l_real_csr_tiled_pallas,
+            m2l_real_csr_tiled_supported,
         )
-        mode = str(farfield_mode).strip().lower()
-        if mode not in ("pair_grouped", "class_major"):
-            raise ValueError("farfield_mode must be 'pair_grouped' or 'class_major'")
-        if mode == "class_major":
-            locals_updated = _accumulate_solidfmm_m2l_grouped_class_major(
-                initial_locals_coeffs,
-                multipoles_coeffs,
-                centers,
-                grouped,
-                grouped_segment_starts=grouped_segment_starts,
-                grouped_segment_lengths=grouped_segment_lengths,
-                grouped_segment_class_ids=grouped_segment_class_ids,
-                grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                grouped_segment_group_ids=grouped_segment_group_ids,
-                grouped_segment_unique_targets=grouped_segment_unique_targets,
-                order=order,
-                rotation=rotation_mode,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-                basis_mode=basis_mode,
-            )
-        else:
-            locals_updated = _accumulate_solidfmm_m2l_grouped(
-                initial_locals_coeffs,
-                multipoles_coeffs,
-                centers,
-                grouped,
-                order=order,
-                rotation=rotation_mode,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
-                basis_mode=basis_mode,
-            )
-    else:
-        if real_basis and _m2l_csr_pallas_active():
-            from jaccpot._env import env_flag
-            from jaccpot.pallas.m2l_real_csr import m2l_real_csr_pallas
-            from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas_cvjp
-            from jaccpot.pallas.m2l_real_csr_tiled import (
-                m2l_real_csr_tiled_pallas,
-                m2l_real_csr_tiled_supported,
-            )
 
-            interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
-            which = _m2l_csr_kernel_choice()
-            if which == "lanes":
-                # the custom_vjp seam: the forward is the same launch, and the
-                # reverse runs the transposed (by-source) lane kernel
-                m2l_inc = m2l_real_csr_lanes_pallas_cvjp(
-                    multipoles_coeffs,
-                    centers,
-                    src,
-                    tgt,
-                    active_pair_count,
-                    order,
-                    int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
-                    interpret,
-                    "triton",
-                    int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
-                    n_targets,
-                    bool(targets_sorted),
-                )
-            elif which == "tiled" and m2l_real_csr_tiled_supported(order):
-                m2l_inc = m2l_real_csr_tiled_pallas(
-                    multipoles_coeffs,
-                    centers,
-                    src,
-                    tgt,
-                    order=order,
-                    active_pair_count=active_pair_count,
-                    k_tile=int(os.environ.get("JACCPOT_M2L_CSR_TILE", "16")),
-                    num_warps=int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "4")),
-                    dot_algorithm=os.environ.get("JACCPOT_M2L_CSR_DOT", "ieee"),
-                    interpret=interpret,
-                )
-            else:
-                m2l_inc = m2l_real_csr_pallas(
-                    multipoles_coeffs,
-                    centers,
-                    src,
-                    tgt,
-                    order=order,
-                    active_pair_count=active_pair_count,
-                    interpret=interpret,
-                )
-            locals_updated = initial_locals_coeffs + m2l_inc
-        elif pair_count <= chunk_size:
-            locals_updated = _accumulate_m2l_fullbatch(
-                initial_locals_coeffs,
+        interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
+        which = _m2l_csr_kernel_choice()
+        if which == "lanes":
+            # the custom_vjp seam: the forward is the same launch, and the
+            # reverse runs the transposed (by-source) lane kernel
+            m2l_inc = m2l_real_csr_lanes_pallas_cvjp(
                 multipoles_coeffs,
                 centers,
                 src,
                 tgt,
                 active_pair_count,
+                order,
+                int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
+                interpret,
+                "triton",
+                int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
+                n_targets,
+                bool(targets_sorted),
+            )
+        elif which == "tiled" and m2l_real_csr_tiled_supported(order):
+            m2l_inc = m2l_real_csr_tiled_pallas(
+                multipoles_coeffs,
+                centers,
+                src,
+                tgt,
                 order=order,
-                basis_mode=basis_mode,
-                rotation=rotation_mode,
-                m2l_impl=m2l_impl,
-                total_nodes=total_nodes,
+                active_pair_count=active_pair_count,
+                k_tile=int(os.environ.get("JACCPOT_M2L_CSR_TILE", "16")),
+                num_warps=int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "4")),
+                dot_algorithm=os.environ.get("JACCPOT_M2L_CSR_DOT", "ieee"),
+                interpret=interpret,
             )
         else:
-            locals_updated = _accumulate_m2l_chunked_scan(
-                initial_locals_coeffs,
+            m2l_inc = m2l_real_csr_pallas(
                 multipoles_coeffs,
                 centers,
                 src,
                 tgt,
-                active_pair_count,
                 order=order,
-                basis_mode=basis_mode,
-                rotation=rotation_mode,
-                m2l_impl=m2l_impl,
-                total_nodes=total_nodes,
-                chunk_size=chunk_size,
+                active_pair_count=active_pair_count,
+                interpret=interpret,
             )
+        locals_updated = initial_locals_coeffs + m2l_inc
+    elif pair_count <= chunk_size:
+        locals_updated = _accumulate_m2l_fullbatch(
+            initial_locals_coeffs,
+            multipoles_coeffs,
+            centers,
+            src,
+            tgt,
+            active_pair_count,
+            order=order,
+            basis_mode=basis_mode,
+            rotation=rotation_mode,
+            m2l_impl=m2l_impl,
+            total_nodes=total_nodes,
+        )
+    else:
+        locals_updated = _accumulate_m2l_chunked_scan(
+            initial_locals_coeffs,
+            multipoles_coeffs,
+            centers,
+            src,
+            tgt,
+            active_pair_count,
+            order=order,
+            basis_mode=basis_mode,
+            rotation=rotation_mode,
+            m2l_impl=m2l_impl,
+            total_nodes=total_nodes,
+            chunk_size=chunk_size,
+        )
 
     if real_basis:
         return locals_updated

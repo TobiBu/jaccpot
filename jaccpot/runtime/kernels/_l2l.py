@@ -26,9 +26,6 @@ import jax.numpy as jnp
 from beartype.typing import Callable
 from jaxtyping import Array
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.grouped_interactions import (
-    GroupedInteractionBuffers,
-)
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
@@ -46,11 +43,6 @@ from jaccpot.downward.local_expansions import (
 from jaccpot.operators.complex_ops import (
     enforce_conjugate_symmetry_batch,
     l2l_complex_batch,
-)
-from jaccpot.operators.m2l_real_rot_scale import (
-    l2l_rot_scale_real_batch_cached_blocks,
-    real_rotation_blocks_from_z_local_batch,
-    real_rotation_blocks_to_z_local_batch,
 )
 from jaccpot.operators.real_harmonics import (
     l2l_real,
@@ -260,8 +252,6 @@ def _l2l_level_compact_kwargs(
         "rotation",
         "total_nodes",
         "basis_mode",
-        "l2l_grouped",
-        "mm_class_capacity",
         "num_levels",
         "level_batch_width",
         "pallas_levels",
@@ -280,8 +270,6 @@ def _propagate_solidfmm_locals_by_level(
     rotation: str,
     total_nodes: int,
     basis_mode: str = "complex",
-    l2l_grouped: bool = False,
-    mm_class_capacity: int = 512,
     num_levels: Optional[int] = None,
     nodes_by_level: Optional[Array] = None,
     level_offsets: Optional[Array] = None,
@@ -335,10 +323,6 @@ def _propagate_solidfmm_locals_by_level(
         Node count.
     basis_mode : str
         ``"complex"`` or ``"real"``; selects the batch kernel.
-    l2l_grouped : bool
-        Use the grouped L2L lane.
-    mm_class_capacity : int
-        Per-class capacity for the grouped lane.
     num_levels : Optional[int]
         Concrete tree depth. ``None`` falls back to the padded shape-derived
         depth, which is correct but iterates more levels than necessary.
@@ -360,12 +344,6 @@ def _propagate_solidfmm_locals_by_level(
     -------
     Array
         ``(total_nodes, C)`` locals after the full root-to-leaf cascade.
-
-    Raises
-    ------
-    NotImplementedError
-        If the Pallas cascade is requested for a configuration it does not
-        implement.
     """
     num_internal = int(left_child.shape[0])
     if num_internal <= 0:
@@ -386,37 +364,6 @@ def _propagate_solidfmm_locals_by_level(
     # ``max_level + 1`` iterations regardless of how the bound is obtained).
     max_level = int(num_levels) if num_levels is not None else jnp.max(parent_levels)
     minus_one = jnp.asarray(-1, dtype=left_internal.dtype)
-
-    # GROUPED/CACHED real L2L: the parent->child displacement set is FIXED by the tree, so
-    # precompute the real rotation blocks ONCE per displacement class (jnp.unique over all
-    # internal->child pairs) and cached-apply per level, instead of rebuilding the rotation
-    # matrices for every node at every level. Only helps when the class count is small (box/
-    # geometric centres quantise the displacements); with COM centres it still works but each
-    # pair is its own class. Bit-identical to the per-node kernel either way.
-    use_grouped_l2l = bool(l2l_grouped) and real_basis
-    if use_grouped_l2l:
-        children_full = jnp.concatenate([left_internal, right_internal], axis=0)
-        safe_full = jnp.where(children_full >= 0, children_full, 0)
-        full_deltas = centers[parent_rep] - centers[safe_full]
-        one_x = jnp.asarray([1.0, 0.0, 0.0], dtype=centers.dtype)
-        l2l_uniq, l2l_cls = jnp.unique(
-            full_deltas,
-            axis=0,
-            size=int(mm_class_capacity),
-            return_inverse=True,
-            fill_value=0.0,
-        )
-        l2l_cls = l2l_cls.reshape(-1)
-        l2l_disp = jnp.where(
-            jnp.all(l2l_uniq == 0, axis=1, keepdims=True), one_x, l2l_uniq
-        )
-        rdt = coeffs_local.dtype
-        l2l_bt = real_rotation_blocks_to_z_local_batch(
-            l2l_disp, order=order, dtype=rdt
-        )[l2l_cls]
-        l2l_bf = real_rotation_blocks_from_z_local_batch(
-            l2l_disp, order=order, dtype=rdt
-        )[l2l_cls]
 
     def _l2l_level_apply(
         state_in: Array,
@@ -464,17 +411,7 @@ def _propagate_solidfmm_locals_by_level(
         """
         parent_coeffs = state_in[parent_rep]
         deltas = centers_all[parent_rep] - centers_all[safe_child]
-        if use_grouped_l2l:
-            translated = l2l_rot_scale_real_batch_cached_blocks(
-                # Both are bound under the same `use_grouped_l2l` test that
-                # gates this call -- E.4 bucket D.
-                parent_coeffs,
-                deltas,
-                l2l_bt,  # pyright: ignore[reportPossiblyUnboundVariable]
-                l2l_bf,  # pyright: ignore[reportPossiblyUnboundVariable]
-                order=order,
-            ).astype(state_in.dtype)
-        elif real_basis:
+        if real_basis:
             translated = _l2l_real_batch_kernel(
                 parent_coeffs, deltas, order=order
             ).astype(state_in.dtype)
@@ -487,10 +424,6 @@ def _propagate_solidfmm_locals_by_level(
     _l2l_level = jax.checkpoint(_l2l_level_apply)
 
     if nodes_by_level is not None and level_offsets is not None and level_batch_width:
-        if use_grouped_l2l:
-            raise NotImplementedError(
-                "level-compact L2L does not support the grouped/cached rotation blocks"
-            )
         if pallas_levels is not None and parent is not None and real_basis:
             # plan sub-10ms Phase 3: one Pallas launch per level, through the
             # custom_vjp seam (plan fast-gradients) so the reverse is the level
@@ -649,15 +582,6 @@ def _prepare_solidfmm_downward_sweep(
     traversal_config: Optional[DualTreeTraversalConfig] = None,
     dense_buffers: Optional[DenseInteractionBuffers] = None,
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
-    grouped_interactions: bool = False,
-    grouped_buffers: Optional[GroupedInteractionBuffers] = None,
-    grouped_segment_starts: Optional[Array] = None,
-    grouped_segment_lengths: Optional[Array] = None,
-    grouped_segment_class_ids: Optional[Array] = None,
-    grouped_segment_sort_permutation: Optional[Array] = None,
-    grouped_segment_group_ids: Optional[Array] = None,
-    grouped_segment_unique_targets: Optional[Array] = None,
-    farfield_mode: str = "pair_grouped",
     far_pairs_coo: Optional[_FarPairCOO] = None,
     far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
     n_targets: Optional[int] = None,
@@ -675,8 +599,8 @@ def _prepare_solidfmm_downward_sweep(
     """Prepare M2L accumulation for solidfmm-style complex or real locals.
 
     The returned value intentionally retains only the locals plus a minimal
-    interaction handle. Grouped layouts, chunk schedules, and other M2L feed
-    structures are execution inputs, not part of the long-lived downward state.
+    interaction handle. Chunk schedules and other M2L feed structures are
+    execution inputs, not part of the long-lived downward state.
 
     Parameters
     ----------
@@ -710,24 +634,6 @@ def _prepare_solidfmm_downward_sweep(
         Pre-built dense interaction buffers.
     retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
         Called when the traversal retries with a larger capacity.
-    grouped_interactions : bool
-        Use the grouped M2L lanes.
-    grouped_buffers : Optional[GroupedInteractionBuffers]
-        Pre-built grouped buffers; built on demand when ``None``.
-    grouped_segment_starts : Optional[Array]
-        Class-major segment starts.
-    grouped_segment_lengths : Optional[Array]
-        Class-major segment lengths.
-    grouped_segment_class_ids : Optional[Array]
-        Translation class of each segment.
-    grouped_segment_sort_permutation : Optional[Array]
-        Permutation into class-major order.
-    grouped_segment_group_ids : Optional[Array]
-        Group id of each segment.
-    grouped_segment_unique_targets : Optional[Array]
-        Distinct target nodes per segment.
-    farfield_mode : str
-        ``"pair_grouped"`` or ``"class_major"`` on the grouped path.
     far_pairs_coo : Optional[_FarPairCOO]
         Pre-built COO far pairs, which take precedence over ``interactions``.
     far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
@@ -771,7 +677,7 @@ def _prepare_solidfmm_downward_sweep(
     Raises
     ------
     ValueError
-        If a basis, rotation or far-field mode option is outside its documented
+        If a basis, rotation or chunk-size option is outside its documented
         domain.
     """
 
@@ -938,9 +844,6 @@ def _prepare_solidfmm_downward_sweep(
             locals_coeffs,
             multip_packed_kernel,
             n_targets=n_targets,
-            tree=tree,
-            upward=upward,
-            interactions=interactions,
             centers=centers,
             src=src,
             tgt=tgt,
@@ -950,15 +853,6 @@ def _prepare_solidfmm_downward_sweep(
             rotation_mode=rotation_mode,
             total_nodes=total_nodes,
             chunk_size=chunk_size,
-            grouped_interactions=grouped_interactions,
-            grouped_buffers=grouped_buffers,
-            grouped_segment_starts=grouped_segment_starts,
-            grouped_segment_lengths=grouped_segment_lengths,
-            grouped_segment_class_ids=grouped_segment_class_ids,
-            grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-            grouped_segment_group_ids=grouped_segment_group_ids,
-            grouped_segment_unique_targets=grouped_segment_unique_targets,
-            farfield_mode=farfield_mode,
             basis_mode=basis_mode,
             m2l_impl=resolved_m2l_impl,
             targets_sorted=targets_sorted,
@@ -1028,9 +922,6 @@ def _prepare_solidfmm_downward_sweep(
                     jnp.zeros_like(locals_coeffs),
                     source_motion_multip_packed,
                     n_targets=n_targets,
-                    tree=tree,
-                    upward=upward,
-                    interactions=interactions,
                     centers=centers,
                     src=src,
                     tgt=tgt,
@@ -1040,15 +931,6 @@ def _prepare_solidfmm_downward_sweep(
                     rotation_mode=rotation_mode,
                     total_nodes=total_nodes,
                     chunk_size=chunk_size,
-                    grouped_interactions=grouped_interactions,
-                    grouped_buffers=grouped_buffers,
-                    grouped_segment_starts=grouped_segment_starts,
-                    grouped_segment_lengths=grouped_segment_lengths,
-                    grouped_segment_class_ids=grouped_segment_class_ids,
-                    grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                    grouped_segment_group_ids=grouped_segment_group_ids,
-                    grouped_segment_unique_targets=grouped_segment_unique_targets,
-                    farfield_mode=farfield_mode,
                     basis_mode=basis_mode,
                     m2l_impl=resolved_m2l_impl,
                     targets_sorted=targets_sorted,

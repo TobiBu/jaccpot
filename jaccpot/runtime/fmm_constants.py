@@ -21,11 +21,9 @@ __all__: list[str] = []
 
 _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE = 1024
 _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE = 4096
-_GROUPED_SCHEDULE_BUDGET_DEFAULT = 32 * 1024 * 1024
 
 
 _LARGE_CPU_PARTICLE_THRESHOLD = 65536
-_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD = 262144
 # Bucketed near-field becomes beneficial on CPU at moderate N for the
 # current fast/solidfmm path; keep threshold above tiny-N crossover noise.
 _NEARFIELD_BUCKETED_CPU_PARTICLE_THRESHOLD = 1024
@@ -45,10 +43,9 @@ _JIT_TREE_CPU_SMALL_N_MAX = 8192
 
 #: N from which the ``large_n_gpu`` + solidfmm GPU lane raises the bucketed
 #: near-field edge chunk. Distinct from
-#: :data:`_LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES` and from
-#: :data:`_CLASS_MAJOR_CPU_PARTICLE_THRESHOLD` despite sharing the value: three
+#: :data:`_LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES` despite sharing the value:
 #: different policies happen to cross over at 262144, and naming them apart is
-#: what stops a future tune of one from silently moving the other two.
+#: what stops a future tune of one from silently moving the other.
 _NEARFIELD_BUCKETED_GPU_LARGE_N_EDGE_CHUNK_THRESHOLD = 262_144
 
 #: N below which the ``large_n_gpu`` production profile prefers the

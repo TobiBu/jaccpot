@@ -164,13 +164,9 @@ def _build(engine, tree_artifacts, *, split: bool, policy_state):
         retry_logger=None,
         fail_fast=False,
         use_dense_interactions=False,
-        grouped_interactions=False,
-        grouped_chunk_size=None,
         need_traversal_result=False,
         need_compact_far_pairs=False,
         need_node_interactions=True,
-        precompute_grouped_class_segments=False,
-        grouped_schedule_budget_bytes=None,
         allow_split_build=bool(split),
         pair_policy=None if policy_state is None else adaptive_pair_policy,
         policy_state=policy_state,
@@ -193,7 +189,6 @@ def test_the_split_build_is_eligible_under_a_pair_policy():
 
     assert _can_split_dual_tree_build(
         split_enabled=True,
-        grouped_interactions=False,
         need_traversal_result=False,
     )
 

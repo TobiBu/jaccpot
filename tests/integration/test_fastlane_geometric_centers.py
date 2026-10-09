@@ -1,24 +1,16 @@
-"""Parity gates for the geometric-centre real radix fast lane (large_n_gpu).
-
-Exercises the opt-in ``JACCPOT_LARGE_N_FASTLANE_GEOMETRIC_CENTERS`` knob, which
-selects box/aabb centres for the real-basis production fast lane independently of
-``grouped_interactions`` (which stays False, so the streamed near/far payload is
-unchanged).
+"""Parity gate for the real radix fast lane (large_n_gpu) against the complex one.
 
 The fast lane requires a GPU (radix + solidfmm + float32) and N above the
 production threshold, so the module skips unless a GPU backend is available and
 the opt-in ``JACCPOT_RUN_FASTLANE_GPU_TESTS`` env flag is set (these are slow).
 
-Assertions:
-  1. the real basis with COM centres tracks the trusted complex fast lane
-     (same centres, different coefficient family);
-  2. geometric (aabb) centres genuinely change the field (the knob is wired) yet
-     stay well-conditioned (finite).
+Asserts that the real basis with COM centres tracks the trusted complex fast lane
+(same centres, different coefficient family).
 
-NB: class-cached far-field *grouping* on top of geometric centres was measured NOT
-to transfer to the radix binary tree (its box centres do not grid-quantise, so the
-distinct-class count overflows any fixed capacity at production N). Grouping is an
-octree-only optimisation and is intentionally absent from this lane.
+The file is named for the opt-in geometric (AABB) centre knob it also covered,
+``JACCPOT_LARGE_N_FASTLANE_GEOMETRIC_CENTERS``. That knob, and the AABB expansion
+centres, went with the grouped far field in the 2026-10 cleanup
+(docs/cleanup_2026-10.md, X3), and its test with them.
 """
 
 from __future__ import annotations
@@ -76,24 +68,13 @@ def _build(basis: str):
     )
 
 
-def _accel(
-    basis: str, pos: jnp.ndarray, mass: jnp.ndarray, geometric: bool
-) -> np.ndarray:
-    key = "JACCPOT_LARGE_N_FASTLANE_GEOMETRIC_CENTERS"
-    prev = os.environ.get(key)
-    os.environ[key] = "1" if geometric else "0"
-    try:
-        fmm = _build(basis)
-        return np.asarray(
-            jax.block_until_ready(
-                fmm.compute_accelerations(pos, mass, leaf_size=_LEAF, max_order=_ORDER)
-            )
+def _accel(basis: str, pos: jnp.ndarray, mass: jnp.ndarray) -> np.ndarray:
+    fmm = _build(basis)
+    return np.asarray(
+        jax.block_until_ready(
+            fmm.compute_accelerations(pos, mass, leaf_size=_LEAF, max_order=_ORDER)
         )
-    finally:
-        if prev is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = prev
+    )
 
 
 @pytest.fixture(scope="module")
@@ -111,17 +92,7 @@ def _rel_median(a: np.ndarray, b: np.ndarray) -> float:
 def test_real_com_tracks_complex(_field):
     """Real basis with COM centres tracks the complex fast lane."""
     pos, mass = _field
-    complex_acc = _accel("complex", pos, mass, geometric=False)
-    real_acc = _accel("real", pos, mass, geometric=False)
+    complex_acc = _accel("complex", pos, mass)
+    real_acc = _accel("real", pos, mass)
     assert np.isfinite(complex_acc).all() and np.isfinite(real_acc).all()
     assert _rel_median(real_acc, complex_acc) < 3.0e-2
-
-
-def test_geometric_centers_knob_is_live(_field):
-    """aabb centres must change the field (knob wired) yet stay finite."""
-    pos, mass = _field
-    com = _accel("real", pos, mass, geometric=False)
-    aabb = _accel("real", pos, mass, geometric=True)
-    assert np.isfinite(aabb).all()
-    # aabb noticeably shifts the field vs COM (the knob is live), but stays sane.
-    assert _rel_median(aabb, com) > 1.0e-4

@@ -39,7 +39,9 @@ def test_accepts_legacy_expanse_kwargs_with_deprecation_warning():
             mac_type="dehnen",
             fixed_order=4,
             fixed_max_leaf_size=16,
-            grouped_interactions=True,
+            # False: the grouped far field went in the 2026-10 cleanup (X3), and
+            # True now raises (test_solver_api pins that); the kwarg still parses.
+            grouped_interactions=False,
             farfield_mode="pair_grouped",
             nearfield_mode="bucketed",
             nearfield_edge_chunk_size=256,
