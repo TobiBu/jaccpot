@@ -198,8 +198,8 @@ class TreeBuilderConfig:
     Attributes
     ----------
     mode : str
-        Build mode: ``"lbvh"``, ``"fixed_depth"``, ``"adaptive"`` or
-        ``"static_radix"``.
+        Build mode: ``"lbvh"``, ``"adaptive"`` or ``"static_radix"``.
+        (``"fixed_depth"`` was removed in the 2026-10 cleanup, X4.)
     target_leaf_particles : int
         Leaf occupancy target. At least 1.
     refine_local : bool
@@ -225,8 +225,7 @@ class TraversalExecutionConfig:
     Attributes
     ----------
     m2l_chunk_size : Optional[int]
-        Far-field pairs per M2L chunk; ``None`` lets the runtime choose, and is
-        what the autotuner fills in.
+        Far-field pairs per M2L chunk; ``None`` lets the runtime choose.
     l2l_chunk_size : Optional[int]
         Nodes per L2L chunk; ``None`` as above.
     max_pair_queue : Optional[int]
@@ -413,10 +412,12 @@ class _GeometryReuseEntry:
 
 
 class _RuntimeExecutionOverrides(NamedTuple):
-    """Resolved runtime execution knobs after adaptive policy decisions.
+    """Resolved runtime execution knobs for one call.
 
-    What the adaptive policy hands back for one call. These override the
-    engine's standing configuration for that call only.
+    What :meth:`_resolve_runtime_execution_overrides` hands back for one call:
+    the engine's static sizing after the GPU memory-safety caps and the caller's
+    field overrides. These override the engine's standing configuration for that
+    call only.
 
     Attributes
     ----------
@@ -434,10 +435,6 @@ class _RuntimeExecutionOverrides(NamedTuple):
         AABB expansion centres went in the same cleanup.
     refine_local_override : Optional[bool]
         Forces local refinement on or off; ``None`` keeps the tree config's.
-    adaptive_applied : bool
-        Whether the policy actually changed anything. ``False`` means every field
-        above is the engine's own value, so a caller can skip the override path
-        entirely.
     """
 
     traversal_config: Optional[DualTreeTraversalConfig]
@@ -446,7 +443,6 @@ class _RuntimeExecutionOverrides(NamedTuple):
     farfield_mode: str
     center_mode: str
     refine_local_override: Optional[bool]
-    adaptive_applied: bool
 
 
 def _resolve_optional(value: Any, preset_value: Any, fallback: Any) -> Any:
@@ -550,8 +546,9 @@ def _resolve_fmm_config(
     Raises
     ------
     ValueError
-        If ``tree_build_mode`` names no known mode, ``target_leaf_particles`` is
-        below 1, or ``jit_tree`` is neither a bool nor ``"auto"``.
+        If ``tree_build_mode`` names no known mode (``"fixed_depth"`` with a
+        removal message), ``target_leaf_particles`` is below 1, or ``jit_tree``
+        is neither a bool nor ``"auto"``.
     """
     preset_name = preset_config.name if preset_config is not None else None
     preset_use_dense_interactions = (
@@ -563,7 +560,12 @@ def _resolve_fmm_config(
         preset_config.tree_build_mode if preset_config else None,
         "lbvh",
     )
-    valid_tree_modes = {"lbvh", "fixed_depth", "adaptive", "static_radix"}
+    if tree_mode == "fixed_depth":
+        raise ValueError(
+            "tree_build_mode='fixed_depth' was removed in the 2026-10 cleanup (X4); "
+            "use 'lbvh' or 'static_radix'"
+        )
+    valid_tree_modes = {"lbvh", "adaptive", "static_radix"}
     if tree_mode not in valid_tree_modes:
         allowed_modes = sorted(valid_tree_modes)
         raise ValueError(f"tree_build_mode must be one of {allowed_modes}")
@@ -808,11 +810,7 @@ def _build_tree_with_config(
         tree.require_fmm_topology()
         workspace_out = None
     else:
-        build_mode = (
-            "fixed_depth"
-            if mode == "fixed_depth"
-            else "static_radix" if mode == "static_radix" else "adaptive"
-        )
+        build_mode = "static_radix" if mode == "static_radix" else "adaptive"
         supports_workspace = tree_type == "radix" and mode != "static_radix"
         built_tree = Tree.from_particles(
             positions,
@@ -852,7 +850,7 @@ def _build_tree_with_config(
         if mode in {"lbvh", "static_radix"}
         else tree_config.target_leaf_particles
     )
-    if mode != "fixed_depth" and int(max_leaf_size) > int(leaf_size):
+    if int(max_leaf_size) > int(leaf_size):
         raise ValueError(
             "configured leaf_size is too small for built tree: "
             f"max_leaf_size={int(max_leaf_size)} > leaf_size={int(leaf_size)}"

@@ -508,32 +508,26 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_process_env(tmp_path):
+def _isolate_process_env():
     """Isolate ``os.environ`` per test to stop env-var leakage across tests.
 
     Under ``pytest -n auto`` each xdist worker runs many tests in one process,
     so any ``os.environ`` mutation that is not undone leaks into every later
-    test on that worker. Two sources make strict / large-N tests order-dependent
-    and flaky:
-
-    * production code writes process-global flags directly, e.g. the strict
-      fused lane sets ``YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_*`` in
-      ``_fmm_impl.py`` (never cleaned up). A prior strict test then changes the
-      dual-tree neighbour/count construction of a later test's *first* build,
-      which can pin an undersized static neighbour-edge cap and blow up a
-      subsequent step (e.g. ``test_strict_run_v2_api``).
-    * the strict fused lane records/loads its traversal cap profile via
-      ``JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH`` (default a single shared
-      ``/tmp`` file), so a test only sees a recorded profile if another test on
-      the same worker wrote it first, and concurrent workers race on the file.
+    test on that worker. Production code writes process-global flags directly,
+    which makes strict / large-N tests order-dependent and flaky: the strict
+    fused lane sets ``YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_*`` in
+    ``_fmm_impl.py`` (never cleaned up). A prior strict test then changes the
+    dual-tree neighbour/count construction of a later test's *first* build,
+    which can pin an undersized static neighbour-edge cap and blow up a
+    subsequent step (e.g. ``test_strict_run_v2_api``). (A second source, the
+    strict lanes' on-disk traversal cap profile, went in the 2026-10 cleanup,
+    X4, and with it this fixture's per-test profile path.)
 
     Snapshot the environment at test start and fully restore it at teardown so
     every test begins from the same baseline regardless of what earlier tests
-    (or the code they exercised) wrote. Also point the strict cap-profile file
-    at a per-test temp path so record/reload stays self-contained (still shared
-    across FastMultipoleMethod instances *within* one test). Tests that set env
-    vars themselves (via monkeypatch or directly) are unaffected -- their
-    changes simply do not survive past their own teardown.
+    (or the code they exercised) wrote. Tests that set env vars themselves (via
+    monkeypatch or directly) are unaffected -- their changes simply do not
+    survive past their own teardown.
 
     **The restore touches only the keys that actually changed, and that is a
     correctness requirement, not an optimisation.** It used to be
@@ -552,9 +546,9 @@ def _isolate_process_env(tmp_path):
         File "<frozen os>", line 723 in __setitem__
         File "<frozen os>", line 875 in encode
 
-    Restoring only the diff makes that one mutation for a typical test (the
-    cap-profile path this fixture itself sets) instead of ~200, which shrinks the
-    race window by the same factor. The final environment is identical either way.
+    Restoring only the diff makes no mutation at all for a typical test instead
+    of ~200, which shrinks the race window accordingly. The final environment is
+    identical either way.
 
     NOTE: the earlier ``worker 'gwN' crashed`` failures in ``tests/unit/runtime``
     were attributed to memory in the note above. At least one of them was this
@@ -564,9 +558,6 @@ def _isolate_process_env(tmp_path):
     not.
     """
     saved_environ = dict(os.environ)
-    os.environ["JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH"] = str(
-        tmp_path / "strict_caps.json"
-    )
     try:
         yield
     finally:

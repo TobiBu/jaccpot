@@ -134,7 +134,6 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "farfield": FarFieldConfig(mixed_order=True, mixed_order_min_order=2)
     },
     # --- tree ---
-    "tree_fixed_depth": {"tree": TreeConfig(mode="fixed_depth")},
     "tree_refine_local": {"tree": TreeConfig(refine_local=True, max_refine_levels=3)},
     "host_refine_on": {"runtime_policy": RuntimePolicyConfig(host_refine_mode="on")},
     "host_refine_off": {"runtime_policy": RuntimePolicyConfig(host_refine_mode="off")},
@@ -154,7 +153,6 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "retain_far_pairs_for_grad": {
         "farfield": FarFieldConfig(retain_far_pairs_for_grad=True)
     },
-    "autotune_m2l": {"runtime_policy": RuntimePolicyConfig(autotune_m2l_chunk=True)},
     "no_interaction_cache": {
         "runtime_policy": RuntimePolicyConfig(enable_interaction_cache=False)
     },

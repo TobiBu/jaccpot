@@ -1,8 +1,5 @@
 """Jaccpot package-local regression tests."""
 
-import json
-import tempfile
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -206,40 +203,6 @@ def test_advanced_config_applies_to_runtime():
     assert fmm.mac_type == "engblom"
 
 
-def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal():
-    impl = fmm_impl_private.FMMEngine(
-        preset=FMMPreset.LARGE_N_GPU,
-        expansion_basis="solidfmm",
-        mac_type="engblom",
-        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
-        runtime_policy=RuntimePolicyConfig(
-            memory_objective="minimum_memory",
-            fail_fast=True,
-            traversal_config=DualTreeTraversalConfig(
-                max_pair_queue=1048576,
-                process_block=256,
-                max_interactions_per_node=32768,
-                max_neighbors_per_leaf=16384,
-            ),
-        ),
-    )
-    # Adaptive minimum-memory capping now only runs when static-sizing is off
-    # (static sizing, default-on, passes the constructor config through unchanged).
-    # Exercise the capping path this test covers.
-    impl._static_runtime_fixed_sizing = False
-
-    overrides = impl._resolve_runtime_execution_overrides(
-        num_particles=2_097_152,
-        backend="gpu",
-    )
-
-    assert overrides.traversal_config is not None
-    assert int(overrides.traversal_config.max_pair_queue) == 262_144
-    assert int(overrides.traversal_config.process_block) == 256
-    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
-    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
-
-
 def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal():
     impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
@@ -320,9 +283,6 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
             memory_objective="minimum_memory", fail_fast=True
         ),
     )
-    # Adaptive auto-seed clamping runs on the adaptive path (static-sizing off).
-    impl._static_runtime_fixed_sizing = False
-
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=2_097_152,
         backend="gpu",
@@ -343,9 +303,6 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
             memory_objective="minimum_memory", fail_fast=True
         ),
     )
-    # Adaptive seed scaling runs on the adaptive path (static-sizing off).
-    impl._static_runtime_fixed_sizing = False
-
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=4_194_304,
         backend="gpu",
@@ -1332,8 +1289,6 @@ def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():
         preset=FMMPreset.FAST,
         basis="solidfmm",
     )
-    # GPU capacity capping runs on the adaptive path (static-sizing off).
-    fmm._impl._static_runtime_fixed_sizing = False
     overrides = fmm._impl._resolve_runtime_execution_overrides(
         num_particles=131072,
         backend="gpu",
@@ -1429,7 +1384,6 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.enable_interaction_cache is True
     assert fmm._impl.retain_traversal_result is False
     assert fmm._impl.retain_interactions is False
-    assert fmm._impl.autotune_m2l_chunk is True
     assert fmm._impl.memory_objective == "minimum_memory"
     assert fmm._impl.upward_leaf_batch_size == 2048
     assert fmm._impl.mac_type == "dehnen"
@@ -1784,31 +1738,18 @@ def test_prepare_state_adaptive_order_requests_compact_far_pairs():
     assert state.dual_tree_result is None
 
 
-def test_runtime_autotune_m2l_chunk_flag_flows_to_runtime():
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            runtime=RuntimePolicyConfig(autotune_m2l_chunk=True),
-        ),
-    )
-    assert bool(fmm._impl.autotune_m2l_chunk) is True
-
-
-def test_runtime_fail_fast_disables_autotune_and_host_refine():
+def test_runtime_fail_fast_disables_host_refine():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
             runtime=RuntimePolicyConfig(
                 fail_fast=True,
-                autotune_m2l_chunk=True,
                 host_refine_mode="on",
             ),
         ),
     )
     assert bool(fmm._impl.fail_fast) is True
-    assert bool(fmm._impl.autotune_m2l_chunk) is False
     assert fmm._impl.host_refine_mode == "off"
 
 
@@ -1889,10 +1830,6 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         preset=FMMPreset.LARGE_N_GPU,
         basis="solidfmm",
     )
-    # The smaller adaptive seeds run on the adaptive path (static-sizing off);
-    # static sizing (default-on) ships the larger preset traversal config instead.
-    fmm._impl._static_runtime_fixed_sizing = False
-
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(jax, "default_backend", lambda: "gpu")
         overrides = fmm._impl._resolve_runtime_execution_overrides(
@@ -2007,29 +1944,3 @@ def test_memory_budget_limits_default_nearfield_schedule_cap():
     )
 
     assert cap == 8
-
-
-def test_m2l_autotune_cache_roundtrip_api():
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    payload = [
-        {
-            "key": ["gpu", "complex", "float32", 4, "solidfmm", "", 0, 2],
-            "chunk_size": 2048,
-        }
-    ]
-    restored = fmm.import_m2l_autotune_cache(payload, merge=False)
-    assert restored == 1
-    exported = fmm.export_m2l_autotune_cache()
-    assert any(int(item.get("chunk_size", -1)) == 2048 for item in exported)
-
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=True) as handle:
-        saved = fmm.save_m2l_autotune_cache(handle.name)
-        assert saved >= 1
-        handle.seek(0)
-        raw = json.load(handle)
-        assert isinstance(raw, list)
-        loaded = fmm.load_m2l_autotune_cache(handle.name, merge=False)
-        assert loaded >= 1

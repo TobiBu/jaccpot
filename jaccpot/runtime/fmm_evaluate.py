@@ -184,8 +184,9 @@ class EvaluateMixin(_EngineBase):
             When ``True``, specialise tree construction via JIT to amortise
             repeated builds for consistent tree sizes.
         refine_local : Optional[bool]
-            Override the fixed-depth builder's local refinement toggle when
-            ``tree_build_mode`` is ``"fixed_depth"``.
+            Override the local refinement toggle. Only the fixed-depth builder
+            (removed in the 2026-10 cleanup, X4) refined leaves; on a radix tree
+            it now only routes the build off the jitted LBVH fast path.
         max_refine_levels : Optional[int]
             Maximum local refinement iterations passed to the builder.
         aspect_threshold : Optional[float]

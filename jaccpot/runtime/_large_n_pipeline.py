@@ -605,46 +605,32 @@ def _size_fused_static_overflow_profile(
     *,
     fmm: "FMMEngine",
     fused_device_mode: bool,
-    static_runtime_fixed_sizing: bool,
     overflow_active_blocks: int,
     overflow_profile_fixed_cap: int,
-    overflow_profile_bootstrap_cap: int,
-    overflow_profile_headroom: float,
     block_size: int,
     target_block_leaf_ids: Array,
     target_block_source_leaf_ids: Array,
     target_block_valid_mask: Array,
-    pick_overflow_profile_capacity: Callable[[int], int],
 ) -> tuple[int, Array, Array, Array, int]:
     """Size the fused static overflow profile and pad the target blocks to it.
 
-    Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**);
-    the body, both branches of its guard and every value it computes are
-    unchanged, including the cap-exceeded ``RuntimeError``.
-
-    ``pick_overflow_profile_capacity`` is passed in because the original is a
-    closure over the driver's ``overflow_profile_caps`` ladder. Handing the
-    closure across keeps the ladder and its lookup exactly as they were rather
-    than duplicating the search here.
+    Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**).
+    Sizing is static: a named fixed cap, else (fused) the first build's block
+    count, kept on the engine, or (not fused) this build's own count. The
+    adaptive ladder that grew the cap with headroom went with adaptive sizing in
+    the 2026-10 cleanup (X4); static sizing had been the default throughout.
 
     Parameters
     ----------
     fmm : FMMEngine
-        Engine whose ``_large_n_overflow_profile_cap`` carries the bootstrapped
+        Engine whose ``_large_n_overflow_profile_cap`` carries the fused lane's
         capacity between builds.
     fused_device_mode : bool
         Whether the fused device lane is in force.
-    static_runtime_fixed_sizing : bool
-        Whether the static runtime is using fixed sizing; with
-        ``fused_device_mode`` this selects the fixed-cap branch.
     overflow_active_blocks : int
         Active overflow blocks this build needs.
     overflow_profile_fixed_cap : int
         Configured fixed cap, or non-positive to derive one.
-    overflow_profile_bootstrap_cap : int
-        Cap used when bootstrapping a profile.
-    overflow_profile_headroom : float
-        Headroom added when growing the capacity.
     block_size : int
         Target-owned block size, in and out.
     target_block_leaf_ids : Array
@@ -653,8 +639,6 @@ def _size_fused_static_overflow_profile(
         Source-leaf ids per target block, in and out.
     target_block_valid_mask : Array
         Validity mask over those ids, in and out.
-    pick_overflow_profile_capacity : Callable[[int], int]
-        Maps a required block count onto the next capacity on the ladder.
 
     Returns
     -------
@@ -676,8 +660,7 @@ def _size_fused_static_overflow_profile(
         If the active block count exceeds the fixed overflow profile cap --
         carried over verbatim with the block.
     """
-    _pick_overflow_profile_capacity = pick_overflow_profile_capacity
-    if bool(fused_device_mode) and static_runtime_fixed_sizing:
+    if bool(fused_device_mode):
         overflow_profile_capacity = int(overflow_profile_fixed_cap)
         if overflow_profile_capacity <= 0:
             overflow_profile_capacity = int(
@@ -718,10 +701,7 @@ def _size_fused_static_overflow_profile(
                 ],
                 axis=0,
             )
-    elif bool(fused_device_mode):
-        # Backward-compatible non-fixed fused mode: keep dynamic active size.
-        overflow_profile_capacity = int(overflow_active_blocks)
-    elif static_runtime_fixed_sizing:
+    else:
         overflow_profile_capacity = int(overflow_profile_fixed_cap)
         if (
             overflow_profile_capacity > 0
@@ -735,65 +715,6 @@ def _size_fused_static_overflow_profile(
         if overflow_profile_capacity <= 0:
             overflow_profile_capacity = int(overflow_active_blocks)
         elif overflow_active_blocks < overflow_profile_capacity:
-            pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
-            block_size = int(target_block_source_leaf_ids.shape[1])
-            target_block_leaf_ids = jnp.concatenate(
-                [
-                    target_block_leaf_ids,
-                    jnp.zeros((pad_rows,), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_source_leaf_ids = jnp.concatenate(
-                [
-                    target_block_source_leaf_ids,
-                    jnp.zeros((pad_rows, block_size), dtype=INDEX_DTYPE),
-                ],
-                axis=0,
-            )
-            target_block_valid_mask = jnp.concatenate(
-                [
-                    target_block_valid_mask,
-                    jnp.zeros((pad_rows, block_size), dtype=bool),
-                ],
-                axis=0,
-            )
-    else:
-        overflow_profile_capacity = int(
-            getattr(fmm, "_large_n_overflow_profile_cap", 0)
-        )
-        if overflow_profile_capacity <= 0 and overflow_profile_bootstrap_cap > 0:
-            overflow_profile_capacity = _pick_overflow_profile_capacity(
-                int(overflow_profile_bootstrap_cap)
-            )
-            setattr(
-                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
-            )
-        if overflow_active_blocks > overflow_profile_capacity:
-            required_blocks = int(
-                np.ceil(
-                    float(overflow_active_blocks) * float(overflow_profile_headroom)
-                )
-            )
-            next_capacity = _pick_overflow_profile_capacity(required_blocks)
-            if (
-                overflow_profile_capacity > 0
-                and next_capacity > overflow_profile_capacity
-            ):
-                setattr(
-                    fmm,
-                    "_large_n_overflow_profile_reprofiles",
-                    int(getattr(fmm, "_large_n_overflow_profile_reprofiles", 0)) + 1,
-                )
-            overflow_profile_capacity = int(next_capacity)
-            setattr(
-                fmm, "_large_n_overflow_profile_cap", int(overflow_profile_capacity)
-            )
-
-        if (
-            overflow_profile_capacity > 0
-            and overflow_active_blocks < overflow_profile_capacity
-        ):
             pad_rows = int(overflow_profile_capacity - overflow_active_blocks)
             block_size = int(target_block_source_leaf_ids.shape[1])
             target_block_leaf_ids = jnp.concatenate(
@@ -831,31 +752,25 @@ def _trim_radix_fast_lane_neighbor_list(
     execution_config: LargeNExecutionConfig,
     fmm: "FMMEngine",
     fused_device_mode: bool,
-    static_runtime_fixed_sizing: bool,
     neighbor_payload: Any,
     state_neighbor_list: Any,
     precomputed_target_leaf_ids: Optional[Array],
     precomputed_source_leaf_ids: Optional[Array],
     precomputed_valid_pairs: Optional[Array],
     neighbor_profile_fixed_cap: int,
-    neighbor_profile_bootstrap_cap: int,
-    neighbor_profile_headroom: float,
-    pick_neighbor_profile_capacity: Callable[[int], int],
 ) -> tuple[Any, Optional[Array], Optional[Array], Optional[Array]]:
     """Trim the neighbour list for the radix fast lane, or take the other branch.
 
-    Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**);
-    the body, both branches of its guard and every value it computes are
-    unchanged.
+    Extracted verbatim from :func:`prepare_large_n_state` (audit item **F11**).
 
     The guard is an ``if``/``else`` and **both** branches assign the three
     ``state_*`` outputs, which is why they need no prior value and why the
     extraction covers the whole statement rather than the ``if`` body -- moving
     one branch and leaving the other would bind them on one path only.
 
-    ``pick_neighbor_profile_capacity`` is passed in because the original is a
-    closure over the driver's ``neighbor_profile_caps`` ladder; handing it
-    across keeps that ladder and its lookup exactly as they were.
+    Sizing is static (the adaptive ladder went with adaptive sizing in the
+    2026-10 cleanup, X4): a named fixed cap, else the widest list seen so far
+    (fused) or this build's own width.
 
     Parameters
     ----------
@@ -867,8 +782,6 @@ def _trim_radix_fast_lane_neighbor_list(
         builds.
     fused_device_mode : bool
         Whether the fused device lane is in force.
-    static_runtime_fixed_sizing : bool
-        Whether the static runtime is using fixed sizing.
     neighbor_payload : Any
         Neighbour list built by the dual/downward stage.
     state_neighbor_list : Any
@@ -882,12 +795,6 @@ def _trim_radix_fast_lane_neighbor_list(
         Precomputed validity mask over those pairs.
     neighbor_profile_fixed_cap : int
         Configured fixed neighbour-edge cap, or non-positive to derive one.
-    neighbor_profile_bootstrap_cap : int
-        Cap used when bootstrapping a profile.
-    neighbor_profile_headroom : float
-        Headroom factor applied when growing the capacity.
-    pick_neighbor_profile_capacity : Callable[[int], int]
-        Maps a required edge count onto the next capacity on the ladder.
 
     Returns
     -------
@@ -907,7 +814,6 @@ def _trim_radix_fast_lane_neighbor_list(
         If the active neighbour-edge count exceeds the fixed profile cap --
         carried over verbatim with the block.
     """
-    _pick_neighbor_profile_capacity = pick_neighbor_profile_capacity
     if bool(execution_config.radix_fast_lane):
         # Memory trim for radix fast lane:
         # neighbor_leaf_positions duplicates information recoverable from
@@ -922,78 +828,34 @@ def _trim_radix_fast_lane_neighbor_list(
         state_valid_pairs = None
         neighbor_edges = jnp.asarray(state_neighbor_list.neighbors, dtype=INDEX_DTYPE)
         neighbor_active_edges = int(neighbor_edges.shape[0])
-        neighbor_profile_capacity = 0
-        if static_runtime_fixed_sizing:
-            neighbor_profile_capacity = int(neighbor_profile_fixed_cap)
-            if neighbor_profile_capacity <= 0:
-                if bool(fused_device_mode):
-                    # Unnamed cap: the width follows the neighbour list, which the
-                    # flat walk sizes from its count and never shrinks. Pinning it
-                    # to the FIRST prepare's width made any later, wider list (a
-                    # rollout's segment retry, a denser state) fail here instead of
-                    # recompiling once.
-                    stored = int(getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0))
-                    neighbor_profile_capacity = max(stored, int(neighbor_active_edges))
-                    if 0 < stored < neighbor_profile_capacity:
-                        setattr(
-                            fmm,
-                            "_large_n_neighbor_edges_profile_reprofiles",
-                            int(
-                                getattr(
-                                    fmm, "_large_n_neighbor_edges_profile_reprofiles", 0
-                                )
-                            )
-                            + 1,
-                        )
-                    setattr(
-                        fmm,
-                        "_large_n_neighbor_edges_profile_cap",
-                        int(neighbor_profile_capacity),
-                    )
-                else:
-                    neighbor_profile_capacity = int(neighbor_active_edges)
-        elif not bool(fused_device_mode):
-            neighbor_profile_capacity = int(
-                getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0)
-            )
-            if neighbor_profile_capacity <= 0 and neighbor_profile_bootstrap_cap > 0:
-                neighbor_profile_capacity = _pick_neighbor_profile_capacity(
-                    int(neighbor_profile_bootstrap_cap)
-                )
-                setattr(
-                    fmm,
-                    "_large_n_neighbor_edges_profile_cap",
-                    int(neighbor_profile_capacity),
-                )
-            if neighbor_active_edges > neighbor_profile_capacity:
-                required_edges = int(
-                    np.ceil(
-                        float(neighbor_active_edges) * float(neighbor_profile_headroom)
-                    )
-                )
-                next_capacity = _pick_neighbor_profile_capacity(required_edges)
-                if (
-                    neighbor_profile_capacity > 0
-                    and next_capacity > neighbor_profile_capacity
-                ):
+        neighbor_profile_capacity = int(neighbor_profile_fixed_cap)
+        if neighbor_profile_capacity <= 0:
+            if bool(fused_device_mode):
+                # Unnamed cap: the width follows the neighbour list, which the
+                # flat walk sizes from its count and never shrinks. Pinning it
+                # to the FIRST prepare's width made any later, wider list (a
+                # rollout's segment retry, a denser state) fail here instead of
+                # recompiling once.
+                stored = int(getattr(fmm, "_large_n_neighbor_edges_profile_cap", 0))
+                neighbor_profile_capacity = max(stored, int(neighbor_active_edges))
+                if 0 < stored < neighbor_profile_capacity:
                     setattr(
                         fmm,
                         "_large_n_neighbor_edges_profile_reprofiles",
                         int(
                             getattr(
-                                fmm,
-                                "_large_n_neighbor_edges_profile_reprofiles",
-                                0,
+                                fmm, "_large_n_neighbor_edges_profile_reprofiles", 0
                             )
                         )
                         + 1,
                     )
-                neighbor_profile_capacity = int(next_capacity)
                 setattr(
                     fmm,
                     "_large_n_neighbor_edges_profile_cap",
                     int(neighbor_profile_capacity),
                 )
+            else:
+                neighbor_profile_capacity = int(neighbor_active_edges)
 
         if (
             neighbor_profile_capacity > 0
@@ -1462,43 +1324,12 @@ def prepare_large_n_state(
     static_target_blocks_cap_options = tuple(
         int(v) for v in large_n_env_cfg.get("static_target_blocks_cap_options", ())
     )
-    overflow_profile_headroom = float(large_n_env_cfg["overflow_profile_headroom"])
-    overflow_profile_caps = tuple(
-        int(v) for v in large_n_env_cfg["overflow_profile_caps"]
-    )
-    neighbor_profile_headroom = float(large_n_env_cfg["neighbor_profile_headroom"])
-    neighbor_profile_caps = tuple(
-        int(v) for v in large_n_env_cfg["neighbor_profile_caps"]
-    )
-    neighbor_profile_bootstrap_cap = int(
-        large_n_env_cfg["neighbor_profile_bootstrap_cap"]
-    )
-    overflow_profile_bootstrap_cap = int(
-        large_n_env_cfg["overflow_profile_bootstrap_cap"]
-    )
-    static_runtime_fixed_sizing = bool(
-        large_n_env_cfg.get("static_runtime_fixed_sizing", True)
-    )
     overflow_profile_fixed_cap = int(
         large_n_env_cfg.get("overflow_profile_fixed_cap", 0)
     )
     neighbor_profile_fixed_cap = int(
         large_n_env_cfg.get("neighbor_profile_fixed_cap", 0)
     )
-
-    def _pick_overflow_profile_capacity(required: int) -> int:
-        required = max(0, int(required))
-        for cap in overflow_profile_caps:
-            if int(cap) >= required:
-                return int(cap)
-        return int(required)
-
-    def _pick_neighbor_profile_capacity(required: int) -> int:
-        required = max(0, int(required))
-        for cap in neighbor_profile_caps:
-            if int(cap) >= required:
-                return int(cap)
-        return int(required)
 
     def _pick_static_target_blocks_capacity(required: int) -> int:
         required = max(1, int(required))
@@ -1872,16 +1703,12 @@ def prepare_large_n_state(
     ) = _size_fused_static_overflow_profile(
         fmm=fmm,
         fused_device_mode=fused_device_mode,
-        static_runtime_fixed_sizing=static_runtime_fixed_sizing,
         overflow_active_blocks=overflow_active_blocks,
         overflow_profile_fixed_cap=overflow_profile_fixed_cap,
-        overflow_profile_bootstrap_cap=overflow_profile_bootstrap_cap,
-        overflow_profile_headroom=overflow_profile_headroom,
         block_size=block_size,
         target_block_leaf_ids=target_block_leaf_ids,
         target_block_source_leaf_ids=target_block_source_leaf_ids,
         target_block_valid_mask=target_block_valid_mask,
-        pick_overflow_profile_capacity=_pick_overflow_profile_capacity,
     )
     _record_nf("_refresh_timing_nearfield_overflow_profile_seconds", substage_t0)
 
@@ -1916,16 +1743,12 @@ def prepare_large_n_state(
         execution_config=execution_config,
         fmm=fmm,
         fused_device_mode=fused_device_mode,
-        static_runtime_fixed_sizing=static_runtime_fixed_sizing,
         neighbor_payload=neighbor_payload,
         state_neighbor_list=state_neighbor_list,
         precomputed_target_leaf_ids=precomputed_target_leaf_ids,
         precomputed_source_leaf_ids=precomputed_source_leaf_ids,
         precomputed_valid_pairs=precomputed_valid_pairs,
         neighbor_profile_fixed_cap=neighbor_profile_fixed_cap,
-        neighbor_profile_bootstrap_cap=neighbor_profile_bootstrap_cap,
-        neighbor_profile_headroom=neighbor_profile_headroom,
-        pick_neighbor_profile_capacity=_pick_neighbor_profile_capacity,
     )
     _record_nf("_refresh_timing_nearfield_neighbor_padding_seconds", substage_t0)
 
@@ -2612,18 +2435,21 @@ def can_use_large_n_prepare_path(
     Raises
     ------
     RuntimeError
-        If ``runtime_path='large_n'`` was requested **explicitly** but the lane
-        cannot honour the configuration. An explicit request is the one case
-        where declining silently would be wrong, so it raises instead.
+        If the ``large_n_gpu`` preset asks for ``mac_type='dehnen_theta'``, which
+        the lane cannot honour. The preset pins the lane, so declining silently
+        would be wrong; it raises instead.
+
+    Notes
+    -----
+    The lane is gated on the ``large_n_gpu`` preset alone. ``runtime_path`` is
+    accepted (``"auto"`` or ``"large_n"``) but no longer consulted here: an
+    explicit ``"large_n"`` used to open the lane under any preset and turn the
+    ``dehnen_theta`` decline into a raise. The preset's contract pins
+    ``runtime_path="large_n"`` anyway, so on that preset nothing changed; under
+    another preset the general path now runs (2026-10 cleanup, X4).
     """
 
-    runtime_path = str(getattr(fmm, "runtime_path", "auto")).strip().lower()
-    if runtime_path not in ("auto", "large_n"):
-        return False
-    if (
-        runtime_path == "auto"
-        and str(getattr(fmm, "preset", "")).strip().lower() != "large_n_gpu"
-    ):
+    if str(getattr(fmm, "preset", "")).strip().lower() != "large_n_gpu":
         return False
     if not allow_stateful_cache:
         return False
@@ -2648,18 +2474,16 @@ def can_use_large_n_prepare_path(
         # step, so it would run the plain geometric MAC at the solver's theta --
         # and paper mode pins that at 1.0, so acceptance would be wildly loose
         # rather than merely different. The mode is refuted anyway (see
-        # `_uses_per_node_effective_theta`), so decline rather than plumb it.
+        # `_uses_per_node_effective_theta`), so refuse rather than plumb it.
         _record_large_n_decline(fmm, "per_node_effective_theta")
-        if runtime_path == "large_n":
-            raise RuntimeError(
-                "runtime_path='large_n' was requested explicitly, but the large-N "
-                "prepare path cannot run mac_type='dehnen_theta': the criterion is "
-                "folded into per-node opening angles before the dual build, which "
-                "this lane does not do, so it would silently run the geometric MAC "
-                "at theta=1.0. Use mac_type='dehnen_error' (which this lane does "
-                "carry) or mac_type='dehnen'."
-            )
-        return False
+        raise RuntimeError(
+            "preset='large_n_gpu' runs the large-N prepare path, which cannot run "
+            "mac_type='dehnen_theta': the criterion is folded into per-node opening "
+            "angles before the dual build, which this lane does not do, so it would "
+            "silently run the geometric MAC at theta=1.0. Use "
+            "mac_type='dehnen_error' (which this lane does carry) or "
+            "mac_type='dehnen'."
+        )
     if int(positions_arr.shape[0]) != int(masses_arr.shape[0]):
         return False
     return True

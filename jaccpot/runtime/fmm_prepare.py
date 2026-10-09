@@ -138,10 +138,11 @@ def _gear_pairs_for_autotune(
 ) -> Optional[tuple[tuple[Array, Array], ...]]:
     """The one-gear ``((sources, targets),)`` a direct far list hands the downward.
 
-    Only the M2L chunk autotune reads it (it times the XLA chunked M2L on a
-    sample of pairs). A :class:`TargetSortedFarPairs` list carries row offsets in
-    ``targets`` and only exists with the Pallas walk, whose M2L is a Pallas CSR
-    kernel that takes no chunk size: ``None`` (no autotune, nothing expanded).
+    Only the M2L chunk autotune read it (it timed the XLA chunked M2L on a
+    sample of pairs). The autotune went in the 2026-10 cleanup (X4); the name and
+    the ``far_pairs_by_gear`` plumbing it feeds, which nothing reads any more, are
+    left for its phase Z. A :class:`TargetSortedFarPairs` list carries row
+    offsets in ``targets`` and only exists with the Pallas walk: ``None``.
 
     Parameters
     ----------
@@ -894,10 +895,7 @@ class PrepareMixin(_EngineBase):
             Tree build plus upward sweep, bundled for the next phase.
         """
         tree_config = self.config.tree
-        if self.tree_type != "radix" and tree_config.mode in (
-            "fixed_depth",
-            "static_radix",
-        ):
+        if self.tree_type != "radix" and tree_config.mode == "static_radix":
             tree_config = TreeBuilderConfig(
                 mode="lbvh",
                 target_leaf_particles=tree_config.target_leaf_particles,
@@ -1180,7 +1178,7 @@ class PrepareMixin(_EngineBase):
         runtime_traversal_config : Optional[DualTreeTraversalConfig]
             Traversal capacities for this build, possibly already clamped.
         runtime_m2l_chunk_size : Optional[int]
-            M2L chunk size for this run, or None to autotune.
+            M2L chunk size for this run, or None for the default.
         runtime_l2l_chunk_size : Optional[int]
             L2L chunk size for this run, or None for the default.
         record_retry : Callable[[DualTreeRetryEvent], None]
@@ -1271,7 +1269,7 @@ class PrepareMixin(_EngineBase):
         runtime_traversal_config : Optional[DualTreeTraversalConfig]
             Traversal capacities for this build, possibly already clamped.
         runtime_m2l_chunk_size : Optional[int]
-            M2L chunk size for this run, or None to autotune.
+            M2L chunk size for this run, or None for the default.
         runtime_l2l_chunk_size : Optional[int]
             L2L chunk size for this run, or None for the default.
         record_retry : Callable[[DualTreeRetryEvent], None]
@@ -1573,15 +1571,7 @@ class PrepareMixin(_EngineBase):
             max_pair_queue=self.max_pair_queue,
             pair_process_block=self.pair_process_block,
             traversal_config=runtime_traversal_config,
-            retry_logger=(
-                None
-                if strict_mode_active
-                else (
-                    record_retry
-                    if bool(getattr(self, "_strict_cap_record_enabled", True))
-                    else (None if jit_traversal_for_prepare else record_retry)
-                )
-            ),
+            retry_logger=None if strict_mode_active else record_retry,
             fail_fast=(self.fail_fast or strict_mode_active),
             use_dense_interactions=use_dense_interactions_for_prepare,
             need_traversal_result=need_traversal_result,
@@ -1680,23 +1670,10 @@ class PrepareMixin(_EngineBase):
                 )
         _record_dual_stage("_refresh_timing_dual_far_pair_plan_seconds", stage_t0)
 
-        stage_t0 = _stage_now()
-        if suppress_host_side_effects and bool(
-            getattr(self, "_static_runtime_fixed_sizing", True)
-        ):
-            runtime_m2l_chunk_size = runtime_m2l_chunk_size
-        else:
-            runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
-                upward=tree_artifacts.upward,
-                far_pairs_by_gear=far_pairs_by_gear,
-                p_gears_for_downward=p_gears_for_downward,
-                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-            )
         if not suppress_host_side_effects:
             self._recent_dual_m2l_chunk_size = (
                 0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
             )
-        _record_dual_stage("_refresh_timing_dual_m2l_autotune_seconds", stage_t0)
 
         stage_t0 = _stage_now()
         interactions_for_downward = (
@@ -2051,67 +2028,6 @@ class PrepareMixin(_EngineBase):
             )
         )
         if strict_mode_active:
-            strict_context_key = self._strict_cap_profile_context_key(
-                tree_mode=str(tree_artifacts.tree_mode),
-                leaf_parameter=int(tree_artifacts.leaf_parameter),
-                particle_count=int(
-                    jnp.asarray(tree_artifacts.positions_sorted).shape[0]
-                ),
-            )
-            strict_fused_hot_path = bool(
-                getattr(self, "_strict_fused_mode_active", False)
-            )
-            strict_profile_key_stable = str(self._strict_profiled_context_key) == str(
-                strict_context_key
-            )
-            if not (strict_fused_hot_path and strict_profile_key_stable):
-                self._maybe_load_strict_cap_profile(context_key=strict_context_key)
-            if bool(self._strict_cap_require_exact_profile_match):
-                if str(self._strict_profiled_context_key) != str(strict_context_key):
-                    self._strict_runner_fail_fast_reject_count += 1
-                    raise RuntimeError(
-                        "strict static lane requires exact cap profile key match: "
-                        f"requested={strict_context_key} "
-                        f"resolved={self._strict_profiled_context_key or 'none'}"
-                    )
-            profiled_q = int(self._strict_profiled_max_pair_queue)
-            profiled_b = int(self._strict_profiled_pair_process_block)
-            if bool(self._strict_cap_require_exact_profile_match) and profiled_q <= 0:
-                self._strict_runner_fail_fast_reject_count += 1
-                raise RuntimeError(
-                    "strict static lane requires non-zero profiled max_pair_queue "
-                    f"for key {strict_context_key}"
-                )
-            if profiled_q > 0:
-                if runtime_traversal_config is not None:
-                    runtime_traversal_config = DualTreeTraversalConfig(
-                        max_pair_queue=max(
-                            int(runtime_traversal_config.max_pair_queue),
-                            int(profiled_q),
-                        ),
-                        process_block=(
-                            int(profiled_b)
-                            if profiled_b > 0
-                            else int(runtime_traversal_config.process_block)
-                        ),
-                        max_interactions_per_node=int(
-                            runtime_traversal_config.max_interactions_per_node
-                        ),
-                        max_neighbors_per_leaf=int(
-                            runtime_traversal_config.max_neighbors_per_leaf
-                        ),
-                    )
-                else:
-                    runtime_traversal_config = DualTreeTraversalConfig(
-                        max_pair_queue=int(profiled_q),
-                        process_block=(
-                            int(profiled_b)
-                            if profiled_b > 0
-                            else int(self.pair_process_block or 1024)
-                        ),
-                        max_interactions_per_node=8192,
-                        max_neighbors_per_leaf=4096,
-                    )
             if bool(traced_prepare_inputs) and not bool(
                 strict_fused_device_only_hot_path
             ):
@@ -2598,79 +2514,6 @@ class PrepareMixin(_EngineBase):
             p_gears_for_downward=p_gears_for_downward,
             recent_far_pairs_by_gear_counts=recent_counts,
         )
-
-    def _prepare_state_autotune_downward_chunk_size(
-        self,
-        *,
-        upward: TreeUpwardData,
-        far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]],
-        p_gears_for_downward: tuple[int, ...],
-        runtime_m2l_chunk_size: Optional[int],
-    ) -> Optional[int]:
-        """Choose runtime M2L chunk size for the downward pass.
-
-        Parameters
-        ----------
-        upward : TreeUpwardData
-            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
-        far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
-            Far pairs bucketed per adaptive-order gear.
-        p_gears_for_downward : tuple[int, ...]
-            Gear orders the downward sweep will consume.
-        runtime_m2l_chunk_size : Optional[int]
-            M2L chunk size for this run, or None to autotune.
-
-        Returns
-        -------
-        Optional[int]
-            The chosen M2L chunk size, or None to leave it unset.
-        """
-
-        static_runtime_fixed_sizing = bool(
-            getattr(self, "_static_runtime_fixed_sizing", True)
-        )
-        if static_runtime_fixed_sizing:
-            return runtime_m2l_chunk_size
-
-        if bool(getattr(self, "_strict_fused_mode_active", False)):
-            return runtime_m2l_chunk_size
-
-        if (
-            runtime_m2l_chunk_size is not None
-            or not bool(self.autotune_m2l_chunk)
-            or self.expansion_basis != "solidfmm"
-            or jax.default_backend() != "gpu"
-            or far_pairs_by_gear is None
-            or len(far_pairs_by_gear) == 0
-        ):
-            return runtime_m2l_chunk_size
-
-        tune_idx = 0
-        tune_pair_count = -1
-        for idx, (src_bucket, _) in enumerate(far_pairs_by_gear):
-            count_i = int(src_bucket.shape[0])
-            if count_i > tune_pair_count:
-                tune_idx = idx
-                tune_pair_count = count_i
-        if tune_pair_count <= 0:
-            return runtime_m2l_chunk_size
-
-        tune_src, tune_tgt = far_pairs_by_gear[tune_idx]
-        tune_order = int(
-            upward.multipoles.order
-            if tune_idx >= len(p_gears_for_downward)
-            else p_gears_for_downward[tune_idx]
-        )
-        tuned_chunk = self._autotune_runtime_m2l_chunk_size(
-            upward=upward,
-            src=tune_src,
-            tgt=tune_tgt,
-            order=tune_order,
-            pair_count=tune_pair_count,
-        )
-        if tuned_chunk is not None:
-            return int(tuned_chunk)
-        return runtime_m2l_chunk_size
 
     def _prepare_state_select_interactions_for_downward(
         self,
@@ -3259,7 +3102,7 @@ class PrepareMixin(_EngineBase):
         interactions : Optional[NodeInteractionList]
             Node interaction list, or None on the streamed path.
         runtime_m2l_chunk_size : Optional[int]
-            M2L chunk size for this run, or None to autotune.
+            M2L chunk size for this run, or None for the default.
         runtime_l2l_chunk_size : Optional[int]
             L2L chunk size for this run, or None for the default.
         runtime_traversal_config : Optional[DualTreeTraversalConfig]
@@ -3644,17 +3487,6 @@ class PrepareMixin(_EngineBase):
         if not suppress_host_side_effects:
             self._recent_far_pairs_by_gear_counts = (int(src_far.shape[0]),)
 
-        if suppress_host_side_effects and bool(
-            getattr(self, "_static_runtime_fixed_sizing", True)
-        ):
-            runtime_m2l_chunk_size = runtime_m2l_chunk_size
-        else:
-            runtime_m2l_chunk_size = self._prepare_state_autotune_downward_chunk_size(
-                upward=tree_artifacts.upward,
-                far_pairs_by_gear=far_pairs_by_gear,
-                p_gears_for_downward=p_gears_for_downward,
-                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-            )
         if not suppress_host_side_effects:
             self._recent_dual_m2l_chunk_size = (
                 0 if runtime_m2l_chunk_size is None else int(runtime_m2l_chunk_size)
@@ -4055,9 +3887,10 @@ class PrepareMixin(_EngineBase):
     ) -> PreparedStateLike:
         """Precompute tree and interaction data for repeated evaluations.
 
-        When ``tree_build_mode`` is ``"fixed_depth"`` the optional
-        ``refine_local``, ``max_refine_levels``, and ``aspect_threshold``
-        arguments control the host-side leaf refinement pass.
+        The optional ``refine_local``, ``max_refine_levels``, and
+        ``aspect_threshold`` arguments controlled the host-side leaf refinement
+        pass of the fixed-depth builder, which went in the 2026-10 cleanup (X4);
+        no radix build refines leaves.
 
         ``force_scale_nodes`` supplies the per-node force scale on the right-hand
         side of the adaptive acceptance test directly, for this call only. It
@@ -4287,16 +4120,6 @@ class PrepareMixin(_EngineBase):
         retry_events_tuple = tuple(collected_retries)
         if allow_stateful_cache:
             self._recent_retry_events = retry_events_tuple
-            self._record_strict_cap_profile_from_retries(
-                retry_events_tuple,
-                context_key=self._strict_cap_profile_context_key(
-                    tree_mode=str(tree_artifacts.tree_mode),
-                    leaf_parameter=int(tree_artifacts.leaf_parameter),
-                    particle_count=int(
-                        jnp.asarray(tree_artifacts.positions_sorted).shape[0]
-                    ),
-                ),
-            )
 
         nearfield_interop = _build_nearfield_interop_data(
             tree_artifacts.tree,

@@ -71,7 +71,10 @@ def test_farfield_mode_never_resolves_to_auto_at_large_n(n, backend):
 
     Regression: the static-fixed-sizing branch (the production default) returned
     ``"auto"`` once the grouped M2L auto-enabled at ``n >= 65536`` on GPU. The
-    grouped far field is gone (X3), so the only value left is the flat pair list.
+    grouped far field is gone (X3), so the only value left is the flat pair list,
+    about COM centres. (This also carries the centre assertion of
+    ``test_static_sizing_does_not_inherit_the_adaptive_grouped_rewrite``, merged
+    here when adaptive sizing went in the 2026-10 cleanup, X4.)
     """
     fmm = _solver()
     overrides = fmm._impl._resolve_runtime_execution_overrides(
@@ -80,16 +83,6 @@ def test_farfield_mode_never_resolves_to_auto_at_large_n(n, backend):
     assert (
         overrides.farfield_mode == "pair_grouped"
     ), f"farfield_mode={overrides.farfield_mode!r} at n={n} backend={backend}"
-
-
-def test_static_sizing_does_not_inherit_the_adaptive_grouped_rewrite():
-    """Static fixed sizing skips adaptive rewrites -- including auto-grouping."""
-    fmm = _solver()
-    fmm._impl._static_runtime_fixed_sizing = True
-    overrides = fmm._impl._resolve_runtime_execution_overrides(
-        num_particles=4 * _GPU_LARGE_PARTICLE_THRESHOLD, backend="gpu"
-    )
-    assert overrides.farfield_mode == "pair_grouped"
     assert overrides.center_mode == "com"
 
 

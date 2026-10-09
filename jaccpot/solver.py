@@ -99,7 +99,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
                 enable_interaction_cache=False,
                 retain_traversal_result=False,
                 retain_interactions=False,
-                autotune_m2l_chunk=True,
                 upward_leaf_batch_size=_LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE,
             ),
             mac_type="dehnen",
@@ -1765,10 +1764,9 @@ class FastMultipoleMethod:
         """Refresh prepared state under fixed-profile large-N runtime constraints.
 
         Rebinds an existing state to new particle data without paying a full
-        :meth:`prepare_state`. Together with :meth:`update_multipoles_only` and
-        :meth:`rebuild_topology_in_place` -- both of which delegate here, differing
-        only in which diagnostic counter they bump and whether ``bounds`` is
-        forwarded -- this is the refresh cadence the strict runners drive.
+        :meth:`prepare_state`. This is the refresh cadence the strict runners
+        drive. (Its two renamed faces, ``update_multipoles_only`` and
+        ``rebuild_topology_in_place``, went in the 2026-10 cleanup, X4.)
 
         Supported only on the large-N production profile
         (``preset="large_n_gpu"``, radix tree, solidfmm basis) and only for a
@@ -1796,8 +1794,7 @@ class FastMultipoleMethod:
         Returns
         -------
         FMMPreparedState
-            The refreshed state. A new object -- nothing is mutated in place,
-            despite what :meth:`rebuild_topology_in_place` is called.
+            The refreshed state. A new object -- nothing is mutated in place.
         """
         return self._impl.refresh_prepared_state(
             prepared_state,
@@ -1866,89 +1863,6 @@ class FastMultipoleMethod:
             jit_traversal=jit_traversal,
         )
 
-    def strict_run_segmented(
-        self: "FastMultipoleMethod",
-        *,
-        state: Any,
-        masses: Float[Array, "n"],
-        num_steps: int,
-        refresh_every: int,
-        segment_runner: Callable[[Any, Array, int], tuple[Any, Any]],
-        positions_getter: Callable[[Any], Array],
-        prepared_state: Optional[FMMPreparedState] = None,
-        leaf_size: int = 16,
-        max_order: int = 4,
-        theta: Optional[float] = None,
-        jit_traversal: Optional[bool] = True,
-        rematerialize_fn: Optional[Callable[[Any], Any]] = None,
-        collect_history: bool = False,
-    ) -> tuple[Any, FMMPreparedState, Optional[list[Any]]]:
-        """Run strict segmented refresh cadence with caller-provided segment kernel.
-
-        The integrator-agnostic runner: it owns only the refresh cadence, and the
-        caller supplies the stepping. ``num_steps`` is cut into segments of
-        ``refresh_every`` (plus a tail), the prepared state is refreshed at each
-        boundary, and ``segment_runner`` advances the caller's own state within a
-        segment. Use :meth:`strict_run_v2` instead when the caller's integrator is
-        velocity Verlet over a raw array. Large-N production profile only.
-
-        Parameters
-        ----------
-        state : Any
-            The caller's integrator state, opaque to this method: it is only
-            passed to ``segment_runner`` and ``positions_getter``.
-        masses : Float[Array, 'n']
-            Particle masses ``[N]``.
-        num_steps : int
-            Total steps. Must be positive.
-        refresh_every : int
-            Steps per segment. Must be positive.
-        segment_runner : Callable[[Any, Array, int], tuple[Any, Any]]
-            ``(state, accelerations, num_steps) -> (next_state, segment_output)``.
-            The segment output is collected only under ``collect_history``.
-        positions_getter : Callable[[Any], Array]
-            Extracts ``[N, 3]`` positions from the caller's state, so the refresh
-            knows where the particles are.
-        prepared_state : Optional[FMMPreparedState]
-            Existing state to refresh, or ``None`` to prepare on the first
-            segment.
-        leaf_size : int
-            Target maximum particles per leaf.
-        max_order : int
-            Expansion order ``p``. Defaults to 4 here against 2 in the engine.
-        theta : Optional[float]
-            Per-call MAC opening-angle override.
-        jit_traversal : Optional[bool]
-            Per-call override of jitted traversal.
-        rematerialize_fn : Optional[Callable[[Any], Any]]
-            Applied to the state between segments, for callers that must
-            reconstruct device arrays across a refresh.
-        collect_history : bool
-            Accumulate each segment's output. Off by default because the history
-            is retained on device.
-
-        Returns
-        -------
-        tuple[Any, FMMPreparedState, Optional[list[Any]]]
-            ``(final_state, prepared_state, history)``, where ``history`` is
-            ``None`` unless ``collect_history``.
-        """
-        return self._impl.strict_run_segmented(
-            state=state,
-            masses=masses,
-            num_steps=int(num_steps),
-            refresh_every=int(refresh_every),
-            segment_runner=segment_runner,
-            positions_getter=positions_getter,
-            prepared_state=prepared_state,
-            leaf_size=int(leaf_size),
-            max_order=int(max_order),
-            theta=theta,
-            jit_traversal=jit_traversal,
-            rematerialize_fn=rematerialize_fn,
-            collect_history=bool(collect_history),
-        )
-
     def strict_run_v2(
         self: "FastMultipoleMethod",
         *,
@@ -1983,9 +1897,9 @@ class FastMultipoleMethod:
         ``step_callback(step_index, state)`` every ``step_callback_stride`` steps,
         for minimal-sync rendering via ``jax.debug.callback``.
 
-        Endpoint-correct velocity Verlet, run device-resident. Unlike
-        :meth:`strict_run_segmented` the integrator is fixed and the state is a
-        raw array, which is what lets the whole loop live inside one scan.
+        Endpoint-correct velocity Verlet, run device-resident. The integrator is
+        fixed and the state is a raw array, which is what lets the whole loop
+        live inside one scan.
         Large-N production profile only, and ``refresh_every`` must be 1 --
         endpoint correctness needs the self-gravity refreshed every step.
 
@@ -2133,103 +2047,6 @@ class FastMultipoleMethod:
             donate_prepared=bool(donate_prepared),
         )
 
-    def update_multipoles_only(
-        self: "FastMultipoleMethod",
-        prepared_state: FMMPreparedState,
-        positions: Float[Array, "n 3"],
-        masses: Float[Array, "n"],
-        *,
-        leaf_size: Optional[int] = None,
-        max_order: Optional[int] = None,
-        theta: Optional[float] = None,
-    ) -> FMMPreparedState:
-        """Update multipole/local payloads when topology mapping is unchanged.
-
-        A :meth:`refresh_prepared_state` under a different name and counter, for
-        the case where the caller knows the tree mapping still holds. It does not
-        take ``bounds``, since changing the domain would change the mapping.
-        Large-N production profile only.
-
-        Parameters
-        ----------
-        prepared_state : FMMPreparedState
-            State whose payloads are refreshed.
-        positions : Float[Array, 'n 3']
-            New particle positions ``[N, 3]``.
-        masses : Float[Array, 'n']
-            New particle masses ``[N]``.
-        leaf_size : Optional[int]
-            Leaf target; ``None`` keeps the state's own.
-        max_order : Optional[int]
-            Expansion order; ``None`` keeps the state's own.
-        theta : Optional[float]
-            Opening angle; ``None`` keeps the state's own.
-
-        Returns
-        -------
-        FMMPreparedState
-            The refreshed state.
-        """
-        return self._impl.update_multipoles_only(
-            prepared_state,
-            positions,
-            masses,
-            leaf_size=leaf_size,
-            max_order=max_order,
-            theta=theta,
-        )
-
-    def rebuild_topology_in_place(
-        self: "FastMultipoleMethod",
-        prepared_state: FMMPreparedState,
-        positions: Float[Array, "n 3"],
-        masses: Float[Array, "n"],
-        *,
-        bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
-        leaf_size: Optional[int] = None,
-        max_order: Optional[int] = None,
-        theta: Optional[float] = None,
-    ) -> FMMPreparedState:
-        """Rebuild topology while tracking profile compatibility diagnostics.
-
-        The third face of :meth:`refresh_prepared_state`: same call, its own
-        counter, and ``bounds`` forwarded because a rebuild may legitimately
-        change the domain. "In place" names the intent to stay within the
-        compiled profile's capacities, not mutation -- a new state is returned.
-        Large-N production profile only.
-
-        Parameters
-        ----------
-        prepared_state : FMMPreparedState
-            State whose topology is rebuilt.
-        positions : Float[Array, 'n 3']
-            New particle positions ``[N, 3]``.
-        masses : Float[Array, 'n']
-            New particle masses ``[N]``.
-        bounds : Optional[Tuple[Float[Array, '3'], Float[Array, '3']]]
-            Explicit ``(lower, upper)`` domain bounds.
-        leaf_size : Optional[int]
-            Leaf target; ``None`` keeps the state's own.
-        max_order : Optional[int]
-            Expansion order; ``None`` keeps the state's own.
-        theta : Optional[float]
-            Opening angle; ``None`` keeps the state's own.
-
-        Returns
-        -------
-        FMMPreparedState
-            The rebuilt state.
-        """
-        return self._impl.rebuild_topology_in_place(
-            prepared_state,
-            positions,
-            masses,
-            bounds=bounds,
-            leaf_size=leaf_size,
-            max_order=max_order,
-            theta=theta,
-        )
-
     def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:
         """Return runtime diagnostics for compile/profile reuse benchmarking.
 
@@ -2261,88 +2078,6 @@ class FastMultipoleMethod:
         self._impl.clear_runtime_caches(
             clear_jax_compilation=bool(clear_jax_compilation)
         )
-
-    def export_m2l_autotune_cache(self: "FastMultipoleMethod") -> list[dict[str, Any]]:
-        """Return a JSON-serializable snapshot of M2L chunk autotune results.
-
-        The cache is process-global, not per-solver, so this exports what every
-        solver in the process has autotuned. Autotuning costs real time on first
-        use, which is why it is worth persisting across runs.
-
-        Returns
-        -------
-        list[dict[str, Any]]
-            One entry per autotuned configuration.
-        """
-
-        return self._impl.export_m2l_autotune_cache()
-
-    def import_m2l_autotune_cache(
-        self: "FastMultipoleMethod",
-        payload: list[dict[str, Any]],
-        *,
-        merge: bool = True,
-    ) -> int:
-        """Restore M2L chunk autotune results from serialized payload.
-
-        Parameters
-        ----------
-        payload : list[dict[str, Any]]
-            Entries as produced by :meth:`export_m2l_autotune_cache`.
-        merge : bool
-            Merge into the process-global cache (default) rather than clearing it
-            first.
-
-        Returns
-        -------
-        int
-            Number of entries restored. Malformed entries are skipped silently,
-            so a result below ``len(payload)`` is the only signal that the
-            payload was not fully understood.
-        """
-
-        return int(self._impl.import_m2l_autotune_cache(payload, merge=bool(merge)))
-
-    def save_m2l_autotune_cache(self: "FastMultipoleMethod", path: str) -> int:
-        """Write M2L chunk autotune results to a JSON file.
-
-        Parameters
-        ----------
-        path : str
-            Destination file, overwritten if it exists.
-
-        Returns
-        -------
-        int
-            Number of entries written.
-        """
-
-        return int(self._impl.save_m2l_autotune_cache(path))
-
-    def load_m2l_autotune_cache(
-        self: "FastMultipoleMethod",
-        path: str,
-        *,
-        merge: bool = True,
-    ) -> int:
-        """Load M2L chunk autotune results from a JSON file.
-
-        Parameters
-        ----------
-        path : str
-            Source file, as written by :meth:`save_m2l_autotune_cache`. Its
-            top-level JSON value must be a list.
-        merge : bool
-            Merge into the process-global cache (default) rather than clearing it
-            first.
-
-        Returns
-        -------
-        int
-            Number of entries restored; see :meth:`import_m2l_autotune_cache`.
-        """
-
-        return int(self._impl.load_m2l_autotune_cache(path, merge=bool(merge)))
 
     @property
     def recent_topology_reused(self: "FastMultipoleMethod") -> bool:

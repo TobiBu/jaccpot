@@ -75,7 +75,11 @@ def _parse_args() -> argparse.Namespace:
         "--runtime-path",
         choices=("auto", "large_n"),
         default="auto",
-        help="Select the legacy or dedicated large-N runtime path",
+        help=(
+            "Passed through as runtime_path. Since the 2026-10 cleanup (X4) it no "
+            "longer selects a lane: the large-N lane runs only under "
+            "--preset large_n_gpu, which pins it"
+        ),
     )
     return parser.parse_args()
 

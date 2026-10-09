@@ -48,7 +48,6 @@ callers should import from the module that defines the symbol.
 
 from __future__ import annotations
 
-import json
 import os
 import warnings
 from typing import Any, Literal, Optional, Union
@@ -83,12 +82,7 @@ from jaccpot.softening import resolve_softening_kernel, support_factor
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
 from ._interaction_cache import _InteractionCacheEntry, _RefreshDualPlannerHint
 from ._large_n_types import LargeNPreparedState
-from .fmm_autotune import AutotuneMixin
-from .fmm_caches import (
-    _clear_global_runtime_caches,
-    _m2l_autotune_payload,
-    _restore_m2l_autotune_payload,
-)
+from .fmm_caches import _clear_global_runtime_caches
 from .fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 from .fmm_derivatives import DerivativesMixin
 from .fmm_diagnostics import DiagnosticsMixin
@@ -255,7 +249,6 @@ class FMMEngine(
     StrictRunMixin,
     SweepsMixin,
     OverridesMixin,
-    AutotuneMixin,
     PolicyMixin,
     DerivativesMixin,
     StrictCapProfileMixin,
@@ -364,8 +357,11 @@ class FMMEngine(
         Materialize the interaction list densely rather than as a compact list --
         faster for small trees, quadratic in memory for large ones.
     runtime_path : Literal['auto', 'large_n']
-        ``"auto"`` or ``"large_n"``. Forcing ``"large_n"`` selects the memory-lean
-        lane regardless of particle count.
+        ``"auto"`` or ``"large_n"``, accepted and stored but no longer a lane
+        switch: the large-N lane is selected by ``preset="large_n_gpu"``, whose
+        contract pins ``"large_n"`` here. Forcing ``"large_n"`` under another
+        preset used to open that lane too; since the 2026-10 cleanup (X4) it does
+        not.
     preset : Optional[Union[str, FMMPreset]]
         Named configuration bundle applied before the individual keywords above. An
         enum member or its string value.
@@ -413,7 +409,7 @@ class FMMEngine(
         The seventeen execution-policy knobs, as one frozen group: backend and
         host-refine mode, ``fail_fast``, the memory objective and budget, the
         traversal capacities and overrides, the cache/retention flags, the
-        autotune switch and the schedule budgets. ``None`` means
+        (inert) autotune switch and the schedule budgets. ``None`` means
         ``RuntimePolicyConfig()``, whose defaults were checked field by field
         against the flat parameters this replaced -- all seventeen matched, so
         omitting it is exactly the old behaviour. Each field is documented on
@@ -562,9 +558,9 @@ class FMMEngine(
         retain_traversal_result = _policy.retain_traversal_result
         retain_interactions = _policy.retain_interactions
         prepare_stage_memory_split_enabled = _policy.prepare_stage_memory_split_enabled
-        autotune_m2l_chunk = _policy.autotune_m2l_chunk
         # `precompute_grouped_class_segments` and `grouped_schedule_budget_bytes`
-        # are ignored since the grouped far field went (2026-10 cleanup, X3).
+        # are ignored since the grouped far field went (2026-10 cleanup, X3), and
+        # `autotune_m2l_chunk` since the M2L chunk autotune went (X4).
         nearfield_schedule_item_cap = _policy.nearfield_schedule_item_cap
         upward_leaf_batch_size = _policy.upward_leaf_batch_size
 
@@ -611,7 +607,6 @@ class FMMEngine(
             retain_interactions=retain_interactions,
             prepare_stage_memory_split_enabled=prepare_stage_memory_split_enabled,
             fail_fast=fail_fast,
-            autotune_m2l_chunk=autotune_m2l_chunk,
         )
         self._resolve_schedule_budgets(
             nearfield_schedule_item_cap=nearfield_schedule_item_cap,
@@ -1059,22 +1054,13 @@ class FMMEngine(
         retain_interactions: bool,
         prepare_stage_memory_split_enabled: Optional[bool],
         fail_fast: bool,
-        autotune_m2l_chunk: bool,
     ) -> None:
-        """Resolve the memory objective, retention flags and the strict-lane pair.
+        """Resolve the memory objective, the retention flags and ``fail_fast``.
 
         Extracted verbatim from ``__init__`` (audit **F09**), called in the
-        original position.
-
-        ``fail_fast`` and ``autotune_m2l_chunk`` are resolved **here, together,
-        and in this order** on purpose: the second reads ``self.fail_fast`` set
-        by the first, because a timing-driven chunk search inside the lane whose
-        purpose is to fail rather than adapt would be a contradiction. Splitting
-        them across two helpers, or calling them the other way round, leaves the
-        autotune silently on under ``fail_fast`` and nothing else in the
-        constructor notices. That is the "resolution order" sensitivity F09
-        flags, and it is pinned in both directions by
-        ``tests/unit/runtime/test_engine_config_resolution.py``.
+        original position. ``autotune_m2l_chunk``, which was resolved here after
+        ``fail_fast`` and forced off by it, went with the M2L chunk autotune in
+        the 2026-10 cleanup (X4); its config field is accepted and ignored.
 
         Parameters
         ----------
@@ -1092,8 +1078,6 @@ class FMMEngine(
             Passed through from ``__init__`` unchanged. ``None`` means "let the
             policy decide" and stays distinct from ``False``.
         fail_fast : bool
-            Passed through from ``__init__`` unchanged.
-        autotune_m2l_chunk : bool
             Passed through from ``__init__`` unchanged.
 
         Returns
@@ -1128,7 +1112,6 @@ class FMMEngine(
             else bool(prepare_stage_memory_split_enabled)
         )
         self.fail_fast = bool(fail_fast)
-        self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
 
     def _resolve_schedule_budgets(
         self,
@@ -1436,10 +1419,7 @@ class FMMEngine(
         self._static_radix_profile_overflows: int = 0
         self._static_radix_compact_pair_reuse_hits: int = 0
         self._static_radix_compact_pair_reuse_misses: int = 0
-        self._compiled_profile_multipoles_only_calls: int = 0
-        self._compiled_profile_topology_rebuild_calls: int = 0
         self._large_n_overflow_profile_cap: int = 0
-        self._large_n_overflow_profile_reprofiles: int = 0
         self._large_n_neighbor_edges_profile_cap: int = 0
         self._large_n_neighbor_edges_profile_reprofiles: int = 0
         self._refresh_timing_total_seconds: float = 0.0
@@ -1469,7 +1449,6 @@ class FMMEngine(
         self._refresh_timing_dual_raw_combined_seconds: float = 0.0
         self._refresh_timing_dual_split_dense_buffers_seconds: float = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds: float = 0.0
-        self._refresh_timing_dual_m2l_autotune_seconds: float = 0.0
         self._refresh_timing_dual_select_interactions_seconds: float = 0.0
         self._refresh_timing_dual_downward_compute_seconds: float = 0.0
         self._refresh_timing_dual_m2l_compute_seconds: float = 0.0
@@ -1530,15 +1509,6 @@ class FMMEngine(
         )
         self._strict_gpu_mode_on: bool = self._strict_gpu_mode == "on"
         self._strict_gpu_mode_auto: bool = self._strict_gpu_mode == "auto"
-        self._strict_cap_record_enabled: bool = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_CAP_RECORD", "1")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        # Default off (2026-10, cleanup D2): with it on, the default static_radix +
-        # large_n_gpu prepare raised unless a recorded cap profile for exactly this
-        # (leaf, N) existed on disk. Every production caller turned it off.
-        self._strict_cap_require_exact_profile_match: bool = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
         split_build_env_raw = os.environ.get(
             "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
         )
@@ -1594,9 +1564,6 @@ class FMMEngine(
         self._strict_fused_disable_hot_timing: bool = str(
             os.environ.get("JACCPOT_STATIC_STRICT_FUSED_DISABLE_HOT_TIMING", "1")
         ).strip().lower() in {"1", "true", "yes", "on"}
-        self._strict_fused_disable_rematerialize: bool = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_DISABLE_REMATERIALIZE", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
         self._strict_fused_disallow_host_segment_fallback: bool = str(
             os.environ.get(
                 "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK",
@@ -1627,18 +1594,6 @@ class FMMEngine(
         self._strict_fused_device_only: bool = str(
             os.environ.get(
                 "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
-                "1",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._strict_fused_compiled_segment_loop: bool = str(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_FUSED_COMPILED_SEGMENT_LOOP",
-                "1",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._strict_fused_jit_refresh_eval: bool = str(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_FUSED_JIT_REFRESH_EVAL",
                 "1",
             )
         ).strip().lower() in {"1", "true", "yes", "on"}
@@ -1763,11 +1718,6 @@ class FMMEngine(
         # pytree structure and avals itself). See
         # _large_n_pipeline._large_n_fastlane_eval_fn.
         self._large_n_fastlane_eval_jit_cache: dict[tuple[Any, ...], Any] = {}
-        self._strict_profiled_max_pair_queue: int = 0
-        self._strict_profiled_pair_process_block: int = 0
-        self._strict_profiled_context_key: str = ""
-        self._strict_profile_catalog: dict[str, dict[str, int]] = {}
-        self._strict_profile_loaded_once: bool = False
         self.fixed_order = fixed_order
         self.fixed_max_leaf_size = fixed_max_leaf_size
         self._explicit_m2l_chunk_size = m2l_chunk_size is not None
@@ -1808,11 +1758,13 @@ class FMMEngine(
         *,
         retain_far_pairs_for_grad: bool,
     ) -> None:
-        """Resolve static runtime sizing and the grad far-pair retention flag.
+        """Resolve the grad far-pair retention flag, then the large-N GPU contract.
 
         Extracted verbatim from ``__init__`` lines 1036-1069 (audit 2.1 step 2).
         Called in the original position, so the resolution order is unchanged --
-        that order is load-bearing (b462e45, dee46d6).
+        that order is load-bearing (b462e45, dee46d6). The static-sizing switch it
+        was named for (``JACCPOT_STATIC_RUNTIME_FIXED_SIZING``) went with adaptive
+        sizing in the 2026-10 cleanup (X4): sizing is always static now.
 
         Parameters
         ----------
@@ -1824,9 +1776,6 @@ class FMMEngine(
         None
             Mutates ``self`` in place, exactly as the inlined code did.
         """
-        self._static_runtime_fixed_sizing: bool = str(
-            os.environ.get("JACCPOT_STATIC_RUNTIME_FIXED_SIZING", "1")
-        ).strip().lower() in {"1", "true", "yes", "on"}
         # Retain the frozen M2L pair list (``compact_far_pairs``) on the prepared
         # state so a gradient path can re-run the downward sweep against it.
         # ``prepare_state`` builds those pairs whenever the streamed-compact policy
@@ -2034,10 +1983,7 @@ class FMMEngine(
         self._static_radix_profile_overflows = 0
         self._static_radix_compact_pair_reuse_hits = 0
         self._static_radix_compact_pair_reuse_misses = 0
-        self._compiled_profile_multipoles_only_calls = 0
-        self._compiled_profile_topology_rebuild_calls = 0
         self._large_n_overflow_profile_cap = 0
-        self._large_n_overflow_profile_reprofiles = 0
         self._large_n_neighbor_edges_profile_cap = 0
         self._large_n_neighbor_edges_profile_reprofiles = 0
         self._refresh_timing_total_seconds = 0.0
@@ -2067,7 +2013,6 @@ class FMMEngine(
         self._refresh_timing_dual_raw_combined_seconds = 0.0
         self._refresh_timing_dual_split_dense_buffers_seconds = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds = 0.0
-        self._refresh_timing_dual_m2l_autotune_seconds = 0.0
         self._refresh_timing_dual_select_interactions_seconds = 0.0
         self._refresh_timing_dual_downward_compute_seconds = 0.0
         self._refresh_timing_dual_m2l_compute_seconds = 0.0
@@ -2134,104 +2079,7 @@ class FMMEngine(
         self._strict_fused_fastlane_last_blockers = tuple()
         self._strict_fused_fastlane_block_counts = {}
         self._strict_fused_jit_function_cache = {}
-        self._strict_profiled_max_pair_queue = 0
-        self._strict_profiled_pair_process_block = 0
-        self._strict_profiled_context_key = ""
-        self._strict_profile_catalog = {}
-        self._strict_profile_loaded_once = False
         _clear_global_runtime_caches(clear_jax_compilation=bool(clear_jax_compilation))
-
-    def export_m2l_autotune_cache(self: "FMMEngine") -> list[dict[str, Any]]:
-        """Return a JSON-serializable snapshot of global M2L autotune results.
-
-        The autotune cache is **process-global**, not per-engine: this reads the
-        same table every engine in the process writes to, so the method is on the
-        engine for discoverability only.
-
-        Returns
-        -------
-        list[dict[str, Any]]
-            One entry per autotuned configuration, ready for ``json.dump``.
-        """
-
-        return _m2l_autotune_payload()
-
-    def import_m2l_autotune_cache(
-        self: "FMMEngine",
-        payload: list[dict[str, Any]],
-        *,
-        merge: bool = True,
-    ) -> int:
-        """Restore global M2L autotune results from serialized payload.
-
-        Writes to the process-global table, so this affects every engine in the
-        process, not just this one.
-
-        Parameters
-        ----------
-        payload : list[dict[str, Any]]
-            Entries as produced by :meth:`export_m2l_autotune_cache`.
-        merge : bool
-            Merge into the existing table rather than replacing it.
-
-        Returns
-        -------
-        int
-            Number of entries restored.
-        """
-
-        return _restore_m2l_autotune_payload(payload, merge=bool(merge))
-
-    def save_m2l_autotune_cache(self: "FMMEngine", path: str) -> int:
-        """Write global M2L autotune cache to a JSON file.
-
-        Parameters
-        ----------
-        path : str
-            Destination path, overwritten if it exists.
-
-        Returns
-        -------
-        int
-            Number of entries written.
-        """
-
-        payload = self.export_m2l_autotune_cache()
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-        return int(len(payload))
-
-    def load_m2l_autotune_cache(
-        self: "FMMEngine",
-        path: str,
-        *,
-        merge: bool = True,
-    ) -> int:
-        """Load global M2L autotune cache from a JSON file.
-
-        Parameters
-        ----------
-        path : str
-            Path to a file written by :meth:`save_m2l_autotune_cache`.
-        merge : bool
-            Merge into the existing table rather than replacing it.
-
-        Returns
-        -------
-        int
-            Number of entries restored.
-
-        Raises
-        ------
-        ValueError
-            If the file's top-level JSON value is not a list.
-        """
-
-        with open(path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-        if not isinstance(payload, list):
-            raise ValueError("autotune cache JSON must contain a list payload")
-        return self.import_m2l_autotune_cache(payload, merge=bool(merge))
 
     # ------------------------------------------------------------------
     # Expansion construction up to a given order

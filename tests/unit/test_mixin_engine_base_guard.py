@@ -1,6 +1,6 @@
 """Guardrails for how the ``FMMEngine`` mixins reach the engine's attributes.
 
-Why this exists: the ten ``*Mixin`` classes under ``jaccpot/runtime/`` are only
+Why this exists: the nine ``*Mixin`` classes under ``jaccpot/runtime/`` are only
 ever mixed into ``FMMEngine``, so every method body reads ``self.<engine
 attribute>`` for attributes the mixin itself does not define. A type checker
 cannot resolve those unless it is told what ``self`` is, and there are two ways
@@ -46,7 +46,9 @@ RUNTIME_ROOT = PROJECT_ROOT / "jaccpot" / "runtime"
 # it carries are correct rather than tolerated.
 SELF_ANNOTATION_EXEMPT = frozenset({"_fmm_impl.py"})
 
-# Asserted, not derived, for the reason check 3 exists at all.
+# Asserted, not derived, for the reason check 3 exists at all. `AutotuneMixin`
+# sat between `OverridesMixin` and `PolicyMixin` until the M2L chunk autotune
+# was removed in the 2026-10 cleanup (X4).
 EXPECTED_ENGINE_MRO = (
     "FMMEngine",
     "PrepareMixin",
@@ -54,7 +56,6 @@ EXPECTED_ENGINE_MRO = (
     "StrictRunMixin",
     "SweepsMixin",
     "OverridesMixin",
-    "AutotuneMixin",
     "PolicyMixin",
     "DerivativesMixin",
     "StrictCapProfileMixin",

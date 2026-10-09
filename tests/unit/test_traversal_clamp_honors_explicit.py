@@ -12,9 +12,8 @@ at N >= ~2M on >=40 GB GPUs (e.g. a 4M-particle A100 disk that otherwise fits at
 
 Static fixed sizing means "use the sizes I gave you", so it now passes an explicit
 config through unclamped (auto-sized *preset* seeds are still bounded). The
-adaptive path (static sizing off) still clamps explicit configs for adaptive
-memory management -- see the companion assertions here and
-``test_solver_api.test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal``.
+adaptive path, which still clamped explicit configs, went in the 2026-10 cleanup
+(X4), so static sizing is the only sizing and this is its one contract.
 """
 
 from __future__ import annotations
@@ -57,9 +56,8 @@ def _oversized() -> DualTreeTraversalConfig:
 def test_static_fixed_sizing_honors_oversized_explicit_traversal():
     requested = _oversized()
     impl = _impl(requested)
-    # Static fixed sizing is on by default; explicit caps are kept as given.
-    assert bool(getattr(impl, "_static_runtime_fixed_sizing", True))
-
+    # Sizing is always static (2026-10 cleanup, X4); explicit caps are kept as
+    # given.
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=4_000_000, backend="gpu"
     )
@@ -70,17 +68,3 @@ def test_static_fixed_sizing_honors_oversized_explicit_traversal():
     assert int(tc.max_neighbors_per_leaf) == requested.max_neighbors_per_leaf
     # ...definitely not pulled down to the streamed ceiling.
     assert int(tc.max_pair_queue) > _CEILING_PAIR_QUEUE
-
-
-def test_adaptive_sizing_still_caps_oversized_explicit_traversal():
-    # With static sizing OFF the adaptive path still bounds an explicit config to
-    # the ceiling (the memory-safety behavior is preserved there).
-    impl = _impl(_oversized())
-    impl._static_runtime_fixed_sizing = False
-
-    overrides = impl._resolve_runtime_execution_overrides(
-        num_particles=2_097_152, backend="gpu"
-    )
-    tc = overrides.traversal_config
-    assert tc is not None
-    assert int(tc.max_pair_queue) <= _CEILING_PAIR_QUEUE

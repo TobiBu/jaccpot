@@ -458,73 +458,50 @@ def test_large_n_accel_only_prepared_bucketed_matches_generic():
     )
 
 
+# `JACCPOT_LARGE_N_TARGET_OWNED_ACCUM`, `..._TARGET_OWNED_ACCUM_V2` and
+# `..._TARGET_LEAF_NEIGHBOR_BLOCK_SIZE` are read nowhere; their settings were
+# dropped in the 2026-10 cleanup (X4). That left the `target_owned_accum_v2` case
+# identical to `target_leaf_batch_size` (formerly `target_owned_accum`), so it
+# went as a duplicate.
 _ACCEL_ONLY_PARITY_CASES = {
     "delayed_scatter_chunking": (
         {"JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1"},
         {"JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2"},
     ),
-    "target_owned_accum": (
-        {"JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0"},
-        {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "1",
-            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE": "2",
-            "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE": "2",
-        },
+    "target_leaf_batch_size": (
+        {},
+        {"JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE": "2"},
     ),
     "sorted_scatter_hint": (
-        {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
-            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "0",
-        },
-        {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
-            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "1",
-        },
+        {"JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "0"},
+        {"JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "1"},
     ),
     "grouped_sorted_scatter": (
         {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
             "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "0",
             "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER": "0",
         },
         {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
             "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "1",
             "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER": "1",
         },
     ),
-    "target_owned_accum_v2": (
-        {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2": "0",
-        },
-        {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "1",
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM_V2": "1",
-            "JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE": "2",
-            "JACCPOT_LARGE_N_TARGET_LEAF_NEIGHBOR_BLOCK_SIZE": "2",
-        },
-    ),
     "superchunk_target_reduce": (
         {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
             "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2",
             "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE": "0",
         },
         {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
             "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2",
             "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE": "1",
         },
     ),
     "disable_chunk_cond": (
         {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
             "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1",
             "JACCPOT_LARGE_N_DISABLE_CHUNK_COND": "0",
         },
         {
-            "JACCPOT_LARGE_N_TARGET_OWNED_ACCUM": "0",
             "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1",
             "JACCPOT_LARGE_N_DISABLE_CHUNK_COND": "1",
         },

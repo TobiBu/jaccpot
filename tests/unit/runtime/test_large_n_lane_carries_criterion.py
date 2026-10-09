@@ -105,19 +105,16 @@ def test_the_lane_still_refuses_the_folded_angle_mode(_pretend_gpu):
     geometric MAC at the solver's ``theta``, which paper mode pins at 1.0 -- so
     acceptance would be wildly loose, not merely different.
 
-    It raises rather than declining quietly, and under the production preset that
-    is the only possible outcome: ``_apply_large_n_gpu_production_contract`` pins
-    ``runtime_path="large_n"``, which turns every decline into an explicit
-    request. The reason is still recorded first, for
-    ``get_runtime_diagnostics()``.
+    It raises rather than declining quietly: the ``large_n_gpu`` preset is what
+    selects this lane, so a decline would be a silent fallback rather than an
+    error. (It used to raise only under an explicit ``runtime_path="large_n"``,
+    which the preset's contract pinned anyway; since the 2026-10 cleanup, X4, the
+    lane is gated on the preset alone and raises unconditionally.) The reason is
+    still recorded first, for ``get_runtime_diagnostics()``.
     """
 
     fmm = _large_n_solver("dehnen_theta")
     engine = getattr(fmm, "_impl", fmm)
-    assert str(engine.runtime_path) == "large_n", (
-        "the large_n_gpu preset no longer pins runtime_path, so a decline here "
-        "would be a silent fallback rather than an error"
-    )
     with pytest.raises(RuntimeError, match="dehnen_theta"):
         _gate(fmm)
     assert (

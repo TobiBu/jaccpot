@@ -639,143 +639,6 @@ class StrictRunMixin(_EngineBase):
             self._refresh_timing_evaluate_seconds += time.perf_counter() - evaluate_t0
         return next_state, acc
 
-    def strict_run_segmented(
-        self,
-        *,
-        state: Any,
-        masses: Array,
-        num_steps: int,
-        refresh_every: int,
-        segment_runner: Callable[[Any, Array, int], tuple[Any, Any]],
-        positions_getter: Callable[[Any], Array],
-        prepared_state: Optional[PreparedStateLike] = None,
-        leaf_size: int = 16,
-        max_order: int = 2,
-        theta: Optional[float] = None,
-        jit_traversal: Optional[bool] = True,
-        rematerialize_fn: Optional[Callable[[Any], Any]] = None,
-        collect_history: bool = False,
-    ) -> tuple[Any, PreparedStateLike, Optional[list[Any]]]:
-        """Run strict refresh/evaluate cadence with caller-provided segment runner.
-
-        The integrator-agnostic runner: it owns only the refresh cadence, and the
-        caller supplies the stepping. ``num_steps`` is cut into segments of
-        ``refresh_every`` plus a tail, the state is refreshed at each boundary,
-        and ``segment_runner`` advances the caller's own state within a segment.
-        Use :meth:`strict_run_v2` instead when the integrator is velocity Verlet
-        over a raw array.
-
-        Parameters
-        ----------
-        state : Any
-            The caller's integrator state, opaque here: it is only passed to
-            ``segment_runner`` and ``positions_getter``.
-        masses : Array
-            Particle masses ``[N]``.
-        num_steps : int
-            Total steps. Must be positive.
-        refresh_every : int
-            Steps per segment. Must be positive.
-        segment_runner : Callable[[Any, Array, int], tuple[Any, Any]]
-            ``(state, accelerations, num_steps) -> (next_state, output)``. The
-            output is collected only under ``collect_history``.
-        positions_getter : Callable[[Any], Array]
-            Extracts ``[N, 3]`` positions from the caller's state, so the refresh
-            knows where the particles are.
-        prepared_state : Optional[PreparedStateLike]
-            Existing state to refresh, or ``None`` to prepare on the first
-            segment.
-        leaf_size : int
-            Target maximum particles per leaf.
-        max_order : int
-            Expansion order ``p``.
-        theta : Optional[float]
-            Per-call MAC opening-angle override.
-        jit_traversal : Optional[bool]
-            Per-call override of jitted traversal.
-        rematerialize_fn : Optional[Callable[[Any], Any]]
-            Applied to the state between segments, for callers that must rebuild
-            device arrays across a refresh.
-        collect_history : bool
-            Accumulate each segment's output. Off by default because the history
-            is retained on device.
-
-        Returns
-        -------
-        tuple[Any, PreparedStateLike, Optional[list[Any]]]
-            ``(final_state, prepared_state, history)``; ``history`` is ``None``
-            unless ``collect_history``.
-
-        Raises
-        ------
-        ValueError
-            If ``num_steps`` or ``refresh_every`` is not positive.
-        """
-        if int(num_steps) <= 0:
-            raise ValueError("num_steps must be positive")
-        if int(refresh_every) <= 0:
-            raise ValueError("refresh_every must be positive")
-
-        num_steps_i = int(num_steps)
-        refresh_every_i = int(refresh_every)
-        full_segments = num_steps_i // refresh_every_i
-        tail_segment = num_steps_i % refresh_every_i
-
-        state_curr = state
-        prepared_curr = prepared_state
-        history: Optional[list[Any]] = [] if collect_history else None
-        runtime_overrides_cached = self._resolve_runtime_execution_overrides(
-            num_particles=int(jnp.asarray(masses).shape[0]),
-        )
-
-        for _ in range(full_segments):
-            positions_curr = positions_getter(state_curr)
-            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
-                prepared_curr,
-                positions_curr,
-                masses,
-                leaf_size=int(leaf_size),
-                max_order=int(max_order),
-                theta=theta,
-                jit_traversal=jit_traversal,
-                runtime_overrides=runtime_overrides_cached,
-                fused_device_mode=bool(self._strict_fused_mode_active),
-            )
-            state_curr, seg_hist = segment_runner(
-                state_curr,
-                jnp.asarray(acc_self),
-                int(refresh_every_i),
-            )
-            if rematerialize_fn is not None:
-                state_curr = rematerialize_fn(state_curr)
-            if history is not None:
-                history.append(seg_hist)
-
-        if tail_segment > 0:
-            positions_curr = positions_getter(state_curr)
-            prepared_curr, acc_self = self.strict_prepare_refresh_and_evaluate(
-                prepared_curr,
-                positions_curr,
-                masses,
-                leaf_size=int(leaf_size),
-                max_order=int(max_order),
-                theta=theta,
-                jit_traversal=jit_traversal,
-                runtime_overrides=runtime_overrides_cached,
-                fused_device_mode=bool(self._strict_fused_mode_active),
-            )
-            state_curr, seg_hist = segment_runner(
-                state_curr,
-                jnp.asarray(acc_self),
-                int(tail_segment),
-            )
-            if rematerialize_fn is not None:
-                state_curr = rematerialize_fn(state_curr)
-            if history is not None:
-                history.append(seg_hist)
-
-        return state_curr, prepared_curr, history
-
     def strict_run_v2(
         self,
         *,
@@ -812,9 +675,9 @@ class StrictRunMixin(_EngineBase):
         stalled. It does not touch the scan carry and is independent of
         ``return_history``.
 
-        Endpoint-correct velocity Verlet, run device-resident. Unlike
-        :meth:`strict_run_segmented` the integrator is fixed and the state is a
-        raw array, which is what lets the whole loop live inside one scan.
+        Endpoint-correct velocity Verlet, run device-resident. The integrator is
+        fixed and the state is a raw array, which is what lets the whole loop
+        live inside one scan.
 
         ``refresh_every`` must be 1: endpoint correctness needs the self-gravity
         refreshed at every step, so any other value is rejected rather than
@@ -2409,10 +2272,7 @@ class StrictRunMixin(_EngineBase):
         mac_type_val = self._base_mac_type()
 
         tree_config = self.config.tree
-        if self.tree_type != "radix" and tree_config.mode in (
-            "fixed_depth",
-            "static_radix",
-        ):
+        if self.tree_type != "radix" and tree_config.mode == "static_radix":
             tree_config = TreeBuilderConfig(
                 mode="lbvh",
                 target_leaf_particles=tree_config.target_leaf_particles,
@@ -2823,16 +2683,6 @@ class StrictRunMixin(_EngineBase):
                 max_order=int(max_order),
             )
             self._recent_retry_events = tuple(collected_retries)
-            self._record_strict_cap_profile_from_retries(
-                self._recent_retry_events,
-                context_key=self._strict_cap_profile_context_key(
-                    tree_mode=str(tree_artifacts.tree_mode),
-                    leaf_parameter=int(tree_artifacts.leaf_parameter),
-                    particle_count=int(
-                        jnp.asarray(tree_artifacts.positions_sorted).shape[0]
-                    ),
-                ),
-            )
             self._topology_reuse_entry = _TopologyReuseEntry(
                 key=str(refresh_topology_key),
                 tree=tree_artifacts.tree,
@@ -2952,146 +2802,3 @@ class StrictRunMixin(_EngineBase):
             )
         except Exception:
             return False
-
-    def update_multipoles_only(
-        self,
-        prepared_state: PreparedStateLike,
-        positions: Array,
-        masses: Array,
-        *,
-        leaf_size: Optional[int] = None,
-        max_order: Optional[int] = None,
-        theta: Optional[float] = None,
-    ) -> PreparedStateLike:
-        """Refresh multipole/local payloads when topology key remains unchanged.
-
-        A :meth:`refresh_prepared_state` under a different name and its own
-        diagnostic counter, for the case where the caller knows the tree mapping
-        still holds. It takes no ``bounds``, since changing the domain would
-        change that mapping. Large-N production profile only.
-
-        Parameters
-        ----------
-        prepared_state : PreparedStateLike
-            State whose payloads are refreshed.
-        positions : Array
-            New particle positions ``[N, 3]``.
-        masses : Array
-            New particle masses ``[N]``.
-        leaf_size : Optional[int]
-            Leaf target; ``None`` keeps the state's own.
-        max_order : Optional[int]
-            Expansion order; ``None`` keeps the state's own.
-        theta : Optional[float]
-            Opening angle; ``None`` keeps the state's own.
-
-        Returns
-        -------
-        PreparedStateLike
-            The refreshed state.
-
-        Raises
-        ------
-        NotImplementedError
-            If the profile is not large-N production, or the state is not a
-            ``LargeNPreparedState``.
-        RuntimeError
-            If the refresh could not preserve the topology mapping the caller
-            asserted was unchanged.
-        """
-        if not self._is_large_n_gpu_production_profile():
-            raise NotImplementedError(
-                "update_multipoles_only is currently supported only for "
-                "preset='large_n_gpu', tree_type='radix', expansion_basis='solidfmm'."
-            )
-        if not isinstance(prepared_state, LargeNPreparedState):
-            raise NotImplementedError(
-                "update_multipoles_only currently supports LargeNPreparedState only."
-            )
-        self._compiled_profile_multipoles_only_calls += 1
-        refreshed = self.refresh_prepared_state(
-            prepared_state,
-            positions,
-            masses,
-            leaf_size=leaf_size,
-            max_order=max_order,
-            theta=theta,
-        )
-        if getattr(refreshed, "topology_key", None) != getattr(
-            prepared_state, "topology_key", None
-        ):
-            raise RuntimeError(
-                "Topology changed during update_multipoles_only; "
-                "use rebuild_topology_in_place for topology updates."
-            )
-        return refreshed
-
-    def rebuild_topology_in_place(
-        self,
-        prepared_state: PreparedStateLike,
-        positions: Array,
-        masses: Array,
-        *,
-        bounds: Optional[Tuple[Array, Array]] = None,
-        leaf_size: Optional[int] = None,
-        max_order: Optional[int] = None,
-        theta: Optional[float] = None,
-    ) -> PreparedStateLike:
-        """Rebuild topology while attempting to remain profile-capacity compatible.
-
-        The third face of :meth:`refresh_prepared_state`: same call, its own
-        counter, and ``bounds`` forwarded because a rebuild may legitimately
-        change the domain.
-
-        "In place" names the intent to stay within the compiled profile's
-        capacities so the existing executables keep applying -- NOT mutation. A
-        new state is returned and the input is untouched. Large-N production
-        profile only.
-
-        Parameters
-        ----------
-        prepared_state : PreparedStateLike
-            State whose topology is rebuilt.
-        positions : Array
-            New particle positions ``[N, 3]``.
-        masses : Array
-            New particle masses ``[N]``.
-        bounds : Optional[Tuple[Array, Array]]
-            Explicit ``(lower, upper)`` domain bounds.
-        leaf_size : Optional[int]
-            Leaf target; ``None`` keeps the state's own.
-        max_order : Optional[int]
-            Expansion order; ``None`` keeps the state's own.
-        theta : Optional[float]
-            Opening angle; ``None`` keeps the state's own.
-
-        Returns
-        -------
-        PreparedStateLike
-            The rebuilt state.
-
-        Raises
-        ------
-        NotImplementedError
-            If the profile is not large-N production, or the state is not a
-            ``LargeNPreparedState``.
-        """
-        if not self._is_large_n_gpu_production_profile():
-            raise NotImplementedError(
-                "rebuild_topology_in_place is currently supported only for "
-                "preset='large_n_gpu', tree_type='radix', expansion_basis='solidfmm'."
-            )
-        if not isinstance(prepared_state, LargeNPreparedState):
-            raise NotImplementedError(
-                "rebuild_topology_in_place currently supports LargeNPreparedState only."
-            )
-        self._compiled_profile_topology_rebuild_calls += 1
-        return self.refresh_prepared_state(
-            prepared_state,
-            positions,
-            masses,
-            bounds=bounds,
-            leaf_size=leaf_size,
-            max_order=max_order,
-            theta=theta,
-        )

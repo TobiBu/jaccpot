@@ -50,7 +50,6 @@ def test_large_n_fast_lane_legacy_opt_out_env_is_noop(monkeypatch):
 def test_large_n_accel_eval_requires_fast_lane_state(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
 
     key = jax.random.PRNGKey(7)
     pos_key, mass_key = jax.random.split(key)

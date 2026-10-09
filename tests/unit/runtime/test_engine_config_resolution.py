@@ -5,19 +5,12 @@ numerics-sensitive *"(resolution order)"*. Almost all of it now delegates to
 ``_resolve_*`` helpers; one inline block was left, and this module characterises
 it **before** it moves, so the extraction has something to be verified against.
 
-The order-sensitivity is real and it is in this block:
+The order-sensitivity this block had was one option reading another:
+``autotune_m2l_chunk`` read ``self.fail_fast`` two lines after it was set, and
+was forced off by it. The M2L chunk autotune went in the 2026-10 cleanup (X4),
+and with it that interaction and the class that pinned it.
 
-    self.fail_fast = bool(fail_fast)
-    self.autotune_m2l_chunk = bool(autotune_m2l_chunk) and not self.fail_fast
-
-``autotune_m2l_chunk`` reads ``self.fail_fast`` two lines after it is set. Swap
-the two, or split them into different helpers called in the wrong order, and
-``autotune_m2l_chunk`` silently stays on under ``fail_fast`` -- which would put a
-timing-driven chunk search inside the lane whose entire purpose is to fail rather
-than adapt. Nothing else in the constructor would complain. That interaction is
-pinned below, in both directions.
-
-The rest is validate-and-assign: three lane strings, two positive-integer
+What is left is validate-and-assign: three lane strings, two positive-integer
 guards, and the ``_explicit_*`` flags that record whether the caller named a
 value or accepted the default -- a distinction the policy layer later reads, so
 "auto" and an explicit "auto" are not the same state.
@@ -76,27 +69,6 @@ def _engine(**kwargs):
     if nearfield:
         base["nearfield"] = NearFieldConfig(**nearfield)
     return FMMEngine(**base)
-
-
-class TestTheFailFastAutotuneInteraction:
-    """The one place in this block where one option reads another."""
-
-    def test_fail_fast_forces_the_autotune_off(self):
-        """Even when the caller explicitly asked for it.
-
-        The strict lane exists to fail rather than adapt; a timing-driven chunk
-        search inside it would be adapting.
-        """
-        engine = _engine(fail_fast=True, autotune_m2l_chunk=True)
-        assert engine.fail_fast is True
-        assert engine.autotune_m2l_chunk is False
-
-    def test_without_fail_fast_the_request_is_honoured(self):
-        engine = _engine(fail_fast=False, autotune_m2l_chunk=True)
-        assert engine.autotune_m2l_chunk is True
-
-    def test_not_requesting_it_leaves_it_off(self):
-        assert _engine(autotune_m2l_chunk=False).autotune_m2l_chunk is False
 
 
 class TestLaneModeNormalisation:

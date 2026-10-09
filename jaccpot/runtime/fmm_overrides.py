@@ -31,12 +31,8 @@ from .fmm_constants import (
     _GPU_MINIMUM_MEMORY_PROCESS_BLOCK,
     _JIT_TREE_CPU_SMALL_N_MAX,
     _KDTREE_DEFAULT_TRAVERSAL_CONFIG,
-    _LARGE_CPU_M2L_CHUNK_SIZE,
     _LARGE_CPU_PARTICLE_THRESHOLD,
-    _LARGE_CPU_TRAVERSAL_CONFIG,
     _LARGE_N_GPU_BASELINE_NEARFIELD_MAX_PARTICLES,
-    _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE,
-    _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE,
     _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_LARGE,
     _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_MEDIUM,
     _NEARFIELD_BUCKETED_CPU_EDGE_CHUNK_XL,
@@ -380,17 +376,16 @@ class OverridesMixin(_EngineBase):
         n_particles: int,
         minimum_memory: bool,
         production_large_n: bool,
-        honor_explicit_traversal: bool = False,
     ) -> Optional[DualTreeTraversalConfig]:
         """Apply the deterministic GPU traversal memory-safety caps.
 
         These caps are closed-form in ``num_particles`` (no count-pass kernel):
         they bound the streamed GPU traversal buffers on the minimum-memory /
-        large-N production lane. They are *memory-safety* clamps, not adaptive
-        performance rewrites, so they must apply even under static fixed sizing
-        -- otherwise an oversized preset/explicit seed (e.g. the large_n_gpu
-        262144 pair-queue default) reaches the GPU traversal build unclamped and
-        inflates device-memory footprint (a minimum-memory OOM regression).
+        large-N production lane. They are *memory-safety* clamps, not sizing
+        decisions, so they apply under static sizing -- otherwise an oversized
+        preset seed (e.g. the large_n_gpu 262144 pair-queue default) reaches the
+        GPU traversal build unclamped and inflates device-memory footprint (a
+        minimum-memory OOM regression).
 
         Parameters
         ----------
@@ -405,10 +400,6 @@ class OverridesMixin(_EngineBase):
             ceilings.
         production_large_n : bool
             Whether this is the large-N production lane.
-        honor_explicit_traversal : bool
-            Whether a caller-supplied config should otherwise be left alone.
-            Note these are memory-SAFETY clamps, so per the paragraph above they
-            still apply where an adaptive performance rewrite would not.
 
         Returns
         -------
@@ -496,20 +487,19 @@ class OverridesMixin(_EngineBase):
         if (
             production_large_n
             and backend_name == "gpu"
-            and not (self._explicit_traversal_config and honor_explicit_traversal)
+            and not self._explicit_traversal_config
             and traversal_config is not None
         ):
             # Bound the production large-N radix traversal to the streamed
             # minimum-memory ceiling so an oversized *preset* seed cannot inflate the
-            # device footprint. But when the caps were supplied EXPLICITLY and the
-            # caller is in static fixed-sizing mode (``honor_explicit_traversal``),
-            # pass them through unclamped: static sizing means "use the sizes I gave
-            # you", and this ceiling is a fixed constant (524288 pair-queue) far below
-            # the frontier a concentrated multi-million-particle disk needs -- clamping
+            # device footprint. But when the caps were supplied EXPLICITLY, pass them
+            # through unclamped: static sizing means "use the sizes I gave you", and
+            # this ceiling is a fixed constant (524288 pair-queue) far below the
+            # frontier a concentrated multi-million-particle disk needs -- clamping
             # an explicit cap there turned a deliberate, memory-fitting override into a
             # fail-fast traversal overflow at N >= ~2M on >=40 GB GPUs. Auto-sized
-            # (non-explicit) preset seeds are still bounded here, and the adaptive path
-            # (static sizing off) still clamps explicit caps for adaptive memory mgmt.
+            # (non-explicit) preset seeds are still bounded here. (Adaptive sizing,
+            # which clamped explicit caps too, went in the 2026-10 cleanup, X4.)
             explicit_ceiling = _minimum_memory_streamed_gpu_traversal_ceiling(
                 num_particles=n_particles
             )
@@ -585,39 +575,38 @@ class OverridesMixin(_EngineBase):
         num_particles: int,
         backend: Optional[str] = None,
     ) -> _RuntimeExecutionOverrides:
-        """Resolve adaptive runtime traversal/chunk settings.
+        """Resolve the runtime traversal/chunk settings for this particle count.
 
-        Runs the adaptive policy for this particle count and backend and returns
-        the whole knob set as one value. Check ``adaptive_applied`` on the result
-        before taking the override path: ``False`` means every field equals the
-        engine's own setting, so there is nothing to apply.
+        Sizing is static: the traversal and chunk knobs keep their
+        constructor/preset values, apart from the deterministic GPU memory-safety
+        caps of :meth:`_clamp_gpu_traversal_config_for_memory` and the caller's
+        field-by-field traversal overrides, which are merged last. Adaptive sizing
+        (``JACCPOT_STATIC_RUNTIME_FIXED_SIZING=0``: a large-CPU traversal and M2L
+        chunk for the fast preset, clamped explicit caps, the minimum-memory M2L
+        chunk) went in the 2026-10 cleanup (X4); static had been the default.
 
         Parameters
         ----------
         num_particles : int
-            Particle count the policy decides on.
+            Particle count the memory-safety caps are expressed in.
         backend : Optional[str]
             Backend name; ``None`` asks JAX for the default.
 
         Returns
         -------
         _RuntimeExecutionOverrides
-            Traversal config, chunk sizes, far-field and centre modes, the
-            refine-local override, and the ``adaptive_applied`` flag.
+            Traversal config, chunk sizes, far-field and centre modes, and the
+            refine-local override.
         """
 
         traversal_config = self.traversal_config
         m2l_chunk_size = self.m2l_chunk_size
         l2l_chunk_size = self.l2l_chunk_size
         refine_local_override: Optional[bool] = None
-        adaptive_applied = False
 
         backend_name = jax.default_backend() if backend is None else str(backend)
         n_particles = int(num_particles)
         production_large_n = self._is_large_n_gpu_production_profile()
-        static_runtime_fixed_sizing = bool(
-            getattr(self, "_static_runtime_fixed_sizing", True)
-        )
         minimum_memory = self.memory_objective == "minimum_memory" or production_large_n
         large_cpu = (
             backend_name == "cpu" and n_particles >= _LARGE_CPU_PARTICLE_THRESHOLD
@@ -649,57 +638,14 @@ class OverridesMixin(_EngineBase):
         # went in the 2026-10 cleanup (X3), and with them the policy's auto-enable
         # of grouping (fast preset at large CPU N, fast / large_n_gpu at large GPU
         # N) and the geometric-centre knob of the large-N fast lane.
-        if static_runtime_fixed_sizing:
-            # Static sizing mode: keep traversal/chunk execution knobs fixed to
-            # constructor/global-input values and skip adaptive runtime rewrites.
-            # Deterministic GPU memory-safety traversal caps are NOT adaptive
-            # rewrites -- they bound the streamed GPU traversal buffers on the
-            # minimum-memory / large-N production lane and must still apply here,
-            # otherwise an oversized *preset* seed reaches the GPU build unclamped
-            # and inflates device memory (a minimum-memory OOM regression). Static
-            # fixed sizing keeps EXPLICIT caps as-given (honor_explicit_traversal),
-            # so a caller who sized the traversal for their GPU is not clamped into
-            # a fail-fast overflow at large N.
-            traversal_config = self._clamp_gpu_traversal_config_for_memory(
-                traversal_config=traversal_config,
-                backend_name=backend_name,
-                n_particles=n_particles,
-                minimum_memory=minimum_memory,
-                production_large_n=production_large_n,
-                honor_explicit_traversal=True,
-            )
-            # Last, after every clamp: see the matching call on the adaptive
-            # return below. Both exits of this method must merge, or which
-            # capacities a caller's override reaches would depend on
-            # JACCPOT_STATIC_RUNTIME_FIXED_SIZING.
-            traversal_config = self._apply_traversal_field_overrides(traversal_config)
-            return _RuntimeExecutionOverrides(
-                traversal_config=traversal_config,
-                m2l_chunk_size=m2l_chunk_size,
-                l2l_chunk_size=l2l_chunk_size,
-                farfield_mode="pair_grouped",
-                center_mode="com",
-                refine_local_override=refine_local_override,
-                adaptive_applied=False,
-            )
-
-        if (
-            self.preset == "fast"
-            and self.expansion_basis == "solidfmm"
-            and self.mac_type == "dehnen"
-            and self.tree_type == "radix"
-            and large_cpu
-            and not self._explicit_traversal_config
-            and not self._explicit_max_pair_queue
-            and not self._explicit_pair_process_block
-        ):
-            traversal_config = _LARGE_CPU_TRAVERSAL_CONFIG
-            adaptive_applied = True
-
-            if not self._explicit_m2l_chunk_size:
-                m2l_chunk_size = _LARGE_CPU_M2L_CHUNK_SIZE
-            if not self._explicit_l2l_chunk_size:
-                l2l_chunk_size = self.l2l_chunk_size
+        #
+        # Deterministic GPU memory-safety traversal caps are not sizing decisions
+        # -- they bound the streamed GPU traversal buffers on the minimum-memory /
+        # large-N production lane, otherwise an oversized *preset* seed reaches the
+        # GPU build unclamped and inflates device memory (a minimum-memory OOM
+        # regression). EXPLICIT caps are kept as given, so a caller who sized the
+        # traversal for their GPU is not clamped into a fail-fast overflow at
+        # large N.
         traversal_config = self._clamp_gpu_traversal_config_for_memory(
             traversal_config=traversal_config,
             backend_name=backend_name,
@@ -710,14 +656,6 @@ class OverridesMixin(_EngineBase):
         # Last, after every clamp: a capacity the caller named explicitly wins,
         # and one they did not name keeps the value resolved above for this N.
         traversal_config = self._apply_traversal_field_overrides(traversal_config)
-
-        if minimum_memory and not self._explicit_m2l_chunk_size:
-            m2l_chunk_size = (
-                _MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE
-                if backend_name == "gpu"
-                else _MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE
-            )
-
         return _RuntimeExecutionOverrides(
             traversal_config=traversal_config,
             m2l_chunk_size=m2l_chunk_size,
@@ -725,7 +663,6 @@ class OverridesMixin(_EngineBase):
             farfield_mode="pair_grouped",
             center_mode="com",
             refine_local_override=refine_local_override,
-            adaptive_applied=adaptive_applied,
         )
 
     def _resolve_tracing_traversal_config(

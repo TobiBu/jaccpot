@@ -78,7 +78,6 @@ STAGE_TREE: dict[str, tuple[str, ...]] = {
         "dual_raw_combined",
         "dual_split_dense_buffers",
         "dual_far_pair_plan",
-        "dual_m2l_autotune",
         "dual_select_interactions",
         "dual_downward_compute",
         "dual_finalize",

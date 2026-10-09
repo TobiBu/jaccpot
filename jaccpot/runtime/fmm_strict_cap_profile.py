@@ -1,19 +1,23 @@
 """StrictCapProfileMixin: fmm_strict_cap_profile methods extracted from the FMMEngine
 god-class (Phase 2d mixin split). Methods are verbatim (self unchanged); the
 engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
+
+What is left are the compiled-profile fingerprints (shape summaries for the
+compile-reuse diagnostics) and the fused lane's ``PROFILE_SET`` gate. The on-disk
+strict cap profile (``JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH``, by default
+``/tmp/jaccpot_static_strict_caps.json``), which the strict lanes read to widen
+their traversal caps and wrote after every retry, went in the 2026-10 cleanup
+(X4): a run's caps no longer depend on what an earlier run left in that file.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
-from beartype.typing import Tuple
-from yggdrax.interactions import DualTreeRetryEvent
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
@@ -34,153 +38,6 @@ __all__ = [
 
 
 class StrictCapProfileMixin(_EngineBase):
-    def _strict_cap_profile_path(self) -> str:
-        return str(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH",
-                "/tmp/jaccpot_static_strict_caps.json",
-            )
-        )
-
-    def _strict_cap_profile_context_key(
-        self,
-        *,
-        tree_mode: str,
-        leaf_parameter: int,
-        particle_count: int,
-    ) -> str:
-        return (
-            f"tree_mode={str(tree_mode).strip().lower()}|"
-            f"leaf={int(leaf_parameter)}|n={int(particle_count)}"
-        )
-
-    def _maybe_load_strict_cap_profile(
-        self, *, context_key: Optional[str] = None
-    ) -> None:
-        if self._strict_profile_loaded_once:
-            if context_key is not None:
-                self._apply_strict_cap_profile_for_key(context_key=context_key)
-            return
-        self._strict_profile_loaded_once = True
-        try:
-            path = self._strict_cap_profile_path()
-            if not os.path.exists(path):
-                return
-            payload = json.load(open(path, "r", encoding="utf-8"))
-            if isinstance(payload, dict) and isinstance(payload.get("profiles"), dict):
-                self._strict_profile_catalog = {
-                    str(k): {
-                        "max_pair_queue": int(v.get("max_pair_queue", 0) or 0),
-                        "pair_process_block": int(v.get("pair_process_block", 0) or 0),
-                    }
-                    for k, v in payload["profiles"].items()
-                    if isinstance(v, dict)
-                }
-            else:
-                # Backward compatibility with the original single-profile payload.
-                q = int(payload.get("max_pair_queue", 0) or 0)
-                b = int(payload.get("pair_process_block", 0) or 0)
-                self._strict_profile_catalog = {
-                    "legacy_default": {
-                        "max_pair_queue": q,
-                        "pair_process_block": b,
-                    }
-                }
-            if context_key is not None:
-                self._apply_strict_cap_profile_for_key(context_key=context_key)
-            elif len(self._strict_profile_catalog) > 0:
-                # Preserve previous behavior when no context is supplied.
-                self._apply_strict_cap_profile_for_key(context_key="legacy_default")
-        except Exception:
-            return
-
-    def _apply_strict_cap_profile_for_key(self, *, context_key: str) -> None:
-        selected_key = ""
-        selected = self._strict_profile_catalog.get(context_key)
-        if selected is not None:
-            selected_key = context_key
-        else:
-            # Conservative fallback: keep same tree_mode+leaf and pick the largest queue.
-            prefix = "|".join(str(context_key).split("|")[:2])
-            best_q = 0
-            best_entry: Optional[dict[str, int]] = None
-            best_key = ""
-            for key, entry in self._strict_profile_catalog.items():
-                if not str(key).startswith(prefix):
-                    continue
-                q = int(entry.get("max_pair_queue", 0) or 0)
-                if q >= best_q:
-                    best_q = q
-                    best_entry = entry
-                    best_key = str(key)
-            if best_entry is not None:
-                selected = best_entry
-                selected_key = best_key
-            else:
-                selected = self._strict_profile_catalog.get("legacy_default")
-                selected_key = "legacy_default" if selected is not None else ""
-        if selected is None:
-            return
-        q = int(selected.get("max_pair_queue", 0) or 0)
-        b = int(selected.get("pair_process_block", 0) or 0)
-        if q > 0:
-            self._strict_profiled_max_pair_queue = q
-        if b > 0:
-            self._strict_profiled_pair_process_block = b
-        if selected_key:
-            self._strict_profiled_context_key = selected_key
-
-    def _record_strict_cap_profile_from_retries(
-        self,
-        retry_events: Tuple[DualTreeRetryEvent, ...],
-        *,
-        context_key: Optional[str] = None,
-    ) -> None:
-        if len(retry_events) == 0:
-            return
-        max_queue = int(self._strict_profiled_max_pair_queue)
-        max_block = int(self._strict_profiled_pair_process_block)
-        for ev in retry_events:
-            try:
-                q = int(getattr(ev, "queue_capacity", 0) or 0)
-            except Exception:
-                q = 0
-            if q > max_queue:
-                max_queue = q
-        block_hint = int(self.pair_process_block or 0)
-        if block_hint > max_block:
-            max_block = block_hint
-        if max_queue <= 0 and max_block <= 0:
-            return
-        self._strict_profiled_max_pair_queue = max_queue
-        self._strict_profiled_pair_process_block = max_block
-        if context_key is not None:
-            self._strict_profiled_context_key = str(context_key)
-            existing = self._strict_profile_catalog.get(str(context_key), {})
-            self._strict_profile_catalog[str(context_key)] = {
-                "max_pair_queue": max(
-                    int(existing.get("max_pair_queue", 0) or 0),
-                    int(max_queue),
-                ),
-                "pair_process_block": max(
-                    int(existing.get("pair_process_block", 0) or 0),
-                    int(max_block),
-                ),
-            }
-        if not bool(getattr(self, "_strict_cap_record_enabled", True)):
-            return
-        try:
-            path = self._strict_cap_profile_path()
-            payload = {
-                "version": 2,
-                "active_context_key": str(self._strict_profiled_context_key),
-                "profiles": self._strict_profile_catalog,
-            }
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle)
-        except Exception:
-            return
-
     def _compiled_profile_from_prepared_state(
         self,
         state: PreparedStateLike,

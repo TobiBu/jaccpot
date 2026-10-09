@@ -19,10 +19,6 @@ from jaccpot._env import env_flag, env_int
 
 __all__: list[str] = []
 
-_MINIMUM_MEMORY_GPU_M2L_CHUNK_SIZE = 1024
-_MINIMUM_MEMORY_CPU_M2L_CHUNK_SIZE = 4096
-
-
 _LARGE_CPU_PARTICLE_THRESHOLD = 65536
 # Bucketed near-field becomes beneficial on CPU at moderate N for the
 # current fast/solidfmm path; keep threshold above tiny-N crossover noise.
@@ -34,7 +30,6 @@ _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP = 16_000_000
 _NEARFIELD_SCATTER_SCHEDULE_ITEM_CAP_GPU = 4_000_000
 _NEARFIELD_GPU_PRECOMPUTE_MAX_PARTICLES = 65_536
 _NEARFIELD_SCATTER_SCHEDULE_INT32_ITEM_LIMIT = np.iinfo(np.int32).max
-_LARGE_CPU_M2L_CHUNK_SIZE = 32768
 
 #: N at or below which the CPU tree build is left un-jitted by
 #: ``jit_tree="auto"``. Tracing the build costs more than it saves for small and
@@ -90,12 +85,6 @@ _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK = 256
 _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_INTERACTIONS_PER_NODE = 8_192
 _GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_NEIGHBORS_PER_LEAF = 4_096
 _LEGACY_STATIC_TRAVERSAL_INT32_ITEM_LIMIT = np.iinfo(np.int32).max
-_LARGE_CPU_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
-    max_pair_queue=131072,
-    process_block=4096,
-    max_interactions_per_node=65536,
-    max_neighbors_per_leaf=32768,
-)
 _KDTREE_DEFAULT_TRAVERSAL_CONFIG = DualTreeTraversalConfig(
     max_pair_queue=65536,
     process_block=64,

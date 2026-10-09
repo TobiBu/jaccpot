@@ -74,59 +74,9 @@ def _read_large_n_env_config() -> dict[str, Any]:
             return int(raw_value)
         return int(min(options, key=lambda v: (abs(v - raw_value), v)))
 
-    overflow_profile_headroom_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_HEADROOM",
-        "2.0",
-    )
-    try:
-        overflow_profile_headroom = max(1.0, float(overflow_profile_headroom_raw))
-    except Exception:
-        overflow_profile_headroom = 2.0
-    overflow_profile_caps_raw = os.environ.get(
-        "JACCPOT_LARGE_N_OVERFLOW_PROFILE_CAP_OPTIONS",
-        "64,128,256,512,1024,2048,4096,8192,16384,32768,65536",
-    )
-    overflow_profile_caps: list[int] = []
-    for token in str(overflow_profile_caps_raw).split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except Exception:
-            continue
-        if value > 0 and value not in overflow_profile_caps:
-            overflow_profile_caps.append(value)
-    overflow_profile_caps = sorted(overflow_profile_caps)
-    if not overflow_profile_caps:
-        overflow_profile_caps = [64, 128, 256, 512, 1024]
-
-    neighbor_profile_headroom_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_HEADROOM",
-        "1.0",
-    )
-    try:
-        neighbor_profile_headroom = max(1.0, float(neighbor_profile_headroom_raw))
-    except Exception:
-        neighbor_profile_headroom = 1.0
-    neighbor_profile_caps_raw = os.environ.get(
-        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_CAP_OPTIONS",
-        "4096,8192,12288,16384,20480,24576,28672,32768,49152,65536,98304,131072",
-    )
-    neighbor_profile_caps: list[int] = []
-    for token in str(neighbor_profile_caps_raw).split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            value = int(token)
-        except Exception:
-            continue
-        if value > 0 and value not in neighbor_profile_caps:
-            neighbor_profile_caps.append(value)
-    neighbor_profile_caps = sorted(neighbor_profile_caps)
-    if not neighbor_profile_caps:
-        neighbor_profile_caps = [4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768]
+    # The bootstrap caps are the defaults of the fixed caps below. They also
+    # seeded the adaptive cap ladder, which went with its headroom and
+    # cap-option knobs when adaptive sizing was removed (2026-10 cleanup, X4).
     neighbor_profile_bootstrap_cap_raw = os.environ.get(
         "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_BOOTSTRAP_CAP",
         "0",
@@ -150,10 +100,6 @@ def _read_large_n_env_config() -> dict[str, Any]:
     except Exception:
         overflow_profile_bootstrap_cap = 0
 
-    static_runtime_fixed_sizing = _env_bool(
-        "JACCPOT_STATIC_RUNTIME_FIXED_SIZING",
-        True,
-    )
     try:
         overflow_profile_fixed_cap = max(
             0,
@@ -182,7 +128,7 @@ def _read_large_n_env_config() -> dict[str, Any]:
     # Static target-block cap. Supports "auto" (data-driven sizing; sentinel 0)
     # in addition to explicit ints, and — for any value — auto-grows to fit the
     # densest leaf at build time (see _large_n_pipeline static-block region),
-    # mirroring the neighbor/overflow cap profiling (headroom + caps ladder).
+    # with headroom and a caps ladder.
     static_target_blocks_cap_raw = (
         str(os.environ.get("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "auto"))
         .strip()
@@ -292,13 +238,6 @@ def _read_large_n_env_config() -> dict[str, Any]:
         "static_target_blocks_cap_options": tuple(
             int(v) for v in static_target_blocks_cap_options
         ),
-        "overflow_profile_headroom": float(overflow_profile_headroom),
-        "overflow_profile_caps": tuple(int(v) for v in overflow_profile_caps),
-        "neighbor_profile_headroom": float(neighbor_profile_headroom),
-        "neighbor_profile_caps": tuple(int(v) for v in neighbor_profile_caps),
-        "neighbor_profile_bootstrap_cap": int(neighbor_profile_bootstrap_cap),
-        "overflow_profile_bootstrap_cap": int(overflow_profile_bootstrap_cap),
-        "static_runtime_fixed_sizing": bool(static_runtime_fixed_sizing),
         "overflow_profile_fixed_cap": int(overflow_profile_fixed_cap),
         "neighbor_profile_fixed_cap": int(neighbor_profile_fixed_cap),
         "disable_specialized_large_n_nearfield": _env_bool(
