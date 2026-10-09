@@ -46,8 +46,8 @@ On `main` at 6cca378 (2026-10-06):
 | D1 | #374 | Spherical-harmonic family without a basis object runs real | targeted CPU, GPU pins | merged |
 | fix | #376 | The large-N lane's no-Pallas near field read the CSR lane's placeholder; two-card pins M1-M3 | targeted CPU, GPU pins (two-card: M1, M3) | merged |
 | pins | #377 | GPU pins re-recorded at 15ceca4 after the softening kernels (#375) | A-vs-A bitwise | merged |
-| D2 | | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | open |
-| X3 | | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins | open |
+| D2 | #378 | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | merged |
+| X3 | | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins (S1-S5, M1, M3) | open |
 
 ### P0: CI runs each test once
 
@@ -225,7 +225,7 @@ removal message.
 **Gates:** CPU suite 2,334 passed and 162 skipped (the one failure is the stale local
 nornax checkout); distributed driver and Dehnen-criterion tests on two forced devices,
 10 passed; `test_shards.py check` 2,562 tests in exactly one shard each. The two-card
-GPU gate is still to run.
+gate ran with #376: M1 and M3 are bitwise against `main`.
 
 ### GPU pins (gate G2)
 
@@ -582,5 +582,8 @@ does not import: it needs `examples/benchmark_gpu_radix_worker.py`, which X1 rem
 - `bench/annotation_census.py`: shape-annotated array parameters 856 -> 837, bare
   `Array` parameters 1,751 -> 1,683 (shaped share 32.8 % -> 33.2 %), `@jaxtyped`
   functions 190 -> 183. Only deletions moved them.
-- **GPU pins:** still to run. No production lane reached the removed code, and the
-  A/B covers the resolved overrides of `large_n_gpu` on a GPU backend.
+- **GPU pins** (frozen worktree at 1694005, against `main-15ceca4` with its A-vs-A control):
+  S1-S4b on one A100 and M1, M3 on two are **bitwise**.
+  - S5 (`BlockStepFMM`, 20 base steps) hit its 30 min per-pin timeout on the shared card.
+  - Rerun back to back with `main` on the same card, it took 26 min on X3 and 40 min on
+    `main`, and is bitwise equal to the pin. So the timeout was the card, not X3.
