@@ -608,6 +608,105 @@ def test_removed_grouped_runtime_policy_fields_are_inert():
     assert not hasattr(fmm._impl, "grouped_schedule_budget_bytes")
 
 
+def _engine_state(engine):
+    """Every engine attribute as text, as the constructor-state golden compares it."""
+    return {name: repr(value) for name, value in vars(engine).items()}
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_fixed_depth_tree_mode_raises_removal_error():
+    """The fixed-depth builder is gone (cleanup 2026-10, X4); naming it must raise.
+
+    ``TreeConfig`` still constructs with the value, so an old config gets the
+    removal message from the solver rather than the generic list of valid modes.
+    Both spellings reach it: the config field and the legacy ``tree_build_mode=``.
+    """
+    with pytest.raises(ValueError, match="fixed_depth.*removed.*X4"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(tree=TreeConfig(mode="fixed_depth")),
+        )
+    with pytest.raises(ValueError, match="fixed_depth.*removed.*X4"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST, basis="solidfmm", tree_build_mode="fixed_depth"
+        )
+
+
+def test_removed_autotune_m2l_chunk_is_inert():
+    """``autotune_m2l_chunk=True`` still constructs, and changes nothing.
+
+    The M2L chunk autotune went in the 2026-10 cleanup (X4); the policy field and
+    the legacy kwarg stay so old configs, examples and notebooks construct. The
+    whole resolved engine state must equal the default's, on the facade (both
+    spellings) and on the engine.
+    """
+    reference = _engine_state(
+        FastMultipoleMethod(preset=FMMPreset.FAST, basis="solidfmm")._impl
+    )
+    via_config = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(autotune_m2l_chunk=True),
+        ),
+    )
+    via_kwarg = FastMultipoleMethod(
+        preset=FMMPreset.FAST, basis="solidfmm", autotune_m2l_chunk=True
+    )
+    assert _engine_state(via_config._impl) == reference
+    assert _engine_state(via_kwarg._impl) == reference
+    assert not hasattr(via_config._impl, "autotune_m2l_chunk")
+    assert _engine_state(
+        fmm_impl_private.FMMEngine(
+            runtime_policy=RuntimePolicyConfig(autotune_m2l_chunk=True)
+        )
+    ) == _engine_state(fmm_impl_private.FMMEngine())
+
+
+@pytest.mark.parametrize("runtime_path", ["auto", "large_n"])
+def test_runtime_path_is_accepted_and_no_longer_selects_the_lane(
+    monkeypatch, runtime_path
+):
+    """``runtime_path`` is a recorded value since the 2026-10 cleanup (X4).
+
+    Both values still construct, through the facade's legacy kwarg and the
+    engine, and are stored. The large-N lane is gated on ``preset="large_n_gpu"``
+    alone: an explicit ``"large_n"`` under another preset used to open it, and no
+    longer does, while the preset opens it whatever was passed (its contract pins
+    ``"large_n"``). The GPU predicate is stubbed, as in the lane's own tests.
+    """
+    from jaccpot.runtime import _large_n_pipeline
+
+    monkeypatch.setattr(_large_n_pipeline.jax, "default_backend", lambda: "gpu")
+    positions, masses = _sample_problem(n=64)
+
+    fast = FastMultipoleMethod(
+        preset=FMMPreset.FAST, basis="solidfmm", runtime_path=runtime_path
+    )
+    assert fast._impl.runtime_path == runtime_path
+    assert not _large_n_pipeline.can_use_large_n_prepare_path(
+        fast._impl,
+        positions_arr=positions,
+        masses_arr=masses,
+        allow_stateful_cache=True,
+    )
+
+    large_n = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU, basis="solidfmm", runtime_path=runtime_path
+    )
+    assert large_n._impl.runtime_path == "large_n"
+    assert _large_n_pipeline.can_use_large_n_prepare_path(
+        large_n._impl,
+        positions_arr=positions,
+        masses_arr=masses,
+        allow_stateful_cache=True,
+    )
+
+    engine = fmm_impl_private.FMMEngine(runtime_path=runtime_path)
+    assert engine.runtime_path == runtime_path
+
+
 def test_basis_complex_alias_matches_solidfmm():
     positions, masses = _sample_problem(n=64)
     fmm_alias = FastMultipoleMethod(
