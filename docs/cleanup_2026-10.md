@@ -47,7 +47,8 @@ On `main` at 6cca378 (2026-10-06):
 | fix | #376 | The large-N lane's no-Pallas near field read the CSR lane's placeholder; two-card pins M1-M3 | targeted CPU, GPU pins (two-card: M1, M3) | merged |
 | pins | #377 | GPU pins re-recorded at 15ceca4 after the softening kernels (#375) | A-vs-A bitwise | merged |
 | D2 | #378 | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | merged |
-| X3 | | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins (S1-S5, M1, M3) | open |
+| X3 | #380 | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins (S1-S5, M1, M3) | merged |
+| X4 | | M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the strict cap-profile file; `runtime_path` no longer a lane switch | CPU suite, shard partition, CPU bitwise A/B | open |
 
 ### P0: CI runs each test once
 
@@ -378,7 +379,7 @@ values were already the defaults. Only these changed:
 | knob | was | now | why |
 | --- | --- | --- | --- |
 | `JACCPOT_STATIC_STRICT_FUSED_MODE` | off | on | the switch; only `strict_run_v2` and the fused eval fn read it (the multi-GPU lane's `measure_shard_plan` needs the latter) |
-| `JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH` | 1 | 0 | with 1, the default static-radix prepare raised without a profile on disk |
+| `JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH` | 1 | 0 | with 1, the default static-radix prepare raised without a profile on disk; read nowhere since X4 removed the profile |
 | `JACCPOT_LARGE_N_TARGET_BLOCK_SIZE` | 32 | 4 | off the CSR lane only (pre-Ampere, CPU, `use_pallas=False`); 32 left at least 256 slots per target leaf |
 | `JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF` | 32 | auto | the same lane; `auto` sizes it from the densest leaf with 1.25 headroom |
 | `large_n_gpu` tree mode | `lbvh` | `static_radix` | the fused lane needs it (`fmm_presets.py`, `solver.py`) |
@@ -587,3 +588,233 @@ does not import: it needs `examples/benchmark_gpu_radix_worker.py`, which X1 rem
   - S5 (`BlockStepFMM`, 20 base steps) hit its 30 min per-pin timeout on the shared card.
   - Rerun back to back with `main` on the same card, it took 26 min on X3 and 40 min on
     `main`, and is bitwise equal to the pin. So the timeout was the card, not X3.
+
+### X4: M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the /tmp cap profile
+
+**Removed** (library -2,067 / +186 lines; the additions are docstrings and removal
+notes):
+- **M2L chunk autotune (~830).** `runtime/fmm_autotune.py` (-397, `AutotuneMixin`),
+  its process-global LRU cache, (de)serialisers and `_GPU_M2L_AUTOTUNE_*` constants in
+  `fmm_caches.py` (-132), the engine's `autotune_m2l_chunk` attribute (and its
+  `fail_fast` coupling) and `dual_m2l_autotune` timer, stage and diagnostics key,
+  `export/import/save/load_m2l_autotune_cache` on the engine (-93) and the facade
+  (-83), `_prepare_state_autotune_downward_chunk_size` (-73) and its two call blocks,
+  and the `large_n_gpu` preset's `autotune_m2l_chunk=True`.
+- **Adaptive sizing (~300).** `JACCPOT_STATIC_RUNTIME_FIXED_SIZING` (read in
+  `_fmm_impl.py` and `_large_n_env.py`) and everything only its `0` reached: the
+  resolver's adaptive tail (the fast preset's large-CPU traversal config and 32768 M2L
+  chunk, clamping of explicit caps, the minimum-memory M2L chunk 1024 / 4096),
+  `honor_explicit_traversal`, `_RuntimeExecutionOverrides.adaptive_applied`, four
+  constants; in the large-N pipeline the non-static branches of
+  `_size_fused_static_overflow_profile` and `_trim_radix_fast_lane_neighbor_list`, the
+  `_pick_*_profile_capacity` ladders, `JACCPOT_LARGE_N_OVERFLOW_PROFILE_HEADROOM` /
+  `_CAP_OPTIONS`, `JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_HEADROOM` / `_CAP_OPTIONS`
+  and the `large_n_overflow_profile_reprofiles` counter. The static branches are
+  unchanged: fused, a named cap or else the first build's count; not fused (what a
+  pre-Ampere card runs), a named cap or else this build's count. The two
+  `*_BOOTSTRAP_CAP` knobs stay as the fixed caps' defaults.
+- **Legacy strict APIs (~470).** `strict_run_segmented`, `update_multipoles_only` and
+  `rebuild_topology_in_place` on the engine (-279) and the facade (-180), their
+  counters and the `update_multipoles_only_calls` / `rebuild_topology_in_place_calls`
+  diagnostics keys. `strict_prepare_refresh_and_evaluate`, `refresh_prepared_state`
+  and `_large_n_neighbor_list_matches` stay.
+- **`tree_build_mode="fixed_depth"` (~25).** The valid-mode entry, its mapping onto
+  yggdrax's builder, its leaf-size exemption, and the two non-radix fallback tuples
+  (`fmm_prepare.py`, `fmm_strict_run.py`). Docstrings: `TreeConfig.mode`, the
+  `refine_local` parameter of three methods, and the FAST preset's description,
+  which said "fixed-depth builder" of a preset that builds `lbvh`.
+- **The strict cap-profile file (~255).** `_strict_cap_profile_path`,
+  `_strict_cap_profile_context_key`, `_maybe_load_strict_cap_profile`,
+  `_apply_strict_cap_profile_for_key` and `_record_strict_cap_profile_from_retries`;
+  the read in the dual/downward prepare (widening `max_pair_queue`, replacing
+  `process_block`, creating an explicit config), the writes after a prepare and after
+  a same-topology refresh, `JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH`,
+  `JACCPOT_STATIC_STRICT_CAP_RECORD`, the read of
+  `JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH`, five engine attributes and
+  the `strict_profiled_*` diagnostics keys. The retry logger is now
+  `None if strict_mode_active else record_retry`, which is what it was by default.
+  `fmm_strict_cap_profile.py` keeps the compiled-profile fingerprints and the
+  `PROFILE_SET` gate.
+- **Dead env reads (~15).** `JACCPOT_STATIC_STRICT_FUSED_DISABLE_REMATERIALIZE`,
+  `_COMPILED_SEGMENT_LOOP` and `_JIT_REFRESH_EVAL` were read into attributes nothing
+  read. Two docstrings named knobs that do not exist: `JACCPOT_UPWARD_DIAGNOSTICS`
+  (the switch is `JACCPOT_PREPARE_DIAGNOSTICS`) and `JACCPOT_MUTUAL_FUSED_M2L=0`
+  (`JACCPOT_MUTUAL_M2L=zcore`).
+
+No production lane reached any of it. The autotune returned early under static
+sizing, and static sizing was the default. Nothing called the three strict APIs:
+Odisseo uses `strict_run_v2` and `strict_prepare_refresh_and_evaluate`. No preset
+named `fixed_depth`.
+
+**Behaviour changes:**
+- **`runtime_path` no longer selects a lane.** The large-N lane is gated on
+  `preset="large_n_gpu"` alone. An explicit `"large_n"` used to open it under any
+  preset, and to turn the lane's `dehnen_theta` decline into a raise; on
+  `large_n_gpu` the contract pins `"large_n"` anyway, so there nothing changed and the
+  raise is now unconditional. Under another preset, `runtime_path="large_n"` on a GPU
+  now runs the general path. Every bench and test that passes `"large_n"` also passes
+  `large_n_gpu`; `bench/bench_fmm.py --runtime-path` says so in its help.
+- **No /tmp cap profile.** The strict lanes no longer read or write
+  `/tmp/jaccpot_static_strict_caps.json` (or the env path). A strict prepare's
+  `max_pair_queue` and `process_block` no longer depend on what an earlier run --
+  another session, another user -- left in that file, and a prepare that retried its
+  traversal no longer writes it, the general default path included. At the time of
+  writing this box has one, left by an `lbvh` run at N = 20,000. The
+  in-memory carry of the same caps between prepares of one engine went with it; the
+  strict lanes run `fail_fast` without a retry logger, so only retries outside them
+  ever fed it.
+- **The refine family is inert on radix trees.** `refine_local`, `max_refine_levels`,
+  `aspect_threshold`, `TreeConfig.leaf_target` and `host_refine_mode` only shaped
+  fixed-depth trees. `refine_local` still routes the build off the jitted LBVH fast
+  path, and `leaf_target` still enters the topology and cache keys outside `lbvh`.
+
+**Shims:**
+- `RuntimePolicyConfig.autotune_m2l_chunk` and the legacy `autotune_m2l_chunk=`
+  kwarg are accepted and ignored (examples and notebooks pass it).
+- `runtime_path` stays `"auto"` | `"large_n"`: validated, stored, and part of the
+  compiled-profile fingerprint.
+- `TreeConfig(mode="fixed_depth")` constructs; the solver raises "tree_build_mode=
+  'fixed_depth' was removed in the 2026-10 cleanup (X4); use 'lbvh' or
+  'static_radix'", as does the legacy `tree_build_mode=`.
+- `_gear_pairs_for_autotune` keeps its name and its three call sites (#379 edits the
+  lines around one), and `far_pairs_by_gear` its plumbing. Both feed nothing now.
+
+**Tests** (88 cases deleted or renamed, 8 added):
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| `tests/unit/runtime/test_autotune_chunk_selection.py` (10), `test_autotune_helpers.py` (23) | (a) | |
+| `test_engine_config_resolution.py::TestTheFailFastAutotuneInteraction` (3) | (a) | module docstring rewritten |
+| `test_solver_api.py`: `test_runtime_autotune_m2l_chunk_flag_flows_to_runtime`, `test_m2l_autotune_cache_roundtrip_api`, `test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal` | (a) | the last asserted an explicit cap clamped, which only adaptive sizing did |
+| `test_solver_api.py::test_runtime_fail_fast_disables_autotune_and_host_refine` | (a) for its autotune half | renamed `test_runtime_fail_fast_disables_host_refine`, host-refine half kept |
+| `test_traversal_clamp_honors_explicit.py::test_adaptive_sizing_still_caps_oversized_explicit_traversal` | (a) | |
+| `test_fmm.py::test_fast_preset_adaptive_large_cpu_policy_applies` | (a) | |
+| `test_large_n_config_thresholds.py::test_static_sizing_does_not_inherit_the_adaptive_grouped_rewrite` | (b) | its `center_mode == "com"` assertion is now in `test_farfield_mode_never_resolves_to_auto_at_large_n` (all four cases) |
+| `tests/integration/test_strict_run_segmented.py` (11) | (a) | `strict_prepare_refresh_and_evaluate` keeps its owner, `test_fmm.py::test_strict_prepare_refresh_and_evaluate_api_and_diagnostics` |
+| `test_strict_refresh_faces.py`: the `update_multipoles_only` and `rebuild_topology_in_place` cases of three parametrised tests (6), `test_rebuild_topology_in_place_does_not_mutate_its_input` | (a) | the `refresh_prepared_state` cases stay |
+| `test_fmm.py`: `test_prepare_state_fixed_depth_tree` (also out of `slow_tests.txt`), `test_compute_accelerations_fixed_depth_matches_direct`, `..._fixed_depth_jitted_matches_eager`, `test_compute_accelerations_refined_tree_matches_non_refined` (and the helpers `_fixed_depth_sample`, `_line_cluster_sample`) | (a) | the radix lanes keep their direct-sum anchors (`test_fmm_golden.py`, the lane goldens) |
+| `test_strict_cap_profile.py`: `TestContextKey` (2), `TestLoading` (5), `TestSelectionPolicy` (5), `TestRecording` (8) | (a) | the compiled-profile and `PROFILE_SET` classes stay |
+| `test_fmm.py::test_strict_exact_cap_profile_match_fail_fast` | (a) | |
+| `test_near_field.py::test_large_n_accel_only_env_variants_match_baseline[target_owned_accum_v2]` | (c) | `[target_leaf_batch_size]`: with the dead knobs dropped the two cases set the same env |
+
+`JACCPOT_LARGE_N_TARGET_OWNED_ACCUM`, `..._ACCUM_V2`,
+`..._TARGET_LEAF_NEIGHBOR_BLOCK_SIZE` and `JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT` are
+read nowhere; the tests that set them no longer do (seven `setenv`s, and the
+accel-only parity cases). The case `[target_owned_accum]` kept its only live knob and
+is now `[target_leaf_batch_size]`.
+`test_large_n_fast_path_policy.py::test_large_n_fast_lane_legacy_opt_out_env_is_noop`
+stays: it pins that the dead `JACCPOT_LARGE_N_RADIX_FAST_LANE=0` cannot switch the
+fast lane off, and it is the only test of `TARGET_BLOCK_SIZE=0` meaning the default.
+
+**Found, not fixed:** every case of `test_large_n_accel_only_env_variants_match_baseline`
+compares the default with itself. `compute_leaf_p2p_accelerations_large_n_accel_only`
+takes its scatter and accumulation knobs as arguments and reads no env, and the test
+passes none of them. So the env variants it names are not exercised there. (Also,
+`TARGET_LEAF_BATCH_SIZE=2` snaps to 16, the default, wherever it is read.) That is its
+own fix.
+
+Adapted:
+- `test_large_n_gpu_preset_applies_memory_safe_gpu_defaults`: no autotune assert.
+- The four traversal-seed tests in `test_solver_api.py`
+  (`..._clamps_auto_traversal_seed`, `..._seed_scales_for_xl_particle_counts`,
+  `test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n`,
+  `test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities`) lost
+  their `_static_runtime_fixed_sizing = False`. Static sizing gives what they assert:
+  the memory-safety clamp is the same function on both paths and differed only for an
+  explicit config.
+- `test_static_fixed_sizing_honors_oversized_explicit_traversal`: no static-sizing
+  precondition, which is now always true.
+- `test_fast_preset_adaptive_policy_respects_explicit_overrides`: no `adaptive_applied`.
+- `test_the_lane_still_refuses_the_folded_angle_mode`: the raise is asserted without
+  the `runtime_path == "large_n"` precondition.
+- `test_capacity_fixed_depth_tree_mode_is_removed`: also asserts the `fixed_depth`
+  removal message.
+- `test_public_api_surface.py` (seven methods), `test_mixin_engine_base_guard.py`
+  (the MRO).
+- `TestLaneModeNormalisation`'s `runtime_path` rows are unchanged: the value is still
+  validated and normalised.
+
+Added:
+- In `test_solver_api.py`:
+  - `test_fixed_depth_tree_mode_raises_removal_error` (both spellings);
+  - `test_removed_autotune_m2l_chunk_is_inert` (the whole engine state equals the
+    default's, through the field, the kwarg and the engine);
+  - `test_runtime_path_is_accepted_and_no_longer_selects_the_lane[auto, large_n]`.
+- `tests/integration/test_strict_cap_profile_removed.py`: a strict static-radix
+  prepare does not open a recorded profile for its own (leaf, N), and a general
+  prepare that retries its traversal does not write one. `open` is guarded to record
+  and refuse, since the old reader and writer swallowed every exception.
+
+Each fails on db02d19, except the `[auto]` case, which pins the half that did not
+change.
+
+**Goldens.** `golden/`, `golden_grad/` and `golden_lanes/` are byte-identical.
+`constructor_state.json` was regenerated; its diff is exactly:
+- the matrix cases `autotune_m2l` and `tree_fixed_depth` (the latter raises now);
+- 16 base attributes: `autotune_m2l_chunk`, `_static_runtime_fixed_sizing`, the
+  `_strict_cap_*` pair, the five `_strict_profile*` / `_strict_profiled_*`
+  attributes, the three dead `_strict_fused_*` flags, the two legacy-API counters,
+  `_large_n_overflow_profile_reprofiles` and `_refresh_timing_dual_m2l_autotune_seconds`;
+- the `preset_large_n_gpu` override of `autotune_m2l_chunk`;
+- the FAST preset description in `preset_fast` and `engine_preset_fast`.
+
+`runtime_path_large_n` stays distinct, and the distinctness check passes.
+
+**Left for phase Z:**
+- the inert `autotune_m2l_chunk` field and kwarg;
+- `runtime_path` itself;
+- the refine family on radix trees;
+- the name `_gear_pairs_for_autotune` and the `far_pairs_by_gear` plumbing;
+- the "or None to autotune" docstring line of
+  `_prepare_state_dual_and_downward_strict_streamed_fast` (#379 edits that docstring);
+- `examples/benchmark_utils.py` and `examples/profile_prepare_residuals.py`, which
+  still pass `autotune_m2l_chunk=True`;
+- `examples/profile_prepare_memory_split.py`, which still calls the removed autotune
+  helper. It has not imported since X1.
+- The notebooks that name autotune (`benchmark_runtime_breakdown_h200`,
+  `benchmark_runtime_accuracy_copy`, `benchmark_gpu_radix_runtime`,
+  `benchmark_runtime_large_N_accuracy`, `benchmark_runtime_large_N`,
+  `benchmark_gpu_single_n_memory`, `benchmark_runtime_large_N_performance`,
+  `benchmark_runtime_rtx2080_focused`), `fixed_depth` (five of them) or
+  `runtime_path`.
+
+**Gates:**
+- **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`): 2,274
+  passed, 187 skipped, 1 failed: the stale local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as before.
+- **Runtime type checks** (`JACCPOT_RUNTIME_TYPECHECK=1`) on every touched unit test
+  file: 184 passed.
+- **Bitwise A/B against db02d19 on CPU** (a `git archive` export; the baseline arm's
+  `JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH` pointed at an empty directory, which stayed
+  empty, so no recorded profile could reach it): 37 arrays equal, and 44 resolved
+  rows equal. The arrays:
+  - forces and potentials of 12 configurations: the default; fast and accurate on
+    both bases; balanced; an explicit `pair_grouped`; kd-tree; `dehnen_error`;
+    `dehnen_paper` adaptive order; `large_n_gpu` in fp32 on the general path;
+    `refine_local=True` on `lbvh`;
+  - a prepared state with a target subset;
+  - position and mass gradients through `differentiable_accelerations` on both bases;
+  - the large-N lane on CPU with the GPU gate opened: prepare + evaluate, a
+    same-topology refresh, two `strict_prepare_refresh_and_evaluate` calls, the fused
+    `strict_run_v2` scan state after 3 steps (fused, no fallback), and the prepacked
+    differentiable lane's forces and position / mass gradients.
+
+  The rows are the runtime overrides that four presets (fast, balanced, accurate,
+  `large_n_gpu`) resolve at five N (1e3 to 5e6) on two backends, plus the large-N
+  lane's two cap diagnostics.
+- **`test_shards.py check`:** 2,524 tests, each in exactly one shard. At db02d19
+  there are 2,604; the export, which has no sibling nornax checkout, collects 2,568.
+  This phase deletes 86 cases, renames 2 and adds 6.
+- `bench/annotation_census.py`: shape-annotated array parameters 837 -> 831, bare
+  `Array` parameters 1,683 -> 1,668 (shaped share 33.2 % -> 33.3 %), `@jaxtyped`
+  functions 183 (unchanged). Only deletions moved them.
+- **After merging `main` with #379 (2896dae; yggdrax `main` 7cab99b, which #379 needs
+  for the walk's `pair_accept` hook):**
+  - CPU suite 2,321 passed, 206 skipped, 1 failed (the stale nornax checkout).
+    Against the older yggdrax 9372332, #379's own new walk tests fail; that is an
+    environment mismatch, not this phase.
+  - `test_shards.py check`: 2,590 tests, each in exactly one shard.
+  - `golden/`, `golden_grad/` and `golden_lanes/` are byte-identical to `main`.
+- **GPU pins** (frozen worktree at 2896dae, against `main-15ceca4` with its A-vs-A
+  control): S1-S5 on one A100 and M1, M3 on two are **bitwise**. #379 and yggdrax #89
+  moved no pin either, so `main-15ceca4` stays the baseline.

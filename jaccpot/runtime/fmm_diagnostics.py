@@ -260,16 +260,7 @@ class DiagnosticsMixin(_EngineBase):
             "static_radix_compact_pair_reuse_misses": int(
                 self._static_radix_compact_pair_reuse_misses
             ),
-            "update_multipoles_only_calls": int(
-                self._compiled_profile_multipoles_only_calls
-            ),
-            "rebuild_topology_in_place_calls": int(
-                self._compiled_profile_topology_rebuild_calls
-            ),
             "large_n_overflow_profile_cap": int(self._large_n_overflow_profile_cap),
-            "large_n_overflow_profile_reprofiles": int(
-                self._large_n_overflow_profile_reprofiles
-            ),
             "large_n_neighbor_edges_profile_cap": int(
                 self._large_n_neighbor_edges_profile_cap
             ),
@@ -453,11 +444,6 @@ class DiagnosticsMixin(_EngineBase):
                 str(k): int(v)
                 for k, v in dict(self._strict_fused_fastlane_block_counts).items()
             },
-            "strict_profiled_max_pair_queue": int(self._strict_profiled_max_pair_queue),
-            "strict_profiled_pair_process_block": int(
-                self._strict_profiled_pair_process_block
-            ),
-            "strict_profiled_context_key": str(self._strict_profiled_context_key),
             "recent_dual_node_count": int(self._recent_dual_node_count),
             "recent_dual_leaf_count": int(self._recent_dual_leaf_count),
             "recent_dual_neighbor_count": int(self._recent_dual_neighbor_count),
@@ -540,9 +526,6 @@ class DiagnosticsMixin(_EngineBase):
             ),
             "refresh_dual_far_pair_plan_seconds": float(
                 self._refresh_timing_dual_far_pair_plan_seconds
-            ),
-            "refresh_dual_m2l_autotune_seconds": float(
-                self._refresh_timing_dual_m2l_autotune_seconds
             ),
             "refresh_dual_select_interactions_seconds": float(
                 self._refresh_timing_dual_select_interactions_seconds

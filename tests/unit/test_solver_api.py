@@ -1,8 +1,5 @@
 """Jaccpot package-local regression tests."""
 
-import json
-import tempfile
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -206,40 +203,6 @@ def test_advanced_config_applies_to_runtime():
     assert fmm.mac_type == "engblom"
 
 
-def test_large_gpu_minimum_memory_streamed_path_caps_oversized_explicit_traversal():
-    impl = fmm_impl_private.FMMEngine(
-        preset=FMMPreset.LARGE_N_GPU,
-        expansion_basis="solidfmm",
-        mac_type="engblom",
-        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
-        runtime_policy=RuntimePolicyConfig(
-            memory_objective="minimum_memory",
-            fail_fast=True,
-            traversal_config=DualTreeTraversalConfig(
-                max_pair_queue=1048576,
-                process_block=256,
-                max_interactions_per_node=32768,
-                max_neighbors_per_leaf=16384,
-            ),
-        ),
-    )
-    # Adaptive minimum-memory capping now only runs when static-sizing is off
-    # (static sizing, default-on, passes the constructor config through unchanged).
-    # Exercise the capping path this test covers.
-    impl._static_runtime_fixed_sizing = False
-
-    overrides = impl._resolve_runtime_execution_overrides(
-        num_particles=2_097_152,
-        backend="gpu",
-    )
-
-    assert overrides.traversal_config is not None
-    assert int(overrides.traversal_config.max_pair_queue) == 262_144
-    assert int(overrides.traversal_config.process_block) == 256
-    assert int(overrides.traversal_config.max_interactions_per_node) == 8_192
-    assert int(overrides.traversal_config.max_neighbors_per_leaf) == 4_096
-
-
 def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal():
     impl = fmm_impl_private.FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
@@ -320,9 +283,6 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
             memory_objective="minimum_memory", fail_fast=True
         ),
     )
-    # Adaptive auto-seed clamping runs on the adaptive path (static-sizing off).
-    impl._static_runtime_fixed_sizing = False
-
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=2_097_152,
         backend="gpu",
@@ -343,9 +303,6 @@ def test_large_gpu_minimum_memory_streamed_seed_scales_for_xl_particle_counts():
             memory_objective="minimum_memory", fail_fast=True
         ),
     )
-    # Adaptive seed scaling runs on the adaptive path (static-sizing off).
-    impl._static_runtime_fixed_sizing = False
-
     overrides = impl._resolve_runtime_execution_overrides(
         num_particles=4_194_304,
         backend="gpu",
@@ -649,6 +606,105 @@ def test_removed_grouped_runtime_policy_fields_are_inert():
     )
     assert not hasattr(fmm._impl, "precompute_grouped_class_segments")
     assert not hasattr(fmm._impl, "grouped_schedule_budget_bytes")
+
+
+def _engine_state(engine):
+    """Every engine attribute as text, as the constructor-state golden compares it."""
+    return {name: repr(value) for name, value in vars(engine).items()}
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_fixed_depth_tree_mode_raises_removal_error():
+    """The fixed-depth builder is gone (cleanup 2026-10, X4); naming it must raise.
+
+    ``TreeConfig`` still constructs with the value, so an old config gets the
+    removal message from the solver rather than the generic list of valid modes.
+    Both spellings reach it: the config field and the legacy ``tree_build_mode=``.
+    """
+    with pytest.raises(ValueError, match="fixed_depth.*removed.*X4"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(tree=TreeConfig(mode="fixed_depth")),
+        )
+    with pytest.raises(ValueError, match="fixed_depth.*removed.*X4"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST, basis="solidfmm", tree_build_mode="fixed_depth"
+        )
+
+
+def test_removed_autotune_m2l_chunk_is_inert():
+    """``autotune_m2l_chunk=True`` still constructs, and changes nothing.
+
+    The M2L chunk autotune went in the 2026-10 cleanup (X4); the policy field and
+    the legacy kwarg stay so old configs, examples and notebooks construct. The
+    whole resolved engine state must equal the default's, on the facade (both
+    spellings) and on the engine.
+    """
+    reference = _engine_state(
+        FastMultipoleMethod(preset=FMMPreset.FAST, basis="solidfmm")._impl
+    )
+    via_config = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(autotune_m2l_chunk=True),
+        ),
+    )
+    via_kwarg = FastMultipoleMethod(
+        preset=FMMPreset.FAST, basis="solidfmm", autotune_m2l_chunk=True
+    )
+    assert _engine_state(via_config._impl) == reference
+    assert _engine_state(via_kwarg._impl) == reference
+    assert not hasattr(via_config._impl, "autotune_m2l_chunk")
+    assert _engine_state(
+        fmm_impl_private.FMMEngine(
+            runtime_policy=RuntimePolicyConfig(autotune_m2l_chunk=True)
+        )
+    ) == _engine_state(fmm_impl_private.FMMEngine())
+
+
+@pytest.mark.parametrize("runtime_path", ["auto", "large_n"])
+def test_runtime_path_is_accepted_and_no_longer_selects_the_lane(
+    monkeypatch, runtime_path
+):
+    """``runtime_path`` is a recorded value since the 2026-10 cleanup (X4).
+
+    Both values still construct, through the facade's legacy kwarg and the
+    engine, and are stored. The large-N lane is gated on ``preset="large_n_gpu"``
+    alone: an explicit ``"large_n"`` under another preset used to open it, and no
+    longer does, while the preset opens it whatever was passed (its contract pins
+    ``"large_n"``). The GPU predicate is stubbed, as in the lane's own tests.
+    """
+    from jaccpot.runtime import _large_n_pipeline
+
+    monkeypatch.setattr(_large_n_pipeline.jax, "default_backend", lambda: "gpu")
+    positions, masses = _sample_problem(n=64)
+
+    fast = FastMultipoleMethod(
+        preset=FMMPreset.FAST, basis="solidfmm", runtime_path=runtime_path
+    )
+    assert fast._impl.runtime_path == runtime_path
+    assert not _large_n_pipeline.can_use_large_n_prepare_path(
+        fast._impl,
+        positions_arr=positions,
+        masses_arr=masses,
+        allow_stateful_cache=True,
+    )
+
+    large_n = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU, basis="solidfmm", runtime_path=runtime_path
+    )
+    assert large_n._impl.runtime_path == "large_n"
+    assert _large_n_pipeline.can_use_large_n_prepare_path(
+        large_n._impl,
+        positions_arr=positions,
+        masses_arr=masses,
+        allow_stateful_cache=True,
+    )
+
+    engine = fmm_impl_private.FMMEngine(runtime_path=runtime_path)
+    assert engine.runtime_path == runtime_path
 
 
 def test_basis_complex_alias_matches_solidfmm():
@@ -1332,8 +1388,6 @@ def test_gpu_runtime_overrides_cap_traversal_capacities_for_large_n():
         preset=FMMPreset.FAST,
         basis="solidfmm",
     )
-    # GPU capacity capping runs on the adaptive path (static-sizing off).
-    fmm._impl._static_runtime_fixed_sizing = False
     overrides = fmm._impl._resolve_runtime_execution_overrides(
         num_particles=131072,
         backend="gpu",
@@ -1429,7 +1483,6 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     assert fmm._impl.enable_interaction_cache is True
     assert fmm._impl.retain_traversal_result is False
     assert fmm._impl.retain_interactions is False
-    assert fmm._impl.autotune_m2l_chunk is True
     assert fmm._impl.memory_objective == "minimum_memory"
     assert fmm._impl.upward_leaf_batch_size == 2048
     assert fmm._impl.mac_type == "dehnen"
@@ -1784,31 +1837,18 @@ def test_prepare_state_adaptive_order_requests_compact_far_pairs():
     assert state.dual_tree_result is None
 
 
-def test_runtime_autotune_m2l_chunk_flag_flows_to_runtime():
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-        advanced=FMMAdvancedConfig(
-            runtime=RuntimePolicyConfig(autotune_m2l_chunk=True),
-        ),
-    )
-    assert bool(fmm._impl.autotune_m2l_chunk) is True
-
-
-def test_runtime_fail_fast_disables_autotune_and_host_refine():
+def test_runtime_fail_fast_disables_host_refine():
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
             runtime=RuntimePolicyConfig(
                 fail_fast=True,
-                autotune_m2l_chunk=True,
                 host_refine_mode="on",
             ),
         ),
     )
     assert bool(fmm._impl.fail_fast) is True
-    assert bool(fmm._impl.autotune_m2l_chunk) is False
     assert fmm._impl.host_refine_mode == "off"
 
 
@@ -1889,10 +1929,6 @@ def test_minimum_memory_gpu_runtime_starts_with_smaller_traversal_capacities():
         preset=FMMPreset.LARGE_N_GPU,
         basis="solidfmm",
     )
-    # The smaller adaptive seeds run on the adaptive path (static-sizing off);
-    # static sizing (default-on) ships the larger preset traversal config instead.
-    fmm._impl._static_runtime_fixed_sizing = False
-
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(jax, "default_backend", lambda: "gpu")
         overrides = fmm._impl._resolve_runtime_execution_overrides(
@@ -2007,29 +2043,3 @@ def test_memory_budget_limits_default_nearfield_schedule_cap():
     )
 
     assert cap == 8
-
-
-def test_m2l_autotune_cache_roundtrip_api():
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    payload = [
-        {
-            "key": ["gpu", "complex", "float32", 4, "solidfmm", "", 0, 2],
-            "chunk_size": 2048,
-        }
-    ]
-    restored = fmm.import_m2l_autotune_cache(payload, merge=False)
-    assert restored == 1
-    exported = fmm.export_m2l_autotune_cache()
-    assert any(int(item.get("chunk_size", -1)) == 2048 for item in exported)
-
-    with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=True) as handle:
-        saved = fmm.save_m2l_autotune_cache(handle.name)
-        assert saved >= 1
-        handle.seek(0)
-        raw = json.load(handle)
-        assert isinstance(raw, list)
-        loaded = fmm.load_m2l_autotune_cache(handle.name, merge=False)
-        assert loaded >= 1

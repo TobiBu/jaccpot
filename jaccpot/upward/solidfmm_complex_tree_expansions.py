@@ -148,7 +148,7 @@ def _diag_upward_stage_estimates(
 ) -> None:
     """Log the byte cost of each upward-sweep stage, when diagnostics are on.
 
-    A no-op unless ``JACCPOT_UPWARD_DIAGNOSTICS`` is set. It exists because the
+    A no-op unless ``JACCPOT_PREPARE_DIAGNOSTICS`` is set. It exists because the
     upward sweep's peak is not the packed coefficient array (which is obvious) but
     the transient per-leaf-batch gather: ``leaf_batch_size * max_leaf_size *
     (p+1)^2`` complex coefficients live at once, so a batch width chosen for

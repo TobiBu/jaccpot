@@ -128,13 +128,17 @@ class TreeConfig:
         ``"kdtree"``. ``"octree"`` is refused by the single-GPU solver since the
         octree execution backend was removed in the 2026-10 cleanup.
     mode : Optional[str]
-        Builder selector: ``"lbvh"``, ``"static_radix"`` (the ``large_n_gpu``
-        preset's default, required by the fused strict lane) or ``"fixed_depth"``.
+        Builder selector: ``"lbvh"`` or ``"static_radix"`` (the ``large_n_gpu``
+        preset's default, required by the fused strict lane). ``"fixed_depth"``
+        was removed in the 2026-10 cleanup (X4) and raises.
     leaf_target : Optional[int]
-        Desired particles per leaf for fixed-depth builds. Note this is a *target*;
-        the achieved occupancy is padded to a static bound at prepare time.
+        Desired particles per leaf. It sized the removed fixed-depth builder; a
+        radix build's leaves are set by the ``leaf_size`` argument instead.
     refine_local : Optional[bool]
-        Enable the host-side refinement pass that splits elongated leaves.
+        Enable the host-side refinement pass that splits elongated leaves. Only
+        the removed fixed-depth builder ran it, so no radix build refines leaves
+        any more; on a radix tree it only routes the build off the jitted LBVH
+        fast path.
     max_refine_levels : Optional[int]
         Depth cap for that refinement pass.
     aspect_threshold : Optional[float]
@@ -416,8 +420,9 @@ class RuntimePolicyConfig:
     prepare_stage_memory_split_enabled : Optional[bool]
         Split the prepare stage to lower peak memory at some throughput cost.
     autotune_m2l_chunk : bool
-        Measure and pick the M2L chunk size at prepare time. Off by default, and
-        consequently the autotune path is thinly covered.
+        Ignored since the 2026-10 cleanup (X4), which removed the M2L chunk
+        autotune it switched on. Kept so old configs construct; it goes in a
+        later phase.
     precompute_grouped_class_segments : Optional[bool]
         Ignored since the 2026-10 cleanup (X3), which removed the grouped far
         field whose segment tables it built. Kept so old configs construct; it

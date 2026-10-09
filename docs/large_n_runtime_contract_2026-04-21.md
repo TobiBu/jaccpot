@@ -4,7 +4,9 @@
 
 For `preset="large_n_gpu"`, Jaccpot now canonicalizes runtime behavior to a single production path:
 
-- `runtime_path = "large_n"`
+- `runtime_path = "large_n"` (since the 2026-10 cleanup, X4, a recorded value only: the
+  preset alone selects the large-N lane, and `runtime_path="large_n"` under another
+  preset no longer opens it)
 - `memory_objective = "minimum_memory"`
 - `farfield_mode = "pair_grouped"`
 - `grouped_interactions = False`
@@ -14,9 +16,12 @@ For `preset="large_n_gpu"`, Jaccpot now canonicalizes runtime behavior to a sing
 
 ## Deprecation Notes
 
-- `runtime_path="legacy"` is deprecated and will be removed.
+- `runtime_path="legacy"` was removed: only `"auto"` and `"large_n"` are accepted, and
+  since the 2026-10 cleanup (X4) neither selects a lane.
 - Conflicting large-N production overrides are accepted for compatibility but coerced to the canonical production values above.
-- Oversized explicit traversal seeds are capped on the large-N production GPU path to avoid memory regressions.
+- Auto-sized (preset) traversal seeds are capped on the large-N production GPU path to
+  avoid memory regressions; an explicit `traversal_config` is used as given. Sizing is
+  static: adaptive sizing went in the 2026-10 cleanup (X4).
 
 ## Benchmark Guidance
 

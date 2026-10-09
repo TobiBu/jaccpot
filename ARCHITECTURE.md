@@ -114,8 +114,9 @@ import cycle (section 8).
 ## 4. The engine: coordinator + mixins
 
 `_fmm_impl.FMMEngine` coordinates (constructor, backend plumbing, cache
-lifecycle, autotune-cache IO) and inherits its behaviour from **10 method-cluster
-mixins**, each a sibling `runtime/fmm_<cluster>.py` module. It used to be described
+lifecycle) and inherits its behaviour from **9 method-cluster mixins**, each a
+sibling `runtime/fmm_<cluster>.py` module. (`AutotuneMixin`, the M2L chunk
+autotune, and its cache IO went in the 2026-10 cleanup, X4.) It used to be described
 as *thin*, which the mixin split achieved for everything except the constructor.
 `__init__` was 722 lines with 60 parameters against 316 for the rest of the class;
 audit 2.1 staged it into 13 private resolvers, so the body is now **141 lines** of
@@ -127,8 +128,7 @@ cross-cluster calls resolve through the MRO.
 ```python
 class FMMEngine(
     PrepareMixin, EvaluateMixin, StrictRunMixin, SweepsMixin, OverridesMixin,
-    AutotuneMixin, PolicyMixin, DerivativesMixin, StrictCapProfileMixin,
-    DiagnosticsMixin,
+    PolicyMixin, DerivativesMixin, StrictCapProfileMixin, DiagnosticsMixin,
 ):
 ```
 
@@ -137,10 +137,9 @@ class FMMEngine(
 | `PrepareMixin` (`fmm_prepare`) | build the `FMMPreparedState`: tree upward pass, downward/far-pairs, nearfield setup |
 | `EvaluateMixin` (`fmm_evaluate`) | evaluate a prepared state into accelerations/potential (L2P + nearfield) |
 | `StrictRunMixin` (`fmm_strict_run`) | static-radix hot path: `refresh_prepared_state`, `strict_run_v2`, same-topology refresh, velocity-Verlet update |
-| `StrictCapProfileMixin` (`fmm_strict_cap_profile`) | compiled-profile persistence for the strict lane |
+| `StrictCapProfileMixin` (`fmm_strict_cap_profile`) | compiled-profile fingerprints for the strict lane's compile-reuse diagnostics, and the fused lane's `PROFILE_SET` gate (the on-disk cap profile went in X4) |
 | `PolicyMixin` (`fmm_policy`) | adaptive execution-policy decisions |
-| `OverridesMixin` (`fmm_overrides`) | resolve runtime execution knobs (farfield/nearfield mode, traversal caps) |
-| `AutotuneMixin` (`fmm_autotune`) | M2L chunk-size autotuning |
+| `OverridesMixin` (`fmm_overrides`) | resolve runtime execution knobs (farfield/nearfield mode, traversal caps; static sizing only since X4) |
 | `SweepsMixin` (`fmm_sweeps`) | delta-sign / convention sweeps |
 | `DerivativesMixin` (`fmm_derivatives`) | jerk / time-derivative towers |
 | `DiagnosticsMixin` (`fmm_diagnostics`) | `get_runtime_diagnostics` + shape diagnostics |

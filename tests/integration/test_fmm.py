@@ -1,6 +1,5 @@
 """Tests for Fast Multipole Method."""
 
-import json
 from unittest import mock
 
 import jax
@@ -224,34 +223,6 @@ def test_direct_acceleration():
     assert accelerations[1, 0] < 0  # -x
 
 
-def test_prepare_state_fixed_depth_tree():
-    n = 64
-    positions = jnp.stack(
-        [jnp.linspace(-1.0, 1.0, n), jnp.zeros((n,)), jnp.zeros((n,))],
-        axis=1,
-    )
-    masses = jnp.ones((n,))
-    fmm = FMMEngine(
-        theta=0.6,
-        tree=TreeConfig(mode="fixed_depth", leaf_target=8),
-        softening_kernel="plummer",
-    )
-
-    state = fmm.prepare_state(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=1,
-        jit_tree=False,
-    )
-
-    assert state.tree.num_particles == n
-
-    leaf_ranges = state.tree.node_ranges[state.tree.num_internal_nodes :]
-    counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    assert state.max_leaf_size == int(jnp.max(counts))
-
-
 def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     # This test profiles the strict cap on the fly (there is no pre-recorded
@@ -317,7 +288,6 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     # profile match (which would make this test depend on run order).
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "16")
 
@@ -595,57 +565,6 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
     assert diagnostics["strict_runner_profile_key_hits"] >= 1
 
 
-def test_strict_exact_cap_profile_match_fail_fast(monkeypatch, tmp_path):
-    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "1")
-    profile_path = tmp_path / "strict_caps.json"
-    profile_path.write_text(
-        json.dumps(
-            {
-                "version": 2,
-                "active_context_key": "tree_mode=static_radix|leaf=64|n=999",
-                "profiles": {
-                    "tree_mode=static_radix|leaf=64|n=999": {
-                        "max_pair_queue": 16384,
-                        "pair_process_block": 1024,
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_CAP_PROFILE_PATH", str(profile_path))
-
-    key = jax.random.PRNGKey(20260513)
-    positions = jax.random.uniform(
-        key,
-        (1024, 3),
-        minval=-1.0,
-        maxval=1.0,
-        dtype=jnp.float32,
-    )
-    masses = jnp.ones((1024,), dtype=jnp.float32)
-    moved = positions + 1e-3
-
-    fmm = FMMEngine(
-        preset="large_n_gpu",
-        runtime_path="large_n",
-        expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
-        theta=0.6,
-        nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        working_dtype=jnp.float32,
-        tree=TreeConfig(mode="static_radix"),
-        fixed_order=2,
-        softening_kernel="plummer",
-    )
-    with pytest.raises(RuntimeError, match="exact cap profile key match"):
-        _ = fmm.prepare_state(positions, masses, leaf_size=128, max_order=2)
-    diagnostics = fmm.get_runtime_diagnostics()
-    assert diagnostics["strict_runner_fail_fast_reject_count"] >= 1
-
-
 def test_strict_run_v2_api(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
@@ -857,140 +776,13 @@ def test_capacity_fixed_depth_tree_mode_is_removed():
             tree=TreeConfig(mode="capacity_fixed_depth"),
             softening_kernel="plummer",
         )
-
-
-def _fixed_depth_sample():
-    positions = jnp.array(
-        [
-            [-0.6, -0.2, 0.1],
-            [-0.1, 0.4, -0.3],
-            [0.3, -0.5, 0.2],
-            [0.7, 0.1, -0.4],
-        ],
-        dtype=jnp.float64,
-    )
-    masses = jnp.array([1.0, 0.8, 1.2, 0.9], dtype=jnp.float64)
-    return positions, masses
-
-
-def _line_cluster_sample():
-    xs = jnp.linspace(-0.9, 0.9, 16)
-    positions = jnp.stack(
-        [xs, jnp.zeros_like(xs), jnp.zeros_like(xs)],
-        axis=1,
-        dtype=jnp.float64,
-    )
-    masses = jnp.ones((xs.shape[0],), dtype=jnp.float64)
-    return positions, masses
-
-
-def test_compute_accelerations_fixed_depth_matches_direct():
-    positions, masses = _fixed_depth_sample()
-    theta = 0.7
-    G = 1.1
-    softening = 0.02
-
-    fmm = FMMEngine(
-        theta=theta,
-        G=G,
-        softening=softening,
-        tree=TreeConfig(mode="fixed_depth", leaf_target=2),
-        softening_kernel="plummer",
-    )
-    acc, pot = fmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=2,
-        return_potential=True,
-        jit_tree=False,
-        jit_traversal=False,
-    )
-
-    direct_acc, direct_pot = _direct_sum(
-        np.asarray(positions),
-        np.asarray(masses),
-        G=G,
-        softening=softening,
-    )
-
-    assert np.allclose(np.asarray(acc), direct_acc, rtol=1e-6, atol=1e-6)
-    assert np.allclose(np.asarray(pot), direct_pot, rtol=1e-6, atol=1e-6)
-
-
-def test_compute_accelerations_refined_tree_matches_non_refined():
-    """Ensure both refine_local modes stay accurate when leaves retain
-    multiple particles."""
-    positions, masses = _line_cluster_sample()
-    theta = 0.7
-    G = 1.1
-    softening = 0.02
-    leaf_size = 8
-    target_leaf_particles = 8
-    max_refine_levels = 1
-    aspect_threshold = 4.0
-
-    def run(refine_local_flag: bool):
-        fmm = FMMEngine(
-            theta=theta,
-            G=G,
-            softening=softening,
-            tree=TreeConfig(mode="fixed_depth", leaf_target=target_leaf_particles),
+    # `fixed_depth` itself went in the 2026-10 cleanup (X4), with a message that
+    # names the removal rather than the generic list of valid modes.
+    with pytest.raises(ValueError, match="fixed_depth.*removed.*X4"):
+        FMMEngine(
+            tree=TreeConfig(mode="fixed_depth"),
             softening_kernel="plummer",
         )
-        acc, pot = fmm.compute_accelerations(
-            positions,
-            masses,
-            leaf_size=leaf_size,
-            return_potential=True,
-            refine_local=refine_local_flag,
-            jit_tree=False,
-            jit_traversal=False,
-            max_refine_levels=max_refine_levels,
-            aspect_threshold=aspect_threshold,
-        )
-        return np.asarray(acc), np.asarray(pot)
-
-    acc_no, pot_no = run(False)
-    acc_ref, pot_ref = run(True)
-    direct_acc, direct_pot = _direct_sum(
-        np.asarray(positions),
-        np.asarray(masses),
-        G=G,
-        softening=softening,
-    )
-
-    assert np.allclose(acc_ref, direct_acc, rtol=1e-6, atol=1e-6)
-    assert np.allclose(pot_ref, direct_pot, rtol=1e-6, atol=1e-6)
-    assert np.allclose(acc_no, direct_acc, rtol=1e-6, atol=1e-6)
-    assert np.allclose(pot_no, direct_pot, rtol=1e-6, atol=1e-6)
-
-
-def test_compute_accelerations_fixed_depth_jitted_matches_eager():
-    positions, masses = _fixed_depth_sample()
-
-    def run(jit_tree: bool, jit_traversal: bool):
-        fmm = FMMEngine(
-            theta=0.7,
-            G=1.1,
-            softening=0.02,
-            tree=TreeConfig(mode="fixed_depth", leaf_target=2),
-            softening_kernel="plummer",
-        )
-        acc, pot = fmm.compute_accelerations(
-            positions,
-            masses,
-            leaf_size=2,
-            return_potential=True,
-            jit_tree=jit_tree,
-            jit_traversal=jit_traversal,
-        )
-        return np.asarray(acc), np.asarray(pot)
-
-    eager_acc, eager_pot = run(False, False)
-    jit_acc, jit_pot = run(True, True)
-
-    assert np.allclose(eager_acc, jit_acc, rtol=1e-6, atol=1e-6)
-    assert np.allclose(eager_pot, jit_pot, rtol=1e-6, atol=1e-6)
 
 
 def test_acceleration_magnitude():
@@ -1785,7 +1577,6 @@ def test_nearfield_precomputed_bucketed_scatter_matches_inline():
 def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
 
     key = jax.random.PRNGKey(1234)
     key_pos, key_mass = jax.random.split(key)
@@ -1850,7 +1641,6 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
 def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_AUTO_FULL_BLOCKS", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "0")
@@ -1915,7 +1705,6 @@ def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
 def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "0")
 
@@ -1962,7 +1751,6 @@ def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
 def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "1")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_FAST_BLOCKS", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_AUTO_FULL_BLOCKS", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "0")
@@ -2117,7 +1905,6 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
 def test_radix_fast_lane_fixed_seed_repeatability(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "8")
-    monkeypatch.setenv("JACCPOT_LARGE_N_SPEED_PREPARED_LAYOUT", "1")
 
     seed = 20260417
     key_a = jax.random.PRNGKey(seed)
@@ -3080,37 +2867,6 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         )
 
 
-def test_fast_preset_adaptive_large_cpu_policy_applies():
-    fmm = FMMEngine(
-        preset=FMMPreset.FAST,
-        expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
-        mac_type="dehnen",
-        softening_kernel="plummer",
-    )
-    # This test exercises the adaptive large-CPU runtime policy, which is the
-    # non-default opt-out path: the production default is static fixed sizing
-    # (JACCPOT_STATIC_RUNTIME_FIXED_SIZING=1), which deliberately skips adaptive
-    # runtime rewrites. Disable it so the adaptive policy is resolved and asserted.
-    fmm._static_runtime_fixed_sizing = False
-
-    overrides = fmm._resolve_runtime_execution_overrides(
-        num_particles=131072,
-        backend="cpu",
-    )
-
-    assert overrides.adaptive_applied is True
-    assert overrides.m2l_chunk_size == 32768
-    assert overrides.traversal_config is not None
-    assert overrides.traversal_config.process_block == 4096
-    assert overrides.traversal_config.max_interactions_per_node == 65536
-    # The policy used to auto-enable the grouped far field here, with AABB centres;
-    # both went in the 2026-10 cleanup (X3), so the flat list about COM centres runs.
-    assert overrides.farfield_mode == "pair_grouped"
-    assert overrides.center_mode == "com"
-    assert overrides.refine_local_override is False
-
-
 def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     fmm_cpu = FMMEngine(
         preset=FMMPreset.FAST,
@@ -3206,7 +2962,6 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
         backend="cpu",
     )
 
-    assert overrides.adaptive_applied is False
     assert overrides.traversal_config is cfg
     assert overrides.m2l_chunk_size == 2048
 

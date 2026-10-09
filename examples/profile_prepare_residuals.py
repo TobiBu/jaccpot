@@ -221,11 +221,6 @@ def profile_prepare_residuals(
         ),
         (
             fmm._impl,
-            "_prepare_state_autotune_downward_chunk_size",
-            "downward_m2l_autotune",
-        ),
-        (
-            fmm._impl,
             "_prepare_state_select_interactions_for_downward",
             "downward_interaction_handoff",
         ),
@@ -347,7 +342,6 @@ def profile_prepare_residuals(
         row.get("downward_adaptive_payload_ms", 0.0)
         + row.get("downward_streamed_pair_plan_ms", 0.0)
         + row.get("downward_far_pair_plan_ms", 0.0)
-        + row.get("downward_m2l_autotune_ms", 0.0)
         + row.get("downward_interaction_handoff_ms", 0.0)
         + row.get("downward_input_arrays_ms", 0.0)
         + row.get("downward_local_init_ms", 0.0)

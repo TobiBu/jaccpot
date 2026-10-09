@@ -90,8 +90,8 @@ _FAST_PRESET = FMMPresetConfig(
     jit_tree="auto",
     jit_traversal=True,
     description=(
-        "Single-tree gravitational preset optimised for throughput. Uses a "
-        "fixed-depth builder, disables host-side refinement, relies on a "
+        "Single-tree gravitational preset optimised for throughput. Uses the "
+        "LBVH radix builder, disables host-side refinement, relies on a "
         "single dual-tree traversal, and favours compiled evaluation while "
         "keeping memory usage bounded."
     ),

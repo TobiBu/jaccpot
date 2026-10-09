@@ -74,7 +74,9 @@ EXPECTED_FMM_INIT_KWARGS = {
     "advanced",
 }
 
-# Frozen public (non-underscore) method set of the facade.
+# Frozen public (non-underscore) method set of the facade. The four M2L autotune
+# cache methods, ``strict_run_segmented``, ``update_multipoles_only`` and
+# ``rebuild_topology_in_place`` were removed in the 2026-10 cleanup (X4).
 EXPECTED_FMM_PUBLIC_METHODS = {
     "clear_prepared_state_cache",
     "clear_runtime_caches",
@@ -86,20 +88,13 @@ EXPECTED_FMM_PUBLIC_METHODS = {
     "evaluate_prepared_state",
     "evaluate_prepared_state_with_jerk",
     "evaluate_prepared_state_with_time_derivatives",
-    "export_m2l_autotune_cache",
     "get_runtime_diagnostics",
-    "import_m2l_autotune_cache",
-    "load_m2l_autotune_cache",
     "prepare_state",
     "prepare_upward_sweep",
-    "rebuild_topology_in_place",
     "refresh_prepared_state",
-    "save_m2l_autotune_cache",
     "strict_fused_prepared_eval_fn",
     "strict_prepare_refresh_and_evaluate",
-    "strict_run_segmented",
     "strict_run_v2",
-    "update_multipoles_only",
 }
 
 

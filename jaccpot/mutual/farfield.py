@@ -526,13 +526,14 @@ def _m2l_batch(
     Three lanes, all computing the same operator as
     :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_rot_scale_real_batch`:
 
-    * **fused Pallas** (``use_pallas`` and Ampere+, or ``interpret``) -- one
+    * **fused Pallas** (``JACCPOT_MUTUAL_M2L=fused``, or ``interpret`` under the
+      default ``"auto"``; see :func:`_m2l_lane`) -- one
       launch per chunk does rotate -> z-translate -> rotate-back on chip via
       :func:`~jaccpot.pallas.m2l_real_fused.m2l_real_fused_pallas_cvjp`. The
       rotations are handed over as explicit per-degree blocks, built by the *same*
       ``real_rotation_*`` ops the single-pair helpers use, so the two lanes are
       the same arithmetic in a different order.
-    * **z-core Pallas** (``JACCPOT_MUTUAL_FUSED_M2L=0``) -- the original
+    * **z-core Pallas** (``JACCPOT_MUTUAL_M2L=zcore``) -- the original
       three-stage sandwich, kept as the A/B reference for the fused lane.
     * **pure JAX** -- the fallback and the correctness/AD oracle.
 

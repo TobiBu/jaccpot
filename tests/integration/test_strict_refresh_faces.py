@@ -1,4 +1,4 @@
-"""The three refresh faces of the strict lane -- audit item **F33**.
+"""The refresh face of the strict lane -- audit item **F33**.
 
 ``fmm_strict_run.py`` sat at 55% coverage, and #193 established that a GPU does
 not change that: an A100 full-suite run measured 226 missed statements against
@@ -6,12 +6,12 @@ CPU's 227. The lane is *reachable* on hardware and still not *exercised*, which 
 the same conflation F27 turned out to be -- and F27 went from 0% to 91% on a test,
 not a card. This file is that test for the largest untouched block.
 
-It covers ``refresh_prepared_state`` (148 statements missing),
-``update_multipoles_only`` (26) and ``rebuild_topology_in_place`` (11). The three
-are one implementation behind three names: same signature, same profile guard,
-differing only in which diagnostic counter they bump and whether they accept
-``bounds``. Their docstrings say exactly that, so the tests assert it rather than
-paraphrasing it.
+It covers ``refresh_prepared_state`` (148 statements missing). It used to cover
+``update_multipoles_only`` (26) and ``rebuild_topology_in_place`` (11) too: one
+implementation behind three names, differing only in which diagnostic counter
+they bumped and whether they accepted ``bounds``. Those two went in the 2026-10
+cleanup (X4), and with them their cases here; the tuple below keeps the shape
+so the remaining face is parametrised as before.
 
 Running on CPU needs the same setup the sibling strict tests use: the large-N
 production profile is gated on a GPU backend, so ``jax.default_backend`` is
@@ -41,15 +41,9 @@ MAX_ORDER = 2
 # file is meant to run in the gate too.
 RELATIVE_TOLERANCE = 1e-6
 
-FACES = (
-    "refresh_prepared_state",
-    "update_multipoles_only",
-    "rebuild_topology_in_place",
-)
+FACES = ("refresh_prepared_state",)
 COUNTERS = {
     "refresh_prepared_state": "_compiled_profile_refresh_calls",
-    "update_multipoles_only": "_compiled_profile_multipoles_only_calls",
-    "rebuild_topology_in_place": "_compiled_profile_topology_rebuild_calls",
 }
 
 
@@ -123,19 +117,12 @@ def test_refresh_face_reproduces_a_fresh_prepare(strict_env, face):
 @pytest.mark.slow
 @pytest.mark.parametrize("face", FACES)
 def test_each_face_bumps_its_own_counter_and_the_refresh_total(strict_env, face):
-    """The counters nest; they are not disjoint, and that is worth pinning.
+    """One refresh bumps the refresh counter exactly once.
 
-    Measured rather than assumed -- the first version of this test asserted the
-    three were mutually exclusive and failed for two of them. They are not:
-    ``update_multipoles_only`` and ``rebuild_topology_in_place`` *delegate to*
-    ``refresh_prepared_state``, exactly as their docstrings say ("a
-    :meth:`refresh_prepared_state` under a different name"), so each bumps its
-    own counter **and** the refresh counter, which is therefore a total over all
-    three rather than the count of direct calls.
-
-    Anyone reading these diagnostics needs to know that, or they will read
-    ``_compiled_profile_refresh_calls`` as the number of plain refreshes and
-    over-count it by however many of the other two faces ran.
+    Until the 2026-10 cleanup (X4) the counters nested: ``update_multipoles_only``
+    and ``rebuild_topology_in_place`` delegated to ``refresh_prepared_state``, so
+    each bumped its own counter **and** the refresh counter. With those two gone,
+    ``_compiled_profile_refresh_calls`` counts plain refreshes again.
     """
     fmm = _engine()
     positions, masses, moved = _particles()
@@ -151,49 +138,18 @@ def test_each_face_bumps_its_own_counter_and_the_refresh_total(strict_env, face)
     delta = {name: after[name] - before[name] for name in COUNTERS}
 
     assert delta[face] == 1, f"{face} did not bump {COUNTERS[face]}"
-    # the refresh counter totals all three, because the other two delegate to it
-    assert (
-        delta["refresh_prepared_state"] == 1
-    ), f"{face} should also register on the refresh total; got {delta}"
-    for other in FACES:
-        if other not in (face, "refresh_prepared_state"):
-            assert (
-                delta[other] == 0
-            ), f"{face} bumped {COUNTERS[other]}, which belongs to {other}: {delta}"
-
-
-@pytest.mark.slow
-def test_rebuild_topology_in_place_does_not_mutate_its_input(strict_env):
-    """ "In place" names the intent, not the mechanism.
-
-    The docstring is explicit that a new state is returned and the input is
-    untouched, because the name invites the opposite reading.
-    """
-    fmm = _engine()
-    positions, masses, moved = _particles()
-    prepared = fmm.prepare_state(
-        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-    )
-    before = np.asarray(prepared.positions_sorted).copy()
-
-    rebuilt = fmm.rebuild_topology_in_place(
-        prepared, moved, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-    )
-
-    assert rebuilt is not prepared
-    np.testing.assert_array_equal(np.asarray(prepared.positions_sorted), before)
 
 
 @pytest.mark.parametrize("face", FACES)
 def test_refresh_faces_reject_a_non_large_n_profile(face):
-    """All three are large-N-production only, and say so rather than degrading.
+    """The refresh is large-N-production only, and says so rather than degrading.
 
     No ``strict_env`` here on purpose: a default engine is exactly the
-    configuration these must refuse. The match is on ``large_n_gpu`` alone
-    because these three word the rejection differently from ``strict_run_v2``
+    configuration it must refuse. The match is on ``large_n_gpu`` alone because
+    the refresh words the rejection differently from ``strict_run_v2``
     ("supported only for preset='large_n_gpu', tree_type='radix',
-    expansion_basis='solidfmm'"), and the test should pin the profile they
-    demand, not one phrasing of it.
+    expansion_basis='solidfmm'"), and the test should pin the profile it demands,
+    not one phrasing of it.
     """
     fmm = FMMEngine(theta=0.6, working_dtype=jnp.float32, fixed_order=MAX_ORDER)
     positions, masses, moved = _particles()
