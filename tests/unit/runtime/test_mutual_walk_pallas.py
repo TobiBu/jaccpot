@@ -325,13 +325,16 @@ def test_pallas_walk_with_eq16a_equals_the_flat_walk_with_it(node_layout, dtype,
     n, leaf, order = 4000, 16, 4
     P = jnp.asarray(_plummer(n, 7), dtype)
     M = jnp.full((n,), 1.0 / n, dtype)
-    topo, ps, ms, inv = build_static_radix_tree(
-        P, M, infer_bounds(P), leaf_size=leaf, return_reordered=True
-    )
+    # a full Tree (the upward sweep is typed for one; CI runs the type checks)
+    from yggdrax.tree import Tree
+
+    tree = Tree.from_particles(P, M, leaf_size=leaf, tree_type="radix")
+    topo = tree.topology
+    ps, ms = P[tree.particle_indices], M[tree.particle_indices]
     com = compute_tree_mass_moments(topo, ps, ms).center_of_mass
     geom = com_mac_geometry(topo, ps, com, leaf_cap=leaf)
     upward = prepare_real_upward_sweep(
-        topo, ps, ms, max_order=order, max_leaf_size=leaf
+        tree, ps, ms, max_order=order, max_leaf_size=leaf
     )
     ni = int(topo.left_child.shape[0])
     tot = int(topo.parent.shape[0])
