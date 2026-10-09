@@ -9,8 +9,9 @@ Phase 5" asks, by measurement rather than assumption:
   and slower at moderate N; the mutual kernel has a different arithmetic
   intensity, so the verdict is re-taken here rather than inherited.
 * **far field** -- how much does the fully fused real M2L (rotate + z-translate +
-  rotate-back in one launch) beat the three-stage sandwich (two pure-JAX rotation
-  ``vmap``s around the Pallas z-core)?
+  rotate-back in one launch) beat the pure-JAX three-stage sandwich? (The Pallas
+  z-core lane between the two, ``pallas-zcore``, was removed with its kernel in
+  the 2026-10 cleanup, X5.)
 * **momentum** -- what does the residual actually do on the Pallas lanes, and in
   float32, where the reduction order changes but the pair antisymmetry does not?
 
@@ -101,13 +102,15 @@ def _near_field_callables(state, pos_sorted, mass_sorted, rung_sorted, weights):
 def _far_field_callables(state, mass_sorted, far_weights):
     """Return ``{lane: fn(positions) -> forces}`` for the far field alone.
 
-    Three lanes, because the Phase-5 question is which of the two Pallas M2L
-    shapes (if either) beats pure JAX:
+    The lanes, because the Phase-5 question is whether the Pallas M2L beats pure
+    JAX:
 
     * ``jax``          -- pure-JAX rot-scale, the oracle;
-    * ``pallas``       -- fully fused rotate + z-translate + rotate-back;
-    * ``pallas-zcore`` -- the original three-stage sandwich, i.e. two pure-JAX
-      rotation ``vmap``s around the Pallas z-core.
+    * ``pallas-auto``  -- what ``JACCPOT_MUTUAL_M2L=auto`` resolves to here;
+    * ``pallas-fused`` -- fully fused rotate + z-translate + rotate-back.
+
+    (``pallas-zcore``, the sandwich around the Pallas z-core, went with that
+    kernel in the 2026-10 cleanup, X5.)
 
     The lane is selected by ``JACCPOT_MUTUAL_M2L``, which
     ``jaccpot.mutual.farfield`` reads at *trace* time, so setting it around the
@@ -148,7 +151,6 @@ def _far_field_callables(state, mass_sorted, far_weights):
         "jax": make(False),
         "pallas-auto": make(True, lane="auto"),
         "pallas-fused": make(True, lane="fused"),
-        "pallas-zcore": make(True, lane="zcore"),
     }
 
 

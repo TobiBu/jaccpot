@@ -2,8 +2,9 @@
 
 Pinned here on a real radix tree, on CPU:
 
-* ``com_mac_geometry`` radii bound every particle of every node about the COM
-  (exact on the leaves, an upper bound on internal nodes);
+* ``com_mac_geometry`` radii are the exact largest particle distance about the
+  COM, on the leaves and the internal nodes (the child-sphere ``bound`` mode was
+  removed in the 2026-10 cleanup, X5, and its env value raises);
 * fed to the flat walk, every accepted far pair satisfies the convergence
   condition about the COMs, ``(r_A + r_B) / d <= theta`` with the EXACT radii;
 * the historical box geometry does not give that guarantee on the same tree
@@ -39,7 +40,6 @@ _LEAF = 8
 _N = 1024
 from tests.unit._typecheck_budget import trim
 
-_INTERNALS = trim(["exact", "bound"])
 _THETAS = trim([0.6, 0.9])
 
 
@@ -78,31 +78,19 @@ def _exact_rmax(topo, ps, centers):
     return out
 
 
-@pytest.mark.parametrize("internal", _INTERNALS)
-def test_com_geometry_bounds_every_node_and_is_exact_on_leaves(tree_data, internal):
+def test_com_geometry_bounds_every_node_and_is_exact_on_leaves(tree_data):
     tree, topo, ps, ms, com, _box = tree_data
-    geom = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal)
+    geom = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
     num_internal = int(topo.left_child.shape[0])
     exact = _exact_rmax(topo, ps, com)
     r = np.asarray(geom.radius)
     assert np.allclose(np.asarray(geom.center), np.asarray(com))
     assert np.all(r + 1e-12 >= exact), "a node's particles leave its MAC sphere"
     assert np.allclose(r[num_internal:], exact[num_internal:], rtol=1e-12, atol=1e-12)
-    if internal == "exact":
-        # every internal node too: the ancestor walk sees all of a node's particles
-        assert np.allclose(r, exact, rtol=1e-12, atol=1e-12)
-    else:
-        # the child-sphere bound compounds over deep chains (3x over exact seen on
-        # this 1024-particle leaf-8 tree); it costs far pairs, never accuracy
-        assert np.all(np.isfinite(r))
+    # every internal node too: the ancestor walk sees all of a node's particles
+    assert np.allclose(r, exact, rtol=1e-12, atol=1e-12)
     assert np.allclose(np.asarray(geom.max_extent), r)
     assert np.allclose(np.asarray(geom.half_extent), r[:, None])
-
-
-def test_internal_mode_is_validated(tree_data):
-    tree, topo, ps, ms, com, _box = tree_data
-    with pytest.raises(ValueError):
-        com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal="tight")
 
 
 def _far_pair_ratios(tree, geometry, centers, exact_r, *, theta):
@@ -168,24 +156,24 @@ def test_mode_knob(monkeypatch, tree_data):
     with pytest.raises(ValueError):
         mac_geometry_mode()
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "com")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "bound")
-    g_b, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "exact")
     g_e, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
-    assert np.all(np.asarray(g_b.radius) + 1e-12 >= np.asarray(g_e.radius))
-    assert float(np.max(np.asarray(g_b.radius) - np.asarray(g_e.radius))) > 0
+    exact = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
+    assert np.array_equal(np.asarray(g_e.radius), np.asarray(exact.radius))
+    # the child-sphere bound was removed (2026-10 cleanup, X5): refused by name
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "bound")
+    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+        resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "tight")
+    with pytest.raises(ValueError, match="must be 'exact'"):
+        resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
 
 
-@pytest.mark.parametrize("internal", _INTERNALS)
-def test_com_geometry_is_jittable(tree_data, internal):
+def test_com_geometry_is_jittable(tree_data):
     tree, topo, ps, ms, com, box = tree_data
-    f = jax.jit(
-        lambda ps, com: com_mac_geometry(
-            topo, ps, com, leaf_cap=_LEAF, internal=internal
-        )
-    )
+    f = jax.jit(lambda ps, com: com_mac_geometry(topo, ps, com, leaf_cap=_LEAF))
     g = f(ps, com)
-    ref = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, internal=internal)
+    ref = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
     assert np.allclose(np.asarray(g.radius), np.asarray(ref.radius))
 
 
@@ -303,7 +291,7 @@ def test_level_passes_equal_the_ancestor_table(tree_data, dtype):
 
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
 def test_pallas_chunks_equal_the_level_passes(tree_data, dtype, monkeypatch):
-    """The Pallas chunk kernel (interpret mode) gives the XLA level passes' radii.
+    """The Pallas table kernel (interpret mode) gives the XLA level passes' radii.
 
     Same squared distances, maxima in any order, one square root per node: equal
     to a few ulp at most (the 3-term sum may contract differently), at the padded
@@ -329,12 +317,26 @@ def test_pallas_chunks_equal_the_level_passes(tree_data, dtype, monkeypatch):
         assert np.all(got > 0)  # every node of this tree holds particles
 
 
+def test_the_removed_chain_variant_raises(tree_data, monkeypatch):
+    """``JACCPOT_COM_RADII_VARIANT=chain`` selected the chain kernel, removed in the
+    2026-10 cleanup (X5): refused by name, not run as the table kernel."""
+    tree, topo, ps, ms, com, _box = tree_data
+    monkeypatch.setenv("JACCPOT_COM_RADII_VARIANT", "table")
+    com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
+    monkeypatch.setenv("JACCPOT_COM_RADII_VARIANT", "chain")
+    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+        com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
+
+
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
 @pytest.mark.parametrize("lanes, block", [(4, 4), (8, 2), (2, 8)])
-def test_the_ancestor_table_kernel_is_the_chain_kernel(tree_data, dtype, lanes, block):
-    """The table variant (ancestors gathered first, particles ``lanes`` at a time)
-    gives the chain kernel's radii to the bit: the same squared distances, and max
-    is exact in any order. ``lanes`` below the leaf size takes several trips."""
+def test_the_table_kernel_tiling_does_not_move_a_bit(tree_data, dtype, lanes, block):
+    """The table kernel at other tilings (particles ``lanes`` at a time, ``block``
+    leaves per program) gives its default tiling's radii to the bit: the same
+    squared distances, and max is exact in any order. ``lanes`` below the leaf size
+    takes several trips. The default is anchored to the XLA level passes by
+    :func:`test_pallas_chunks_equal_the_level_passes`. (Until the 2026-10 cleanup,
+    X5, the reference here was the removed chain kernel.)"""
     from yggdrax.tree import get_node_levels
 
     from jaccpot.runtime._mac_geometry import _com_radii
@@ -351,10 +353,8 @@ def test_the_ancestor_table_kernel_is_the_chain_kernel(tree_data, dtype, lanes, 
         ps,
         com,
     )
-    kw = dict(leaf_cap=_LEAF, internal="exact", num_levels=depth, kernel="interpret")
-    chain = np.asarray(_com_radii(*args, variant="chain", **kw))
-    table = np.asarray(
-        _com_radii(*args, variant="table", lanes=lanes, block=block, **kw)
-    )
-    assert np.array_equal(table, chain)
+    kw = dict(leaf_cap=_LEAF, num_levels=depth, kernel="interpret")
+    default = np.asarray(_com_radii(*args, **kw))
+    table = np.asarray(_com_radii(*args, lanes=lanes, block=block, **kw))
+    assert np.array_equal(table, default)
     assert np.all(table > 0)

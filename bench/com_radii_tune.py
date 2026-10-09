@@ -1,11 +1,13 @@
 """Time the COM-radii pass alone on a tree captured from a real step.
 
-usage: python bench/com_radii_tune.py CAPTURE_comr.npz --variants table table:block=32 chain ...
+usage: python bench/com_radii_tune.py CAPTURE_comr.npz --variants table table:block=32 ...
 
 ``CAPTURE_comr.npz`` (+ ``.json``) comes from ``bench/nearfield_capture.py``. A variant is
-``table`` / ``chain`` with optional ``:key=value,...`` overrides of
+``table`` with optional ``:key=value,...`` overrides of
 :func:`jaccpot.runtime._mac_geometry._com_radii`'s ``block``, ``chunk``, ``lanes``,
-``num_warps``. Every variant must give the first one's radii to the bit.
+``num_warps``. Every variant must give the first one's radii to the bit. The ``chain``
+variant and the ``internal`` option (a capture's ``internal`` and ``variant`` are
+ignored) were removed in the 2026-10 cleanup (X5).
 """
 
 from __future__ import annotations
@@ -30,9 +32,7 @@ args = ap.parse_args()
 
 data = {k: jnp.asarray(v) for k, v in np.load(args.capture).items()}
 meta = json.load(open(os.path.splitext(args.capture)[0] + ".json"))
-base = {
-    k: meta[k] for k in ("leaf_cap", "internal", "num_levels", "kernel") if k in meta
-}
+base = {k: meta[k] for k in ("leaf_cap", "num_levels", "kernel") if k in meta}
 order = (
     "node_ranges",
     "left_child",
@@ -49,7 +49,10 @@ print(
 fns, ref, best = {}, None, {}
 for spec in args.variants:
     name, _, rest = spec.partition(":")
-    kw = dict(base, variant=name)
+    if name != "table":
+        print(f"  {spec:<32} skipped: only the table kernel is left", flush=True)
+        continue
+    kw = dict(base)
     for item in filter(None, rest.split(",")):
         k, v = item.split("=")
         kw[k] = int(v)
@@ -66,14 +69,14 @@ for spec in args.variants:
     print(f"  {spec:<32} {same}", flush=True)
     best[spec] = []
 for _ in range(args.rounds):
-    for spec in args.variants:
+    for spec in fns:
         ts = []
         for _ in range(args.reps):
             t0 = time.perf_counter()
             jax.block_until_ready(fns[spec](*arrs))
             ts.append(1e3 * (time.perf_counter() - t0))
         best[spec].append(min(ts))
-for spec in args.variants:
+for spec in fns:
     print(
         f"  {spec:<32} min per round " + " ".join(f"{x:7.3f}" for x in best[spec]),
         flush=True,

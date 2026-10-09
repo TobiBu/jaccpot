@@ -228,17 +228,20 @@ def main() -> None:
             )
     emit()
 
-    # ---- Pallas real z-M2L core -------------------------------------------
+    # ---- real basis with use_pallas -----------------------------------------
     if not args.skip_pallas:
-        from jaccpot.pallas.m2l_core_z_real import pallas_m2l_real_supported
+        # the real Pallas kernels' gate (sm_80+); the z-core kernel and its
+        # gpu/tpu-only gate were removed in the 2026-10 cleanup (X5)
+        from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
-        emit("## Real z-M2L core: pure-JAX vs Pallas")
+        emit("## Real basis: pure-JAX vs use_pallas")
         emit()
-        if not pallas_m2l_real_supported():
+        if not pallas_m2l_real_csr_supported():
             emit(
                 f"Pallas not supported on backend `{backend}` "
-                "(runs only on gpu/tpu); use_pallas silently falls back to "
-                "pure-JAX, so these numbers would be identical. Skipping."
+                "(the real kernels need an sm_80+ GPU); use_pallas silently "
+                "falls back to pure-JAX, so these numbers would be identical. "
+                "Skipping."
             )
         else:
             emit("| N | order | pure-JAX (ms) | Pallas (ms) | pallas/pureJAX |")

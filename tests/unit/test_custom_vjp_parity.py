@@ -135,66 +135,17 @@ def test_p2p_analytic_custom_vjp_matches_autodiff(seed):
 
 
 # --------------------------------------------------------------------------
-# Fused Pallas z-axis real M2L custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
-# --------------------------------------------------------------------------
-from jaccpot.operators.real_harmonics import (  # noqa: E402
-    sh_size,
-    translate_along_z_m2l_real,
-)
-from jaccpot.pallas.m2l_core_z_real import (  # noqa: E402
-    m2l_core_z_real_pallas_cvjp,
-    pallas_m2l_real_supported,
-)
-
-
-@pytest.mark.parametrize("interpret", [True, False])
-@pytest.mark.parametrize("order", [2, 4])
-def test_m2l_core_z_pallas_custom_vjp_matches_twin(order, interpret):
-    """Pallas z-M2L custom_vjp reverse == autodiff of the pure-JAX twin.
-
-    ``interpret=True`` exercises the kernel + custom_vjp on CPU CI (float64, tight
-    tolerance); ``interpret=False`` runs the real Pallas GPU kernel (float32, the
-    kernel's GPU tolerance), skipped off-GPU or when the backend rejects the tile.
-    The reverse is autodiff of ``vmap(translate_along_z_m2l_real)`` -- identical to
-    ``f_ref`` -- so gradients match to round-off; only the Pallas-vs-twin forward
-    is loosened.
-    """
-    if not interpret and not pallas_m2l_real_supported():
-        pytest.skip("real Pallas M2L kernel requires a GPU/TPU backend")
-    if interpret and not jax.config.jax_enable_x64:
-        pytest.skip("interpret parity requires x64 for a tight tolerance")
-
-    dtype = jnp.float64 if interpret else jnp.float32
-    tol = 1.0e-10 if interpret else 1.0e-5
-    rng = np.random.default_rng(order)
-    ncoeff = sh_size(order)
-    mult = jnp.asarray(rng.normal(size=(8, ncoeff)), dtype=dtype)
-    radii = jnp.asarray(rng.uniform(2.0, 5.0, size=(8,)), dtype=dtype)
-
-    def f_custom(m, r):
-        return m2l_core_z_real_pallas_cvjp(m, r, order, interpret, "triton")
-
-    def f_ref(m, r):
-        return jax.vmap(lambda mm, rr: translate_along_z_m2l_real(mm, rr, order=order))(
-            m, r
-        )
-
-    try:
-        assert_vjp_matches(f_custom, f_ref, (mult, radii), rtol=tol, atol=tol)
-    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
-        msg = str(exc).lower()
-        if not interpret and ("warpgroup" in msg or "ptx" in msg or "triton" in msg):
-            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
-        raise
-
-
-# --------------------------------------------------------------------------
 # Fused complex-basis M2L custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
 # --------------------------------------------------------------------------
 from jaccpot.operators.complex_ops import (  # noqa: E402
     complex_rotation_blocks_from_z_solidfmm_batch,
     complex_rotation_blocks_to_z_solidfmm_batch,
 )
+
+# The z-axis real M2L custom_vjp (``m2l_core_z_real_pallas_cvjp``) and its test
+# went with the z-core kernel in the 2026-10 cleanup (X5). ``sh_size`` is still
+# used below.
+from jaccpot.operators.real_harmonics import sh_size  # noqa: E402
 from jaccpot.pallas.m2l_complex_fused import (  # noqa: E402
     m2l_complex_fused_jax,
     m2l_complex_fused_pallas_cvjp,

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from yggdrax.interactions import DualTreeTraversalConfig
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
-from jaccpot.pallas import pallas_m2l_real_supported
+from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
 
 def _sample_problem(n: int = 1024, dtype=jnp.float32):
@@ -56,10 +56,10 @@ def main():
     pallas_time = _time_solver(use_pallas=True)
 
     print("backend             :", jax.default_backend())
-    print("pallas_supported    :", pallas_m2l_real_supported())
+    print("pallas_supported    :", pallas_m2l_real_csr_supported())
     print("pure_jax_time_s     :", f"{pure_time:.4f}")
     print("use_pallas_time_s   :", f"{pallas_time:.4f}")
-    if pallas_m2l_real_supported():
+    if pallas_m2l_real_csr_supported():
         print("speedup_x           :", f"{pure_time / max(pallas_time, 1.0e-12):.3f}")
     else:
         print("speedup_x           : fallback (unsupported backend)")

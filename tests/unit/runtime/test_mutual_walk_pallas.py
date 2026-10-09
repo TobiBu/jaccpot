@@ -217,8 +217,8 @@ def test_lex_sorted_orders_by_target_then_source_in_both_branches():
 def test_walk_backend_flag_parsing(monkeypatch):
     from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
     from jaccpot.runtime._interaction_cache import (
+        _reject_nondeterministic_walk_rows,
         strict_walk_backend,
-        strict_walk_deterministic_rows,
     )
 
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_WALK", raising=False)
@@ -231,10 +231,15 @@ def test_walk_backend_flag_parsing(monkeypatch):
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK", "cuda")
     with pytest.raises(ValueError):
         strict_walk_backend()
+    # the walk's rows are always sorted; switching the sort off was removed in
+    # the 2026-10 cleanup (X5) and is refused by name
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", raising=False)
-    assert strict_walk_deterministic_rows()
+    _reject_nondeterministic_walk_rows()
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", "1")
+    _reject_nondeterministic_walk_rows()
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", "off")
-    assert not strict_walk_deterministic_rows()
+    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+        _reject_nondeterministic_walk_rows()
 
 
 @pytest.mark.parametrize("floor", [0.05, 0.3])

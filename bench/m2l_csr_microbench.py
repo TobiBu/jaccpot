@@ -8,8 +8,8 @@ Synthetic far-pair lists of 1M and 6M directed pairs over ``n`` nodes (the leaf
   per-target ``m2l_real_csr_pallas``, which that phase removed;
 * the pure-JAX chunked lane as production runs it -- ``m2l_rot_scale_real_batch``
   over 4096-pair chunks in a ``lax.scan`` with ``_chunk_segment_scatter_add`` --
-  with ``JACCPOT_M2L_DEGREE_BATCHED`` off and on (the plan's 2.0 candidate, and
-  the honest pure-JAX baseline).
+  the honest pure-JAX baseline. (Its ``JACCPOT_M2L_DEGREE_BATCHED`` arm went with
+  the batched rotation in the 2026-10 cleanup, X5.)
 
 Reports ns per directed pair (min of the timed calls) and the fp32 rel-L2 of
 the kernel against the pure-JAX lane. Gate: <= 15 ns/pair at p=4 and parity
@@ -115,28 +115,16 @@ def main() -> None:
                 )
                 return acc
 
-            rows = {}
-            for db in ("0", "1"):
-                os.environ["JACCPOT_M2L_DEGREE_BATCHED"] = db
-                # the knob is read at trace time and the cascade's inner jits are
-                # cached across variants -- without this the second variant reuses
-                # the first's trace (measured: bit-identical output and time)
-                jax.clear_caches()
-                fn = jax.jit(pure)
-                out_p, t_p, med_p = timed(fn, mult, centers, src_p, tgt_p)
-                rows[db] = (out_p, t_p, med_p)
-                del fn
-            ref = np.asarray(rows["0"][0], np.float64)
+            fn = jax.jit(pure)
+            out_p, t_p, med_p = timed(fn, mult, centers, src_p, tgt_p)
+            del fn
+            ref = np.asarray(out_p, np.float64)
             assert np.all(np.isfinite(ref)), "pure-JAX reference has non-finite rows"
             assert np.all(
                 np.isfinite(np.asarray(out_k))
             ), "CSR kernel produced non-finite rows"
             rel = float(
                 np.linalg.norm(np.asarray(out_k, np.float64) - ref)
-                / np.linalg.norm(ref)
-            )
-            rel_db = float(
-                np.linalg.norm(np.asarray(rows["1"][0], np.float64) - ref)
                 / np.linalg.norm(ref)
             )
             row = dict(
@@ -147,19 +135,17 @@ def main() -> None:
                 csr_ns_per_pair=1e9 * t_k / P,
                 csr_ms=1e3 * t_k,
                 csr_median_ms=1e3 * med_k,
-                pure_ns_per_pair=1e9 * rows["0"][1] / P,
-                pure_ms=1e3 * rows["0"][1],
-                pure_db_ns_per_pair=1e9 * rows["1"][1] / P,
-                pure_db_ms=1e3 * rows["1"][1],
+                pure_ns_per_pair=1e9 * t_p / P,
+                pure_ms=1e3 * t_p,
+                pure_median_ms=1e3 * med_p,
                 rel_l2_csr_vs_pure=rel,
-                rel_l2_db_vs_pure=rel_db,
                 chunk=chunk,
             )
             results.append(row)
             print(
                 f"p={order} pairs={P/1e6:.0f}M longest_row={counts.max()}: CSR {row['csr_ns_per_pair']:.1f} ns/pair "
-                f"({row['csr_ms']:.1f} ms) | pure-JAX {row['pure_ns_per_pair']:.1f} ns/pair | degree-batched "
-                f"{row['pure_db_ns_per_pair']:.1f} ns/pair | rel-L2 csr {rel:.2e}, db {rel_db:.2e}",
+                f"({row['csr_ms']:.1f} ms) | pure-JAX {row['pure_ns_per_pair']:.1f} ns/pair "
+                f"| rel-L2 csr {rel:.2e}",
                 flush=True,
             )
     if args.out:

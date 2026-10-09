@@ -31,7 +31,7 @@ from yggdrax.interactions import (
 )
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_flag, env_float
+from jaccpot._env import env_flag, env_float, env_reject_removed
 from jaccpot._jax_compat import Tracer
 from jaccpot._searchsorted import searchsorted_method
 
@@ -53,7 +53,6 @@ __all__ = [
     "flat_walk_cap_headroom",
     "pair_policy_cache_identity",
     "strict_walk_backend",
-    "strict_walk_deterministic_rows",
     "TargetSortedFarPairs",
     "far_pair_targets",
 ]
@@ -1257,21 +1256,28 @@ def strict_walk_backend() -> str:
     return raw
 
 
-def strict_walk_deterministic_rows() -> bool:
-    """Whether the Pallas walk's rows are sorted by (target, source).
+def _reject_nondeterministic_walk_rows() -> None:
+    """Refuse ``JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC=0``; rows are sorted.
 
-    ``JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC`` (default on): the Pallas
-    walk emits in atomic order, so without the sort the fp32 summation order of
-    every M2L and near-field row -- hence the forces at ~1e-7 -- would vary
-    between runs. Off saves one sort of the far list.
+    The Pallas walk emits in atomic order, so its rows are always sorted by
+    (target, source): without the sort the fp32 summation order of every M2L and
+    near-field row -- hence the forces at ~1e-7 -- would vary between runs. The
+    switch that turned the sort off (saving one sort of the far list, 0.1 ms per
+    step at 2e5) was removed in the 2026-10 cleanup (X5).
 
     Returns
     -------
-    bool
-        ``True`` unless the flag is ``0``/``off``/``false``.
+    None
+        Returns only when the variable is unset or on; ``0`` / ``off`` /
+        ``false`` / ``no`` raise a ``ValueError``
+        (:func:`jaccpot._env.env_reject_removed`).
     """
-    raw = os.environ.get("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", "1")
-    return raw.strip().lower() not in ("0", "off", "false")
+    env_reject_removed(
+        "JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC",
+        ("0", "off", "false", "no"),
+        phase="X5",
+        default="rows sorted by (target, source)",
+    )
 
 
 def _lex_sorted(
@@ -1951,7 +1957,7 @@ def _build_flat_walk_artifacts_strict_streamed(
     )
 
     walk_backend = strict_walk_backend()
-    deterministic_rows = strict_walk_deterministic_rows()
+    _reject_nondeterministic_walk_rows()
     if walk_backend == "pallas" and str(mac_type) not in ("bh", "dehnen"):
         raise RuntimeError(
             "JACCPOT_STATIC_STRICT_FUSED_WALK=pallas implements the dual-tree "
@@ -2223,13 +2229,11 @@ def _build_flat_walk_artifacts_strict_streamed(
         near_width=int(near_width),
         num_internal=num_internal,
         total_nodes=total_nodes,
-        deterministic=bool(walk_backend == "pallas" and deterministic_rows),
+        deterministic=bool(walk_backend == "pallas"),
         idx=np.dtype(idx),
     )
     far_cls = (
-        TargetSortedFarPairs
-        if walk_backend == "pallas" and deterministic_rows
-        else CompactTaggedFarPairs
+        TargetSortedFarPairs if walk_backend == "pallas" else CompactTaggedFarPairs
     )
     compact_far_pairs = far_cls(
         sources=far_sources,

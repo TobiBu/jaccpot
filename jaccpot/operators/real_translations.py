@@ -232,10 +232,13 @@ def z_m2l_translation_tables(order: int) -> Tuple[np.ndarray, ...]:
         sign[out]           ``sign(m)`` (shared across all slots of an output)
 
     BOTH the pure-JAX kernel :func:`translate_along_z_m2l_real` and the Pallas
-    kernel (``jaccpot.pallas.m2l_core_z_real``) build from these tables, so the
-    recurrence is defined exactly once and the two encodings cannot drift. The
-    parity test in ``tests/unit/operators/test_pallas_m2l_core_z_real.py``
-    guards this invariant on CPU (Pallas interpret mode).
+    M2L kernels' z-core tables (:func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_tables`,
+    the lane kernel's constants) build from these tables, so the recurrence is
+    defined exactly once and the encodings cannot drift. The CSR twin's parity
+    test against the rotate/scale operator
+    (``tests/unit/operators/test_m2l_real_csr_pallas.py``) guards it on CPU. (The
+    z-core Pallas kernel that also read them was removed in the 2026-10 cleanup,
+    X5.)
 
     Parameters
     ----------

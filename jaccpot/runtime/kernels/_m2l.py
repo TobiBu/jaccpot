@@ -301,9 +301,10 @@ def _real_m2l_pallas_active() -> bool:
 
     Uses :func:`pallas_m2l_real_fused_supported` (the gate for the kernel actually
     dispatched, :func:`_m2l_real_batch_kernel_fused_pallas`), which requires
-    Ampere+ (sm_80) -- matching the complex gate. The z-core
-    ``pallas_m2l_real_supported`` used previously only checks gpu/tpu, so it would
-    route to Pallas on a pre-Ampere GPU where the Triton lowering fails.
+    Ampere+ (sm_80) -- matching the complex gate. The z-core kernel's
+    ``pallas_m2l_real_supported`` (removed with that kernel in the 2026-10
+    cleanup, X5) used previously only checked gpu/tpu, so it would route to
+    Pallas on a pre-Ampere GPU where the Triton lowering fails.
 
     Returns
     -------

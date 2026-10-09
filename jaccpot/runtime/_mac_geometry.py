@@ -19,15 +19,15 @@ matched error.
 
 :func:`com_mac_geometry` builds a ``TreeGeometry`` whose centres are the COMs
 and whose radii bound every particle of the node about its COM: exact for the
-leaves (one gather over the leaf particle table), and for internal nodes
-either EXACT (default, ``internal="exact"``: every leaf walks its ancestor
-chain by pointer jumping and each ancestor takes the segment-max of the leaf's
-particle distances about the ancestor's centre -- one gather + segment-max per
-tree level) or the conservative upward bound ``r_p = max_c (|c_c - c_p| + r_c)``
-(``internal="bound"``, level by level like ``yggdrax._geometry_impl``). Measured
-on the real 2e5 / leaf-64 tree at theta 0.8 (``probe_tree_volume.py``): the
-bound is 1.38x (p50) / 1.94x (p90) over exact and costs 2.7x in far pairs
-(565k -> 1541k directed) for 7 % fewer near edges, so exact is the default.
+leaves (one gather over the leaf particle table) and for internal nodes (every
+leaf walks its ancestor chain by pointer jumping and each ancestor takes the
+segment-max of the leaf's particle distances about the ancestor's centre -- one
+gather + segment-max per tree level). The conservative upward bound
+``r_p = max_c (|c_c - c_p| + r_c)`` it was measured against
+(``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS=bound``) was 1.38x (p50) / 1.94x
+(p90) over exact on the real 2e5 / leaf-64 tree at theta 0.8 and cost 2.7x in
+far pairs (565k -> 1541k directed) for 7 % fewer near edges; it was removed in
+the 2026-10 cleanup (X5) and the variable's ``bound`` value raises.
 ``half_extent`` and ``max_extent`` are set to the radius too, so the ``bh`` box
 test degrades to the sphere test rather than to a stale box.
 
@@ -46,7 +46,7 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
-from yggdrax.dtypes import INDEX_DTYPE, as_index
+from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.geometry import TreeGeometry
 
 _MAX_TREE_LEVELS = (
@@ -56,14 +56,11 @@ _MAX_TREE_LEVELS = (
 __all__ = [
     "com_mac_geometry",
     "mac_geometry_mode",
-    "mac_radius_mode",
     "resolve_walk_geometry",
 ]
 
 _MAC_GEOMETRY_ENV = "JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY"
 _MAC_GEOMETRY_MODES = ("aabb", "com")
-_MAC_RADIUS_ENV = "JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS"
-_MAC_RADIUS_MODES = ("exact", "bound")
 
 
 def mac_geometry_mode(default: str = "aabb") -> str:
@@ -109,62 +106,30 @@ def mac_geometry_mode(default: str = "aabb") -> str:
     return raw
 
 
-def mac_radius_mode() -> str:
-    """How ``com_mac_geometry`` sizes internal nodes: ``"exact"`` (default) or ``"bound"``.
+def _reject_removed_mac_radius_mode() -> None:
+    """Refuse ``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS=bound``; radii are exact.
+
+    The child-sphere bound for internal nodes was removed in the 2026-10 cleanup
+    (X5): it cost 2.7x in far pairs for no accuracy (module docstring). ``exact``,
+    the default, is accepted.
 
     Returns
     -------
-    str
-        The mode named by ``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS``.
+    None
+        Returns only for an unset variable or ``exact``.
 
     Raises
     ------
     ValueError
-        If the environment names a mode this module does not implement.
+        If the variable is ``bound`` (removed) or names no mode.
     """
-    raw = os.environ.get(_MAC_RADIUS_ENV, "exact").strip().lower()
-    if raw not in _MAC_RADIUS_MODES:
-        raise ValueError(
-            f"{_MAC_RADIUS_ENV} must be one of {_MAC_RADIUS_MODES}, got {raw!r}"
-        )
-    return raw
+    from jaccpot._env import env_reject_removed
 
-
-def _node_depths(parent: Array) -> Array:
-    """Depth of every node from the parent array by pointer doubling (root = 0).
-
-    Parameters
-    ----------
-    parent : Array
-        Parent index per node ``[nodes]``; negative marks a root.
-
-    Returns
-    -------
-    Array
-        Depth per node, index dtype, roots at 0.
-    """
-    num_nodes = int(parent.shape[0])
-    parent_safe = jnp.where(parent >= 0, parent, as_index(0))
-    is_root = parent < 0
-    init_dist = jnp.where(is_root, as_index(0), as_index(1))
-    init_shortcut = jnp.where(
-        is_root, jnp.arange(num_nodes, dtype=INDEX_DTYPE), parent_safe
-    )
-
-    def _cond(state):
-        _sc, _d, changed = state
-        return changed
-
-    def _body(state):
-        sc, d, _changed = state
-        new_d = d + d[sc]
-        new_sc = sc[sc]
-        return new_sc, new_d, jnp.any(new_sc != sc)
-
-    _, depth, _ = lax.while_loop(
-        _cond, _body, (init_shortcut, init_dist, jnp.bool_(True))
-    )
-    return depth
+    name = "JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS"
+    env_reject_removed(name, ("bound",), phase="X5", default="exact")
+    raw = os.environ.get(name, "exact").strip().lower()
+    if raw != "exact":
+        raise ValueError(f"{name} must be 'exact', got {raw!r}")
 
 
 @jax.named_scope("fmm_com_radii")
@@ -174,7 +139,6 @@ def com_mac_geometry(
     centers: Array,
     *,
     leaf_cap: int,
-    internal: str = "exact",
     num_levels: Optional[int] = None,
 ) -> TreeGeometry:
     """``TreeGeometry`` about the expansion centres: COM centres, particle radii about them.
@@ -193,9 +157,6 @@ def com_mac_geometry(
         ``multipoles.centers`` (centres of mass).
     leaf_cap : int
         Leaf capacity (particles per leaf at most). Static.
-    internal : str
-        ``"exact"`` (max particle distance about the node's own centre, via the
-        leaves' ancestor chains) or ``"bound"`` (child-sphere bound). Static.
     num_levels : Optional[int]
         Static bound on the tree's level count (the upward sweep's
         ``static_num_levels``; a traced rebuild deeper than it trips the
@@ -204,19 +165,10 @@ def com_mac_geometry(
     Returns
     -------
     TreeGeometry
-        ``center = centers``; ``radius`` bounds every particle of the node about
-        its centre (exact for leaves and, with ``internal="exact"``, for every
-        node); ``half_extent`` and ``max_extent`` equal the radius.
-
-    Raises
-    ------
-    ValueError
-        If ``internal`` is not ``"exact"`` or ``"bound"``.
+        ``center = centers``; ``radius`` is the exact largest distance of the
+        node's particles from its centre (leaves and internal nodes alike);
+        ``half_extent`` and ``max_extent`` equal the radius.
     """
-    if internal not in _MAC_RADIUS_MODES:
-        raise ValueError(
-            f"internal must be one of {_MAC_RADIUS_MODES}, got {internal!r}"
-        )
     positions_sorted = jnp.asarray(positions_sorted)
     # one compiled program even when the caller is eager (the prepare): op by op,
     # the leaf pass materialised its (L, w, 3) gather and (L, w) tables
@@ -228,10 +180,8 @@ def com_mac_geometry(
         positions_sorted,
         jnp.asarray(centers, dtype=positions_sorted.dtype),
         leaf_cap=int(leaf_cap),
-        internal=str(internal),
         num_levels=None if num_levels is None else int(num_levels),
         kernel=_com_radii_kernel(),
-        variant=_com_radii_variant(),
     )
     centers = jnp.asarray(centers, dtype=positions_sorted.dtype)
     num_nodes = int(radii.shape[0])
@@ -242,13 +192,21 @@ def com_mac_geometry(
 def _com_radii_kernel() -> str:
     """``JACCPOT_COM_RADII_KERNEL``: ``pallas`` (sm_80+ default), ``xla``, ``interpret``.
 
+    The Pallas kernel is the ancestor-table one; the chain kernel
+    ``JACCPOT_COM_RADII_VARIANT=chain`` selected (the same radii, 2.1-2.4x slower)
+    was removed in the 2026-10 cleanup (X5), and that value raises a
+    ``ValueError`` (:func:`jaccpot._env.env_reject_removed`).
+
     Returns
     -------
     str
         The exact-radius implementation :func:`_com_radii` runs.
     """
-    from jaccpot._env import env_choice
+    from jaccpot._env import env_choice, env_reject_removed
 
+    env_reject_removed(
+        "JACCPOT_COM_RADII_VARIANT", ("chain",), phase="X5", default="table"
+    )
     choice = env_choice(
         "JACCPOT_COM_RADII_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
     )
@@ -259,35 +217,15 @@ def _com_radii_kernel() -> str:
     return "pallas" if pallas_cascade_level_supported() else "xla"
 
 
-def _com_radii_variant() -> str:
-    """``JACCPOT_COM_RADII_VARIANT``: ``table`` (default) or ``chain``.
-
-    ``table`` gathers each pass's ancestors first and reads the particles a few
-    lanes at a time; ``chain`` is the kernel that walks the ancestors itself over
-    the leaf capacity's lanes. The same radii to the bit; timed alone on the 8e6 and
-    1e8 cell trees (A100, 2026-10-05): 11.4 -> 4.8 ms and 78 -> 36.5 ms.
-
-    Returns
-    -------
-    str
-        The variant :func:`_com_radii` runs.
-    """
-    from jaccpot._env import env_choice
-
-    return env_choice("JACCPOT_COM_RADII_VARIANT", "table", ("table", "chain"))
-
-
 @partial(
     jax.jit,
     static_argnames=(
         "leaf_cap",
-        "internal",
         "num_levels",
         "kernel",
         "block",
         "chunk",
         "num_warps",
-        "variant",
         "lanes",
     ),
 )
@@ -300,13 +238,11 @@ def _com_radii(
     centers: Array,
     *,
     leaf_cap: int,
-    internal: str,
     num_levels: Optional[int],
     kernel: str = "xla",
     block: int = 32,
     chunk: int = 8,
     num_warps: int = 4,
-    variant: str = "table",
     lanes: int = 8,
 ) -> Array:
     """The radii of :func:`com_mac_geometry`, one jitted program.
@@ -327,15 +263,12 @@ def _com_radii(
         ``(nodes, 3)`` expansion centres, in the positions' dtype.
     leaf_cap : int
         Leaf capacity. Static.
-    internal : str
-        ``"exact"`` or ``"bound"``. Static.
     num_levels : Optional[int]
         Level-count bound. Static.
     kernel : str
         ``"xla"`` (one ``(L, w)`` reduction per level), ``"pallas"`` or
         ``"interpret"`` (:mod:`jaccpot.pallas.com_radii_leaf`: each leaf's
-        particles read once per chunk of ``chunk`` levels). Exact mode only.
-        Static.
+        particles read once per chunk of ``chunk`` levels). Static.
     block : int
         Leaves per Pallas program (a power of two). Static. 32: the table kernel
         alone on the 8e6 cell tree (A100, 2026-10-06) 5.43 ms at 16, 5.07 at 32.
@@ -343,15 +276,10 @@ def _com_radii(
         Ancestor levels per pass over the particles. Static.
     num_warps : int
         Warps per Pallas program. Static.
-    variant : str
-        ``"chain"``: the kernel walks each leaf's ancestors itself, over the leaf
-        capacity's lanes (:func:`~jaccpot.pallas.com_radii_leaf.com_radii_chunk_pallas`).
-        ``"table"``: the ancestors are gathered first and the kernel reads the
-        particles ``lanes`` at a time
-        (:func:`~jaccpot.pallas.com_radii_leaf.com_radii_table_pallas`). The same
-        radii to the bit. Static.
     lanes : int
-        Particles per leaf per iteration of the ``"table"`` kernel. Static.
+        Particles per leaf per iteration of the Pallas kernel
+        (:func:`~jaccpot.pallas.com_radii_leaf.com_radii_table_pallas`; the
+        ancestors are gathered first). Static.
 
     Returns
     -------
@@ -386,16 +314,13 @@ def _com_radii(
     leaf_ids = jnp.arange(num_internal, num_nodes, dtype=INDEX_DTYPE)
     levels = int(_MAX_TREE_LEVELS) if num_levels is None else int(num_levels)
     levels = max(1, min(levels, int(_MAX_TREE_LEVELS)))
-    if kernel in ("pallas", "interpret") and (internal == "exact" or num_internal == 0):
+    if kernel in ("pallas", "interpret"):
         # Each leaf's particles read once per chunk of ``chunk`` levels (the leaf
         # itself, then its ancestors), max SQUARED distances per (leaf, level);
         # then, per chunk, the runs of equal ancestor reduced and their ends
         # scattered as below, and one square root per node at the end (sqrt is
         # monotone: the max of the distances).
-        from jaccpot.pallas.com_radii_leaf import (
-            com_radii_chunk_pallas,
-            com_radii_table_pallas,
-        )
+        from jaccpot.pallas.com_radii_leaf import com_radii_table_pallas
 
         counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
         drop = jnp.asarray(num_nodes, INDEX_DTYPE)
@@ -413,40 +338,24 @@ def _com_radii(
 
         def _chunk(_, carry):
             r2, anc = carry
-            if variant == "table":
-                # the chunk's ancestors by pointer jumping, one gather per level
-                # over all leaves (the same table the chain kernel emits), so the
-                # kernel's loads do not wait on each other
-                cols = [anc]
-                for _j in range(chunk - 1):
-                    cols.append(_up(cols[-1]))
-                ancs = jnp.stack(cols, axis=1)
-                nxt = _up(cols[-1])
-                d2 = com_radii_table_pallas(
-                    positions_sorted,
-                    centers,
-                    leaf_ranges[:, 0],
-                    counts,
-                    ancs,
-                    lanes=lanes,
-                    block=block,
-                    num_warps=num_warps,
-                    interpret=kernel == "interpret",
-                )
-            else:
-                d2, ancs, nxt = com_radii_chunk_pallas(
-                    positions_sorted,
-                    centers,
-                    parent,
-                    leaf_ranges[:, 0],
-                    counts,
-                    anc,
-                    leaf_cap=w,
-                    levels=chunk,
-                    block=block,
-                    num_warps=num_warps,
-                    interpret=kernel == "interpret",
-                )
+            # the chunk's ancestors by pointer jumping, one gather per level over
+            # all leaves, so the kernel's loads do not wait on each other
+            cols = [anc]
+            for _j in range(chunk - 1):
+                cols.append(_up(cols[-1]))
+            ancs = jnp.stack(cols, axis=1)
+            nxt = _up(cols[-1])
+            d2 = com_radii_table_pallas(
+                positions_sorted,
+                centers,
+                leaf_ranges[:, 0],
+                counts,
+                ancs,
+                lanes=lanes,
+                block=block,
+                num_warps=num_warps,
+                interpret=kernel == "interpret",
+            )
             live = ancs >= 0
             _, run = lax.associative_scan(_seg2, (ancs, d2), axis=0)
             last = (
@@ -471,7 +380,7 @@ def _com_radii(
     r_leaf = _leaf_max_about(leaf_ids)
     radii = jnp.zeros((num_nodes,), dtype=dtype).at[num_internal:].set(r_leaf)
 
-    if num_internal > 0 and internal == "exact":
+    if num_internal > 0:
         # Every internal node's particles are exactly the union of its descendant
         # leaves', so the max over (leaf, ancestor) pairs of the leaf's particle
         # distances about the ancestor's centre is the exact radius. One pass per
@@ -508,22 +417,6 @@ def _com_radii(
         # a leaf at depth D has D ancestors, so depth-bound - 1 passes cover all
         passes = max(1, levels - 1)
         radii, _ = lax.fori_loop(0, passes, _level, (radii, parent[leaf_ids]))
-
-    elif num_internal > 0:
-        depth = _node_depths(parent)
-        max_depth = jnp.max(depth)
-        internal_depth = depth[:num_internal]
-        c_int = centers[:num_internal]
-        off_l = jnp.linalg.norm(centers[left_child] - c_int, axis=-1)
-        off_r = jnp.linalg.norm(centers[right_child] - c_int, axis=-1)
-
-        def _body(rev_idx, r):
-            level = max_depth - as_index(1) - as_index(rev_idx)
-            at_level = internal_depth == level
-            bound = jnp.maximum(off_l + r[left_child], off_r + r[right_child])
-            return r.at[:num_internal].set(jnp.where(at_level, bound, r[:num_internal]))
-
-        radii = lax.fori_loop(0, jnp.maximum(max_depth, as_index(0)), _body, radii)
 
     return radii
 
@@ -602,12 +495,12 @@ def resolve_walk_geometry(
                 "centres, and this lane's upward data has none."
             )
         return box_geometry, geometry_factory
+    _reject_removed_mac_radius_mode()
     geometry = com_mac_geometry(
         tree,
         positions_sorted,
         expansion_centers,
         leaf_cap=int(leaf_cap),
-        internal=mac_radius_mode(),
         num_levels=num_levels,
     )
     if radius_scale is not None:

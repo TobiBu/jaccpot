@@ -87,3 +87,26 @@ def test_large_n_accel_eval_requires_fast_lane_state(monkeypatch):
     state_bad = replace(state, nearfield_mode="baseline")
     with pytest.raises(RuntimeError, match="nearfield_mode='bucketed'"):
         _ = fmm.evaluate_prepared_state(state_bad)
+
+
+def test_the_removed_gather_unpermute_raises(monkeypatch):
+    """The fast lane returns forces to input order by a scatter; the gather through
+    the inverse permutation (``JACCPOT_FASTLANE_UNPERMUTE=gather``) was removed in
+    the 2026-10 cleanup (X5) and is refused by name, not run as the scatter."""
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    key = jax.random.PRNGKey(3)
+    positions = jax.random.uniform(key, (512, 3), minval=-1.0, maxval=1.0)
+    masses = jnp.full((512,), 1.0 / 512)
+    fmm = _make_large_n_fmm()
+    state = fmm.prepare_state(
+        positions.astype(jnp.float32),
+        masses.astype(jnp.float32),
+        leaf_size=64,
+        max_order=3,
+    )
+    monkeypatch.setenv("JACCPOT_FASTLANE_UNPERMUTE", "scatter")
+    acc = fmm.evaluate_prepared_state(state)
+    assert tuple(acc.shape) == (512, 3)
+    monkeypatch.setenv("JACCPOT_FASTLANE_UNPERMUTE", "gather")
+    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+        fmm.evaluate_prepared_state(state)
