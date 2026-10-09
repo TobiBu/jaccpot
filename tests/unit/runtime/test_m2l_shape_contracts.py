@@ -1,15 +1,10 @@
-"""Shape contracts for the M2L seam's two axes: `classes`, and `nodes`/`sh`.
+"""Shape contracts for the M2L seam's `nodes`/`sh` axes.
 
 `bench/annotation_pilot.py` re-recorded 2026-09-03 put 23 silent acceptances of 286
 perturbations in this module, concentrated in the class/rotation family and the
-accumulators. The annotations that close 19 of them are pinned here.
-
-`classes` is the interesting one. This module's docstring records G.11 as a 60x accuracy
-gap between two of the four accumulators, caused by `pair_grouped` gathering rotations
-with class ids from the **wrong ordering**. `_rotation_blocks_for_grouped_classes` takes
-its class count from `class_deltas` while using `class_keys` as the rotation cache's
-identity, so a length disagreement between them keys the cache on a different class count
-than the blocks it returns -- G.11 expressed as a shape.
+accumulators. The annotations that closed 19 of them were pinned here. The `classes`
+axis -- G.11 expressed as a shape, on `_rotation_blocks_for_grouped_classes` -- went
+with the grouped far field in the 2026-10 cleanup (X3), and its four tests with it.
 """
 
 from __future__ import annotations
@@ -22,10 +17,9 @@ from jaxtyping import TypeCheckError
 from jaccpot.runtime.kernels._m2l import (
     _chunk_segment_scatter_add,
     _m2l_chunk_contributions,
-    _rotation_blocks_for_grouped_classes,
 )
 
-CLASSES, KEYS, ORDER = 7, 5, 2
+ORDER = 2
 
 
 def _dtype():
@@ -36,70 +30,12 @@ def _dtype():
     numpy.dtype
         `float64` under `JAX_ENABLE_X64`, else `float32`.
     """
-    # A dtype INSTANCE, not the scalar type: `_rotation_blocks_for_grouped_classes`
-    # declares `dtype: jnp.dtype` and the decorator added with these annotations now
-    # enforces it, which is how this helper was caught passing `jnp.float64` itself.
+    # A dtype INSTANCE, not the scalar type: the grouped rotation-block builder this
+    # used to feed declared `dtype: jnp.dtype`, which is how this helper was caught
+    # passing `jnp.float64` itself.
     return jnp.zeros(
         (), dtype=jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
     ).dtype
-
-
-def _class_args(classes: int = CLASSES):
-    """Build a matched `class_keys` / `class_deltas` pair.
-
-    Parameters
-    ----------
-    classes : int
-        Number of displacement classes.
-
-    Returns
-    -------
-    dict
-        Keyword arguments for `_rotation_blocks_for_grouped_classes`.
-    """
-    return {
-        "order": ORDER,
-        "rotation": "solidfmm",
-        "class_keys": jnp.zeros((classes, KEYS), dtype=jnp.int32),
-        "class_deltas": jnp.ones((classes, 3), dtype=_dtype()),
-        "dtype": _dtype(),
-        "basis_mode": "complex",
-    }
-
-
-def test_matched_classes_still_build_their_blocks():
-    """The control. Every rejection below is worthless without it."""
-    to_blocks, from_blocks = _rotation_blocks_for_grouped_classes(**_class_args())
-    assert to_blocks.shape[0] == CLASSES
-    assert from_blocks.shape[0] == CLASSES
-
-
-def test_class_deltas_shorter_than_class_keys_is_rejected():
-    """G.11 as a shape: the cache identity and the class count disagreeing."""
-    args = _class_args()
-    args["class_deltas"] = args["class_deltas"][:-1]
-    with pytest.raises(TypeCheckError):
-        _rotation_blocks_for_grouped_classes(**args)
-
-
-def test_class_keys_shorter_than_class_deltas_is_rejected():
-    """The same disagreement from the other side."""
-    args = _class_args()
-    args["class_keys"] = args["class_keys"][:-1]
-    with pytest.raises(TypeCheckError):
-        _rotation_blocks_for_grouped_classes(**args)
-
-
-def test_a_class_key_of_the_wrong_width_is_rejected():
-    """The key width is a literal 5, so a changed key layout fails loudly.
-
-    It was 5 in all eight recorded calls, across three problem sizes and two orders.
-    Failing here is the point: a mis-keyed rotation cache is silent.
-    """
-    args = _class_args()
-    args["class_keys"] = args["class_keys"][:, :-1]
-    with pytest.raises(TypeCheckError):
-        _rotation_blocks_for_grouped_classes(**args)
 
 
 def _chunk_args(nodes: int = 6, sh: int = 9):
@@ -155,8 +91,8 @@ def test_a_two_component_centre_is_rejected():
 
     Kept because it documents the contract, not because it closes a hole: it passes
     against `main` too, so the M2L displacement arithmetic was already refusing a
-    2-component centre on its own. The four tests above are the ones that go red
-    without the annotations.
+    2-component centre on its own. The `nodes` test above is the one that goes red
+    without the annotations (three `classes` ones did too, until X3 removed them).
     """
     args = _chunk_args()
     args["centers"] = args["centers"][:, :-1]

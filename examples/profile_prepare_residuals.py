@@ -201,16 +201,6 @@ def profile_prepare_residuals(
         ),
         (
             _interaction_cache_mod,
-            "_dual_tree_build_grouped_buffers",
-            "dual_grouped_buffers",
-        ),
-        (
-            _interaction_cache_mod,
-            "_dual_tree_build_grouped_class_segments",
-            "dual_grouped_segments",
-        ),
-        (
-            _interaction_cache_mod,
             "_dual_tree_build_dense_buffers",
             "dual_dense_buffers",
         ),
@@ -268,8 +258,6 @@ def profile_prepare_residuals(
         (_rt_mod, "enforce_conjugate_symmetry_batch", "downward_symmetry"),
         (_rt_mod, "_accumulate_m2l_fullbatch", "M2L"),
         (_rt_mod, "_accumulate_m2l_chunked_scan", "M2L"),
-        (_rt_mod, "_accumulate_solidfmm_m2l_grouped", "M2L"),
-        (_rt_mod, "_accumulate_solidfmm_m2l_grouped_class_major", "M2L"),
         (_rt_mod, "_propagate_solidfmm_locals_to_children", "L2L"),
         (_rt_mod, "_propagate_real_locals_to_children", "L2L"),
         (_rt_mod, "_build_nearfield_interop_data", "nearfield_interop"),
@@ -340,8 +328,6 @@ def profile_prepare_residuals(
         row.get("dual_cache_lookup_ms", 0.0)
         + row.get("dual_raw_build_ms", 0.0)
         + row.get("dual_unpack_build_output_ms", 0.0)
-        + row.get("dual_grouped_buffers_ms", 0.0)
-        + row.get("dual_grouped_segments_ms", 0.0)
         + row.get("dual_dense_buffers_ms", 0.0)
     )
     row["dual_artifacts_residual_ms"] = max(

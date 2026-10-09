@@ -177,13 +177,13 @@ trusting the 3.0 threshold on other hardware.
   materialized per-particle "pairs" layout — each would differentiate a different
   force than the forward computes.
 
-**Grouped M2L is forced off.** The grouped/class-major M2L classifies pairs on
-the host and is not traceable. It is also an *approximation*, not a re-spelling:
-it quantises pair displacements onto a lattice and applies one representative
-displacement per class. Measured against an exact direct sum on a deliberately
-deep tree, the ungrouped grad path was **6.6× more accurate**. If you explicitly
-request `grouped_interactions=True`, your forward force and the force your
-gradient is taken of differ at the grouped path's own accuracy.
+**There is no grouped M2L any more.** The grouped/class-major M2L classified
+pairs on the host, so it was not traceable, and it was an *approximation*: one
+representative displacement per lattice class (the flat grad path was **6.6×
+more accurate** against an exact direct sum on a deliberately deep tree). The
+grad path used to force it off; it was removed in the 2026-10 cleanup
+(`docs/cleanup_2026-10.md`, X3), and `grouped_interactions=True` now raises at
+construction, so the forward and the gradient always run the same far field.
 
 **Outer `jax.jit`.** Bare `jax.grad`/`jax.vjp` is the recommended usage — the
 inner kernels are already jit-compiled. Wrapping the entire call in `jax.jit`
@@ -271,5 +271,5 @@ Measure in context, at the target scale.
 | all-NaN gradients in fp32 | historical; the squared-radius floors underflowed in fp32 | fixed — ensure you are on this branch |
 | `ConcretizationTypeError` under outer `jax.jit` | host-side ops in the re-run sweeps at large N | use bare `jax.grad` |
 | gradients are exactly zero | you differentiated `evaluate_prepared_state` or the Odisseo forward path | use `differentiable_accelerations` / `differentiable=True` |
-| `TracerArrayConversionError` on centres | grouped M2L reached the grad path | should not happen; file a bug |
+| `TracerArrayConversionError` on centres | historical: the grouped M2L reached the grad path | removed in the 2026-10 cleanup (X3); file a bug |
 | FD and AD disagree | FD perturbed a *different* function (full rebuild) | FD the same frozen `state` |

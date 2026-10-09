@@ -195,14 +195,11 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
         pair_process_block=impl.pair_process_block,
         traversal_config=runtime_overrides.traversal_config,
         retry_logger=None,
+        fail_fast=False,
         use_dense_interactions=impl.use_dense_interactions,
-        grouped_interactions=runtime_overrides.grouped_interactions,
-        grouped_chunk_size=runtime_overrides.m2l_chunk_size,
         need_traversal_result=bool(impl.adaptive_order),
-        precompute_grouped_class_segments=impl._should_precompute_grouped_class_segments(
-            grouped_chunk_size=runtime_overrides.m2l_chunk_size,
-        ),
-        grouped_schedule_budget_bytes=impl._grouped_schedule_item_budget(),
+        need_compact_far_pairs=False,
+        need_node_interactions=True,
         pair_policy=pair_policy,
         policy_state=policy_state,
     )
@@ -246,14 +243,8 @@ def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_art
         interactions,
         _neighbor_list,
         _traversal_result,
+        _compact_far_pairs,
         dense_buffers,
-        grouped_buffers,
-        grouped_segment_starts,
-        grouped_segment_lengths,
-        grouped_segment_class_ids,
-        grouped_segment_sort_permutation,
-        grouped_segment_group_ids,
-        grouped_segment_unique_targets,
     ) = impl._unpack_dual_tree_artifacts(dual_artifacts)
 
     locals_template = _fresh_locals_template(fmm, staged)
@@ -270,15 +261,6 @@ def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_art
         runtime_traversal_config=runtime_overrides.traversal_config,
         record_retry=lambda _: None,
         dense_buffers=dense_buffers,
-        grouped_interactions=runtime_overrides.grouped_interactions,
-        grouped_buffers=grouped_buffers,
-        grouped_segment_starts=grouped_segment_starts,
-        grouped_segment_lengths=grouped_segment_lengths,
-        grouped_segment_class_ids=grouped_segment_class_ids,
-        grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-        grouped_segment_group_ids=grouped_segment_group_ids,
-        grouped_segment_unique_targets=grouped_segment_unique_targets,
-        farfield_mode=runtime_overrides.farfield_mode,
         far_pairs_by_gear=far_pairs_by_gear,
         adaptive_order=impl.adaptive_order,
         p_gears=impl.p_gears,
@@ -304,10 +286,15 @@ def _prime_paper_force_scales(fmm: FastMultipoleMethod, positions, masses) -> No
 def _count_interactions(dual_artifacts) -> dict[str, int]:
     interactions = dual_artifacts.interactions
     traversal_result = dual_artifacts.traversal_result
-    far_pairs = int(traversal_result.far_pair_count)
     level_offsets = getattr(interactions, "level_offsets", None)
     levels = int(level_offsets.shape[0] - 1) if level_offsets is not None else 0
-    near_pairs = int(traversal_result.near_pair_count)
+    if traversal_result is not None:
+        far_pairs = int(traversal_result.far_pair_count)
+        near_pairs = int(traversal_result.near_pair_count)
+    else:
+        # The walk result is only retained on the adaptive-order path.
+        far_pairs = int(jnp.sum(interactions.counts)) if interactions is not None else 0
+        near_pairs = int(jnp.sum(dual_artifacts.neighbor_list.counts))
     return {
         "far_pairs": far_pairs,
         "near_pairs": near_pairs,

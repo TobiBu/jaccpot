@@ -14,7 +14,6 @@ from beartype import beartype
 from beartype.typing import Callable
 from jaxtyping import Array, Float, jaxtyped
 from yggdrax.dense_interactions import DenseInteractionBuffers
-from yggdrax.grouped_interactions import GroupedInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
@@ -529,15 +528,6 @@ class SweepsMixin(_EngineBase):
         traversal_config: Optional[DualTreeTraversalConfig] = None,
         dense_buffers: Optional[DenseInteractionBuffers] = None,
         retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
-        grouped_interactions: bool = False,
-        grouped_buffers: Optional[GroupedInteractionBuffers] = None,
-        grouped_segment_starts: Optional[Array] = None,
-        grouped_segment_lengths: Optional[Array] = None,
-        grouped_segment_class_ids: Optional[Array] = None,
-        grouped_segment_sort_permutation: Optional[Array] = None,
-        grouped_segment_group_ids: Optional[Array] = None,
-        grouped_segment_unique_targets: Optional[Array] = None,
-        farfield_mode: str = "pair_grouped",
         dehnen_radius_scale: Optional[float] = None,
         far_pairs_coo: Optional[_FarPairCOO] = None,
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
@@ -578,24 +568,6 @@ class SweepsMixin(_EngineBase):
             Pre-built dense interaction buffers.
         retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
             Called when the traversal retries with a larger capacity.
-        grouped_interactions : bool
-            Use the grouped M2L lanes.
-        grouped_buffers : Optional[GroupedInteractionBuffers]
-            Pre-built grouped buffers; built on demand when ``None``.
-        grouped_segment_starts : Optional[Array]
-            Class-major segment starts.
-        grouped_segment_lengths : Optional[Array]
-            Class-major segment lengths.
-        grouped_segment_class_ids : Optional[Array]
-            Translation class of each segment.
-        grouped_segment_sort_permutation : Optional[Array]
-            Permutation into class-major order.
-        grouped_segment_group_ids : Optional[Array]
-            Group id of each segment.
-        grouped_segment_unique_targets : Optional[Array]
-            Distinct target nodes per segment.
-        farfield_mode : str
-            ``"pair_grouped"`` or ``"class_major"`` on the grouped path.
         dehnen_radius_scale : Optional[float]
             Node-radius scale for the Dehnen criteria; ``None`` takes the
             engine's.
@@ -694,15 +666,6 @@ class SweepsMixin(_EngineBase):
                 retry_logger=retry_callback,
                 traversal_config=config,
                 dense_buffers=dense_buffers,
-                grouped_interactions=grouped_interactions,
-                grouped_buffers=grouped_buffers,
-                grouped_segment_starts=grouped_segment_starts,
-                grouped_segment_lengths=grouped_segment_lengths,
-                grouped_segment_class_ids=grouped_segment_class_ids,
-                grouped_segment_sort_permutation=grouped_segment_sort_permutation,
-                grouped_segment_group_ids=grouped_segment_group_ids,
-                grouped_segment_unique_targets=grouped_segment_unique_targets,
-                farfield_mode=farfield_mode,
                 far_pairs_coo=far_pairs_coo,
                 far_pairs_by_gear=far_pairs_by_gear,
                 adaptive_order=adaptive_order_val,

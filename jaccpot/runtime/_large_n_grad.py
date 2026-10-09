@@ -71,8 +71,6 @@ class LargeNGradPlan:
         Leaf slot capacity.
     center_mode : str
         How expansion centres are chosen.
-    farfield_mode : str
-        Far-field lane the recomputation must reproduce.
     m2l_chunk_size : Optional[int]
         M2L chunk size; ``None`` leaves it to the runtime.
     l2l_chunk_size : Optional[int]
@@ -87,7 +85,6 @@ class LargeNGradPlan:
     order: int
     max_leaf_size: int
     center_mode: str
-    farfield_mode: str
     m2l_chunk_size: Optional[int]
     l2l_chunk_size: Optional[int]
     num_far_pairs: int
@@ -247,12 +244,6 @@ def prepare_large_n_grad_plan(
     overrides = engine._resolve_runtime_execution_overrides(
         num_particles=int(positions.shape[0])
     )
-    _require(
-        not bool(overrides.grouped_interactions),
-        "differentiable large-N evaluation requires ungrouped far-field execution; "
-        "the grouped M2L classifies pairs on the host and is not traceable.",
-    )
-
     from ._interaction_cache import far_pair_targets
 
     sources = jnp.asarray(compact.sources, dtype=INDEX_DTYPE)
@@ -264,7 +255,6 @@ def prepare_large_n_grad_plan(
         order=int(state.local_order),
         max_leaf_size=int(state.max_leaf_size),
         center_mode=str(overrides.center_mode),
-        farfield_mode=str(overrides.farfield_mode),
         m2l_chunk_size=overrides.m2l_chunk_size,
         l2l_chunk_size=overrides.l2l_chunk_size,
         num_far_pairs=int(sources.shape[0]),
@@ -326,8 +316,6 @@ def large_n_farfield_locals_at(
         interactions=None,
         m2l_chunk_size=plan.m2l_chunk_size,
         l2l_chunk_size=plan.l2l_chunk_size,
-        grouped_interactions=False,
-        farfield_mode=plan.farfield_mode,
         dehnen_radius_scale=engine.dehnen_radius_scale,
         far_pairs_coo=_FarPairCOO(
             plan.far_pair_sources,
