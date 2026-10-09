@@ -808,5 +808,13 @@ change.
 - `bench/annotation_census.py`: shape-annotated array parameters 837 -> 831, bare
   `Array` parameters 1,683 -> 1,668 (shaped share 33.2 % -> 33.3 %), `@jaxtyped`
   functions 183 (unchanged). Only deletions moved them.
-- **GPU pins:** not run for this record (CPU-only work). The lanes they drive are
-  bitwise in the CPU A/B above.
+- **After merging `main` with #379 (2896dae; yggdrax `main` 7cab99b, which #379 needs
+  for the walk's `pair_accept` hook):**
+  - CPU suite 2,321 passed, 206 skipped, 1 failed (the stale nornax checkout).
+    Against the older yggdrax 9372332, #379's own new walk tests fail; that is an
+    environment mismatch, not this phase.
+  - `test_shards.py check`: 2,590 tests, each in exactly one shard.
+  - `golden/`, `golden_grad/` and `golden_lanes/` are byte-identical to `main`.
+- **GPU pins** (frozen worktree at 2896dae, against `main-15ceca4` with its A-vs-A
+  control): S1-S5 on one A100 and M1, M3 on two are **bitwise**. #379 and yggdrax #89
+  moved no pin either, so `main-15ceca4` stays the baseline.
