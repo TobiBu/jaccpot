@@ -53,8 +53,11 @@ FLOAT64_GATE = dict(rtol=1.0e-12, atol=1.0e-12)
 # FMM vs direct sum. Observed: large-N 3.9e-4, block-step 5.0e-4.
 ANCHOR_REL_L2 = 1.0e-2
 
-# The fused lane's switches as Odisseo and the benches set them today (the cleanup
-# makes them the library default; the golden must not move when it does).
+# The fused lane's switches as Odisseo and the benches set them before the cleanup
+# made them the library default (D2). The goldens below run with every one of them,
+# and the near-field sizing knobs, UNSET -- they pin the defaults, and were recorded
+# with this env set: the defaults reproduce them. Tests that pin the lane explicitly
+# still import the dict.
 _FUSED_ENV = {
     "JACCPOT_STATIC_STRICT_GPU_MODE": "on",
     "JACCPOT_STATIC_STRICT_FUSED_MODE": "on",
@@ -135,8 +138,15 @@ def _large_n_solver():
 @pytest.fixture
 def _large_n_lane(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    for key, value in _FUSED_ENV.items():
-        monkeypatch.setenv(key, value)
+    for key in (
+        *_FUSED_ENV,
+        "JACCPOT_LARGE_N_TARGET_BLOCK_SIZE",
+        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS",
+        "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
+        "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP",
+        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP",
+    ):
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.mark.usefixtures("_large_n_lane")
