@@ -4157,11 +4157,11 @@ class PrepareMixin(_EngineBase):
             Refinement depth cap forwarded to the prepass builders.
         aspect_threshold_val : float
             Aspect-ratio threshold forwarded to the prepass builders.
-
         fused_seed : bool
             A fused device-mode prepare: with the fused lane's criterion the
             force scale comes from ``_fused_force_scale_seed`` (its own kernels),
             not the general prepass. Off everywhere else.
+
         Returns
         -------
         Optional[Array]
