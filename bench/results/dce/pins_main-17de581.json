@@ -1,0 +1,42 @@
+{
+ "a_vs_a": {
+  "S6": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    },
+    "ref": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    }
+   }
+  }
+ },
+ "cards": {
+  "single": "A100 40GB, GPU 2 (psaegert's idle job, untimed)"
+ },
+ "control": "main-17de581-b",
+ "deterministic_ops": true,
+ "library": "jaccpot main 17de581 (after #384 and X5); worktree on cleanup/pin-clean-env (bench changes only); yggdrax 7cab99b",
+ "notes": {
+  "S6_vs_S1": "S6 (no JACCPOT_*/YGGDRAX_* env) is bitwise equal to S1 at main-15ceca4 (full harness env): force and scan state. rel-L2 vs fp64 direct 7.764e-4.",
+  "baseline": "later phases compare S6 against main-17de581 (envelope main-17de581-b); S1-S5 keep main-15ceca4"
+ },
+ "pins": [
+  "S6"
+ ],
+ "tag": "main-17de581"
+}

@@ -106,6 +106,13 @@ def _args() -> argparse.Namespace:
     )
     ap.add_argument("--caps", default="bench", choices=("bench", "named", "unnamed"))
     ap.add_argument(
+        "--clean-env",
+        action="store_true",
+        help="apply none of the harness's JACCPOT_* / YGGDRAX_* environment (only "
+        "--env), so the run sees what a caller who sets nothing sees; the solver "
+        "configuration stays the bench's",
+    )
+    ap.add_argument(
         "--library-defaults",
         action="store_true",
         help="drop the harness's fused-lane switches that are library defaults since "
@@ -259,7 +266,17 @@ if ARGS.dump_dir:
 overrides = fast_lane_overrides_for_leaf(ARGS.leaf, ARGS.n)
 extra = dict(kv.split("=", 1) for kv in ARGS.env)
 overrides.update(extra)
-apply_fast_lane_env(ARGS.n, overrides=overrides)
+if ARGS.clean_env:
+    # Nothing from the harness and nothing inherited (the worktree pointers the
+    # sitecustom hook reads at start-up excepted): the library's own defaults. The
+    # 2026-10 CSR payload bug hid for months behind the harness's
+    # RADIX_FAST_PAYLOAD_MAX_MB=0, which no production caller sets.
+    for _k in [k for k in os.environ if k.startswith(("JACCPOT_", "YGGDRAX_"))]:
+        if not _k.endswith("_WORKTREE"):
+            os.environ.pop(_k)
+    os.environ.update(extra)
+else:
+    apply_fast_lane_env(ARGS.n, overrides=overrides)
 if ARGS.caps == "named":
     if ARGS.far_cap <= 0 or ARGS.near_cap <= 0:
         raise SystemExit("--caps named needs --far-cap and --near-cap")
