@@ -51,7 +51,7 @@ On `main` at 6cca378 (2026-10-06):
 | X4 | #383 | M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the strict cap-profile file; `runtime_path` no longer a lane switch | CPU suite, shard partition, CPU bitwise A/B, GPU pins (S1-S5, M1, M3) | merged |
 | fix | #384 | The CSR lane's placeholder no longer feeds the per-particle near-field payload (default payload budget) | CPU suite, A100 bitwise budget-0 vs default | merged |
 | X5 | #385 | Superseded GPU kernel variants: cascade level forwards, CSR pair / tiled M2L, per-leaf P2M, near-field sorted layout / classes / `g` / lone `p` / chunked rows, unfused walk emission (X5a); COM radii chain, MAC radius bound, degree-batched rotation, z-core M2L, three small branches (X5b). Removed env values raise | CPU suite, shard partition, CPU bitwise A/B (interpret-mode Pallas included) | merged |
-| X6 | | The strict lane's superseded paths: the host-routed strict refresh (`DEVICE_ONLY=0`), the dual-downward refresh planner, the unsafe compact far-pair reuse, the non-fused `strict_run_v2` loop (`FUSED_MODE=off`); `GPU_MODE` is inert. Removed env values raise, accepted ones are ignored | CPU suite, shard partition, distributed tier, CPU bitwise A/B (env unset and harness env) | open |
+| X6 | | The strict lane's superseded paths: the host-routed strict refresh (`DEVICE_ONLY=0`), the dual-downward refresh planner, the unsafe compact far-pair reuse, the non-fused `strict_run_v2` loop (`FUSED_MODE=off`); `GPU_MODE` is inert. Removed env values raise, accepted ones are ignored | CPU suite, shard partition, distributed tier, CPU bitwise A/B (env unset and harness env), GPU pins S1-S6, timing A/B | open |
 
 ### P0: CI runs each test once
 
@@ -1450,9 +1450,22 @@ steady_timing_bypass_count}`, `_static_radix_compact_pair_reuse_{hits,misses}`,
 - `bench/annotation_census.py`: shape-annotated array parameters 833 (unchanged),
   bare `Array` parameters 1,701 -> 1,695 (the planner route's six flags), shaped
   share 32.9 % -> 33.0 %, `@jaxtyped` functions 183 (unchanged).
-- **GPU pins:** not run in this phase (no GPU). S1 and S2 run
-  `fused_memory_budget.py`, and S4b calls `apply_fast_lane_env`; all three set
-  only accepted values. The A/B's harness arm is that environment on CPU.
+- **GPU pins** (frozen worktree at 18f068a, plus S6's bench changes from #386; one
+  A100):
+  - S1-S5 are **bitwise** against `main-15ceca4`. S1, S2 and S4b run with the
+    harness env, which sets only accepted values.
+  - S6 (no `JACCPOT_*` env at all) is **bitwise** against `main-17de581`.
+  - M1 and M3 (two cards) are pending. They run when a second card is free under the
+    card rules.
+- **Speed (G5)**, interleaved main 17de581 / X6 x 3 on the same A100, which was shared
+  with another user's idle job. `fused_memory_budget.py` scan min, ms/step:
+
+  | N | main | X6 |
+  | --- | --- | --- |
+  | 2e5 | 6.38, 6.20, 6.45 (median 6.38) | 6.36, 6.62, 6.03 (median 6.36) |
+  | 8e6 | 83.09, 83.03, 83.53 (median 83.09) | 83.54, 83.10, 83.43 (median 83.43) |
+
+  Equal within the run-to-run spread.
 
 **Left for phase Z:**
 - the ignored switches' env lines in Odisseo, the harness and four benches;
