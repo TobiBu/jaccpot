@@ -154,8 +154,6 @@ ANCHOR_REL_L2_BY_ORDER = {
 CASES = [
     ("uni_real_n128_p2", "uniform", 128, "real", 2),
     ("uni_real_n128_p4", "uniform", 128, "real", 4),
-    ("uni_complex_n128_p2", "uniform", 128, "complex", 2),
-    ("uni_complex_n128_p4", "uniform", 128, "complex", 4),
     ("clu_real_n128_p4", "clustered", 128, "real", 4),
     ("uni_real_n256_p4", "uniform", 256, "real", 4),
 ]

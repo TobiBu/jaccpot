@@ -1185,7 +1185,7 @@ class EvaluateMixin(_EngineBase):
         if getattr(state, "expansion_basis", None) != "solidfmm":
             raise NotImplementedError(
                 "differentiable_accelerations currently supports "
-                "expansion_basis='solidfmm' (basis 'complex'/'solidfmm' or 'real') "
+                "expansion_basis='solidfmm' (basis 'real' or 'solidfmm') "
                 f"only; got {getattr(state, 'expansion_basis', None)!r}."
             )
         positions_sorted, masses_sorted = self._sorted_inputs(state, positions, masses)

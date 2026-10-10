@@ -608,7 +608,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     rotation_mode: str,
     total_nodes: int,
     chunk_size: int,
-    basis_mode: str = "complex",
+    basis_mode: str = "real",
     m2l_impl: str = "rot_scale",
     targets_sorted: bool = False,
 ) -> Array:

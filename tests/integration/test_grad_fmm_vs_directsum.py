@@ -86,7 +86,7 @@ def _num_far_pairs(state):
 # (theta, order, leaf) point per basis is enough: the reverse pass is
 # order-independent to validate, and the deep-config memory plateaus rather than
 # accumulating (see the module docstring and tests/conftest.py).
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 @pytest.mark.parametrize("theta,order,leaf,tol", [(0.6, 4, 4, 5e-3)])
 def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, leaf, tol):
     n = 64
@@ -123,7 +123,7 @@ def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, leaf, to
     )
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_grad_fmm_matches_grad_directsum_masses(basis):
     n = 64
     positions, masses, probe = _system(n, seed=1)

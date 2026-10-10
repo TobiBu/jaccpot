@@ -1,9 +1,5 @@
 tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_real_n256_p6]
-tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_solidfmm_n1024_p4]
-tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_solidfmm_n256_p2]
 tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[clu_real_n128_p4]
-tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_complex_n128_p2]
-tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_complex_n128_p4]
 tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_real_n128_p2]
 tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_real_n128_p4]
 tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_real_n256_p4]
@@ -79,7 +75,6 @@ tests/unit/runtime/test_large_n_grad_reverse_path.py::test_the_pairs_layout_is_r
 tests/unit/runtime/test_m2l_csr_lane_wiring.py::test_csr_lane_is_taken_and_matches_the_chunked_lane
 tests/unit/test_large_n_config_thresholds.py::test_fp32_farfield_gradient_is_finite
 tests/unit/test_large_n_fast_path_policy.py::test_large_n_accel_eval_requires_fast_lane_state
-tests/unit/test_nearfield_fastlane_grad_path.py::test_differentiable_accelerations_fast_lane_matches_bucketed[complex]
 tests/unit/test_nearfield_fastlane_grad_path.py::test_differentiable_accelerations_fast_lane_matches_bucketed[real]
 tests/unit/test_nearfield_fastlane_grad_path.py::test_fast_lane_is_opt_in
 tests/unit/test_nearfield_fastlane_grad_path.py::test_leaf_major_payload_matches_bucketed_near_field[192-16]

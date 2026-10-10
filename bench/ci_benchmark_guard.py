@@ -172,7 +172,7 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--preset", type=str, default="fast")
-    parser.add_argument("--basis", type=str, default="solidfmm")
+    parser.add_argument("--basis", type=str, default="real")
     parser.add_argument("--theta", type=float, default=0.6)
     parser.add_argument("--leaf-size", type=int, default=16)
     parser.add_argument("--max-order", type=int, default=4)

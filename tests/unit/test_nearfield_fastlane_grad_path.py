@@ -470,7 +470,7 @@ def test_analytic_reverse_matches_autodiff_under_skewed_occupancy():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_differentiable_accelerations_fast_lane_matches_bucketed(basis, monkeypatch):
     fmm, state, positions, masses = _prepared(256, leaf=16, order=4, basis=basis)
 
