@@ -863,6 +863,14 @@ never materialises the payload under it.
 set is blind to that knob's default. At least one pin should run with a clean
 environment, which is what D2's `--library-defaults` checks.
 
+**Pin S6 (added after #384).** S6 is S1 run with `bench/fused_memory_budget.py
+--clean-env`: no `JACCPOT_*` or `YGGDRAX_*` variable at all, and the bench's solver
+configuration unchanged. Recorded at `main` 17de581 with an A-vs-A control, which is
+bitwise. S6 is **bitwise equal to S1**, the full harness env, in force and scan state.
+So the library's defaults now reproduce the benches' configuration exactly. Later
+phases compare S6 against `main-17de581` and S1-S5 against `main-15ceca4`. Summary:
+`bench/results/dce/pins_main-17de581.json`.
+
 ### X5: superseded GPU kernel variants
 
 Each switch keeps exactly its default branch, and every pure-JAX CPU / pre-Ampere
