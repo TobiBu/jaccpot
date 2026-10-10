@@ -1797,6 +1797,6 @@ byte-identical. `constructor_state.json` (+17 / -30 lines), per case against 037
 - `bench/annotation_census.py`: shape-annotated array parameters 833 -> 783, bare
   `Array` parameters 1,695 -> 1,658, shaped share 33.0 % -> 32.1 %, `@jaxtyped`
   functions 183 -> 159. Only deletions moved them.
-- **GPU pins: not run** (this phase was CPU-only). No removed code ran on a GPU-only
-  path, and the protected lanes are bitwise on CPU, including the fused scan and the
-  Pallas near field in interpret mode; S1-S6, M1 and M3 are the check if wanted.
+- **GPU pins** (frozen worktree at 1377ddb, one A100): S1-S5 **bitwise** against
+  `main-15ceca4`, S6 **bitwise** against `main-17de581`. M1 and M3 (two cards) and an
+  interleaved timing A/B against `main` are queued.
