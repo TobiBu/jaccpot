@@ -23,12 +23,12 @@ Tree construction and traversal artifacts are provided by the companion package
 ## Features
 
 - High-level `FastMultipoleMethod` API with `fast`, `balanced`, `accurate`, and `large_n_gpu` presets
-- Configurable expansion basis — **`real` (Dehnen) is the default** production basis (the radix large-N fast lane runs pure-real end to end, no complex↔real conversion); `complex`/`solidfmm` are retained for cross-checking; `cartesian` also available
+- Configurable expansion basis — **`real` (Dehnen) is the default** production basis (the radix large-N fast lane runs pure-real end to end, no complex↔real conversion); `complex`/`solidfmm` are retained for cross-checking
 - Pure-JAX real spherical harmonic rotate+scale M2L path
 - Adaptive-order far-field evaluation with fixed `p_gears` buckets
 - Optional topology reuse for multiple nearby timesteps
 - Optional Pallas acceleration for the real-basis z-translation hotspot
-- Modular runtime with flat (streamed or materialised) and dense interaction pathways
+- Modular runtime with flat interaction pathways, streamed or materialised
 - Near-field and far-field execution paths with optional prepared state reuse
 - **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
 - **Momentum-conserving (mutual) force** for block-step individual timesteps — `sum_i m_i a_i` cancels to round-off instead of to the truncation error (see [Momentum-Conserving FMM](#momentum-conserving-fmm))
@@ -182,14 +182,12 @@ single-GPU execution backend.
   select the same code path and produce bit-identical forces (measured at
   N=2048/p=4/theta=0.5: max difference exactly 0.0). Prefer spelling it
   `"solidfmm"`; `"complex"` is retained for backwards compatibility.
-- `basis="cartesian"` — **experimental; not for quantitative work.**
-  Its relative L2 force error is ~1.8e-1 *independent of expansion order*, which
-  is a divergent-series signature rather than truncation error: raising the order
-  does not improve it. solidfmm is 8.1e-5 on the same configuration, ~2000x
-  better. Selecting it emits a `UserWarning`; set
-  `JACCPOT_ALLOW_CARTESIAN_BASIS=1` to silence it. It is the sole reason the
-  characterization anchor for cartesian carries a 0.35 tolerance. See
-  `docs/dehnen_mass_mac_status_and_plan.md`.
+- `basis="cartesian"` — **removed** in the 2026-10 cleanup (phase K): it raises a
+  `ValueError` naming the removal, as do `FMMEngine(expansion_basis="cartesian")`
+  and `DistributedFMMConfig(basis="cartesian")`. Its relative L2 force error was
+  ~1.8e-1 *independent of expansion order*, a divergent-series signature rather
+  than truncation error. `JACCPOT_ALLOW_CARTESIAN_BASIS`, which silenced its
+  warning, is inert. See `docs/cleanup_2026-10.md`.
 
 ## Multi-GPU: the JAX floor is a correctness floor
 

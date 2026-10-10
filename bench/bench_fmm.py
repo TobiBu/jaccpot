@@ -200,7 +200,6 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
         traversal_config=runtime_overrides.traversal_config,
         retry_logger=None,
         fail_fast=False,
-        use_dense_interactions=impl.use_dense_interactions,
         need_traversal_result=bool(impl.adaptive_order),
         need_compact_far_pairs=False,
         need_node_interactions=True,
@@ -208,17 +207,6 @@ def _build_traversal(fmm: FastMultipoleMethod, staged: StageArtifacts):
         policy_state=policy_state,
     )
     return dual_artifacts
-
-
-def _fresh_locals_template(fmm: FastMultipoleMethod, staged: StageArtifacts):
-    impl = fmm._impl
-    tree_artifacts = staged.tree_artifacts
-    return impl._build_locals_template_for_prepare_state(
-        tree=tree_artifacts.tree,
-        upward=tree_artifacts.upward,
-        max_order=int(ARGS.p),
-        pos_sorted=tree_artifacts.positions_sorted,
-    )
 
 
 def _adaptive_far_pairs_by_gear(fmm: FastMultipoleMethod, dual_artifacts):
@@ -248,23 +236,22 @@ def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_art
         _neighbor_list,
         _traversal_result,
         _compact_far_pairs,
-        dense_buffers,
     ) = impl._unpack_dual_tree_artifacts(dual_artifacts)
 
-    locals_template = _fresh_locals_template(fmm, staged)
     far_pairs_by_gear = _adaptive_far_pairs_by_gear(fmm, dual_artifacts)
 
     return impl._prepare_downward_with_artifacts(
         tree=tree_artifacts.tree,
         upward=tree_artifacts.upward,
         theta_val=float(ARGS.theta),
-        locals_template=locals_template,
+        # The SH downward pass allocates its own accumulator; only the Cartesian
+        # basis (removed in the 2026-10 cleanup, K) reused a locals template.
+        locals_template=None,
         interactions=interactions,
         runtime_m2l_chunk_size=runtime_overrides.m2l_chunk_size,
         runtime_l2l_chunk_size=runtime_overrides.l2l_chunk_size,
         runtime_traversal_config=runtime_overrides.traversal_config,
         record_retry=lambda _: None,
-        dense_buffers=dense_buffers,
         far_pairs_by_gear=far_pairs_by_gear,
         adaptive_order=impl.adaptive_order,
         p_gears=impl.p_gears,

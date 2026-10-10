@@ -38,7 +38,7 @@ USAGE
 -----
 Capture, by running any part of the suite with the plugin enabled::
 
-    JACCPOT_CAPTURE_TARGETS='jaccpot.operators.multipole_utils:pack_tensor,unpack_tensor' \\
+    JACCPOT_CAPTURE_TARGETS='jaccpot.operators.real_p2m_l2p:p2m_real_direct' \\
     JACCPOT_CAPTURE_OUT=/tmp/caps.jsonl \\
       pytest -p bench.annotation_capture tests/unit tests/integration
 
@@ -288,8 +288,9 @@ def _binding_sites(holder: Any, name: str, original: Any) -> list[tuple[Any, str
 
     So every loaded module is scanned for an attribute that IS this object. The
     identity test is what keeps it safe: a same-named function from a different
-    module -- and `jaccpot.operators.multipole_utils` duplicates eight of
-    yggdrax's names -- is a different object and is left alone.
+    module -- `jaccpot.operators.multipole_utils` duplicated eight of yggdrax's
+    names until the 2026-10 cleanup (K) -- is a different object and is left
+    alone.
 
     Parameters
     ----------

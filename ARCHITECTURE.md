@@ -181,9 +181,10 @@ targeting + scatter. The public `compute_gravitational_{acceleration,potential}`
 convenience wrappers live in `_fmm_impl.py` (not in `kernels/core`) because they
 construct/drive the engine.
 
-**Intentionally NOT merged** (distinct math / dispatch): the Cartesian path
-(`_evaluate_local_cartesian_with_grad_batch`), the complex-only
-derivative/jerk towers, and cached-vs-uncached M2L dispatch.
+**Intentionally NOT merged** (distinct math / dispatch): the complex-only
+derivative/jerk towers, and cached-vs-uncached M2L dispatch. (The Cartesian
+L2P, `_evaluate_local_cartesian_with_grad_batch`, was the third; it went with
+the Cartesian basis in the 2026-10 cleanup, K.)
 
 ## 6. Config resolution, presets, and the autodiff export
 
@@ -317,9 +318,10 @@ change.
   i.e. **~6e-04 regardless of expansion order**, so raising the order past 4 buys
   nothing in fp32. Under `jax.default_matmul_precision("highest")` the same cases
   give 1.5e-06 / 2.4e-06 / 1.8e-06 (~300x better). The complex basis behaves the
-  same (3.7e-04 -> 5.6e-08 at order 2). The L2P path *does* set
-  `lax.Precision.HIGHEST` (`downward/local_expansions.py`), so this is an
-  inconsistency rather than a considered trade. Not changed: fixing it moves
+  same (3.7e-04 -> 5.6e-08 at order 2). The real L2P path *does* set
+  `lax.Precision.HIGHEST` (`operators/real_p2m_l2p.py`; the Cartesian one in
+  `downward/local_expansions.py` did too, until the 2026-10 cleanup, K), so this
+  is an inconsistency rather than a considered trade. Not changed: fixing it moves
   forward numerics package-wide (the golden oracle would need regenerating) and
   costs throughput, so it wants a preset-level decision. This floor is also why
   `tests/integration/test_fmm.py::test_solidfmm_m2l_ignores_padded_compact_far_pairs`

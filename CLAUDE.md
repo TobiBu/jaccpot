@@ -180,7 +180,9 @@ It does **not** cover `tests/distributed/` (24 tests, needs two cards) — audit
 jaccpot/basis/         real and complex solid-harmonic bases
 jaccpot/operators/     expansion algebra: harmonics, M2L rotate/scale, precision pinning
 jaccpot/upward/        P2M / M2M sweep
-jaccpot/downward/      M2L / L2L / L2P sweep
+jaccpot/downward/      the downward pass's containers (LocalExpansionData,
+                       TreeDownwardData); the M2L / L2L / L2P sweep itself lives
+                       in runtime/kernels/ (_downward_prep, _l2l, _m2l, _evaluate)
 jaccpot/nearfield/     P2P and its gradient
 jaccpot/mutual/        momentum-conserving path — a SECOND lane beside the three sweeps
                        above, not a variant of them: each pair is evaluated once and
