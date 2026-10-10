@@ -49,6 +49,7 @@ On `main` at 6cca378 (2026-10-06):
 | D2 | #378 | The fused strict lane is the default; `large_n_gpu` builds `static_radix` | CPU suite, GPU defaults gate, pins, Odisseo G4 | merged |
 | X3 | #380 | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins (S1-S5, M1, M3) | merged |
 | X4 | #383 | M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the strict cap-profile file; `runtime_path` no longer a lane switch | CPU suite, shard partition, CPU bitwise A/B, GPU pins (S1-S5, M1, M3) | merged |
+| fix | #384 | The CSR lane's placeholder no longer feeds the per-particle near-field payload (default payload budget) | CPU suite, A100 bitwise budget-0 vs default | merged |
 | X5 | | Superseded GPU kernel variants: cascade level forwards, CSR pair / tiled M2L, per-leaf P2M, near-field sorted layout / classes / `g` / lone `p` / chunked rows, unfused walk emission (X5a); COM radii chain, MAC radius bound, degree-batched rotation, z-core M2L, three small branches (X5b). Removed env values raise | CPU suite, shard partition, CPU bitwise A/B (interpret-mode Pallas included) | open |
 
 ### P0: CI runs each test once
@@ -819,6 +820,48 @@ change.
 - **GPU pins** (frozen worktree at 2896dae, against `main-15ceca4` with its A-vs-A
   control): S1-S5 on one A100 and M1, M3 on two are **bitwise**. #379 and yggdrax #89
   moved no pin either, so `main-15ceca4` stays the baseline.
+
+### Fix: the CSR lane's placeholder fed the per-particle near-field payload
+
+Found by the X5 survey.
+
+**Cause.** With the CSR near-field lane active (Ampere, `use_pallas`), the prepare
+shrinks the target-block rectangle to a one-block placeholder. The fast lane
+materialises a per-particle source payload whenever its size estimate fits
+`JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB` (default 1024). The placeholder's estimate
+always fits. A materialised payload makes the evaluation take the pairs kernel instead
+of the CSR lane, so each leaf saw only its first block of neighbour leaves.
+
+**Measured on an A100** with the production bench (clipped Plummer, leaf 64 cells, p6),
+as rel-L2 against an fp64 direct sum on 4,096 targets:
+
+| N | budget 0 | default budget, before | default budget, after |
+| --- | --- | --- | --- |
+| 5e4 | 1.6e-3 | 0.113 | 1.6e-3, bitwise equal to budget 0 |
+| 2e5 | 7.8e-4 | 0.070 | 7.8e-4, bitwise equal to budget 0 |
+
+The 5e4 value equals the #376 bug's to all printed digits: the same placeholder read
+through another door.
+
+**Why nothing caught it.** The bench harness (`compare_force.FAST_LANE_ENV`), and with
+it every GPU pin, sets the budget to 0. Production callers that do not set it were
+affected. That includes Odisseo's production lane since Odisseo #29, which stopped
+setting jaccpot env vars, and any plain `large_n_gpu` user on Ampere.
+
+**Fix.** `_build_radix_fast_lane_payloads` takes the prepare's `csr_lane` decision and
+never materialises the payload under it.
+
+**Checks:**
+- Budget 0 is bitwise unchanged against `main`.
+- Odisseo's production lane at 2e5 (4 steps, its defaults) is now bitwise equal to its
+  budget-0 run. On `main` it differed by 5.7e-5 in the final state.
+- CPU suite: 2,322 passed; the one failure is the stale nornax checkout.
+- New test: `test_the_csr_lane_ignores_the_payload_budget` forces the CSR lane in
+  Pallas interpret mode on CPU. It fails on `main`.
+
+**Lesson for the pins.** A pin that sets an env knob the production caller does not
+set is blind to that knob's default. At least one pin should run with a clean
+environment, which is what D2's `--library-defaults` checks.
 
 ### X5: superseded GPU kernel variants
 

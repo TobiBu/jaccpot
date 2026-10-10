@@ -192,3 +192,46 @@ def test_wide_accumulation_runs_the_table_layout(monkeypatch):
     monkeypatch.setenv("JACCPOT_NEARFIELD_LAYOUT", "sorted")
     with pytest.raises(ValueError, match="JACCPOT_NEARFIELD_LAYOUT"):
         _csr_lane_forces(monkeypatch)
+
+
+def _csr_lane_forces_at_budget(monkeypatch, payload_budget_mb: str):
+    """The CSR lane on Pallas (interpret mode on CPU), at a given payload budget."""
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    for key, value in _FUSED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
+    monkeypatch.setenv("JACCPOT_NEARFIELD_LEAFPAIR_CSR", "1")
+    monkeypatch.setenv("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "1")
+    monkeypatch.setenv("JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB", payload_budget_mb)
+    positions, masses = _make_inputs("clustered", N)
+    solver = _large_n_solver()
+    solver._impl.use_pallas = True  # what an Ampere card resolves
+    prepared = solver.prepare_state(
+        jnp.asarray(positions, jnp.float32),
+        jnp.asarray(masses, jnp.float32),
+        leaf_size=16,
+        max_order=4,
+    )
+    materialised = int(prepared.radix_fast_payload.source_particle_ids.size) > 0
+    return np.asarray(solver.evaluate_prepared_state(prepared)), materialised
+
+
+def test_the_csr_lane_ignores_the_payload_budget(monkeypatch):
+    """The per-particle source payload is never materialised from the placeholder.
+
+    With the CSR lane active the rectangle is a one-block placeholder, so the
+    payload-size estimate is tiny and fit any budget. With the library's default
+    budget (1024 MB) the prepare materialised a payload from that one block, the
+    evaluation took the pairs kernel instead of the CSR lane, and each leaf saw
+    only its first block of neighbours: rel-L2 0.070 at 2e5 and 0.113 at 5e4 on an
+    A100 (2026-10-09). The benches set the budget to 0 and never saw it.
+    """
+    no_payload, materialised_at_zero = _csr_lane_forces_at_budget(monkeypatch, "0")
+    default_budget, materialised_by_default = _csr_lane_forces_at_budget(
+        monkeypatch, "1024"
+    )
+    assert not materialised_at_zero
+    assert not materialised_by_default
+    np.testing.assert_array_equal(default_budget, no_payload)
+    positions, masses = _make_inputs("clustered", N)
+    assert _rel_l2(no_payload, _direct_sum_accelerations(positions, masses)) < 1e-2

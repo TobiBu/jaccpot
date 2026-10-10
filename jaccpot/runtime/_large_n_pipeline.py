@@ -86,6 +86,7 @@ def _build_radix_fast_lane_payloads(
     overflow_active_blocks: int,
     fused_device_mode: bool,
     fused_payload_enabled: bool,
+    csr_lane: bool,
     nearfield_target_leaf_batch_size: int,
     nearfield_target_block_tile_size: int,
     nearfield_target_block_tile_scan_unroll: int,
@@ -127,6 +128,11 @@ def _build_radix_fast_lane_payloads(
         Whether the fused device lane is in force.
     fused_payload_enabled : bool
         Whether the fused payload is enabled for this build.
+    csr_lane : bool
+        Whether the CSR near-field lane will run
+        (:func:`jaccpot.nearfield._fast_lane._nearfield_csr_lane_active`). The
+        rectangle is then a one-block placeholder, so the per-particle source
+        payload is never materialised from it.
     nearfield_target_leaf_batch_size : int
         Target-leaf batch size for the fast lane.
     nearfield_target_block_tile_size : int
@@ -205,8 +211,14 @@ def _build_radix_fast_lane_payloads(
         )
         est_payload_mb = est_payload_bytes / (1024.0 * 1024.0)
 
+        # Never from the CSR lane's one-block placeholder: a materialised payload
+        # selects the pairs kernel over the prepacked CSR lane, which then reads
+        # only the first block of each leaf's neighbours (rel-L2 0.070 at 2e5 on
+        # an A100 with the default 1024 MB budget, 2026-10-09; the benches set the
+        # budget to 0 and never saw it).
         materialize_source_particle_payload = (
             source_slots > 0
+            and not bool(csr_lane)
             and est_payload_mb <= payload_max_mb
             and ((not bool(fused_device_mode)) or bool(fused_payload_enabled))
         )
@@ -1732,6 +1744,7 @@ def prepare_large_n_state(
         overflow_active_blocks=overflow_active_blocks,
         fused_device_mode=fused_device_mode,
         fused_payload_enabled=fused_payload_enabled,
+        csr_lane=csr_lane,
         nearfield_target_leaf_batch_size=nearfield_target_leaf_batch_size,
         nearfield_target_block_tile_size=nearfield_target_block_tile_size,
         nearfield_target_block_tile_scan_unroll=nearfield_target_block_tile_scan_unroll,
