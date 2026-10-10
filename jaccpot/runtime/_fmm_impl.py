@@ -289,9 +289,11 @@ class FMMEngine(
         Dtype the sweeps compute in. ``None`` resolves against the device later
         rather than here.
     expansion_basis : ExpansionBasis
-        Expansion algebra. ``"cartesian"`` or ``"solidfmm"`` (the spherical-harmonic
-        family, real or complex); ``"complex"`` is accepted and selects the complex
-        basis explicitly.
+        Expansion algebra. ``"solidfmm"`` (default; the spherical-harmonic family,
+        real or complex) or ``"cartesian"``; ``"complex"`` is accepted and selects
+        the complex basis explicitly. The default was ``"cartesian"`` until the
+        2026-10 cleanup (K), so an engine built without a basis now runs the real
+        basis.
     basis_impl : Optional[Any]
         The basis object. For ``"solidfmm"`` without one, the REAL basis is used
         (cleanup 2026-10, phase D1; it used to default to complex);
@@ -439,7 +441,7 @@ class FMMEngine(
         softening: float = 1e-12,
         working_dtype: Optional[DTypeLike] = None,
         *,
-        expansion_basis: ExpansionBasis = "cartesian",
+        expansion_basis: ExpansionBasis = "solidfmm",
         basis_impl: Optional[Any] = None,
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
@@ -2051,7 +2053,8 @@ def compute_gravitational_acceleration(
 
     A one-shot convenience wrapper: it builds a fresh :class:`FMMEngine` per call
     and therefore reuses nothing between calls. Construct an engine directly if
-    you are evaluating more than once.
+    you are evaluating more than once. It runs the engine's default basis, the
+    real SH basis (Cartesian until the 2026-10 cleanup, K).
 
     Parameters
     ----------

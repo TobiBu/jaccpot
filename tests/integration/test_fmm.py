@@ -862,7 +862,9 @@ def test_prepare_downward_sweep_matches_module_helper():
         leaf_size=DEFAULT_TEST_LEAF_SIZE,
     )
 
-    fmm = FMMEngine(theta=0.4, softening_kernel="plummer")
+    # The module helper is the Cartesian downward sweep, so the engine is pinned
+    # to the Cartesian basis it used to default to (2026-10 cleanup, K).
+    fmm = FMMEngine(theta=0.4, softening_kernel="plummer", expansion_basis="cartesian")
     upward = fmm.prepare_upward_sweep(
         tree,
         pos_sorted,

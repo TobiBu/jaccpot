@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 
 import jaccpot
-from jaccpot import ComplexSHBasis, RealSHBasis
+from jaccpot import ComplexSHBasis
 from jaccpot.config import (
     FarFieldConfig,
     NearFieldConfig,
@@ -60,8 +60,12 @@ _VIA_FACADE = "__via_facade__"
 #: branch adds a row of snapshot and no coverage.
 CONFIGS: dict[str, dict[str, Any]] = {
     # --- basis, which selects entire kernel families ---
-    "cartesian_default": {},
-    "solidfmm_real": {"expansion_basis": "solidfmm", "basis_impl": RealSHBasis()},
+    # The engine's default is the real SH basis since the 2026-10 cleanup (K); it
+    # was Cartesian. So the base case is the real basis, and the old
+    # `solidfmm_real` row (`expansion_basis="solidfmm"` with a `RealSHBasis()`)
+    # resolved byte-identically to it and went: the distinctness guard caught it.
+    "real_default": {},
+    "cartesian": {"expansion_basis": "cartesian"},
     "solidfmm_explicit_complex": {
         "expansion_basis": "solidfmm",
         "basis_impl": ComplexSHBasis(),
@@ -90,7 +94,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "engine_preset_fast": {"preset": "fast"},
     "engine_preset_large_n_gpu": {"preset": "large_n_gpu"},
     # --- MAC family, including the jaccpot-level policy value ---
-    # `bh` is the engine default, so `cartesian_default` already covers it -- a
+    # `bh` is the engine default, so `real_default` already covers it -- a
     # `mac_bh` row would be a duplicate, which the distinctness guard rejects.
     "mac_engblom": {"mac_type": "engblom"},
     "mac_dehnen": {"mac_type": "dehnen"},
@@ -144,7 +148,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     # since `pallas_nearfield_fused_supported()` is already False on CPU. With
     # `use_pallas=True` pinned, the clobber is caught.
     # Only the forced-ON row is here. `use_pallas=False` IS the CPU-resolved default,
-    # so a forced-off row is byte-identical to `cartesian_default` and the distinctness
+    # so a forced-off row is byte-identical to `real_default` and the distinctness
     # guard rejects it -- it would only be distinct on Pallas-capable hardware, which
     # a CPU-generated golden cannot represent. Recorded rather than worked around.
     "use_pallas_forced_on": {"use_pallas": True},
@@ -204,7 +208,7 @@ def _all_states() -> dict[str, dict[str, str]]:
 
 #: The case every other case is stored as a diff against. Full state for this one,
 #: changed attributes only for the rest.
-BASE_CASE = "cartesian_default"
+BASE_CASE = "real_default"
 
 
 def _to_golden(states: dict[str, dict[str, str]]) -> dict[str, Any]:
