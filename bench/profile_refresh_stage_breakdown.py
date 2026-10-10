@@ -1,11 +1,13 @@
 """Per-stage breakdown of the strict large-N refresh hot path.
 
-Runs the non-fused strict prepare/refresh+evaluate loop with jaccpot's per-stage
-refresh timers enabled (JACCPOT_REFRESH_TIMING_ENABLE=1) and dumps the
-_refresh_timing_*_seconds breakdown from get_runtime_diagnostics(). This answers
-"where does per-step time actually go" (tree / upward geometry|mass|p2m|m2m /
-dual / downward / nearfield / eval) on the current hardware, so we optimize the
-real bottleneck rather than an assumed one.
+Runs the eager strict face, ``strict_prepare_refresh_and_evaluate`` (one host
+call per step, not the fused scan), with jaccpot's per-stage refresh timers
+enabled (JACCPOT_REFRESH_TIMING_ENABLE=1) and dumps the _refresh_timing_*_seconds
+breakdown from get_runtime_diagnostics(). This answers "where does per-step time
+go" (tree / upward geometry|mass|p2m|m2m / dual / downward / nearfield / eval)
+stage by stage. Host timers sync the device, so the fused lane never runs them;
+docs/fmm_fused_perstep_profiling_2026-07-08.md says why these numbers do not
+describe the fused scan.
 
     PROFILE_N=200000 PROFILE_STEPS=20 CUDA_VISIBLE_DEVICES=<free> \
         micromamba run -n odisseo python bench/profile_refresh_stage_breakdown.py
@@ -23,7 +25,6 @@ def _set_env() -> None:
         JACCPOT_REFRESH_TIMING_ENABLE="1",
         JACCPOT_PROFILE_UPWARD_STAGES="1",
         JACCPOT_STATIC_STRICT_GPU_MODE="on",
-        JACCPOT_STATIC_STRICT_FUSED_MODE="off",  # non-fused: per-stage timers work
         JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH="0",
         JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF="64",
         JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP="2097152",
@@ -118,7 +119,7 @@ def main() -> None:
     per_step = {k: v / steps for k, v in stages.items() if v}
     ranked = sorted(per_step.items(), key=lambda kv: -kv[1])
 
-    print(f"compute_capability={cc} n={n} steps={steps} fused=off")
+    print(f"compute_capability={cc} n={n} steps={steps} face=prepare_refresh_evaluate")
     print(f"wall={wall:.3f}s  per-step={wall/steps*1000:.1f} ms")
     print("per-step stage seconds (nonzero, ranked):")
     for k, v in ranked:

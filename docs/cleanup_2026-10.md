@@ -50,7 +50,8 @@ On `main` at 6cca378 (2026-10-06):
 | X3 | #380 | Grouped / class-major far field; AABB (non-COM) expansion centres | CPU suite, shard partition, GPU pins (S1-S5, M1, M3) | merged |
 | X4 | #383 | M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the strict cap-profile file; `runtime_path` no longer a lane switch | CPU suite, shard partition, CPU bitwise A/B, GPU pins (S1-S5, M1, M3) | merged |
 | fix | #384 | The CSR lane's placeholder no longer feeds the per-particle near-field payload (default payload budget) | CPU suite, A100 bitwise budget-0 vs default | merged |
-| X5 | | Superseded GPU kernel variants: cascade level forwards, CSR pair / tiled M2L, per-leaf P2M, near-field sorted layout / classes / `g` / lone `p` / chunked rows, unfused walk emission (X5a); COM radii chain, MAC radius bound, degree-batched rotation, z-core M2L, three small branches (X5b). Removed env values raise | CPU suite, shard partition, CPU bitwise A/B (interpret-mode Pallas included) | open |
+| X5 | #385 | Superseded GPU kernel variants: cascade level forwards, CSR pair / tiled M2L, per-leaf P2M, near-field sorted layout / classes / `g` / lone `p` / chunked rows, unfused walk emission (X5a); COM radii chain, MAC radius bound, degree-batched rotation, z-core M2L, three small branches (X5b). Removed env values raise | CPU suite, shard partition, CPU bitwise A/B (interpret-mode Pallas included) | merged |
+| X6 | | The strict lane's superseded paths: the host-routed strict refresh (`DEVICE_ONLY=0`), the dual-downward refresh planner, the unsafe compact far-pair reuse, the non-fused `strict_run_v2` loop (`FUSED_MODE=off`); `GPU_MODE` is inert. Removed env values raise, accepted ones are ignored | CPU suite, shard partition, distributed tier, CPU bitwise A/B (env unset and harness env), GPU pins S1-S6, timing A/B | open |
 
 ### P0: CI runs each test once
 
@@ -1142,3 +1143,332 @@ the removed switches. The other plan and audit documents stay as written.
 - Odisseo's `tools/walltime_ab_compare.py` sets `JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN=1`
   in one arm; that arm now raises. Out of this repo.
 - `bench/results/` keeps profiles that name the removed kernels.
+
+### X6: host-routed strict refresh, the dual-downward planner, unsafe compact-pair reuse, the non-fused strict loop
+
+The strict lane now has one path: the fused scan, whose traced refresh takes the
+device-only streamed fast path and builds a fresh far-pair list every step. A
+value that selected one of the removed paths raises a `ValueError` naming the
+variable and X6 (`jaccpot._env.env_reject_removed`), at every door into the fused
+lane: `strict_run_v2`, `strict_fused_prepared_eval_fn` (through which the
+multi-GPU lane's `measure_shard_plan` prepares its shards), and a fused-device
+refresh (`_refresh_large_n_same_topology(fused_device_mode=True)`, the multi-GPU
+lane's per-force door). The check is `_reject_removed_strict_lane_env` in
+`fmm_strict_run.py`; the two far-pair switches are also refused by their reader,
+`_fresh_compact_pair_rebuild_enabled`. A switch whose other values only made
+something inert, or that a caller reads for itself, is accepted and ignored.
+
+**Removed** (library -746 / +178 lines, not counting the re-indent of two
+`try` bodies; raw -974 / +406):
+
+1. **The host-routed strict refresh** (-51 / +58 with items 5c and 5d; the
+   additions are the refusal helper, its table and comments).
+   `JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY` and `_strict_fused_device_only`.
+   `0` sent the fused lane's traced refresh through the generic dual/downward
+   build, about 10x slower (the 2026-07 A100 note it carried: 1224 -> 119
+   ms/step at 2e5). The hot-path predicate in `_resolve_dual_downward_plan` is
+   now `suppress_host_side_effects and _strict_fused_mode_active`, and the
+   mixed-order bucketing reads `_strict_fused_mode_active` alone. The generic
+   dual/downward code stays (the eager prepare and the traced unsuppressed path
+   use it), and so do its `suppress_host_side_effects` guards.
+2. **The dual-downward refresh planner** (-367 / +2).
+   `_RefreshDualPlannerHint`, `_compiled_refresh_dual_planner_route`, the
+   `planner_hint` parameter of `_build_dual_tree_artifacts`,
+   `_resolve_dual_downward_planner_hint`, the steady-state timing bypass, the
+   two constant hints, eleven engine attributes and their counters, and the
+   `JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE` and
+   `..._STEADY_NO_SUBSTAGE_TIMING` reads. The planner was enabled only on the
+   large-N production profile with a static-radix tree, which is where the strict
+   streamed fast path returns before it. Per-test coverage of the 20 strict-lane
+   test files at 17de581: no test reached its compiled route or its fast-lane
+   branch; only four counter bumps on the strict fast path ran. Its route,
+   `allow & ~need_traversal_result`, is `_can_split_dual_tree_build`, which now
+   decides every build; the constant hints equalled `_can_split(True, False)`.
+   The substage timing callback is always passed (it records only while refresh
+   timing is on).
+3. **Unsafe compact far-pair reuse** (-177 / +61). The reuse branch of the
+   refresh (it re-used the carried far list after the drift: stale M2L pairs),
+   its refusal, its reuse-only stage timing, and the
+   `static_radix_compact_pair_reuse_{hits,misses}` counters and diagnostics keys
+   (emitted twice). `JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH=1`
+   only switched the compact streamed pairs off, which made the fused refresh
+   raise; its block in the plan went too.
+4. **The non-fused `strict_run_v2` loop** (-156 / +62). The host-driven
+   per-step loop `JACCPOT_STATIC_STRICT_FUSED_MODE=off` selected, and the
+   engine's `_strict_fused_mode_raw` / `_enabled`. `_strict_fused_mode_active` is
+   now the profile-set verdict; where it only told the loop from the scan it is
+   folded (`fused_device_mode=True`, the force-scale carry, the particle carry,
+   the `LargeNPreparedState` guard), and the "carry='particles' needs the strict
+   fused lane" raise is dead and gone. The attribute stays: prepares and
+   refreshes after a run read it. Per-test coverage at 17de581: no test executed
+   the loop.
+5. **Other strict machinery.**
+   - (a) `JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK` chose between
+     re-raising a failed scan's exception and wrapping it in a `RuntimeError`
+     ("... while host fallback is disallowed"). There was no host segment
+     fallback either way. Both `try` blocks went; a failed scan raises its own
+     exception.
+   - (b) `JACCPOT_STATIC_STRICT_FUSED_DISABLE_HOT_TIMING`: host stage timers
+     never run under `fused_device_mode` (the refresh and the large-N prepare).
+   - (c) The strict plan's process-wide write of
+     `YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_{ONE_SHOT,STEADY_SINGLE_QUEUE}`. Only
+     yggdrax's bounded count passes read them, and those need an explicit
+     traversal config; the strict lane's walks pass none. So the write reached
+     only later generic builds in the same process, which is the flake
+     `tests/conftest.py`'s env isolation was written for (its docstring now says
+     so). No library code writes `os.environ` any more.
+   - (d) `JACCPOT_STATIC_STRICT_GPU_MODE`: strict mode is now exactly its old
+     `auto`, the large-N production profile on a static-radix tree.
+
+**Env policy:**
+
+| variable | accepted | raises |
+| --- | --- | --- |
+| `JACCPOT_STATIC_STRICT_FUSED_MODE` | unset, `on`, `1`, `true`, `yes` | `off`, `0`, `false`, `no` |
+| `JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY` | unset, `1`, ... | `0`, `false`, `no`, `off` |
+| `JACCPOT_STATIC_STRICT_FUSED_DISABLE_HOT_TIMING` | unset, `1`, ... | `0`, `false`, `no`, `off` |
+| `JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE` | unset, `0`, ... | `1`, `true`, `yes`, `on` |
+| `JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH` | unset, `0`, ... | `1`, `true`, `yes`, `on` |
+| `JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD` | unset, `1`, ... | `0`, `false`, `no`, `off` |
+| `JACCPOT_STATIC_STRICT_GPU_MODE` | any value, ignored | never |
+| `JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK` | any value, ignored | never |
+| `JACCPOT_STATIC_STRICT_FUSED_REUSE_COMPACT_PAIRS` | any value, ignored | never |
+| `JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE`, `..._STEADY_NO_SUBSTAGE_TIMING` | any value, ignored | never |
+
+The accepted values are what Odisseo's env block (`jaccpot_coupling.py`), the bench
+harness (`compare_force.FAST_LANE_ENV`, `apply_fast_lane_env`) and pins S1, S2 and
+S4b set.
+`GPU_MODE` is never refused because Odisseo reads it for its own lane gate. The
+planner modes gave identical forces. `REUSE_COMPACT_PAIRS` only armed the reuse
+together with the unsafe opt-in.
+
+`FRESH_COMPACT_PAIR_REBUILD=0` is refused rather than kept. With the reuse gone, `0`
+would have been a newly reachable mode: the refresh returning its fresh list in the
+state, so the list rides in the scan's carry instead of outside it. It was reachable
+before only with `REUSE_COMPACT_PAIRS=0` as well. Nothing sets it: not jaccpot's
+library, tests (except the deleted reuse refusal) or benches, not the bench harness
+under `/export/home/tbuck/Odisseo-bench-multigpu`, and not the Odisseo checkouts.
+Their only mention is an archived 2026-06 handoff note that describes the default.
+
+**Behaviour changes:**
+- `GPU_MODE=on` no longer opens strict mode on other engines. On those it meant
+  `fail_fast`, no retry logger, and the strict streamed path when the build allowed
+  it. `GPU_MODE=off` no longer closes strict mode on the production profile. Before
+  X6 that made the fused scan's refresh raise ("strict_mode_inactive").
+- Under `DISALLOW_HOST_SEGMENT_FALLBACK=1` (Odisseo's and the harness's setting) a
+  failed fused scan used to surface as a chained `RuntimeError`. It now raises its
+  own exception.
+- `DISABLE_HOT_TIMING`: the refresh timers no longer run under `fused_device_mode`
+  even when refresh timing is on and the variable said `0`. Only eager calls ever
+  timed there: a prepare or refresh with `fused_device_mode=True` (passed, or
+  inherited by `strict_prepare_refresh_and_evaluate` after the engine ran the fused
+  lane).
+- A generic build with an explicit traversal config, later in a process that ran a
+  strict prepare, used to take yggdrax's one-shot, single-queue count pass. It now
+  takes the default queue ladder, as in a process that never ran a strict prepare.
+- The profile-set refusals of `strict_run_v2` and `strict_fused_prepared_eval_fn`
+  no longer name a fused-mode switch or "a slower non-fused path"; both name the
+  set, the N and the two remedies.
+
+**Kept:** `strict_prepare_refresh_and_evaluate`, `refresh_prepared_state`, and the
+non-fused refresh branch of `_refresh_large_n_same_topology` they take with
+`fused_device_mode=False`; `_velocity_verlet_state_update` in `fmm_state.py`
+(Odisseo imports it; `test_downstream_contract.py` pins it); the
+`JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET` gate and its refusals; the fused lane's
+jit cache-key layout (`bench/fused_memory_budget.py` reads `num_steps` at index 6);
+`_strict_far_pairs_ride_outside_the_scan`; `_strict_fused_validated_caps`;
+`_prepare_state_dual_and_downward_strict_streamed_fast` and
+`_build_flat_walk_artifacts_strict_streamed` (the budget bench wraps both);
+`strict_fused_prepared_eval_fn`; `_strict_fused_device_refresh_route_count`; the
+fastlane diagnostics; `refresh_strict_mode_active_count`.
+
+**The fused scan covers the loop.** Everything the loop did, the scan does:
+
+| feature | non-fused loop | fused scan |
+| --- | --- | --- |
+| external field | yes | yes |
+| `initial_self_acceleration` | yes | yes |
+| `return_history` | yes | yes |
+| `prepared_state` in, `return_prepared_state` | yes | yes |
+| `step_callback` | ignored | yes |
+| `carry="particles"` | refused | yes |
+| `donate_prepared_state` / `donate_state` | ignored | yes |
+| `mac_type="dehnen_error"` force-scale carry | not carried (kept the state's scale) | yes |
+| capacity segment retry | no | yes |
+| refresh diag modes | yes | yes |
+
+The loop's update was `_velocity_verlet_state_update` (positions recomputed from the
+old ones); the scan kicks the drifted state (`_velocity_verlet_kick_drifted`), the
+same scheme.
+
+**Diagnostics keys that disappear:** `refresh_dual_planner_{cache_hits,
+cache_misses, compile_count, execute_count, steady_timing_bypass_count,
+compiled_route_count}`, `strict_fused_planner_bypassed_count`,
+`static_radix_compact_pair_reuse_{hits,misses}`. Odisseo's `jaccpot_coupling.py`
+reads every one with `.get(..., 0)`, so its records show 0. The harness's
+`probe_step.py` reads two planner keys with `.get`, which gives `None`.
+
+**Tests** (deleted: 5; retargeted: 1; adapted: 3; added: 1 file, 24 cases):
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| `test_fmm.py::test_static_radix_refresh_dual_planner_mode_parity_and_diagnostics` (also out of `slow_tests.txt`) | (b) | `test_strict_refresh_faces.py::test_refresh_face_reproduces_a_fresh_prepare` owns the refresh parity (against a fresh prepare, 1e-6, stricter than the planner test's 1e-5 between two refreshes), and now also asserts that the refresh ran the strict plan (`refresh_strict_mode_active_count` + 1). Both planner modes ran the strict fast path, so the planner test compared one path with itself |
+| `test_device_only_default.py`: `test_strict_fused_device_only_defaults_on`, `test_strict_fused_device_only_env_opt_out` | (b) | `test_strict_lane_removed_switches.py`: the default is `test_accepted_values_run_the_same_fused_scan` (the unset env and `DEVICE_ONLY=1` give the same scan, bitwise); the opt-out is `test_a_removed_value_raises_at_every_fused_entry[DEVICE_ONLY=0]` |
+| `test_same_topology_refresh_modes.py::test_compact_pair_reuse_refuses_without_the_unsafe_opt_in`, `::test_compact_pair_reuse_is_taken_when_explicitly_allowed` | (a) | the module keeps `test_upward_only_diagnostic_returns_after_the_upward_sweep`; its docstring says what went |
+| `test_strict_fused_eval_fn.py::test_requires_fused_mode_to_be_active` | (b) | now `test_requires_the_particle_count_in_the_profile_set`: the guard it reached is the profile set's (variable, N and remedies in the message, mode left inactive), and `FUSED_MODE=off` is asserted to raise |
+| `test_strict_carry_helpers.py::test_fresh_rebuild_flag` | adapted | five cases: unset, `on`, `1` return `True`; `FRESH=0` and `UNSAFE=1` raise |
+| `test_strict_run_fail_fast.py` (`TestFusedModeRefusesToDegradeSilently`, `TestProfileKeyAccounting`) | adapted | no longer set the removed `_strict_fused_mode_enabled`; match the reworded refusal; module docstring |
+| `test_fmm.py::test_strict_run_v2_api`, `::test_strict_fused_compact_far_pair_cap_fails` | unchanged | both ran the fused scan; the second sets `DISALLOW=0`, now inert |
+
+Added: `tests/integration/test_strict_lane_removed_switches.py`:
+- `test_a_removed_value_raises_at_every_fused_entry`: seven removed values (two
+  spellings of `FUSED_MODE`) times three entries, 21 cases, each before any device
+  work;
+- `test_the_strict_lane_is_the_production_profile_whatever_gpu_mode_says`: `off`
+  leaves the strict plan on for the production profile, `on` does not open it on a
+  general engine;
+- `test_accepted_values_run_the_same_fused_scan[harness, inverted]`: the
+  harness's values (and every other switch at its default, named), and the other
+  value of each ignored switch, each give the unset environment's fused scan
+  bitwise (state, history, force on the returned state).
+
+Against 17de581, 23 of the 24 fail; the `harness` case passes there too, as it
+should.
+
+**Goldens.** `golden/`, `golden_grad/`, `golden_lanes/` and the `golden_modes/*.npz`
+are byte-identical. `constructor_state.json` was regenerated; its diff is exactly 23
+base attributes: `_planner_steady_timing_bypass_enabled`,
+`_refresh_dual_planner_{cache, cache_hits, cache_misses, compile_count,
+compiled_route_count, execute_count, mode, mode_auto, mode_on,
+steady_timing_bypass_count}`, `_static_radix_compact_pair_reuse_{hits,misses}`,
+`_strict_fused_device_only`, `_strict_fused_disable_hot_timing`,
+`_strict_fused_disallow_host_segment_fallback`, `_strict_fused_mode_{enabled,raw}`,
+`_strict_fused_planner_bypassed_count`, `_strict_gpu_mode{,_auto,_on}` and
+`_strict_shared_env_applied`. No matrix case and no override moved.
+
+**Bench:**
+- `profile_refresh_stage_breakdown.py` no longer sets `FUSED_MODE=off`. It drove
+  `strict_prepare_refresh_and_evaluate`, which never read the switch. Smoke-run on
+  CPU with the GPU gate opened.
+- `cleanup_inventory.py`: a span whose anchor its phase removed contributes
+  nothing, as a removed file or function already did. So `nonfused_strict_loop`
+  and `dual_planner` stay as the record. Against the coverage file above, both
+  report 0 tests.
+- `multigpu_fused_ndev2_probe.py`: its comment no longer names the planner as a
+  cause of the cold-solver trap.
+- The default-valued env lines in `profile_downward_breakdown.py`,
+  `profile_fused_gpu_util.py`, `profile_fused_stage_ablation.py` and
+  `bench_fused_eval_vs_jaxfmm.py` stay: they set accepted values.
+- `dce_pins.py` and `fused_memory_budget.py` are unchanged. S1, S2 and S4b set
+  only accepted values, and `--library-defaults` unsets them.
+
+**Docs:**
+- `phase5_pallas_plan.md` (`DEVICE_ONLY` is the only path).
+- `fmm_fused_perstep_profiling_2026-07-08.md` (the breakdown script times the eager
+  face).
+- `multigpu_fused_2026-09.md` (the planner site of the cold-solver trap is gone).
+
+`ARCHITECTURE.md` and `README.md` named none of it.
+
+**Downstream:**
+- Odisseo's `tools/walltime_ab_compare.py` sets `JACCPOT_STATIC_STRICT_FUSED_MODE=off`
+  in its variant arm. That arm now raises, as its `LOCAL_EVAL_DIRECT_LEAF_FLATTEN=1`
+  already does since X5. This goes to phase O3.
+- Odisseo's env block (`jaccpot_coupling.py`), its
+  `tools/agama_ic_sweep_and_render.py` and the harness set only accepted values.
+
+**Gates:**
+- **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`, at
+  482e616): 2,314 passed, 198 skipped, 1 failed: the stale local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as before.
+- **Runtime type checks** (`JACCPOT_RUNTIME_TYPECHECK=1`) on the two touched unit
+  test files: 28 passed.
+- **Distributed tier** on four forced host devices (`tests/distributed` and
+  `test_mutual_distributed.py`, `-n 6`): 95 passed, 3 skipped (two opt-in upstream
+  checks and one sm_80-only case), as at X5.
+- **Bitwise A/B against 17de581 on CPU** (`git archive` exports of 17de581 and of
+  this branch). Every lane ran twice: with every X6 switch unset, and with the bench
+  harness's values (`GPU_MODE=on`, `FUSED_MODE=on`, `DEVICE_ONLY=1`,
+  `DISALLOW_HOST_SEGMENT_FALLBACK=1`, `REQUIRE_EXACT_CAP_PROFILE_MATCH=0`,
+  `FLAT_COMPACT_FAR_PAIRS=1`, `PAYLOAD_IN_FUSED=1`, `PROFILE_SET=N`). In each env
+  arm, 45 arrays are bitwise equal to 17de581's in the same env:
+  - the general path: forces and potentials of the default, fast and accurate on
+    the real basis, `dehnen_error` and `large_n_gpu` in fp32; a bare
+    `FastMultipoleMethod()`; the position and mass gradients through
+    `differentiable_accelerations` on both bases (15);
+  - `BlockStepFMM(backend="jax")`: total accelerations and one base step (3);
+  - the large-N lane with the GPU gate opened (N = 2048, 19):
+    - prepare + evaluate, `refresh_prepared_state`, two
+      `strict_prepare_refresh_and_evaluate` calls;
+    - the fused `strict_run_v2` scan, plain;
+    - the scan with history, a `step_callback` (its emitted stream),
+      an external field, a given initial self acceleration and the returned
+      prepared state (forces on it);
+    - `carry="particles"` on cell leaves, two calls chained through the handle;
+    - `strict_fused_prepared_eval_fn`;
+    - the prepacked differentiable lane's forces and gradients;
+  - `mac_type="dehnen_error"` in the fused scan, both carries, through the CSR
+    near-field lane in Pallas interpret mode (N = 768): states, the force on the
+    returned state, the handle's self-gravity and force scale (5);
+  - the multi-GPU fused lane's machinery on one forced host device:
+    `setup_fused_force` (`measure_shard_plan` through
+    `strict_fused_prepared_eval_fn`, the plan merge, the assembled states) and the
+    `shard_map`'d `fused_force_step` (the fused-device refresh with `num_valid`),
+    three forces at drifted positions (3). Two devices cannot run on CPU:
+    `decompose` repartitions with `ragged_all_to_all`, which XLA:CPU does not
+    implement (jax 0.11.2), so the cross field has no CPU arm.
+
+  The diagnostic rows (fused mode active, fallback count, fast-lane hits and misses,
+  runner and plan counts, overflow flags, the callback's steps) are equal in the
+  unset arm. In the harness arm, 6 of the 69 rows differ, all expected:
+  - `refresh_strict_mode_active_count` on the general path (default, fast,
+    accurate, `dehnen_error`): 1, 1, 1, 2 at 17de581, where `GPU_MODE=on` opened the
+    strict plan on any engine; 0 now.
+  - Two cases fail in every arm and tree: the particle carry on non-cell leaves,
+    which saturates a capacity on this CPU configuration, and `dehnen_error` without
+    the CSR lane, which needs it. At 17de581 under `DISALLOW=1` their messages were
+    the wrapper "strict fused velocity-Verlet scan failed while host fallback is
+    disallowed". Now they are the errors themselves.
+
+  On this branch the two env arms are bitwise equal to each other, rows included.
+- **`test_shards.py check`:** 2,575 tests, each in exactly one shard. The 17de581
+  export, with no sibling nornax checkout, collects 2,519; adding the 36 nornax tests
+  this checkout collects gives 2,555. X6 deletes 5 cases and adds 25 (the new
+  file's 24 and one case of `test_fresh_rebuild_flag`).
+- **Inventory:** per-test coverage of the 20 strict-lane test files at 17de581
+  (`--cov-context=test`).
+  - No test executed the non-fused loop, the planner's compiled route or its
+    fast-lane branch, or either `DISALLOW` wrapper.
+  - The reuse branch ran only in its own opt-in test, and its refusal only in its
+    refusal test (both deleted).
+  - The shared-env write ran in 29 tests.
+- **Goldens:** `golden/`, `golden_grad/`, `golden_lanes/` and `golden_modes/*.npz`
+  are byte-identical; `constructor_state.json` as above.
+- `import jaccpot` and all 123 modules import. No file in `jaccpot/`, `tests/`,
+  `bench/` or `examples/` imports a removed name; `cleanup_inventory.py` names one
+  as a regex. pre-commit is clean on every changed file.
+- `bench/annotation_census.py`: shape-annotated array parameters 833 (unchanged),
+  bare `Array` parameters 1,701 -> 1,695 (the planner route's six flags), shaped
+  share 32.9 % -> 33.0 %, `@jaxtyped` functions 183 (unchanged).
+- **GPU pins** (frozen worktree at 18f068a, plus S6's bench changes from #386; one
+  A100):
+  - S1-S5 are **bitwise** against `main-15ceca4`. S1, S2 and S4b run with the
+    harness env, which sets only accepted values.
+  - S6 (no `JACCPOT_*` env at all) is **bitwise** against `main-17de581`.
+  - M1 and M3 (two cards) are pending. They run when a second card is free under the
+    card rules.
+- **Speed (G5)**, interleaved main 17de581 / X6 x 3 on the same A100, which was shared
+  with another user's idle job. `fused_memory_budget.py` scan min, ms/step:
+
+  | N | main | X6 |
+  | --- | --- | --- |
+  | 2e5 | 6.38, 6.20, 6.45 (median 6.38) | 6.36, 6.62, 6.03 (median 6.36) |
+  | 8e6 | 83.09, 83.03, 83.53 (median 83.09) | 83.54, 83.10, 83.43 (median 83.43) |
+
+  Equal within the run-to-run spread.
+
+**Left for phase Z:**
+- the ignored switches' env lines in Odisseo, the harness and four benches;
+- `_fresh_compact_pair_rebuild_enabled`, which now always returns `True` or raises;
+- the name `strict_fused_device_only_hot_path`;
+- `bench/results/` logs that show the removed wrapper message.

@@ -32,10 +32,18 @@ def test_an_unaliased_tree_is_returned_as_is():
 
 
 @pytest.mark.parametrize(
-    "fresh, unsafe, expected",
-    [(None, None, True), ("0", None, False), ("1", "1", False), ("on", "0", True)],
+    "fresh, unsafe, removed",
+    [
+        (None, None, None),
+        ("on", "0", None),
+        ("1", None, None),
+        # the stale reuse and the far list in the carry: removed in the 2026-10
+        # cleanup (X6), refused by name rather than read as the default
+        ("0", None, "FRESH_COMPACT_PAIR_REBUILD"),
+        ("1", "1", "ALLOW_UNSAFE_COMPACT_PAIR_REUSE"),
+    ],
 )
-def test_fresh_rebuild_flag(monkeypatch, fresh, unsafe, expected):
+def test_fresh_rebuild_flag(monkeypatch, fresh, unsafe, removed):
     for name, value in (
         ("JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD", fresh),
         ("JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE", unsafe),
@@ -44,4 +52,8 @@ def test_fresh_rebuild_flag(monkeypatch, fresh, unsafe, expected):
             monkeypatch.delenv(name, raising=False)
         else:
             monkeypatch.setenv(name, value)
-    assert _fresh_compact_pair_rebuild_enabled() is expected
+    if removed is None:
+        assert _fresh_compact_pair_rebuild_enabled() is True
+    else:
+        with pytest.raises(ValueError, match=rf"{removed}=.*\(X6\)"):
+            _fresh_compact_pair_rebuild_enabled()

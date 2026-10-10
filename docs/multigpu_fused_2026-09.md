@@ -138,7 +138,8 @@ to 3460 / 50, which is the width both devices then compiled against.
   dies on a `TracerBoolConversionError`. This is the **third** site of the same "an eager prepare always precedes
   a traced refresh" assumption, after the level-shape registry and the upward depth stash -- the first two degrade
   silently, this one at least fails loudly. The driver must run its eager per-shard prepares on the SAME solver
-  instance it then builds the `shard_map` around.
+  instance it then builds the `shard_map` around. (The planner went in the 2026-10 cleanup, X6; the other two
+  sites stay, and so does the rule.)
 * **`shard_map` does not remove the mapped axis.** With `in_specs=P("gpus")` a `(ndev, cap, 3)` input arrives
   inside the body as `(1, cap, 3)`, so a `min(axis=0)` reduces the DEVICE axis instead of the particles and every
   collective after it compares whole shards elementwise -- silently, with plausible shapes. It surfaced here as a
