@@ -1065,8 +1065,24 @@ the removed switches. The other plan and audit documents stay as written.
   (`grad_cascade_reverse_microbench.py`, `m2l_csr_microbench.py`,
   `nearfield_kernel_tune.py`, `walk_tune.py`, `com_radii_tune.py`) compile and their
   jaccpot imports resolve; they were not run.
-- **GPU pins:** not run in this phase's implementation (no GPU was used). Only
-  non-default branches went; the pins are the gate before merge.
+- **GPU pins** (frozen worktree at ff710d5, one A100, against `main-15ceca4` with its
+  A-vs-A control): S1-S5 **bitwise**. M1 and M3 (two cards) are pending; they run when
+  a second card is free under the card rules.
+- **Speed (G5), one A100**, interleaved main / X5 x 3 on the same card. The card was
+  shared with another user's idle job (0 % util at each sample). The timed region is
+  `fused_memory_budget.py` scan min, ms/step:
+
+  | N | main | X5 |
+  | --- | --- | --- |
+  | 2e5 | 6.22, 6.67, 6.25 (median 6.25) | 6.39, 6.14, 6.18 (median 6.18) |
+  | 8e6 | 83.79, 83.21, 83.18 (median 83.21) | 83.10, 82.73, 83.61 (median 83.10) |
+
+  Equal within the run-to-run spread.
+  - The XLA programs around the kernels are identical: optimised HLO with source
+    metadata stripped, and modules whose fusion choice the autotuner flipped compared
+    before optimisation.
+  - The serialised Pallas kernels differ in their embedded source-line numbers, as
+    expected after editing those files.
 
 **Left for phase Z:**
 - `bench/cleanup_inventory.py`'s `kernel_variants` family still lists the removed files
