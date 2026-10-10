@@ -131,7 +131,7 @@ def test_node_monopole_equals_the_mass_it_spans(n, leaf_size, order):
     )
 
     packed = np.asarray(state.upward.multipoles.packed)
-    monopole = packed[:, 0].real if np.iscomplexobj(packed) else packed[:, 0]
+    monopole = packed[:, 0]
     masses_sorted = np.asarray(state.masses_sorted)
     node_ranges = np.asarray(state.tree.node_ranges)
     reachable = _reachable_from_root(state.tree)

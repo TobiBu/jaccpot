@@ -37,7 +37,7 @@ from jaccpot.runtime.fmm_constants import _GPU_LARGE_PARTICLE_THRESHOLD
 
 def _solver(**kwargs):
     return FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.6, G=1.0, softening=1e-2, **kwargs
+        basis="real", use_pallas=False, theta=0.6, G=1.0, softening=1e-2, **kwargs
     )
 
 
@@ -109,18 +109,22 @@ def test_translation_reverse_is_finite_at_degenerate_displacements(dtype, delta,
     exactly ``0.0`` in float32, which silently disabled the guard: this exact probe
     returned ``[nan, nan, nan]`` in float32 (float64 stayed finite), which is why
     fp32 far-field gradients were all-NaN.
+
+    Probed through the real L2L since the complex basis was removed in the 2026-10
+    cleanup (C); it was ``l2l_complex`` before. Both take ``r = sqrt(max(r2,
+    floor))`` through :func:`~jaccpot.operators.dtypes.floor_squared_radius`.
+    Mutation-checked on the real L2L: with the legacy ``1e-60`` floor in every dtype,
+    the float32 exact-zero case returns a non-finite gradient (the z-axis case stays
+    finite there), so the retargeted probe still catches the regression.
     """
-    from jaccpot.operators.complex_ops import l2l_complex
+    from jaccpot.operators.real_harmonics import l2l_real
 
     order = 4
     ncoeff = (order + 1) ** 2
-    cdtype = jnp.complex128 if dtype is jnp.float64 else jnp.complex64
-    local = jnp.asarray(np.arange(1, ncoeff + 1) * 0.1, dtype=cdtype)
+    local = jnp.asarray(np.arange(1, ncoeff + 1) * 0.1, dtype=dtype)
     d = jnp.asarray(delta, dtype)
 
-    grad = jax.grad(
-        lambda dd: jnp.sum(jnp.abs(l2l_complex(local, dd, order=order)) ** 2)
-    )(d)
+    grad = jax.grad(lambda dd: jnp.sum(l2l_real(local, dd, order=order) ** 2))(d)
     assert jnp.all(jnp.isfinite(grad)), f"non-finite L2L reverse at {label}"
 
 
@@ -145,7 +149,7 @@ def test_fp32_farfield_gradient_is_finite():
     """
     positions, masses = _clustered(512, dtype=jnp.float32)
     fmm = FastMultipoleMethod(
-        basis="complex",
+        basis="real",
         use_pallas=False,
         theta=0.6,
         G=1.0,

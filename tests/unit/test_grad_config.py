@@ -367,7 +367,7 @@ def test_forward_permutation_is_memoized_on_the_engine():
     rng = np.random.default_rng(3)
     positions = jnp.asarray(rng.normal(size=(128, 3)))
     masses = jnp.asarray(rng.uniform(0.5, 1.5, size=128))
-    fmm = FastMultipoleMethod(basis="solidfmm", use_pallas=False, theta=0.6)
+    fmm = FastMultipoleMethod(basis="real", use_pallas=False, theta=0.6)
     state = fmm.prepare_state(positions, masses, max_order=2, leaf_size=16)
 
     engine = fmm._impl
@@ -385,7 +385,7 @@ def test_forward_permutation_memo_stays_correct_across_states():
     would silently scramble the force."""
     from jaccpot import FastMultipoleMethod
 
-    fmm = FastMultipoleMethod(basis="solidfmm", use_pallas=False, theta=0.6)
+    fmm = FastMultipoleMethod(basis="real", use_pallas=False, theta=0.6)
     states = []
     for seed in (1, 2):
         rng = np.random.default_rng(seed)

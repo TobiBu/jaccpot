@@ -113,7 +113,7 @@ def test_an_advanced_config_does_not_disable_the_preset_split_build():
     rather than before it.
     """
 
-    common = dict(preset="large_n_gpu", expansion_basis="solidfmm", theta=0.5)
+    common = dict(preset="large_n_gpu", basis="real", theta=0.5)
     bare = FastMultipoleMethod(**common)._impl
 
     advanced = FMMAdvancedConfig()

@@ -11,9 +11,8 @@ import jaccpot.runtime._interaction_cache as interaction_cache_private
 import jaccpot.runtime._large_n_nearfield as large_n_nearfield_private
 import jaccpot.runtime.fmm as runtime_fmm
 import jaccpot.runtime.fmm_constants as fmm_constants_private
-import jaccpot.upward.solidfmm_complex_tree_expansions as upward_private
+import jaccpot.upward.real_tree_expansions as real_upward_private
 from jaccpot import (
-    ComplexSHBasis,
     FarFieldConfig,
 )
 from jaccpot import FastMultipoleMethod
@@ -21,7 +20,7 @@ from jaccpot import FastMultipoleMethod as ExpanseFMM
 from jaccpot import FMMAdvancedConfig
 from jaccpot import FMMPreset
 from jaccpot import FMMPreset as ExpansePreset
-from jaccpot import NearFieldConfig, RuntimePolicyConfig, TreeConfig
+from jaccpot import NearFieldConfig, RealSHBasis, RuntimePolicyConfig, TreeConfig
 
 
 def _sample_problem(n: int = 64):
@@ -765,7 +764,7 @@ def test_basis_complex_alias_matches_solidfmm():
 
 def test_basis_object_is_accepted():
     positions, masses = _sample_problem(n=48)
-    basis = ComplexSHBasis()
+    basis = RealSHBasis()
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis=basis,
@@ -776,7 +775,7 @@ def test_basis_object_is_accepted():
         leaf_size=16,
         max_order=3,
     )
-    assert fmm.basis == "complex"
+    assert fmm.basis == "real"
     assert acc.shape == positions.shape
 
 
@@ -1914,7 +1913,7 @@ def test_runtime_memory_policy_fields_flow_to_runtime():
     assert fmm._impl.upward_leaf_batch_size == 128
 
 
-def test_solidfmm_upward_defaults_to_bounded_leaf_batch_size():
+def test_real_upward_defaults_to_bounded_leaf_batch_size():
     # The recorded batch size is min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE) and
     # expected_batch is recomputed from the actual tree below, so a small N is
     # sufficient to exercise the leaf_batch_size=None default path.
@@ -1942,26 +1941,27 @@ def test_solidfmm_upward_defaults_to_bounded_leaf_batch_size():
     )
     num_internal = int(build.tree.num_internal_nodes)
     num_leaves = int(build.tree.parent.shape[0]) - num_internal
-    expected_batch = min(num_leaves, upward_private._DEFAULT_LEAF_BATCH_SIZE)
+    expected_batch = min(num_leaves, real_upward_private._DEFAULT_LEAF_BATCH_SIZE)
 
     recorded: list[int] = []
-    original = upward_private._p2m_leaves_complex
+    original = real_upward_private._p2m_leaves_real
 
     def _recording_p2m(*args, **kwargs):
         recorded.append(int(kwargs["leaf_batch_size"]))
         return original(*args, **kwargs)
 
+    # The pure-JAX leaf P2M is the one that takes the batch size; the Pallas
+    # cascade (GPU only) does not, so pin it off for this check.
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(upward_private, "_p2m_leaves_complex", _recording_p2m)
-        upward_private.prepare_solidfmm_complex_upward_sweep(
+        mp.setattr(real_upward_private, "_pallas_cascades_enabled", lambda: False)
+        mp.setattr(real_upward_private, "_p2m_leaves_real", _recording_p2m)
+        real_upward_private.prepare_real_upward_sweep(
             build.tree,
             build.positions_sorted,
             build.masses_sorted,
             max_order=2,
-            center_mode="com",
             max_leaf_size=int(build.leaf_cap),
             leaf_batch_size=None,
-            rotation="solidfmm",
         )
 
     assert recorded == [expected_batch]

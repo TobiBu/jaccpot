@@ -31,7 +31,7 @@ def _sample_state(n: int = 48):
 @pytest.fixture(scope="module")
 def prepared_coupler():
     state, masses = _sample_state(n=56)
-    solver = FastMultipoleMethod(preset="fast", basis="solidfmm")
+    solver = FastMultipoleMethod(preset="fast", basis="real")
     coupler = OdisseoFMMCoupler(solver=solver, leaf_size=16, max_order=3)
     coupler.prepare(state, masses)
     return coupler, state, masses
@@ -63,7 +63,7 @@ def test_coupler_active_subset_matches_solver_prepared_subset(prepared_coupler):
 
 def test_coupler_requires_masses_on_first_call():
     state, _ = _sample_state(n=12)
-    solver = FastMultipoleMethod(preset="fast", basis="solidfmm")
+    solver = FastMultipoleMethod(preset="fast", basis="real")
     coupler = OdisseoFMMCoupler(solver=solver)
     with pytest.raises(ValueError, match="masses must be provided"):
         coupler.accelerations(state)

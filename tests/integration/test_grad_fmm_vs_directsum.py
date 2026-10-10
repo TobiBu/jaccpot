@@ -170,7 +170,7 @@ def test_differentiable_matches_forward_compute_accelerations():
     n = 64
     positions, masses, _ = _system(n, seed=2)
     fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.4, G=1.0, softening=1e-2
+        basis="real", use_pallas=False, theta=0.4, G=1.0, softening=1e-2
     )
     state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=16)
     a_diff = fmm.differentiable_accelerations(state, positions, masses)
