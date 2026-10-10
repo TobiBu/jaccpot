@@ -274,8 +274,8 @@ class BlockStepFMM:
     basis : str
         Only ``"real"`` (the Dehnen real spherical-harmonic submode) is
         supported. It is the production basis and roughly halves the flops and
-        memory of the complex submode; the cartesian basis has no mutual
-        operators here.
+        memory of the complex submode. (The Cartesian basis, which never had
+        mutual operators, was removed in the 2026-10 cleanup, K.)
     backend : str
         ``"jax"`` (default) runs the pure-JAX kernels, differentiable by generic
         autodiff. ``"pallas"`` additionally routes the real-basis z-axis M2L

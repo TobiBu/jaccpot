@@ -24,7 +24,19 @@ MEMORY_OBJECTIVE_DOC = (
     "'minimum_memory'."
 )
 
+#: ``"cartesian"`` stays in the alias only so that an old config naming it still
+#: type-checks, and its caller sees :data:`_CARTESIAN_BASIS_REMOVED` rather than a
+#: type-check error: the Cartesian basis was removed in the 2026-10 cleanup
+#: (docs/cleanup_2026-10.md, K).
 Basis = Literal["cartesian", "solidfmm", "complex", "real"]
+#: The one message every spelling of the removed Cartesian basis raises with: the
+#: facade's ``basis=`` and legacy ``expansion_basis=``, a ``BasisInterface`` whose
+#: ``runtime_expansion_basis`` is ``"cartesian"``, the engine's
+#: ``expansion_basis=`` and ``DistributedFMMConfig(basis=...)``.
+_CARTESIAN_BASIS_REMOVED = (
+    "basis='cartesian' was removed in the 2026-10 cleanup (K); see "
+    "docs/cleanup_2026-10.md. Use basis='real' (the default)."
+)
 #: ``"class_major"`` stays in the alias only so that an old config naming it still
 #: constructs (and type-checks); the solver then raises, because the class-major far
 #: field was removed with the grouped one in the 2026-10 cleanup

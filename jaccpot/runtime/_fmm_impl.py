@@ -64,6 +64,7 @@ from yggdrax.interactions import (  # noqa: F401
 from yggdrax.tree import TreeType, available_tree_types
 
 from jaccpot.config import (
+    _CARTESIAN_BASIS_REMOVED,
     FarFieldConfig,
     FMMPreset,
     MACTypeInput,
@@ -290,14 +291,14 @@ class FMMEngine(
         rather than here.
     expansion_basis : ExpansionBasis
         Expansion algebra. ``"solidfmm"`` (default; the spherical-harmonic family,
-        real or complex) or ``"cartesian"``; ``"complex"`` is accepted and selects
-        the complex basis explicitly. The default was ``"cartesian"`` until the
-        2026-10 cleanup (K), so an engine built without a basis now runs the real
-        basis.
+        real or complex); ``"complex"`` is accepted and selects the complex basis
+        explicitly. ``"cartesian"`` raises: the Cartesian basis was removed in the
+        2026-10 cleanup (K). Until then it was this default, so an engine built
+        without a basis now runs the real basis.
     basis_impl : Optional[Any]
         The basis object. For ``"solidfmm"`` without one, the REAL basis is used
         (cleanup 2026-10, phase D1; it used to default to complex);
-        ``"complex"`` without one uses the complex basis. ``None`` for Cartesian.
+        ``"complex"`` without one uses the complex basis.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide", which
         selects ``"rot_scale"`` for the real basis.
@@ -728,9 +729,12 @@ class FMMEngine(
         Raises
         ------
         ValueError
-            If the expansion basis is not 'cartesian' or 'solidfmm'.
+            If the expansion basis is not 'solidfmm' or 'complex'. 'cartesian'
+            gets the removal message (2026-10 cleanup, K).
         """
         basis_norm = str(expansion_basis).strip().lower()
+        if basis_norm == "cartesian":
+            raise ValueError(_CARTESIAN_BASIS_REMOVED)
         if basis_impl is None and basis_norm in ("solidfmm", "complex"):
             # The spherical-harmonic family without a basis object: real unless
             # complex was named. Before 2026-10 both meant complex, which made
@@ -741,9 +745,9 @@ class FMMEngine(
             basis_impl = ComplexSHBasis() if basis_norm == "complex" else RealSHBasis()
         if basis_norm == "complex":
             basis_norm = "solidfmm"
-        if basis_norm not in ("cartesian", "solidfmm"):
+        if basis_norm != "solidfmm":
             raise ValueError(
-                "expansion_basis must be 'cartesian', 'solidfmm', or 'complex'",
+                "expansion_basis must be 'solidfmm' or 'complex'",
             )
         self.expansion_basis = basis_norm  # type: ignore[assignment]
         self.basis_impl = basis_impl

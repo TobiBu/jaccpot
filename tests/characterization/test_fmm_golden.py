@@ -55,36 +55,27 @@ INERT_ATOL = 1.0e-12
 # A single loose bound did not do that. At 0.35 it accepted an M2M defect that
 # dropped up to 23% of the system mass from the far field -- `clu_solidfmm_n256_p4`
 # sat at 2.5e-2 and passed, where the correct value is 3.5e-4. The bound was loose
-# because it had to accommodate the *cartesian* basis, which is ~1.8e-1 here at
-# both p=2 and p=4. Order-independent error is the signature of a divergent series
-# rather than truncation, and solidfmm at the same configuration is 8.1e-5, so
-# cartesian has a defect of its own that is out of scope here.
-#
-# Per-basis bounds instead, so the accurate bases get a bound that can actually
-# fail and the loose one is confined to the basis that needs it.
-ANCHOR_REL_L2 = 0.35
+# because it had to accommodate the *cartesian* basis, which was ~1.8e-1 here at
+# both p=2 and p=4 (order-independent: a divergent series, not truncation). So the
+# bounds became per basis, and the 0.35 one went with the Cartesian basis and its
+# three cases in the 2026-10 cleanup (docs/cleanup_2026-10.md, K).
 ANCHOR_REL_L2_BY_BASIS = {
     # Worst observed across the grid is 7.2e-4 (uniform, p=2); 1e-2 keeps an order
     # of magnitude of headroom while still catching a mass-loss-scale regression.
     "solidfmm": 1.0e-2,
     "real": 1.0e-2,
-    # Pre-existing, unexplained, and tracked separately -- see above.
-    "cartesian": 0.35,
 }
 
 # (id, distribution, N, basis, order). Kept modest but covers the axes the
-# refactor touches: real / complex(solidfmm) / cartesian bases, orders 2/4/6,
-# uniform + clustered geometry, and a larger-N case.
+# refactor touches: real / complex(solidfmm) bases, orders 2/4/6, uniform +
+# clustered geometry, and a larger-N case.
 CASES = [
     ("uni_solidfmm_n256_p2", "uniform", 256, "solidfmm", 2),
     ("uni_solidfmm_n256_p4", "uniform", 256, "solidfmm", 4),
     ("uni_real_n256_p2", "uniform", 256, "real", 2),
     ("uni_real_n256_p4", "uniform", 256, "real", 4),
-    ("uni_cartesian_n256_p2", "uniform", 256, "cartesian", 2),
-    ("uni_cartesian_n256_p4", "uniform", 256, "cartesian", 4),
     ("clu_solidfmm_n256_p4", "clustered", 256, "solidfmm", 4),
     ("clu_real_n256_p4", "clustered", 256, "real", 4),
-    ("clu_cartesian_n256_p4", "clustered", 256, "cartesian", 4),
     ("uni_solidfmm_n256_p6", "uniform", 256, "solidfmm", 6),
     ("uni_real_n256_p6", "uniform", 256, "real", 6),
     ("uni_solidfmm_n1024_p4", "uniform", 1024, "solidfmm", 4),
@@ -93,7 +84,7 @@ CASES = [
 
 
 # Second grid, for the axes the grid above does not cover: near-field execution mode,
-# and the potential output. Kept separate so the 13 committed `.npz` above are
+# and the potential output. Kept separate so the 10 committed `.npz` above are
 # untouched -- regenerating a golden is a deliberate act, not a side effect of widening
 # coverage.
 #
@@ -212,7 +203,7 @@ def test_fmm_golden(
     # Physics anchor: never trust a golden that is grossly wrong.
     ref = _direct_sum_accelerations(positions, masses)
     rel_l2 = np.linalg.norm(accel - ref) / (np.linalg.norm(ref) + 1e-12)
-    anchor = ANCHOR_REL_L2_BY_BASIS.get(basis, ANCHOR_REL_L2)
+    anchor = ANCHOR_REL_L2_BY_BASIS[basis]
     assert rel_l2 < anchor, (
         f"{case_id}: FMM vs direct-sum rel-L2 {rel_l2:.3e} exceeds "
         f"anchor {anchor} for basis {basis!r}"

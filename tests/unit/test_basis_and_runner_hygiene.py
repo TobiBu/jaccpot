@@ -6,9 +6,10 @@ failing:
 * ``basis="complex"`` and ``basis="solidfmm"`` are the same path (measured
   bit-identical at N=2048/p=4/theta=0.5, max difference 0.0), so a user
   switching between them to cross-check was comparing a run against itself.
-* ``basis="cartesian"`` is ~1.8e-1 rel-L2 *independent of order* -- a
+* ``basis="cartesian"`` was ~1.8e-1 rel-L2 *independent of order* -- a
   divergent-series signature -- against 8.1e-5 for solidfmm, and nothing at the
-  call site said so.
+  call site said so. It warned from then on, and was removed in the 2026-10
+  cleanup (K): every spelling of it now raises one migration error.
 * ``bench/bench_jaxfmm_paper_compare.py`` wrote ``status=error`` rows when
   jaxFMM could not be imported, so a dead comparison arm produced a CSV that
   looked like data. It stayed dead for months.
@@ -16,12 +17,23 @@ failing:
 
 from __future__ import annotations
 
+import dataclasses
+import re
 import warnings
 
 import pytest
 
-from jaccpot import FastMultipoleMethod
+from jaccpot import FastMultipoleMethod, RealSHBasis
+from jaccpot.distributed import DistributedFMMConfig
+from jaccpot.distributed.fmm import make_force_evaluator
+from jaccpot.runtime._fmm_impl import FMMEngine
 from jaccpot.solver import _resolve_basis_input
+
+#: The migration message, matched literally (``re.escape``) by every spelling below.
+_REMOVED = (
+    "basis='cartesian' was removed in the 2026-10 cleanup (K); see "
+    "docs/cleanup_2026-10.md. Use basis='real' (the default)."
+)
 
 
 class TestBasisAliasing:
@@ -49,32 +61,63 @@ class TestBasisAliasing:
             FastMultipoleMethod(preset="fast", basis=basis)
 
 
-class TestCartesianIsExperimental:
-    def test_it_warns_by_name_and_says_why(self) -> None:
-        with pytest.warns(UserWarning, match="EXPERIMENTAL"):
-            FastMultipoleMethod(preset="fast", basis="cartesian")
+class TestCartesianWasRemoved:
+    """Every way to name the Cartesian basis raises the one migration error.
 
-    def test_the_warning_names_the_order_independence(self) -> None:
-        """The specific fact a user needs: raising max_order will not help."""
+    Replaces the four ``TestCartesianIsExperimental`` tests (2026-10 cleanup, K):
+    the basis they warned about is gone, so the warning, its wording, its silencing
+    switch and "it still works" became this refusal, spelling by spelling.
+    """
 
-        with pytest.warns(UserWarning) as record:
-            FastMultipoleMethod(preset="fast", basis="cartesian")
-        message = str(record[0].message)
-        assert "independent of expansion order" in message
-        assert "solidfmm" in message
+    @pytest.mark.parametrize("basis", ("cartesian", "Cartesian", " CARTESIAN "))
+    def test_the_facade_basis_argument_raises(self, basis: str) -> None:
+        with pytest.raises(ValueError, match=re.escape(_REMOVED)):
+            FastMultipoleMethod(preset="fast", basis=basis)
 
-    def test_it_can_be_silenced_deliberately(self, monkeypatch) -> None:
-        monkeypatch.setenv("JACCPOT_ALLOW_CARTESIAN_BASIS", "1")
+    def test_the_legacy_expansion_basis_kwarg_raises(self) -> None:
         with warnings.catch_warnings():
-            warnings.simplefilter("error", UserWarning)
+            warnings.simplefilter("ignore", DeprecationWarning)
+            with pytest.raises(ValueError, match=re.escape(_REMOVED)):
+                FastMultipoleMethod(expansion_basis="cartesian")
+
+    def test_a_basis_object_that_names_it_raises(self) -> None:
+        basis = dataclasses.replace(RealSHBasis(), runtime_expansion_basis="cartesian")
+        with pytest.raises(ValueError, match=re.escape(_REMOVED)):
+            FastMultipoleMethod(preset="fast", basis=basis)
+
+    def test_the_engine_expansion_basis_raises(self) -> None:
+        with pytest.raises(ValueError, match=re.escape(_REMOVED)):
+            FMMEngine(expansion_basis="cartesian")
+
+    def test_the_distributed_config_basis_raises(self) -> None:
+        """Raised while the evaluator is built, before the mesh is touched.
+
+        ``DistributedFMMConfig.basis`` was never validated: ``"cartesian"`` failed
+        the ``== "real"`` test and silently ran the complex far field.
+        """
+        with pytest.raises(ValueError, match=re.escape(_REMOVED)):
+            make_force_evaluator(
+                DistributedFMMConfig(basis="cartesian"), 1, 64, mesh=None
+            )
+
+    @pytest.mark.parametrize("basis", ("real", "solidfmm"))
+    def test_the_distributed_config_still_takes_its_two_bases(self, basis) -> None:
+        assert callable(
+            make_force_evaluator(DistributedFMMConfig(basis=basis), 1, 64, mesh=None)
+        )
+
+    def test_the_old_silencing_switch_is_inert(self, monkeypatch) -> None:
+        """``JACCPOT_ALLOW_CARTESIAN_BASIS=1`` silenced the warning; it opens nothing."""
+        monkeypatch.setenv("JACCPOT_ALLOW_CARTESIAN_BASIS", "1")
+        with pytest.raises(ValueError, match=re.escape(_REMOVED)):
             FastMultipoleMethod(preset="fast", basis="cartesian")
+        with pytest.raises(ValueError, match=re.escape(_REMOVED)):
+            FMMEngine(expansion_basis="cartesian")
 
-    def test_it_still_works(self) -> None:
-        """Warned, not removed: it remains a usable cross-check of structure."""
-
-        with pytest.warns(UserWarning):
-            solver = FastMultipoleMethod(preset="fast", basis="cartesian")
-        assert solver is not None
+    def test_an_unknown_basis_is_not_offered_cartesian(self) -> None:
+        with pytest.raises(ValueError, match="basis must be one of") as excinfo:
+            FastMultipoleMethod(preset="fast", basis="spherical")
+        assert "cartesian" not in str(excinfo.value)
 
 
 class TestComparisonBenchExitCode:

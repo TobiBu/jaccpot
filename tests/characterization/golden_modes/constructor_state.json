@@ -254,11 +254,6 @@
   "backend_radix": {
    "execution_backend": "'radix'"
   },
-  "cartesian": {
-   "basis_impl": "None",
-   "expansion_basis": "'cartesian'",
-   "m2l_impl": "None"
-  },
   "engine_preset_fast": {
    "_preset_config": "FMMPresetConfig(name=<FMMPreset.FAST: 'fast'>, tree_build_mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), use_dense_interactions=False, jit_tree='auto', jit_traversal=True, description='Single-tree gravitational preset optimised for throughput. Uses the LBVH radix builder, disables host-side refinement, relies on a single dual-tree traversal, and favours compiled evaluation while keeping memory usage bounded.')",
    "aspect_threshold": "16.0",

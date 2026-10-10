@@ -61,11 +61,10 @@ _VIA_FACADE = "__via_facade__"
 CONFIGS: dict[str, dict[str, Any]] = {
     # --- basis, which selects entire kernel families ---
     # The engine's default is the real SH basis since the 2026-10 cleanup (K); it
-    # was Cartesian. So the base case is the real basis, and the old
-    # `solidfmm_real` row (`expansion_basis="solidfmm"` with a `RealSHBasis()`)
+    # was Cartesian, which K removed. So the base case is the real basis, and the
+    # old `solidfmm_real` row (`expansion_basis="solidfmm"` with a `RealSHBasis()`)
     # resolved byte-identically to it and went: the distinctness guard caught it.
     "real_default": {},
-    "cartesian": {"expansion_basis": "cartesian"},
     "solidfmm_explicit_complex": {
         "expansion_basis": "solidfmm",
         "basis_impl": ComplexSHBasis(),
