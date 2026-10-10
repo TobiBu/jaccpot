@@ -84,7 +84,7 @@ def _run(c, kernel, interpret, source_tile, flags, **kw):
 @pytest.mark.parametrize("interpret", [True, False])
 @pytest.mark.parametrize("kernel", ["plummer", "ferrers3", "wendland_c2"])
 @pytest.mark.parametrize(
-    "source_tile, flags", [(0, None), (4, ""), (4, "l"), (8, "alr"), (4, "alg")]
+    "source_tile, flags", [(0, None), (4, ""), (4, "l"), (8, "alr")]
 )
 def test_force_scale_lane_equals_the_near_pair_sum(
     kernel, source_tile, flags, interpret

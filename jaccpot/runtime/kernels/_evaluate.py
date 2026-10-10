@@ -34,7 +34,7 @@ from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_flag
+from jaccpot._env import env_flag, env_reject_removed
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
@@ -2493,23 +2493,21 @@ def _evaluate_local_expansions_for_particles(
             )
             derivative_fields = list(derivative_fields_tuple)
 
-        direct_leaf_flatten = str(
-            os.environ.get(
-                "JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN",
-                "0",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        if bool(direct_leaf_flatten) and max_acc_derivative_order <= 0:
-            gradients = grad_field.reshape((-1, grad_field.shape[-1]))[
-                : positions.shape[0]
-            ]
-        else:
-            gradients = _scatter_vectors(
-                jnp.zeros_like(positions),
-                safe_idx,
-                grad_field,
-                valid,
-            )
+        # JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN=1 reshaped the leaf block into
+        # particle order instead of scattering it, which is only right when every
+        # leaf is full and in order; removed in the 2026-10 cleanup (X5)
+        env_reject_removed(
+            "JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN",
+            ("1", "true", "yes", "on"),
+            phase="X5",
+            default="the scatter by particle index",
+        )
+        gradients = _scatter_vectors(
+            jnp.zeros_like(positions),
+            safe_idx,
+            grad_field,
+            valid,
+        )
 
         derivative_outputs: Optional[PackedAccelerationDerivatives]
         if max_acc_derivative_order > 0:

@@ -40,6 +40,7 @@ from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 
+from jaccpot._env import env_reject_removed
 from jaccpot.runtime.grad_options import LeafPairReverseOptions
 
 from ._kernels import _pair_contributions_batched, _self_contributions
@@ -1611,10 +1612,10 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         the forward CSR lane can read the sorted particles directly instead of
         gathered ``(L, W)`` leaf tables (``JACCPOT_NEARFIELD_LAYOUT``):
         ``direct`` (default) stores straight into particle order with no
-        per-leaf partials (the table path's bits on rows of at most two chunks;
-        see :mod:`jaccpot.pallas.nearfield_leafpair_csr`), ``sorted`` keeps the
-        per-leaf result and gathers it back (the table path's bits), ``table``
-        is the gathered-table kernel.
+        per-leaf partials (see :mod:`jaccpot.pallas.nearfield_leafpair_csr`),
+        ``table`` is the gathered-table kernel. ``JACCPOT_NEARFIELD_ACCUM=wide``
+        runs the table kernel (the direct one accumulates in the input dtype).
+        The ``sorted`` layout was removed in the 2026-10 cleanup (X5) and raises.
 
     return_force_scale : bool
         Also return eq (16b)'s near-field force scale ``sum G m / (r^2 + eps^2)``
@@ -1825,23 +1826,28 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         nbr_leaf = jnp.maximum(nbr_nodes - leaf_nodes[0], 0)
         chunk = max(1, _env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64))
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
-        layout = _env_choice(
-            "JACCPOT_NEARFIELD_LAYOUT", "direct", ("table", "sorted", "direct")
+        # the sorted-ranges layout with per-chunk partials, between the two
+        # below, was removed in the 2026-10 cleanup (X5)
+        env_reject_removed(
+            "JACCPOT_NEARFIELD_LAYOUT", ("sorted",), phase="X5", default="direct"
         )
+        layout = _env_choice("JACCPOT_NEARFIELD_LAYOUT", "direct", ("table", "direct"))
         if differentiable or leaf_ranges is None:
             layout = "table"
         if layout == "direct" and accum != "input":
-            layout = "sorted"  # the direct lane accumulates in the input dtype
+            # the direct kernel accumulates in the input dtype; the table kernel
+            # carries the wide accumulator (as the multi-GPU cross term, which
+            # reads the same variable)
+            layout = "table"
         if want_force_scale and layout != "direct":
             raise NotImplementedError(
                 "return_force_scale is accumulated by the direct CSR kernel only; "
                 f"this call resolved layout={layout!r} (differentiable, no leaf "
                 "ranges, JACCPOT_NEARFIELD_LAYOUT or accum='wide')"
             )
-        if layout != "table":
+        if layout == "direct":
             from jaccpot.pallas.nearfield_leafpair_csr import (
                 nearfield_leafpair_csr_sorted_direct_pallas,
-                nearfield_leafpair_csr_sorted_pallas,
             )
 
             ranges = jnp.asarray(leaf_ranges, dtype=INDEX_DTYPE)
@@ -1859,7 +1865,6 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
                 interpret=pallas_interpret,
             )
-        if layout == "direct":
             pair_acc, pair_pot = nearfield_leafpair_csr_sorted_direct_pallas(
                 positions,
                 masses,
@@ -1884,34 +1889,6 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         table = build_leafpair_chunk_table(
             offsets, counts, chunk=chunk, capacity=capacity
         )
-        if layout == "sorted":
-            out = nearfield_leafpair_csr_sorted_pallas(
-                positions,
-                masses,
-                leaf_start,
-                leaf_count,
-                nbr_leaf,
-                table,
-                accum=accum,
-                include_self=True,
-                **kernel_opts,
-            )
-            # each particle is one (leaf, slot) of the result: a gather, where the
-            # table path scatters by its (L, W) index table
-            n = int(positions.shape[0])
-            leaf_of = jnp.repeat(
-                jnp.arange(leaf_start.shape[0], dtype=INDEX_DTYPE),
-                leaf_count,
-                total_repeat_length=n,
-            )
-            particle = jnp.arange(n, dtype=INDEX_DTYPE)
-            live = particle < jnp.sum(leaf_count)
-            slot = jnp.clip(particle - leaf_start[leaf_of], 0, width - 1)
-            picked = out[leaf_of, slot]
-            pair_acc = jnp.where(live[:, None], picked[:, :3], 0.0).astype(dtype)
-            if want_potential:
-                return pair_acc, jnp.where(live, picked[:, 3], 0.0).astype(dtype)
-            return pair_acc
         if differentiable:
             out = nearfield_leafpair_csr_pallas_cvjp(
                 leaf_positions,

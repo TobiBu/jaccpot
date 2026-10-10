@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from jaccpot._env import env_choice, env_int
+from jaccpot._env import env_choice, env_int, env_reject_removed
 from jaccpot._jax_compat import Tracer
 
 # `_read_large_n_env_config` is re-imported although only its memoising wrapper
@@ -2114,10 +2114,11 @@ def evaluate_large_n_state(
         l2p_kernel = env_choice(
             "JACCPOT_L2P_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
         )
-        # how the force returns to input order: "scatter" (default; each sorted
-        # row to its input row) or "gather" (through the inverse permutation)
-        unpermute = env_choice(
-            "JACCPOT_FASTLANE_UNPERMUTE", "scatter", ("scatter", "gather")
+        # the force returns to input order by a scatter (each sorted row to its
+        # input row); the gather through the inverse permutation
+        # (JACCPOT_FASTLANE_UNPERMUTE=gather) was removed in the 2026-10 cleanup (X5)
+        env_reject_removed(
+            "JACCPOT_FASTLANE_UNPERMUTE", ("gather",), phase="X5", default="scatter"
         )
         if l2p_kernel == "auto":
             from jaccpot.pallas.cascade_real_level import (
@@ -2200,44 +2201,35 @@ def evaluate_large_n_state(
                     return acc_out, jnp.asarray(scale_sorted).astype(output_dtype)
                 return acc_out
             accelerations_sorted = jnp.asarray(accelerations_sorted)
-            if unpermute == "scatter":
-                # each sorted row to its input row through the sort permutation:
-                # the sum fuses into the scatter's contiguous reads, and the
-                # inverse permutation is not needed. The gather form, with the sum
-                # fused into it, read the near field's three component arrays and
-                # the far field at a random index per particle: 2.44 ms at 8e6 and
-                # 39.7 ms at 1e8 on an A100 (+ the inverse's scatter, 16 ms at 1e8).
-                # Materialising the sum before the gather (an optimization barrier)
-                # recovered 1.2 of the 1.8 ms at 8e6, for +10 B/p of peak at 2e6.
-                perm = jnp.asarray(state_in.tree.particle_indices, dtype=INDEX_DTYPE)
-                acc_out = (
-                    jnp.zeros(accelerations_sorted.shape, output_dtype)
+            # each sorted row to its input row through the sort permutation: the
+            # sum fuses into the scatter's contiguous reads, and the inverse
+            # permutation is not needed. The gather form, with the sum fused into
+            # it, read the near field's three component arrays and the far field
+            # at a random index per particle: 2.44 ms at 8e6 and 39.7 ms at 1e8 on
+            # an A100 (+ the inverse's scatter, 16 ms at 1e8). Materialising the
+            # sum before the gather (an optimization barrier) recovered 1.2 of the
+            # 1.8 ms at 8e6, for +10 B/p of peak at 2e6.
+            perm = jnp.asarray(state_in.tree.particle_indices, dtype=INDEX_DTYPE)
+            acc_out = (
+                jnp.zeros(accelerations_sorted.shape, output_dtype)
+                .at[perm]
+                .set(
+                    accelerations_sorted.astype(output_dtype),
+                    unique_indices=True,
+                    mode="promise_in_bounds",
+                )
+            )
+            if want_scale:
+                scale_out = (
+                    jnp.zeros(scale_sorted.shape, output_dtype)
                     .at[perm]
                     .set(
-                        accelerations_sorted.astype(output_dtype),
+                        scale_sorted.astype(output_dtype),
                         unique_indices=True,
                         mode="promise_in_bounds",
                     )
                 )
-                if want_scale:
-                    scale_out = (
-                        jnp.zeros(scale_sorted.shape, output_dtype)
-                        .at[perm]
-                        .set(
-                            scale_sorted.astype(output_dtype),
-                            unique_indices=True,
-                            mode="promise_in_bounds",
-                        )
-                    )
-                    return acc_out, scale_out
-                return acc_out
-            acc_out = accelerations_sorted[state_in.inverse_permutation].astype(
-                output_dtype
-            )
-            if want_scale:
-                return acc_out, scale_sorted[state_in.inverse_permutation].astype(
-                    output_dtype
-                )
+                return acc_out, scale_out
             return acc_out
 
         compiled = _large_n_fastlane_eval_fn(
@@ -2259,7 +2251,6 @@ def evaluate_large_n_state(
                 l2p_layout,
                 int(l2p_chunk),
                 l2p_kernel,
-                unpermute,
                 keep_sorted,
                 want_scale,
             ),

@@ -1,17 +1,21 @@
-"""The CSR near-field kernels reading sorted particle ranges equal the table kernel.
+"""The direct CSR near-field kernel, reading sorted particle ranges, equals the table kernel.
 
-``nearfield_leafpair_csr_sorted_pallas`` reads a leaf's particles as the range
-``[start, start + count)`` of the sorted array instead of gathered ``(L, W)``
-tables. Same lane body, loop bounds and summation order, so the result must be
-the same to the bit: on leaves of every occupancy, empty padding leaves at the
-end, rows past every leaf's particles (a shard's padding), a subtile that pads
-``W``, and chunks that split rows. On a GPU, rows of three or more chunks agree
-to round-off only: their partials are added by unordered atomics.
+``nearfield_leafpair_csr_sorted_direct_pallas`` reads a leaf's particles as the
+range ``[start, start + count)`` of the sorted array instead of gathered
+``(L, W)`` tables, and stores straight into particle order. With the scalar
+source loop it has the table kernel's lane body, loop bounds and summation order,
+so rows of one chunk come out the same to the bit: on leaves of every occupancy,
+empty padding leaves at the end, rows past every leaf's particles (a shard's
+padding) and a subtile that pads ``W``. The vector source tiles agree with the
+scalar loop to single-precision round-off.
+
+The ``sorted`` layout (ranges in, per-chunk partials out), the chunked rows, the
+per-class target launches and the source flags ``g`` and ``p`` without ``r``
+were removed in the 2026-10 cleanup (X5).
 """
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -21,24 +25,7 @@ from jaccpot.pallas.nearfield_leafpair_csr import (
     leafpair_chunk_capacity,
     nearfield_leafpair_csr_pallas,
     nearfield_leafpair_csr_sorted_direct_pallas,
-    nearfield_leafpair_csr_sorted_pallas,
 )
-
-
-def _bitwise_leaves(row_counts, chunk, *, ordered):
-    """Leaves whose sum is reproduced to the bit by a chunked kernel.
-
-    Pass 2 adds a row's chunk partials with a ``segment_sum``. On CPU it adds them
-    in chunk order, so every row agrees to the bit (``ordered``). On a GPU it is a
-    scatter of unordered atomics: two partials commute, three or more round in
-    arrival order, which changes run to run.
-    """
-    row_chunks = -(-np.asarray(row_counts) // chunk)
-    return np.ones(row_chunks.shape, bool) if ordered else row_chunks <= 2
-
-
-def _ordered_segment_sum():
-    return jax.default_backend() == "cpu"
 
 
 def _case(seed, *, num_live, num_pad, W, n_dead, max_row, empty_rows=()):
@@ -85,74 +72,23 @@ def _case(seed, *, num_live, num_pad, W, n_dead, max_row, empty_rows=()):
 
 
 @pytest.mark.parametrize(
-    "W, chunk, subtile, n_dead, accum",
-    [
-        (8, 3, None, 0, "input"),
-        (8, 1, 4, 5, "input"),
-        (6, 2, 4, 3, "input"),  # W padded to 8 lanes
-        (8, 4, None, 2, "wide"),
-    ],
-)
-def test_sorted_ranges_equal_the_table_kernel(W, chunk, subtile, n_dead, accum):
-    c = _case(7, num_live=9, num_pad=3, W=W, n_dead=n_dead, max_row=6, empty_rows=(2,))
-    cap = leafpair_chunk_capacity(int(c["nbr"].shape[0]), c["L"], chunk)
-    tab = build_leafpair_chunk_table(
-        c["offsets"], c["row_counts"], chunk=chunk, capacity=cap
-    )
-    common = dict(
-        softening_sq=jnp.float32(0.05**2),
-        G=jnp.float32(1.3),
-        chunk=chunk,
-        target_subtile=subtile,
-        interpret=True,
-        accum=accum,
-        include_self=True,
-    )
-    ref = nearfield_leafpair_csr_pallas(
-        c["leaf_pos"], c["leaf_mass"], c["mask"], c["nbr"], tab, **common
-    )
-    got = nearfield_leafpair_csr_sorted_pallas(
-        c["pos"],
-        c["mass"],
-        c["starts"],
-        c["counts"],
-        c["nbr"],
-        tab,
-        leaf_width=W,
-        **common,
-    )
-    ref = np.asarray(ref)
-    got = np.asarray(got)
-    assert got.shape == ref.shape == (c["L"], W, 4)
-    assert np.any(ref[:9]) and not np.any(ref[9:])  # padding leaves stay zero
-    exact = _bitwise_leaves(c["row_counts"], chunk, ordered=_ordered_segment_sum())
-    np.testing.assert_allclose(got, ref, rtol=2e-6, atol=1e-6)
-    assert np.array_equal(got[exact], ref[exact])
-
-
-@pytest.mark.parametrize(
     "W, chunk, subtile, n_dead, with_potential",
     [
         (8, 3, None, 0, False),
         (8, 1, 4, 5, True),  # rows of up to 6 chunks
         (6, 2, 4, 3, False),  # W padded to 8 lanes
-        (8, 64, None, 2, True),  # every row one chunk: no second pass at all
+        (8, 64, None, 2, True),  # every row one chunk
     ],
 )
-@pytest.mark.parametrize("rows", ["chunked", "whole"])
 def test_direct_equals_the_table_kernel_in_particle_order(
-    W, chunk, subtile, n_dead, with_potential, rows, monkeypatch
+    W, chunk, subtile, n_dead, with_potential
 ):
     """The direct lane, gathered back: the table kernel's values.
 
-    ``chunked``: on CPU the scatter of pass 2 adds a row's chunks in chunk
-    order, which is the segment sum's order, so even rows of three or more
-    chunks agree to the bit here; on a GPU both are unordered atomics
-    (``_bitwise_leaves``), so longer rows agree to single-precision round-off.
-    ``whole``: one running sum per row, so rows of one chunk agree to the bit
-    and longer rows to single-precision round-off.
+    One running sum per row, so rows of one chunk agree to the bit and longer
+    rows to single-precision round-off. (The ``chunked`` rows that kept the
+    table's chunk partials were removed in the 2026-10 cleanup, X5.)
     """
-    monkeypatch.setenv("JACCPOT_NEARFIELD_DIRECT_ROWS", rows)
     c = _case(7, num_live=9, num_pad=3, W=W, n_dead=n_dead, max_row=6, empty_rows=(2,))
     cap = leafpair_chunk_capacity(int(c["nbr"].shape[0]), c["L"], chunk)
     tab = build_leafpair_chunk_table(
@@ -195,12 +131,9 @@ def test_direct_equals_the_table_kernel_in_particle_order(
     got = np.concatenate(
         [acc, np.asarray(pot)[:, None] if with_potential else want[:, 3:]], axis=1
     )
-    # particles of the leaves that keep the table's bits
+    # particles of the leaves that keep the table's bits: rows of one chunk
     row_counts = np.asarray(c["row_counts"])
-    if rows == "chunked":
-        bitwise = _bitwise_leaves(row_counts, chunk, ordered=_ordered_segment_sum())
-    else:  # whole: one running sum per row, so rows of one chunk
-        bitwise = row_counts <= chunk
+    bitwise = row_counts <= chunk
     exact = np.zeros(n, bool)
     for leaf in range(c["L"]):
         if bitwise[leaf]:
@@ -209,16 +142,15 @@ def test_direct_equals_the_table_kernel_in_particle_order(
     assert np.array_equal(got[exact], want[exact])
     if not with_potential:
         assert pot is None
-    if chunk < 6:  # some row really is split (non-vacuity of pass 2)
+    if chunk < 6:  # some row really is longer than a chunk
         assert int(np.asarray(c["row_counts"]).max()) > chunk
 
 
 @pytest.mark.parametrize("row_limit", [1, 2, 4])
-def test_whole_rows_past_the_limit_go_in_pieces(row_limit, monkeypatch):
-    """``whole`` mode runs each row up to ``row_limit`` entries in its own program
-    and the rest in pieces: the unlimited run's values to single-precision
-    round-off, and the bits of every row that fits the limit."""
-    monkeypatch.setenv("JACCPOT_NEARFIELD_DIRECT_ROWS", "whole")
+def test_whole_rows_past_the_limit_go_in_pieces(row_limit):
+    """Each row runs up to ``row_limit`` entries in its own program and the rest
+    in pieces: the unlimited run's values to single-precision round-off, and the
+    bits of every row that fits the limit."""
     c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6, empty_rows=(2,))
     common = dict(
         softening_sq=jnp.float32(0.05**2),
@@ -272,29 +204,27 @@ def _consecutive_case(seed, *, W):
 
 
 @pytest.mark.parametrize(
-    "W, subtile, source_tile, flags, with_potential, classes",
+    "W, subtile, source_tile, flags, with_potential",
     [
-        (8, None, 4, "", True, ()),
-        (8, 4, 8, "p", False, ()),
-        (6, 4, 2, "a", True, ()),  # W padded to 8 lanes
-        (16, 8, 4, "r", True, ()),
-        (16, 16, 32, "apr", True, ()),  # source tile wider than a leaf
-        (8, 8, 4, "ar", False, ()),
-        (16, None, 8, "al", True, (4, 8, 16)),  # one launch per occupancy class
-        (16, None, 4, "alr", False, (2, 8)),  # the widest class in two subtiles
-        (8, None, 8, "l", True, (8,)),
-        (16, 8, 8, "alg", True, ()),  # 2D-indexed operands
-        (16, None, 4, "aglr", True, (4, 16)),
+        (8, None, 4, "", True),
+        (6, 4, 2, "a", True),  # W padded to 8 lanes
+        (16, 8, 4, "r", True),
+        (16, 16, 32, "apr", True),  # source tile wider than a leaf; p rides on r
+        (8, 8, 4, "ar", False),
+        (16, None, 8, "al", True),
+        (16, None, 4, "alr", False),  # the default flags
+        (8, None, 8, "l", True),
     ],
 )
 @pytest.mark.parametrize("row_limit", [1 << 20, 2])
 def test_source_tiles_equal_the_scalar_loop(
-    W, subtile, source_tile, flags, with_potential, classes, row_limit
+    W, subtile, source_tile, flags, with_potential, row_limit
 ):
     """Vector source tiles: the scalar loop's values to single-precision round-off
     (a tile is summed as a tree), with and without the pieces of long rows, on rows
-    whose leaves are consecutive (runs merge) and on random rows; per-class launches
-    the one-launch tiled kernel's values exactly on CPU, to round-off on a GPU."""
+    whose leaves are consecutive (runs merge) and on random rows. (The cases of the
+    per-class launches and of the removed ``g`` and lone ``p`` flags went in the
+    2026-10 cleanup, X5; the class cases' flag sets stay, in one launch.)"""
     for c in (
         _case(7, num_live=9, num_pad=3, W=W, n_dead=2, max_row=6, empty_rows=(2,)),
         _consecutive_case(11, W=W),
@@ -325,26 +255,8 @@ def test_source_tiles_equal_the_scalar_loop(
             *args,
             source_tile=source_tile,
             source_flags=flags,
-            target_classes=classes,
             **common,
         )
-        if classes:
-            one, _ = nearfield_leafpair_csr_sorted_direct_pallas(
-                *args,
-                source_tile=source_tile,
-                source_flags=flags,
-                target_classes=(),
-                **common,
-            )
-            acc1_np, one = np.asarray(acc1), np.asarray(one)
-            if jax.default_backend() == "cpu":
-                assert np.array_equal(acc1_np, one)
-            else:
-                # each class is its own launch shape, so its own compiled program,
-                # which may round differently on a GPU (each launch is reproducible
-                # run to run; measured on an A100: <= 0.5 ulp of the largest force)
-                tol = 2 * np.spacing(np.float32(np.abs(one).max()))
-                np.testing.assert_allclose(acc1_np, one, rtol=0, atol=tol)
         acc0, acc1 = np.asarray(acc0), np.asarray(acc1)
         assert np.any(acc0)
         n_dead = 2
@@ -364,26 +276,51 @@ def test_source_tiles_equal_the_scalar_loop(
 
 
 def test_source_flags_are_validated():
-    """Bad tile options are refused, naming the option."""
+    """Bad tile options are refused, naming the option; so are the removed ones."""
     c = _case(7, num_live=4, num_pad=0, W=4, n_dead=0, max_row=2)
+    args = (
+        c["pos"],
+        c["mass"],
+        c["starts"],
+        c["counts"],
+        c["nbr"],
+        c["offsets"],
+        c["row_counts"],
+    )
+    common = dict(
+        leaf_width=4,
+        softening_sq=jnp.float32(0.01),
+        G=jnp.float32(1.0),
+        chunk=2,
+        interpret=True,
+    )
     with pytest.raises(ValueError, match="source_flags"):
         nearfield_leafpair_csr_sorted_direct_pallas(
-            c["pos"],
-            c["mass"],
-            c["starts"],
-            c["counts"],
-            c["nbr"],
-            c["offsets"],
-            c["row_counts"],
-            leaf_width=4,
-            softening_sq=jnp.float32(0.01),
-            G=jnp.float32(1.0),
-            chunk=2,
-            interpret=True,
-            source_tile=4,
-            source_flags="x",
+            *args, source_tile=4, source_flags="x", **common
         )
     with pytest.raises(ValueError, match="power of two"):
+        nearfield_leafpair_csr_sorted_direct_pallas(*args, source_tile=6, **common)
+    # the 2D-indexed operands and the prefetch without the runs: removed (X5)
+    for flags in ("alg", "g", "p", "ap"):
+        with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+            nearfield_leafpair_csr_sorted_direct_pallas(
+                *args, source_tile=4, source_flags=flags, **common
+            )
+
+
+@pytest.mark.parametrize(
+    "var, value",
+    [
+        ("JACCPOT_NEARFIELD_TARGET_CLASSES", "4,8,16"),
+        ("JACCPOT_NEARFIELD_DIRECT_ROWS", "chunked"),
+    ],
+)
+def test_the_removed_layout_options_raise(var, value, monkeypatch):
+    """Per-class target launches and chunked rows were removed (2026-10 cleanup,
+    X5): setting either is refused by name rather than run as the default."""
+    c = _case(7, num_live=4, num_pad=0, W=4, n_dead=0, max_row=2)
+    monkeypatch.setenv(var, value)
+    with pytest.raises(ValueError, match=f"{var}.*removed in the 2026-10 cleanup"):
         nearfield_leafpair_csr_sorted_direct_pallas(
             c["pos"],
             c["mass"],
@@ -397,24 +334,6 @@ def test_source_flags_are_validated():
             G=jnp.float32(1.0),
             chunk=2,
             interpret=True,
-            source_tile=6,
-        )
-    with pytest.raises(ValueError, match="powers of two"):
-        nearfield_leafpair_csr_sorted_direct_pallas(
-            c["pos"],
-            c["mass"],
-            c["starts"],
-            c["counts"],
-            c["nbr"],
-            c["offsets"],
-            c["row_counts"],
-            leaf_width=4,
-            softening_sq=jnp.float32(0.01),
-            G=jnp.float32(1.0),
-            chunk=2,
-            interpret=True,
-            source_tile=4,
-            target_classes=(3,),
         )
 
 
@@ -426,7 +345,6 @@ def test_the_default_is_the_tiled_kernel(monkeypatch):
     for var in (
         "JACCPOT_NEARFIELD_SOURCE_TILE",
         "JACCPOT_NEARFIELD_SOURCE_FLAGS",
-        "JACCPOT_NEARFIELD_TARGET_CLASSES",
     ):
         monkeypatch.delenv(var, raising=False)
     c = _case(7, num_live=9, num_pad=3, W=16, n_dead=2, max_row=6, empty_rows=(2,))

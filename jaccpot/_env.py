@@ -28,6 +28,11 @@ Two rules that matter for correctness, not style:
   ignored, and is emitted at most once per variable per process so a knob read
   inside a hot path cannot spam.
 
+The one reader that raises is :func:`env_reject_removed`, and it raises on purpose:
+a value that selected a kernel or lane the 2026-10 cleanup deleted is not a typo.
+Falling back to the default would run something other than what the caller asked
+for, so it is refused by name.
+
 This module deliberately imports nothing from ``jaccpot`` so that any module,
 at any layer, can use it without an import cycle.
 """
@@ -51,6 +56,7 @@ __all__ = [
     "env_flag_optional",
     "env_float",
     "env_int",
+    "env_reject_removed",
     "env_text",
 ]
 
@@ -291,3 +297,41 @@ def env_text(name: str, default: str = "") -> str:
     """
     raw = os.environ.get(name)
     return default if raw is None else str(raw)
+
+
+def env_reject_removed(
+    name: str, removed: Iterable[str], *, phase: str, default: str
+) -> None:
+    """Raise if a knob holds a value whose kernel or lane the 2026-10 cleanup removed.
+
+    The other readers fall back to the default on a value they do not know. A
+    removed value is not that: it asked for a code path that no longer exists, and
+    running the default instead would silently change what the caller measured.
+
+    Parameters
+    ----------
+    name : str
+        Environment variable name.
+    removed : Iterable[str]
+        The removed values, compared lowercased with surrounding whitespace removed.
+    phase : str
+        The cleanup phase that removed them (``docs/cleanup_2026-10.md``), e.g.
+        ``"X5"``.
+    default : str
+        What runs instead, for the message: the surviving default.
+
+    Raises
+    ------
+    ValueError
+        If the variable is set to one of ``removed``. Unset, or any other value,
+        returns quietly; the caller's own reader decides what else is valid.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return
+    text = str(raw).strip().lower()
+    if text in {str(r).strip().lower() for r in removed}:
+        raise ValueError(
+            f"{name}={raw!r} was removed in the 2026-10 cleanup ({phase}); the "
+            f"default is {default}. Unset the variable."
+        )

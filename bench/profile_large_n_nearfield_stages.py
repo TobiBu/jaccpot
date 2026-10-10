@@ -90,7 +90,8 @@ visible **in the stage**, which matches the code -- the flag lives in
 ``operators/m2l_real_rot_scale`` (the REAL basis) and this lane runs solidfmm. So the
 flag does not reach the production lane, and anyone wanting that 1.64x would have to
 put the lane on the real basis first. Note it is read at module import, so it cannot
-be A/B'd inside one process.
+be A/B'd inside one process. (The flag and the batched rotation it selected were
+removed in the 2026-10 cleanup, X5; setting it now raises.)
 
 A NOTE ON MEASURING ANYTHING ABSOLUTE ON THIS BOX
 -------------------------------------------------

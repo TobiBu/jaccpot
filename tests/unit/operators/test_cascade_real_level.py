@@ -1,4 +1,10 @@
-"""Per-level Pallas M2M / L2L cascades (plan sub-10ms, Phase 3), interpret mode on CPU."""
+"""Pallas M2M / L2L cascades (plan sub-10ms, Phase 3), interpret mode on CPU.
+
+The pair twins of :mod:`jaccpot.pallas.cascade_real_level` (the reverse kernels'
+translate body) against the reference operators, and the cascade forward -- the
+one-node-per-lane kernel since the level forward kernels were removed (cleanup
+2026-10, X5) -- against the pure-JAX level loops.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +18,13 @@ from yggdrax.bounds import infer_bounds
 from yggdrax.tree import Tree
 
 from jaccpot.operators.real_translations import l2l_real, m2m_real
+from jaccpot.pallas.cascade_real_lanes import (
+    l2l_real_levels_lanes_pallas,
+    m2m_real_levels_lanes_pallas,
+)
 from jaccpot.pallas.cascade_real_level import (
     l2l_real_centred_pair_jax,
-    l2l_real_levels_pallas,
     m2m_real_centred_pair_jax,
-    m2m_real_levels_pallas,
 )
 from jaccpot.runtime.kernels._l2l import _propagate_solidfmm_locals_by_level
 from jaccpot.upward.real_tree_expansions import aggregate_m2m_real_by_level
@@ -108,7 +116,7 @@ def test_m2m_levels_interpret_matches_the_level_loop(tree_data, order):
         num_levels=num_levels,
         level_batch_width=width,
     )
-    got = m2m_real_levels_pallas(
+    got = m2m_real_levels_lanes_pallas(
         leaves,
         com,
         topo.left_child,
@@ -153,7 +161,7 @@ def test_l2l_levels_interpret_matches_the_cascade(tree_data, order):
         basis_mode="real",
         num_levels=num_levels - 1,
     )
-    got = l2l_real_levels_pallas(
+    got = l2l_real_levels_lanes_pallas(
         locals0,
         com,
         topo.parent,
@@ -181,7 +189,7 @@ def test_levels_are_jittable(tree_data):
     offs = topo.level_offsets
     width = int(jnp.max(offs[1:] - offs[:-1]))
     f = jax.jit(
-        lambda x, com: m2m_real_levels_pallas(
+        lambda x, com: m2m_real_levels_lanes_pallas(
             x,
             com,
             topo.left_child,
@@ -196,7 +204,7 @@ def test_levels_are_jittable(tree_data):
         )
     )
     g = jax.jit(
-        lambda x, com: l2l_real_levels_pallas(
+        lambda x, com: l2l_real_levels_lanes_pallas(
             x,
             com,
             topo.parent,

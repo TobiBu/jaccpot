@@ -407,16 +407,16 @@ GPU, and falls back to pure JAX wherever the hardware cannot run the kernel:
 | far field | pure JAX | both Pallas M2L shapes measured *slower* (0.84×/0.61×) |
 
 The far-field routing is a measured decision, not an oversight — see
-[Phase 5 outcome](#phase-5-outcome). Both Pallas M2L lanes remain wired,
-differentiable and covered by tests; `JACCPOT_MUTUAL_M2L=fused|zcore|jax` forces
-one on hardware to reproduce the A/B.
+[Phase 5 outcome](#phase-5-outcome). The fused Pallas M2L lane remains wired,
+differentiable and covered by tests; `JACCPOT_MUTUAL_M2L=fused|jax` forces one on
+hardware to reproduce the A/B. (The second shape, the z-core lane
+`JACCPOT_MUTUAL_M2L=zcore`, was removed with its kernel in the 2026-10 cleanup, X5;
+setting it raises.)
 
 Every Pallas lane goes through a `custom_vjp` wrapper, **not** the bare kernel.
 `pallas_call` has no JVP/transpose rule, so a path reaching a bare kernel is
-silently non-differentiable — and jaccpot's own `m2l_core_z_real` helper calls the
-bare kernel, so `use_pallas=True` there cannot be differentiated. On CPU the
-Pallas path is simply unsupported and falls back, which means the defect is
-invisible off-GPU.
+silently non-differentiable. On CPU the Pallas path is simply unsupported and
+falls back, which means the defect is invisible off-GPU.
 
 `pallas_interpret=True` runs the Pallas kernels in interpret mode, which works on
 CPU. That is what makes the Pallas tests non-vacuous without a GPU: they execute
@@ -513,7 +513,8 @@ arithmetic somewhere cheaper. See the replacement below.
 So `_m2l_batch` gained the fused lane exactly as specified — it is wired,
 differentiable through `m2l_real_fused_pallas_cvjp`, and exercised on every CI run
 in interpret mode — but `JACCPOT_MUTUAL_M2L=auto` resolves to pure JAX on
-hardware. Set `fused` or `zcore` to force it.
+hardware. Set `fused` to force it. (`zcore` was removed in the 2026-10 cleanup,
+X5.)
 
 #### 3–4. Mutual P2P kernel and its analytic reverse — landed
 
@@ -742,11 +743,11 @@ Fusions 108 -> 42 at order 4. Parity is exact at every order, both sides, forwar
 launch-bound stage looks like: 23.43 -> 38.37 GFLOP/s, 3.47 -> 5.68 GB/s, both
 still far from any roofline.
 
-**It is off by default** (`JACCPOT_M2L_DEGREE_BATCHED=1`), because the order-6
+**It was off by default** (`JACCPOT_M2L_DEGREE_BATCHED=1`), because the order-6
 falloff suggests order-dependent selection rather than a global flip, and that
-decision was left separate. The flag is read at call time, so it can be set after
-`import jaccpot` — but note it is *not* A/B-able within one process on the lanes
-that read it at import.
+decision was left separate. It never left that state: the batched rotation and its
+flag were removed in the 2026-10 cleanup (X5), and setting the flag now raises.
+The production real-basis lanes had moved to the Pallas CSR M2L by then.
 
 **Two claims this retires, and one it does not reach.**
 

@@ -174,6 +174,38 @@ class TestEnvText:
         assert not caught
 
 
+class TestEnvRejectRemoved:
+    """The one reader that raises: a value whose code path the cleanup deleted."""
+
+    @pytest.mark.parametrize("raw", ["level", " LEVEL ", "Chunked"])
+    def test_a_removed_value_raises_naming_the_phase_and_the_default(
+        self, monkeypatch, raw
+    ):
+        monkeypatch.setenv("JACCPOT_TEST_TEXT", raw)
+        with pytest.raises(ValueError, match=r"removed in the 2026-10 cleanup \(X5\)"):
+            _env.env_reject_removed(
+                "JACCPOT_TEST_TEXT", ("level", "chunked"), phase="X5", default="lanes"
+            )
+        with pytest.raises(ValueError, match="the default is lanes"):
+            _env.env_reject_removed(
+                "JACCPOT_TEST_TEXT", ("level", "chunked"), phase="X5", default="lanes"
+            )
+
+    @pytest.mark.parametrize("raw", [None, "lanes", "anything else"])
+    def test_unset_and_other_values_pass_quietly(self, monkeypatch, raw):
+        """Only the removed values are refused; the caller's reader owns the rest."""
+        if raw is None:
+            monkeypatch.delenv("JACCPOT_TEST_TEXT", raising=False)
+        else:
+            monkeypatch.setenv("JACCPOT_TEST_TEXT", raw)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _env.env_reject_removed(
+                "JACCPOT_TEST_TEXT", ("level",), phase="X5", default="lanes"
+            )
+        assert not caught
+
+
 class TestMalformedWarning:
     """Falling back silently is what lets a typo survive a whole session."""
 

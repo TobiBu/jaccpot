@@ -10,24 +10,20 @@ There is now one definition in ``pallas/_flags``; the test below pins that the
 two names are the *same object*, so they cannot drift again.
 
 **F38** -- ``JACCPOT_M2L_DEGREE_BATCHED`` was read into a module-level constant
-at import:
+at import, which is the defect ``jaccpot._env`` exists to prevent: a knob captured
+at import cannot be changed by anyone who sets the variable after
+``import jaccpot``, so it *silently does nothing*. It was then read at call time
+through the sanctioned reader. The batched rotation it selected was removed in the
+2026-10 cleanup (X5); the switch is still read at call time, and setting it now
+raises, which the class below pins.
 
-    _DEGREE_BATCHED = os.environ.get("JACCPOT_M2L_DEGREE_BATCHED", "0")...
-
-which is the defect ``jaccpot._env`` exists to prevent, and says so in its own
-docstring: a knob captured at import cannot be changed by anyone who sets the
-variable after ``import jaccpot``, so it *silently does nothing* -- worse than
-not having the knob. It is now read at call time through the sanctioned reader.
-
-Both switches keep their defaults. Nothing here changes what the library
+``JACCPOT_FUSED_M2L_VJP`` keeps its default. Nothing here changes what the library
 computes with no environment set.
 """
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 import jaccpot.operators.m2l_real_rot_scale as rot_scale
@@ -75,77 +71,32 @@ class TestTheFusedVjpSwitchHasOneReader:
         assert fused_m2l_vjp_enabled() is True
 
 
-class TestTheDegreeBatchedSwitchIsReadAtCallTime:
-    """F38: the knob has to be reachable after import, or it is not a knob."""
+class TestTheDegreeBatchedSwitchWasRemoved:
+    """F38's switch selected a batched rotation the 2026-10 cleanup (X5) removed."""
 
-    def test_it_is_off_by_default(self, monkeypatch):
-        monkeypatch.delenv("JACCPOT_M2L_DEGREE_BATCHED", raising=False)
-        assert rot_scale._degree_batched() is False
+    def test_setting_it_after_import_raises(self, monkeypatch):
+        """Read at call time, and refused by name rather than ignored.
 
-    def test_setting_it_after_import_is_honoured(self, monkeypatch):
-        """The defect itself.
-
-        Before this change the value was captured into a module-level constant
-        at import, so this assertion failed for every process that did not set
-        the variable *before* ``import jaccpot`` -- and failed silently, by
-        running the unrolled path while the operator believed the knob was on.
+        Ignoring it would run the unrolled rotation under a switch that asked for
+        another one -- the silent no-op F38 was about, in a new form.
         """
+        multipole = jnp.zeros((rot_scale.sh_size(2),), dtype=jnp.float32)
+        delta = jnp.asarray([0.7, -1.3, 2.1], dtype=jnp.float32)
+        monkeypatch.delenv("JACCPOT_M2L_DEGREE_BATCHED", raising=False)
+        rot_scale._rotate_multipole_to_z_single(multipole, delta, order=2)
         monkeypatch.setenv("JACCPOT_M2L_DEGREE_BATCHED", "1")
-        assert rot_scale._degree_batched() is True
+        with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+            rot_scale._rotate_multipole_to_z_single(multipole, delta, order=2)
+        with pytest.raises(ValueError, match="JACCPOT_M2L_DEGREE_BATCHED"):
+            rot_scale._rotate_local_from_z_single(multipole, delta, order=2)
 
     def test_the_module_captures_no_env_value_at_import(self):
-        """No module-level constant may hold this switch again.
-
-        Pinned structurally rather than behaviourally, because the behavioural
-        symptom only shows up in a process that sets the variable late -- which
-        is exactly why it survived unnoticed.
-        """
+        """No module-level constant may hold an env switch again (F38's defect)."""
         import pathlib
 
         source = pathlib.Path(rot_scale.__file__).read_text()
         assert "os.environ" not in source
         assert "_DEGREE_BATCHED =" not in source
-
-
-@pytest.mark.skipif(
-    not jax.config.jax_enable_x64, reason="needs float64 (JAX_ENABLE_X64=1)"
-)
-class TestTheTwoRotationPathsAgree:
-    """What the now-reachable switch actually selects.
-
-    The batched path is a different reduction order, so it is not bit-identical
-    and CLAUDE.md's rule about reduction order is why it stays off by default.
-    Measured here so the size of the difference is on record rather than
-    assumed: it is at the float64 noise floor, which is what makes the knob an
-    A/B choice rather than a numerics change.
-    """
-
-    ORDER = 4
-
-    def _inputs(self):
-        multipole = jax.random.normal(
-            jax.random.PRNGKey(0), (rot_scale.sh_size(self.ORDER),), dtype=jnp.float64
-        )
-        return multipole, jnp.asarray([0.7, -1.3, 2.1], dtype=jnp.float64)
-
-    def test_batched_matches_unrolled_at_the_noise_floor(self, monkeypatch):
-        multipole, delta = self._inputs()
-
-        monkeypatch.delenv("JACCPOT_M2L_DEGREE_BATCHED", raising=False)
-        unrolled = np.asarray(
-            rot_scale._rotate_multipole_to_z_single(multipole, delta, order=self.ORDER)
-        )
-        monkeypatch.setenv("JACCPOT_M2L_DEGREE_BATCHED", "1")
-        batched = np.asarray(
-            rot_scale._rotate_multipole_to_z_single(multipole, delta, order=self.ORDER)
-        )
-
-        assert np.max(np.abs(unrolled - batched)) < 1e-15
-        assert not np.array_equal(unrolled, batched), (
-            "bit-identical would mean the switch selects nothing -- if the two "
-            "paths ever converge exactly, this test has stopped testing the "
-            "switch and should be re-pointed"
-        )
 
 
 class TestRawEnvReadersOutsideRuntimeStayAccountedFor:
