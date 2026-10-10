@@ -22,6 +22,8 @@ S4b    the same through the large-N lane and its grad plan, with Odisseo's
        large-N env overrides, 2e4
 S5     ``BlockStepFMM`` with Odisseo's ``BlockStepOptions`` defaults (jax
        backend, leaf 64, static shapes, device topology), 20 base steps at 2e4
+S6     S1 with ``--clean-env``: no JACCPOT_* / YGGDRAX_* variables at all, so
+       the fused lane runs on the library's own defaults
 M1     two cards: ``distributed/fmm.py`` built as Odisseo's mesh lane builds it
        (``MeshOptions`` defaults: leaf 512, theta 0.7, p6, rcb), one force at
        131,072, in input order
@@ -59,7 +61,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT_DEFAULT = "/export/scratch/tbuck/dce_pins"
-PINS = ("S1", "S2", "S3", "S4", "S4b", "S5")
+PINS = ("S1", "S2", "S3", "S4", "S4b", "S5", "S6")
 PINS_TWO_CARD = ("M1", "M2", "M3")
 
 
@@ -125,6 +127,15 @@ def case_s1(out: Path) -> dict:
 
 def case_s2(out: Path) -> dict:
     return _fused_bench(out, 50_000, ["--use-pallas", "off"])
+
+
+def case_s6(out: Path) -> dict:
+    """S1 with no JACCPOT_* / YGGDRAX_* environment at all: the library defaults.
+
+    Every other fused pin inherits the bench harness's env, which hid the CSR
+    payload bug (#384) behind its RADIX_FAST_PAYLOAD_MAX_MB=0.
+    """
+    return _fused_bench(out, 200_000, ["--clean-env"])
 
 
 def case_s3(out: Path) -> dict:
@@ -460,6 +471,7 @@ CASES = {
     "S4": case_s4,
     "S4b": case_s4b,
     "S5": case_s5,
+    "S6": case_s6,
 }
 
 
