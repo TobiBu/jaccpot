@@ -254,12 +254,6 @@ class DiagnosticsMixin(_EngineBase):
             "static_radix_refresh_hits": int(self._static_radix_refresh_hits),
             "static_radix_refresh_misses": int(self._static_radix_refresh_misses),
             "static_radix_profile_overflows": int(self._static_radix_profile_overflows),
-            "static_radix_compact_pair_reuse_hits": int(
-                self._static_radix_compact_pair_reuse_hits
-            ),
-            "static_radix_compact_pair_reuse_misses": int(
-                self._static_radix_compact_pair_reuse_misses
-            ),
             "large_n_overflow_profile_cap": int(self._large_n_overflow_profile_cap),
             "large_n_neighbor_edges_profile_cap": int(
                 self._large_n_neighbor_edges_profile_cap
@@ -356,12 +350,6 @@ class DiagnosticsMixin(_EngineBase):
             ),
             "static_radix_far_pair_count": int(
                 getattr(self, "_static_radix_far_pair_count", 0)
-            ),
-            "static_radix_compact_pair_reuse_hits": int(
-                getattr(self, "_static_radix_compact_pair_reuse_hits", 0)
-            ),
-            "static_radix_compact_pair_reuse_misses": int(
-                getattr(self, "_static_radix_compact_pair_reuse_misses", 0)
             ),
             "static_radix_m2l_chunk_count": int(
                 getattr(self, "_static_radix_m2l_chunk_count", 0)

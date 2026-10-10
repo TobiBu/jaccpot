@@ -1850,32 +1850,8 @@ class PrepareMixin(_EngineBase):
                 (tree_artifacts.positions_sorted, tree_artifacts.masses_sorted)
             )
         )
-        strict_fused_node_interactions_safe_path = (
-            bool(strict_fused_device_only_hot_path)
-            and str(
-                os.environ.get(
-                    "JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH",
-                    "0",
-                )
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-            and not (
-                str(
-                    os.environ.get(
-                        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
-                        "0",
-                    )
-                )
-                .strip()
-                .lower()
-                in {"1", "true", "yes", "on"}
-            )
-        )
         use_compact_streamed_pairs = (
             (bool(self.streamed_far_pairs) or bool(strict_fused_device_only_hot_path))
-            and not bool(strict_fused_node_interactions_safe_path)
             and not adaptive_order_active
             and not mixed_order_farfield_active
             and not retain_interactions_active

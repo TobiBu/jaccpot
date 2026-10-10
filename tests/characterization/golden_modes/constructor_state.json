@@ -122,8 +122,6 @@
   "_refresh_timing_upward_mass_moments_seconds": "0.0",
   "_refresh_timing_upward_p2m_seconds": "0.0",
   "_refresh_timing_upward_source_motion_seconds": "0.0",
-  "_static_radix_compact_pair_reuse_hits": "0",
-  "_static_radix_compact_pair_reuse_misses": "0",
   "_static_radix_far_pair_count": "0",
   "_static_radix_l2l_edge_count": "0",
   "_static_radix_m2l_chunk_count": "0",

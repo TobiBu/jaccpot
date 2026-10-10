@@ -27,15 +27,12 @@ from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import (
     TreeBuilderConfig,
-    _PrepareStateDualDownwardArtifacts,
     _PrepareStateTreeUpwardArtifacts,
     _RuntimeExecutionOverrides,
     _TopologyReuseEntry,
     _velocity_verlet_kick_drifted,
     _velocity_verlet_state_update,
 )
-from .kernels._downward_prep import _far_pair_coo_from
-from .kernels.core import _empty_interaction_storage_for_tree
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
@@ -88,29 +85,46 @@ def _walk_caps_key(validated: Optional[dict]) -> tuple:
     )
 
 
+_FALSE_VALUES = ("0", "false", "no", "off")
+
+
 def _fresh_compact_pair_rebuild_enabled() -> bool:
     """Whether the fused refresh rebuilds its far-pair list fresh on every step.
 
-    ``JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD`` (default on) and not the
-    legacy ``JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE``. Then the
-    far list a state carries into the refresh is never read: the refresh builds its
-    own, uses it in the same step and returns the input's as a shape placeholder.
+    It always does. The far list a state carries into the refresh is never read:
+    the refresh builds its own, uses it in the same step and returns the input's
+    as a shape placeholder. The two ways out were removed in the 2026-10 cleanup
+    (X6), and naming either raises:
+
+    * ``JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE=1`` re-used
+      the carried list after the drift: stale M2L pairs, wrong endpoint forces.
+    * ``JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD=0`` returned the
+      freshly built list in the state instead of the placeholder, so it rode in
+      the scan's carry. No caller set it; only a test of the reuse path did.
+
+    ``JACCPOT_STATIC_STRICT_FUSED_REUSE_COMPACT_PAIRS``, which only armed the first
+    together with it, is ignored.
 
     Returns
     -------
     bool
-        The flag pair's verdict (the caller adds the lane conditions).
+        ``True``; :func:`jaccpot._env.env_reject_removed` raises ``ValueError``
+        on a removed value instead.
     """
-    fresh = os.environ.get(
-        "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD", "1"
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    unsafe = os.environ.get(
-        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE", "0"
-    ).strip().lower() in {"1", "true", "yes", "on"}
-    return fresh and not unsafe
+    env_reject_removed(
+        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
+        ("1", "true", "yes", "on"),
+        phase="X6",
+        default="0, a fresh far-pair list every step",
+    )
+    env_reject_removed(
+        "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD",
+        _FALSE_VALUES,
+        phase="X6",
+        default="1, the fresh far-pair rebuild with the carried list a placeholder",
+    )
+    return True
 
-
-_FALSE_VALUES = ("0", "false", "no", "off")
 
 #: Values of the strict lane's switches whose path the 2026-10 cleanup (X6) removed:
 #: ``(variable, removed values, what runs instead)``. Any other value is accepted
@@ -120,6 +134,11 @@ _REMOVED_STRICT_LANE_VALUES = (
         "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
         _FALSE_VALUES,
         "1, the device-only streamed fast path (the host-routed refresh is gone)",
+    ),
+    (
+        "JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH",
+        ("1", "true", "yes", "on"),
+        "0, the compact streamed far pairs (1 only made the fused refresh raise)",
     ),
 )
 
@@ -141,6 +160,7 @@ def _reject_removed_strict_lane_env() -> None:
     """
     for name, removed, default in _REMOVED_STRICT_LANE_VALUES:
         env_reject_removed(name, removed, phase="X6", default=default)
+    _fresh_compact_pair_rebuild_enabled()
 
 
 def _unaliased(tree: Any) -> Any:
@@ -178,12 +198,13 @@ class StrictRunMixin(_EngineBase):
     def _strict_far_pairs_ride_outside_the_scan(self, prepared: Any) -> bool:
         """Whether ``strict_run_v2`` may keep the state's far list out of the scan.
 
-        On the static-radix fused lane with the fresh far-pair rebuild (the
-        default) the carried far list is a placeholder: every refresh builds its
-        own and returns the input's unchanged, so it is dead inside the scan, yet
-        it was an argument AND an output of the compiled runner (3 x P int32 each,
-        1.1 GB at 2.5e7 on the disc+bulge IC). It is detached before the scan and
-        re-attached to the returned state, which the gradient path reads.
+        On the static-radix fused lane the fresh far-pair rebuild (its only mode
+        since the 2026-10 cleanup, X6) makes the carried far list a placeholder:
+        every refresh builds its own and returns the input's unchanged, so it is
+        dead inside the scan, yet it was an argument AND an output of the
+        compiled runner (3 x P int32 each, 1.1 GB at 2.5e7 on the disc+bulge IC).
+        It is detached before the scan and re-attached to the returned state,
+        which the gradient path reads.
 
         Parameters
         ----------
@@ -1824,9 +1845,10 @@ class StrictRunMixin(_EngineBase):
         def _template_of(prepared: Any) -> Any:
             if not self._strict_far_pairs_ride_outside_the_scan(prepared):
                 raise ValueError(
-                    "carry='particles' needs the fresh far-pair rebuild inside the "
-                    "scan (JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD): "
-                    "otherwise a step reads the carried far list"
+                    "carry='particles' needs the fused static-radix lane's fresh "
+                    "far-pair rebuild inside the scan (a LargeNPreparedState with "
+                    "a far list on a static_radix tree): otherwise a step reads "
+                    "the carried far list"
                 )
             return shape_template(replace(prepared, compact_far_pairs=None))
 
@@ -2404,12 +2426,10 @@ class StrictRunMixin(_EngineBase):
         -------
         Optional[LargeNPreparedState]
             The refreshed state, or ``None`` when the fast path declined -- see
-            above.
-
-        Raises
-        ------
-        RuntimeError
-            Only for genuine inconsistencies, not for a declined reuse.
+            above. What it calls raises only for genuine inconsistencies, never
+            for a declined reuse; a fused-device refresh first refuses a
+            strict-lane switch set to a value the 2026-10 cleanup (X6) removed
+            (``ValueError``).
         """
         # Side channels for the traced capacity guard and the segment retry; see
         # the end of this method and `capacity_guard.last_refresh_walk_needs`.
@@ -2660,73 +2680,30 @@ class StrictRunMixin(_EngineBase):
             if self.interaction_retry_logger is not None:
                 self.interaction_retry_logger(event)
 
-        dual_t0 = time.perf_counter() if refresh_timing_active else 0.0
         strict_fused_traced_hot_path = bool(fused_device_mode) and bool(
             getattr(self, "_strict_fused_mode_active", False)
         )
-        cached_compact_far_pairs = getattr(prepared_state, "compact_far_pairs", None)
-        compact_far_pairs_carry_placeholder = cached_compact_far_pairs
-        reuse_static_compact_pairs_enabled = str(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_FUSED_REUSE_COMPACT_PAIRS",
-                "1",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        allow_unsafe_compact_pair_reuse = str(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
-                "0",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        # The fused refresh builds its far-pair list fresh every step and returns
+        # the input's as a shape placeholder (`_fresh_compact_pair_rebuild_enabled`).
+        compact_far_pairs_carry_placeholder = getattr(
+            prepared_state, "compact_far_pairs", None
+        )
         safe_fresh_compact_pair_rebuild = (
             bool(strict_fused_traced_hot_path)
             and str(tree_config.mode).strip().lower() == "static_radix"
             and _fresh_compact_pair_rebuild_enabled()
         )
-        reuse_static_compact_pairs = (
-            bool(strict_fused_traced_hot_path)
-            and bool(cached_compact_far_pairs is not None)
-            and str(tree_config.mode).strip().lower() == "static_radix"
-            and bool(reuse_static_compact_pairs_enabled)
-            and bool(allow_unsafe_compact_pair_reuse)
-        )
-        if (
-            bool(strict_fused_traced_hot_path)
-            and bool(cached_compact_far_pairs is not None)
-            and str(tree_config.mode).strip().lower() == "static_radix"
-            and bool(reuse_static_compact_pairs_enabled)
-            and not bool(allow_unsafe_compact_pair_reuse)
-            and not bool(safe_fresh_compact_pair_rebuild)
-        ):
-            raise RuntimeError(
-                "strict fused compact far-pair reuse is unsafe for moved "
-                "static-radix positions: cached M2L pairs can change after "
-                "the drift and corrupt endpoint forces. A production fix needs "
-                "fresh fixed-cap compact pairs with an active mask/count, or a "
-                "proven far-pair validity key. Set "
-                "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE=1 "
-                "only for legacy performance experiments."
-            )
-        if bool(safe_fresh_compact_pair_rebuild):
-            cached_compact_far_pairs = None
-        if bool(strict_fused_traced_hot_path) and (
-            str(tree_config.mode).strip().lower() == "static_radix"
-        ):
-            if reuse_static_compact_pairs:
-                self._static_radix_compact_pair_reuse_hits += 1
-            else:
-                self._static_radix_compact_pair_reuse_misses += 1
         # The one point where a cross-domain exchange belongs: the multipoles exist
-        # here and the downward sweep -- either branch below -- has not consumed them.
+        # here and the downward sweep below has not consumed them.
         # It goes in the REFRESH because that is what a per-step force runs; the
         # prepare path builds the state once, and `LargeNPreparedState.upward` is None
         # (measured), so no caller holding a state can reach the multipoles at all.
         # Doing the cross field afterwards instead would need a SECOND L2L cascade,
         # and Phase 3.4 measured the far half as the bigger one.
         #
-        # ABOVE the branch, not inside one: the compact-pair reuse path and the
-        # general path both build a downward sweep, and a hook in only one of them
-        # silently never fires on the other -- which is exactly what happened first.
+        # ABOVE the dual/downward build, not inside it: there used to be a second
+        # route (the unsafe compact-pair reuse, removed in the 2026-10 cleanup,
+        # X6), and a hook in only one of them silently never fired on the other.
         #
         # Phase C1: called, result discarded, force bit-identical either way.
         cross_far = None
@@ -2744,75 +2721,36 @@ class StrictRunMixin(_EngineBase):
                     walk_geometry=self._strict_walk_geometry(tree_artifacts)
                 )
             cross_far = cross_hook(tree_artifacts)
-        if reuse_static_compact_pairs:
-            from jaccpot.runtime.fmm_prepare import _gear_pairs_for_autotune
+        force_scale_nodes_now = prepared_state.force_scale_nodes
+        if force_scale_particles is not None:
+            from jaccpot.runtime._force_scale_levels import node_force_scale_min
 
-            src_far = jnp.asarray(cached_compact_far_pairs.sources, dtype=INDEX_DTYPE)
-            tgt_far = jnp.asarray(cached_compact_far_pairs.targets, dtype=INDEX_DTYPE)
-            far_pairs_by_gear = _gear_pairs_for_autotune(
-                cached_compact_far_pairs, src_far, tgt_far
-            )
-            downward = self._prepare_downward_with_artifacts(
-                cross_far=cross_far,
+            levels_fb = self._resolve_upward_num_levels(tree_artifacts.tree)
+            if levels_fb is None:
+                levels_fb = int(get_level_offsets(tree_artifacts.tree).shape[0] - 1)
+            force_scale_nodes_now = node_force_scale_min(
                 tree=tree_artifacts.tree,
-                upward=tree_artifacts.upward,
-                theta_val=theta_val,
-                locals_template=tree_artifacts.locals_template,
-                interactions=None,
-                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                runtime_traversal_config=runtime_traversal_config,
-                record_retry=record_retry,
-                dense_buffers=None,
-                far_pairs_coo=_far_pair_coo_from(
-                    cached_compact_far_pairs, src_far, tgt_far
-                ),
-                far_pairs_by_gear=far_pairs_by_gear,
-                adaptive_order=True,
-                p_gears=(int(tree_artifacts.upward.multipoles.order),),
+                force_scale_particles=force_scale_particles,
+                num_levels=int(levels_fb),
             )
-            downward = downward._replace(
-                interactions=_empty_interaction_storage_for_tree(tree_artifacts.tree)
-            )
-            dual_downward_artifacts = _PrepareStateDualDownwardArtifacts(
-                interactions=None,
-                neighbor_list=prepared_state.neighbor_list,
-                traversal_result=None,
-                compact_far_pairs=cached_compact_far_pairs,
-                downward=downward,
-                cache_entry=None,
-            )
-        else:
-            force_scale_nodes_now = prepared_state.force_scale_nodes
-            if force_scale_particles is not None:
-                from jaccpot.runtime._force_scale_levels import node_force_scale_min
-
-                levels_fb = self._resolve_upward_num_levels(tree_artifacts.tree)
-                if levels_fb is None:
-                    levels_fb = int(get_level_offsets(tree_artifacts.tree).shape[0] - 1)
-                force_scale_nodes_now = node_force_scale_min(
-                    tree=tree_artifacts.tree,
-                    force_scale_particles=force_scale_particles,
-                    num_levels=int(levels_fb),
-                )
-            dual_downward_artifacts = self._prepare_state_dual_and_downward(
-                cross_far=cross_far,
-                tree_artifacts=tree_artifacts,
-                force_scale_nodes=force_scale_nodes_now,
-                upward_center_mode=upward_center_mode,
-                theta_val=theta_val,
-                mac_type_val=mac_type_val,
-                dehnen_radius_scale=self.dehnen_radius_scale,
-                runtime_traversal_config=runtime_traversal_config,
-                runtime_m2l_chunk_size=runtime_m2l_chunk_size,
-                runtime_l2l_chunk_size=runtime_l2l_chunk_size,
-                record_retry=record_retry,
-                refine_local_val=refine_local_val,
-                max_refine_levels_val=max_refine_levels_val,
-                aspect_threshold_val=aspect_threshold_val,
-                allow_stateful_cache=True,
-                suppress_host_side_effects=strict_fused_traced_hot_path,
-            )
+        dual_downward_artifacts = self._prepare_state_dual_and_downward(
+            cross_far=cross_far,
+            tree_artifacts=tree_artifacts,
+            force_scale_nodes=force_scale_nodes_now,
+            upward_center_mode=upward_center_mode,
+            theta_val=theta_val,
+            mac_type_val=mac_type_val,
+            dehnen_radius_scale=self.dehnen_radius_scale,
+            runtime_traversal_config=runtime_traversal_config,
+            runtime_m2l_chunk_size=runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_l2l_chunk_size,
+            record_retry=record_retry,
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=max_refine_levels_val,
+            aspect_threshold_val=aspect_threshold_val,
+            allow_stateful_cache=True,
+            suppress_host_side_effects=strict_fused_traced_hot_path,
+        )
         if str(tree_config.mode).strip().lower() == "static_radix":
             tree_now = build_artifacts.tree
             leaf_codes = getattr(tree_now, "leaf_codes", None)
@@ -2853,20 +2791,6 @@ class StrictRunMixin(_EngineBase):
                 if left_child is not None
                 else 0
             )
-
-        if refresh_timing_active:
-            elapsed = time.perf_counter() - dual_t0
-            if reuse_static_compact_pairs:
-                # The compact-far-pair reuse branch above does NOT go through
-                # _prepare_state_dual_and_downward, so nothing else records this
-                # stage -- and this is the steady-state route once topology is
-                # frozen, which is precisely when a per-step breakdown is being
-                # read. Leaving it unrecorded made the entire downward pass
-                # (~30% of per-step time at N=65536) land in "unattributed", and
-                # made every dual_* counter read as a hard zero.
-                self._refresh_timing_dual_downward_seconds += elapsed
-            # Otherwise _prepare_state_dual_and_downward has already recorded
-            # this stage and its children; adding elapsed here would double-count.
 
         if (
             tree_config.mode != "static_radix"

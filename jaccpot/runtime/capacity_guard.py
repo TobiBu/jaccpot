@@ -105,7 +105,7 @@ def last_refresh_capacity_ok(engine: Any) -> Array:
     """The capacity verdict of the lists the engine's most recent refresh BUILT.
 
     ``_refresh_large_n_same_topology`` swaps its freshly built far-pair list for the
-    cached placeholder in the fresh-rebuild mode (the default), so the saturated count
+    cached placeholder (the fused lane's only mode since X6), so the saturated count
     that signals an overflow never reaches the returned state. The refresh leaves the
     verdict on the engine instead; read it inside the SAME trace, right after the
     refresh -- it holds a tracer and is reset at the start of every refresh.

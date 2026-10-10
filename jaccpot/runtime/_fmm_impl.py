@@ -1436,8 +1436,6 @@ class FMMEngine(
         self._static_radix_refresh_hits: int = 0
         self._static_radix_refresh_misses: int = 0
         self._static_radix_profile_overflows: int = 0
-        self._static_radix_compact_pair_reuse_hits: int = 0
-        self._static_radix_compact_pair_reuse_misses: int = 0
         self._large_n_overflow_profile_cap: int = 0
         self._large_n_neighbor_edges_profile_cap: int = 0
         self._large_n_neighbor_edges_profile_reprofiles: int = 0
@@ -1953,8 +1951,6 @@ class FMMEngine(
         self._static_radix_refresh_hits = 0
         self._static_radix_refresh_misses = 0
         self._static_radix_profile_overflows = 0
-        self._static_radix_compact_pair_reuse_hits = 0
-        self._static_radix_compact_pair_reuse_misses = 0
         self._large_n_overflow_profile_cap = 0
         self._large_n_neighbor_edges_profile_cap = 0
         self._large_n_neighbor_edges_profile_reprofiles = 0
