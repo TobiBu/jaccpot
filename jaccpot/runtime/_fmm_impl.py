@@ -1529,32 +1529,9 @@ class FMMEngine(
         self._strict_v2_profile_key_misses: int = 0
         self._strict_v2_fail_fast_reject_count: int = 0
         self._strict_v2_seen_profile_keys: set[str] = set()
-        # The fused strict lane is the default (2026-10, cleanup D2): strict_run_v2
-        # runs as one compiled scan, and the multi-GPU lane's fused eval fn works
-        # without an env var. "off" restores the host-driven strict loop.
-        self._strict_fused_mode_raw: str = (
-            str(os.environ.get("JACCPOT_STATIC_STRICT_FUSED_MODE", "on"))
-            .strip()
-            .lower()
-        )
-        self._strict_fused_mode_enabled: bool = self._strict_fused_mode_raw in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
         self._strict_fused_profile_set_raw: str = str(
             os.environ.get("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", "")
         ).strip()
-        self._strict_fused_disable_hot_timing: bool = str(
-            os.environ.get("JACCPOT_STATIC_STRICT_FUSED_DISABLE_HOT_TIMING", "1")
-        ).strip().lower() in {"1", "true", "yes", "on"}
-        self._strict_fused_disallow_host_segment_fallback: bool = str(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK",
-                "0",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
 
     def _resolve_large_n_diag_modes(self) -> None:
         """Resolve the large-N fused defaults and every diagnostic-mode env switch.

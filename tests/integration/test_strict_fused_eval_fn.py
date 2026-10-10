@@ -8,7 +8,9 @@ static-radix lane can be compared like-for-like against functional FMM eval APIs
 A benchmarking entry point is exactly the kind of code that rots unnoticed --
 nothing in the suite calls it, and a benchmark that fails to build simply looks
 like a slow day. Its two guards are tested because they are the difference
-between "this configuration cannot be measured" and a misleading number.
+between "this configuration cannot be measured" and a misleading number. (The
+multi-GPU fused lane builds its shard plans through it too, via
+``capacity_plan.measure_shard_plan``.)
 """
 
 from __future__ import annotations
@@ -73,20 +75,32 @@ def test_requires_the_large_n_production_profile():
 
 
 @pytest.mark.slow
-def test_requires_fused_mode_to_be_active(strict_env, monkeypatch):
-    """The second guard: right profile, fused mode off.
+def test_requires_the_particle_count_in_the_profile_set(strict_env, monkeypatch):
+    """The second guard: right profile, a particle count the profile set excludes.
 
-    It names both switches in its message rather than failing obscurely later,
-    which is the behaviour worth pinning -- a benchmark that cannot run should
-    say which flag would let it. Fused mode is the default since the 2026-10
-    cleanup, so this switches it off explicitly.
+    It names the variable and both remedies in its message rather than failing
+    obscurely later, which is the behaviour worth pinning -- a benchmark that
+    cannot run should say which setting would let it. The fused-mode switch this
+    guard also named is gone: ``JACCPOT_STATIC_STRICT_FUSED_MODE=off`` raises
+    before it (2026-10 cleanup, X6), checked last here.
     """
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "off")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", "999999")
     fmm = _engine()
-    assert not fmm._strict_fused_mode_enabled
     positions, masses = _particles()
-    with pytest.raises(RuntimeError, match="JACCPOT_STATIC_STRICT_FUSED_MODE"):
+    with pytest.raises(RuntimeError) as excinfo:
         fmm.strict_fused_prepared_eval_fn(
+            positions=positions, masses=masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+        )
+    message = str(excinfo.value)
+    assert "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET" in message
+    assert f"N={N_PARTICLES}" in message
+    assert "leave it empty to allow all N" in message
+    assert not fmm._strict_fused_mode_active
+
+    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "off")
+    with pytest.raises(ValueError, match=r"JACCPOT_STATIC_STRICT_FUSED_MODE=.*X6"):
+        _engine().strict_fused_prepared_eval_fn(
             positions=positions, masses=masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
         )
 
@@ -100,9 +114,8 @@ def test_returns_a_prepared_state_and_an_eval_closure(strict_env, monkeypatch):
     same state, which is what a benchmark comparing it to another library would
     implicitly be claiming.
     """
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")  # accepted, inert
     fmm = _engine()
-    assert fmm._strict_fused_mode_enabled
     positions, masses = _particles()
 
     prepared, eval_fn = fmm.strict_fused_prepared_eval_fn(
