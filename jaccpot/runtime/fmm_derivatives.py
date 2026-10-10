@@ -169,8 +169,10 @@ class DerivativesMixin(_EngineBase):
             :meth:`evaluate_prepared_state_with_jerk`, which is where the two
             differ and where an invalid value is rejected.
         jerk_fd_dt : float
-            Finite-difference step used by the ``"accurate"`` mode on a
-            non-solidfmm basis. Ignored otherwise.
+            Accepted and unused. It was the step of the ``"accurate"`` mode's
+            finite-difference fallback for the Cartesian basis, removed in the
+            2026-10 cleanup (K); kept because callers pass it on every call
+            (nornax's jaccpot adapter, ``bench/ci_benchmark_guard.py``).
 
         Returns
         -------
@@ -400,11 +402,10 @@ class DerivativesMixin(_EngineBase):
           convective term ``(v . grad) a``. It omits the source-motion far-field
           contribution ``d_t L``, so it is an approximation whose error grows with
           how much the far field is itself moving.
-        * ``"accurate"`` -- adds that term. On ``expansion_basis="solidfmm"`` it
-          comes from the analytic ``dM -> dL`` contraction; on any other basis
-          there is no analytic path, so it falls back to a central finite
-          difference of the accelerations along ``dt * v`` with step
-          ``jerk_fd_dt``.
+        * ``"accurate"`` -- adds that term, from the analytic ``dM -> dL``
+          contraction. (The Cartesian basis had no analytic path and fell back to
+          a central finite difference with step ``jerk_fd_dt``; it was removed in
+          the 2026-10 cleanup, K.)
 
         Parameters
         ----------
@@ -422,8 +423,8 @@ class DerivativesMixin(_EngineBase):
         jerk_mode : str
             ``"fast_approx"`` or ``"accurate"``; see above.
         jerk_fd_dt : float
-            Finite-difference step for the ``"accurate"`` non-solidfmm fallback.
-            Must be positive. Unused on the analytic paths.
+            Accepted and unused, with no check on its value: the finite-difference
+            fallback it stepped went with the Cartesian basis (2026-10 cleanup, K).
 
         Returns
         -------
@@ -434,9 +435,8 @@ class DerivativesMixin(_EngineBase):
         Raises
         ------
         ValueError
-            If ``velocities`` does not match the state's position shape, if
-            ``jerk_mode`` is neither ``"fast_approx"`` nor ``"accurate"``, or if
-            the finite-difference fallback is selected with ``jerk_fd_dt <= 0``.
+            If ``velocities`` does not match the state's position shape, or if
+            ``jerk_mode`` is neither ``"fast_approx"`` nor ``"accurate"``.
         """
         vel_arr = jnp.asarray(velocities, dtype=state.working_dtype)
         if vel_arr.shape != state.positions_sorted.shape:
@@ -454,48 +454,6 @@ class DerivativesMixin(_EngineBase):
             raise ValueError("jerk_mode must be 'fast_approx' or 'accurate'")
 
         if mode == "accurate":
-            if state.expansion_basis != "solidfmm":
-                dt = float(jerk_fd_dt)
-                if dt <= 0.0:
-                    raise ValueError("jerk_fd_dt must be positive")
-
-                accelerations = self.evaluate_prepared_state(
-                    state,
-                    target_indices=resolved_target_indices,
-                    return_potential=False,
-                    jit_traversal=jit_traversal,
-                    max_acc_derivative_order=0,
-                )
-                particle_indices = jnp.asarray(
-                    state.tree.particle_indices, dtype=INDEX_DTYPE
-                )
-                vel_sorted = vel_arr[particle_indices]
-                positions_plus_sorted = (
-                    jnp.asarray(state.positions_sorted) + dt * vel_sorted
-                )
-                positions_minus_sorted = (
-                    jnp.asarray(state.positions_sorted) - dt * vel_sorted
-                )
-
-                acc_plus = self._evaluate_prepared_state_at_positions_sorted(
-                    state=state,
-                    positions_sorted=positions_plus_sorted,
-                    target_indices=resolved_target_indices,
-                    jit_traversal=jit_traversal,
-                )
-                acc_minus = self._evaluate_prepared_state_at_positions_sorted(
-                    state=state,
-                    positions_sorted=positions_minus_sorted,
-                    target_indices=resolved_target_indices,
-                    jit_traversal=jit_traversal,
-                )
-                jerk = (acc_plus - acc_minus) / (2.0 * dt)
-                if jnp.issubdtype(state.input_dtype, jnp.floating):
-                    output_dtype = state.input_dtype
-                else:
-                    output_dtype = state.working_dtype
-                return accelerations.astype(output_dtype), jerk.astype(output_dtype)
-
             acc_eval = self.evaluate_prepared_state(
                 state,
                 target_indices=resolved_target_indices,
@@ -924,7 +882,7 @@ class DerivativesMixin(_EngineBase):
         source_motion_multipoles = NodeMultipoleData(
             order=int(state.downward.locals.order),
             centers=centers,
-            moments=None,  # type: ignore[arg-type]
+            moments=None,
             packed=jnp.asarray(source_motion_packed),
             component_matrix=None,
             source_motion_packed=None,
@@ -1159,7 +1117,7 @@ class DerivativesMixin(_EngineBase):
                 multipoles=NodeMultipoleData(
                     order=int(state.downward.locals.order),
                     centers=centers,
-                    moments=None,  # type: ignore[arg-type]
+                    moments=None,
                     packed=jnp.asarray(source_motion_packed),
                     component_matrix=jnp.asarray(source_motion_packed),
                     source_motion_packed=None,

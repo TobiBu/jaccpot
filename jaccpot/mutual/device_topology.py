@@ -98,7 +98,7 @@ def node_centers_and_radii(
     **Gradients.** Centres are differentiable in ``positions``/``masses`` and
     *must stay so*: the mutual far field re-derives its expansion centres from
     the live positions on every call, and freezing them drops a real gradient
-    term (see ``jaccpot/upward/tree_expansions.py``). The radii, by contrast,
+    term (see ``jaccpot/upward/real_tree_expansions.py``). The radii, by contrast,
     feed only the MAC -- a discrete accept/reject decision -- so a caller
     building a topology inside a differentiated window should
     ``stop_gradient`` the copy of ``positions`` it passes *here* while leaving

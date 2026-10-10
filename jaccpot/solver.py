@@ -21,9 +21,9 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, DTypeLike, Float, Int
 
-from ._env import env_flag
 from .basis import BasisInterface, ComplexSHBasis, RealSHBasis
 from .config import (
+    _CARTESIAN_BASIS_REMOVED,
     Basis,
     FarFieldConfig,
     FMMAdvancedConfig,
@@ -163,42 +163,13 @@ class _BasisResolution(NamedTuple):
         What the engine is constructed with. This is the name that selects the
         expansion algebra.
     basis_impl : Optional[BasisInterface]
-        The basis object, when one exists. ``None`` for bases the runtime
-        implements internally rather than through the interface.
+        The basis object. Every basis left has one; it was ``None`` only for the
+        Cartesian basis, removed in the 2026-10 cleanup (K).
     """
 
     public_name: str
     runtime_basis: Basis
     basis_impl: Optional[BasisInterface]
-
-
-def _warn_cartesian_basis_is_experimental() -> None:
-    """Say that ``basis="cartesian"`` is not fit for quantitative work.
-
-    Its relative L2 force error is ~1.8e-1 *independent of expansion order*,
-    which is a divergent-series signature rather than truncation: raising the
-    order does not improve it. solidfmm is 8.1e-5 on the same configuration,
-    ~2000x better, and the characterization anchor carries a 0.35 tolerance for
-    cartesian alone to accommodate this.
-
-    Warned rather than removed: it is the only Cartesian-multipole implementation
-    here and is useful for cross-checking the harmonic paths' *structure*. But an
-    error that does not fall with order is not something anyone should select by
-    accident, and until this tranche nothing said so at the call site.
-    """
-
-    if env_flag("JACCPOT_ALLOW_CARTESIAN_BASIS", False):
-        return
-    warnings.warn(
-        "basis='cartesian' is EXPERIMENTAL and unsuitable for quantitative work: "
-        "its relative L2 force error is ~1.8e-1 independent of expansion order "
-        "(a divergent-series signature, not truncation), against 8.1e-5 for "
-        "basis='solidfmm' on the same configuration. Raising max_order will not "
-        "improve it. Use basis='real' (default) or 'solidfmm'. Set "
-        "JACCPOT_ALLOW_CARTESIAN_BASIS=1 to silence this.",
-        UserWarning,
-        stacklevel=4,
-    )
 
 
 def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisResolution:
@@ -237,7 +208,9 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     Raises
     ------
     ValueError
-        If ``basis`` is a string that names no known basis.
+        If ``basis`` is a string that names no known basis, or names the
+        Cartesian basis (removed in the 2026-10 cleanup, K), either as a string
+        or as a basis object's ``runtime_expansion_basis``.
     TypeError
         If ``basis`` is neither a string nor a :class:`BasisInterface`.
     """
@@ -257,25 +230,20 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
                 basis_impl=RealSHBasis(),
             )
         if basis_norm == "cartesian":
-            _warn_cartesian_basis_is_experimental()
-            return _BasisResolution(
-                public_name="cartesian",
-                runtime_basis="cartesian",
-                basis_impl=None,
-            )
+            raise ValueError(_CARTESIAN_BASIS_REMOVED)
         raise ValueError(
-            "basis must be one of 'cartesian', 'solidfmm', 'complex', or 'real', "
-            f"got '{basis}'"
+            f"basis must be one of 'solidfmm', 'complex', or 'real', got '{basis}'"
         )
 
     if isinstance(basis, BasisInterface):
         runtime_basis = str(basis.runtime_expansion_basis).strip().lower()
         if runtime_basis == "complex":
             runtime_basis = "solidfmm"
-        if runtime_basis not in ("cartesian", "solidfmm"):
+        if runtime_basis == "cartesian":
+            raise ValueError(_CARTESIAN_BASIS_REMOVED)
+        if runtime_basis != "solidfmm":
             raise ValueError(
-                "basis.runtime_expansion_basis must be 'cartesian', "
-                "'solidfmm', or 'complex'"
+                "basis.runtime_expansion_basis must be 'solidfmm' or 'complex'"
             )
         return _BasisResolution(
             public_name=str(basis.name),
@@ -578,9 +546,9 @@ class FastMultipoleMethod:
     * ``basis`` defaults to ``"real"`` (Dehnen real harmonics), which is what the
       production radix large-N fast lane runs end to end with no complex<->real
       conversion. ``"solidfmm"``/``"complex"`` are the same basis under two names
-      and stay selectable for cross-checking; ``"cartesian"`` is **experimental**
-      and warns -- its relative L2 force error is ~1.8e-1 *independent of expansion
-      order*, a divergent-series signature rather than truncation.
+      and stay selectable for cross-checking. ``"cartesian"`` raises: it was
+      removed in the 2026-10 cleanup (K), having had a relative L2 force error of
+      ~1.8e-1 *independent of expansion order*.
     * ``use_pallas=None`` resolves at construction: Pallas near field on where it
       can run (Ampere sm_80+), pure-JAX on sm_75 and CPU. An explicit ``True`` or
       ``False`` wins.
@@ -596,9 +564,9 @@ class FastMultipoleMethod:
         config, and for ``"large_n_gpu"`` also forces fp32 when no dtype was
         requested, because that lane's kernels are fp32-only.
     basis : Union[Basis, BasisInterface, str]
-        ``"real"`` (default), ``"solidfmm"``/``"complex"``, or the experimental
-        ``"cartesian"``, as above. May also be a constructed
-        :class:`~jaccpot.BasisInterface`.
+        ``"real"`` (default) or ``"solidfmm"``/``"complex"``, as above.
+        ``"cartesian"`` raises a ``ValueError`` (removed in the 2026-10 cleanup,
+        K). May also be a constructed :class:`~jaccpot.BasisInterface`.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide",
         which selects ``"rot_scale"`` for the real basis.
@@ -1226,8 +1194,10 @@ class FastMultipoleMethod:
             ``"accurate"`` uses an analytic far-field source-motion term
             (`dM -> dL`) plus the convective and exact near-field terms.
         jerk_fd_dt : float
-            Finite-difference step used only for non-``solidfmm`` fallback
-            in ``jerk_mode="accurate"``.
+            Accepted and unused, with no check on its value. It was the step of
+            the ``"accurate"`` mode's finite-difference fallback for the
+            Cartesian basis, removed in the 2026-10 cleanup (K); kept because
+            callers pass it (nornax's jaccpot adapter does, on every call).
 
         Returns
         -------
@@ -1666,8 +1636,7 @@ class FastMultipoleMethod:
             :meth:`compute_accelerations_and_jerk`, including the note that the
             two are not numerically equivalent.
         jerk_fd_dt : float
-            Finite-difference step for non-``solidfmm`` fallback in
-            ``"accurate"`` mode.
+            Accepted and unused; see :meth:`compute_accelerations_and_jerk`.
 
         Returns
         -------

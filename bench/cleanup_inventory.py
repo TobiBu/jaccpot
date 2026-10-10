@@ -57,12 +57,21 @@ FAMILIES: dict[str, dict] = {
     "cartesian": {
         "files": ["operators/multipole_utils.py"],
         "functions": [
-            ("upward/tree_expansions.py", r"^[^.]+$"),
+            # After K, `_resolve_center_mode` is all that is left of this module's
+            # functions, and the complex upward sweep calls it: not Cartesian.
+            ("upward/tree_expansions.py", r"^(?!_resolve_center_mode$)[^.]+$"),
             ("downward/local_expansions.py", r"^[^.]+$"),
-            ("**/*.py", r"cartesian"),
+            # `l2p_real_grad_cartesian` is the real-SH Pallas L2P (Cartesian
+            # gradient components), which K keeps; it was always an overcount.
+            ("**/*.py", r"^(?!l2p_real_grad_cartesian$).*cartesian"),
         ],
     },
-    "dense": {"functions": [("runtime/**/*.py", r"dense")]},
+    "dense": {
+        # K's refusal of `use_dense_interactions=True` runs in every engine
+        # construction and only decides the feature is off.
+        "gatekeepers": [r"_reject_removed_dense_interactions$"],
+        "functions": [("runtime/**/*.py", r"dense")],
+    },
     "octree": {
         "gatekeepers": [r"_prepared_state_octree_upward_payload$"],
         "files": [

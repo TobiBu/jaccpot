@@ -22,15 +22,6 @@ from jaccpot.config import (
     RuntimePolicyConfig,
     TreeConfig,
 )
-from jaccpot.downward.local_expansions import (
-    TreeDownwardData,
-)
-from jaccpot.downward.local_expansions import (
-    prepare_downward_sweep as prepare_local_downward_sweep,
-)
-from jaccpot.downward.local_expansions import (
-    run_downward_sweep as run_local_downward_sweep,
-)
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
@@ -42,8 +33,6 @@ from jaccpot.runtime.fmm import (
     compute_gravitational_acceleration,
     compute_gravitational_potential,
 )
-
-DEFAULT_TEST_LEAF_SIZE = 1
 
 
 def _direct_sum(positions, masses, *, G: float, softening: float):
@@ -836,127 +825,6 @@ def test_stf_symmetry_and_trace_free():
     # double trace ~ 0
     dt = jnp.trace(tr_01)
     assert jnp.allclose(dt, 0.0, atol=1e-4)
-
-
-def test_prepare_downward_sweep_matches_module_helper():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.9, -0.1, 0.05],
-            [0.7, 0.0, -0.05],
-            [0.9, -0.1, 0.1],
-        ],
-        dtype=jnp.float64,
-    )
-    masses = jnp.array([1.0, 0.8, 1.2, 0.9], dtype=jnp.float64)
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0], dtype=jnp.float64),
-        jnp.array([1.0, 1.0, 1.0], dtype=jnp.float64),
-    )
-
-    tree, pos_sorted, mass_sorted, _ = build_tree(
-        positions,
-        masses,
-        bounds,
-        return_reordered=True,
-        leaf_size=DEFAULT_TEST_LEAF_SIZE,
-    )
-
-    fmm = FMMEngine(theta=0.4, softening_kernel="plummer")
-    upward = fmm.prepare_upward_sweep(
-        tree,
-        pos_sorted,
-        mass_sorted,
-        max_order=2,
-    )
-
-    via_method = fmm.prepare_downward_sweep(tree, upward)
-    via_module = prepare_local_downward_sweep(
-        tree,
-        upward,
-        theta=0.4,
-    )
-
-    assert isinstance(via_method, TreeDownwardData)
-    assert jnp.array_equal(
-        via_method.interactions.offsets,
-        via_module.interactions.offsets,
-    )
-    assert jnp.array_equal(
-        via_method.interactions.sources,
-        via_module.interactions.sources,
-    )
-    assert jnp.allclose(
-        via_method.locals.coefficients,
-        via_module.locals.coefficients,
-    )
-    assert jnp.allclose(via_method.locals.centers, via_module.locals.centers)
-
-    theta_override = 0.3
-    alt_method = fmm.prepare_downward_sweep(
-        tree,
-        upward,
-        theta=theta_override,
-    )
-    alt_module = prepare_local_downward_sweep(
-        tree,
-        upward,
-        theta=theta_override,
-    )
-    assert jnp.array_equal(
-        alt_method.interactions.offsets,
-        alt_module.interactions.offsets,
-    )
-    assert jnp.array_equal(
-        alt_method.interactions.sources,
-        alt_module.interactions.sources,
-    )
-
-    run_result = fmm.run_downward_sweep(
-        tree,
-        upward.multipoles,
-        via_module.interactions,
-    )
-    module_result = run_local_downward_sweep(
-        tree,
-        upward.multipoles,
-        via_module.interactions,
-    )
-    assert jnp.allclose(run_result.coefficients, module_result.coefficients)
-    assert jnp.allclose(run_result.centers, module_result.centers)
-
-
-def test_fmm_dense_downward_matches_sparse_path():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.4, -0.2, 0.25],
-            [0.2, 0.3, -0.1],
-            [0.6, -0.15, 0.15],
-        ],
-        dtype=jnp.float64,
-    )
-    masses = jnp.array([1.0, 0.7, 1.3, 0.9], dtype=jnp.float64)
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0], dtype=jnp.float64),
-        jnp.array([1.0, 1.0, 1.0], dtype=jnp.float64),
-    )
-
-    kwargs = dict(bounds=bounds, leaf_size=2, max_order=2, theta=0.6)
-    fmm_sparse = FMMEngine(
-        theta=0.6, use_dense_interactions=False, softening_kernel="plummer"
-    )
-    fmm_dense = FMMEngine(
-        theta=0.6, use_dense_interactions=True, softening_kernel="plummer"
-    )
-
-    state_sparse = fmm_sparse.prepare_state(positions, masses, **kwargs)
-    state_dense = fmm_dense.prepare_state(positions, masses, **kwargs)
-
-    acc_sparse = fmm_sparse.evaluate_prepared_state(state_sparse)
-    acc_dense = fmm_dense.evaluate_prepared_state(state_dense)
-
-    assert jnp.allclose(acc_sparse, acc_dense, rtol=1e-10, atol=1e-10)
 
 
 def test_far_field_accuracy_order3_vs_order4():
@@ -2669,8 +2537,10 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
 
     So the bound below is what is achievable, not slack. Tightening it means
     setting the matmul precision in the M2L kernels -- jaccpot does that in the
-    L2P path (``jaccpot/downward/local_expansions.py``, ``Precision.HIGHEST``)
-    but not here. Left as-is deliberately; see ARCHITECTURE.md section 7.
+    real L2P path (``jaccpot/operators/real_p2m_l2p.py``, ``Precision.HIGHEST``;
+    the Cartesian one in ``downward/local_expansions.py`` did too, until the
+    2026-10 cleanup, K) but not here. Left as-is deliberately; see
+    ARCHITECTURE.md section 7.
 
     What this does and does not discriminate, measured by mutation:
 

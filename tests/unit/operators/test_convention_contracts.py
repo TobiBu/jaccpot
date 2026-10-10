@@ -1,4 +1,4 @@
-"""Tripwires for the three sign/ordering conventions that collide in this package.
+"""Tripwires for the sign/ordering conventions that collide in this package.
 
 Each convention here is a pair of things with the SAME shape and INCOMPATIBLE
 meaning. Getting one backwards is not a crash and not a shape error -- it is a
@@ -22,7 +22,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot.operators.multipole_utils import multi_index_tuples
 from jaccpot.operators.real_harmonics import evaluate_local_real, p2m_real_direct
 from jaccpot.operators.real_rotations import (
     real_rotation_from_z_axis_local,
@@ -31,7 +30,6 @@ from jaccpot.operators.real_rotations import (
     real_rotation_to_z_axis_multipole,
 )
 from jaccpot.operators.real_translations import l2l_real, m2l_real, m2m_real
-from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 
 # Enough order that a correct translation is limited by float64, not truncation,
 # so "correct" and "sign-flipped" differ by ten orders of magnitude rather than
@@ -252,41 +250,11 @@ def test_the_two_translation_conventions_really_are_opposite() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Convention 2: two packed symmetric-tensor orderings, exact reverses.
+# Convention 2 (two packed symmetric-tensor orderings, exact reverses) is no
+# longer jaccpot's: its ascending half, `multipole_utils`, went with the
+# Cartesian basis in the 2026-10 cleanup (K) and now lives only in yggdrax,
+# which tests it. `docs/operator_conventions.md` section 2 keeps the record.
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("order", list(range(9)))
-def test_packed_orderings_are_exact_reverses(order: int) -> None:
-    """``symmetric_tensors`` descends where ``multipole_utils`` ascends.
-
-    Both enumerate the same multi-index set with the same length, so an index
-    from one used against the other reads a real component from the wrong slot
-    with nothing to catch it.
-
-    Parameters
-    ----------
-    order : int
-        Tensor order under test.
-    """
-    descending = symmetric_multi_indices_3d(order)
-    ascending = multi_index_tuples(order)
-
-    assert set(descending) == set(ascending)
-    assert len(descending) == len(ascending)
-    assert descending == tuple(reversed(ascending))
-
-
-@pytest.mark.parametrize("order", [1, 2, 3, 4])
-def test_packed_orderings_are_not_interchangeable(order: int) -> None:
-    """The tripwire half: they must NOT coincide.
-
-    Parameters
-    ----------
-    order : int
-        Tensor order under test.
-    """
-    assert symmetric_multi_indices_3d(order) != multi_index_tuples(order)
 
 
 # ---------------------------------------------------------------------------

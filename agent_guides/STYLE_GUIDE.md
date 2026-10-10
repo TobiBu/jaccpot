@@ -150,7 +150,7 @@ predictor is not the module and not "the public surface":
 
 | pilot | module | malformed inputs `main` already caught, so the annotation added nothing |
 |---|---|---|
-| 1 | `upward/tree_expansions.py` | **3 of 3** — yggdrax validated everything |
+| 1 | `upward/tree_expansions.py` (its Cartesian sweep; removed in the 2026-10 cleanup, K) | **3 of 3** — yggdrax validated everything |
 | 2 | `nearfield/near_field.py` | **0 of 4** — silently accepted, wrong answers returned |
 | 3 | `runtime/fmm_evaluate.py` | **2 of 5** — split by parameter family |
 
@@ -219,7 +219,7 @@ must also be added to the flake8 hook's `--builtins` list — see 4.4.
 | `tiles` | source-block tiles in a fixed-shape tile sequence (`nearfield/_large_n_blocks.py`) |
 | `tbatch` | target leaves per scan step, i.e. `target_leaf_batch_size` |
 | `blockdim` | one solid-harmonic rotation block, square: `2*ell + 1` a side |
-| `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6` |
+| `ct` | Cartesian packed coefficients, `(p+1)(p+2)(p+3)/6`. Retired: nothing in jaccpot packs Cartesian moments since the Cartesian basis went (2026-10 cleanup, K) |
 | `sh` | spherical-harmonic packed coefficients, `sh_size(p) == (p+1)**2` |
 | `degrees` | spherical-harmonic degrees of a per-degree summary, `p+1` of them |
 | `orders` | the candidate expansion orders an adaptive policy scores |
@@ -315,8 +315,10 @@ for `masked_binomial` in the same module; `sh` is still the only one of the thre
 never appeared alone.
 
 **`ct` is not `C`.** Elsewhere in the package `C` means `sh_size(p) == (p+1)**2`, the
-spherical-harmonic packing. `upward/tree_expansions.py` packs Cartesian moments, so its count is
+spherical-harmonic packing. `upward/tree_expansions.py` packed Cartesian moments, so its count was
 `(p+1)(p+2)(p+3)/6`. The two agree only at p=1, which is how one symbol served both for so long.
+That code went with the Cartesian basis in the 2026-10 cleanup (K), so `ct` is retired; the
+lesson -- name the packing, not just the role -- stands.
 
 **`farleaves` exists because of a mistake worth not repeating.** `leaf_nodes` in
 `runtime/kernels/_evaluate.py` was annotated `leaves`, sharing the axis with
@@ -329,7 +331,8 @@ coverage bounds annotation validity:** an axis equality observed in every call y
 only as strong as the lanes you recorded.
 
 **`targets` and `sources` are the same lesson a third time, and the cheapest to have
-avoided.** `downward/local_expansions.py`'s `_accumulate_level` takes `coeffs` and
+avoided.** `downward/local_expansions.py`'s `_accumulate_level` (the Cartesian M2L, removed
+in the 2026-10 cleanup, K; the lesson stands) took `coeffs` and
 `component_matrix` on what looks like one node axis: every recorded call had them equal, at
 (7, 7) and (31, 31). The DISTRIBUTED lane passes `coeffs` at 9 nodes against
 `component_matrix` at 11, because the source side is a remote tree. Annotating them as one

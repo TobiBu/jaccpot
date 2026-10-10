@@ -16,7 +16,6 @@ import numpy as np
 from beartype import beartype
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array, Bool, Int, jaxtyped
-from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
     DualTreeRetryEvent,
@@ -39,14 +38,12 @@ from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
-    initialize_local_expansions,
 )
 from jaccpot.nearfield.near_field import (
     prepare_bucketed_scatter_schedules,
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
 )
-from jaccpot.operators.multipole_utils import MAX_MULTIPOLE_ORDER, total_coefficients
 from jaccpot.upward.tree_expansions import TreeUpwardData
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
@@ -167,7 +164,7 @@ def _gear_pairs_for_autotune(
 class _DualDownwardPlan(NamedTuple):
     """Everything the dual/downward phase resolves before it builds anything.
 
-    Sixteen host-side decisions -- which traversal build to use, whether the
+    Fifteen host-side decisions -- which traversal build to use, whether the
     stateful interaction cache may be reused, which far-field payload shape the
     M2L feed needs, and whether the strict streamed fast lane is eligible --
     resolved together because they constrain each other. ARCHITECTURE §4 and the
@@ -175,7 +172,8 @@ class _DualDownwardPlan(NamedTuple):
     here, which is the reason this is one bundle produced by one function rather
     than flags set at their point of use. (There were seventeen until the grouped
     far field, and its ``grouped_interactions_active`` flag, went in the 2026-10
-    cleanup, X3.)
+    cleanup, X3; then sixteen until ``use_dense_interactions_for_prepare`` went
+    with the Cartesian basis, K.)
 
     ``runtime_traversal_config`` is carried through rather than merely read: the
     resolution can clamp it, and the clamped value is what the build must see.
@@ -227,8 +225,6 @@ class _DualDownwardPlan(NamedTuple):
         Whether the tree build is the static radix mode the strict lane requires.
     use_compact_streamed_pairs : bool
         Whether far pairs are consumed in the compact streamed form.
-    use_dense_interactions_for_prepare : bool
-        Whether this build uses dense interaction buffers.
     use_paper_fixed_policy : bool
         Whether the Dehnen paper-style fixed acceptance policy applies.
     """
@@ -247,7 +243,6 @@ class _DualDownwardPlan(NamedTuple):
     strict_streamed_fast_path: bool
     tree_mode_static_radix: bool
     use_compact_streamed_pairs: bool
-    use_dense_interactions_for_prepare: bool
     use_paper_fixed_policy: bool
 
 
@@ -266,7 +261,8 @@ class _DualDownwardPlan(NamedTuple):
 #       "positions must have shape (N, 3)", "masses must have shape (N,)". Every helper
 #       below receives the arrays AFTER that gate, so annotating them would replace the
 #       best error in the module with a generic `TypeCheckError` (section 4.1 calls that a
-#       loss, and `local_expansions.py`'s `centers` is the same entry in DELIBERATELY_BARE).
+#       loss; the Cartesian `local_expansions.py`'s `centers` was the same entry in
+#       DELIBERATELY_BARE until that sweep went in the 2026-10 cleanup, K).
 #
 #   bounds                                                          (5 parameters)
 #       Rejected already, and not by us: a short, long or rank-2 bound raises a
@@ -330,19 +326,14 @@ class PrepareMixin(_EngineBase):
 
         Raises
         ------
-        NotImplementedError
-            If the requested order exceeds what the active basis supports.
         ValueError
-            If the order or leaf size is outside its valid range.
+            If the leaf size is below 1, or ``max_order`` disagrees with a pinned
+            ``fixed_order``.
         """
         if leaf_size < 1:
             raise ValueError("leaf_size must be >= 1")
         if self.fixed_order is not None and int(self.fixed_order) != int(max_order):
             raise ValueError("fixed_order must match max_order")
-        if max_order > MAX_MULTIPOLE_ORDER and self.expansion_basis != "solidfmm":
-            raise NotImplementedError(
-                "orders above 4 require expansion_basis='solidfmm'",
-            )
 
     def _prepare_state_input_arrays(
         self,
@@ -802,51 +793,32 @@ class PrepareMixin(_EngineBase):
         max_order: int,
         pos_sorted: Array,
     ) -> Optional[LocalExpansionData]:
-        """Build initial local-expansion buffers matching the active basis.
+        """Return no prebuilt local-expansion buffers: every basis left builds its own.
+
+        Only the Cartesian basis reused a zeroed locals template across prepares;
+        the spherical-harmonic downward pass allocates its accumulator on demand, so
+        a redundant zero buffer is not held alive across dual-tree staging. The
+        Cartesian basis was removed in the 2026-10 cleanup (K), so this always
+        returns ``None``, which is what the SH path always got. Kept, with its
+        signature, because the strict and large-N lanes call it; it goes in phase Z.
 
         Parameters
         ----------
         tree : Tree
-            The radix tree this prepare is building against.
+            The radix tree this prepare is building against. Unused.
         upward : TreeUpwardData
-            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+            Upward-sweep artifacts. Unused.
         max_order : int
-            Expansion order ``p`` for this prepare.
+            Expansion order ``p`` for this prepare. Unused.
         pos_sorted : Array
-            Particle positions in tree order.
+            Particle positions in tree order. Unused.
 
         Returns
         -------
         Optional[LocalExpansionData]
-            Zeroed local-expansion buffers, or None when the basis needs none.
+            Always ``None``.
         """
-        if self.expansion_basis == "solidfmm":
-            # Solid-FMM does not reuse a cached locals template across prepare calls.
-            # Let the downward pass allocate its accumulator on demand so we do not
-            # hold a redundant zero buffer alive across dual-tree staging.
-            return None
-
-        template = self._locals_template
-        total_nodes = int(tree.parent.shape[0])
-        coeff_count = total_coefficients(max_order)
-        reuse_template = (
-            template is not None
-            and int(template.order) == max_order
-            and template.coefficients.shape == (total_nodes, coeff_count)
-            and template.coefficients.dtype == pos_sorted.dtype
-        )
-
-        if reuse_template:
-            return LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros_like(template.coefficients),
-            )
-        return initialize_local_expansions(
-            tree,
-            upward.multipoles.centers,
-            max_order=max_order,
-        )
+        return None
 
     def _prepare_state_tree_and_upward(
         self,
@@ -1344,7 +1316,6 @@ class PrepareMixin(_EngineBase):
                 "dual_split_leaf_neighbors": "_refresh_timing_dual_split_leaf_neighbors_seconds",
                 "dual_split_interactions_and_neighbors": "_refresh_timing_dual_split_combined_seconds",
                 "dual_raw_interactions_and_neighbors": "_refresh_timing_dual_raw_combined_seconds",
-                "dual_split_dense_buffers": "_refresh_timing_dual_split_dense_buffers_seconds",
             }
             attr = attr_by_name.get(str(name))
             if attr is None:
@@ -1355,7 +1326,7 @@ class PrepareMixin(_EngineBase):
         pair_policy = None
         policy_state = None
         cache_key = None
-        # The 16 interdependent build decisions, resolved together -- see
+        # The 15 interdependent build decisions, resolved together -- see
         # `_DualDownwardPlan`. Unpacked back into locals so every expression
         # below reads exactly as it did before the extraction.
         (
@@ -1373,7 +1344,6 @@ class PrepareMixin(_EngineBase):
             strict_streamed_fast_path,
             tree_mode_static_radix,
             use_compact_streamed_pairs,
-            use_dense_interactions_for_prepare,
             use_paper_fixed_policy,
         ) = self._resolve_dual_downward_plan(
             tree_artifacts=tree_artifacts,
@@ -1531,7 +1501,6 @@ class PrepareMixin(_EngineBase):
             traversal_config=runtime_traversal_config,
             retry_logger=None if strict_mode_active else record_retry,
             fail_fast=(self.fail_fast or strict_mode_active),
-            use_dense_interactions=use_dense_interactions_for_prepare,
             need_traversal_result=need_traversal_result,
             need_compact_far_pairs=need_compact_far_pairs,
             need_node_interactions=need_node_interactions,
@@ -1558,7 +1527,6 @@ class PrepareMixin(_EngineBase):
             neighbor_list,
             traversal_result,
             compact_far_pairs,
-            dense_buffers,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
         if not suppress_host_side_effects:
             far_pair_count_diag = None
@@ -1588,8 +1556,7 @@ class PrepareMixin(_EngineBase):
                 "dual-tree bytes "
                 f"neighbors={_format_nbytes(_estimate_payload_nbytes(neighbor_list))} "
                 f"compact_far_pairs={_format_nbytes(_estimate_payload_nbytes(compact_far_pairs))} "
-                f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))} "
-                f"dense_buffers={_format_nbytes(_estimate_payload_nbytes(dense_buffers))}"
+                f"interactions={_format_nbytes(_estimate_payload_nbytes(interactions))}"
             )
 
         strict_streamed_direct_far_pairs = bool(
@@ -1657,7 +1624,6 @@ class PrepareMixin(_EngineBase):
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
             runtime_traversal_config=runtime_traversal_config,
             record_retry=record_retry,
-            dense_buffers=dense_buffers,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=adaptive_order_for_downward,
@@ -1747,7 +1713,7 @@ class PrepareMixin(_EngineBase):
         allow_stateful_cache: bool,
         suppress_host_side_effects: bool,
     ) -> _DualDownwardPlan:
-        """Resolve the dual/downward build plan: 16 interdependent host decisions.
+        """Resolve the dual/downward build plan: 15 interdependent host decisions.
 
         Extracted verbatim from :meth:`_prepare_state_dual_and_downward` (Tier
         1.7). Pure host-side policy -- it traces nothing and allocates no device
@@ -1776,7 +1742,7 @@ class PrepareMixin(_EngineBase):
         Returns
         -------
         _DualDownwardPlan
-            The 16 resolved decisions, in the order the bundle declares them.
+            The 15 resolved decisions, in the order the bundle declares them.
 
         Raises
         ------
@@ -1865,9 +1831,6 @@ class PrepareMixin(_EngineBase):
             bool(adaptive_order_active) and not bool(need_traversal_result)
         ) or bool(use_compact_streamed_pairs)
         need_node_interactions = not bool(use_compact_streamed_pairs)
-        use_dense_interactions_for_prepare = bool(self.use_dense_interactions) and (
-            self.expansion_basis != "solidfmm"
-        )
         if not suppress_host_side_effects:
             _prepare_diag(
                 "dual-tree start "
@@ -1876,8 +1839,7 @@ class PrepareMixin(_EngineBase):
                 f"memory_objective={self.memory_objective} "
                 f"traversal_config={runtime_traversal_config} "
                 f"need_compact_far_pairs={bool(need_compact_far_pairs)} "
-                f"need_node_interactions={bool(need_node_interactions)} "
-                f"dense_buffers={bool(use_dense_interactions_for_prepare)}"
+                f"need_node_interactions={bool(need_node_interactions)}"
             )
         if (
             runtime_traversal_config is not None
@@ -2027,7 +1989,6 @@ class PrepareMixin(_EngineBase):
             strict_streamed_fast_path=strict_streamed_fast_path,
             tree_mode_static_radix=tree_mode_static_radix,
             use_compact_streamed_pairs=use_compact_streamed_pairs,
-            use_dense_interactions_for_prepare=use_dense_interactions_for_prepare,
             use_paper_fixed_policy=use_paper_fixed_policy,
         )
 
@@ -2360,29 +2321,27 @@ class PrepareMixin(_EngineBase):
         upward: TreeUpwardData,
         max_order: int,
     ) -> None:
-        """Update reusable cartesian local-expansion template after prepare_state.
+        """Clear the reusable local-expansion template, as the SH path always did.
+
+        The template was a Cartesian-basis cache (removed in the 2026-10 cleanup,
+        K); on the spherical-harmonic path this stored ``None``, which is all it
+        does now. Kept, with its signature, because the strict and large-N lanes
+        call it; it goes in phase Z.
 
         Parameters
         ----------
         locals_template : Optional[LocalExpansionData]
-            Preallocated local-expansion buffers, or None to build them.
+            What the template builder returned (always ``None``). Unused.
         upward : TreeUpwardData
-            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+            Upward-sweep artifacts. Unused.
         max_order : int
-            Expansion order ``p`` for this prepare.
+            Expansion order ``p`` for this prepare. Unused.
 
         Returns
         -------
         None
-            Nothing; it updates the reusable template cache in place.
+            Nothing; it sets ``self._locals_template`` to ``None``.
         """
-        if locals_template is not None and self.expansion_basis == "cartesian":
-            self._locals_template = LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros_like(locals_template.coefficients),
-            )
-            return
         self._locals_template = None
 
     def _prepare_nearfield_precompute_artifacts(
@@ -2771,7 +2730,6 @@ class PrepareMixin(_EngineBase):
         NodeNeighborList,
         Optional[DualTreeWalkResult],
         Optional[CompactTaggedFarPairs],
-        Optional[DenseInteractionBuffers],
     ]:
         """Unpack dual-tree artifacts for downward preparation and state export.
 
@@ -2782,17 +2740,17 @@ class PrepareMixin(_EngineBase):
 
         Returns
         -------
-        tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs], Optional[DenseInteractionBuffers]]
-            The five dual-tree artifacts in the order the downward phase consumes
+        tuple[Optional[NodeInteractionList], NodeNeighborList, Optional[DualTreeWalkResult], Optional[CompactTaggedFarPairs]]
+            The four dual-tree artifacts in the order the downward phase consumes
             them: the interaction list (``None`` on the streamed path), the neighbour
-            list, the walk result, the compact far pairs and the dense buffers.
+            list, the walk result and the compact far pairs. (A fifth, the dense
+            buffers, went with the Cartesian basis in the 2026-10 cleanup, K.)
         """
         return (
             dual_artifacts.interactions,
             dual_artifacts.neighbor_list,
             dual_artifacts.traversal_result,
             dual_artifacts.compact_far_pairs,
-            dual_artifacts.dense_buffers,
         )
 
     @jax.named_scope("fmm_downward")
@@ -2808,7 +2766,6 @@ class PrepareMixin(_EngineBase):
         runtime_l2l_chunk_size: Optional[int],
         runtime_traversal_config: Optional[DualTreeTraversalConfig],
         record_retry: Callable[[DualTreeRetryEvent], None],
-        dense_buffers: Optional[DenseInteractionBuffers],
         far_pairs_coo: Optional[_FarPairCOO] = None,
         far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: bool = False,
@@ -2838,8 +2795,6 @@ class PrepareMixin(_EngineBase):
             Traversal capacities for this build, possibly already clamped.
         record_retry : Callable[[DualTreeRetryEvent], None]
             Callback invoked when a traversal capacity retry occurs.
-        dense_buffers : Optional[DenseInteractionBuffers]
-            Dense interaction buffers, or None when unused.
         far_pairs_coo : Optional[_FarPairCOO]
             Far pairs in coordinate form for the streamed feed.
         far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
@@ -2874,7 +2829,6 @@ class PrepareMixin(_EngineBase):
             l2l_chunk_size=runtime_l2l_chunk_size,
             traversal_config=runtime_traversal_config,
             retry_logger=record_retry,
-            dense_buffers=dense_buffers,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             n_targets=n_targets,
@@ -3200,7 +3154,6 @@ class PrepareMixin(_EngineBase):
             traversal_config=runtime_traversal_config,
             retry_logger=None,
             fail_fast=True,
-            use_dense_interactions=False,
             need_traversal_result=False,
             need_compact_far_pairs=True,
             need_node_interactions=False,
@@ -3215,12 +3168,10 @@ class PrepareMixin(_EngineBase):
             neighbor_list,
             traversal_result,
             compact_far_pairs,
-            dense_buffers,
         ) = self._unpack_dual_tree_artifacts(dual_artifacts)
         del (
             interactions,
             traversal_result,
-            dense_buffers,
         )
         if compact_far_pairs is None:
             raise RuntimeError(
@@ -3286,7 +3237,6 @@ class PrepareMixin(_EngineBase):
             runtime_l2l_chunk_size=runtime_l2l_chunk_size,
             runtime_traversal_config=runtime_traversal_config,
             record_retry=record_retry,
-            dense_buffers=None,
             far_pairs_coo=far_pairs_coo,
             far_pairs_by_gear=far_pairs_by_gear,
             adaptive_order=True,
@@ -3366,7 +3316,6 @@ class PrepareMixin(_EngineBase):
             traversal_config=runtime_traversal_config,
             retry_logger=None,
             fail_fast=True,
-            use_dense_interactions=False,
             need_traversal_result=False,
             need_compact_far_pairs=True,
             need_node_interactions=False,

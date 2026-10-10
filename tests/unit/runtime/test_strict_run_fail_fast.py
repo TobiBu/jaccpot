@@ -38,6 +38,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import pytest
 
+from jaccpot.basis import RealSHBasis
 from jaccpot.runtime._fmm_impl import FMMEngine
 
 _N = 8
@@ -94,17 +95,20 @@ class TestTheProfileGateIsConfigNotHardware:
         """No GPU, no monkeypatching, no device query -- four config values."""
         assert _strict()._is_large_n_gpu_production_profile()
 
-    def test_the_basis_is_part_of_the_contract(self):
-        """`preset="large_n_gpu"` alone is not enough: its default basis is cartesian.
+    def test_the_preset_alone_opens_it_on_the_default_basis(self):
+        """`preset="large_n_gpu"` alone opens the profile: the default basis is real.
 
-        Worth its own test because it is the trap -- setting the preset and
-        assuming the profile is open leaves it closed, silently.
+        Until the 2026-10 cleanup (K) the engine defaulted to the Cartesian basis,
+        so setting the preset alone left the profile closed, silently -- the trap
+        this test was written for. The default is now the real SH basis, which the
+        profile's ``expansion_basis == "solidfmm"`` conjunct accepts.
         """
         preset_only = FMMEngine(
             theta=0.6, working_dtype=jnp.float32, preset="large_n_gpu"
         )
-        assert preset_only.expansion_basis == "cartesian"
-        assert not preset_only._is_large_n_gpu_production_profile()
+        assert preset_only.expansion_basis == "solidfmm"
+        assert isinstance(preset_only.basis_impl, RealSHBasis)
+        assert preset_only._is_large_n_gpu_production_profile()
 
 
 class TestFailFastGuards:

@@ -52,10 +52,11 @@ def symmetric_multi_indices_3d(order: int) -> tuple[tuple[int, int, int], ...]:
 
     This ordering **defines** the packed layout for every function here, and it
     descends in ``nx`` then ``ny``. It is the exact *reverse* of
-    :func:`~jaccpot.operators.multipole_utils.multi_index_tuples`, which ascends
-    (checked for orders 0-8), so the two packed representations in this package
-    are not interchangeable and indices from one must never be used against the
-    other. See ``docs/operator_conventions.md`` section 2.
+    ``yggdrax.multipole_utils.multi_index_tuples``, which ascends (checked for
+    orders 0-8), so the two packed representations are not interchangeable and
+    indices from one must never be used against the other. jaccpot's own copy of
+    that module went with the Cartesian basis in the 2026-10 cleanup (K). See
+    ``docs/operator_conventions.md`` section 2.
 
     Memoized with an unbounded ``lru_cache``: one tuple per order, and orders are
     small and few.

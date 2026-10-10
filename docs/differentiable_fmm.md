@@ -170,7 +170,8 @@ trusting the 3.0 threshold on other hardware.
 
 **Not supported** (all raise, none degrade silently)
 
-* `expansion_basis="cartesian"`.
+* `expansion_basis="cartesian"` -- since the 2026-10 cleanup (K) the basis is
+  gone and naming it raises at construction, before any state exists.
 * `target_indices` on the large-N path.
 * Potentials on the fast lane (`return_potential=True`).
 * The radix *overflow* and *target-block* near-field payloads, and the

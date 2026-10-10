@@ -567,6 +567,35 @@ def test_class_major_farfield_mode_raises_removal_error():
         )
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_use_dense_interactions_true_raises_removal_error():
+    """The dense interaction buffers went with the Cartesian basis (cleanup 2026-10, K).
+
+    Both doors: the engine keyword, and the facade's legacy kwarg that reaches it.
+    """
+    with pytest.raises(ValueError, match="dense interaction buffers were removed"):
+        fmm_impl_private.FMMEngine(use_dense_interactions=True)
+    with pytest.raises(ValueError, match="dense interaction buffers were removed"):
+        FastMultipoleMethod(preset=FMMPreset.FAST, use_dense_interactions=True)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("value", [None, False])
+def test_use_dense_interactions_unset_or_false_is_accepted_and_ignored(value):
+    """``None``/``False`` construct, as before; the resolved field is always ``False``.
+
+    The engine attribute and the ``refresh_dual_split_dense_buffers_seconds``
+    diagnostics key went with the dense build (Odisseo reads the key with ``.get``).
+    """
+    engine = fmm_impl_private.FMMEngine(use_dense_interactions=value)
+    assert engine.config.traversal.use_dense_interactions is False
+    assert not hasattr(engine, "use_dense_interactions")
+    fmm = FastMultipoleMethod(preset=FMMPreset.FAST, use_dense_interactions=value)
+    assert fmm._impl.config.traversal.use_dense_interactions is False
+    diagnostics = fmm.get_runtime_diagnostics()
+    assert "refresh_dual_split_dense_buffers_seconds" not in diagnostics
+
+
 @pytest.mark.parametrize("mode", ["auto", "pair_grouped"])
 def test_surviving_farfield_modes_still_construct(mode):
     """``"auto"`` and ``"pair_grouped"`` stay accepted; both run the flat pair list."""
@@ -1234,35 +1263,49 @@ def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
     assert jerk.shape == positions.shape
 
 
-def test_compute_accelerations_and_jerk_accurate_cartesian_uses_fd_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    positions, masses = _sample_problem(n=14)
-    velocities = _sample_velocities(n=14)
-    fmm = FastMultipoleMethod(basis="cartesian")
+@pytest.mark.parametrize("jerk_mode", ["accurate", "fast_approx"])
+def test_jerk_fd_dt_is_accepted_silently_and_unused(jerk_mode):
+    """``jerk_fd_dt`` stays on all four jerk signatures, accepted and unused.
 
-    def _forbidden(*args, **kwargs):
-        raise AssertionError(
-            "non-solidfmm accurate jerk should use finite-difference fallback"
-        )
+    It stepped the finite-difference fallback of the Cartesian basis, removed in the
+    2026-10 cleanup (K). nornax's jaccpot adapter passes ``jerk_fd_dt=1e-3`` on every
+    call and ``bench/ci_benchmark_guard.py`` passes it too, so it must neither warn
+    nor be range-checked (a non-positive step used to raise on the fallback): any
+    value gives the result of not passing it, bitwise.
+    """
+    import warnings
 
-    monkeypatch.setattr(
-        fmm._impl,
-        "_evaluate_source_motion_farfield_jerk",
-        _forbidden,
-    )
-    acc, jerk = fmm.compute_accelerations_and_jerk(
-        positions,
-        masses,
-        velocities,
-        leaf_size=8,
-        max_order=3,
-        jerk_mode="accurate",
-        jerk_fd_dt=1e-3,
-    )
+    positions, masses = _sample_problem(n=24)
+    velocities = _sample_velocities(n=24)
+    fmm = FastMultipoleMethod(preset=FMMPreset.FAST, basis="real")
+    engine = fmm._impl
+    kwargs = dict(leaf_size=8, max_order=3, jerk_mode=jerk_mode)
+    state = fmm.prepare_state(positions, masses, leaf_size=8, max_order=3)
 
-    assert acc.shape == positions.shape
-    assert jerk.shape == positions.shape
+    calls = {
+        "facade compute": lambda **kw: fmm.compute_accelerations_and_jerk(
+            positions, masses, velocities, **kwargs, **kw
+        ),
+        "engine compute": lambda **kw: engine.compute_accelerations_and_jerk(
+            positions, masses, velocities, **kwargs, **kw
+        ),
+        "facade evaluate": lambda **kw: fmm.evaluate_prepared_state_with_jerk(
+            state, velocities, jerk_mode=jerk_mode, **kw
+        ),
+        "engine evaluate": lambda **kw: engine.evaluate_prepared_state_with_jerk(
+            state, velocities, jerk_mode=jerk_mode, **kw
+        ),
+    }
+    for name, call in calls.items():
+        reference = call()
+        for step in (1e-3, 0.0, -1.0):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                got = call(jerk_fd_dt=step)
+            for want_arr, got_arr in zip(reference, got):
+                assert np.array_equal(
+                    np.asarray(want_arr), np.asarray(got_arr)
+                ), f"{name}: jerk_fd_dt={step} changed the result"
 
 
 def test_compute_accelerations_and_jerk_invalid_mode_raises():

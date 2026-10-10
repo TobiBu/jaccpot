@@ -353,7 +353,7 @@ def test_host_loop_geometry_modes_reject_tracers_clearly(mode):
     from yggdrax.tree import Tree
 
     from jaccpot.runtime._adaptive_policy import resolve_dehnen_geometry
-    from jaccpot.upward.tree_expansions import prepare_upward_sweep
+    from jaccpot.runtime._fmm_impl import FMMEngine
 
     positions, masses, _ = _system(N_PARTICLES, seed=1)
     tree = Tree.from_particles(
@@ -366,7 +366,9 @@ def test_host_loop_geometry_modes_reject_tracers_clearly(mode):
     )
     positions_sorted = positions[tree.particle_indices]
     masses_sorted = masses[tree.particle_indices]
-    upward = prepare_upward_sweep(
+    # The engine's real upward sweep (the module-level Cartesian one went in the
+    # 2026-10 cleanup, K); the geometry modes read only centres and geometry.
+    upward = FMMEngine(expansion_basis="solidfmm").prepare_upward_sweep(
         tree, positions_sorted, masses_sorted, max_order=MAX_ORDER, center_mode="com"
     )
 

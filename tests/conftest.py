@@ -86,10 +86,12 @@ if NORNAX_ROOT is not None and str(NORNAX_ROOT) not in sys.path:
 # listed: every `from yggdrax... import ...` that jaccpot executes at module
 # level is a hard requirement, because the package cannot be imported without it.
 # Deriving it is the point -- a hand-maintained list goes stale the first time
-# someone adds an import. It is also more complete than one would be: the 72
-# names it finds include the private `tree_moments` helpers jaccpot imports from
-# where they are defined rather than from a re-export, which is exactly the kind
-# of edge a list written by hand omits and a vanishing re-export then breaks.
+# someone adds an import (this comment said 72 names when there were 85). It is
+# also more complete than one would be: it found the private `tree_moments`
+# helpers jaccpot imported from where they are defined rather than from a
+# re-export, which is exactly the kind of edge a list written by hand omits and a
+# vanishing re-export then breaks. Those helpers served the Cartesian basis and
+# went with it in the 2026-10 cleanup (K).
 #
 # WHERE THE LINE IS, and it is NOT "module level". The first draft of this scanned
 # only a module's own body, on the theory that a function-local import is jaccpot

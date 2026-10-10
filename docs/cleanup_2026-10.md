@@ -52,6 +52,7 @@ On `main` at 6cca378 (2026-10-06):
 | fix | #384 | The CSR lane's placeholder no longer feeds the per-particle near-field payload (default payload budget) | CPU suite, A100 bitwise budget-0 vs default | merged |
 | X5 | #385 | Superseded GPU kernel variants: cascade level forwards, CSR pair / tiled M2L, per-leaf P2M, near-field sorted layout / classes / `g` / lone `p` / chunked rows, unfused walk emission (X5a); COM radii chain, MAC radius bound, degree-batched rotation, z-core M2L, three small branches (X5b). Removed env values raise | CPU suite, shard partition, CPU bitwise A/B (interpret-mode Pallas included) | merged |
 | X6 | | The strict lane's superseded paths: the host-routed strict refresh (`DEVICE_ONLY=0`), the dual-downward refresh planner, the unsafe compact far-pair reuse, the non-fused `strict_run_v2` loop (`FUSED_MODE=off`); `GPU_MODE` is inert. Removed env values raise, accepted ones are ignored | CPU suite, shard partition, distributed tier, CPU bitwise A/B (env unset and harness env), GPU pins S1-S6, timing A/B | open |
+| K | | The Cartesian basis (`FMMEngine`'s default flips to real first: a behaviour change), `operators/multipole_utils.py`, the dense interaction buffers, the finite-difference jerk fallback. Every Cartesian spelling raises one migration error; `use_dense_interactions=True` raises; `jerk_fd_dt` is accepted and unused | CPU suite (also at the default flip alone), shard partition, distributed tier, CPU bitwise A/B | open |
 
 ### P0: CI runs each test once
 
@@ -1472,3 +1473,330 @@ steady_timing_bypass_count}`, `_static_radix_compact_pair_reuse_{hits,misses}`,
 - `_fresh_compact_pair_rebuild_enabled`, which now always returns `True` or raises;
 - the name `strict_fused_device_only_hot_path`;
 - `bench/results/` logs that show the removed wrapper message.
+
+### K: the Cartesian basis, dense interactions, multipole_utils
+
+**Behaviour change, first and alone (1c348c7).** `FMMEngine(expansion_basis=...)`
+defaulted to `"cartesian"`. It now defaults to `"solidfmm"`, which D1's
+`_validate_expansion_family` resolves to `RealSHBasis`. Every engine built without
+a basis runs the real basis: `compute_gravitational_acceleration` and every direct
+`FMMEngine(...)` caller (tests, benches). `FastMultipoleMethod` always passed a basis
+and does not move. Measured on CPU in fp64, theta 0.5, leaf 16, against an fp64
+direct sum (rel-L2 of the acceleration, per-particle median in brackets):
+
+| case | Cartesian (before) | real (after) |
+| --- | --- | --- |
+| `compute_gravitational_acceleration` (order 2), uniform cube, N = 2,048 | 0.386 (0.644) | 4.63e-3 (5.79e-3) |
+| `FMMEngine().compute_accelerations(max_order=4)`, the same | 0.386 (0.645) | 7.65e-4 (7.11e-4) |
+| `compute_gravitational_acceleration`, Plummer, N = 2,041 | 0.306 (0.209) | 1.28e-2 (4.08e-3) |
+| order 4, the same | 0.307 (0.208) | 3.35e-3 (4.96e-4) |
+| `compute_gravitational_acceleration`, the A/B's clustered N = 1,500 | 0.171 (0.145) | 8.05e-3 (4.01e-3) |
+| order 4, the same | 0.171 (0.145) | 1.46e-3 (4.74e-4) |
+
+The Cartesian error does not fall with order, as its warning said (~1.8e-1 on the
+golden configuration). One more engine moves with the default:
+`FMMEngine(preset="large_n_gpu")` without a basis now satisfies the large-N production
+profile (preset, radix tree, `expansion_basis == "solidfmm"`) and takes its contract
+(minimum memory, streamed far pairs, `runtime_path="large_n"`, bucketed near field, no
+retained interactions, upward batch 2048). The facade's `large_n_gpu` always did.
+
+The commit is green on its own: the full CPU suite at 1c348c7 ran 2,314 passed, 198
+skipped, 1 failed (the stale local nornax checkout,
+`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`, as at X6). Every
+`test_fmm.py` test that built an engine without a basis or called
+`compute_gravitational_acceleration` passes on real with its tolerance unchanged; the
+one that failed compared against the Cartesian module helper. It changed three tests:
+- `test_strict_run_fail_fast.py::test_the_basis_is_part_of_the_contract` asserted that
+  the preset alone left the profile closed because the default basis was Cartesian.
+  It is now `test_the_preset_alone_opens_it_on_the_default_basis` (real basis, profile
+  open).
+- `test_fmm.py::test_prepare_downward_sweep_matches_module_helper` compared the engine
+  with the Cartesian module helper, so it pinned `expansion_basis="cartesian"` until
+  the next commit deleted it.
+- The constructor-state matrix: its base case `cartesian_default` (`FMMEngine()`)
+  became `real_default`, and the `solidfmm_real` row went because it now resolves
+  byte-identically to the base (the distinctness guard caught it). The old base stayed
+  as a `cartesian` row until the migration-error commit.
+
+**Every Cartesian spelling raises one migration error (63bbda8, library -61 / +49;
+the experimental-basis warning went):**
+
+    basis='cartesian' was removed in the 2026-10 cleanup (K); see
+    docs/cleanup_2026-10.md. Use basis='real' (the default).
+
+It is `config._CARTESIAN_BASIS_REMOVED`, raised by:
+- `FastMultipoleMethod(basis="cartesian")` (any case and whitespace) and the legacy
+  `expansion_basis="cartesian"` kwarg (`solver._resolve_basis_input`);
+- a `BasisInterface` whose `runtime_expansion_basis` is `"cartesian"`;
+- `FMMEngine(expansion_basis="cartesian")` (`_validate_expansion_family`);
+- `DistributedFMMConfig(basis="cartesian")`, when the evaluator is built
+  (`distributed/fmm.py::_make_fn`, before any device work). The field was never
+  validated: `is_real = basis == "real"`, so `"cartesian"` silently ran the complex
+  far field. Valid values are unchanged; anything else still runs complex, as before.
+
+`"cartesian"` stays in `config.Basis` and `kernels._shared.ExpansionBasis`, so a typed
+caller (under `JACCPOT_RUNTIME_TYPECHECK=1`) sees this `ValueError` rather than a
+type-check error; X3 kept `"class_major"` in `FarFieldMode` for the same reason. The
+experimental-basis warning went, so `JACCPOT_ALLOW_CARTESIAN_BASIS` is inert. The
+unknown-basis messages no longer offer `cartesian`.
+
+**Removed** (library -3,395 / +282 lines across K; the additions are docstrings, the
+migration message, the dense refusal, the moved gradient note and a `ValueError` for
+an impossible basis where a Cartesian tail was):
+- **Cartesian code (44cbfba, -3,134 / +155).**
+  - `operators/multipole_utils.py` (-392), the copy of yggdrax's module (audit F41).
+  - `downward/local_expansions.py` (-1,997 / +12): the derivative and stencil tables,
+    `_accumulate_level`, the dense and CSR Cartesian M2L,
+    `_translate_multipole_to_local_impl`, `translate_local_expansion`,
+    `translate_multipole_to_local`, `initialize_local_expansions`,
+    `accumulate_m2l_contributions`, `accumulate_dense_m2l_contributions`,
+    `propagate_local_expansions` and the module-level `prepare_downward_sweep` /
+    `run_downward_sweep`. `LocalExpansionData` and `TreeDownwardData` stay in place.
+  - `upward/tree_expansions.py` (-466 / +27): `_aggregate_m2m_impl`,
+    `compute_node_multipoles`, `_aggregate_multipoles_via_m2m` and the module-level
+    `prepare_upward_sweep`. `_CENTER_MODES`, `_resolve_center_mode` (the complex upward
+    imports it), `NodeMultipoleData` and `TreeUpwardData` stay.
+    `NodeMultipoleData.moments` and `.component_matrix` are `Optional[Any]`: always
+    `None` on the SH paths, kept so the pytree shape is unchanged
+    (`test_prepare_state_does_not_retain_duplicate_component_matrix` still asserts
+    `None`). So jaccpot no longer imports yggdrax's `TreeMultipoleMoments`, and five
+    `# type: ignore[arg-type]` on `moments=None` went (`fmm_sweeps.py` 2,
+    `fmm_derivatives.py` 2, `distributed/_force_scale.py` 1). The "COM centres are
+    differentiated through" note moved to `upward/real_tree_expansions.py`'s
+    docstring; `mutual/device_topology.py` points there.
+  - `runtime/kernels/_evaluate.py` (-129 / +16): `_evaluate_local_cartesian_with_grad_batch`,
+    the Cartesian tails of both L2P evaluators, the Cartesian order search in
+    `_infer_order_from_coeff_count`, the two `order > 4` guards and the dead
+    `offsets`. A basis other than `"solidfmm"` raises a `ValueError` where a tail was.
+    Re-exports dropped from `kernels/core.py` and `kernels/__init__.py`.
+  - `runtime/fmm_sweeps.py`: the Cartesian imports and fall-throughs of
+    `prepare_upward_sweep` / `prepare_downward_sweep` (a `ValueError` now), and
+    `SweepsMixin.run_downward_sweep` (Cartesian on every basis, not on the facade).
+  - `runtime/fmm_prepare.py`: the `order > 4` guard. The locals-template helpers
+    (`_build_locals_template_for_prepare_state`,
+    `_update_locals_template_cache_after_prepare`) were Cartesian-only but are called
+    from protected lanes (`fmm_strict_run.py` twice, `_large_n_pipeline.py`,
+    `fmm_policy.py`, `fmm_prepare.py` twice), so they are no-ops returning what the SH
+    path always got: `None`, and `_locals_template = None`. Call sites untouched.
+- **Dense interactions (75e7ecd, -141 / +57).** Built only for the Cartesian basis (the
+  prepare gated them on `expansion_basis != "solidfmm"`). Gone: the
+  `yggdrax.dense_interactions` imports, `_DualTreeArtifacts.dense_buffers`,
+  `_dual_tree_build_dense_buffers`, the `use_dense_interactions` parameter of the split
+  and top-level dual-tree builders (and its terms in their payload predicates, true on
+  every surviving lane), the plan field `use_dense_interactions_for_prepare` (16 -> 15
+  decisions), the `dense_buffers` plumbing of `_unpack_dual_tree_artifacts` (now a
+  4-tuple), `_prepare_downward_with_artifacts`, `SweepsMixin.prepare_downward_sweep`
+  and `_prepare_solidfmm_downward_sweep` (which never read it), the engine attribute
+  `use_dense_interactions`, and the `dual_split_dense_buffers` timing counter with its
+  `STAGE_TREE` node and diagnostics key.
+- **The finite-difference jerk fallback (7b672df, -58 / +17).**
+  `evaluate_prepared_state_with_jerk(jerk_mode="accurate")` fell back to a central
+  difference of the accelerations along `jerk_fd_dt * v` on a basis other than
+  `"solidfmm"`: the Cartesian one. The analytic `dM -> dL` path is the only one, and
+  unchanged.
+
+**API shims:**
+- `use_dense_interactions`: `FMMEngine(use_dense_interactions=True)` and the facade's
+  legacy kwarg raise a `ValueError` naming the removal (X3's `grouped_interactions`
+  pattern, refused first in `__init__` by `_reject_removed_dense_interactions`);
+  `None` and `False` are accepted and ignored. `TraversalExecutionConfig` and
+  `FMMPresetConfig` keep the field (always `False`) so old configs construct.
+- `jerk_fd_dt` stays on all four signatures (engine and facade,
+  `compute_accelerations_and_jerk` and `evaluate_prepared_state_with_jerk`),
+  documented as accepted and unused, with no warning and no `<= 0` check: nornax's
+  `adapters/jaccpot.py` passes `jerk_fd_dt=1e-3` on every call, and
+  `bench/ci_benchmark_guard.py`, which CI runs, passes it too.
+- `JACCPOT_ALLOW_CARTESIAN_BASIS`: inert.
+
+**Kept:** `runtime/reference.py` and the engine's `compute_expansion` /
+`evaluate_expansion` (the trace-free oracle); `operators/symmetric_tensors.py` (the SH
+derivative towers); `pallas/l2p_real.py::l2p_real_grad_cartesian` (real SH; "Cartesian"
+names its gradient components) and the "Cartesian component" wording in the SH
+operators; `_resolve_center_mode`; the `moments` / `component_matrix` fields; the dead
+`!= "solidfmm"` guards and tautological `== "solidfmm"` conjuncts in the protected lanes
+(`fmm_evaluate.py`, `fmm_derivatives.py`, `_large_n_*`, `_fmm_impl.py`); the facade's
+`mac_type` default branch; `_evaluate_prepared_state_at_positions_sorted` (the gradient
+seam) and the complex-only `_evaluate_source_motion_farfield_jerk` (phase C);
+everything complex.
+
+**Tests** (deleted: 105 cases, 101 under (a) and 4 under (b); moved: 1; retargeted or
+renamed: 3; added: 16). Collected (with the sibling nornax checkout) at 0375c08: 2,575;
+at K: 2,486.
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| `tests/unit/core/test_local_expansions.py`: 21 of 22 cases | (a) | the 22nd, `test_target_local_eval_returns_potential_on_the_complex_analytic_branch`, is a complex-basis L2P test of `_evaluate.py`: moved to `tests/unit/runtime/test_l2p_particle_major.py` |
+| `test_local_expansion_axis_contracts.py` (7), `test_local_expansions_shape_contracts.py` (9), `test_local_expansions_raw_moment_guard.py` (12) | (a) | |
+| `tests/unit/operators/test_multipole_utils.py` (23) | (a) | yggdrax tests its own copy |
+| `test_tree_expansions.py`: `test_compute_node_multipoles_com_matches_mass_moments`, `..._high_order_matches_direct`, `test_prepare_upward_sweep_returns_consistent_data` | (a) | |
+| `test_convention_contracts.py`: `test_packed_orderings_are_exact_reverses` (9), `test_packed_orderings_are_not_interchangeable` (4) | (a) | the ascending packing lives only in yggdrax now; `docs/operator_conventions.md` section 2 keeps the record |
+| `test_evaluate_scatter_contracts.py::test_the_cartesian_pack_is_ct_and_is_shared_with_its_offsets` | (a) | the scatter and target/leaf/node contracts stay |
+| `tests/distributed/`: `test_distributed_m2l_mechanism.py` (2), `test_distributed_shardmap_local.py` (1), `test_distributed_fmm_assembly.py` (1), `test_distributed_fmm_shardmap.py` (1); two also out of `slow_tests.txt` | (a) | the Cartesian Phase-4 prototypes. The LET near-field half of `fmm_shardmap` is interleaved with its Cartesian far field (both feed every assertion), so it was not retargeted: the same `[local ; halo]` combined P2P is asserted against a direct sum by `test_distributed_solidfmm_far_shardmap.py` and through the production lane by `test_distributed_fmm_driver.py` |
+| `test_fmm.py::test_prepare_downward_sweep_matches_module_helper` | (a) | |
+| `test_fmm.py::test_fmm_dense_downward_matches_sparse_path` (also out of `slow_tests.txt`) | (a) | it ran the real basis from the default flip on, where the dense flag was already ignored |
+| `test_fmm_golden.py::test_fmm_golden[uni_cartesian_n256_p2, uni_cartesian_n256_p4, clu_cartesian_n256_p4]` and their `golden/*.npz` | (a) | the 0.35 Cartesian anchor went with them; the anchor lookup has no fallback now (stricter) |
+| `test_solver_api.py::test_compute_accelerations_and_jerk_accurate_cartesian_uses_fd_fallback` (also out of `slow_tests.txt`) | (a) | `test_jerk_fd_dt_is_accepted_silently_and_unused` owns the keyword |
+| `test_gradient_correctness.py::test_rejects_non_solidfmm_basis` | (a) | no non-SH prepared state can be built; the migration error is `TestCartesianWasRemoved`'s |
+| `test_basis_and_runner_hygiene.py::TestCartesianIsExperimental` (4) | (b) | `TestCartesianWasRemoved` (11 cases): the warning, its wording, its silencing switch and "it still works" became the refusal, per spelling, plus the inert switch |
+| constructor-state matrix rows `cartesian`, `farfield_dense`; `solidfmm_real` | (a); (c) | `solidfmm_real` resolved byte-identically to the new base case `real_default` |
+
+Retargeted:
+- `test_tree_expansions.py`: `test_compute_node_multipoles_explicit_requires_centers` and
+  `..._rejects_unknown_mode` now run on the complex upward sweep
+  (`test_explicit_centre_mode_requires_centres`, `test_an_unknown_centre_mode_is_rejected`,
+  the latter matching the message now); `test_removed_geometric_centres_raise_a_removal_error`
+  keeps its complex-sweep assertion (3 cases).
+- `test_dehnen_mac_reference.py::_upward_fixture` and the `test_dehnen_mac_gradients.py`
+  host-loop test build their upward with `FMMEngine(expansion_basis="solidfmm")`
+  (`resolve_dehnen_geometry` reads only the centres and the geometry).
+- `test_strict_run_fail_fast.py::test_the_preset_alone_opens_it_on_the_default_basis`, as above.
+
+Adapted: `test_type_annotation_guard.py` (two `CONVERTED_MODULES` entries and two
+`DELIBERATELY_BARE` entries for deleted functions), `test_interaction_cache_retry.py`
+and `test_split_build_carries_pair_policy.py` (internal builders lost the dense
+keyword), `test_constructor_state_golden.py` (the matrix, above), comments in
+`test_annotation_capture.py`, `test_fmm.py` and `tests/conftest.py` (the yggdrax
+symbol contract: jaccpot imports 68 names from 20 yggdrax modules now, 85 from 22 at
+0375c08; the comment said 72). `test_prepare_state_solidfmm_skips_prebuilt_locals_template`
+is unchanged and pins the template no-op.
+
+Added (16 cases): `TestCartesianWasRemoved` (11; 9 fail at 1c348c7, the two
+`test_the_distributed_config_still_takes_its_two_bases` cases pass there too, as they
+should); `test_use_dense_interactions_true_raises_removal_error` and
+`test_use_dense_interactions_unset_or_false_is_accepted_and_ignored` (2 cases; the
+engine attribute and the diagnostics key are asserted gone);
+`test_jerk_fd_dt_is_accepted_silently_and_unused` (both jerk modes x four signatures x
+steps 1e-3, 0, -1, warnings as errors, bitwise against not passing it; 2 cases).
+
+**Goldens.** `golden/`: the three Cartesian `.npz` are deleted; the ten real and complex
+ones are byte-identical. `golden_grad/`, `golden_lanes/` and `golden_modes/*.npz` are
+byte-identical. `constructor_state.json` (+17 / -30 lines), per case against 0375c08:
+- the base case is `real_default` (`FMMEngine()`, the real basis); `solidfmm_real` and
+  `farfield_dense` are gone;
+- every case loses `use_dense_interactions` and
+  `_refresh_timing_dual_split_dense_buffers_seconds`;
+- the 32 direct-engine cases that name no basis move `basis_impl` (`None` ->
+  `RealSHBasis(...)`), `expansion_basis` (`'cartesian'` -> `'solidfmm'`) and `m2l_impl`
+  (`None` -> `'rot_scale'`);
+- `engine_preset_large_n_gpu` also takes the production contract (ten attributes:
+  `_large_n_gpu_production_profile_cached`, `farfield_mode`, `memory_objective`,
+  `nearfield_mode`, `precompute_nearfield_scatter_schedules`, `retain_interactions`,
+  `retain_traversal_result`, `runtime_path`, `streamed_far_pairs`,
+  `upward_leaf_batch_size`);
+- the facade cases and `solidfmm_explicit_complex` move only by the two dense
+  attributes.
+
+**Bench:**
+- `bench_fmm.py` runs again: no dense keyword, the 4-tuple unpack, no locals template.
+  Smoke-run on CPU at N = 2,000, fixed order and adaptive order.
+- `cleanup_inventory.py`: the Cartesian family excludes `_resolve_center_mode` (complex)
+  and `l2p_real_grad_cartesian` (real SH; it was an overcount from P1 on); the dense
+  family treats `_reject_removed_dense_interactions` as a gatekeeper. At K both
+  families resolve to zero regions, so a re-run counts nothing for them.
+- `annotation_capture.py`: its usage example and identity-scan note no longer name
+  jaccpot's `multipole_utils`.
+
+**Docs:** `README.md` (features; the basis section says `"cartesian"` is removed),
+`ARCHITECTURE.md` (sections 5 and 7), `CLAUDE.md` (the `downward/` layout line),
+`derivatives_and_jerk.md`, `differentiable_fmm.md`, `operator_conventions.md` section 2,
+`agent_guides/STYLE_GUIDE.md` (`ct` retired).
+
+**Downstream:**
+- Odisseo: `fmm_basis="cartesian"` now raises at solver construction. Its defaults are
+  `"real"` / `"solidfmm"`; the one place that names `"cartesian"`,
+  `tests/test_integration_api.py::test_integrate_dispatches_to_fmm_coupler`,
+  monkeypatches the coupler, so jaccpot never sees it.
+  `jaccpot_coupling.py` reads `refresh_dual_split_dense_buffers_seconds` with
+  `.get(..., 0.0)`, so its records show 0.0.
+- nornax: `adapters/jaccpot.py` passes `jerk_fd_dt=1e-3` on every call; it keeps
+  working, silently.
+- yggdrax names jaccpot no longer imports, for phase Y2: `dense_interactions`
+  (`DenseInteractionBuffers`, `densify_interactions`; `build_dense_interactions` was
+  imported only by a deleted test); `multipole_utils` (`MAX_MULTIPOLE_ORDER`,
+  `level_offset`, `multi_index_factorial`, `multi_index_tuples`, `multi_power`,
+  `total_coefficients`); the Cartesian half of `tree_moments` (`TreeMultipoleMoments`,
+  `compute_tree_multipole_moments`, `pack_multipole_expansions`,
+  `translate_packed_moments`, `tree_moments_from_raw`, `multipole_from_packed`,
+  `_quadrupole_from_second`, `_octupole_from_third`, `_hexadecapole_from_fourth`). From
+  `tree_moments` jaccpot still imports `TreeMassMoments`, `compute_tree_mass_moments`
+  and `compute_tree_mass_moments_jit`.
+
+**Left for phase Z:**
+- the locals-template helpers (now no-ops) and their seven call sites, and the engine's
+  `_locals_template`;
+- the inert `use_dense_interactions` fields of `TraversalExecutionConfig` and
+  `FMMPresetConfig`, the engine keyword and the facade's legacy kwarg;
+- `jerk_fd_dt` on the four signatures (needs nornax's adapter to stop passing it);
+- `"cartesian"` in `config.Basis` and `ExpansionBasis`;
+- examples that still use the removed plumbing:
+  `examples/profile_prepare_memory_split.py` (dense keyword, 5-tuple unpack; it already
+  does not import, see X3), `examples/profile_prepare_residuals.py` (wraps
+  `_dual_tree_build_dense_buffers` by name), and the notebooks
+  `adaptive_vs_fixed_benchmark.ipynb`, `benchmark_gpu_single_n_memory.ipynb`,
+  `benchmark_runtime_accuracy_new.ipynb`, `benchmark_runtime_large_N_accuracy.ipynb`,
+  `benchmark_runtime_large_N_performance.ipynb`.
+
+**Gates:**
+- **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`, at
+  9be5571): 2,230 passed, 198 skipped, 1 failed: the stale local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as before. At
+  the default flip alone (1c348c7): 2,314 passed, 198 skipped, the same 1 failed. The
+  84 fewer passes are the 104 node ids K removes outside `tests/distributed` less the
+  20 it adds (moved, retargeted and renamed tests included).
+- **Runtime type checks** (`JACCPOT_RUNTIME_TYPECHECK=1`) on the 15 touched unit test
+  files: 289 passed.
+- **Distributed tier** on four forced host devices (`tests/distributed` and
+  `test_mutual_distributed.py`, `-n 6`): 90 passed, 3 skipped (two opt-in upstream
+  checks and one sm_80-only case). At X6 it was 95 passed with the same skips; K
+  deletes the five Cartesian prototypes.
+- **Bitwise A/B against 0375c08 on CPU** (`git archive` exports of 0375c08 and of
+  9be5571, every switch unset). 90 arrays and 75 diagnostic rows are bitwise equal:
+  - the general path (21): forces and potentials of the default, fast, accurate and
+    balanced on the real basis, fast and accurate on the complex basis (spelled
+    `"solidfmm"` and `"complex"`), `dehnen_error` and `large_n_gpu` in fp32; a bare
+    `FastMultipoleMethod()`; the position and mass gradients through
+    `differentiable_accelerations` on both bases;
+  - jerk and time derivatives (32), on both bases: `compute_accelerations_and_jerk` in
+    both modes with `jerk_fd_dt=1e-3` passed (accelerations, jerk, a target subset's
+    jerk), `evaluate_prepared_state_with_jerk(jerk_mode="accurate")`,
+    `compute_accelerations_with_time_derivatives` to crackle,
+    `evaluate_prepared_state_with_time_derivatives` on a subset, and
+    `compute_accelerations(max_acc_derivative_order=2)`;
+  - `BlockStepFMM(backend="jax")`: total accelerations and one base step (3);
+  - the large-N lane with the GPU gate opened, N = 2,048 (19): prepare + evaluate,
+    `refresh_prepared_state`, two `strict_prepare_refresh_and_evaluate` calls, the fused
+    `strict_run_v2` scan plain and with history, callback, external field, initial
+    acceleration and returned state, `carry="particles"` on cell leaves (two chained
+    calls), `strict_fused_prepared_eval_fn`, and the prepacked differentiable lane's
+    forces and gradients. The two cases that fail on this CPU configuration at X6 fail
+    here too, with the same messages;
+  - `mac_type="dehnen_error"` in the fused scan, both carries, through the CSR near
+    field in Pallas interpret mode, N = 768 (5);
+  - `distributed/fmm.py` on four forced host devices, N = 1,024 (10): forces on the real
+    and complex bases with the Dehnen and BH MACs (cross-domain far pairs accepted,
+    172-275 per device under BH), and the differentiable evaluator's forward and its
+    position and mass gradients on both bases.
+
+  The only differences are the expected ones: the three direct engine-default arrays
+  (`FMMEngine()` at orders 2 and 4, `compute_gravitational_acceleration`) and the row
+  naming the engine's basis. Against an fp64 direct sum on that clustered N = 1,500 they
+  go from rel-L2 0.171 / 0.171 / 0.171 (Cartesian) to 8.05e-3 / 1.46e-3 / 8.05e-3
+  (real), as in the table at the top.
+- **`test_shards.py check`:** 2,486 tests, each in exactly one shard. At 0375c08 the
+  same collection (with the sibling nornax checkout) is 2,575; K deletes 105 cases and
+  adds 16, and moves, retargets or renames 4.
+- **Inventory:** `cleanup_inventory.py`'s `cartesian` and `dense` families resolve to
+  zero regions at K (40 and 1 at 0375c08).
+- **Goldens** as above.
+- `import jaccpot` and all 122 modules import (123 at X6, less `multipole_utils`).
+  jaccpot imports 68 names from 20 yggdrax modules (85 from 22 at 0375c08), none from
+  `yggdrax.dense_interactions` or `yggdrax.multipole_utils`. No file in `jaccpot/`,
+  `tests/` or `bench/` imports a removed name; docstrings and comments name some as
+  history, and `cleanup_inventory.py` as regexes. pre-commit is clean on every changed
+  file.
+- `bench/annotation_census.py`: shape-annotated array parameters 833 -> 783, bare
+  `Array` parameters 1,695 -> 1,658, shaped share 33.0 % -> 32.1 %, `@jaxtyped`
+  functions 183 -> 159. Only deletions moved them.
+- **GPU pins** (frozen worktree at 1377ddb, one A100): S1-S5 **bitwise** against
+  `main-15ceca4`, S6 **bitwise** against `main-17de581`. M1 and M3 (two cards) and an
+  interleaved timing A/B against `main` are queued.

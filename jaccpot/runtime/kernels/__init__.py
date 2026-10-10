@@ -27,7 +27,6 @@ from .core import (
     _chunk_segment_scatter_add,
     _compute_targeted_nearfield,
     _empty_interaction_storage_for_tree,
-    _evaluate_local_cartesian_with_grad_batch,
     _evaluate_local_expansions_for_particles,
     _evaluate_local_expansions_for_target_particles,
     _evaluate_prepared_tree,

@@ -5,7 +5,8 @@ incompatible meaning**. Each was found during the Tier 2.5 docstring programme
 (batches 23, 24, 25), each was documented only in a body comment or not at all, and
 each fails the same way: not a crash, not a shape error, but a silently degraded
 force. That is the worst failure mode this library has, so they are collected here
-and pinned by `tests/unit/operators/test_convention_contracts.py`.
+and pinned by `tests/unit/operators/test_convention_contracts.py` (all but section 2,
+whose second half left jaccpot with the Cartesian basis in the 2026-10 cleanup, K).
 
 **If you are about to change a sign or an enumeration order in these files, read the
 matching section first, then run that test file.**
@@ -59,10 +60,17 @@ measurement was first mis-taken.
 
 ## 2. Two packed symmetric-tensor orderings, exact reverses
 
+**No longer a collision inside jaccpot.** jaccpot's copy of `multipole_utils.py` went
+with the Cartesian basis in the 2026-10 cleanup (K, `docs/cleanup_2026-10.md`); the
+ascending (Cartesian) packing now lives only in `yggdrax.multipole_utils`, which tests
+it, and `test_convention_contracts.py` no longer pins this section. The record stays
+because a caller combining yggdrax's packing with jaccpot's derivative towers still
+meets it.
+
 | module | ordering |
 | --- | --- |
 | `operators/symmetric_tensors.py` (`symmetric_multi_indices_3d`) | **descends** in `nx`, then `ny` |
-| `operators/multipole_utils.py` (`multi_index_tuples`, `triangular_indices`) | **ascends** |
+| `yggdrax.multipole_utils` (`multi_index_tuples`, `triangular_indices`); jaccpot's `operators/multipole_utils.py` until K | **ascends** |
 
 At order 2:
 
@@ -78,8 +86,8 @@ real component from the wrong slot with nothing — no shape error, no bounds er
 to catch it.
 
 `symmetric_tensors.py` serves the derivative towers; `multipole_utils.py` serves the
-packed triangular multipole layout. They are separate representations that happen to
-share a domain.
+packed triangular (Cartesian) multipole layout. They are separate representations that
+happen to share a domain.
 
 ## 3. Four rotation builders, one signature
 

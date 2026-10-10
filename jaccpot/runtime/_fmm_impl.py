@@ -64,6 +64,7 @@ from yggdrax.interactions import (  # noqa: F401
 from yggdrax.tree import TreeType, available_tree_types
 
 from jaccpot.config import (
+    _CARTESIAN_BASIS_REMOVED,
     FarFieldConfig,
     FMMPreset,
     MACTypeInput,
@@ -189,6 +190,34 @@ def _reject_removed_farfield_options(farfield: FarFieldConfig) -> None:
         )
 
 
+def _reject_removed_dense_interactions(use_dense_interactions: Optional[bool]) -> None:
+    """Refuse ``use_dense_interactions=True``, removed in the 2026-10 cleanup (K).
+
+    The dense interaction buffers were materialised only on the Cartesian basis
+    (the prepare gated them on ``expansion_basis != "solidfmm"``) and went with it.
+    The keyword stays so an old call constructs; ``True`` raises rather than being
+    ignored, so an old config cannot believe it ran the dense lane. Runs first in
+    ``__init__``, beside :func:`_reject_removed_farfield_options`.
+
+    Parameters
+    ----------
+    use_dense_interactions : Optional[bool]
+        The engine keyword as the caller passed it.
+
+    Raises
+    ------
+    ValueError
+        If it is true.
+    """
+    if bool(use_dense_interactions):
+        raise ValueError(
+            "use_dense_interactions=True is no longer available: the dense "
+            "interaction buffers were removed with the Cartesian basis in the "
+            "2026-10 cleanup (K); see docs/cleanup_2026-10.md. Leave it unset or "
+            "False."
+        )
+
+
 def derive_split_build_default(
     *,
     memory_objective: str,
@@ -289,13 +318,15 @@ class FMMEngine(
         Dtype the sweeps compute in. ``None`` resolves against the device later
         rather than here.
     expansion_basis : ExpansionBasis
-        Expansion algebra. ``"cartesian"`` or ``"solidfmm"`` (the spherical-harmonic
-        family, real or complex); ``"complex"`` is accepted and selects the complex
-        basis explicitly.
+        Expansion algebra. ``"solidfmm"`` (default; the spherical-harmonic family,
+        real or complex); ``"complex"`` is accepted and selects the complex basis
+        explicitly. ``"cartesian"`` raises: the Cartesian basis was removed in the
+        2026-10 cleanup (K). Until then it was this default, so an engine built
+        without a basis now runs the real basis.
     basis_impl : Optional[Any]
         The basis object. For ``"solidfmm"`` without one, the REAL basis is used
         (cleanup 2026-10, phase D1; it used to default to complex);
-        ``"complex"`` without one uses the complex basis. ``None`` for Cartesian.
+        ``"complex"`` without one uses the complex basis.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide", which
         selects ``"rot_scale"`` for the real basis.
@@ -354,8 +385,9 @@ class FMMEngine(
         capacity and re-runs with a larger one. Purely observational -- use it to
         detect that ``traversal_config`` is undersized.
     use_dense_interactions : Optional[bool]
-        Materialize the interaction list densely rather than as a compact list --
-        faster for small trees, quadratic in memory for large ones.
+        Removed in the 2026-10 cleanup (K): the dense interaction buffers were
+        built only for the Cartesian basis. ``None`` and ``False`` are accepted
+        and ignored; ``True`` raises.
     runtime_path : Literal['auto', 'large_n']
         ``"auto"`` or ``"large_n"``, accepted and stored but no longer a lane
         switch: the large-N lane is selected by ``preset="large_n_gpu"``, whose
@@ -439,7 +471,7 @@ class FMMEngine(
         softening: float = 1e-12,
         working_dtype: Optional[DTypeLike] = None,
         *,
-        expansion_basis: ExpansionBasis = "cartesian",
+        expansion_basis: ExpansionBasis = "solidfmm",
         basis_impl: Optional[Any] = None,
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
@@ -502,6 +534,7 @@ class FMMEngine(
         # resolves it at `solver.py:445-447` -- None means "not overridden".
         _ff = FarFieldConfig() if farfield is None else farfield
         _reject_removed_farfield_options(_ff)
+        _reject_removed_dense_interactions(use_dense_interactions)
         farfield_mode = _ff.mode
         complex_rotation = "solidfmm" if _ff.rotation is None else _ff.rotation
         m2l_chunk_size = _ff.m2l_chunk_size
@@ -658,7 +691,6 @@ class FMMEngine(
             max_pair_queue=max_pair_queue,
             pair_process_block=pair_process_block,
             traversal_config=traversal_config,
-            use_dense_interactions=use_dense_interactions,
             preset_config=preset_config,
         )
 
@@ -726,9 +758,12 @@ class FMMEngine(
         Raises
         ------
         ValueError
-            If the expansion basis is not 'cartesian' or 'solidfmm'.
+            If the expansion basis is not 'solidfmm' or 'complex'. 'cartesian'
+            gets the removal message (2026-10 cleanup, K).
         """
         basis_norm = str(expansion_basis).strip().lower()
+        if basis_norm == "cartesian":
+            raise ValueError(_CARTESIAN_BASIS_REMOVED)
         if basis_impl is None and basis_norm in ("solidfmm", "complex"):
             # The spherical-harmonic family without a basis object: real unless
             # complex was named. Before 2026-10 both meant complex, which made
@@ -739,9 +774,9 @@ class FMMEngine(
             basis_impl = ComplexSHBasis() if basis_norm == "complex" else RealSHBasis()
         if basis_norm == "complex":
             basis_norm = "solidfmm"
-        if basis_norm not in ("cartesian", "solidfmm"):
+        if basis_norm != "solidfmm":
             raise ValueError(
-                "expansion_basis must be 'cartesian', 'solidfmm', or 'complex'",
+                "expansion_basis must be 'solidfmm' or 'complex'",
             )
         self.expansion_basis = basis_norm  # type: ignore[assignment]
         self.basis_impl = basis_impl
@@ -1393,7 +1428,6 @@ class FMMEngine(
         self.max_refine_levels = resolved.tree.max_refine_levels
         self.aspect_threshold = resolved.tree.aspect_threshold
         self.interaction_retry_logger = interaction_retry_logger
-        self.use_dense_interactions = resolved.traversal.use_dense_interactions
         self._tree_workspace: Optional[object] = None
         self._locals_template: Optional[LocalExpansionData] = None
         self._interaction_cache: Optional[_InteractionCacheEntry] = None
@@ -1464,7 +1498,6 @@ class FMMEngine(
         self._refresh_timing_dual_split_leaf_neighbors_seconds: float = 0.0
         self._refresh_timing_dual_split_combined_seconds: float = 0.0
         self._refresh_timing_dual_raw_combined_seconds: float = 0.0
-        self._refresh_timing_dual_split_dense_buffers_seconds: float = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds: float = 0.0
         self._refresh_timing_dual_select_interactions_seconds: float = 0.0
         self._refresh_timing_dual_downward_compute_seconds: float = 0.0
@@ -1956,7 +1989,6 @@ class FMMEngine(
         self._refresh_timing_dual_split_leaf_neighbors_seconds = 0.0
         self._refresh_timing_dual_split_combined_seconds = 0.0
         self._refresh_timing_dual_raw_combined_seconds = 0.0
-        self._refresh_timing_dual_split_dense_buffers_seconds = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds = 0.0
         self._refresh_timing_dual_select_interactions_seconds = 0.0
         self._refresh_timing_dual_downward_compute_seconds = 0.0
@@ -2051,7 +2083,8 @@ def compute_gravitational_acceleration(
 
     A one-shot convenience wrapper: it builds a fresh :class:`FMMEngine` per call
     and therefore reuses nothing between calls. Construct an engine directly if
-    you are evaluating more than once.
+    you are evaluating more than once. It runs the engine's default basis, the
+    real SH basis (Cartesian until the 2026-10 cleanup, K).
 
     Parameters
     ----------

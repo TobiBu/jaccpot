@@ -488,9 +488,6 @@ class DiagnosticsMixin(_EngineBase):
             "refresh_dual_raw_combined_seconds": float(
                 self._refresh_timing_dual_raw_combined_seconds
             ),
-            "refresh_dual_split_dense_buffers_seconds": float(
-                self._refresh_timing_dual_split_dense_buffers_seconds
-            ),
             "refresh_dual_far_pair_plan_seconds": float(
                 self._refresh_timing_dual_far_pair_plan_seconds
             ),

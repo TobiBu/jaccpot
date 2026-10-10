@@ -116,13 +116,15 @@ FACADE_MODULES = (
 # Modules converted by the E.3 shape programme, in the order they landed. Listing
 # a module here says "its unvalidated array parameters carry shapes, and must keep
 # them" -- not "every array parameter in it is shaped". Some are deliberately bare
-# with the reason recorded at the site: `explicit_centers` in tree_expansions would
-# preempt a documented `ValueError` and make that branch unreachable for shape
-# errors, so it is left alone (and it is outside the families below anyway).
+# with the reason recorded at the site (see `DELIBERATELY_BARE` below).
+#
+# Two of its modules are no longer listed, `upward/tree_expansions.py` (the first)
+# and `downward/local_expansions.py` (Phase 1 of the rollout): their functions were
+# the Cartesian sweeps, removed in the 2026-10 cleanup (K), and what is left of them
+# is containers with nothing for this guard to check.
 #
 # Add a module here in the same PR that annotates it. See STYLE_GUIDE.md section 4.
 CONVERTED_MODULES = (
-    "jaccpot/upward/tree_expansions.py",
     "jaccpot/nearfield/near_field.py",
     "jaccpot/runtime/fmm_evaluate.py",
     # Added late, and the delay is the point: this module was annotated and given
@@ -131,11 +133,6 @@ CONVERTED_MODULES = (
     # this guard did not hold. STYLE_GUIDE section 4 says to add a module in the
     # same PR that annotates it; that is the rule this omission broke.
     "jaccpot/runtime/kernels/_evaluate.py",
-    # Phase 1 of the rollout. Only the `delta`/`raw_*` family was unvalidated
-    # here; the `upward/solidfmm_complex_*` functions in the same phase were
-    # measured and left alone, because yggdrax and their own bodies already
-    # reject every malformed input tried (13 of 15 across the group).
-    "jaccpot/downward/local_expansions.py",
     # Phase 1, `runtime/` half. Only the reference oracle and its sweeps facade
     # were unvalidated: `fmm_derivatives.py`, `fmm_prepare.py` and `_fmm_impl.py`
     # were measured and left alone, because each already rejects every malformed
@@ -204,21 +201,9 @@ CONVERTED_MODULES = (
 # this cannot become a place where exemptions accumulate unexamined.
 DELIBERATELY_BARE: frozenset[tuple[str, str]] = frozenset(
     {
-        # Annotating the shape would raise a beartype violation BEFORE the body,
-        # replacing the `ValueError` both functions document in their Raises
-        # section and making that branch unreachable for shape errors. Changing
-        # which exception a caller sees is a behaviour change, not a docs change.
-        ("jaccpot/upward/tree_expansions.py", "explicit_centers"),
         # `Union[float, Array]`: a scalar that legitimately accepts a Python
         # number, so `Float[Array, ""]` would break every defaulted call.
         ("jaccpot/nearfield/near_field.py", "G"),
-        # `initialize_local_expansions` already raises
-        # `ValueError("centers must have shape (num_nodes, 3)")`, and it fires on
-        # both a wrong node count and a wrong trailing dimension -- measured, not
-        # read off the docstring. Annotating would preempt that message with a
-        # generic `TypeCheckError`, which STYLE_GUIDE section 4.1 calls out as a
-        # loss rather than a gain.
-        ("jaccpot/downward/local_expansions.py", "centers"),
         # Same `Union[float, Array]` reason as `near_field.py`'s `G` above, and
         # here it is load-bearing for BOTH names: every one of these signatures
         # defaults them to Python floats (`G=1.0`, `softening=0.0`), so

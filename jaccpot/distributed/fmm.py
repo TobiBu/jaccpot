@@ -77,7 +77,7 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
-from jaccpot.config import MACTypeInput
+from jaccpot.config import _CARTESIAN_BASIS_REMOVED, MACTypeInput
 from jaccpot.distributed._force_scale import (
     DISTRIBUTED_FORCE_SCALE_MODES,
     cross_policy_state,
@@ -729,6 +729,8 @@ class DistributedFMMConfig:
     # (memory-lighter, and unlocks the fused real M2L Pallas kernel when
     # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is set). Upward sweep + coarse M2M stay
     # complex; multipoles are converted to Dehnen real coeffs at the M2L boundary.
+    # "cartesian" raises when the evaluator is built (the Cartesian basis was removed
+    # in the 2026-10 cleanup, K); before, it silently ran the complex path.
     basis: str = "real"
     # Near-field backend: "baseline" (pure-JAX combined [local;halo] P2P) or
     # "pallas" (fused leafpair Pallas kernel, sm_80+, the single-GPU fast-lane
@@ -1774,6 +1776,8 @@ def _make_fn(
     )
     rot = config.rotation
     theta = config.theta
+    if str(config.basis).strip().lower() == "cartesian":
+        raise ValueError(_CARTESIAN_BASIS_REMOVED)
     is_real = str(config.basis).strip().lower() == "real"
 
     # The self walk is the dual-tree walk; "treecode" was removed (cleanup 2026-10).

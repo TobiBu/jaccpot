@@ -278,16 +278,6 @@ def test_no_nan_axis_aligned_grid(basis):
     assert jnp.all(jnp.isfinite(grad)), "non-finite grad on axis-aligned lattice"
 
 
-def test_rejects_non_solidfmm_basis():
-    positions, masses = _system(32, seed=3)
-    fmm = FastMultipoleMethod(
-        basis="cartesian", use_pallas=False, theta=0.6, G=1.0, softening=1e-2
-    )
-    state = fmm.prepare_state(positions, masses, max_order=2, leaf_size=16)
-    with pytest.raises(NotImplementedError, match="solidfmm"):
-        fmm.differentiable_accelerations(state, positions, masses)
-
-
 @pytest.mark.parametrize("basis", ["complex", "real"])
 def test_reorders_to_original_particle_order(basis):
     """Output is aligned with the original (unsorted) input order."""

@@ -14,8 +14,9 @@ limits:
 - the general time-derivative API currently accepts only `mode="accurate"`
   and raises for other mode strings.
 - public acceleration spatial derivatives
-  (`max_acc_derivative_order > 0`) work on the spherical-harmonic bases: `"real"`
-  (the default) and `"solidfmm"`/`"complex"`, not on `"cartesian"`.
+  (`max_acc_derivative_order > 0`) work on both bases: `"real"` (the default) and
+  `"solidfmm"`/`"complex"`. (`"cartesian"` never supported them; it was removed in
+  the 2026-10 cleanup, K, and now raises at construction.)
 - public time derivatives above crackle (`max_time_derivative_order > 3`) are
   not implemented yet.
 - all of these paths work both on full solves and on prepared-state/subset
@@ -41,8 +42,8 @@ For `max_acc_derivative_order = 1`:
 
 Current support:
 
-- enabled for `basis="real"` (default) and `basis="solidfmm"`
-- requesting derivatives with `basis="cartesian"` raises `NotImplementedError`
+- enabled for `basis="real"` (default) and `basis="solidfmm"`, the only two
+  bases left (`basis="cartesian"` was removed in the 2026-10 cleanup, K)
 - exact at every offset on the real basis, including a target sitting on its
   expansion centre (a single-particle leaf) or on the centre's z-axis: the tower
   lowers the coefficients with the exact Cartesian-derivative operator of the real
@@ -95,10 +96,11 @@ For the currently supported public orders:
 
 - analytic far-field source-motion jerk via source-motion multipole/local
   contractions (`dM -> dL`) plus convective far-field and exact near-field terms
-- no finite-difference solves on the spherical-harmonic bases (`real` and
-  `solidfmm`)
-- `jerk_fd_dt` is only used by the finite-difference fallback of
-  `basis="cartesian"`
+- no finite-difference solves, on either basis (`real` and `solidfmm`)
+- `jerk_fd_dt` is accepted and unused, with no warning and no check on its
+  value: it stepped the finite-difference fallback of `basis="cartesian"`, which
+  was removed in the 2026-10 cleanup (K). It stays on all four jerk signatures
+  because callers pass it (nornax's jaccpot adapter does, on every call)
 - slower than `fast_approx`, but typically faster than finite-difference
   accurate-mode equivalents
 - builds the source-motion multipoles `d^k M / dt^k` directly for the prepared
@@ -125,8 +127,8 @@ reference that includes the relative-acceleration terms (as nornax's
   - order 3: crackle
 - `mode="accurate"` is currently the only accepted public mode for the general
   time-derivative API.
-- the far-field higher time-derivative assembler works on the spherical-harmonic
-  bases (`real`, `solidfmm`); `cartesian` is not supported
+- the far-field higher time-derivative assembler works on both bases (`real`,
+  `solidfmm`)
 - orders above 3 are not implemented yet
 - higher-order source-motion multipole kernels are implemented internally and
   feed the public runtime assembler
