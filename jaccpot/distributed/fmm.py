@@ -1,12 +1,13 @@
 """Reusable multi-GPU distributed FMM force driver.
 
-This is a faithful extraction of the per-device ``shard_map`` body validated in
-``tests/distributed/test_distributed_solidfmm_far_shardmap.py``.  The pipeline, per device,
-inside one ``shard_map``:
+This is a faithful extraction of the per-device ``shard_map`` body first validated
+in a hand-rolled complex-basis test (``test_distributed_solidfmm_far_shardmap.py``,
+removed with the complex basis in the 2026-10 cleanup, C); the far field has run the
+real basis since. The pipeline, per device, inside one ``shard_map``:
 
     global bounds + sanitize padding
     local radix tree  (yggdrax ``Tree.from_particles``)
-    solidfmm upward sweep (P2M / M2M)         -> per-node complex multipoles
+    real upward sweep (P2M / M2M)             -> per-node real multipoles
     self dual-tree walk (M2L list + near CSR)
     remote coarse tree  (frontier of leaf COMs, own domain excluded)
       all_gather local multipoles -> seed coarse leaves with the REAL order-p
@@ -66,7 +67,7 @@ from yggdrax.distributed.let import (
 )
 from yggdrax.distributed.local_tree import sanitize_padding
 from yggdrax.distributed.partition import global_bounds
-from yggdrax.dtypes import INDEX_DTYPE, complex_dtype_for_real
+from yggdrax.dtypes import INDEX_DTYPE
 from yggdrax.interactions import DualTreeTraversalConfig, MACType
 from yggdrax.morton import morton_encode_impl
 from yggdrax.tree import (
@@ -99,10 +100,6 @@ from jaccpot.nearfield.near_field import (
     _prepare_leaf_data_from_groups,
     compute_leaf_p2p_accelerations,
 )
-from jaccpot.operators.complex_ops import (
-    enforce_conjugate_symmetry_batch,
-    m2l_complex_reference_batch,
-)
 from jaccpot.operators.real_harmonics import sh_size
 from jaccpot.runtime._adaptive_policy import (
     adaptive_cross_pair_policy,
@@ -119,10 +116,6 @@ from jaccpot.softening import resolve_softening_kernel, support_factor
 from jaccpot.upward.real_tree_expansions import (
     aggregate_m2m_real_by_level,
     prepare_real_upward_sweep,
-)
-from jaccpot.upward.solidfmm_complex_tree_expansions import (
-    _aggregate_m2m_complex_by_level,
-    prepare_solidfmm_complex_upward_sweep,
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
@@ -1738,9 +1731,10 @@ def _make_fn(
 ) -> Callable:
     """Build the per-device ``shard_map`` body closing over static shapes.
 
-    This is a faithful copy of ``fn`` / ``_combined_neighbors`` from
-    ``tests/distributed/test_distributed_solidfmm_far_shardmap.py`` with the module-level
-    constants promoted to ``config`` fields and only the *full* force path kept.
+    This is a faithful copy of ``fn`` / ``_combined_neighbors`` from the hand-rolled
+    complex-basis test ``test_distributed_solidfmm_far_shardmap.py`` (removed with the
+    complex basis in the 2026-10 cleanup, C) with the module-level constants promoted
+    to ``config`` fields, only the *full* force path kept, and the real basis.
 
     ``differentiable`` switches on the fixed-topology gradient seam (see
     :func:`make_force_evaluator`). It never changes the forward values: every
@@ -1789,7 +1783,6 @@ def _make_fn(
         raise ValueError(
             f"DistributedFMMConfig.basis must be 'real'; got {config.basis!r}"
         )
-    is_real = basis == "real"
 
     # The self walk is the dual-tree walk; "treecode" was removed (cleanup 2026-10).
     lw = str(config.local_walk).strip().lower()
@@ -2002,23 +1995,14 @@ def _make_fn(
             tree, tree.positions_sorted, max_leaf_size=leaf
         )
         total_nodes = jnp.asarray(tree.node_ranges).shape[0]
-        cdtype = complex_dtype_for_real(lp.dtype)
 
-        # local upward. Real basis runs a NATIVE-real P2M + M2M (multipoles are
-        # real from the start -> the coarse-tree all_gather below ships half the
-        # bytes); solidfmm runs the complex sweep. Both produce per-node multipoles
-        # + COM centers with the same API.
-        if is_real:
-            up = prepare_real_upward_sweep(
-                tree, lp, lm, max_order=p, max_leaf_size=leaf
-            )
-        else:
-            up = prepare_solidfmm_complex_upward_sweep(
-                tree, lp, lm, max_order=p, max_leaf_size=leaf, rotation=rot
-            )
+        # local upward: a NATIVE-real P2M + M2M (multipoles are real from the start,
+        # so the coarse-tree all_gather below ships real coefficients). Produces
+        # per-node multipoles + COM centers.
+        up = prepare_real_upward_sweep(tree, lp, lm, max_order=p, max_leaf_size=leaf)
         centers = up.multipoles.centers
-        packed = up.multipoles.packed  # real when is_real, complex otherwise
-        coeff_dtype = lp.dtype if is_real else cdtype
+        packed = up.multipoles.packed
+        coeff_dtype = lp.dtype
         packed_use = packed
 
         inter, nbr, self_res = build_interactions_and_neighbors(
@@ -2056,23 +2040,13 @@ def _make_fn(
             coarse_mass_sorted = rct.masses_sorted
 
         # coarse centres (COM) + level structure (same basis as the local sweep)
-        if is_real:
-            upc = prepare_real_upward_sweep(
-                rct.tree,
-                coarse_pos_sorted,
-                coarse_mass_sorted,
-                max_order=p,
-                max_leaf_size=1,
-            )
-        else:
-            upc = prepare_solidfmm_complex_upward_sweep(
-                rct.tree,
-                coarse_pos_sorted,
-                coarse_mass_sorted,
-                max_order=p,
-                max_leaf_size=1,
-                rotation=rot,
-            )
+        upc = prepare_real_upward_sweep(
+            rct.tree,
+            coarse_pos_sorted,
+            coarse_mass_sorted,
+            max_order=p,
+            max_leaf_size=1,
+        )
         c_centers = upc.multipoles.centers
         c_lc = jnp.asarray(rct.tree.left_child, INDEX_DTYPE)
         c_rc = jnp.asarray(rct.tree.right_child, INDEX_DTYPE)
@@ -2081,8 +2055,7 @@ def _make_fn(
         c_nr = jnp.asarray(rct.tree.node_ranges, INDEX_DTYPE)
         c_leaves = jnp.arange(c_nint, c_total, dtype=INDEX_DTYPE)
 
-        # seed coarse leaves with the remote leaves' own multipoles. The gathered
-        # array is REAL in the real basis (half the bytes of the complex packed).
+        # seed coarse leaves with the remote leaves' own (real) multipoles.
         gpacked = jax.lax.all_gather(packed, "gpus", tiled=False)  # [ndev,N,C]
         spos = c_nr[c_leaves, 0]
         dom = rct.tag_domain[spos]
@@ -2098,34 +2071,19 @@ def _make_fn(
         c_nbl = get_nodes_by_level(rct.tree)
         c_loff = get_level_offsets(rct.tree)
         c_numlev = int(c_loff.shape[0] - 1)
-        if is_real:
-            coarse_packed = aggregate_m2m_real_by_level(
-                seed,
-                c_centers,
-                c_lc,
-                c_rc,
-                jnp.asarray(c_nbl, INDEX_DTYPE),
-                jnp.asarray(c_loff, INDEX_DTYPE),
-                order=p,
-                num_internal=c_nint,
-                num_levels=c_numlev,
-                level_batch_width=max(c_nint, 1),
-            )
-        else:
-            coarse_packed = _aggregate_m2m_complex_by_level(
-                seed,
-                c_centers,
-                c_lc,
-                c_rc,
-                jnp.asarray(c_nbl, INDEX_DTYPE),
-                jnp.asarray(c_loff, INDEX_DTYPE),
-                order=p,
-                num_internal=c_nint,
-                num_levels=c_numlev,
-                level_batch_width=max(c_nint, 1),
-                rotation=rot,
-            )
-        coarse_packed_use = coarse_packed  # real when is_real, complex otherwise
+        coarse_packed = aggregate_m2m_real_by_level(
+            seed,
+            c_centers,
+            c_lc,
+            c_rc,
+            jnp.asarray(c_nbl, INDEX_DTYPE),
+            jnp.asarray(c_loff, INDEX_DTYPE),
+            order=p,
+            num_internal=c_nint,
+            num_levels=c_numlev,
+            level_batch_width=max(c_nint, 1),
+        )
+        coarse_packed_use = coarse_packed
 
         # Same MAC as the self walk above: ``rct.geometry`` bounds the particles behind
         # each coarse node, so the acceptance test means the same thing on both sides.
@@ -2384,9 +2342,6 @@ def _make_fn(
             l2l_overflow = jnp.zeros((), jnp.float64)
 
         def _l2p(loc_coeffs):
-            # Real coeffs carry no conjugate symmetry -> skip the complex-only fixup.
-            if not is_real:
-                loc_coeffs = enforce_conjugate_symmetry_batch(loc_coeffs, order=p)
             loc_coeffs = _propagate_solidfmm_locals_by_level(
                 loc_coeffs,
                 centers,
@@ -2396,12 +2351,12 @@ def _make_fn(
                 order=p,
                 rotation=rot,
                 total_nodes=int(total_nodes),
-                basis_mode="real" if is_real else "complex",
+                basis_mode="real",
                 num_levels=l2l_levels,
             )
             ld = LocalExpansionData(order=p, centers=centers, coefficients=loc_coeffs)
-            # L2P auto-selects the real path from the (real-typed) coefficients;
-            # expansion_basis stays "solidfmm" for both.
+            # L2P selects the real path from the (real-typed) coefficients;
+            # "solidfmm" names the spherical-harmonic family.
             g = _evaluate_local_expansions_for_particles(
                 ld,
                 lp,
@@ -2414,9 +2369,9 @@ def _make_fn(
             )[0]
             return -G * g
 
-        # far: self M2L (local list) + remote M2L (cross list). Both bases share the
-        # tgt-minus-src delta convention; the real path routes through the same
-        # Pallas-aware _apply_real_m2l kernel used by the single-GPU fast lane.
+        # far: self M2L (local list) + remote M2L (cross list), tgt-minus-src deltas,
+        # through the same Pallas-aware _apply_real_m2l kernel used by the
+        # single-GPU fast lane.
         zeros = jnp.zeros((int(total_nodes), C), dtype=coeff_dtype)
         # Far-M2L compute dtype: fp32 halves the per-pair rotation-block memory (the M2L
         # peak) at negligible accuracy cost; accumulation stays coeff_dtype (fp64).
@@ -2425,7 +2380,7 @@ def _make_fn(
         s_tgt = jnp.asarray(inter.targets, INDEX_DTYPE)
         # The dual-tree list is trimmed (-1 padded), so a >=0 test recovers its count.
         s_active = jnp.sum((s_tgt >= 0).astype(INDEX_DTYPE))
-        if is_real and config.m2l_chunk:
+        if config.m2l_chunk:
             # Blockwise self-far M2L (same bound as the cross-far path): the per-pair
             # rotation blocks are the >1.2M/GPU OOM here too. Reproduce the fullbatch
             # gather (valid mask, safe src/tgt, tgt-minus-src deltas) then scan in blocks.
@@ -2449,7 +2404,7 @@ def _make_fn(
                 total_nodes=int(total_nodes),
                 m2l_dtype=m2l_dtype,
             )
-        elif is_real:
+        else:
             loc_self = _accumulate_m2l_fullbatch(
                 zeros,
                 packed_use.astype(m2l_dtype),
@@ -2460,19 +2415,6 @@ def _make_fn(
                 order=p,
                 basis_mode="real",
                 m2l_impl="rot_scale",
-                total_nodes=int(total_nodes),
-            )
-        else:
-            loc_self = _accumulate_m2l_fullbatch(
-                zeros,
-                packed_use,
-                centers,
-                s_src,
-                s_tgt,
-                s_active,
-                order=p,
-                basis_mode="complex",
-                rotation=rot,
                 total_nodes=int(total_nodes),
             )
 
@@ -2490,7 +2432,7 @@ def _make_fn(
         x_valid = x_tgt >= 0
         xs = jnp.where(x_valid, x_src, 0)
         xt = jnp.where(x_valid, x_tgt, 0)
-        if is_real and config.m2l_chunk:
+        if config.m2l_chunk:
             # Blockwise cross-far M2L, index-based (gathers source multipoles + deltas per
             # block, so no full [Npairs, C] materialisation). Bounds peak memory; numerics-
             # identical to the full batch (associative accumulate). src=coarse tree/centres.
@@ -2509,17 +2451,12 @@ def _make_fn(
             )
         else:
             x_deltas = centers[xt] - c_centers[xs]
-            if is_real:
-                x_contribs = _apply_real_m2l(
-                    coarse_packed_use[xs].astype(m2l_dtype),
-                    x_deltas.astype(m2l_dtype),
-                    order=p,
-                    m2l_impl="rot_scale",
-                ).astype(coeff_dtype)
-            else:
-                x_contribs = m2l_complex_reference_batch(
-                    coarse_packed_use[xs], x_deltas, order=p, rotation=rot
-                ).astype(cdtype)
+            x_contribs = _apply_real_m2l(
+                coarse_packed_use[xs].astype(m2l_dtype),
+                x_deltas.astype(m2l_dtype),
+                order=p,
+                m2l_impl="rot_scale",
+            ).astype(coeff_dtype)
             x_contribs = jnp.where(x_valid[:, None], x_contribs, 0)
             loc_full = loc_self + jax.ops.segment_sum(x_contribs, xt, int(total_nodes))
         far_full = _l2p(loc_full)

@@ -1,10 +1,10 @@
 """Regression test for the reusable distributed FMM driver.
 
-Proves that ``jaccpot.distributed.distributed_fmm_accelerations`` reproduces the
-result of the validated in-test assembly in
-``test_distributed_solidfmm_far_shardmap.py``: on the same spatially-separated
-cluster IC, the reassembled per-particle accelerations match a direct N-body sum
-to within 1%.
+Proves that ``jaccpot.distributed.distributed_fmm_accelerations`` matches a direct
+N-body sum to within 1% on a spatially-separated cluster IC. (It began as the
+reusable form of a hand-rolled complex-basis assembly,
+``test_distributed_solidfmm_far_shardmap.py``, removed with the complex basis in the
+2026-10 cleanup, C; this file owns its assertions.)
 
 CAUTION about the IC (measured 2026-08-21, was stated the other way round here for
 as long as this file went unexecuted): ``_separated_clusters`` puts one cluster per
