@@ -62,4 +62,4 @@ Downward sub-split (`bench/profile_downward_breakdown.py`, detail diag modes):
 - `bench/bench_upward_sweep.py` — isolated upward-sweep microbench + `static_num_levels` A/B.
 - `bench/profile_fused_stage_ablation.py` — in-scan per-stage attribution (the reliable one).
 - `bench/profile_downward_breakdown.py` — downward plan-build vs M2L/L2L split.
-- `bench/profile_refresh_stage_breakdown.py` — non-fused per-stage host timers (kept for reference; note the eager-overhead caveat above).
+- `bench/profile_refresh_stage_breakdown.py` — non-fused per-stage host timers (kept for reference; note the eager-overhead caveat above). Since the 2026-10 cleanup (X6) the non-fused `strict_run_v2` loop is gone and `JACCPOT_STATIC_STRICT_FUSED_MODE=off` raises; the script times the eager face, `strict_prepare_refresh_and_evaluate`, which it always drove.
