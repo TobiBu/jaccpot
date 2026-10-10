@@ -19,7 +19,7 @@ from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
 from yggdrax.tree import RadixTree, get_level_offsets
 
-from jaccpot._env import env_choice, env_flag
+from jaccpot._env import env_choice, env_flag, env_reject_removed
 
 from ._large_n_pipeline import evaluate_large_n_state, prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
@@ -108,6 +108,39 @@ def _fresh_compact_pair_rebuild_enabled() -> bool:
         "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE", "0"
     ).strip().lower() in {"1", "true", "yes", "on"}
     return fresh and not unsafe
+
+
+_FALSE_VALUES = ("0", "false", "no", "off")
+
+#: Values of the strict lane's switches whose path the 2026-10 cleanup (X6) removed:
+#: ``(variable, removed values, what runs instead)``. Any other value is accepted
+#: and changes nothing.
+_REMOVED_STRICT_LANE_VALUES = (
+    (
+        "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
+        _FALSE_VALUES,
+        "1, the device-only streamed fast path (the host-routed refresh is gone)",
+    ),
+)
+
+
+def _reject_removed_strict_lane_env() -> None:
+    """Refuse a strict-lane switch set to a value whose path X6 removed.
+
+    Called where the fused lane is opened (``strict_run_v2``,
+    ``strict_fused_prepared_eval_fn``) and by every fused-device refresh: the
+    removed values took effect there, and running the surviving path instead would
+    measure something other than what the caller asked for.
+
+    Returns
+    -------
+    None
+        Returns only when no switch holds a removed value;
+        :func:`jaccpot._env.env_reject_removed` raises ``ValueError`` naming the
+        variable otherwise.
+    """
+    for name, removed, default in _REMOVED_STRICT_LANE_VALUES:
+        env_reject_removed(name, removed, phase="X6", default=default)
 
 
 def _unaliased(tree: Any) -> Any:
@@ -780,7 +813,8 @@ class StrictRunMixin(_EngineBase):
             If ``num_steps`` is not positive, or ``refresh_every`` is not 1; if
             ``carry="particles"`` is asked of a lane that cannot rebuild the state
             from its shapes, or a :class:`StrictParticleCarry` comes without it;
-            if ``donate_state`` is asked without ``carry="particles"``.
+            if ``donate_state`` is asked without ``carry="particles"``; if a
+            strict-lane switch holds a value the 2026-10 cleanup (X6) removed.
         Exception
             Re-raised unchanged when the fused scan fails and the host-segment
             fallback IS allowed -- the caller sees the underlying failure rather
@@ -831,6 +865,7 @@ class StrictRunMixin(_EngineBase):
                 "strict_run_v2 requires refresh_every=1 for endpoint-correct "
                 "velocity-Verlet self gravity"
             )
+        _reject_removed_strict_lane_env()
 
         profile_key = (
             f"n={int(state_arr.shape[0])}|leaf={int(leaf_size)}|"
@@ -2237,7 +2272,9 @@ class StrictRunMixin(_EngineBase):
         Raises
         ------
         RuntimeError
-            If the profile is not large-N production.
+            If the profile is not large-N production. (A strict-lane switch that
+            holds a value the 2026-10 cleanup removed raises ``ValueError``, as in
+            ``strict_run_v2``.)
         """
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
@@ -2245,6 +2282,7 @@ class StrictRunMixin(_EngineBase):
             raise RuntimeError(
                 "strict_fused_prepared_eval_fn requires large_n_gpu production profile."
             )
+        _reject_removed_strict_lane_env()
         fused_mode_requested = bool(getattr(self, "_strict_fused_mode_enabled", False))
         fused_mode_allowed = self._strict_fused_profile_allows_n(
             int(positions_arr.shape[0])
@@ -2377,6 +2415,8 @@ class StrictRunMixin(_EngineBase):
         # the end of this method and `capacity_guard.last_refresh_walk_needs`.
         self._last_refresh_capacity_ok = None
         self._last_refresh_walk_needs = None
+        if fused_device_mode:
+            _reject_removed_strict_lane_env()
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):

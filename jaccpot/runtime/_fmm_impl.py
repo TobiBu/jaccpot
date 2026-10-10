@@ -1510,13 +1510,6 @@ class FMMEngine(
         self._refresh_timing_enabled: bool = str(
             os.environ.get("JACCPOT_REFRESH_TIMING_ENABLE", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
-        self._strict_gpu_mode: str = (
-            str(os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto"))
-            .strip()
-            .lower()
-        )
-        self._strict_gpu_mode_on: bool = self._strict_gpu_mode == "on"
-        self._strict_gpu_mode_auto: bool = self._strict_gpu_mode == "auto"
         split_build_env_raw = os.environ.get(
             "JACCPOT_PREPARE_STAGE_MEMORY_SPLIT_ENABLED"
         )
@@ -1525,7 +1518,6 @@ class FMMEngine(
             if split_build_env_raw is None
             else str(split_build_env_raw).strip().lower() in {"1", "true", "yes", "on"}
         )
-        self._strict_shared_env_applied: bool = False
         self._refresh_strict_mode_active_count: int = 0
         self._strict_runner_compile_count: int = 0
         self._strict_runner_execute_count: int = 0
@@ -1578,20 +1570,6 @@ class FMMEngine(
         None
             Mutates ``self`` in place, exactly as the inlined code did.
         """
-        # Default ON: the device-only fused hot path enables the streamed
-        # fast-lane (_prepare_state_dual_and_downward_strict_streamed_fast),
-        # which is ~10x faster than the host-routed path for the strict fused
-        # static-radix lane (200k particles: ~1224 -> ~119 ms/step on an A100)
-        # with bit-identical energy / angular-momentum conservation
-        # (max|dE/E0| = 8.415e-04 either way, verified over 400 steps). Set the
-        # env var to "0" to opt back into the slower host-routed path, which is
-        # retained only as a fallback.
-        self._strict_fused_device_only: bool = str(
-            os.environ.get(
-                "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
-                "1",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
         self._large_n_eval_diag_mode: str = (
             str(os.environ.get("JACCPOT_LARGE_N_EVAL_DIAG_MODE", "full"))
             .strip()

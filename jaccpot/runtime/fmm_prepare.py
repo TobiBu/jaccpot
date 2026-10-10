@@ -1754,8 +1754,8 @@ class PrepareMixin(_EngineBase):
         buffer -- but it does two things with side effects that must stay here
         rather than move to the call site: it raises loudly when the strict fused
         device-only lane is asked for a configuration it cannot honour (rather
-        than silently degrading the MAC, STYLE_GUIDE §9), and it sets the
-        ``YGGDRAX_DUAL_TREE_SHARED_*`` environment once for the strict lane.
+        than silently degrading the MAC, STYLE_GUIDE §9), and it counts the
+        strict plans it resolves.
 
         Parameters
         ----------
@@ -1771,7 +1771,7 @@ class PrepareMixin(_EngineBase):
         allow_stateful_cache : bool
             Whether this call may reuse cached dual-tree artifacts.
         suppress_host_side_effects : bool
-            Traced/refresh hot path: skip counters, diagnostics and env writes.
+            Traced/refresh hot path: skip counters and diagnostics.
 
         Returns
         -------
@@ -1813,10 +1813,11 @@ class PrepareMixin(_EngineBase):
             and str(tree_artifacts.tree_mode) != "static_radix"
             and (not suppress_host_side_effects)
         )
-        strict_fused_device_only_hot_path = (
-            bool(suppress_host_side_effects)
-            and bool(getattr(self, "_strict_fused_mode_active", False))
-            and bool(getattr(self, "_strict_fused_device_only", False))
+        # The fused lane's traced refresh. It always takes the streamed fast path:
+        # the host-routed alternative (`JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY=0`)
+        # was removed in the 2026-10 cleanup (X6).
+        strict_fused_device_only_hot_path = bool(suppress_host_side_effects) and bool(
+            getattr(self, "_strict_fused_mode_active", False)
         )
         adaptive_order_active = bool(self.adaptive_order) and not bool(
             strict_fused_device_only_hot_path
@@ -1959,15 +1960,12 @@ class PrepareMixin(_EngineBase):
         tree_mode_static_radix = (
             str(tree_artifacts.tree_mode).strip().lower() == "static_radix"
         )
+        # The strict lane is the large-N production profile on a static-radix
+        # tree. `JACCPOT_STATIC_STRICT_GPU_MODE` (on / off) no longer moves it: the
+        # 2026-10 cleanup (X6) hard-wired its `auto`, and ignores the variable
+        # (Odisseo reads it for its own lane gate).
         strict_mode_active = bool(
-            (
-                self._strict_gpu_mode_on
-                or (
-                    self._strict_gpu_mode_auto
-                    and self._large_n_gpu_production_profile_cached
-                    and tree_mode_static_radix
-                )
-            )
+            self._large_n_gpu_production_profile_cached and tree_mode_static_radix
         )
         if strict_mode_active:
             if bool(traced_prepare_inputs) and not bool(
@@ -1976,13 +1974,6 @@ class PrepareMixin(_EngineBase):
                 allow_split_build = False
             if not suppress_host_side_effects:
                 self._refresh_strict_mode_active_count += 1
-                # Strict mode contract: one-shot shared count->fill and single queue.
-                if not bool(getattr(self, "_strict_shared_env_applied", False)):
-                    os.environ["YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_ONE_SHOT"] = "1"
-                    os.environ[
-                        "YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_STEADY_SINGLE_QUEUE"
-                    ] = "1"
-                    self._strict_shared_env_applied = True
         strict_streamed_fast_path = bool(
             strict_mode_active
             and bool(allow_split_build)
@@ -2177,13 +2168,11 @@ class PrepareMixin(_EngineBase):
                 active_count=None,
             )
         max_order_int = int(upward.multipoles.order)
-        strict_fused_device_only_active = bool(
-            getattr(self, "_strict_fused_mode_active", False)
-        ) and bool(getattr(self, "_strict_fused_device_only", False))
+        strict_fused_active = bool(getattr(self, "_strict_fused_mode_active", False))
         if (
             self.mixed_order_farfield
             and max_order_int >= 1
-            and (not strict_fused_device_only_active)
+            and (not strict_fused_active)
         ):
             if interactions is None:
                 raise RuntimeError(

@@ -513,15 +513,14 @@ def _isolate_process_env():
 
     Under ``pytest -n auto`` each xdist worker runs many tests in one process,
     so any ``os.environ`` mutation that is not undone leaks into every later
-    test on that worker. Production code writes process-global flags directly,
-    which makes strict / large-N tests order-dependent and flaky: the strict
-    fused lane sets ``YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_*`` in
-    ``_fmm_impl.py`` (never cleaned up). A prior strict test then changes the
-    dual-tree neighbour/count construction of a later test's *first* build,
-    which can pin an undersized static neighbour-edge cap and blow up a
-    subsequent step (e.g. ``test_strict_run_v2_api``). (A second source, the
-    strict lanes' on-disk traversal cap profile, went in the 2026-10 cleanup,
-    X4, and with it this fixture's per-test profile path.)
+    test on that worker, and makes strict / large-N tests order-dependent and
+    flaky. The two production sources this was written for are gone: the strict
+    lane's process-global ``YGGDRAX_DUAL_TREE_SHARED_COUNT_FILL_*`` writes, which
+    changed a later test's *first* dual-tree build and could pin an undersized
+    static neighbour-edge cap (``test_strict_run_v2_api``), went in the 2026-10
+    cleanup (X6), and the strict lanes' on-disk traversal cap profile, with this
+    fixture's per-test profile path, in X4. The isolation stays, for tests that
+    set variables without ``monkeypatch``.
 
     Snapshot the environment at test start and fully restore it at teardown so
     every test begins from the same baseline regardless of what earlier tests
