@@ -41,7 +41,9 @@ class FMMPresetConfig:
     traversal_config : Optional[DualTreeTraversalConfig]
         Explicit traversal capacities.
     use_dense_interactions : bool
-        Materialise the interaction list densely.
+        Inert, and ``False`` in every preset: the dense interaction buffers were
+        removed with the Cartesian basis in the 2026-10 cleanup (K). Kept so a
+        preset config constructs as before (phase Z).
     jit_tree : Union[bool, Literal['auto']]
         JIT the tree build; ``"auto"`` defers the decision to the runtime.
     jit_traversal : bool

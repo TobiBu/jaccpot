@@ -14,7 +14,6 @@ import jax.numpy as jnp
 import numpy as np
 from beartype.typing import Callable
 from jaxtyping import Array
-from yggdrax.dense_interactions import DenseInteractionBuffers, densify_interactions
 from yggdrax.geometry import TreeGeometry
 from yggdrax.interactions import (
     CompactTaggedFarPairs,
@@ -72,8 +71,6 @@ class _DualTreeArtifacts:
         Full walk result, or ``None`` when it was not retained.
     compact_far_pairs : Optional[CompactTaggedFarPairs]
         Compact tagged far pairs, or ``None`` when not requested.
-    dense_buffers : Optional[DenseInteractionBuffers]
-        Dense interaction buffers, or ``None`` when unused.
     cache_hit : bool
         Whether these artifacts came from the cache rather than a fresh build.
     """
@@ -82,7 +79,6 @@ class _DualTreeArtifacts:
     neighbor_list: NodeNeighborList
     traversal_result: Optional[DualTreeWalkResult]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
-    dense_buffers: Optional[DenseInteractionBuffers]
     cache_hit: bool = False
 
 
@@ -492,7 +488,6 @@ def _build_dual_tree_artifacts_split(
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
     need_node_interactions: bool,
     need_compact_far_pairs: bool,
-    use_dense_interactions: bool,
     pair_policy: Optional[PairPolicy],
     policy_state: Optional[AdaptivePolicyState],
     timing_callback: Optional[Callable[[str, float], None]] = None,
@@ -530,8 +525,6 @@ def _build_dual_tree_artifacts_split(
         Produce a node interaction list.
     need_compact_far_pairs : bool
         Produce compact tagged far pairs.
-    use_dense_interactions : bool
-        Also materialise dense buffers.
     pair_policy : Optional[PairPolicy]
         Solver-owned per-pair acceptance callable. ``None`` runs the geometric
         MAC alone.
@@ -551,12 +544,10 @@ def _build_dual_tree_artifacts_split(
         if timing_enabled and start is not None:
             timing_callback(name, float(time.perf_counter() - start))
 
-    need_far_payload = bool(
-        need_node_interactions or need_compact_far_pairs or use_dense_interactions
-    )
+    need_far_payload = bool(need_node_interactions or need_compact_far_pairs)
     interactions: Optional[NodeInteractionList]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
-    if need_far_payload and not bool(need_node_interactions or use_dense_interactions):
+    if need_far_payload and not bool(need_node_interactions):
         stage_t0 = time.perf_counter() if timing_enabled else None
         interactions = None
         compact_far_pairs, neighbor_list = (
@@ -625,20 +616,11 @@ def _build_dual_tree_artifacts_split(
             policy_state=policy_state,
         )
         _record("dual_split_leaf_neighbors", stage_t0)
-    stage_t0 = time.perf_counter() if timing_enabled else None
-    dense_buffers = _dual_tree_build_dense_buffers(
-        tree=tree,
-        geometry=geometry,
-        interactions=interactions,
-        use_dense_interactions=use_dense_interactions,
-    )
-    _record("dual_split_dense_buffers", stage_t0)
     return _DualTreeArtifacts(
         interactions=interactions,
         neighbor_list=neighbor_list,
         traversal_result=None,
         compact_far_pairs=compact_far_pairs,
-        dense_buffers=dense_buffers,
     )
 
 
@@ -787,7 +769,7 @@ def _build_dual_tree_artifacts_split_strict_streamed(
 
     This path intentionally avoids generic split-builder host branching and
     callback plumbing. It is valid only for streamed compact far-pairs with no
-    dense/interactions payload requests.
+    node-interaction payload request.
 
     ``pair_policy``/``policy_state`` are forwarded rather than assumed absent:
     this branch is selected on payload shape (``fail_fast`` + compact far pairs),
@@ -1148,7 +1130,6 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         neighbor_list=neighbor_list,
         traversal_result=None,
         compact_far_pairs=compact_far_pairs,
-        dense_buffers=None,
     )
 
 
@@ -2232,41 +2213,7 @@ def _build_flat_walk_artifacts_strict_streamed(
         neighbor_list=neighbor_list,
         traversal_result=None,
         compact_far_pairs=compact_far_pairs,
-        dense_buffers=None,
     )
-
-
-def _dual_tree_build_dense_buffers(
-    *,
-    tree: Tree,
-    geometry: TreeGeometry,
-    interactions: Optional[NodeInteractionList],
-    use_dense_interactions: bool,
-) -> Optional[DenseInteractionBuffers]:
-    """Materialize dense interaction buffers when requested.
-
-    Parameters
-    ----------
-    tree : Tree
-        Built tree.
-    geometry : TreeGeometry
-        Node centres and radii.
-    interactions : Optional[NodeInteractionList]
-        Far-field pairs to densify.
-    use_dense_interactions : bool
-        Whether to build them at all.
-
-    Returns
-    -------
-    Optional[DenseInteractionBuffers]
-        The dense buffers, or ``None`` when not requested or when there is no
-        interaction list to densify. Dense storage is quadratic in node count,
-        which is why it is opt-in rather than the default.
-    """
-
-    if not use_dense_interactions:
-        return None
-    return densify_interactions(tree, geometry, interactions)
 
 
 _CAPACITY_RETRY_MAX_ATTEMPTS = 2
@@ -2767,7 +2714,6 @@ def _build_dual_tree_artifacts(
     traversal_config: Optional[DualTreeTraversalConfig],
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]],
     fail_fast: bool,
-    use_dense_interactions: bool,
     need_traversal_result: bool,
     need_compact_far_pairs: bool,
     need_node_interactions: bool,
@@ -2823,8 +2769,6 @@ def _build_dual_tree_artifacts(
         diagnostics rather than being absorbed here.
     fail_fast : bool
         Raise on a capacity overflow instead of retrying with more room.
-    use_dense_interactions : bool
-        Materialise the interaction list densely.
     need_traversal_result : bool
         Retain the full walk result.
     need_compact_far_pairs : bool
@@ -2907,7 +2851,6 @@ def _build_dual_tree_artifacts(
                 fail_fast
                 and bool(need_compact_far_pairs)
                 and not bool(need_node_interactions)
-                and not bool(use_dense_interactions)
                 and not bool(need_traversal_result)
             )
         if walk_criterion is not None and not (
@@ -2954,7 +2897,6 @@ def _build_dual_tree_artifacts(
                     retry_logger=retry_logger,
                     need_node_interactions=need_node_interactions,
                     need_compact_far_pairs=need_compact_far_pairs,
-                    use_dense_interactions=use_dense_interactions,
                     pair_policy=pair_policy,
                     policy_state=policy_state,
                     timing_callback=timing_callback,
@@ -3041,19 +2983,11 @@ def _build_dual_tree_artifacts(
                 else None
             )
 
-    dense_buffers = _dual_tree_build_dense_buffers(
-        tree=tree,
-        geometry=geometry,
-        interactions=interactions,
-        use_dense_interactions=use_dense_interactions,
-    )
-
     artifacts = _DualTreeArtifacts(
         interactions=interactions,
         neighbor_list=neighbor_list,
         traversal_result=traversal_result,
         compact_far_pairs=compact_far_pairs,
-        dense_buffers=dense_buffers,
         cache_hit=bool(dual_tree_cache_hit),
     )
     return artifacts, cache_out

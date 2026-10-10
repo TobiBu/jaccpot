@@ -13,7 +13,6 @@ import jax.numpy as jnp
 from beartype import beartype
 from beartype.typing import Callable
 from jaxtyping import Array, Float, jaxtyped
-from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
@@ -468,7 +467,6 @@ class SweepsMixin(_EngineBase):
         m2l_chunk_size: Optional[int] = None,
         l2l_chunk_size: Optional[int] = None,
         traversal_config: Optional[DualTreeTraversalConfig] = None,
-        dense_buffers: Optional[DenseInteractionBuffers] = None,
         retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
         dehnen_radius_scale: Optional[float] = None,
         far_pairs_coo: Optional[_FarPairCOO] = None,
@@ -506,8 +504,6 @@ class SweepsMixin(_EngineBase):
             Nodes per L2L chunk.
         traversal_config : Optional[DualTreeTraversalConfig]
             Traversal capacities and retry policy.
-        dense_buffers : Optional[DenseInteractionBuffers]
-            Pre-built dense interaction buffers.
         retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
             Called when the traversal retries with a larger capacity.
         dehnen_radius_scale : Optional[float]
@@ -613,7 +609,6 @@ class SweepsMixin(_EngineBase):
                 m2l_impl=self.m2l_impl,
                 retry_logger=retry_callback,
                 traversal_config=config,
-                dense_buffers=dense_buffers,
                 far_pairs_coo=far_pairs_coo,
                 far_pairs_by_gear=far_pairs_by_gear,
                 adaptive_order=adaptive_order_val,

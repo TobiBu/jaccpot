@@ -567,6 +567,35 @@ def test_class_major_farfield_mode_raises_removal_error():
         )
 
 
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_use_dense_interactions_true_raises_removal_error():
+    """The dense interaction buffers went with the Cartesian basis (cleanup 2026-10, K).
+
+    Both doors: the engine keyword, and the facade's legacy kwarg that reaches it.
+    """
+    with pytest.raises(ValueError, match="dense interaction buffers were removed"):
+        fmm_impl_private.FMMEngine(use_dense_interactions=True)
+    with pytest.raises(ValueError, match="dense interaction buffers were removed"):
+        FastMultipoleMethod(preset=FMMPreset.FAST, use_dense_interactions=True)
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("value", [None, False])
+def test_use_dense_interactions_unset_or_false_is_accepted_and_ignored(value):
+    """``None``/``False`` construct, as before; the resolved field is always ``False``.
+
+    The engine attribute and the ``refresh_dual_split_dense_buffers_seconds``
+    diagnostics key went with the dense build (Odisseo reads the key with ``.get``).
+    """
+    engine = fmm_impl_private.FMMEngine(use_dense_interactions=value)
+    assert engine.config.traversal.use_dense_interactions is False
+    assert not hasattr(engine, "use_dense_interactions")
+    fmm = FastMultipoleMethod(preset=FMMPreset.FAST, use_dense_interactions=value)
+    assert fmm._impl.config.traversal.use_dense_interactions is False
+    diagnostics = fmm.get_runtime_diagnostics()
+    assert "refresh_dual_split_dense_buffers_seconds" not in diagnostics
+
+
 @pytest.mark.parametrize("mode", ["auto", "pair_grouped"])
 def test_surviving_farfield_modes_still_construct(mode):
     """``"auto"`` and ``"pair_grouped"`` stay accepted; both run the flat pair list."""

@@ -190,6 +190,34 @@ def _reject_removed_farfield_options(farfield: FarFieldConfig) -> None:
         )
 
 
+def _reject_removed_dense_interactions(use_dense_interactions: Optional[bool]) -> None:
+    """Refuse ``use_dense_interactions=True``, removed in the 2026-10 cleanup (K).
+
+    The dense interaction buffers were materialised only on the Cartesian basis
+    (the prepare gated them on ``expansion_basis != "solidfmm"``) and went with it.
+    The keyword stays so an old call constructs; ``True`` raises rather than being
+    ignored, so an old config cannot believe it ran the dense lane. Runs first in
+    ``__init__``, beside :func:`_reject_removed_farfield_options`.
+
+    Parameters
+    ----------
+    use_dense_interactions : Optional[bool]
+        The engine keyword as the caller passed it.
+
+    Raises
+    ------
+    ValueError
+        If it is true.
+    """
+    if bool(use_dense_interactions):
+        raise ValueError(
+            "use_dense_interactions=True is no longer available: the dense "
+            "interaction buffers were removed with the Cartesian basis in the "
+            "2026-10 cleanup (K); see docs/cleanup_2026-10.md. Leave it unset or "
+            "False."
+        )
+
+
 def derive_split_build_default(
     *,
     memory_objective: str,
@@ -357,8 +385,9 @@ class FMMEngine(
         capacity and re-runs with a larger one. Purely observational -- use it to
         detect that ``traversal_config`` is undersized.
     use_dense_interactions : Optional[bool]
-        Materialize the interaction list densely rather than as a compact list --
-        faster for small trees, quadratic in memory for large ones.
+        Removed in the 2026-10 cleanup (K): the dense interaction buffers were
+        built only for the Cartesian basis. ``None`` and ``False`` are accepted
+        and ignored; ``True`` raises.
     runtime_path : Literal['auto', 'large_n']
         ``"auto"`` or ``"large_n"``, accepted and stored but no longer a lane
         switch: the large-N lane is selected by ``preset="large_n_gpu"``, whose
@@ -505,6 +534,7 @@ class FMMEngine(
         # resolves it at `solver.py:445-447` -- None means "not overridden".
         _ff = FarFieldConfig() if farfield is None else farfield
         _reject_removed_farfield_options(_ff)
+        _reject_removed_dense_interactions(use_dense_interactions)
         farfield_mode = _ff.mode
         complex_rotation = "solidfmm" if _ff.rotation is None else _ff.rotation
         m2l_chunk_size = _ff.m2l_chunk_size
@@ -661,7 +691,6 @@ class FMMEngine(
             max_pair_queue=max_pair_queue,
             pair_process_block=pair_process_block,
             traversal_config=traversal_config,
-            use_dense_interactions=use_dense_interactions,
             preset_config=preset_config,
         )
 
@@ -1399,7 +1428,6 @@ class FMMEngine(
         self.max_refine_levels = resolved.tree.max_refine_levels
         self.aspect_threshold = resolved.tree.aspect_threshold
         self.interaction_retry_logger = interaction_retry_logger
-        self.use_dense_interactions = resolved.traversal.use_dense_interactions
         self._tree_workspace: Optional[object] = None
         self._locals_template: Optional[LocalExpansionData] = None
         self._interaction_cache: Optional[_InteractionCacheEntry] = None
@@ -1470,7 +1498,6 @@ class FMMEngine(
         self._refresh_timing_dual_split_leaf_neighbors_seconds: float = 0.0
         self._refresh_timing_dual_split_combined_seconds: float = 0.0
         self._refresh_timing_dual_raw_combined_seconds: float = 0.0
-        self._refresh_timing_dual_split_dense_buffers_seconds: float = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds: float = 0.0
         self._refresh_timing_dual_select_interactions_seconds: float = 0.0
         self._refresh_timing_dual_downward_compute_seconds: float = 0.0
@@ -1962,7 +1989,6 @@ class FMMEngine(
         self._refresh_timing_dual_split_leaf_neighbors_seconds = 0.0
         self._refresh_timing_dual_split_combined_seconds = 0.0
         self._refresh_timing_dual_raw_combined_seconds = 0.0
-        self._refresh_timing_dual_split_dense_buffers_seconds = 0.0
         self._refresh_timing_dual_far_pair_plan_seconds = 0.0
         self._refresh_timing_dual_select_interactions_seconds = 0.0
         self._refresh_timing_dual_downward_compute_seconds = 0.0

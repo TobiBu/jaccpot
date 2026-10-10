@@ -127,7 +127,6 @@ CONFIGS: dict[str, dict[str, Any]] = {
     # --- far/near field and runtime lane selection ---
     "streamed_far_pairs_on": {"farfield": FarFieldConfig(streamed_far_pairs=True)},
     "streamed_far_pairs_off": {"farfield": FarFieldConfig(streamed_far_pairs=False)},
-    "farfield_dense": {"use_dense_interactions": True},
     "farfield_pair_grouped": {"farfield": FarFieldConfig(mode="pair_grouped")},
     "nearfield_baseline": {"nearfield": NearFieldConfig(mode="baseline")},
     "nearfield_bucketed": {"nearfield": NearFieldConfig(mode="bucketed")},

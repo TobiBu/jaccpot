@@ -220,7 +220,7 @@ class TreeBuilderConfig:
 
 @dataclass(frozen=True)
 class TraversalExecutionConfig:
-    """Resolved configuration for traversal, batching, and dense buffers.
+    """Resolved configuration for traversal and batching.
 
     Attributes
     ----------
@@ -236,8 +236,9 @@ class TraversalExecutionConfig:
         Full dual-tree traversal override; ``None`` builds one from the fields
         above.
     use_dense_interactions : bool
-        Materialize the interaction list densely rather than as a compact
-        list -- faster for small trees, quadratic in memory for large ones.
+        Always ``False``, and read by nothing: the dense interaction buffers were
+        removed with the Cartesian basis in the 2026-10 cleanup (K). Kept so the
+        resolved config keeps its shape (phase Z).
     jit_tree : Union[bool, Literal['auto']]
         Compile the tree build. ``"auto"`` decides per call, which is why this is
         not a plain ``bool``.
@@ -493,7 +494,6 @@ def _resolve_fmm_config(
     max_pair_queue: Optional[int],
     pair_process_block: Optional[int],
     traversal_config: Optional[DualTreeTraversalConfig],
-    use_dense_interactions: Optional[bool],
     preset_config: Optional[FMMPresetConfig],
 ) -> FMMResolvedConfig:
     """Normalize constructor inputs into a validated runtime configuration.
@@ -532,8 +532,6 @@ def _resolve_fmm_config(
         Pairs drained from that queue per step.
     traversal_config : Optional[DualTreeTraversalConfig]
         Full traversal override.
-    use_dense_interactions : Optional[bool]
-        Materialize interactions densely.
     preset_config : Optional[FMMPresetConfig]
         The preset's contribution -- the middle tier. ``None`` means every
         resolution falls straight from the explicit argument to the default.
@@ -551,9 +549,6 @@ def _resolve_fmm_config(
         is neither a bool nor ``"auto"``.
     """
     preset_name = preset_config.name if preset_config is not None else None
-    preset_use_dense_interactions = (
-        preset_config.use_dense_interactions if preset_config else None
-    )
 
     tree_mode = _resolve_optional(
         tree_build_mode,
@@ -638,13 +633,9 @@ def _resolve_fmm_config(
             preset_config.traversal_config if preset_config else None,
             None,
         ),
-        use_dense_interactions=bool(
-            _resolve_optional(
-                use_dense_interactions,
-                preset_use_dense_interactions,
-                False,
-            )
-        ),
+        # Removed with the Cartesian basis (2026-10 cleanup, K); the engine
+        # refuses `use_dense_interactions=True`, and no preset sets it.
+        use_dense_interactions=False,
         jit_tree=jit_tree_cfg,
         jit_traversal=bool(
             _resolve_optional(

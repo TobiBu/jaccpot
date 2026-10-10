@@ -163,7 +163,6 @@ def _build(engine, tree_artifacts, *, split: bool, policy_state):
         traversal_config=_TRAVERSAL,
         retry_logger=None,
         fail_fast=False,
-        use_dense_interactions=False,
         need_traversal_result=False,
         need_compact_far_pairs=False,
         need_node_interactions=True,

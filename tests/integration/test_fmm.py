@@ -827,39 +827,6 @@ def test_stf_symmetry_and_trace_free():
     assert jnp.allclose(dt, 0.0, atol=1e-4)
 
 
-def test_fmm_dense_downward_matches_sparse_path():
-    positions = jnp.array(
-        [
-            [-0.8, 0.1, 0.0],
-            [-0.4, -0.2, 0.25],
-            [0.2, 0.3, -0.1],
-            [0.6, -0.15, 0.15],
-        ],
-        dtype=jnp.float64,
-    )
-    masses = jnp.array([1.0, 0.7, 1.3, 0.9], dtype=jnp.float64)
-    bounds = (
-        jnp.array([-1.0, -1.0, -1.0], dtype=jnp.float64),
-        jnp.array([1.0, 1.0, 1.0], dtype=jnp.float64),
-    )
-
-    kwargs = dict(bounds=bounds, leaf_size=2, max_order=2, theta=0.6)
-    fmm_sparse = FMMEngine(
-        theta=0.6, use_dense_interactions=False, softening_kernel="plummer"
-    )
-    fmm_dense = FMMEngine(
-        theta=0.6, use_dense_interactions=True, softening_kernel="plummer"
-    )
-
-    state_sparse = fmm_sparse.prepare_state(positions, masses, **kwargs)
-    state_dense = fmm_dense.prepare_state(positions, masses, **kwargs)
-
-    acc_sparse = fmm_sparse.evaluate_prepared_state(state_sparse)
-    acc_dense = fmm_dense.evaluate_prepared_state(state_dense)
-
-    assert jnp.allclose(acc_sparse, acc_dense, rtol=1e-10, atol=1e-10)
-
-
 def test_far_field_accuracy_order3_vs_order4():
     """Order 4 should be at least as accurate as order 3 in far field."""
     key = jax.random.PRNGKey(2)

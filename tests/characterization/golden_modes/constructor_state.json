@@ -89,7 +89,6 @@
   "_refresh_timing_dual_setup_seconds": "0.0",
   "_refresh_timing_dual_source_motion_seconds": "0.0",
   "_refresh_timing_dual_split_combined_seconds": "0.0",
-  "_refresh_timing_dual_split_dense_buffers_seconds": "0.0",
   "_refresh_timing_dual_split_far_pairs_seconds": "0.0",
   "_refresh_timing_dual_split_leaf_neighbors_seconds": "0.0",
   "_refresh_timing_dual_split_shared_combined_fill_seconds": "0.0",
@@ -236,7 +235,6 @@
   "tree_build_mode": "'lbvh'",
   "tree_type": "'radix'",
   "upward_leaf_batch_size": "None",
-  "use_dense_interactions": "False",
   "use_pallas": "False",
   "working_dtype": "None"
  },
@@ -288,10 +286,6 @@
   "fail_fast": {
    "fail_fast": "True",
    "host_refine_mode": "'off'"
-  },
-  "farfield_dense": {
-   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=False, max_refine_levels=2, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, use_dense_interactions=True, jit_tree='auto', jit_traversal=True), preset=None)",
-   "use_dense_interactions": "True"
   },
   "farfield_pair_grouped": {
    "farfield_mode": "'pair_grouped'"

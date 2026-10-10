@@ -25,7 +25,6 @@ import jax
 import jax.numpy as jnp
 from beartype.typing import Callable
 from jaxtyping import Array
-from yggdrax.dense_interactions import DenseInteractionBuffers
 from yggdrax.interactions import (
     DualTreeRetryEvent,
     DualTreeTraversalConfig,
@@ -580,7 +579,6 @@ def _prepare_solidfmm_downward_sweep(
     basis_mode: str = "complex",
     m2l_impl: Optional[str] = None,
     traversal_config: Optional[DualTreeTraversalConfig] = None,
-    dense_buffers: Optional[DenseInteractionBuffers] = None,
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
     far_pairs_coo: Optional[_FarPairCOO] = None,
     far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
@@ -630,8 +628,6 @@ def _prepare_solidfmm_downward_sweep(
         M2L implementation selector for the flat lanes.
     traversal_config : Optional[DualTreeTraversalConfig]
         Traversal capacities and retry policy.
-    dense_buffers : Optional[DenseInteractionBuffers]
-        Pre-built dense interaction buffers.
     retry_logger : Optional[Callable[[DualTreeRetryEvent], None]]
         Called when the traversal retries with a larger capacity.
     far_pairs_coo : Optional[_FarPairCOO]
