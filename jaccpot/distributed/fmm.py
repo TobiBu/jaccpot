@@ -77,7 +77,11 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
-from jaccpot.config import _CARTESIAN_BASIS_REMOVED, MACTypeInput
+from jaccpot.config import (
+    _CARTESIAN_BASIS_REMOVED,
+    _COMPLEX_BASIS_REMOVED,
+    MACTypeInput,
+)
 from jaccpot.distributed._force_scale import (
     DISTRIBUTED_FORCE_SCALE_MODES,
     cross_policy_state,
@@ -724,13 +728,13 @@ class DistributedFMMConfig:
     # loop over nodes and cannot be traced, so they are unreachable inside
     # ``shard_map`` and rejected up front rather than at trace time.
     dehnen_geometry_mode: str = "com"
-    # Far-field expansion basis: "real" (Dehnen no-sqrt2, DEFAULT) or "solidfmm" (complex).
-    # "real" is the per-device far field converged onto the single-GPU fast-lane path
-    # (memory-lighter, and unlocks the fused real M2L Pallas kernel when
-    # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is set). Upward sweep + coarse M2M stay
-    # complex; multipoles are converted to Dehnen real coeffs at the M2L boundary.
-    # "cartesian" raises when the evaluator is built (the Cartesian basis was removed
-    # in the 2026-10 cleanup, K); before, it silently ran the complex path.
+    # Far-field expansion basis: "real" (Dehnen no-sqrt2) is the only one. It is the
+    # per-device far field converged onto the single-GPU fast-lane path (native-real
+    # P2M + M2M, and the fused real M2L Pallas kernel when
+    # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is set). Anything else raises when the
+    # evaluator is built: "cartesian" (removed in the 2026-10 cleanup, K; before, it
+    # silently ran the complex path), "complex" and "solidfmm" (the complex far field,
+    # removed in C), and any other string (which also used to run complex).
     basis: str = "real"
     # Near-field backend: "baseline" (pure-JAX combined [local;halo] P2P) or
     # "pallas" (fused leafpair Pallas kernel, sm_80+, the single-GPU fast-lane
@@ -1776,9 +1780,16 @@ def _make_fn(
     )
     rot = config.rotation
     theta = config.theta
-    if str(config.basis).strip().lower() == "cartesian":
+    basis = str(config.basis).strip().lower()
+    if basis == "cartesian":
         raise ValueError(_CARTESIAN_BASIS_REMOVED)
-    is_real = str(config.basis).strip().lower() == "real"
+    if basis in ("complex", "solidfmm"):
+        raise ValueError(_COMPLEX_BASIS_REMOVED)
+    if basis != "real":
+        raise ValueError(
+            f"DistributedFMMConfig.basis must be 'real'; got {config.basis!r}"
+        )
+    is_real = basis == "real"
 
     # The self walk is the dual-tree walk; "treecode" was removed (cleanup 2026-10).
     lw = str(config.local_walk).strip().lower()

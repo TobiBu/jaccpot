@@ -37,6 +37,15 @@ _CARTESIAN_BASIS_REMOVED = (
     "basis='cartesian' was removed in the 2026-10 cleanup (K); see "
     "docs/cleanup_2026-10.md. Use basis='real' (the default)."
 )
+#: The one message every spelling of the removed complex spherical-harmonic basis
+#: raises with (2026-10 cleanup, C). ``DistributedFMMConfig(basis=...)`` raises it
+#: for ``"complex"`` and for ``"solidfmm"``, the distributed driver's name for its
+#: complex far field.
+_COMPLEX_BASIS_REMOVED = (
+    "basis='complex' was removed in the 2026-10 cleanup (C); see "
+    "docs/cleanup_2026-10.md. Use basis='real' (the default) -- it agrees with the "
+    "complex basis to round-off."
+)
 #: ``"class_major"`` stays in the alias only so that an old config naming it still
 #: constructs (and type-checks); the solver then raises, because the class-major far
 #: field was removed with the grouped one in the 2026-10 cleanup

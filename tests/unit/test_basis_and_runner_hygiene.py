@@ -34,6 +34,11 @@ _REMOVED = (
     "basis='cartesian' was removed in the 2026-10 cleanup (K); see "
     "docs/cleanup_2026-10.md. Use basis='real' (the default)."
 )
+_COMPLEX_REMOVED = (
+    "basis='complex' was removed in the 2026-10 cleanup (C); see "
+    "docs/cleanup_2026-10.md. Use basis='real' (the default) -- it agrees with the "
+    "complex basis to round-off."
+)
 
 
 class TestBasisAliasing:
@@ -100,8 +105,8 @@ class TestCartesianWasRemoved:
                 DistributedFMMConfig(basis="cartesian"), 1, 64, mesh=None
             )
 
-    @pytest.mark.parametrize("basis", ("real", "solidfmm"))
-    def test_the_distributed_config_still_takes_its_two_bases(self, basis) -> None:
+    @pytest.mark.parametrize("basis", ("real", " Real "))
+    def test_the_distributed_config_still_takes_the_real_basis(self, basis) -> None:
         assert callable(
             make_force_evaluator(DistributedFMMConfig(basis=basis), 1, 64, mesh=None)
         )
@@ -118,6 +123,27 @@ class TestCartesianWasRemoved:
         with pytest.raises(ValueError, match="basis must be one of") as excinfo:
             FastMultipoleMethod(preset="fast", basis="spherical")
         assert "cartesian" not in str(excinfo.value)
+
+
+class TestComplexWasRemoved:
+    """Every way to name the complex basis raises the one migration error (C)."""
+
+    @pytest.mark.parametrize("basis", ("complex", "solidfmm", " Complex ", "SOLIDFMM"))
+    def test_the_distributed_config_basis_raises(self, basis: str) -> None:
+        """Raised while the evaluator is built, before the mesh is touched.
+
+        ``"solidfmm"`` was the distributed driver's name for its complex far field
+        (``DistributedFMMConfig.basis`` ran complex for every string but ``"real"``).
+        """
+        with pytest.raises(ValueError, match=re.escape(_COMPLEX_REMOVED)):
+            make_force_evaluator(DistributedFMMConfig(basis=basis), 1, 64, mesh=None)
+
+    def test_an_unknown_distributed_basis_raises(self) -> None:
+        """Before C, any string but ``"real"`` silently ran the complex far field."""
+        with pytest.raises(ValueError, match="must be 'real'"):
+            make_force_evaluator(
+                DistributedFMMConfig(basis="spherical"), 1, 64, mesh=None
+            )
 
 
 class TestComparisonBenchExitCode:
