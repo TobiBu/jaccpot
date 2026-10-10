@@ -11,11 +11,11 @@ wrapper installed only on the defining module never runs, and the tool reports
 "never called" for a function called on every step -- which is worse than no
 tool, because the silence looks like evidence.
 
-**It must not confuse same-named functions from different modules.** This is not
-hypothetical here: `jaccpot/operators/multipole_utils.py` and
-`yggdrax/multipole_utils.py` define eight identically-named functions, and
-production imports yggdrax's. The binding scan therefore matches on object
-identity, never on name.
+**It must not confuse same-named functions from different modules.** This was not
+hypothetical here: `jaccpot/operators/multipole_utils.py` (removed in the 2026-10
+cleanup, K) and `yggdrax/multipole_utils.py` defined eight identically-named
+functions, and production imported yggdrax's. The binding scan therefore matches
+on object identity, never on name.
 """
 
 from __future__ import annotations

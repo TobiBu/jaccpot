@@ -2570,8 +2570,10 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
 
     So the bound below is what is achievable, not slack. Tightening it means
     setting the matmul precision in the M2L kernels -- jaccpot does that in the
-    L2P path (``jaccpot/downward/local_expansions.py``, ``Precision.HIGHEST``)
-    but not here. Left as-is deliberately; see ARCHITECTURE.md section 7.
+    real L2P path (``jaccpot/operators/real_p2m_l2p.py``, ``Precision.HIGHEST``;
+    the Cartesian one in ``downward/local_expansions.py`` did too, until the
+    2026-10 cleanup, K) but not here. Left as-is deliberately; see
+    ARCHITECTURE.md section 7.
 
     What this does and does not discriminate, measured by mutation:
 

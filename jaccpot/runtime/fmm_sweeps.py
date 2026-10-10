@@ -28,12 +28,6 @@ from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
 )
-from jaccpot.downward.local_expansions import (
-    prepare_downward_sweep as prepare_tree_downward_sweep,
-)
-from jaccpot.downward.local_expansions import (
-    run_downward_sweep as run_tree_downward_sweep,
-)
 from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
 from jaccpot.upward.solidfmm_complex_tree_expansions import (
     prepare_solidfmm_complex_upward_sweep,
@@ -41,9 +35,6 @@ from jaccpot.upward.solidfmm_complex_tree_expansions import (
 from jaccpot.upward.tree_expansions import (
     NodeMultipoleData,
     TreeUpwardData,
-)
-from jaccpot.upward.tree_expansions import (
-    prepare_upward_sweep as prepare_tree_upward_sweep,
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
@@ -331,8 +322,10 @@ class SweepsMixin(_EngineBase):
         ------
         ValueError
             If the native real-basis sweep is asked for a ``center_mode`` other
-            than ``"com"``; or, with int32 indices, if the particle count or the
-            nodes x coefficients reach the int32 range.
+            than ``"com"``; with int32 indices, if the particle count or the
+            nodes x coefficients reach the int32 range; or if the engine's
+            basis is not ``"solidfmm"`` (the Cartesian sweep went in the 2026-10
+            cleanup, K).
         """
         node_ranges = getattr(tree, "node_ranges", None)
         require_index_capacity(
@@ -399,7 +392,7 @@ class SweepsMixin(_EngineBase):
                 real_multipoles = NodeMultipoleData(
                     order=int(real_upward.multipoles.order),
                     centers=real_upward.multipoles.centers,
-                    moments=None,  # type: ignore[arg-type]
+                    moments=None,
                     packed=real_upward.multipoles.packed,
                     component_matrix=None,
                     source_motion_packed=None,
@@ -444,7 +437,7 @@ class SweepsMixin(_EngineBase):
             multipoles = NodeMultipoleData(
                 order=int(complex_upward.multipoles.order),
                 centers=complex_upward.multipoles.centers,
-                moments=None,  # type: ignore[arg-type]
+                moments=None,
                 packed=complex_upward.multipoles.packed,
                 component_matrix=None,
                 source_motion_packed=complex_upward.multipoles.source_motion_packed,
@@ -456,59 +449,8 @@ class SweepsMixin(_EngineBase):
                 multipoles=multipoles,
             )
 
-        return prepare_tree_upward_sweep(
-            tree,
-            positions_sorted,
-            masses_sorted,
-            max_order=max_order,
-            center_mode=center_mode,
-            explicit_centers=explicit_centers,
-            precomputed_geometry=precomputed_geometry,
-        )
-
-    def run_downward_sweep(
-        self,
-        tree: Tree,
-        multipoles: NodeMultipoleData,
-        interactions: NodeInteractionList,
-        *,
-        initial_locals: Optional[LocalExpansionData] = None,
-        m2l_chunk_size: Optional[int] = None,
-        dense_buffers: Optional[DenseInteractionBuffers] = None,
-    ) -> LocalExpansionData:
-        """Execute an M2L+L2L pass for the provided multipoles.
-
-        Takes an interaction list as given; :meth:`prepare_downward_sweep` is the
-        entry point that builds one.
-
-        Parameters
-        ----------
-        tree : Tree
-            Tree being swept.
-        multipoles : NodeMultipoleData
-            Source multipoles from the upward sweep.
-        interactions : NodeInteractionList
-            Far-pair list to accumulate.
-        initial_locals : Optional[LocalExpansionData]
-            Locals to accumulate into; ``None`` starts from zeros.
-        m2l_chunk_size : Optional[int]
-            Pairs per M2L chunk; a memory/throughput knob only.
-        dense_buffers : Optional[DenseInteractionBuffers]
-            Pre-built dense interaction buffers, when the dense lane is in use.
-
-        Returns
-        -------
-        LocalExpansionData
-            Local expansions after M2L and the L2L cascade.
-        """
-
-        return run_tree_downward_sweep(
-            tree,
-            multipoles,
-            interactions,
-            initial_locals=initial_locals,
-            m2l_chunk_size=m2l_chunk_size,
-            dense_buffers=dense_buffers,
+        raise ValueError(
+            f"expansion_basis must be 'solidfmm'; got {self.expansion_basis!r}"
         )
 
     def prepare_downward_sweep(
@@ -596,6 +538,12 @@ class SweepsMixin(_EngineBase):
         -------
         TreeDownwardData
             Interactions plus the local expansions they produced.
+
+        Raises
+        ------
+        ValueError
+            If the engine's basis is not ``"solidfmm"`` (the Cartesian sweep went
+            in the 2026-10 cleanup, K).
         """
         theta_val = float(self.theta if theta is None else theta)
         # Resolve BEFORE the traversal sees it. Both branches: an explicitly
@@ -676,17 +624,6 @@ class SweepsMixin(_EngineBase):
                 timing_recorder=timing_recorder,
             )
 
-        return prepare_tree_downward_sweep(
-            tree,
-            upward_data,
-            theta=theta_val,
-            mac_type=mac_type_val,
-            initial_locals=initial_locals,
-            interactions=interactions,
-            m2l_chunk_size=m2l_chunk_size,
-            retry_logger=retry_callback,
-            traversal_config=config,
-            max_pair_queue=self.max_pair_queue,
-            process_block=self.pair_process_block,
-            dense_buffers=dense_buffers,
+        raise ValueError(
+            f"expansion_basis must be 'solidfmm'; got {self.expansion_basis!r}"
         )

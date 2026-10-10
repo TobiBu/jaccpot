@@ -39,14 +39,12 @@ from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
-    initialize_local_expansions,
 )
 from jaccpot.nearfield.near_field import (
     prepare_bucketed_scatter_schedules,
     prepare_bucketed_scatter_schedules_from_groups,
     prepare_leaf_neighbor_pairs,
 )
-from jaccpot.operators.multipole_utils import MAX_MULTIPOLE_ORDER, total_coefficients
 from jaccpot.upward.tree_expansions import TreeUpwardData
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
@@ -266,7 +264,8 @@ class _DualDownwardPlan(NamedTuple):
 #       "positions must have shape (N, 3)", "masses must have shape (N,)". Every helper
 #       below receives the arrays AFTER that gate, so annotating them would replace the
 #       best error in the module with a generic `TypeCheckError` (section 4.1 calls that a
-#       loss, and `local_expansions.py`'s `centers` is the same entry in DELIBERATELY_BARE).
+#       loss; the Cartesian `local_expansions.py`'s `centers` was the same entry in
+#       DELIBERATELY_BARE until that sweep went in the 2026-10 cleanup, K).
 #
 #   bounds                                                          (5 parameters)
 #       Rejected already, and not by us: a short, long or rank-2 bound raises a
@@ -330,19 +329,14 @@ class PrepareMixin(_EngineBase):
 
         Raises
         ------
-        NotImplementedError
-            If the requested order exceeds what the active basis supports.
         ValueError
-            If the order or leaf size is outside its valid range.
+            If the leaf size is below 1, or ``max_order`` disagrees with a pinned
+            ``fixed_order``.
         """
         if leaf_size < 1:
             raise ValueError("leaf_size must be >= 1")
         if self.fixed_order is not None and int(self.fixed_order) != int(max_order):
             raise ValueError("fixed_order must match max_order")
-        if max_order > MAX_MULTIPOLE_ORDER and self.expansion_basis != "solidfmm":
-            raise NotImplementedError(
-                "orders above 4 require expansion_basis='solidfmm'",
-            )
 
     def _prepare_state_input_arrays(
         self,
@@ -802,51 +796,32 @@ class PrepareMixin(_EngineBase):
         max_order: int,
         pos_sorted: Array,
     ) -> Optional[LocalExpansionData]:
-        """Build initial local-expansion buffers matching the active basis.
+        """Return no prebuilt local-expansion buffers: every basis left builds its own.
+
+        Only the Cartesian basis reused a zeroed locals template across prepares;
+        the spherical-harmonic downward pass allocates its accumulator on demand, so
+        a redundant zero buffer is not held alive across dual-tree staging. The
+        Cartesian basis was removed in the 2026-10 cleanup (K), so this always
+        returns ``None``, which is what the SH path always got. Kept, with its
+        signature, because the strict and large-N lanes call it; it goes in phase Z.
 
         Parameters
         ----------
         tree : Tree
-            The radix tree this prepare is building against.
+            The radix tree this prepare is building against. Unused.
         upward : TreeUpwardData
-            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+            Upward-sweep artifacts. Unused.
         max_order : int
-            Expansion order ``p`` for this prepare.
+            Expansion order ``p`` for this prepare. Unused.
         pos_sorted : Array
-            Particle positions in tree order.
+            Particle positions in tree order. Unused.
 
         Returns
         -------
         Optional[LocalExpansionData]
-            Zeroed local-expansion buffers, or None when the basis needs none.
+            Always ``None``.
         """
-        if self.expansion_basis == "solidfmm":
-            # Solid-FMM does not reuse a cached locals template across prepare calls.
-            # Let the downward pass allocate its accumulator on demand so we do not
-            # hold a redundant zero buffer alive across dual-tree staging.
-            return None
-
-        template = self._locals_template
-        total_nodes = int(tree.parent.shape[0])
-        coeff_count = total_coefficients(max_order)
-        reuse_template = (
-            template is not None
-            and int(template.order) == max_order
-            and template.coefficients.shape == (total_nodes, coeff_count)
-            and template.coefficients.dtype == pos_sorted.dtype
-        )
-
-        if reuse_template:
-            return LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros_like(template.coefficients),
-            )
-        return initialize_local_expansions(
-            tree,
-            upward.multipoles.centers,
-            max_order=max_order,
-        )
+        return None
 
     def _prepare_state_tree_and_upward(
         self,
@@ -2360,29 +2335,27 @@ class PrepareMixin(_EngineBase):
         upward: TreeUpwardData,
         max_order: int,
     ) -> None:
-        """Update reusable cartesian local-expansion template after prepare_state.
+        """Clear the reusable local-expansion template, as the SH path always did.
+
+        The template was a Cartesian-basis cache (removed in the 2026-10 cleanup,
+        K); on the spherical-harmonic path this stored ``None``, which is all it
+        does now. Kept, with its signature, because the strict and large-N lanes
+        call it; it goes in phase Z.
 
         Parameters
         ----------
         locals_template : Optional[LocalExpansionData]
-            Preallocated local-expansion buffers, or None to build them.
+            What the template builder returned (always ``None``). Unused.
         upward : TreeUpwardData
-            Upward-sweep artifacts: geometry, mass moments and packed multipoles.
+            Upward-sweep artifacts. Unused.
         max_order : int
-            Expansion order ``p`` for this prepare.
+            Expansion order ``p`` for this prepare. Unused.
 
         Returns
         -------
         None
-            Nothing; it updates the reusable template cache in place.
+            Nothing; it sets ``self._locals_template`` to ``None``.
         """
-        if locals_template is not None and self.expansion_basis == "cartesian":
-            self._locals_template = LocalExpansionData(
-                order=max_order,
-                centers=upward.multipoles.centers,
-                coefficients=jnp.zeros_like(locals_template.coefficients),
-            )
-            return
         self._locals_template = None
 
     def _prepare_nearfield_precompute_artifacts(

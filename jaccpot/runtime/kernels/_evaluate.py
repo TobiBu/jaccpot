@@ -39,7 +39,6 @@ from jaccpot._searchsorted import searchsorted_method
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
-    translate_local_expansion,
 )
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
@@ -61,11 +60,6 @@ from jaccpot.operators.complex_ops import (
     evaluate_local_complex_with_grad_analytic,
     evaluate_local_complex_with_grad_analytic_batch,
 )
-from jaccpot.operators.multipole_utils import (
-    MAX_MULTIPOLE_ORDER,
-    level_offset,
-    total_coefficients,
-)
 from jaccpot.operators.real_harmonics import (
     evaluate_local_real_derivative_tower_batch,
     evaluate_local_real_with_grad,
@@ -85,61 +79,6 @@ from ._shared import (
 )
 
 __all__: list[str] = []
-
-
-@partial(jax.jit, static_argnames=("order",))
-@jaxtyped(typechecker=beartype)
-def _evaluate_local_cartesian_with_grad_batch(
-    coeffs: Float[Array, "leaves w ct"],
-    offsets: Float[Array, "leaves w 3"],
-    *,
-    order: int,
-) -> tuple[Array, Array]:
-    """Evaluate cartesian local expansions and gradients at batch offsets.
-
-    Parameters
-    ----------
-    coeffs : Float[Array, 'leaves w ct']
-        Local coefficients, ``[..., total_coefficients(order)]``.
-    offsets : Float[Array, 'leaves w 3']
-        Evaluation points relative to each expansion centre, ``[..., 3]``, with
-        leading shape matching ``coeffs``.
-    order : int
-        Expansion order ``p``. Static under ``jit``.
-
-    Returns
-    -------
-    tuple[Array, Array]
-        ``(gradients, potentials)`` -- gradients first, matching the caller's
-        unpacking, with shapes ``[..., 3]`` and ``[...]``. The gradient is read
-        off the degree-1 block with its components reversed, because the
-        cartesian coefficient layout orders them ``z, y, x``. At ``order <= 0``
-        there is no degree-1 block and the gradient is zero.
-    """
-    leading_shape = coeffs.shape[:-1]
-    coeffs_flat = jnp.reshape(coeffs, (-1, coeffs.shape[-1]))
-    offsets_flat = jnp.reshape(offsets, (-1, offsets.shape[-1]))
-
-    translated_flat = jax.vmap(
-        lambda coeff_row, offset_row: translate_local_expansion(
-            coeff_row,
-            offset_row,
-            order=order,
-        )
-    )(coeffs_flat, offsets_flat)
-
-    translated = jnp.reshape(
-        translated_flat,
-        leading_shape + (translated_flat.shape[-1],),
-    )
-
-    potentials = translated[..., level_offset(0)]
-    if order <= 0:
-        gradients = jnp.zeros(leading_shape + (3,), dtype=translated.dtype)
-    else:
-        first = translated[..., level_offset(1) : level_offset(1) + 3]
-        gradients = jnp.stack([first[..., 2], first[..., 1], first[..., 0]], axis=-1)
-    return gradients, potentials
 
 
 @jaxtyped(typechecker=beartype)
@@ -260,16 +199,16 @@ def _infer_order_from_coeff_count(
 ) -> int:
     """Infer expansion order from static coefficient-array width.
 
-    The two bases pack coefficients differently, so the inversion differs: the
-    solidfmm width is exactly ``(p + 1) ** 2`` and inverts in closed form, while
-    the cartesian width is searched over the supported orders.
+    The solidfmm width is exactly ``(p + 1) ** 2`` and inverts in closed form.
+    (The Cartesian width, searched over the supported orders, went with the
+    Cartesian basis in the 2026-10 cleanup, K.)
 
     Parameters
     ----------
     coeff_count : int
         Trailing width of the coefficient array. Static, not traced.
     expansion_basis : ExpansionBasis
-        Which packing ``coeff_count`` refers to.
+        Which packing ``coeff_count`` refers to; only ``"solidfmm"`` is left.
 
     Returns
     -------
@@ -279,8 +218,9 @@ def _infer_order_from_coeff_count(
     Raises
     ------
     ValueError
-        If no order in the basis's packing produces this width -- which means
-        the coefficient array is malformed, not that the order is unusual.
+        If ``expansion_basis`` is not ``"solidfmm"``, or the width is not a
+        perfect square -- which means the coefficient array is malformed, not
+        that the order is unusual.
     """
     if expansion_basis == "solidfmm":
         root = int(round(float(np.sqrt(coeff_count))))
@@ -292,13 +232,7 @@ def _infer_order_from_coeff_count(
             )
         return order
 
-    for order in range(MAX_MULTIPOLE_ORDER + 1):
-        if int(total_coefficients(order)) == int(coeff_count):
-            return int(order)
-    raise ValueError(
-        "Could not infer cartesian order from coefficient shape; "
-        f"got coeff_count={coeff_count}."
-    )
+    raise ValueError(f"expansion_basis must be 'solidfmm'; got {expansion_basis!r}")
 
 
 def _resolve_evaluation_node_views(
@@ -1754,14 +1688,10 @@ def _evaluate_local_expansions_for_target_particles(
 
     Raises
     ------
-    NotImplementedError
-        For orders above ``MAX_MULTIPOLE_ORDER`` in any basis but solidfmm,
-        which is the only one whose recurrences are defined that far.
+    ValueError
+        If ``expansion_basis`` is not ``"solidfmm"`` (the Cartesian basis went
+        in the 2026-10 cleanup, K).
     """
-    if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
-        raise NotImplementedError(
-            "orders above 4 require expansion_basis='solidfmm'",
-        )
     if int(target_sorted_indices.shape[0]) == 0:
         zeros = jnp.zeros((0, 3), dtype=positions_sorted.dtype)
         # Named apart from the `derivatives` list the main path builds below.
@@ -1894,16 +1824,7 @@ def _evaluate_local_expansions_for_target_particles(
             return gradients, potentials, packed_derivatives
         return gradients, None, packed_derivatives
 
-    offsets = target_positions - centers
-
-    gradients, potentials = _evaluate_local_cartesian_with_grad_batch(
-        coeffs,
-        offsets,
-        order=order,
-    )
-    if return_potential:
-        return gradients, potentials, None
-    return gradients, None, None
+    raise ValueError(f"expansion_basis must be 'solidfmm'; got {expansion_basis!r}")
 
 
 def _evaluate_prepared_tree_targets(
@@ -2245,14 +2166,10 @@ def _evaluate_local_expansions_for_particles(
 
     Raises
     ------
-    NotImplementedError
-        For orders above ``MAX_MULTIPOLE_ORDER`` in any basis but solidfmm.
+    ValueError
+        If ``expansion_basis`` is not ``"solidfmm"`` (the Cartesian basis went
+        in the 2026-10 cleanup, K).
     """
-    if order > MAX_MULTIPOLE_ORDER and expansion_basis != "solidfmm":
-        raise NotImplementedError(
-            "orders above 4 require expansion_basis='solidfmm'",
-        )
-
     leaf_ranges = node_ranges[leaf_nodes]
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
 
@@ -2270,8 +2187,6 @@ def _evaluate_local_expansions_for_particles(
     leaf_positions = jnp.where(valid[..., None], leaf_positions, 0.0)
 
     centers = local_data.centers[leaf_nodes]
-    offsets = leaf_positions - centers[:, None, :]
-    offsets = jnp.where(valid[..., None], offsets, 0.0)
 
     coeffs = local_data.coefficients[leaf_nodes]
     dtype = positions.dtype
@@ -2544,35 +2459,7 @@ def _evaluate_local_expansions_for_particles(
         )
         return gradients, potentials_flat, derivative_outputs
 
-    coeffs_broadcast = jnp.broadcast_to(
-        coeffs[:, None, :],
-        offsets.shape[:-1] + (coeffs.shape[-1],),
-    )
-    grad_field, potentials = _evaluate_local_cartesian_with_grad_batch(
-        coeffs_broadcast,
-        offsets,
-        order=order,
-    )
-    grad_field = jnp.where(valid[..., None], grad_field, 0.0)
-    potentials = jnp.where(valid, potentials, 0.0)
-
-    gradients = _scatter_vectors(
-        jnp.zeros_like(positions),
-        safe_idx,
-        grad_field,
-        valid,
-    )
-
-    if not return_potential:
-        return gradients, None, None
-
-    potentials_flat = _scatter_scalars(
-        jnp.zeros((positions.shape[0],), dtype=dtype),
-        safe_idx,
-        potentials,
-        valid,
-    )
-    return gradients, potentials_flat, None
+    raise ValueError(f"expansion_basis must be 'solidfmm'; got {expansion_basis!r}")
 
 
 # THE THREE SCATTER HELPERS SHARE ONE CONTRACT, AND IT IS THE ONE THING IN THIS MODULE

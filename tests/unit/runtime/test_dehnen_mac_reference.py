@@ -403,7 +403,10 @@ def test_node_sphere_contains_every_particle(leaf_mode):
 
 
 def _upward_fixture(n: int = 512, seed: int = 3):
-    from jaccpot.upward.tree_expansions import prepare_upward_sweep
+    # The engine's real upward sweep. The module-level Cartesian one this used went
+    # in the 2026-10 cleanup (K); `resolve_dehnen_geometry` reads only the centres
+    # and the geometry, never the packed coefficients.
+    from jaccpot.runtime._fmm_impl import FMMEngine
 
     rng = np.random.default_rng(seed)
     positions = jnp.asarray(rng.normal(size=(n, 3)), dtype=jnp.float64)
@@ -418,7 +421,7 @@ def _upward_fixture(n: int = 512, seed: int = 3):
     )
     positions_sorted = positions[tree.particle_indices]
     masses_sorted = masses[tree.particle_indices]
-    upward = prepare_upward_sweep(
+    upward = FMMEngine(expansion_basis="solidfmm").prepare_upward_sweep(
         tree,
         positions_sorted,
         masses_sorted,

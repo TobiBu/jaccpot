@@ -17,6 +17,43 @@ copy of the complex module; only the per-node operators (``p2m_real_direct`` /
 conjugate-symmetry fixup differ.
 
 Center mode is COM only (what the distributed driver + fast lane use).
+
+**COM centres are differentiated through, not held fixed.** The expansion centres
+are a differentiable function of the particle positions, and that coupling is
+carried all the way through: a gradient through the COM centres is exact for the
+fixed-topology force, not an approximation that drops the centre-motion term.
+The same holds for the complex sweep's ``center_mode="com"``; ``"explicit"`` (the
+complex sweep's test seam) has no such coupling.
+
+The chain, for anyone tempted to insert a ``stop_gradient`` here:
+:meth:`~jaccpot.runtime.fmm_evaluate.EvaluateMixin.differentiable_accelerations`
+re-derives the centres from the live inputs on every call -- it calls
+``prepare_upward_sweep`` on the live ``positions``/``masses`` and reads only
+``int(state.downward.locals.order)``, a Python int, off the frozen state. The
+M2L/L2L pair displacements are then ``centers[tgt] - centers[src]`` on those
+live centres, and L2P uses ``leaf_positions - centers``. There is no
+``stop_gradient`` anywhere on the single-GPU path; the only ones in the tree are
+in :mod:`jaccpot.distributed.fmm`, where they freeze the frontier used to *build*
+the coarse tree while ``_live_coarse_payload`` deliberately keeps the coarse COMs
+live -- its docstring records that freezing them "would silently drop a real
+gradient term".
+
+Guarded by ``tests/unit/test_gradient_correctness.py::test_fd_vs_ad_positions``,
+whose finite-difference reference perturbs the *same* frozen-topology function
+and therefore moves the COM centres too; it would fail if the centre-motion term
+were dropped from the reverse pass. ``"com"`` is also the production default
+(resolved in :mod:`jaccpot.runtime.fmm_overrides`). See
+``docs/differentiable_fmm_design.md`` ("COM centers are differentiated through,
+not held fixed") and ``docs/differentiable_fmm_audit.md`` for the audit that
+established this.
+
+The one caveat: on degenerate displacements -- exactly-zero (structural under
+COM, since a single-child internal node shares its child's COM) and
+z-axis-aligned -- the rotation-angle builders return a zero cotangent by
+construction. See :func:`jaccpot.operators.complex_ops._angles_from_delta_solidfmm`.
+
+(This note lived on the Cartesian ``compute_node_multipoles`` until that sweep
+was removed in the 2026-10 cleanup, K.)
 """
 
 from __future__ import annotations

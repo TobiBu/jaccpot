@@ -592,8 +592,8 @@ def evaluate_local_real_derivative_tower(
         potential, so the tuple is one longer than ``max_derivative_order``.
         Components follow
         :func:`~jaccpot.operators.symmetric_tensors.symmetric_multi_indices_3d`,
-        which is the DESCENDING ordering -- not ``multipole_utils``' ascending one
-        (``docs/operator_conventions.md`` section 2).
+        which is the DESCENDING ordering -- not yggdrax ``multipole_utils``'
+        ascending one (``docs/operator_conventions.md`` section 2).
 
     Raises
     ------

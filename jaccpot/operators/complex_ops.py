@@ -90,8 +90,9 @@ __all__ = [
 # NOTE: the annotation narrows the accepted input, and that is deliberate rather
 # than incidental. Before it, every one of them also took a numpy array, a list or
 # a tuple, because the bodies reach `jnp` ops that coerce; `Float[Array, "3"]`
-# admits only `jax.Array`. `downward/local_expansions.py` already made this trade
-# in the same programme. The alternative spelling,
+# admits only `jax.Array`. The Cartesian `downward/local_expansions.py` (removed in
+# the 2026-10 cleanup, K) had made this trade in the same programme. The alternative
+# spelling,
 # `Float[Union[Array, np.ndarray], "3"]`, closes the same hole while keeping numpy
 # callers, and was rejected only to avoid two spellings of one idea -- so if a
 # numpy caller ever has to be supported here, that is the change to make, and it
@@ -106,7 +107,8 @@ __all__ = [
 #   - `"_"` -- one anonymous axis -- rather than a length tied to `order`, because
 #     the bodies slice `[:ncoeff]` and so deliberately tolerate a LONGER buffer.
 #     Binding the length would reject calls these functions have always taken.
-#     Same reasoning as `coefficients` in `downward/local_expansions.py`.
+#     The Cartesian downward sweep (removed in K) gave its `coefficients` the
+#     same reasoning.
 #
 # What that leaves asserted is rank and dtype family. A 2-D `local` was reaching
 # `evaluate_local_complex` silently before it, so that is not nothing.
