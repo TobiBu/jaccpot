@@ -1194,8 +1194,10 @@ class FastMultipoleMethod:
             ``"accurate"`` uses an analytic far-field source-motion term
             (`dM -> dL`) plus the convective and exact near-field terms.
         jerk_fd_dt : float
-            Finite-difference step used only for non-``solidfmm`` fallback
-            in ``jerk_mode="accurate"``.
+            Accepted and unused, with no check on its value. It was the step of
+            the ``"accurate"`` mode's finite-difference fallback for the
+            Cartesian basis, removed in the 2026-10 cleanup (K); kept because
+            callers pass it (nornax's jaccpot adapter does, on every call).
 
         Returns
         -------
@@ -1634,8 +1636,7 @@ class FastMultipoleMethod:
             :meth:`compute_accelerations_and_jerk`, including the note that the
             two are not numerically equivalent.
         jerk_fd_dt : float
-            Finite-difference step for non-``solidfmm`` fallback in
-            ``"accurate"`` mode.
+            Accepted and unused; see :meth:`compute_accelerations_and_jerk`.
 
         Returns
         -------

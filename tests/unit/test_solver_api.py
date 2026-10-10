@@ -1263,6 +1263,51 @@ def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
     assert jerk.shape == positions.shape
 
 
+@pytest.mark.parametrize("jerk_mode", ["accurate", "fast_approx"])
+def test_jerk_fd_dt_is_accepted_silently_and_unused(jerk_mode):
+    """``jerk_fd_dt`` stays on all four jerk signatures, accepted and unused.
+
+    It stepped the finite-difference fallback of the Cartesian basis, removed in the
+    2026-10 cleanup (K). nornax's jaccpot adapter passes ``jerk_fd_dt=1e-3`` on every
+    call and ``bench/ci_benchmark_guard.py`` passes it too, so it must neither warn
+    nor be range-checked (a non-positive step used to raise on the fallback): any
+    value gives the result of not passing it, bitwise.
+    """
+    import warnings
+
+    positions, masses = _sample_problem(n=24)
+    velocities = _sample_velocities(n=24)
+    fmm = FastMultipoleMethod(preset=FMMPreset.FAST, basis="real")
+    engine = fmm._impl
+    kwargs = dict(leaf_size=8, max_order=3, jerk_mode=jerk_mode)
+    state = fmm.prepare_state(positions, masses, leaf_size=8, max_order=3)
+
+    calls = {
+        "facade compute": lambda **kw: fmm.compute_accelerations_and_jerk(
+            positions, masses, velocities, **kwargs, **kw
+        ),
+        "engine compute": lambda **kw: engine.compute_accelerations_and_jerk(
+            positions, masses, velocities, **kwargs, **kw
+        ),
+        "facade evaluate": lambda **kw: fmm.evaluate_prepared_state_with_jerk(
+            state, velocities, jerk_mode=jerk_mode, **kw
+        ),
+        "engine evaluate": lambda **kw: engine.evaluate_prepared_state_with_jerk(
+            state, velocities, jerk_mode=jerk_mode, **kw
+        ),
+    }
+    for name, call in calls.items():
+        reference = call()
+        for step in (1e-3, 0.0, -1.0):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                got = call(jerk_fd_dt=step)
+            for want_arr, got_arr in zip(reference, got):
+                assert np.array_equal(
+                    np.asarray(want_arr), np.asarray(got_arr)
+                ), f"{name}: jerk_fd_dt={step} changed the result"
+
+
 def test_compute_accelerations_and_jerk_invalid_mode_raises():
     positions, masses = _sample_problem(n=16)
     velocities = _sample_velocities(n=16)
