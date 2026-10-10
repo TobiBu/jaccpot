@@ -60,11 +60,9 @@ from ._force_scale_levels import far_force_scale_sorted, node_force_scale_min_so
 from ._interaction_cache import (
     TargetSortedFarPairs,
     _build_dual_tree_artifacts,
-    _compiled_refresh_dual_planner_route,
     _DualTreeArtifacts,
     _interaction_cache_key,
     _InteractionCacheEntry,
-    _RefreshDualPlannerHint,
     far_pair_targets,
     pair_policy_cache_identity,
 )
@@ -1386,10 +1384,6 @@ class PrepareMixin(_EngineBase):
             suppress_host_side_effects=suppress_host_side_effects,
         )
         if strict_streamed_fast_path:
-            if not suppress_host_side_effects:
-                self._refresh_dual_planner_cache_hits += 1
-                self._refresh_dual_planner_execute_count += 1
-                self._refresh_dual_planner_steady_timing_bypass_count += 1
             return self._prepare_state_dual_and_downward_strict_streamed_fast(
                 cross_far=cross_far,
                 force_scale_nodes=force_scale_nodes,
@@ -1502,48 +1496,7 @@ class PrepareMixin(_EngineBase):
                 ),
             ),
         )
-        has_pair_policy = pair_policy is not None
-        has_policy_state = policy_state is not None
-        planner_hint, planner_cache_hit = self._resolve_dual_downward_planner_hint(
-            tree_artifacts=tree_artifacts,
-            theta_val=theta_val,
-            mac_type_val=mac_type_val,
-            runtime_traversal_config=runtime_traversal_config,
-            plan=_DualDownwardPlan(
-                adaptive_order_active=adaptive_order_active,
-                allow_split_build=allow_split_build,
-                jit_traversal_for_prepare=jit_traversal_for_prepare,
-                mixed_order_farfield_active=mixed_order_farfield_active,
-                need_compact_far_pairs=need_compact_far_pairs,
-                need_node_interactions=need_node_interactions,
-                need_traversal_result=need_traversal_result,
-                retain_interactions_active=retain_interactions_active,
-                runtime_traversal_config=runtime_traversal_config,
-                stateful_cache_enabled=stateful_cache_enabled,
-                strict_mode_active=strict_mode_active,
-                strict_streamed_fast_path=strict_streamed_fast_path,
-                tree_mode_static_radix=tree_mode_static_radix,
-                use_compact_streamed_pairs=use_compact_streamed_pairs,
-                use_dense_interactions_for_prepare=use_dense_interactions_for_prepare,
-                use_paper_fixed_policy=use_paper_fixed_policy,
-            ),
-            has_pair_policy=has_pair_policy,
-            has_policy_state=has_policy_state,
-            suppress_host_side_effects=suppress_host_side_effects,
-        )
-        planner_allow_steady_timing_bypass = bool(
-            self._planner_steady_timing_bypass_enabled
-        )
         dual_artifact_timing_callback = _record_dual_artifact_substage
-        if (
-            planner_hint is not None
-            and planner_cache_hit
-            and bool(getattr(planner_hint, "suppress_substage_timing", False))
-            and planner_allow_steady_timing_bypass
-        ):
-            dual_artifact_timing_callback = None
-            if not suppress_host_side_effects:
-                self._refresh_dual_planner_steady_timing_bypass_count += 1
         _record_dual_stage("_refresh_timing_dual_setup_seconds", stage_t0)
 
         stage_t0 = time.perf_counter()
@@ -1587,7 +1540,6 @@ class PrepareMixin(_EngineBase):
             policy_state=policy_state,
             jit_traversal=jit_traversal_for_prepare,
             timing_callback=dual_artifact_timing_callback,
-            planner_hint=planner_hint,
         )
         if stateful_cache_enabled:
             if bool(getattr(dual_artifacts, "cache_hit", False)):
@@ -2111,181 +2063,6 @@ class PrepareMixin(_EngineBase):
             use_dense_interactions_for_prepare=use_dense_interactions_for_prepare,
             use_paper_fixed_policy=use_paper_fixed_policy,
         )
-
-    def _resolve_dual_downward_planner_hint(
-        self,
-        *,
-        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
-        theta_val: float,
-        mac_type_val: MACType,
-        runtime_traversal_config: Optional[DualTreeTraversalConfig],
-        plan: _DualDownwardPlan,
-        has_pair_policy: bool,
-        has_policy_state: bool,
-        suppress_host_side_effects: bool,
-    ) -> Tuple[Optional[_RefreshDualPlannerHint], bool]:
-        """Look up or compile the refresh planner hint for this topology.
-
-        Extracted verbatim from :meth:`_prepare_state_dual_and_downward` (Tier
-        1.7). The planner memoises the route the dual-tree build should take for
-        a given static-radix topology, so a steady refresh does not re-probe it;
-        a hit is what allows the substage timing to be bypassed downstream.
-
-        Parameters
-        ----------
-        tree_artifacts : _PrepareStateTreeUpwardArtifacts
-            Tree and upward-sweep artifacts this prepare call already built.
-        theta_val : float
-            Resolved opening angle; part of the planner key.
-        mac_type_val : MACType
-            Resolved acceptance criterion; part of the planner key.
-        runtime_traversal_config : Optional[DualTreeTraversalConfig]
-            Traversal capacities as resolved by the plan.
-        plan : _DualDownwardPlan
-            The resolved build plan; the planner key is derived from it.
-        has_pair_policy : bool
-            Whether a solver-owned pair policy is active for this call.
-        has_policy_state : bool
-            Whether that policy carries prepass state.
-        suppress_host_side_effects : bool
-            Traced/refresh hot path: skip planner counters and cache writes.
-
-        Returns
-        -------
-        Tuple[Optional[_RefreshDualPlannerHint], bool]
-            The hint (``None`` when the planner is off) and whether it was a
-            cache hit.
-        """
-        allow_split_build = plan.allow_split_build
-        need_compact_far_pairs = plan.need_compact_far_pairs
-        need_node_interactions = plan.need_node_interactions
-        need_traversal_result = plan.need_traversal_result
-        strict_mode_active = plan.strict_mode_active
-        tree_mode_static_radix = plan.tree_mode_static_radix
-        use_dense_interactions_for_prepare = plan.use_dense_interactions_for_prepare
-        planner_hint: Optional[_RefreshDualPlannerHint] = None
-        planner_cache_hit = False
-        planner_enabled = bool(
-            (
-                self._refresh_dual_planner_mode_on
-                or (
-                    self._refresh_dual_planner_mode_auto
-                    and self._large_n_gpu_production_profile_cached
-                    and tree_mode_static_radix
-                )
-            )
-        )
-        planner_hint: Optional[_RefreshDualPlannerHint] = None
-        planner_cache_hit = False
-        if planner_enabled:
-            strict_split_fastlane = bool(
-                (
-                    bool(suppress_host_side_effects)
-                    and not has_pair_policy
-                    and not has_policy_state
-                )
-                or (
-                    strict_mode_active
-                    and bool(allow_split_build)
-                    and not bool(need_traversal_result)
-                    and not has_pair_policy
-                    and not has_policy_state
-                )
-            )
-            if strict_split_fastlane:
-                # Strict/static production lane: keep routing fully on a
-                # fixed host-side decision and skip compiled route probing +
-                # device_get round-trips in the refresh hot path.
-                planner_hint = _RefreshDualPlannerHint(
-                    use_split_build=bool(allow_split_build),
-                    suppress_substage_timing=True,
-                )
-                planner_cache_hit = True
-                if not suppress_host_side_effects:
-                    self._refresh_dual_planner_cache_hits += 1
-                    self._refresh_dual_planner_execute_count += 1
-            else:
-                traversal_key = (
-                    "none"
-                    if runtime_traversal_config is None
-                    else (
-                        f"{int(runtime_traversal_config.max_pair_queue)}:"
-                        f"{int(runtime_traversal_config.process_block)}:"
-                        f"{int(runtime_traversal_config.max_interactions_per_node)}:"
-                        f"{int(runtime_traversal_config.max_neighbors_per_leaf)}"
-                    )
-                )
-                planner_key = "|".join(
-                    (
-                        str(tree_artifacts.topology_key),
-                        str(tree_artifacts.tree_mode),
-                        str(int(tree_artifacts.leaf_parameter)),
-                        f"{float(theta_val):.12g}",
-                        str(mac_type_val),
-                        str(bool(need_traversal_result)),
-                        str(bool(need_compact_far_pairs)),
-                        str(bool(need_node_interactions)),
-                        str(bool(allow_split_build)),
-                        str(traversal_key),
-                    )
-                )
-                planner_hint = self._refresh_dual_planner_cache.get(planner_key)
-                if planner_hint is None:
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_cache_misses += 1
-                    total_nodes_planner = int(tree_artifacts.tree.parent.shape[0])
-                    internal_nodes_planner = int(
-                        jnp.asarray(tree_artifacts.tree.left_child).shape[0]
-                    )
-                    leaf_count_planner = max(
-                        0, total_nodes_planner - internal_nodes_planner
-                    )
-                    (
-                        use_split_build_compiled,
-                        _use_compact_shared_far_near_compiled,
-                        suppress_substage_timing_compiled,
-                    ) = _compiled_refresh_dual_planner_route(
-                        allow_split_build_flag=jnp.asarray(
-                            bool(allow_split_build), dtype=jnp.bool_
-                        ),
-                        need_traversal_result_flag=jnp.asarray(
-                            bool(need_traversal_result), dtype=jnp.bool_
-                        ),
-                        leaf_count=jnp.asarray(leaf_count_planner, dtype=jnp.int32),
-                        need_node_interactions_flag=jnp.asarray(
-                            bool(need_node_interactions), dtype=jnp.bool_
-                        ),
-                        need_compact_far_pairs_flag=jnp.asarray(
-                            bool(need_compact_far_pairs), dtype=jnp.bool_
-                        ),
-                        use_dense_interactions_flag=jnp.asarray(
-                            bool(use_dense_interactions_for_prepare), dtype=jnp.bool_
-                        ),
-                    )
-                    if suppress_host_side_effects:
-                        use_split_build_compiled_bool = bool(allow_split_build)
-                        suppress_substage_timing_compiled_bool = True
-                    else:
-                        use_split_build_compiled_bool = bool(use_split_build_compiled)
-                        suppress_substage_timing_compiled_bool = bool(
-                            suppress_substage_timing_compiled
-                        )
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_compiled_route_count += 1
-                    planner_hint = _RefreshDualPlannerHint(
-                        use_split_build=use_split_build_compiled_bool,
-                        suppress_substage_timing=suppress_substage_timing_compiled_bool,
-                    )
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_cache[planner_key] = planner_hint
-                        self._refresh_dual_planner_compile_count += 1
-                else:
-                    planner_cache_hit = True
-                    if not suppress_host_side_effects:
-                        self._refresh_dual_planner_cache_hits += 1
-                if not suppress_host_side_effects:
-                    self._refresh_dual_planner_execute_count += 1
-        return planner_hint, planner_cache_hit
 
     def _prepare_state_extract_adaptive_far_pairs(
         self,
@@ -3467,10 +3244,6 @@ class PrepareMixin(_EngineBase):
             policy_state=None,
             jit_traversal=True,
             timing_callback=None,
-            planner_hint=_RefreshDualPlannerHint(
-                use_split_build=True,
-                suppress_substage_timing=True,
-            ),
         )
         (
             interactions,
@@ -3637,10 +3410,6 @@ class PrepareMixin(_EngineBase):
             policy_state=None,
             jit_traversal=True,
             timing_callback=None,
-            planner_hint=_RefreshDualPlannerHint(
-                use_split_build=True,
-                suppress_substage_timing=True,
-            ),
         )
         unpacked = self._unpack_dual_tree_artifacts(dual_artifacts)
         neighbor_list, compact_far_pairs = unpacked[1], unpacked[3]

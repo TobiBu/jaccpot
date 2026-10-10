@@ -161,76 +161,6 @@ class _DualTreeCacheHit(NamedTuple):
     cache_out: Optional["_InteractionCacheEntry"]
 
 
-class _RefreshDualPlannerHint(NamedTuple):
-    """Cached refresh planner decision for dual artifact build routing.
-
-    Attributes
-    ----------
-    use_split_build : bool
-        Whether to build far and near traversal in separate passes.
-    suppress_substage_timing : bool
-        Whether to skip the per-substage timing callbacks.
-    """
-
-    use_split_build: bool
-    suppress_substage_timing: bool = False
-
-
-@partial(jax.jit, static_argnames=())
-def _compiled_refresh_dual_planner_route(
-    *,
-    allow_split_build_flag: Array,
-    need_traversal_result_flag: Array,
-    leaf_count: Array,
-    need_node_interactions_flag: Array,
-    need_compact_far_pairs_flag: Array,
-    use_dense_interactions_flag: Array,
-) -> tuple[Array, Array, Array]:
-    """Return compiled routing decisions for refresh dual-artifact planning.
-
-    This keeps steady-state route/plan branching in JAX control flow so the
-    refresh hot path avoids repeated Python-side conditional orchestration.
-
-    A pair policy no longer routes away from the split build; it is threaded into
-    it instead. That also closes a hole: the caller's planner cache key never
-    included the policy flags, so a routing decision cached by a no-policy call
-    could be replayed for a policy call, sending it down a split build that
-    dropped the policy silently.
-
-    Parameters
-    ----------
-    allow_split_build_flag : Array
-        Traced flag: whether a split build is permitted.
-    need_traversal_result_flag : Array
-        See the module docstring.
-    leaf_count : Array
-        See the module docstring.
-    need_node_interactions_flag : Array
-        See the module docstring.
-    need_compact_far_pairs_flag : Array
-        See the module docstring.
-    use_dense_interactions_flag : Array
-        See the module docstring.
-
-    Returns
-    -------
-    tuple[Array, Array, Array]
-        The routing decisions as traced values, so the refresh path can branch without a host sync.
-    """
-
-    use_split_build = allow_split_build_flag & (~need_traversal_result_flag)
-    need_far_payload = (
-        need_node_interactions_flag
-        | need_compact_far_pairs_flag
-        | use_dense_interactions_flag
-    )
-    use_compact_shared_far_near = (
-        use_split_build & need_far_payload & (~need_node_interactions_flag)
-    )
-    suppress_substage_timing = use_split_build & (leaf_count >= jnp.int32(1))
-    return use_split_build, use_compact_shared_far_near, suppress_substage_timing
-
-
 def _dual_tree_cache_lookup(
     *,
     cache_key: Optional[str],
@@ -2846,7 +2776,6 @@ def _build_dual_tree_artifacts(
     policy_state: Optional[AdaptivePolicyState] = None,
     jit_traversal: bool = True,
     timing_callback: Optional[Callable[[str, float], None]] = None,
-    planner_hint: Optional[_RefreshDualPlannerHint] = None,
     strict_capacity_report: Optional[Callable[[dict], None]] = None,
     strict_max_neighbors_per_leaf_override: Optional[int] = None,
     strict_flat_walk_capacity_floor: Optional[dict] = None,
@@ -2915,9 +2844,6 @@ def _build_dual_tree_artifacts(
         Run the compiled traversal.
     timing_callback : Optional[Callable[[str, float], None]]
         Per-phase timing sink, named so a caller can attribute prepare cost.
-    planner_hint : Optional[_RefreshDualPlannerHint]
-        Hint from a previous refresh, letting the planner skip work whose answer
-        is already known.
     strict_capacity_report : Optional[Callable[[dict], None]]
         Forwarded to the strict streamed builder as ``capacity_report``.
     strict_max_neighbors_per_leaf_override : Optional[int]
@@ -2971,15 +2897,10 @@ def _build_dual_tree_artifacts(
                     "geometry must be provided when dual-tree cache lookup misses"
                 )
             geometry = geometry_factory()
-        if planner_hint is not None:
-            # Fast refresh path: reuse prior routing decision and avoid
-            # re-evaluating split-eligibility branching on host each call.
-            use_split_build = bool(planner_hint.use_split_build)
-        else:
-            use_split_build = _can_split_dual_tree_build(
-                split_enabled=bool(allow_split_build),
-                need_traversal_result=need_traversal_result,
-            )
+        use_split_build = _can_split_dual_tree_build(
+            split_enabled=bool(allow_split_build),
+            need_traversal_result=need_traversal_result,
+        )
         strict_streamed_split = False
         if use_split_build:
             strict_streamed_split = bool(

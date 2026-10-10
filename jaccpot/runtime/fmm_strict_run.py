@@ -862,7 +862,6 @@ class StrictRunMixin(_EngineBase):
                 self._strict_fused_seen_profile_keys.add(profile_key)
             self._strict_fused_execute_count += 1
             self._strict_fused_device_refresh_route_count += num_steps_i
-            self._strict_fused_planner_bypassed_count += num_steps_i
         elif fused_mode_requested and not fused_mode_allowed:
             self._strict_fused_fallback_count += 1
             self._strict_fused_last_fallback_reason = (

@@ -80,7 +80,7 @@ from jaccpot.operators.real_harmonics import sh_size  # noqa: F401
 from jaccpot.softening import resolve_softening_kernel, support_factor
 
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
-from ._interaction_cache import _InteractionCacheEntry, _RefreshDualPlannerHint
+from ._interaction_cache import _InteractionCacheEntry
 from ._large_n_types import LargeNPreparedState
 from .fmm_caches import _clear_global_runtime_caches
 from .fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
@@ -1489,7 +1489,7 @@ class FMMEngine(
         self._refresh_timing_evaluate_seconds: float = 0.0
 
     def _resolve_refresh_and_strict_modes(self) -> None:
-        """Resolve the refresh-timing, dual-planner and strict-lane execution modes.
+        """Resolve the refresh-timing and strict-lane execution modes.
 
         Extracted verbatim from ``__init__`` lines 807-901 (audit 2.1 step 2).
         Called in the original position, so the resolution order is unchanged --
@@ -1510,17 +1510,6 @@ class FMMEngine(
         self._refresh_timing_enabled: bool = str(
             os.environ.get("JACCPOT_REFRESH_TIMING_ENABLE", "0")
         ).strip().lower() in {"1", "true", "yes", "on"}
-        self._refresh_dual_planner_mode: str = (
-            str(os.environ.get("JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_MODE", "auto"))
-            .strip()
-            .lower()
-        )
-        self._refresh_dual_planner_mode_on: bool = (
-            self._refresh_dual_planner_mode == "on"
-        )
-        self._refresh_dual_planner_mode_auto: bool = (
-            self._refresh_dual_planner_mode == "auto"
-        )
         self._strict_gpu_mode: str = (
             str(os.environ.get("JACCPOT_STATIC_STRICT_GPU_MODE", "auto"))
             .strip()
@@ -1536,20 +1525,7 @@ class FMMEngine(
             if split_build_env_raw is None
             else str(split_build_env_raw).strip().lower() in {"1", "true", "yes", "on"}
         )
-        self._planner_steady_timing_bypass_enabled: bool = str(
-            os.environ.get(
-                "JACCPOT_LARGE_N_REFRESH_DUAL_PLANNER_STEADY_NO_SUBSTAGE_TIMING",
-                "1",
-            )
-        ).strip().lower() in {"1", "true", "yes", "on"}
         self._strict_shared_env_applied: bool = False
-        self._refresh_dual_planner_cache: dict[str, _RefreshDualPlannerHint] = {}
-        self._refresh_dual_planner_cache_hits: int = 0
-        self._refresh_dual_planner_cache_misses: int = 0
-        self._refresh_dual_planner_compile_count: int = 0
-        self._refresh_dual_planner_execute_count: int = 0
-        self._refresh_dual_planner_steady_timing_bypass_count: int = 0
-        self._refresh_dual_planner_compiled_route_count: int = 0
         self._refresh_strict_mode_active_count: int = 0
         self._strict_runner_compile_count: int = 0
         self._strict_runner_execute_count: int = 0
@@ -1667,7 +1643,6 @@ class FMMEngine(
         self._strict_fused_fallback_count: int = 0
         self._strict_fused_last_fallback_reason: str = ""
         self._strict_fused_device_refresh_route_count: int = 0
-        self._strict_fused_planner_bypassed_count: int = 0
         self._strict_velocity_verlet_acceleration_carry_active: bool = False
         self._strict_self_force_bootstrap_evaluations: int = 0
         self._strict_self_force_endpoint_evaluations: int = 0
@@ -2054,13 +2029,6 @@ class FMMEngine(
         self._refresh_timing_substages_measured = False
         self._refresh_timing_calls = 0
         self._refresh_timing_active = False
-        self._refresh_dual_planner_cache = {}
-        self._refresh_dual_planner_cache_hits = 0
-        self._refresh_dual_planner_cache_misses = 0
-        self._refresh_dual_planner_compile_count = 0
-        self._refresh_dual_planner_execute_count = 0
-        self._refresh_dual_planner_steady_timing_bypass_count = 0
-        self._refresh_dual_planner_compiled_route_count = 0
         self._refresh_strict_mode_active_count = 0
         self._strict_runner_compile_count = 0
         self._strict_runner_execute_count = 0
@@ -2084,7 +2052,6 @@ class FMMEngine(
         # steps the last particle-carry segment that overflowed had completed
         self._strict_particle_failed_step = -1
         self._strict_fused_device_refresh_route_count = 0
-        self._strict_fused_planner_bypassed_count = 0
         self._strict_velocity_verlet_acceleration_carry_active = False
         self._strict_self_force_bootstrap_evaluations = 0
         self._strict_self_force_endpoint_evaluations = 0

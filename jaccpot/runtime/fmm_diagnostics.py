@@ -269,24 +269,6 @@ class DiagnosticsMixin(_EngineBase):
             ),
             "interaction_cache_hits": int(self._interaction_cache_hits),
             "interaction_cache_misses": int(self._interaction_cache_misses),
-            "refresh_dual_planner_cache_hits": int(
-                self._refresh_dual_planner_cache_hits
-            ),
-            "refresh_dual_planner_cache_misses": int(
-                self._refresh_dual_planner_cache_misses
-            ),
-            "refresh_dual_planner_compile_count": int(
-                self._refresh_dual_planner_compile_count
-            ),
-            "refresh_dual_planner_execute_count": int(
-                self._refresh_dual_planner_execute_count
-            ),
-            "refresh_dual_planner_steady_timing_bypass_count": int(
-                self._refresh_dual_planner_steady_timing_bypass_count
-            ),
-            "refresh_dual_planner_compiled_route_count": int(
-                self._refresh_dual_planner_compiled_route_count
-            ),
             "refresh_strict_mode_active_count": int(
                 self._refresh_strict_mode_active_count
             ),
@@ -400,9 +382,6 @@ class DiagnosticsMixin(_EngineBase):
             ),
             "strict_fused_device_refresh_route_count": int(
                 self._strict_fused_device_refresh_route_count
-            ),
-            "strict_fused_planner_bypassed_count": int(
-                self._strict_fused_planner_bypassed_count
             ),
             "strict_velocity_verlet_acceleration_carry_active": bool(
                 self._strict_velocity_verlet_acceleration_carry_active
