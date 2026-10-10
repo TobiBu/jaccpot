@@ -8,7 +8,9 @@ Input is a coverage data file recorded with per-test contexts::
 (``COVERAGE_FILE`` selects the file). Every removal family below is a set of
 REGIONS: whole files, or the bodies of functions found by name in the AST (so the
 inventory follows the code, not stale line numbers), or a span between two text
-anchors. A test belongs to a family when it executed at least one line inside one
+anchors. A family's phase removes its regions; a removed file, a function name
+that no longer matches and a span whose anchor is gone contribute nothing, so the
+families stay as the record of what each phase removed. A test belongs to a family when it executed at least one line inside one
 of the family's regions; ``def`` lines and module-level code run at import and
 carry no test context, so they never count. Neither do a function's leading guard
 clauses (``if not use_dense: return None``), nor the ``gatekeepers`` a family
@@ -205,9 +207,11 @@ def _family_regions(spec: dict) -> dict[Path, list[tuple[int, int, str]]]:
                     )
     for rel, start, end in spec.get("spans", []):
         path = PKG / rel
-        text = path.read_text()
-        a = text.index(start)
-        b = text.index(end, a)
+        text = path.read_text() if path.exists() else ""
+        a = text.find(start)
+        b = text.find(end, a) if a >= 0 else -1
+        if b < 0:
+            continue  # removed by its phase
         regions[path].append(
             (text.count("\n", 0, a) + 1, text.count("\n", 0, b) + 1, f"{rel} (span)")
         )

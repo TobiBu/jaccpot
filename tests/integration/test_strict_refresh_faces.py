@@ -101,9 +101,12 @@ def test_refresh_face_reproduces_a_fresh_prepare(strict_env, face):
     )
     assert isinstance(prepared, LargeNPreparedState)
 
+    strict_plans_before = int(fmm._refresh_strict_mode_active_count)
     refreshed = getattr(fmm, face)(
         prepared, moved, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
     )
+    # the refresh rebuilt its lists through the strict plan, not the general one
+    assert int(fmm._refresh_strict_mode_active_count) == strict_plans_before + 1
     fresh = fmm.prepare_state(moved, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER)
 
     from_refresh = np.asarray(fmm.evaluate_prepared_state(refreshed))

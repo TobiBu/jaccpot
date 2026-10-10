@@ -1,22 +1,16 @@
-"""Two opt-in paths inside ``_refresh_large_n_same_topology`` -- audit **F33**.
+"""An opt-in path inside ``_refresh_large_n_same_topology`` -- audit **F33**.
 
-Both are gated behind flags that default off, which is why nothing reached them:
-lines 1442-1463 and 1542-1579 of ``fmm_strict_run.py``, 60 statements between
-them, unexercised on CPU and on the A100 run #193 recorded.
+The **upward-only diagnostic short-circuit** returns after the upward sweep so a
+profiler can attribute stage cost. It is gated behind a flag that defaults off,
+which is why nothing reached it before this file. It carries a ``dep`` term built
+from sums multiplied by ``0.0`` -- a data dependency that keeps the compiler from
+eliding the work being measured while contributing nothing numerically.
 
-* the **upward-only diagnostic short-circuit**, which returns after the upward
-  sweep so a profiler can attribute stage cost. It carries a ``dep`` term built
-  from sums multiplied by ``0.0`` -- a data dependency that keeps the compiler
-  from eliding the work being measured while contributing nothing numerically.
-* the **compact far-pair reuse** fast path, which skips re-walking the far list
-  and is gated behind an env var whose name says it is unsafe. The refusal when
-  reuse is requested *without* that opt-in is covered too, and is the more
-  valuable of the two: it is what stands between a moved static-radix tree and
-  silently stale M2L pairs.
-
-Reaching the second needs ``_strict_fused_mode_active``, which only
-``strict_run_v2`` sets -- ``refresh_prepared_state`` never does, so these go
-through the runner rather than the refresh method directly.
+This file also covered the **compact far-pair reuse** path, which skipped
+re-walking the far list after the drift, and its refusal without the unsafe
+opt-in. The path went in the 2026-10 cleanup (X6): the fused refresh always
+rebuilds its far list, and the opt-in now raises
+(``test_strict_lane_removed_switches.py``).
 """
 
 from __future__ import annotations
@@ -72,10 +66,6 @@ def _particles(seed: int = 3):
     return positions, masses, moved
 
 
-def _state(positions):
-    return jnp.stack([positions, jnp.zeros_like(positions)], axis=1)
-
-
 @pytest.mark.slow
 def test_upward_only_diagnostic_returns_after_the_upward_sweep(strict_env, monkeypatch):
     """The stage-attribution mode still returns a usable state.
@@ -111,73 +101,3 @@ def test_upward_only_diagnostic_returns_after_the_upward_sweep(strict_env, monke
     assert isinstance(refreshed, LargeNPreparedState)
     assert int(fmm._large_n_same_topology_refresh_hits) == hits_before + 1
     assert refreshed.tree.positions_sorted.shape == (N_PARTICLES, 3)
-
-
-@pytest.mark.slow
-def test_compact_pair_reuse_refuses_without_the_unsafe_opt_in(strict_env, monkeypatch):
-    """The refusal is the safety property, so it is asserted directly.
-
-    With reuse enabled, the unsafe opt-in withheld, and the fresh rebuild that
-    would otherwise make it safe turned off, the only correct outcome is a
-    refusal: cached M2L pairs can change once static-radix positions move, and
-    reusing them would be silently wrong rather than loudly broken.
-    """
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_REUSE_COMPACT_PAIRS", "1")
-    monkeypatch.setenv(
-        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE", "0"
-    )
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD", "0")
-
-    fmm = _engine()
-    positions, masses, _ = _particles()
-    with pytest.raises(RuntimeError, match="unsafe"):
-        fmm.strict_run_v2(
-            state=_state(positions),
-            masses=masses,
-            dt=1e-3,
-            num_steps=2,
-            refresh_every=1,
-            leaf_size=LEAF_SIZE,
-            max_order=MAX_ORDER,
-            theta=0.6,
-            return_history=False,
-        )
-
-
-@pytest.mark.slow
-def test_compact_pair_reuse_is_taken_when_explicitly_allowed(strict_env, monkeypatch):
-    """The unsafe path runs when asked for by name, and is counted.
-
-    Asserting the reuse counter rather than a numerical result on purpose: this
-    path reuses far pairs that the moved positions may have invalidated, so its
-    output is not something to pin. What matters is that opting in reaches it and
-    that the diagnostics say so.
-    """
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_REUSE_COMPACT_PAIRS", "1")
-    monkeypatch.setenv(
-        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE", "1"
-    )
-
-    fmm = _engine()
-    positions, masses, _ = _particles()
-    reuse_before = int(getattr(fmm, "_static_radix_compact_pair_reuse_hits", 0))
-
-    fmm.strict_run_v2(
-        state=_state(positions),
-        masses=masses,
-        dt=1e-3,
-        num_steps=2,
-        refresh_every=1,
-        leaf_size=LEAF_SIZE,
-        max_order=MAX_ORDER,
-        theta=0.6,
-        return_history=False,
-    )
-
-    reuse_after = int(getattr(fmm, "_static_radix_compact_pair_reuse_hits", 0))
-    assert reuse_after > reuse_before, (
-        "the unsafe reuse path was not taken despite being opted into; without "
-        "this the test silently exercises the ordinary rebuild instead"
-    )

@@ -1215,12 +1215,11 @@ def prepare_large_n_state(
     record_retry = request.record_retry
     collected_retries = request.collected_retries
 
+    # no host stage timers inside the fused lane (X6 removed the switch that
+    # allowed them, JACCPOT_STATIC_STRICT_FUSED_DISABLE_HOT_TIMING=0)
     refresh_timing_active = bool(
         getattr(fmm, "_refresh_timing_active", False)
-    ) and not (
-        bool(fused_device_mode)
-        and bool(getattr(fmm, "_strict_fused_disable_hot_timing", False))
-    )
+    ) and not bool(fused_device_mode)
 
     def _now() -> float:
         if not refresh_timing_active:

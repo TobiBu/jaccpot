@@ -23,13 +23,14 @@ lane's velocity-Verlet update is endpoint-correct only if the state is refreshed
 every step; refreshing less often silently integrates against stale multipoles.
 It raises.
 
-**Fused mode refuses to degrade silently.** If fused mode is requested and the
-particle count is not in ``JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET``, the lane
-raises instead of quietly running the slower non-fused path -- and the message
-names the variable and both ways to fix it. A silent fallback here would be a
-performance cliff nobody would ever notice, which is exactly what the code
-comment says. That predicate is `_strict_fused_profile_allows_n`, covered from
-the other side in ``test_strict_cap_profile.py``.
+**The profile set refuses rather than degrades.** If the particle count is not in
+``JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET``, the lane raises -- and the message
+names the variable and both ways to fix it. Before the 2026-10 cleanup (X6) the
+alternative was quietly running the slower non-fused loop, a performance cliff
+nobody would have noticed; X6 removed that loop, so the fused scan is the only
+one and the set only restricts it. That predicate is
+`_strict_fused_profile_allows_n`, covered from the other side in
+``test_strict_cap_profile.py``.
 """
 
 from __future__ import annotations
@@ -182,18 +183,17 @@ class TestArgumentValidation:
 
 
 class TestFusedModeRefusesToDegradeSilently:
-    """Requested-but-not-allowed raises rather than quietly running the slow path."""
+    """A particle count outside the profile set raises: there is no other loop."""
 
     @staticmethod
     def _engine_wanting_fused_at_another_n():
         engine = _strict()
-        engine._strict_fused_mode_enabled = True
         engine._strict_fused_profile_set_raw = "999999"  # deliberately not _N
         return engine
 
     def test_it_raises_instead_of_falling_back(self, particles):
         engine = self._engine_wanting_fused_at_another_n()
-        with pytest.raises(RuntimeError, match="refusing to silently fall back"):
+        with pytest.raises(RuntimeError, match="the strict lane's only loop"):
             engine.strict_run_v2(**_run_kwargs(*particles))
 
     def test_the_message_names_the_variable_and_both_remedies(self, particles):
@@ -236,7 +236,6 @@ class TestProfileKeyAccounting:
     @staticmethod
     def _engine():
         engine = _strict()
-        engine._strict_fused_mode_enabled = True
         engine._strict_fused_profile_set_raw = "999999"
         return engine
 

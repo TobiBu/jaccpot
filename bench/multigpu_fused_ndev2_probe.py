@@ -134,11 +134,11 @@ print(f"global box lo={np.asarray(BLO)} hi={np.asarray(BHI)}", flush=True)
 
 # --- eager prepare per shard, collect plans
 # ONE solver, and it must be the same instance the mesh run uses: the solver
-# carries host-side caches (the dual-downward planner hint among them) that an
-# eager prepare fills, and the traced body does bool() on their contents. A cold
-# solver therefore dies on a TracerBoolConversionError inside shard_map -- the
-# same "an eager prepare always precedes the trace" assumption as the level-shape
-# registry, in a different place.
+# carries host-side state that an eager prepare fills and the traced body reads
+# (the level-shape registry, the upward depth stash, and the fused mode the eval
+# fn opens). The dual-downward planner hint, whose bool() made a cold solver die
+# on a TracerBoolConversionError inside shard_map, went in the 2026-10 cleanup
+# (X6); the assumption "an eager prepare always precedes the trace" did not.
 solver = build()
 preps, plans = [], []
 for d in range(NDEV):

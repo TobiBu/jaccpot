@@ -43,7 +43,7 @@ published per-stage breakdown. **First A100 task: a fresh in-scan ablation** (ex
 
 ## The "fast-lane" is XLA fusion, not Pallas
 
-`JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY=1` (default) → `_prepare_state_dual_and_downward_strict_streamed_fast`
+`JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY=1` (default; since the 2026-10 cleanup, X6, the only path: `0` raises) → `_prepare_state_dual_and_downward_strict_streamed_fast`
 (`_fmm_impl.py:8097`). ~10× win is from device-resident execution (compact COO far-pairs,
 no host round-trips, fixed-shape static-radix), all plain JAX/XLA in one scan. Pallas is
 orthogonal: the only optionally-Pallas stage reachable from the fast lane is P2P near-field
