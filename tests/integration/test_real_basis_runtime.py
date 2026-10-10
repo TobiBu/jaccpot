@@ -11,6 +11,7 @@ pytest.importorskip("yggdrax")
 from yggdrax.interactions import DualTreeTraversalConfig
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
+from jaccpot.operators.symmetric_tensors import symmetric_multi_indices_3d
 
 
 def _direct_sum_accelerations(
@@ -125,16 +126,6 @@ def test_real_basis_far_field_converges_with_order():
     assert errors[2] < 1.0e-3
 
 
-# Used only where the backend fails the same-basis-twice control, i.e. cannot
-# reproduce its own output. Measured on an A100-PCIE-40GB (sm_80, jax 0.10.2) at
-# leaf_size=8 over 3 seeds: cross-basis 2.07e-08 .. 2.56e-08, and the same-basis
-# control 1.82e-08 .. 2.91e-08 -- the control is as large as the signal, and at one
-# seed larger. Both are ~0.2 eps_float32. 1e-6 is ~8 eps_float32 and ~40x the worst
-# measurement; a genuine basis-algebra error is orders above it (the pre-2026-08
-# form of this test used 3e-2 and caught nothing).
-_NONREPRODUCIBLE_ROUNDOFF_BOUND = {"float32": 1.0e-6, "float64": 1.0e-12}
-
-
 def _far_pair_count(state) -> int:
     """M2L interactions in a prepared topology; 0 means the far field never runs."""
     interactions = state.interactions
@@ -146,166 +137,72 @@ def _far_pair_count(state) -> int:
     return 0
 
 
-@pytest.mark.parametrize(
-    ("leaf_size", "dtype", "tolerance", "expect_far_field"),
-    [
-        # leaf_size=8 is what this test used before. At N=96 it accepts NO M2L
-        # pairs, so it compares the near field only -- which is basis-independent
-        # code and therefore agrees exactly. Kept, but labelled for what it is.
-        pytest.param(8, jnp.float32, 1e-14, False, id="nearfield-only-f32"),
-        pytest.param(4, jnp.float32, 2e-6, True, id="farfield-f32"),
-        pytest.param(4, jnp.float64, 1e-14, True, id="farfield-f64"),
-    ],
-)
-def test_real_basis_tracks_complex_basis(leaf_size, dtype, tolerance, expect_far_field):
-    """Real and solidfmm bases agree to round-off on the same frozen topology.
+def _far_source_mask(state, n: int) -> np.ndarray:
+    """``mask[i, j]``: source ``j`` reaches target ``i`` through an accepted M2L pair.
 
-    This is the genuine independent-basis cross-check: ``real`` and ``solidfmm``
-    reach the same force through different expansion algebra, so agreement bounds
-    the algebra rather than one implementation against itself.
-
-    Two things about this test were previously not true of it.
-
-    First, it asserted ``rel_l2 < 3e-2`` on a quantity that is **exactly zero**. At
-    ``leaf_size=8`` and N=96 the MAC accepts no M2L pairs, so both bases evaluate a
-    pure near-field P2P sum through the same basis-independent code -- measured,
-    the two outputs are bit-identical. That configuration is kept here as the
-    ``nearfield-only`` case, with an assertion that actually reflects it, but on its
-    own it never compared the two bases.
-
-    Second, 3e-2 was ~6 orders looser than the real agreement even in the regime
-    that does exercise the far field. Measured across 4 PRNG seeds x N in {96, 256}
-    at ``leaf_size=4`` (52-1090 M2L pairs):
-
-        float32   2.3e-08 .. 1.89e-07     (~1.6 eps_f32)
-        float64   3.5e-17 .. 9.63e-17     (~0.4 eps_f64)
-
-    Bounds are 2e-6 for fp32 (~10x headroom) and 1e-14 for fp64. Both are far
-    tighter than 3e-2, so this strengthens the test; nothing is relaxed.
-
-    The far-pair count is asserted, in both directions -- ``> 0`` for the far-field
-    cases and ``== 0`` for the near-field-only one -- so neither can silently drift
-    into the other regime and start passing for the wrong reason.
-
-    Topology parity is also asserted: both bases must accept the *same* number of
-    M2L pairs (measured, they always do). Without that, a difference in the accepted
-    interaction set would be indistinguishable from a difference in the algebra, and
-    the tolerance above would be measuring the wrong thing.
-
-    Third -- and this is why the bound is no longer a bare constant -- ``1e-14`` on a
-    **float32** quantity is below ``eps_float32`` (1.19e-07), so it is not a
-    tolerance at all: it is an exact-equality assertion, satisfiable only if the two
-    outputs are bit-identical. That held on CPU (measured: exactly 0.0, because at
-    ``leaf_size=8`` both bases run the same basis-independent near-field code) and
-    does **not** hold on GPU, where the same kernel does not reproduce itself
-    run-to-run. On an A100 this case failed 3 of 3 runs under default XLA and 0 of 3
-    under ``--xla_gpu_deterministic_ops=true`` -- it was measuring XLA, not the bases.
-
-    So the test now runs the **same basis twice** and uses that control to pick which
-    claim it is entitled to make: bit-identity where the backend reproduces itself
-    (unchanged, still ``1e-14``, nothing relaxed), and achievable round-off where it
-    does not. The control is also asserted to be inside that bound, so a backend
-    whose own repeatability has degraded fails loudly rather than widening the bound
-    it is compared against. See ``ARCHITECTURE.md`` section 10.
+    Built from the prepared state's own far-pair list and node ranges, in input
+    order. Every source is reached at most once (asserted): a pair list that covered
+    a source twice would double-count it, and this oracle would then hide it.
     """
-    if dtype is jnp.float64 and not jax.config.jax_enable_x64:
-        pytest.skip("float64 case requires JAX_ENABLE_X64=1")
-
-    n = 96
-    key = jax.random.PRNGKey(321)
-    key_pos, key_mass = jax.random.split(key)
-    positions = jax.random.uniform(
-        key_pos, (n, 3), minval=-1.0, maxval=1.0, dtype=dtype
-    )
-    masses = jnp.abs(jax.random.normal(key_mass, (n,), dtype=dtype)) + jnp.asarray(
-        0.5, dtype=dtype
-    )
-
-    fmm_real = _solver_with_capacity(basis="real")
-    fmm_complex = _solver_with_capacity(basis="complex")
-
-    far_real = _far_pair_count(
-        fmm_real.prepare_state(positions, masses, leaf_size=leaf_size, max_order=4)
-    )
-    far_complex = _far_pair_count(
-        fmm_complex.prepare_state(positions, masses, leaf_size=leaf_size, max_order=4)
-    )
-    assert far_real == far_complex, (
-        "the two bases must accept the same M2L set for this to be a basis "
-        f"comparison rather than a topology comparison (real={far_real}, "
-        f"complex={far_complex})"
-    )
-    if expect_far_field:
-        assert far_real > 0, (
-            "config must engage the far field or this compares basis-independent "
-            f"near-field code only (got {far_real} M2L pairs)"
-        )
-    else:
-        assert far_real == 0, (
-            "this case is the documented near-field-only regime; it now accepts "
-            f"{far_real} M2L pairs, so its exact-agreement bound no longer applies"
-        )
-
-    acc_real = np.asarray(
-        fmm_real.compute_accelerations(
-            positions, masses, leaf_size=leaf_size, max_order=4
-        ),
-        dtype=np.float64,
-    )
-    acc_complex = np.asarray(
-        fmm_complex.compute_accelerations(
-            positions, masses, leaf_size=leaf_size, max_order=4
-        ),
-        dtype=np.float64,
-    )
-
-    # The same basis run twice, which is what tells a basis difference apart from a
-    # backend that simply does not repeat itself. Exactly 0.0 wherever the
-    # computation is reproducible, so this changes nothing on CPU.
-    acc_real_again = np.asarray(
-        fmm_real.compute_accelerations(
-            positions, masses, leaf_size=leaf_size, max_order=4
-        ),
-        dtype=np.float64,
-    )
-
-    scale = np.linalg.norm(acc_complex) + 1.0e-12
-    rel_l2 = float(np.linalg.norm(acc_real - acc_complex) / scale)
-    nondeterminism = float(np.linalg.norm(acc_real - acc_real_again) / scale)
-
-    if nondeterminism == 0.0:
-        bound = tolerance
-    else:
-        # The backend does not reproduce itself, so the strict bound is not a claim
-        # anyone can make here; fall back to achievable round-off and say so.
-        bound = max(tolerance, _NONREPRODUCIBLE_ROUNDOFF_BOUND[np.dtype(dtype).name])
-        assert nondeterminism < bound, (
-            "the same basis run twice already differs by more than the round-off "
-            f"bound: {nondeterminism:.3e} >= {bound:.3e}. That is a backend or "
-            "capacity problem, not a basis comparison."
-        )
-
-    assert rel_l2 < bound, (
-        f"real and solidfmm bases disagree beyond round-off: rel-L2 {rel_l2:.3e} > "
-        f"{bound:.3e} (leaf={leaf_size}, {np.dtype(dtype).name}, "
-        f"{far_real} M2L pairs; same-basis-twice control {nondeterminism:.3e})"
-    )
+    interactions = state.interactions
+    total = int(jnp.sum(interactions.counts))
+    sources = np.asarray(interactions.sources)[:total]
+    targets = np.asarray(interactions.targets)[:total]
+    ranges = np.asarray(state.tree.node_ranges)
+    hits = np.zeros((n, n), dtype=np.int64)
+    for src, tgt in zip(sources, targets):
+        if src < 0 or tgt < 0:
+            continue
+        (t0, t1), (s0, s1) = ranges[tgt], ranges[src]
+        hits[t0 : t1 + 1, s0 : s1 + 1] += 1
+    assert hits.max() <= 1, "a source reaches a target through two far pairs"
+    to_sorted = np.asarray(state.inverse_permutation)
+    return hits[to_sorted][:, to_sorted].astype(bool)
 
 
-def test_real_basis_acceleration_derivatives_match_complex():
-    """Real-basis acceleration derivative towers match the complex path.
+def _packed_symmetric(full: jnp.ndarray, order: int) -> jnp.ndarray:
+    """``[N, 3, 3, ...]`` derivative tensor -> the solver's packed layout ``[N, 3, C]``."""
+    columns = []
+    for nx, ny, nz in symmetric_multi_indices_3d(order):
+        axes = (0,) * nx + (1,) * ny + (2,) * nz
+        columns.append(full[(slice(None), slice(None)) + axes])
+    return jnp.stack(columns, axis=-1)
 
-    Regression guard for the real L2P derivative tower
-    (evaluate_local_real_derivative_tower): with the same tree/interactions the
-    real and complex bases must produce identical accelerations AND identical
-    packed acceleration-derivative levels.
+
+def test_real_basis_acceleration_derivatives_match_direct_sum():
+    """The acceleration's spatial-derivative tower against a direct sum.
+
+    ``max_acc_derivative_order`` returns the derivatives of the **far-field**
+    acceleration only (the near-field P2P contributes none; with no M2L pair the
+    tower is exactly zero). So the oracle is the derivative, by ``jax.jacfwd`` at
+    the target, of the direct-sum field of exactly the sources the FMM's accepted
+    far pairs cover for that target -- read off the prepared state, frozen, with
+    the target itself never among them. The accelerations are checked against the
+    full self-excluded direct sum.
+
+    This replaces ``test_real_basis_acceleration_derivatives_match_complex``
+    (2026-10 cleanup, C), which compared the tower with the complex basis's to 1e-6
+    at ``leaf_size=16``, ``theta=0.4`` -- a configuration with **no** M2L pair at
+    this N, so it compared two zero towers. Here ``leaf_size=4`` engages 52 pairs.
+
+    The local expansion of order ``p`` gives the k-th acceleration derivative to
+    an effective order ``p - k - 1``, so the tower converges more slowly than the
+    acceleration does. Measured (fp64, N = 128, leaf 4, theta 0.4; identical on the
+    complex basis before it was removed):
+
+        order   acceleration   D1 rel-L2   D2 rel-L2
+          4        2.31e-4       4.51e-2     2.00e-1
+          8        9.39e-6       2.27e-3     1.43e-2
+
+    The tower bounds are the order-8 values with ~2x headroom (the accelerations'
+    are ~2x the measured values at both orders), and the order-4 -> 8
+    improvement (20x and 14x measured) must exceed 5x: a tower that stopped
+    converging -- a wrong lift or sign at one degree -- fails that even when it
+    happens to land inside the bound.
     """
     if not jax.config.jax_enable_x64:
         pytest.skip("requires x64 for stable tolerance")
 
-    # Parity claim (real derivative tower == complex derivative tower on the
-    # same tree) holds at any order/N, so a small n + moderate order keeps the
-    # regression coverage while cutting the compile cost of this test.
     n = 128
     dtype = jnp.float64
     key = jax.random.PRNGKey(5)
@@ -316,31 +213,65 @@ def test_real_basis_acceleration_derivatives_match_complex():
     masses = jnp.abs(jax.random.normal(key_mass, (n,), dtype=dtype)) + jnp.asarray(
         0.5, dtype=dtype
     )
+    softening = 1.0e-3
+    leaf_size, theta = 4, 0.4
 
-    def run(basis: str, k: int):
+    def field(mask_row: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        delta = x[None, :] - positions
+        dist_sq = jnp.sum(delta * delta, axis=1) + softening * softening
+        weights = jnp.where(mask_row, masses * dist_sq ** (-1.5), 0.0)
+        return -jnp.sum(weights[:, None] * delta, axis=0)
+
+    not_self = ~np.eye(n, dtype=bool)
+    acc_ref = jax.vmap(field)(jnp.asarray(not_self), positions)
+
+    errors = {}
+    for order in (4, 8):
         fmm = FastMultipoleMethod(
-            preset="accurate", basis=basis, theta=0.4, softening_kernel="plummer"
+            preset="accurate",
+            basis="real",
+            theta=theta,
+            softening=softening,
+            softening_kernel="plummer",
         )
-        return fmm.compute_accelerations(
-            positions, masses, leaf_size=16, max_order=4, max_acc_derivative_order=k
+        state = fmm.prepare_state(
+            positions, masses, leaf_size=leaf_size, max_order=order
         )
+        far_pairs = _far_pair_count(state)
+        assert far_pairs > 0, (
+            "config must engage the far field: the tower is far-field only, so with "
+            f"no M2L pair it is zero and this compares nothing (got {far_pairs})"
+        )
+        far_mask = jnp.asarray(_far_source_mask(state, n))
+        assert not bool(jnp.any(jnp.diagonal(far_mask)))
 
-    for k in (1, 2):
-        real_out = run("real", k)
-        complex_out = run("complex", k)
-        acc_real = np.asarray(real_out[0])
-        acc_complex = np.asarray(complex_out[0])
-        assert (
-            np.linalg.norm(acc_real - acc_complex)
-            / (np.linalg.norm(acc_complex) + 1.0e-12)
-            < 1.0e-6
+        acc, levels = fmm.compute_accelerations(
+            positions,
+            masses,
+            leaf_size=leaf_size,
+            max_order=order,
+            max_acc_derivative_order=2,
         )
-        levels_real = real_out[1]
-        levels_complex = complex_out[1]
-        assert len(levels_real) == len(levels_complex) == k
-        for dr, dc in zip(levels_real, levels_complex):
-            dr_np = np.asarray(dr)
-            dc_np = np.asarray(dc)
-            assert dr_np.shape == dc_np.shape
-            rel = np.linalg.norm(dr_np - dc_np) / (np.linalg.norm(dc_np) + 1.0e-30)
-            assert rel < 1.0e-6
+        acc_err = float(jnp.linalg.norm(acc - acc_ref) / jnp.linalg.norm(acc_ref))
+        acc_bound = {4: 5.0e-4, 8: 2.0e-5}[order]
+        assert acc_err < acc_bound, f"order {order}: acceleration rel-L2 {acc_err:.3e}"
+
+        assert len(levels) == 2
+        derivative = field
+        for k, level in enumerate(levels, start=1):
+            derivative = jax.jacfwd(derivative, argnums=1)
+            reference = _packed_symmetric(jax.vmap(derivative)(far_mask, positions), k)
+            got = jnp.asarray(level)
+            assert got.shape == reference.shape
+            errors[(order, k)] = float(
+                jnp.linalg.norm(got - reference) / jnp.linalg.norm(reference)
+            )
+
+    assert errors[(8, 1)] < 5.0e-3, errors
+    assert errors[(8, 2)] < 3.0e-2, errors
+    for k in (1, 2):
+        improvement = errors[(4, k)] / max(errors[(8, k)], 1e-300)
+        assert improvement > 5.0, (
+            f"D{k} stopped converging with order: {errors[(4, k)]:.3e} at p=4, "
+            f"{errors[(8, k)]:.3e} at p=8 ({improvement:.1f}x)"
+        )

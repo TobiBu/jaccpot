@@ -96,32 +96,6 @@ def test_static_num_levels_bit_identical_to_padded():
     assert jnp.array_equal(padded.multipoles.packed, optimized.multipoles.packed)
 
 
-def test_prepare_upward_sweep_stashes_and_reuses_concrete_depth():
-    """The runtime method stashes the concrete depth and a traced (jitted) call
-    reuses it, staying bit-identical to the concrete result."""
-    import jax
-    from yggdrax.tree import get_num_levels
-
-    from jaccpot.runtime._fmm_impl import FMMEngine
-
-    tree, ps, ms = _build_multilevel_tree()
-    actual = int(get_num_levels(tree))
-    fmm = FMMEngine(expansion_basis="solidfmm")
-
-    concrete = fmm.prepare_upward_sweep(
-        tree, ps, ms, max_order=4, center_mode="com", max_leaf_size=8
-    )
-    assert fmm._static_upward_num_levels == actual
-
-    def _run(t, p, m):
-        return fmm.prepare_upward_sweep(
-            t, p, m, max_order=4, center_mode="com", max_leaf_size=8
-        ).multipoles.packed
-
-    packed_jit = jax.jit(_run)(tree, ps, ms)
-    assert jnp.array_equal(packed_jit, concrete.multipoles.packed)
-
-
 def test_prepare_solidfmm_upward_source_motion_optional_none():
     tree, pos_sorted, mass_sorted, _ = _build_sample_tree()
     upward = prepare_solidfmm_complex_upward_sweep(

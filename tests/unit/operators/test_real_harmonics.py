@@ -246,6 +246,84 @@ def test_solid_harmonic_transverse_derivative_coefficients_are_half_integers():
                     )
 
 
+# Geometries chosen to cover the degenerate azimuths as well as a generic point:
+# `rho == 0` (z-aligned) is where the azimuth is undefined, and the axis cases are
+# where a per-m sign or normalisation error shows up most cleanly.
+_P2M_GEOMETRIES = [
+    pytest.param([0.7, -0.3, 0.45], id="generic-off-axis"),
+    pytest.param([0.0, 0.0, 0.8], id="z-aligned-rho-zero"),
+    pytest.param([0.9, 0.0, 0.0], id="x-aligned"),
+    pytest.param([0.0, -0.6, 0.0], id="y-aligned"),
+    pytest.param([0.5, 0.5, 0.0], id="xy-plane"),
+    pytest.param([1e-8, -2e-8, 3e-8], id="near-origin"),
+]
+
+
+@pytest.mark.parametrize("delta", _P2M_GEOMETRIES)
+def test_p2m_point_mass_reproduces_its_far_field_at_every_order(delta):
+    """A point mass's multipole reproduces ``m / r`` and its field far away, p = 0-6.
+
+    The real-only anchor for the P2M normalisation at every degree and at the
+    degenerate azimuths. It replaces
+    ``test_complex_to_dehnen_real_matches_p2m_real_direct`` (orders 0-6 over these
+    six geometries against the complex basis's conversion, removed with the complex
+    basis in the 2026-10 cleanup, C) as the per-geometry check; the derivative
+    recurrences above pin the normalisation at generic points to ~1e-3.
+
+    The multipole of a mass ``m`` at ``d`` about the origin is translated (M2L) to
+    a local expansion about ``X`` (``|X| = 9.1``, so ``q = |d|/|X| <= 0.1``) and
+    evaluated there. The multipole series' truncation error is bounded **exactly**:
+    ``|phi - phi_p| <= m / (|X| - |d|) q^(p+1)``, i.e. relative to ``m / |X - d|``
+    at most ``(1 + q)/(1 - q) q^(p+1)``. A per-``(n, m)`` normalisation error
+    ``delta`` at degree ``n <= p`` moves the potential by ~``delta q^n``, so at
+    ``p = 6`` it is caught down to ``delta ~ q^(7 - n)`` (1e-6 at degree 1, 0.1 at
+    degree 6), and a sign error at any degree fails outright. Measured worst ratio
+    of the error to the bound: 0.98 (``near-origin``, p = 0, where the bound is the
+    leading term itself); generic points 0.07-0.84.
+
+    The field at the local centre uses multipole degrees up to ``p - 1``, so its
+    error bound is ``(p + 1) q^p (1 + q)^2 / (1 - q)^2``; asserted with a factor 2
+    (measured worst ratio 0.99 to the unscaled bound, near-origin p = 1, again
+    the leading term). The returned gradient is ``d phi / d delta`` with
+    ``delta = centre - point``: minus the gradient in the evaluation point, so for
+    ``phi = m / |x - d|`` it is ``m (X - d) / r^3`` at the centre.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("the truncation bounds go below float32 round-off")
+
+    d = jnp.asarray(delta, dtype=jnp.float64)
+    mass = jnp.asarray(1.7, dtype=jnp.float64)
+    target = jnp.asarray([4.0, -5.0, 6.5], dtype=jnp.float64)
+    separation = target - d
+    r = float(jnp.linalg.norm(separation))
+    potential_ref = float(mass) / r
+    grad_ref = float(mass) * np.asarray(separation) / r**3
+    q = float(jnp.linalg.norm(d) / jnp.linalg.norm(target))
+
+    for order in range(7):
+        multipole = p2m_real_direct(d, mass, order=order)
+        local = m2l_real(multipole, target, order=order)
+        grad, potential = evaluate_local_real_with_grad(
+            local, jnp.zeros(3, dtype=jnp.float64), order=order
+        )
+
+        pot_err = abs(float(potential) - potential_ref) / potential_ref
+        pot_bound = (1 + q) / (1 - q) * q ** (order + 1) + 1e-14
+        assert pot_err < pot_bound, (
+            f"order {order}: potential rel err {pot_err:.3e} above the multipole "
+            f"truncation bound {pot_bound:.3e} (q = {q:.3e})"
+        )
+
+        grad_err = float(
+            np.linalg.norm(np.asarray(grad) - grad_ref) / np.linalg.norm(grad_ref)
+        )
+        grad_bound = 2.0 * (order + 1) * q**order * (1 + q) ** 2 / (1 - q) ** 2 + 1e-13
+        assert grad_err < grad_bound, (
+            f"order {order}: field rel err {grad_err:.3e} above {grad_bound:.3e} "
+            f"(q = {q:.3e})"
+        )
+
+
 def test_p2m_real_direct_monopole():
     """Monopole (ell=0) should equal mass."""
     for order in [0, 1, 2, 4]:

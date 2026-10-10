@@ -3,9 +3,9 @@
 ``prepare_real_source_motion_multipoles`` returns ``d^k M / dt^k`` for every node
 when the particles move on straight lines about frozen centres. These tests use a
 basis-independent oracle -- central finite differences of the ordinary real
-multipoles at those same centres -- so they outlive the complex basis. The
-engine-level check against the complex implementation (while it exists) is in
-``test_real_source_motion_matches_complex``.
+multipoles at those same centres. The engine-level check, with the far field
+engaged, is against direct sums:
+``test_real_source_motion_with_the_far_field_matches_direct_sum``.
 """
 
 from __future__ import annotations
@@ -134,17 +134,35 @@ def test_a_resting_system_has_no_source_motion():
     assert float(jnp.max(jnp.abs(got))) == 0.0
 
 
-def test_real_source_motion_matches_complex():
-    """Jerk and the K = 3 tower: real against complex on one configuration.
+def test_real_source_motion_with_the_far_field_matches_direct_sum():
+    """Jerk and the K = 3 tower with the far field engaged, against direct sums.
 
-    The complex basis computed these first; the real path now does it natively
-    (lowered leaf P2M, real M2M / M2L / L2L, exact derivative tower). Measured at
-    N = 96, leaf 4, p = 4, theta 0.6 (106 M2L pairs): 8e-18 relative on the jerk,
-    <= 6e-18 on D1-D3. Goes with the complex basis (cleanup phase C); the
-    direct-sum tests in ``test_solver_api.py`` and the finite-difference test
-    above then own these properties.
+    The engine-level owner of the far-field time derivatives: the direct-sum tests
+    in ``test_solver_api.py`` run the tower at ``theta=1e-4`` (no M2L pair), and
+    ``test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged`` covers
+    the jerk only. Here snap and crackle go through the far field too.
+
+    Replaces ``test_real_source_motion_matches_complex`` (2026-10 cleanup, C), which
+    compared the same quantities with the complex basis to 1e-12. Measured at
+    N = 96, leaf 4, p = 4, theta 0.6 (106 M2L pairs), fp64, Plummer softening 1e-3
+    (the direct sums' kernel), relative L2 against the direct sums -- identical on
+    the complex basis before it was removed:
+
+        jerk     4.338e-4   (both entry points)
+        snap     8.285e-5
+        crackle  9.554e-6
+
+    The bounds give each ~2.3-3x headroom. The two jerk entry points
+    (``compute_accelerations_and_jerk`` and the tower's first level) run the same
+    analytic path and must agree to round-off.
     """
-    from tests.unit.test_solver_api import _sample_problem, _sample_velocities
+    from tests.unit.test_solver_api import (
+        _direct_sum_crackle,
+        _direct_sum_jerk,
+        _direct_sum_snap,
+        _sample_problem,
+        _sample_velocities,
+    )
 
     positions, masses = _sample_problem(n=96)
     velocities = _sample_velocities(n=96)
@@ -152,17 +170,33 @@ def test_real_source_motion_matches_complex():
         jnp.asarray(a, jnp.float64) for a in (positions, masses, velocities)
     )
     kwargs = dict(leaf_size=4, max_order=ORDER, theta=0.6)
-    out = {}
-    for basis in ("complex", "real"):
-        fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis=basis)
-        _, jerk = fmm.compute_accelerations_and_jerk(
-            positions, masses, velocities, jerk_mode="accurate", **kwargs
+
+    def solver():
+        return FastMultipoleMethod(
+            preset=FMMPreset.ACCURATE, softening=1e-3, softening_kernel="plummer"
         )
-        fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis=basis)
-        _, derivs = fmm.compute_accelerations_with_time_derivatives(
-            positions, masses, velocities, max_time_derivative_order=3, **kwargs
-        )
-        out[basis] = (jerk, *derivs)
-    for got, want in zip(out["real"], out["complex"]):
+
+    state = solver().prepare_state(positions, masses, **kwargs)
+    far_pairs = int(jnp.sum(state.interactions.counts))
+    assert far_pairs > 0, f"the far field must be engaged (got {far_pairs} M2L pairs)"
+
+    _, jerk = solver().compute_accelerations_and_jerk(
+        positions, masses, velocities, jerk_mode="accurate", **kwargs
+    )
+    _, derivs = solver().compute_accelerations_with_time_derivatives(
+        positions, masses, velocities, max_time_derivative_order=3, **kwargs
+    )
+    assert len(derivs) == 3
+    jerk_gap = float(jnp.linalg.norm(jerk - derivs[0]) / jnp.linalg.norm(derivs[0]))
+    assert jerk_gap < 1e-12, jerk_gap
+
+    references = [
+        oracle(positions, masses, velocities, G=1.0, softening=1e-3)
+        for oracle in (_direct_sum_jerk, _direct_sum_snap, _direct_sum_crackle)
+    ]
+    bounds = (1e-3, 2.5e-4, 3e-5)
+    for name, got, want, bound in zip(
+        ("jerk", "snap", "crackle"), derivs, references, bounds
+    ):
         rel = float(jnp.linalg.norm(got - want) / jnp.linalg.norm(want))
-        assert rel < 1e-12, rel
+        assert rel < bound, f"{name}: rel-L2 {rel:.3e} >= {bound:.1e}"
