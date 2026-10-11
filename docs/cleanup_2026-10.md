@@ -56,7 +56,8 @@ On `main` at 6cca378 (2026-10-06):
 | C | #389 | The complex basis: the distributed driver's complex far field (C2), then single GPU (C1): `basis="complex"` raises one migration error, `basis="solidfmm"` is the real basis, the six complex modules and the runtime's complex branches go; direct-sum oracles replace the real basis's complex-only cross-checks first | CPU suite (also at the behaviour change alone), shard partition, distributed tier, CPU bitwise A/B, CI benchmark guard on real | merged |
 | tower | #390 | The acceleration-derivative tower includes the near field (C's finding); `evaluate_local_real_with_grad`'s docstring sign; a GPU-only failure of K's `jerk_fd_dt` test | CPU suite, A100 tests + fp32 check, GPU pins S3/S4/S4b | merged |
 | Z-a | #392 | Test consolidation (T1, rules R2-R7): the bench-tooling tests move to `bench/tests`; one signature-contract table; grid corners; `tests/integration/strict/`; one owner per gradient property; `test_fmm.py` and `test_solver_api.py` split by subject; the removed-option and shim tests collected in `test_removed_options.py` for Z-b. Tests only | CPU suite, shard partition, bench-tooling tests | merged |
-| Z-b | | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | open |
+| Z-b | #393 | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | open |
+| Z-c | | CI and docs: `slow_tests.txt` rebuilt from durations; a curated `smoke` marker run by the Python-floor job; the criterion and nornax-distributed jobs path-gated (main, nightly, dispatch, PRs touching their code); caps at about twice the measured times; stale marker ids fail `test-partition`; ARCHITECTURE, README, the docs index and the current docs follow the cleanup; notebooks stop passing removed options; the `CLAUDE.md` amendment reverted. Library: comments only | CPU suite, shard partition, smoke run, actionlint, bench tooling | open |
 
 ### P0: CI runs each test once
 
@@ -2832,3 +2833,261 @@ too).
   describes the complex packing); `DistributedFMMConfig.local_walk` is single-valued;
   `JACCPOT_LARGE_N_COMPILED_STATE_MODE` is read nowhere (the harness sets it).
 - The four comments in `jaccpot/` that name a test Z-a moved (Z-a's list).
+
+### Z-c: CI, docs, and the end of the `CLAUDE.md` exception
+
+The last phase: CI tuning (R10 and the plan's CI list), the docs, and the revert of the
+temporary `CLAUDE.md` amendment. No behaviour change: in `jaccpot/` only comments and
+docstrings changed (four stale test paths, four `experimental/` mentions, one stale
+"smoke leg"); an AST comparison with docstrings removed finds every changed module
+identical to 434387f. No test was deleted; the exception this project ran under is
+reverted in the PR's last commit.
+
+**`tests/slow_tests.txt` rebuilt from durations (R10).** One CPU run of the default
+collection at 434387f (`pytest -n 12 --durations=0`, a loaded host, so only the relative
+order is used): 1,672 passed, 237 skipped, 1 failed (the stale local nornax checkout) in
+30 min. The list is now the 44 tests not already marked `slow` by a decorator whose call
+takes >= 60 s, plus `TestEveryFastPallasKernel::test_the_far_field_is_load_bearing`,
+which only pays the class fixture its listed sibling shares: 45 ids (85 before; 21 kept,
+24 added, 64 dropped, all of those < 60 s). The listed tests are 28.1 % of the run's
+summed test time (the old list 22.5 %). `-m slow` 242 -> 205, `-m "not slow"` 1,668 ->
+1,705. No CI job deselects `slow`; it is the local fast subset only. Format unchanged.
+
+**A curated `smoke` marker (R10).** `tests/smoke_tests.txt` (64 node ids), applied by
+`tests/conftest.py` exactly as the slow list is (one loader for both) and registered in
+`pyproject.toml`:
+- one fast representative per lane: baseline CPU radix against the direct sum, the
+  forward golden and the constructor golden; the large-N CPU fallback and the fused
+  strict lane (their lane goldens); the multi-GPU drivers (the fused lane's cross near
+  field against a direct sum on one device, and `distributed/fmm.py` against a direct
+  sum, which skips below two devices); BlockStepFMM against the direct sum and the
+  distributed mutual lane's node rungs;
+- one test per gradient owner of R6: FD vs AD, the direct-sum oracle's gradient, the
+  gradient golden, the real-L2P and CSR near-field VJPs, the large-N reverse against the
+  direct sum, the mutual lane's level gradients. The distributed owner's module is
+  decorator-marked `slow` (and skips on one device), so it has no smoke entry;
+- jerk against the direct sum (accurate mode), the near-field derivative tower, the
+  softening kernels;
+- the whole public-API, Odisseo-contract (coupler and downstream contract) and
+  repo-guard files: exports, overloads, mixin base, operators-do-not-import-pallas, the
+  yggdrax symbol contract.
+
+Smoke and slow are disjoint. `test-py-floor` (3.12) now runs `pytest -n 2 -m smoke tests`
+instead of the goldens and two API files: 63 passed, 1 skipped (the two-device driver)
+in 3 min 28 s at `-n 2` on this loaded host with a cold cache; the job measured 3.9-4.1
+min with its old selection.
+
+**Stale marker ids fail CI.** `test_shards.py check` (the `test-partition` job) also
+fails on an id in either list that the default collection no longer contains, so moving
+or renaming a test can no longer un-mark it silently (checked by feeding it a bogus id).
+
+**Two jobs are path-gated.** `test-distributed-criterion` and
+`test-cross-repo-nornax-distributed` run on pushes to main, on a nightly schedule
+(02:23 UTC), on `workflow_dispatch`, and on pull requests whose diff touches
+`GATED_PATHS` in `test_shards.py`: `jaccpot/distributed/`, `jaccpot/mutual/`,
+`jaccpot/nornax_adapter.py`, `jaccpot/pallas/nearfield_*`, and also their own tests,
+`tests/conftest.py`, `.github/` and `pyproject.toml`. No third-party action: a `changes`
+job checks out the full history, diffs the PR's base commit against the merge commit and
+asks `test_shards.py touches`; both jobs `needs: changes` and run on its output (always
+true outside pull requests). A failed diff fails the step instead of reading as "nothing
+changed". Both shards stay in `SHARDS`, so `test-partition` still accounts for their
+tests. The nightly run skips every other job; a dispatch is a full run. The concurrency
+group now includes the event, so a nightly run cannot take the pending slot of a push to
+main. Of the 25 PRs merged into `main` during the project, 12 would have skipped them
+(among them P1, J, X2, X3, D1, D2 and #390); the other 13 touched a gated path.
+
+**Caps at about twice the measured job time** (fff5dfa, Z-a's PR and main runs, Z-b's
+PR run), never below 15 min:
+
+| job | measured (min) | cap before | cap after |
+| --- | --- | --- | --- |
+| test-full (integration) | 17.4-24.2 | 60 | 50 |
+| test-full (unit) | 16.5-34.5 | 60 | 45 |
+| test-full (unit-runtime) | 15.0-21.1 | 60 | 40 |
+| test-full (unit-runtime-mac) | 18.7-18.9 | 60 | 40 |
+| test-full (mutual-static-device), (characterization) | 3.8-5.2 | 60 | 15 |
+| test-cross-repo-nornax | 18.8-21.5 | 45 | 45 |
+| test-distributed-mutual | 12.1-15.5 | 35 | 30 |
+| test-distributed-tier | 10.7-14.1 | 60 | 30 |
+| test-distributed-criterion | 6.5-9.7 | 90 | 20 |
+| test-cross-repo-nornax-distributed | 3.4-3.6 | 90 | 15 |
+| test-py-floor | 3.9-4.1 | 30 | 15 |
+| test-partition | 2.2-2.3 | 20 | 15 |
+| lint, benchmark-guard, changes (new) | 2.0-4.5 | none (360) | 15 |
+
+The `test-full` caps are per shard through the matrix.
+
+**Runner time per push.** Z-b's PR run: 158.9 runner-min (2.65 h), all 15 jobs green.
+Without the two gated jobs (8.9 + 3.4 min) and with the `changes` job (well under a
+minute), a pull request that does not touch the gated paths costs about 147 min
+(2.45 h), within the plan's 2.5 h; pushes to main and gated PRs stay at about 2.65 h.
+Not yet measured on CI: this PR touches `.github/`, so its own run is a gated one.
+
+**Docs.**
+- `ARCHITECTURE.md`: a per-package table (with `basis/` and `downward/`) and a test
+  layout (`tests/integration/strict/`, `bench/tests/`); `experimental/` gone from the
+  leaf-boundary and dependency notes; `runtime/kernels/` as five modules behind an
+  aggregator; §5's M2L seam without `basis_mode` / `rotation`, and where the CSR Pallas
+  lane takes over the accumulate step; §7's treecode kernels and its fp32-precision
+  bullet (the operators have pinned `HIGHEST` since before the cleanup; the bullet still
+  called it an open floor); §10's invariant without the basis seam;
+  `DistributedBlockStepFMM` in the export table; 15 names, 9 mixins.
+- `README.md`: Pallas Acceleration (it said only the z-axis M2L core is offloaded; that
+  kernel went in X5) now lists what runs as Pallas on sm_80+ and the automatic fallback;
+  one short "Removed in the 2026-10 cleanup" section replaces the octree and
+  removal-error paragraphs; Adaptive Order notes the known gap below; coverage is
+  measured, not enforced; the CI section lists the real jobs; the performance-guard
+  paragraph described refreshing a `bench/benchmark_baseline.json` that never existed
+  (the guard checks ratio bounds); the missing `benchmark_runtime_accuracy.ipynb`
+  reference is gone; the Python badge says 3.12+.
+  `examples/README.md` likewise (relative links, the benchmark notebooks labelled as
+  records), and `CONTRIBUTING.md` (coverage, the two markers).
+- `docs/README.md`: `treecode_mac_stability.md`, `refactor_audit_2026-08.md`, both
+  phase-5 Pallas plans and the TONB runbook re-marked closed, each file with a one-line
+  historical note; rows for this record and the eight dated fused-lane records the index
+  lacked; "what is still open" points at the project summary below.
+- Current docs fixed: `large_n_runtime_contract_2026-04-21.md` (the contract is the
+  preset alone, and lists what `_apply_large_n_gpu_production_contract` sets),
+  `dehnen_mass_mac_status_and_plan.md` (the treecode builder, `local_walk`, the
+  `runtime_path` pinning, trap 15, the Cartesian ~1.8e-1 item closed by removal),
+  `derivatives_and_jerk.md`, `differentiable_fmm.md`, `operator_conventions.md`
+  (yggdrax's `multipole_utils` went too), `rotation_degeneracy_derivative.md` (a note
+  that its complex rows and §9 are history), `agent_guides/NUMERICS_AND_JAX.md` (the
+  markers).
+- Left as they are (dated plans, audits and handoffs that the index already marks
+  closed or superseded): `differentiable_fmm_design.md`,
+  `differentiable_fmm_pallas_vjp_plan.md`, `dehnen_mac_step3prime_prompt.md`,
+  `octree_fmm_task_list.md`, `octree_status_2026-03-15.md`,
+  `phase5_multigpu_pallas_foldin_plan.md`, the three `radix_*` plans,
+  `pytest_cleanup_handoff_2026-04-22.md`, `handoff_tier1_gpu_validation.md`,
+  `runtime_traversal_comparison_2026-03-20.md`,
+  `small_gpu_large_n_followup_2026-03-25.md`.
+
+**Notebooks.** Source cells only, outputs and metadata unchanged, nothing executed:
+eight of the nine stop passing `FarFieldConfig(rotation=, mode=, grouped_interactions=)`,
+`autotune_m2l_chunk`, `runtime_path` and the near-field studies' `farfield_mode` /
+`grouped_interactions` (139 lines removed, 1 replaced). They still need real rework to
+run, and are left for it:
+- the worker cells of `benchmark_gpu_radix_runtime`, `benchmark_gpu_single_n_memory`,
+  the `benchmark_runtime_*` family and `benchmark_runtime_rtx2080_focused` drive
+  `examples/benchmark_gpu_radix_worker.py`, deleted in X1, and read removed config
+  attributes; `benchmark_gpu_single_n_memory` also runs the deleted
+  `profile_prepare_memory_split.py`;
+- the sweep guard of `benchmark_runtime_accuracy_copy`, `benchmark_runtime_large_N`,
+  `..._large_N_accuracy` and `..._large_N_performance` reads `complex_rotation`;
+- their sparse-vs-grouped and pair_grouped-vs-class_major comparison cells, the
+  complex-module cells (`complex_harmonics`, `complex_ops`) and the
+  `solidfmm_complex_tree_expansions` cells;
+- `adaptive_vs_fixed_benchmark` (left whole): it calls private prepare helpers whose
+  signatures changed beyond the removed keywords.
+
+**Gates:**
+- **CPU suite** (`pytest -p no:cacheprovider -n 12 --timeout=1800 tests/unit
+  tests/integration tests/characterization -rf`, CPU) at 06f3bcd (the CI commits in;
+  later commits are docs and one docstring): 1,663 passed, 191 skipped, 1 failed in
+  35 min, the same counts as Z-b. The failure is the stale local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as at every
+  phase since K.
+- **`test_shards.py check`** (four forced host devices, x64): 1,910 tests, each in
+  exactly one of the 11 shards; `slow_tests.txt` 45 ids, `smoke_tests.txt` 64 ids, none
+  stale.
+- **Smoke** (`pytest -n 2 -m smoke tests`, x64, one device): 64 collected, 63 passed, 1
+  skipped, 3 min 28 s.
+- **Workflow**: parses (PyYAML); actionlint 1.7.12 reports nothing; `touches` false for
+  `README.md` + `jaccpot/solver.py`, true for `jaccpot/pallas/nearfield_mutual.py`.
+- **Bench tooling** (`pytest -n 0 bench/tests`): 93 passed.
+- **pre-commit** on every changed file: clean.
+- **Library diff** (`git diff 434387f -- jaccpot/`): comments and docstrings only, eight
+  files; the AST of each, docstrings removed, is identical to 434387f.
+
+**Left:**
+- Comments in seven test modules still explain a `slow` marker by the `test-smoke` job
+  that P0 removed (the markers themselves are right).
+- Z-a's ten single-value `basis` parametrisations (`[real]` ids), R9, and the plan's
+  item and file targets (below).
+
+## Project summary
+
+**Phases and PRs** (jaccpot unless named):
+
+| phase | PR | phase | PR |
+| --- | --- | --- | --- |
+| P0 CI | #369 | X4 autotune, sizing, legacy strict | #383 |
+| P1 safety net | #370 | fix: CSR payload placeholder | #384 |
+| J real-basis jerk | #371 | X5 superseded kernels | #385 |
+| X1 treecode, experimental | #372 | pin S6 (clean env) | #386 |
+| X2 octree backend | #373 | X6 strict-lane paths | #387 |
+| D1 real default | #374 | K Cartesian basis | #388 |
+| fix: no-Pallas near field | #376 | C complex basis | #389 |
+| pins at 15ceca4 | #377 | tower: near field in the derivative tower | #390 |
+| D2 fused lane default | #378 | Z-a test consolidation | #392 |
+| X3 grouped far field, AABB centres | #380 | Z-b shims and removal errors | #393 |
+| Z-c CI and docs | (this) | | |
+
+yggdrax: Y3 #90 (with the `jaccpot-compat` CI job), Y1 #91, Y2 #92. Odisseo
+(`jaccpot-integration`): #27, #29 (O2), #31 (O3), #32 (open, Z-b's follow-up). nornax:
+#14.
+
+**Library size.**
+- jaccpot `jaccpot/`: 104,966 lines in 130 modules at 6cca378 -> 85,762 in 118 now
+  (-19,204 net). That includes the feature PRs merged meanwhile (fused round 7 #368,
+  softening #375, `dehnen_error` #379, the derivative tower #390: about +4,300 net).
+  The removal phases
+  alone (X1-X6, K, C, Z-b, by their merge diffs) took -26,787 / +2,851 lines.
+  Quoted `JACCPOT_*` names in the package: 177 -> 126.
+- yggdrax `yggdrax/`: 29,630 -> 22,707 lines (7cab99b -> main, -7,238 / +315; the Y
+  commits alone -7,220 / +259).
+
+**Tests.** At 6cca378: 2,054 unit tests in 204 files, and 2,545 in the default
+collection (P0's count). Now: 1,913 items in 151 files (`tests/unit` 1,575 in 121
+files), 1,910 in the default collection, plus the 93 bench-tooling tests in
+`bench/tests`. Every collected test runs at most once per push (all of them on main).
+The plan's targets (<= 1,100
+items, <= 125 files) were not met: most of the remaining volume is live coverage of the
+kept lanes, and the trimming rules only removed what they could tag.
+
+**CI runner time per push:** about 5.2 h before P0 -> 3.2 h after it -> 2.63 h at fff5dfa
+-> 2.65 h on Z-b's PR -> about 2.45 h for a pull request that does not touch the gated
+paths (2.65 h on main and gated PRs).
+
+**Bugs found and fixed along the way:**
+- the pure-JAX real P2M dropped the first leaf's multipole whenever the scan batch was
+  wider than the leaf count, as under `large_n_gpu` on any tree below 2,048 leaves (P1);
+- Odisseo's strict velocity-Verlet test imported a re-export that had gone (P1;
+  Odisseo #27);
+- `jerk_mode="accurate"` and the time-derivative API raised on the real basis, and the
+  real derivative tower was wrong at `delta = 0` and on the z-axis (J);
+- the large-N lane's no-Pallas near field read the CSR lane's placeholder: rel-L2 0.113
+  instead of 1.6e-3 at 5e4 (#376);
+- the CSR lane's placeholder also fed the per-particle near-field payload at the default
+  payload budget (#384);
+- Odisseo's own production lane (N >= 2e5 on a GPU) did not run on `main`: an odd edge
+  cap, then a far-cap overflow (D2);
+- a `/tmp` cap-profile file coupled strict-lane runs across sessions and users (X4);
+- `FMMEngine`'s own default basis was the Cartesian one, rel-L2 0.17-0.39 for every
+  direct engine caller and `compute_gravitational_acceleration` (K);
+- `DistributedFMMConfig.basis` was never validated: `"cartesian"` or a typo silently ran
+  the complex far field (K, C2);
+- the acceleration-derivative tower was far-field only, and
+  `evaluate_local_real_with_grad`'s docstring had the sign wrong (C; fixed in #390);
+- the accel-only near-field variant tests compared the default with itself (Z-a);
+- `tests/perf` compared a far-field mode that had raised since X3 (Z-b); and the
+  large-N gate's `complex_rotation` conjunct had to go in the same commit as the
+  attribute, or the lane would have declined silently (Z-b).
+
+**Still open:**
+- **The jax 0.11.2 two-card fused-lane hang** (`ragged_all_to_all`): pin M2 cannot be
+  recorded until it is fixed; a separate investigation.
+- **The two-card pins M1 / M3 were not re-run** after C (last bitwise on main 944e6ba
+  and at C); Z-a, Z-b and Z-c did not run them (no two free cards), though the mesh lane
+  is in Z-b's CPU A/B and Z-c changes no library code.
+- **Adaptive order does not reach the downward sweep**: `_prepare_solidfmm_downward_sweep`
+  reads neither `adaptive_order` nor `p_gears`, so every accepted pair runs at
+  `max_order` and the gears only feed `far_pairs_by_gear_counts` (README notes it).
+- **yggdrax switches `jax_enable_x64` on at import**, so `JAX_ENABLE_X64=0` is not an
+  fp32 switch for jaccpot; fp32 needs float32 inputs and `working_dtype`.
+- Smaller leftovers (Z-b's list): two never-written refresh timing keys,
+  `_adaptive_policy.py`'s `Inexact`, the single-valued
+  `DistributedFMMConfig.local_walk`, `JACCPOT_LARGE_N_COMPILED_STATE_MODE` read nowhere,
+  the prepared states' `execution_backend` tag; the notebooks above; Z-a's `[real]`
+  parametrisations; the plan's item and file targets.
