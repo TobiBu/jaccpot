@@ -96,8 +96,8 @@ class BasisInterface(Protocol):
         Optional in practice: an implementation whose production M2L is reached
         through the runtime's ``basis_mode`` seam rather than through this object
         may raise :class:`NotImplementedError` here.
-        :class:`~jaccpot.RealSHBasis` does exactly that, while
-        :class:`~jaccpot.basis.complex_sh.ComplexSHBasis` implements it.
+        :class:`~jaccpot.RealSHBasis` does exactly that (the complex basis's
+        adapter, which implemented it, was removed in the 2026-10 cleanup, C).
 
         Parameters
         ----------

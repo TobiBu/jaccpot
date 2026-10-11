@@ -209,8 +209,8 @@ def _apply_generator(coeffs: Array, generator: Array) -> Array:
     """Apply a packed generator to the last axis of ``coeffs``, padding with zeros.
 
     ``coeffs`` may be longer than the generator when a caller passes coefficients for a
-    higher order than it asks for -- :func:`~jaccpot.operators.complex_ops.m2l_complex_reference`
-    slices its input, so its tangent has the untruncated width. The tail contributes
+    higher order than it asks for -- the complex ``m2l_complex_reference`` (removed
+    in the 2026-10 cleanup, C) sliced its input, so its tangent has the untruncated width. The tail contributes
     nothing to the result, so it contributes nothing to the correction either.
 
     Parameters

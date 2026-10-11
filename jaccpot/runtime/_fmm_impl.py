@@ -75,9 +75,6 @@ from jaccpot.config import (
     TreeConfig,
 )
 from jaccpot.downward.local_expansions import LocalExpansionData
-from jaccpot.operators.complex_ops import (  # noqa: F401
-    enforce_conjugate_symmetry_batch,
-)
 from jaccpot.operators.real_harmonics import sh_size  # noqa: F401
 from jaccpot.softening import resolve_softening_kernel, support_factor
 
@@ -139,7 +136,6 @@ _REEXPORTS = (
     _prepare_solidfmm_downward_sweep,
     adaptive_pair_policy,
     build_interactions_and_neighbors,
-    enforce_conjugate_symmetry_batch,
     sh_size,
 )
 

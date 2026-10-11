@@ -1,20 +1,21 @@
 """Native real (Dehnen no-sqrt2) tree upward sweep: P2M + M2M by level.
 
-Real-basis analog of
-:func:`jaccpot.upward.solidfmm_complex_tree_expansions.prepare_solidfmm_complex_upward_sweep`.
-It produces per-node **real** multipole coefficients directly (no complex
-intermediate), which matters for the distributed FMM: the coarse-tree seeding
-``all_gather``\\s the leaf multipoles, so real coefficients halve the inter-GPU
-communication versus the complex packed multipoles.
+Began as the real-basis analog of the complex upward sweep
+(``upward/solidfmm_complex_tree_expansions.py``, removed with the complex basis in
+the 2026-10 cleanup, C), and is the only upward sweep now. It produces per-node
+**real** multipole coefficients directly (no complex intermediate), which matters
+for the distributed FMM: the coarse-tree seeding ``all_gather``\\s the leaf
+multipoles, so real coefficients halved the inter-GPU communication versus the
+complex packed multipoles.
 
-The result is mathematically identical (to machine precision) to running the
-complex upward sweep and converting with
-:func:`jaccpot.operators.real_harmonics.complex_to_dehnen_real_coeffs` -- that
-equivalence is the correctness oracle used by the unit test. The structure
-(leaf-batched P2M scan, level-by-level M2M with dead-row scatter) is a faithful
-copy of the complex module; only the per-node operators (``p2m_real_direct`` /
-``m2m_real``), the real dtype, and the absence of the complex-only
-conjugate-symmetry fixup differ.
+Its correctness oracle is a direct per-node P2M (the sum of ``p2m_real_direct`` over
+each node's particles about its centre:
+``tests/unit/core/test_real_upward_sweep.py``); until C it was also checked against
+the complex sweep plus the complex -> real conversion, to machine precision. The
+structure (leaf-batched P2M scan, level-by-level M2M with dead-row scatter) is a
+faithful copy of the complex module's; only the per-node operators
+(``p2m_real_direct`` / ``m2m_real``), the real dtype, and the absence of the
+complex-only conjugate-symmetry fixup differed.
 
 Center mode is COM only (what the distributed driver + fast lane use).
 
@@ -22,8 +23,7 @@ Center mode is COM only (what the distributed driver + fast lane use).
 are a differentiable function of the particle positions, and that coupling is
 carried all the way through: a gradient through the COM centres is exact for the
 fixed-topology force, not an approximation that drops the centre-motion term.
-The same holds for the complex sweep's ``center_mode="com"``; ``"explicit"`` (the
-complex sweep's test seam) has no such coupling.
+(The same held for the complex sweep's ``center_mode="com"``, removed in C.)
 
 The chain, for anyone tempted to insert a ``stop_gradient`` here:
 :meth:`~jaccpot.runtime.fmm_evaluate.EvaluateMixin.differentiable_accelerations`
@@ -50,7 +50,9 @@ established this.
 The one caveat: on degenerate displacements -- exactly-zero (structural under
 COM, since a single-child internal node shares its child's COM) and
 z-axis-aligned -- the rotation-angle builders return a zero cotangent by
-construction. See :func:`jaccpot.operators.complex_ops._angles_from_delta_solidfmm`.
+construction (``docs/operator_conventions.md`` and
+``jaccpot/operators/_transverse_degeneracy_jvp.py`` record how the axis-aligned
+transverse derivative is carried instead).
 
 (This note lived on the Cartesian ``compute_node_multipoles`` until that sweep
 was removed in the 2026-10 cleanup, K.)
@@ -105,9 +107,9 @@ class RealNodeMultipoleData(NamedTuple):
         correctly against these.
     packed : Array
         ``[num_nodes, (p+1)^2]`` real solid-harmonic coefficients, in the real
-        basis rather than the complex one -- these are not interchangeable with
-        :class:`~jaccpot.upward.solidfmm_complex_tree_expansions.SolidFMMComplexNodeMultipoleData.packed`
-        despite the matching field name. Rows are indexed by global node id, so
+        basis (they were not interchangeable with the complex sweep's
+        ``packed``, despite the matching field name, until that sweep was removed
+        in the 2026-10 cleanup, C). Rows are indexed by global node id, so
         internal and leaf nodes share one array.
     """
 
@@ -117,12 +119,13 @@ class RealNodeMultipoleData(NamedTuple):
 
 
 class RealTreeUpwardData(NamedTuple):
-    """Container mirroring the complex sweep's ``.multipoles`` access path.
+    """Container exposing the ``.multipoles`` access path of ``TreeUpwardData``.
 
-    The mirroring is of that one attribute only. The complex counterpart
-    :class:`~jaccpot.upward.solidfmm_complex_tree_expansions.SolidFMMComplexTreeUpwardData`
-    also carries ``geometry`` and ``mass_moments``; code written against it and
-    handed one of these will fail on those, not on ``multipoles``.
+    The mirroring is of that one attribute only: the runtime's
+    :class:`~jaccpot.upward.tree_expansions.TreeUpwardData` also carries
+    ``geometry`` and ``mass_moments``; code written against it and handed one of
+    these will fail on those, not on ``multipoles``. (It mirrored the complex
+    sweep's container, removed in the 2026-10 cleanup, C.)
 
     Attributes
     ----------
@@ -477,7 +480,8 @@ def prepare_real_source_motion_multipoles(
 
     ``M_k(node) = sum_j m_j (v_j . grad)^k U(x_j - c_node)`` for particles moving
     as ``x_j + v_j t`` about FROZEN centres ``c`` -- the real-basis counterpart of
-    :func:`~jaccpot.upward.solidfmm_complex_tree_expansions.prepare_solidfmm_complex_source_motion_multipoles`.
+    the complex sweep's ``prepare_solidfmm_complex_source_motion_multipoles``
+    (removed in the 2026-10 cleanup, C).
     The leaves come from :func:`_p2m_leaves_real` with ``time_derivative_order``;
     M2M is linear in the coefficients at fixed geometry, so the ordinary real
     cascade (:func:`aggregate_m2m_real_by_level`) carries them up the tree. Forward
@@ -577,9 +581,8 @@ def prepare_real_upward_sweep(
     keeps the leaf-bound gathers from padding out to ``num_particles`` and avoids
     a concrete device_get under trace.
 
-    ``static_num_levels`` is the same knob as on the complex sweep
-    (:func:`~jaccpot.upward.solidfmm_complex_tree_expansions.prepare_solidfmm_complex_upward_sweep`),
-    and carries the same contract: radix trees pad ``level_offsets`` to the full
+    ``static_num_levels`` is the same knob the complex sweep had (removed in the
+    2026-10 cleanup, C), and carries the same contract: radix trees pad ``level_offsets`` to the full
     Morton depth, so deriving the M2M level count from the array shape makes the
     level loop iterate many empty levels, each still paying a full-width vmapped
     translate. Passing the concrete depth collapses that waste. It must be a static

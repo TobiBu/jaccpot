@@ -1,18 +1,21 @@
-"""The Dehnen ``B`` matrices and the complex -> real basis conversion ``Q``.
+"""The Dehnen ``B`` matrices, built through the complex -> real basis map ``Q``.
 
 Two related pieces of static (host-side, ``lru_cache``-d) linear algebra:
 
 * the involutory **B matrix**, which implements the ``(x, y, z) -> (z, y, x)``
   coordinate swap so that a y/x-axis rotation factors as ``B @ D_z(-beta) @ B``
   -- the decomposition the whole rotation-accelerated M2L rests on;
-* the block-diagonal **Q**, which maps complex Dehnen coefficients to the real
-  (no-sqrt2) basis, giving ``complex_to_dehnen_real_coeffs``.
+* the per-degree **Q**, which maps complex Dehnen coefficients to the real
+  (no-sqrt2) basis.
 
 They belong together because the real ``B`` is *derived* from the complex one
 through ``Q``: ``_compute_B_real_dehnen_via_Q`` conjugates
 ``_compute_dehnen_B_matrix_complex`` by the per-degree ``Q`` block rather than
-re-deriving a real recursion, which is what keeps the two bases consistent by
-construction.
+re-deriving a real recursion. That is why the complex-named builders stay after
+the complex basis was removed in the 2026-10 cleanup (C): the real basis's
+precomputed ``B`` matrices are made from them. The coefficient conversion
+``complex_to_dehnen_real_coeffs`` and its block-diagonal ``_dehnen_real_Q_full``
+(test-only once the complex upward sweep was gone) went in C.
 
 Split out of ``real_harmonics.py`` (Tier 1.3); the mathematics is unchanged and
 ``real_harmonics`` re-exports the public names.
@@ -20,20 +23,17 @@ Split out of ``real_harmonics.py`` (Tier 1.3); the mathematics is unchanged and
 
 from __future__ import annotations
 
-from functools import lru_cache, partial
+from functools import lru_cache
 from typing import Any, Tuple
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, DTypeLike
 
 from ._precision import highest_matmul_precision
-from ._sh_indexing import sh_offset, sh_size
 
 __all__ = [
     "build_Q_dehnen_no_sqrt2",
-    "complex_to_dehnen_real_coeffs",
     "compute_real_B_matrix_local",
     "compute_real_B_matrix_multipole",
     "verify_real_B_matrix",
@@ -157,8 +157,8 @@ def build_Q_dehnen_no_sqrt2(ell: int) -> np.ndarray:
     The absent sqrt(2) is the whole point: this is the DEHNEN real convention, not
     the unitary tesseral one. Coefficients in this basis are a factor of two
     smaller on every ``m != 0`` channel than the genuine-complex form -- the
-    relationship ``m2l_solidfmm_reference`` carries
-    (``docs/operator_conventions.md``).
+    relationship ``m2l_solidfmm_reference`` carried until the complex basis was
+    removed in the 2026-10 cleanup, C (``docs/operator_conventions.md``).
 
     Parameters
     ----------
@@ -199,143 +199,6 @@ def build_Q_dehnen_no_sqrt2(ell: int) -> np.ndarray:
         Q[row_T_minus_m, col_minus_m] = 0.5j * phase
 
     return Q
-
-
-@lru_cache(maxsize=None)
-def _dehnen_real_Q_full(order: int) -> np.ndarray:
-    """Block-diagonal complex->Dehnen-real transform for all degrees <= order.
-
-    Stacks :func:`build_Q_dehnen_no_sqrt2` per degree into one
-    ``((p+1)^2, (p+1)^2)`` complex matrix ``Q`` such that, for packed complex
-    solidfmm coefficients ``c`` (conjugate-symmetric), ``real(Q @ c)`` are the
-    packed Dehnen no-sqrt2 real coefficients used by this module's operators.
-
-    Parameters
-    ----------
-    order : int
-        Maximum degree ``p``.
-
-    Returns
-    -------
-    np.ndarray
-        ``[(p+1)^2, (p+1)^2]`` block-diagonal complex ``Q``. For conjugate-symmetric
-        packed complex coefficients ``c``, ``real(Q @ c)`` are the packed Dehnen
-        no-sqrt2 real coefficients this module's operators consume -- the
-        conjugate symmetry is what makes taking the real part lossless rather than
-        a projection.
-
-    Raises
-    ------
-    ValueError
-        If ``order`` is negative.
-    """
-    p = int(order)
-    if p < 0:
-        raise ValueError("order must be >= 0")
-    ncoeff = sh_size(p)
-    q_full = np.zeros((ncoeff, ncoeff), dtype=np.complex128)
-    for ell in range(p + 1):
-        sl = slice(sh_offset(ell), sh_offset(ell + 1))
-        q_full[sl, sl] = build_Q_dehnen_no_sqrt2(ell)
-    return q_full
-
-
-@partial(jax.jit, static_argnames=("order",))
-@highest_matmul_precision
-def complex_to_dehnen_real_coeffs(complex_coeffs: Array, *, order: int) -> Array:
-    """Convert packed complex solidfmm coefficients to Dehnen no-sqrt2 real ones.
-
-    This is the conversion consistent with :func:`p2m_real_direct` and the real
-    M2L/M2M/L2L/L2P operators in this module (verified: for a point source,
-    ``complex_to_dehnen_real_coeffs(complex_R_solidfmm(delta)) ==
-    p2m_real_direct(delta)`` to machine precision).
-
-    NOTE: this is NOT the same as ``jaccpot.basis.real_sh.complex_to_real_coeffs``,
-    which produces the unitary sqrt(2) tesseral basis (a different normalization
-    that is incompatible with the Dehnen no-sqrt2 real operators here).
-
-    Parameters
-    ----------
-    complex_coeffs : Array
-        Packed complex coefficients of shape ``(..., (p+1)^2)``.
-    order : int
-        Maximum harmonic degree ``p``.
-
-    Returns
-    -------
-    Array
-        Packed real coefficients of shape ``(..., (p+1)^2)`` with the real dtype
-        matching the input's real component.
-
-    Raises
-    ------
-    ValueError
-        If the trailing axis of ``complex_coeffs`` is not ``(p+1)^2``. A static
-        shape check on a static ``order``, so it fires at trace time.
-
-    Notes
-    -----
-    A single matmul against a fixed basis-change matrix, so differentiable in
-    ``complex_coeffs``.
-
-    **Forward: nothing is lost, for conforming input.** The reality condition is
-    stated in :mod:`jaccpot.operators.complex_harmonics` -- Dehnen normalization,
-    no Condon-Shortley phase, and ``H_n^{-m} = (-1)^m conj(H_n^m)`` -- and the
-    ``(p+1)^2`` layout is *redundant* rather than packed:
-    :func:`~jaccpot.operators.complex_harmonics._pack_complex` fills the negative
-    ``m`` slots as ``(-1)^|m| conj(coeff[n, |m|])``, so both ``+m`` and ``-m`` are
-    present and conjugate-related. ``build_Q_dehnen_no_sqrt2`` recombines each
-    conjugate pair, and the imaginary part of the product comes out **exactly**
-    zero -- measured, not merely bounded.
-
-    Note the easily-missed half of that condition: at ``m = 0`` it reads
-    ``H_n^0 = conj(H_n^0)``, i.e. **the m=0 coefficients must be real**.
-    ``complex_R_solidfmm`` satisfies this (its m=0 entries have exactly zero
-    imaginary part). An array that is conjugate-symmetric for ``m != 0`` but has
-    complex ``m = 0`` entries does *not* conform, and for such input
-    ``Im(coeffs @ q_full.T)`` is a substantial fraction of the real part
-    (measured ~0.6 at order 3) -- so ``jnp.real`` would silently discard real
-    information. Nothing here validates the condition; it is a precondition.
-
-    **Reverse: the gradient is complete.** ``jnp.real`` does not make the VJP blind
-    to the imaginary components -- ``Q`` is complex, so ``Im(coeffs)`` contributes
-    to ``Re(coeffs @ q_full.T)`` and the returned cotangent has a nonzero imaginary
-    part. This is the correct adjoint of the R-linear map, and it agrees with finite
-    differences along both real and imaginary perturbation directions.
-
-    The claim above -- that this composes with ``complex_R_solidfmm`` to reproduce
-    :func:`p2m_real_direct` -- is asserted directly by
-    ``tests/unit/operators/test_real_harmonics.py::test_complex_to_dehnen_real_matches_p2m_real_direct``
-    over six geometries (including the ``rho == 0`` z-aligned degeneracy and the
-    three coordinate axes) at orders 0-6, to a relative L2 of 1e-13 against a
-    measured worst case of 8.9e-16.
-
-    That test exists because the two indirect proxies cannot substitute for it:
-    ``tests/unit/core/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
-    checks an aggregate relative L2 over a whole 300-particle P2M+M2M tree, where
-    a single-``m`` error is diluted, and
-    ``tests/unit/runtime/test_dehnen_mac_reference.py::test_dehnen_power_is_basis_invariant``
-    checks only the degree-wise Dehnen power -- a rotational invariant, therefore
-    blind to sign errors within a degree. Verified by mutation: flipping the sign
-    of one row of the degree-2 Q block fails the direct test and leaves the power
-    proxy passing.
-
-    Runs under :func:`~jaccpot.operators._precision.highest_matmul_precision`;
-    the matmul must not be dropped back to TF32.
-    """
-    coeffs = jnp.asarray(complex_coeffs)
-    expected = sh_size(int(order))
-    if int(coeffs.shape[-1]) != expected:
-        raise ValueError(
-            f"expected last dimension {expected} for order={int(order)}, "
-            f"got {coeffs.shape[-1]}"
-        )
-    q_full = jnp.asarray(
-        _dehnen_real_Q_full(int(order)),
-        dtype=jnp.result_type(coeffs.dtype, jnp.complex64),
-    )
-    converted = jnp.real(coeffs @ q_full.T)
-    return converted.astype(coeffs.real.dtype)
 
 
 @lru_cache(maxsize=None)

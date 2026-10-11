@@ -175,3 +175,28 @@ def test_prepare_upward_sweep_stashes_and_reuses_concrete_depth():
 
     packed_jit = jax.jit(_run)(tree, ps, ms)
     assert jnp.array_equal(packed_jit, concrete.multipoles.packed)
+
+
+def test_the_real_upward_refuses_every_centre_mode_but_com():
+    """The engine's (real) upward sweep is COM-only and says so for anything else.
+
+    Takes over the rejection half of ``test_tree_expansions.py`` (the removed-mode
+    and unknown-mode checks of ``_resolve_center_mode``), which ran on the complex
+    upward sweep and went with it in the 2026-10 cleanup (C). The AABB / geometric
+    centres went in X3; ``"explicit"`` was the complex sweep's test seam.
+    """
+    import pytest
+
+    from jaccpot.runtime._fmm_impl import FMMEngine
+
+    tree, ps, ms = _build_multilevel_tree(n=200)
+    fmm = FMMEngine(expansion_basis="solidfmm")
+    for mode in ("explicit", "aabb", "geometric", "Bogus"):
+        with pytest.raises(ValueError, match="center_mode='com' only"):
+            fmm.prepare_upward_sweep(
+                tree, ps, ms, max_order=2, center_mode=mode, max_leaf_size=8
+            )
+    packed = fmm.prepare_upward_sweep(
+        tree, ps, ms, max_order=2, center_mode=" COM ", max_leaf_size=8
+    ).multipoles.packed
+    assert packed.shape[1] == 9

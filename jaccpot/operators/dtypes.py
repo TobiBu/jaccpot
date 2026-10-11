@@ -5,7 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, DTypeLike
-from yggdrax.dtypes import INDEX_DTYPE, as_index, complex_dtype_for_real
+from yggdrax.dtypes import INDEX_DTYPE, as_index
 
 # Historical squared-radius floor. Load-bearing for REVERSE-mode safety, not just
 # for the forward: the translation operators take ``r = sqrt(max(r2, FLOOR))`` and
@@ -75,7 +75,6 @@ def floor_squared_radius(r2: Array) -> Array:
 __all__ = [
     "INDEX_DTYPE",
     "as_index",
-    "complex_dtype_for_real",
     "floor_squared_radius",
     "squared_radius_floor",
 ]

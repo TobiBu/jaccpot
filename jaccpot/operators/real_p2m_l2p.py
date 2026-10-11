@@ -96,11 +96,12 @@ def p2m_real_direct(
     degree 1"; both statements are now false, and the second was already too
     pessimistic when written:
 
-    * ``test_complex_to_dehnen_real_matches_p2m_real_direct`` cross-checks orders
-      0-6 against ``complex_to_dehnen_real_coeffs(complex_R_solidfmm(...))`` over six
-      geometries, to 1e-13 relative L2. This is a *relative* check -- a convention
-      error shared between ``Q`` and this function would cancel in it -- but it does
-      catch a per-``m`` error introduced here alone.
+    * ``test_p2m_point_mass_reproduces_its_far_field_at_every_order`` evaluates a
+      point mass's multipole far away at orders 0-6 over six geometries (the axes,
+      ``rho == 0`` and a generic point) against the exact multipole truncation bound.
+      It replaced ``test_complex_to_dehnen_real_matches_p2m_real_direct``, a
+      *relative* cross-check against the complex basis (1e-13 relative L2) that went
+      with that basis in the 2026-10 cleanup (C).
     * ``test_solid_harmonic_z_derivative_lowers_the_degree`` and
       ``test_solid_harmonic_transverse_derivative_coefficients_are_half_integers``
       close the absolute gap. The 1/(n+|m|)!-normalised solid harmonics satisfy
