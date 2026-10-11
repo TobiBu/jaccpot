@@ -90,7 +90,7 @@ _MUST_RUN_SM80 = (
     "test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]",
     "test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative",
 )
-# NOT registered here, by the registry's own contract: `tests/unit/test_gpu_gate_checks.py`
+# NOT registered here, by the registry's own contract: `bench/tests/test_gpu_gate_checks.py`
 # derives the gated set from ONE module (test_transverse_degeneracy_jvp.py) and
 # fails on any fragment outside it. The sm_80 tests of the near-field self-fold
 # (test_pallas_nearfield_fused.py::test_leafpair_include_self_gpu_matches_reference)

@@ -32,6 +32,15 @@ jobs:
         run: black --check .
       - name: isort
         run: isort --check-only .
+      - name: Bench-tooling tests
+        # The tests of the bench/ scripts: the GPU and two-card gates' own checks,
+        # the annotation tools, a comparison benchmark's exit code. They test no
+        # library code, so they run here, once, outside the partitioned suite
+        # (2026-10 cleanup, Z-a; about 30 s). Selection in test_shards.py
+        # (`EXTRA["bench-tooling"]`).
+        run: |
+          mapfile -t selection < <(python .github/scripts/test_shards.py args bench-tooling)
+          pytest -n 0 "${selection[@]}"
 
   test-full:
     # The whole default collection, once, on the dev Python version, with coverage

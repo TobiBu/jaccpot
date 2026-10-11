@@ -8,8 +8,9 @@ the default collection (``tests/perf`` excluded by ``addopts``). A test director
 either lands in a shard or turns that job red -- before, the partition was
 checked by hand-counted comments in ``ci.yml``, which drifted.
 
-``EXTRA`` holds selections that deliberately re-run a subset (the Python-floor
-job) and are not part of the partition.
+``EXTRA`` holds selections that are not part of the partition: one that
+deliberately re-runs a subset (the Python-floor job), and the tests of the
+``bench/`` scripts, which live outside ``tests/`` and run in the lint job.
 
 Usage::
 
@@ -87,6 +88,11 @@ EXTRA: dict[str, list[str]] = {
         "tests/unit/test_public_api_surface.py",
         "tests/unit/test_odisseo_coupling.py",
     ],
+    # The lint job: the tests of the bench/ scripts (the GPU and two-card gates'
+    # own checks, the annotation tools, a comparison benchmark's exit code). They
+    # test no library code, so they sit outside `tests/` and outside the partition,
+    # and run once per push (moved out of tests/unit in the 2026-10 cleanup, Z-a).
+    "bench-tooling": ["bench/tests"],
 }
 
 _UNIVERSE = ["tests"]

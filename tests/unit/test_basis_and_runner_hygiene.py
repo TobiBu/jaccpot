@@ -1,7 +1,6 @@
-"""Arguments that were silently inert, and a benchmark that faked its output.
+"""Arguments that were silently inert.
 
-Three separate ways the library or its benchmarks said something untrue without
-failing:
+Two ways the library said something untrue without failing:
 
 * ``basis="complex"`` and ``basis="solidfmm"`` were the same path (measured
   bit-identical at N=2048/p=4/theta=0.5, max difference 0.0), so a user
@@ -12,9 +11,9 @@ failing:
   divergent-series signature -- against 8.1e-5 for solidfmm, and nothing at the
   call site said so. It warned from then on, and was removed in the 2026-10
   cleanup (K): every spelling of it now raises one migration error.
-* ``bench/bench_jaxfmm_paper_compare.py`` wrote ``status=error`` rows when
-  jaxFMM could not be imported, so a dead comparison arm produced a CSV that
-  looked like data. It stayed dead for months.
+
+The third, a benchmark that faked its output, is tested with the benchmark, in
+``bench/tests/test_comparison_bench_exit_code.py``.
 """
 
 from __future__ import annotations
@@ -190,56 +189,3 @@ class TestComplexWasRemoved:
             make_force_evaluator(
                 DistributedFMMConfig(basis="spherical"), 1, 64, mesh=None
             )
-
-
-class TestComparisonBenchExitCode:
-    """An explicitly requested runner that cannot run is a failed invocation.
-
-    Tests ``resolve_runner`` rather than ``main``: the guard is the contract, and
-    running ``main`` would run the whole benchmark.
-    """
-
-    @staticmethod
-    def _resolve(requested, have_jaxfmm):
-        from bench.bench_jaxfmm_paper_compare import resolve_runner
-
-        return resolve_runner(requested, have_jaxfmm=have_jaxfmm)
-
-    @pytest.mark.parametrize("runner", ("jaxfmm", "both"))
-    def test_explicit_unavailable_runner_exits_non_zero(self, runner: str) -> None:
-        with pytest.raises(SystemExit) as excinfo:
-            self._resolve(runner, have_jaxfmm=False)
-        message = str(excinfo.value)
-        assert "not importable" in message
-        assert "status=error" in message
-        # A SystemExit carrying a string is a non-zero exit.
-        assert excinfo.value.code not in (0, None)
-
-    def test_the_unset_default_tolerates_a_missing_arm(self) -> None:
-        """Not naming a runner keeps the old behaviour, so CI without jaxFMM runs."""
-
-        assert self._resolve(None, have_jaxfmm=False) == "both"
-
-    def test_jaccpot_only_never_needs_jaxfmm(self) -> None:
-        assert self._resolve("jaccpot", have_jaxfmm=False) == "jaccpot"
-
-    @pytest.mark.parametrize("requested", (None, "jaxfmm", "jaccpot", "both"))
-    def test_available_jaxfmm_is_always_fine(self, requested) -> None:
-        expected = "both" if requested is None else requested
-        assert self._resolve(requested, have_jaxfmm=True) == expected
-
-    def test_the_flag_default_is_the_tolerant_sentinel(self) -> None:
-        """If the default went back to "both", the explicit check would misfire."""
-
-        import bench.bench_jaxfmm_paper_compare as module
-
-        parser_source = __import__("inspect").getsource(module._parse_args)
-        assert '"--runner"' in parser_source
-        assert "default=None" in parser_source
-
-    def test_importing_the_bench_does_not_parse_sys_argv(self) -> None:
-        """Importing a benchmark must not read the importer's command line."""
-
-        import bench.bench_jaxfmm_paper_compare as module
-
-        assert module.ARGS is None
