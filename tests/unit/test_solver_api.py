@@ -1273,6 +1273,13 @@ def test_jerk_fd_dt_is_accepted_silently_and_unused(jerk_mode):
         for step in (1e-3, 0.0, -1.0):
             with warnings.catch_warnings():
                 warnings.simplefilter("error")
+                # jax 0.11's own notice, raised when a GPU lowers a Pallas kernel
+                # (the upward P2M here); not one of jaccpot's warnings
+                warnings.filterwarnings(
+                    "ignore",
+                    message="The Pallas Triton backend is deprecated",
+                    category=DeprecationWarning,
+                )
                 got = call(jerk_fd_dt=step)
             for want_arr, got_arr in zip(reference, got):
                 assert np.array_equal(
