@@ -20,7 +20,7 @@ jaccpot/runtime/fmm/           orchestrator package (re-export seam)
         |                      __init__ re-exports the engine; must NOT be the
         |                      import that forms a cycle (see section 8)
 jaccpot/runtime/_fmm_impl.py   FMMEngine (thin coordinator)
-        |                      + 10 method-cluster mixins (section 4)
+        |                      + 9 method-cluster mixins (section 4)
         |
 jaccpot/runtime/kernels/       reusable numerical core (LEAF -- never imports
         core.py                the engine); M2L / L2L / eval / nearfield kernels
@@ -29,8 +29,22 @@ jaccpot/runtime/kernels/       reusable numerical core (LEAF -- never imports
 The **hinge of the design** is that the reusable kernel library
 (`runtime/kernels/`) is a true leaf: it depends only on operators, tree
 artifacts, and the shared constant/cache modules — never on the orchestrator.
-`distributed/` and `experimental/` reach straight past the engine into
-`kernels/`, which is what proves the leaf boundary is real.
+`distributed/` reaches straight past the engine into `kernels/`, which is what
+proves the leaf boundary is real.
+
+The packages under `jaccpot/`, one line each:
+
+| package | what lives there |
+|---|---|
+| `basis/` | the real solid-harmonic basis (`RealSHBasis`), the only one |
+| `operators/` | expansion algebra: real harmonics, rotations, M2L rotate/scale, translations, precision pinning |
+| `upward/` | P2M / M2M and the expansion centres |
+| `downward/` | the downward pass's containers (`LocalExpansionData`, `TreeDownwardData`); the M2L / L2L / L2P sweep itself is in `runtime/kernels/` |
+| `nearfield/` | P2P, its fast lane and large-N blocks, its analytic reverse rules, the acceleration-derivative tower |
+| `pallas/` | the fused Pallas kernels and their `custom_vjp` wrappers (section 7) |
+| `runtime/` | the engine, config resolution, lane selection, the large-N pipeline, kernel dispatch (section 3) |
+| `mutual/` | the momentum-conserving lane (below) |
+| `distributed/` | the multi-GPU drivers: `fmm.py` (one `shard_map`), and `fused.py` + `cross.py` + `rollout.py` (one process per GPU) |
 
 **The one path that does not go through this stack** is the mutual force:
 
@@ -65,9 +79,10 @@ ODISSEO coupling) depends on. It is frozen by
 | `TraversalOverrides` | named traversal capacities, merged onto a preset's sizing |
 | `GradConfig` | the supported interface for configuring the differentiable path (section 6) |
 | `MemoryObjective` | memory-policy literal |
-| `RealSHBasis` | the expansion basis (`ComplexSHBasis` was removed with the complex basis in the 2026-10 cleanup, C; importing it raises with the migration message) |
+| `RealSHBasis` | the expansion basis (the only one since the 2026-10 cleanup) |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
 | `BlockStepFMM` | momentum-conserving force for a block-step individual-timestep KDK (in `nornax_adapter.py`; see section 1) |
+| `DistributedBlockStepFMM` | the same contract over a device mesh, on the distributed mutual lane (`mutual/distributed.py`) |
 | `direct_sum_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
 `FastMultipoleMethod` in `solver.py` is the facade for the production force. The
@@ -76,9 +91,10 @@ detail reached only through the facade. The two used to share the name, which th
 document flagged as confusing; audit 2.4 renamed the engine, so a reference to
 `FastMultipoleMethod` now unambiguously means the public class.
 
-`BlockStepFMM` is the only other public class, and it is **not** an alternative
-spelling of the same thing -- it computes a different number (momentum-exact rather
-than target-centric) through a separate path.
+`BlockStepFMM` (and its mesh twin `DistributedBlockStepFMM`) is the only other
+public class, and it is **not** an alternative spelling of the same thing -- it
+computes a different number (momentum-exact rather than target-centric) through a
+separate path.
 
 ## 3. runtime/ package map
 
@@ -99,8 +115,13 @@ import cycle (section 8).
 
 | Module | Role |
 |---|---|
-| `kernels/core.py` | the whole numerical kernel library: M2L / L2L / evaluation / nearfield-targeting / downward builders (section 5) |
-| `kernels/__init__.py` | curated re-exports consumed by `distributed/`, `experimental/`, `_large_n_pipeline`, tests |
+| `kernels/_m2l.py` | the M2L apply / accumulate seam (section 5) |
+| `kernels/_l2l.py` | L2L propagation and the downward-sweep driver |
+| `kernels/_downward_prep.py` | the downward sweep's input bundles |
+| `kernels/_evaluate.py` | L2P, the targeted near field, the evaluation entry points |
+| `kernels/_shared.py` | the basis tag, output bundles, the strict-refresh diagnostics gate |
+| `kernels/core.py` | aggregator over the five above, so `jaccpot.runtime.kernels.core` stays a working import path |
+| `kernels/__init__.py` | curated re-exports consumed by `distributed/`, `_large_n_pipeline`, tests |
 
 **Orchestrator scaffolding** (sibling of `_fmm_impl`):
 
@@ -144,48 +165,42 @@ class FMMEngine(
 | `DerivativesMixin` (`fmm_derivatives`) | jerk / time-derivative towers |
 | `DiagnosticsMixin` (`fmm_diagnostics`) | `get_runtime_diagnostics` + shape diagnostics |
 
-## 5. Kernel-family map (`runtime/kernels/core.py`)
+## 5. Kernel-family map (`runtime/kernels/`)
 
-The M2L translation kernels are unified behind a **static `basis_mode`** seam.
-Because `basis_mode` (and `order`, `rotation`, `m2l_impl`, `chunk_size`,
-`total_nodes`) are `static_argname`s, XLA specialises each `jax.jit` per static
-combination — the merged kernels compile to the exact HLO each single-basis
-kernel did, so consolidation is source-level dedup with no numerical change.
+There is one basis (real solid harmonics), so the kernels carry no basis
+discriminator. What is static is `order`, `m2l_impl`, `chunk_size` and
+`total_nodes`: they are `static_argname`s, so XLA specialises each `jax.jit` per
+combination.
 
-**M2L apply seam:**
+**M2L apply** (`kernels/_m2l.py`):
 
-- `_apply_m2l(..., *, order, basis_mode, rotation, m2l_impl)` — routes to
-  `_apply_real_m2l` → real rot-scale (`_m2l_real_batch_kernel`) or the fused
-  Pallas kernel `_m2l_real_batch_kernel_fused_pallas` when gated on.
-  `basis_mode` other than `"real"` raises and `rotation` is unused: the complex
-  branch (`_apply_complex_m2l`, its reference and fused Pallas kernels) went
-  with the complex basis in the 2026-10 cleanup (C).
+- `_apply_real_m2l(src_mult, deltas, *, order, m2l_impl)` — the real rot-scale
+  kernel (`_m2l_real_batch_kernel`), or the fused Pallas kernel
+  `_m2l_real_batch_kernel_fused_pallas` when `_real_m2l_pallas_active()` (section 7).
 
-**M2L accumulate (via the seam):**
+**M2L accumulate** (through `_apply_real_m2l`):
 
 - `_accumulate_m2l_fullbatch` — one full interaction batch → `segment_sum`
 - `_accumulate_m2l_chunked_scan` — chunked `lax.scan` reduction (bounded memory)
-- the grouped / class-major variants (`_accumulate_solidfmm_m2l_grouped[_class_major]`,
-  cached class blocks about AABB expansion centres) were removed in the 2026-10
-  cleanup (`docs/cleanup_2026-10.md`, X3), and the AABB centres with them: every
-  upward sweep now expands about the centres of mass (`center_mode="com"`, or
-  `"explicit"` for tests). Their one lasting lesson is in §10: the grouped
-  fullbatch branch once dropped `basis_mode` and silently applied the complex
-  cached kernel to real blocks (3.8e-01 relative error, no exception).
 
-**L2L / downward:** `_propagate_solidfmm_locals_by_level` (unified real+complex
-behind `basis_mode` until the complex basis went in C; "real" is the only value
-now), `_propagate_real_locals_to_children`, the solidfmm downward-sweep builders.
+On an Ampere+ GPU the downward's accumulate step
+(`_solidfmm_downward_accumulate_from_multipoles`, `kernels/_downward_prep.py`) runs
+neither: it routes the flat M2L through the CSR Pallas lane kernel
+(`pallas/m2l_real_csr_lanes.py`, a `custom_vjp`; gate `_m2l_csr_pallas_active`,
+`JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0` restores the two above).
 
-**Evaluation:** `_evaluate_local_expansions_for_particles` (L2P), nearfield
-targeting + scatter. The public `compute_gravitational_{acceleration,potential}`
-convenience wrappers live in `_fmm_impl.py` (not in `kernels/core`) because they
-construct/drive the engine.
+**L2L / downward** (`kernels/_l2l.py`, `kernels/_downward_prep.py`):
+`_propagate_solidfmm_locals_by_level`, `_propagate_real_locals_to_children`, the
+solidfmm downward-sweep builders ("solidfmm" names the spherical-harmonic family).
 
-**Intentionally NOT merged** (distinct math / dispatch): cached-vs-uncached M2L
-dispatch. (The complex-only derivative/jerk towers and the Cartesian L2P,
-`_evaluate_local_cartesian_with_grad_batch`, were the others; they went with
-their bases in the 2026-10 cleanup, C and K.)
+**Evaluation** (`kernels/_evaluate.py`): `_evaluate_local_expansions_for_particles`
+(L2P), near-field targeting + scatter. The public
+`compute_gravitational_{acceleration,potential}` convenience wrappers live in
+`_fmm_impl.py` (not in `kernels/`) because they construct/drive the engine.
+
+The grouped / class-major accumulators, the complex and Cartesian kernels and the
+`basis_mode` / `rotation` seam that chose between bases were removed in the 2026-10
+cleanup (`docs/cleanup_2026-10.md`: X3, K, C, Z-b).
 
 ## 6. Config resolution, presets, and the autodiff export
 
@@ -279,14 +294,12 @@ auto-gated off and the pure-JAX path runs (CPU CI can still lower Pallas with
 from the `compiler_params` dataclass type instead. The M2L kernels must name
 Triton either way -- Mosaic-GPU rejects them (small per-(pair, coeff) tiles its TMA
 cannot express; fp64 in the since-removed complex kernel) -- so the shim raises rather than
-letting a non-Triton request fall through to a default. The near-field and
-treecode kernels already passed `pallas.triton.CompilerParams` and needed no
-change.
+letting a non-Triton request fall through to a default. The near-field kernels
+already passed `pallas.triton.CompilerParams` and needed no change.
 
 - Fused M2L Pallas is gated by `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` **and**
   the Ampere+ hardware support check (`_real_m2l_pallas_active`, evaluated at trace
-  time, gating on the fused kernel's own sm_80 support function). The complex fused
-  kernel and its gate went with the complex basis in the 2026-10 cleanup (C).
+  time, gating on the fused kernel's own sm_80 support function).
 - The fused M2L kernel is **differentiable** via a module-level `custom_vjp` wrapper
   (`m2l_real_fused_pallas_cvjp`): Pallas forward + reverse. `_apply_real_m2l` routes
   through the wrapper, so the same flag enables the fused M2L on both the forward and
@@ -312,19 +325,16 @@ change.
     reverse is `jax.vjp` of a dense twin that materialises a `(leaves, W_t, K, 3)`
     tensor — fine at test scale, ~50 TB at the fiducial large-N config. Keep them for
     `tests/unit/test_custom_vjp_parity.py`; do not add a second grad-path caller.
-- **fp32 matmul precision is a known accuracy floor in the M2L.** XLA lowers fp32
-  matmuls on Ampere to **TF32** (~10-bit mantissa) by default, and neither M2L
-  basis sets `precision=`. Measured against a float64 reference (real basis, max
-  rel err): 5.7e-04 at order 4, 5.7e-04 at order 6, 5.6e-04 at order 8 —
-  i.e. **~6e-04 regardless of expansion order**, so raising the order past 4 buys
-  nothing in fp32. Under `jax.default_matmul_precision("highest")` the same cases
-  give 1.5e-06 / 2.4e-06 / 1.8e-06 (~300x better). The complex basis, removed in
-  the 2026-10 cleanup (C), behaved the same (3.7e-04 -> 5.6e-08 at order 2). The real L2P path *does* set
-  `lax.Precision.HIGHEST` (`operators/real_p2m_l2p.py`; the Cartesian one in
-  `downward/local_expansions.py` did too, until the 2026-10 cleanup, K), so this
-  is an inconsistency rather than a considered trade. Not changed: fixing it moves
-  forward numerics package-wide (the golden oracle would need regenerating) and
-  costs throughput, so it wants a preset-level decision. This floor is also why
+- **fp32 matmul precision is pinned in the operators.** XLA lowers fp32 matmuls on
+  Ampere to **TF32** (~10-bit mantissa) by default. Measured against a float64
+  reference (real basis, max rel err), that capped the M2L at 5.7e-04 at order 4,
+  5.7e-04 at order 6, 5.6e-04 at order 8 — **~6e-04 regardless of expansion
+  order** — against 1.5e-06 / 2.4e-06 / 1.8e-06 under highest precision (~300x
+  better; the complex basis, removed in the 2026-10 cleanup, behaved the same:
+  3.7e-04 -> 5.6e-08 at order 2). The expansion operators therefore run under
+  `operators/_precision.highest_matmul_precision`, and the real L2P sets
+  `lax.Precision.HIGHEST` (`operators/real_p2m_l2p.py`); `CLAUDE.md` forbids
+  dropping either. The floor is also why
   `tests/integration/test_fmm.py::test_m2l_ignores_padded_compact_far_pairs`
   compares against a float64 reference with a 2e-03 bound instead of asserting
   padded == exact — the latter passed on JAX 0.9.x only because both fp32 paths
@@ -342,7 +352,9 @@ fmm_constants -> fmm_caches -> kernels -> {_interaction_cache, _large_n_pipeline
 (The `_octree_*` modules left this chain with the octree execution backend in the
 2026-10 cleanup; `docs/cleanup_2026-10.md`, X2.)
 
-`distributed/` and `experimental/` depend only on `kernels/` (not the engine).
+`distributed/` depends on `kernels/` and on runtime modules below the engine
+(`_adaptive_policy`, `_interaction_cache`, `_mac_geometry`, `_large_n_pipeline`, the
+`capacity_*` modules), never on the engine itself.
 
 `mutual/` sits beside the sweeps and depends on `operators/` at module scope and
 on `pallas/` from **six function-local sites** (`farfield.py` ×4,
@@ -361,6 +373,20 @@ pulls the engine in. Keep `fmm_constants`/`fmm_caches`/`fmm_state`/`fmm_*` mixin
 at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`.
 
 ## 9. Validation harness
+
+Where the tests live:
+
+| directory | |
+|---|---|
+| `tests/unit/` | one function or module against its docstring; runtime type checks on in CI |
+| `tests/integration/` | end-to-end paths; `strict/` holds the fused strict lane (`strict_run_v2`, the refresh, the fused eval fn) |
+| `tests/characterization/` | the goldens (below) |
+| `tests/distributed/` | multi-device; every file skips below two devices, so CI runs it on forced host devices |
+| `tests/perf/` | performance assertions, opt-in (`addopts` ignores it) |
+| `bench/tests/` | the tests of the `bench/` scripts (gate checks, annotation tools); outside the partitioned suite, run in CI's lint job |
+
+Which CI job runs which of them is defined once, in `.github/scripts/test_shards.py`
+(`CLAUDE.md`, "Layout").
 
 - **Gradient golden** —
   [`tests/characterization/test_fmm_grad_golden.py`](tests/characterization/test_fmm_grad_golden.py)
@@ -383,7 +409,7 @@ at the `runtime/` level until the engine is fully dissolved into `fmm/engine.py`
   numerical one. Regenerate goldens intentionally with `JACCPOT_REGEN_GOLDEN=1`.
 - **Public-API guard** —
   [`tests/unit/test_public_api_surface.py`](tests/unit/test_public_api_surface.py)
-  freezes the 14 `__all__` names + `FMMPreset` members. Red = the refactor leaked
+  freezes the 15 `__all__` names + `FMMPreset` members. Red = the refactor leaked
   into the public contract.
 - **Runtime typecheck** — set `JACCPOT_RUNTIME_TYPECHECK=1` to enable beartype
   runtime checks over the suite.
@@ -457,18 +483,17 @@ with a per-particle gate.
 
 ## 10. Kernel-consolidation invariant
 
-When merging real/complex kernel families, the merge is numerics-preserving
-**only** because every discriminator (`basis_mode`, `rotation`, `m2l_impl`,
-`order`, `chunk_size`) is a `static_argname`, so XLA specialises the merged
-`jax.jit` per static combination. This is source-level dedup, never a runtime
+When two kernel families are merged behind a discriminator, the merge is
+numerics-preserving **only** if every discriminator (today `m2l_impl`, `order`,
+`chunk_size`, `total_nodes`) is a `static_argname`, so XLA specialises the merged
+`jax.jit` per static combination. That makes it source-level dedup, never a runtime
 branch inside a compiled kernel. What that argument does **not** cover is the call
-sites: a discriminator with a default (`basis_mode: str = "complex"` on every
-accumulator, until the complex basis went in the 2026-10 cleanup, C; the defaults
-are `"real"` now and anything else raises) is silently satisfied by a caller that
-forgets to forward it, and the specialisation then happily compiles the wrong
-basis. That is exactly how the
-(since removed) `_accumulate_solidfmm_m2l_grouped`'s fullbatch branch went wrong —
-see §5. Audit the callers, not only the kernels. Any consolidation PR must show:
+sites: a discriminator with a default is silently satisfied by a caller that forgets
+to forward it, and the specialisation then happily compiles the wrong variant. That
+is how the grouped fullbatch accumulator once applied the complex kernel to real
+blocks (3.8e-01 relative error, no exception), through a `basis_mode="complex"`
+default; both went in the 2026-10 cleanup. Audit the callers, not only the kernels.
+Any consolidation PR must show:
 
 1. merged-vs-old **bit-identical** output on a fixed input grid (rtol=0),
 2. the golden oracle exact-green,
