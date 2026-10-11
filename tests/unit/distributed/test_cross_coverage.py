@@ -147,6 +147,7 @@ def _export(send, recv, theta, *, mode, drop_entry=None, cell_level=None):
         two_sided=two_sided,
         mac_type="dehnen",
         walk_fn=None,
+        node_active=send.active,
     )
     return ex, pub_r.block_nodes, int(pub_r.block_nodes.shape[0])
 
