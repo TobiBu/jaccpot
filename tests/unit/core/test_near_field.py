@@ -99,17 +99,18 @@ def accel_only_case():
     )
 
 
-def _accel_only(case):
+def _accel_only(case, positions=None, masses=None, **knobs):
     return compute_leaf_p2p_accelerations_large_n_accel_only(
         case.tree,
         case.neighbor_list,
-        case.pos_sorted,
-        case.mass_sorted,
+        case.pos_sorted if positions is None else positions,
+        case.mass_sorted if masses is None else masses,
         G=1.25,
         softening=0.05,
         edge_chunk_size=2,
         leaf_particle_indices=case.leaf_particle_indices,
         leaf_particle_mask=case.leaf_particle_mask,
+        **knobs,
     )
 
 
@@ -458,79 +459,65 @@ def test_large_n_accel_only_prepared_bucketed_matches_generic():
     )
 
 
-# `JACCPOT_LARGE_N_TARGET_OWNED_ACCUM`, `..._TARGET_OWNED_ACCUM_V2` and
-# `..._TARGET_LEAF_NEIGHBOR_BLOCK_SIZE` are read nowhere; their settings were
-# dropped in the 2026-10 cleanup (X4). That left the `target_owned_accum_v2` case
-# identical to `target_leaf_batch_size` (formerly `target_owned_accum`), so it
-# went as a duplicate.
+# The accel-only entry point takes its scatter and accumulation knobs as keyword
+# arguments and reads no environment (`runtime/_large_n_env.py` resolves them
+# upstream, from the `JACCPOT_LARGE_N_*` names these cases used to set). Until the
+# 2026-10 cleanup (Z-a) the cases set those env variables and passed nothing, so
+# every one compared the default with itself; they now pass the knobs, and assert
+# that the variant traces a different program. Measured: all four variants agree
+# with the default bit for bit on this case. (`target_leaf_batch_size` went: only
+# the target-block kernels read it, and this edge-list route traces the same
+# program with and without it.)
 _ACCEL_ONLY_PARITY_CASES = {
     "delayed_scatter_chunking": (
-        {"JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1"},
-        {"JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2"},
-    ),
-    "target_leaf_batch_size": (
-        {},
-        {"JACCPOT_LARGE_N_TARGET_LEAF_BATCH_SIZE": "2"},
+        {"delayed_scatter_chunks_per_superchunk": 1},
+        {"delayed_scatter_chunks_per_superchunk": 2},
     ),
     "sorted_scatter_hint": (
-        {"JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "0"},
-        {"JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "1"},
+        {"sorted_scatter_hint": False},
+        {"sorted_scatter_hint": True},
     ),
     "grouped_sorted_scatter": (
-        {
-            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "0",
-            "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER": "0",
-        },
-        {
-            "JACCPOT_LARGE_N_SORTED_SCATTER_HINT": "1",
-            "JACCPOT_LARGE_N_GROUPED_SORTED_SCATTER": "1",
-        },
+        {"sorted_scatter_hint": False, "grouped_sorted_scatter": False},
+        {"sorted_scatter_hint": True, "grouped_sorted_scatter": True},
     ),
     "superchunk_target_reduce": (
-        {
-            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2",
-            "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE": "0",
-        },
-        {
-            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "2",
-            "JACCPOT_LARGE_N_SUPERCHUNK_TARGET_REDUCE": "1",
-        },
-    ),
-    "disable_chunk_cond": (
-        {
-            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1",
-            "JACCPOT_LARGE_N_DISABLE_CHUNK_COND": "0",
-        },
-        {
-            "JACCPOT_LARGE_N_DELAYED_SCATTER_CHUNKS": "1",
-            "JACCPOT_LARGE_N_DISABLE_CHUNK_COND": "1",
-        },
+        {"delayed_scatter_chunks_per_superchunk": 2, "superchunk_target_reduce": False},
+        {"delayed_scatter_chunks_per_superchunk": 2, "superchunk_target_reduce": True},
     ),
 }
 
 
+def _accel_only_program(case, **knobs) -> str:
+    """The jaxpr the accel-only route traces for ``knobs``, as text."""
+    return str(
+        jax.make_jaxpr(lambda p, m: _accel_only(case, p, m, **knobs))(
+            case.pos_sorted, case.mass_sorted
+        )
+    )
+
+
 @pytest.mark.parametrize(
-    "baseline_env, optimized_env",
+    "baseline_knobs, variant_knobs",
     list(_ACCEL_ONLY_PARITY_CASES.values()),
     ids=list(_ACCEL_ONLY_PARITY_CASES.keys()),
 )
-def test_large_n_accel_only_env_variants_match_baseline(
-    monkeypatch, accel_only_case, baseline_env, optimized_env
+def test_large_n_accel_only_scatter_variants_match_baseline(
+    accel_only_case, baseline_knobs, variant_knobs
 ):
     """Every large-N accel-only scatter/accumulation variant must reproduce the
-    default baseline bit-for-bit on the shared small case.
+    baseline on the shared small case.
 
     Consolidates the former per-flag ``*_matches_baseline`` tests, which each
     rebuilt the identical 6-particle tree and ran the same baseline/optimized
     A/B comparison.
     """
-    for name, value in baseline_env.items():
-        monkeypatch.setenv(name, value)
-    baseline = _accel_only(accel_only_case)
+    assert _accel_only_program(accel_only_case, **baseline_knobs) != (
+        _accel_only_program(accel_only_case, **variant_knobs)
+    ), "the variant traces the baseline's program: the comparison would be vacuous"
 
-    for name, value in optimized_env.items():
-        monkeypatch.setenv(name, value)
-    optimized = _accel_only(accel_only_case)
+    baseline = _accel_only(accel_only_case, **baseline_knobs)
+    optimized = _accel_only(accel_only_case, **variant_knobs)
 
     assert np.allclose(
         np.asarray(optimized), np.asarray(baseline), rtol=1e-6, atol=1e-6
