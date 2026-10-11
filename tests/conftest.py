@@ -314,32 +314,47 @@ if _jax_cache_dir and os.environ.get(
     os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "1.0")
 
 
-# --- Data-driven slow-test marking ------------------------------------------
-# The heavy, compile-bound tests (>~8s each) are listed by node id in
-# tests/slow_tests.txt and auto-marked `slow` here, so CI can run the full suite
-# on one Python version and a fast `-m "not slow"` smoke on the others without
-# scattering @pytest.mark.slow across ~50 tests. Regenerate the list with:
-#   pytest --durations=0 | awk '/call/ && $1+0>=8 {print $3}' | sort -u
-_SLOW_LIST = pathlib.Path(__file__).parent / "slow_tests.txt"
-_SLOW_NODE_IDS = (
-    {
+# --- Data-driven slow and smoke marking --------------------------------------
+# Two markers are applied by node id from a list next to this file, rather than by
+# decorators scattered across the suite:
+#
+# * `slow` (tests/slow_tests.txt): the heavy, compile-bound tests -- the slowest
+#   ids that together dominate the suite's runtime -- so `-m "not slow"` is a fast
+#   local subset. CI's `test-full` runs them like any other. Rebuild the list from
+#   measured durations (`pytest -n 12 --durations=0`, relative order on a loaded
+#   host is enough) rather than by hand.
+# * `smoke` (tests/smoke_tests.txt): a curated set of about 60 fast tests, one
+#   representative per lane plus the public API, contract and guard tests. It is
+#   what the Python-floor CI job runs (`-m smoke`), so keep each entry cheap.
+#
+# A moved or renamed test silently drops out of either list, so
+# `.github/scripts/test_shards.py check` (the `test-partition` job) fails on a
+# listed id the suite no longer collects.
+_TESTS_DIR = pathlib.Path(__file__).parent
+
+
+def _listed_node_ids(name: str) -> set[str]:
+    path = _TESTS_DIR / name
+    if not path.exists():
+        return set()
+    return {
         line.strip()
-        for line in _SLOW_LIST.read_text().splitlines()
+        for line in path.read_text().splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    if _SLOW_LIST.exists()
-    else set()
-)
+
+
+_SLOW_NODE_IDS = _listed_node_ids("slow_tests.txt")
+_SMOKE_NODE_IDS = _listed_node_ids("smoke_tests.txt")
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-apply the `slow` marker to node ids listed in slow_tests.txt."""
-    if not _SLOW_NODE_IDS:
-        return
-    slow = pytest.mark.slow
+    """Apply `slow` / `smoke` to the node ids in slow_tests.txt / smoke_tests.txt."""
     for item in items:
         if item.nodeid in _SLOW_NODE_IDS:
-            item.add_marker(slow)
+            item.add_marker(pytest.mark.slow)
+        if item.nodeid in _SMOKE_NODE_IDS:
+            item.add_marker(pytest.mark.smoke)
 
 
 # --- Bound peak memory of the differentiable-FMM tests ----------------------

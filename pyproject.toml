@@ -223,7 +223,11 @@ skip_gitignore = true
 minversion = "7.4"
 testpaths = ["tests"]
 markers = [
-    "slow: long-running / compile-heavy test (deselect with -m 'not slow')",
+    "slow: long-running / compile-heavy test (deselect with -m 'not slow'); applied from tests/slow_tests.txt",
+    # A curated set of ~60 fast tests (tests/smoke_tests.txt): one representative per
+    # lane plus the public API, contract and guard tests. The Python-floor CI job
+    # (`test-py-floor`, 3.12) runs exactly this marker.
+    "smoke: curated fast representative of a lane or contract; applied from tests/smoke_tests.txt",
     # One distributed FMM evaluation is ~190 s of COMPILATION on a forced-CPU mesh,
     # and that cost is flat in N, leaf size and expansion order (measured), so it is
     # per-CONFIGURATION and cannot be shrunk by making the problem smaller. The

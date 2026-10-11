@@ -9,8 +9,13 @@ either lands in a shard or turns that job red -- before, the partition was
 checked by hand-counted comments in ``ci.yml``, which drifted.
 
 ``EXTRA`` holds selections that are not part of the partition: one that
-deliberately re-runs a subset (the Python-floor job), and the tests of the
-``bench/`` scripts, which live outside ``tests/`` and run in the lint job.
+deliberately re-runs a subset (the Python-floor job, the ``smoke`` marker), and the
+tests of the ``bench/`` scripts, which live outside ``tests/`` and run in the lint
+job.
+
+``check`` also fails on a node id in ``tests/slow_tests.txt`` or
+``tests/smoke_tests.txt`` that the default collection no longer contains: a moved
+or renamed test silently drops out of either marker otherwise.
 
 Usage::
 
@@ -20,6 +25,7 @@ Usage::
 
 from __future__ import annotations
 
+import pathlib
 import subprocess
 import sys
 
@@ -81,13 +87,10 @@ SHARDS: dict[str, list[str]] = {
 
 EXTRA: dict[str, list[str]] = {
     # The Python-floor job: version compatibility on the oldest supported
-    # interpreter, not a second run of the suite. The goldens plus the public
-    # API surface and the downstream (Odisseo) coupling contract.
-    "py-floor": [
-        "tests/characterization",
-        "tests/unit/test_public_api_surface.py",
-        "tests/unit/test_odisseo_coupling.py",
-    ],
+    # interpreter, not a second run of the suite. The curated `smoke` marker
+    # (tests/smoke_tests.txt): one fast representative per lane plus the public
+    # API, contract and guard tests.
+    "py-floor": ["tests", "-m", "smoke"],
     # The lint job: the tests of the bench/ scripts (the GPU and two-card gates'
     # own checks, the annotation tools, a comparison benchmark's exit code). They
     # test no library code, so they sit outside `tests/` and outside the partition,
@@ -96,6 +99,16 @@ EXTRA: dict[str, list[str]] = {
 }
 
 _UNIVERSE = ["tests"]
+_TESTS = pathlib.Path(__file__).resolve().parents[2] / "tests"
+_MARKER_LISTS = ("slow_tests.txt", "smoke_tests.txt")
+
+
+def _listed_node_ids(name: str) -> list[str]:
+    path = _TESTS / name
+    if not path.exists():
+        return []
+    lines = (line.strip() for line in path.read_text().splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
 
 
 def _selection(name: str) -> list[str]:
@@ -142,6 +155,13 @@ def check() -> int:
         print(f"  NOT IN THE DEFAULT COLLECTION {node} ({owner[node]})")
     problems += len(missing) + len(extra)
     print(f"{'universe':24s} {len(universe):5d}; shards cover {len(owner)}")
+    for name in _MARKER_LISTS:
+        listed = _listed_node_ids(name)
+        stale = sorted(set(listed) - universe)
+        for node in stale:
+            print(f"  STALE ID IN tests/{name}: {node}")
+        problems += len(stale)
+        print(f"{name:24s} {len(listed):5d} ids; {len(stale)} stale")
     return 1 if problems else 0
 
 

@@ -61,10 +61,13 @@ pre-commit run --all-files
 
 ## Testing and coverage
 
-CI enforces coverage through `pytest-cov`.
+CI measures branch coverage through `pytest-cov` on every `test-full` shard; there is
+no `fail_under` threshold, so a coverage drop does not fail the build on its own.
 
 ```bash
 pytest --cov=jaccpot --cov-report=term-missing
+pytest -m "not slow"     # the fast local subset (tests/slow_tests.txt)
+pytest -m smoke          # the curated smoke set CI's Python-floor job runs (tests/smoke_tests.txt)
 ```
 
 Runtime type checks (`jaxtyping` + `beartype`) are available via import-hook

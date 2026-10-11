@@ -170,7 +170,10 @@ jobs:
     # 3.13 is test-full's). This is a version-compatibility check, not a second run
     # of the suite: it replaces `test-smoke`, which ran every non-slow test again
     # in three shards. Selection in test_shards.py (`EXTRA["py-floor"]`): the
-    # goldens, the public API surface and the Odisseo coupling contract.
+    # curated `smoke` marker (tests/smoke_tests.txt), one fast representative per
+    # lane plus the public API, contract and guard tests: 64 tests, 3.5 min at
+    # `-n 2` on a loaded CPU host with a cold cache (2026-10, Z-c). The job measured
+    # 3.9-4.1 min with its previous selection.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -196,7 +199,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install git+https://github.com/TobiBu/yggdrax.git
           pip install -e ".[dev]"
-      - name: Goldens and API contract on Python 3.12
+      - name: Smoke tests on Python 3.12
         run: |
           mapfile -t selection < <(python .github/scripts/test_shards.py args py-floor)
           pytest -n 2 "${selection[@]}" --durations=20
@@ -210,6 +213,9 @@ jobs:
     # Forced host devices and nornax are installed so that the distributed and
     # cross-repo modules collect their tests rather than skip at module level;
     # otherwise a missing shard for them would be invisible here.
+    #
+    # The same check fails on a node id in tests/slow_tests.txt or
+    # tests/smoke_tests.txt that is no longer collected.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
