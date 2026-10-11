@@ -137,10 +137,6 @@ _REEXPORTS = (
     sh_size,
 )
 
-#: Both values run the flat far-pair list. ``"class_major"`` went with the grouped
-#: far field in the 2026-10 cleanup (docs/cleanup_2026-10.md, X3); naming it raises
-#: in :func:`_reject_removed_farfield_options`.
-FarFieldMode = Literal["auto", "pair_grouped"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 JerkMode = Literal["fast_approx", "accurate"]
 PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
@@ -149,15 +145,14 @@ PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 def _reject_removed_farfield_options(farfield: FarFieldConfig) -> None:
     """Refuse the far-field options the 2026-10 cleanup removed (X3).
 
-    The grouped far field (``grouped_interactions=True``) and its class-major
-    batching (``mode="class_major"``) were removed in the 2026-10 cleanup
-    (docs/cleanup_2026-10.md, X3): no production lane used them, they were less
-    accurate than the flat pair list (one representative rotation per
-    displacement class) and they needed the AABB expansion centres that went with
-    them. The config fields stay so old
-    configs construct; naming a removed value raises here rather than silently
-    running the flat far field, so an old config cannot measure the wrong thing.
-    Runs first in ``__init__``, before any typed helper sees the value.
+    The grouped far field (``grouped_interactions=True``) was removed in the
+    2026-10 cleanup (docs/cleanup_2026-10.md, X3): no production lane used it, it
+    was less accurate than the flat pair list (one representative rotation per
+    displacement class) and it needed the AABB expansion centres that went with
+    it. The config field stays so old configs construct; naming a removed value
+    raises here rather than silently running the flat far field, so an old config
+    cannot measure the wrong thing. Runs first in ``__init__``, before any typed
+    helper sees the value.
 
     Parameters
     ----------
@@ -167,7 +162,7 @@ def _reject_removed_farfield_options(farfield: FarFieldConfig) -> None:
     Raises
     ------
     ValueError
-        If ``grouped_interactions`` is true or ``mode`` is ``"class_major"``.
+        If ``grouped_interactions`` is true.
     """
     if bool(farfield.grouped_interactions):
         raise ValueError(
@@ -175,13 +170,6 @@ def _reject_removed_farfield_options(farfield: FarFieldConfig) -> None:
             "grouped interactions were removed in the 2026-10 cleanup (X3); see "
             "docs/cleanup_2026-10.md. Leave it unset or False -- the far field "
             "runs the flat pair list."
-        )
-    if str(farfield.mode).strip().lower() == "class_major":
-        raise ValueError(
-            "FarFieldConfig(mode='class_major') is no longer available: the "
-            "class-major far field was removed in the 2026-10 cleanup (X3); see "
-            "docs/cleanup_2026-10.md. Use 'auto' or 'pair_grouped' (both run the "
-            "flat pair list)."
         )
 
 
@@ -296,8 +284,8 @@ class FMMEngine(
     was extracted verbatim and left in its original position for that reason
     (commits b462e45, dee46d6). Reordering them changes what the engine resolves
     to. A later contract can also override what a caller asked for:
-    :meth:`_apply_large_n_gpu_production_contract` forces ``runtime_path`` to
-    ``"large_n"`` and clears ``precompute_nearfield_scatter_schedules`` and
+    :meth:`_apply_large_n_gpu_production_contract` forces ``streamed_far_pairs``
+    on and clears ``precompute_nearfield_scatter_schedules`` and
     ``mixed_order_farfield``.
 
     Parameters
@@ -382,12 +370,6 @@ class FMMEngine(
         Removed in the 2026-10 cleanup (K): the dense interaction buffers were
         built only for the Cartesian basis. ``None`` and ``False`` are accepted
         and ignored; ``True`` raises.
-    runtime_path : Literal['auto', 'large_n']
-        ``"auto"`` or ``"large_n"``, accepted and stored but no longer a lane
-        switch: the large-N lane is selected by ``preset="large_n_gpu"``, whose
-        contract pins ``"large_n"`` here. Forcing ``"large_n"`` under another
-        preset used to open that lane too; since the 2026-10 cleanup (X4) it does
-        not.
     preset : Optional[Union[str, FMMPreset]]
         Named configuration bundle applied before the individual keywords above. An
         enum member or its string value.
@@ -397,13 +379,12 @@ class FMMEngine(
         Pin the maximum leaf size, bypassing preset selection.
 
     farfield : Optional[FarFieldConfig]
-        The far-field group: mode, rotation, the M2L/L2L chunk sizes,
-        streamed far pairs, mixed-order settings and gradient retention.
-        ``None`` means ``FarFieldConfig()``. ``grouped_interactions=True`` and
-        ``mode="class_major"`` raise: the grouped far field was removed in the
-        2026-10 cleanup (X3).
+        The far-field group: rotation, the M2L/L2L chunk sizes, streamed far
+        pairs, mixed-order settings and gradient retention. ``None`` means
+        ``FarFieldConfig()``. ``grouped_interactions=True`` raises: the grouped
+        far field was removed in the 2026-10 cleanup (X3).
 
-        Three names differ (``mode``, ``rotation``, ``mixed_order``) and one
+        Two names differ (``rotation``, ``mixed_order``) and one
         **default** does: ``FarFieldConfig.rotation`` is ``None`` where this
         constructor defaulted to ``"solidfmm"``. ``None`` means "not
         overridden", so it is resolved at the unpack -- the same resolution the
@@ -492,7 +473,6 @@ class FMMEngine(
         # preset's resolved sizing). See normalize_traversal_config_request.
         interaction_retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
         use_dense_interactions: Optional[bool] = None,
-        runtime_path: Literal["auto", "large_n"] = "auto",
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
@@ -521,15 +501,14 @@ class FMMEngine(
         # is resolved here -- the same `or "radix"` the facade already applies at
         # `solver.py`'s construction call. Without this line every caller who omits
         # the group would silently get tree_type=None instead of "radix".
-        # The far-field group, last of the four (audit F09). Three names differ
-        # (`mode`, `rotation`, `mixed_order`) and, like the tree group, one
+        # The far-field group, last of the four (audit F09). Two names differ
+        # (`rotation`, `mixed_order`) and, like the tree group, one
         # DEFAULT differs: FarFieldConfig.rotation is None where this constructor
         # defaulted to "solidfmm". Resolved here exactly as the facade already
         # resolves it at `solver.py:445-447` -- None means "not overridden".
         _ff = FarFieldConfig() if farfield is None else farfield
         _reject_removed_farfield_options(_ff)
         _reject_removed_dense_interactions(use_dense_interactions)
-        farfield_mode = _ff.mode
         complex_rotation = "solidfmm" if _ff.rotation is None else _ff.rotation
         m2l_chunk_size = _ff.m2l_chunk_size
         l2l_chunk_size = _ff.l2l_chunk_size
@@ -608,7 +587,6 @@ class FMMEngine(
             adaptive_error_model=adaptive_error_model,
             complex_rotation=complex_rotation,
             dehnen_geometry_mode=dehnen_geometry_mode,
-            farfield_mode=farfield_mode,
             mac_force_scale_fb_inflation=mac_force_scale_fb_inflation,
             mac_force_scale_mode=mac_force_scale_mode,
             mac_force_scale_prepass_theta=mac_force_scale_prepass_theta,
@@ -619,7 +597,6 @@ class FMMEngine(
         )
         self._resolve_lane_modes(
             nearfield_mode=nearfield_mode,
-            runtime_path=runtime_path,
             execution_backend=execution_backend,
             nearfield_edge_chunk_size=nearfield_edge_chunk_size,
             precompute_nearfield_scatter_schedules=(
@@ -850,7 +827,6 @@ class FMMEngine(
         adaptive_error_model: str,
         complex_rotation: str,
         dehnen_geometry_mode: str,
-        farfield_mode: FarFieldMode,
         mac_force_scale_fb_inflation: Optional[float],
         mac_force_scale_mode: str,
         mac_force_scale_prepass_theta: Optional[float],
@@ -873,8 +849,6 @@ class FMMEngine(
         complex_rotation : str
             Passed through from ``__init__`` unchanged.
         dehnen_geometry_mode : str
-            Passed through from ``__init__`` unchanged.
-        farfield_mode : FarFieldMode
             Passed through from ``__init__`` unchanged.
         mac_force_scale_fb_inflation : Optional[float]
             Passed through from ``__init__`` unchanged. Inflates the far-field
@@ -977,10 +951,6 @@ class FMMEngine(
         if rotation_norm != "solidfmm":
             raise ValueError("complex_rotation must be 'solidfmm'")
         self.complex_rotation = rotation_norm
-        farfield_mode_norm = str(farfield_mode).strip().lower()
-        if farfield_mode_norm not in ("auto", "pair_grouped"):
-            raise ValueError("farfield_mode must be 'auto' or 'pair_grouped'")
-        self.farfield_mode = farfield_mode_norm
         self._explicit_streamed_far_pairs = streamed_far_pairs is not None
         self.streamed_far_pairs = bool(streamed_far_pairs)
         self.mixed_order_farfield = bool(mixed_order_farfield)
@@ -997,12 +967,11 @@ class FMMEngine(
         self,
         *,
         nearfield_mode: str,
-        runtime_path: str,
         execution_backend: str,
         nearfield_edge_chunk_size: int,
         precompute_nearfield_scatter_schedules: bool,
     ) -> None:
-        """Normalise and validate the three lane-selection strings.
+        """Normalise and validate the lane-selection strings.
 
         Extracted verbatim from ``__init__`` (audit **F09**) and called in the
         original position, so the resolution order is unchanged. Characterised
@@ -1016,8 +985,6 @@ class FMMEngine(
         Parameters
         ----------
         nearfield_mode : str
-            Passed through from ``__init__`` unchanged.
-        runtime_path : str
             Passed through from ``__init__`` unchanged.
         execution_backend : str
             Passed through from ``__init__`` unchanged.
@@ -1040,9 +1007,6 @@ class FMMEngine(
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
-        runtime_path_norm = str(runtime_path).strip().lower()
-        if runtime_path_norm not in ("auto", "large_n"):
-            raise ValueError("runtime_path must be 'auto' or 'large_n'")
         execution_backend_norm = str(execution_backend).strip().lower()
         if execution_backend_norm not in ("auto", "radix"):
             raise ValueError("execution_backend must be 'auto' or 'radix'")
@@ -1050,7 +1014,6 @@ class FMMEngine(
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
         self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
-        self.runtime_path = runtime_path_norm
         self.execution_backend = execution_backend_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
         self.precompute_nearfield_scatter_schedules = bool(
@@ -1802,10 +1765,8 @@ class FMMEngine(
             )
 
         # Keep large-N production on one stable runtime lane.
-        self.runtime_path = "large_n"
         self.memory_objective = "minimum_memory"  # type: ignore[assignment]
         self.streamed_far_pairs = True
-        self.farfield_mode = "pair_grouped"
 
         # Keep near-field on the radix fast-lane compatible bucketed path.
         self.nearfield_mode = "bucketed"

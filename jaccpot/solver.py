@@ -72,7 +72,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             ),
             farfield=replace(
                 cfg.farfield,
-                mode="auto",
                 rotation="solidfmm",
                 m2l_chunk_size=None,
                 l2l_chunk_size=None,
@@ -107,7 +106,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
         cfg = FMMAdvancedConfig()
         return replace(
             cfg,
-            farfield=replace(cfg.farfield, mode="pair_grouped"),
             nearfield=replace(cfg.nearfield, mode="bucketed", edge_chunk_size=512),
         )
     # ACCURATE
@@ -115,7 +113,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
     return replace(
         cfg,
         tree=replace(cfg.tree, mode="lbvh", refine_local=True, max_refine_levels=1),
-        farfield=replace(cfg.farfield, mode="pair_grouped"),
         # "auto", not "baseline". This preset's accuracy comes from the tree
         # (refine_local + an extra refinement level) and from the expansion, not
         # from how the near field is traversed: baseline and bucketed visit the
@@ -327,8 +324,6 @@ class _LegacyRuntimeOverrides(NamedTuple):
         Grouped traversal toggle. Legacy name: ``grouped_interactions``. Only
         ``None``/``False`` construct: the engine raises on ``True``, since the
         grouped far field was removed in the 2026-10 cleanup (X3).
-    farfield_mode : str
-        Far-field interaction mode. Legacy name: ``farfield_mode``.
     nearfield_mode : str
         Near-field interaction mode. Legacy name: ``nearfield_mode``.
     nearfield_edge_chunk_size : int
@@ -352,7 +347,6 @@ class _LegacyRuntimeOverrides(NamedTuple):
     expanse_preset: Optional[str]
     mac_type: str
     grouped_interactions: Optional[bool]
-    farfield_mode: str
     nearfield_mode: str
     nearfield_edge_chunk_size: int
     fixed_order: Optional[int]
@@ -451,12 +445,6 @@ def _pop_legacy_runtime_overrides(
         grouped_interactions = bool(legacy_grouped)
         legacy_used = True
 
-    farfield_mode = advanced_cfg.farfield.mode
-    legacy_farfield_mode = legacy_kwargs.pop("farfield_mode", None)
-    if legacy_farfield_mode is not None:
-        farfield_mode = str(legacy_farfield_mode)
-        legacy_used = True
-
     nearfield_mode = advanced_cfg.nearfield.mode
     legacy_nearfield_mode = legacy_kwargs.pop("nearfield_mode", None)
     if legacy_nearfield_mode is not None:
@@ -494,7 +482,6 @@ def _pop_legacy_runtime_overrides(
         expanse_preset=expanse_preset,
         mac_type=mac_type,
         grouped_interactions=grouped_interactions,
-        farfield_mode=farfield_mode,
         nearfield_mode=nearfield_mode,
         nearfield_edge_chunk_size=nearfield_edge_chunk_size,
         fixed_order=fixed_order,
@@ -726,7 +713,6 @@ class FastMultipoleMethod:
             expansion_basis=runtime_basis,
             basis_impl=basis_resolution.basis_impl,
             m2l_impl=resolved_m2l_impl,
-            runtime_path=str(legacy_kwargs.pop("runtime_path", "auto")),
             adaptive_order=adaptive_order,
             p_gears=p_gears,
             use_pallas=use_pallas,
@@ -746,7 +732,6 @@ class FastMultipoleMethod:
                     "retain_far_pairs_for_grad",
                     advanced_cfg.farfield.retain_far_pairs_for_grad,
                 ),
-                mode=runtime_overrides.farfield_mode,
                 streamed_far_pairs=legacy_kwargs.pop(
                     "streamed_far_pairs", advanced_cfg.farfield.streamed_far_pairs
                 ),
@@ -2040,11 +2025,6 @@ class FastMultipoleMethod:
     def mac_type(self: "FastMultipoleMethod") -> str:
         """Active multipole-acceptance criterion policy."""
         return str(self._impl.mac_type)
-
-    @property
-    def farfield_mode(self: "FastMultipoleMethod") -> str:
-        """Resolved far-field interaction mode."""
-        return str(self._impl.farfield_mode)
 
     @property
     def nearfield_mode(self: "FastMultipoleMethod") -> str:

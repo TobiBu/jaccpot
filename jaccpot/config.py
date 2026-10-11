@@ -6,10 +6,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-FARFIELD_MODE_DOC = (
-    "For large_n_gpu production, far-field execution is canonicalized to "
-    "'pair_grouped'."
-)
 NEARFIELD_MODE_DOC = (
     "For large_n_gpu production, near-field execution is canonicalized to "
     "'bucketed'."
@@ -23,12 +19,6 @@ MEMORY_OBJECTIVE_DOC = (
 #: basis, like ``"real"`` (the Cartesian and complex bases were removed in the
 #: 2026-10 cleanup, docs/cleanup_2026-10.md, K and C).
 Basis = Literal["solidfmm", "real"]
-#: ``"class_major"`` stays in the alias only so that an old config naming it still
-#: constructs (and type-checks); the solver then raises, because the class-major far
-#: field was removed with the grouped one in the 2026-10 cleanup
-#: (docs/cleanup_2026-10.md, X3). ``"auto"`` and ``"pair_grouped"`` both run the flat
-#: far-pair list.
-FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
 #: How the runtime should trade peak memory against throughput when it resolves
@@ -202,10 +192,6 @@ class FarFieldConfig:
         default         7.230e-04  8.148e-05  1.128e-05
         grouped         8.927e-04  2.049e-04  1.887e-04
         ==============  =========  =========  =========
-    mode : FarFieldMode
-        ``"auto"`` or ``"pair_grouped"``; both run the flat far-pair list (the
-        name is historical). ``"class_major"`` raises at solver construction: it
-        was the grouped far field's other batching and went with it (X3).
     rotation : Optional[str]
         M2L rotation implementation, e.g. ``"solidfmm"`` or ``"cached"``.
     m2l_chunk_size : Optional[int]
@@ -228,7 +214,6 @@ class FarFieldConfig:
     """
 
     grouped_interactions: Optional[bool] = None
-    mode: FarFieldMode = "auto"
     rotation: Optional[str] = None
     m2l_chunk_size: Optional[int] = None
     l2l_chunk_size: Optional[int] = None
@@ -372,8 +357,8 @@ class RuntimePolicyConfig:
     Notes
     -----
     For ``preset="large_n_gpu"``, runtime policy is canonicalized to the production
-    low-memory fast path (``minimum_memory`` + streamed ``pair_grouped`` + bucketed
-    near field), so overrides that contradict that profile are overridden back.
+    low-memory fast path (``minimum_memory`` + streamed far pairs + bucketed near
+    field), so overrides that contradict that profile are overridden back.
 
     ``traversal_config`` accepts a :class:`TraversalOverrides` (or a ``dict`` with
     the same keys) for a field-by-field merge onto the preset's resolved capacities,
@@ -630,7 +615,6 @@ __all__ = [
     "FMMExecutionBackend",
     "FMMPreset",
     "FarFieldConfig",
-    "FarFieldMode",
     "GradConfig",
     "GradNearFieldLane",
     "MACTypeInput",

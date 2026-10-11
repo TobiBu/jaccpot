@@ -2497,12 +2497,10 @@ def can_use_large_n_prepare_path(
 
     Notes
     -----
-    The lane is gated on the ``large_n_gpu`` preset alone. ``runtime_path`` is
-    accepted (``"auto"`` or ``"large_n"``) but no longer consulted here: an
-    explicit ``"large_n"`` used to open the lane under any preset and turn the
-    ``dehnen_theta`` decline into a raise. The preset's contract pins
-    ``runtime_path="large_n"`` anyway, so on that preset nothing changed; under
-    another preset the general path now runs (2026-10 cleanup, X4).
+    The lane is gated on the ``large_n_gpu`` preset alone. The engine's
+    ``runtime_path="large_n"`` used to open it under any preset too (and turn the
+    ``dehnen_theta`` decline into a raise); X4 of the 2026-10 cleanup stopped
+    consulting it, and Z-b removed it.
     """
 
     if str(getattr(fmm, "preset", "")).strip().lower() != "large_n_gpu":
