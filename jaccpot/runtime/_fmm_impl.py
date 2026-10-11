@@ -142,65 +142,6 @@ JerkMode = Literal["fast_approx", "accurate"]
 PreparedStateLike = Union["FMMPreparedState", LargeNPreparedState]
 
 
-def _reject_removed_farfield_options(farfield: FarFieldConfig) -> None:
-    """Refuse the far-field options the 2026-10 cleanup removed (X3).
-
-    The grouped far field (``grouped_interactions=True``) was removed in the
-    2026-10 cleanup (docs/cleanup_2026-10.md, X3): no production lane used it, it
-    was less accurate than the flat pair list (one representative rotation per
-    displacement class) and it needed the AABB expansion centres that went with
-    it. The config field stays so old configs construct; naming a removed value
-    raises here rather than silently running the flat far field, so an old config
-    cannot measure the wrong thing. Runs first in ``__init__``, before any typed
-    helper sees the value.
-
-    Parameters
-    ----------
-    farfield : FarFieldConfig
-        The far-field group as the caller passed it.
-
-    Raises
-    ------
-    ValueError
-        If ``grouped_interactions`` is true.
-    """
-    if bool(farfield.grouped_interactions):
-        raise ValueError(
-            "FarFieldConfig(grouped_interactions=True) is no longer available: "
-            "grouped interactions were removed in the 2026-10 cleanup (X3); see "
-            "docs/cleanup_2026-10.md. Leave it unset or False -- the far field "
-            "runs the flat pair list."
-        )
-
-
-def _reject_removed_dense_interactions(use_dense_interactions: Optional[bool]) -> None:
-    """Refuse ``use_dense_interactions=True``, removed in the 2026-10 cleanup (K).
-
-    The dense interaction buffers were materialised only on the Cartesian basis
-    (the prepare gated them on ``expansion_basis != "solidfmm"``) and went with it.
-    The keyword stays so an old call constructs; ``True`` raises rather than being
-    ignored, so an old config cannot believe it ran the dense lane. Runs first in
-    ``__init__``, beside :func:`_reject_removed_farfield_options`.
-
-    Parameters
-    ----------
-    use_dense_interactions : Optional[bool]
-        The engine keyword as the caller passed it.
-
-    Raises
-    ------
-    ValueError
-        If it is true.
-    """
-    if bool(use_dense_interactions):
-        raise ValueError(
-            "use_dense_interactions=True is no longer available: the dense "
-            "interaction buffers were removed with the Cartesian basis in the "
-            "2026-10 cleanup (K); see docs/cleanup_2026-10.md. Leave it unset or "
-            "False."
-        )
-
-
 def derive_split_build_default(
     *,
     memory_objective: str,
@@ -366,10 +307,6 @@ class FMMEngine(
         Called once per dual-tree retry, when the traversal overflows its pair
         capacity and re-runs with a larger one. Purely observational -- use it to
         detect that ``traversal_config`` is undersized.
-    use_dense_interactions : Optional[bool]
-        Removed in the 2026-10 cleanup (K): the dense interaction buffers were
-        built only for the Cartesian basis. ``None`` and ``False`` are accepted
-        and ignored; ``True`` raises.
     preset : Optional[Union[str, FMMPreset]]
         Named configuration bundle applied before the individual keywords above. An
         enum member or its string value.
@@ -381,8 +318,7 @@ class FMMEngine(
     farfield : Optional[FarFieldConfig]
         The far-field group: rotation, the M2L/L2L chunk sizes, streamed far
         pairs, mixed-order settings and gradient retention. ``None`` means
-        ``FarFieldConfig()``. ``grouped_interactions=True`` raises: the grouped
-        far field was removed in the 2026-10 cleanup (X3).
+        ``FarFieldConfig()``.
 
         Two names differ (``rotation``, ``mixed_order``) and one
         **default** does: ``FarFieldConfig.rotation`` is ``None`` where this
@@ -413,10 +349,11 @@ class FMMEngine(
         stated in full where the group is unpacked. Fields are documented on
         :class:`jaccpot.config.NearFieldConfig`.
     runtime_policy : Optional[RuntimePolicyConfig]
-        The seventeen execution-policy knobs, as one frozen group: backend and
-        host-refine mode, ``fail_fast``, the memory objective and budget, the
-        traversal capacities and overrides, the cache/retention flags, the
-        (inert) autotune switch and the schedule budgets. ``None`` means
+        The execution-policy knobs, as one frozen group: host-refine mode,
+        ``fail_fast``, the memory objective and budget, the traversal capacities
+        and overrides, the cache/retention flags and the schedule budgets (the
+        backend, the inert autotune switch and the grouped-schedule knobs went
+        in the 2026-10 cleanup, Z-b). ``None`` means
         ``RuntimePolicyConfig()``, whose defaults were checked field by field
         against the flat parameters this replaced -- all seventeen matched, so
         omitting it is exactly the old behaviour. Each field is documented on
@@ -472,7 +409,6 @@ class FMMEngine(
         # TraversalOverrides / mapping of named capacities (merge onto the
         # preset's resolved sizing). See normalize_traversal_config_request.
         interaction_retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
-        use_dense_interactions: Optional[bool] = None,
         preset: Optional[Union[str, FMMPreset]] = None,
         fixed_order: Optional[int] = None,
         fixed_max_leaf_size: Optional[int] = None,
@@ -507,8 +443,6 @@ class FMMEngine(
         # defaulted to "solidfmm". Resolved here exactly as the facade already
         # resolves it at `solver.py:445-447` -- None means "not overridden".
         _ff = FarFieldConfig() if farfield is None else farfield
-        _reject_removed_farfield_options(_ff)
-        _reject_removed_dense_interactions(use_dense_interactions)
         complex_rotation = "solidfmm" if _ff.rotation is None else _ff.rotation
         m2l_chunk_size = _ff.m2l_chunk_size
         l2l_chunk_size = _ff.l2l_chunk_size
@@ -552,7 +486,6 @@ class FMMEngine(
         nearfield_mode = _nf.mode
         nearfield_edge_chunk_size = _nf.edge_chunk_size
         precompute_nearfield_scatter_schedules = _nf.precompute_scatter_schedules
-        execution_backend = _policy.execution_backend
         host_refine_mode = _policy.host_refine_mode
         fail_fast = _policy.fail_fast
         memory_objective = _policy.memory_objective
@@ -564,9 +497,6 @@ class FMMEngine(
         retain_traversal_result = _policy.retain_traversal_result
         retain_interactions = _policy.retain_interactions
         prepare_stage_memory_split_enabled = _policy.prepare_stage_memory_split_enabled
-        # `precompute_grouped_class_segments` and `grouped_schedule_budget_bytes`
-        # are ignored since the grouped far field went (2026-10 cleanup, X3), and
-        # `autotune_m2l_chunk` since the M2L chunk autotune went (X4).
         nearfield_schedule_item_cap = _policy.nearfield_schedule_item_cap
         upward_leaf_batch_size = _policy.upward_leaf_batch_size
 
@@ -597,7 +527,6 @@ class FMMEngine(
         )
         self._resolve_lane_modes(
             nearfield_mode=nearfield_mode,
-            execution_backend=execution_backend,
             nearfield_edge_chunk_size=nearfield_edge_chunk_size,
             precompute_nearfield_scatter_schedules=(
                 precompute_nearfield_scatter_schedules
@@ -967,7 +896,6 @@ class FMMEngine(
         self,
         *,
         nearfield_mode: str,
-        execution_backend: str,
         nearfield_edge_chunk_size: int,
         precompute_nearfield_scatter_schedules: bool,
     ) -> None:
@@ -985,8 +913,6 @@ class FMMEngine(
         Parameters
         ----------
         nearfield_mode : str
-            Passed through from ``__init__`` unchanged.
-        execution_backend : str
             Passed through from ``__init__`` unchanged.
         nearfield_edge_chunk_size : int
             Passed through from ``__init__`` unchanged.
@@ -1007,14 +933,10 @@ class FMMEngine(
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
             raise ValueError("nearfield_mode must be 'auto', 'baseline', or 'bucketed'")
-        execution_backend_norm = str(execution_backend).strip().lower()
-        if execution_backend_norm not in ("auto", "radix"):
-            raise ValueError("execution_backend must be 'auto' or 'radix'")
         if int(nearfield_edge_chunk_size) <= 0:
             raise ValueError("nearfield_edge_chunk_size must be positive")
         self.nearfield_mode = nearfield_mode_norm
         self._explicit_nearfield_mode = nearfield_mode_norm != "auto"
-        self.execution_backend = execution_backend_norm
         self.nearfield_edge_chunk_size = int(nearfield_edge_chunk_size)
         self.precompute_nearfield_scatter_schedules = bool(
             precompute_nearfield_scatter_schedules
@@ -1036,7 +958,7 @@ class FMMEngine(
         Extracted verbatim from ``__init__`` (audit **F09**), called in the
         original position. ``autotune_m2l_chunk``, which was resolved here after
         ``fail_fast`` and forced off by it, went with the M2L chunk autotune in
-        the 2026-10 cleanup (X4); its config field is accepted and ignored.
+        the 2026-10 cleanup (X4).
 
         Parameters
         ----------

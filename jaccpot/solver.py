@@ -307,8 +307,6 @@ class _LegacyRuntimeOverrides(NamedTuple):
     tree_type : Optional[str]
         Tree family. ``None`` here becomes ``"radix"`` at the engine call.
         Legacy name: ``tree_type``.
-    execution_backend : str
-        Engine execution backend. Legacy name: ``execution_backend``.
     tree_mode : Optional[str]
         Tree build mode. Legacy name: ``tree_build_mode``.
     target_leaf_particles : Optional[int]
@@ -320,10 +318,6 @@ class _LegacyRuntimeOverrides(NamedTuple):
     mac_type : str
         Acceptance criterion; defaults to ``"dehnen"`` for the solidfmm basis
         and ``"bh"`` otherwise. Legacy name: ``mac_type``.
-    grouped_interactions : Optional[bool]
-        Grouped traversal toggle. Legacy name: ``grouped_interactions``. Only
-        ``None``/``False`` construct: the engine raises on ``True``, since the
-        grouped far field was removed in the 2026-10 cleanup (X3).
     nearfield_mode : str
         Near-field interaction mode. Legacy name: ``nearfield_mode``.
     nearfield_edge_chunk_size : int
@@ -341,12 +335,10 @@ class _LegacyRuntimeOverrides(NamedTuple):
 
     complex_rotation: str
     tree_type: Optional[str]
-    execution_backend: str
     tree_mode: Optional[str]
     target_leaf_particles: Optional[int]
     expanse_preset: Optional[str]
     mac_type: str
-    grouped_interactions: Optional[bool]
     nearfield_mode: str
     nearfield_edge_chunk_size: int
     fixed_order: Optional[int]
@@ -397,12 +389,6 @@ def _pop_legacy_runtime_overrides(
         tree_type = str(legacy_tree_type)
         legacy_used = True
 
-    execution_backend = advanced_cfg.runtime.execution_backend
-    legacy_execution_backend = legacy_kwargs.pop("execution_backend", None)
-    if legacy_execution_backend is not None:
-        execution_backend = str(legacy_execution_backend)
-        legacy_used = True
-
     tree_mode = advanced_cfg.tree.mode
     legacy_tree_mode = legacy_kwargs.pop("tree_build_mode", None)
     if legacy_tree_mode is not None:
@@ -439,12 +425,6 @@ def _pop_legacy_runtime_overrides(
         mac_type = str(legacy_mac_type)
         legacy_used = True
 
-    grouped_interactions = advanced_cfg.farfield.grouped_interactions
-    legacy_grouped = legacy_kwargs.pop("grouped_interactions", None)
-    if legacy_grouped is not None:
-        grouped_interactions = bool(legacy_grouped)
-        legacy_used = True
-
     nearfield_mode = advanced_cfg.nearfield.mode
     legacy_nearfield_mode = legacy_kwargs.pop("nearfield_mode", None)
     if legacy_nearfield_mode is not None:
@@ -476,12 +456,10 @@ def _pop_legacy_runtime_overrides(
     return _LegacyRuntimeOverrides(
         complex_rotation=complex_rotation,
         tree_type=tree_type,
-        execution_backend=execution_backend,
         tree_mode=tree_mode,
         target_leaf_particles=target_leaf_particles,
         expanse_preset=expanse_preset,
         mac_type=mac_type,
-        grouped_interactions=grouped_interactions,
         nearfield_mode=nearfield_mode,
         nearfield_edge_chunk_size=nearfield_edge_chunk_size,
         fixed_order=fixed_order,
@@ -727,7 +705,6 @@ class FastMultipoleMethod:
             mac_theta_max=mac_theta_max,
             farfield=FarFieldConfig(
                 rotation=runtime_overrides.complex_rotation,
-                grouped_interactions=runtime_overrides.grouped_interactions,
                 retain_far_pairs_for_grad=legacy_kwargs.pop(
                     "retain_far_pairs_for_grad",
                     advanced_cfg.farfield.retain_far_pairs_for_grad,
@@ -767,7 +744,6 @@ class FastMultipoleMethod:
             ),
             runtime_policy=dataclasses.replace(
                 advanced_cfg.runtime,
-                execution_backend=runtime_overrides.execution_backend,
                 host_refine_mode=legacy_kwargs.pop(
                     "host_refine_mode", advanced_cfg.runtime.host_refine_mode
                 ),
@@ -812,19 +788,6 @@ class FastMultipoleMethod:
                     "prepare_stage_memory_split_enabled",
                     advanced_cfg.runtime.prepare_stage_memory_split_enabled,
                 ),
-                autotune_m2l_chunk=bool(
-                    legacy_kwargs.pop(
-                        "autotune_m2l_chunk", advanced_cfg.runtime.autotune_m2l_chunk
-                    )
-                ),
-                precompute_grouped_class_segments=legacy_kwargs.pop(
-                    "precompute_grouped_class_segments",
-                    advanced_cfg.runtime.precompute_grouped_class_segments,
-                ),
-                grouped_schedule_budget_bytes=legacy_kwargs.pop(
-                    "grouped_schedule_budget_bytes",
-                    advanced_cfg.runtime.grouped_schedule_budget_bytes,
-                ),
                 nearfield_schedule_item_cap=legacy_kwargs.pop(
                     "nearfield_schedule_item_cap",
                     advanced_cfg.runtime.nearfield_schedule_item_cap,
@@ -854,7 +817,6 @@ class FastMultipoleMethod:
                 if advanced_cfg.softening_floor is None
                 else float(advanced_cfg.softening_floor)
             ),
-            use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,
             mac_type=runtime_overrides.mac_type,
@@ -2024,44 +1986,6 @@ class FastMultipoleMethod:
     def nearfield_edge_chunk_size(self: "FastMultipoleMethod") -> int:
         """Chunk size used by bucketed near-field edge processing."""
         return int(self._impl.nearfield_edge_chunk_size)
-
-    @property
-    def grouped_interactions(self: "FastMultipoleMethod") -> bool:
-        """Always ``False``: the grouped far field was removed (2026-10 cleanup, X3)."""
-        return False
-
-    @grouped_interactions.setter
-    def grouped_interactions(self: "FastMultipoleMethod", value: bool) -> None:
-        """Accept ``False`` (a no-op mirrored into ``advanced``); refuse ``True``.
-
-        The grouped far field was removed in the 2026-10 cleanup
-        (docs/cleanup_2026-10.md, X3). The setter stays so old code that turns it
-        off keeps running; turning it on raises rather than silently running the
-        flat far field.
-
-        Parameters
-        ----------
-        value : bool
-            Must be falsy.
-
-        Raises
-        ------
-        ValueError
-            If ``value`` is true.
-        """
-        if bool(value):
-            raise ValueError(
-                "grouped_interactions=True is no longer available: grouped "
-                "interactions were removed in the 2026-10 cleanup (X3); see "
-                "docs/cleanup_2026-10.md. The far field runs the flat pair list."
-            )
-        self.advanced = replace(
-            self.advanced,
-            farfield=replace(
-                self.advanced.farfield,
-                grouped_interactions=False,
-            ),
-        )
 
 
 __all__ = [

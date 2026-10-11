@@ -235,10 +235,6 @@ class TraversalExecutionConfig:
     traversal_config : Optional[DualTreeTraversalConfig]
         Full dual-tree traversal override; ``None`` builds one from the fields
         above.
-    use_dense_interactions : bool
-        Always ``False``, and read by nothing: the dense interaction buffers were
-        removed with the Cartesian basis in the 2026-10 cleanup (K). Kept so the
-        resolved config keeps its shape (phase Z).
     jit_tree : Union[bool, Literal['auto']]
         Compile the tree build. ``"auto"`` decides per call, which is why this is
         not a plain ``bool``.
@@ -251,7 +247,6 @@ class TraversalExecutionConfig:
     max_pair_queue: Optional[int]
     pair_process_block: Optional[int]
     traversal_config: Optional[DualTreeTraversalConfig]
-    use_dense_interactions: bool
     jit_tree: Union[bool, Literal["auto"]]
     jit_traversal: bool
 
@@ -623,9 +618,6 @@ def _resolve_fmm_config(
             preset_config.traversal_config if preset_config else None,
             None,
         ),
-        # Removed with the Cartesian basis (2026-10 cleanup, K); the engine
-        # refuses `use_dense_interactions=True`, and no preset sets it.
-        use_dense_interactions=False,
         jit_tree=jit_tree_cfg,
         jit_traversal=bool(
             _resolve_optional(

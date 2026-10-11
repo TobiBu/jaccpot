@@ -40,10 +40,6 @@ class FMMPresetConfig:
         Traversal process-block width.
     traversal_config : Optional[DualTreeTraversalConfig]
         Explicit traversal capacities.
-    use_dense_interactions : bool
-        Inert, and ``False`` in every preset: the dense interaction buffers were
-        removed with the Cartesian basis in the 2026-10 cleanup (K). Kept so a
-        preset config constructs as before (phase Z).
     jit_tree : Union[bool, Literal['auto']]
         JIT the tree build; ``"auto"`` defers the decision to the runtime.
     jit_traversal : bool
@@ -63,7 +59,6 @@ class FMMPresetConfig:
     max_pair_queue: Optional[int]
     pair_process_block: Optional[int]
     traversal_config: Optional[DualTreeTraversalConfig]
-    use_dense_interactions: bool
     jit_tree: Union[bool, Literal["auto"]]
     jit_traversal: bool
     description: str
@@ -88,7 +83,6 @@ _FAST_PRESET = FMMPresetConfig(
     max_pair_queue=None,
     pair_process_block=None,
     traversal_config=_FAST_TRAVERSAL_CONFIG,
-    use_dense_interactions=False,
     jit_tree="auto",
     jit_traversal=True,
     description=(
@@ -119,7 +113,6 @@ _LARGE_N_GPU_PRESET = FMMPresetConfig(
     max_pair_queue=None,
     pair_process_block=None,
     traversal_config=_LARGE_N_GPU_TRAVERSAL_CONFIG,
-    use_dense_interactions=False,
     jit_tree=True,
     jit_traversal=True,
     description=(
