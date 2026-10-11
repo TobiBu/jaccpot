@@ -13,7 +13,6 @@ tests/integration/test_fmm.py::test_compute_accelerations_reuse_cache_invalidate
 tests/integration/test_fmm.py::test_evaluate_tree_far_field_accuracy
 tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline[n256-f32-chunk64]
 tests/integration/test_fmm.py::test_nearfield_bucketed_matches_baseline[n256-f64-chunk64]
-tests/integration/test_fmm.py::test_prepare_downward_sweep_matches_module_helper
 tests/integration/test_fmm.py::test_prepare_refresh_static_radix_tree_preserves_static_shape
 tests/integration/test_fmm.py::test_prepare_state_precomputes_bucketed_scatter_schedule
 tests/integration/test_fmm.py::test_prepare_state_reuses_cached_interactions_when_inputs_match
