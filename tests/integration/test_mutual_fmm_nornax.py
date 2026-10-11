@@ -10,6 +10,11 @@ module skips when nornax is unavailable.
 The oracle is ``nornax.forces.mutual_direct.MutualDirectSumGravity``: a dense
 ``O(N^2)`` sum whose momentum conservation is structural, so it is a fair
 reference for the property under test and not just for the force values.
+
+Rollout gradients are owned by ``test_mutual_fmm.py``, which needs no nornax (the
+2026-10 cleanup's rule R7). The three kept here have no owner there, because they
+need nornax's rollout: its ``checkpoint`` (remat) switch, twice, and its in-scan
+``rebuild_fn`` hook.
 """
 
 from __future__ import annotations
@@ -1072,17 +1077,20 @@ def _directional_fd(fn, x, seed, h=1.0e-3):
     return fd, direction
 
 
-@pytest.mark.parametrize("checkpoint", [False, True])
-def test_rollout_gradient_matches_finite_differences_through_the_fmm(checkpoint):
+def test_rollout_gradient_matches_finite_differences_through_the_fmm():
     """``d(summary)/d(v0)`` through a frozen-topology, frozen-rung, multi-step FMM rollout.
 
     ODISSEO's test, ported: both sides must see the *same* frozen plan, so the
     topology is prepared once outside the differentiated function and
     ``reassign_rungs=False`` holds the schedule -- the same treatment nornax gives
     its own schedule with ``stop_gradient``. What is new is that the rollout is
-    nornax's ``block_kdk_rollout`` over three base steps rather than two hand-
-    written ``advance_base_step`` calls, on both sides of its ``checkpoint``
-    switch: the remat must not change the gradient of the FMM path either.
+    nornax's ``block_kdk_rollout`` over three base steps, with its ``checkpoint``
+    (remat) switch on: the remat must not change the gradient of the FMM path.
+
+    The plain (``checkpoint=False``) case went in the 2026-10 cleanup (Z-a, rule
+    R7): FD-vs-AD through the adapter's base step is owned by
+    ``test_mutual_fmm.py::test_rollout_gradient_finite_difference``, and plain
+    against remat by ``test_checkpointed_and_plain_fmm_rollout_gradients_agree``.
 
     Tolerance: 1e-6 relative to the finite difference, along one random direction
     (a full Jacobian would be 768 rollouts). The step is h = 1e-3, chosen by
@@ -1104,7 +1112,7 @@ def test_rollout_gradient_matches_finite_differences_through_the_fmm(checkpoint)
             fmm,
             k_max=k_max,
             n_base=3,
-            checkpoint=checkpoint,
+            checkpoint=True,
             reassign_rungs=False,
         )
         return jnp.sum(final.positions**2)
@@ -1201,37 +1209,4 @@ def test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan():
     minus = _topology_arrays(rollout(velocities - h * direction).topology)
     assert _same_topology(plus, minus), "the FD perturbation crossed a topology change"
 
-    assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"AD {ad:.10e} vs FD {fd:.10e}"
-
-
-def test_dt_max_gradient_is_exact_through_the_fmm_rollout():
-    """``d/d(dt_max)`` of a multi-step FMM rollout matches finite differences.
-
-    nornax keeps ``dt_max`` traced by scaling it *into* the boundary weight table
-    rather than baking it in, precisely so a loss can be differentiated with
-    respect to the timestep; the adapter's ``boundary_kick`` must carry that
-    through its weighted traversal. ODISSEO pins this for a single boundary kick
-    on the pure-JAX backend; this is the multi-step form. (ODISSEO also pins that
-    the Pallas near field *drops* most of this gradient -- a known upstream defect
-    in ``jaccpot/pallas/nearfield_mutual.py``'s reverse rule; that is pinned in
-    ``test_mutual_fmm.py``, which needs no nornax.) Measured here: |AD - FD| / |FD|
-    of 8.6e-8 at h = 1e-7, against a tolerance of 1e-6.
-    """
-    fmm, positions, velocities, masses, rung, k_max = _rollout_gradient_system(39)
-
-    def loss(dt_max):
-        final = block_kdk_rollout(
-            _frozen_state(positions, velocities, masses, rung),
-            dt_max,
-            fmm,
-            k_max=k_max,
-            n_base=2,
-            reassign_rungs=False,
-        )
-        return jnp.sum(final.positions**2) + jnp.sum(final.velocities**2)
-
-    dt0, h = jnp.asarray(2.0e-3, jnp.float64), 1.0e-7
-    ad = float(jax.grad(loss)(dt0))
-    fd = float((loss(dt0 + h) - loss(dt0 - h)) / (2.0 * h))
-    assert abs(fd) > 0.0
     assert abs(ad - fd) <= 1.0e-6 * abs(fd), f"AD {ad:.10e} vs FD {fd:.10e}"
