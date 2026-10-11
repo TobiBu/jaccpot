@@ -112,7 +112,6 @@ _LEAF = _CONFIG.leaf_size
 # to account at whatever opening angle production actually ships.
 _CROSS_THETA = _CONFIG.theta
 _MAC = _CONFIG.mac_type
-_ROTATION = _CONFIG.rotation
 _G = _CONFIG.G
 _SOFTENING = _CONFIG.softening
 
@@ -449,9 +448,7 @@ class _CrossView:
             jnp.asarray(target.tree.right_child, INDEX_DTYPE),
             get_node_levels(target.tree),
             order=_ORDER,
-            rotation=_ROTATION,
             total_nodes=total_nodes,
-            basis_mode="real",
             num_levels=None,
         )
         expansion = LocalExpansionData(

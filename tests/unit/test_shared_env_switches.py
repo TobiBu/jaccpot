@@ -14,17 +14,14 @@ at import, which is the defect ``jaccpot._env`` exists to prevent: a knob captur
 at import cannot be changed by anyone who sets the variable after
 ``import jaccpot``, so it *silently does nothing*. It was then read at call time
 through the sanctioned reader. The batched rotation it selected was removed in the
-2026-10 cleanup (X5); the switch is still read at call time, and setting it now
-raises, which the class below pins.
+2026-10 cleanup (X5), and the switch is read nowhere since Z-b; the class below
+pins that no module-level capture comes back.
 
 ``JACCPOT_FUSED_M2L_VJP`` keeps its default. Nothing here changes what the library
 computes with no environment set.
 """
 
 from __future__ import annotations
-
-import jax.numpy as jnp
-import pytest
 
 import jaccpot.operators.m2l_real_rot_scale as rot_scale
 from jaccpot.pallas import m2l_real_fused
@@ -69,23 +66,11 @@ class TestTheFusedVjpSwitchHasOneReader:
 
 
 class TestTheDegreeBatchedSwitchWasRemoved:
-    """F38's switch selected a batched rotation the 2026-10 cleanup (X5) removed."""
+    """F38's switch selected a batched rotation the 2026-10 cleanup (X5) removed.
 
-    def test_setting_it_after_import_raises(self, monkeypatch):
-        """Read at call time, and refused by name rather than ignored.
-
-        Ignoring it would run the unrolled rotation under a switch that asked for
-        another one -- the silent no-op F38 was about, in a new form.
-        """
-        multipole = jnp.zeros((rot_scale.sh_size(2),), dtype=jnp.float32)
-        delta = jnp.asarray([0.7, -1.3, 2.1], dtype=jnp.float32)
-        monkeypatch.delenv("JACCPOT_M2L_DEGREE_BATCHED", raising=False)
-        rot_scale._rotate_multipole_to_z_single(multipole, delta, order=2)
-        monkeypatch.setenv("JACCPOT_M2L_DEGREE_BATCHED", "1")
-        with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-            rot_scale._rotate_multipole_to_z_single(multipole, delta, order=2)
-        with pytest.raises(ValueError, match="JACCPOT_M2L_DEGREE_BATCHED"):
-            rot_scale._rotate_local_from_z_single(multipole, delta, order=2)
+    The module reads no switch at all since Z-b (the refusal of the removed value
+    went too); what stays pinned is F38's defect class.
+    """
 
     def test_the_module_captures_no_env_value_at_import(self):
         """No module-level constant may hold an env switch again (F38's defect)."""

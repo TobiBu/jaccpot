@@ -117,7 +117,7 @@ def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta, node_layout)
     assert int(got.peak_wavefront) == int(ref.peak_wavefront)
 
 
-def test_pallas_walk_flags_overflow(monkeypatch):
+def test_pallas_walk_flags_overflow():
     n = 3000
     P = jnp.asarray(_plummer(n, 5), jnp.float32)
     M = jnp.ones((n,), jnp.float32)
@@ -180,22 +180,6 @@ def test_pallas_walk_flags_overflow(monkeypatch):
         interpret=True,
     )
     assert bool(tiny_q.queue_overflow)
-    # the unfused emission was removed (2026-10 cleanup, X5): refused by name
-    monkeypatch.setenv("JACCPOT_WALK_FUSED_EMIT", "0")
-    with pytest.raises(ValueError, match="JACCPOT_WALK_FUSED_EMIT"):
-        mutual_walk_pallas(
-            left,
-            right,
-            geom.center,
-            geom.radius,
-            0.6,
-            root,
-            max_pair_queue=64,
-            far_cap=64,
-            near_cap=64,
-            block=64,
-            interpret=True,
-        )
 
 
 def test_lex_sorted_orders_by_target_then_source_in_both_branches():
@@ -216,10 +200,7 @@ def test_lex_sorted_orders_by_target_then_source_in_both_branches():
 
 def test_walk_backend_flag_parsing(monkeypatch):
     from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
-    from jaccpot.runtime._interaction_cache import (
-        _reject_nondeterministic_walk_rows,
-        strict_walk_backend,
-    )
+    from jaccpot.runtime._interaction_cache import strict_walk_backend
 
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_WALK", raising=False)
     monkeypatch.delenv("JACCPOT_WALK_PALLAS_INTERPRET", raising=False)
@@ -231,15 +212,6 @@ def test_walk_backend_flag_parsing(monkeypatch):
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK", "cuda")
     with pytest.raises(ValueError):
         strict_walk_backend()
-    # the walk's rows are always sorted; switching the sort off was removed in
-    # the 2026-10 cleanup (X5) and is refused by name
-    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", raising=False)
-    _reject_nondeterministic_walk_rows()
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", "1")
-    _reject_nondeterministic_walk_rows()
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_WALK_DETERMINISTIC", "off")
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-        _reject_nondeterministic_walk_rows()
 
 
 @pytest.mark.parametrize("floor", [0.05, 0.3])

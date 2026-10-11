@@ -19,7 +19,6 @@ from yggdrax.interactions import DualTreeTraversalConfig, build_leaf_neighbor_li
 from yggdrax.tree import build_tree
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
-from jaccpot.config import FarFieldConfig
 from jaccpot.runtime.fmm import (
     FMMEngine,
     compute_gravitational_acceleration,
@@ -745,7 +744,6 @@ def test_solidfmm_dehnen_accuracy_improves_with_order():
                 working_dtype=jnp.float64,
                 runtime_policy=RuntimePolicyConfig(traversal_config=traversal),
                 expansion_basis="solidfmm",
-                farfield=FarFieldConfig(rotation="solidfmm"),
                 mac_type="dehnen",
                 fixed_order=order,
                 fixed_max_leaf_size=16,

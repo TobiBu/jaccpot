@@ -4,7 +4,7 @@ Odisseo (``jaccpot-integration``) is the production consumer and has no test CI 
 its own, so a jaccpot change that drops a name, a keyword or a config field it
 uses would only surface in a user's run. These tests import every name it imports
 and construct every config object with the exact keywords it passes
-(``odisseo/jaccpot_coupling.py`` ``_build_solver``, ``odisseo/blockstep_coupling.py``,
+(``odisseo/jaccpot_coupling.py`` ``_build_fmm_solver``, ``odisseo/blockstep_coupling.py``,
 ``odisseo/mesh_coupling.py``, ``odisseo/differentiable.py``). The method keywords
 it calls with are checked against the signatures; nothing is solved here.
 
@@ -44,17 +44,22 @@ def _odisseo_solver(
     traversal_config=None,
     retain_far_pairs_for_grad: bool = False,
 ) -> FastMultipoleMethod:
-    """``odisseo.jaccpot_coupling._build_solver`` with SimulationConfig defaults."""
-    farfield_kwargs = dict(mode="auto", m2l_chunk_size=None)
+    """``odisseo.jaccpot_coupling._build_fmm_solver`` with SimulationConfig defaults.
+
+    The call shape of Odisseo ``jaccpot-integration`` after its PR #31: no
+    ``runtime_path`` and no far-field ``mode`` (both removed in the 2026-10
+    cleanup, Z-b), and the ``softening_kernel`` it reads from its config.
+    """
+    farfield_kwargs = dict(m2l_chunk_size=None)
     if retain_far_pairs_for_grad:
         farfield_kwargs["retain_far_pairs_for_grad"] = True
     return FastMultipoleMethod(
         preset=preset,
         basis="real",
-        runtime_path="auto",
         theta=0.6,
         G=1.0,
         softening=1e-3,
+        softening_kernel=None,
         working_dtype=jnp.float32,
         use_pallas=None,
         advanced=FMMAdvancedConfig(

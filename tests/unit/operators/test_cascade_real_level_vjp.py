@@ -166,9 +166,7 @@ def test_l2l_reverse_matches_vjp_of_the_cascade_in_both_halves(
             topo.right_child,
             topo.node_level,
             order=order,
-            rotation="solidfmm",
             total_nodes=total,
-            basis_mode="real",
             num_levels=num_levels - 1,
         )
 

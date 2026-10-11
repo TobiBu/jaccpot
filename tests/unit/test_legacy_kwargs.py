@@ -35,8 +35,8 @@ def test_accepts_legacy_expanse_kwargs_with_deprecation_warning():
         fmm = FastMultipoleMethod(
             preset="fast",
             expansion_basis="real",
-            # `complex_rotation`, `grouped_interactions=False` and `farfield_mode`
-            # are shims now: tests/unit/test_removed_options.py (2026-10, Z-a).
+            # `complex_rotation`, `grouped_interactions` and `farfield_mode` went in
+            # the 2026-10 cleanup (Z-b): unknown keywords now.
             mac_type="dehnen",
             fixed_order=4,
             fixed_max_leaf_size=16,

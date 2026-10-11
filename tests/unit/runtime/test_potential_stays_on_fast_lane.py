@@ -32,7 +32,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot.config import FarFieldConfig
 from jaccpot.pallas.nearfield_fused_leaf import pallas_nearfield_fused_supported
 from jaccpot.runtime import _large_n_nearfield
 from jaccpot.runtime._large_n_nearfield import evaluate_large_n_nearfield_fast_lane
@@ -92,10 +91,8 @@ def engine_and_state(request: pytest.FixtureRequest):
 
     engine = FMMEngine(
         preset="large_n_gpu",
-        runtime_path="large_n",
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         fixed_order=ORDER,
     )
     state = engine.prepare_state(positions, masses, leaf_size=LEAF, max_order=ORDER)

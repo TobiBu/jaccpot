@@ -25,7 +25,6 @@ import numpy as np
 import pytest
 
 from jaccpot import (
-    FarFieldConfig,
     FastMultipoleMethod,
     FMMAdvancedConfig,
     NearFieldConfig,
@@ -119,15 +118,10 @@ def _direct(pos, mass, idx, eps):
 
 
 _ENV = {
-    "JACCPOT_STATIC_STRICT_GPU_MODE": "on",
-    "JACCPOT_STATIC_STRICT_FUSED_MODE": "on",
     "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS": "1",
     "JACCPOT_LARGE_N_TARGET_BLOCK_SIZE": "4",
     "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto",
     "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "4194304",
-    "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH": "0",
-    "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY": "1",
-    "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK": "1",
     "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
     "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "1048576",
     "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED": "1",
@@ -146,7 +140,6 @@ def _force(monkeypatch, pos, mass, eps, floor):
     monkeypatch.delenv("JACCPOT_WALK_SEPARATION_FLOOR", raising=False)
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=_THETA,
         G=1.0,
@@ -154,7 +147,6 @@ def _force(monkeypatch, pos, mass, eps, floor):
         working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix", leaf_target=_LEAF),
-            farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
             mac_type="dehnen",
             softening_floor=floor,

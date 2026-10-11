@@ -159,7 +159,7 @@ def test_diagnostics_exposes_the_structure(impl) -> None:
     assert "refresh_substages_measured" in diagnostics
     roles = diagnostics["refresh_stage_timing_roles"]
     assert "refresh_nearfield_seconds" in roles["aggregates"]
-    assert "refresh_upward_geometry_seconds" in roles["leaves"]
+    assert "refresh_upward_compute_seconds" in roles["leaves"]
     assert "refresh_nearfield_seconds" not in roles["leaves"]
 
 

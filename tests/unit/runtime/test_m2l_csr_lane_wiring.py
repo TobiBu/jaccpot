@@ -8,13 +8,13 @@ custom VJP,
 the kernel runs in interpret mode (``JACCPOT_M2L_CSR_INTERPRET=1``). A lane that
 is silently not reached would pass any parity check, so the kernel entry is
 counted. The per-target and tiled kernels ``JACCPOT_M2L_CSR_KERNEL`` used to
-select were removed in the 2026-10 cleanup (X5); asking for them raises.
+select were removed in the 2026-10 cleanup (X5); since Z-b the variable is read
+nowhere.
 """
 
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 import jaccpot.pallas.m2l_real_csr as csr_mod
 import jaccpot.pallas.m2l_real_csr_lanes as lanes_mod
@@ -61,7 +61,6 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
     import jax.numpy as jnp
 
     from jaccpot import (
-        FarFieldConfig,
         FastMultipoleMethod,
         FMMAdvancedConfig,
         NearFieldConfig,
@@ -80,7 +79,6 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
             working_dtype=jnp.float32,
             advanced=FMMAdvancedConfig(
                 tree=TreeConfig(mode="static_radix", leaf_target=32),
-                farfield=FarFieldConfig(mode="auto"),
                 nearfield=NearFieldConfig(mode="auto"),
                 mac_type="dehnen",
             ),
@@ -103,7 +101,6 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
 
     # the lane reads the entry from its module at call time (a local import)
     monkeypatch.setattr(lanes_mod, "m2l_real_csr_lanes_pallas_cvjp", counting)
-    monkeypatch.delenv("JACCPOT_M2L_CSR_KERNEL", raising=False)
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", "1")
     monkeypatch.setenv("JACCPOT_M2L_CSR_INTERPRET", "1")
     a_csr = solve()
@@ -111,13 +108,3 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
     rel = np.linalg.norm(a_csr - a_ref) / np.linalg.norm(a_ref)
     assert np.all(np.isfinite(a_csr))
     assert rel < 2e-5, rel
-    # the removed kernels are refused by name, not run as the lane kernel
-    for var, value in (
-        ("JACCPOT_M2L_CSR_KERNEL", "pair"),
-        ("JACCPOT_M2L_CSR_KERNEL", "tiled"),
-        ("JACCPOT_M2L_CSR_TILED", "1"),
-    ):
-        monkeypatch.setenv(var, value)
-        with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-            solve()
-        monkeypatch.delenv(var)

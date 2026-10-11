@@ -113,16 +113,12 @@ class TestLaneModeNormalisation:
         ("kwarg", "supplied", "expected"),
         [
             ("nearfield_mode", "  Bucketed  ", "bucketed"),
-            ("runtime_path", "LARGE_N", "large_n"),
-            ("execution_backend", " Radix ", "radix"),
         ],
     )
     def test_case_and_whitespace_are_normalised(self, kwarg, supplied, expected):
         engine = _engine()
         defaults = dict(
             nearfield_mode="auto",
-            runtime_path="auto",
-            execution_backend="auto",
             nearfield_edge_chunk_size=engine.nearfield_edge_chunk_size,
             precompute_nearfield_scatter_schedules=(
                 engine.precompute_nearfield_scatter_schedules
@@ -136,16 +132,12 @@ class TestLaneModeNormalisation:
         ("kwarg", "message"),
         [
             ("nearfield_mode", "nearfield_mode must be"),
-            ("runtime_path", "runtime_path must be"),
-            ("execution_backend", "execution_backend must be"),
         ],
     )
     def test_an_unknown_value_is_rejected(self, kwarg, message):
         engine = _engine()
         defaults = dict(
             nearfield_mode="auto",
-            runtime_path="auto",
-            execution_backend="auto",
             nearfield_edge_chunk_size=engine.nearfield_edge_chunk_size,
             precompute_nearfield_scatter_schedules=(
                 engine.precompute_nearfield_scatter_schedules
@@ -246,8 +238,7 @@ def test_the_spherical_harmonic_family_defaults_to_the_real_basis(with_object):
     It used to be complex, so every engine built as ``expansion_basis="solidfmm"``
     ran the basis the public API had already stopped defaulting to. Since C the
     real basis is the only one: ``"complex"`` and a basis object not named
-    ``"real"`` raise (``TestComplexWasRemoved`` in
-    ``tests/unit/test_removed_options.py``).
+    ``"real"`` raise (the generic validation since Z-b).
     """
     from jaccpot.basis import RealSHBasis
 
@@ -257,7 +248,6 @@ def test_the_spherical_harmonic_family_defaults_to_the_real_basis(with_object):
     engine = FMMEngine(**kwargs)
     assert engine.expansion_basis == "solidfmm"
     assert isinstance(engine.basis_impl, RealSHBasis)
-    assert engine._solidfmm_basis_mode() == "real"
     assert engine.m2l_impl == "rot_scale"
 
 
@@ -268,8 +258,8 @@ class TestBasisResolution:
     and ``basis="solidfmm"`` were the same path (measured bit-identical at
     N=2048/p=4/theta=0.5), so a user switching between them to cross-check was
     comparing a run against itself; since C the real basis is the only one and
-    ``"solidfmm"`` names it. The migration errors for ``"complex"`` and
-    ``"cartesian"`` are in ``tests/unit/test_removed_options.py``.
+    ``"solidfmm"`` names it. ``"complex"`` and ``"cartesian"`` are unknown names
+    since Z-b (their migration errors went with ``test_removed_options.py``).
     """
 
     @pytest.mark.parametrize("spelling", ("solidfmm", "SolidFMM", " solidfmm "))
@@ -327,8 +317,8 @@ def test_an_unknown_tree_build_mode_raises():
     """An unknown ``TreeConfig.mode`` is refused with the generic list of modes.
 
     The live half of ``test_fmm.py::test_capacity_fixed_depth_tree_mode_is_removed``
-    (2026-10 cleanup, Z-a); its ``fixed_depth`` half, which names that removal, is in
-    ``tests/unit/test_removed_options.py``.
+    (2026-10 cleanup, Z-a); its ``fixed_depth`` half, which named that removal, went
+    in Z-b with the removal error.
     """
     with pytest.raises(ValueError, match="tree_build_mode"):
         FMMEngine(
@@ -347,15 +337,12 @@ def test_advanced_config_applies_to_runtime():
         preset=FMMPreset.BALANCED,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(mode="pair_grouped"),
             nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=512),
             mac_type="engblom",
         ),
     )
-    # The far-field mode used to be `class_major` with grouped interactions on;
-    # both went in the 2026-10 cleanup (X3), so the surviving explicit value is
-    # what flows through now.
-    assert fmm.farfield_mode == "pair_grouped"
+    # (The far-field mode, `class_major` with grouped interactions here once, went
+    # in the 2026-10 cleanup: X3 removed both, Z-b the mode field.)
     assert fmm.nearfield_mode == "bucketed"
     assert int(fmm.nearfield_edge_chunk_size) == 512
     assert fmm.mac_type == "engblom"
@@ -602,7 +589,6 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     fmm_cpu = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         nearfield=NearFieldConfig(mode="auto", edge_chunk_size=256),
         softening_kernel="plummer",
@@ -641,7 +627,6 @@ def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
     fmm_gpu = FMMEngine(
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         nearfield=NearFieldConfig(mode="auto", edge_chunk_size=128),
         softening_kernel="plummer",
     )
@@ -682,7 +667,7 @@ def test_fast_preset_adaptive_policy_respects_explicit_overrides():
     fmm = FMMEngine(
         preset=FMMPreset.FAST,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm", m2l_chunk_size=2048),
+        farfield=FarFieldConfig(m2l_chunk_size=2048),
         mac_type="dehnen",
         runtime_policy=RuntimePolicyConfig(traversal_config=cfg),
         softening_kernel="plummer",

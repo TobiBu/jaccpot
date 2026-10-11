@@ -25,7 +25,6 @@ def _make_large_n_fmm():
         expansion_basis="solidfmm",
         tree=TreeConfig(tree_type="radix"),
         nearfield=NearFieldConfig(mode="bucketed"),
-        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
 
@@ -44,14 +43,17 @@ def test_large_n_fast_lane_defaults_on(monkeypatch):
     assert bool(cfg.speed_prepared_layout)
 
 
-def test_large_n_fast_lane_legacy_opt_out_env_is_noop(monkeypatch):
-    monkeypatch.setenv("JACCPOT_LARGE_N_RADIX_FAST_LANE", "0")
+def test_a_zero_target_block_size_means_the_default(monkeypatch):
+    """``JACCPOT_LARGE_N_TARGET_BLOCK_SIZE=0`` means "use the default", now 4.
+
+    Was ``test_large_n_fast_lane_legacy_opt_out_env_is_noop``; its other half, the
+    legacy ``JACCPOT_LARGE_N_RADIX_FAST_LANE=0`` opt-out that nothing reads, went in
+    the 2026-10 cleanup (Z-b).
+    """
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "0")
 
     cfg = resolve_large_n_execution_config(_make_large_n_fmm(), num_particles=2048)
     assert bool(cfg.radix_fast_lane)
-    # JACCPOT_LARGE_N_TARGET_BLOCK_SIZE="0" means "use default", now 4. The legacy
-    # fast-lane opt-out env remains a no-op.
     assert int(cfg.target_owned_block_size) == 4
 
 
@@ -97,36 +99,12 @@ def test_large_n_accel_eval_requires_fast_lane_state(monkeypatch):
         _ = fmm.evaluate_prepared_state(state_bad)
 
 
-def test_the_removed_gather_unpermute_raises(monkeypatch):
-    """The fast lane returns forces to input order by a scatter; the gather through
-    the inverse permutation (``JACCPOT_FASTLANE_UNPERMUTE=gather``) was removed in
-    the 2026-10 cleanup (X5) and is refused by name, not run as the scatter."""
-    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    key = jax.random.PRNGKey(3)
-    positions = jax.random.uniform(key, (512, 3), minval=-1.0, maxval=1.0)
-    masses = jnp.full((512,), 1.0 / 512)
-    fmm = _make_large_n_fmm()
-    state = fmm.prepare_state(
-        positions.astype(jnp.float32),
-        masses.astype(jnp.float32),
-        leaf_size=64,
-        max_order=3,
-    )
-    monkeypatch.setenv("JACCPOT_FASTLANE_UNPERMUTE", "scatter")
-    acc = fmm.evaluate_prepared_state(state)
-    assert tuple(acc.shape) == (512, 3)
-    monkeypatch.setenv("JACCPOT_FASTLANE_UNPERMUTE", "gather")
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-        fmm.evaluate_prepared_state(state)
-
-
 def test_the_large_n_lane_is_gated_on_the_preset_alone(monkeypatch):
     """``preset="large_n_gpu"`` opens the large-N prepare lane; another preset does not.
 
     The live half of ``test_runtime_path_is_accepted_and_no_longer_selects_the_lane``
-    (2026-10 cleanup, Z-a; that test, of the ``runtime_path`` shim, is in
-    ``tests/unit/test_removed_options.py``). The GPU predicate is stubbed, as in the
-    lane's own tests.
+    (2026-10 cleanup, Z-a; that test, of the ``runtime_path`` shim, went with the
+    shim in Z-b). The GPU predicate is stubbed, as in the lane's own tests.
     """
     from jaccpot import FastMultipoleMethod, FMMPreset
     from jaccpot.runtime import _large_n_pipeline
@@ -184,7 +162,6 @@ def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
     )
     assert fmm._impl.tree_type == "radix"
     assert fmm._impl.tree_build_mode == "static_radix"
-    assert fmm._impl.farfield_mode == "pair_grouped"
     assert fmm._impl.nearfield_mode == "bucketed"
     assert fmm._impl.precompute_nearfield_scatter_schedules is False
     assert fmm._impl.streamed_far_pairs is True
@@ -233,12 +210,10 @@ def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
         ),
     )
     impl = fmm._impl
-    assert impl.runtime_path == "large_n"
     assert impl.memory_objective == "minimum_memory"
     assert impl.nearfield_mode == "bucketed"
     assert impl.precompute_nearfield_scatter_schedules is False
     assert impl.streamed_far_pairs is True
-    assert impl.farfield_mode == "pair_grouped"
     assert impl.mixed_order_farfield is False
     assert impl.mixed_order_min_order is None
     # Contract keeps the interaction scaffold resident (enable_interaction_cache

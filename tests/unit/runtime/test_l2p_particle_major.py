@@ -90,9 +90,10 @@ def test_particle_major_equals_leaf_major(n_live, n_rows, pad, chunk):
     # (fp32 rounding level, ~1e-5 of the largest component on CPU)
     scale = float(np.abs(leaf).max())
     np.testing.assert_allclose(part[:n_live], leaf[:n_live], rtol=0, atol=2e-5 * scale)
-    # dead rows (past every leaf's particles) are zero
+    # dead rows (past every leaf's particles) are zero, on both layouts
     assert not np.any(part[n_live:])
     assert np.any(part[:n_live])
+    assert not np.any(leaf[n_live:])
 
 
 @pytest.mark.parametrize("dtype, tol", [(jnp.float64, 1e-13), (jnp.float32, 1e-5)])
@@ -168,28 +169,3 @@ def test_pallas_l2p_finds_each_particles_leaf_in_its_block(block):
         )
     )
     assert np.array_equal(got, ref)
-
-
-def test_the_removed_leaf_flatten_switch_raises(monkeypatch):
-    """``JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN=1`` reshaped the leaf-major block
-    into particle order instead of scattering it -- right only when every leaf is
-    full and in order (the case below has neither). It was removed in the 2026-10
-    cleanup (X5) and is refused by name.
-
-    The switch is read at trace time and the function is jitted, so the refusal
-    is checked on a shape no other test in this module traces."""
-    local, positions, leaf_nodes, ranges = _case(13, 113, 120, 1)
-    kw = dict(
-        leaf_nodes=leaf_nodes,
-        node_ranges=ranges,
-        max_leaf_size=_WIDTH,
-        order=_ORDER,
-        expansion_basis="solidfmm",
-        return_potential=False,
-    )
-    monkeypatch.setenv("JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN", "1")
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-        _evaluate_local_expansions_for_particles(local, positions, **kw)
-    monkeypatch.setenv("JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN", "0")
-    grad, _, _ = _evaluate_local_expansions_for_particles(local, positions, **kw)
-    assert np.any(np.asarray(grad)[:113]) and not np.any(np.asarray(grad)[113:])

@@ -7,8 +7,9 @@ reference expansions, the physics and the accuracy against the direct sum went t
 ``test_gravity_vs_direct.py``, the strict lane to ``tests/integration/strict/``,
 preset defaults and validation (but the near-field mode check, below) to
 ``tests/unit/runtime/test_engine_config_resolution.py``,
-the STF tensor test to ``tests/unit/operators/test_symmetric_tensors.py``, and the
-``complex_rotation`` refusal to ``tests/unit/test_removed_options.py``.
+and the STF tensor test to ``tests/unit/operators/test_symmetric_tensors.py``. (The
+``complex_rotation`` refusal went to ``tests/unit/test_removed_options.py``, and with
+the shim in Z-b.)
 """
 
 from unittest import mock
@@ -129,7 +130,6 @@ def test_nearfield_bucketed_matches_baseline(
         softening=1e-3,
         working_dtype=dtype,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         fixed_order=3,
         fixed_max_leaf_size=16,
@@ -348,7 +348,6 @@ def test_radix_fast_lane_prepared_state_matches_large_n_baseline(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
 
@@ -415,7 +414,6 @@ def test_radix_fast_lane_includes_overflow_target_blocks(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
         softening_kernel="plummer",
     )
@@ -478,7 +476,6 @@ def test_radix_fast_lane_auto_full_prefix_eliminates_overflow(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
         softening_kernel="plummer",
     )
@@ -525,7 +522,6 @@ def test_large_n_prepacked_overflow_fallback_matches_tiled_overflow(monkeypatch)
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
         softening_kernel="plummer",
     )
@@ -696,7 +692,6 @@ def test_radix_fast_lane_fixed_seed_repeatability(monkeypatch):
         expansion_basis="solidfmm",
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
-        farfield=FarFieldConfig(grouped_interactions=False),
         working_dtype=jnp.float32,
     )
     fmm_a = FMMEngine(**kwargs, softening_kernel="plummer")
@@ -1020,7 +1015,6 @@ def test_prepare_state_cache_respects_dehnen_radius_scale_changes():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         dehnen_radius_scale=1.0,
         softening_kernel="plummer",
@@ -1242,7 +1236,6 @@ def test_real_float32_locals_keep_the_working_dtype():
         softening=1e-3,
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         softening_kernel="plummer",
     )
@@ -1277,7 +1270,6 @@ def test_real_float64_locals_keep_the_working_dtype():
             softening=1e-3,
             working_dtype=jnp.float64,
             expansion_basis="solidfmm",
-            farfield=FarFieldConfig(rotation="solidfmm"),
             mac_type="dehnen",
             softening_kernel="plummer",
         )
@@ -1375,7 +1367,7 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
             softening=1e-3,
             working_dtype=dtype,
             expansion_basis="solidfmm",
-            farfield=FarFieldConfig(rotation="solidfmm", m2l_chunk_size=chunk_size),
+            farfield=FarFieldConfig(m2l_chunk_size=chunk_size),
             mac_type="dehnen",
             tree=TreeConfig(mode="lbvh"),
             fixed_order=4,
@@ -1521,7 +1513,6 @@ def test_m2l_ignores_padded_compact_far_pairs():
             tgt,
             active_count,
             order=order,
-            basis_mode="real",
             m2l_impl="rot_scale",
             total_nodes=int(centers.shape[0]),
         )
@@ -1554,7 +1545,6 @@ def test_m2l_ignores_padded_compact_far_pairs():
             tgt_padded,
             active_count,
             order=order,
-            basis_mode="real",
             m2l_impl="rot_scale",
             total_nodes=4,
             chunk_size=2,

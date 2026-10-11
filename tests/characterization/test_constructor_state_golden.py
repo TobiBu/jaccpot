@@ -111,14 +111,12 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "memory_budgeted": {
         "runtime_policy": RuntimePolicyConfig(memory_budget_bytes=2 * 1024**3)
     },
-    # --- far/near field and runtime lane selection ---
+    # --- far/near field selection (the far-field mode, `runtime_path` and
+    # `execution_backend` rows went with those options in the 2026-10 cleanup, Z-b) ---
     "streamed_far_pairs_on": {"farfield": FarFieldConfig(streamed_far_pairs=True)},
     "streamed_far_pairs_off": {"farfield": FarFieldConfig(streamed_far_pairs=False)},
-    "farfield_pair_grouped": {"farfield": FarFieldConfig(mode="pair_grouped")},
     "nearfield_baseline": {"nearfield": NearFieldConfig(mode="baseline")},
     "nearfield_bucketed": {"nearfield": NearFieldConfig(mode="bucketed")},
-    "runtime_path_large_n": {"runtime_path": "large_n"},
-    "backend_radix": {"runtime_policy": RuntimePolicyConfig(execution_backend="radix")},
     "mixed_order": {
         "farfield": FarFieldConfig(mixed_order=True, mixed_order_min_order=2)
     },

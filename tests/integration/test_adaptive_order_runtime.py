@@ -241,7 +241,6 @@ def test_dehnen_error_uses_adaptive_pair_policy(monkeypatch):
         leaf_parameter=8,
         topology_key=None,
         upward=upward,
-        locals_template=None,
     )
 
     with pytest.raises(_StopTraversal, match="recording traversal policy"):

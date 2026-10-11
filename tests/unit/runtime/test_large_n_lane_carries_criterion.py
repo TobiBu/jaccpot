@@ -50,7 +50,7 @@ def _problem(seed: int = 0):
     )
 
 
-def _large_n_solver(mac_type: str, *, runtime_path: str = "auto"):
+def _large_n_solver(mac_type: str):
     """A solver configured the way the large-N GPU lane requires."""
 
     advanced = FMMAdvancedConfig()
@@ -64,7 +64,6 @@ def _large_n_solver(mac_type: str, *, runtime_path: str = "auto"):
         adaptive_eps=EPS,
         preset="large_n_gpu",
         basis="real",
-        runtime_path=runtime_path,
         advanced=advanced,
     )
 
@@ -109,8 +108,9 @@ def test_the_lane_still_refuses_the_folded_angle_mode(_pretend_gpu):
     selects this lane, so a decline would be a silent fallback rather than an
     error. (It used to raise only under an explicit ``runtime_path="large_n"``,
     which the preset's contract pinned anyway; since the 2026-10 cleanup, X4, the
-    lane is gated on the preset alone and raises unconditionally.) The reason is
-    still recorded first, for ``get_runtime_diagnostics()``.
+    lane is gated on the preset alone and raises unconditionally, and Z-b removed
+    ``runtime_path``.) The reason is still recorded first, for
+    ``get_runtime_diagnostics()``.
     """
 
     fmm = _large_n_solver("dehnen_theta")

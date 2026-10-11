@@ -4,7 +4,7 @@ Pinned here on a real radix tree, on CPU:
 
 * ``com_mac_geometry`` radii are the exact largest particle distance about the
   COM, on the leaves and the internal nodes (the child-sphere ``bound`` mode was
-  removed in the 2026-10 cleanup, X5, and its env value raises);
+  removed in the 2026-10 cleanup, X5; its variable is read nowhere since Z-b);
 * fed to the flat walk, every accepted far pair satisfies the convergence
   condition about the COMs, ``(r_A + r_B) / d <= theta`` with the EXACT radii;
 * the historical box geometry does not give that guarantee on the same tree
@@ -156,17 +156,9 @@ def test_mode_knob(monkeypatch, tree_data):
     with pytest.raises(ValueError):
         mac_geometry_mode()
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "com")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "exact")
     g_e, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
     exact = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
     assert np.array_equal(np.asarray(g_e.radius), np.asarray(exact.radius))
-    # the child-sphere bound was removed (2026-10 cleanup, X5): refused by name
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "bound")
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-        resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS", "tight")
-    with pytest.raises(ValueError, match="must be 'exact'"):
-        resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
 
 
 def test_com_geometry_is_jittable(tree_data):
@@ -315,17 +307,6 @@ def test_pallas_chunks_equal_the_level_passes(tree_data, dtype, monkeypatch):
         )
         np.testing.assert_allclose(got, ref, rtol=4 * eps, atol=0)
         assert np.all(got > 0)  # every node of this tree holds particles
-
-
-def test_the_removed_chain_variant_raises(tree_data, monkeypatch):
-    """``JACCPOT_COM_RADII_VARIANT=chain`` selected the chain kernel, removed in the
-    2026-10 cleanup (X5): refused by name, not run as the table kernel."""
-    tree, topo, ps, ms, com, _box = tree_data
-    monkeypatch.setenv("JACCPOT_COM_RADII_VARIANT", "table")
-    com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
-    monkeypatch.setenv("JACCPOT_COM_RADII_VARIANT", "chain")
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-        com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
 
 
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])

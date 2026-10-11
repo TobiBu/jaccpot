@@ -322,16 +322,17 @@ def test_the_criterion_without_a_tolerance_is_refused():
     _expect("requires adaptive_eps", mac_type="dehnen_error")
 
 
-def test_the_removed_treecode_walk_is_refused():
-    """The treecode local walk is gone (cleanup 2026-10); naming it must raise.
+def test_an_unknown_local_walk_is_refused():
+    """``local_walk`` takes only ``"dual_tree"``; anything else raises.
 
-    It used to be refused only together with the criterion, because it took no
-    pair policy; now it is refused outright, with a message naming the removal
-    rather than a silent fall-back to the dual-tree walk.
+    The treecode local walk went in the 2026-10 cleanup (X1). It used to be refused
+    only together with the criterion, because it took no pair policy, then by a
+    message naming its removal; since Z-b it is an unknown value, refused rather
+    than silently run as the dual-tree walk.
     """
 
     _expect(
-        "treecode' local walk was removed",
+        "local_walk must be 'dual_tree'",
         mac_type="dehnen_error",
         adaptive_eps=_EPS,
         local_walk="treecode",

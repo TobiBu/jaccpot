@@ -81,6 +81,5 @@ tests/unit/test_nearfield_fastlane_grad_path.py::test_fast_lane_is_opt_in
 tests/unit/test_nearfield_fastlane_grad_path.py::test_leaf_major_payload_matches_bucketed_near_field[192-16]
 tests/unit/test_nearfield_fastlane_grad_path.py::test_leaf_major_payload_matches_bucketed_near_field[320-8]
 tests/unit/test_nearfield_fastlane_grad_path.py::test_leaf_major_payload_matches_bucketed_near_field[512-32]
-tests/unit/test_removed_options.py::test_prepare_state_records_resolved_execution_backend
 tests/unit/test_solver_api.py::test_real_basis_selects_rot_scale_m2l_impl
 tests/unit/test_solver_api.py::test_target_indices_match_slice_across_acceleration_apis

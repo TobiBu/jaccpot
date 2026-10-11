@@ -412,7 +412,6 @@ def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter
         max_order=4,
         theta=1e-4,
         jerk_mode="accurate",
-        jerk_fd_dt=1e-3,
     )
     jerk_ref = _direct_sum_jerk(
         positions,
@@ -493,8 +492,6 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     for mode in ("fast_approx", "accurate"):
         fmm = FastMultipoleMethod(preset=FMMPreset.ACCURATE, basis="real")
         kwargs = dict(leaf_size=leaf_size, max_order=order, theta=theta, jerk_mode=mode)
-        if mode == "accurate":
-            kwargs["jerk_fd_dt"] = 1e-3
         _, jerk = fmm.compute_accelerations_and_jerk(
             positions, masses, velocities, **kwargs
         )
@@ -537,7 +534,6 @@ def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
         max_order=4,
         theta=1e-4,
         jerk_mode="accurate",
-        jerk_fd_dt=1e-3,
     )
 
     assert acc.shape == positions.shape
@@ -572,7 +568,6 @@ def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
         max_order=4,
         theta=1e-4,
         jerk_mode="accurate",
-        jerk_fd_dt=1e-3,
     )
 
     assert acc.shape == positions.shape

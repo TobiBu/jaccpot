@@ -33,7 +33,7 @@ def _impl(traversal: DualTreeTraversalConfig):
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
-        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
+        farfield=FarFieldConfig(streamed_far_pairs=True),
         runtime_policy=RuntimePolicyConfig(
             memory_objective="minimum_memory",
             fail_fast=True,
