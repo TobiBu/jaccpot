@@ -2194,5 +2194,14 @@ loses exactly the two rows `solidfmm_explicit_complex` and `preset_accurate_comp
   - modules walked 123 -> 117.
 
   Only deletions moved them; the complex modules were among the most annotated.
-- **GPU pins: not run** (no GPU in this phase's session). The A/B above is CPU-only, so
-  S1-S6 and M1 / M3 are the GPU gate.
+- **GPU pins** (frozen worktree at 31e7756):
+  - M1 and M3 on two A100s (GPUs 2+6) are **bitwise** against `main-15ceca4`. C2
+    changed `distributed/fmm.py`, so these were the key gate.
+  - S1-S5 on one A100 are **bitwise** against `main-15ceca4`.
+  - S6 (no `JACCPOT_*` env) is **bitwise** against `main-17de581`.
+  - An interleaved timing A/B against `main` was queued.
+
+**K's timing A/B (recorded here; #388 was already merged).** Interleaved main / K x 3 on
+one A100, `fused_memory_budget.py` scan min, ms/step: at 2e5, 6.18 / 6.21 / 6.30 against
+6.38 / 6.18 / 6.33; at 8e6, 83.20 / 83.15 / 82.90 (median 83.15) against
+83.02 / 83.23 / 82.60 (median 83.02). Equal within the run-to-run spread.
