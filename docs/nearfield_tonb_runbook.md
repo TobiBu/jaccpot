@@ -1,5 +1,9 @@
 # Nearfield TONB Runbook
 
+> **Historical (2026-10).** The commands below drive `examples/benchmark_gpu_radix_worker.py`,
+> deleted in the 2026-10 cleanup (X1), and pass options it removed
+> ([`cleanup_2026-10.md`](cleanup_2026-10.md)). Kept as the record of the TONB A/B checks.
+
 Date: 2026-04-15
 
 This runbook is the copy/paste path for running the new cross-repo TONB

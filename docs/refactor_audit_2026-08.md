@@ -1,5 +1,9 @@
 # Refactor and code-hygiene audit — 2026-08
 
+> **Dated (2026-10).** Many of the subjects below (`experimental/`, autotune, the octree, the
+> complex and Cartesian bases) were removed in the 2026-10 cleanup;
+> [`cleanup_2026-10.md`](cleanup_2026-10.md) records what went and what is still open.
+
 Scope: `jaccpot/` excluding `jaccpot/experimental/`, plus `tests/`, repository root, and
 `pyproject.toml`. Baseline commit `32857c4` (`main`, clean tree) — the state the findings
 below were *filed* against, not the state of the tree: 344 commits have touched `jaccpot/`

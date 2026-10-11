@@ -155,14 +155,16 @@ sign eq (16a) says it has.
 **Two hazards this document lists are moot, both verified rather than assumed.** The
 interaction-cache key already takes `pair_policy_identity` with no default
 (`pair_policy_cache_identity`, landed with Step 3′), *and* the distributed lane has no
-interaction cache at all — its only `_interaction_cache` import is
-`_build_treecode_artifacts_strict_streamed`, a builder with no lookup.
+interaction cache at all — its only `_interaction_cache` import was
+`_build_treecode_artifacts_strict_streamed`, a builder with no lookup (removed with the
+treecode walk in the 2026-10 cleanup, X1).
 
 **Four configurations raise rather than running a different criterion quietly**, because
 each would be *faster* than the correct behaviour and so invisible to any cost measurement:
 `dehnen_theta` (refuted, and it folds the criterion into `geometry.radius`, which the cross
-walk does not carry); a missing `adaptive_eps`; `local_walk="treecode"` (that walk takes no
-pair policy); and the eq (16a) force-scale modes. `dehnen_geometry_mode` is validated up
+walk does not carry); a missing `adaptive_eps`; `local_walk="treecode"` (that walk took no
+pair policy; since the 2026-10 cleanup it no longer exists, and `local_walk` must be
+`"dual_tree"`); and the eq (16a) force-scale modes. `dehnen_geometry_mode` is validated up
 front too — the sphere-fitting modes run a numpy host loop that cannot trace.
 
 **What is measured so far, and what it is worth.** Only CPU plumbing evidence. 2 forced
@@ -748,9 +750,10 @@ failed *silently*:
 **One thing deliberately kept as a refusal:** `dehnen_theta` on this lane. It folds the
 criterion into `geometry.radius` before the dual build, which the lane does not do, so it
 would run the geometric MAC at the solver's θ — which paper mode pins at **1.0**, i.e.
-wildly loose rather than merely different. Under the production preset,
-`_apply_large_n_gpu_production_contract` pins `runtime_path="large_n"`, so that decline
-**raises** rather than falling back.
+wildly loose rather than merely different. Under the production preset that decline
+**raises** rather than falling back. (This paragraph first said the preset's contract pinned
+`runtime_path="large_n"`; since the 2026-10 cleanup the preset alone gates the lane and
+`runtime_path` is gone, and the raise is in `can_use_large_n_prepare_path`.)
 
 **The split/streamed build is now reachable end-to-end, and that took a second fix.**
 Relaxing `_can_split_dual_tree_build` was not enough: `need_traversal_result` was forced
@@ -1342,12 +1345,11 @@ and its monopole must equal the mass it spans. The golden anchor is now per-basi
 10⁻² for real and solidfmm (worst observed 7.2×10⁻⁴, so it can actually fail), 0.35
 only for cartesian.
 
-**Open, and separate: the cartesian basis is ~1.8×10⁻¹ rel-L2** at both p=2 and p=4,
-before *and* after these fixes. Order-independent error is a divergent-series
+**Closed by removal (2026-10): the cartesian basis was ~1.8×10⁻¹ rel-L2** at both p=2
+and p=4, before *and* after these fixes. Order-independent error is a divergent-series
 signature, not truncation, and solidfmm is 8.1×10⁻⁵ at the same configuration — 2000×
-better. Nobody should use the cartesian basis for anything quantitative until that is
-understood. It is now documented at the anchor rather than hidden behind a blanket
-tolerance.
+better. It was never understood; the 2026-10 cleanup (K) removed the Cartesian basis,
+and the golden anchor is the real basis's 10⁻² alone.
 
 ### Guard-rails added
 
@@ -1361,7 +1363,8 @@ tolerance.
   (it is cheap and occasionally useful) but **is no longer needed** — see trap 4.
 - Silent downgrades now raise: the strict fused device-only lane
   (`fmm_prepare.py` ~:795) and an explicit `runtime_path="large_n"` request
-  (`_large_n_pipeline.py` ~:1918). The large-N decline reason is surfaced in
+  (`_large_n_pipeline.py` ~:1918; since the 2026-10 cleanup removed `runtime_path`, the
+  `large_n_gpu` preset's `dehnen_theta` decline, in `can_use_large_n_prepare_path`). The large-N decline reason is surfaced in
   `get_runtime_diagnostics()` as `large_n_path_declined_reason`.
 
 ### Tests: `tests/unit/runtime/`, 94 cases / 46 functions
@@ -1798,11 +1801,13 @@ is the **scaled error δa/f** with `f_b ≡ Σ_{a≠b} G μ_a / |x_a−x_b|²`.
      was quietly fixing them. Use it for production runs; turn it **off** when the
      question is whether the cap rule is right.
 
-15. **`preset="large_n_gpu"` pins `runtime_path="large_n"`.** So on the production preset
-   every large-N lane decline *raises* instead of quietly falling back -- which is the
-   behaviour you want, and also means the silent-decline branch is unreachable there and
-   cannot be tested under that preset. Do not add a decline reason expecting a graceful
-   fallback for preset users; they get an exception.
+15. **`preset="large_n_gpu"` pins the large-N lane.** When this was written it did so
+   through `runtime_path="large_n"`, which made the lane's declines *raise* instead of
+   quietly falling back. Since the 2026-10 cleanup (X4, Z-b) the preset alone gates the
+   lane and `runtime_path` is gone: under the preset the `dehnen_theta` decline raises,
+   and the other declines (non-GPU backend, adaptive or mixed order, ...) return to the
+   general path, recorded in `large_n_path_declined_reason`. Read that diagnostic before
+   assuming the lane ran.
 
 ## The four steps
 

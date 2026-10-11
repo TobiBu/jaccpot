@@ -17,6 +17,11 @@ given the same pair the real lane has, and what that pair costs — which, above
 is nothing, because the chunked M2L scan's existing `jax.checkpoint` already absorbs it. G.10 in
 [`refactor_audit_2026-08.md`](refactor_audit_2026-08.md) records the defect itself.
 
+**2026-10:** the complex basis was removed in the 2026-10 cleanup (C;
+[`cleanup_2026-10.md`](cleanup_2026-10.md)). Its rows, its modules (`complex_ops`, the
+complex fused Pallas lane) and §9 are a record of code that no longer exists; the
+real-basis derivation, wiring and numbers are current.
+
 ---
 
 ## 1. The problem

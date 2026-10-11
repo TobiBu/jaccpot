@@ -1,5 +1,9 @@
 # Treecode MAC choice and multi-step stability (bh box vs dehnen sphere)
 
+> **Historical (2026-10).** The per-leaf treecode walk this measures, its env knobs and
+> `jaccpot/experimental/` were removed in the 2026-10 cleanup (X1,
+> [`cleanup_2026-10.md`](cleanup_2026-10.md)); the dual-tree walk replaced it.
+
 **TL;DR** — In the static-radix device-resident fast lane, the per-leaf treecode walk
 (`JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK=1`) must use **bounding-sphere (`dehnen`)
 MAC extents**, not the cheaper axis-aligned **box (`bh`) extents**, for multi-step

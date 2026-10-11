@@ -1,5 +1,9 @@
 # Phase 5 — Pallas GPU-kernel speedups for the jaccpot FMM
 
+> **Historical (2026-10).** The z-core prototype planned here was removed in the 2026-10
+> cleanup (X5), as were the complex basis and the grouped far field it builds on (C, X3);
+> see [`cleanup_2026-10.md`](cleanup_2026-10.md).
+
 Status: planning + first prototype (2026-07-10). Author handoff doc so the perf work
 can resume on Ampere+ hardware (see "Hardware" — it cannot be benchmarked on the dev box).
 

@@ -1,5 +1,8 @@
 # Phase-5 fused M2L: A100 findings + wiring + padding plan (2026-07-13)
 
+> **Historical (2026-10).** Written against the complex fast-lane M2L and the grouped far
+> field, both removed in the 2026-10 cleanup (C, X3; [`cleanup_2026-10.md`](cleanup_2026-10.md)).
+
 Branch: `feat/phase5-pallas-m2l-prototype` (now up to date with main + the
 `perf/octree-rsh-kernels` real-basis grouped/cached M2L). Context for whoever
 picks up the fused-M2L work next.
