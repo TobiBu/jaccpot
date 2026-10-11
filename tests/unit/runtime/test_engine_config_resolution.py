@@ -14,17 +14,26 @@ What is left is validate-and-assign: three lane strings, two positive-integer
 guards, and the ``_explicit_*`` flags that record whether the caller named a
 value or accepted the default -- a distinction the policy layer later reads, so
 "auto" and an explicit "auto" are not the same state.
+
+Also here since the 2026-10 cleanup (Z-a): which basis a name resolves to
+(``TestBasisResolution``, from ``test_basis_and_runner_hygiene.py``) and how the
+facade's configuration reaches the engine (from ``test_solver_api.py``).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import warnings
 
 import jax.numpy as jnp
 import pytest
 
-from jaccpot.config import NearFieldConfig, RuntimePolicyConfig
+from jaccpot import FastMultipoleMethod, RealSHBasis
+from jaccpot.config import NearFieldConfig, RuntimePolicyConfig, TreeConfig
+from jaccpot.distributed import DistributedFMMConfig
+from jaccpot.distributed.fmm import make_force_evaluator
 from jaccpot.runtime._fmm_impl import FMMEngine
+from jaccpot.solver import _resolve_basis_input
 
 _POLICY_FIELDS = {f.name for f in dataclasses.fields(RuntimePolicyConfig)}
 # NearFieldConfig drops the redundant `nearfield_` prefix, so this group needs a
@@ -230,7 +239,7 @@ def test_the_spherical_harmonic_family_defaults_to_the_real_basis(with_object):
     ran the basis the public API had already stopped defaulting to. Since C the
     real basis is the only one: ``"complex"`` and a basis object not named
     ``"real"`` raise (``TestComplexWasRemoved`` in
-    ``tests/unit/test_basis_and_runner_hygiene.py``).
+    ``tests/unit/test_removed_options.py``).
     """
     from jaccpot.basis import RealSHBasis
 
@@ -242,3 +251,79 @@ def test_the_spherical_harmonic_family_defaults_to_the_real_basis(with_object):
     assert isinstance(engine.basis_impl, RealSHBasis)
     assert engine._solidfmm_basis_mode() == "real"
     assert engine.m2l_impl == "rot_scale"
+
+
+class TestBasisResolution:
+    """Which basis a name resolves to, and what an unknown one is told.
+
+    From ``test_basis_and_runner_hygiene.py`` (2026-10 cleanup, Z-a). ``basis="complex"``
+    and ``basis="solidfmm"`` were the same path (measured bit-identical at
+    N=2048/p=4/theta=0.5), so a user switching between them to cross-check was
+    comparing a run against itself; since C the real basis is the only one and
+    ``"solidfmm"`` names it. The migration errors for ``"complex"`` and
+    ``"cartesian"`` are in ``tests/unit/test_removed_options.py``.
+    """
+
+    @pytest.mark.parametrize("spelling", ("solidfmm", "SolidFMM", " solidfmm "))
+    def test_solidfmm_resolves_to_the_real_basis(self, spelling: str) -> None:
+        """Not "two bases that agree" -- literally one resolution (C).
+
+        ``"solidfmm"`` meant the complex basis until the 2026-10 cleanup (C); it
+        names the spherical-harmonic family, whose only basis is now the real one,
+        and Odisseo's non-integration branches and nornax's smoke test pass it.
+        """
+        real = _resolve_basis_input("real")
+        solidfmm = _resolve_basis_input(spelling)
+        assert solidfmm.public_name == real.public_name == "real"
+        assert solidfmm.runtime_basis == real.runtime_basis == "solidfmm"
+        assert type(solidfmm.basis_impl) is type(real.basis_impl) is RealSHBasis
+        assert FastMultipoleMethod(preset="fast", basis=spelling).basis == "real"
+
+    def test_the_legacy_expansion_basis_kwarg_resolves_to_real(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            fmm = FastMultipoleMethod(expansion_basis="solidfmm")
+        assert fmm.basis == "real"
+
+    @pytest.mark.parametrize("basis", ("real", "solidfmm"))
+    def test_the_supported_bases_do_not_warn(self, basis: str) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            FastMultipoleMethod(preset="fast", basis=basis)
+
+    @pytest.mark.parametrize("basis", ("real", " Real "))
+    def test_the_distributed_config_still_takes_the_real_basis(self, basis) -> None:
+        assert callable(
+            make_force_evaluator(DistributedFMMConfig(basis=basis), 1, 64, mesh=None)
+        )
+
+    def test_an_unknown_basis_is_not_offered_cartesian(self) -> None:
+        with pytest.raises(ValueError, match="basis must be one of") as excinfo:
+            FastMultipoleMethod(preset="fast", basis="spherical")
+        assert "cartesian" not in str(excinfo.value)
+
+    def test_an_unknown_basis_is_not_offered_complex(self) -> None:
+        with pytest.raises(ValueError, match="basis must be one of") as excinfo:
+            FastMultipoleMethod(preset="fast", basis="spherical")
+        assert "complex" not in str(excinfo.value)
+
+    def test_an_unknown_distributed_basis_raises(self) -> None:
+        """Before C, any string but ``"real"`` silently ran the complex far field."""
+        with pytest.raises(ValueError, match="must be 'real'"):
+            make_force_evaluator(
+                DistributedFMMConfig(basis="spherical"), 1, 64, mesh=None
+            )
+
+
+def test_an_unknown_tree_build_mode_raises():
+    """An unknown ``TreeConfig.mode`` is refused with the generic list of modes.
+
+    The live half of ``test_fmm.py::test_capacity_fixed_depth_tree_mode_is_removed``
+    (2026-10 cleanup, Z-a); its ``fixed_depth`` half, which names that removal, is in
+    ``tests/unit/test_removed_options.py``.
+    """
+    with pytest.raises(ValueError, match="tree_build_mode"):
+        FMMEngine(
+            tree=TreeConfig(mode="capacity_fixed_depth"),
+            softening_kernel="plummer",
+        )

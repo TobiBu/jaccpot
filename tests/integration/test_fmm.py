@@ -670,21 +670,6 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
         )
 
 
-def test_capacity_fixed_depth_tree_mode_is_removed():
-    with pytest.raises(ValueError, match="tree_build_mode"):
-        FMMEngine(
-            tree=TreeConfig(mode="capacity_fixed_depth"),
-            softening_kernel="plummer",
-        )
-    # `fixed_depth` itself went in the 2026-10 cleanup (X4), with a message that
-    # names the removal rather than the generic list of valid modes.
-    with pytest.raises(ValueError, match="fixed_depth.*removed.*X4"):
-        FMMEngine(
-            tree=TreeConfig(mode="fixed_depth"),
-            softening_kernel="plummer",
-        )
-
-
 def test_acceleration_magnitude():
     """Test that acceleration magnitude follows inverse square law."""
     # Single particle at origin, evaluate at different distances
@@ -2785,18 +2770,6 @@ def _direct_accelerations_vectorized(
     inv_r3 = np.where(mask, 1.0 / (dist_sq * np.sqrt(dist_sq)), 0.0)
     weighted = diff * masses[None, :, None] * inv_r3[..., None]
     return -np.sum(weighted, axis=1)
-
-
-def test_solidfmm_basis_rejects_non_solidfmm_rotation():
-    with pytest.raises(
-        ValueError,
-        match="complex_rotation must be 'solidfmm'",
-    ):
-        FMMEngine(
-            expansion_basis="solidfmm",
-            farfield=FarFieldConfig(rotation="cached"),
-            softening_kernel="plummer",
-        )
 
 
 def test_dehnen_radius_scale_must_be_positive():

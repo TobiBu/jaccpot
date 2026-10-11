@@ -110,3 +110,35 @@ def test_the_removed_gather_unpermute_raises(monkeypatch):
     monkeypatch.setenv("JACCPOT_FASTLANE_UNPERMUTE", "gather")
     with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
         fmm.evaluate_prepared_state(state)
+
+
+def test_the_large_n_lane_is_gated_on_the_preset_alone(monkeypatch):
+    """``preset="large_n_gpu"`` opens the large-N prepare lane; another preset does not.
+
+    The live half of ``test_runtime_path_is_accepted_and_no_longer_selects_the_lane``
+    (2026-10 cleanup, Z-a; that test, of the ``runtime_path`` shim, is in
+    ``tests/unit/test_removed_options.py``). The GPU predicate is stubbed, as in the
+    lane's own tests.
+    """
+    from jaccpot import FastMultipoleMethod, FMMPreset
+    from jaccpot.runtime import _large_n_pipeline
+
+    monkeypatch.setattr(_large_n_pipeline.jax, "default_backend", lambda: "gpu")
+    key_pos, key_mass = jax.random.split(jax.random.PRNGKey(11))
+    positions = jax.random.uniform(key_pos, (64, 3), minval=-1.0, maxval=1.0)
+    masses = jax.random.uniform(key_mass, (64,), minval=0.5, maxval=1.5)
+
+    fast = FastMultipoleMethod(preset=FMMPreset.FAST, basis="solidfmm")
+    assert not _large_n_pipeline.can_use_large_n_prepare_path(
+        fast._impl,
+        positions_arr=positions,
+        masses_arr=masses,
+        allow_stateful_cache=True,
+    )
+    large_n = FastMultipoleMethod(preset=FMMPreset.LARGE_N_GPU, basis="solidfmm")
+    assert _large_n_pipeline.can_use_large_n_prepare_path(
+        large_n._impl,
+        positions_arr=positions,
+        masses_arr=masses,
+        allow_stateful_cache=True,
+    )
