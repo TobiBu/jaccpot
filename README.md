@@ -633,26 +633,20 @@ pytest --cov=jaccpot --cov-report=term-missing
 
 ### Performance Guard
 
-CI also runs a benchmark regression guard based on:
-
-- [bench/bench_parallel_paths.py](bench/bench_parallel_paths.py)
-- [bench/ci_benchmark_guard.py](bench/ci_benchmark_guard.py)
-- [bench/benchmark_baseline.json](bench/benchmark_baseline.json)
-
-Run the lightweight runtime-path benchmark and CI guard locally:
+CI also runs a runtime sanity guard,
+[bench/ci_benchmark_guard.py](bench/ci_benchmark_guard.py), on top of
+[bench/bench_parallel_paths.py](bench/bench_parallel_paths.py). It has no stored
+baseline: it checks broad ratio bounds between the acceleration, the two jerk modes and
+the time-derivative orders (broad, to avoid hardware-specific flakiness while still
+catching major runtime regressions), and that `jerk_mode="accurate"` still
+differs from `"fast_approx"` by more than 1e-6 rel-L2, a tripwire for the source-motion
+term going missing. Locally, as CI runs it:
 
 ```bash
-python -m bench.bench_parallel_paths --n 512 --runs 3 --warmup 1
-python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1
+python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1 --preset fast \
+    --basis real --theta 0.6 --leaf-size 16 --max-order 4 --dtype float32
+python -m bench.bench_parallel_paths --n 512 --runs 3 --warmup 1   # the timings alone
 ```
-
-If a performance change is intentional, refresh the baseline:
-
-1. Run `bench/bench_parallel_paths.py` with the CI benchmark arguments.
-2. Read the `timings_s` line and update:
-   `target_eval_mean_s` and `adaptive_prepare_mean_s` in
-   `bench/benchmark_baseline.json`.
-3. Re-run `bench/ci_benchmark_guard.py` to confirm the new baseline passes.
 
 ## Examples
 
