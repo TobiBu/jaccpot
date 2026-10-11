@@ -33,11 +33,7 @@ import time
 
 def _set_fused_env(n_profile: str, far_pair_cap: str, neighbor_cap: str) -> None:
     defaults = {
-        "JACCPOT_STATIC_STRICT_GPU_MODE": "on",
-        "JACCPOT_STATIC_STRICT_FUSED_MODE": "on",
         "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET": n_profile,
-        "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH": "0",
-        "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY": "1",
         "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
         "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": far_pair_cap,
         "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED": "1",
@@ -125,7 +121,6 @@ def main() -> None:
     import numpy as np
 
     from jaccpot import (
-        FarFieldConfig,
         FastMultipoleMethod,
         FMMAdvancedConfig,
         NearFieldConfig,
@@ -197,16 +192,11 @@ def main() -> None:
             try:
                 solver = FastMultipoleMethod(
                     preset="large_n_gpu",
-                    runtime_path="large_n",
                     basis="solidfmm",
                     theta=args.theta,
                     working_dtype=jnp.float32,
                     advanced=FMMAdvancedConfig(
                         tree=TreeConfig(mode="static_radix"),
-                        farfield=FarFieldConfig(
-                            rotation="solidfmm",
-                            grouped_interactions=False,
-                        ),
                         nearfield=NearFieldConfig(
                             mode="bucketed",
                             edge_chunk_size=64,

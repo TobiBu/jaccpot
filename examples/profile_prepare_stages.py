@@ -45,17 +45,11 @@ def main() -> None:
     parser.add_argument("--max-order", type=int, default=4)
     parser.add_argument("--preset", type=str, default="large_n_gpu")
     parser.add_argument("--basis", type=str, default="solidfmm")
-    parser.add_argument(
-        "--runtime-path",
-        choices=("auto", "large_n"),
-        default="auto",
-    )
     args = parser.parse_args()
 
     solver = FastMultipoleMethod(
         preset=FMMPreset(str(args.preset).strip().lower()),
         basis=args.basis,
-        runtime_path=str(args.runtime_path).strip().lower(),
     )
     positions, masses = _sample_problem(args.num_particles, dtype=jnp.float32)
     impl = solver._impl

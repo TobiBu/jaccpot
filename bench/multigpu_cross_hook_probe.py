@@ -49,7 +49,6 @@ from yggdrax.morton import morton_encode  # noqa: E402
 
 from jaccpot import FastMultipoleMethod, TraversalOverrides  # noqa: E402
 from jaccpot.config import (  # noqa: E402
-    FarFieldConfig,
     FMMAdvancedConfig,
     NearFieldConfig,
     RuntimePolicyConfig,
@@ -69,7 +68,6 @@ def build():
     cap = 1 << int(np.ceil(np.log2(1.25 * k)))
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=THETA,
         G=1.0,
@@ -82,7 +80,6 @@ def build():
                 leaf_partition="cells",
                 leaf_capacity=cap,
             ),
-            farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
             runtime=(
                 RuntimePolicyConfig(

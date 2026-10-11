@@ -62,12 +62,7 @@ import os
 import time
 
 FUSED_ENV = dict(
-    JACCPOT_STATIC_STRICT_GPU_MODE="on",
-    JACCPOT_STATIC_STRICT_FUSED_MODE="on",
     JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET="200000",
-    JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH="0",
-    JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY="1",
-    JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK="1",
     JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS="1",
     JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP="131072",
     JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED="1",
@@ -114,7 +109,6 @@ def _solver():
     import jax.numpy as jnp
 
     from jaccpot import (
-        FarFieldConfig,
         FastMultipoleMethod,
         FMMAdvancedConfig,
         NearFieldConfig,
@@ -124,16 +118,11 @@ def _solver():
 
     return FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="solidfmm",
         theta=0.6,
         working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix"),
-            farfield=FarFieldConfig(
-                rotation="solidfmm",
-                grouped_interactions=False,
-            ),
             nearfield=NearFieldConfig(
                 mode="bucketed",
                 edge_chunk_size=64,

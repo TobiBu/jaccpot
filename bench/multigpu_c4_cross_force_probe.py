@@ -118,7 +118,6 @@ from yggdrax.morton import morton_encode
 
 from jaccpot import FastMultipoleMethod, TraversalOverrides
 from jaccpot.config import (
-    FarFieldConfig,
     FMMAdvancedConfig,
     NearFieldConfig,
     RuntimePolicyConfig,
@@ -237,7 +236,6 @@ print(
 def build():
     return FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=THETA,
         G=1.0,
@@ -251,7 +249,6 @@ def build():
                 leaf_capacity=LEAF_CAP,
                 cell_min_level=CELL_MIN_LEVEL or None,
             ),
-            farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
             runtime=(
                 RuntimePolicyConfig(

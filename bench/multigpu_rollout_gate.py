@@ -74,7 +74,6 @@ from yggdrax.morton import morton_encode
 
 from jaccpot import FastMultipoleMethod
 from jaccpot.config import (
-    FarFieldConfig,
     FMMAdvancedConfig,
     NearFieldConfig,
     TreeConfig,
@@ -147,7 +146,6 @@ def energy(pos, vel, mass):
 def build_solver():
     return FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=THETA,
         G=1.0,
@@ -160,7 +158,6 @@ def build_solver():
                 leaf_partition="cells",
                 leaf_capacity=LEAF_CAP,
             ),
-            farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
             mac_type="dehnen",
         ),

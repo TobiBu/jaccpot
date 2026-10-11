@@ -24,8 +24,6 @@ def _set_env() -> None:
     env = dict(
         JACCPOT_REFRESH_TIMING_ENABLE="1",
         JACCPOT_PROFILE_UPWARD_STAGES="1",
-        JACCPOT_STATIC_STRICT_GPU_MODE="on",
-        JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH="0",
         JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF="64",
         JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP="2097152",
     )
@@ -43,7 +41,6 @@ def main() -> None:
     import jax.numpy as jnp
 
     from jaccpot import (
-        FarFieldConfig,
         FastMultipoleMethod,
         FMMAdvancedConfig,
         NearFieldConfig,
@@ -61,16 +58,11 @@ def main() -> None:
     )
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="solidfmm",
         theta=0.6,
         working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix"),
-            farfield=FarFieldConfig(
-                rotation="solidfmm",
-                grouped_interactions=False,
-            ),
             nearfield=NearFieldConfig(
                 mode="bucketed",
                 edge_chunk_size=64,
