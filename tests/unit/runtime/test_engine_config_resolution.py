@@ -222,28 +222,23 @@ class TestBooleanCoercion:
         )
 
 
-@pytest.mark.parametrize(
-    "kwargs, mode",
-    [
-        ({"expansion_basis": "solidfmm"}, "real"),
-        ({"expansion_basis": "complex"}, "complex"),
-        ({"expansion_basis": "solidfmm", "basis_impl": "complex_object"}, "complex"),
-        ({"expansion_basis": "solidfmm", "basis_impl": "real_object"}, "real"),
-    ],
-)
-def test_the_spherical_harmonic_family_defaults_to_the_real_basis(kwargs, mode):
+@pytest.mark.parametrize("with_object", [False, True])
+def test_the_spherical_harmonic_family_defaults_to_the_real_basis(with_object):
     """``"solidfmm"`` without a basis object is REAL (cleanup 2026-10, D1).
 
     It used to be complex, so every engine built as ``expansion_basis="solidfmm"``
-    ran the basis the public API had already stopped defaulting to. Naming
-    ``"complex"``, or passing a basis object, still selects explicitly.
+    ran the basis the public API had already stopped defaulting to. Since C the
+    real basis is the only one: ``"complex"`` and a basis object not named
+    ``"real"`` raise (``TestComplexWasRemoved`` in
+    ``tests/unit/test_basis_and_runner_hygiene.py``).
     """
-    from jaccpot.basis import ComplexSHBasis, RealSHBasis
+    from jaccpot.basis import RealSHBasis
 
-    objects = {"complex_object": ComplexSHBasis(), "real_object": RealSHBasis()}
-    resolved = {
-        k: objects.get(v, v) if k == "basis_impl" else v for k, v in kwargs.items()
-    }
-    engine = FMMEngine(**resolved)
+    kwargs = {"expansion_basis": "solidfmm"}
+    if with_object:
+        kwargs["basis_impl"] = RealSHBasis()
+    engine = FMMEngine(**kwargs)
     assert engine.expansion_basis == "solidfmm"
-    assert engine._solidfmm_basis_mode() == mode
+    assert isinstance(engine.basis_impl, RealSHBasis)
+    assert engine._solidfmm_basis_mode() == "real"
+    assert engine.m2l_impl == "rot_scale"

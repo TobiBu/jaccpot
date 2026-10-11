@@ -1,10 +1,10 @@
 """Regression test for the reusable distributed FMM driver.
 
-Proves that ``jaccpot.distributed.distributed_fmm_accelerations`` reproduces the
-result of the validated in-test assembly in
-``test_distributed_solidfmm_far_shardmap.py``: on the same spatially-separated
-cluster IC, the reassembled per-particle accelerations match a direct N-body sum
-to within 1%.
+Proves that ``jaccpot.distributed.distributed_fmm_accelerations`` matches a direct
+N-body sum to within 1% on a spatially-separated cluster IC. (It began as the
+reusable form of a hand-rolled complex-basis assembly,
+``test_distributed_solidfmm_far_shardmap.py``, removed with the complex basis in the
+2026-10 cleanup, C; this file owns its assertions.)
 
 CAUTION about the IC (measured 2026-08-21, was stated the other way round here for
 as long as this file went unexecuted): ``_separated_clusters`` puts one cluster per
@@ -128,11 +128,12 @@ def test_driver_matches_direct():
 
 
 def test_driver_real_basis_matches_direct():
-    """Real (Dehnen) far-field basis matches direct N-body as well as solidfmm.
+    """Real (Dehnen) far-field basis matches direct N-body under the bh MAC.
 
-    Isolates the basis change: same IC and same bh MAC as the solidfmm baseline,
-    only ``basis="real"``. Confirms the per-device far field converged onto the
-    single-GPU fast-lane real path is correct.
+    The same IC as :func:`test_driver_matches_direct` with the bh MAC instead of the
+    default dehnen one. It also owns the old complex (``basis="solidfmm"``) + bh
+    case, whose far field was removed in the 2026-10 cleanup (C). Confirms the
+    per-device far field converged onto the single-GPU fast-lane real path is correct.
     """
     ndev = min(4, device_count())
     mesh = make_mesh(ndev)
@@ -154,35 +155,6 @@ def test_driver_real_basis_matches_direct():
     print(f"driver REAL-basis FULL aggL2 vs direct = {err:.6f}  (ndev={ndev})")
     assert not result.overflow, "traversal buffers overflowed -- grow the caps"
     assert err < 1e-2, f"real-basis aggL2 err {err:.6f} exceeds 1%"
-    _assert_cross_far_engaged(result)
-
-
-def test_driver_solidfmm_matches_direct():
-    """Legacy solidfmm(complex)/bh path still matches direct after the real default.
-
-    Keeps the pre-convergence force path covered regardless of the (now real+dehnen)
-    default, so a future change to the real path can't silently break solidfmm.
-    """
-    ndev = min(4, device_count())
-    mesh = make_mesh(ndev)
-    per = 64
-    pts, mass = _separated_clusters(ndev, per)
-    config = DistributedFMMConfig(
-        softening_kernel="plummer", basis="solidfmm", mac_type="bh", leaf_size=_LEAF
-    )
-
-    result = distributed_fmm_accelerations(
-        pts, mass, config=config, mesh=mesh, jit=False
-    )
-    direct = np.asarray(
-        _direct(jnp.asarray(pts), jnp.asarray(mass), config.G, config.softening)
-    )
-    err = float(
-        np.linalg.norm(result.accelerations - direct) / (np.linalg.norm(direct) + 1e-30)
-    )
-    print(f"driver SOLIDFMM FULL aggL2 vs direct = {err:.6f}  (ndev={ndev})")
-    assert not result.overflow, "traversal buffers overflowed -- grow the caps"
-    assert err < 1e-2, f"solidfmm aggL2 err {err:.6f} exceeds 1%"
     _assert_cross_far_engaged(result)
 
 

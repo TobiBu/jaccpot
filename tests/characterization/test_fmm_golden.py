@@ -70,15 +70,10 @@ ANCHOR_REL_L2_BY_BASIS = {
 # refactor touches: real / complex(solidfmm) bases, orders 2/4/6, uniform +
 # clustered geometry, and a larger-N case.
 CASES = [
-    ("uni_solidfmm_n256_p2", "uniform", 256, "solidfmm", 2),
-    ("uni_solidfmm_n256_p4", "uniform", 256, "solidfmm", 4),
     ("uni_real_n256_p2", "uniform", 256, "real", 2),
     ("uni_real_n256_p4", "uniform", 256, "real", 4),
-    ("clu_solidfmm_n256_p4", "clustered", 256, "solidfmm", 4),
     ("clu_real_n256_p4", "clustered", 256, "real", 4),
-    ("uni_solidfmm_n256_p6", "uniform", 256, "solidfmm", 6),
     ("uni_real_n256_p6", "uniform", 256, "real", 6),
-    ("uni_solidfmm_n1024_p4", "uniform", 1024, "solidfmm", 4),
     ("uni_real_n1024_p4", "uniform", 1024, "real", 4),
 ]
 
@@ -96,15 +91,6 @@ CASES = [
 # G.11 (`docs/refactor_audit_2026-08.md`), the 60x gap between the two batchings.
 MODE_CASES = [
     ("bkt_uni_real_n256_p4", "uniform", 256, "real", 4, "bucketed", 1.0e-2),
-    (
-        "bkt_uni_solidfmm_n256_p4",
-        "uniform",
-        256,
-        "solidfmm",
-        4,
-        "bucketed",
-        1.0e-2,
-    ),
 ]
 
 

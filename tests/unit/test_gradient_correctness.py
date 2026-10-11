@@ -65,8 +65,6 @@ def _directional_fd_vs_ad(loss_fn, x, direction, eps=1e-6):
 @pytest.mark.parametrize(
     "basis,theta,n,order,leaf,min_far",
     [
-        ("complex", 0.4, 64, 2, 16, 0),  # shallow, low order: near-field only
-        ("complex", 0.6, 64, 4, 4, 1),  # deep: non-empty M2L reverse path
         ("real", 0.6, 64, 4, 4, 1),  # deep real basis: rotation-angle M2L
         ("real", 0.4, 64, 2, 16, 0),  # shallow, low order: near-field only
     ],
@@ -91,7 +89,7 @@ def test_fd_vs_ad_positions(basis, theta, n, order, leaf, min_far):
     assert rel < 1e-4, f"FD-vs-AD rel-err {rel:.3e} (fd={fd:.3e}, ad={ad:.3e})"
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_fd_vs_ad_masses(basis):
     # Deep tree (leaf_size=4, theta=0.6) so the mass gradient's FD-vs-AD
     # self-consistency covers the far-field (M2L) reverse path, not just P2P.
@@ -115,7 +113,7 @@ def test_fd_vs_ad_masses(basis):
     assert rel < 1e-4, f"FD-vs-AD rel-err {rel:.3e} (fd={fd:.3e}, ad={ad:.3e})"
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 @pytest.mark.parametrize("softening", [1e-2, 0.0])
 def test_no_nan_near_coincident(softening, basis):
     """Near-coincident particles must not produce NaN/inf gradients."""
@@ -172,7 +170,7 @@ def _num_rho_zero_m2l_pairs(state):
     return int(np.sum(delta[:, 0] ** 2 + delta[:, 1] ** 2 == 0.0))
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_degenerate_azimuth_subgradient_is_correct(basis):
     """At rho == 0 the zeroed azimuth cotangent must not drop a real term.
 
@@ -241,7 +239,7 @@ def test_degenerate_azimuth_subgradient_is_correct(basis):
     )
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_no_nan_axis_aligned_grid(basis):
     """A regular lattice keeps gradients finite.
 
@@ -278,7 +276,7 @@ def test_no_nan_axis_aligned_grid(basis):
     assert jnp.all(jnp.isfinite(grad)), "non-finite grad on axis-aligned lattice"
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_reorders_to_original_particle_order(basis):
     """Output is aligned with the original (unsorted) input order."""
     positions, masses = _system(80, seed=9)
@@ -336,7 +334,7 @@ def _count_degenerate_m2l_pairs(state):
     return int(np.sum(rho_sq == 0.0)), valid
 
 
-@pytest.mark.parametrize("basis", ["real", "complex"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_fd_vs_ad_along_a_transverse_direction_at_rho_zero(basis):
     """FD and AD must agree when M2L displacements are exactly z-aligned.
 

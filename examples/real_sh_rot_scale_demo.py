@@ -1,4 +1,8 @@
-"""Demo: real SH rotate+scale FMM vs direct-sum and complex basis."""
+"""Demo: real SH rotate+scale FMM vs direct sum.
+
+It also compared against the complex basis until that basis was removed in the
+2026-10 cleanup (C).
+"""
 
 from __future__ import annotations
 
@@ -59,36 +63,16 @@ def main() -> None:
         softening=softening,
         advanced=advanced,
     )
-    fmm_complex = FastMultipoleMethod(
-        preset="accurate",
-        basis="complex",
-        theta=0.5,
-        softening=softening,
-        advanced=advanced,
-    )
 
     acc_real = np.asarray(
         fmm_real.compute_accelerations(positions, masses, leaf_size=8, max_order=order)
     )
-    acc_complex = np.asarray(
-        fmm_complex.compute_accelerations(
-            positions, masses, leaf_size=8, max_order=order
-        )
-    )
     acc_ref = _direct_sum(np.asarray(positions), np.asarray(masses), softening)
 
     err_real = np.linalg.norm(acc_real - acc_ref) / (np.linalg.norm(acc_ref) + 1.0e-12)
-    err_complex = np.linalg.norm(acc_complex - acc_ref) / (
-        np.linalg.norm(acc_ref) + 1.0e-12
-    )
-    real_vs_complex = np.linalg.norm(acc_real - acc_complex) / (
-        np.linalg.norm(acc_complex) + 1.0e-12
-    )
 
     print(f"dtype={dtype} n={n} order={order}")
     print(f"real_vs_direct_rel_l2={err_real:.6e}")
-    print(f"complex_vs_direct_rel_l2={err_complex:.6e}")
-    print(f"real_vs_complex_rel_l2={real_vs_complex:.6e}")
 
 
 if __name__ == "__main__":

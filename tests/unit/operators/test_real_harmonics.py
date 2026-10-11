@@ -18,11 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot.operators.complex_harmonics import _pack_complex, complex_R_solidfmm
-from jaccpot.operators.complex_ops import m2l_complex_reference
 from jaccpot.operators.real_harmonics import (  # Index utilities; P2M; L2P; B matrices; Rotation; Z-axis translations;; Full operators
-    _dehnen_real_Q_full,
-    complex_to_dehnen_real_coeffs,
     compute_real_B_matrix_local,
     compute_real_B_matrix_multipole,
     evaluate_local_real,
@@ -45,7 +41,6 @@ from jaccpot.operators.real_harmonics import (  # Index utilities; P2M; L2P; B m
     translate_along_z_m2m_real,
     verify_real_B_matrix,
 )
-from jaccpot.operators.solidfmm_reference import m2l_solidfmm_reference
 
 # ===========================================================================
 # Index utility tests
@@ -123,11 +118,13 @@ def test_p2m_real_direct_dehnen_table3():
 # ===========================================================================
 #
 # `test_p2m_real_direct_dehnen_table3` pins degree 1 against Dehnen (2014) Table 3,
-# and `test_complex_to_dehnen_real_matches_p2m_real_direct` cross-checks degrees 0-6
-# against the complex basis. The second is a *relative* check: a convention error
-# shared between `Q` and `p2m_real_direct` cancels in it. Nothing pinned degrees 2-6
-# absolutely, which the docstring on `p2m_real_direct` used to call the most serious
-# gap in the file.
+# and `test_complex_to_dehnen_real_matches_p2m_real_direct` cross-checked degrees 0-6
+# against the complex basis (removed with it in the 2026-10 cleanup, C;
+# `test_p2m_point_mass_reproduces_its_far_field_at_every_order` is the per-geometry
+# check now). That was a *relative* check: a convention error shared between `Q`
+# and `p2m_real_direct` cancelled in it. Nothing pinned degrees 2-6 absolutely,
+# which the docstring on `p2m_real_direct` used to call the most serious gap in the
+# file.
 #
 # These two tests close it without a table. The regular solid harmonics normalised
 # by 1/(n+|m|)! satisfy derivative recurrences that map degree n onto degree n-1, and
@@ -244,6 +241,84 @@ def test_solid_harmonic_transverse_derivative_coefficients_are_half_integers():
                         f"U_{n - 1}^{m2}, which is not a multiple of 1/2 -- the "
                         "signature of a per-m normalisation error"
                     )
+
+
+# Geometries chosen to cover the degenerate azimuths as well as a generic point:
+# `rho == 0` (z-aligned) is where the azimuth is undefined, and the axis cases are
+# where a per-m sign or normalisation error shows up most cleanly.
+_P2M_GEOMETRIES = [
+    pytest.param([0.7, -0.3, 0.45], id="generic-off-axis"),
+    pytest.param([0.0, 0.0, 0.8], id="z-aligned-rho-zero"),
+    pytest.param([0.9, 0.0, 0.0], id="x-aligned"),
+    pytest.param([0.0, -0.6, 0.0], id="y-aligned"),
+    pytest.param([0.5, 0.5, 0.0], id="xy-plane"),
+    pytest.param([1e-8, -2e-8, 3e-8], id="near-origin"),
+]
+
+
+@pytest.mark.parametrize("delta", _P2M_GEOMETRIES)
+def test_p2m_point_mass_reproduces_its_far_field_at_every_order(delta):
+    """A point mass's multipole reproduces ``m / r`` and its field far away, p = 0-6.
+
+    The real-only anchor for the P2M normalisation at every degree and at the
+    degenerate azimuths. It replaces
+    ``test_complex_to_dehnen_real_matches_p2m_real_direct`` (orders 0-6 over these
+    six geometries against the complex basis's conversion, removed with the complex
+    basis in the 2026-10 cleanup, C) as the per-geometry check; the derivative
+    recurrences above pin the normalisation at generic points to ~1e-3.
+
+    The multipole of a mass ``m`` at ``d`` about the origin is translated (M2L) to
+    a local expansion about ``X`` (``|X| = 9.1``, so ``q = |d|/|X| <= 0.1``) and
+    evaluated there. The multipole series' truncation error is bounded **exactly**:
+    ``|phi - phi_p| <= m / (|X| - |d|) q^(p+1)``, i.e. relative to ``m / |X - d|``
+    at most ``(1 + q)/(1 - q) q^(p+1)``. A per-``(n, m)`` normalisation error
+    ``delta`` at degree ``n <= p`` moves the potential by ~``delta q^n``, so at
+    ``p = 6`` it is caught down to ``delta ~ q^(7 - n)`` (1e-6 at degree 1, 0.1 at
+    degree 6), and a sign error at any degree fails outright. Measured worst ratio
+    of the error to the bound: 0.98 (``near-origin``, p = 0, where the bound is the
+    leading term itself); generic points 0.07-0.84.
+
+    The field at the local centre uses multipole degrees up to ``p - 1``, so its
+    error bound is ``(p + 1) q^p (1 + q)^2 / (1 - q)^2``; asserted with a factor 2
+    (measured worst ratio 0.99 to the unscaled bound, near-origin p = 1, again
+    the leading term). The returned gradient is ``d phi / d delta`` with
+    ``delta = centre - point``: minus the gradient in the evaluation point, so for
+    ``phi = m / |x - d|`` it is ``m (X - d) / r^3`` at the centre.
+    """
+    if not jax.config.jax_enable_x64:
+        pytest.skip("the truncation bounds go below float32 round-off")
+
+    d = jnp.asarray(delta, dtype=jnp.float64)
+    mass = jnp.asarray(1.7, dtype=jnp.float64)
+    target = jnp.asarray([4.0, -5.0, 6.5], dtype=jnp.float64)
+    separation = target - d
+    r = float(jnp.linalg.norm(separation))
+    potential_ref = float(mass) / r
+    grad_ref = float(mass) * np.asarray(separation) / r**3
+    q = float(jnp.linalg.norm(d) / jnp.linalg.norm(target))
+
+    for order in range(7):
+        multipole = p2m_real_direct(d, mass, order=order)
+        local = m2l_real(multipole, target, order=order)
+        grad, potential = evaluate_local_real_with_grad(
+            local, jnp.zeros(3, dtype=jnp.float64), order=order
+        )
+
+        pot_err = abs(float(potential) - potential_ref) / potential_ref
+        pot_bound = (1 + q) / (1 - q) * q ** (order + 1) + 1e-14
+        assert pot_err < pot_bound, (
+            f"order {order}: potential rel err {pot_err:.3e} above the multipole "
+            f"truncation bound {pot_bound:.3e} (q = {q:.3e})"
+        )
+
+        grad_err = float(
+            np.linalg.norm(np.asarray(grad) - grad_ref) / np.linalg.norm(grad_ref)
+        )
+        grad_bound = 2.0 * (order + 1) * q**order * (1 + q) ** 2 / (1 - q) ** 2 + 1e-13
+        assert grad_err < grad_bound, (
+            f"order {order}: field rel err {grad_err:.3e} above {grad_bound:.3e} "
+            f"(q = {q:.3e})"
+        )
 
 
 def test_p2m_real_direct_monopole():
@@ -650,223 +725,6 @@ def test_m2l_convergence_radius_respected_in_rotated_geometry():
     for i in range(len(errors) - 1):
         if errors[i] > 1e-12:
             assert errors[i + 1] <= errors[i] * 1.1
-
-
-def test_solidfmm_reference_matches_z_axis_m2l():
-    """Genuine-complex solidfmm reference relates to the real-basis z-M2L.
-
-    The complex reference (``m2l_solidfmm_reference``) runs a standard complex
-    M2L, so it reproduces the real-basis result on the m = 0 channel and is a
-    factor of 2 smaller on every m != 0 channel -- exactly the no-sqrt2
-    real-basis factor carried by ``translate_along_z_m2l_real``.
-    """
-    dtype = jnp.float64
-    order = 6
-
-    source_pos = jnp.array([0.2, -0.1, 0.3], dtype=dtype)
-    multipole_center = jnp.array([0.0, 0.0, 0.0], dtype=dtype)
-    local_center = jnp.array([0.0, 0.0, 4.0], dtype=dtype)
-
-    multipole = p2m_real_direct(
-        source_pos - multipole_center, jnp.array(1.0, dtype=dtype), order=order
-    )
-    delta_m2l = local_center - multipole_center
-
-    local_ref = translate_along_z_m2l_real(
-        multipole, jnp.linalg.norm(delta_m2l), order=order
-    )
-    local_solidfmm = np.asarray(
-        m2l_solidfmm_reference(multipole, delta_m2l, order=order)
-    )
-
-    # Rescale the genuine-complex reference by the real-basis channel factor.
-    channel_scale = np.ones(sh_size(order))
-    for n in range(order + 1):
-        for m in range(-n, n + 1):
-            if m != 0:
-                channel_scale[sh_index(n, m)] = 2.0
-    local_solidfmm_real = local_solidfmm * channel_scale
-
-    assert jnp.allclose(local_solidfmm_real, local_ref, rtol=1e-10, atol=1e-10)
-
-
-# ---------------------------------------------------------------------------
-# The genuine-complex <-> Dehnen-no-sqrt2 relationship for LOCAL coefficients,
-# and the off-axis defect in solidfmm_reference that it exposes.
-# See docs/operator_conventions.md section 4.
-# ---------------------------------------------------------------------------
-
-# Directions used by both tests below. Chosen to include the cases where a
-# convention error can hide: one with two near-equal components (a wrong
-# azimuth argument order is invisible when x == y), one with z == 0, one with
-# every component negative, and one at rho ~ 0 where the m != 0 channels carry
-# (rho/r)^|m| and suppress any azimuth error whatsoever.
-_M2L_PROBE_DELTAS = (
-    (4.0, 1.5, -2.5),
-    (3.0, 3.0000001, 1.0),
-    (5.0, 0.0, 0.0),
-    (-2.0, -3.0, -1.5),
-    (-1.0, 2.5, 3.5),
-    (1e-6, 0.0, 5.0),
-)
-
-
-def _dehnen_local_channel_factor(order: int) -> np.ndarray:
-    """Diagonal complex -> Dehnen-no-sqrt2 factor for LOCAL coefficients.
-
-    Multipole coefficients are harmonic *values* (``M_n^m = mass * U_n^m``), so
-    they convert with ``Q`` alone -- that is what
-    :func:`~jaccpot.operators.real_harmonics.complex_to_dehnen_real_coeffs`
-    does. Local coefficients are the *dual* objects: ``evaluate_local_real``
-    forms the plain sum ``Psi = sum_{n,m} F_n^m U_n^m``, and collapsing the
-    complex sum over ``m`` in ``[-n, n]`` onto the ``m >= 0`` real channels
-    folds each conjugate pair together, which contributes one extra factor of
-    two on every ``m != 0`` channel. So locals convert with ``D @ Q``, this
-    ``D``, and multipoles with ``Q``. The asymmetry is the whole reason the
-    factor of two exists.
-
-    Parameters
-    ----------
-    order : int
-        Maximum SH degree ``p``.
-
-    Returns
-    -------
-    np.ndarray
-        Packed ``(sh_size(order),)`` factor: 1.0 on every ``m == 0`` channel and
-        2.0 everywhere else.
-    """
-    factor = np.ones(sh_size(order))
-    for n in range(order + 1):
-        for m in range(-n, n + 1):
-            if m != 0:
-                factor[sh_index(n, m)] = 2.0
-    return factor
-
-
-@pytest.mark.parametrize("order", [2, 4, 6])
-def test_dehnen_local_channel_factor_holds_at_any_delta(order: int) -> None:
-    """``D @ Q`` converts complex locals to Dehnen-real ones at ANY ``delta``.
-
-    The factor-of-two-on-``m != 0`` relationship is a statement about the two
-    *bases*, not about the geometry, so it must hold for an arbitrary off-axis
-    displacement and not only for an axis-aligned one. This pins that against
-    the production complex M2L (``complex_ops.m2l_complex_reference``), which is
-    independently validated end-to-end, so the comparison here needs no
-    reference of its own.
-
-    Measured worst case over these six directions and orders 2/4/6: 3.1e-16
-    relative to ``max|m2l_real|``, i.e. round-off. The tolerance below is 1e-12,
-    which leaves ~3 orders of magnitude of headroom for the order-6 matmul
-    chains while staying far under the 1.6e-3 floor that the inertness gate
-    measures -- so the test cannot pass by being loose.
-
-    Parameters
-    ----------
-    order : int
-        Expansion order under test.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("the 1e-12 basis-identity tolerance requires float64")
-
-    dtype = jnp.float64
-    source = jnp.array([0.2, -0.1, 0.3], dtype=dtype)
-    factor = _dehnen_local_channel_factor(order)
-    q_full = np.asarray(_dehnen_real_Q_full(order))
-
-    multipole_real = p2m_real_direct(source, jnp.array(1.0, dtype=dtype), order=order)
-    multipole_complex = complex_R_solidfmm(source, order=order)
-
-    for delta_tuple in _M2L_PROBE_DELTAS:
-        delta = jnp.asarray(delta_tuple, dtype=dtype)
-
-        want = np.asarray(m2l_real(multipole_real, delta, order=order))
-        local_complex = np.asarray(
-            m2l_complex_reference(multipole_complex, delta, order=order)
-        )
-        product = q_full @ local_complex
-
-        # Conjugate symmetry is a documented PRECONDITION of the Q conversion,
-        # not something it enforces; if the complex locals ever stopped
-        # conforming, taking the real part would silently discard signal.
-        assert np.max(np.abs(product.imag)) < 1e-12 * max(
-            np.max(np.abs(product.real)), 1.0
-        )
-
-        got = product.real * factor
-        scale = max(np.max(np.abs(want)), 1.0)
-        assert np.max(np.abs(got - want)) < 1e-12 * scale, (
-            f"D @ Q must reproduce m2l_real at delta={delta_tuple}, order={order}; "
-            f"got max deviation {np.max(np.abs(got - want)) / scale:.3e}"
-        )
-
-        # Inertness gate. Without the factor of two the two bases disagree by at
-        # least 1.6e-3 (measured minimum, at the rho ~ 0 direction and order 2;
-        # the genuinely off-axis directions reach 4.3e-1). A test that only
-        # pinned the right answer would pass just as happily if the factor
-        # stopped mattering, which is exactly when it has stopped being pinned.
-        undone = np.max(np.abs(product.real - want)) / scale
-        assert undone > 1e-4, (
-            "dropping the m != 0 factor of two must break the identity, else "
-            f"this test pins nothing; got {undone:.3e} at delta={delta_tuple}"
-        )
-
-
-def test_solidfmm_reference_matches_m2l_real_off_axis():
-    """``m2l_solidfmm_reference`` must agree with ``m2l_real`` off axis.
-
-    Same relationship as
-    :func:`test_dehnen_local_channel_factor_holds_at_any_delta`, which shows it
-    holding to round-off at every one of these directions for the production
-    complex M2L. The reference fails it: measured deviation 3.9e-2 (order 2) to
-    1.7 (order 6) relative to ``max|m2l_real|``, and the resulting *potential*
-    -- which is basis-independent, so no convention argument can excuse it --
-    plateaus at 2.1e-2 to 8.5e-2 relative error, flat in ``order`` where
-    ``m2l_real`` converges 4.5e-4 -> 6.1e-7 -> 2.7e-8. An error that does not
-    fall with ``order`` is not truncation.
-
-    ``(1e-6, 0, 5)`` is deliberately excluded: at rho ~ 0 the defect is
-    suppressed to 1.9e-8 by the ``(rho/r)^|m|`` factors, so a near-axis
-    direction would make this test vacuous.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("the 1e-12 basis-identity tolerance requires float64")
-
-    dtype = jnp.float64
-    order = 4
-    source = jnp.array([0.2, -0.1, 0.3], dtype=dtype)
-    eval_offset = jnp.array([0.15, 0.2, -0.1], dtype=dtype)
-    factor = _dehnen_local_channel_factor(order)
-
-    multipole = p2m_real_direct(source, jnp.array(1.0, dtype=dtype), order=order)
-
-    for delta_tuple in _M2L_PROBE_DELTAS[:-1]:
-        delta = jnp.asarray(delta_tuple, dtype=dtype)
-
-        want = np.asarray(m2l_real(multipole, delta, order=order))
-        got = np.asarray(m2l_solidfmm_reference(multipole, delta, order=order)) * factor
-        scale = max(np.max(np.abs(want)), 1.0)
-        assert np.max(np.abs(got - want)) < 1e-12 * scale, (
-            f"reference M2L must match m2l_real at delta={delta_tuple}; got max "
-            f"deviation {np.max(np.abs(got - want)) / scale:.3e}"
-        )
-
-        # And the physics anchor: the evaluated potential against the direct sum.
-        # `evaluate_local_real` takes centre - eval_point (section 1 of
-        # docs/operator_conventions.md), hence the minus sign.
-        exact = 1.0 / float(jnp.linalg.norm(delta + eval_offset - source))
-        potential = float(
-            evaluate_local_real(jnp.asarray(got), -eval_offset, order=order)
-        )
-        # 1e-4 sits between the two regimes with room on both sides: at order 4
-        # `m2l_real` lands at 6.1e-7 to 6.5e-6 over these five directions (15x
-        # under the bound), while the reference's plateau is 2.1e-2 to 8.5e-2
-        # (210x over it). So neither a slightly loose tolerance nor a slightly
-        # unlucky geometry decides the outcome.
-        assert abs(potential - exact) / exact < 1e-4, (
-            f"reference potential must converge at delta={delta_tuple}; got "
-            f"relative error {abs(potential - exact) / exact:.3e}"
-        )
 
 
 def test_z_m2l_higher_multipoles():
@@ -1836,192 +1694,17 @@ def test_functions_vmappable():
 
 
 # ===========================================================================
-# Complex -> Dehnen-real conversion: the identity the docstring promises
+# P2M factorises as mass * U_n^m(delta)
 # ===========================================================================
 
 
-# Geometries chosen to cover the degenerate azimuths as well as a generic point:
-# `rho == 0` (z-aligned) is where the azimuth is undefined, and the axis cases
-# are where a per-m sign or normalisation error shows up most cleanly.
-_CONVERSION_DELTAS = [
-    pytest.param([0.7, -0.3, 0.45], id="generic-off-axis"),
-    pytest.param([0.0, 0.0, 0.8], id="z-aligned-rho-zero"),
-    pytest.param([0.9, 0.0, 0.0], id="x-aligned"),
-    pytest.param([0.0, -0.6, 0.0], id="y-aligned"),
-    pytest.param([0.5, 0.5, 0.0], id="xy-plane"),
-    pytest.param([1e-8, -2e-8, 3e-8], id="near-origin"),
-]
+def test_p2m_real_direct_scales_linearly_in_mass():
+    """``p2m_real_direct`` factorises as ``mass * U_n^m(delta)``, to round-off.
 
-
-@pytest.mark.parametrize("delta", _CONVERSION_DELTAS)
-@pytest.mark.parametrize("order", [0, 1, 2, 3, 4, 6])
-def test_complex_to_dehnen_real_matches_p2m_real_direct(delta, order):
-    """``complex_to_dehnen_real_coeffs(complex_R_solidfmm(d)) == p2m_real_direct(d)``.
-
-    This is the equivalence ``complex_to_dehnen_real_coeffs`` claims in its own
-    docstring and that nothing asserted until now. It is the seam between the
-    complex solidfmm basis and the Dehnen no-sqrt2 real operators, so a per-``m``
-    sign or normalisation error here silently corrupts every real-basis M2L.
-
-    The two proxies that existed cannot catch that:
-    ``tests/unit/core/test_real_upward_sweep.py::test_real_upward_matches_complex_convert``
-    checks an aggregate relative L2 over a whole tree, where a single-``m`` error
-    is diluted, and ``test_dehnen_power_is_basis_invariant`` checks only the
-    degree-wise Dehnen power, which is a rotational invariant and therefore blind
-    to sign errors within a degree.
-
-    Tolerance: this is an exact algebraic identity, not a truncation, so the only
-    admissible error is float64 round-off in the two independent recurrences.
-    Measured worst case across these 36 combinations is 8.9e-16 relative L2
-    (~4 eps); 1e-13 leaves ~2 orders of headroom without admitting a real defect.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")
-
-    d = jnp.asarray(delta, dtype=jnp.float64)
-    unit_mass = jnp.asarray(1.0, dtype=jnp.float64)
-
-    converted = complex_to_dehnen_real_coeffs(
-        complex_R_solidfmm(d, order=order), order=order
-    )
-    direct = p2m_real_direct(d, unit_mass, order=order)
-
-    assert converted.shape == direct.shape == (sh_size(order),)
-
-    converted_np = np.asarray(converted)
-    direct_np = np.asarray(direct)
-    rel_l2 = float(
-        np.linalg.norm(converted_np - direct_np)
-        / max(float(np.linalg.norm(direct_np)), 1e-300)
-    )
-    assert rel_l2 < 1e-13, (
-        f"complex->real conversion disagrees with p2m_real_direct at "
-        f"delta={delta}, order={order}: rel-L2 {rel_l2:.3e}"
-    )
-
-
-def _conjugate_symmetric_packed(order: int, *, m0_real: bool, seed: int):
-    """Build a packed complex array via ``_pack_complex``, m=0 real or not.
-
-    ``_pack_complex`` enforces ``H_n^{-m} = (-1)^m conj(H_n^m)`` for the negative
-    ``m`` slots, but it copies ``m = 0`` through verbatim -- so whether the array
-    satisfies the *full* reality condition depends on whether the caller made the
-    m=0 entries real. That is the distinction this helper exists to expose.
-    """
-    rng = np.random.default_rng(seed)
-    half = np.zeros((order + 1, order + 1), dtype=np.complex128)
-    for n in range(order + 1):
-        for m in range(n + 1):
-            imag = 0.0 if (m == 0 and m0_real) else rng.normal()
-            half[n, m] = rng.normal() + 1j * imag
-    return _pack_complex(jnp.asarray(half))
-
-
-@pytest.mark.parametrize("order", [1, 2, 3, 4])
-def test_complex_to_dehnen_real_discards_only_exact_zero_for_conforming_input(order):
-    """``Im(coeffs @ Q^T)`` is EXACTLY zero when the reality condition holds.
-
-    That is what makes ``jnp.real`` lossless here rather than a projection. The
-    condition is ``H_n^{-m} = (-1)^m conj(H_n^m)``, whose ``m = 0`` case reads
-    ``H_n^0 = conj(H_n^0)`` -- i.e. **the m=0 coefficients must be real**. That half
-    is easy to miss, and it is the half this test pins: with m=0 real the imaginary
-    part of the product is identically 0.0, and with m=0 complex it is a substantial
-    fraction of the real part, so ``jnp.real`` would be discarding real information
-    rather than round-off.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("exact-zero check requires float64")
-
-    q_full = np.asarray(_dehnen_real_Q_full(order))
-
-    conforming = np.asarray(_conjugate_symmetric_packed(order, m0_real=True, seed=9))
-    product = conforming @ q_full.T
-    assert np.max(np.abs(product.imag)) == 0.0, (
-        "the imaginary part must vanish exactly for conforming coefficients, "
-        f"got max {np.max(np.abs(product.imag)):.3e}"
-    )
-    assert np.linalg.norm(product.real) > 0.0
-
-    # And the near-miss: conjugate-symmetric for m != 0 but complex at m = 0.
-    non_conforming = np.asarray(
-        _conjugate_symmetric_packed(order, m0_real=False, seed=9)
-    )
-    bad = non_conforming @ q_full.T
-    discarded = np.linalg.norm(bad.imag) / max(np.linalg.norm(bad.real), 1e-300)
-    assert discarded > 1e-3, (
-        "a complex m=0 entry should make the discarded imaginary part significant, "
-        f"so that this precondition is worth documenting; got ratio {discarded:.3e}"
-    )
-
-
-def test_complex_to_dehnen_real_vjp_carries_the_imaginary_part():
-    """The VJP is the complete adjoint -- it is NOT blind to ``Im(coeffs)``.
-
-    ``jnp.real`` on the *output* does not decouple the input's imaginary part,
-    because ``Q`` is complex and ``Im(coeffs)`` therefore contributes to
-    ``Re(coeffs @ Q^T)``. This asserts both halves of that: the returned cotangent
-    has a nonzero imaginary component, and the directional derivative it predicts
-    matches finite differences along an **imaginary** perturbation as well as a real
-    one.
-
-    Written because an earlier revision of this function's docstring claimed the
-    opposite -- that the VJP discarded the imaginary cotangent -- inferred from the
-    presence of ``jnp.real`` rather than measured. A test is what stops that
-    reappearing.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("finite-difference comparison requires float64")
-
-    order = 3
-    size = sh_size(order)
-    rng = np.random.default_rng(4)
-    coeffs = jnp.asarray(
-        rng.normal(size=size) + 1j * rng.normal(size=size), dtype=jnp.complex128
-    )
-    cotangent = jnp.asarray(rng.normal(size=size), dtype=jnp.float64)
-
-    def convert(z):
-        return complex_to_dehnen_real_coeffs(z, order=order)
-
-    _, vjp_fn = jax.vjp(convert, coeffs)
-    (grad,) = vjp_fn(cotangent)
-
-    assert jnp.linalg.norm(jnp.imag(grad)) > 0.0, (
-        "the cotangent must carry an imaginary component; a purely real one would "
-        "mean the gradient is blind to Im(coeffs)"
-    )
-
-    step = 1e-7
-    for name, direction in (
-        ("real", jnp.asarray(rng.normal(size=size), dtype=jnp.complex128)),
-        ("imaginary", jnp.asarray(1j * rng.normal(size=size), dtype=jnp.complex128)),
-    ):
-        finite_difference = float(
-            np.dot(
-                np.asarray(cotangent),
-                (
-                    np.asarray(convert(coeffs + step * direction))
-                    - np.asarray(convert(coeffs - step * direction))
-                )
-                / (2 * step),
-            )
-        )
-        predicted = float(jnp.real(jnp.sum(grad * direction)))
-        rel = abs(predicted - finite_difference) / max(abs(finite_difference), 1e-300)
-        assert rel < 1e-6, (
-            f"VJP disagrees with the finite difference along the {name} direction: "
-            f"predicted {predicted:.10e} vs fd {finite_difference:.10e} "
-            f"(rel {rel:.3e})"
-        )
-
-
-def test_complex_to_dehnen_real_scales_linearly_in_mass():
-    """The conversion is mass-independent; P2M is linear in it.
-
-    Guards the other half of the identity above: ``complex_R_solidfmm`` carries no
-    mass, so the equivalence only holds because ``p2m_real_direct`` factorises as
-    ``mass * U_n^m(delta)``. If that factorisation broke, the unit-mass test above
-    would still pass.
+    Was ``test_complex_to_dehnen_real_scales_linearly_in_mass``, the mass half of
+    the complex-conversion identity removed with the complex basis in the 2026-10
+    cleanup (C). It is a real-only check and stays: the far-field normalisation
+    test above runs at one mass, so a broken factorisation would pass it.
     """
     if not jax.config.jax_enable_x64:
         pytest.skip("exact-identity tolerance requires float64 (JAX_ENABLE_X64=1)")

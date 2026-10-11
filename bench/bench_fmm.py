@@ -26,7 +26,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--basis",
-        choices=("real", "complex", "solidfmm"),
+        choices=("real", "solidfmm"),
         default="solidfmm",
         help="Expansion basis used for the benchmark",
     )

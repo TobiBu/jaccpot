@@ -67,7 +67,7 @@ def _solver(*, streamed: bool, retain: bool, force_scale_mode: str = "paper_cach
     return FastMultipoleMethod(
         theta=1.0,
         adaptive_eps=EPS,
-        expansion_basis="solidfmm",
+        basis="real",
         softening=0.0,
         mac_force_scale_mode=force_scale_mode,
         advanced=cfg,

@@ -253,8 +253,7 @@ def dehnen_multipole_power_by_degree(
 
     packed = jnp.asarray(multipole_packed)
     total_p = _packed_total_order(packed)
-    is_complex = jnp.iscomplexobj(packed)
-    dtype = packed.real.dtype if is_complex else packed.dtype
+    dtype = packed.dtype
     factorial = jnp.exp(jax.lax.lgamma(jnp.arange(2 * total_p + 1, dtype=dtype) + 1.0))
     powers: list[Array] = []
     for ell in range(total_p + 1):
@@ -264,12 +263,11 @@ def dehnen_multipole_power_by_degree(
         m_vals = jnp.arange(-ell, ell + 1, dtype=jnp.int32)
         m_abs = jnp.abs(m_vals)
         weights = factorial[ell - m_abs] * factorial[ell + m_abs]
-        if not is_complex:
-            weights = weights * jnp.where(
-                m_vals == 0,
-                jnp.asarray(1.0, dtype=dtype),
-                jnp.asarray(2.0, dtype=dtype),
-            )
+        weights = weights * jnp.where(
+            m_vals == 0,
+            jnp.asarray(1.0, dtype=dtype),
+            jnp.asarray(2.0, dtype=dtype),
+        )
         weighted_sq = jnp.square(jnp.abs(degree_slice)) * weights[None, :]
         powers.append(jnp.sqrt(jnp.sum(weighted_sq, axis=1)))
     return jnp.stack(powers, axis=1)
@@ -2345,7 +2343,7 @@ def build_adaptive_policy_state(
     if len(p_gears) == 0:
         raise ValueError("adaptive policy state requires non-empty p_gears")
     packed = upward.multipoles.packed
-    dtype = packed.real.dtype if jnp.iscomplexobj(packed) else packed.dtype
+    dtype = packed.dtype
     num_nodes = int(packed.shape[0])
     # The dispatch below is a Python ``if``, so the code has to be STATIC. A 0-d
     # array is fine while it is concrete, which it is on the single-GPU lane. It is

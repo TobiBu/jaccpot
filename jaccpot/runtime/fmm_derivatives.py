@@ -20,9 +20,6 @@ from jaccpot._jax_compat import Tracer
 from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.operators.symmetric_tensors import contract_symmetric_one_axis_3d
 from jaccpot.upward.real_tree_expansions import prepare_real_source_motion_multipoles
-from jaccpot.upward.solidfmm_complex_tree_expansions import (
-    prepare_solidfmm_complex_source_motion_multipoles,
-)
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
@@ -824,142 +821,6 @@ class DerivativesMixin(_EngineBase):
         return (jerk, snap, crackle)  # type: ignore[possibly-undefined]
 
     @jaxtyped(typechecker=beartype)
-    def _evaluate_source_motion_farfield_jerk(
-        self,
-        state: FMMPreparedState,
-        velocities: Array,
-        *,
-        target_indices: Optional[Array] = None,
-    ) -> Array:
-        """Evaluate source-motion far-field jerk using analytic dM->dL contraction.
-
-        This is the ``d_t L`` half of the far-field jerk -- the part that comes
-        from the *sources* moving, as distinct from the convective ``(v . grad) a``
-        part that comes from the target moving through a static field.
-        ``jerk_mode="fast_approx"`` drops exactly this term.
-
-        It runs a second full downward sweep on time-differentiated multipoles,
-        so it costs roughly another far-field evaluation.
-
-        Parameters
-        ----------
-        state : FMMPreparedState
-            Prepared state; must have ``expansion_basis == "solidfmm"``.
-        velocities : Array
-            Particle velocities in the caller's original order.
-        target_indices : Optional[Array]
-            Optional 1D index array selecting which targets to evaluate.
-
-        Returns
-        -------
-        Array
-            Source-motion far-field jerk, already scaled by ``-G``.
-
-        Raises
-        ------
-        NotImplementedError
-            If the state's expansion basis is not ``"solidfmm"``; no other basis
-            has the analytic source-motion multipoles this needs.
-        """
-        if state.expansion_basis != "solidfmm":
-            raise NotImplementedError(
-                "source-motion far-field jerk currently requires expansion_basis='solidfmm'"
-            )
-        particle_indices = jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
-        vel_sorted = velocities[particle_indices]
-        centers = jnp.asarray(state.downward.locals.centers, dtype=state.working_dtype)
-        source_motion_packed = prepare_solidfmm_complex_source_motion_multipoles(
-            state.tree,
-            state.positions_sorted,
-            state.masses_sorted,
-            vel_sorted,
-            max_order=int(state.downward.locals.order),
-            centers=centers,
-            time_derivative_order=1,
-            max_leaf_size=int(state.max_leaf_size),
-            rotation=self.complex_rotation,
-        )
-        source_motion_multipoles = NodeMultipoleData(
-            order=int(state.downward.locals.order),
-            centers=centers,
-            moments=None,
-            packed=jnp.asarray(source_motion_packed),
-            component_matrix=None,
-            source_motion_packed=None,
-        )
-        source_motion_upward = TreeUpwardData(
-            geometry=compute_tree_geometry_compiled(state.tree, state.positions_sorted),
-            mass_moments=compute_tree_mass_moments(
-                state.tree,
-                state.positions_sorted,
-                state.masses_sorted,
-            ),
-            multipoles=source_motion_multipoles,
-        )
-        runtime_overrides = self._resolve_runtime_execution_overrides(
-            num_particles=int(state.positions_sorted.shape[0]),
-        )
-        source_motion_downward = self.prepare_downward_sweep(
-            state.tree,
-            source_motion_upward,
-            theta=float(state.theta),
-            mac_type=self.mac_type,
-            initial_locals=None,
-            interactions=state.interactions,
-            m2l_chunk_size=runtime_overrides.m2l_chunk_size,
-            l2l_chunk_size=runtime_overrides.l2l_chunk_size,
-            dehnen_radius_scale=self.dehnen_radius_scale,
-        )
-        tracing_targets = isinstance(state.positions_sorted, Tracer) or isinstance(
-            target_indices, Tracer
-        )
-        if target_indices is None or tracing_targets:
-            far_grad_sorted, _, _ = _evaluate_local_expansions_for_particles(
-                source_motion_downward.locals,
-                state.positions_sorted,
-                leaf_nodes=jnp.asarray(
-                    state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
-                ),
-                node_ranges=jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
-                max_leaf_size=state.max_leaf_size,
-                order=int(source_motion_downward.locals.order),
-                expansion_basis=state.expansion_basis,
-                return_potential=False,
-                max_acc_derivative_order=0,
-            )
-            if target_indices is None:
-                far_grad = jnp.asarray(far_grad_sorted)[state.inverse_permutation]
-            else:
-                far_grad = jnp.asarray(far_grad_sorted)[state.inverse_permutation][
-                    target_indices
-                ]
-        else:
-            target_sorted_indices = jnp.asarray(
-                state.inverse_permutation[target_indices], dtype=INDEX_DTYPE
-            )
-            leaf_nodes = jnp.asarray(
-                state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
-            )
-            node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
-            target_leaf_positions = _map_targets_to_leaf_positions(
-                target_sorted_indices=target_sorted_indices,
-                leaf_nodes=leaf_nodes,
-                node_ranges=node_ranges,
-            )
-            far_grad, _, _ = _evaluate_local_expansions_for_target_particles(
-                local_data=source_motion_downward.locals,
-                positions_sorted=state.positions_sorted,
-                target_sorted_indices=target_sorted_indices,
-                target_leaf_positions=target_leaf_positions,
-                leaf_nodes=leaf_nodes,
-                order=int(source_motion_downward.locals.order),
-                expansion_basis=state.expansion_basis,
-                return_potential=False,
-                max_acc_derivative_order=0,
-            )
-        return -jnp.asarray(self.G, dtype=state.positions_sorted.dtype) * far_grad
-
-    @jaxtyped(typechecker=beartype)
     def _evaluate_farfield_time_derivative_orders(
         self,
         state: FMMPreparedState,
@@ -1084,33 +945,17 @@ class DerivativesMixin(_EngineBase):
         mass_moments = compute_tree_mass_moments(
             state.tree, state.positions_sorted, state.masses_sorted
         )
-        real_basis = self._solidfmm_basis_mode() == "real"
         for k in range(1, k_max + 1):
-            if real_basis:
-                source_motion_packed = prepare_real_source_motion_multipoles(
-                    state.tree,
-                    state.positions_sorted,
-                    state.masses_sorted,
-                    vel_sorted,
-                    max_order=int(state.downward.locals.order),
-                    centers=centers,
-                    time_derivative_order=k,
-                    max_leaf_size=int(state.max_leaf_size),
-                )
-            else:
-                source_motion_packed = (
-                    prepare_solidfmm_complex_source_motion_multipoles(
-                        state.tree,
-                        state.positions_sorted,
-                        state.masses_sorted,
-                        vel_sorted,
-                        max_order=int(state.downward.locals.order),
-                        centers=centers,
-                        time_derivative_order=k,
-                        max_leaf_size=int(state.max_leaf_size),
-                        rotation=self.complex_rotation,
-                    )
-                )
+            source_motion_packed = prepare_real_source_motion_multipoles(
+                state.tree,
+                state.positions_sorted,
+                state.masses_sorted,
+                vel_sorted,
+                max_order=int(state.downward.locals.order),
+                centers=centers,
+                time_derivative_order=k,
+                max_leaf_size=int(state.max_leaf_size),
+            )
             source_motion_upward = TreeUpwardData(
                 geometry=geometry,
                 mass_moments=mass_moments,

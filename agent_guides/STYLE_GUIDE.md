@@ -301,8 +301,9 @@ F821 on an axis name, add it and move on -- the prediction is the fragile part, 
 spherical-harmonic buffer before -- the note below says `C` means `sh_size(p)` *elsewhere in
 the package*, meaning in prose. `sh` is that count as an axis, lowercase like the rest, and
 named after the `sh_size` function it equals. Observed at 4, 16 and 25, i.e. p=1, 3 and 4. It
-carries `Inexact`, not `Float`: the complex basis is a live lane and a packed buffer on it is
-`c64`/`c128`, which is the subject of the dtype half of the capture-coverage note below.
+carries `Inexact`, not `Float`: the complex basis was a live lane (until the 2026-10 cleanup,
+C) and a packed buffer on it was `c64`/`c128`, which is the subject of the dtype half of the
+capture-coverage note below.
 
 **`degrees` and `orders` are different axes and were observed differing**, which is the only
 reason they need separate names: `dehnen_paper_pair_error_by_order` takes `source_power` as
@@ -348,7 +349,8 @@ even the symbolic form had to go back to a rank-only `_`.
 
 **And the same bound applies to the dtype, which is the easier half to forget.**
 `runtime/_adaptive_policy.py`'s `multipole_packed` was annotated `Float[Array, "nodes sh"]`
-from a pilot recording taken entirely on the real basis. The complex basis hands the same
+from a pilot recording taken entirely on the real basis. The complex basis (removed in the
+2026-10 cleanup, C) handed the same
 parameter `c128[31,9]`, `c128[1,25]`, `c128[255,25]` and `c64[15,16]`, so the annotation
 rejected a supported lane and 27 tests failed in CI -- including
 `test_dehnen_power_is_basis_invariant`, whose whole point is that both bases agree, and the

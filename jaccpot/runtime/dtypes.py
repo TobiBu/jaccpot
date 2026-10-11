@@ -106,35 +106,8 @@ def as_index(x: object) -> jnp.ndarray:
     return jnp.asarray(x, dtype=INDEX_DTYPE)
 
 
-def complex_dtype_for_real(real_dtype: DTypeLike) -> DTypeLike:
-    """Return complex dtype paired with a real floating dtype.
-
-    Parameters
-    ----------
-    real_dtype : DTypeLike
-        A real dtype. Resolved through ``jnp.asarray(0, dtype=...)``, so it picks
-        up JAX's own canonicalisation -- with x64 disabled a ``float64`` request
-        resolves to float32 here and pairs with complex64, matching what the
-        arrays will actually be.
-
-    Returns
-    -------
-    DTypeLike
-        ``jnp.complex128`` for float64, ``jnp.complex64`` for **everything
-        else**. That is a floor as well as a mapping: float16 and bfloat16 both
-        widen to complex64 rather than to a half-precision complex, which JAX has
-        no type for.
-    """
-
-    dtype = jnp.asarray(0, dtype=real_dtype).dtype
-    if dtype == jnp.float64:
-        return jnp.complex128
-    return jnp.complex64
-
-
 __all__ = [
     "INDEX_DTYPE",
     "as_index",
-    "complex_dtype_for_real",
     "require_index_capacity",
 ]

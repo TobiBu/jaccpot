@@ -152,12 +152,6 @@ CONVERTED_MODULES = (
     # scalar `dz`/`r`/`angle` group and the packing helpers -- about 60 bare
     # parameters, each its own family question.
     #
-    # `evaluate_local_complex_with_grad_batch` keeps a bare `deltas` and gets NO
-    # `DELIBERATELY_BARE` entry, deliberately: that set is keyed on (module,
-    # parameter name), so exempting `deltas` would stop the guard checking the 11
-    # annotated ones too. It is simply not decorated, which is what keeps it out of
-    # this check -- and the reason it is not annotated is recorded at the site.
-    "jaccpot/operators/complex_ops.py",
     # Phase 2, second change, and the FIRST enforced annotations anywhere in
     # `jaccpot/pallas/`. Not a module conversion: the five module-level entry
     # points carry shapes, the three tile helpers below them do not, and the split

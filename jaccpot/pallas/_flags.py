@@ -1,7 +1,8 @@
-"""Runtime switches shared by both fused M2L kernels.
+"""Runtime switches of the fused M2L kernel.
 
-``JACCPOT_FUSED_M2L_VJP`` selects the reverse-mode implementation for *both* the
-real and the complex fused M2L, so it needs exactly one reader. It had two --
+``JACCPOT_FUSED_M2L_VJP`` selected the reverse-mode implementation for *both* the
+real and the complex fused M2L (the complex one went with the complex basis in the
+2026-10 cleanup, C), so it needed exactly one reader. It had two --
 byte-identical bodies in ``m2l_real_fused`` and ``m2l_complex_fused`` (audit
 **F13**) -- and they had already begun to drift: the docstrings disagreed about
 what the switch does while the code still agreed. That is the cheap half of the

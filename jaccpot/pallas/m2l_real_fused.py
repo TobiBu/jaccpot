@@ -1,6 +1,7 @@
 """Fully-fused real-basis M2L Pallas kernel (rotate -> z-translate -> rotate-back).
 
-Real analog of :mod:`jaccpot.pallas.m2l_complex_fused`: fuses the ENTIRE real
+Real analog of the complex fused kernel (``m2l_complex_fused``, removed with the
+complex basis in the 2026-10 cleanup, C): fuses the ENTIRE real
 rot-scale M2L (:func:`jaccpot.operators.m2l_real_rot_scale.m2l_rot_scale_real_batch`
 = rotate-to-z, z-translate, rotate-back) into a single Pallas kernel per pair, so
 the per-pair JAX rotation + z-core launches collapse. Real-valued (no imaginary
@@ -53,7 +54,7 @@ __all__ = [
 def pallas_m2l_real_fused_supported() -> bool:
     """True only on a GPU with compute capability >= 8.0 (Ampere+).
 
-    Matches :func:`jaccpot.pallas.m2l_complex_fused.pallas_m2l_complex_fused_supported`:
+    Matched the complex kernel's support check (removed in the 2026-10 cleanup, C):
     real Pallas GPU execution needs Ampere (sm_80+), so a plain ``gpu``/``tpu``
     backend check is not sufficient -- on a pre-Ampere GPU the Triton lowering
     fails at runtime. Callers must fall back to the pure-JAX rot-scale otherwise.
@@ -716,7 +717,7 @@ def m2l_real_fused_vjp_pallas(
 # --------------------------------------------------------------------------
 # Differentiable wrapper: fused Pallas forward + autodiff-of-twin reverse.
 # --------------------------------------------------------------------------
-# Real analogue of ``m2l_complex_fused_pallas_cvjp``. ``pallas_call`` has no
+# Real analogue of ``m2l_complex_fused_pallas_cvjp`` (removed in C). ``pallas_call`` has no
 # JVP/transpose, so this ``custom_vjp`` runs the fused Pallas kernel forward and
 # takes the reverse from autodiff of the pure-jnp twin ``m2l_real_fused_jax`` --
 # the literal port the kernel is verified against, so the gradient is a faithful

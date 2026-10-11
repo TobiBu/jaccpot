@@ -14,9 +14,9 @@ limits:
 - the general time-derivative API currently accepts only `mode="accurate"`
   and raises for other mode strings.
 - public acceleration spatial derivatives
-  (`max_acc_derivative_order > 0`) work on both bases: `"real"` (the default) and
-  `"solidfmm"`/`"complex"`. (`"cartesian"` never supported them; it was removed in
-  the 2026-10 cleanup, K, and now raises at construction.)
+  (`max_acc_derivative_order > 0`) work on the real basis, the only one
+  (`"solidfmm"` is its family name). `"complex"` and `"cartesian"` were removed in
+  the 2026-10 cleanup (C and K) and raise at construction.
 - public time derivatives above crackle (`max_time_derivative_order > 3`) are
   not implemented yet.
 - all of these paths work both on full solves and on prepared-state/subset
@@ -42,8 +42,15 @@ For `max_acc_derivative_order = 1`:
 
 Current support:
 
-- enabled for `basis="real"` (default) and `basis="solidfmm"`, the only two
-  bases left (`basis="cartesian"` was removed in the 2026-10 cleanup, K)
+- enabled for `basis="real"` (default; `basis="solidfmm"` is the same basis),
+  the only basis left (`"cartesian"` and `"complex"` were removed in the 2026-10
+  cleanup, K and C)
+- **far field only**: the tower differentiates the local expansions (the far
+  field), and the near-field P2P contributes nothing to it -- with no accepted
+  M2L pair it is exactly zero. Its direct-sum oracle
+  (`tests/integration/test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_direct_sum`)
+  is therefore the derivative of the direct sum over exactly the sources the
+  accepted far pairs cover
 - exact at every offset on the real basis, including a target sitting on its
   expansion centre (a single-particle leaf) or on the centre's z-axis: the tower
   lowers the coefficients with the exact Cartesian-derivative operator of the real
@@ -96,7 +103,7 @@ For the currently supported public orders:
 
 - analytic far-field source-motion jerk via source-motion multipole/local
   contractions (`dM -> dL`) plus convective far-field and exact near-field terms
-- no finite-difference solves, on either basis (`real` and `solidfmm`)
+- no finite-difference solves
 - `jerk_fd_dt` is accepted and unused, with no warning and no check on its
   value: it stepped the finite-difference fallback of `basis="cartesian"`, which
   was removed in the 2026-10 cleanup (K). It stays on all four jerk signatures
@@ -107,8 +114,10 @@ For the currently supported public orders:
   (frozen) centres -- a lowered leaf P2M plus the ordinary M2M -- and runs them
   through the ordinary M2L / L2L, which are linear at fixed geometry. On the real
   basis this is `prepare_real_source_motion_multipoles`
-  (`jaccpot/upward/real_tree_expansions.py`); real and complex agree to round-off
-  (8e-18 relative on the jerk at N = 96, p = 4, theta 0.6)
+  (`jaccpot/upward/real_tree_expansions.py`); real and complex agreed to round-off
+  (8e-18 relative on the jerk at N = 96, p = 4, theta 0.6) until the complex basis
+  was removed in the 2026-10 cleanup (C). The direct-sum oracle with the far field
+  engaged there: jerk 4.3e-4, snap 8.3e-5, crackle 9.6e-6 (Plummer softening)
 
 ### What the time derivatives mean
 
@@ -127,8 +136,8 @@ reference that includes the relative-acceleration terms (as nornax's
   - order 3: crackle
 - `mode="accurate"` is currently the only accepted public mode for the general
   time-derivative API.
-- the far-field higher time-derivative assembler works on both bases (`real`,
-  `solidfmm`)
+- the far-field higher time-derivative assembler runs on the real basis (the
+  only one since the 2026-10 cleanup, C)
 - orders above 3 are not implemented yet
 - higher-order source-motion multipole kernels are implemented internally and
   feed the public runtime assembler
@@ -164,5 +173,5 @@ General recommendation:
 See
 [`examples/time_derivatives_demo.ipynb`](/Users/buck/Documents/Nexus/Projects/jaccpot/examples/time_derivatives_demo.ipynb)
 for a worked example that computes and inspects jerk, snap, and crackle in the
-analytic `solidfmm` path, including a direct-sum accuracy comparison on small
+analytic spherical-harmonic path, including a direct-sum accuracy comparison on small
 particle sets.

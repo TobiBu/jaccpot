@@ -26,11 +26,7 @@ import numpy as np
 import pytest
 from yggdrax.tree import Tree
 
-from jaccpot.operators.complex_harmonics import p2m_complex
-from jaccpot.operators.real_harmonics import (
-    complex_to_dehnen_real_coeffs,
-    p2m_real_direct,
-)
+from jaccpot.operators.real_harmonics import p2m_real_direct
 from jaccpot.runtime._adaptive_policy import (
     _ERROR_MODEL_DEHNEN_PAPER,
     adaptive_pair_policy,
@@ -67,24 +63,15 @@ def _packed_real(delta: tuple[float, float, float], mass: float) -> jnp.ndarray:
     return jnp.asarray(packed)[None, :]
 
 
-def _packed_complex(delta: tuple[float, float, float], mass: float) -> jnp.ndarray:
-    packed = p2m_complex(
-        jnp.asarray(delta, dtype=jnp.float64),
-        jnp.asarray(mass, dtype=jnp.float64),
-        order=ORDER,
-    )
-    return jnp.asarray(packed)[None, :]
-
-
 # ---------------------------------------------------------------------------
 # eq (12): source power
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("delta", OFFSETS)
-@pytest.mark.parametrize("basis", ["real", "complex"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_dehnen_power_of_point_mass_equals_mass_times_distance_pow_n(basis, delta):
-    """``P_n == m |d|^n`` for a single point mass, in either packed basis.
+    """``P_n == m |d|^n`` for a single point mass, in the real packed basis.
 
     This is the exact closed form of eq (12) for a one-particle cell and it is
     rotation invariant, so any error in the factorial weights -- including one
@@ -92,34 +79,13 @@ def test_dehnen_power_of_point_mass_equals_mass_times_distance_pow_n(basis, delt
     the coordinate axes -- breaks it.
     """
 
-    packed = (
-        _packed_real(delta, MASS) if basis == "real" else _packed_complex(delta, MASS)
-    )
+    packed = _packed_real(delta, MASS)
     power = np.asarray(dehnen_multipole_power_by_degree(multipole_packed=packed))[0]
 
     distance = float(np.linalg.norm(np.asarray(delta)))
     expected = np.asarray([MASS * distance**n for n in range(ORDER + 1)])
 
     np.testing.assert_allclose(power, expected, rtol=1e-12, atol=1e-13)
-
-
-@pytest.mark.parametrize("delta", OFFSETS)
-def test_dehnen_power_is_basis_invariant(delta):
-    """eq (12) is a rotation invariant, so it cannot depend on the packing."""
-
-    complex_packed = _packed_complex(delta, MASS)
-    real_packed = jnp.asarray(
-        complex_to_dehnen_real_coeffs(complex_packed[0], order=ORDER)
-    )[None, :]
-
-    from_complex = np.asarray(
-        dehnen_multipole_power_by_degree(multipole_packed=complex_packed)
-    )
-    from_real = np.asarray(
-        dehnen_multipole_power_by_degree(multipole_packed=real_packed)
-    )
-
-    np.testing.assert_allclose(from_real, from_complex, rtol=1e-12, atol=1e-13)
 
 
 def test_dehnen_power_matches_numpy_weight_reference():

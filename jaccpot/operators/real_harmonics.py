@@ -191,10 +191,7 @@ from __future__ import annotations
 
 from ._sh_indexing import sh_index, sh_offset, sh_size
 from .real_dehnen_q import (
-    _compute_dehnen_B_matrix_complex,
-    _dehnen_real_Q_full,
     build_Q_dehnen_no_sqrt2,
-    complex_to_dehnen_real_coeffs,
     compute_real_B_matrix_local,
     compute_real_B_matrix_multipole,
     verify_real_B_matrix,
@@ -226,17 +223,6 @@ from .real_translations import (
     z_m2l_translation_tables,
 )
 
-# RE-EXPORTS. Both names are imported for other modules to reach through this
-# aggregator and are unused *here*. Holding references makes that a fact the
-# interpreter can see, so `pyflakes` reports only genuinely dead re-exports for
-# this module. `__all__` cannot carry them: it declares the PUBLIC surface, and
-# these are private by name -- which is why an `__all__` alone left this module
-# reporting 10 unused imports (audit A.11).
-_REEXPORTS = (
-    _compute_dehnen_B_matrix_complex,
-    _dehnen_real_Q_full,
-)
-
 # ===========================================================================
 # Exports
 # ===========================================================================
@@ -247,9 +233,8 @@ __all__ = [
     "sh_size",
     "sh_offset",
     "sh_index",
-    # Complex -> Dehnen real basis conversion
+    # The per-degree complex -> Dehnen-real map the real B matrices are built from
     "build_Q_dehnen_no_sqrt2",
-    "complex_to_dehnen_real_coeffs",
     # P2M (particle to multipole)
     "p2m_real_direct",
     # L2P (local to particle evaluation)

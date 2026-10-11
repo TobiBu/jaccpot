@@ -96,11 +96,10 @@ def policy_upward_view(*, upward: Any, geometry: Any, mass_moments: Any) -> Any:
     ``fmm_sweeps`` by rebuilding a :class:`TreeUpwardData` around the real
     coefficients; this is the same construction, for the same reason.
 
-    Both bases are wrapped, not only the real one, so the criterion measures its
-    geometry from the SAME ``TreeGeometry`` the two walks used. The complex sweep
-    computes a geometry of its own, and letting the criterion silently take that
-    one instead would put the acceptance test and the traversal on different node
-    radii.
+    The criterion measures its geometry from the SAME ``TreeGeometry`` the two
+    walks used. (The complex sweep, removed in the 2026-10 cleanup, C, computed a
+    geometry of its own; letting the criterion take that one would have put the
+    acceptance test and the traversal on different node radii.)
 
     **Everything here is frozen with ``stop_gradient``, and that is the point.**
     The criterion decides the far/near split, which is part of the DISCRETE
@@ -117,8 +116,8 @@ def policy_upward_view(*, upward: Any, geometry: Any, mass_moments: Any) -> Any:
     Parameters
     ----------
     upward : Any
-        The per-device upward-sweep result, real or complex basis. May be live;
-        it is frozen here.
+        The per-device (real-basis) upward-sweep result. May be live; it is
+        frozen here.
     geometry : Any
         The ``TreeGeometry`` the walks were run against.
     mass_moments : Any

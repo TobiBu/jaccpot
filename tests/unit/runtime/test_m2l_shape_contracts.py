@@ -55,27 +55,17 @@ def _chunk_args(nodes: int = 6, sh: int = 9):
     """
     idx = jnp.zeros((2,), dtype=jnp.int32)
     return {
-        "multip_packed": jnp.zeros((nodes, sh), dtype=jnp.complex128),
+        "multip_packed": jnp.zeros((nodes, sh), dtype=_dtype()),
         "centers": jnp.zeros((nodes, 3), dtype=_dtype()),
         "src_idx": idx,
         "tgt_idx": idx,
         "valid": jnp.ones((2,), dtype=bool),
         "order": ORDER,
-        "basis_mode": "complex",
+        "basis_mode": "real",
         "rotation": "solidfmm",
-        "m2l_impl": None,
-        "out_dtype": jnp.complex128,
+        "m2l_impl": "rot_scale",
+        "out_dtype": _dtype(),
     }
-
-
-def test_a_complex_packed_expansion_is_still_accepted():
-    """`Inexact` and not `Float`: `basis_mode="complex"` is a live lane.
-
-    Narrowing this pair to `Float` is the mistake #293 made one module over, where a
-    real-basis-only recording cost 27 CI failures on the complex lane.
-    """
-    out = _m2l_chunk_contributions(**_chunk_args())
-    assert out.shape[0] == 2
 
 
 def test_centers_that_disagree_with_the_multipoles_on_nodes_are_rejected():
@@ -121,14 +111,15 @@ def test_a_two_component_centre_is_rejected():
 CHUNK, CHUNK_SH, CHUNK_NODES = 512, 25, 255
 
 
-def _scatter_args(dtype=jnp.complex128):
+def _scatter_args(dtype=jnp.float64):
     """Build one valid chunked-scatter argument set.
 
     Parameters
     ----------
     dtype : Any
-        Coefficient dtype. The recording shows complex128, complex64 AND float64 here,
-        which is why the annotation is `Inexact` and not `Float`.
+        Coefficient dtype. The recording showed complex128, complex64 AND float64
+        here, which is why the annotation is `Inexact` and not `Float`; the complex
+        basis went in the 2026-10 cleanup (C), so the cases below are float64.
 
     Returns
     -------
@@ -143,15 +134,15 @@ def _scatter_args(dtype=jnp.complex128):
     }
 
 
-@pytest.mark.parametrize("dtype", [jnp.complex128, jnp.float64])
+@pytest.mark.parametrize("dtype", [jnp.float64])
 def test_the_chunked_scatter_accepts_both_bases(dtype):
     """The control, and the dtype half of it.
 
     Parameters
     ----------
     dtype : Any
-        Complex for the complex basis, float for the real one. `Float` here would
-        reject the complex basis outright -- the mistake #293 shipped.
+        Float, the real basis's. (A `complex128` case went with the complex basis
+        in the 2026-10 cleanup, C.)
     """
     args = _scatter_args(dtype)
     out = _chunk_segment_scatter_add(**args, chunk_size=CHUNK)
@@ -165,7 +156,7 @@ def test_contributions_shorter_than_their_target_list_are_rejected():
     row 510 twice.
     """
     args = _scatter_args()
-    args["contribs"] = jnp.ones((CHUNK - 1, CHUNK_SH), dtype=jnp.complex128)
+    args["contribs"] = jnp.ones((CHUNK - 1, CHUNK_SH), dtype=jnp.float64)
     with pytest.raises(TypeCheckError):
         _chunk_segment_scatter_add(**args, chunk_size=CHUNK)
 
@@ -178,7 +169,7 @@ def test_the_accumulator_and_the_contributions_must_agree_on_sh():
     The recording agrees on it in all 9 distinct combinations, at 4, 9, 25 and 81.
     """
     args = _scatter_args()
-    args["local_accum"] = jnp.zeros((CHUNK_NODES, CHUNK_SH - 1), dtype=jnp.complex128)
+    args["local_accum"] = jnp.zeros((CHUNK_NODES, CHUNK_SH - 1), dtype=jnp.float64)
     with pytest.raises((TypeCheckError, ValueError)):
         _chunk_segment_scatter_add(**args, chunk_size=CHUNK)
 
@@ -191,6 +182,6 @@ def test_the_accumulators_node_axis_stays_free():
     chunk. Asserted so nobody "closes" it later on the strength of the pilot's report.
     """
     args = _scatter_args()
-    args["local_accum"] = jnp.zeros((CHUNK_NODES - 1, CHUNK_SH), dtype=jnp.complex128)
+    args["local_accum"] = jnp.zeros((CHUNK_NODES - 1, CHUNK_SH), dtype=jnp.float64)
     out = _chunk_segment_scatter_add(**args, chunk_size=CHUNK)
     assert out.shape == (CHUNK_NODES - 1, CHUNK_SH)

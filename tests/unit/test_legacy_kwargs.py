@@ -34,7 +34,7 @@ def test_accepts_legacy_expanse_kwargs_with_deprecation_warning():
     with pytest.warns(DeprecationWarning):
         fmm = FastMultipoleMethod(
             preset="fast",
-            expansion_basis="solidfmm",
+            expansion_basis="real",
             complex_rotation="solidfmm",
             mac_type="dehnen",
             fixed_order=4,
@@ -70,7 +70,7 @@ def test_runtime_config_spelling_of_fixed_order_and_leaf_cap_is_silent():
         warnings.simplefilter("error", DeprecationWarning)
         fmm = FastMultipoleMethod(
             preset="fast",
-            basis="solidfmm",
+            basis="real",
             theta=0.6,
             softening=1e-3,
             working_dtype=jnp.float32,
@@ -99,7 +99,7 @@ def test_the_config_spelling_reaches_the_engine():
     """
     fmm = FastMultipoleMethod(
         preset="fast",
-        basis="solidfmm",
+        basis="real",
         advanced=FMMAdvancedConfig(
             runtime=RuntimePolicyConfig(fixed_order=5, fixed_max_leaf_size=32),
         ),
@@ -119,7 +119,7 @@ def test_the_kwarg_spelling_still_warns_but_wins():
     with pytest.warns(DeprecationWarning):
         fmm = FastMultipoleMethod(
             preset="fast",
-            basis="solidfmm",
+            basis="real",
             fixed_order=4,
             fixed_max_leaf_size=16,
             advanced=FMMAdvancedConfig(

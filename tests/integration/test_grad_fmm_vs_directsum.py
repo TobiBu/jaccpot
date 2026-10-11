@@ -86,7 +86,7 @@ def _num_far_pairs(state):
 # (theta, order, leaf) point per basis is enough: the reverse pass is
 # order-independent to validate, and the deep-config memory plateaus rather than
 # accumulating (see the module docstring and tests/conftest.py).
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 @pytest.mark.parametrize("theta,order,leaf,tol", [(0.6, 4, 4, 5e-3)])
 def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, leaf, tol):
     n = 64
@@ -123,7 +123,7 @@ def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, leaf, to
     )
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_grad_fmm_matches_grad_directsum_masses(basis):
     n = 64
     positions, masses, probe = _system(n, seed=1)
@@ -170,7 +170,7 @@ def test_differentiable_matches_forward_compute_accelerations():
     n = 64
     positions, masses, _ = _system(n, seed=2)
     fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.4, G=1.0, softening=1e-2
+        basis="real", use_pallas=False, theta=0.4, G=1.0, softening=1e-2
     )
     state = fmm.prepare_state(positions, masses, max_order=4, leaf_size=16)
     a_diff = fmm.differentiable_accelerations(state, positions, masses)

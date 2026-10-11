@@ -109,7 +109,7 @@ def audit(*, n, leaf, order, theta, dtype, softening, wrt, precompute_scatter=Tr
         nearfield=NearFieldConfig(precompute_scatter_schedules=bool(precompute_scatter))
     )
     fmm = FastMultipoleMethod(
-        basis="complex",
+        basis="real",
         use_pallas=False,
         theta=theta,
         G=1.0,

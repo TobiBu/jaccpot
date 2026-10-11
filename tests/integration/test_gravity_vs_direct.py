@@ -69,7 +69,7 @@ def test_fmm_acceleration_matches_direct_sum(dtype, rel_tol: float, abs_tol: flo
 
     fmm = FastMultipoleMethod(
         preset="accurate",
-        basis="solidfmm",
+        basis="real",
         theta=0.5,
         G=g_const,
         softening=softening,

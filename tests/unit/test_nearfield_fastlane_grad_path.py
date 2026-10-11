@@ -50,7 +50,7 @@ def _system(n, seed=0):
     return positions, masses
 
 
-def _prepared(n, *, leaf, order=3, theta=0.5, basis="complex", seed=0):
+def _prepared(n, *, leaf, order=3, theta=0.5, basis="real", seed=0):
     positions, masses = _system(n, seed=seed)
     fmm = FastMultipoleMethod(
         basis=basis, use_pallas=False, theta=theta, G=1.0, softening=1e-2
@@ -204,7 +204,7 @@ def test_payload_handles_a_tree_with_no_cross_leaf_neighbours():
     assert not bool(np.asarray(payload.source_leaf_valid_mask).any())
 
     fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.5, G=1.0, softening=1e-2
+        basis="real", use_pallas=False, theta=0.5, G=1.0, softening=1e-2
     )
     near = compute_leaf_p2p_accelerations_radix_fast_lane(
         positions_sorted=positions,
@@ -470,7 +470,7 @@ def test_analytic_reverse_matches_autodiff_under_skewed_occupancy():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("basis", ["complex", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_differentiable_accelerations_fast_lane_matches_bucketed(basis, monkeypatch):
     fmm, state, positions, masses = _prepared(256, leaf=16, order=4, basis=basis)
 
@@ -532,10 +532,10 @@ def test_fused_pallas_fast_lane_matches_bucketed_end_to_end(monkeypatch):
 
     positions, masses = _system(256, seed=0)
     reference_fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=False, theta=0.5, G=1.0, softening=1e-2
+        basis="real", use_pallas=False, theta=0.5, G=1.0, softening=1e-2
     )
     pallas_fmm = FastMultipoleMethod(
-        basis="complex", use_pallas=True, theta=0.5, G=1.0, softening=1e-2
+        basis="real", use_pallas=True, theta=0.5, G=1.0, softening=1e-2
     )
     ref_state = reference_fmm.prepare_state(
         positions, masses, max_order=4, leaf_size=16

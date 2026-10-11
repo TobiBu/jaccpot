@@ -52,14 +52,16 @@ FAMILIES: dict[str, dict] = {
             "upward/solidfmm_complex_tree_expansions.py",
             "basis/complex_sh.py",
         ],
-        "functions": [("**/*.py", r"complex")],
+        # `_compute_dehnen_B_matrix_complex` (operators/real_dehnen_q.py) stays
+        # after C: the real basis's precomputed B matrices are built from it.
+        "functions": [("**/*.py", r"^(?!_compute_dehnen_B_matrix_complex$).*complex")],
     },
     "cartesian": {
         "files": ["operators/multipole_utils.py"],
         "functions": [
-            # After K, `_resolve_center_mode` is all that is left of this module's
-            # functions, and the complex upward sweep calls it: not Cartesian.
-            ("upward/tree_expansions.py", r"^(?!_resolve_center_mode$)[^.]+$"),
+            # After K, `_resolve_center_mode` was all that was left of this
+            # module's functions (complex, not Cartesian); it went in C.
+            ("upward/tree_expansions.py", r"^[^.]+$"),
             ("downward/local_expansions.py", r"^[^.]+$"),
             # `l2p_real_grad_cartesian` is the real-SH Pallas L2P (Cartesian
             # gradient components), which K keeps; it was always an overcount.

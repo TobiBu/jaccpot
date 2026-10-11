@@ -27,23 +27,20 @@ import jax.numpy as jnp
 import pytest
 
 import jaccpot.operators.m2l_real_rot_scale as rot_scale
-from jaccpot.pallas import m2l_complex_fused, m2l_real_fused
+from jaccpot.pallas import m2l_real_fused
 from jaccpot.pallas._flags import fused_m2l_vjp_enabled
 
 
 class TestTheFusedVjpSwitchHasOneReader:
     """F13: one shared switch, one definition."""
 
-    def test_both_lanes_resolve_to_the_same_object(self):
+    def test_the_lane_resolves_to_the_shared_object(self):
         """Not merely equal behaviour -- the same function.
 
-        Equality of results would still permit the two to drift apart later,
-        which is what this row was about. Identity cannot.
+        Equality of results would still permit the copies to drift apart later,
+        which is what this row was about. Identity cannot. (The complex fused lane,
+        the other reader, went with the complex basis in the 2026-10 cleanup, C.)
         """
-        assert (
-            m2l_real_fused._fused_m2l_vjp_enabled
-            is m2l_complex_fused._fused_m2l_vjp_enabled
-        )
         assert m2l_real_fused._fused_m2l_vjp_enabled is fused_m2l_vjp_enabled
 
     def test_the_package_defines_it_once(self):

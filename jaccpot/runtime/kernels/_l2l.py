@@ -39,10 +39,6 @@ from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
 )
-from jaccpot.operators.complex_ops import (
-    enforce_conjugate_symmetry_batch,
-    l2l_complex_batch,
-)
 from jaccpot.operators.real_harmonics import (
     l2l_real,
 )
@@ -63,35 +59,6 @@ from ._shared import _normalize_strict_refresh_detail_diag_mode
 __all__: list[str] = []
 
 
-@partial(jax.jit, static_argnames=("order", "rotation"))
-def _l2l_complex_batch_kernel(
-    coeffs: Array,
-    deltas: Array,
-    *,
-    order: int,
-    rotation: str,
-) -> Array:
-    """Vectorized complex-basis L2L translation kernel.
-
-    Parameters
-    ----------
-    coeffs : Array
-        ``(pairs, C)`` parent local coefficients, one row per child.
-    deltas : Array
-        ``(pairs, 3)`` displacements, ``parent centre - child centre``.
-    order : int
-        Expansion order.
-    rotation : str
-        Rotation lane for the complex L2L.
-
-    Returns
-    -------
-    Array
-        ``(pairs, C)`` local coefficients re-centred on the children.
-    """
-    return l2l_complex_batch(coeffs, deltas, order=order, rotation=rotation)
-
-
 @partial(jax.jit, static_argnames=("order",))
 def _l2l_real_batch_kernel(
     coeffs: Array,
@@ -106,8 +73,7 @@ def _l2l_real_batch_kernel(
     coeffs : Array
         ``(pairs, C)`` parent local coefficients, one row per child.
     deltas : Array
-        ``(pairs, 3)`` displacements, ``parent centre - child centre`` -- the
-        same sign convention as the complex kernel.
+        ``(pairs, 3)`` displacements, ``parent centre - child centre``.
     order : int
         Expansion order.
 
@@ -117,74 +83,6 @@ def _l2l_real_batch_kernel(
         ``(pairs, C)`` local coefficients re-centred on the children.
     """
     return jax.vmap(lambda c, d: l2l_real(c, d, order=order))(coeffs, deltas)
-
-
-@partial(
-    jax.jit,
-    static_argnames=("order", "rotation", "total_nodes"),
-    donate_argnums=(0,),
-)
-def _propagate_solidfmm_locals_to_children(
-    coeffs_local: Array,
-    centers_local: Array,
-    left_child: Array,
-    right_child: Array,
-    *,
-    order: int,
-    rotation: str,
-    total_nodes: int,
-) -> Array:
-    """Apply solidfmm L2L translations from parents to their children.
-
-    One level of descent only. Use
-    :func:`_propagate_solidfmm_locals_by_level` when expansions may have been
-    deposited above the leaves, which is the general case.
-
-    Parameters
-    ----------
-    coeffs_local : Array
-        ``(total_nodes, C)`` local coefficients; parents are read, children
-        written.
-    centers_local : Array
-        ``(total_nodes, 3)`` expansion centres.
-    left_child : Array
-        Left child of each internal node.
-    right_child : Array
-        Right child of each internal node.
-    order : int
-        Expansion order.
-    rotation : str
-        Rotation lane for the complex L2L.
-    total_nodes : int
-        Node count, i.e. the scatter extent.
-
-    Returns
-    -------
-    Array
-        ``(total_nodes, C)`` locals with each child's inherited expansion added.
-    """
-    num_internal_nodes = left_child.shape[0]
-    parent_idx = jnp.arange(num_internal_nodes, dtype=INDEX_DTYPE)
-    child_idx = jnp.concatenate(
-        [left_child[:num_internal_nodes], right_child[:num_internal_nodes]],
-        axis=0,
-    )
-    parent_rep = jnp.concatenate([parent_idx, parent_idx], axis=0)
-    valid = child_idx >= 0
-    safe_child_idx = jnp.where(valid, child_idx, 0)
-
-    parent_coeffs = coeffs_local[parent_rep]
-    deltas = centers_local[safe_child_idx] - centers_local[parent_rep]
-    translated = _l2l_complex_batch_kernel(
-        parent_coeffs,
-        deltas,
-        order=order,
-        rotation=rotation,
-    )
-    translated = translated.astype(coeffs_local.dtype)
-    translated = jnp.where(valid[:, None], translated, 0)
-    updates = jax.ops.segment_sum(translated, safe_child_idx, total_nodes)
-    return coeffs_local + updates
 
 
 def _l2l_level_compact_kwargs(
@@ -268,7 +166,7 @@ def _propagate_solidfmm_locals_by_level(
     order: int,
     rotation: str,
     total_nodes: int,
-    basis_mode: str = "complex",
+    basis_mode: str = "real",
     num_levels: Optional[int] = None,
     nodes_by_level: Optional[Array] = None,
     level_offsets: Optional[Array] = None,
@@ -289,7 +187,7 @@ def _propagate_solidfmm_locals_by_level(
     (:mod:`jaccpot.pallas.cascade_real_level`). Numerics: the level-compact
     loop is identical to the masked one; the Pallas lane agrees to round-off.
 
-    A single parent->child pass (``_propagate_solidfmm_locals_to_children``)
+    A single parent->child pass (``_propagate_real_locals_to_children``)
     moves each node's local expansion down exactly one level. That is only
     sufficient when every node already carries the far-field appropriate to its
     own level. A local expansion deposited high in the tree (a well-separated
@@ -317,11 +215,12 @@ def _propagate_solidfmm_locals_by_level(
     order : int
         Expansion order.
     rotation : str
-        Rotation lane for the complex L2L.
+        Accepted and unused (the complex L2L's rotation lane; the complex basis
+        was removed in the 2026-10 cleanup, C).
     total_nodes : int
         Node count.
     basis_mode : str
-        ``"complex"`` or ``"real"``; selects the batch kernel.
+        ``"real"``; anything else raises.
     num_levels : Optional[int]
         Concrete tree depth. ``None`` falls back to the padded shape-derived
         depth, which is correct but iterates more levels than necessary.
@@ -343,12 +242,21 @@ def _propagate_solidfmm_locals_by_level(
     -------
     Array
         ``(total_nodes, C)`` locals after the full root-to-leaf cascade.
+
+    Raises
+    ------
+    ValueError
+        If ``basis_mode`` is not ``"real"``.
     """
+    if str(basis_mode).strip().lower() != "real":
+        raise ValueError(
+            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
+            "removed in the 2026-10 cleanup, C)"
+        )
     num_internal = int(left_child.shape[0])
     if num_internal <= 0:
         return coeffs_local
 
-    real_basis = str(basis_mode).strip().lower() == "real"
     left_internal = left_child[:num_internal]
     right_internal = right_child[:num_internal]
     parent_levels = node_levels[:num_internal].astype(INDEX_DTYPE)
@@ -379,8 +287,8 @@ def _propagate_solidfmm_locals_by_level(
         i.e. ``depth x nodes`` and 5.4 GB at N=1048576. ``centers_all`` is
         loop-invariant so it is hoisted and counted once.
 
-        L2L uses the old_center - new_center (parent - child) displacement in BOTH
-        bases. The complex path previously used child - parent here, which is the
+        L2L uses the old_center - new_center (parent - child) displacement. The
+        (since removed) complex path once used child - parent here, which is the
         wrong sign: the far field was left uncorrected in proportion to the
         cascade depth, capping accuracy (~3e-3 at theta>=0.5) regardless of
         expansion order, while looking fine at small theta where the cascade is
@@ -410,20 +318,15 @@ def _propagate_solidfmm_locals_by_level(
         """
         parent_coeffs = state_in[parent_rep]
         deltas = centers_all[parent_rep] - centers_all[safe_child]
-        if real_basis:
-            translated = _l2l_real_batch_kernel(
-                parent_coeffs, deltas, order=order
-            ).astype(state_in.dtype)
-        else:
-            translated = _l2l_complex_batch_kernel(
-                parent_coeffs, deltas, order=order, rotation=rotation
-            ).astype(state_in.dtype)
+        translated = _l2l_real_batch_kernel(parent_coeffs, deltas, order=order).astype(
+            state_in.dtype
+        )
         return jnp.where(valid[:, None], translated, 0)
 
     _l2l_level = jax.checkpoint(_l2l_level_apply)
 
     if nodes_by_level is not None and level_offsets is not None and level_batch_width:
-        if pallas_levels is not None and parent is not None and real_basis:
+        if pallas_levels is not None and parent is not None:
             # plan sub-10ms Phase 3: one Pallas launch per level, through the
             # custom_vjp seam (plan fast-gradients) so the reverse is the level
             # kernels' own adjoint rather than pallas_call's generic JVP rule
@@ -459,12 +362,7 @@ def _propagate_solidfmm_locals_by_level(
         def _compact_apply(state_in, centers_all, parent_rep_b, safe_child, valid):
             parent_coeffs = state_in[parent_rep_b]
             deltas = centers_all[parent_rep_b] - centers_all[safe_child]
-            if real_basis:
-                translated = _l2l_real_batch_kernel(parent_coeffs, deltas, order=order)
-            else:
-                translated = _l2l_complex_batch_kernel(
-                    parent_coeffs, deltas, order=order, rotation=rotation
-                )
+            translated = _l2l_real_batch_kernel(parent_coeffs, deltas, order=order)
             return jnp.where(valid[:, None], translated.astype(state_in.dtype), 0)
 
         _compact = jax.checkpoint(_compact_apply)
@@ -523,8 +421,9 @@ def _propagate_real_locals_to_children(
 ) -> Array:
     """Apply real-basis L2L translations from parents to their children.
 
-    Real-basis twin of :func:`_propagate_solidfmm_locals_to_children`; one level
-    of descent only.
+    One level of descent only (its complex twin,
+    ``_propagate_solidfmm_locals_to_children``, went with the complex basis in the
+    2026-10 cleanup, C).
 
     Parameters
     ----------
@@ -576,7 +475,7 @@ def _prepare_solidfmm_downward_sweep(
     m2l_chunk_size: Optional[int] = None,
     l2l_chunk_size: Optional[int] = None,
     complex_rotation: str = "solidfmm",
-    basis_mode: str = "complex",
+    basis_mode: str = "real",
     m2l_impl: Optional[str] = None,
     traversal_config: Optional[DualTreeTraversalConfig] = None,
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
@@ -594,7 +493,7 @@ def _prepare_solidfmm_downward_sweep(
     use_pallas: bool = False,
     timing_recorder: Optional[Callable[[str, float], None]] = None,
 ) -> TreeDownwardData:
-    """Prepare M2L accumulation for solidfmm-style complex or real locals.
+    """Prepare M2L accumulation and the L2L cascade for the real locals.
 
     The returned value intentionally retains only the locals plus a minimal
     interaction handle. Chunk schedules and other M2L feed structures are
@@ -723,38 +622,16 @@ def _prepare_solidfmm_downward_sweep(
             centers=centers,
             coefficients=locals_coeffs,
         )
-        empty_source_motion_locals: Optional[LocalExpansionData]
-        if upward.multipoles.source_motion_packed is not None:
-            empty_source_motion_locals = LocalExpansionData(
-                order=p,
-                centers=centers,
-                coefficients=jnp.zeros_like(locals_coeffs),
-            )
-        else:
-            empty_source_motion_locals = None
         return TreeDownwardData(
             interactions=interactions,
             locals=empty_locals,
-            source_motion_locals=empty_source_motion_locals,
         )
 
     detail_diag_mode = _normalize_strict_refresh_detail_diag_mode(
         os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
     )
 
-    def _detail_downward_data(
-        coefficients: Array,
-        source_motion_coefficients: Optional[Array] = None,
-    ) -> TreeDownwardData:
-        source_motion_locals: Optional[LocalExpansionData]
-        if source_motion_coefficients is not None:
-            source_motion_locals = LocalExpansionData(
-                order=p,
-                centers=centers,
-                coefficients=source_motion_coefficients,
-            )
-        else:
-            source_motion_locals = None
+    def _detail_downward_data(coefficients: Array) -> TreeDownwardData:
         return TreeDownwardData(
             interactions=interactions,
             locals=LocalExpansionData(
@@ -762,22 +639,15 @@ def _prepare_solidfmm_downward_sweep(
                 centers=centers,
                 coefficients=coefficients,
             ),
-            source_motion_locals=source_motion_locals,
         )
 
     if detail_diag_mode == "downward_artifacts_only":
-        source_motion_zeros = (
-            jnp.zeros_like(locals_coeffs)
-            if upward.multipoles.source_motion_packed is not None
-            else None
-        )
-        return _detail_downward_data(locals_coeffs, source_motion_zeros)
+        return _detail_downward_data(locals_coeffs)
 
     rotation_mode = str(complex_rotation).strip().lower()
     resolved_m2l_impl = (
         "rot_scale" if m2l_impl is None else str(m2l_impl).strip().lower()
     )
-    source_motion_multip_packed = None
     if detail_diag_mode == "l2l_only":
         locals_updated = jnp.ones_like(locals_coeffs)
         chunk_size = 4096 if m2l_chunk_size is None else int(m2l_chunk_size)
@@ -790,8 +660,6 @@ def _prepare_solidfmm_downward_sweep(
             basis_mode=basis_mode,
             complex_rotation=complex_rotation,
         )
-        multip_packed = multipole_inputs.multip_packed
-        source_motion_multip_packed = multipole_inputs.source_motion_multip_packed
         multip_packed_kernel = multipole_inputs.multip_packed_kernel
         rotation_mode = multipole_inputs.rotation_mode
 
@@ -910,120 +778,14 @@ def _prepare_solidfmm_downward_sweep(
             stage_t0,
             locals_updated,
         )
-        source_motion_locals_updated: Optional[Array]
-        if source_motion_multip_packed is not None:
-            stage_t0 = time.perf_counter()
-            source_motion_locals_updated = (
-                _solidfmm_downward_accumulate_from_multipoles(
-                    jnp.zeros_like(locals_coeffs),
-                    source_motion_multip_packed,
-                    n_targets=n_targets,
-                    centers=centers,
-                    src=src,
-                    tgt=tgt,
-                    pair_count=pair_count,
-                    active_pair_count=active_pair_count,
-                    order=p,
-                    rotation_mode=rotation_mode,
-                    total_nodes=total_nodes,
-                    chunk_size=chunk_size,
-                    basis_mode=basis_mode,
-                    m2l_impl=resolved_m2l_impl,
-                    targets_sorted=targets_sorted,
-                )
-            )
-            source_motion_locals_updated = _propagate_solidfmm_locals_by_level(
-                source_motion_locals_updated,
-                centers,
-                left_child,
-                right_child,
-                node_levels,
-                order=p,
-                rotation=rotation_mode,
-                total_nodes=total_nodes,
-                basis_mode=basis_mode,
-                num_levels=l2l_num_levels,
-                **_l2l_level_compact_kwargs(
-                    tree,
-                    total_nodes=total_nodes,
-                    num_internal=child_inputs.num_internal_nodes,
-                ),
-            )
-            source_motion_locals_updated = _record_timed_array(
-                "_refresh_timing_dual_source_motion_seconds",
-                stage_t0,
-                source_motion_locals_updated,
-            )
-        else:
-            source_motion_locals_updated = None
-    else:
-        # No internal nodes: the tree is a single leaf. There is no M2L to do (a
-        # lone node has no box pair to be far from) and no parent-to-child cascade
-        # to run, so the source-motion far field is exactly ZERO -- the whole
-        # interaction is near-field, which this function does not compute. That is
-        # the same conclusion the `pair_count == 0` guard above already reaches, and
-        # zero is what it returns there; these two agree on purpose.
-        #
-        # This used to call `_accumulate_from_multipoles`, which is defined nowhere
-        # -- audit G.1a, a latent `NameError`. It never fired because the branch is
-        # unreachable: getting here needs `pair_count > 0` AND
-        # `num_internal_nodes == 0`, and the `pair_count == 0` return above already
-        # took every single-leaf tree. Measured, not assumed -- forcing a one-node
-        # tree with a foreign interaction list still does not reach this line. The
-        # audit's reachability note missed that guard.
-        #
-        # Kept as zeros rather than a raise: it is the correct value if the guard
-        # above is ever loosened, and it cannot introduce a new crash path.
-        # `None` would be wrong -- it means "source motion was not requested" (the
-        # else below), which the consumer cannot distinguish from "requested, and
-        # the far field is empty".
-        if source_motion_multip_packed is not None:
-            source_motion_locals_updated = jnp.zeros_like(locals_coeffs)
-        else:
-            source_motion_locals_updated = None
 
-    stage_t0 = time.perf_counter()
     locals_after = LocalExpansionData(
         order=p,
         centers=centers,
         coefficients=locals_updated,
     )
 
-    # Conjugate symmetry is a property of the COMPLEX solidfmm coefficients
-    # only. Real (Dehnen no-sqrt2) locals are not conjugate-symmetric, so
-    # applying it there corrupts them (it silently caps far-field accuracy).
-    real_basis = str(basis_mode).strip().lower() == "real"
-    if not real_basis:
-        coefficients_after = enforce_conjugate_symmetry_batch(
-            jnp.asarray(locals_after.coefficients),
-            order=p,
-        )
-        coefficients_after = _record_timed_array(
-            "_refresh_timing_dual_final_symmetry_seconds",
-            stage_t0,
-            coefficients_after,
-        )
-        locals_after = locals_after._replace(coefficients=coefficients_after)
-    source_motion_locals_after: Optional[LocalExpansionData]
-    if source_motion_locals_updated is not None:
-        source_motion_coefficients = (
-            jnp.asarray(source_motion_locals_updated)
-            if real_basis
-            else enforce_conjugate_symmetry_batch(
-                jnp.asarray(source_motion_locals_updated),
-                order=p,
-            )
-        )
-        source_motion_locals_after = LocalExpansionData(
-            order=p,
-            centers=centers,
-            coefficients=source_motion_coefficients,
-        )
-    else:
-        source_motion_locals_after = None
-
     return TreeDownwardData(
         interactions=interactions,
         locals=locals_after,
-        source_motion_locals=source_motion_locals_after,
     )

@@ -135,85 +135,17 @@ def test_p2p_analytic_custom_vjp_matches_autodiff(seed):
 
 
 # --------------------------------------------------------------------------
-# Fused complex-basis M2L custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
-# --------------------------------------------------------------------------
-from jaccpot.operators.complex_ops import (  # noqa: E402
-    complex_rotation_blocks_from_z_solidfmm_batch,
-    complex_rotation_blocks_to_z_solidfmm_batch,
-)
-
-# The z-axis real M2L custom_vjp (``m2l_core_z_real_pallas_cvjp``) and its test
-# went with the z-core kernel in the 2026-10 cleanup (X5). ``sh_size`` is still
-# used below.
-from jaccpot.operators.real_harmonics import sh_size  # noqa: E402
-from jaccpot.pallas.m2l_complex_fused import (  # noqa: E402
-    m2l_complex_fused_jax,
-    m2l_complex_fused_pallas_cvjp,
-    pallas_m2l_complex_fused_supported,
-)
-
-
-def _complex_m2l_case(order, seed=0, n=9):
-    """Build a well-separated complex M2L pair batch (mirrors the parity template)."""
-    rng = np.random.default_rng(seed)
-    c = sh_size(order)
-    mult = (rng.standard_normal((n, c)) + 1j * rng.standard_normal((n, c))).astype(
-        np.complex128
-    )
-    deltas = (rng.standard_normal((n, 3)) * 2.0).astype(np.float64)
-    deltas[:, 2] += 3.0  # keep |delta| well away from 0 (well-separated pairs)
-    deltas = jnp.asarray(deltas)
-    r = jnp.sqrt(jnp.sum(deltas * deltas, axis=1))
-    bto = complex_rotation_blocks_to_z_solidfmm_batch(
-        deltas, order=order, basis="multipole", dtype=jnp.complex128
-    )
-    bfr = complex_rotation_blocks_from_z_solidfmm_batch(
-        deltas, order=order, basis="local", dtype=jnp.complex128
-    )
-    return jnp.asarray(mult), bto, bfr, r
-
-
-@pytest.mark.parametrize("interpret", [True, False])
-@pytest.mark.parametrize("order", [2, 4])
-def test_m2l_complex_fused_pallas_custom_vjp_matches_twin(order, interpret):
-    """Fused complex-M2L custom_vjp reverse == autodiff of the pure-jnp twin.
-
-    Differentiates w.r.t. all four kernel inputs (multipoles, both rotation-block
-    stacks, and the radius). ``interpret=True`` runs on CPU CI; ``interpret=False``
-    runs the real Pallas GPU kernel (skipped off Ampere+ or on backend reject).
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("requires x64 for a tight tolerance")
-    if not interpret and not pallas_m2l_complex_fused_supported():
-        pytest.skip("fused complex Pallas M2L requires an Ampere+ (sm_80) GPU")
-
-    tol = 1.0e-10 if interpret else 1.0e-8
-    mult, bto, bfr, r = _complex_m2l_case(order, seed=order)
-
-    def f_custom(m, bt, bf, rr):
-        return m2l_complex_fused_pallas_cvjp(m, bt, bf, rr, order, interpret, "triton")
-
-    def f_ref(m, bt, bf, rr):
-        return m2l_complex_fused_jax(m, bt, bf, rr, order=order)
-
-    try:
-        assert_vjp_matches(f_custom, f_ref, (mult, bto, bfr, r), rtol=tol, atol=tol)
-    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
-        msg = str(exc).lower()
-        if not interpret and (
-            "warpgroup" in msg or "ptx" in msg or "triton" in msg or "mosaic" in msg
-        ):
-            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
-        raise
-
-
-# --------------------------------------------------------------------------
 # Fully-fused real-basis M2L custom_vjp (fwd=Pallas, bwd=autodiff-of-twin)
 # --------------------------------------------------------------------------
 from jaccpot.operators.m2l_real_rot_scale import (  # noqa: E402
     real_rotation_blocks_from_z_local_batch,
     real_rotation_blocks_to_z_multipole_batch,
 )
+
+# The z-axis real M2L custom_vjp (``m2l_core_z_real_pallas_cvjp``) and its test
+# went with the z-core kernel in the 2026-10 cleanup (X5). ``sh_size`` is still
+# used below.
+from jaccpot.operators.real_harmonics import sh_size  # noqa: E402
 from jaccpot.pallas.m2l_real_fused import (  # noqa: E402
     m2l_real_fused_jax,
     m2l_real_fused_pallas_cvjp,
@@ -704,7 +636,7 @@ def test_mutual_nearfield_kernel_is_bitwise_antisymmetric(interpret):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("basis", ["real", "complex"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_fused_m2l_vjp_env_off_falls_back_and_agrees(basis, monkeypatch):
     """``JACCPOT_FUSED_M2L_VJP=0`` must select the twin's autodiff and agree with it.
 
@@ -728,32 +660,19 @@ def test_fused_m2l_vjp_env_off_falls_back_and_agrees(basis, monkeypatch):
     if not jax.config.jax_enable_x64:
         pytest.skip("requires x64 for a tight tolerance")
 
-    if basis == "real":
-        from jaccpot.pallas import m2l_real_fused as module
+    assert basis == "real"  # the complex lane went with its basis (2026-10, C)
+    from jaccpot.pallas import m2l_real_fused as module
 
-        order = 2
-        mult, bto, bfr, r = _real_m2l_case(order, seed=11)
+    order = 2
+    mult, bto, bfr, r = _real_m2l_case(order, seed=11)
 
-        args = (mult, bto, bfr, r)
+    args = (mult, bto, bfr, r)
 
-        def custom(m, bt, bf, rr):
-            return m2l_real_fused_pallas_cvjp(m, bt, bf, rr, order, True, "triton")
+    def custom(m, bt, bf, rr):
+        return m2l_real_fused_pallas_cvjp(m, bt, bf, rr, order, True, "triton")
 
-        def ref(m, bt, bf, rr):
-            return m2l_real_fused_jax(m, bt, bf, rr, order=order)
-
-    else:
-        from jaccpot.pallas import m2l_complex_fused as module
-
-        order = 2
-        mult, bto, bfr, r = _complex_m2l_case(order, seed=11)
-        args = (mult, bto, bfr, r)
-
-        def custom(m, bt, bf, rr):
-            return m2l_complex_fused_pallas_cvjp(m, bt, bf, rr, order, True, "triton")
-
-        def ref(m, bt, bf, rr):
-            return m2l_complex_fused_jax(m, bt, bf, rr, order=order)
+    def ref(m, bt, bf, rr):
+        return m2l_real_fused_jax(m, bt, bf, rr, order=order)
 
     # The gate must be read per call, not captured at import.
     monkeypatch.setenv("JACCPOT_FUSED_M2L_VJP", "0")

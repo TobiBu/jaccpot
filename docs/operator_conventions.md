@@ -16,7 +16,10 @@ one of which was simply **wrong**. Unlike 1-3 it was not a convention to reconci
 a defect to fix, and it **has been fixed** -- two expressions in
 `solidfmm_reference._angles_from_delta`. Kept here because the diagnosis is the
 transferable part, and because the wrong expressions are the ones a reader's
-spherical-coordinate instinct will reach for.
+spherical-coordinate instinct will reach for. Both modules it compares
+(`complex_ops`, `solidfmm_reference`) went with the complex basis in the 2026-10
+cleanup (C); the real basis's rotation (`real_rotations`) takes the production
+convention below.
 
 ---
 
@@ -216,8 +219,9 @@ After it, rescaled coefficients agree with `m2l_real` to **3e-17** and the evalu
 potential converges identically — 1.1e-6, 3.8e-10, 1.2e-13 at orders 2, 4, 6, against
 the flat 1.2e-2 plateau before.
 
-Blast radius was small and was checked, not assumed: `solidfmm_reference` is imported
-only by `tests/`, and the three consuming files
+Blast radius was small and was checked, not assumed: `solidfmm_reference` was imported
+only by `tests/` (it was removed with the complex basis in the 2026-10 cleanup, C), and
+the three consuming files
 (`test_complex_ops.py`, `test_m2l_complex_fused_pallas.py`, `test_real_harmonics.py`)
 give **171 passed** after the change — nothing had been calibrated against the wrong
 oracle. `translate_along_z_m2l_complex` has no rotation and was never affected.

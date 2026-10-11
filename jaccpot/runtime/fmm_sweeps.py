@@ -28,9 +28,6 @@ from jaccpot.downward.local_expansions import (
     TreeDownwardData,
 )
 from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
-from jaccpot.upward.solidfmm_complex_tree_expansions import (
-    prepare_solidfmm_complex_upward_sweep,
-)
 from jaccpot.upward.tree_expansions import (
     NodeMultipoleData,
     TreeUpwardData,
@@ -337,115 +334,65 @@ class SweepsMixin(_EngineBase):
         )
 
         if self.expansion_basis == "solidfmm":
-            if self._solidfmm_basis_mode() == "real":
-                # Native real (Dehnen no-sqrt2) upward sweep: P2M + M2M produce real
-                # multipoles directly -- NO complex intermediate, NO complex<->real
-                # conversion (the "real everywhere / never convert bases" contract).
-                # prepare_real_upward_sweep uses COM centers (what the large-N fast
-                # lane uses) and is bit-equivalent to the complex sweep +
-                # complex_to_dehnen_real_coeffs it replaces.
-                center_mode_norm = str(center_mode).strip().lower()
-                if center_mode_norm != "com":
-                    raise ValueError(
-                        "native real-basis upward sweep supports center_mode='com' "
-                        f"only (got '{center_mode}'); the large-N fast lane uses COM"
-                    )
-                resolved_leaf_cap = max_leaf_size
-                if resolved_leaf_cap is None:
-                    num_internal_real = int(jnp.asarray(tree.left_child).shape[0])
-                    leaf_ranges_real = jax.device_get(tree.node_ranges)[
-                        num_internal_real:
-                    ]
-                    if leaf_ranges_real.shape[0] == 0:
-                        resolved_leaf_cap = 0
-                    else:
-                        counts_real = (
-                            leaf_ranges_real[:, 1] - leaf_ranges_real[:, 0] + 1
-                        )
-                        resolved_leaf_cap = int(counts_real.max())
-                geometry_real = (
-                    precomputed_geometry
-                    if precomputed_geometry is not None
-                    else (
-                        None
-                        if bool(defer_geometry)
-                        else compute_tree_geometry_compiled(
-                            tree,
-                            positions_sorted,
-                            max_leaf_size=int(resolved_leaf_cap),
-                        )
+            # Native real (Dehnen no-sqrt2) upward sweep: P2M + M2M produce real
+            # multipoles directly -- NO complex intermediate, NO complex<->real
+            # conversion (the "real everywhere / never convert bases" contract).
+            # prepare_real_upward_sweep uses COM centers (what the large-N fast
+            # lane uses). The complex sweep it once mirrored, and that sweep's
+            # per-stage upward timings (the refresh diagnostics' upward_* keys,
+            # which now stay 0), went in the 2026-10 cleanup (C).
+            center_mode_norm = str(center_mode).strip().lower()
+            if center_mode_norm != "com":
+                raise ValueError(
+                    "native real-basis upward sweep supports center_mode='com' "
+                    f"only (got '{center_mode}'); the large-N fast lane uses COM"
+                )
+            resolved_leaf_cap = max_leaf_size
+            if resolved_leaf_cap is None:
+                num_internal_real = int(jnp.asarray(tree.left_child).shape[0])
+                leaf_ranges_real = jax.device_get(tree.node_ranges)[num_internal_real:]
+                if leaf_ranges_real.shape[0] == 0:
+                    resolved_leaf_cap = 0
+                else:
+                    counts_real = leaf_ranges_real[:, 1] - leaf_ranges_real[:, 0] + 1
+                    resolved_leaf_cap = int(counts_real.max())
+            geometry_real = (
+                precomputed_geometry
+                if precomputed_geometry is not None
+                else (
+                    None
+                    if bool(defer_geometry)
+                    else compute_tree_geometry_compiled(
+                        tree,
+                        positions_sorted,
+                        max_leaf_size=int(resolved_leaf_cap),
                     )
                 )
-                mass_moments_real = compute_tree_mass_moments(
-                    tree, positions_sorted, masses_sorted
-                )
-                real_upward = prepare_real_upward_sweep(
-                    tree,
-                    positions_sorted,
-                    masses_sorted,
-                    max_order=max_order,
-                    max_leaf_size=int(resolved_leaf_cap),
-                    leaf_batch_size=self.upward_leaf_batch_size,
-                    static_num_levels=self._resolve_upward_num_levels(tree),
-                )
-                real_multipoles = NodeMultipoleData(
-                    order=int(real_upward.multipoles.order),
-                    centers=real_upward.multipoles.centers,
-                    moments=None,
-                    packed=real_upward.multipoles.packed,
-                    component_matrix=None,
-                    source_motion_packed=None,
-                )
-                return TreeUpwardData(
-                    geometry=geometry_real,
-                    mass_moments=mass_moments_real,
-                    multipoles=real_multipoles,
-                )
-
-            def _record_upward_stage(name: str, elapsed: float) -> None:
-                if not bool(getattr(self, "_refresh_timing_active", False)):
-                    return
-                attr_by_name = {
-                    "geometry": "_refresh_timing_upward_geometry_seconds",
-                    "mass_moments": "_refresh_timing_upward_mass_moments_seconds",
-                    "p2m": "_refresh_timing_upward_p2m_seconds",
-                    "m2m": "_refresh_timing_upward_m2m_seconds",
-                    "source_motion": "_refresh_timing_upward_source_motion_seconds",
-                }
-                attr = attr_by_name.get(str(name))
-                if attr is None:
-                    return
-                setattr(self, attr, float(getattr(self, attr, 0.0)) + float(elapsed))
-
-            complex_upward = prepare_solidfmm_complex_upward_sweep(
+            )
+            mass_moments_real = compute_tree_mass_moments(
+                tree, positions_sorted, masses_sorted
+            )
+            real_upward = prepare_real_upward_sweep(
                 tree,
                 positions_sorted,
                 masses_sorted,
                 max_order=max_order,
-                center_mode=center_mode,
-                explicit_centers=explicit_centers,
-                max_leaf_size=max_leaf_size,
+                max_leaf_size=int(resolved_leaf_cap),
                 leaf_batch_size=self.upward_leaf_batch_size,
-                rotation=self.complex_rotation,
-                precomputed_geometry=precomputed_geometry,
-                upward_timing_callback=_record_upward_stage,
-                defer_geometry=bool(defer_geometry),
                 static_num_levels=self._resolve_upward_num_levels(tree),
             )
-
-            multipoles = NodeMultipoleData(
-                order=int(complex_upward.multipoles.order),
-                centers=complex_upward.multipoles.centers,
+            real_multipoles = NodeMultipoleData(
+                order=int(real_upward.multipoles.order),
+                centers=real_upward.multipoles.centers,
                 moments=None,
-                packed=complex_upward.multipoles.packed,
+                packed=real_upward.multipoles.packed,
                 component_matrix=None,
-                source_motion_packed=complex_upward.multipoles.source_motion_packed,
+                source_motion_packed=None,
             )
-
             return TreeUpwardData(
-                geometry=complex_upward.geometry,
-                mass_moments=complex_upward.mass_moments,
-                multipoles=multipoles,
+                geometry=geometry_real,
+                mass_moments=mass_moments_real,
+                multipoles=real_multipoles,
             )
 
         raise ValueError(

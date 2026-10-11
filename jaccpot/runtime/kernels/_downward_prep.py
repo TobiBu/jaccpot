@@ -35,15 +35,12 @@ from yggdrax.tree import Tree
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
 )
-from jaccpot.operators.complex_ops import (
-    enforce_conjugate_symmetry_batch,
-)
 from jaccpot.operators.real_harmonics import (
     sh_size,
 )
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
-from ..dtypes import INDEX_DTYPE, complex_dtype_for_real
+from ..dtypes import INDEX_DTYPE
 from ._m2l import (
     _accumulate_m2l_chunked_scan,
     _accumulate_m2l_fullbatch,
@@ -116,8 +113,7 @@ class _SolidFMMDownwardInit(NamedTuple):
     coeff_count : int
         Coefficients per node, ``sh_size(order)``.
     dtype : Any
-        Working dtype of the local buffer: complex for the complex basis, the
-        centres' own real dtype for the real basis.
+        Working dtype of the local buffer: the centres' own real dtype.
     """
 
     centers: Array
@@ -214,19 +210,15 @@ class _SolidFMMDownwardMultipoleInputs(NamedTuple):
     ----------
     multip_packed : Array
         Packed multipole coefficients in the working dtype.
-    source_motion_multip_packed : Optional[Array]
-        Time-differentiated multipoles, present only when the upward sweep
-        produced them.
     multip_packed_kernel : Array
         The array handed to the M2L kernel. Currently the same object as
-        ``multip_packed`` on both bases; kept a separate field so a lane can feed
-        the kernel a different layout without disturbing the payload above.
+        ``multip_packed``; kept a separate field so a lane can feed the kernel a
+        different layout without disturbing the payload above.
     rotation_mode : str
         Normalised ``complex_rotation`` value selecting the rotation lane.
     """
 
     multip_packed: Array
-    source_motion_multip_packed: Optional[Array]
     multip_packed_kernel: Array
     rotation_mode: str
 
@@ -390,7 +382,7 @@ def _prepare_solidfmm_downward_init(
         them is what lets a caller add a second contribution to an existing
         field rather than recomputing it.
     basis_mode : str
-        ``"complex"`` or ``"real"``; selects the local buffer's dtype.
+        ``"real"``: the local buffer takes the centres' own dtype.
 
     Returns
     -------
@@ -400,8 +392,9 @@ def _prepare_solidfmm_downward_init(
     Raises
     ------
     ValueError
-        If ``basis_mode`` is neither ``"complex"`` nor ``"real"``, or if
-        ``initial_locals`` does not have shape ``[total_nodes, sh_size(order)]``.
+        If ``basis_mode`` is not ``"real"`` (the complex basis was removed in the
+        2026-10 cleanup, C), or if ``initial_locals`` does not have shape
+        ``[total_nodes, sh_size(order)]``.
     """
 
     p = int(upward.multipoles.order)
@@ -409,13 +402,12 @@ def _prepare_solidfmm_downward_init(
     total_nodes = int(centers.shape[0])
     coeff_count = sh_size(p)
     basis_mode_norm = str(basis_mode).strip().lower()
-    if basis_mode_norm not in ("complex", "real"):
-        raise ValueError("basis_mode must be 'complex' or 'real'")
-    dtype = (
-        complex_dtype_for_real(centers.dtype)
-        if basis_mode_norm == "complex"
-        else centers.dtype
-    )
+    if basis_mode_norm != "real":
+        raise ValueError(
+            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
+            "removed in the 2026-10 cleanup, C)"
+        )
+    dtype = centers.dtype
     if initial_locals is not None:
         locals_coeffs = jnp.asarray(initial_locals.coefficients)
         if locals_coeffs.shape != (total_nodes, coeff_count):
@@ -440,10 +432,10 @@ def _prepare_solidfmm_downward_multipole_inputs(
 ) -> _SolidFMMDownwardMultipoleInputs:
     """Resolve multipole coefficient payloads for downward accumulation.
 
-    The real path deliberately performs **no** basis conversion: the native real
-    upward sweep is the single source of real multipoles, so complex-packed input
-    is a wiring regression and is rejected rather than silently converted. See
-    the inline comment for the contract this enforces.
+    There is deliberately **no** basis conversion: the native real upward sweep
+    is the single source of real multipoles, so complex-packed input is a wiring
+    regression and is rejected rather than silently converted. See the inline
+    comment for the contract this enforces.
 
     Parameters
     ----------
@@ -452,70 +444,44 @@ def _prepare_solidfmm_downward_multipole_inputs(
     dtype : Any
         Working dtype to cast the payloads to.
     basis_mode : str
-        ``"complex"`` or ``"real"``.
+        ``"real"``. Accepted for the callers' sake; the basis is checked where
+        the local buffer is made (:func:`_prepare_solidfmm_downward_init`).
     complex_rotation : str
-        Rotation lane; must be ``"solidfmm"`` on the complex basis.
+        Rotation lane, passed through to the kernels, which no longer read it.
 
     Returns
     -------
     _SolidFMMDownwardMultipoleInputs
-        Cast multipoles, optional source-motion multipoles, the kernel-facing
-        array and the normalised rotation mode.
+        Cast multipoles, the kernel-facing array and the normalised rotation
+        mode.
 
     Raises
     ------
-    ValueError
-        If ``basis_mode`` is ``"complex"`` and ``complex_rotation`` is not
-        ``"solidfmm"``.
     TypeError
-        If ``basis_mode`` is ``"real"`` but the multipoles are complex-packed --
-        the removed complex-to-real conversion is not reinstated silently.
+        If the multipoles are complex-packed -- the removed complex-to-real
+        conversion is not reinstated silently.
     """
 
     p = int(upward.multipoles.order)
-    basis_mode_norm = str(basis_mode).strip().lower()
     rotation_mode = str(complex_rotation).strip().lower()
-    # Complex basis: upward produces packed COMPLEX solidfmm multipoles.
-    # Real basis: the native real upward sweep (prepare_real_upward_sweep) produces
-    # packed REAL (Dehnen no-sqrt2) coefficients directly -- there is NO complex
-    # intermediate and NO complex<->real conversion on the real path.
+    # The native real upward sweep (prepare_real_upward_sweep) produces packed REAL
+    # (Dehnen no-sqrt2) coefficients directly -- there is NO complex intermediate
+    # and NO complex<->real conversion. Pass them straight through to the real
+    # M2L/L2L/L2P operators. Hard-error if complex-packed multipoles ever reach
+    # here (a wiring regression) rather than silently reintroducing a basis
+    # conversion.
     packed_raw = jnp.asarray(upward.multipoles.packed)
-    source_motion_raw = (
-        jnp.asarray(upward.multipoles.source_motion_packed)
-        if upward.multipoles.source_motion_packed is not None
-        else None
-    )
-    if basis_mode_norm == "complex":
-        if rotation_mode != "solidfmm":
-            raise ValueError("complex_rotation must be 'solidfmm'")
-        multip_packed = packed_raw.astype(dtype)
-        source_motion_multip_packed = (
-            source_motion_raw.astype(dtype) if source_motion_raw is not None else None
+    if jnp.iscomplexobj(packed_raw):
+        raise TypeError(
+            "real basis_mode expects REAL multipole coefficients from the "
+            "native real upward sweep (prepare_real_upward_sweep), but received "
+            "complex-packed multipoles. The complex->real conversion has been "
+            "removed from the real path; check prepare_upward_sweep wiring."
         )
-        multip_packed_kernel = multip_packed
-    else:
-        # Real (Dehnen no-sqrt2) basis: pass the native real multipoles straight
-        # through to the real M2L/L2L/L2P operators. The complex->real Dehnen Q
-        # conversion (complex_to_dehnen_real_coeffs) has been REMOVED from the real
-        # path per the "real everywhere, never convert bases" contract; the native
-        # real upward sweep is the single source of real multipoles. Hard-error if
-        # complex-packed multipoles ever reach here (a wiring regression) rather
-        # than silently reintroducing a basis conversion.
-        if jnp.iscomplexobj(packed_raw):
-            raise TypeError(
-                "real basis_mode expects REAL multipole coefficients from the "
-                "native real upward sweep (prepare_real_upward_sweep), but received "
-                "complex-packed multipoles. The complex->real conversion has been "
-                "removed from the real path; check prepare_upward_sweep wiring."
-            )
-        multip_packed = packed_raw.astype(dtype)
-        multip_packed_kernel = multip_packed
-        source_motion_multip_packed = (
-            source_motion_raw.astype(dtype) if source_motion_raw is not None else None
-        )
+    multip_packed = packed_raw.astype(dtype)
+    multip_packed_kernel = multip_packed
     return _SolidFMMDownwardMultipoleInputs(
         multip_packed=multip_packed,
-        source_motion_multip_packed=source_motion_multip_packed,
         multip_packed_kernel=multip_packed_kernel,
         rotation_mode=rotation_mode,
     )
@@ -608,16 +574,14 @@ def _solidfmm_downward_accumulate_from_multipoles(
     rotation_mode: str,
     total_nodes: int,
     chunk_size: int,
-    basis_mode: str = "complex",
+    basis_mode: str = "real",
     m2l_impl: str = "rot_scale",
     targets_sorted: bool = False,
 ) -> Array:
-    """Run one solidfmm M2L accumulation pass plus symmetry enforcement.
+    """Run one M2L accumulation pass over the flat pair list (real basis).
 
-    Both the complex and real (Dehnen no-sqrt2) bases run the flat pair list;
-    ``basis_mode`` selects the translation kernel. Real coefficients carry no
-    conjugate symmetry, so the complex symmetry-enforcement step is skipped for
-    the real basis.
+    The complex basis, and the conjugate-symmetry enforcement its coefficients
+    needed after the pass, went in the 2026-10 cleanup (C).
 
     Two lanes, selected without any traced branching: ``pair_count <=
     chunk_size`` picks full-batch over a chunked scan. Both compute the same
@@ -658,8 +622,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     chunk_size : int
         Pairs per chunk, and the threshold that selects the chunked lane.
     basis_mode : str
-        ``"complex"`` or ``"real"``. Also decides whether conjugate-symmetry
-        enforcement runs afterwards -- real coefficients have no such symmetry.
+        ``"real"``; anything else raises.
     m2l_impl : str
         M2L implementation selector for the flat lanes.
     targets_sorted : bool
@@ -670,12 +633,20 @@ def _solidfmm_downward_accumulate_from_multipoles(
     Returns
     -------
     Array
-        Updated local coefficients, with conjugate symmetry re-enforced on the
-        complex basis and returned as-is on the real basis.
+        Updated local coefficients.
+
+    Raises
+    ------
+    ValueError
+        If ``basis_mode`` is not ``"real"``.
     """
 
-    real_basis = str(basis_mode).strip().lower() == "real"
-    csr_lane = real_basis and _m2l_csr_pallas_active()
+    if str(basis_mode).strip().lower() != "real":
+        raise ValueError(
+            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
+            "removed in the 2026-10 cleanup, C)"
+        )
+    csr_lane = _m2l_csr_pallas_active()
     if csr_lane:
         _check_m2l_csr_kernel_env()
     if targets_sorted and not csr_lane:
@@ -737,6 +708,4 @@ def _solidfmm_downward_accumulate_from_multipoles(
             chunk_size=chunk_size,
         )
 
-    if real_basis:
-        return locals_updated
-    return enforce_conjugate_symmetry_batch(locals_updated, order=order)
+    return locals_updated

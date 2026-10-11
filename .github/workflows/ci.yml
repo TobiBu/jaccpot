@@ -640,7 +640,7 @@ jobs:
             --runs 2 \
             --warmup 1 \
             --preset fast \
-            --basis solidfmm \
+            --basis real \
             --theta 0.6 \
             --leaf-size 16 \
             --max-order 4 \

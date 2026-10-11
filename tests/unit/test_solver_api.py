@@ -11,9 +11,8 @@ import jaccpot.runtime._interaction_cache as interaction_cache_private
 import jaccpot.runtime._large_n_nearfield as large_n_nearfield_private
 import jaccpot.runtime.fmm as runtime_fmm
 import jaccpot.runtime.fmm_constants as fmm_constants_private
-import jaccpot.upward.solidfmm_complex_tree_expansions as upward_private
+import jaccpot.upward.real_tree_expansions as real_upward_private
 from jaccpot import (
-    ComplexSHBasis,
     FarFieldConfig,
 )
 from jaccpot import FastMultipoleMethod
@@ -21,7 +20,7 @@ from jaccpot import FastMultipoleMethod as ExpanseFMM
 from jaccpot import FMMAdvancedConfig
 from jaccpot import FMMPreset
 from jaccpot import FMMPreset as ExpansePreset
-from jaccpot import NearFieldConfig, RuntimePolicyConfig, TreeConfig
+from jaccpot import NearFieldConfig, RealSHBasis, RuntimePolicyConfig, TreeConfig
 
 
 def _sample_problem(n: int = 64):
@@ -736,36 +735,9 @@ def test_runtime_path_is_accepted_and_no_longer_selects_the_lane(
     assert engine.runtime_path == runtime_path
 
 
-def test_basis_complex_alias_matches_solidfmm():
-    positions, masses = _sample_problem(n=64)
-    fmm_alias = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="complex",
-    )
-    fmm_solidfmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-    acc_alias = fmm_alias.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
-    acc_solidfmm = fmm_solidfmm.compute_accelerations(
-        positions,
-        masses,
-        leaf_size=16,
-        max_order=3,
-    )
-    assert np.allclose(
-        np.asarray(acc_alias), np.asarray(acc_solidfmm), rtol=1e-5, atol=1e-5
-    )
-
-
 def test_basis_object_is_accepted():
     positions, masses = _sample_problem(n=48)
-    basis = ComplexSHBasis()
+    basis = RealSHBasis()
     fmm = FastMultipoleMethod(
         preset=FMMPreset.FAST,
         basis=basis,
@@ -776,7 +748,7 @@ def test_basis_object_is_accepted():
         leaf_size=16,
         max_order=3,
     )
-    assert fmm.basis == "complex"
+    assert fmm.basis == "real"
     assert acc.shape == positions.shape
 
 
@@ -1005,7 +977,7 @@ def test_evaluate_prepared_state_can_run_inside_jit_with_targets():
     assert np.allclose(np.asarray(acc_jit), np.asarray(acc_ref), rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_compute_accelerations_returns_acc_derivatives_when_requested(basis):
     positions, masses = _sample_problem(n=48)
     fmm = FastMultipoleMethod(
@@ -1024,7 +996,7 @@ def test_compute_accelerations_returns_acc_derivatives_when_requested(basis):
     assert derivatives[0].shape == (positions.shape[0], 3, 3)
 
 
-@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_compute_accelerations_and_jerk_matches_direct_sum_small_n(basis):
     """Jerk matches direct summation in the NEAR-FIELD-ONLY regime.
 
@@ -1066,7 +1038,7 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n(basis):
     assert rel < 5e-2
 
 
-@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter(basis):
     """``jerk_mode="accurate"`` matches direct summation, near-field-only regime.
 
@@ -1119,7 +1091,7 @@ def _far_pair_count(state) -> int:
     return 0
 
 
-@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged(basis):
     """``"accurate"`` beats ``"fast_approx"`` against direct summation -- measured.
 
@@ -1195,7 +1167,7 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged(basis):
     )
 
 
-@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
     monkeypatch: pytest.MonkeyPatch, basis: str
 ):
@@ -1227,7 +1199,7 @@ def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
     assert jerk.shape == positions.shape
 
 
-@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
     monkeypatch: pytest.MonkeyPatch, basis: str
 ):
@@ -1324,7 +1296,7 @@ def test_compute_accelerations_and_jerk_invalid_mode_raises():
         )
 
 
-@pytest.mark.parametrize("basis", ["solidfmm", "real"])
+@pytest.mark.parametrize("basis", ["real"])
 def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum(basis):
     n = 12
     positions, masses = _sample_problem(n=n)
@@ -1784,24 +1756,6 @@ def test_prepare_state_solidfmm_skips_prebuilt_locals_template():
     assert acc.shape == positions.shape
 
 
-def test_prepare_state_solidfmm_complex_locals_remain_conjugate_symmetric():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-
-    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=2)
-    coeffs = state.downward.locals.coefficients
-    coeffs_sym = fmm_impl_private.enforce_conjugate_symmetry_batch(
-        coeffs,
-        order=int(state.downward.locals.order),
-    )
-    assert np.allclose(np.asarray(coeffs), np.asarray(coeffs_sym))
-    acc = fmm.evaluate_prepared_state(state)
-    assert acc.shape == positions.shape
-
-
 def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
     positions, masses = _sample_problem(n=64)
     fmm = ExpanseFMM(
@@ -1914,7 +1868,7 @@ def test_runtime_memory_policy_fields_flow_to_runtime():
     assert fmm._impl.upward_leaf_batch_size == 128
 
 
-def test_solidfmm_upward_defaults_to_bounded_leaf_batch_size():
+def test_real_upward_defaults_to_bounded_leaf_batch_size():
     # The recorded batch size is min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE) and
     # expected_batch is recomputed from the actual tree below, so a small N is
     # sufficient to exercise the leaf_batch_size=None default path.
@@ -1942,26 +1896,27 @@ def test_solidfmm_upward_defaults_to_bounded_leaf_batch_size():
     )
     num_internal = int(build.tree.num_internal_nodes)
     num_leaves = int(build.tree.parent.shape[0]) - num_internal
-    expected_batch = min(num_leaves, upward_private._DEFAULT_LEAF_BATCH_SIZE)
+    expected_batch = min(num_leaves, real_upward_private._DEFAULT_LEAF_BATCH_SIZE)
 
     recorded: list[int] = []
-    original = upward_private._p2m_leaves_complex
+    original = real_upward_private._p2m_leaves_real
 
     def _recording_p2m(*args, **kwargs):
         recorded.append(int(kwargs["leaf_batch_size"]))
         return original(*args, **kwargs)
 
+    # The pure-JAX leaf P2M is the one that takes the batch size; the Pallas
+    # cascade (GPU only) does not, so pin it off for this check.
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(upward_private, "_p2m_leaves_complex", _recording_p2m)
-        upward_private.prepare_solidfmm_complex_upward_sweep(
+        mp.setattr(real_upward_private, "_pallas_cascades_enabled", lambda: False)
+        mp.setattr(real_upward_private, "_p2m_leaves_real", _recording_p2m)
+        real_upward_private.prepare_real_upward_sweep(
             build.tree,
             build.positions_sorted,
             build.masses_sorted,
             max_order=2,
-            center_mode="com",
             max_leaf_size=int(build.leaf_cap),
             leaf_batch_size=None,
-            rotation="solidfmm",
         )
 
     assert recorded == [expected_batch]

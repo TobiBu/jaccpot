@@ -3,7 +3,8 @@
 Jaccpot exposes a number of execution knobs through ``JACCPOT_*`` environment
 variables. Four near-identical private readers had accumulated across
 ``runtime/fmm_constants``, ``nearfield/near_field``,
-``upward/solidfmm_complex_tree_expansions`` and ``runtime/_interaction_cache``,
+``upward/solidfmm_complex_tree_expansions`` (removed in the 2026-10 cleanup, C) and
+``runtime/_interaction_cache``,
 and they did **not** agree: one clamped integers to a minimum of 1, the others
 did not, so the same env value meant different things depending on which module
 read it. This module is the single implementation; the per-module names remain

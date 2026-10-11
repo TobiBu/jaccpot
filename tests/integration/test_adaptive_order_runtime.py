@@ -47,14 +47,14 @@ def test_adaptive_order_false_matches_baseline():
     positions, masses = _sample_problem(80)
     base = FastMultipoleMethod(
         preset="accurate",
-        basis="complex",
+        basis="real",
         theta=0.5,
         softening=1.0e-2,
         advanced=_advanced_cfg(),
     )
     adaptive_off = FastMultipoleMethod(
         preset="accurate",
-        basis="complex",
+        basis="real",
         theta=0.5,
         softening=1.0e-2,
         adaptive_order=False,

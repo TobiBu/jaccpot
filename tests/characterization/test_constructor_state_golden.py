@@ -32,7 +32,6 @@ from typing import Any
 import pytest
 
 import jaccpot
-from jaccpot import ComplexSHBasis
 from jaccpot.config import (
     FarFieldConfig,
     NearFieldConfig,
@@ -65,10 +64,6 @@ CONFIGS: dict[str, dict[str, Any]] = {
     # old `solidfmm_real` row (`expansion_basis="solidfmm"` with a `RealSHBasis()`)
     # resolved byte-identically to it and went: the distinctness guard caught it.
     "real_default": {},
-    "solidfmm_explicit_complex": {
-        "expansion_basis": "solidfmm",
-        "basis_impl": ComplexSHBasis(),
-    },
     # --- presets: the gap audit 2.1 names explicitly. Routed through the PUBLIC
     # facade (`_VIA_FACADE`), because that is the only path that resolves all four.
     # The engine's own `preset=` argument accepts any `FMMPreset` but `get_preset_config`
@@ -80,14 +75,6 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "preset_balanced": {"preset": "balanced", _VIA_FACADE: True},
     "preset_accurate": {"preset": "accurate", _VIA_FACADE: True},
     "preset_large_n_gpu": {"preset": "large_n_gpu", _VIA_FACADE: True},
-    # `basis="complex"`, not `"real"`: the FACADE defaults to real, so a "real" row
-    # would duplicate `preset_accurate` exactly. Caught by the distinctness guard,
-    # which is the point of having one.
-    "preset_accurate_complex": {
-        "preset": "accurate",
-        "basis": "complex",
-        _VIA_FACADE: True,
-    },
     # The engine's own two supported values, direct, so the engine-level `preset`
     # attribute is snapshotted too (it stays None on every facade route).
     "engine_preset_fast": {"preset": "fast"},

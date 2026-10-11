@@ -6,11 +6,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-BASIS_DOC = (
-    "Preferred production basis is 'real' (Dehnen no-sqrt2 harmonics): the radix "
-    "large-N fast lane runs pure-real end to end with no complex<->real "
-    "conversion. 'solidfmm'/'complex' are retained for cross-checking only."
-)
 FARFIELD_MODE_DOC = (
     "For large_n_gpu production, far-field execution is canonicalized to "
     "'pair_grouped'."
@@ -24,10 +19,12 @@ MEMORY_OBJECTIVE_DOC = (
     "'minimum_memory'."
 )
 
-#: ``"cartesian"`` stays in the alias only so that an old config naming it still
-#: type-checks, and its caller sees :data:`_CARTESIAN_BASIS_REMOVED` rather than a
-#: type-check error: the Cartesian basis was removed in the 2026-10 cleanup
-#: (docs/cleanup_2026-10.md, K).
+#: ``"cartesian"`` and ``"complex"`` stay in the alias only so that an old config
+#: naming them still type-checks, and its caller sees :data:`_CARTESIAN_BASIS_REMOVED`
+#: / :data:`_COMPLEX_BASIS_REMOVED` rather than a type-check error: the Cartesian
+#: and complex bases were removed in the 2026-10 cleanup (docs/cleanup_2026-10.md, K
+#: and C). ``"solidfmm"`` names the spherical-harmonic family and resolves to the
+#: real basis, like ``"real"``.
 Basis = Literal["cartesian", "solidfmm", "complex", "real"]
 #: The one message every spelling of the removed Cartesian basis raises with: the
 #: facade's ``basis=`` and legacy ``expansion_basis=``, a ``BasisInterface`` whose
@@ -36,6 +33,19 @@ Basis = Literal["cartesian", "solidfmm", "complex", "real"]
 _CARTESIAN_BASIS_REMOVED = (
     "basis='cartesian' was removed in the 2026-10 cleanup (K); see "
     "docs/cleanup_2026-10.md. Use basis='real' (the default)."
+)
+#: The one message every spelling of the removed complex spherical-harmonic basis
+#: raises with (2026-10 cleanup, C): the facade's ``basis="complex"`` and legacy
+#: ``expansion_basis="complex"``, a basis object whose ``name`` is not ``"real"``
+#: (or whose ``runtime_expansion_basis`` is ``"complex"``), the engine's
+#: ``expansion_basis="complex"`` and ``basis_impl``, and
+#: ``DistributedFMMConfig(basis=...)`` naming ``"complex"`` or ``"solidfmm"`` (the
+#: distributed driver's name for its complex far field). The facade and the engine
+#: resolve ``"solidfmm"`` to the real basis instead.
+_COMPLEX_BASIS_REMOVED = (
+    "basis='complex' was removed in the 2026-10 cleanup (C); see "
+    "docs/cleanup_2026-10.md. Use basis='real' (the default) -- it agrees with the "
+    "complex basis to round-off."
 )
 #: ``"class_major"`` stays in the alias only so that an old config naming it still
 #: constructs (and type-checks); the solver then raises, because the class-major far

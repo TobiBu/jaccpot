@@ -35,7 +35,7 @@ def _base_runtime_kwargs():
     )
     return dict(
         preset=FMMPreset.FAST,
-        basis="solidfmm",
+        basis="real",
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,

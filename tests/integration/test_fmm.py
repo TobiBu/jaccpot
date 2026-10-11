@@ -1159,7 +1159,7 @@ def test_nearfield_bucketed_matches_baseline(
         theta=0.6,
         softening=1e-3,
         working_dtype=dtype,
-        expansion_basis="complex",
+        expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         fixed_order=3,
@@ -2294,7 +2294,13 @@ def test_fast_preset_defaults_to_auto_jit_tree_policy():
     assert fmm._jit_tree_default == "auto"
 
 
-def test_solidfmm_float32_uses_complex64_locals():
+def test_real_float32_locals_keep_the_working_dtype():
+    """fp32 in, fp32 locals out: the real basis never widens the local buffer.
+
+    Was ``test_solidfmm_float32_uses_complex64_locals`` (the complex basis's
+    ``complex64`` locals) until the complex basis was removed in the 2026-10
+    cleanup (C).
+    """
     key = jax.random.PRNGKey(7)
     num_particles = 64
     positions = jax.random.uniform(
@@ -2310,7 +2316,7 @@ def test_solidfmm_float32_uses_complex64_locals():
         theta=0.6,
         softening=1e-3,
         working_dtype=jnp.float32,
-        expansion_basis="complex",
+        expansion_basis="solidfmm",
         farfield=FarFieldConfig(rotation="solidfmm"),
         mac_type="dehnen",
         softening_kernel="plummer",
@@ -2322,10 +2328,11 @@ def test_solidfmm_float32_uses_complex64_locals():
         max_order=4,
         jit_tree=False,
     )
-    assert state.downward.locals.coefficients.dtype == jnp.complex64
+    assert state.downward.locals.coefficients.dtype == jnp.float32
 
 
-def test_solidfmm_float64_uses_complex128_locals():
+def test_real_float64_locals_keep_the_working_dtype():
+    """fp64 in, fp64 locals out (was ``..._uses_complex128_locals``, C)."""
     with jax.enable_x64(True):
         key = jax.random.PRNGKey(9)
         num_particles = 64
@@ -2344,7 +2351,7 @@ def test_solidfmm_float64_uses_complex128_locals():
             theta=0.6,
             softening=1e-3,
             working_dtype=jnp.float64,
-            expansion_basis="complex",
+            expansion_basis="solidfmm",
             farfield=FarFieldConfig(rotation="solidfmm"),
             mac_type="dehnen",
             softening_kernel="plummer",
@@ -2356,7 +2363,7 @@ def test_solidfmm_float64_uses_complex128_locals():
             max_order=4,
             jit_tree=False,
         )
-        assert state.downward.locals.coefficients.dtype == jnp.complex128
+        assert state.downward.locals.coefficients.dtype == jnp.float64
 
 
 def _m2l_far_pair_count(state) -> int:
@@ -2395,7 +2402,7 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
 
     Second, it compared the two **fp32** paths to each other. Two fp32 paths
     agreeing proves nothing -- they can be identically wrong, which is exactly why
-    the neighbouring ``test_solidfmm_m2l_ignores_padded_compact_far_pairs`` was
+    the neighbouring ``test_m2l_ignores_padded_compact_far_pairs`` was
     rewritten to use a float64 reference. Each path is now checked against a
     float64 reference built from the *same* particles cast up. (Re-drawing the
     particles in float64 instead would silently compare a different physical
@@ -2510,7 +2517,7 @@ def test_solidfmm_chunked_m2l_matches_fullbatch():
     )
 
 
-def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
+def test_m2l_ignores_padded_compact_far_pairs():
     """Sentinel (-1) padding in the far-pair list must not corrupt the M2L.
 
     Both the exact-length and the padded list are checked against a **float64
@@ -2542,6 +2549,11 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
     2026-10 cleanup, K) but not here. Left as-is deliberately; see
     ARCHITECTURE.md section 7.
 
+    It ran on the complex basis until the 2026-10 cleanup (C) and runs on the real
+    basis now (real coefficients, ``basis_mode="real"``). Measured on CPU in fp32:
+    every case below lands at 5.9e-07 from the float64 reference, and the two
+    mutations behave as they did on the complex basis.
+
     What this does and does not discriminate, measured by mutation:
 
     * A ``-1``-sentinel row is dropped by the **index masking** (``tgt >= 0``),
@@ -2550,9 +2562,10 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
       sentinel padding; it cannot tell which of the two guards did the work.
     * The leak it does catch is the ``0``-padded form (what the treecode compact
       far-pair list produces, with the true count in ``far_pair_count``), where
-      ``active_count`` is the only guard: honest ``active_count=1`` lands at
-      3.7e-04, while ``active_count=4`` returns NaN and fails both the isfinite
-      assertion and the bound below.
+      ``active_count`` is the only guard: honest ``active_count=1`` lands at the
+      reference (3.7e-04 on the complex basis, 5.9e-07 on the real one on CPU),
+      while ``active_count=4`` returns NaN and fails both the isfinite assertion
+      and the bound below.
     """
     order = 2
     src_exact = jnp.array([1], dtype=INDEX_DTYPE)
@@ -2561,7 +2574,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
     tgt_padded = jnp.array([0, -1, -1, -1], dtype=INDEX_DTYPE)
     active_count = jnp.array(1, dtype=INDEX_DTYPE)
 
-    def accumulate(src, tgt, complex_dtype, real_dtype):
+    def accumulate(src, tgt, real_dtype):
         coeff_count = fmm_impl_private.sh_size(order)
         centers = jnp.array(
             [
@@ -2574,9 +2587,7 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
         )
         multipoles = jnp.arange(
             centers.shape[0] * coeff_count, dtype=real_dtype
-        ).reshape((centers.shape[0], coeff_count)).astype(complex_dtype) * jnp.array(
-            0.01 + 0.02j, dtype=complex_dtype
-        )
+        ).reshape((centers.shape[0], coeff_count)) * jnp.asarray(0.01, real_dtype)
         return kernels_core._accumulate_m2l_fullbatch(
             jnp.zeros_like(multipoles),
             multipoles,
@@ -2585,30 +2596,26 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
             tgt,
             active_count,
             order=order,
-            basis_mode="complex",
-            rotation="solidfmm",
+            basis_mode="real",
+            m2l_impl="rot_scale",
             total_nodes=int(centers.shape[0]),
         )
 
     # The reference is only a reference if x64 is actually on; without it
-    # complex128 silently degrades to complex64 and the comparison is vacuous.
+    # float64 silently degrades to float32 and the comparison is vacuous.
     if not jax.config.read("jax_enable_x64"):
         pytest.skip("float64 reference needs JAX_ENABLE_X64=1")
-    reference = np.asarray(
-        accumulate(src_exact, tgt_exact, jnp.complex128, jnp.float64)
-    )
+    reference = np.asarray(accumulate(src_exact, tgt_exact, jnp.float64))
 
-    exact_np = np.asarray(accumulate(src_exact, tgt_exact, jnp.complex64, jnp.float32))
-    padded_full_np = np.asarray(
-        accumulate(src_padded, tgt_padded, jnp.complex64, jnp.float32)
-    )
+    exact_np = np.asarray(accumulate(src_exact, tgt_exact, jnp.float32))
+    padded_full_np = np.asarray(accumulate(src_padded, tgt_padded, jnp.float32))
     padded_chunked_np = np.asarray(
         kernels_core._accumulate_m2l_chunked_scan(
-            jnp.zeros((4, fmm_impl_private.sh_size(order)), dtype=jnp.complex64),
-            jnp.arange(4 * fmm_impl_private.sh_size(order), dtype=jnp.float32)
-            .reshape((4, fmm_impl_private.sh_size(order)))
-            .astype(jnp.complex64)
-            * jnp.array(0.01 + 0.02j, dtype=jnp.complex64),
+            jnp.zeros((4, fmm_impl_private.sh_size(order)), dtype=jnp.float32),
+            jnp.arange(4 * fmm_impl_private.sh_size(order), dtype=jnp.float32).reshape(
+                (4, fmm_impl_private.sh_size(order))
+            )
+            * jnp.asarray(0.01, jnp.float32),
             jnp.array(
                 [
                     [0.0, 0.0, 0.0],
@@ -2622,8 +2629,8 @@ def test_solidfmm_m2l_ignores_padded_compact_far_pairs():
             tgt_padded,
             active_count,
             order=order,
-            basis_mode="complex",
-            rotation="solidfmm",
+            basis_mode="real",
+            m2l_impl="rot_scale",
             total_nodes=4,
             chunk_size=2,
         )
