@@ -164,10 +164,10 @@ acc_active = coupler.accelerations(primitive_state, active_indices=active)
 
 The octree execution backend (`RuntimePolicyConfig(execution_backend="octree")`,
 complex basis only, about 3x behind radix, no production caller) was removed in the
-2026-10 cleanup ([docs/cleanup_2026-10.md](docs/cleanup_2026-10.md), X2). Configs
-that name it still construct, but the solver raises a `ValueError` on
-`execution_backend="octree"` or `TreeConfig(tree_type="octree")`. Radix is the only
-single-GPU execution backend.
+2026-10 cleanup ([docs/cleanup_2026-10.md](docs/cleanup_2026-10.md), X2), and the
+`execution_backend` field with it (Z-b). `TreeConfig(tree_type="octree")` raises the
+generic "tree_type must be one of" `ValueError`. Radix is the only single-GPU
+execution backend.
 
 ## Basis Selection
 
@@ -179,20 +179,18 @@ single-GPU execution backend.
   2026-10 cleanup (phase C) **an alias for `"real"`**: it resolves to the same
   basis object and reports `basis == "real"`. Until C it selected the complex
   basis.
-- `basis="complex"` — **removed** in the 2026-10 cleanup (phase C): it raises a
-  `ValueError` naming the removal, as do `FMMEngine(expansion_basis="complex")`,
-  a basis object not named `"real"`, and `DistributedFMMConfig(basis="complex")`
-  or `basis="solidfmm"` (the distributed driver's name for its complex far
-  field); `from jaccpot import ComplexSHBasis` raises an `ImportError` with the
-  same message. The complex basis agreed with the real one to round-off
-  (4.5e-13 at N=2048/p=4/theta=0.5 in float64), so `"real"` is a drop-in
-  replacement.
-- `basis="cartesian"` — **removed** in the 2026-10 cleanup (phase K): it raises a
-  `ValueError` naming the removal, as do `FMMEngine(expansion_basis="cartesian")`
-  and `DistributedFMMConfig(basis="cartesian")`. Its relative L2 force error was
-  ~1.8e-1 *independent of expansion order*, a divergent-series signature rather
-  than truncation error. `JACCPOT_ALLOW_CARTESIAN_BASIS`, which silenced its
-  warning, is inert. See `docs/cleanup_2026-10.md`.
+- `basis="complex"` — **removed** in the 2026-10 cleanup (phase C). Since Z-b it
+  is an unknown name like any other and raises the generic `ValueError` of its
+  validator, as do `FMMEngine(expansion_basis="complex")`, a basis object not named
+  `"real"`, and `DistributedFMMConfig(basis="complex")` or `basis="solidfmm"` (the
+  distributed driver's name for its complex far field); `ComplexSHBasis` is not
+  importable. The
+  complex basis agreed with the real one to round-off (4.5e-13 at N=2048/p=4/
+  theta=0.5 in float64), so `"real"` is a drop-in replacement.
+- `basis="cartesian"` — **removed** in the 2026-10 cleanup (phase K); an unknown name
+  since Z-b, likewise. Its relative L2 force error was ~1.8e-1 *independent of
+  expansion order*, a divergent-series signature rather than truncation error. See
+  `docs/cleanup_2026-10.md`.
 
 ## Multi-GPU: the JAX floor is a correctness floor
 
