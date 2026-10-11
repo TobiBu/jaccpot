@@ -430,21 +430,6 @@ class DiagnosticsMixin(_EngineBase):
             "refresh_upward_compute_seconds": float(
                 self._refresh_timing_upward_compute_seconds
             ),
-            "refresh_upward_geometry_seconds": float(
-                self._refresh_timing_upward_geometry_seconds
-            ),
-            "refresh_upward_mass_moments_seconds": float(
-                self._refresh_timing_upward_mass_moments_seconds
-            ),
-            "refresh_upward_p2m_seconds": float(
-                self._refresh_timing_upward_p2m_seconds
-            ),
-            "refresh_upward_m2m_seconds": float(
-                self._refresh_timing_upward_m2m_seconds
-            ),
-            "refresh_upward_source_motion_seconds": float(
-                self._refresh_timing_upward_source_motion_seconds
-            ),
             "refresh_dual_downward_seconds": float(
                 self._refresh_timing_dual_downward_seconds
             ),

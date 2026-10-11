@@ -322,7 +322,6 @@ def large_n_farfield_locals_at(
             plan.far_pair_targets,
             plan.far_pair_active_count,
         ),
-        far_pairs_by_gear=((plan.far_pair_sources, plan.far_pair_targets),),
         adaptive_order=True,
         p_gears=(plan.order,),
     )

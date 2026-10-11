@@ -72,7 +72,6 @@ from jaccpot.config import (
     RuntimePolicyConfig,
     TreeConfig,
 )
-from jaccpot.downward.local_expansions import LocalExpansionData
 from jaccpot.operators.real_harmonics import sh_size  # noqa: F401
 from jaccpot.softening import resolve_softening_kernel, support_factor
 
@@ -1266,7 +1265,6 @@ class FMMEngine(
         self.aspect_threshold = resolved.tree.aspect_threshold
         self.interaction_retry_logger = interaction_retry_logger
         self._tree_workspace: Optional[object] = None
-        self._locals_template: Optional[LocalExpansionData] = None
         self._interaction_cache: Optional[_InteractionCacheEntry] = None
         self._interaction_cache_hits: int = 0
         self._interaction_cache_misses: int = 0
@@ -1315,11 +1313,6 @@ class FMMEngine(
         self._refresh_timing_tree_upward_seconds: float = 0.0
         self._refresh_timing_tree_build_seconds: float = 0.0
         self._refresh_timing_upward_compute_seconds: float = 0.0
-        self._refresh_timing_upward_geometry_seconds: float = 0.0
-        self._refresh_timing_upward_mass_moments_seconds: float = 0.0
-        self._refresh_timing_upward_p2m_seconds: float = 0.0
-        self._refresh_timing_upward_m2m_seconds: float = 0.0
-        self._refresh_timing_upward_source_motion_seconds: float = 0.0
         self._refresh_timing_dual_downward_seconds: float = 0.0
         self._refresh_timing_nearfield_seconds: float = 0.0
         self._refresh_timing_profile_accounting_seconds: float = 0.0
@@ -1753,7 +1746,6 @@ class FMMEngine(
         """
 
         self.clear_prepared_state_cache()
-        self._locals_template = None
         self._interaction_cache = None
         self._interaction_cache_hits = 0
         self._interaction_cache_misses = 0
@@ -1804,11 +1796,6 @@ class FMMEngine(
         self._refresh_timing_tree_upward_seconds = 0.0
         self._refresh_timing_tree_build_seconds = 0.0
         self._refresh_timing_upward_compute_seconds = 0.0
-        self._refresh_timing_upward_geometry_seconds = 0.0
-        self._refresh_timing_upward_mass_moments_seconds = 0.0
-        self._refresh_timing_upward_p2m_seconds = 0.0
-        self._refresh_timing_upward_m2m_seconds = 0.0
-        self._refresh_timing_upward_source_motion_seconds = 0.0
         self._refresh_timing_dual_downward_seconds = 0.0
         self._refresh_timing_nearfield_seconds = 0.0
         self._refresh_timing_profile_accounting_seconds = 0.0

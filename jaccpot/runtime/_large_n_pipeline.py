@@ -1200,7 +1200,6 @@ def prepare_large_n_state(
     # signature change only -- the 880 lines below are untouched.
     bounds = request.bounds
     leaf_size = request.leaf_size
-    max_order = request.max_order
     theta_val = request.theta_val
     mac_type_val = request.mac_type_val
     refine_local_val = request.refine_local_val
@@ -1271,13 +1270,6 @@ def prepare_large_n_state(
     )
 
     stage_t0 = _now()
-    if allow_stateful_cache:
-        fmm._update_locals_template_cache_after_prepare(
-            locals_template=tree_artifacts.locals_template,
-            upward=tree_artifacts.upward,
-            max_order=int(max_order),
-        )
-
     retry_events_tuple = tuple(collected_retries)
     if allow_stateful_cache:
         fmm._recent_retry_events = retry_events_tuple

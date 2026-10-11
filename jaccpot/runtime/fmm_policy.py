@@ -929,12 +929,6 @@ class PolicyMixin(_EngineBase):
             center_mode=upward_center_mode,
             max_leaf_size=tree_artifacts.leaf_cap,
         )
-        low_locals_template = self._build_locals_template_for_prepare_state(
-            tree=tree_artifacts.tree,
-            upward=low_upward,
-            max_order=int(low_order),
-            pos_sorted=tree_artifacts.positions_sorted,
-        )
         low_tree_artifacts = _PrepareStateTreeUpwardArtifacts(
             tree_mode=tree_artifacts.tree_mode,
             tree=tree_artifacts.tree,
@@ -945,7 +939,6 @@ class PolicyMixin(_EngineBase):
             leaf_parameter=tree_artifacts.leaf_parameter,
             topology_key=tree_artifacts.topology_key,
             upward=low_upward,
-            locals_template=low_locals_template,
         )
 
         with self._force_scale_prepass_scope(low_order=int(low_order)):

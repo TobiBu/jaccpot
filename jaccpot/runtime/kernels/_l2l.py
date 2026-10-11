@@ -459,7 +459,6 @@ def _prepare_solidfmm_downward_sweep(
     traversal_config: Optional[DualTreeTraversalConfig] = None,
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
     far_pairs_coo: Optional[_FarPairCOO] = None,
-    far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
     n_targets: Optional[int] = None,
     cross_multipoles: Optional[Array] = None,
     cross_centers: Optional[Array] = None,
@@ -506,8 +505,6 @@ def _prepare_solidfmm_downward_sweep(
         Called when the traversal retries with a larger capacity.
     far_pairs_coo : Optional[_FarPairCOO]
         Pre-built COO far pairs, which take precedence over ``interactions``.
-    far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
-        Per-gear far-pair lists for the adaptive-order path.
     n_targets : Optional[int]
         Number of leading nodes that receive M2L contributions. ``None`` means
         all. Set to the local node count when cross-domain sources sit behind the

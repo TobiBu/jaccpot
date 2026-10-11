@@ -2452,12 +2452,6 @@ class StrictRunMixin(_EngineBase):
             max_leaf_size=int(build_artifacts.max_leaf_size),
             defer_geometry=defer_geometry,
         )
-        locals_template = self._build_locals_template_for_prepare_state(
-            tree=build_artifacts.tree,
-            upward=upward,
-            max_order=int(max_order),
-            pos_sorted=build_artifacts.positions_sorted,
-        )
         tree_artifacts = _PrepareStateTreeUpwardArtifacts(
             tree_mode=tree_config.mode,
             tree=build_artifacts.tree,
@@ -2468,7 +2462,6 @@ class StrictRunMixin(_EngineBase):
             leaf_parameter=int(build_artifacts.cache_leaf_parameter),
             topology_key=refresh_topology_key,
             upward=upward,
-            locals_template=locals_template,
         )
         if refresh_timing_active:
             self._refresh_timing_tree_upward_seconds += time.perf_counter() - tree_t0
@@ -2639,11 +2632,6 @@ class StrictRunMixin(_EngineBase):
             self._static_radix_refresh_hits += 1
 
         if allow_stateful_cache and (not traced_refresh):
-            self._update_locals_template_cache_after_prepare(
-                locals_template=tree_artifacts.locals_template,
-                upward=tree_artifacts.upward,
-                max_order=int(max_order),
-            )
             self._recent_retry_events = tuple(collected_retries)
             self._topology_reuse_entry = _TopologyReuseEntry(
                 key=str(refresh_topology_key),

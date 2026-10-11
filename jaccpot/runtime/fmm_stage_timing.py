@@ -3,7 +3,7 @@
 ``get_runtime_diagnostics()`` returns ~50 ``refresh_*_seconds`` counters. They
 are a **hierarchy, not a partition**: ``refresh_nearfield_seconds`` is the sum of
 the ``refresh_nearfield_*`` children, and ``refresh_tree_upward_seconds`` the sum
-of the ``refresh_upward_*`` ones. Measured at N=65536: nearfield 80.33 ms against
+of the tree build and ``refresh_upward_compute_seconds``. Measured at N=65536: nearfield 80.33 ms against
 its children summing to 79.4 ms.
 
 Any consumer that sums "all the counters" therefore double-counts, and the first
@@ -63,14 +63,10 @@ STAGE_TREE: dict[str, tuple[str, ...]] = {
         "profile_accounting",
         "compile_or_sync_suspect",
     ),
+    # `upward_compute` is a leaf: its five children (geometry, mass moments, P2M,
+    # M2M, source motion) were never instrumented and always read 0.0; they went in
+    # the 2026-10 cleanup (Z-b).
     "tree_upward": ("tree_build", "upward_compute"),
-    "upward_compute": (
-        "upward_geometry",
-        "upward_mass_moments",
-        "upward_p2m",
-        "upward_m2m",
-        "upward_source_motion",
-    ),
     "dual_downward": (
         "dual_setup",
         "dual_artifact_build",

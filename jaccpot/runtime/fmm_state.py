@@ -34,7 +34,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree
 
 from jaccpot._jax_compat import Tracer
-from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
+from jaccpot.downward.local_expansions import TreeDownwardData
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from ..config import FMMPreset
@@ -1229,9 +1229,6 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
         Topology signature, when one was computed.
     upward : TreeUpwardData
         Upward-sweep result.
-    locals_template : Optional[LocalExpansionData]
-        Zero-filled locals matching the tree's shape, kept so the downward sweep
-        can allocate without re-deriving the layout.
     leaf_capacity_overflow : Optional[Array]
         Cell-leaf partitions only; see :class:`_TreeBuildArtifacts`.
     walk_geometry : Optional[tuple]
@@ -1251,7 +1248,6 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     leaf_parameter: int
     topology_key: Optional[str]
     upward: TreeUpwardData
-    locals_template: Optional[LocalExpansionData]
     leaf_capacity_overflow: Optional[Array] = None
     walk_geometry: Optional[tuple] = None
 
