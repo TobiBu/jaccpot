@@ -118,21 +118,6 @@ def _far_pair_arrays_for_fb_prepass(
 
 
 class PolicyMixin(_EngineBase):
-    def _solidfmm_basis_mode(self) -> str:
-        """Return the active spherical-harmonic coefficient family: always ``"real"``.
-
-        The complex basis was removed in the 2026-10 cleanup (C); the engine
-        refuses any basis object not named ``"real"`` at construction, so there is
-        nothing left to read. Kept because the sweeps and the derivative paths
-        still pass its value on as the kernels' ``basis_mode``.
-
-        Returns
-        -------
-        str
-            ``"real"``.
-        """
-        return "real"
-
     def _compute_node_force_scale_from_sorted_acc(
         self,
         *,

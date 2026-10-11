@@ -2517,8 +2517,6 @@ def can_use_large_n_prepare_path(
         return False
     if bool(getattr(fmm, "mixed_order_farfield", False)):
         return False
-    if str(getattr(fmm, "complex_rotation", "")).strip().lower() != "solidfmm":
-        return False
     if (
         bool(getattr(fmm, "_uses_per_node_effective_theta", None))
         and fmm._uses_per_node_effective_theta()

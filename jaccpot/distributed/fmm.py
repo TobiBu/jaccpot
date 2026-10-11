@@ -654,7 +654,6 @@ class DistributedFMMConfig:
     softening_kernel: Optional[str] = None
     softening_floor: Optional[float] = None
     G: float = 1.0
-    rotation: str = "solidfmm"
     # dehnen bounding-SPHERE MAC extents (the correct multipole-radius bound, matching
     # the single-GPU fast lane and required for stable multi-step use). "bh" (box) is
     # cheaper but under-bounds the source radius; keep it only for single-shot use.
@@ -1767,7 +1766,6 @@ def _make_fn(
         if config.softening_floor is None
         else float(config.softening_floor)
     )
-    rot = config.rotation
     theta = config.theta
     basis = str(config.basis).strip().lower()
     if basis != "real":
@@ -2337,9 +2335,7 @@ def _make_fn(
                 rc_full,
                 node_levels,
                 order=p,
-                rotation=rot,
                 total_nodes=int(total_nodes),
-                basis_mode="real",
                 num_levels=l2l_levels,
             )
             ld = LocalExpansionData(order=p, centers=centers, coefficients=loc_coeffs)
@@ -2401,7 +2397,6 @@ def _make_fn(
                 s_tgt,
                 s_active,
                 order=p,
-                basis_mode="real",
                 m2l_impl="rot_scale",
                 total_nodes=int(total_nodes),
             )

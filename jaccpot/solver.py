@@ -72,7 +72,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             ),
             farfield=replace(
                 cfg.farfield,
-                rotation="solidfmm",
                 m2l_chunk_size=None,
                 l2l_chunk_size=None,
                 streamed_far_pairs=True,
@@ -301,9 +300,6 @@ class _LegacyRuntimeOverrides(NamedTuple):
 
     Attributes
     ----------
-    complex_rotation : str
-        Rotation backend; falls back to ``"solidfmm"`` when the config leaves it
-        ``None``. Legacy name: ``complex_rotation``.
     tree_type : Optional[str]
         Tree family. ``None`` here becomes ``"radix"`` at the engine call.
         Legacy name: ``tree_type``.
@@ -333,7 +329,6 @@ class _LegacyRuntimeOverrides(NamedTuple):
         Threaded in and out so both poppers contribute to one warning decision.
     """
 
-    complex_rotation: str
     tree_type: Optional[str]
     tree_mode: Optional[str]
     target_leaf_particles: Optional[int]
@@ -375,14 +370,6 @@ def _pop_legacy_runtime_overrides(
     _LegacyRuntimeOverrides
         Resolved settings, with ``legacy_used`` folded in.
     """
-    complex_rotation = advanced_cfg.farfield.rotation
-    if complex_rotation is None:
-        complex_rotation = "solidfmm"
-    legacy_rotation = legacy_kwargs.pop("complex_rotation", None)
-    if legacy_rotation is not None:
-        complex_rotation = str(legacy_rotation)
-        legacy_used = True
-
     tree_type = advanced_cfg.tree.tree_type
     legacy_tree_type = legacy_kwargs.pop("tree_type", None)
     if legacy_tree_type is not None:
@@ -454,7 +441,6 @@ def _pop_legacy_runtime_overrides(
         fixed_max_leaf_size = int(fixed_max_leaf_size)
 
     return _LegacyRuntimeOverrides(
-        complex_rotation=complex_rotation,
         tree_type=tree_type,
         tree_mode=tree_mode,
         target_leaf_particles=target_leaf_particles,
@@ -704,7 +690,6 @@ class FastMultipoleMethod:
             dehnen_geometry_mode=dehnen_geometry_mode,
             mac_theta_max=mac_theta_max,
             farfield=FarFieldConfig(
-                rotation=runtime_overrides.complex_rotation,
                 retain_far_pairs_for_grad=legacy_kwargs.pop(
                     "retain_far_pairs_for_grad",
                     advanced_cfg.farfield.retain_far_pairs_for_grad,
@@ -1966,11 +1951,6 @@ class FastMultipoleMethod:
         """Whether the latest prepare/evaluate path reused cached topology."""
 
         return bool(getattr(self._impl, "_recent_topology_reused", False))
-
-    @property
-    def complex_rotation(self: "FastMultipoleMethod") -> str:
-        """Active complex-rotation backend identifier."""
-        return str(self._impl.complex_rotation)
 
     @property
     def mac_type(self: "FastMultipoleMethod") -> str:

@@ -213,13 +213,10 @@ class _SolidFMMDownwardMultipoleInputs(NamedTuple):
         The array handed to the M2L kernel. Currently the same object as
         ``multip_packed``; kept a separate field so a lane can feed the kernel a
         different layout without disturbing the payload above.
-    rotation_mode : str
-        Normalised ``complex_rotation`` value selecting the rotation lane.
     """
 
     multip_packed: Array
     multip_packed_kernel: Array
-    rotation_mode: str
 
 
 class _SolidFMMDownwardChildInputs(NamedTuple):
@@ -368,7 +365,6 @@ def _prepare_solidfmm_downward_init(
     *,
     upward: TreeUpwardData,
     initial_locals: Optional[LocalExpansionData],
-    basis_mode: str,
 ) -> _SolidFMMDownwardInit:
     """Resolve centers and local-expansion buffers for downward prep.
 
@@ -379,9 +375,8 @@ def _prepare_solidfmm_downward_init(
     initial_locals : Optional[LocalExpansionData]
         Locals to accumulate into, or ``None`` to start from zeros. Supplying
         them is what lets a caller add a second contribution to an existing
-        field rather than recomputing it.
-    basis_mode : str
-        ``"real"``: the local buffer takes the centres' own dtype.
+        field rather than recomputing it. Without them the local buffer takes
+        the centres' own dtype.
 
     Returns
     -------
@@ -391,21 +386,13 @@ def _prepare_solidfmm_downward_init(
     Raises
     ------
     ValueError
-        If ``basis_mode`` is not ``"real"`` (the complex basis was removed in the
-        2026-10 cleanup, C), or if ``initial_locals`` does not have shape
-        ``[total_nodes, sh_size(order)]``.
+        If ``initial_locals`` does not have shape ``[total_nodes, sh_size(order)]``.
     """
 
     p = int(upward.multipoles.order)
     centers = jnp.asarray(upward.multipoles.centers)
     total_nodes = int(centers.shape[0])
     coeff_count = sh_size(p)
-    basis_mode_norm = str(basis_mode).strip().lower()
-    if basis_mode_norm != "real":
-        raise ValueError(
-            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
-            "removed in the 2026-10 cleanup, C)"
-        )
     dtype = centers.dtype
     if initial_locals is not None:
         locals_coeffs = jnp.asarray(initial_locals.coefficients)
@@ -426,8 +413,6 @@ def _prepare_solidfmm_downward_multipole_inputs(
     *,
     upward: TreeUpwardData,
     dtype: Any,
-    basis_mode: str,
-    complex_rotation: str,
 ) -> _SolidFMMDownwardMultipoleInputs:
     """Resolve multipole coefficient payloads for downward accumulation.
 
@@ -442,17 +427,11 @@ def _prepare_solidfmm_downward_multipole_inputs(
         Upward-pass result supplying the packed multipoles.
     dtype : Any
         Working dtype to cast the payloads to.
-    basis_mode : str
-        ``"real"``. Accepted for the callers' sake; the basis is checked where
-        the local buffer is made (:func:`_prepare_solidfmm_downward_init`).
-    complex_rotation : str
-        Rotation lane, passed through to the kernels, which no longer read it.
 
     Returns
     -------
     _SolidFMMDownwardMultipoleInputs
-        Cast multipoles, the kernel-facing array and the normalised rotation
-        mode.
+        Cast multipoles and the kernel-facing array.
 
     Raises
     ------
@@ -461,8 +440,6 @@ def _prepare_solidfmm_downward_multipole_inputs(
         conversion is not reinstated silently.
     """
 
-    p = int(upward.multipoles.order)
-    rotation_mode = str(complex_rotation).strip().lower()
     # The native real upward sweep (prepare_real_upward_sweep) produces packed REAL
     # (Dehnen no-sqrt2) coefficients directly -- there is NO complex intermediate
     # and NO complex<->real conversion. Pass them straight through to the real
@@ -472,7 +449,7 @@ def _prepare_solidfmm_downward_multipole_inputs(
     packed_raw = jnp.asarray(upward.multipoles.packed)
     if jnp.iscomplexobj(packed_raw):
         raise TypeError(
-            "real basis_mode expects REAL multipole coefficients from the "
+            "the downward sweep expects REAL multipole coefficients from the "
             "native real upward sweep (prepare_real_upward_sweep), but received "
             "complex-packed multipoles. The complex->real conversion has been "
             "removed from the real path; check prepare_upward_sweep wiring."
@@ -482,7 +459,6 @@ def _prepare_solidfmm_downward_multipole_inputs(
     return _SolidFMMDownwardMultipoleInputs(
         multip_packed=multip_packed,
         multip_packed_kernel=multip_packed_kernel,
-        rotation_mode=rotation_mode,
     )
 
 
@@ -530,10 +506,8 @@ def _solidfmm_downward_accumulate_from_multipoles(
     pair_count: int,
     active_pair_count: Array,
     order: int,
-    rotation_mode: str,
     total_nodes: int,
     chunk_size: int,
-    basis_mode: str = "real",
     m2l_impl: str = "rot_scale",
     targets_sorted: bool = False,
 ) -> Array:
@@ -574,14 +548,10 @@ def _solidfmm_downward_accumulate_from_multipoles(
         Live pair count, traced; entries beyond it contribute nothing.
     order : int
         Expansion order.
-    rotation_mode : str
-        Rotation lane passed through to the kernels.
     total_nodes : int
         Node count, i.e. the scatter extent.
     chunk_size : int
         Pairs per chunk, and the threshold that selects the chunked lane.
-    basis_mode : str
-        ``"real"``; anything else raises.
     m2l_impl : str
         M2L implementation selector for the flat lanes.
     targets_sorted : bool
@@ -593,18 +563,8 @@ def _solidfmm_downward_accumulate_from_multipoles(
     -------
     Array
         Updated local coefficients.
-
-    Raises
-    ------
-    ValueError
-        If ``basis_mode`` is not ``"real"``.
     """
 
-    if str(basis_mode).strip().lower() != "real":
-        raise ValueError(
-            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
-            "removed in the 2026-10 cleanup, C)"
-        )
     csr_lane = _m2l_csr_pallas_active()
     if targets_sorted and not csr_lane:
         # only the CSR lane kernel reads a CSR as (sources, row offsets)
@@ -644,8 +604,6 @@ def _solidfmm_downward_accumulate_from_multipoles(
             tgt,
             active_pair_count,
             order=order,
-            basis_mode=basis_mode,
-            rotation=rotation_mode,
             m2l_impl=m2l_impl,
             total_nodes=total_nodes,
         )
@@ -658,8 +616,6 @@ def _solidfmm_downward_accumulate_from_multipoles(
             tgt,
             active_pair_count,
             order=order,
-            basis_mode=basis_mode,
-            rotation=rotation_mode,
             m2l_impl=m2l_impl,
             total_nodes=total_nodes,
             chunk_size=chunk_size,

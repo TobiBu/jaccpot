@@ -170,8 +170,6 @@ class FarFieldConfig:
 
     Attributes
     ----------
-    rotation : Optional[str]
-        M2L rotation implementation, e.g. ``"solidfmm"`` or ``"cached"``.
     m2l_chunk_size : Optional[int]
         Pairs per chunk in the chunked M2L ``lax.scan``. A memory/throughput knob;
         it bounds peak memory rather than changing the result.
@@ -191,7 +189,6 @@ class FarFieldConfig:
         memory); **required** to differentiate the large-N path.
     """
 
-    rotation: Optional[str] = None
     m2l_chunk_size: Optional[int] = None
     l2l_chunk_size: Optional[int] = None
     streamed_far_pairs: Optional[bool] = None

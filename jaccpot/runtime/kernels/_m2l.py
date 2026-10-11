@@ -1,16 +1,14 @@
 """The M2L apply-and-accumulate seam: every batching, both gates.
 
-THIS MODULE IS ONE UNIT ON PURPOSE. ``_apply_m2l`` checks ``basis_mode`` and
-routes to ``_apply_real_m2l``, which consults its ``*_pallas_active`` gate and
-routes to either the reference batch kernel or the fused Pallas twin.
-ARCHITECTURE §10's invariant is that **every discriminator on that path is a
-static argument** -- ``order``, ``rotation``, ``m2l_impl``, ``basis_mode`` -- so
-the whole dispatch compiles to one branch-free jaxpr per configuration. Splitting
-*within* it would break the argument that the invariant holds, which is why the
-audit says this seam moves whole. The complex basis's branch
-(``_apply_complex_m2l``) went with that basis in the 2026-10 cleanup (C);
-``basis_mode`` other than ``"real"`` raises, and ``rotation`` is accepted and
-unused.
+THIS MODULE IS ONE UNIT ON PURPOSE. ``_apply_real_m2l`` consults its
+``*_pallas_active`` gate and routes to either the reference batch kernel or the
+fused Pallas twin. ARCHITECTURE §10's invariant is that **every discriminator on
+that path is a static argument** -- ``order``, ``m2l_impl`` -- so the whole
+dispatch compiles to one branch-free jaxpr per configuration. Splitting *within*
+it would break the argument that the invariant holds, which is why the audit says
+this seam moves whole. The complex basis's branch (``_apply_complex_m2l``) went
+with that basis in the 2026-10 cleanup (C), and the ``basis_mode`` / ``rotation``
+discriminators that selected it in Z-b.
 
 EQUIVALENCE THAT MUST HOLD (NUMERICS_AND_JAX §1, asserted in
 ``tests/unit/operators/test_m2l_real_fused_pallas.py``):
@@ -380,8 +378,8 @@ def _apply_real_m2l(
     order : int
         Expansion order ``p``. Static under ``jit``.
     m2l_impl : Optional[str]
-        Real M2L implementation. ``Optional`` because :func:`_apply_m2l` declares
-        it so and passes it through unresolved; both kernels below then require
+        Real M2L implementation. ``Optional`` because the accumulators declare
+        it so and pass it through unresolved; both kernels below then require
         ``"rot_scale"`` and raise otherwise, so ``None`` reaches a ValueError
         rather than a default.
 
@@ -398,57 +396,6 @@ def _apply_real_m2l(
     return _m2l_real_batch_kernel(src_mult, deltas, order=order, m2l_impl=m2l_impl)
 
 
-def _apply_m2l(
-    src_mult: Array,
-    deltas: Array,
-    *,
-    order: int,
-    basis_mode: str,
-    rotation: Optional[str] = None,
-    m2l_impl: Optional[str] = None,
-) -> Array:
-    """Batched M2L apply seam.
-
-    ``basis_mode`` is a static discriminator, and ``"real"`` is the only basis:
-    it routes through :func:`_apply_real_m2l` (``m2l_impl``). The complex branch
-    (``_apply_complex_m2l``, reading ``rotation``) went with the complex basis in
-    the 2026-10 cleanup (C).
-
-    Parameters
-    ----------
-    src_mult : Array
-        Multipole coefficients in whichever basis ``basis_mode`` names, one row
-        per pair.
-    deltas : Array
-        Target-minus-source centre displacements ``[N, 3]``.
-    order : int
-        Expansion order ``p``. Static.
-    basis_mode : str
-        ``"real"``. Static.
-    rotation : Optional[str]
-        Accepted and unused (it was the complex branch's rotation convention).
-    m2l_impl : Optional[str]
-        Real M2L implementation.
-
-    Returns
-    -------
-    Array
-        Real local contributions ``[N, (p+1)^2]``.
-
-    Raises
-    ------
-    ValueError
-        If ``basis_mode`` is not ``"real"`` (the complex basis was removed in the
-        2026-10 cleanup, C).
-    """
-    if str(basis_mode).strip().lower() != "real":
-        raise ValueError(
-            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
-            "removed in the 2026-10 cleanup, C)"
-        )
-    return _apply_real_m2l(src_mult, deltas, order=order, m2l_impl=m2l_impl)
-
-
 @jaxtyped(typechecker=beartype)
 def _m2l_chunk_contributions(
     multip_packed: Inexact[Array, "nodes sh"],
@@ -458,8 +405,6 @@ def _m2l_chunk_contributions(
     valid: Array,
     *,
     order: int,
-    basis_mode: str,
-    rotation: Optional[str],
     m2l_impl: Optional[str],
     out_dtype: Any,
 ) -> Array:
@@ -504,10 +449,6 @@ def _m2l_chunk_contributions(
         ``src_idx == tgt_idx == 0`` and are zeroed by the double ``where``.
     order : int
         Expansion order ``p``. Static.
-    basis_mode : str
-        ``"real"``. Static.
-    rotation : Optional[str]
-        Accepted and unused (the complex branch's rotation convention).
     m2l_impl : Optional[str]
         Real M2L implementation.
     out_dtype : Any
@@ -525,19 +466,14 @@ def _m2l_chunk_contributions(
     # reverse-mode cotangent. Substitute a nonzero delta BEFORE the apply; the
     # contribution is masked to 0 by the caller, so the forward is unchanged.
     deltas = jnp.where(valid[:, None], deltas, jnp.ones_like(deltas))
-    return _apply_m2l(
-        src_mult,
-        deltas,
-        order=order,
-        basis_mode=basis_mode,
-        rotation=rotation,
-        m2l_impl=m2l_impl,
-    ).astype(out_dtype)
+    return _apply_real_m2l(src_mult, deltas, order=order, m2l_impl=m2l_impl).astype(
+        out_dtype
+    )
 
 
 @partial(
     jax.jit,
-    static_argnames=("order", "basis_mode", "rotation", "m2l_impl", "total_nodes"),
+    static_argnames=("order", "m2l_impl", "total_nodes"),
     donate_argnums=(0,),
 )
 @jaxtyped(typechecker=beartype)
@@ -550,17 +486,13 @@ def _accumulate_m2l_fullbatch(
     active_pair_count: Array,
     *,
     order: int,
-    basis_mode: str,
     total_nodes: int,
-    rotation: Optional[str] = None,
     m2l_impl: Optional[str] = None,
 ) -> Array:
-    """Accumulate M2L contributions in one full interaction batch (both bases).
+    """Accumulate M2L contributions in one full interaction batch.
 
-    Unifies the former ``_accumulate_{solidfmm,real}_m2l_fullbatch`` behind the
-    static ``basis_mode`` seam. Numerics-preserving: every discriminator is a
-    ``static_argname`` so XLA specialises the merged jit per basis to the exact
-    HLO each single-basis kernel produced.
+    Every discriminator is a ``static_argname``, so XLA specialises the jit per
+    configuration.
 
     One of the two accumulators (module docstring): it takes raw source/target
     indices and applies the whole list in one batch.
@@ -582,12 +514,8 @@ def _accumulate_m2l_fullbatch(
         allocated to a fixed capacity and this says how much of it is real.
     order : int
         Expansion order ``p``. Static.
-    basis_mode : str
-        ``"real"``. Static.
     total_nodes : int
         Node count, sizing the accumulator. Static.
-    rotation : Optional[str]
-        Accepted and unused (the complex branch's rotation convention).
     m2l_impl : Optional[str]
         Real M2L implementation.
 
@@ -614,8 +542,6 @@ def _accumulate_m2l_fullbatch(
         safe_tgt,
         valid,
         order=order,
-        basis_mode=basis_mode,
-        rotation=rotation,
         m2l_impl=m2l_impl,
         out_dtype=locals_coeffs.dtype,
     )
@@ -627,8 +553,6 @@ def _accumulate_m2l_fullbatch(
     jax.jit,
     static_argnames=(
         "order",
-        "basis_mode",
-        "rotation",
         "m2l_impl",
         "total_nodes",
         "chunk_size",
@@ -645,17 +569,11 @@ def _accumulate_m2l_chunked_scan(
     active_pair_count: Array,
     *,
     order: int,
-    basis_mode: str,
     total_nodes: int,
     chunk_size: int,
-    rotation: Optional[str] = None,
     m2l_impl: Optional[str] = None,
 ) -> Array:
-    """Accumulate M2L contributions with chunked scan reduction (both bases).
-
-    Unifies the former ``_accumulate_{solidfmm,real}_m2l_chunked_scan`` behind
-    the static ``basis_mode`` seam; numerics-preserving (identical HLO per
-    basis, single shared ``lax.scan`` body).
+    """Accumulate M2L contributions with chunked scan reduction.
 
     One of the two accumulators (module docstring): the bounded-memory form. Its scan body is rematerialized, which is what keeps the
     reverse pass from retaining the rotation blocks per chunk -- see the comment
@@ -678,14 +596,10 @@ def _accumulate_m2l_chunked_scan(
         skipped by a ``lax.cond`` rather than masked.
     order : int
         Expansion order ``p``. Static.
-    basis_mode : str
-        ``"real"``. Static.
     total_nodes : int
         Node count, sizing the accumulator. Static.
     chunk_size : int
         Pairs per scan step; sets peak memory. Static.
-    rotation : Optional[str]
-        Accepted and unused (the complex branch's rotation convention).
     m2l_impl : Optional[str]
         Real M2L implementation.
 
@@ -705,7 +619,7 @@ def _accumulate_m2l_chunked_scan(
     # a mask are stacked, while the scan-invariant multipoles/centres are hoisted
     # out and counted once (see ``_m2l_chunk_contributions``).
     #
-    # The wrapper sits OUTSIDE ``_apply_m2l``, which also fixes the fused-Pallas
+    # The wrapper sits OUTSIDE ``_apply_real_m2l``, which also fixes the fused-Pallas
     # M2L lane: that kernel's ``custom_vjp`` saves the blocks as its residual, and
     # being inside the recomputed region means that residual is discarded too.
     # Statics are captured by closure rather than passed through
@@ -718,8 +632,6 @@ def _accumulate_m2l_chunked_scan(
             tgt_idx,
             valid_mask,
             order=order,
-            basis_mode=basis_mode,
-            rotation=rotation,
             m2l_impl=m2l_impl,
             out_dtype=locals_coeffs.dtype,
         )

@@ -316,17 +316,11 @@ class FMMEngine(
         Pin the maximum leaf size, bypassing preset selection.
 
     farfield : Optional[FarFieldConfig]
-        The far-field group: rotation, the M2L/L2L chunk sizes, streamed far
-        pairs, mixed-order settings and gradient retention. ``None`` means
-        ``FarFieldConfig()``.
-
-        Two names differ (``rotation``, ``mixed_order``) and one
-        **default** does: ``FarFieldConfig.rotation`` is ``None`` where this
-        constructor defaulted to ``"solidfmm"``. ``None`` means "not
-        overridden", so it is resolved at the unpack -- the same resolution the
-        facade already performs at ``solver.py:445-447``. This is the second of
-        the four groups where the field-by-field default check caught a
-        difference the names alone would not have shown.
+        The far-field group: the M2L/L2L chunk sizes, streamed far pairs,
+        mixed-order settings and gradient retention. ``None`` means
+        ``FarFieldConfig()``. One name differs (``mixed_order``). (Its
+        ``rotation``, the complex basis's rotation lane, went in the 2026-10
+        cleanup, Z-b.)
     tree : Optional[TreeConfig]
         Tree construction as one group: type, build mode, leaf target, and the
         local-refinement knobs. ``None`` means ``TreeConfig()``.
@@ -437,13 +431,9 @@ class FMMEngine(
         # is resolved here -- the same `or "radix"` the facade already applies at
         # `solver.py`'s construction call. Without this line every caller who omits
         # the group would silently get tree_type=None instead of "radix".
-        # The far-field group, last of the four (audit F09). Two names differ
-        # (`rotation`, `mixed_order`) and, like the tree group, one
-        # DEFAULT differs: FarFieldConfig.rotation is None where this constructor
-        # defaulted to "solidfmm". Resolved here exactly as the facade already
-        # resolves it at `solver.py:445-447` -- None means "not overridden".
+        # The far-field group, last of the four (audit F09). One name differs
+        # (`mixed_order`).
         _ff = FarFieldConfig() if farfield is None else farfield
-        complex_rotation = "solidfmm" if _ff.rotation is None else _ff.rotation
         m2l_chunk_size = _ff.m2l_chunk_size
         l2l_chunk_size = _ff.l2l_chunk_size
         streamed_far_pairs = _ff.streamed_far_pairs
@@ -515,7 +505,6 @@ class FMMEngine(
         self._resolve_mac_and_adaptive_policy(
             adaptive_eps=adaptive_eps,
             adaptive_error_model=adaptive_error_model,
-            complex_rotation=complex_rotation,
             dehnen_geometry_mode=dehnen_geometry_mode,
             mac_force_scale_fb_inflation=mac_force_scale_fb_inflation,
             mac_force_scale_mode=mac_force_scale_mode,
@@ -677,7 +666,7 @@ class FMMEngine(
         self.expansion_basis = basis_norm  # type: ignore[assignment]
         self.basis_impl = basis_impl
         self.m2l_impl = None if m2l_impl is None else str(m2l_impl).strip().lower()
-        if self.m2l_impl is None and self._solidfmm_basis_mode() == "real":
+        if self.m2l_impl is None:
             self.m2l_impl = "rot_scale"
         self.adaptive_order = bool(adaptive_order)
         self.p_gears = tuple(int(v) for v in (p_gears or ()))
@@ -754,7 +743,6 @@ class FMMEngine(
         *,
         adaptive_eps: Optional[float],
         adaptive_error_model: str,
-        complex_rotation: str,
         dehnen_geometry_mode: str,
         mac_force_scale_fb_inflation: Optional[float],
         mac_force_scale_mode: str,
@@ -774,8 +762,6 @@ class FMMEngine(
         adaptive_eps : Optional[float]
             Passed through from ``__init__`` unchanged.
         adaptive_error_model : str
-            Passed through from ``__init__`` unchanged.
-        complex_rotation : str
             Passed through from ``__init__`` unchanged.
         dehnen_geometry_mode : str
             Passed through from ``__init__`` unchanged.
@@ -876,10 +862,6 @@ class FMMEngine(
         self._recent_effective_theta_nodes: Optional[Array] = None
         self._recent_effective_theta_radius_scale: Optional[Array] = None
 
-        rotation_norm = str(complex_rotation).strip().lower()
-        if rotation_norm != "solidfmm":
-            raise ValueError("complex_rotation must be 'solidfmm'")
-        self.complex_rotation = rotation_norm
         self._explicit_streamed_far_pairs = streamed_far_pairs is not None
         self.streamed_far_pairs = bool(streamed_far_pairs)
         self.mixed_order_farfield = bool(mixed_order_farfield)

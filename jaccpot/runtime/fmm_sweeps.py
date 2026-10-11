@@ -551,8 +551,6 @@ class SweepsMixin(_EngineBase):
                 interactions=interactions,
                 m2l_chunk_size=m2l_chunk_size,
                 l2l_chunk_size=l2l_chunk_size,
-                complex_rotation=self.complex_rotation,
-                basis_mode=self._solidfmm_basis_mode(),
                 m2l_impl=self.m2l_impl,
                 retry_logger=retry_callback,
                 traversal_config=config,

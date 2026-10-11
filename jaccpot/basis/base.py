@@ -93,9 +93,9 @@ class BasisInterface(Protocol):
     ) -> Array:
         """Evaluate batched M2L translation in the basis' native convention.
 
-        Optional in practice: an implementation whose production M2L is reached
-        through the runtime's ``basis_mode`` seam rather than through this object
-        may raise :class:`NotImplementedError` here.
+        Optional in practice: an implementation whose production M2L the runtime
+        reaches directly rather than through this object may raise
+        :class:`NotImplementedError` here.
         :class:`~jaccpot.RealSHBasis` does exactly that (the complex basis's
         adapter, which implemented it, was removed in the 2026-10 cleanup, C).
 

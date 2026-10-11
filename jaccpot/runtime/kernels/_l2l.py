@@ -146,9 +146,7 @@ def _l2l_level_compact_kwargs(
     jax.jit,
     static_argnames=(
         "order",
-        "rotation",
         "total_nodes",
-        "basis_mode",
         "num_levels",
         "level_batch_width",
         "pallas_levels",
@@ -164,9 +162,7 @@ def _propagate_solidfmm_locals_by_level(
     node_levels: Array,
     *,
     order: int,
-    rotation: str,
     total_nodes: int,
-    basis_mode: str = "real",
     num_levels: Optional[int] = None,
     nodes_by_level: Optional[Array] = None,
     level_offsets: Optional[Array] = None,
@@ -214,13 +210,8 @@ def _propagate_solidfmm_locals_by_level(
         Depth of each node; drives which parents are active per iteration.
     order : int
         Expansion order.
-    rotation : str
-        Accepted and unused (the complex L2L's rotation lane; the complex basis
-        was removed in the 2026-10 cleanup, C).
     total_nodes : int
         Node count.
-    basis_mode : str
-        ``"real"``; anything else raises.
     num_levels : Optional[int]
         Concrete tree depth. ``None`` falls back to the padded shape-derived
         depth, which is correct but iterates more levels than necessary.
@@ -242,17 +233,7 @@ def _propagate_solidfmm_locals_by_level(
     -------
     Array
         ``(total_nodes, C)`` locals after the full root-to-leaf cascade.
-
-    Raises
-    ------
-    ValueError
-        If ``basis_mode`` is not ``"real"``.
     """
-    if str(basis_mode).strip().lower() != "real":
-        raise ValueError(
-            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
-            "removed in the 2026-10 cleanup, C)"
-        )
     num_internal = int(left_child.shape[0])
     if num_internal <= 0:
         return coeffs_local
@@ -474,8 +455,6 @@ def _prepare_solidfmm_downward_sweep(
     interactions: Optional[NodeInteractionList] = None,
     m2l_chunk_size: Optional[int] = None,
     l2l_chunk_size: Optional[int] = None,
-    complex_rotation: str = "solidfmm",
-    basis_mode: str = "real",
     m2l_impl: Optional[str] = None,
     traversal_config: Optional[DualTreeTraversalConfig] = None,
     retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
@@ -519,10 +498,6 @@ def _prepare_solidfmm_downward_sweep(
         Pairs per M2L chunk.
     l2l_chunk_size : Optional[int]
         Nodes per L2L chunk.
-    complex_rotation : str
-        Rotation lane on the complex basis.
-    basis_mode : str
-        ``"complex"`` or ``"real"``.
     m2l_impl : Optional[str]
         M2L implementation selector for the flat lanes.
     traversal_config : Optional[DualTreeTraversalConfig]
@@ -572,8 +547,7 @@ def _prepare_solidfmm_downward_sweep(
     Raises
     ------
     ValueError
-        If a basis, rotation or chunk-size option is outside its documented
-        domain.
+        If a chunk-size option is not positive.
     """
 
     interaction_inputs = _prepare_solidfmm_downward_interaction_inputs(
@@ -608,7 +582,6 @@ def _prepare_solidfmm_downward_sweep(
     downward_init = _prepare_solidfmm_downward_init(
         upward=upward,
         initial_locals=initial_locals,
-        basis_mode=basis_mode,
     )
     centers = downward_init.centers
     locals_coeffs = downward_init.locals_coeffs
@@ -644,7 +617,6 @@ def _prepare_solidfmm_downward_sweep(
     if detail_diag_mode == "downward_artifacts_only":
         return _detail_downward_data(locals_coeffs)
 
-    rotation_mode = str(complex_rotation).strip().lower()
     resolved_m2l_impl = (
         "rot_scale" if m2l_impl is None else str(m2l_impl).strip().lower()
     )
@@ -657,11 +629,8 @@ def _prepare_solidfmm_downward_sweep(
         multipole_inputs = _prepare_solidfmm_downward_multipole_inputs(
             upward=upward,
             dtype=dtype,
-            basis_mode=basis_mode,
-            complex_rotation=complex_rotation,
         )
         multip_packed_kernel = multipole_inputs.multip_packed_kernel
-        rotation_mode = multipole_inputs.rotation_mode
 
         chunk_size = 4096 if m2l_chunk_size is None else int(m2l_chunk_size)
         if chunk_size <= 0:
@@ -714,10 +683,8 @@ def _prepare_solidfmm_downward_sweep(
             pair_count=pair_count,
             active_pair_count=active_pair_count,
             order=p,
-            rotation_mode=rotation_mode,
             total_nodes=total_nodes,
             chunk_size=chunk_size,
-            basis_mode=basis_mode,
             m2l_impl=resolved_m2l_impl,
             targets_sorted=targets_sorted,
         )
@@ -763,9 +730,7 @@ def _prepare_solidfmm_downward_sweep(
             right_child,
             node_levels,
             order=p,
-            rotation=rotation_mode,
             total_nodes=total_nodes,
-            basis_mode=basis_mode,
             num_levels=l2l_num_levels,
             **_l2l_level_compact_kwargs(
                 tree,
