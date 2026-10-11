@@ -2199,7 +2199,15 @@ loses exactly the two rows `solidfmm_explicit_complex` and `preset_accurate_comp
     changed `distributed/fmm.py`, so these were the key gate.
   - S1-S5 on one A100 are **bitwise** against `main-15ceca4`.
   - S6 (no `JACCPOT_*` env) is **bitwise** against `main-17de581`.
-  - An interleaved timing A/B against `main` was queued.
+- **Speed (G5)**, interleaved main 944e6ba / C x 3 on one A100,
+  `fused_memory_budget.py` scan min, ms/step:
+
+  | N | main | C |
+  | --- | --- | --- |
+  | 2e5 | 6.35, 6.08, 6.18 (median 6.18) | 6.15, 6.14, 6.22 (median 6.15) |
+  | 8e6 | 82.69, 82.48, 82.37 (median 82.48) | 82.70, 82.40, 82.55 (median 82.55) |
+
+  Equal within the run-to-run spread.
 
 **K's timing A/B (recorded here; #388 was already merged).** Interleaved main / K x 3 on
 one A100, `fused_memory_budget.py` scan min, ms/step: at 2e5, 6.18 / 6.21 / 6.30 against
