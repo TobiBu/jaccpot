@@ -2788,9 +2788,12 @@ too).
 - `bench/annotation_census.py`: shape-annotated array parameters 696 -> 696, bare
   `Array` parameters 1,543 -> 1,535, non-array parameters 3,399 -> 3,353, shaped
   share 31.1 % -> 31.2 %, `@jaxtyped` functions 111 -> 111, modules 118 -> 118.
-- **Not run:** any GPU. The GPU pins (S1-S6) are next, from this branch: `dce_pins.py`
-  S4 / S4b and `fused_memory_budget.py` drop only removed keywords, so the pins run
-  the same configuration as `main-15ceca4` / `main-17de581`.
+- **GPU pins** on one A100 (GPU 2), frozen worktree at 59d781b with yggdrax main
+  1f0e36f (after its #94), tag `zb-59d781b`: S1-S5 are **bitwise** against
+  `main-15ceca4`, and S6 (no `JACCPOT_*` env) is **bitwise** against `main-17de581`.
+  `dce_pins.py` S4 / S4b and `fused_memory_budget.py` drop only removed keywords, so
+  the pins ran the same configuration as their references. The two-card pins M1 / M3
+  were not run (no two free cards); the mesh lane is in the CPU A/B above.
 
 **Findings:**
 - `tests/perf/test_perf_metrics.py` compared the far fields `pair_grouped` and
