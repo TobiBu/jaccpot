@@ -1,23 +1,22 @@
-"""The M2L apply-and-accumulate seam: every basis, every batching, both gates.
+"""The M2L apply-and-accumulate seam: every batching, both gates.
 
-THIS MODULE IS ONE UNIT ON PURPOSE. ``_apply_m2l`` dispatches on ``basis_mode``
-to ``_apply_real_m2l`` / ``_apply_complex_m2l``, each of which consults its
-``*_pallas_active`` gate and routes to either the reference batch kernel or the
-fused Pallas twin. ARCHITECTURE §10's invariant is that **every discriminator on
-that path is a static argument** -- ``order``, ``rotation``, ``m2l_impl``,
-``basis_mode`` -- so the whole dispatch compiles to one branch-free jaxpr per
-configuration. Splitting *within* it would break the argument that the invariant
-holds, which is why the audit says this seam moves whole.
+THIS MODULE IS ONE UNIT ON PURPOSE. ``_apply_m2l`` checks ``basis_mode`` and
+routes to ``_apply_real_m2l``, which consults its ``*_pallas_active`` gate and
+routes to either the reference batch kernel or the fused Pallas twin.
+ARCHITECTURE §10's invariant is that **every discriminator on that path is a
+static argument** -- ``order``, ``rotation``, ``m2l_impl``, ``basis_mode`` -- so
+the whole dispatch compiles to one branch-free jaxpr per configuration. Splitting
+*within* it would break the argument that the invariant holds, which is why the
+audit says this seam moves whole. The complex basis's branch
+(``_apply_complex_m2l``) went with that basis in the 2026-10 cleanup (C);
+``basis_mode`` other than ``"real"`` raises, and ``rotation`` is accepted and
+unused.
 
-EQUIVALENCES THAT MUST HOLD (NUMERICS_AND_JAX §1, asserted in
-``tests/unit/operators/test_m2l_{real,complex}_fused_pallas.py``):
-
-* ``_m2l_real_batch_kernel_fused_pallas`` == ``_m2l_real_batch_kernel`` (rot-scale
-  reference), and
-* ``_m2l_complex_batch_kernel_fused_pallas`` == ``_m2l_complex_batch_kernel``
-  (solidfmm reference).
-
-The Pallas kernels are execution accelerators, not different mathematics.
+EQUIVALENCE THAT MUST HOLD (NUMERICS_AND_JAX §1, asserted in
+``tests/unit/operators/test_m2l_real_fused_pallas.py``):
+``_m2l_real_batch_kernel_fused_pallas`` == ``_m2l_real_batch_kernel`` (rot-scale
+reference). The Pallas kernel is an execution accelerator, not different
+mathematics.
 
 THE TWO ACCUMULATORS are two batchings of the same sum over a flat pair list:
 full-batch and chunked scan. They must agree to reassociation only. There used to
@@ -40,23 +39,16 @@ import jax.numpy as jnp
 from beartype import beartype
 from jaxtyping import Array, Bool, Float, Inexact, Int, jaxtyped
 
-from jaccpot.operators.complex_ops import (
-    complex_rotation_blocks_from_z_solidfmm_batch,
-    complex_rotation_blocks_to_z_solidfmm_batch,
-    m2l_complex_fused_align_deltas,
-    m2l_complex_reference_batch,
-    make_m2l_complex_fused_carry_axis_derivative,
-)
 from jaccpot.operators.m2l_real_rot_scale import (
     m2l_rot_scale_real_batch,
     make_m2l_real_fused_carry_axis_derivative,
 )
 from jaccpot.runtime.grad_options import fused_m2l_pallas_enabled
 
-# The two fused-M2L transverse-tangent carriers, built ONCE each and cached.
+# The fused-M2L transverse-tangent carrier, built ONCE and cached.
 #
-# Cached rather than module-level for two independent reasons. The pure-JAX twins
-# each carrier needs live in `jaccpot.pallas.*`, and importing that at module scope
+# Cached rather than module-level for two independent reasons. The pure-JAX twin
+# the carrier needs lives in `jaccpot.pallas.*`, and importing that at module scope
 # would drag `jax.experimental.pallas` onto the `import jaccpot` path, which it is
 # deliberately not on -- every pallas import in this module is function-local for
 # that reason. And they are `custom_jvp` objects, so building one per call would
@@ -81,61 +73,9 @@ def _real_fused_carry_axis_derivative() -> Any:
     return make_m2l_real_fused_carry_axis_derivative(m2l_real_fused_jax)
 
 
-@functools.lru_cache(maxsize=1)
-def _complex_fused_carry_axis_derivative() -> Any:
-    """The complex fused M2L's tangent carrier, built once.
-
-    Returns
-    -------
-    Any
-        ``carry(out, coeffs, delta, blocks_to_z, blocks_from_z, radii, order=p)``.
-    """
-    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_jax
-
-    return make_m2l_complex_fused_carry_axis_derivative(m2l_complex_fused_jax)
-
-
 from ..dtypes import INDEX_DTYPE
 
 __all__: list[str] = []
-
-
-@partial(jax.jit, static_argnames=("order", "rotation"))
-def _m2l_complex_batch_kernel(
-    src_mult: Array,
-    deltas: Array,
-    *,
-    order: int,
-    rotation: str,
-) -> Array:
-    """Vectorized complex-basis M2L kernel for one interaction batch.
-
-    The solidfmm reference: rotate to z, translate along z, rotate back. This is
-    the definition the fused Pallas twin is asserted equal to, so it is the one
-    to change if the mathematics ever must.
-
-    Parameters
-    ----------
-    src_mult : Array
-        Complex multipole coefficients ``[N, (p+1)^2]``, one row per pair.
-    deltas : Array
-        Target-minus-source centre displacements ``[N, 3]``.
-    order : int
-        Expansion order ``p``. Static under ``jit``.
-    rotation : str
-        Rotation convention; ``"solidfmm"``.
-
-    Returns
-    -------
-    Array
-        Complex local contributions ``[N, (p+1)^2]``, aligned with ``src_mult``.
-    """
-    return m2l_complex_reference_batch(
-        src_mult,
-        deltas,
-        order=order,
-        rotation=rotation,
-    )
 
 
 # WHY ONLY ONE AXIS IS ANNOTATED, AND WHY IT IS NOT A WHOLE-MODULE PASS.
@@ -154,9 +94,10 @@ def _m2l_complex_batch_kernel(
 # 13, 63, 127, 255, 511, 1023), and the two packed arrays shared the trailing axis at five
 # (4, 9, 16, 25, 81).
 #
-# `Inexact` and not `Float` on the packed pair: `basis_mode="complex"` is a live lane and
-# passes complex coefficients. Narrowing to `Float` is the mistake #293 made one module
-# over, where a real-basis-only recording cost 27 CI failures.
+# `Inexact` and not `Float` on the packed pair: `basis_mode="complex"` passed complex
+# coefficients until the complex basis went in the 2026-10 cleanup (C). Narrowing to
+# `Float` is the mistake #293 made one module over, where a real-basis-only recording
+# cost 27 CI failures; it is left to phase Z, with the other leftovers of C.
 #
 # The decorators go INSIDE `jax.jit` on the jitted accumulators, per the house order, so
 # beartype runs once per trace rather than per call on the production M2L path.
@@ -301,7 +242,7 @@ def _real_m2l_pallas_active() -> bool:
 
     Uses :func:`pallas_m2l_real_fused_supported` (the gate for the kernel actually
     dispatched, :func:`_m2l_real_batch_kernel_fused_pallas`), which requires
-    Ampere+ (sm_80) -- matching the complex gate. The z-core kernel's
+    Ampere+ (sm_80). The z-core kernel's
     ``pallas_m2l_real_supported`` (removed with that kernel in the 2026-10
     cleanup, X5) used previously only checked gpu/tpu, so it would route to
     Pallas on a pre-Ampere GPU where the Triton lowering fails.
@@ -457,151 +398,6 @@ def _apply_real_m2l(
     return _m2l_real_batch_kernel(src_mult, deltas, order=order, m2l_impl=m2l_impl)
 
 
-def _fused_complex_m2l_pallas_active() -> bool:
-    """Whether to route the complex-basis M2L through the fused Pallas kernel.
-
-    Gated by ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS`` and the sm_80+ support
-    check; falls back to the solidfmm reference batch on unsupported hardware.
-    Evaluated at trace time; the flag does not change within a compiled run.
-
-    Returns
-    -------
-    bool
-        ``True`` when the flag is set and an Ampere+ GPU is available.
-    """
-    if not fused_m2l_pallas_enabled():
-        return False
-    try:
-        from jaccpot.pallas.m2l_complex_fused import (
-            pallas_m2l_complex_fused_supported,
-        )
-
-        return bool(pallas_m2l_complex_fused_supported())
-    except Exception:
-        return False
-
-
-def _m2l_complex_batch_kernel_fused_pallas(
-    src_mult: Array,
-    deltas: Array,
-    *,
-    order: int,
-) -> Array:
-    """Complex-basis M2L via the fully-fused Pallas kernel.
-
-    Adapter over solidfmm: solidfmm is the sole rotation strategy, and it already
-    materialises the block-diagonal rotate-to-z / rotate-from-z matrices the fused
-    kernel consumes (``complex_rotation_blocks_*_z_solidfmm_batch``, padded to
-    ``[N, p+1, 2p+1, 2p+1]``). This builds those blocks plus the pair radii and
-    hands them to the kernel, which keeps the rotate -> z-translate -> rotate-back
-    intermediates on-chip. Numerically equivalent to ``_m2l_complex_batch_kernel``
-    (the solidfmm reference); the kernel is purely an execution accelerator.
-
-    Parameters
-    ----------
-    src_mult : Array
-        Complex multipole coefficients ``[N, (p+1)^2]`` for each pair.
-    deltas : Array
-        Target-minus-source center displacements ``[N, 3]``.
-    order : int
-        Expansion order ``p``.
-
-    Returns
-    -------
-    Array
-        Complex local contributions ``[N, (p+1)^2]``.
-
-    Notes
-    -----
-    **This lane's transverse gradient near ``rho == 0`` is covered in two pieces rather
-    than one, and neither is optional** -- the same shape as the real fused lane, and for
-    the same reason: ``m2l_complex_fused_pallas_cvjp`` is a ``custom_vjp``, and JAX
-    refuses forward-mode through one, so a rule that differentiates the operator cannot
-    wrap it. Instead
-    :data:`~jaccpot.operators.complex_ops.m2l_complex_fused_align_deltas` runs on
-    ``deltas`` **before** the radius and both block stacks are built, and
-    :func:`~jaccpot.operators.complex_ops.make_m2l_complex_fused_carry_axis_derivative` runs on
-    the output and adds the analytic term back.
-
-    The withdrawal alone was already in force here, because
-    ``_complex_rotation_blocks_{to,from}_z_solidfmm_padded`` carry
-    ``without_unresolvable_transverse_jvp`` for the cached-blocks lane's sake -- and half
-    the pair is worse than neither half. Without the carrier this lane's on-axis ``d/dx``
-    and ``d/dy`` came back exactly zero, measured **5.1e-01** from the pure-JAX reference
-    batch, where before any of the G.10 work the two agreed to 6.7e-16. Asserted by
-    ``tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative``,
-    which differentiates *this function* with respect to ``deltas`` --
-    ``test_m2l_complex_fused_pallas_custom_vjp_matches_twin`` cannot see it, because it
-    differentiates the kernel's four inputs and never the displacement.
-    """
-    from jaccpot.pallas.m2l_complex_fused import m2l_complex_fused_pallas_cvjp
-
-    # Everything the kernel sees is built from a displacement whose unusable transverse
-    # tangent has already been withdrawn, so the radius and both block stacks agree on
-    # where the band is; the carrier below then puts the analytic term back.
-    aligned = m2l_complex_fused_align_deltas(deltas)
-    r = jnp.sqrt(jnp.sum(aligned * aligned, axis=-1))
-    blocks_to_z = complex_rotation_blocks_to_z_solidfmm_batch(
-        aligned,
-        order=order,
-        basis="multipole",
-        dtype=src_mult.dtype,
-    )
-    blocks_from_z = complex_rotation_blocks_from_z_solidfmm_batch(
-        aligned,
-        order=order,
-        basis="local",
-        dtype=src_mult.dtype,
-    )
-    # Route through the custom_vjp wrapper (not the raw kernel): the forward is
-    # byte-identical to m2l_complex_fused_pallas, but the wrapper carries the
-    # reverse rule (autodiff of the pure-jnp twin) so this fused path is also
-    # differentiable -- required for FMMEngine.differentiable_accelerations
-    # to run the fast lane. interpret=False, backend="triton" (the runtime always
-    # runs the real Pallas GPU kernel here).
-    out = m2l_complex_fused_pallas_cvjp(
-        src_mult, blocks_to_z, blocks_from_z, r, order, False, "triton"
-    )
-    return _complex_fused_carry_axis_derivative()(
-        out, src_mult, deltas, blocks_to_z, blocks_from_z, r, order=order
-    )
-
-
-def _apply_complex_m2l(
-    src_mult: Array,
-    deltas: Array,
-    *,
-    order: int,
-    rotation: str,
-) -> Array:
-    """Complex-basis batched M2L: fused Pallas kernel when enabled, else solidfmm.
-
-    When the fused-M2L Pallas flag is active (and the GPU is Ampere+), route
-    through the single-launch fused kernel fed by solidfmm rotation blocks.
-    Otherwise use the default solidfmm rotate/z-translate/rotate-back reference
-    batch. Both paths are numerically equivalent.
-
-    Parameters
-    ----------
-    src_mult : Array
-        Complex multipole coefficients ``[N, (p+1)^2]`` for each pair.
-    deltas : Array
-        Target-minus-source center displacements ``[N, 3]``.
-    order : int
-        Expansion order ``p``.
-    rotation : str
-        Rotation strategy; must be ``"solidfmm"``.
-
-    Returns
-    -------
-    Array
-        Complex local contributions ``[N, (p+1)^2]``.
-    """
-    if _fused_complex_m2l_pallas_active():
-        return _m2l_complex_batch_kernel_fused_pallas(src_mult, deltas, order=order)
-    return _m2l_complex_batch_kernel(src_mult, deltas, order=order, rotation=rotation)
-
-
 def _apply_m2l(
     src_mult: Array,
     deltas: Array,
@@ -611,12 +407,12 @@ def _apply_m2l(
     rotation: Optional[str] = None,
     m2l_impl: Optional[str] = None,
 ) -> Array:
-    """Basis-dispatched batched M2L apply seam.
+    """Batched M2L apply seam.
 
-    ``basis_mode`` is a static discriminator, so XLA specialises each branch to
-    the exact HLO of the corresponding single-basis kernel. Real basis routes
-    through :func:`_apply_real_m2l` (``m2l_impl``); solidfmm/complex through
-    :func:`_apply_complex_m2l` (``rotation``).
+    ``basis_mode`` is a static discriminator, and ``"real"`` is the only basis:
+    it routes through :func:`_apply_real_m2l` (``m2l_impl``). The complex branch
+    (``_apply_complex_m2l``, reading ``rotation``) went with the complex basis in
+    the 2026-10 cleanup (C).
 
     Parameters
     ----------
@@ -628,22 +424,29 @@ def _apply_m2l(
     order : int
         Expansion order ``p``. Static.
     basis_mode : str
-        ``"real"`` selects the real branch; anything else the complex one.
-        Static.
+        ``"real"``. Static.
     rotation : Optional[str]
-        Rotation convention. Read by the complex branch, ignored by the real one.
+        Accepted and unused (it was the complex branch's rotation convention).
     m2l_impl : Optional[str]
-        Real M2L implementation. Read by the real branch, ignored by the complex
-        one.
+        Real M2L implementation.
 
     Returns
     -------
     Array
-        Local contributions, packed as the selected basis requires.
+        Real local contributions ``[N, (p+1)^2]``.
+
+    Raises
+    ------
+    ValueError
+        If ``basis_mode`` is not ``"real"`` (the complex basis was removed in the
+        2026-10 cleanup, C).
     """
-    if str(basis_mode).strip().lower() == "real":
-        return _apply_real_m2l(src_mult, deltas, order=order, m2l_impl=m2l_impl)
-    return _apply_complex_m2l(src_mult, deltas, order=order, rotation=rotation)
+    if str(basis_mode).strip().lower() != "real":
+        raise ValueError(
+            f"basis_mode must be 'real'; got {basis_mode!r} (the complex basis was "
+            "removed in the 2026-10 cleanup, C)"
+        )
+    return _apply_real_m2l(src_mult, deltas, order=order, m2l_impl=m2l_impl)
 
 
 @jaxtyped(typechecker=beartype)
@@ -702,11 +505,11 @@ def _m2l_chunk_contributions(
     order : int
         Expansion order ``p``. Static.
     basis_mode : str
-        ``"real"`` or ``"complex"``. Static.
+        ``"real"``. Static.
     rotation : Optional[str]
-        Rotation convention; complex branch only.
+        Accepted and unused (the complex branch's rotation convention).
     m2l_impl : Optional[str]
-        Real M2L implementation; real branch only.
+        Real M2L implementation.
     out_dtype : Any
         Dtype to cast the contributions to before accumulation.
 
@@ -780,13 +583,13 @@ def _accumulate_m2l_fullbatch(
     order : int
         Expansion order ``p``. Static.
     basis_mode : str
-        ``"real"`` or ``"complex"``. Static.
+        ``"real"``. Static.
     total_nodes : int
         Node count, sizing the accumulator. Static.
     rotation : Optional[str]
-        Rotation convention; used by the complex branch only.
+        Accepted and unused (the complex branch's rotation convention).
     m2l_impl : Optional[str]
-        Real M2L implementation; used by the real branch only.
+        Real M2L implementation.
 
     Returns
     -------
@@ -876,15 +679,15 @@ def _accumulate_m2l_chunked_scan(
     order : int
         Expansion order ``p``. Static.
     basis_mode : str
-        ``"real"`` or ``"complex"``. Static.
+        ``"real"``. Static.
     total_nodes : int
         Node count, sizing the accumulator. Static.
     chunk_size : int
         Pairs per scan step; sets peak memory. Static.
     rotation : Optional[str]
-        Rotation convention; complex branch only.
+        Accepted and unused (the complex branch's rotation convention).
     m2l_impl : Optional[str]
-        Real M2L implementation; real branch only.
+        Real M2L implementation.
 
     Returns
     -------

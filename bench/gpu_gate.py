@@ -88,9 +88,7 @@ _MUST_RUN = (
 _MUST_RUN_SM80 = (
     "test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes",
     "test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]",
-    "test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]",
     "test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative",
-    "test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative",
 )
 # NOT registered here, by the registry's own contract: `tests/unit/test_gpu_gate_checks.py`
 # derives the gated set from ONE module (test_transverse_degeneracy_jvp.py) and

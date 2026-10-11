@@ -2153,9 +2153,7 @@ def evaluate_large_n_state(
                 )
             if bool(disable_far_eval):
                 far_acc = jnp.zeros_like(state_in.positions_sorted)
-            elif l2p_layout == "particle" and not jnp.iscomplexobj(
-                state_in.local_data.coefficients
-            ):
+            elif l2p_layout == "particle":
                 far_grad = _evaluate_local_expansions_particle_major(
                     state_in.local_data,
                     state_in.positions_sorted,

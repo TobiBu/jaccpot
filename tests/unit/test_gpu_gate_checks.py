@@ -52,9 +52,7 @@ tests/unit/test_large_n_config_thresholds.py::test_threshold_a
 [gw0] [ 76%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes[inside the band-2.5]
 [gw0] [ 80%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[True]
 [gw1] [ 84%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]
-[gw1] [ 88%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]
 [gw0] [ 92%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative
-[gw1] [ 96%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative
 =========================== short test summary info ============================
 SKIPPED [1] tests/unit/runtime/test_split_build_default_predicate.py:4: needs gpu
 ==================== 1 failed, 2 passed, 1 skipped in 1.19s ====================
@@ -75,16 +73,14 @@ VACUOUS_OUTPUT = """\
 [gw0] [ 76%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes[inside the band-2.5]
 [gw0] [ 80%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[True]
 [gw1] [ 84%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]
-[gw1] [ 88%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]
 [gw0] [ 92%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative
-[gw1] [ 96%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative
 ==================== 3 skipped in 0.8s ====================
 """
 
 
 # The blind spot this module gained a check for: a **real GPU**, but not Ampere+.
 # Every backend-gated test runs and passes, so the original three-file assertion
-# is satisfied and the gate printed green -- while all five fused-Pallas lanes
+# is satisfied and the gate printed green -- while all the fused-Pallas lanes
 # self-skipped off sm_80 and asserted nothing. Note the
 # `..._in_gradient[True]` line: the interpret half runs on any card, so a check
 # keyed on the test *name* rather than the `[False]` parametrisation would find a
@@ -96,12 +92,10 @@ NON_AMPERE_OUTPUT = """\
 [gw0] [ 60%] PASSED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[True]
 [gw0] [ 70%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes[inside the band-2.5]
 [gw1] [ 80%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient[False]
-[gw1] [ 85%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient[False]
 [gw0] [ 90%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative
-[gw1] [100%] SKIPPED tests/unit/operators/test_transverse_degeneracy_jvp.py::test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative
 =========================== short test summary info ============================
-SKIPPED [5] the fused Pallas M2L lanes require an Ampere+ (sm_80) GPU
-==================== 4 passed, 5 skipped in 61.2s ====================
+SKIPPED [3] the fused Pallas M2L lanes require an Ampere+ (sm_80) GPU
+==================== 4 passed, 3 skipped in 61.2s ====================
 """
 
 
@@ -183,13 +177,14 @@ class TestNotVacuous:
     def test_all_skipped_is_reported_as_vacuous(self) -> None:
         """A CPU fallback empties both gated sets and must fail the gate.
 
-        Eight, not three: the three backend-gated files plus the five sm_80-gated
-        node ids. The ``[True]`` interpret half is recorded as PASSED because on
+        Six, not three: the three backend-gated files plus the three sm_80-gated
+        node ids (five until the two complex fused-M2L ones went with the complex
+        basis in the 2026-10 cleanup, C). The ``[True]`` interpret half is recorded as PASSED because on
         CPU it really does run -- and the ``[False]`` fragment still complains,
         which is the parametrisation trap the node-id form exists to avoid.
         """
         complaints = _check_not_vacuous(VACUOUS_OUTPUT)
-        assert len(complaints) == 8
+        assert len(complaints) == 6
         assert all("0 tests ran" in c for c in complaints)
 
     def test_moving_a_gated_file_does_not_empty_the_check(self) -> None:
@@ -214,9 +209,9 @@ class TestTheNonAmpereBlindSpot:
     """
 
     def test_a_non_ampere_run_is_reported_as_vacuous(self) -> None:
-        """Backend tests green, sm_80 lanes skipped -> five complaints."""
+        """Backend tests green, sm_80 lanes skipped -> three complaints."""
         complaints = _check_not_vacuous(NON_AMPERE_OUTPUT)
-        assert len(complaints) == 5, complaints
+        assert len(complaints) == 3, complaints
         assert all("sm_80" in c for c in complaints)
 
     def test_the_interpret_half_passing_does_not_excuse_the_kernel_half(self) -> None:

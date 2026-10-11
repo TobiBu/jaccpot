@@ -1,8 +1,8 @@
-"""Axis contracts for the two fused M2L kernels and their pure-JAX twins.
+"""Axis contracts for the fused M2L kernel and its pure-JAX twin.
 
-`runtime/kernels/_m2l.py`'s module docstring pins an equivalence: the fused Pallas kernels
-must equal their references, `m2l_real_fused_pallas == _m2l_real_batch_kernel` and the
-complex pair likewise. Signatures are part of that -- a twin that accepts a shape its
+`runtime/kernels/_m2l.py`'s module docstring pins an equivalence: the fused Pallas kernel
+must equal its reference, `m2l_real_fused_pallas == _m2l_real_batch_kernel` (the complex
+pair, and its rows here, went with the complex basis in the 2026-10 cleanup, C). Signatures are part of that -- a twin that accepts a shape its
 reference rejects is not a drop-in replacement -- so both halves carry the SAME axes and
 these tests assert that rather than each in isolation.
 
@@ -22,10 +22,6 @@ import jax.numpy as jnp
 import pytest
 from jaxtyping import TypeCheckError
 
-from jaccpot.pallas.m2l_complex_fused import (
-    m2l_complex_fused_jax,
-    m2l_complex_fused_vjp_pallas,
-)
 from jaccpot.pallas.m2l_real_fused import (
     m2l_real_fused_jax,
     m2l_real_fused_vjp_pallas,
@@ -41,7 +37,7 @@ def _args(dtype):
     Parameters
     ----------
     dtype : Any
-        Element dtype -- complex for the complex twin, float for the real one.
+        Element dtype of the coefficient arrays.
 
     Returns
     -------
@@ -57,7 +53,6 @@ def _args(dtype):
 
 
 CASES = [
-    ("complex", m2l_complex_fused_jax, jnp.complex128),
     ("real", m2l_real_fused_jax, jnp.float64),
 ]
 IDS = [name for name, _, _ in CASES]
@@ -109,7 +104,6 @@ def test_the_two_block_stacks_must_agree_on_degrees(fn, dtype):
 
 
 VJP_CASES = [
-    ("complex", m2l_complex_fused_vjp_pallas, jnp.complex128),
     ("real", m2l_real_fused_vjp_pallas, jnp.float64),
 ]
 

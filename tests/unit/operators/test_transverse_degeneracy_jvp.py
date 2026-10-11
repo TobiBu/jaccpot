@@ -1,7 +1,8 @@
 """The ``rho == 0`` transverse-derivative rule: inertness, transposition, primal.
 
 The correctness of the analytic formula itself is asserted per operator in
-``test_real_harmonics.py`` and ``test_complex_ops.py``. What is pinned here is the
+``test_real_harmonics.py`` (and was in ``test_complex_ops.py`` for the complex
+operators, removed with the complex basis in the 2026-10 cleanup, C). What is pinned here is the
 three properties the *mechanism* has to have, none of which those tests can see:
 
 * the rule is **inert** off the degenerate axis -- bit-identical, not merely close,
@@ -25,17 +26,6 @@ import pytest
 from jaccpot.operators._transverse_degeneracy_jvp import (
     split_transverse_tangent,
     withdraw_unresolvable_transverse,
-)
-from jaccpot.operators.complex_ops import (
-    complex_rotation_blocks_from_z_solidfmm_batch,
-    complex_rotation_blocks_to_z_solidfmm_batch,
-    l2l_complex,
-    m2l_complex_fused_align_deltas,
-    m2l_complex_reference,
-    m2l_complex_reference_batch,
-    m2l_complex_reference_batch_cached_blocks,
-    m2m_complex,
-    make_m2l_complex_fused_carry_axis_derivative,
 )
 from jaccpot.operators.m2l_real_rot_scale import (
     l2l_rot_scale_real_batch_cached_blocks,
@@ -64,24 +54,11 @@ _REAL_CASCADES = [
     pytest.param(m2m_real, id="m2m_real"),
     pytest.param(l2l_real, id="l2l_real"),
 ]
-_COMPLEX_CASCADES = [
-    pytest.param(m2l_complex_reference, id="m2l_complex_reference"),
-    pytest.param(m2m_complex, id="m2m_complex"),
-    pytest.param(l2l_complex, id="l2l_complex"),
-]
 
 
 def _real_coeffs(seed):
     return jax.random.normal(
         jax.random.PRNGKey(seed), (sh_size(_ORDER),), dtype=jnp.float64
-    )
-
-
-def _complex_coeffs(seed):
-    rng = np.random.default_rng(seed)
-    n = sh_size(_ORDER)
-    return jnp.asarray(
-        rng.normal(size=n) + 1j * rng.normal(size=n), dtype=jnp.complex128
     )
 
 
@@ -260,12 +237,8 @@ def test_split_is_vectorised_over_a_batch():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "operator, is_complex",
-    [pytest.param(p.values[0], False, id=p.id) for p in _REAL_CASCADES]
-    + [pytest.param(p.values[0], True, id=p.id) for p in _COMPLEX_CASCADES],
-)
-def test_the_rule_transposes_so_reverse_mode_agrees_with_forward(operator, is_complex):
+@pytest.mark.parametrize("operator", _REAL_CASCADES)
+def test_the_rule_transposes_so_reverse_mode_agrees_with_forward(operator):
     """``grad`` must equal the ``jvp`` contracted with the same direction.
 
     A ``custom_jvp`` rule only supports reverse mode if it is linear in the tangents,
@@ -281,8 +254,8 @@ def test_the_rule_transposes_so_reverse_mode_agrees_with_forward(operator, is_co
     if not jax.config.jax_enable_x64:
         pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
 
-    coeffs = _complex_coeffs(5) if is_complex else _real_coeffs(5)
-    weights = _complex_coeffs(6) if is_complex else _real_coeffs(6)
+    coeffs = _real_coeffs(5)
+    weights = _real_coeffs(6)
 
     def loss(delta):
         out = operator(coeffs, delta, order=_ORDER)
@@ -316,15 +289,9 @@ _FP32_RHOS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "operator, is_complex",
-    [pytest.param(p.values[0], False, id=p.id) for p in _REAL_CASCADES]
-    + [pytest.param(p.values[0], True, id=p.id) for p in _COMPLEX_CASCADES],
-)
+@pytest.mark.parametrize("operator", _REAL_CASCADES)
 @pytest.mark.parametrize("rho", _FP32_RHOS)
-def test_the_analytic_branch_holds_at_float32(
-    operator: Callable, is_complex: bool, rho: float
-) -> None:
+def test_the_analytic_branch_holds_at_float32(operator: Callable, rho: float) -> None:
     """Inside the float32 band the float32 transverse gradient must track float64.
 
     This is the claim the float64 tests cannot make, because float32's band admits
@@ -343,9 +310,7 @@ def test_the_analytic_branch_holds_at_float32(
     Parameters
     ----------
     operator : Callable
-        The cascade under test, in either basis.
-    is_complex : bool
-        Whether ``operator`` takes complex coefficients.
+        The cascade under test.
     rho : float
         Cylindrical radius, inside the float32 band at ``r ~ 2.5``.
     """
@@ -353,13 +318,8 @@ def test_the_analytic_branch_holds_at_float32(
         pytest.skip("the float64 reference requires JAX_ENABLE_X64=1")
 
     def transverse_gradient(dtype):
-        if is_complex:
-            complex_dtype = jnp.complex64 if dtype == jnp.float32 else jnp.complex128
-            coeffs = _complex_coeffs(5).astype(complex_dtype)
-            weights = _complex_coeffs(6).astype(complex_dtype)
-        else:
-            coeffs = _real_coeffs(5).astype(dtype)
-            weights = _real_coeffs(6).astype(dtype)
+        coeffs = _real_coeffs(5).astype(dtype)
+        weights = _real_coeffs(6).astype(dtype)
 
         def loss(delta):
             out = operator(coeffs, delta, order=_ORDER)
@@ -390,20 +350,21 @@ def test_the_analytic_branch_holds_at_float32(
 def test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes(
     rho: float, z: float
 ) -> None:
-    """The same float32 claim, on the two lanes that most need it.
+    """The same float32 claim, on the lane that most needs it.
 
-    The test above covers the six direct cascades. It does **not** cover either fused
-    Pallas M2L, and that was the gap that mattered most: the band is
+    The test above covers the three direct cascades. It does **not** cover the fused
+    Pallas M2L (there were two, until the complex one went with the complex basis in
+    the 2026-10 cleanup, C), and that was the gap that mattered most: the band is
     ``rho_sq <= eps r_sq``, so its width in ``rho/r`` is ``sqrt(eps)`` -- 1.5e-08 at
     float64 but **3.4e-04** at float32, four orders wider -- and the fused path is the
     one most likely to run float32 in production. A lane can hold at float64 and still
     fail here, because at float32 the band admits ``rho`` that ordinary tree geometry
     reaches rather than only exact zeros.
 
-    The **shipped** functions are differentiated, not a hand-composed rebuild of them,
+    The **shipped** function is differentiated, not a hand-composed rebuild of it,
     for the reason ``test_the_production_real_fused_m2l_kernel_carries_the_axis_derivative``
     records: a rebuild passes whether or not ``runtime/kernels/core.py`` wires the pair
-    up. GPU-only, unavoidably -- both hardcode ``interpret=False``.
+    up. GPU-only, unavoidably -- it hardcodes ``interpret=False``.
 
     Measured worst over these three ``rho`` and both signs of ``z``: 8.9e-07 on the real
     fused lane and 1.5e-06 on the complex one, against direct-lane controls of 1.8e-06
@@ -430,24 +391,15 @@ def test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes(
     """
     if not jax.config.jax_enable_x64:
         pytest.skip("the float64 reference requires JAX_ENABLE_X64=1")
-    from jaccpot.pallas.m2l_complex_fused import pallas_m2l_complex_fused_supported
     from jaccpot.pallas.m2l_real_fused import pallas_m2l_real_fused_supported
-    from jaccpot.runtime.kernels.core import (
-        _m2l_complex_batch_kernel_fused_pallas,
-        _m2l_real_batch_kernel_fused_pallas,
-    )
+    from jaccpot.runtime.kernels.core import _m2l_real_batch_kernel_fused_pallas
 
-    if not (pallas_m2l_real_fused_supported() and pallas_m2l_complex_fused_supported()):
+    if not pallas_m2l_real_fused_supported():
         pytest.skip("the fused Pallas M2L lanes require an Ampere+ (sm_80) GPU")
 
-    def transverse_gradient(operator, is_complex, dtype):
-        if is_complex:
-            complex_dtype = jnp.complex64 if dtype == jnp.float32 else jnp.complex128
-            coeffs = _complex_coeffs(5).astype(complex_dtype)
-            weights = _complex_coeffs(6).astype(complex_dtype)
-        else:
-            coeffs = _real_coeffs(5).astype(dtype)
-            weights = _real_coeffs(6).astype(dtype)
+    def transverse_gradient(operator, dtype):
+        coeffs = _real_coeffs(5).astype(dtype)
+        weights = _real_coeffs(6).astype(dtype)
 
         def loss(delta):
             out = operator(coeffs[None, :], delta, order=_ORDER)
@@ -462,14 +414,12 @@ def test_the_analytic_branch_holds_at_float32_on_the_fused_pallas_lanes(
             lambda c, d, order: _m2l_real_batch_kernel_fused_pallas(
                 c, d, order=order, m2l_impl="rot_scale"
             ),
-            False,
         ),
-        ("complex fused", _m2l_complex_batch_kernel_fused_pallas, True),
     )
-    for name, operator, is_complex in lanes:
+    for name, operator in lanes:
         try:
-            single = transverse_gradient(operator, is_complex, jnp.float32)
-            double = transverse_gradient(operator, is_complex, jnp.float64)
+            single = transverse_gradient(operator, jnp.float32)
+            double = transverse_gradient(operator, jnp.float64)
         except Exception as exc:  # pragma: no cover - GPU/runtime dependent
             message = str(exc).lower()
             if any(t in message for t in ("warpgroup", "ptx", "triton", "mosaic")):
@@ -551,15 +501,6 @@ def _lane_pair(name):
     real_weights = jax.random.normal(
         jax.random.PRNGKey(2), (3, width), dtype=jnp.float64
     )
-    rng = np.random.default_rng(3)
-    cplx_coeffs = jnp.asarray(
-        rng.normal(size=(3, width)) + 1j * rng.normal(size=(3, width)),
-        dtype=jnp.complex128,
-    )
-    cplx_weights = jnp.asarray(
-        rng.normal(size=(3, width)) + 1j * rng.normal(size=(3, width)),
-        dtype=jnp.complex128,
-    )
 
     if name == "m2l_real":
 
@@ -608,7 +549,8 @@ def _lane_pair(name):
                 )
             )
 
-    elif name == "l2l_real":
+    else:
+        assert name == "l2l_real", name
 
         def direct(d):
             return jnp.sum(
@@ -632,38 +574,10 @@ def _lane_pair(name):
                 )
             )
 
-    else:
-
-        def direct(d):
-            return jnp.real(
-                jnp.sum(
-                    cplx_weights
-                    * m2l_complex_reference_batch(cplx_coeffs, d, order=order)
-                )
-            )
-
-        def cached(d):
-            to_z = complex_rotation_blocks_to_z_solidfmm_batch(
-                d, order=order, basis="multipole", dtype=cplx_coeffs.dtype
-            )
-            from_z = complex_rotation_blocks_from_z_solidfmm_batch(
-                d, order=order, basis="local", dtype=cplx_coeffs.dtype
-            )
-            return jnp.real(
-                jnp.sum(
-                    cplx_weights
-                    * m2l_complex_reference_batch_cached_blocks(
-                        cplx_coeffs, d, to_z, from_z, order=order
-                    )
-                )
-            )
-
     return direct, cached
 
 
-@pytest.mark.parametrize(
-    "lane", ["m2l_real", "m2m_real", "l2l_real", "m2l_complex_reference"]
-)
+@pytest.mark.parametrize("lane", ["m2l_real", "m2m_real", "l2l_real"])
 def test_precomputed_block_lanes_match_their_direct_twin_in_gradient(lane):
     """The cached-blocks lanes must agree with the direct lanes on the *gradient* too.
 
@@ -806,143 +720,6 @@ def test_fused_pallas_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
     )
     assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
         "the on-axis transverse gradient is ~0 in the direct lane too, so this "
-        "comparison would pass without testing anything"
-    )
-
-
-@pytest.mark.parametrize("interpret", [True, False])
-def test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient(interpret):
-    """The complex fused Pallas M2L needs the same two halves the real one does.
-
-    Its middle, ``m2l_complex_fused_pallas_cvjp``, is a ``custom_vjp`` for the same
-    reason the real one is, so it takes the same pair rather than the consumer
-    decorator: withdraw the unresolvable transverse tangent from the displacement before
-    the radius and both block stacks are built, and carry the analytic term back onto the
-    output afterwards.
-
-    This lane already had the *withdrawal*, because
-    ``_complex_rotation_blocks_{to,from}_z_solidfmm_padded`` carry
-    :func:`~jaccpot.operators._transverse_degeneracy_jvp.without_unresolvable_transverse_jvp`
-    for the sake of the cached-blocks lane. Half of the pair is worse than neither half:
-    with the withdrawal alone the on-axis rows came back exactly ``(0, 0)`` and this lane
-    sat **5.1e-01** from the pure-JAX reference, where before any of this work the two
-    agreed to 6.7e-16 -- both wrong then, only one wrong after. That is the
-    reference-versus-fused equivalence ``NUMERICS_AND_JAX.md`` §1 requires.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
-    from jaccpot.pallas.m2l_complex_fused import (
-        m2l_complex_fused_jax,
-        m2l_complex_fused_pallas_cvjp,
-        pallas_m2l_complex_fused_supported,
-    )
-
-    if not interpret and not pallas_m2l_complex_fused_supported():
-        pytest.skip("the fused complex Pallas M2L requires an Ampere+ (sm_80) GPU")
-
-    multipoles = _complex_coeffs(1)[None, :].repeat(3, axis=0)
-    weights = _complex_coeffs(2)[None, :].repeat(3, axis=0)
-    deltas = jnp.asarray(
-        [[0.0, 0.0, 2.5], [5.551e-17, 0.0, -3.0], [1.1, -0.4, 3.0]], dtype=jnp.float64
-    )
-
-    def direct(d):
-        return jnp.real(
-            jnp.sum(weights * m2l_complex_reference_batch(multipoles, d, order=_ORDER))
-        )
-
-    def fused(d):
-        aligned = m2l_complex_fused_align_deltas(d)
-        radii = jnp.sqrt(jnp.sum(aligned * aligned, axis=-1))
-        to_z = complex_rotation_blocks_to_z_solidfmm_batch(
-            aligned, order=_ORDER, basis="multipole", dtype=multipoles.dtype
-        )
-        from_z = complex_rotation_blocks_from_z_solidfmm_batch(
-            aligned, order=_ORDER, basis="local", dtype=multipoles.dtype
-        )
-        out = m2l_complex_fused_pallas_cvjp(
-            multipoles, to_z, from_z, radii, _ORDER, interpret, "triton"
-        )
-        carry = make_m2l_complex_fused_carry_axis_derivative(m2l_complex_fused_jax)
-        out = carry(out, multipoles, d, to_z, from_z, radii, order=_ORDER)
-        return jnp.real(jnp.sum(weights * out))
-
-    try:
-        grad_direct = np.asarray(jax.grad(direct)(deltas))
-        grad_fused = np.asarray(jax.grad(fused)(deltas))
-    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
-        message = str(exc).lower()
-        if not interpret and any(
-            token in message for token in ("warpgroup", "ptx", "triton", "mosaic")
-        ):
-            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
-        raise
-
-    # Separate implementations, so the bound is their asserted forward agreement rather
-    # than pure round-off -- the same reasoning as the real lane's tolerance.
-    tolerance = 1.0e-10 if interpret else 1.0e-8
-    worst = float(np.max(np.abs(grad_direct - grad_fused)))
-    assert worst <= tolerance, (
-        f"complex fused Pallas gradient differs from the pure-JAX lane by {worst:.3e}\n"
-        f"  direct: {grad_direct}\n  fused:  {grad_fused}"
-    )
-    assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
-        "the on-axis transverse gradient is ~0 in the direct lane too, so this "
-        "comparison would pass without testing anything"
-    )
-
-
-def test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative():
-    """The wiring in ``runtime/kernels/core.py``, not a reconstruction of it.
-
-    The test above composes the lane itself so that ``interpret=True`` can cover it on
-    CPU. That leaves the production function free to be wired differently, which is
-    exactly how the gap arose: it built its blocks from the withdrawing builders and
-    never carried the term back. So this asserts the shipped function.
-
-    Nothing else can. ``test_m2l_complex_fused_pallas_custom_vjp_matches_twin``
-    differentiates the kernel's four inputs -- multipoles, both block stacks, the radius
-    -- and never ``deltas``, so it is structurally blind to a degeneracy that lives only
-    in the ``delta -> blocks`` map, and ``m2l_complex_fused_jax``, the twin it compares
-    against, shares the blindness.
-    """
-    if not jax.config.jax_enable_x64:
-        pytest.skip("requires float64 (JAX_ENABLE_X64=1)")
-    from jaccpot.pallas.m2l_complex_fused import pallas_m2l_complex_fused_supported
-    from jaccpot.runtime.kernels.core import _m2l_complex_batch_kernel_fused_pallas
-
-    if not pallas_m2l_complex_fused_supported():
-        pytest.skip("the fused complex Pallas M2L requires an Ampere+ (sm_80) GPU")
-
-    multipoles = _complex_coeffs(1)[None, :].repeat(3, axis=0)
-    weights = _complex_coeffs(2)[None, :].repeat(3, axis=0)
-    deltas = jnp.asarray(
-        [[0.0, 0.0, 2.5], [5.551e-17, 0.0, -3.0], [1.1, -0.4, 3.0]], dtype=jnp.float64
-    )
-
-    def loss(operator):
-        return lambda d: jnp.real(
-            jnp.sum(weights * operator(multipoles, d, order=_ORDER))
-        )
-
-    try:
-        grad_fused = np.asarray(
-            jax.grad(loss(_m2l_complex_batch_kernel_fused_pallas))(deltas)
-        )
-    except Exception as exc:  # pragma: no cover - GPU/runtime dependent
-        message = str(exc).lower()
-        if any(token in message for token in ("warpgroup", "ptx", "triton", "mosaic")):
-            pytest.skip(f"Pallas kernel unavailable on this GPU/runtime: {exc}")
-        raise
-    grad_direct = np.asarray(jax.grad(loss(m2l_complex_reference_batch))(deltas))
-
-    worst = float(np.max(np.abs(grad_direct - grad_fused)))
-    assert worst <= 1.0e-8, (
-        f"the production complex fused M2L gradient differs from the reference batch by "
-        f"{worst:.3e}\n  direct: {grad_direct}\n  fused:  {grad_fused}"
-    )
-    assert np.max(np.abs(grad_direct[0, :2])) > 1.0e-3, (
-        "the on-axis transverse gradient is ~0 in the reference lane too, so this "
         "comparison would pass without testing anything"
     )
 
