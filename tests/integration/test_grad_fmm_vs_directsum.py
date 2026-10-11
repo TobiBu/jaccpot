@@ -33,7 +33,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot import FastMultipoleMethod
+from jaccpot import FastMultipoleMethod, direct_sum_gravitational_acceleration
 
 
 def _direct_sum_accelerations(positions, masses, *, softening, G):
@@ -177,3 +177,80 @@ def test_differentiable_matches_forward_compute_accelerations():
     a_fwd = fmm.compute_accelerations(positions, masses, max_order=4, theta=0.4)
     assert a_diff.shape == positions.shape
     assert _rel_l2(a_diff, a_fwd) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# The oracle itself (was tests/integration/test_autodiff.py, merged here in the
+# 2026-10 cleanup's rule R6): `direct_sum_gravitational_acceleration` is the
+# gradient reference every test above leans on, so its own gradient is checked
+# against the hand-written dense sum, and its FMM-shaped keywords are inert.
+# ---------------------------------------------------------------------------
+
+
+def test_autodiff_matches_direct_sum():
+    positions = jnp.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.3, -0.4, 0.1],
+            [-0.5, 0.2, 0.6],
+            [0.7, 0.1, -0.3],
+        ],
+        dtype=jnp.float64,
+    )
+    masses = jnp.array([1.0, 0.8, 1.2, 0.5], dtype=jnp.float64)
+    probe = jnp.linspace(0.1, 0.4, positions.size).reshape(positions.shape)
+    softening = 1e-2
+    G = 2.0
+
+    def fmm_loss(pos):
+        acc = direct_sum_gravitational_acceleration(
+            pos,
+            masses,
+            softening=softening,
+            G=G,
+            theta=0.6,
+            max_order=2,
+        )
+        return jnp.sum(acc * probe)
+
+    def dense_loss(pos):
+        acc = _direct_sum_accelerations(pos, masses, softening=softening, G=G)
+        return jnp.sum(acc * probe)
+
+    grad_fmm = jax.grad(fmm_loss)(positions)
+    grad_dense = jax.grad(dense_loss)(positions)
+    assert jnp.allclose(grad_fmm, grad_dense, rtol=5e-4, atol=5e-4)
+
+
+def test_autodiff_repeated_calls_are_stable():
+    positions = jnp.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.2, 0.1, -0.2],
+            [-0.3, 0.4, 0.5],
+        ],
+        dtype=jnp.float32,
+    )
+    masses = jnp.array([1.0, 0.6, 0.9], dtype=jnp.float32)
+
+    acc1 = direct_sum_gravitational_acceleration(
+        positions,
+        masses,
+        theta=0.5,
+        max_order=2,
+    )
+    acc2 = direct_sum_gravitational_acceleration(
+        positions,
+        masses,
+        theta=0.5,
+        max_order=2,
+    )
+    acc3 = direct_sum_gravitational_acceleration(
+        positions,
+        masses,
+        theta=0.7,
+        max_order=2,
+    )
+    assert acc1.shape == positions.shape
+    assert jnp.allclose(acc1, acc2, rtol=1e-5, atol=1e-5)
+    assert acc3.shape == positions.shape
