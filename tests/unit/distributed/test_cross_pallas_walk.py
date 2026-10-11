@@ -168,7 +168,7 @@ def test_the_two_sided_export_walk_emits_the_same_sets(
     assert not any(bool(p.overflow) for p in pubs)
     rows = jnp.stack([p.rows for p in pubs])
     args = (rows, me["left"], me["right"], me["geom"], me["root"], float(theta))
-    kw = dict(two_sided=True, mac_type="dehnen")
+    kw = dict(two_sided=True, mac_type="dehnen", node_active=me["active"])
     ref = _export_from_rows(*args, jnp.asarray(0), cap, walk_fn=None, **kw)
     got = _export_from_rows(*args, jnp.asarray(0), cap, walk_fn=pallas_walk, **kw)
     for res in (ref, got):
@@ -246,7 +246,12 @@ def test_a_walk_cut_off_at_max_rounds_is_flagged(two_domains):
     from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
 
     me, _ = two_domains
-    kw = dict(max_pair_queue=1 << 15, far_cap=1 << 16, near_cap=1 << 16)
+    kw = dict(
+        max_pair_queue=1 << 15,
+        far_cap=1 << 16,
+        near_cap=1 << 16,
+        node_active=me["active"],
+    )
     args = (me["left"], me["right"], me["geom"].center, me["geom"].radius, 0.8)
     full = mutual_walk_pallas(*args, me["root"], interpret=True, **kw)
     assert not bool(full.queue_overflow) and int(full.rounds) > 2

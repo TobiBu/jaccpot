@@ -305,6 +305,7 @@ def _export_from_rows(
     two_sided: bool,
     mac_type: str,
     walk_fn: Optional[Callable[..., Any]],
+    node_active: Optional[Array] = None,
 ) -> ExportLists:
     """Unpack every device's published rows and run the export walk against them.
 
@@ -330,6 +331,11 @@ def _export_from_rows(
         MAC variant. Static.
     walk_fn : Optional[Callable[..., Any]]
         The walk implementation (``None``: yggdrax's traced walk).
+    node_active : Optional[Array]
+        This device's live nodes (non-empty particle range). A cells tree pads its
+        leaves to a static capacity with empty leaves in one subtree, and an
+        empty node must never be exported: ``None`` treats every node as live,
+        which emits pairs for the padding and can exhaust the list caps.
 
     Returns
     -------
@@ -344,6 +350,7 @@ def _export_from_rows(
         near_cap=cap.export_near_cap,
         mac_type=mac_type,
         walk_fn=walk_fn,
+        node_active=node_active,
     )
     args = (left, right, jnp.asarray(geom.center), jnp.asarray(geom.radius), root)
     if not two_sided:
@@ -1571,6 +1578,8 @@ def make_cross_hook(
             return sym["cross_far"]
 
         idx = parent.dtype
+        ranges = jnp.asarray(tree.node_ranges)
+        node_active = ranges[:, 1] >= ranges[:, 0]
         leaf_fill = jnp.full((n_local - num_internal,), -1, idx)
         left = jnp.concatenate([jnp.asarray(tree.left_child, idx), leaf_fill])
         right = jnp.concatenate([jnp.asarray(tree.right_child, idx), leaf_fill])
@@ -1587,6 +1596,9 @@ def make_cross_hook(
             two_sided=two_sided,
             mac_type=mac_type,
             walk_fn=walk_fn,
+            # a cells tree pads its leaves to a static capacity with EMPTY leaves in
+            # one subtree; the walk must leave those nodes alone
+            node_active=node_active,
         )
 
         if record is not None:
