@@ -19,7 +19,7 @@ from jaxtyping import Array
 from yggdrax.interactions import DualTreeRetryEvent, NodeNeighborList
 from yggdrax.tree import RadixTree, get_level_offsets
 
-from jaccpot._env import env_choice, env_flag, env_reject_removed
+from jaccpot._env import env_choice, env_flag
 
 from ._large_n_pipeline import evaluate_large_n_state, prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
@@ -84,94 +84,6 @@ def _walk_caps_key(validated: Optional[dict]) -> tuple:
     )
 
 
-_FALSE_VALUES = ("0", "false", "no", "off")
-
-
-def _fresh_compact_pair_rebuild_enabled() -> bool:
-    """Whether the fused refresh rebuilds its far-pair list fresh on every step.
-
-    It always does. The far list a state carries into the refresh is never read:
-    the refresh builds its own, uses it in the same step and returns the input's
-    as a shape placeholder. The two ways out were removed in the 2026-10 cleanup
-    (X6), and naming either raises:
-
-    * ``JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE=1`` re-used
-      the carried list after the drift: stale M2L pairs, wrong endpoint forces.
-    * ``JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD=0`` returned the
-      freshly built list in the state instead of the placeholder, so it rode in
-      the scan's carry. No caller set it; only a test of the reuse path did.
-
-    ``JACCPOT_STATIC_STRICT_FUSED_REUSE_COMPACT_PAIRS``, which only armed the first
-    together with it, is ignored.
-
-    Returns
-    -------
-    bool
-        ``True``; :func:`jaccpot._env.env_reject_removed` raises ``ValueError``
-        on a removed value instead.
-    """
-    env_reject_removed(
-        "JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE",
-        ("1", "true", "yes", "on"),
-        phase="X6",
-        default="0, a fresh far-pair list every step",
-    )
-    env_reject_removed(
-        "JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD",
-        _FALSE_VALUES,
-        phase="X6",
-        default="1, the fresh far-pair rebuild with the carried list a placeholder",
-    )
-    return True
-
-
-#: Values of the strict lane's switches whose path the 2026-10 cleanup (X6) removed:
-#: ``(variable, removed values, what runs instead)``. Any other value is accepted
-#: and changes nothing.
-_REMOVED_STRICT_LANE_VALUES = (
-    (
-        "JACCPOT_STATIC_STRICT_FUSED_MODE",
-        _FALSE_VALUES,
-        "on, the fused scan (the host-driven strict loop is gone)",
-    ),
-    (
-        "JACCPOT_STATIC_STRICT_FUSED_DISABLE_HOT_TIMING",
-        _FALSE_VALUES,
-        "1, no host stage timers inside the fused lane",
-    ),
-    (
-        "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
-        _FALSE_VALUES,
-        "1, the device-only streamed fast path (the host-routed refresh is gone)",
-    ),
-    (
-        "JACCPOT_STATIC_STRICT_FUSED_NODE_INTERACTIONS_SAFE_PATH",
-        ("1", "true", "yes", "on"),
-        "0, the compact streamed far pairs (1 only made the fused refresh raise)",
-    ),
-)
-
-
-def _reject_removed_strict_lane_env() -> None:
-    """Refuse a strict-lane switch set to a value whose path X6 removed.
-
-    Called where the fused lane is opened (``strict_run_v2``,
-    ``strict_fused_prepared_eval_fn``) and by every fused-device refresh: the
-    removed values took effect there, and running the surviving path instead would
-    measure something other than what the caller asked for.
-
-    Returns
-    -------
-    None
-        Returns only when no switch holds a removed value;
-        :func:`jaccpot._env.env_reject_removed` raises ``ValueError`` naming the
-        variable otherwise.
-    """
-    for name, removed, default in _REMOVED_STRICT_LANE_VALUES:
-        env_reject_removed(name, removed, phase="X6", default=default)
-    _fresh_compact_pair_rebuild_enabled()
-
-
 def _unaliased(tree: Any) -> Any:
     """``tree`` with every array that appears under more than one leaf copied.
 
@@ -231,7 +143,6 @@ class StrictRunMixin(_EngineBase):
             and mode == "static_radix"
             and isinstance(prepared, LargeNPreparedState)
             and getattr(prepared, "compact_far_pairs", None) is not None
-            and _fresh_compact_pair_rebuild_enabled()
         )
 
     def _replan_walk_caps_from_needs(self, needs: np.ndarray) -> bool:
@@ -842,8 +753,7 @@ class StrictRunMixin(_EngineBase):
             If ``num_steps`` is not positive, or ``refresh_every`` is not 1; if
             ``carry="particles"`` is asked of a lane that cannot rebuild the state
             from its shapes, or a :class:`StrictParticleCarry` comes without it;
-            if ``donate_state`` is asked without ``carry="particles"``; if a
-            strict-lane switch holds a value the 2026-10 cleanup (X6) removed.
+            or if ``donate_state`` is asked without ``carry="particles"``.
         """
         from jaccpot.runtime.strict_carry import StrictParticleCarry
 
@@ -890,8 +800,6 @@ class StrictRunMixin(_EngineBase):
                 "strict_run_v2 requires refresh_every=1 for endpoint-correct "
                 "velocity-Verlet self gravity"
             )
-        _reject_removed_strict_lane_env()
-
         profile_key = (
             f"n={int(state_arr.shape[0])}|leaf={int(leaf_size)}|"
             f"order={int(max_order)}|refresh=1|"
@@ -2227,9 +2135,7 @@ class StrictRunMixin(_EngineBase):
         ------
         RuntimeError
             If the profile is not large-N production, or the particle count is not
-            in ``JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET``. (A strict-lane switch
-            that holds a value the 2026-10 cleanup removed raises ``ValueError``,
-            as in ``strict_run_v2``.)
+            in ``JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET``.
         """
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
@@ -2237,7 +2143,6 @@ class StrictRunMixin(_EngineBase):
             raise RuntimeError(
                 "strict_fused_prepared_eval_fn requires large_n_gpu production profile."
             )
-        _reject_removed_strict_lane_env()
         self._strict_fused_mode_active = self._strict_fused_profile_allows_n(
             int(positions_arr.shape[0])
         )
@@ -2358,16 +2263,12 @@ class StrictRunMixin(_EngineBase):
         Optional[LargeNPreparedState]
             The refreshed state, or ``None`` when the fast path declined -- see
             above. What it calls raises only for genuine inconsistencies, never
-            for a declined reuse; a fused-device refresh first refuses a
-            strict-lane switch set to a value the 2026-10 cleanup (X6) removed
-            (``ValueError``).
+            for a declined reuse.
         """
         # Side channels for the traced capacity guard and the segment retry; see
         # the end of this method and `capacity_guard.last_refresh_walk_needs`.
         self._last_refresh_capacity_ok = None
         self._last_refresh_walk_needs = None
-        if fused_device_mode:
-            _reject_removed_strict_lane_env()
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):
@@ -2614,14 +2515,14 @@ class StrictRunMixin(_EngineBase):
             getattr(self, "_strict_fused_mode_active", False)
         )
         # The fused refresh builds its far-pair list fresh every step and returns
-        # the input's as a shape placeholder (`_fresh_compact_pair_rebuild_enabled`).
+        # the input's as a shape placeholder: the list a state carries in is never
+        # read (the unsafe reuse of it went in the 2026-10 cleanup, X6).
         compact_far_pairs_carry_placeholder = getattr(
             prepared_state, "compact_far_pairs", None
         )
         safe_fresh_compact_pair_rebuild = (
             bool(strict_fused_traced_hot_path)
             and str(tree_config.mode).strip().lower() == "static_radix"
-            and _fresh_compact_pair_rebuild_enabled()
         )
         # The one point where a cross-domain exchange belongs: the multipoles exist
         # here and the downward sweep below has not consumed them.

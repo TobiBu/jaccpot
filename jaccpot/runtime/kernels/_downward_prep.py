@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 from typing import Any, NamedTuple, Optional
 
-import jax
 import jax.numpy as jnp
 from beartype.typing import Callable
 from jaxtyping import Array
@@ -520,46 +519,6 @@ def _prepare_solidfmm_downward_child_inputs(
     )
 
 
-@jax.named_scope("fmm_m2l")
-def _check_m2l_csr_kernel_env() -> None:
-    """Refuse the removed CSR M2L kernels; the flat real path runs the lane kernel.
-
-    ``JACCPOT_M2L_CSR_KERNEL`` chose between the per-target ``pair`` kernel, the
-    K-source ``tiled`` one (``JACCPOT_M2L_CSR_TILED=1`` was its older spelling)
-    and ``lanes`` (Phase 6, 2026-09-11; 18x the per-pair kernel). The first two
-    were removed in the 2026-10 cleanup (X5): asking for either raises rather than
-    running the lane kernel under its name. ``lanes``, the default, is accepted;
-    it is also the only kernel with a custom_vjp, so the gradient path took it
-    regardless.
-
-    Returns
-    -------
-    None
-        Returns only when no removed kernel is requested.
-
-    Raises
-    ------
-    ValueError
-        If ``JACCPOT_M2L_CSR_KERNEL`` is ``pair`` or ``tiled``, if
-        ``JACCPOT_M2L_CSR_TILED`` is on, or if ``JACCPOT_M2L_CSR_KERNEL`` names no
-        kernel.
-    """
-    from jaccpot._env import env_reject_removed
-
-    env_reject_removed(
-        "JACCPOT_M2L_CSR_KERNEL", ("pair", "tiled"), phase="X5", default="lanes"
-    )
-    env_reject_removed(
-        "JACCPOT_M2L_CSR_TILED",
-        ("1", "true", "yes", "on"),
-        phase="X5",
-        default="the lanes kernel",
-    )
-    which = os.environ.get("JACCPOT_M2L_CSR_KERNEL", "").strip().lower()
-    if which not in ("", "lanes"):
-        raise ValueError(f"JACCPOT_M2L_CSR_KERNEL={which!r}; expected lanes")
-
-
 def _solidfmm_downward_accumulate_from_multipoles(
     initial_locals_coeffs: Array,
     multipoles_coeffs: Array,
@@ -647,8 +606,6 @@ def _solidfmm_downward_accumulate_from_multipoles(
             "removed in the 2026-10 cleanup, C)"
         )
     csr_lane = _m2l_csr_pallas_active()
-    if csr_lane:
-        _check_m2l_csr_kernel_env()
     if targets_sorted and not csr_lane:
         # only the CSR lane kernel reads a CSR as (sources, row offsets)
         from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets

@@ -544,9 +544,8 @@ def _resolve_fmm_config(
     Raises
     ------
     ValueError
-        If ``tree_build_mode`` names no known mode (``"fixed_depth"`` with a
-        removal message), ``target_leaf_particles`` is below 1, or ``jit_tree``
-        is neither a bool nor ``"auto"``.
+        If ``tree_build_mode`` names no known mode, ``target_leaf_particles`` is
+        below 1, or ``jit_tree`` is neither a bool nor ``"auto"``.
     """
     preset_name = preset_config.name if preset_config is not None else None
 
@@ -555,11 +554,6 @@ def _resolve_fmm_config(
         preset_config.tree_build_mode if preset_config else None,
         "lbvh",
     )
-    if tree_mode == "fixed_depth":
-        raise ValueError(
-            "tree_build_mode='fixed_depth' was removed in the 2026-10 cleanup (X4); "
-            "use 'lbvh' or 'static_radix'"
-        )
     valid_tree_modes = {"lbvh", "adaptive", "static_radix"}
     if tree_mode not in valid_tree_modes:
         allowed_modes = sorted(valid_tree_modes)
@@ -897,7 +891,7 @@ def _restore_static_leaf_size(tree: Tree) -> Tree:
     place the FMM runtime obtains a tree, so one coercion covers every jitted
     entry point that later sees the prepared state.
 
-    Since the 2026-10 cleanup (X2) the single-GPU solver refuses
+    Since the 2026-10 cleanup (X2) the single-GPU solver takes no
     ``tree_type="octree"``, and on 2026-10-07 no radix, kd-tree or octree build
     through this function handed it an array leaf size, so this is now insurance
     rather than a live fix.

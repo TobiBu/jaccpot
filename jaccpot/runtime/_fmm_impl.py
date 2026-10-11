@@ -64,8 +64,6 @@ from yggdrax.interactions import (  # noqa: F401
 from yggdrax.tree import TreeType, available_tree_types
 
 from jaccpot.config import (
-    _CARTESIAN_BASIS_REMOVED,
-    _COMPLEX_BASIS_REMOVED,
     FarFieldConfig,
     FMMPreset,
     MACTypeInput,
@@ -316,13 +314,13 @@ class FMMEngine(
         rather than here.
     expansion_basis : ExpansionBasis
         Expansion algebra. ``"solidfmm"`` (default): the spherical-harmonic family,
-        whose only basis is the real one. ``"cartesian"`` and ``"complex"`` raise:
-        those bases were removed in the 2026-10 cleanup (K and C). Until K the
-        Cartesian basis was this default.
+        whose only basis is the real one (the Cartesian and complex bases were
+        removed in the 2026-10 cleanup, K and C; until K the Cartesian basis was
+        this default). Anything else raises.
     basis_impl : Optional[Any]
         The basis object. Without one the REAL basis is used (cleanup 2026-10,
         phase D1; it used to default to complex); one whose ``name`` is not
-        ``"real"`` raises (C).
+        ``"real"`` raises.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide", which
         selects ``"rot_scale"`` for the real basis.
@@ -754,15 +752,10 @@ class FMMEngine(
         Raises
         ------
         ValueError
-            If the expansion basis is not 'solidfmm'. 'cartesian' and 'complex'
-            get their removal messages (2026-10 cleanup, K and C), and so does a
-            ``basis_impl`` whose ``name`` is not ``"real"``.
+            If the expansion basis is not 'solidfmm', or a ``basis_impl``'s
+            ``name`` is not ``"real"``.
         """
         basis_norm = str(expansion_basis).strip().lower()
-        if basis_norm == "cartesian":
-            raise ValueError(_CARTESIAN_BASIS_REMOVED)
-        if basis_norm == "complex":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
         if basis_norm != "solidfmm":
             raise ValueError("expansion_basis must be 'solidfmm'")
         if basis_impl is None:
@@ -772,7 +765,9 @@ class FMMEngine(
 
             basis_impl = RealSHBasis()
         elif str(getattr(basis_impl, "name", "")).strip().lower() != "real":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
+            raise ValueError(
+                f"basis_impl.name must be 'real'; got {getattr(basis_impl, 'name', None)!r}"
+            )
         self.expansion_basis = basis_norm  # type: ignore[assignment]
         self.basis_impl = basis_impl
         self.m2l_impl = None if m2l_impl is None else str(m2l_impl).strip().lower()
@@ -1040,9 +1035,7 @@ class FMMEngine(
         ------
         ValueError
             If any lane string is unrecognised, or the edge chunk size is not
-            positive -- same messages as before the extraction. Also if
-            ``execution_backend`` names the octree backend, which was removed in
-            the 2026-10 cleanup.
+            positive -- same messages as before the extraction.
         """
         nearfield_mode_norm = str(nearfield_mode).strip().lower()
         if nearfield_mode_norm not in ("auto", "baseline", "bucketed"):
@@ -1051,16 +1044,6 @@ class FMMEngine(
         if runtime_path_norm not in ("auto", "large_n"):
             raise ValueError("runtime_path must be 'auto' or 'large_n'")
         execution_backend_norm = str(execution_backend).strip().lower()
-        if execution_backend_norm == "octree":
-            # The octree execution backend (complex basis only, ~3x behind radix, no
-            # production caller) was removed in the 2026-10 cleanup
-            # (docs/cleanup_2026-10.md, X2). Naming it raises rather than silently
-            # running radix, so an old config cannot measure the wrong thing.
-            raise ValueError(
-                "execution_backend='octree' is no longer available: the octree "
-                "execution backend was removed in the 2026-10 cleanup "
-                "(docs/cleanup_2026-10.md, X2). Use 'auto' or 'radix'."
-            )
         if execution_backend_norm not in ("auto", "radix"):
             raise ValueError("execution_backend must be 'auto' or 'radix'")
         if int(nearfield_edge_chunk_size) <= 0:
@@ -1257,9 +1240,10 @@ class FMMEngine(
         Raises
         ------
         ValueError
-            If ``host_refine_mode`` or ``tree_type`` is outside its documented domain,
-            including ``tree_type="octree"``, which this solver no longer accepts
-            since the octree execution backend was removed (2026-10 cleanup).
+            If ``host_refine_mode`` or ``tree_type`` is outside its documented domain.
+            ``"octree"`` is not in it: yggdrax still builds octrees, but this
+            solver's octree path went with the octree execution backend in the
+            2026-10 cleanup (X2).
         """
         dehnen_scale_val = float(dehnen_radius_scale)
         if dehnen_scale_val <= 0.0:
@@ -1273,15 +1257,6 @@ class FMMEngine(
             refine_mode_norm = "off"
         self.host_refine_mode = refine_mode_norm
         tree_type_norm = str(tree_type).strip().lower()
-        if tree_type_norm == "octree":
-            # yggdrax still builds octrees, but this solver's octree path went with
-            # the octree execution backend in the 2026-10 cleanup
-            # (docs/cleanup_2026-10.md, X2).
-            raise ValueError(
-                "tree_type='octree' is no longer available on the single-GPU solver: "
-                "the octree execution backend was removed in the 2026-10 cleanup "
-                "(docs/cleanup_2026-10.md, X2). Use 'radix' (the default) or 'kdtree'."
-            )
         supported_tree_types = set(available_tree_types()) - {"octree"}
         if tree_type_norm not in supported_tree_types:
             supported_txt = ", ".join(sorted(supported_tree_types))

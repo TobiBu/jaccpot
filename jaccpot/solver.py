@@ -23,8 +23,6 @@ from jaxtyping import Array, DTypeLike, Float, Int
 
 from .basis import BasisInterface, RealSHBasis
 from .config import (
-    _CARTESIAN_BASIS_REMOVED,
-    _COMPLEX_BASIS_REMOVED,
     Basis,
     FarFieldConfig,
     FMMAdvancedConfig,
@@ -181,8 +179,8 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     same runtime basis and the same :class:`~jaccpot.RealSHBasis`, so they produce
     bit-identical forces. Until the 2026-10 cleanup (C) ``"solidfmm"`` meant the
     complex basis, which agreed with the real one to round-off (4.5e-13 relative
-    L2 in float64 at N=2048, p=4, theta=0.5). ``"complex"`` and ``"cartesian"``
-    raise their migration errors (C and K).
+    L2 in float64 at N=2048, p=4, theta=0.5). The complex and Cartesian bases were
+    removed (C and K): their names are unknown strings.
 
     Parameters
     ----------
@@ -199,10 +197,9 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     Raises
     ------
     ValueError
-        If ``basis`` is a string that names no known basis, or names the
-        Cartesian or the complex basis (removed in the 2026-10 cleanup, K and C),
-        either as a string or as a basis object's ``runtime_expansion_basis``; or
-        if a basis object's ``name`` is not ``"real"``.
+        If ``basis`` is a string that names no known basis, or a basis object's
+        ``runtime_expansion_basis`` is not ``"solidfmm"`` or its ``name`` is not
+        ``"real"``.
     TypeError
         If ``basis`` is neither a string nor a :class:`BasisInterface`.
     """
@@ -215,24 +212,16 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
                 runtime_basis="solidfmm",
                 basis_impl=RealSHBasis(),
             )
-        if basis_norm == "complex":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
-        if basis_norm == "cartesian":
-            raise ValueError(_CARTESIAN_BASIS_REMOVED)
         raise ValueError(
             f"basis must be one of 'real' or 'solidfmm' (the same basis), got '{basis}'"
         )
 
     if isinstance(basis, BasisInterface):
         runtime_basis = str(basis.runtime_expansion_basis).strip().lower()
-        if runtime_basis == "complex":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
-        if runtime_basis == "cartesian":
-            raise ValueError(_CARTESIAN_BASIS_REMOVED)
         if runtime_basis != "solidfmm":
             raise ValueError("basis.runtime_expansion_basis must be 'solidfmm'")
         if str(basis.name).strip().lower() != "real":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
+            raise ValueError(f"basis.name must be 'real'; got {basis.name!r}")
         return _BasisResolution(
             public_name=str(basis.name),
             runtime_basis=runtime_basis,  # type: ignore[arg-type]
@@ -532,10 +521,10 @@ class FastMultipoleMethod:
     per-argument docs:
 
     * ``basis`` defaults to ``"real"`` (Dehnen real harmonics), the only basis;
-      ``"solidfmm"`` (the family name) is the same basis. ``"complex"`` raises: it
-      was removed in the 2026-10 cleanup (C), and agreed with the real basis to
-      round-off. ``"cartesian"`` raises too: it was removed in K, having had a
-      relative L2 force error of ~1.8e-1 *independent of expansion order*.
+      ``"solidfmm"`` (the family name) is the same basis. Any other name raises.
+      The complex basis was removed in the 2026-10 cleanup (C), and agreed with
+      the real basis to round-off; the Cartesian basis was removed in K, having
+      had a relative L2 force error of ~1.8e-1 *independent of expansion order*.
     * ``use_pallas=None`` resolves at construction: Pallas near field on where it
       can run (Ampere sm_80+), pure-JAX on sm_75 and CPU. An explicit ``True`` or
       ``False`` wins.
@@ -551,9 +540,8 @@ class FastMultipoleMethod:
         config, and for ``"large_n_gpu"`` also forces fp32 when no dtype was
         requested, because that lane's kernels are fp32-only.
     basis : Union[Basis, BasisInterface, str]
-        ``"real"`` (default) or its alias ``"solidfmm"``, as above.
-        ``"complex"`` and ``"cartesian"`` raise a ``ValueError`` (removed in the
-        2026-10 cleanup, C and K). May also be a constructed
+        ``"real"`` (default) or its alias ``"solidfmm"``, as above; any other
+        name raises a ``ValueError``. May also be a constructed
         :class:`~jaccpot.BasisInterface` named ``"real"``.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide",
@@ -651,7 +639,6 @@ class FastMultipoleMethod:
         *,
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
         # Real (Dehnen) harmonics, the only basis; 'solidfmm' is its family name.
-        # 'complex' and 'cartesian' raise (removed in the 2026-10 cleanup, C and K).
         basis: Union[Basis, BasisInterface, str] = "real",
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,

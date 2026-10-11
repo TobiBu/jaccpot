@@ -52,7 +52,7 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
-from jaccpot._env import env_int, env_reject_removed, env_text
+from jaccpot._env import env_int, env_text
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import (
@@ -1368,10 +1368,11 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         iteration (see :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
         ``JACCPOT_NEARFIELD_SOURCE_TILE``, default :data:`DIRECT_SOURCE_TILE`. Static.
     source_flags : str | None
-        With a source tile, the kernel's options (``a``, ``l``, ``r``, and ``p``
-        alongside ``r``; see :func:`_nearfield_leafpair_csr_sorted_kernel`).
-        ``None``: ``JACCPOT_NEARFIELD_SOURCE_FLAGS``, default
-        :data:`DIRECT_SOURCE_FLAGS`. Static.
+        With a source tile, the kernel's options (``a``, ``l``, ``r``; ``p``, the
+        prefetch, is part of ``r`` and is accepted and ignored; see
+        :func:`_nearfield_leafpair_csr_sorted_kernel`). ``None``:
+        ``JACCPOT_NEARFIELD_SOURCE_FLAGS``, default :data:`DIRECT_SOURCE_FLAGS`.
+        Static.
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
 
@@ -1388,9 +1389,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         If Pallas or its Triton backend could not be imported.
     ValueError
         If ``source_tile`` is not ``0`` or a power of two, ``source_flags``
-        holds a letter other than ``a``, ``l``, ``p``, ``r``, or names a removed
-        option (``g``, or ``p`` without ``r``); if ``JACCPOT_NEARFIELD_TARGET_CLASSES``
-        or ``JACCPOT_NEARFIELD_DIRECT_ROWS=chunked`` is set (removed); or if both
+        holds a letter other than ``a``, ``l``, ``p``, ``r``, or both
         ``with_potential`` and ``with_force_scale`` are set.
     """
     if pl is None or plgpu is None:
@@ -1419,31 +1418,12 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     source_tile = int(source_tile)
     if source_tile & (source_tile - 1):
         raise ValueError(f"source_tile must be 0 or a power of two, got {source_tile}")
-    # one launch per target occupancy class, and running only each row's first
-    # chunk in its program: both removed in the 2026-10 cleanup (X5)
-    if env_text("JACCPOT_NEARFIELD_TARGET_CLASSES", "").strip():
-        raise ValueError(
-            "JACCPOT_NEARFIELD_TARGET_CLASSES was removed in the 2026-10 cleanup "
-            "(X5); the default is one launch at the target subtile. Unset the "
-            "variable."
-        )
-    env_reject_removed(
-        "JACCPOT_NEARFIELD_DIRECT_ROWS",
-        ("chunked",),
-        phase="X5",
-        default="whole rows",
-    )
     if source_flags is None:
         source_flags = env_text("JACCPOT_NEARFIELD_SOURCE_FLAGS", DIRECT_SOURCE_FLAGS)
     source_flags = "".join(sorted(set(source_flags))) if source_tile else ""
-    if set(source_flags) - set("aglpr"):
+    if set(source_flags) - set("alpr"):
         raise ValueError(
             f"source_flags takes the letters a, l, p, r; got {source_flags!r}"
-        )
-    if "g" in source_flags or ("p" in source_flags and "r" not in source_flags):
-        raise ValueError(
-            f"source_flags={source_flags!r}: 'g' and 'p' without 'r' were removed "
-            f"in the 2026-10 cleanup (X5); the default is {DIRECT_SOURCE_FLAGS!r}."
         )
     if source_tile and target_subtile is None:
         target_subtile = DIRECT_TILED_TARGET_SUBTILE

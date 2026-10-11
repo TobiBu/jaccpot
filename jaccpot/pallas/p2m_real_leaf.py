@@ -327,9 +327,7 @@ def p2m_real_leaves_pallas(
     Raises
     ------
     ValueError
-        If ``block`` (or ``JACCPOT_P2M_BLOCK``) is ``0`` or negative: that
-        selected the one-program-per-leaf forward, removed in the 2026-10
-        cleanup (X5).
+        If ``block`` (or ``JACCPOT_P2M_BLOCK``) is ``0`` or negative.
     """
     from jaccpot._env import env_int
 
@@ -341,10 +339,7 @@ def p2m_real_leaves_pallas(
         block = env_int("JACCPOT_P2M_BLOCK", P2M_BLOCK_DEFAULT)
     if int(block) <= 0:
         named = f"JACCPOT_P2M_BLOCK={block}" if block_from_env else f"block={block}"
-        raise ValueError(
-            f"{named} (one program per leaf) was removed in the 2026-10 cleanup "
-            f"(X5); the default is {P2M_BLOCK_DEFAULT} leaves per program."
-        )
+        raise ValueError(f"{named}: the leaves per program must be positive")
     if chunk is None:
         chunk = env_int("JACCPOT_P2M_CHUNK", P2M_CHUNK_DEFAULT, minimum=1)
     if num_warps is None:

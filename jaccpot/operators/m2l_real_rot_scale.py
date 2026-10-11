@@ -15,7 +15,6 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot._env import env_reject_removed
 from jaccpot.operators.real_harmonics import (
     real_rotation_from_z_axis_local,
     real_rotation_from_z_axis_multipole,
@@ -36,28 +35,6 @@ from ._transverse_degeneracy_jvp import (
     withdraw_unresolvable_transverse,
     without_unresolvable_transverse_jvp,
 )
-
-
-def _reject_removed_degree_batched() -> None:
-    """Refuse ``JACCPOT_M2L_DEGREE_BATCHED=1``; the rotations are unrolled by degree.
-
-    The switch selected one batched einsum over degrees in place of the ``p + 1``
-    per-degree blocks (a different reduction order, off by default). It was
-    removed in the 2026-10 cleanup (X5); the unrolled blocks, the default, stay.
-    Read at trace time through :mod:`jaccpot._env`, as the switch was.
-
-    Returns
-    -------
-    None
-        Returns only when the variable is unset or off; ``1`` raises a
-        ``ValueError`` (:func:`jaccpot._env.env_reject_removed`).
-    """
-    env_reject_removed(
-        "JACCPOT_M2L_DEGREE_BATCHED",
-        ("1", "true", "yes", "on"),
-        phase="X5",
-        default="the per-degree rotation blocks",
-    )
 
 
 @highest_matmul_precision
@@ -84,7 +61,6 @@ def _rotate_multipole_to_z_single(
     Array
         Coefficients in the z-aligned frame, same shape and dtype.
     """
-    _reject_removed_degree_batched()
     x, y, z = delta[0], delta[1], delta[2]
     out = jnp.zeros_like(multipole)
     for ell in range(int(order) + 1):
@@ -116,7 +92,6 @@ def _rotate_local_from_z_single(local_z: Array, delta: Array, *, order: int) -> 
     Array
         Coefficients back in the world frame.
     """
-    _reject_removed_degree_batched()
     x, y, z = delta[0], delta[1], delta[2]
     out = jnp.zeros_like(local_z)
     for ell in range(int(order) + 1):

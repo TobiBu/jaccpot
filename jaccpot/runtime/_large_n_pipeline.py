@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from jaccpot._env import env_choice, env_int, env_reject_removed
+from jaccpot._env import env_choice, env_int
 from jaccpot._jax_compat import Tracer
 
 # `_read_large_n_env_config` is re-imported although only its memoising wrapper
@@ -2112,12 +2112,6 @@ def evaluate_large_n_state(
         # jaccpot.pallas.l2p_real) or the XLA vmap of the autodiff form
         l2p_kernel = env_choice(
             "JACCPOT_L2P_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
-        )
-        # the force returns to input order by a scatter (each sorted row to its
-        # input row); the gather through the inverse permutation
-        # (JACCPOT_FASTLANE_UNPERMUTE=gather) was removed in the 2026-10 cleanup (X5)
-        env_reject_removed(
-            "JACCPOT_FASTLANE_UNPERMUTE", ("gather",), phase="X5", default="scatter"
         )
         if l2p_kernel == "auto":
             from jaccpot.pallas.cascade_real_level import (

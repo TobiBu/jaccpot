@@ -27,7 +27,7 @@ gather + segment-max per tree level). The conservative upward bound
 (``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS=bound``) was 1.38x (p50) / 1.94x
 (p90) over exact on the real 2e5 / leaf-64 tree at theta 0.8 and cost 2.7x in
 far pairs (565k -> 1541k directed) for 7 % fewer near edges; it was removed in
-the 2026-10 cleanup (X5) and the variable's ``bound`` value raises.
+the 2026-10 cleanup (X5), and the variable is no longer read.
 ``half_extent`` and ``max_extent`` are set to the radius too, so the ``bh`` box
 test degrades to the sphere test rather than to a stale box.
 
@@ -106,32 +106,6 @@ def mac_geometry_mode(default: str = "aabb") -> str:
     return raw
 
 
-def _reject_removed_mac_radius_mode() -> None:
-    """Refuse ``JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS=bound``; radii are exact.
-
-    The child-sphere bound for internal nodes was removed in the 2026-10 cleanup
-    (X5): it cost 2.7x in far pairs for no accuracy (module docstring). ``exact``,
-    the default, is accepted.
-
-    Returns
-    -------
-    None
-        Returns only for an unset variable or ``exact``.
-
-    Raises
-    ------
-    ValueError
-        If the variable is ``bound`` (removed) or names no mode.
-    """
-    from jaccpot._env import env_reject_removed
-
-    name = "JACCPOT_STATIC_STRICT_FUSED_MAC_RADIUS"
-    env_reject_removed(name, ("bound",), phase="X5", default="exact")
-    raw = os.environ.get(name, "exact").strip().lower()
-    if raw != "exact":
-        raise ValueError(f"{name} must be 'exact', got {raw!r}")
-
-
 @jax.named_scope("fmm_com_radii")
 def com_mac_geometry(
     tree: Any,
@@ -194,19 +168,15 @@ def _com_radii_kernel() -> str:
 
     The Pallas kernel is the ancestor-table one; the chain kernel
     ``JACCPOT_COM_RADII_VARIANT=chain`` selected (the same radii, 2.1-2.4x slower)
-    was removed in the 2026-10 cleanup (X5), and that value raises a
-    ``ValueError`` (:func:`jaccpot._env.env_reject_removed`).
+    was removed in the 2026-10 cleanup (X5), and that variable is no longer read.
 
     Returns
     -------
     str
         The exact-radius implementation :func:`_com_radii` runs.
     """
-    from jaccpot._env import env_choice, env_reject_removed
+    from jaccpot._env import env_choice
 
-    env_reject_removed(
-        "JACCPOT_COM_RADII_VARIANT", ("chain",), phase="X5", default="table"
-    )
     choice = env_choice(
         "JACCPOT_COM_RADII_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
     )
@@ -495,7 +465,6 @@ def resolve_walk_geometry(
                 "centres, and this lane's upward data has none."
             )
         return box_geometry, geometry_factory
-    _reject_removed_mac_radius_mode()
     geometry = com_mac_geometry(
         tree,
         positions_sorted,

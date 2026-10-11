@@ -19,34 +19,10 @@ MEMORY_OBJECTIVE_DOC = (
     "'minimum_memory'."
 )
 
-#: ``"cartesian"`` and ``"complex"`` stay in the alias only so that an old config
-#: naming them still type-checks, and its caller sees :data:`_CARTESIAN_BASIS_REMOVED`
-#: / :data:`_COMPLEX_BASIS_REMOVED` rather than a type-check error: the Cartesian
-#: and complex bases were removed in the 2026-10 cleanup (docs/cleanup_2026-10.md, K
-#: and C). ``"solidfmm"`` names the spherical-harmonic family and resolves to the
-#: real basis, like ``"real"``.
-Basis = Literal["cartesian", "solidfmm", "complex", "real"]
-#: The one message every spelling of the removed Cartesian basis raises with: the
-#: facade's ``basis=`` and legacy ``expansion_basis=``, a ``BasisInterface`` whose
-#: ``runtime_expansion_basis`` is ``"cartesian"``, the engine's
-#: ``expansion_basis=`` and ``DistributedFMMConfig(basis=...)``.
-_CARTESIAN_BASIS_REMOVED = (
-    "basis='cartesian' was removed in the 2026-10 cleanup (K); see "
-    "docs/cleanup_2026-10.md. Use basis='real' (the default)."
-)
-#: The one message every spelling of the removed complex spherical-harmonic basis
-#: raises with (2026-10 cleanup, C): the facade's ``basis="complex"`` and legacy
-#: ``expansion_basis="complex"``, a basis object whose ``name`` is not ``"real"``
-#: (or whose ``runtime_expansion_basis`` is ``"complex"``), the engine's
-#: ``expansion_basis="complex"`` and ``basis_impl``, and
-#: ``DistributedFMMConfig(basis=...)`` naming ``"complex"`` or ``"solidfmm"`` (the
-#: distributed driver's name for its complex far field). The facade and the engine
-#: resolve ``"solidfmm"`` to the real basis instead.
-_COMPLEX_BASIS_REMOVED = (
-    "basis='complex' was removed in the 2026-10 cleanup (C); see "
-    "docs/cleanup_2026-10.md. Use basis='real' (the default) -- it agrees with the "
-    "complex basis to round-off."
-)
+#: ``"solidfmm"`` names the spherical-harmonic family and resolves to the real
+#: basis, like ``"real"`` (the Cartesian and complex bases were removed in the
+#: 2026-10 cleanup, docs/cleanup_2026-10.md, K and C).
+Basis = Literal["solidfmm", "real"]
 #: ``"class_major"`` stays in the alias only so that an old config naming it still
 #: constructs (and type-checks); the solver then raises, because the class-major far
 #: field was removed with the grouped one in the 2026-10 cleanup
@@ -147,12 +123,12 @@ class TreeConfig:
     ----------
     tree_type : Optional[str]
         Yggdrax tree family, e.g. ``"radix"`` (the production default) or
-        ``"kdtree"``. ``"octree"`` is refused by the single-GPU solver since the
-        octree execution backend was removed in the 2026-10 cleanup.
+        ``"kdtree"``. Not ``"octree"``: the single-GPU solver's octree path went
+        with the octree execution backend in the 2026-10 cleanup.
     mode : Optional[str]
         Builder selector: ``"lbvh"`` or ``"static_radix"`` (the ``large_n_gpu``
-        preset's default, required by the fused strict lane). ``"fixed_depth"``
-        was removed in the 2026-10 cleanup (X4) and raises.
+        preset's default, required by the fused strict lane). (``"fixed_depth"``
+        was removed in the 2026-10 cleanup, X4.)
     leaf_target : Optional[int]
         Desired particles per leaf. It sized the removed fixed-depth builder; a
         radix build's leaves are set by the ``leaf_size`` argument instead.

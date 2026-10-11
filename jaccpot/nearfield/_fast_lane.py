@@ -40,7 +40,6 @@ from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.dtypes import INDEX_DTYPE
 
-from jaccpot._env import env_reject_removed
 from jaccpot.runtime.grad_options import LeafPairReverseOptions
 
 from ._kernels import _pair_contributions_batched, _self_contributions
@@ -1615,7 +1614,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         per-leaf partials (see :mod:`jaccpot.pallas.nearfield_leafpair_csr`),
         ``table`` is the gathered-table kernel. ``JACCPOT_NEARFIELD_ACCUM=wide``
         runs the table kernel (the direct one accumulates in the input dtype).
-        The ``sorted`` layout was removed in the 2026-10 cleanup (X5) and raises.
+        (The ``sorted`` layout was removed in the 2026-10 cleanup, X5.)
 
     return_force_scale : bool
         Also return eq (16b)'s near-field force scale ``sum G m / (r^2 + eps^2)``
@@ -1826,11 +1825,6 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         nbr_leaf = jnp.maximum(nbr_nodes - leaf_nodes[0], 0)
         chunk = max(1, _env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64))
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
-        # the sorted-ranges layout with per-chunk partials, between the two
-        # below, was removed in the 2026-10 cleanup (X5)
-        env_reject_removed(
-            "JACCPOT_NEARFIELD_LAYOUT", ("sorted",), phase="X5", default="direct"
-        )
         layout = _env_choice("JACCPOT_NEARFIELD_LAYOUT", "direct", ("table", "direct"))
         if differentiable or leaf_ranges is None:
             layout = "table"
