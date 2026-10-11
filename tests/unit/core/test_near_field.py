@@ -464,7 +464,7 @@ def test_large_n_accel_only_prepared_bucketed_matches_generic():
 # upstream, from the `JACCPOT_LARGE_N_*` names these cases used to set). Until the
 # 2026-10 cleanup (Z-a) the cases set those env variables and passed nothing, so
 # every one compared the default with itself; they now pass the knobs, and assert
-# that the variant traces a different program. Measured: all four variants agree
+# that the variant traces a different program. Measured: all five variants agree
 # with the default bit for bit on this case. (`target_leaf_batch_size` went: only
 # the target-block kernels read it, and this edge-list route traces the same
 # program with and without it.)
@@ -484,6 +484,10 @@ _ACCEL_ONLY_PARITY_CASES = {
     "superchunk_target_reduce": (
         {"delayed_scatter_chunks_per_superchunk": 2, "superchunk_target_reduce": False},
         {"delayed_scatter_chunks_per_superchunk": 2, "superchunk_target_reduce": True},
+    ),
+    "disable_chunk_cond": (
+        {"delayed_scatter_chunks_per_superchunk": 1, "disable_chunk_cond": False},
+        {"delayed_scatter_chunks_per_superchunk": 1, "disable_chunk_cond": True},
     ),
 }
 
