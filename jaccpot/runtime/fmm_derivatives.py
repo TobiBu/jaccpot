@@ -954,10 +954,7 @@ class DerivativesMixin(_EngineBase):
                 multipoles=NodeMultipoleData(
                     order=int(state.downward.locals.order),
                     centers=centers,
-                    moments=None,
                     packed=jnp.asarray(source_motion_packed),
-                    component_matrix=jnp.asarray(source_motion_packed),
-                    source_motion_packed=None,
                 ),
             )
             down_k = self.prepare_downward_sweep(

@@ -11,9 +11,9 @@ carries the note on why the COM expansion centres are differentiated through.
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple, Optional
+from typing import NamedTuple
 
-from jaxtyping import Array, Float, Inexact
+from jaxtyping import Array, Float
 from yggdrax.geometry import TreeGeometry
 from yggdrax.tree_moments import TreeMassMoments
 
@@ -27,26 +27,16 @@ class NodeMultipoleData(NamedTuple):
         Expansion order ``p``.
     centers : Float[Array, 'nodes 3']
         ``(nodes, 3)`` expansion centres.
-    moments : Optional[Any]
-        Always ``None``. It held the raw Cartesian moments, removed with the
-        Cartesian basis in the 2026-10 cleanup (K); kept so the pytree structure
-        is unchanged.
-    packed : Inexact[Array, 'nodes sh']
-        ``(nodes, sh_size(order))`` packed spherical-harmonic coefficients, real
-        or complex by basis -- what the sweeps actually consume.
-    component_matrix : Optional[Any]
-        Always ``None``, for the same reason as ``moments``.
-    source_motion_packed : Optional[Inexact[Array, 'nodes sh']]
-        Time-differentiated multipoles, present only when a derivative path asked
-        for them.
+    packed : Float[Array, 'nodes sh']
+        ``(nodes, sh_size(order))`` packed real spherical-harmonic coefficients --
+        what the sweeps consume. (The always-``None`` ``moments``,
+        ``component_matrix`` and ``source_motion_packed`` of the removed
+        Cartesian and complex bases went in the 2026-10 cleanup, Z-b.)
     """
 
     order: int
     centers: Float[Array, "nodes 3"]
-    moments: Optional[Any]
-    packed: Inexact[Array, "nodes sh"]
-    component_matrix: Optional[Any]
-    source_motion_packed: Optional[Inexact[Array, "nodes sh"]] = None
+    packed: Float[Array, "nodes sh"]
 
 
 class TreeUpwardData(NamedTuple):

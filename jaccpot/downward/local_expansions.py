@@ -10,7 +10,7 @@ distributed lane.
 
 from __future__ import annotations
 
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from jaxtyping import Array
 from yggdrax.interactions import NodeInteractionList
@@ -42,17 +42,13 @@ class TreeDownwardData(NamedTuple):
     interactions : NodeInteractionList
         The accepted far-field node pairs this sweep consumed.
     locals : LocalExpansionData
-        The local expansions the sweep produced.
-    source_motion_locals : Optional[LocalExpansionData]
-        Locals for the source-motion (time-derivative) tower, or ``None`` when no
-        source motion was requested. ``None`` means "not requested"; an all-zero
-        value means "requested, and the far field is empty" -- the two are
-        deliberately distinguishable.
+        The local expansions the sweep produced. (The always-``None``
+        ``source_motion_locals`` went in the 2026-10 cleanup, Z-b: the time
+        derivatives build their own source-motion locals per order.)
     """
 
     interactions: NodeInteractionList
     locals: LocalExpansionData
-    source_motion_locals: Optional[LocalExpansionData] = None
 
 
 __all__ = [

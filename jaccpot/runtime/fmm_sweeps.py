@@ -384,10 +384,7 @@ class SweepsMixin(_EngineBase):
             real_multipoles = NodeMultipoleData(
                 order=int(real_upward.multipoles.order),
                 centers=real_upward.multipoles.centers,
-                moments=None,
                 packed=real_upward.multipoles.packed,
-                component_matrix=None,
-                source_motion_packed=None,
             )
             return TreeUpwardData(
                 geometry=geometry_real,

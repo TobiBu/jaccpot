@@ -35,7 +35,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 from beartype import beartype
-from jaxtyping import Array, Bool, Float, Inexact, Int, jaxtyped
+from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
 from jaccpot.operators.m2l_real_rot_scale import (
     m2l_rot_scale_real_batch,
@@ -92,17 +92,15 @@ __all__: list[str] = []
 # 13, 63, 127, 255, 511, 1023), and the two packed arrays shared the trailing axis at five
 # (4, 9, 16, 25, 81).
 #
-# `Inexact` and not `Float` on the packed pair: `basis_mode="complex"` passed complex
-# coefficients until the complex basis went in the 2026-10 cleanup (C). Narrowing to
-# `Float` is the mistake #293 made one module over, where a real-basis-only recording
-# cost 27 CI failures; it is left to phase Z, with the other leftovers of C.
+# `Float` on the packed pair: it was `Inexact` while `basis_mode="complex"` passed
+# complex coefficients, until the complex basis went in the 2026-10 cleanup (C, Z-b).
 #
 # The decorators go INSIDE `jax.jit` on the jitted accumulators, per the house order, so
 # beartype runs once per trace rather than per call on the production M2L path.
 @jaxtyped(typechecker=beartype)
 def _chunk_segment_scatter_add(
-    local_accum: Inexact[Array, "nodes sh"],
-    contribs: Inexact[Array, "chunkflat sh"],
+    local_accum: Float[Array, "nodes sh"],
+    contribs: Float[Array, "chunkflat sh"],
     tgt_chunk: Int[Array, "chunkflat"],
     valid: Bool[Array, "chunkflat"],
     *,
@@ -137,12 +135,12 @@ def _chunk_segment_scatter_add(
 
     Parameters
     ----------
-    local_accum : Inexact[Array, 'nodes sh']
+    local_accum : Float[Array, 'nodes sh']
         Local coefficient accumulator to add into. `nodes` is bound by this parameter
         alone -- nothing else in the signature carries it, and the recording shows it
         varying over 7, 15, 31, 127, 255, 511 and 1023 against an unchanged
         `contribs` -- so it is deliberately NOT cross-checked against anything.
-    contribs : Inexact[Array, 'chunkflat sh']
+    contribs : Float[Array, 'chunkflat sh']
         Per-pair M2L contributions for this chunk. Shares `sh` with `local_accum`,
         which is the coefficient count the two are added along.
     tgt_chunk : Int[Array, 'chunkflat']
@@ -398,7 +396,7 @@ def _apply_real_m2l(
 
 @jaxtyped(typechecker=beartype)
 def _m2l_chunk_contributions(
-    multip_packed: Inexact[Array, "nodes sh"],
+    multip_packed: Float[Array, "nodes sh"],
     centers: Float[Array, "nodes 3"],
     src_idx: Array,
     tgt_idx: Array,
@@ -433,7 +431,7 @@ def _m2l_chunk_contributions(
 
     Parameters
     ----------
-    multip_packed : Inexact[Array, 'nodes sh']
+    multip_packed : Float[Array, 'nodes sh']
         Packed multipole coefficients for every node. Loop-invariant, so hoisted
         out of the scan and counted once.
     centers : Float[Array, 'nodes 3']
@@ -478,8 +476,8 @@ def _m2l_chunk_contributions(
 )
 @jaxtyped(typechecker=beartype)
 def _accumulate_m2l_fullbatch(
-    locals_coeffs: Inexact[Array, "nodes sh"],
-    multip_packed: Inexact[Array, "nodes sh"],
+    locals_coeffs: Float[Array, "nodes sh"],
+    multip_packed: Float[Array, "nodes sh"],
     centers: Float[Array, "nodes 3"],
     src: Array,
     tgt: Array,
@@ -499,9 +497,9 @@ def _accumulate_m2l_fullbatch(
 
     Parameters
     ----------
-    locals_coeffs : Inexact[Array, 'nodes sh']
+    locals_coeffs : Float[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Inexact[Array, 'nodes sh']
+    multip_packed : Float[Array, 'nodes sh']
         Packed multipole coefficients for every node.
     centers : Float[Array, 'nodes 3']
         Node centres.
@@ -561,8 +559,8 @@ def _accumulate_m2l_fullbatch(
 )
 @jaxtyped(typechecker=beartype)
 def _accumulate_m2l_chunked_scan(
-    locals_coeffs: Inexact[Array, "nodes sh"],
-    multip_packed: Inexact[Array, "nodes sh"],
+    locals_coeffs: Float[Array, "nodes sh"],
+    multip_packed: Float[Array, "nodes sh"],
     centers: Float[Array, "nodes 3"],
     src: Array,
     tgt: Array,
@@ -581,9 +579,9 @@ def _accumulate_m2l_chunked_scan(
 
     Parameters
     ----------
-    locals_coeffs : Inexact[Array, 'nodes sh']
+    locals_coeffs : Float[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Inexact[Array, 'nodes sh']
+    multip_packed : Float[Array, 'nodes sh']
         Packed multipole coefficients for every node.
     centers : Float[Array, 'nodes 3']
         Node centres.
