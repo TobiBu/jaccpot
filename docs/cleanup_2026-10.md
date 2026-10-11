@@ -54,7 +54,8 @@ On `main` at 6cca378 (2026-10-06):
 | X6 | #387 | The strict lane's superseded paths: the host-routed strict refresh (`DEVICE_ONLY=0`), the dual-downward refresh planner, the unsafe compact far-pair reuse, the non-fused `strict_run_v2` loop (`FUSED_MODE=off`); `GPU_MODE` is inert. Removed env values raise, accepted ones are ignored | CPU suite, shard partition, distributed tier, CPU bitwise A/B (env unset and harness env), GPU pins S1-S6, timing A/B | merged |
 | K | #388 | The Cartesian basis (`FMMEngine`'s default flips to real first: a behaviour change), `operators/multipole_utils.py`, the dense interaction buffers, the finite-difference jerk fallback. Every Cartesian spelling raises one migration error; `use_dense_interactions=True` raises; `jerk_fd_dt` is accepted and unused | CPU suite (also at the default flip alone), shard partition, distributed tier, CPU bitwise A/B, GPU pins S1-S6, M1, M3 | merged |
 | C | #389 | The complex basis: the distributed driver's complex far field (C2), then single GPU (C1): `basis="complex"` raises one migration error, `basis="solidfmm"` is the real basis, the six complex modules and the runtime's complex branches go; direct-sum oracles replace the real basis's complex-only cross-checks first | CPU suite (also at the behaviour change alone), shard partition, distributed tier, CPU bitwise A/B, CI benchmark guard on real | merged |
-| tower | #390 | The acceleration-derivative tower includes the near field (C's finding); `evaluate_local_real_with_grad`'s docstring sign; a GPU-only failure of K's `jerk_fd_dt` test | CPU suite, A100 tests + fp32 check, GPU pins S3/S4/S4b | open |
+| tower | #390 | The acceleration-derivative tower includes the near field (C's finding); `evaluate_local_real_with_grad`'s docstring sign; a GPU-only failure of K's `jerk_fd_dt` test | CPU suite, A100 tests + fp32 check, GPU pins S3/S4/S4b | merged |
+| Z-a | | Test consolidation (T1, rules R2-R7): the bench-tooling tests move to `bench/tests`; one signature-contract table; grid corners; `tests/integration/strict/`; one owner per gradient property; `test_fmm.py` and `test_solver_api.py` split by subject; the removed-option and shim tests collected in `test_removed_options.py` for Z-b. Tests only | CPU suite, shard partition, bench-tooling tests | open |
 
 ### P0: CI runs each test once
 
@@ -2291,3 +2292,240 @@ equals `+1/r` to 1e-9, and the returned gradient is `-grad_x(1/r)` to 1e-8.
   and jax 0.11.2 warns that the Pallas Triton backend is deprecated whenever it
   lowers a Pallas kernel (the upward P2M). CI runs it on CPU only. It now ignores
   that one jax message, and passes on the A100 and on CPU.
+
+### Z-a: test consolidation (T1)
+
+Tests only: nothing in `jaccpot/` changed. The plan's trimming rules R2-R7, the split of
+the two grab-bag files by subject, and one file that Z-b deletes whole.
+
+**Counts** (`pytest --collect-only -q -o addopts="" tests`):
+
+| | fff5dfa | Z-a |
+| --- | --- | --- |
+| items (files) | 2,211 (180) | 2,009 (154) |
+| default collection, `tests/perf` excluded | 2,208 (179) | 2,006 (153) |
+| `tests/unit` | 1,836 (140) | 1,646 (122) |
+| `tests/integration` | 297 (26) | 285 (18) |
+| `tests/distributed`, `characterization`, `perf` | 55 (9), 20 (4), 3 (1) | unchanged |
+| `-m "not slow"` | 1,969 | 1,764 |
+| `bench/tests` (outside `tests/`) | -- | 93 (6) |
+
+Of the 202 items fewer: 93 moved to `bench/tests` (R2), 100 folded by the signature table
+(R3: 138 -> 38), 12 deleted under the tag rule (below), and 3 added where a test mixing a
+shim with live behaviour was split. The slow-marked set grew by 3 because three
+`slow_tests.txt` ids that had gone stale (`[real]` suffixes) match again. Every other test
+moved unchanged, with the same name; a reconciliation of the collected ids before and after
+accounts for each one.
+
+**R2: bench tooling.** `test_gpu_gate_checks.py` (30), `test_annotation_pilot.py` (25),
+`test_annotation_capture.py` (13), `test_annotation_census.py` (10),
+`test_distributed_gate_checks.py` (5) and `TestComparisonBenchExitCode` (10, now
+`bench/tests/test_comparison_bench_exit_code.py`) test `bench/` scripts, not the library.
+They moved unchanged to `bench/tests/` and run once per push in the lint job, whose new
+step reads its selection from `test_shards.py` (`EXTRA["bench-tooling"]`, outside the
+partitioned `tests/` universe): `pytest -n 0 bench/tests` -> 93 passed in 26 s on this host.
+
+**R3: one signature-contract table.** The twelve shape/axis-contract files (138 items) are
+`tests/unit/test_signature_contracts.py`: one row per annotated kernel (37), each a valid
+control call, the perturbations it must reject (`TypeCheckError`, or the fused near-field
+leaf entry points' named `ValueError`) and the ones it must keep accepting (the free axes:
+`farleaves`, the offsets lengths, `srcslots`, `srcleaves`, `tbatch`, the scatter `base`
+length, the M2L accumulator's node axis; an all-zero leaf table; a length-1 level-weight
+table; Python-float `G`). Every assertion of the twelve files is a case of its kernel's
+row, including the reference oracle's Newtonian two-body sum and its documented `nan` at a
+source; a failure names the row and the case. 38 items (37 rows and an id-uniqueness
+check), 44 s serial against 69 s. The repo guards (exports, overloads, public API, mixin
+base, operators-do-not-import-pallas, env readers) stay as they were.
+
+**R4: grid corners.** At most one axis keeps full width:
+- `test_real_harmonics.py`: the two `rho == 0` limit tests keep orders 1, 4 and 6 / 1 and
+  4, over all three degenerate offsets.
+- `test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32` keeps
+  `rho = 0` and `1e-6` over the three cascades. Mutation-checked in a scratch copy: a band
+  narrowed to `rho_sq > 0` fails `1e-6` and `1e-12` on every cascade, an `eps` read from a
+  float64 constant fails `1e-6` only, and neither is caught at `rho = 0`; so `1e-12` added
+  no detection. The GPU fused-Pallas twin keeps all three (it is in `gpu_gate`'s registry).
+- `test_custom_vjp_parity.py`'s grids were already at their corners (orders 2/4/6 on one
+  axis; the `interpret` axis is a lane, not a size).
+- The single-value `@pytest.mark.parametrize("basis", ["real"])` C left behind goes from
+  seven `test_solver_api.py` tests and one `test_custom_vjp_parity.py` test (ids lose
+  `[real]`).
+
+**R5: `tests/integration/strict/`.** Twelve files become five:
+- `test_strict_run_v2.py`: the seven `test_strict_run_v2_*.py` modules (24 items, slow,
+  GPU-only), one class per former module with its docstring, env fixture and tests
+  unchanged. The shared setup is `_solver`, `_state` and `_FUSED_ENV` (four modules
+  imported or duplicated them byte for byte); helpers that differed carry the module's
+  name. Checked by AST: all 71 tests, fixtures, helpers and constants are equivalent to
+  their originals modulo the renames and `self`. They could not be run here (CPU); the
+  next GPU gate (G2's integration set) runs them.
+- `test_strict_fused_lane.py` (was `test_strict_fused_eval_fn.py`), plus `test_fmm.py`'s
+  three fused-scan tests; `test_strict_refresh.py` (was `test_strict_refresh_faces.py`),
+  plus `test_same_topology_refresh_modes.py`'s upward-only diagnostic and `test_fmm.py`'s
+  three static-radix refresh tests.
+- `conftest.py` holds `strict_env`, which three modules defined identically.
+- `test_strict_cap_profile_removed.py` and `test_strict_lane_removed_switches.py` moved
+  unchanged.
+
+No module-scoped `fused_solver` was introduced: every test either sets env before it
+builds its engine or reads that engine's own counters, so sharing one would change what
+the tests observe.
+
+**R6: one owner per gradient property.** `tests/integration/test_autodiff.py` (the
+direct-sum oracle's own gradient against a dense sum, and its repeat-call stability) moved
+into `test_grad_fmm_vs_directsum.py`. `test_grad_path_fast_kernels_large_n.py` and
+`test_grad_path_pallas_cascades.py` are classes of `test_large_n_grad_reverse_path.py`:
+`TestEveryFastPallasKernel` (its interpret-flag env is class-scoped, so the module's other
+tests keep the default lane) and `TestPallasCascades` (it restores the real
+`jax.default_backend`, which the module's gate patches, so it runs the CPU profile it ran
+before). No assertion changed; 18 passed (x64).
+
+**R7: the nornax adapter file** keeps protocol and schedule conformance and the three
+rollout-gradient checks that need nornax's rollout and have no owner in
+`test_mutual_fmm.py`: the FD check with the `checkpoint` (remat) switch on, plain-vs-remat
+agreement, and AD-vs-FD through the in-scan `rebuild_fn` hook. The other two are deleted
+(below). `test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`, the local
+stale-nornax failure, is one of the kept three.
+
+**The accel-only variants compared the default with itself** (X4's finding).
+`test_large_n_accel_only_env_variants_match_baseline` set `JACCPOT_LARGE_N_*` variables
+that `compute_leaf_p2p_accelerations_large_n_accel_only` never reads (it takes its knobs as
+arguments; `runtime/_large_n_env.py` resolves the env upstream). Fixed, not deleted: the
+cases pass the knobs (`..._scatter_variants_match_baseline`), and each first asserts that
+the variant traces a different jaxpr from its baseline. All five agree bitwise. The sixth
+case, `target_leaf_batch_size`, is deleted: only the target-block kernels read that knob,
+and this edge-list route traces the same program with and without it.
+
+**`tests/unit/test_removed_options.py` (46 items), for Z-b to delete whole.** Exactly the
+tests whose subject is a removed option, an accepted-and-ignored shim or an error naming a
+removal, from the four files named in the plan:
+- `test_solver_api.py`: `execution_backend` (2), the octree (2), grouped / class-major /
+  `FarFieldConfig.mode` (8), `fixed_depth`, `autotune_m2l_chunk`, `runtime_path` (2),
+  `use_dense_interactions` (3), `jerk_fd_dt` (2), the locals template;
+- `test_basis_and_runner_hygiene.py`: `TestCartesianWasRemoved` and
+  `TestComplexWasRemoved` (less four live tests);
+- `test_fmm.py`: the `complex_rotation` refusal, and the `fixed_depth` half of
+  `test_capacity_fixed_depth_tree_mode_is_removed`;
+- `test_legacy_kwargs.py`: the shim keywords (`complex_rotation`,
+  `grouped_interactions=False`, `farfield_mode`) of the legacy-kwarg test.
+
+The live halves stayed in live files: the basis aliasing, the distributed config taking
+`"real"` and the unknown-basis messages (`TestBasisResolution` in
+`runtime/test_engine_config_resolution.py`; `test_basis_and_runner_hygiene.py` is gone);
+`tree_type` flowing from the config; an unknown tree build mode raising
+(`test_an_unknown_tree_build_mode_raises`); the large-N lane gated on the preset alone
+(`test_large_n_fast_path_policy.py::test_the_large_n_lane_is_gated_on_the_preset_alone`);
+the live legacy keywords.
+
+**The split by subject**, absorbed into existing files (`core/test_real_source_motion.py`
+is renamed `core/test_time_derivatives.py`, as it takes the jerk APIs):
+- `test_solver_api.py` keeps the facade end to end (solving, `target_indices`,
+  prepared-state contents, caches; 17). Out: GPU memory and traversal caps (14) ->
+  `test_large_n_config_thresholds.py`; the `large_n_gpu` preset (5) ->
+  `test_large_n_fast_path_policy.py`; jerk and the time-derivative APIs (8) and the
+  direct-sum jerk / snap / crackle oracles -> `core/test_time_derivatives.py` (its float64
+  skip now marks only the source-motion tests); configuration reaching the engine (14) ->
+  `runtime/test_engine_config_resolution.py`; the upward's default leaf batch ->
+  `core/test_real_upward_sweep.py`.
+- `test_fmm.py` keeps the engine's evaluation paths (near field, fast lane, caches, M2L,
+  locals dtype; 25). Out: the reference expansions, physics and accuracy against the
+  direct sum (16) -> `test_gravity_vs_direct.py`; preset defaults and validation (6) ->
+  `runtime/test_engine_config_resolution.py`; the STF tensor test ->
+  `operators/test_symmetric_tensors.py`; the strict lane (6) -> R5. The near-field-mode
+  validation stays: under the unit shards' runtime type checks `NearFieldConfig` refuses
+  `mode="unknown"` before the engine does (found running the moved tests with
+  `JACCPOT_RUNTIME_TYPECHECK=1`).
+- The heavy end-to-end tests (20-47 s each on CPU) stayed in `tests/integration`; only
+  light configuration tests moved into the type-checked unit shards.
+
+**Deleted or merged** (the tag rule):
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| the twelve shape/axis-contract files (136 of 138 items): `nearfield/test_large_n_block_shape_contracts.py` (37), `pallas/test_nearfield_mutual_shape_contracts.py` (28), `runtime/test_evaluate_scatter_contracts.py` (14), `pallas/test_fused_leaf_shape_guards.py` (11), `runtime/test_reference_shape_contracts.py` (8), `runtime/test_bucketed_schedule_shape_contract.py` (6), `runtime/test_m2l_shape_contracts.py` (6), `pallas/test_fused_leaf_axis_contracts.py` (6), `test_force_scale_axis_contracts.py` (5), `pallas/test_fused_m2l_axis_contracts.py` (5), `nearfield/test_near_field_axis_contracts.py` (5), `nearfield/test_kernel_axis_contracts.py` (5) | (b) | `test_signature_contracts.py::test_signature_contract[<kernel>]`: each assertion is a case of its kernel's row |
+| `test_nearfield_mutual_shape_contracts.py::test_the_twin_and_the_kernel_reject_the_same_shapes` | (c) | rows `mutual_block_jax` and `mutual_block_pallas`, case "two-component xa" |
+| `test_bucketed_schedule_shape_contract.py::test_the_shapes_this_pins_are_the_ones_production_passes` | (c) | row `bucketed_scatter_schedule`'s control (all three schedules built) |
+| `test_real_harmonics.py::test_evaluate_local_real_grad_at_rho_zero_matches_limit[2-*]` (3) | (c) | the same test at orders 1, 4, 6, same offsets |
+| `test_real_harmonics.py::test_p2m_real_direct_jacobian_at_rho_zero_matches_limit[2-*]` (3) | (c) | the same test at orders 1, 4 |
+| `test_transverse_degeneracy_jvp.py::test_the_analytic_branch_holds_at_float32[deep inside the band-*]` (3) | (c) | `[exactly on axis-*]` and `[inside the band-*]`, same cascade (mutation-checked above) |
+| `test_mutual_fmm_nornax.py::test_rollout_gradient_matches_finite_differences_through_the_fmm[False]` | (c) | `test_mutual_fmm.py::test_rollout_gradient_finite_difference` (FD vs AD through the adapter's base step) and `test_checkpointed_and_plain_fmm_rollout_gradients_agree` (plain = remat, remat FD-checked) |
+| `test_mutual_fmm_nornax.py::test_dt_max_gradient_is_exact_through_the_fmm_rollout` | (c) | `test_mutual_fmm.py::test_the_dt_max_gradient_is_exact_on_both_backends[jax]` |
+| `test_near_field.py::test_large_n_accel_only_env_variants_match_baseline[target_leaf_batch_size]` | (a) | the knob has no reader on this route (same jaxpr with and without it) |
+
+By tag: (a) 1, (b) 136, (c) 13. No tolerance changed, and no lane lost a direct-sum
+oracle (the deleted gradient checks have owners on the same lanes).
+
+Renamed or moved without an assertion lost: the 93 R2 items; the eight `[real]` ids; the
+nornax `[True]` FD case (unparametrised); the five accel-only variants; everything listed
+under R5, R6 and the split. Added: the 38 signature items, and three halves of split tests
+(`test_the_engine_refuses_fixed_depth_by_name` next to
+`test_an_unknown_tree_build_mode_raises`, `test_the_large_n_lane_is_gated_on_the_preset_alone`,
+`test_the_legacy_shim_keywords_still_parse_with_a_deprecation_warning`).
+
+**CI and lists.** `test_shards.py` gains `EXTRA["bench-tooling"]`; no shard needed a new
+path (`tests/integration/strict/` is under the integration shard,
+`test_signature_contracts.py` under unit). `ci.yml`: the lint job's bench-tooling step.
+`slow_tests.txt`: ten ids follow their tests, the K-deleted
+`test_prepare_downward_sweep_matches_module_helper` goes, and the list is byte-sorted; none
+is stale.
+
+**Left for Z-b:**
+- Removal-error assertions outside `test_removed_options.py`, mostly env values refused by
+  `env_reject_removed` near their subjects (several inside otherwise live tests):
+  `test_env_readers.py::TestEnvRejectRemoved`,
+  `test_shared_env_switches.py::TestTheDegreeBatchedSwitchWasRemoved`,
+  `test_large_n_fast_path_policy.py::test_the_removed_gather_unpermute_raises`,
+  `test_mutual_fmm.py::test_the_removed_zcore_lane_raises`,
+  `operators/test_p2m_real_leaf.py::test_the_removed_per_leaf_forward_raises`,
+  `operators/test_pallas_nearfield_leafpair_csr_sorted.py::test_the_removed_layout_options_raise`
+  (and part of `test_source_flags_are_validated`),
+  `runtime/test_l2p_particle_major.py::test_the_removed_leaf_flatten_switch_raises`,
+  `runtime/test_mac_geometry_com.py::test_the_removed_chain_variant_raises` (and part of
+  `test_mode_knob`),
+  `runtime/test_flat_walk_lane_wiring.py::test_the_removed_treecode_flag_is_refused`, parts
+  of `operators/test_cascade_real_lanes.py::test_lanes_jit_and_the_vjp_forward`,
+  `runtime/test_m2l_csr_lane_wiring.py::test_csr_lane_is_taken_and_matches_the_chunked_lane`,
+  `runtime/test_mutual_walk_pallas.py::test_walk_backend_flag_parsing`,
+  `runtime/test_nearfield_csr_lane_consistency.py::test_wide_accumulation_runs_the_table_layout`
+  and `runtime/test_strict_carry_helpers.py::test_fresh_rebuild_flag`;
+  `distributed/test_distributed_dehnen_error_mac.py::test_the_removed_treecode_walk_is_refused`;
+  and `tests/integration/strict/test_strict_lane_removed_switches.py` (24, the X6 env
+  values) with `test_strict_cap_profile_removed.py` (2).
+- Live tests still pass the shims: `runtime_path=` (24 sites in 14 files),
+  `FarFieldConfig(rotation="solidfmm")` (28 in 14), `grouped_interactions=False` (18 in
+  8), `FarFieldConfig(mode=...)`, `execution_backend`.
+- Comments in `jaccpot/` that name a moved test (this PR leaves the library alone):
+  `solver.py:1216` (the jerk tests, now `core/test_time_derivatives.py`),
+  `distributed/fmm.py:195` (the process-block floor, now
+  `test_large_n_config_thresholds.py`), `runtime/_mac_geometry.py:82` (`test_fmm.py`'s
+  order sweep, now `test_gravity_vs_direct.py`) and `runtime/strict_carry.py:8`
+  (`test_strict_run_v2_particle_carry.py`, now
+  `strict/test_strict_run_v2.py::TestParticleCarry`). `CLAUDE.md`'s layout block does not
+  list `bench/tests/` or `tests/integration/strict/` yet.
+
+**Left for Z-c:** ten more single-value `basis` parametrisations
+(`test_gradient_correctness.py` 6, `test_grad_fmm_vs_directsum.py` 2,
+`test_nearfield_fastlane_grad_path.py` 1, `test_dehnen_mac_reference.py` 1; their ids are
+in `slow_tests.txt`), R9 (N <= 512, not chased), R10 (rebuild `slow_tests.txt` from
+durations; smoke marker), and the shape-contract tests that live outside the twelve files
+(`test_adaptive_policy_runtime.py`'s seven, `core/test_near_field.py`'s two payload-pair
+rejections). The file count is 154 against the 125 target.
+
+**Gates:**
+- **CPU suite** (`pytest -p no:cacheprovider -n 12 --timeout=1800 tests/unit tests/integration
+  tests/characterization -rf`, CPU, x64 off) at efcabdc: 1,757 passed, 193 skipped, 1 failed
+  in 24 min. The failure is the stale local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as at K, C and the
+  tower follow-up; R7 keeps that test.
+- **As CI runs the shards:** every file that received tests was also run with
+  `JAX_ENABLE_X64=1`, and the unit ones with `JACCPOT_RUNTIME_TYPECHECK=1`: green (that
+  is how the near-field-mode check was found). `tests/integration/strict` on CPU: 42
+  passed, the 24 GPU-only skip. The merged R6 module: 18 passed; the nornax FD check with
+  remat: passed.
+- **`test_shards.py check`** (forced four host devices, x64): 2,006 tests, each in exactly
+  one of the 11 shards; no overlap, no gap.
+- **Bench tooling** (the lint job's selection, `pytest -n 0 bench/tests`): 93 passed.
+- **pre-commit** on the 38 changed files: clean. The goldens are untouched (no
+  `tests/characterization` file changed).
+- **Not run:** any GPU. The merged GPU-only `strict/test_strict_run_v2.py` and the
+  sm_80-only cases are for the next G2 run.
