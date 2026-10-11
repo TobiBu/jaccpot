@@ -39,6 +39,10 @@ from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
 )
+from jaccpot.nearfield.acc_derivatives import (
+    compute_leaf_p2p_acc_derivatives,
+    compute_targeted_p2p_acc_derivatives,
+)
 from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations,
     compute_leaf_p2p_accelerations_large_n_accel_only,
@@ -971,6 +975,7 @@ def _evaluate_prepared_tree(
     return_potential: bool,
     jit_traversal: bool,
     max_acc_derivative_order: int = 0,
+    near_field_derivatives: bool = True,
     nearfield_mode_override: Optional[str] = None,
     nearfield_reverse_options: Optional[Any] = None,
 ) -> Union[
@@ -989,7 +994,8 @@ def _evaluate_prepared_tree(
 
     Two routes leave here. With ``max_acc_derivative_order > 0`` this assembles
     the answer itself, because the derivative tower has no compiled path: near
-    and far are evaluated separately and summed here. Otherwise it delegates to
+    and far are evaluated separately and summed here, the acceleration and each
+    level of the tower alike. Otherwise it delegates to
     the engine, and ``jit_traversal`` picks which entry point -- only the
     non-compiled one accepts the two override arguments, since the compiled
     traversal resolves its own policy.
@@ -1041,6 +1047,10 @@ def _evaluate_prepared_tree(
         is what lets the two overrides below reach the near field.
     max_acc_derivative_order : int
         Spatial derivative tower depth. Non-zero takes the assemble-here route.
+    near_field_derivatives : bool
+        Include the near-field half of the tower (the default). ``False`` returns
+        the far-field half alone, which is what the jerk path's convective term
+        needs: its near-field jerk is already exact.
     nearfield_mode_override : Optional[str]
         Forces the near-field mode; see above.
     nearfield_reverse_options : Optional[Any]
@@ -1105,6 +1115,23 @@ def _evaluate_prepared_tree(
         if far_derivatives is None:
             raise RuntimeError("expected far-field acceleration derivatives")
         acc_derivatives = tuple(fmm.G * level for level in far_derivatives)
+        if near_field_derivatives:
+            near_derivatives = compute_leaf_p2p_acc_derivatives(
+                tree,
+                neighbor_list,
+                positions_sorted,
+                masses_sorted,
+                G=fmm.G,
+                softening=fmm.softening,
+                softening_kernel=fmm.softening_kernel,
+                max_leaf_size=max_leaf_size,
+                max_derivative_order=int(max_acc_derivative_order),
+                edge_chunk_size=nearfield_edge_chunk_size,
+            )
+            acc_derivatives = tuple(
+                near_level + far_level
+                for near_level, far_level in zip(near_derivatives, acc_derivatives)
+            )
 
         if return_potential:
             near_acc, near_pot = near
@@ -1777,6 +1804,7 @@ def _evaluate_prepared_tree_targets(
     target_sorted_indices: Array,
     return_potential: bool,
     max_acc_derivative_order: int = 0,
+    near_field_derivatives: bool = True,
 ) -> Union[
     Array,
     Tuple[Array, Array],
@@ -1819,6 +1847,9 @@ def _evaluate_prepared_tree_targets(
         Also return potentials.
     max_acc_derivative_order : int
         Spatial derivative tower depth; ``0`` returns no tower.
+    near_field_derivatives : bool
+        Include the near-field half of the tower, as in
+        :func:`_evaluate_prepared_tree`.
 
     Returns
     -------
@@ -1886,6 +1917,22 @@ def _evaluate_prepared_tree_targets(
     acc_derivatives: Optional[PackedAccelerationDerivatives]
     if far_derivatives is not None:
         acc_derivatives = tuple(g_const * level for level in far_derivatives)
+        if near_field_derivatives:
+            near_derivatives = compute_targeted_p2p_acc_derivatives(
+                positions_sorted,
+                masses_sorted,
+                target_sorted_indices,
+                near_source_idx,
+                near_source_mask,
+                G=g_const,
+                softening=float(fmm.softening),
+                softening_kernel=fmm.softening_kernel,
+                max_derivative_order=int(max_acc_derivative_order),
+            )
+            acc_derivatives = tuple(
+                near_level + far_level
+                for near_level, far_level in zip(near_derivatives, acc_derivatives)
+            )
     else:
         acc_derivatives = None
     if return_potential:

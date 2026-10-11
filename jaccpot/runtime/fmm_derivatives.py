@@ -121,7 +121,8 @@ class DerivativesMixin(_EngineBase):
 
         Jerk combines:
         - exact near-field pairwise jerk from source/target velocities,
-        - far-field convective term from acceleration Jacobian times target velocity.
+        - far-field convective term from the far-field acceleration Jacobian
+          times target velocity (the near half is already in the pairwise jerk).
 
         Parameters
         ----------
@@ -457,6 +458,7 @@ class DerivativesMixin(_EngineBase):
                 return_potential=False,
                 jit_traversal=jit_traversal,
                 max_acc_derivative_order=1,
+                near_field_derivatives=False,
             )
             accelerations, acc_derivs = acc_eval
             acc_jac = acc_derivs[0]
@@ -495,6 +497,7 @@ class DerivativesMixin(_EngineBase):
             return_potential=False,
             jit_traversal=jit_traversal,
             max_acc_derivative_order=1,
+            near_field_derivatives=False,
         )
         accelerations, acc_derivs = acc_eval
         acc_jac = acc_derivs[0]

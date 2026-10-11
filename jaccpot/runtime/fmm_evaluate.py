@@ -200,7 +200,8 @@ class EvaluateMixin(_EngineBase):
             and preparation parameters are provided.
         max_acc_derivative_order : int
             Highest acceleration-derivative order to return alongside the
-            accelerations. ``0`` (the default) returns none. Non-zero requires
+            accelerations, near field and far. ``0`` (the default) returns
+            none. Non-zero requires
             ``expansion_basis="solidfmm"`` and is rejected on the traced
             fallback; see ``Raises``.
 
@@ -332,6 +333,7 @@ class EvaluateMixin(_EngineBase):
         return_potential: bool = False,
         jit_traversal: bool = True,
         max_acc_derivative_order: int = 0,
+        near_field_derivatives: bool = True,
     ) -> Union[
         Array,
         Tuple[Array, Array],
@@ -358,7 +360,12 @@ class EvaluateMixin(_EngineBase):
         jit_traversal : bool
             Use the compiled traversal.
         max_acc_derivative_order : int
-            Packed spatial derivative tower depth; ``0`` returns no tower.
+            Packed spatial derivative tower depth; ``0`` returns no tower. The
+            tower differentiates the full acceleration, near field and far.
+        near_field_derivatives : bool
+            ``False`` leaves the near-field half out of the tower. Internal: the
+            jerk path wants the far-field Jacobian alone, because its near-field
+            jerk is already exact. The facade does not expose it.
 
         Returns
         -------
@@ -428,6 +435,7 @@ class EvaluateMixin(_EngineBase):
                 return_potential=return_potential,
                 jit_traversal=jit_traversal,
                 max_acc_derivative_order=derivative_order,
+                near_field_derivatives=near_field_derivatives,
             )
         else:
             target_sorted_indices = jnp.asarray(
@@ -448,6 +456,7 @@ class EvaluateMixin(_EngineBase):
                 target_sorted_indices=target_sorted_indices,
                 return_potential=return_potential,
                 max_acc_derivative_order=derivative_order,
+                near_field_derivatives=near_field_derivatives,
             )
 
         self._record_force_scale_from_evaluation(

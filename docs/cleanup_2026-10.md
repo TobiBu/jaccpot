@@ -2109,10 +2109,12 @@ loses exactly the two rows `solidfmm_explicit_complex` and `preset_accurate_comp
   `benchmark_runtime_large_N_accuracy.ipynb`, `benchmark_runtime_large_N_performance.ipynb`.
 
 **Found, not changed:**
-- The acceleration-derivative tower's far-field-only scope (above).
+- The acceleration-derivative tower's far-field-only scope (above). Fixed after C; see
+  "Follow-up: the near field in the acceleration-derivative tower" below.
 - `evaluate_local_real_with_grad`'s docstring says it returns the gradient with respect
   to the evaluation point. It returns `d phi / d delta` with `delta = centre - point`,
   which is minus that. The L2P callers use it correctly, and (ix) documents the sign.
+  The docstring was fixed in the same follow-up.
 
 **Gates:**
 - **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`) at
@@ -2213,3 +2215,60 @@ loses exactly the two rows `solidfmm_explicit_complex` and `preset_accurate_comp
 one A100, `fused_memory_budget.py` scan min, ms/step: at 2e5, 6.18 / 6.21 / 6.30 against
 6.38 / 6.18 / 6.33; at 8e6, 83.20 / 83.15 / 82.90 (median 83.15) against
 83.02 / 83.23 / 82.60 (median 83.02). Equal within the run-to-run spread.
+
+### Follow-up: the near field in the acceleration-derivative tower
+
+C found that `max_acc_derivative_order > 0` returned the derivatives of the far-field
+acceleration only. The maintainer asked for the near field to be added (2026-10-11).
+The tower is now `d^k a / dx^k` of the full acceleration.
+
+**Implementation.** The new `jaccpot/nearfield/acc_derivatives.py` is the near half.
+- It uses the same pairs as the acceleration: on the full route, each leaf against
+  itself and its neighbour list; on the target route, the padded source matrix.
+- Order 1 is the closed form `-G sum m (g I + h d d^T)`. Higher orders use nested
+  forward mode through `masked_pair_factors`.
+- The self pair is excluded, since its Jacobian is `-G m g(0) I`.
+- For the C2 Wendland kernel, a coincident pair of distinct particles is left out at
+  order 2 and above, because `sqrt(r2)` has no forward derivative at 0. Zero is the
+  exact second derivative there.
+- It is kept apart from the acceleration kernels: their custom VJPs block forward
+  mode, and their op sequence is pinned.
+- `_evaluate_prepared_tree` and `_evaluate_prepared_tree_targets` add it to the far
+  half.
+- The jerk path keeps the far half alone (`near_field_derivatives=False` on the
+  engine's `evaluate_prepared_state`, which the facade does not expose). Its
+  near-field pairwise jerk already contains the near Jacobian, so `fast_approx` would
+  otherwise count it twice.
+
+**Measured** (fp64, CPU):
+- With no far pair (theta 1e-4, N = 128, leaf 4), the tower matches `jax.jacfwd` of the
+  self-excluded direct sum to 3e-16 - 1e-15 at orders 1-3, for Plummer, `ferrers3`
+  and `wendland_c2`. Before the change it was exactly zero there.
+- At theta 0.4 (52 far pairs), the full tower's rel-L2 against the full direct sum is:
+
+  | p | D1 | D2 |
+  | --- | --- | --- |
+  | 4 | 1.52e-4 | 3.10e-5 |
+  | 8 | 7.67e-6 | 2.21e-6 |
+
+  The near pairs dominate the norm. The far half alone is unchanged (D1 2.27e-3 and D2
+  1.43e-2 at p = 8). The near half (full minus far) matches the direct sum over the
+  sources the far pairs do not cover to round-off, so no source is missing or counted
+  twice.
+- A target subset matches the full route to 1e-15, also under `jit` with traced
+  targets.
+
+**Docstring.** `evaluate_local_real_with_grad` now says it returns `d phi / d delta`,
+minus the gradient with respect to the evaluation point, and that the acceleration is
+`-G * grad`. A numeric check of the example in `operators/real_harmonics.py`: `phi`
+equals `+1/r` to 1e-9, and the returned gradient is `-grad_x(1/r)` to 1e-8.
+
+**Tests:**
+- New: `tests/unit/nearfield/test_acc_derivatives.py`. It checks the pair rule
+  against autodiff for every kernel at orders 1-3, a coincident pair finite for every
+  kernel, and the leaf route against the direct sum with a padded tail block.
+- Rewritten: `test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_direct_sum`.
+  It now checks three oracles (full, far half, near half) and keeps the far half's
+  bounds and convergence check.
+- Every jerk test passes unchanged, including `fast_approx` with no far pair and the
+  1e-12 `accurate` gap against the time-derivative API.
