@@ -1122,7 +1122,6 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         reuse_prepared_state: bool = False,
         jerk_mode: str = "fast_approx",
-        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Compute accelerations and jerk estimates for particle data.
 
@@ -1154,11 +1153,6 @@ class FastMultipoleMethod:
             convective jerk from the far-field acceleration Jacobian.
             ``"accurate"`` uses an analytic far-field source-motion term
             (`dM -> dL`) plus the convective and exact near-field terms.
-        jerk_fd_dt : float
-            Accepted and unused, with no check on its value. It was the step of
-            the ``"accurate"`` mode's finite-difference fallback for the
-            Cartesian basis, removed in the 2026-10 cleanup (K); kept because
-            callers pass it (nornax's jaccpot adapter does, on every call).
 
         Returns
         -------
@@ -1205,7 +1199,6 @@ class FastMultipoleMethod:
             jit_tree=self.advanced.runtime.jit_tree,
             jit_traversal=self.advanced.runtime.jit_traversal,
             jerk_mode=jerk_mode,
-            jerk_fd_dt=jerk_fd_dt,
         )
 
     def compute_accelerations_with_time_derivatives(
@@ -1577,7 +1570,6 @@ class FastMultipoleMethod:
         *,
         target_indices: Optional[Int[Array, "t"]] = None,
         jerk_mode: str = "fast_approx",
-        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Evaluate accelerations and jerk for a prepared state.
 
@@ -1597,8 +1589,6 @@ class FastMultipoleMethod:
             ``"fast_approx"`` or ``"accurate"``; see
             :meth:`compute_accelerations_and_jerk`, including the note that the
             two are not numerically equivalent.
-        jerk_fd_dt : float
-            Accepted and unused; see :meth:`compute_accelerations_and_jerk`.
 
         Returns
         -------
@@ -1624,7 +1614,6 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             jit_traversal=jit_traversal,
             jerk_mode=jerk_mode,
-            jerk_fd_dt=jerk_fd_dt,
         )
 
     def evaluate_prepared_state_with_time_derivatives(

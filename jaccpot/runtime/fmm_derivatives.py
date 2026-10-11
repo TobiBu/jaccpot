@@ -115,7 +115,6 @@ class DerivativesMixin(_EngineBase):
         jit_traversal: Optional[bool] = None,
         reuse_prepared_state: bool = False,
         jerk_mode: str = "fast_approx",
-        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Run FMM and return accelerations plus jerk estimates.
 
@@ -166,11 +165,6 @@ class DerivativesMixin(_EngineBase):
             ``"fast_approx"`` or ``"accurate"``; forwarded to
             :meth:`evaluate_prepared_state_with_jerk`, which is where the two
             differ and where an invalid value is rejected.
-        jerk_fd_dt : float
-            Accepted and unused. It was the step of the ``"accurate"`` mode's
-            finite-difference fallback for the Cartesian basis, removed in the
-            2026-10 cleanup (K); kept because callers pass it on every call
-            (nornax's jaccpot adapter, ``bench/ci_benchmark_guard.py``).
 
         Returns
         -------
@@ -239,7 +233,6 @@ class DerivativesMixin(_EngineBase):
             target_indices=target_indices,
             jit_traversal=jit_traversal_flag,
             jerk_mode=jerk_mode,
-            jerk_fd_dt=jerk_fd_dt,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -389,7 +382,6 @@ class DerivativesMixin(_EngineBase):
         target_indices: Optional[Array] = None,
         jit_traversal: bool = True,
         jerk_mode: str = "fast_approx",
-        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Evaluate accelerations and jerk for all particles or targets.
 
@@ -402,8 +394,8 @@ class DerivativesMixin(_EngineBase):
           how much the far field is itself moving.
         * ``"accurate"`` -- adds that term, from the analytic ``dM -> dL``
           contraction. (The Cartesian basis had no analytic path and fell back to
-          a central finite difference with step ``jerk_fd_dt``; it was removed in
-          the 2026-10 cleanup, K.)
+          a central finite difference; it was removed in the 2026-10 cleanup, K,
+          and with it the ``jerk_fd_dt`` step, in Z-b.)
 
         Parameters
         ----------
@@ -420,9 +412,6 @@ class DerivativesMixin(_EngineBase):
             implementation.
         jerk_mode : str
             ``"fast_approx"`` or ``"accurate"``; see above.
-        jerk_fd_dt : float
-            Accepted and unused, with no check on its value: the finite-difference
-            fallback it stepped went with the Cartesian basis (2026-10 cleanup, K).
 
         Returns
         -------

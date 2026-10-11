@@ -62,7 +62,6 @@ def collect_metrics(
     theta: float,
     leaf_size: int,
     max_order: int,
-    jerk_fd_dt: float,
     seed: int,
     dtype: jnp.dtype,
 ) -> dict[str, Any]:
@@ -87,7 +86,6 @@ def collect_metrics(
         leaf_size=leaf_size,
         max_order=max_order,
         jerk_mode="fast_approx",
-        jerk_fd_dt=jerk_fd_dt,
         warmup=warmup,
         runs=runs,
     )
@@ -99,7 +97,6 @@ def collect_metrics(
         leaf_size=leaf_size,
         max_order=max_order,
         jerk_mode="accurate",
-        jerk_fd_dt=jerk_fd_dt,
         warmup=warmup,
         runs=runs,
     )
@@ -164,7 +161,6 @@ def main() -> None:
     parser.add_argument("--theta", type=float, default=0.6)
     parser.add_argument("--leaf-size", type=int, default=16)
     parser.add_argument("--max-order", type=int, default=4)
-    parser.add_argument("--jerk-fd-dt", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--json-out", type=Path, default=None)
@@ -180,7 +176,6 @@ def main() -> None:
         theta=float(args.theta),
         leaf_size=int(args.leaf_size),
         max_order=int(args.max_order),
-        jerk_fd_dt=float(args.jerk_fd_dt),
         seed=int(args.seed),
         dtype=dtype,
     )
