@@ -2272,3 +2272,21 @@ equals `+1/r` to 1e-9, and the returned gradient is `-grad_x(1/r)` to 1e-8.
   bounds and convergence check.
 - Every jerk test passes unchanged, including `fast_approx` with no far pair and the
   1e-12 `accurate` gap against the time-derivative API.
+
+**Gates:**
+- **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`) at
+  bdcff74: 1,959 passed, 193 skipped, 1 failed. The failure is the stale local
+  nornax checkout, as at K and C.
+- **One A100** (GPU 2, untimed):
+  - The new tests, the oracle and the solver API's tower, jerk and time-derivative
+    tests pass in fp64.
+  - At N = 2e4, the fp32 tower agrees with fp64 to 3.0e-6 (D1) and 3.8e-6 (D2), and
+    the acceleration to 5.4e-7.
+  - Pins S3, S4 and S4b are **bitwise** against C (`c-31e7756`). These cover the
+    general evaluation route and the gradient lanes; at order 0 they never reach
+    the new code.
+- **Found on the GPU run and fixed:** `test_jerk_fd_dt_is_accepted_silently_and_unused`
+  (from K) failed on a GPU, on C's base too. It turns every warning into an error,
+  and jax 0.11.2 warns that the Pallas Triton backend is deprecated whenever it
+  lowers a Pallas kernel (the upward P2M). CI runs it on CPU only. It now ignores
+  that one jax message, and passes on the A100 and on CPU.
