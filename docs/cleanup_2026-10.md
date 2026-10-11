@@ -51,8 +51,9 @@ On `main` at 6cca378 (2026-10-06):
 | X4 | #383 | M2L autotune, adaptive sizing, legacy strict APIs, `fixed_depth`, the strict cap-profile file; `runtime_path` no longer a lane switch | CPU suite, shard partition, CPU bitwise A/B, GPU pins (S1-S5, M1, M3) | merged |
 | fix | #384 | The CSR lane's placeholder no longer feeds the per-particle near-field payload (default payload budget) | CPU suite, A100 bitwise budget-0 vs default | merged |
 | X5 | #385 | Superseded GPU kernel variants: cascade level forwards, CSR pair / tiled M2L, per-leaf P2M, near-field sorted layout / classes / `g` / lone `p` / chunked rows, unfused walk emission (X5a); COM radii chain, MAC radius bound, degree-batched rotation, z-core M2L, three small branches (X5b). Removed env values raise | CPU suite, shard partition, CPU bitwise A/B (interpret-mode Pallas included) | merged |
-| X6 | | The strict lane's superseded paths: the host-routed strict refresh (`DEVICE_ONLY=0`), the dual-downward refresh planner, the unsafe compact far-pair reuse, the non-fused `strict_run_v2` loop (`FUSED_MODE=off`); `GPU_MODE` is inert. Removed env values raise, accepted ones are ignored | CPU suite, shard partition, distributed tier, CPU bitwise A/B (env unset and harness env), GPU pins S1-S6, timing A/B | open |
-| K | | The Cartesian basis (`FMMEngine`'s default flips to real first: a behaviour change), `operators/multipole_utils.py`, the dense interaction buffers, the finite-difference jerk fallback. Every Cartesian spelling raises one migration error; `use_dense_interactions=True` raises; `jerk_fd_dt` is accepted and unused | CPU suite (also at the default flip alone), shard partition, distributed tier, CPU bitwise A/B | open |
+| X6 | #387 | The strict lane's superseded paths: the host-routed strict refresh (`DEVICE_ONLY=0`), the dual-downward refresh planner, the unsafe compact far-pair reuse, the non-fused `strict_run_v2` loop (`FUSED_MODE=off`); `GPU_MODE` is inert. Removed env values raise, accepted ones are ignored | CPU suite, shard partition, distributed tier, CPU bitwise A/B (env unset and harness env), GPU pins S1-S6, timing A/B | merged |
+| K | #388 | The Cartesian basis (`FMMEngine`'s default flips to real first: a behaviour change), `operators/multipole_utils.py`, the dense interaction buffers, the finite-difference jerk fallback. Every Cartesian spelling raises one migration error; `use_dense_interactions=True` raises; `jerk_fd_dt` is accepted and unused | CPU suite (also at the default flip alone), shard partition, distributed tier, CPU bitwise A/B, GPU pins S1-S6, M1, M3 | merged |
+| C | | The complex basis: the distributed driver's complex far field (C2), then single GPU (C1): `basis="complex"` raises one migration error, `basis="solidfmm"` is the real basis, the six complex modules and the runtime's complex branches go; direct-sum oracles replace the real basis's complex-only cross-checks first | CPU suite (also at the behaviour change alone), shard partition, distributed tier, CPU bitwise A/B, CI benchmark guard on real | open |
 
 ### P0: CI runs each test once
 
@@ -172,7 +173,9 @@ without `basis_impl`. Under it, the 52 complex-touching files ran 972 passed, 25
   `test_basis_object_is_accepted`, which asserts the public name `"complex"`.
 
 So D1 flips only the implicit default (an engine without `basis_impl` runs real) and
-warns on an explicit `"solidfmm"` / `"complex"`. Mapping those names to real waits for C,
+leaves an explicit `"solidfmm"` / `"complex"` on the complex basis. (An earlier version of
+this record said D1 also warned on them; no such warning was ever added, as C found.)
+Mapping those names to real waits for C,
 after X3 and J have removed or ported the 22 tests that need them. No mass edit of the
 ~290 `"solidfmm"` call sites is needed before then.
 
@@ -1800,3 +1803,396 @@ byte-identical. `constructor_state.json` (+17 / -30 lines), per case against 037
 - **GPU pins** (frozen worktree at 1377ddb, one A100): S1-S5 **bitwise** against
   `main-15ceca4`, S6 **bitwise** against `main-17de581`. M1 and M3 (two cards) and an
   interleaved timing A/B against `main` are queued.
+- **Two-card gate closed (2026-10-11):** M1 and M3 are **bitwise** on `main` 944e6ba
+  (X1-X6 + K) against `main-15ceca4` (GPUs 5 and 6).
+
+### C: the complex basis
+
+The real spherical-harmonic basis is the only one. The distributed driver went first
+(C2), then the single-GPU code (C1). The complex basis agreed with the real one to
+round-off wherever the two were compared (4.5e-13 relative L2 in float64 at N = 2048,
+p = 4, theta 0.5; 8e-18 on the jerk), so `basis="real"` is a drop-in replacement.
+
+**The migration error** is `config._COMPLEX_BASIS_REMOVED`:
+
+    basis='complex' was removed in the 2026-10 cleanup (C); see
+    docs/cleanup_2026-10.md. Use basis='real' (the default) -- it agrees with the
+    complex basis to round-off.
+
+#### C2: the distributed driver
+
+**Behaviour change (2200eb0).** `DistributedFMMConfig.basis` was never validated beyond
+K's Cartesian refusal: `is_real = basis == "real"`, so every other string --
+`"complex"`, `"solidfmm"`, a typo -- silently ran the complex far field. The evaluator
+now refuses them while it is built (`_make_fn`, before any device work):
+- `"complex"` and `"solidfmm"` (any case and whitespace) raise the migration error;
+- any other string but `"real"` raises "`DistributedFMMConfig.basis must be 'real'`";
+- `"cartesian"` keeps K's message.
+
+Every production caller passes or defaults to `"real"`: Odisseo's mesh lane, pin M1,
+the downstream contract test and the distributed tier.
+
+**Removed (85b4cca; distributed -128 / +65, the additions docstrings).** From
+`distributed/fmm.py`:
+- the complex upward sweep and the complex coarse-tree M2M;
+- the conjugate-symmetry fixup before L2L;
+- the complex self- and cross-M2L branches and the complex working dtype;
+- the module-level imports of `operators.complex_ops`,
+  `upward.solidfmm_complex_tree_expansions` and `yggdrax.dtypes.complex_dtype_for_real`
+  (they had to go before those modules could).
+
+`rot = config.rotation` stays: `DistributedFMMConfig.rotation` is an inert passthrough
+that the L2L cascade no longer reads.
+
+#### C1: single GPU
+
+**Tests first (2d1cba0, 1709c1c).** Every real-basis test that was validated only
+against the complex basis got an oracle that does not need it, while the complex basis
+still existed, so each new oracle was also run against complex. These are oracle
+changes, not relaxations:
+
+| test | old oracle | new oracle | measured, real (complex) | bound |
+| --- | --- | --- | --- | --- |
+| (i) `test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_direct_sum` (was `..._match_complex`) | complex tower, 1e-6, at leaf 16 / theta 0.4: **no M2L pair** at N = 128, so it compared two zero towers | `jax.jacfwd` of the direct-sum field of exactly the sources the accepted far pairs cover (read off the prepared state; double coverage asserted absent), at leaf 4 / theta 0.4, 52 pairs (guarded) | p = 4: acc 2.31e-4, D1 4.51e-2, D2 2.00e-1; p = 8: acc 9.39e-6, D1 2.27e-3, D2 1.43e-2 (complex identical to the digits shown) | p = 8: D1 5e-3, D2 3e-2; acc 5e-4 / 2e-5; p = 4 -> 8 improvement > 5x (20x, 14x measured) |
+| (ii) `core/test_real_source_motion.py::test_real_source_motion_with_the_far_field_matches_direct_sum` (was `..._matches_complex`) | complex, 1e-12 | `test_solver_api`'s `_direct_sum_jerk` / `_snap` / `_crackle`, N = 96, leaf 4, p = 4, theta 0.6, 106 pairs (guarded), Plummer | jerk 4.338e-4, snap 8.285e-5, crackle 9.554e-6 (complex identical); the two jerk entry points agree to 1e-12 | 1e-3, 2.5e-4, 3e-5 |
+| (iii) `core/test_real_upward_sweep.py::test_real_upward_matches_direct_per_node_p2m` (was `..._matches_complex_convert`) | complex sweep + complex -> real conversion | the sum of `p2m_real_direct` over each node's particles about its centre, plus the centres asserted to be the nodes' COMs | 1.0e-16 / 1.2e-16 at p = 2 / 4, worst node 3.7e-16 (complex + conversion: 1.3e-16 / 1.4e-16) | 1e-9 (unchanged) |
+| (iv) `test_fmm.py::test_m2l_ignores_padded_compact_far_pairs` (was `test_solidfmm_...`) | the complex M2L vs float64 | the real M2L (`basis_mode="real"`) vs float64 | 5.9e-7 on CPU fp32 (3.7e-4 on complex); both mutations behave as on complex | 2e-3 (unchanged, the TF32 floor) |
+| (ix) `operators/test_real_harmonics.py::test_p2m_point_mass_reproduces_its_far_field_at_every_order` (new, 6 geometries) | `test_complex_to_dehnen_real_matches_p2m_real_direct` (orders 0-6, six geometries, a relative cross-check) | a point mass's multipole, M2L'd to `|X| = 9.1` and evaluated there, against the exact multipole truncation bound `(1+q)/(1-q) q^(p+1)`, p = 0-6, on the axes, `rho = 0` and a generic point | worst error/bound 0.98 (near-origin p = 0, where the bound is the leading term) | the exact bound (+1e-14); the field at 2x its bound |
+
+Notes on them:
+- **The acceleration-derivative tower is far-field only.** With no accepted M2L pair it
+  is exactly zero: the near-field P2P contributes nothing to it. This is how the old
+  test's two towers agreed. It is now documented in `docs/derivatives_and_jerk.md` and
+  the README. Whether the near field should contribute is a separate question, not
+  answered here.
+- (ix) pins degree `n` to about `q^(7-n)` at p = 6 (1e-6 at degree 1, 0.1 at degree 6)
+  and fails outright on a sign error. The derivative-recurrence tests anchor the
+  generic-point normalisation to ~1e-3.
+- (vi) `test_translation_reverse_is_finite_at_degenerate_displacements` probes `l2l_real`
+  (it was `l2l_complex`). Mutation-checked: with the legacy 1e-60 floor in every dtype,
+  the float32 exact-zero case goes non-finite on the real L2L as well.
+- (vii) `test_fastlane_geometric_centers.py::test_real_com_tracks_complex` is GPU-only
+  and opt-in, so it could not be re-measured on CPU against a direct sum. It is deleted
+  under (c), with the large-N lane golden (`test_lane_goldens.py`, direct-sum anchored)
+  and GPU pin S1 as owners.
+
+1709c1c retargets the tests that ran the complex basis with no real twin to
+`basis="real"`, tolerances unchanged:
+- (v) `test_solver_api.py`: the bounded-leaf-batch test runs the real upward (renamed
+  `test_real_upward_defaults_to_bounded_leaf_batch_size`); the basis-object test passes
+  a `RealSHBasis`.
+- (vi) `test_large_n_config_thresholds.py`: `_solver` and the fp32 far-field gradient
+  test.
+- `test_fmm.py`: the two locals-dtype tests became
+  `test_real_float{32,64}_locals_keep_the_working_dtype`; bucketed-vs-baseline.
+- Plain retargets: `test_grad_fmm_vs_directsum` (forward match),
+  `test_nearfield_fastlane_grad_path` (`_prepared` and three sites),
+  `test_gravity_vs_direct`, `test_adaptive_order_runtime`, `test_odisseo_coupling`,
+  `test_grad_config`, `perf/test_perf_metrics`, `test_large_n_lane_carries_criterion`,
+  `test_criterion_reaches_the_split_build`, `test_split_build_default_predicate`,
+  `test_legacy_kwargs` (the legacy `expansion_basis=` too). And
+  `test_upward_node_mass_conservation` loses its complex branch.
+
+**Behaviour change (9e21f1e; library +112 / -93, the additions docstrings, the migration
+message and the package `__getattr__`).**
+- These raise the migration error:
+  - `FastMultipoleMethod(basis="complex")` (any case and whitespace) and the legacy
+    `expansion_basis="complex"`;
+  - a basis object whose `name` is not `"real"`, or whose `runtime_expansion_basis`
+    is `"complex"` (what a `ComplexSHBasis` was);
+  - `FMMEngine(expansion_basis="complex")`, and an engine `basis_impl` not named
+    `"real"`.
+- **`basis="solidfmm"` and the legacy `expansion_basis="solidfmm"` resolve to
+  `RealSHBasis`, public name `"real"`, silently.** `"solidfmm"` names the
+  spherical-harmonic family; until now it meant the complex basis on the facade (D1 had
+  already made it real on a bare engine). Odisseo's non-integration branches default
+  `fmm_basis="solidfmm"` and nornax's smoke test passes `basis="solidfmm"`; both keep
+  working, now on the real basis.
+- `jaccpot.ComplexSHBasis` is no longer exported. `from jaccpot import ComplexSHBasis`
+  raises an `ImportError` carrying the migration message, through a module
+  `__getattr__`. An `AttributeError` would have lost the message in a `from ... import`.
+  `jaccpot.basis` gets the same `__getattr__` with the modules (608278a).
+- `fmm_policy._solidfmm_basis_mode()` always returns `"real"`.
+- The three kernel `basis_mode: str = "complex"` defaults (`_l2l.py` twice,
+  `_downward_prep.py`) are `"real"`. Every library caller passed it explicitly
+  (checked); ARCHITECTURE section 10, which named this default as a trap, is updated.
+- CI's benchmark guard runs `--basis real` and defaults to it. It was first run locally
+  exactly as CI runs it, before the switch (see Gates).
+
+The commit was gated by the full CPU suite: 2,216 passed, 197 skipped, 3 failed. Two of
+the failures were downward source-motion tests in
+`test_solidfmm_complex_tree_expansions.py` that built
+`FMMEngine(expansion_basis="complex")`. They and their single-leaf sibling (which fed
+complex multipoles to the real downward) are deleted in the commit, tag (a). The third
+failure is the stale local nornax checkout, as at K.
+
+**Removed** (library -7,863 / +573 lines across C; -7,726 / +436 ignoring the re-indent
+where a branch became unconditional):
+- **Runtime complex branches (4da9f68, runtime -1,168 / +255, or -1,058 / +145 ignoring
+  whitespace).** The kernels keep their `basis_mode` / `rotation` keywords, because
+  callers pass them. `basis_mode` other than `"real"` raises a `ValueError` where a
+  complex branch was; `rotation` is accepted and unused.
+  - `kernels/_m2l.py` (-253 / +56): `_apply_complex_m2l`, `_m2l_complex_batch_kernel`,
+    the fused complex Pallas route (`_fused_complex_m2l_pallas_active`,
+    `_m2l_complex_batch_kernel_fused_pallas`) and its cached tangent carrier.
+  - `kernels/_l2l.py` (-265 / +27):
+    - `_l2l_complex_batch_kernel` and the complex arms of the level cascade;
+    - `_propagate_solidfmm_locals_to_children` (complex-only, no caller);
+    - the conjugate-symmetry enforcement after the downward pass;
+    - the source-motion-locals plumbing. Only the complex upward ever produced
+      `source_motion_packed` (the runtime never passed it velocities), so those
+      branches were dead on every real path.
+  - `kernels/_downward_prep.py` (-77 / +46): the complex local-buffer dtype, the complex
+    multipole branch and its rotation check, the source-motion payload, the symmetry step
+    after the M2L pass.
+  - `kernels/_evaluate.py` (-225 / +8):
+    - both complex L2P tails (leaf-major and per-target, including the complex derivative
+      towers);
+    - the complex-only knobs `JACCPOT_LOCAL_EVAL_FLAT_ANALYTIC`, `_DTYPE_PRESERVE` and
+      `_ORDER4_UNROLLED`. They never touched the real path and are inert now, ignored
+      silently;
+    - the particle-major L2P's complex refusal. The `iscomplexobj` gates are
+      unconditional.
+  - `fmm_sweeps.py`: the complex upward branch. The `upward_*` refresh-timing keys stay,
+    and are always 0.
+  - `fmm_derivatives.py`: the complex source-motion branch and the dead
+    `_evaluate_source_motion_farfield_jerk` (-155).
+  - `_large_n_pipeline.py`: only the `and not jnp.iscomplexobj(...)` of the
+    particle-layout L2P test. Its `else` is the real leaf-layout L2P and stays.
+  - `_adaptive_policy.py`: the complex dtype branches of the Dehnen source power.
+  - `kernels/core.py` and `kernels/__init__.py`: six re-exports.
+- **The modules (608278a, library -6,468 / +115).**
+  - Deleted: `operators/complex_ops.py` (2,943), `operators/complex_harmonics.py` (333),
+    `operators/solidfmm_reference.py` (297), `pallas/m2l_complex_fused.py` (1,171),
+    `upward/solidfmm_complex_tree_expansions.py` (1,102), `basis/complex_sh.py` (158).
+  - Their exports: `operators/__init__.py`, `basis/__init__.py`, and the `_fmm_impl.py`
+    re-export of `enforce_conjugate_symmetry_batch`.
+  - The public `jaccpot.basis.complex_to_real_coeffs` / `real_to_complex_coeffs`, and
+    the private `_idx_nm` only they used.
+  - The test-only `complex_to_dehnen_real_coeffs` / `_dehnen_real_Q_full`
+    (`operators/real_dehnen_q.py`), with their `real_harmonics` re-exports. The
+    `_compute_dehnen_B_matrix_complex` re-export went too: its only users were the
+    deleted modules.
+  - `runtime/dtypes.py::complex_dtype_for_real`, and `operators/dtypes.py`'s re-export
+    of yggdrax's.
+  - `upward/tree_expansions.py`'s `_CENTER_MODES`, `_REMOVED_CENTER_MODES` and
+    `_resolve_center_mode`; only the containers are left there.
+  - `config.BASIS_DOC`, which nothing used.
+- **Distributed (85b4cca)**, as above.
+
+**API shims:**
+- `"complex"` stays in `config.Basis` and `kernels._shared.ExpansionBasis`, so a typed
+  caller gets the migration error rather than a type-check error (K kept
+  `"cartesian"` the same way).
+- `basis="solidfmm"` -> real, silently, on the facade, the legacy kwarg and the engine.
+  On `DistributedFMMConfig` it raises, because there it named the complex far field.
+- `complex_rotation` (engine attribute, facade property, legacy kwarg),
+  `FarFieldConfig.rotation` and `DistributedFMMConfig.rotation` are inert
+  passthroughs; renaming them is phase Z. The large-N production gate
+  (`_large_n_pipeline.py`) requires `fmm.complex_rotation == "solidfmm"`; dropping the
+  attribute would have declined the large-N lane silently.
+- The kernels' `basis_mode` / `rotation` keywords stay (callers pass them).
+- `jaccpot.ComplexSHBasis` and `jaccpot.basis.ComplexSHBasis` raise an `ImportError`
+  with the migration message.
+
+**Kept:**
+- `_compute_dehnen_B_matrix_complex`, `build_Q_dehnen_no_sqrt2` and
+  `_compute_B_real_dehnen_via_Q` (`operators/real_dehnen_q.py`): complex-named, but the
+  real basis's precomputed B matrices are built from them.
+  `bench/cleanup_inventory.py`'s complex family excludes the first.
+- The `complex_rotation` passthroughs above.
+- `NodeMultipoleData.source_motion_packed` and `TreeDownwardData.source_motion_locals`:
+  always `None`, but the protected lanes construct them, so the pytree shapes stay.
+- The internal `"solidfmm"` family string everywhere (`expansion_basis`, the
+  `_prepare_solidfmm_*` / `_propagate_solidfmm_*` names).
+
+**Tests.** Collected at 944e6ba: 2,486; at C: 2,201. C removes 325 node ids and adds 40,
+renames and moves included.
+
+| test | tag | owner / note |
+| --- | --- | --- |
+| `test_distributed_fmm_driver.py::test_driver_solidfmm_matches_direct` | (a) | `test_driver_real_basis_matches_direct` (same IC, real + bh) |
+| `tests/distributed/test_distributed_solidfmm_far_shardmap.py` (1) | (a) | the hand-rolled complex shard_map assembly; `test_driver_real_basis_matches_direct` and `test_driver_matches_direct` own its direct-sum assertions |
+| `test_real_basis_runtime.py::test_real_basis_tracks_complex_basis` (3) | (c) | `test_real_basis_far_field_converges_with_order`, `test_real_basis_matches_direct_sum_small_n`, the real forward goldens |
+| `test_fastlane_geometric_centers.py::test_real_com_tracks_complex` | (c) | GPU opt-in; the large-N lane golden and pin S1 |
+| `test_fmm_golden.py::test_fmm_golden[uni_solidfmm_n256_p2, uni_solidfmm_n256_p4, clu_solidfmm_n256_p4, uni_solidfmm_n256_p6, uni_solidfmm_n1024_p4]`, `test_fmm_golden_execution_modes[bkt_uni_solidfmm_n256_p4]` and their `.npz` | (a) | the `*_real_*` cases on the same particles |
+| `test_fmm_grad_golden.py::test_fmm_grad_golden[uni_complex_n128_p2, uni_complex_n128_p4]` and their `.npz` | (a) | `uni_real_n128_p2`, `uni_real_n128_p4` |
+| `test_solver_api.py::test_basis_complex_alias_matches_solidfmm`, `test_prepare_state_solidfmm_complex_locals_remain_conjugate_symmetric` | (a) | |
+| `test_solver_api.py`: the `[solidfmm]` cases of the seven J-phase jerk / time-derivative / acc-derivative tests | (c) | the `[real]` cases (identical once `"solidfmm"` is real) |
+| `test_gradient_correctness.py`: `test_fd_vs_ad_positions[complex-0.4-64-2-16-0, complex-0.6-64-4-4-1]` and the `[complex]` cases of `test_fd_vs_ad_masses`, `test_no_nan_near_coincident` (2), `test_degenerate_azimuth_subgradient_is_correct`, `test_no_nan_axis_aligned_grid`, `test_reorders_to_original_particle_order`, `test_fd_vs_ad_along_a_transverse_direction_at_rho_zero` (9) | (a) | the `[real]` cases |
+| `test_grad_fmm_vs_directsum.py`: the `[complex]` positions and masses cases (2) | (a) | the `[real]` cases |
+| `test_nearfield_fastlane_grad_path.py::test_differentiable_accelerations_fast_lane_matches_bucketed[complex]` | (a) | `[real]` |
+| `test_basis_and_runner_hygiene.py::TestBasisAliasing`: `test_real_is_a_genuinely_different_implementation`, `test_the_supported_bases_do_not_warn[complex]` | (a) | |
+| `test_engine_config_resolution.py::test_the_spherical_harmonic_family_defaults_to_the_real_basis[kwargs1-complex, kwargs2-complex]` | (b) | `TestComplexWasRemoved::test_the_engine_expansion_basis_raises`, `test_the_engine_rejects_a_basis_object_not_named_real` |
+| constructor-state matrix rows `solidfmm_explicit_complex`, `preset_accurate_complex` | (a) | they would resolve to `real_default` / `preset_accurate` under the mapping |
+| `test_solidfmm_complex_tree_expansions.py`: the three downward source-motion-locals tests (9e21f1e), the rest (5) with the modules (608278a) | (a) | `core/test_real_source_motion.py` (finite differences at frozen centres, and the direct-sum engine test) |
+| `test_real_harmonics.py`: `test_solidfmm_reference_matches_z_axis_m2l`, `test_dehnen_local_channel_factor_holds_at_any_delta` (3), `test_solidfmm_reference_matches_m2l_real_off_axis`, `test_complex_to_dehnen_real_matches_p2m_real_direct` (36), `test_complex_to_dehnen_real_discards_only_exact_zero_for_conforming_input` (4), `test_complex_to_dehnen_real_vjp_carries_the_imaginary_part` | (a) | the real M2L against the direct potential: `test_m2l_delta_convention_matches_direct_and_wrong_sign_is_worse`, `test_m2l_rotated_error_improves_with_order`, `test_full_rotated_pipeline_m2m_m2l_l2l_converges`; P2M: (ix) and the recurrence tests |
+| `test_transverse_degeneracy_jvp.py`: the complex cascades of `test_the_rule_transposes_...` (3) and `test_the_analytic_branch_holds_at_float32` (9), `test_precomputed_block_lanes_...[m2l_complex_reference]`, `test_fused_pallas_complex_m2l_matches_the_pure_jax_lane_in_gradient` (2), `test_the_production_complex_fused_m2l_kernel_carries_the_axis_derivative` | (a) | the real cascades and the real fused lane; `bench/gpu_gate.py` drops the two complex sm_80 fragments |
+| `test_custom_vjp_parity.py::test_m2l_complex_fused_pallas_custom_vjp_matches_twin` (4), `test_fused_m2l_vjp_env_off_falls_back_and_agrees[complex]` | (a) | the real fused-M2L twins |
+| `test_fused_m2l_axis_contracts.py`: the five `[complex]` rows | (a) | the `[real]` rows |
+| `test_l2p_particle_major.py::test_target_local_eval_returns_potential_on_the_complex_analytic_branch` | (a) | |
+| `test_m2l_shape_contracts.py::test_a_complex_packed_expansion_is_still_accepted`, `test_the_chunked_scatter_accepts_both_bases[complex128]` | (a) | `_chunk_args` / `_scatter_args` are float now |
+| `test_adaptive_policy_runtime.py::test_source_power_by_degree_accepts_the_complex_basis` | (a) | |
+| `test_dehnen_mac_reference.py`: `test_dehnen_power_of_point_mass_...[complex-*]` (8), `test_dehnen_power_is_basis_invariant` (8) | (a) | the `[real-*]` cases and `test_dehnen_power_matches_numpy_weight_reference` |
+| `test_complex_ops.py` (32), `test_complex_ops_vec3_contracts.py` (83), `test_complex_ops_packed_length_contracts.py` (23), `test_complex_harmonics.py` (2), `test_complex_sh_basis.py` (3), `test_m2l_complex_fused_pallas.py` (13), `pallas/test_fused_m2l_helper_axis_contracts.py` (8), `test_real_sh_roundtrip.py` (2) | (a) | |
+| `core/test_tree_expansions.py` (5): the complex sweep's centre-mode checks | (a) / (b) | the rejection half is merged into `test_real_upward_sweep.py::test_the_real_upward_refuses_every_centre_mode_but_com` |
+
+Renamed or moved (no assertion lost):
+- `test_complex_to_dehnen_real_scales_linearly_in_mass` -> `test_p2m_real_direct_scales_linearly_in_mass`;
+- `test_both_lanes_resolve_to_the_same_object` -> `test_the_lane_resolves_to_the_shared_object`;
+- `test_the_distributed_config_still_takes_its_two_bases` -> `..._takes_the_real_basis`;
+- `test_complex_and_solidfmm_resolve_identically` -> `test_solidfmm_resolves_to_the_real_basis`;
+- the converted and retargeted tests named above;
+- `test_prepare_upward_sweep_stashes_and_reuses_concrete_depth`, moved into
+  `test_real_upward_sweep.py`.
+
+Added:
+- `TestComplexWasRemoved` (16): facade (3), legacy kwarg, basis object (2), engine,
+  engine `basis_impl`, class import, unknown basis, distributed (4), unknown distributed
+  basis;
+- `TestBasisAliasing::test_solidfmm_resolves_to_the_real_basis` (3) and
+  `test_the_legacy_expansion_basis_kwarg_resolves_to_real`;
+- (ix) (6);
+- `test_the_real_upward_refuses_every_centre_mode_but_com`.
+
+Adapted:
+- the public-API surface (`ComplexSHBasis` out of the frozen set);
+- `test_type_annotation_guard.py` (the `complex_ops` entry);
+- `test_gpu_gate_checks.py` fixtures (the two complex fragments; counts 8 -> 6, 5 -> 3);
+- `test_shared_env_switches.py`;
+- `slow_tests.txt`.
+
+**Goldens.** `golden/`: the five `*_solidfmm_*` `.npz` are deleted, and the five
+`*_real_*` are byte-identical. `golden_grad/`: the two `uni_complex_*` are deleted, the
+four real ones byte-identical. `golden_modes/bkt_uni_solidfmm_n256_p4.npz` is deleted.
+`golden_lanes/` and the real mode golden are byte-identical. `constructor_state.json`
+loses exactly the two rows `solidfmm_explicit_complex` and `preset_accurate_complex`
+(-16 lines); no other case moved.
+
+**Bench / examples / docs (9b32502):**
+- `bench_real_vs_complex.py` is deleted.
+- `bench_upward_sweep.py` times the real sweep (smoke-run on CPU, parity holds); the
+  stage breakdown is empty, since the real sweep has no stage callback.
+- `audit_reverse_residuals.py` runs real; `bench_fmm.py` no longer offers `"complex"`.
+- `examples/differentiable_fmm_overhead.py` runs real;
+  `examples/real_sh_rot_scale_demo.py` compares real with the direct sum only
+  (smoke-run, 2.66e-2 at N = 128).
+- `examples/profile_prepare_residuals.py` is deleted: it wrapped the complex sweep's
+  internals and K's removed dense buffers, and had not run since K.
+- Docs: README, ARCHITECTURE, CLAUDE.md (layout), `derivatives_and_jerk.md`,
+  `differentiable_fmm.md`, `operator_conventions.md` section 4,
+  `real_vs_complex_gpu_plan.md` (historical) and the agent guides.
+
+**Downstream:**
+- Odisseo: `jaccpot_coupling.py`'s `fmm_basis="solidfmm"` defaults keep working, now on
+  the real basis (`option_classes.py` already defaults to `"real"`).
+  `fmm_basis="complex"` raises at solver construction. The mesh lane passes
+  `DistributedFMMConfig(basis="real")`.
+- nornax: the smoke test's and `examples/getting_started.py`'s `basis="solidfmm"` keep
+  working (real).
+- yggdrax names jaccpot no longer imports, for the Y phases:
+  `dtypes.complex_dtype_for_real` and `tree_moments.compute_tree_mass_moments_jit` (the
+  complex upward was its only user). jaccpot now imports 66 names from 20 yggdrax
+  modules; it was 68 at K. From `tree_moments` it still imports `TreeMassMoments` and
+  `compute_tree_mass_moments`.
+
+**Left for phase Z:**
+- `complex_rotation`, `FarFieldConfig.rotation`, `DistributedFMMConfig.rotation` and the
+  kernels' `rotation` keyword (inert);
+- `"complex"` in `config.Basis` and `ExpansionBasis`;
+- the always-`None` fields `NodeMultipoleData.source_motion_packed` and
+  `TreeDownwardData.source_motion_locals`;
+- the `Inexact` (not `Float`) annotations on the M2L packed buffers;
+- the `offsets_complex` local name in `_evaluate.py`;
+- the notebooks that still name complex APIs: `examples/benchmark_runtime_accuracy_copy.ipynb`,
+  `benchmark_runtime_accuracy_new.ipynb`, `benchmark_runtime_large_N.ipynb`,
+  `benchmark_runtime_large_N_accuracy.ipynb`, `benchmark_runtime_large_N_performance.ipynb`.
+
+**Found, not changed:**
+- The acceleration-derivative tower's far-field-only scope (above).
+- `evaluate_local_real_with_grad`'s docstring says it returns the gradient with respect
+  to the evaluation point. It returns `d phi / d delta` with `delta = centre - point`,
+  which is minus that. The L2P callers use it correctly, and (ix) documents the sign.
+
+**Gates:**
+- **CPU suite** (`tests/unit tests/integration tests/characterization`, `-n 12`) at
+  3da44fc: 1,951 passed, 193 skipped, 1 failed. The failure is the stale local nornax
+  checkout (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as at K.
+  The final head 9b32502 adds back one real-only test that 3da44fc had cut by mistake
+  (`test_dehnen_mac_reference.py::test_dehnen_power_matches_numpy_weight_reference`);
+  it passes, as does its whole file (23).
+  - At the behaviour change alone (9e21f1e, before its last three test deletions):
+    2,216 passed, 197 skipped, 3 failed, as described above.
+  - Targeted runs at the two deletion commits: 1,354 passed at 4da9f68 (runtime,
+    operators, core, pallas, characterization, `test_fmm.py`, `test_solver_api.py`),
+    and 571 passed at 608278a.
+- **Runtime type checks** (`JACCPOT_RUNTIME_TYPECHECK=1`) on the 27 touched unit test
+  files: green.
+- **Distributed tier** on four forced host devices (`tests/distributed` and
+  `test_mutual_distributed.py`, `-n 6`): 88 passed, 3 skipped. The skips are the two
+  opt-in upstream checks and the sm_80-only case, as at K; K's 90 less the two deleted
+  complex tests.
+- **Bitwise A/B against 944e6ba on CPU** (`git archive` exports of 944e6ba and of the
+  final library, every switch unset): **89 arrays and 70 diagnostic rows bitwise
+  equal, none different.**
+  - The general path (21 arrays): forces and potentials of the default, fast, accurate
+    and balanced on the real basis, `dehnen_error`, and `large_n_gpu` in fp32; a bare
+    `FastMultipoleMethod()`; and the position and mass gradients through
+    `differentiable_accelerations`. Also **`basis="solidfmm"` (fast, accurate and the
+    gradients) against the base's `basis="real"`: bitwise.**
+  - Jerk and the time derivatives (32 arrays, 16 of them `"solidfmm"` against base
+    `"real"`): `compute_accelerations_and_jerk` in both modes (with `jerk_fd_dt=1e-3`
+    passed, and on a target subset), `evaluate_prepared_state_with_jerk`,
+    `compute_accelerations_with_time_derivatives` to crackle,
+    `evaluate_prepared_state_with_time_derivatives` on a subset, and
+    `compute_accelerations(max_acc_derivative_order=2)`.
+  - `FMMEngine()` defaults at orders 2 and 4, and `compute_gravitational_acceleration`
+    (4).
+  - `BlockStepFMM(backend="jax")`: total accelerations and one base step (3).
+  - The large-N lane with the GPU gate opened, N = 2,048 (19):
+    - prepare + evaluate, refresh, two `strict_prepare_refresh_and_evaluate` calls;
+    - the fused `strict_run_v2` scan, plain and with history, callback, external
+      field, initial acceleration and returned state;
+    - `strict_fused_prepared_eval_fn`;
+    - the prepacked differentiable lane's forces and gradients.
+
+    The two cases that fail on this CPU configuration at K fail here too, with the
+    same messages.
+  - `mac_type="dehnen_error"` in the fused scan, both carries, through the CSR near
+    field in Pallas interpret mode, N = 768 (5).
+  - `distributed/fmm.py` on four forced host devices, N = 1,024 (5): real forces with
+    the Dehnen and BH MACs (cross-domain far pairs accepted: 3 / 0 / 1 / 29 per device
+    under Dehnen, 275 / 177 / 172 / 201 under BH), and the differentiable evaluator's
+    forward and its position and mass gradients.
+- **`test_shards.py check`:** 2,201 tests, each in exactly one shard. At 944e6ba there
+  are 2,486; C removes 325 node ids and adds 40.
+- **CI benchmark guard on real**, run locally the way CI runs it
+  (`--n 384 --runs 2 --warmup 1 --preset fast --basis real --theta 0.6 --leaf-size 16
+  --max-order 4 --dtype float32`, `JAX_ENABLE_X64=1`; plus the jax 0.11.2 CPU
+  `-vectorize-loops=false` flag this host needs). It passes every bound, three times
+  (twice before the switch, once at the head):
+
+  | ratio | bound | runs |
+  | --- | --- | --- |
+  | jerk_fast / acc | 0.4-8 | 0.78, 0.82, 1.03 |
+  | jerk_accurate / fast | 0.9-15 | 1.83, 2.26, 1.78 |
+  | td2 / jerk | 0.8-12 | 1.82, 1.93, 1.43 |
+  | td3 / td2 | 0.8-12 | 1.11, 1.51, 1.31 |
+
+  The accurate-vs-fast jerk rel-L2 is 2.116e-5 (floor 1e-6). The old setting (complex)
+  failed td3 / td2 once under host load (0.749) and passed on a rerun (1.24); its jerk
+  rel-L2 agrees with real to 7e-9.
+- **Goldens** as above. **Imports:** `import jaccpot` works, all 116 modules import
+  (122 at K, less the six), and no file in `jaccpot/`, `tests/` or `bench/` imports a
+  removed name. Docstrings, comments and `cleanup_inventory.py`'s regexes name some as
+  history. pre-commit is clean on every changed file.
+- `bench/annotation_census.py`:
+  - shape-annotated array parameters 783 -> 686;
+  - bare `Array` parameters 1,658 -> 1,524;
+  - shaped share 32.1 % -> 31.0 %;
+  - `@jaxtyped` functions 159 -> 108;
+  - modules walked 123 -> 117.
+
+  Only deletions moved them; the complex modules were among the most annotated.
+- **GPU pins: not run** (no GPU in this phase's session). The A/B above is CPU-only, so
+  S1-S6 and M1 / M3 are the GPU gate.
