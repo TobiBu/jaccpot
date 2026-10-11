@@ -509,8 +509,14 @@ def evaluate_local_real_with_grad(
     (NOT eval_point - center)!
     This follows the Dehnen (2014) convention from equation 3a.
 
-    The returned gradient is ∇φ with respect to the evaluation point position.
-    For gravitational acceleration, use a = -∇φ (note the sign!).
+    The returned gradient is ``d phi / d delta``, the gradient with respect to
+    ``delta``. That is **minus** the gradient with respect to the evaluation
+    point: ``grad_x phi = -d phi / d delta``. ``phi`` is the expansion of
+    ``+sum m / |r|``, positive and without ``G``, so the physical acceleration
+    is ``a = G grad_x phi = -G * grad`` and the physical potential is
+    ``-G * potential``. That is what the L2P callers compute. (Until 2026-10 this
+    said the gradient was taken with respect to the evaluation point, which has
+    the opposite sign; the callers were right.)
 
     Parameters
     ----------
@@ -527,8 +533,8 @@ def evaluate_local_real_with_grad(
     -------
     tuple[Array, Array]
         (gradient, potential) where gradient is shape (3,) and potential is
-        scalar.
-        Note: gradient is ∇φ (not the acceleration -∇φ).
+        scalar. The gradient is ``d phi / d delta``, so the acceleration is
+        ``-G * gradient``; note the order, gradient first.
     """
     # Delegate to the custom_vjp-wrapped kernel: the forward is byte-identical to
     # value_and_grad(evaluate_local_real), but the reverse uses an analytic-

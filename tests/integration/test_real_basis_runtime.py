@@ -172,30 +172,36 @@ def _packed_symmetric(full: jnp.ndarray, order: int) -> jnp.ndarray:
 def test_real_basis_acceleration_derivatives_match_direct_sum():
     """The acceleration's spatial-derivative tower against a direct sum.
 
-    ``max_acc_derivative_order`` returns the derivatives of the **far-field**
-    acceleration only (the near-field P2P contributes none; with no M2L pair the
-    tower is exactly zero). So the oracle is the derivative, by ``jax.jacfwd`` at
-    the target, of the direct-sum field of exactly the sources the FMM's accepted
-    far pairs cover for that target -- read off the prepared state, frozen, with
-    the target itself never among them. The accelerations are checked against the
-    full self-excluded direct sum.
+    ``max_acc_derivative_order`` returns the derivatives of the full
+    acceleration. The near field contributes its direct sum's, exactly
+    (:mod:`jaccpot.nearfield.acc_derivatives`, 2026-10); before that the tower was
+    far-field only. Three oracles, all ``jax.jacfwd`` at the target of a
+    self-excluded direct sum:
 
-    This replaces ``test_real_basis_acceleration_derivatives_match_complex``
-    (2026-10 cleanup, C), which compared the tower with the complex basis's to 1e-6
-    at ``leaf_size=16``, ``theta=0.4`` -- a configuration with **no** M2L pair at
+    * the full tower against the full direct sum;
+    * the far half alone (the engine's ``near_field_derivatives=False``, the
+      jerk path's Jacobian) against the field of exactly the sources the FMM's
+      accepted far pairs cover for that target, read off the prepared state;
+    * the near half (full minus far) against the field of every other source, to
+      round-off. That pins that the near pairs are exactly the complement of the
+      far ones, with no source missing or counted twice.
+
+    The far half replaces ``test_real_basis_acceleration_derivatives_match_complex``
+    (2026-10 cleanup, C). That test compared the tower with the complex basis's to
+    1e-6 at ``leaf_size=16``, ``theta=0.4``, a configuration with **no** M2L pair at
     this N, so it compared two zero towers. Here ``leaf_size=4`` engages 52 pairs.
 
-    The local expansion of order ``p`` gives the k-th acceleration derivative to
-    an effective order ``p - k - 1``, so the tower converges more slowly than the
-    acceleration does. Measured (fp64, N = 128, leaf 4, theta 0.4; identical on the
-    complex basis before it was removed):
+    The local expansion of order ``p`` gives the k-th acceleration derivative to an
+    effective order ``p - k - 1``, so the far half converges more slowly than the
+    acceleration. The near pairs at softening 1e-3 dominate the full tower's
+    norm, so its relative error sits far below the far half's. Measured (fp64,
+    N = 128, leaf 4, theta 0.4):
 
-        order   acceleration   D1 rel-L2   D2 rel-L2
-          4        2.31e-4       4.51e-2     2.00e-1
-          8        9.39e-6       2.27e-3     1.43e-2
+        order   acceleration   far D1     far D2     full D1    full D2
+          4        2.31e-4     4.51e-2    2.00e-1    1.52e-4    3.10e-5
+          8        9.39e-6     2.27e-3    1.43e-2    7.67e-6    2.21e-6
 
-    The tower bounds are the order-8 values with ~2x headroom (the accelerations'
-    are ~2x the measured values at both orders), and the order-4 -> 8
+    Bounds are the order-8 values with ~2x headroom. The far half's order-4 -> 8
     improvement (20x and 14x measured) must exceed 5x: a tower that stopped
     converging -- a wrong lift or sign at one degree -- fails that even when it
     happens to land inside the bound.
@@ -222,8 +228,16 @@ def test_real_basis_acceleration_derivatives_match_direct_sum():
         weights = jnp.where(mask_row, masses * dist_sq ** (-1.5), 0.0)
         return -jnp.sum(weights[:, None] * delta, axis=0)
 
+    def tower(mask: jnp.ndarray, order: int) -> list:
+        derivative, levels = field, []
+        for k in range(1, order + 1):
+            derivative = jax.jacfwd(derivative, argnums=1)
+            levels.append(_packed_symmetric(jax.vmap(derivative)(mask, positions), k))
+        return levels
+
     not_self = ~np.eye(n, dtype=bool)
     acc_ref = jax.vmap(field)(jnp.asarray(not_self), positions)
+    full_ref = tower(jnp.asarray(not_self), 2)
 
     errors = {}
     for order in (4, 8):
@@ -239,11 +253,13 @@ def test_real_basis_acceleration_derivatives_match_direct_sum():
         )
         far_pairs = _far_pair_count(state)
         assert far_pairs > 0, (
-            "config must engage the far field: the tower is far-field only, so with "
-            f"no M2L pair it is zero and this compares nothing (got {far_pairs})"
+            "config must engage the far field, or the far half is zero and its "
+            f"oracle compares nothing (got {far_pairs})"
         )
-        far_mask = jnp.asarray(_far_source_mask(state, n))
-        assert not bool(jnp.any(jnp.diagonal(far_mask)))
+        far_mask_np = _far_source_mask(state, n)
+        assert not bool(np.any(np.diagonal(far_mask_np)))
+        far_ref = tower(jnp.asarray(far_mask_np), 2)
+        near_ref = tower(jnp.asarray(not_self & ~far_mask_np), 2)
 
         acc, levels = fmm.compute_accelerations(
             positions,
@@ -255,23 +271,33 @@ def test_real_basis_acceleration_derivatives_match_direct_sum():
         acc_err = float(jnp.linalg.norm(acc - acc_ref) / jnp.linalg.norm(acc_ref))
         acc_bound = {4: 5.0e-4, 8: 2.0e-5}[order]
         assert acc_err < acc_bound, f"order {order}: acceleration rel-L2 {acc_err:.3e}"
-
-        assert len(levels) == 2
-        derivative = field
-        for k, level in enumerate(levels, start=1):
-            derivative = jax.jacfwd(derivative, argnums=1)
-            reference = _packed_symmetric(jax.vmap(derivative)(far_mask, positions), k)
-            got = jnp.asarray(level)
-            assert got.shape == reference.shape
-            errors[(order, k)] = float(
-                jnp.linalg.norm(got - reference) / jnp.linalg.norm(reference)
-            )
-
-    assert errors[(8, 1)] < 5.0e-3, errors
-    assert errors[(8, 2)] < 3.0e-2, errors
-    for k in (1, 2):
-        improvement = errors[(4, k)] / max(errors[(8, k)], 1e-300)
-        assert improvement > 5.0, (
-            f"D{k} stopped converging with order: {errors[(4, k)]:.3e} at p=4, "
-            f"{errors[(8, k)]:.3e} at p=8 ({improvement:.1f}x)"
+        _, far_levels = fmm._impl.evaluate_prepared_state(
+            state, max_acc_derivative_order=2, near_field_derivatives=False
         )
+
+        assert len(levels) == 2 and len(far_levels) == 2
+        for k in (1, 2):
+            got, far = jnp.asarray(levels[k - 1]), jnp.asarray(far_levels[k - 1])
+            assert got.shape == far.shape == full_ref[k - 1].shape
+
+            def rel(a, b):
+                return float(jnp.linalg.norm(a - b) / jnp.linalg.norm(b))
+
+            errors[("full", order, k)] = rel(got, full_ref[k - 1])
+            errors[("far", order, k)] = rel(far, far_ref[k - 1])
+            near_err = rel(got - far, near_ref[k - 1])
+            assert (
+                near_err < 1.0e-10
+            ), f"order {order}, D{k}: near half rel-L2 {near_err:.3e}"
+
+    assert errors[("full", 8, 1)] < 2.0e-5, errors
+    assert errors[("full", 8, 2)] < 5.0e-6, errors
+    assert errors[("far", 8, 1)] < 5.0e-3, errors
+    assert errors[("far", 8, 2)] < 3.0e-2, errors
+    for k in (1, 2):
+        improvement = errors[("far", 4, k)] / max(errors[("far", 8, k)], 1e-300)
+        assert improvement > 5.0, (
+            f"far D{k} stopped converging with order: {errors[('far', 4, k)]:.3e} "
+            f"at p=4, {errors[('far', 8, k)]:.3e} at p=8 ({improvement:.1f}x)"
+        )
+    print({key: f"{value:.3e}" for key, value in errors.items()})

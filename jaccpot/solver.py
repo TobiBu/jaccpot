@@ -1025,7 +1025,9 @@ class FastMultipoleMethod:
             Request packed spatial derivatives of acceleration in addition to
             acceleration itself. ``0`` disables derivatives.
             ``1`` returns the acceleration Jacobian with shape ``(N, 3, 3)`` in
-            packed-symmetric layout across the trailing axis. Non-zero requires
+            packed-symmetric layout across the trailing axis. The tower
+            differentiates the full acceleration, near field and far
+            (``docs/derivatives_and_jerk.md``). Non-zero requires
             ``expansion_basis="solidfmm"``.
 
         Returns
@@ -1177,7 +1179,7 @@ class FastMultipoleMethod:
             parameters are identical.
         jerk_mode : str
             ``"fast_approx"`` uses exact near-field jerk plus far-field
-            convective jerk from the acceleration Jacobian.
+            convective jerk from the far-field acceleration Jacobian.
             ``"accurate"`` uses an analytic far-field source-motion term
             (`dM -> dL`) plus the convective and exact near-field terms.
         jerk_fd_dt : float
@@ -1432,8 +1434,9 @@ class FastMultipoleMethod:
             Per-call override; ``None`` takes the solver's configured value,
             itself defaulting to ``True``.
         max_acc_derivative_order : int
-            Packed spatial derivatives of acceleration to return alongside it;
-            ``0`` disables them. Non-zero requires the solidfmm basis.
+            Packed spatial derivatives of acceleration (near field and far) to
+            return alongside it; ``0`` disables them. Non-zero requires the
+            solidfmm basis.
 
         Returns
         -------

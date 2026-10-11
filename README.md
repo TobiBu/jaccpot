@@ -134,9 +134,9 @@ Current higher-order status:
   (`max_time_derivative_order=3`)
 - the general time-derivative API currently uses the analytic `accurate` path
 - orders above crackle are not yet available
-- acceleration spatial derivatives (`max_acc_derivative_order > 0`) are the
-  derivatives of the far-field (local-expansion) part of the acceleration only;
-  the near-field P2P contributes none
+- acceleration spatial derivatives (`max_acc_derivative_order > 0`) differentiate
+  the full acceleration: the far field through its local expansions, the near
+  field exactly through its direct sum over the same pairs
 
 There is also a worked example notebook for jerk, snap, and crackle, including
 a small-`N` direct-sum accuracy check:

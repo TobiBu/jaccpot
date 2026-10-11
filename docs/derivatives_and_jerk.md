@@ -38,19 +38,47 @@ For `max_acc_derivative_order = 1`:
 
 - derivative tuple length is `1`
 - `derivatives[0]` has shape `(N, 3, 3)`
-- this is the acceleration Jacobian
+- this is the acceleration Jacobian, `derivatives[0][n, i, j] = d a_i / d x_j`
+
+In general, level `k` (`derivatives[k - 1]`) has shape `(N, 3, C_k)` with
+`C_k = (k + 1)(k + 2) / 2`:
+`derivatives[k - 1][n, i, c] = d^alpha a_i / d x^alpha`, where `alpha` is the
+`c`-th multi-index of `symmetric_multi_indices_3d(k)`
+(`jaccpot/operators/symmetric_tensors.py`). That order descends in `x`, then `y`.
+At `k = 2` the columns are `xx, xy, xz, yy, yz, zz`. Only the derivative axis is
+packed; the component axis `i` is kept whole.
 
 Current support:
 
 - enabled for `basis="real"` (default; `basis="solidfmm"` is the same basis),
   the only basis left (`"cartesian"` and `"complex"` were removed in the 2026-10
   cleanup, K and C)
-- **far field only**: the tower differentiates the local expansions (the far
-  field), and the near-field P2P contributes nothing to it -- with no accepted
-  M2L pair it is exactly zero. Its direct-sum oracle
+- **near field and far**: the tower is the derivative of the full
+  acceleration. The far half differentiates the local expansions. The near half
+  is the direct sum over the same near pairs the acceleration uses, differentiated
+  exactly (`jaccpot/nearfield/acc_derivatives.py`):
+  - order 1 in closed form;
+  - higher orders by nested forward mode through the softening kernel;
+  - the self pair excluded, since its Jacobian is `-G m g(0) I`, not zero.
+
+  It runs with every softening kernel. One case is special for the C2 Wendland
+  kernel: a coincident pair of distinct particles contributes zero at order 2 and
+  above. That is its exact second derivative; the third does not exist there.
+  Until 2026-10 the tower was far-field only.
+- the near half costs one more pass over the near pairs, only when the tower is
+  requested
+- the direct-sum oracle
   (`tests/integration/test_real_basis_runtime.py::test_real_basis_acceleration_derivatives_match_direct_sum`)
-  is therefore the derivative of the direct sum over exactly the sources the
-  accepted far pairs cover
+  checks three things:
+  - the full tower against the full direct sum;
+  - the far half alone against the sources the accepted far pairs cover;
+  - the near half against every other source, to round-off.
+
+  With no far pair the tower matches the direct sum to round-off, for every kernel
+  at orders 1-3 (`tests/unit/nearfield/test_acc_derivatives.py`)
+- the general radix path only: the large-N lane and a traced
+  `compute_accelerations` raise `NotImplementedError` for
+  `max_acc_derivative_order > 0`
 - exact at every offset on the real basis, including a target sitting on its
   expansion centre (a single-particle leaf) or on the centre's z-axis: the tower
   lowers the coefficients with the exact Cartesian-derivative operator of the real
@@ -96,7 +124,9 @@ For the currently supported public orders:
 ### `jerk_mode="fast_approx"`
 
 - exact near-field pairwise jerk
-- far-field convective jerk from acceleration Jacobian (`da/dx @ v_target`)
+- far-field convective jerk from the far-field acceleration Jacobian
+  (`da_far/dx @ v_target`); the near half of the Jacobian is left out, because
+  the near-field jerk already contains it
 - fastest option
 
 ### `jerk_mode="accurate"`
