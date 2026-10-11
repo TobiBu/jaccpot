@@ -1,5 +1,9 @@
 # GPU benchmark plan: real (Dehnen) vs complex/solidfmm basis
 
+> **Historical.** `bench/bench_real_vs_complex.py` and the complex basis were removed
+> in the 2026-10 cleanup (`docs/cleanup_2026-10.md`, C); the commands below no longer
+> run.
+
 Goal: measure on a GPU whether the real basis should become the default. It is
 already **correct**, **feature-complete** (P2M/M2M/M2L/L2L/L2P, grouped +
 class-major, acceleration-derivative towers), and uses **2x less coefficient

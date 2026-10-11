@@ -23,7 +23,7 @@ Tree construction and traversal artifacts are provided by the companion package
 ## Features
 
 - High-level `FastMultipoleMethod` API with `fast`, `balanced`, `accurate`, and `large_n_gpu` presets
-- Configurable expansion basis — **`real` (Dehnen) is the default** production basis (the radix large-N fast lane runs pure-real end to end, no complex↔real conversion); `complex`/`solidfmm` are retained for cross-checking
+- Real (Dehnen) spherical-harmonic expansions, the only basis (`"solidfmm"` is its family name; the complex and Cartesian bases were removed in the 2026-10 cleanup)
 - Pure-JAX real spherical harmonic rotate+scale M2L path
 - Adaptive-order far-field evaluation with fixed `p_gears` buckets
 - Optional topology reuse for multiple nearby timesteps
@@ -71,7 +71,7 @@ key_pos, key_mass = jax.random.split(key)
 positions = jax.random.uniform(key_pos, (1024, 3), minval=-1.0, maxval=1.0)
 masses = jax.random.uniform(key_mass, (1024,), minval=0.5, maxval=1.5)
 
-# basis defaults to "real" (Dehnen); pass basis="solidfmm" only to cross-check.
+# basis defaults to "real" (Dehnen), the only basis.
 solver = FastMultipoleMethod(preset="balanced")
 accelerations = solver.compute_accelerations(positions, masses)
 print(accelerations.shape)
@@ -94,7 +94,6 @@ For very large single-GPU runs, use the dedicated throughput/memory preset:
 ```python
 solver = FastMultipoleMethod(
     preset="large_n_gpu",
-    basis="solidfmm",
     precision="fp32",
 )
 ```
@@ -135,8 +134,9 @@ Current higher-order status:
   (`max_time_derivative_order=3`)
 - the general time-derivative API currently uses the analytic `accurate` path
 - orders above crackle are not yet available
-- acceleration spatial derivatives (`max_acc_derivative_order > 0`) currently
-  require `basis="solidfmm"`
+- acceleration spatial derivatives (`max_acc_derivative_order > 0`) are the
+  derivatives of the far-field (local-expansion) part of the acceleration only;
+  the near-field P2P contributes none
 
 There is also a worked example notebook for jerk, snap, and crackle, including
 a small-`N` direct-sum accuracy check:
@@ -175,13 +175,18 @@ single-GPU execution backend.
   real spherical harmonic coefficient layout (Dehnen, no sqrt-2) with
   rotate+scale-to-z M2L. The large-N radix fast lane runs pure-real end to end,
   with no complex<->real conversion.
-- `basis="solidfmm"` — complex solid-harmonic path, kept for cross-checking.
-  `real` vs `solidfmm` agree to 4.5e-13 at N=2048/p=4/theta=0.5, which is a
-  genuine independent-basis check and a good result.
-- `basis="complex"` — **an alias for `solidfmm`**, not a third basis. The two
-  select the same code path and produce bit-identical forces (measured at
-  N=2048/p=4/theta=0.5: max difference exactly 0.0). Prefer spelling it
-  `"solidfmm"`; `"complex"` is retained for backwards compatibility.
+- `basis="solidfmm"` — the spherical-harmonic family's name, and since the
+  2026-10 cleanup (phase C) **an alias for `"real"`**: it resolves to the same
+  basis object and reports `basis == "real"`. Until C it selected the complex
+  basis.
+- `basis="complex"` — **removed** in the 2026-10 cleanup (phase C): it raises a
+  `ValueError` naming the removal, as do `FMMEngine(expansion_basis="complex")`,
+  a basis object not named `"real"`, and `DistributedFMMConfig(basis="complex")`
+  or `basis="solidfmm"` (the distributed driver's name for its complex far
+  field); `from jaccpot import ComplexSHBasis` raises an `ImportError` with the
+  same message. The complex basis agreed with the real one to round-off
+  (4.5e-13 at N=2048/p=4/theta=0.5 in float64), so `"real"` is a drop-in
+  replacement.
 - `basis="cartesian"` — **removed** in the 2026-10 cleanup (phase K): it raises a
   `ValueError` naming the removal, as do `FMMEngine(expansion_basis="cartesian")`
   and `DistributedFMMConfig(basis="cartesian")`. Its relative L2 force error was
@@ -240,13 +245,11 @@ Use `precision` to select runtime dtype explicitly:
 ```python
 solver_fp32 = FastMultipoleMethod(
     preset="fast",
-    basis="solidfmm",
     precision="fp32",
 )
 
 solver_fp64 = FastMultipoleMethod(
     preset="accurate",
-    basis="solidfmm",
     precision="fp64",
 )
 ```

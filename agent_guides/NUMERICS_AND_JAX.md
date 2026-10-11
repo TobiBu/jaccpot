@@ -33,8 +33,8 @@ A refactor does not change results.
   rotate → z-translate → rotate-back decomposition and the involutory B-matrices are ordered
   for cancellation reasons, not aesthetics.
 - **Do not change accumulation order in P2P or M2L.**
-- **Equivalent paths must stay equivalent.** Reference vs. fused Pallas, real vs. complex
-  basis, fast lane vs. general lane, single vs. multi-device — each pair has an asserted
+- **Equivalent paths must stay equivalent.** Reference vs. fused Pallas, fast lane vs.
+  general lane, single vs. multi-device — each pair has an asserted
   numerical equivalence. If you touch one side, prove the pair still agrees.
 
 ### Differentiability
@@ -121,7 +121,7 @@ cells, and the flattened centrally-concentrated distribution that stresses the t
 - Physics invariants that hold regardless of implementation: total force sums to ~zero,
   potential energy computed two ways agrees, known analytic cases.
 - Gradients against finite differences and against `jax.grad` of the direct sum.
-- Path equivalences: reference vs. fused, real vs. complex, fast lane vs. general.
+- Path equivalences: reference vs. fused, fast lane vs. general.
 
 **A gradient test at a default leaf size covers no far field.** Assert the M2L pair count,
 not just the gradient. Measured at `theta=0.5`, N=128: `leaf_size=4` accepts 110 M2L pairs and
@@ -166,7 +166,8 @@ be intermittently red on an A100 while being perfectly green in CI. Two conseque
 
 **Two fp32 paths agreeing with each other proves nothing.** Compare fp32 against an fp64
 reference, not against another fp32 path — the two can be identically wrong. This already bit
-once: `test_solidfmm_m2l_ignores_padded_compact_far_pairs` asserted `padded == exact` and
+once: `test_solidfmm_m2l_ignores_padded_compact_far_pairs` (now
+`test_m2l_ignores_padded_compact_far_pairs`) asserted `padded == exact` and
 passed on JAX 0.9.x only because both fp32 paths shared the TF32 error floor (see
 `ARCHITECTURE.md` §7).
 
@@ -216,7 +217,7 @@ Things that look like helpfulness and are not:
 1. [ ] `JAX_ENABLE_X64=1 pytest -q` green on CPU.
 2. [ ] `tests/characterization/` unmoved — **including gradient goldens**.
 3. [ ] Validation tests still converge at the expected rate in `p` and the MAC.
-4. [ ] Stated path equivalences (reference/fused, real/complex, lane/lane) still hold.
+4. [ ] Stated path equivalences (reference/fused, lane/lane) still hold.
 5. [ ] No new host syncs, no new `@jit` boundaries, no changed static or donated arguments.
 6. [ ] PyTree registration, sharding annotations, and `custom_vjp` residuals untouched, or
        explicitly signed off.

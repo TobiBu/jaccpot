@@ -65,7 +65,7 @@ ODISSEO coupling) depends on. It is frozen by
 | `TraversalOverrides` | named traversal capacities, merged onto a preset's sizing |
 | `GradConfig` | the supported interface for configuring the differentiable path (section 6) |
 | `MemoryObjective` | memory-policy literal |
-| `ComplexSHBasis`, `RealSHBasis` | expansion bases |
+| `RealSHBasis` | the expansion basis (`ComplexSHBasis` was removed with the complex basis in the 2026-10 cleanup, C; importing it raises with the migration message) |
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
 | `BlockStepFMM` | momentum-conserving force for a block-step individual-timestep KDK (in `nornax_adapter.py`; see section 1) |
 | `direct_sum_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
@@ -154,13 +154,14 @@ kernel did, so consolidation is source-level dedup with no numerical change.
 
 **M2L apply seam:**
 
-- `_apply_m2l(..., *, order, basis_mode, rotation, m2l_impl)` — dispatches to:
-  - `_apply_real_m2l` → real rot-scale (`_m2l_real_batch_kernel`) or the fused
-    Pallas kernel `_m2l_real_batch_kernel_fused_pallas` when gated on
-  - `_apply_complex_m2l` → solidfmm rotation (`_m2l_complex_batch_kernel`) or
-    `_m2l_complex_batch_kernel_fused_pallas`
+- `_apply_m2l(..., *, order, basis_mode, rotation, m2l_impl)` — routes to
+  `_apply_real_m2l` → real rot-scale (`_m2l_real_batch_kernel`) or the fused
+  Pallas kernel `_m2l_real_batch_kernel_fused_pallas` when gated on.
+  `basis_mode` other than `"real"` raises and `rotation` is unused: the complex
+  branch (`_apply_complex_m2l`, its reference and fused Pallas kernels) went
+  with the complex basis in the 2026-10 cleanup (C).
 
-**M2L accumulate (both bases, via the seam):**
+**M2L accumulate (via the seam):**
 
 - `_accumulate_m2l_fullbatch` — one full interaction batch → `segment_sum`
 - `_accumulate_m2l_chunked_scan` — chunked `lax.scan` reduction (bounded memory)
@@ -172,19 +173,19 @@ kernel did, so consolidation is source-level dedup with no numerical change.
   fullbatch branch once dropped `basis_mode` and silently applied the complex
   cached kernel to real blocks (3.8e-01 relative error, no exception).
 
-**L2L / downward:** `_propagate_solidfmm_locals_by_level` (unifies real+complex
-behind `basis_mode`), `_propagate_{solidfmm,real}_locals_to_children`, the
-solidfmm downward-sweep builders.
+**L2L / downward:** `_propagate_solidfmm_locals_by_level` (unified real+complex
+behind `basis_mode` until the complex basis went in C; "real" is the only value
+now), `_propagate_real_locals_to_children`, the solidfmm downward-sweep builders.
 
 **Evaluation:** `_evaluate_local_expansions_for_particles` (L2P), nearfield
 targeting + scatter. The public `compute_gravitational_{acceleration,potential}`
 convenience wrappers live in `_fmm_impl.py` (not in `kernels/core`) because they
 construct/drive the engine.
 
-**Intentionally NOT merged** (distinct math / dispatch): the complex-only
-derivative/jerk towers, and cached-vs-uncached M2L dispatch. (The Cartesian
-L2P, `_evaluate_local_cartesian_with_grad_batch`, was the third; it went with
-the Cartesian basis in the 2026-10 cleanup, K.)
+**Intentionally NOT merged** (distinct math / dispatch): cached-vs-uncached M2L
+dispatch. (The complex-only derivative/jerk towers and the Cartesian L2P,
+`_evaluate_local_cartesian_with_grad_batch`, were the others; they went with
+their bases in the 2026-10 cleanup, C and K.)
 
 ## 6. Config resolution, presets, and the autodiff export
 
@@ -204,7 +205,7 @@ the Cartesian basis in the 2026-10 cleanup, K.)
   `jax.vjp` transpose it exactly (Route A; the translation cascade is linear so its VJP
   is free). `prepare_state` (tree build) is not traceable, so `state` must be built once,
   concretely, before `jax.grad`. Requires a radix `FMMPreparedState` with a solidfmm
-  basis (complex or real submode). The M2L defaults to the pure-JAX path but can opt
+  (real) basis. The M2L defaults to the pure-JAX path but can opt
   into the differentiable **fused-Pallas M2L fast lane** with
   `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` on an Ampere+ GPU (the fused kernels now
   carry a `custom_vjp`, PR-2). The near-field defaults to the bucketed pure-JAX
@@ -277,23 +278,23 @@ auto-gated off and the pure-JAX path runs (CPU CI can still lower Pallas with
 `pallas_call(backend="triton")`; 0.9.1 removed that kwarg and infers the backend
 from the `compiler_params` dataclass type instead. The M2L kernels must name
 Triton either way -- Mosaic-GPU rejects them (small per-(pair, coeff) tiles its TMA
-cannot express; fp64 in the complex kernel) -- so the shim raises rather than
+cannot express; fp64 in the since-removed complex kernel) -- so the shim raises rather than
 letting a non-Triton request fall through to a default. The near-field and
 treecode kernels already passed `pallas.triton.CompilerParams` and needed no
 change.
 
 - Fused M2L Pallas is gated by `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` **and**
-  the Ampere+ hardware support check (`_real_m2l_pallas_active` /
-  `_fused_complex_m2l_pallas_active`, evaluated at trace time; both now gate on the
-  fused kernels' own sm_80 support functions).
-- The fused M2L kernels are **differentiable** via module-level `custom_vjp` wrappers
-  (`m2l_{core_z_real,complex_fused,real_fused}_pallas_cvjp`): Pallas forward +
-  reverse. `_apply_{real,complex}_m2l` route through the wrappers, so the same flag
-  enables the fused M2L on both the forward and the `differentiable_accelerations`
-  grad path (PR-2). `pallas_call` itself still has no autodiff rule — the wrapper
-  supplies it. The reverse is a **fully-fused analytic VJP kernel**
-  (`m2l_{real,complex}_fused_vjp_pallas`, default; `JACCPOT_FUSED_M2L_VJP=0` falls back
-  to autodiff of the twin), so both forward and reverse run as single Pallas launches.
+  the Ampere+ hardware support check (`_real_m2l_pallas_active`, evaluated at trace
+  time, gating on the fused kernel's own sm_80 support function). The complex fused
+  kernel and its gate went with the complex basis in the 2026-10 cleanup (C).
+- The fused M2L kernel is **differentiable** via a module-level `custom_vjp` wrapper
+  (`m2l_real_fused_pallas_cvjp`): Pallas forward + reverse. `_apply_real_m2l` routes
+  through the wrapper, so the same flag enables the fused M2L on both the forward and
+  the `differentiable_accelerations` grad path (PR-2). `pallas_call` itself still has
+  no autodiff rule — the wrapper supplies it. The reverse is a **fully-fused analytic
+  VJP kernel** (`m2l_real_fused_vjp_pallas`, default; `JACCPOT_FUSED_M2L_VJP=0` falls
+  back to autodiff of the twin), so both forward and reverse run as single Pallas
+  launches.
 - Nearfield Pallas is resolved from `pallas_nearfield_fused_supported()` into the
   engine's `use_pallas`. Two differentiable near-field lanes exist and they are **not**
   interchangeable:
@@ -317,14 +318,14 @@ change.
   rel err): 5.7e-04 at order 4, 5.7e-04 at order 6, 5.6e-04 at order 8 —
   i.e. **~6e-04 regardless of expansion order**, so raising the order past 4 buys
   nothing in fp32. Under `jax.default_matmul_precision("highest")` the same cases
-  give 1.5e-06 / 2.4e-06 / 1.8e-06 (~300x better). The complex basis behaves the
-  same (3.7e-04 -> 5.6e-08 at order 2). The real L2P path *does* set
+  give 1.5e-06 / 2.4e-06 / 1.8e-06 (~300x better). The complex basis, removed in
+  the 2026-10 cleanup (C), behaved the same (3.7e-04 -> 5.6e-08 at order 2). The real L2P path *does* set
   `lax.Precision.HIGHEST` (`operators/real_p2m_l2p.py`; the Cartesian one in
   `downward/local_expansions.py` did too, until the 2026-10 cleanup, K), so this
   is an inconsistency rather than a considered trade. Not changed: fixing it moves
   forward numerics package-wide (the golden oracle would need regenerating) and
   costs throughput, so it wants a preset-level decision. This floor is also why
-  `tests/integration/test_fmm.py::test_solidfmm_m2l_ignores_padded_compact_far_pairs`
+  `tests/integration/test_fmm.py::test_m2l_ignores_padded_compact_far_pairs`
   compares against a float64 reference with a 2e-03 bound instead of asserting
   padded == exact — the latter passed on JAX 0.9.x only because both fp32 paths
   were identically wrong.
@@ -462,8 +463,10 @@ When merging real/complex kernel families, the merge is numerics-preserving
 `jax.jit` per static combination. This is source-level dedup, never a runtime
 branch inside a compiled kernel. What that argument does **not** cover is the call
 sites: a discriminator with a default (`basis_mode: str = "complex"` on every
-accumulator) is silently satisfied by a caller that forgets to forward it, and the
-specialisation then happily compiles the wrong basis. That is exactly how the
+accumulator, until the complex basis went in the 2026-10 cleanup, C; the defaults
+are `"real"` now and anything else raises) is silently satisfied by a caller that
+forgets to forward it, and the specialisation then happily compiles the wrong
+basis. That is exactly how the
 (since removed) `_accumulate_solidfmm_m2l_grouped`'s fullbatch branch went wrong —
 see §5. Audit the callers, not only the kernels. Any consolidation PR must show:
 

@@ -177,7 +177,7 @@ It does **not** cover `tests/distributed/` (24 tests, needs two cards) — audit
 ## Layout
 
 ```
-jaccpot/basis/         real and complex solid-harmonic bases
+jaccpot/basis/         the real solid-harmonic basis (the only one)
 jaccpot/operators/     expansion algebra: harmonics, M2L rotate/scale, precision pinning
 jaccpot/upward/        P2M / M2M sweep
 jaccpot/downward/      the downward pass's containers (LocalExpansionData,

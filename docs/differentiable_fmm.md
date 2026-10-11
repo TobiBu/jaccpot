@@ -161,8 +161,8 @@ trusting the 3.0 threshold on other hardware.
 
 **Supported states**
 
-* Radix `FMMPreparedState` with a solidfmm basis (`basis="complex"` or
-  `basis="real"`).
+* Radix `FMMPreparedState` with the real basis (`basis="real"`, or its alias
+  `"solidfmm"`; the complex basis was removed in the 2026-10 cleanup, C).
 * `LargeNPreparedState` from `preset="large_n_gpu"`, with
   `retain_far_pairs_for_grad=True`. Without it the frozen M2L pair list is
   discarded at `prepare_state` and the call raises — it does not silently give

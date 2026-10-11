@@ -1,9 +1,11 @@
-"""Microbenchmark for the solidfmm complex upward pass (geometry/mass/P2M/M2M).
+"""Microbenchmark for the real upward pass (mass moments + P2M + M2M).
 
 Isolates the per-step upward-sweep cost that dominates the strict fused lane
 (``runtime_refresh_tree_upward_seconds``) without needing the full galaxy lane or
-a fitted strict cap profile. Reports the per-stage breakdown so we can see the
-share of each stage (especially M2M) and decide where to optimize.
+a fitted strict cap profile, and A/Bs the ``static_num_levels`` knob. It measured
+the complex sweep, with a per-stage breakdown from that sweep's timing callback,
+until the complex basis was removed in the 2026-10 cleanup (C); the real sweep has
+no stage callback, so ``stage_seconds_mean`` is empty now.
 
 Free-GPU selection uses ``autocvd`` and MUST run before ``import jax`` (mirrors
 ``bench/bench_fused_eval_vs_jaxfmm.py``). Example:
@@ -29,7 +31,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--runs", type=int, default=5)
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--center-mode", choices=("com", "aabb"), default="com")
+    p.add_argument("--center-mode", choices=("com",), default="com")
     p.add_argument(
         "--gpu-select",
         choices=("free", "least-used", "none"),
@@ -64,9 +66,7 @@ def main() -> None:
     import numpy as np
     from yggdrax.tree import build_tree, get_level_offsets, get_num_levels
 
-    from jaccpot.upward.solidfmm_complex_tree_expansions import (
-        prepare_solidfmm_complex_upward_sweep,
-    )
+    from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
 
     backend = jax.default_backend()
     dev = jax.devices()[0]
@@ -106,20 +106,13 @@ def main() -> None:
     max_internal_level_width = int(internal_widths.max()) if internal_widths.size else 1
 
     def _run_once(collect, overrides):
-        cb = None
-        if collect is not None:
-
-            def cb(name: str, seconds: float) -> None:
-                collect[name] = collect.get(name, 0.0) + float(seconds)
-
-        out = prepare_solidfmm_complex_upward_sweep(
+        del collect  # the real sweep has no per-stage timing callback
+        out = prepare_real_upward_sweep(
             tree,
             pos_sorted,
             mass_sorted,
             max_order=int(args.max_order),
-            center_mode=args.center_mode,
             max_leaf_size=int(args.leaf_size),
-            upward_timing_callback=cb,
             **overrides,
         )
         jax.block_until_ready(out.multipoles.packed)

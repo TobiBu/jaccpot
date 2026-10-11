@@ -66,7 +66,7 @@ from jaccpot import FastMultipoleMethod, GradConfig
 def _bench(
     n,
     *,
-    basis="complex",
+    basis="real",
     theta=0.5,
     order=4,
     leaf=32,
@@ -140,16 +140,13 @@ def main():
     # to the pure-JAX M2L otherwise). The gates are context-locals, so ask them
     # inside the same override scope the benchmark will run under.
     from jaccpot.runtime.grad_options import grad_option_overrides, resolve_grad_options
-    from jaccpot.runtime.kernels.core import (
-        _fused_complex_m2l_pallas_active,
-        _real_m2l_pallas_active,
-    )
+    from jaccpot.runtime.kernels.core import _real_m2l_pallas_active
 
     options = resolve_grad_options(
         grad_config, num_particles=0, supports_fast_lane=True
     )
     with grad_option_overrides(options):
-        engaged = bool(_fused_complex_m2l_pallas_active() and _real_m2l_pallas_active())
+        engaged = bool(_real_m2l_pallas_active())
     m2l = "fused-Pallas" if (fused_m2l and engaged) else "pure-JAX"
     if fused_m2l and not engaged:
         m2l = "pure-JAX (fused-Pallas requested but unsupported here)"
@@ -169,7 +166,7 @@ def main():
         f"{'N':>8} {'basis':>8} {'mode':>6} {'fwd (ms)':>12} {'fwd+bwd (ms)':>14} {'ratio':>8}",
         flush=True,
     )
-    for basis in ("complex", "real"):
+    for basis in ("real",):
         for n in (256, 1024, 4096):
             try:
                 t_fwd, t_vg, mode = _bench(
