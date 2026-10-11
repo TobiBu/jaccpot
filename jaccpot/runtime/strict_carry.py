@@ -4,8 +4,8 @@ The fused lane's scan carried the whole prepared state -- tree, upward and
 downward payloads, lists: 1.4 GiB at 8x10^6 particles, plus the far list held
 outside the scan to re-attach to the returned state (0.66 GiB) -- although the
 in-scan refresh rebuilds every one of them from the positions. Measured by
-jax's dead-code elimination on the scan body (``tests/integration/
-test_strict_run_v2_particle_carry.py``): with the default fresh far-pair rebuild,
+jax's dead-code elimination on the scan body (``tests/integration/strict/
+test_strict_run_v2.py::TestParticleCarry``): with the default fresh far-pair rebuild,
 a step reads NONE of the carried state's 51 leaves, only their shapes, dtypes
 and the static fields.
 

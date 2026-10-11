@@ -8,8 +8,8 @@ this package re-exports its symbols so consumers import from
 ``jaccpot.runtime.kernels``.
 
 Leaf contract: this package and ``core`` must NOT import the engine
-(``runtime.fmm.engine`` / the prepare pipeline), so ``distributed`` and
-``experimental`` can use the kernels without dragging in the orchestrator.
+(``runtime.fmm.engine`` / the prepare pipeline), so ``distributed`` can use the
+kernels without dragging in the orchestrator.
 """
 
 from __future__ import annotations
