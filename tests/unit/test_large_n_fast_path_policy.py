@@ -6,6 +6,14 @@ import jax
 import jax.numpy as jnp
 import pytest
 
+import jaccpot.runtime._fmm_impl as fmm_impl_private
+import jaccpot.runtime._large_n_nearfield as large_n_nearfield_private
+from jaccpot import (
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    FMMPreset,
+    RuntimePolicyConfig,
+)
 from jaccpot.config import FarFieldConfig, NearFieldConfig, TreeConfig
 from jaccpot.runtime._large_n_nearfield import resolve_large_n_execution_config
 from jaccpot.runtime.fmm import FMMEngine
@@ -142,3 +150,148 @@ def test_the_large_n_lane_is_gated_on_the_preset_alone(monkeypatch):
         masses_arr=masses,
         allow_stateful_cache=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# From test_solver_api.py (2026-10 cleanup, Z-a): the large_n_gpu preset
+# ---------------------------------------------------------------------------
+
+
+def _sample_problem(n: int = 64):
+    key = jax.random.PRNGKey(11)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (n, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (n,),
+        minval=0.5,
+        maxval=1.5,
+        dtype=jnp.float32,
+    )
+    return positions, masses
+
+
+def test_large_n_gpu_preset_applies_memory_safe_gpu_defaults():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+    )
+    assert fmm._impl.tree_type == "radix"
+    assert fmm._impl.tree_build_mode == "static_radix"
+    assert fmm._impl.farfield_mode == "pair_grouped"
+    assert fmm._impl.nearfield_mode == "bucketed"
+    assert fmm._impl.precompute_nearfield_scatter_schedules is False
+    assert fmm._impl.streamed_far_pairs is True
+    assert fmm._impl.mixed_order_farfield is False
+    assert fmm._impl.m2l_chunk_size is None
+    # The large_n_gpu production contract keeps the topology-derived interaction
+    # scaffold resident (enable_interaction_cache=True) so fixed-shape refreshes
+    # can reuse it. This is memory-neutral on the production path: the stateful
+    # interaction cache is gated off for static_radix tree mode, so True here does
+    # not add device-memory pressure. (The memory-heavy retain_* knobs stay off.)
+    assert fmm._impl.enable_interaction_cache is True
+    assert fmm._impl.retain_traversal_result is False
+    assert fmm._impl.retain_interactions is False
+    assert fmm._impl.memory_objective == "minimum_memory"
+    assert fmm._impl.upward_leaf_batch_size == 2048
+    assert fmm._impl.mac_type == "dehnen"
+
+
+def test_large_n_gpu_preset_accepts_string_alias():
+    fmm = FastMultipoleMethod(
+        preset="large_n_gpu",
+        basis="solidfmm",
+    )
+    assert fmm.preset is FMMPreset.LARGE_N_GPU
+
+
+def test_large_n_gpu_profile_coerces_conflicting_runtime_knobs():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            nearfield=NearFieldConfig(
+                mode="baseline", precompute_scatter_schedules=True
+            ),
+            farfield=FarFieldConfig(
+                streamed_far_pairs=False,
+                mixed_order=True,
+                mixed_order_min_order=2,
+            ),
+            runtime=RuntimePolicyConfig(
+                memory_objective="throughput",
+                enable_interaction_cache=True,
+                retain_traversal_result=True,
+                retain_interactions=True,
+            ),
+        ),
+    )
+    impl = fmm._impl
+    assert impl.runtime_path == "large_n"
+    assert impl.memory_objective == "minimum_memory"
+    assert impl.nearfield_mode == "bucketed"
+    assert impl.precompute_nearfield_scatter_schedules is False
+    assert impl.streamed_far_pairs is True
+    assert impl.farfield_mode == "pair_grouped"
+    assert impl.mixed_order_farfield is False
+    assert impl.mixed_order_min_order is None
+    # Contract keeps the interaction scaffold resident (enable_interaction_cache
+    # =True); it is memory-neutral on the static_radix production path (the
+    # stateful cache is gated off there). The requested True is honoured, not
+    # coerced off, while the memory-heavy retain_* knobs are coerced off below.
+    assert impl.enable_interaction_cache is True
+    assert impl.retain_traversal_result is False
+    assert impl.retain_interactions is False
+
+
+def test_large_n_gpu_profile_emits_deprecation_warnings_for_conflicting_knobs():
+    with pytest.warns(FutureWarning):
+        _ = FastMultipoleMethod(
+            preset=FMMPreset.LARGE_N_GPU,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(
+                nearfield=NearFieldConfig(mode="baseline"),
+                farfield=FarFieldConfig(streamed_far_pairs=False),
+                runtime=RuntimePolicyConfig(memory_objective="throughput"),
+            ),
+        )
+
+
+def test_large_n_compiled_eval_uses_specialized_nearfield(monkeypatch):
+    positions, masses = _sample_problem(n=64)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.LARGE_N_GPU,
+        basis="solidfmm",
+    )
+    monkeypatch.setattr(fmm_impl_private.jax, "default_backend", lambda: "gpu")
+
+    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=3)
+
+    assert state.execution_backend == "large_n"
+    assert state.nearfield_mode == "bucketed"
+    assert int(state.nearfield_leaf_particle_indices.shape[0]) > 0
+    assert state.nearfield_chunk_sort_indices is None
+
+    called = {"specialized": 0}
+    original = large_n_nearfield_private.compute_leaf_p2p_accelerations_radix_fast_lane
+
+    def _spy_specialized(*args, **kwargs):
+        called["specialized"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        large_n_nearfield_private,
+        "compute_leaf_p2p_accelerations_radix_fast_lane",
+        _spy_specialized,
+    )
+
+    acc = fmm.evaluate_prepared_state(state)
+
+    assert acc.shape == positions.shape
+    assert called["specialized"] == 1

@@ -25,10 +25,18 @@ from __future__ import annotations
 import dataclasses
 import warnings
 
+import jax
 import jax.numpy as jnp
 import pytest
+from yggdrax.interactions import DualTreeTraversalConfig
 
-from jaccpot import FastMultipoleMethod, RealSHBasis
+from jaccpot import (
+    FarFieldConfig,
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    FMMPreset,
+    RealSHBasis,
+)
 from jaccpot.config import NearFieldConfig, RuntimePolicyConfig, TreeConfig
 from jaccpot.distributed import DistributedFMMConfig
 from jaccpot.distributed.fmm import make_force_evaluator
@@ -327,3 +335,368 @@ def test_an_unknown_tree_build_mode_raises():
             tree=TreeConfig(mode="capacity_fixed_depth"),
             softening_kernel="plummer",
         )
+
+
+# ---------------------------------------------------------------------------
+# From test_solver_api.py (2026-10 cleanup, Z-a): the facade's configuration reaching the engine
+# ---------------------------------------------------------------------------
+
+
+def test_advanced_config_applies_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.BALANCED,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            farfield=FarFieldConfig(mode="pair_grouped"),
+            nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=512),
+            mac_type="engblom",
+        ),
+    )
+    # The far-field mode used to be `class_major` with grouped interactions on;
+    # both went in the 2026-10 cleanup (X3), so the surviving explicit value is
+    # what flows through now.
+    assert fmm.farfield_mode == "pair_grouped"
+    assert fmm.nearfield_mode == "bucketed"
+    assert int(fmm.nearfield_edge_chunk_size) == 512
+    assert fmm.mac_type == "engblom"
+
+
+def test_dehnen_error_defaults_to_paper_policy_settings():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        # eps is the accuracy knob of Dehnen eq (16a) and must be explicit; the
+        # theta-derived fallback is a tail_proxy heuristic unrelated to it.
+        adaptive_eps=1.0e-4,
+        advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
+    )
+    assert fmm.mac_type == "dehnen_error"
+    assert fmm._impl.adaptive_error_model == "dehnen_paper"
+    # 'prev' is promoted to 'paper_cached', not 'paper': the paper prepass is a full
+    # extra FMM solve, and re-running it every prepare_state costs ~3.5x steady
+    # state for a force scale Dehnen §5.4 explicitly licenses reusing.
+    assert fmm._impl.mac_force_scale_mode == "paper_cached"
+
+
+def test_dehnen_error_preserves_explicit_policy_overrides():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        adaptive_error_model="dehnen_degree",
+        mac_force_scale_mode="prepass",
+        adaptive_eps=1.0e-4,
+        advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
+    )
+    assert fmm.mac_type == "dehnen_error"
+    assert fmm._impl.adaptive_error_model == "dehnen_degree"
+    assert fmm._impl.mac_force_scale_mode == "prepass"
+
+
+def test_dehnen_error_requires_explicit_adaptive_eps():
+    """The paper MAC must not silently inherit the theta-derived tolerance.
+
+    In paper mode theta does not gate acceptance at all -- eq (16a) supplies its
+    own ``theta < 1`` convergence guard -- so ``theta**(p+2)`` is an unrelated
+    heuristic. At theta=0.6, p=4 it evaluates to 0.047, a 4.7% per-interaction
+    tolerance, which is how a wildly loose eps reached the accuracy notebooks.
+    """
+
+    with pytest.raises(ValueError, match="requires an explicit adaptive_eps"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(mac_type="dehnen_error"),
+        )
+
+    with pytest.raises(ValueError, match="requires an explicit adaptive_eps"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            adaptive_error_model="dehnen_paper",
+        )
+
+    # Adaptive order keeps the validated theta-derived default.
+    FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        adaptive_order=True,
+        p_gears=(2, 3, 4),
+        adaptive_error_model="dehnen_paper",
+    )
+
+
+def test_tree_type_flows_from_advanced_config():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="radix")),
+    )
+    assert fmm._impl.tree_type == "radix"
+
+
+def test_topology_reuse_options_flow_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="real",
+        reuse_topology=True,
+        rebuild_every=3,
+    )
+    assert fmm._impl.reuse_topology is True
+    assert fmm._impl.rebuild_every == 3
+    assert fmm.recent_topology_reused is False
+
+
+def test_use_pallas_option_flows_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="real",
+        use_pallas=True,
+    )
+    assert fmm._impl.use_pallas is True
+
+
+def test_invalid_tree_type_raises():
+    with pytest.raises(ValueError, match="tree_type must be one of"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            advanced=FMMAdvancedConfig(tree=TreeConfig(tree_type="invalid-tree")),
+        )
+
+
+def test_precision_fp32_sets_working_dtype():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        precision="fp32",
+    )
+    assert fmm._impl.working_dtype == jnp.float32
+
+
+def test_precision_conflicts_with_working_dtype():
+    with pytest.raises(ValueError, match="precision conflicts with explicit"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            precision="fp32",
+            working_dtype=jnp.float64,
+        )
+
+
+def test_precision_fp64_requires_x64_enabled():
+    if bool(jax.config.jax_enable_x64):
+        fmm = FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            precision="fp64",
+        )
+        assert fmm._impl.working_dtype == jnp.float64
+        return
+    with pytest.raises(ValueError, match="requires jax_enable_x64=True"):
+        FastMultipoleMethod(
+            preset=FMMPreset.FAST,
+            basis="solidfmm",
+            precision="fp64",
+        )
+
+
+def test_nearfield_precompute_scatter_flag_flows_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            nearfield=NearFieldConfig(
+                mode="bucketed",
+                edge_chunk_size=256,
+                precompute_scatter_schedules=False,
+            )
+        ),
+    )
+    assert fmm._impl.precompute_nearfield_scatter_schedules is False
+
+
+def test_runtime_fail_fast_disables_host_refine():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                fail_fast=True,
+                host_refine_mode="on",
+            ),
+        ),
+    )
+    assert bool(fmm._impl.fail_fast) is True
+    assert fmm._impl.host_refine_mode == "off"
+
+
+def test_runtime_memory_policy_fields_flow_to_runtime():
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(
+                memory_objective="minimum_memory",
+                memory_budget_bytes=123456,
+                nearfield_schedule_item_cap=2048,
+                upward_leaf_batch_size=128,
+            ),
+        ),
+    )
+    assert fmm._impl.memory_objective == "minimum_memory"
+    assert fmm._impl.memory_budget_bytes == 123456
+    assert fmm._impl.nearfield_schedule_item_cap == 2048
+    assert fmm._impl.upward_leaf_batch_size == 128
+
+
+# ---------------------------------------------------------------------------
+# From tests/integration/test_fmm.py (2026-10 cleanup, Z-a): preset defaults and validation
+# ---------------------------------------------------------------------------
+
+
+def test_fast_preset_sets_lbvh_defaults():
+    key = jax.random.PRNGKey(111)
+    num_particles = 48
+    positions = jax.random.normal(key, (num_particles, 3), dtype=jnp.float32)
+    masses = jnp.ones((num_particles,), dtype=jnp.float32)
+
+    fmm = FMMEngine(
+        preset="fast", theta=0.6, softening=1e-3, softening_kernel="plummer"
+    )
+
+    assert fmm.tree_build_mode == "lbvh"
+    assert fmm.target_leaf_particles == 64
+    assert fmm.refine_local is False
+    assert isinstance(fmm.traversal_config, DualTreeTraversalConfig)
+    assert fmm.m2l_chunk_size == 512
+
+    accelerations = fmm.compute_accelerations(
+        positions,
+        masses,
+        leaf_size=8,
+        max_order=2,
+    )
+
+    assert accelerations.shape == (num_particles, 3)
+
+
+def test_fast_preset_allows_explicit_overrides():
+    fmm = FMMEngine(
+        preset=FMMPreset.FAST,
+        tree=TreeConfig(mode="lbvh", leaf_target=12, refine_local=True),
+        softening_kernel="plummer",
+    )
+
+    assert fmm.tree_build_mode == "lbvh"
+    assert fmm.target_leaf_particles == 12
+    assert fmm.refine_local is True
+    assert isinstance(fmm.traversal_config, DualTreeTraversalConfig)
+
+
+def test_fast_preset_defaults_to_auto_jit_tree_policy():
+    fmm = FMMEngine(preset=FMMPreset.FAST, softening_kernel="plummer")
+    assert fmm._jit_tree_default == "auto"
+
+
+def test_adaptive_nearfield_edge_chunk_size_auto_policy(monkeypatch):
+    fmm_cpu = FMMEngine(
+        preset=FMMPreset.FAST,
+        expansion_basis="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
+        mac_type="dehnen",
+        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=256),
+        softening_kernel="plummer",
+    )
+    monkeypatch.setattr(jax, "default_backend", lambda: "cpu")
+
+    assert (
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
+            num_particles=131072,
+            nearfield_mode="baseline",
+        )
+        == 256
+    )
+    assert (
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
+            num_particles=262144,
+            nearfield_mode="bucketed",
+        )
+        == 1024
+    )
+    assert (
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
+            num_particles=1000000,
+            nearfield_mode="bucketed",
+        )
+        == 2048
+    )
+    assert (
+        fmm_cpu._resolve_nearfield_edge_chunk_size(
+            num_particles=2000000,
+            nearfield_mode="bucketed",
+        )
+        == 4096
+    )
+
+    fmm_gpu = FMMEngine(
+        preset=FMMPreset.LARGE_N_GPU,
+        expansion_basis="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm"),
+        nearfield=NearFieldConfig(mode="auto", edge_chunk_size=128),
+        softening_kernel="plummer",
+    )
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+
+    assert fmm_gpu._resolve_nearfield_mode(num_particles=131072) == "baseline"
+    assert fmm_gpu._resolve_nearfield_mode(num_particles=262144) == "bucketed"
+    assert (
+        fmm_gpu._resolve_nearfield_edge_chunk_size(
+            num_particles=131072,
+            nearfield_mode="baseline",
+        )
+        == 128
+    )
+    assert (
+        fmm_gpu._resolve_nearfield_edge_chunk_size(
+            num_particles=262144,
+            nearfield_mode="bucketed",
+        )
+        == 256
+    )
+    assert (
+        fmm_gpu._resolve_nearfield_edge_chunk_size(
+            num_particles=1000000,
+            nearfield_mode="bucketed",
+        )
+        == 256
+    )
+
+
+def test_fast_preset_adaptive_policy_respects_explicit_overrides():
+    cfg = DualTreeTraversalConfig(
+        max_pair_queue=4096,
+        process_block=256,
+        max_interactions_per_node=4096,
+        max_neighbors_per_leaf=4096,
+    )
+    fmm = FMMEngine(
+        preset=FMMPreset.FAST,
+        expansion_basis="solidfmm",
+        farfield=FarFieldConfig(rotation="solidfmm", m2l_chunk_size=2048),
+        mac_type="dehnen",
+        runtime_policy=RuntimePolicyConfig(traversal_config=cfg),
+        softening_kernel="plummer",
+    )
+
+    overrides = fmm._resolve_runtime_execution_overrides(
+        num_particles=131072,
+        backend="cpu",
+    )
+
+    assert overrides.traversal_config is cfg
+    assert overrides.m2l_chunk_size == 2048
+
+
+def test_dehnen_radius_scale_must_be_positive():
+    with pytest.raises(ValueError, match="dehnen_radius_scale must be > 0"):
+        FMMEngine(dehnen_radius_scale=0.0, softening_kernel="plummer")

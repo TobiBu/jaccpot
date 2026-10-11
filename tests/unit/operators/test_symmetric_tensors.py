@@ -9,6 +9,7 @@ from jaccpot.operators.symmetric_tensors import (
     symmetric_multi_indices_3d,
     symmetric_order_offsets_3d,
 )
+from jaccpot.runtime.fmm import FMMEngine
 
 
 def test_symmetric_component_count_3d_matches_closed_form() -> None:
@@ -76,3 +77,52 @@ def test_component_lift_index_map_3d_order_one() -> None:
         (1, 3, 4),
         (2, 4, 5),
     )
+
+
+# ---------------------------------------------------------------------------
+# From tests/integration/test_fmm.py (2026-10 cleanup, Z-a)
+# ---------------------------------------------------------------------------
+
+
+def test_stf_symmetry_and_trace_free():
+    """Quadrupole, octupole, hexadecapole are symmetric and trace-free."""
+    key = jax.random.PRNGKey(1)
+    n = 10
+    pos = 0.2 * jax.random.normal(key, (n, 3))
+    mass = jax.random.uniform(key, (n,), minval=0.1, maxval=2.0)
+
+    exp = FMMEngine.compute_expansion(pos, mass, order=4)
+
+    # Quadrupole symmetry and trace-free
+    Q = exp.quadrupole
+    assert jnp.allclose(Q, jnp.swapaxes(Q, 0, 1), atol=1e-6)
+    tr_Q = jnp.trace(Q)
+    assert jnp.allclose(tr_Q, 0.0, atol=1e-5)
+
+    # Octupole: symmetric under pairwise swaps, single traces vanish
+    oct_t = exp.octupole
+    assert jnp.allclose(oct_t, jnp.transpose(oct_t, (1, 0, 2)), atol=1e-6)
+    assert jnp.allclose(oct_t, jnp.transpose(oct_t, (2, 1, 0)), atol=1e-6)
+    # single traces
+    tr1 = jnp.trace(oct_t, axis1=0, axis2=1)  # shape (3,)
+    tr2 = jnp.trace(oct_t, axis1=0, axis2=2)  # shape (3,)
+    tr3 = jnp.trace(oct_t, axis1=1, axis2=2)  # shape (3,)
+    assert jnp.allclose(tr1, 0.0, atol=1e-5)
+    assert jnp.allclose(tr2, 0.0, atol=1e-5)
+    assert jnp.allclose(tr3, 0.0, atol=1e-5)
+
+    # Hexadecapole: symmetric under swaps, single traces vanish
+    hex_t = exp.hexadecapole
+    assert jnp.allclose(hex_t, jnp.transpose(hex_t, (1, 0, 2, 3)), atol=1e-6)
+    assert jnp.allclose(hex_t, jnp.transpose(hex_t, (0, 2, 1, 3)), atol=1e-6)
+    assert jnp.allclose(hex_t, jnp.transpose(hex_t, (0, 1, 3, 2)), atol=1e-6)
+    # single traces along different pairs
+    tr_01 = jnp.trace(hex_t, axis1=0, axis2=1)  # (3,3)
+    tr_02 = jnp.trace(hex_t, axis1=0, axis2=2)  # (3,3)
+    tr_03 = jnp.trace(hex_t, axis1=0, axis2=3)  # (3,3)
+    assert jnp.allclose(tr_01, 0.0, atol=1e-4)
+    assert jnp.allclose(tr_02, 0.0, atol=1e-4)
+    assert jnp.allclose(tr_03, 0.0, atol=1e-4)
+    # double trace ~ 0
+    dt = jnp.trace(tr_01)
+    assert jnp.allclose(dt, 0.0, atol=1e-4)
