@@ -13,8 +13,16 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from yggdrax.tree import Tree, build_tree
 
+import jaccpot.upward.real_tree_expansions as real_upward_private
+from jaccpot import (
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    FMMPreset,
+    RuntimePolicyConfig,
+)
 from jaccpot.operators.real_harmonics import p2m_real_direct
 from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
 
@@ -200,3 +208,82 @@ def test_the_real_upward_refuses_every_centre_mode_but_com():
         tree, ps, ms, max_order=2, center_mode=" COM ", max_leaf_size=8
     ).multipoles.packed
     assert packed.shape[1] == 9
+
+
+# ---------------------------------------------------------------------------
+# From test_solver_api.py (2026-10 cleanup, Z-a): the real upward's default leaf batch
+# ---------------------------------------------------------------------------
+
+
+def _sample_problem(n: int = 64):
+    key = jax.random.PRNGKey(11)
+    key_pos, key_mass = jax.random.split(key)
+    positions = jax.random.uniform(
+        key_pos,
+        (n, 3),
+        minval=-1.0,
+        maxval=1.0,
+        dtype=jnp.float32,
+    )
+    masses = jax.random.uniform(
+        key_mass,
+        (n,),
+        minval=0.5,
+        maxval=1.5,
+        dtype=jnp.float32,
+    )
+    return positions, masses
+
+
+def test_real_upward_defaults_to_bounded_leaf_batch_size():
+    # The recorded batch size is min(num_leaves, _DEFAULT_LEAF_BATCH_SIZE) and
+    # expected_batch is recomputed from the actual tree below, so a small N is
+    # sufficient to exercise the leaf_batch_size=None default path.
+    positions, masses = _sample_problem(n=512)
+    fmm = FastMultipoleMethod(
+        preset=FMMPreset.FAST,
+        basis="solidfmm",
+        advanced=FMMAdvancedConfig(
+            runtime=RuntimePolicyConfig(upward_leaf_batch_size=None),
+        ),
+    )
+
+    build = fmm._impl._prepare_state_tree_and_upward(
+        positions_arr=positions,
+        masses_arr=masses,
+        bounds=None,
+        leaf_size=16,
+        max_order=2,
+        refine_local_val=False,
+        max_refine_levels_val=0,
+        aspect_threshold_val=16.0,
+        jit_tree_override=None,
+        upward_center_mode="com",
+        allow_stateful_cache=False,
+    )
+    num_internal = int(build.tree.num_internal_nodes)
+    num_leaves = int(build.tree.parent.shape[0]) - num_internal
+    expected_batch = min(num_leaves, real_upward_private._DEFAULT_LEAF_BATCH_SIZE)
+
+    recorded: list[int] = []
+    original = real_upward_private._p2m_leaves_real
+
+    def _recording_p2m(*args, **kwargs):
+        recorded.append(int(kwargs["leaf_batch_size"]))
+        return original(*args, **kwargs)
+
+    # The pure-JAX leaf P2M is the one that takes the batch size; the Pallas
+    # cascade (GPU only) does not, so pin it off for this check.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(real_upward_private, "_pallas_cascades_enabled", lambda: False)
+        mp.setattr(real_upward_private, "_p2m_leaves_real", _recording_p2m)
+        real_upward_private.prepare_real_upward_sweep(
+            build.tree,
+            build.positions_sorted,
+            build.masses_sorted,
+            max_order=2,
+            max_leaf_size=int(build.leaf_cap),
+            leaf_batch_size=None,
+        )
+
+    assert recorded == [expected_batch]

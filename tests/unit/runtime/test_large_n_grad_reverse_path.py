@@ -57,6 +57,16 @@ fp32 working dtype, 1130 active far pairs::
 Tolerances below carry ~5x headroom on the worst of those. Costs about 25 s to
 prepare and 115 s for the reverse compile, so the fixture is module-scoped and
 the expensive tests are marked ``slow`` by node id in ``tests/slow_tests.txt``.
+
+This module owns the large-N reverse property (the 2026-10 cleanup's rule R6), so
+two former modules are classes here, each with its own lane setup:
+
+* ``TestEveryFastPallasKernel`` (was ``test_grad_path_fast_kernels_large_n.py``):
+  the same lane with every Pallas kernel opened on CPU through its interpret flag,
+  the five reverse kernels COUNTED;
+* ``TestPallasCascades`` (was ``test_grad_path_pallas_cascades.py``): the default
+  solver's gradient through the Pallas M2M/L2L cascades and the leaf P2M, on the
+  real (CPU) backend profile.
 """
 
 from __future__ import annotations
@@ -69,9 +79,21 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, TreeConfig
+from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, GradConfig, TreeConfig
 from jaccpot.autodiff import direct_sum_gravitational_acceleration
+from jaccpot.pallas import (
+    cascade_real_level,
+    m2l_real_csr_lanes,
+    nearfield_leafpair_csr,
+    p2m_real_leaf,
+)
 from jaccpot.runtime._large_n_types import LargeNPreparedState
+from jaccpot.runtime._level_shapes import pallas_cascades_enabled
+from jaccpot.runtime.grad_options import grad_option_overrides, resolve_grad_options
+
+#: The real backend query, captured before `_open_the_backend_gate` patches it, for
+#: the tests that must run on the CPU's own profile (`TestPallasCascades`).
+_REAL_DEFAULT_BACKEND = jax.default_backend
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -371,3 +393,307 @@ def test_discarded_far_pairs_are_rejected_rather_than_differentiated_as_constant
     with pytest.raises(RuntimeError, match="compact_far_pairs"):
         fmm.differentiable_accelerations(state, positions, masses)
     assert states["static_radix"][1].compact_far_pairs is not None
+
+
+# ---------------------------------------------------------------------------
+# Every fast Pallas kernel, on CPU (was test_grad_path_fast_kernels_large_n.py).
+#
+# Plan ``fast-gradients-for-the-sub10ms-fmm``. The sub-10 ms forward at N = 2x10^5
+# runs five Pallas kernels: the leaf P2M, the per-level M2M and L2L cascades, the
+# pair-per-lane M2L over the far-pair CSR and the CSR row-chunk near field. Each
+# carries a ``custom_vjp`` whose reverse is a Pallas kernel of its own. This opens
+# every one of them on CPU through its interpret flag, differentiates the
+# production ``large_n_gpu`` path (the gates above: backend patched, prepacked
+# near-field layout forced, far pairs retained) and checks the gradient against
+# the direct-sum oracle -- and COUNTS the five reverse kernels, because a path that
+# quietly fell back to a pure-JAX lane would pass the accuracy check while
+# measuring nothing.
+#
+# Found while writing it (Phase 1 of the plan, GPU): the M2L CSR lanes kernel had
+# no gradient guard at all, so on an Ampere card ``jax.grad`` still died in
+# ``program_id`` after the Phase 0 fix -- the CPU tests never reached it because
+# the CSR M2L does not lower there. ``JACCPOT_M2L_CSR_INTERPRET=1`` reaches it.
+# ---------------------------------------------------------------------------
+
+_INTERPRET_FLAGS = {
+    "JACCPOT_CASCADE_PALLAS": "1",
+    "JACCPOT_CASCADE_PALLAS_INTERPRET": "1",
+    "JACCPOT_M2L_CSR_INTERPRET": "1",
+    "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
+    "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    _PAYLOAD_CAP_ENV: "0",  # the prepacked layout, as at N=200k
+}
+
+
+def _count_calls(monkeypatch, counts, module, name, key) -> None:
+    """Wrap ``module.name`` so each call increments ``counts[key]``.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Undoes the wrap at teardown.
+    counts : dict
+        The counters.
+    module : module
+        Where the kernel is looked up at call time.
+    name : str
+        The kernel's name.
+    key : str
+        Its counter.
+    """
+    real = getattr(module, name)
+
+    def counted(*args, **kwargs):
+        counts[key] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, counted)
+
+
+class TestEveryFastPallasKernel:
+    @pytest.fixture(scope="class", autouse=True)
+    def _every_pallas_lane_on_cpu(self) -> Iterator[None]:
+        patcher = pytest.MonkeyPatch()
+        for key, value in _INTERPRET_FLAGS.items():
+            patcher.setenv(key, value)
+        yield
+        patcher.undo()
+
+    @pytest.fixture(scope="class")
+    def prepared(self, _every_pallas_lane_on_cpu) -> tuple[Any, Any, Any, Any, Any]:
+        positions, masses, weight = _problem()
+        fmm = FastMultipoleMethod(
+            preset="large_n_gpu",
+            G=_G,
+            softening=_SOFTENING,
+            retain_far_pairs_for_grad=True,
+            use_pallas=True,
+        )
+        state = fmm.prepare_state(positions, masses, leaf_size=_LEAF, max_order=_ORDER)
+        assert isinstance(state, LargeNPreparedState)
+        assert (
+            int(getattr(state.radix_fast_payload, "source_particle_ids").size) == 0
+        )  # prepacked
+        assert state.compact_far_pairs is not None
+        return fmm, state, positions, masses, weight
+
+    @pytest.fixture
+    def reverse_counters(self, monkeypatch):
+        counts = {k: 0 for k in ("p2m", "m2m", "l2l", "m2l", "near")}
+        for module, name, key in (
+            (p2m_real_leaf, "p2m_real_leaves_reverse_pallas", "p2m"),
+            (cascade_real_level, "m2m_real_levels_reverse_pallas", "m2m"),
+            (cascade_real_level, "l2l_real_levels_reverse_pallas", "l2l"),
+            (m2l_real_csr_lanes, "m2l_real_csr_lanes_reverse_pallas", "m2l"),
+            (nearfield_leafpair_csr, "nearfield_leafpair_csr_reverse_pallas", "near"),
+        ):
+            _count_calls(monkeypatch, counts, module, name, key)
+        return counts
+
+    @pytest.fixture
+    def forward_counters(self, monkeypatch):
+        counts = {k: 0 for k in ("m2l_lanes", "near_csr")}
+        for module, name, key in (
+            (m2l_real_csr_lanes, "m2l_real_csr_lanes_pallas", "m2l_lanes"),
+            (nearfield_leafpair_csr, "nearfield_leafpair_csr_pallas", "near_csr"),
+        ):
+            _count_calls(monkeypatch, counts, module, name, key)
+        return counts
+
+    def test_the_far_field_is_load_bearing(self, prepared):
+        _, state, *_ = prepared
+        assert int(np.asarray(state.compact_far_pairs.far_pair_count)) > 0
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_grad_through_all_five_reverse_kernels_matches_the_direct_sum(
+        self, prepared, reverse_counters, forward_counters
+    ):
+        fmm, state, positions, masses, weight = prepared
+
+        def loss(p, m):
+            return jnp.sum(weight * fmm.differentiable_accelerations(state, p, m))
+
+        def oracle(p, m):
+            return jnp.sum(
+                weight
+                * direct_sum_gravitational_acceleration(
+                    p, m, G=_G, softening=_SOFTENING
+                )
+            )
+
+        forward = np.asarray(fmm.differentiable_accelerations(state, positions, masses))
+        assert (
+            forward_counters["m2l_lanes"] >= 1 and forward_counters["near_csr"] >= 1
+        ), forward_counters
+        assert reverse_counters == {k: 0 for k in reverse_counters}
+        got_p, got_m = jax.grad(loss, argnums=(0, 1))(positions, masses)
+        assert all(v == 1 for v in reverse_counters.values()), reverse_counters
+        want_p, want_m = jax.grad(oracle, argnums=(0, 1))(positions, masses)
+        assert np.all(np.isfinite(np.asarray(got_p))) and np.all(
+            np.isfinite(np.asarray(got_m))
+        )
+        rel_p = _relative_l2(got_p, want_p)
+        rel_m = _relative_l2(got_m, want_m)
+        assert rel_p < _RTOL, f"d/dpos rel-L2 {rel_p:.3e}"
+        assert rel_m < _RTOL, f"d/dmass rel-L2 {rel_m:.3e}"
+        ref_fwd = np.asarray(
+            direct_sum_gravitational_acceleration(
+                positions, masses, G=_G, softening=_SOFTENING
+            )
+        )
+        assert _relative_l2(forward, ref_fwd) < 5e-3
+
+
+# ---------------------------------------------------------------------------
+# The Pallas cascades under jax.grad (was test_grad_path_pallas_cascades.py).
+#
+# Phase 6 of the sub-10 ms plan made the per-level Pallas M2M/L2L cascades and the
+# leaf P2M default-ON while they had no autodiff rule; ``pallas_call``'s generic
+# JVP rule dies on ``program_id`` (no grid context), so ``jax.grad`` broke
+# everywhere Pallas lowers -- invisibly, because Pallas does not lower on CPU and
+# the gradient suite runs there. The first fix (d06dee0) forced the gradient path
+# onto the pure-JAX loops. The kernels now carry ``custom_vjp`` rules whose reverse
+# is a Pallas kernel of its own, so the gate stays ON under ``jax.grad`` and
+# ``GradConfig(cascade_pallas=False)`` is the A/B switch back to the loops.
+#
+# ``JACCPOT_CASCADE_PALLAS_INTERPRET=1`` makes the Pallas path reachable on CPU,
+# so this runs in ordinary CI. The reverse kernels are COUNTED, not assumed. These
+# run the default solver on the real backend profile, so the module's backend
+# gate is closed again for each of them.
+# ---------------------------------------------------------------------------
+
+_CASCADE_SOFT = 1e-2
+_CASCADE_LEAF = 8  # deep enough for a non-empty M2L list at N=1024
+
+
+def _plummer(n, seed=0):
+    rng = np.random.default_rng(seed)
+    x = rng.uniform(0.0, 1.0, size=n)
+    r = 1.0 / np.sqrt(x ** (-2.0 / 3.0) - 1.0)
+    mu = rng.uniform(-1.0, 1.0, size=n)
+    phi = rng.uniform(0.0, 2.0 * np.pi, size=n)
+    s = np.sqrt(1.0 - mu * mu)
+    return np.stack([r * s * np.cos(phi), r * s * np.sin(phi), r * mu], axis=1)
+
+
+def _plummer_system(n=1024, seed=3):
+    pos = jnp.asarray(_plummer(n, seed), jnp.float64)
+    mass = jnp.asarray(np.full(n, 1.0 / n), jnp.float64)
+    return pos, mass
+
+
+def _far_pairs(state) -> int:
+    """M2L pairs in the frozen topology. ZERO means the multipoles are dead code:
+    JAX never calls a custom_vjp's reverse for an output nothing depends on, and
+    the near field alone reproduces the direct sum -- the inertness trap of
+    ``test_grad_golden_leaf_size_is_what_makes_the_far_field_nonempty``. At
+    N=512 / leaf 32 / theta 0.5 that is exactly what happened, which is why the
+    first version of this test (d06dee0) could only fail through JVP tracing."""
+    inter = state.interactions
+    if inter is not None:
+        return int(jnp.sum(inter.counts))
+    dual = state.dual_tree_result
+    return int(jnp.sum(dual.far_pair_count)) if dual is not None else 0
+
+
+class TestPallasCascades:
+    @pytest.fixture
+    def pallas_cascades_on(self, monkeypatch):
+        """The real backend profile, with the Pallas cascades reachable on CPU."""
+        monkeypatch.setattr(jax, "default_backend", _REAL_DEFAULT_BACKEND)
+        monkeypatch.setenv("JACCPOT_CASCADE_PALLAS", "1")
+        monkeypatch.setenv("JACCPOT_CASCADE_PALLAS_INTERPRET", "1")
+        assert (
+            pallas_cascades_enabled()
+        ), "fixture is vacuous: the Pallas path is not reachable"
+
+    @pytest.fixture
+    def reverse_counters(self, monkeypatch):
+        """Count the three reverse kernels (the bwd rules look them up per call)."""
+        counts = {"m2m": 0, "l2l": 0, "p2m": 0}
+        for module, name, key in (
+            (cascade_real_level, "m2m_real_levels_reverse_pallas", "m2m"),
+            (cascade_real_level, "l2l_real_levels_reverse_pallas", "l2l"),
+            (p2m_real_leaf, "p2m_real_leaves_reverse_pallas", "p2m"),
+        ):
+            _count_calls(monkeypatch, counts, module, name, key)
+        return counts
+
+    def test_the_gate_stays_on_under_grad_and_the_config_turns_it_off(
+        self, pallas_cascades_on
+    ):
+        """Non-vacuous both ways: on inside the block, off with the config, restored."""
+        options = resolve_grad_options(None, num_particles=256, supports_fast_lane=True)
+        assert options.cascade_pallas is True
+        with grad_option_overrides(options):
+            assert pallas_cascades_enabled()
+        off = resolve_grad_options(
+            GradConfig(cascade_pallas=False),
+            num_particles=256,
+            supports_fast_lane=True,
+        )
+        assert off.cascade_pallas is False
+        with grad_option_overrides(off):
+            assert not pallas_cascades_enabled()
+        assert pallas_cascades_enabled()
+
+    @pytest.mark.filterwarnings("ignore::FutureWarning")
+    def test_grad_matches_the_direct_sum_through_the_reverse_pallas_kernels(
+        self, pallas_cascades_on, reverse_counters
+    ):
+        """``jax.grad`` with the Pallas cascades ON runs their reverses and is exact.
+
+        Before the custom_vjp seams this raised ``AssertionError`` from
+        ``jax/_src/pallas/core.py::axis_frame``; with the loops substituted it would
+        pass but the counters below would stay at zero.
+        """
+        pos, mass = _plummer_system()
+        fmm = FastMultipoleMethod(theta=0.5, softening=_CASCADE_SOFT, G=1.0)
+        state = fmm.prepare_state(pos, mass, max_order=4, leaf_size=_CASCADE_LEAF)
+        assert (
+            _far_pairs(state) > 0
+        ), "vacuous configuration: no far pairs, the cascades are dead code"
+
+        def loss(p):
+            return jnp.sum(fmm.differentiable_accelerations(state, p, mass) ** 2)
+
+        got = np.asarray(jax.grad(loss)(pos))
+        ref = np.asarray(
+            jax.grad(
+                lambda p: jnp.sum(
+                    direct_sum_gravitational_acceleration(
+                        p, mass, G=1.0, softening=_CASCADE_SOFT
+                    )
+                    ** 2
+                )
+            )(pos)
+        )
+        assert reverse_counters == {"m2m": 1, "l2l": 1, "p2m": 1}, reverse_counters
+        assert np.all(np.isfinite(got))
+        assert np.linalg.norm(got) > 0
+        rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
+        assert (
+            rel < 1e-5
+        ), f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"
+
+    @pytest.mark.filterwarnings("ignore::FutureWarning")
+    def test_pallas_and_pure_jax_reverses_agree(
+        self, pallas_cascades_on, reverse_counters
+    ):
+        """``GradConfig(cascade_pallas=False)`` runs the loops and gives the same gradient."""
+        pos, mass = _plummer_system(seed=5)
+        fmm = FastMultipoleMethod(theta=0.5, softening=_CASCADE_SOFT, G=1.0)
+        state = fmm.prepare_state(pos, mass, max_order=4, leaf_size=_CASCADE_LEAF)
+        assert _far_pairs(state) > 0
+
+        def loss(p, cfg):
+            return jnp.sum(
+                fmm.differentiable_accelerations(state, p, mass, grad_config=cfg) ** 2
+            )
+
+        g_loops = np.asarray(jax.grad(loss)(pos, GradConfig(cascade_pallas=False)))
+        assert reverse_counters == {"m2m": 0, "l2l": 0, "p2m": 0}
+        g_pallas = np.asarray(jax.grad(loss)(pos, GradConfig(cascade_pallas=True)))
+        assert reverse_counters == {"m2m": 1, "l2l": 1, "p2m": 1}
+        rel = np.linalg.norm(g_pallas - g_loops) / np.linalg.norm(g_loops)
+        assert rel < 1e-9, f"Pallas reverse vs loop reverse rel-L2 {rel:.3e}"

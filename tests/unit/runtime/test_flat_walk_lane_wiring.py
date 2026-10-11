@@ -5,7 +5,7 @@ Pattern of ``test_m2l_csr_lane_wiring.py``: a lane that is silently not reached
 would pass any parity check, so the builder entry is counted. The strict fused
 lane that owns this seam exists only above the large-N threshold on a GPU
 (``LargeNPreparedState``), so this runs in the ordinary GPU suite at N=70k with
-the env of ``tests/integration/test_strict_run_v2_refresh_capacity.py``.
+the env of ``tests/integration/strict/test_strict_run_v2.py::TestRefreshCapacity``.
 """
 
 from __future__ import annotations

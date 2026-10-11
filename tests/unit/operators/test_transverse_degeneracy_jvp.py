@@ -289,8 +289,14 @@ _FP32_RHOS = [
 ]
 
 
+# The two rho that between them catch every regression named below: exactly on the
+# axis (the defect's own (0, 0)), and 1e-6, inside the float32 band but outside the
+# float64 one. Mutation-checked (2026-10-11): a band narrowed to `rho_sq > 0` fails
+# 1e-6 and 1e-12 on all three cascades, an `eps` read from a float64 constant fails
+# 1e-6 only. So the 2026-10 cleanup's grid rule R4 dropped 1e-12 ("deep inside the
+# band") on this test; the fused-Pallas test below keeps all three.
 @pytest.mark.parametrize("operator", _REAL_CASCADES)
-@pytest.mark.parametrize("rho", _FP32_RHOS)
+@pytest.mark.parametrize("rho", [_FP32_RHOS[0], _FP32_RHOS[2]])
 def test_the_analytic_branch_holds_at_float32(operator: Callable, rho: float) -> None:
     """Inside the float32 band the float32 transverse gradient must track float64.
 
@@ -298,8 +304,8 @@ def test_the_analytic_branch_holds_at_float32(operator: Callable, rho: float) ->
     ``rho`` values four orders of magnitude larger. Inside it the analytic branch is the
     ``rho -> 0`` limit and errs ``O(rho/r)``, so agreement with the float64 gradient
     should be at float32 round-off and nowhere near the ``3.4e-04`` worst case the
-    minimax crossover permits *on the boundary*. Measured worst over these three ``rho``
-    and both signs of ``z``: 1.1e-06.
+    minimax crossover permits *on the boundary*. Measured worst over the three
+    ``_FP32_RHOS`` and both signs of ``z``: 1.1e-06.
 
     What the tolerance is really guarding is that the error does not *blow up* inside
     the band. The polar route errs ``O(eps r / rho)``, which at ``rho = 1e-12``,

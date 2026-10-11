@@ -411,8 +411,10 @@ DEGENERATE_L2P_DELTAS = [
 ]
 
 
+# Orders at the corners: the lowest, the production p4 and the highest (the 2026-10
+# cleanup's grid rule R4 dropped p2 here and below).
 @pytest.mark.parametrize("label,delta", DEGENERATE_L2P_DELTAS, ids=lambda v: str(v))
-@pytest.mark.parametrize("order", [1, 2, 4, 6])
+@pytest.mark.parametrize("order", [1, 4, 6])
 def test_evaluate_local_real_grad_at_rho_zero_matches_limit(label, delta, order):
     """L2P gradient at rho == 0 equals the limit from a tiny transverse nudge.
 
@@ -468,7 +470,7 @@ def test_evaluate_local_real_grad_at_origin_is_the_degree_one_term():
 
 
 @pytest.mark.parametrize("label,delta", DEGENERATE_L2P_DELTAS, ids=lambda v: str(v))
-@pytest.mark.parametrize("order", [1, 2, 4])
+@pytest.mark.parametrize("order", [1, 4])
 def test_p2m_real_direct_jacobian_at_rho_zero_matches_limit(label, delta, order):
     """P2M has the same rho == 0 degeneracy as L2P, and the same fix.
 

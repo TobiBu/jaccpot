@@ -636,8 +636,7 @@ def test_mutual_nearfield_kernel_is_bitwise_antisymmetric(interpret):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("basis", ["real"])
-def test_fused_m2l_vjp_env_off_falls_back_and_agrees(basis, monkeypatch):
+def test_fused_m2l_vjp_env_off_falls_back_and_agrees(monkeypatch):
     """``JACCPOT_FUSED_M2L_VJP=0`` must select the twin's autodiff and agree with it.
 
     The flag's own docstring calls the fallback "the correctness reference -- identical
@@ -660,7 +659,6 @@ def test_fused_m2l_vjp_env_off_falls_back_and_agrees(basis, monkeypatch):
     if not jax.config.jax_enable_x64:
         pytest.skip("requires x64 for a tight tolerance")
 
-    assert basis == "real"  # the complex lane went with its basis (2026-10, C)
     from jaccpot.pallas import m2l_real_fused as module
 
     order = 2

@@ -35,14 +35,11 @@ def test_accepts_legacy_expanse_kwargs_with_deprecation_warning():
         fmm = FastMultipoleMethod(
             preset="fast",
             expansion_basis="real",
-            complex_rotation="solidfmm",
+            # `complex_rotation`, `grouped_interactions=False` and `farfield_mode`
+            # are shims now: tests/unit/test_removed_options.py (2026-10, Z-a).
             mac_type="dehnen",
             fixed_order=4,
             fixed_max_leaf_size=16,
-            # False: the grouped far field went in the 2026-10 cleanup (X3), and
-            # True now raises (test_solver_api pins that); the kwarg still parses.
-            grouped_interactions=False,
-            farfield_mode="pair_grouped",
             nearfield_mode="bucketed",
             nearfield_edge_chunk_size=256,
             theta=0.6,
