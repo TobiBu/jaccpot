@@ -58,6 +58,7 @@ On `main` at 6cca378 (2026-10-06):
 | Z-a | #392 | Test consolidation (T1, rules R2-R7): the bench-tooling tests move to `bench/tests`; one signature-contract table; grid corners; `tests/integration/strict/`; one owner per gradient property; `test_fmm.py` and `test_solver_api.py` split by subject; the removed-option and shim tests collected in `test_removed_options.py` for Z-b. Tests only | CPU suite, shard partition, bench-tooling tests | merged |
 | Z-b | #393 | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | open |
 | Z-c | | CI and docs: `slow_tests.txt` rebuilt from durations; a curated `smoke` marker run by the Python-floor job; the criterion and nornax-distributed jobs path-gated (main, nightly, dispatch, PRs touching their code); caps at about twice the measured times; stale marker ids fail `test-partition`; ARCHITECTURE, README, the docs index and the current docs follow the cleanup; notebooks stop passing removed options; the `CLAUDE.md` amendment reverted. Library: comments only | CPU suite, shard partition, smoke run, actionlint, bench tooling | open |
+| fix | #398 | The fused two-card lane on jax 0.11.2: XLA's NCCL ragged exchange needs `use_barrier_with_nccl=false`; `RAGGED_EXCHANGE_XLA_FLAGS`, bench flag helper, pure-JAX repro; yggdrax guard (yggdrax #95) | pure-JAX repro matrix, rollout gate, exchange bench, distributed grad tier, pins M1-M3 (two cards) | open |
 
 ### P0: CI runs each test once
 
@@ -328,7 +329,7 @@ shared with another user's ~4 GB jobs; these runs are untimed.
 | pin | lane | result |
 | --- | --- | --- |
 | M1 | `distributed/fmm.py` as Odisseo's mesh lane builds it (`MeshOptions` defaults: leaf 512, theta 0.7, p6, rcb), one force at 131,072 | rel-L2 1.85e-4 vs fp64 direct, no overflow; bitwise vs `main` |
-| M2 | `bench/multigpu_rollout_gate.py`, 1e5, 17 steps, repartition every 8 | **not recorded**, see below |
+| M2 | `bench/multigpu_rollout_gate.py`, 1e5, 17 steps, repartition every 8 | not recorded here; recorded 2026-10-12, see "The fused two-card lane on jax 0.11.2" |
 | M3 | `DistributedBlockStepFMM` (jax backend, cross_theta 0.5), 4 base steps at 8192 | momentum drift 6.9e-10; bitwise vs `main` |
 
 The A-vs-A control at `main` is bitwise for M1 and M3. So X1's distributed changes and
@@ -345,8 +346,9 @@ is not part of this cleanup.**
 - `bench/distributed_gate.py`'s target ran without the flag: four tests passed, then
   `test_forward_survives_a_gradient` hung the same way.
 
-To be investigated separately. Until then, the fused multi-GPU lane (`FusedRollout`) has
-no GPU gate on jax 0.11.2.
+Resolved 2026-10-12: XLA's NCCL ragged exchange is broken while
+`use_barrier_with_nccl` is on, and jax 0.11 turned that on by default. See "The fused
+two-card lane on jax 0.11.2" at the end of this record.
 
 ### Pin baseline re-recorded at 15ceca4
 
@@ -3264,3 +3266,98 @@ tests/characterization` 1,616 passed, 191 skipped, 1 failed -- the known stale-n
 touched files under `JAX_ENABLE_X64=1` (the timing runs above, both arms) all passed;
 pre-commit clean on every touched file.
 
+
+## The fused two-card lane on jax 0.11.2 (2026-10-12)
+
+**The symptom** (2026-10-08, pin M2, see G3 above). With jaccpot's recommended NCCL
+flag, XLA refused the exchange. With the fallback allowed, the rollout gate hung in its
+first exchange. It was not caused by the cleanup.
+
+**The cause is XLA's NCCL ragged exchange with `use_barrier_with_nccl` on**, which
+jax 0.11 made the default. Reproduced in pure JAX
+(`bench/repro_jax_ragged_all_to_all_nccl_fallback.py`, no jaccpot, no yggdrax) on two
+A100s in one process (GPUs 3+5, across sockets), width 56 float32, 10 calls each:
+
+| jax | exchange | 1, 64 rows (<= 14 KB) | 512 ... 16,384 rows (115 KB ... 3.7 MB) |
+| --- | --- | --- | --- |
+| 0.11.2 | default one-shot kernel | | 10/10 (16,384) |
+| 0.11.2 | NCCL fallback, barrier on (the 0.11 default) | 10/10 | call 0 returns only the self blocks (the remote half keeps the fill value); call 1 never returns |
+| 0.11.2 | NCCL fallback, `use_barrier_with_nccl=false` | 10/10 | 10/10 |
+| 0.10.2 | NCCL fallback, barrier off (the 0.10 default) | | 10/10 (16,384) |
+| 0.10.2 | NCCL fallback, `use_barrier_with_nccl=true` | | the same failure (16,384) |
+
+- **Old bug, new default.** The defect is older than 0.11. jax 0.11's XLA (91888df6)
+  turned the barrier on by default, where 0.10.2's (5a9e73cb) left it off. So the
+  one-flag setting jaccpot recommended (`one_shot_kernel=false`), safe on 0.10,
+  deadlocks on 0.11.
+- **Not the cause:**
+  - The NCCL library: jax 0.10.2 with 0.11.2's NCCL 2.32.3 is clean.
+  - CUDA command buffers: turning them off does not help.
+  - XLA's send/recv code: unchanged between the two XLA commits apart from macro
+    renames.
+- **What the hang looks like.**
+  - All XLA execute threads are idle, the host waits in `BlockUntilReady`, and both
+    GPUs spin at 100 %.
+  - NCCL's debug log shows matching send/recv counts on both ranks. The receive
+    buffers sit in NCCL's symmetric VA window, and only when the barrier is on.
+  - With the barrier on, the optimized HLO puts the ragged output in memory space
+    `S(1)` and the program's root copies it out.
+- **The message size matters.** The repro script's first version, which sent two
+  floats each way, passed in every mode. At 16,384 rows, a broader scratch harness
+  passes with the barrier off: repeated calls, donation, two executables alternating,
+  four exchanges in one program, and a gradient through the exchange.
+
+**Fix.**
+- `fused.RAGGED_EXCHANGE_XLA_FLAG` became `RAGGED_EXCHANGE_XLA_FLAGS`, three flags:
+  - the one-shot kernel off;
+  - the NCCL fallback allowed (0.11 refuses it otherwise);
+  - `use_barrier_with_nccl=false`.
+- The evaluator's warning names each missing flag. When the NCCL path is selected
+  without the barrier flag, it says the setting deadlocks, rather than that it is slow.
+- `bench/_ragged_exchange_flags.py` holds the flags for bench scripts. They set
+  `XLA_FLAGS` before jax starts and cannot import jaccpot, because that import starts
+  the backend. `bench/tests/test_ragged_exchange_flags.py` pins the copy to the
+  library's constant and fails on any script that hardcodes the one-shot flag again: a
+  stale copy in the gate, the C4 probe and pin M2 is how this went unnoticed. They all
+  use the helper now.
+- **yggdrax #95:** `ragged_all_to_all_exchange` raises at trace time when a
+  native GPU exchange would run under the broken flags (`ragged_native_flag_hazard`).
+  That covers the mesh, fused, rollout and mutual lanes alike.
+- **Upstream:** `docs/xla_ragged_nccl_barrier_bug_report.md`, a draft for openxla/xla.
+
+**Measured.** Same two cards, untimed except the exchange bench.
+- **The M2 gate** (`multigpu_rollout_gate.py`, 1e5, 17 steps, repartition every 8)
+  passes on both exchanges. Probes vs an fp64 direct sum at steps 1 / 16 / 17:
+  - with `RAGGED_EXCHANGE_XLA_FLAGS`: 8.598e-4 / 8.438e-4 / 7.916e-4;
+  - on XLA's default one-shot kernel: the same to four digits. Positions differ by at
+    most 2.4e-7, the gate running without deterministic ops.
+  - Both: 2 repartitions, 1,651 particles moved.
+- **The exchange bench** (`bench/results/multigpu_exchange_jax0112/`) says to keep
+  NCCL. It is still 3.6-6.6x faster than the default on the cross field's large
+  messages (65,536 rows of 312 float32: 6.4-7.0 vs 37.5 ms); the ragged decomposer is
+  the runner-up at 1.0-1.4x NCCL's time. Every row is correct in every mode.
+- **The distributed gradient tier** (`tests/distributed/test_distributed_grad_correctness.py`,
+  x64, deterministic ops, the opt-in upstream check on): 10/10 on XLA's default, and
+  10/10 with `RAGGED_EXCHANGE_XLA_FLAGS`.
+  - **Open:** on 2026-10-08 this tier hung at `test_forward_survives_a_gradient` with
+    no flag set. That was on GPUs 2+3 (one PCIe switch), with jaccpot 3a4bfc7 and
+    yggdrax 9372332, and one GPU spun while the other idled. It does not reproduce on
+    3+5 at e25633d. A PIX pair was not free to tell topology from code.
+- **Pins** (`bench/dce_pins.py`, deterministic ops):
+  - **M1 and M3 on `main` e25633d are bitwise** vs `main-15ceca4`, with metadata
+    equal: M1 rel-L2 1.853e-4, no overflow; M3 momentum drift 6.85e-10. Every change
+    merged since 15ceca4 leaves the mesh and block-step lanes unchanged, on a different
+    card pair too. Summary: `bench/results/dce/pins_main-e25633d.json`.
+  - **M2 is recorded for the first time**, on this fix: tag `fix-27372d6`, control
+    `fix-27372d6-b`. Its A-vs-A is **not bitwise**, even with deterministic ops.
+    Positions differ by up to 2.4e-7 (about one fp32 ulp, rel-L2 5e-10) at steps 16/17,
+    and by 1.9e-9 already at step 1. So the two-card force carries ulp-level
+    nondeterminism that XLA's flag does not reach; the single-card pins are bitwise.
+    Probes agree to 5 digits, and the repartitions match.
+  - Later phases compare M2 with `--envelope fix-27372d6-b`. The metadata check now
+    gives nested floats the top-level 2-digit tolerance: before, the probes (a dict of
+    dicts) were compared exactly, and M2 failed against its own control.
+    Summary: `bench/results/dce/pins_fix-27372d6.json`.
+- **A trap in the hunt:** a two-minute no-progress watchdog killed the default-exchange
+  gate during its first compile, which looked like a second hang. A watchdog for these
+  runs has to read the stack and count time inside XLA's compiler as progress.

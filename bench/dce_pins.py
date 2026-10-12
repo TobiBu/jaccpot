@@ -395,11 +395,7 @@ def case_m2(out: Path) -> dict:
         GATE_EVERY=str(every),
         GATE_OUT=str(gate_dir),
     )
-    # The gate selects XLA's NCCL ragged exchange (fused.RAGGED_EXCHANGE_XLA_FLAG);
-    # from jax 0.11 XLA refuses that fallback unless it is allowed explicitly.
-    allow = "--xla_gpu_allow_ragged_all_to_all_nccl_send_recv_fallback=true"
-    if allow.split("=")[0] not in env.get("XLA_FLAGS", ""):
-        env["XLA_FLAGS"] = (env.get("XLA_FLAGS", "") + " " + allow).strip()
+    # The gate sets XLA's NCCL ragged exchange itself (bench/_ragged_exchange_flags.py).
     subprocess.run(
         [sys.executable, str(HERE / "multigpu_rollout_gate.py")], env=env, check=True
     )
@@ -529,6 +525,20 @@ def _diff(a: Path, b: Path) -> dict:
     return rows
 
 
+def _meta_matches(ref, new) -> bool:
+    """Floats agree to 2 significant digits, at any depth; everything else exactly.
+
+    Nested so that M2's per-step probe errors (a dict of dicts) get the same tolerance
+    as a top-level float: M2's A-vs-A control is not bitwise (ulp-level, see the
+    cleanup record), and an exact match on its probes would fail every comparison.
+    """
+    if isinstance(ref, float) and isinstance(new, float):
+        return f"{ref:.2g}" == f"{new:.2g}"
+    if isinstance(ref, dict) and isinstance(new, dict):
+        return all(_meta_matches(val, new.get(key)) for key, val in ref.items())
+    return ref == new
+
+
 def _compare(args) -> int:
     root = Path(args.root)
     ref, new = root / args.ref, root / args.new
@@ -562,13 +572,8 @@ def _compare(args) -> int:
                     passed = False
                 elif row["max_abs"] > 2.0 * c["max_abs"]:
                     passed = False
-            for key, val in meta_ref.items():
-                other = meta_new.get(key)
-                if isinstance(val, float) and isinstance(other, float):
-                    if f"{val:.2g}" != f"{other:.2g}":
-                        passed = False
-                elif val != other:
-                    passed = False
+            if not _meta_matches(meta_ref, meta_new):
+                passed = False
             entry["pass"] = passed
             ok = ok and passed
         report[pin] = entry

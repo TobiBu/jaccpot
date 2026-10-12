@@ -1,0 +1,72 @@
+{
+ "a_vs_a": {
+  "M2": {
+   "arrays": {
+    "positions_step1": {
+     "bitwise": false,
+     "max_abs": 1.862645149230957e-09,
+     "rel_l2": 1.3900680155523926e-12
+    },
+    "positions_step16": {
+     "bitwise": false,
+     "max_abs": 2.384185791015625e-07,
+     "rel_l2": 4.674879734200634e-10
+    },
+    "positions_step17": {
+     "bitwise": false,
+     "max_abs": 2.384185791015625e-07,
+     "rel_l2": 4.892589520591459e-10
+    }
+   },
+   "meta": {
+    "new": {
+     "moved_total": 1651,
+     "n": 100000,
+     "probes": {
+      "1": {
+       "err": 0.0008598315284953285
+      },
+      "16": {
+       "err": 0.0008438044828506681
+      },
+      "17": {
+       "err": 0.0007916009800709727
+      }
+     },
+     "repartitions": 2
+    },
+    "ref": {
+     "moved_total": 1651,
+     "n": 100000,
+     "probes": {
+      "1": {
+       "err": 0.0008598346906136312
+      },
+      "16": {
+       "err": 0.0008438071200268219
+      },
+      "17": {
+       "err": 0.0007915986505519955
+      }
+     },
+     "repartitions": 2
+    }
+   },
+   "pass": true
+  }
+ },
+ "cards": {
+  "two": "A100-PCIE-40GB x2, GPUs 3+5 of compgpu9 (across CPU sockets; GPU 5 user-approved, GPU 3 carried another user's ~3 GB job; untimed)"
+ },
+ "control": "fix-27372d6-b",
+ "deterministic_ops": true,
+ "jax": "0.11.2",
+ "library": "jaccpot fix/ragged-nccl-barrier 27372d6 (main e25633d + RAGGED_EXCHANGE_XLA_FLAGS; the gate sets them via bench/_ragged_exchange_flags.py), frozen worktree; yggdrax fix/ragged-nccl-barrier-guard 29f0f6c (main 1f0e36f + the flag guard)",
+ "notes": {
+  "M2": "first record of M2 (on main it hangs: the NCCL exchange with use_barrier_with_nccl on). A-vs-A is NOT bitwise even with --xla_gpu_deterministic_ops=true: positions differ by up to 2.4e-7 (about one fp32 ulp, rel-L2 5e-10) at steps 16/17 and by 1.9e-9 at step 1, so the first two-card force is nondeterministic at the ulp level; probes 8.598e-4 / 8.438e-4 / 7.916e-4 agree to 5 digits, 2 repartitions moving 1,651 in both. Compare later phases with --envelope fix-27372d6-b (nested meta floats at 2 significant digits since this commit)."
+ },
+ "pins": [
+  "M2"
+ ],
+ "tag": "fix-27372d6"
+}

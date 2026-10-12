@@ -18,9 +18,11 @@ counts the lane uses, so the XLA implementation can be chosen from numbers:
 The XLA implementation is chosen by the CALLER through ``XLA_FLAGS`` -- one process per
 setting, since the flags are read once when the backend starts:
 
-    --xla_gpu_ragged_all_to_all_mode=COLLECTIVES_{PEER,PRIVATE,SYMMETRIC}_MEMORY
-    --xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false
+    --xla_gpu_ragged_all_to_all_mode={peer,private,symmetric}
+    the NCCL path: jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAGS (all three flags;
+        with the one-shot flag alone, jax 0.11 deadlocks: see that constant)
     --xla_gpu_unsupported_enable_ragged_all_to_all_decomposer=true
+    --xla_gpu_experimental_ragged_all_to_all_use_device_kernel=true
 
     CUDA_VISIBLE_DEVICES=1,2 BENCH_LABEL=default BENCH_JSON=out.json python bench/multigpu_exchange_bench.py
 """
