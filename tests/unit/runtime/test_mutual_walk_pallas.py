@@ -18,8 +18,20 @@ from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
 from jaccpot.runtime._mac_geometry import com_mac_geometry
 from tests.unit._typecheck_budget import trim
 
-_KINDS = trim(["cells", "buckets"])
-_THETAS = trim([0.8, 0.5])
+# Every PAIR of (tree kind, theta, node layout) values, in four cases rather than
+# the eight-case grid (2026-10-12). Each factor drives a different part of the walk
+# and none of the three was ever seen to interact with another, so a pairwise cover
+# keeps each factor's effect and each two-way combination. The first two cases --
+# both layouts, the most representative -- are what a trimmed run keeps.
+_PAIRWISE_CASES = trim(
+    [
+        ("soa", 0.8, "cells"),
+        ("record", 0.5, "cells"),
+        ("record", 0.8, "buckets"),
+        ("soa", 0.5, "buckets"),
+    ],
+    keep=2,
+)
 
 
 def _plummer(n, seed=0):
@@ -39,9 +51,7 @@ def _sets(res):
     return set(zip(fa.tolist(), fb.tolist())), set(zip(na.tolist(), nb.tolist()))
 
 
-@pytest.mark.parametrize("kind", _KINDS)
-@pytest.mark.parametrize("theta", _THETAS)
-@pytest.mark.parametrize("node_layout", ["soa", "record"])
+@pytest.mark.parametrize("node_layout,theta,kind", _PAIRWISE_CASES)
 def test_pallas_walk_lists_equal_the_flat_walk_as_sets(kind, theta, node_layout):
     # Interpret-mode cost tracks the PAIR count, not n: 800 particles at leaf 4 ran
     # SLOWER than 4000 at leaf 16 (more leaves -> 43k far pairs). The typecheck job is

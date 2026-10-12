@@ -117,16 +117,72 @@ def _rel_l2(a, b):
     return float(np.linalg.norm(a - b) / (denom if denom else 1.0))
 
 
+# conftest clears JAX's caches after every test in this file, so a shared SHAPE
+# saves nothing here; the fixtures below share built RESULTS instead (states,
+# payloads, a forward), which survive it. A module fixture is built once per xdist
+# worker that asks for it, so each one's users carry an `xdist_group` and CI's
+# `-n 2 --dist loadgroup` keeps them on one worker.
+_PAYLOAD_CASE_USERS = pytest.mark.xdist_group("nearfield_fastlane_payload_cases")
+_N256_USERS = pytest.mark.xdist_group("nearfield_fastlane_n256")
+
+
+@pytest.fixture(scope="module")
+def payload_case():
+    """``(n, leaf) -> (fmm, state, view, payload)``, each built once per module.
+
+    The default ``_prepared`` system (order 3, theta 0.5, real basis, seed 0), its
+    near-field view and its leaf-major payload.
+
+    Returns
+    -------
+    Callable[[int, int], tuple]
+        The lazy, memoized builder.
+    """
+    built = {}
+
+    def get(n, leaf):
+        if (n, leaf) not in built:
+            fmm, state, _, _ = _prepared(n, leaf=leaf)
+            built[(n, leaf)] = (fmm, state, _nearfield_view(state), _payload(state, n))
+        return built[(n, leaf)]
+
+    return get
+
+
+@pytest.fixture(scope="module")
+def fast_lane_256():
+    """The N=256, order-4, leaf-16 system and its bucketed (shipped) forward.
+
+    The forward is taken with the fast-lane flag cleared for the call, as the
+    tests that compare against it did.
+
+    Returns
+    -------
+    dict
+        ``fmm``, ``state``, ``positions``, ``masses`` and ``acc_bucketed``.
+    """
+    fmm, state, positions, masses = _prepared(256, leaf=16, order=4)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv(FAST_LANE_ENV, raising=False)
+        acc_bucketed = fmm.differentiable_accelerations(state, positions, masses)
+    return {
+        "fmm": fmm,
+        "state": state,
+        "positions": positions,
+        "masses": masses,
+        "acc_bucketed": acc_bucketed,
+    }
+
+
 # ---------------------------------------------------------------------------
 # The payload enumerates the same edge set as the bucketed lane
 # ---------------------------------------------------------------------------
 
 
+@_PAYLOAD_CASE_USERS
 @pytest.mark.parametrize("n,leaf", [(192, 16), (320, 8), (512, 32)])
-def test_leaf_major_payload_matches_bucketed_near_field(n, leaf):
-    fmm, state, _, _ = _prepared(n, leaf=leaf)
-    view = _nearfield_view(state)
-    payload = _payload(state, n)
+def test_leaf_major_payload_matches_bucketed_near_field(payload_case, n, leaf):
+    fmm, state, view, payload = payload_case(n, leaf)
     positions_sorted = state.positions_sorted
     masses_sorted = state.masses_sorted
 
@@ -135,12 +191,11 @@ def test_leaf_major_payload_matches_bucketed_near_field(n, leaf):
     assert _rel_l2(bucketed, fastlane) < 1e-13
 
 
+@_PAYLOAD_CASE_USERS
 @pytest.mark.parametrize("n,leaf", [(192, 16), (320, 8)])
-def test_leaf_major_payload_near_field_gradients_match_bucketed(n, leaf):
+def test_leaf_major_payload_near_field_gradients_match_bucketed(payload_case, n, leaf):
     """Positions AND masses -- the analytic leaf-pair reverse must match autodiff."""
-    fmm, state, _, _ = _prepared(n, leaf=leaf)
-    view = _nearfield_view(state)
-    payload = _payload(state, n)
+    fmm, state, view, payload = payload_case(n, leaf)
     positions_sorted = state.positions_sorted
     masses_sorted = state.masses_sorted
 
@@ -163,11 +218,10 @@ def test_leaf_major_payload_near_field_gradients_match_bucketed(n, leaf):
     assert bool(jnp.all(jnp.isfinite(g_fastlane[1])))
 
 
-def test_payload_covers_every_valid_neighbour_edge():
+@_PAYLOAD_CASE_USERS
+def test_payload_covers_every_valid_neighbour_edge(payload_case):
     """Edge-count identity: padded slots dropped, real neighbours all present."""
-    _, state, _, _ = _prepared(320, leaf=8)
-    view = _nearfield_view(state)
-    payload = _payload(state, 320)
+    _, state, view, payload = payload_case(320, 8)
     offsets = np.asarray(view.offsets)
     neighbors = np.asarray(view.neighbors)
     leaf_nodes = np.asarray(view.leaf_nodes)
@@ -230,22 +284,24 @@ def test_payload_handles_a_tree_with_no_cross_leaf_neighbours():
     assert _rel_l2(direct, near) < 1e-12
 
 
-def test_payload_is_memoized_per_topology():
+@_PAYLOAD_CASE_USERS
+def test_payload_is_memoized_per_topology(payload_case):
+    _, state, _, _ = payload_case(192, 16)
     clear_nearfield_fastlane_payload_cache()
-    _, state, _, _ = _prepared(192, leaf=16)
     first = _payload(state, 192)
     second = _payload(state, 192)
     assert first is second
 
 
-def test_payload_builder_rejects_traced_topology():
+@_PAYLOAD_CASE_USERS
+def test_payload_builder_rejects_traced_topology(payload_case):
     """A payload built from tracers would silently mis-size the padded block.
 
     Under an outer ``jax.jit`` every ``jnp`` op is staged out even on concrete
     constants, so the max-neighbour reduction that sizes the block cannot be read
     back. That has to be a loud error, not a fallback.
     """
-    _, state, _, _ = _prepared(192, leaf=16)
+    _, state, _, _ = payload_case(192, 16)
     args = nearfield_topology_arrays(
         state.tree, state.neighbor_list, state.nearfield_interop
     )
@@ -470,15 +526,20 @@ def test_analytic_reverse_matches_autodiff_under_skewed_occupancy():
 # ---------------------------------------------------------------------------
 
 
+@_N256_USERS
 @pytest.mark.parametrize("basis", ["real"])
-def test_differentiable_accelerations_fast_lane_matches_bucketed(basis, monkeypatch):
-    fmm, state, positions, masses = _prepared(256, leaf=16, order=4, basis=basis)
+def test_differentiable_accelerations_fast_lane_matches_bucketed(
+    basis, monkeypatch, fast_lane_256
+):
+    assert basis == "real"  # the fixture's basis: the only one
+    fmm, state = fast_lane_256["fmm"], fast_lane_256["state"]
+    positions, masses = fast_lane_256["positions"], fast_lane_256["masses"]
 
     def loss(p, m):
         return jnp.sum(fmm.differentiable_accelerations(state, p, m) ** 2)
 
     monkeypatch.delenv(FAST_LANE_ENV, raising=False)
-    acc_bucketed = fmm.differentiable_accelerations(state, positions, masses)
+    acc_bucketed = fast_lane_256["acc_bucketed"]
     grad_bucketed = jax.grad(loss, argnums=(0, 1))(positions, masses)
 
     monkeypatch.setenv(FAST_LANE_ENV, "1")
@@ -574,17 +635,17 @@ def test_fused_pallas_fast_lane_matches_bucketed_end_to_end(monkeypatch):
     assert bool(jnp.all(jnp.isfinite(grad_pallas[1])))
 
 
-def test_fast_lane_survives_an_outer_jit(monkeypatch):
+@_N256_USERS
+def test_fast_lane_survives_an_outer_jit(monkeypatch, fast_lane_256):
     """Regression: the payload must be host-built, not staged into the jaxpr.
 
     Wrapping the whole call in ``jax.jit`` turns every ``jnp`` op on the frozen
     topology into a tracer, which is what broke the first cut of this lane (the
     max-neighbour reduction that sizes the padded source block).
     """
-    fmm, state, positions, masses = _prepared(256, leaf=16, order=4)
-
-    monkeypatch.delenv(FAST_LANE_ENV, raising=False)
-    reference = fmm.differentiable_accelerations(state, positions, masses)
+    fmm, state = fast_lane_256["fmm"], fast_lane_256["state"]
+    positions, masses = fast_lane_256["positions"], fast_lane_256["masses"]
+    reference = fast_lane_256["acc_bucketed"]
 
     monkeypatch.setenv(FAST_LANE_ENV, "1")
     jitted = jax.jit(lambda p, m: fmm.differentiable_accelerations(state, p, m))

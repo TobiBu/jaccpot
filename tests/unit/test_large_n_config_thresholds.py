@@ -156,8 +156,12 @@ def test_fp32_farfield_gradient_is_finite():
     Regression: with a non-empty M2L list the fp32 reverse pass returned all-NaN
     (float64 was fine, and fp32 with an empty M2L list was fine), so gradients
     were unusable at the precision the large-N production path uses.
+
+    N=256 since 2026-10-12 (was 512): 682 far pairs there against 2488, so the far
+    field the regression needs is still engaged, and the test is compile-bound
+    (63 s -> 49 s measured; N=128 leaves only 28 far pairs).
     """
-    positions, masses = _clustered(512, dtype=jnp.float32)
+    positions, masses = _clustered(256, dtype=jnp.float32)
     fmm = FastMultipoleMethod(
         basis="real",
         use_pallas=False,

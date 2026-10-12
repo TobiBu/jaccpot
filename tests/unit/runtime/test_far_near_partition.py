@@ -137,10 +137,21 @@ def _coverage_counts(state) -> np.ndarray:
     return counts
 
 
-@pytest.mark.parametrize("clustered", [False, True])
+# Every case accepts far pairs (asserted below). Measured 2026-10-12 (far pairs,
+# uniform / clustered): dehnen 4 / 50; dehnen_error eps 1e-2 38 / 50, 1e-3 0 / 146,
+# 1e-4 0 / 94. eq (16a) is very conservative at N=512, so on the uniform problem eps
+# 1e-3 and 1e-4 accepted NOTHING: both cases were near-only, so neither could see a
+# policy-dropped pair, which is what this file exists for. The 1e-4 one is gone and
+# the 1e-3 one runs at 1e-2; the clustered problem keeps both tolerances.
 @pytest.mark.parametrize(
-    "mac_type,adaptive_eps",
-    [("dehnen", None), ("dehnen_error", 1e-3), ("dehnen_error", 1e-4)],
+    "mac_type,adaptive_eps,clustered",
+    [
+        ("dehnen", None, False),
+        ("dehnen", None, True),
+        ("dehnen_error", 1e-2, False),
+        ("dehnen_error", 1e-3, True),
+        ("dehnen_error", 1e-4, True),
+    ],
 )
 def test_far_near_partition_is_complete(mac_type, adaptive_eps, clustered):
     positions, masses = _problem(clustered=clustered)
@@ -158,6 +169,12 @@ def test_far_near_partition_is_complete(mac_type, adaptive_eps, clustered):
 
     fmm = FastMultipoleMethod(**kwargs)
     state = fmm.prepare_state(positions, masses, leaf_size=LEAF, max_order=ORDER)
+    accepted = np.asarray(state.interactions.sources) >= 0
+    accepted &= np.asarray(state.interactions.targets) >= 0
+    assert accepted.any(), (
+        f"{mac_type} eps={adaptive_eps}: no far pairs accepted, so a dropped pair "
+        "cannot occur and the partition is checked over the near list alone"
+    )
 
     counts = _coverage_counts(state)
     missing = int(np.sum(counts == 0))

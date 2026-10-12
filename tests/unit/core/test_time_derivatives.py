@@ -345,18 +345,26 @@ def test_compute_accelerations_returns_acc_derivatives_when_requested():
     assert derivatives[0].shape == (positions.shape[0], 3, 3)
 
 
+# The near-field-only (theta=1e-4) jerk and time-derivative tests below share one
+# configuration, N=20 at leaf 10 (2026-10-12: they had four, (20, 12), (16, 10),
+# (20, 10) and (12, 8)), so one worker compiles its tree once. Measured there:
+# jerk rel-L2 4.3e-5 in both modes, snap 6.1e-5, crackle 7.3e-5 -- against
+# bounds of 5e-2, 2e-3, 5e-3, 3e-2 and 6e-2.
+_NEAR_ONLY_N = 20
+_NEAR_ONLY_LEAF = 10
+
+
 def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
     """Jerk matches direct summation in the NEAR-FIELD-ONLY regime.
 
-    ``theta=1e-4`` with ``leaf_size=12`` accepts **no** M2L pairs at this N, so
-    this is a direct-summation self-check: it bounds the near-field jerk and the
-    L2P/evaluation plumbing, and says nothing about the far field. Measured error
-    is ~1e-7, i.e. fp32 round-off, and it is identical for both ``jerk_mode``
-    values -- which is the tell that the far-field source-motion term never runs
-    here. Far-field coverage is
-    :func:`test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged`.
+    ``theta=1e-4`` accepts **no** M2L pairs at this N, so this is a
+    direct-summation self-check: it bounds the near-field jerk and the
+    L2P/evaluation plumbing, and says nothing about the far field. The error
+    (4.3e-5 measured) is identical for both ``jerk_mode`` values -- which is the
+    tell that the far-field source-motion term never runs here. Far-field coverage
+    is :func:`test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged`.
     """
-    n = 20
+    n = _NEAR_ONLY_N
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
@@ -367,7 +375,7 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
         positions,
         masses,
         velocities,
-        leaf_size=12,
+        leaf_size=_NEAR_ONLY_LEAF,
         max_order=4,
         theta=1e-4,
     )
@@ -386,33 +394,60 @@ def test_compute_accelerations_and_jerk_matches_direct_sum_small_n():
     assert rel < 5e-2
 
 
-def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter():
+def test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """``jerk_mode="accurate"`` matches direct summation, near-field-only regime.
 
     Same caveat as
     :func:`test_compute_accelerations_and_jerk_matches_direct_sum_small_n`:
-    ``theta=1e-4`` accepts no M2L pairs, so the tighter 2e-3 bound here reflects a
-    smaller N rather than the ``"accurate"`` scheme doing more work. The two
-    tolerances in these two tests are NOT a measurement of what ``"fast_approx"``
-    gives up; see
+    ``theta=1e-4`` accepts no M2L pairs, so the tighter 2e-3 bound here does not
+    reflect the ``"accurate"`` scheme doing more work. The two tolerances in these
+    two tests are NOT a measurement of what ``"fast_approx"`` gives up; see
     :func:`test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged`.
+
+    The same call also pins how the accurate mode gets there, which were two
+    tests of their own on the identical call until 2026-10-12: it reuses the
+    prepared topology (no full rebuild solve through ``compute_accelerations``)
+    and, on the real (solidfmm) basis, takes the analytic path (no
+    finite-difference fallback through
+    ``_evaluate_prepared_state_at_positions_sorted``). Both are forbidden below.
     """
-    n = 16
+    n = _NEAR_ONLY_N
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
         preset=FMMPreset.ACCURATE,
         basis="real",
     )
-    _, jerk_acc = fmm.compute_accelerations_and_jerk(
+
+    def _forbidden_rebuild(*args, **kwargs):
+        raise AssertionError(
+            "accurate jerk mode should reuse prepared topology and avoid full rebuild solves"
+        )
+
+    def _forbidden_fd_fallback(*args, **kwargs):
+        raise AssertionError(
+            "solidfmm accurate jerk should not use finite-difference fallback evaluations"
+        )
+
+    monkeypatch.setattr(fmm._impl, "compute_accelerations", _forbidden_rebuild)
+    monkeypatch.setattr(
+        fmm._impl,
+        "_evaluate_prepared_state_at_positions_sorted",
+        _forbidden_fd_fallback,
+    )
+    acc, jerk_acc = fmm.compute_accelerations_and_jerk(
         positions,
         masses,
         velocities,
-        leaf_size=10,
+        leaf_size=_NEAR_ONLY_LEAF,
         max_order=4,
         theta=1e-4,
         jerk_mode="accurate",
     )
+    assert acc.shape == positions.shape
+    assert jerk_acc.shape == positions.shape
     jerk_ref = _direct_sum_jerk(
         positions,
         masses,
@@ -446,10 +481,10 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     bounds what ``"fast_approx"`` gives up.
 
     Configuration matters and is asserted, not assumed: ``leaf_size=4`` is what
-    makes the MAC accept anything at this N. At ``leaf_size=12`` -- what the tests
-    above use -- the far-pair count is **zero** and both modes return bit-identical
-    jerks, so a version of this test with the usual leaf size would pass while
-    measuring nothing. Hence the ``far_pairs > 0`` guard.
+    makes the MAC accept anything at this N. At ``leaf_size=10`` (what the tests
+    above use) or 12 the far-pair count is **zero** and both modes return
+    bit-identical jerks, so a version of this test with the usual leaf size would
+    pass while measuring nothing. Hence the ``far_pairs > 0`` guard.
 
     Measured at N=96, leaf 4, p=4, ``theta=0.6`` (106 M2L pairs), relative L2
     against direct summation:
@@ -482,7 +517,7 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     )
     assert far_pairs > 0, (
         "config must engage the far field or this test measures nothing "
-        f"(got {far_pairs} M2L pairs; leaf_size=12 gives 0 at this N)"
+        f"(got {far_pairs} M2L pairs; leaf_size=10 or 12 gives 0 at this N)"
     )
 
     jerk_ref = _direct_sum_jerk(positions, masses, velocities, G=1.0, softening=1e-3)
@@ -510,70 +545,6 @@ def test_jerk_modes_diverge_against_direct_sum_when_far_field_engaged():
     )
 
 
-def test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    positions, masses = _sample_problem(n=20)
-    velocities = _sample_velocities(n=20)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.ACCURATE,
-        basis="real",
-    )
-
-    def _forbidden(*args, **kwargs):
-        raise AssertionError(
-            "accurate jerk mode should reuse prepared topology and avoid full rebuild solves"
-        )
-
-    monkeypatch.setattr(fmm._impl, "compute_accelerations", _forbidden)
-    acc, jerk = fmm.compute_accelerations_and_jerk(
-        positions,
-        masses,
-        velocities,
-        leaf_size=10,
-        max_order=4,
-        theta=1e-4,
-        jerk_mode="accurate",
-    )
-
-    assert acc.shape == positions.shape
-    assert jerk.shape == positions.shape
-
-
-def test_compute_accelerations_and_jerk_accurate_solidfmm_uses_analytic_path(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    positions, masses = _sample_problem(n=20)
-    velocities = _sample_velocities(n=20)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.ACCURATE,
-        basis="real",
-    )
-
-    def _forbidden(*args, **kwargs):
-        raise AssertionError(
-            "solidfmm accurate jerk should not use finite-difference fallback evaluations"
-        )
-
-    monkeypatch.setattr(
-        fmm._impl,
-        "_evaluate_prepared_state_at_positions_sorted",
-        _forbidden,
-    )
-    acc, jerk = fmm.compute_accelerations_and_jerk(
-        positions,
-        masses,
-        velocities,
-        leaf_size=10,
-        max_order=4,
-        theta=1e-4,
-        jerk_mode="accurate",
-    )
-
-    assert acc.shape == positions.shape
-    assert jerk.shape == positions.shape
-
-
 def test_compute_accelerations_and_jerk_invalid_mode_raises():
     positions, masses = _sample_problem(n=16)
     velocities = _sample_velocities(n=16)
@@ -591,7 +562,7 @@ def test_compute_accelerations_and_jerk_invalid_mode_raises():
 
 
 def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
-    n = 12
+    n = _NEAR_ONLY_N
     positions, masses = _sample_problem(n=n)
     velocities = _sample_velocities(n=n)
     fmm = FastMultipoleMethod(
@@ -602,7 +573,7 @@ def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
         positions,
         masses,
         velocities,
-        leaf_size=8,
+        leaf_size=_NEAR_ONLY_LEAF,
         max_order=4,
         theta=1e-4,
         max_time_derivative_order=3,

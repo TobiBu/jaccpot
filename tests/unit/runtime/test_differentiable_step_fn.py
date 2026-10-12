@@ -59,30 +59,17 @@ def test_it_returns_the_same_force_as_the_eager_entry_point(setup) -> None:
     assert jnp.allclose(got, eager, rtol=1e-12, atol=0.0)
 
 
-def test_it_stays_differentiable(setup) -> None:
-    """The point of the seam. An AOT-compiled object would fail here.
-
-    Returning ``jit(f).lower(...).compile()`` instead of ``jit(f)`` raises
-    "Cannot apply JAX transformations to a function lowered and compiled for a
-    particular signature" -- silently turning the seam into a dead end for the
-    training loops it exists to serve.
-    """
-
-    solver, state, positions, masses, probe = setup
-    step = solver.differentiable_step_fn(state)
-
-    def loss(pos, mass):
-        return jnp.sum(probe * step(pos, mass))
-
-    grad_pos, grad_mass = jax.grad(loss, argnums=(0, 1))(positions, masses)
-    assert grad_pos.shape == positions.shape
-    assert grad_mass.shape == masses.shape
-    assert bool(jnp.all(jnp.isfinite(grad_pos)))
-    assert bool(jnp.all(jnp.isfinite(grad_mass)))
-
-
 def test_the_gradient_matches_the_eager_gradient(setup) -> None:
-    """Faster is worthless if it is a different derivative."""
+    """Faster is worthless if it is a different derivative.
+
+    And the seam has to be differentiable at all, which is the point of it: an
+    AOT-compiled object would fail here. Returning ``jit(f).lower(...).compile()``
+    instead of ``jit(f)`` raises "Cannot apply JAX transformations to a function
+    lowered and compiled for a particular signature" -- silently turning the seam
+    into a dead end for the training loops it exists to serve. (That, with the
+    shape and finiteness checks, was ``test_it_stays_differentiable`` until
+    2026-10-12: the same reverse pass, taken twice.)
+    """
 
     solver, state, positions, masses, probe = setup
     step = solver.differentiable_step_fn(state)
@@ -95,7 +82,9 @@ def test_the_gradient_matches_the_eager_gradient(setup) -> None:
 
     seam = jax.grad(loss_seam, argnums=(0, 1))(positions, masses)
     eager = jax.grad(loss_eager, argnums=(0, 1))(positions, masses)
-    for got, want in zip(seam, eager):
+    for got, want, primal in zip(seam, eager, (positions, masses)):
+        assert got.shape == primal.shape
+        assert bool(jnp.all(jnp.isfinite(got)))
         assert jnp.allclose(got, want, rtol=1e-10, atol=0.0)
 
 

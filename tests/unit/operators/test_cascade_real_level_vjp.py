@@ -66,14 +66,26 @@ def _rel(a, b):
     return float(np.linalg.norm(a - b) / max(np.linalg.norm(b), 1e-300))
 
 
+# Interpret mode (CPU CI) runs orders 2 and 4 -- the low bracket and the production
+# default (`max_order=4`); order 5 was the costliest interpret case (45 s for M2M in
+# CI) and repeated what they cover (2026-10-12). The native Triton cases, which skip
+# without an Ampere+ GPU and cost little where they run, keep all three orders.
+_ORDER_CASES = [
+    (2, True),
+    (4, True),
+    (2, False),
+    (4, False),
+    (5, False),
+]
+
+
 def _native_or_skip(interpret: bool) -> None:
     """Native Triton lowering needs an Ampere+ GPU; interpret mode runs anywhere."""
     if not interpret and not pallas_cascade_level_supported():
         pytest.skip("native Pallas GPU lowering not available here")
 
 
-@pytest.mark.parametrize("interpret", [True, False])
-@pytest.mark.parametrize("order", [2, 4, 5])
+@pytest.mark.parametrize("order,interpret", _ORDER_CASES)
 def test_m2m_reverse_matches_vjp_of_the_level_loop_in_both_halves(
     tree_data, order, interpret
 ):
@@ -141,8 +153,7 @@ def test_m2m_reverse_matches_vjp_of_the_level_loop_in_both_halves(
     assert _rel(cb_g, cb_r) < 1e-9, f"centre half rel-L2 {_rel(cb_g, cb_r):.3e}"
 
 
-@pytest.mark.parametrize("interpret", [True, False])
-@pytest.mark.parametrize("order", [2, 4, 5])
+@pytest.mark.parametrize("order,interpret", _ORDER_CASES)
 def test_l2l_reverse_matches_vjp_of_the_cascade_in_both_halves(
     tree_data, order, interpret
 ):

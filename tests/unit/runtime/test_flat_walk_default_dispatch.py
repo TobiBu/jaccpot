@@ -289,13 +289,26 @@ def test_a_floor_keeps_a_wider_validated_width(monkeypatch, tree_and_geometry):
 def test_pallas_ladder_grows_lists_only_once_the_queue_fits(
     monkeypatch, tree_and_geometry
 ):
-    """A walk stopped by its queue counted part of the pairs: lists wait for a full walk."""
+    """A walk stopped by its queue counted part of the pairs: lists wait for a full walk.
+
+    The queue starts at the largest power of two below the walk's peak wavefront,
+    so it must double exactly once before the lists can grow. It started at 16
+    until 2026-10-12, which took six doublings -- six more interpret-mode Pallas
+    walks (58.8 s against 23.6 s measured) for the same ordering claim. The peak
+    comes from the default flat walk; the Pallas walk peaks at the same 862 here.
+    """
     tree, geometry = tree_and_geometry
+    probe = []
+    _seam(tree, geometry, report=probe.append)
+    peak = int(probe[0]["peak_wavefront"])
+    queue = 1 << ((peak - 1).bit_length() - 1)
+    assert 16 <= queue < peak, (queue, peak)
+
     monkeypatch.setenv("JACCPOT_WALK_PALLAS_INTERPRET", "1")
     monkeypatch.setattr(ic, "_FLAT_WALK_NEAR_EDGE_FLOOR", 16)
     monkeypatch.setattr(ic, "_STRICT_STREAMED_FAR_PAIR_FLOOR", 16)
     reports = []
-    _seam(tree, geometry, report=reports.append, queue=16)
+    _seam(tree, geometry, report=reports.append, queue=queue)
     (report,) = reports
     queue_growth = [g for g in report["grew"] if g.startswith("max_pair_queue")]
     list_growth = [g for g in report["grew"] if not g.startswith("max_pair_queue")]

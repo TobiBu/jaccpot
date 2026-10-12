@@ -46,6 +46,15 @@ from tests.unit.runtime._reproducibility import assert_reproducible
 # the criterion's correctness is still verified on every supported Python.
 pytestmark = pytest.mark.slow
 
+# One prepared state and ONE reverse pass serve every gradient test below (they all
+# used the same solver, system and seed). Module fixtures hold arrays, which survive
+# the per-test `jax.clear_caches()` conftest runs in this directory. A module fixture
+# is built once per xdist worker that asks for it, so each fixture's users share a
+# group, which CI's `-n 2 --dist loadgroup` keeps on one worker; the fixture-free
+# tests still spread.
+_SHARED_PASS_USERS = pytest.mark.xdist_group("dehnen_mac_gradients_shared_pass")
+_UPWARD_USERS = pytest.mark.xdist_group("dehnen_mac_gradients_upward")
+
 
 # eq (16a) thresholds on `eps * min_b |a_b|` over the *target* cell, so the least
 # accelerated particle in a cell sets that cell's budget. At small N that makes the
@@ -111,51 +120,122 @@ def _rel(a, b):
     return float(np.linalg.norm(a - b) / (np.linalg.norm(b) + 1e-300))
 
 
+_FD_STEP = 1e-6
+
+
+@pytest.fixture(scope="module")
+def mass_mac_problem():
+    """The system, solver and frozen state every gradient test here differentiates.
+
+    Returns
+    -------
+    tuple
+        ``(fmm, state, positions, masses, probe)``.
+    """
+    positions, masses, probe = _system(N_PARTICLES, seed=1)
+    fmm = _mass_mac_solver()
+    state = fmm.prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
+    return fmm, state, positions, masses, probe
+
+
+@pytest.fixture(scope="module")
+def mass_mac_reverse(mass_mac_problem):
+    """One reverse pass (both arguments), its FD references and the direct-sum oracle.
+
+    The loss is jitted and then differentiated -- ``grad(jit(loss))`` -- so the same
+    pass is the ``com`` case of the device-side geometry check below. The FD
+    references perturb the same jitted function, so FD-vs-AD stays a
+    self-consistency check on one frozen function.
+
+    Parameters
+    ----------
+    mass_mac_problem : tuple
+        Fixture value: solver, state, positions, masses, probe.
+
+    Returns
+    -------
+    dict
+        Gradients, directional finite differences, the force error and the
+        direct-sum gradients.
+    """
+    fmm, state, positions, masses, probe = mass_mac_problem
+    softening, G = 1e-2, 1.0  # `_mass_mac_solver`'s defaults
+
+    @jax.jit
+    def loss(pos, m):
+        return jnp.sum(probe * fmm.differentiable_accelerations(state, pos, m))
+
+    def direct_loss(pos, m):
+        return jnp.sum(
+            probe * _direct_sum_accelerations(pos, m, softening=softening, G=G)
+        )
+
+    grad_positions, grad_masses = jax.grad(loss, argnums=(0, 1))(positions, masses)
+    mass_direction = jnp.asarray(
+        np.random.default_rng(2).normal(size=masses.shape), dtype=jnp.float64
+    )
+    step = _FD_STEP
+    fd_positions = float(
+        (
+            loss(positions + step * probe, masses)
+            - loss(positions - step * probe, masses)
+        )
+        / (2 * step)
+    )
+    fd_masses = float(
+        (
+            loss(positions, masses + step * mass_direction)
+            - loss(positions, masses - step * mass_direction)
+        )
+        / (2 * step)
+    )
+    force_error = _rel(
+        fmm.differentiable_accelerations(state, positions, masses),
+        _direct_sum_accelerations(positions, masses, softening=softening, G=G),
+    )
+    direct_positions, direct_masses = jax.grad(direct_loss, argnums=(0, 1))(
+        positions, masses
+    )
+    return {
+        "grad": {"positions": grad_positions, "masses": grad_masses},
+        "direction": {"positions": probe, "masses": mass_direction},
+        "fd": {"positions": fd_positions, "masses": fd_masses},
+        "direct_grad": {"positions": direct_positions, "masses": direct_masses},
+        "force_error": force_error,
+    }
+
+
 # ---------------------------------------------------------------------------
 # FD vs AD on the frozen function
 # ---------------------------------------------------------------------------
 
 
+@_SHARED_PASS_USERS
 @pytest.mark.parametrize("wrt", ["positions", "masses"])
-def test_fd_vs_ad_under_mass_dependent_mac(wrt):
+def test_fd_vs_ad_under_mass_dependent_mac(mass_mac_problem, mass_mac_reverse, wrt):
     """Reverse-mode AD must agree with FD of the same frozen-topology function.
 
     This holds trivially for a mass-dependent MAC because the MAC is frozen, so
     the test is a guard that nothing in the paper-policy path leaks a tracer into
     ``prepare_state`` or breaks the reverse pass -- not evidence that the
     criterion itself is sound.
+
+    It also owns the ``f_b`` (``mac_force_scale_mode="paper_fb"``) case that
+    ``test_fb_force_scale_estimator.py`` used to repeat: the force-scale prepass,
+    whichever estimator, runs inside ``prepare_state`` and writes its caches there;
+    ``differentiable_accelerations`` never records a force scale (only
+    ``evaluate_prepared_state`` does), so under ``jax.grad`` the two modes run the
+    same code on a different frozen state.
     """
 
-    positions, masses, probe = _system(N_PARTICLES, seed=1)
-    fmm = _mass_mac_solver()
-    state = fmm.prepare_state(
-        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-    )
+    _, state, *_ = mass_mac_problem
     assert _num_far_pairs(state) > 0, "config must exercise the M2L reverse pass"
-
-    if wrt == "positions":
-
-        def loss(x):
-            return jnp.sum(probe * fmm.differentiable_accelerations(state, x, masses))
-
-        x0, direction = positions, probe
-    else:
-
-        def loss(m):
-            return jnp.sum(
-                probe * fmm.differentiable_accelerations(state, positions, m)
-            )
-
-        x0 = masses
-        direction = jnp.asarray(
-            np.random.default_rng(2).normal(size=masses.shape), dtype=jnp.float64
-        )
-
-    grad = jax.grad(loss)(x0)
+    grad = mass_mac_reverse["grad"][wrt]
     assert bool(jnp.all(jnp.isfinite(grad)))
-    step = 1e-6
-    ad = float(jnp.sum(grad * direction))
-    fd = float((loss(x0 + step * direction) - loss(x0 - step * direction)) / (2 * step))
+    ad = float(jnp.sum(grad * mass_mac_reverse["direction"][wrt]))
+    fd = mass_mac_reverse["fd"][wrt]
     assert abs(fd - ad) / (abs(fd) + 1e-300) < 1e-4
 
 
@@ -164,8 +244,11 @@ def test_fd_vs_ad_under_mass_dependent_mac(wrt):
 # ---------------------------------------------------------------------------
 
 
+@_SHARED_PASS_USERS
 @pytest.mark.parametrize("wrt", ["positions", "masses"])
-def test_grad_matches_direct_sum_under_mass_dependent_mac(wrt):
+def test_grad_matches_direct_sum_under_mass_dependent_mac(
+    mass_mac_problem, mass_mac_reverse, wrt
+):
     """The gradient must be as accurate as the force it differentiates.
 
     Bounded relative to the measured force error rather than to a constant: the
@@ -174,31 +257,12 @@ def test_grad_matches_direct_sum_under_mass_dependent_mac(wrt):
     re-tune a threshold whenever the MAC changes.
     """
 
-    positions, masses, probe = _system(N_PARTICLES, seed=1)
-    softening, G = 1e-2, 1.0
-    fmm = _mass_mac_solver(softening=softening, G=G)
-    state = fmm.prepare_state(
-        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-    )
+    _, state, *_ = mass_mac_problem
     assert _num_far_pairs(state) > 0, "config must exercise the M2L reverse pass"
-
-    def fmm_loss(pos, m):
-        return jnp.sum(probe * fmm.differentiable_accelerations(state, pos, m))
-
-    def direct_loss(pos, m):
-        return jnp.sum(
-            probe * _direct_sum_accelerations(pos, m, softening=softening, G=G)
-        )
-
-    force_error = _rel(
-        fmm.differentiable_accelerations(state, positions, masses),
-        _direct_sum_accelerations(positions, masses, softening=softening, G=G),
+    force_error = mass_mac_reverse["force_error"]
+    grad_error = _rel(
+        mass_mac_reverse["grad"][wrt], mass_mac_reverse["direct_grad"][wrt]
     )
-
-    argnum = 0 if wrt == "positions" else 1
-    g_fmm = jax.grad(fmm_loss, argnums=argnum)(positions, masses)
-    g_direct = jax.grad(direct_loss, argnums=argnum)(positions, masses)
-    grad_error = _rel(g_fmm, g_direct)
 
     assert force_error > 0.0, "far field must contribute a measurable error"
     assert grad_error < 3.0 * force_error + 1e-12, (
@@ -218,6 +282,12 @@ def _accept_signature(fmm, positions, masses) -> tuple[int, ...]:
     state = fmm.prepare_state(
         positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
     )
+    return _signature_of(state)
+
+
+def _signature_of(state) -> tuple[int, ...]:
+    """The sorted accepted (target, source) pairs of a prepared state."""
+
     inter = state.interactions
     assert inter is not None
     src = np.asarray(inter.sources)
@@ -226,26 +296,25 @@ def _accept_signature(fmm, positions, masses) -> tuple[int, ...]:
     return tuple(sorted(zip(tgt[keep].tolist(), src[keep].tolist())))
 
 
-def test_mass_perturbation_that_crosses_no_mac_boundary_is_smooth():
+@_SHARED_PASS_USERS
+def test_mass_perturbation_that_crosses_no_mac_boundary_is_smooth(
+    mass_mac_problem, mass_mac_reverse
+):
     """Off the boundary, the force is smooth in mass and AD is exact.
 
     "Crosses no boundary" is *verified* by rebuilding the accept decision at
-    ``m`` and at ``m +/- delta`` and requiring an identical pair set, rather than
-    assumed from a small delta.
+    ``m +/- delta`` and requiring the pair set ``prepare_state`` built at ``m``,
+    rather than assumed from a small delta.
     """
 
-    positions, masses, probe = _system(N_PARTICLES, seed=1)
-    fmm = _mass_mac_solver()
-    state = fmm.prepare_state(
-        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-    )
+    fmm, state, positions, masses, probe = mass_mac_problem
     assert _num_far_pairs(state) > 0
 
     rng = np.random.default_rng(5)
     direction = jnp.asarray(rng.normal(size=masses.shape), dtype=jnp.float64)
     direction = direction / jnp.linalg.norm(direction)
 
-    baseline = _accept_signature(fmm, positions, masses)
+    baseline = _signature_of(state)
 
     # Shrink delta until the rebuilt topology is provably unchanged both ways.
     delta = 1e-3
@@ -260,11 +329,12 @@ def test_mass_perturbation_that_crosses_no_mac_boundary_is_smooth():
     else:  # pragma: no cover - would mean the boundary is dense in mass space
         pytest.fail("could not find a mass perturbation that crosses no MAC boundary")
 
-    def loss(m):
-        return jnp.sum(probe * fmm.differentiable_accelerations(state, positions, m))
+    @jax.jit
+    def loss(pos, m):
+        return jnp.sum(probe * fmm.differentiable_accelerations(state, pos, m))
 
-    g0 = jax.grad(loss)(masses)
-    g1 = jax.grad(loss)(masses + delta * direction)
+    g0 = mass_mac_reverse["grad"]["masses"]
+    g1 = jax.grad(loss, argnums=1)(positions, masses + delta * direction)
     assert bool(jnp.all(jnp.isfinite(g0))) and bool(jnp.all(jnp.isfinite(g1)))
     # Smoothness: the gradient moves by O(delta), not by O(1).
     drift = float(jnp.linalg.norm(g1 - g0) / (jnp.linalg.norm(g0) + 1e-300))
@@ -274,7 +344,8 @@ def test_mass_perturbation_that_crosses_no_mac_boundary_is_smooth():
     )
 
 
-def test_force_scale_nodes_receives_no_cotangent():
+@_SHARED_PASS_USERS
+def test_force_scale_nodes_receives_no_cotangent(mass_mac_problem):
     """``force_scale_nodes`` is a pytree leaf but must never carry a gradient.
 
     It is the p=1 prepass output that parameterises the frozen MAC decision. It
@@ -283,11 +354,7 @@ def test_force_scale_nodes_receives_no_cotangent():
     because the decision it drives is piecewise constant.
     """
 
-    positions, masses, probe = _system(N_PARTICLES, seed=1)
-    fmm = _mass_mac_solver()
-    state = fmm.prepare_state(
-        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-    )
+    fmm, state, positions, masses, probe = mass_mac_problem
     if state.force_scale_nodes is None:
         pytest.skip("this configuration does not populate force_scale_nodes")
 
@@ -323,36 +390,17 @@ def test_force_scale_nodes_receives_no_cotangent():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode", ["com", "tree_approx", "runtime"])
-def test_device_side_geometry_modes_are_differentiable(mode):
-    """The device-side MAC geometry modes must survive jit and grad."""
+@pytest.fixture(scope="module")
+def upward_artifacts():
+    """A real tree, its sorted positions and the engine's upward sweep.
 
-    positions, masses, probe = _system(N_PARTICLES, seed=1)
-    fmm = _mass_mac_solver(geometry=mode)
-    state = fmm.prepare_state(
-        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-    )
-
-    @jax.jit
-    def loss(pos, m):
-        return jnp.sum(probe * fmm.differentiable_accelerations(state, pos, m))
-
-    grad = jax.grad(loss)(positions, masses)
-    assert bool(jnp.all(jnp.isfinite(grad)))
-
-
-@pytest.mark.parametrize("mode", ["exact", "tree"])
-def test_host_loop_geometry_modes_reject_tracers_clearly(mode):
-    """The numpy host-loop modes must fail with an actionable message.
-
-    They run a Python loop over nodes, so they cannot be traced at all. Without an
-    explicit guard the failure surfaces as an opaque numpy conversion error deep
-    inside the policy builder.
+    Returns
+    -------
+    tuple
+        ``(tree, positions_sorted, upward)`` for ``resolve_dehnen_geometry``.
     """
-
     from yggdrax.tree import Tree
 
-    from jaccpot.runtime._adaptive_policy import resolve_dehnen_geometry
     from jaccpot.runtime._fmm_impl import FMMEngine
 
     positions, masses, _ = _system(N_PARTICLES, seed=1)
@@ -371,6 +419,13 @@ def test_host_loop_geometry_modes_reject_tracers_clearly(mode):
     upward = FMMEngine(expansion_basis="solidfmm").prepare_upward_sweep(
         tree, positions_sorted, masses_sorted, max_order=MAX_ORDER, center_mode="com"
     )
+    return tree, positions_sorted, upward
+
+
+def _traced_geometry(mode, tree, upward):
+    """``resolve_dehnen_geometry`` for ``mode`` as a function of traced positions."""
+
+    from jaccpot.runtime._adaptive_policy import resolve_dehnen_geometry
 
     def run(pos):
         return resolve_dehnen_geometry(
@@ -379,7 +434,54 @@ def test_host_loop_geometry_modes_reject_tracers_clearly(mode):
             positions_sorted=pos,
             upward=upward,
             dtype=jnp.float64,
-        )[1]
+        )
 
+    return run
+
+
+@_SHARED_PASS_USERS
+def test_the_com_geometry_mode_is_differentiable(mass_mac_reverse):
+    """The default (``com``) device-side mode must survive jit and grad.
+
+    The fixture's reverse pass is ``grad(jit(loss))`` on a ``com``-geometry state,
+    which is what this asserted with a reverse pass of its own.
+    """
+
+    for wrt in ("positions", "masses"):
+        assert bool(jnp.all(jnp.isfinite(mass_mac_reverse["grad"][wrt]))), wrt
+
+
+@pytest.mark.parametrize("mode", ["tree_approx", "runtime"])
+def test_device_side_geometry_modes_build_a_usable_state(mode):
+    """The opt-in device-side MAC geometry modes must build the frozen state.
+
+    The mode is consumed in ``prepare_state``, outside any trace: the reverse pass
+    differentiates the same frozen pytree whichever mode built it, and
+    :func:`test_the_com_geometry_mode_is_differentiable` covers that pass. So these
+    cases stop at the prepare; until 2026-10-12 each took a reverse pass of its
+    own. (They are not traceable themselves, despite ``resolve_dehnen_geometry``'s
+    error message: under ``jax.jit`` ``tree_approx`` raises a
+    ``ConcretizationTypeError`` reading its leaf width off the device.)
+    """
+
+    positions, masses, _ = _system(N_PARTICLES, seed=1)
+    state = _mass_mac_solver(geometry=mode).prepare_state(
+        positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
+    )
+    assert _num_far_pairs(state) > 0, f"{mode}: no far pairs to differentiate"
+
+
+@_UPWARD_USERS
+@pytest.mark.parametrize("mode", ["exact", "tree"])
+def test_host_loop_geometry_modes_reject_tracers_clearly(upward_artifacts, mode):
+    """The numpy host-loop modes must fail with an actionable message.
+
+    They run a Python loop over nodes, so they cannot be traced at all. Without an
+    explicit guard the failure surfaces as an opaque numpy conversion error deep
+    inside the policy builder.
+    """
+
+    tree, positions_sorted, upward = upward_artifacts
+    run = _traced_geometry(mode, tree, upward)
     with pytest.raises(RuntimeError, match="cannot be traced"):
-        jax.jit(run)(positions_sorted)
+        jax.jit(lambda pos: run(pos)[1])(positions_sorted)

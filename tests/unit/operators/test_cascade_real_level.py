@@ -3,7 +3,10 @@
 The pair twins of :mod:`jaccpot.pallas.cascade_real_level` (the reverse kernels'
 translate body) against the reference operators, and the cascade forward -- the
 one-node-per-lane kernel since the level forward kernels were removed (cleanup
-2026-10, X5) -- against the pure-JAX level loops.
+2026-10, X5) -- under ``jax.jit``. The forward's parity with the pure-JAX level
+loops is ``test_cascade_real_lanes.py``'s: since X5 the parity tests here ran the
+same ``k_lanes=32`` kernels against the same references at the same tolerance as
+its ``[32-*]`` cases, so they were deleted (2026-10-12).
 """
 
 from __future__ import annotations
@@ -26,8 +29,6 @@ from jaccpot.pallas.cascade_real_level import (
     l2l_real_centred_pair_jax,
     m2m_real_centred_pair_jax,
 )
-from jaccpot.runtime.kernels._l2l import _propagate_solidfmm_locals_by_level
-from jaccpot.upward.real_tree_expansions import aggregate_m2m_real_by_level
 from tests.unit._typecheck_budget import trim
 
 
@@ -90,90 +91,6 @@ def tree_data():
         topo, tree.positions_sorted, tree.masses_sorted
     ).center_of_mass
     return topo, jnp.asarray(com, jnp.float32)
-
-
-@pytest.mark.parametrize("order", trim([5, 3]))
-def test_m2m_levels_interpret_matches_the_level_loop(tree_data, order):
-    topo, com = tree_data
-    num_internal = int(topo.left_child.shape[0])
-    total = int(topo.parent.shape[0])
-    C = (order + 1) ** 2
-    rng = np.random.default_rng(4)
-    leaves = jnp.asarray(rng.standard_normal((total, C)), jnp.float32)
-    leaves = leaves.at[:num_internal].set(0.0)  # only leaves carry P2M
-    num_levels = int(jnp.max(topo.node_level)) + 1
-    offs = topo.level_offsets
-    width = int(jnp.max(offs[1:] - offs[:-1]))
-    ref = aggregate_m2m_real_by_level(
-        leaves,
-        com,
-        topo.left_child,
-        topo.right_child,
-        topo.nodes_by_level,
-        offs,
-        order=order,
-        num_internal=num_internal,
-        num_levels=num_levels,
-        level_batch_width=width,
-    )
-    got = m2m_real_levels_lanes_pallas(
-        leaves,
-        com,
-        topo.left_child,
-        topo.right_child,
-        topo.nodes_by_level,
-        offs,
-        order=order,
-        num_internal=num_internal,
-        num_levels=num_levels,
-        level_batch_width=width,
-        interpret=True,
-    )
-    assert np.array_equal(
-        np.asarray(got)[num_internal:], np.asarray(leaves)[num_internal:]
-    )
-    r, g = np.asarray(ref), np.asarray(got)
-    scale = np.abs(r).max()
-    assert np.allclose(g, r, rtol=2e-5, atol=2e-5 * scale)
-    assert np.abs(g[:num_internal]).max() > 0  # non-vacuous: the root got something
-
-
-@pytest.mark.parametrize("order", trim([5, 3]))
-def test_l2l_levels_interpret_matches_the_cascade(tree_data, order):
-    topo, com = tree_data
-    num_internal = int(topo.left_child.shape[0])
-    total = int(topo.parent.shape[0])
-    C = (order + 1) ** 2
-    rng = np.random.default_rng(5)
-    locals0 = jnp.asarray(rng.standard_normal((total, C)), jnp.float32)
-    num_levels = int(jnp.max(topo.node_level)) + 1
-    offs = topo.level_offsets
-    width = int(jnp.max(offs[1:] - offs[:-1]))
-    ref = _propagate_solidfmm_locals_by_level(
-        locals0 + 0.0,
-        com,
-        topo.left_child,
-        topo.right_child,
-        topo.node_level,  # donated by its jit
-        order=order,
-        total_nodes=total,
-        num_levels=num_levels - 1,
-    )
-    got = l2l_real_levels_lanes_pallas(
-        locals0,
-        com,
-        topo.parent,
-        topo.nodes_by_level,
-        offs,
-        order=order,
-        num_levels=num_levels,
-        level_batch_width=width,
-        interpret=True,
-    )
-    r, g = np.asarray(ref), np.asarray(got)
-    scale = np.abs(r).max()
-    assert np.allclose(g, r, rtol=2e-5, atol=2e-5 * scale)
-    assert not np.allclose(g, np.asarray(locals0))  # non-vacuous
 
 
 def test_levels_are_jittable(tree_data):

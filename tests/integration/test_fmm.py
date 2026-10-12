@@ -71,8 +71,9 @@ def _direct_sum(positions, masses, *, G: float, softening: float):
 @pytest.mark.parametrize(
     ("num_particles", "dtype", "chunk_size", "tolerance"),
     [
-        # (96, float32, 128) is the configuration this test has always used.
-        pytest.param(96, jnp.float32, 128, 1e-6, id="n96-f32-chunk128"),
+        # (96, float32, 128) was the configuration this test always used; since
+        # 2026-10-12 fp32 is checked at N=256 only. The fp64 cases are the sharp
+        # instrument (see below), and fp32 can see only a divergence above ~1e-6.
         pytest.param(96, jnp.float64, 128, 1e-13, id="n96-f64-chunk128"),
         pytest.param(256, jnp.float32, 64, 1e-6, id="n256-f32-chunk64"),
         pytest.param(256, jnp.float64, 64, 1e-13, id="n256-f64-chunk64"),

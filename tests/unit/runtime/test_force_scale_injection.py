@@ -47,6 +47,11 @@ from jaccpot.runtime._adaptive_policy import (
 # the criterion's correctness is still verified on every supported Python.
 pytestmark = pytest.mark.slow
 
+# The prepare_state-parameter tests below need only the problem's node count, which
+# they each used to buy with a full prepare: it is a module fixture now, and its
+# users share an xdist group so CI's `-n 2 --dist loadgroup` builds it on one worker.
+_NODE_COUNT_USERS = pytest.mark.xdist_group("force_scale_injection_node_count")
+
 
 N_PARTICLES = 512
 LEAF_SIZE = 8
@@ -89,6 +94,19 @@ def _prepare(fmm, positions, masses, **kwargs):
     return fmm.prepare_state(
         positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER, **kwargs
     )
+
+
+@pytest.fixture(scope="module")
+def node_count() -> int:
+    """Tree nodes for ``_sample_problem()`` under ``_paper_solver()``.
+
+    Returns
+    -------
+    int
+        The length a supplied ``force_scale_nodes`` must have.
+    """
+    positions, masses = _sample_problem()
+    return int(_prepare(_paper_solver(), positions, masses).tree.parent.shape[0])
 
 
 def _far_pairs(state) -> int:
@@ -200,10 +218,11 @@ def test_scalar_reduction_rejects_vector_input():
 # --------------------------------------------------------------------------- #
 
 
-def test_supplied_force_scale_is_used_verbatim():
+@_NODE_COUNT_USERS
+def test_supplied_force_scale_is_used_verbatim(node_count):
+    """On a solver with nothing cached; the warm-cache case is the next test's."""
     positions, masses = _sample_problem()
     fmm = _paper_solver()
-    node_count = int(_prepare(fmm, positions, masses).tree.parent.shape[0])
     supplied = jnp.linspace(1.0, 2.0, node_count, dtype=jnp.float64)
 
     state = _prepare(fmm, positions, masses, force_scale_nodes=supplied)
@@ -225,21 +244,22 @@ def test_supplied_force_scale_does_not_touch_the_reuse_cache():
     baseline = _prepare(fmm, positions, masses)
     cached = np.asarray(fmm._impl._last_force_scale_nodes).copy()
     node_count = int(baseline.tree.parent.shape[0])
+    supplied = jnp.full((node_count,), 7.0, dtype=jnp.float64)
 
-    _prepare(
-        fmm,
-        positions,
-        masses,
-        force_scale_nodes=jnp.full((node_count,), 7.0, dtype=jnp.float64),
+    injected = _prepare(fmm, positions, masses, force_scale_nodes=supplied)
+
+    # Used verbatim with a scale cached, too: the supplied one wins over the cache.
+    np.testing.assert_array_equal(
+        np.asarray(injected.force_scale_nodes), np.asarray(supplied)
     )
-
     np.testing.assert_array_equal(np.asarray(fmm._impl._last_force_scale_nodes), cached)
     np.testing.assert_array_equal(
         np.asarray(_prepare(fmm, positions, masses).force_scale_nodes), cached
     )
 
 
-def test_supplied_force_scale_skips_the_prepass(monkeypatch):
+@_NODE_COUNT_USERS
+def test_supplied_force_scale_skips_the_prepass(monkeypatch, node_count):
     positions, masses = _sample_problem()
     fmm = _paper_solver()
     impl = fmm._impl
@@ -255,9 +275,9 @@ def test_supplied_force_scale_skips_the_prepass(monkeypatch):
         "_compute_force_scale_paper_prepass_from_tree_artifacts",
         counting,
     )
-    node_count = int(_prepare(fmm, positions, masses).tree.parent.shape[0])
-    calls[0] = 0
-    fmm._impl._last_force_scale_nodes = None
+    # A fresh solver has nothing cached, so without the supplied scale this
+    # prepare would have to run the prepass.
+    assert fmm._impl._last_force_scale_nodes is None
 
     _prepare(
         fmm,
@@ -269,13 +289,13 @@ def test_supplied_force_scale_skips_the_prepass(monkeypatch):
     assert calls[0] == 0
 
 
+@_NODE_COUNT_USERS
 @pytest.mark.parametrize("bad", ["short", "two_dim"])
-def test_supplied_force_scale_rejects_a_mismatched_shape(bad):
+def test_supplied_force_scale_rejects_a_mismatched_shape(node_count, bad):
     """A wrong length would otherwise fail deep inside the policy build."""
 
     positions, masses = _sample_problem()
     fmm = _paper_solver()
-    node_count = int(_prepare(fmm, positions, masses).tree.parent.shape[0])
     supplied = (
         jnp.ones((node_count - 1,), dtype=jnp.float64)
         if bad == "short"

@@ -115,6 +115,25 @@ def _prepare(fmm: FastMultipoleMethod, positions, masses):
     )
 
 
+def _overridden_policy_knobs(fmm: FastMultipoleMethod) -> tuple:
+    """The knobs the force-scale prepass overrides for its inner solve."""
+
+    impl = fmm._impl
+    return (
+        impl.p_gears,
+        impl.adaptive_order,
+        impl.adaptive_error_model,
+        impl.mac_type,
+    )
+
+
+def _assert_prepass_restored(fmm: FastMultipoleMethod, before: tuple) -> None:
+    """Every overridden knob is back to its configured value, the guard lowered."""
+
+    assert _overridden_policy_knobs(fmm) == before
+    assert fmm._impl._in_force_scale_prepass is False
+
+
 # --------------------------------------------------------------------------- #
 # paper_cached: the prepass runs once, not once per prepare_state
 # --------------------------------------------------------------------------- #
@@ -132,26 +151,63 @@ def test_dehnen_error_default_mode_is_paper_cached():
 
 
 def test_paper_cached_runs_the_prepass_only_on_the_cold_call(monkeypatch):
+    """Once, on the cold call -- and the reuse must not make ``prepare_state``
+    history-dependent, nor leave the prepass's overridden knobs behind.
+
+    Idempotency guard on the ``_last_force_scale_nodes`` statefulness: the first
+    call writes the cache, the second reads it back, and reading it back must
+    reproduce what writing it produced. The cached scale itself is compared to the
+    bit -- that is the stateful thing under test, and it is exactly reproducible on
+    every backend. The accelerations derived from it are compared within the
+    atomic-reduction noise band, because on GPU the near-field/M2L scatter-adds
+    commit in nondeterministic order and no repeat of *any* computation is
+    bit-identical there. See ``_reproducibility.py`` for the measurement.
+
+    Those two checks were ``test_repeated_prepare_state_gives_bit_identical_
+    accelerations`` and the knob check ``test_force_scale_prepass_restores_the_
+    overridden_policy_knobs[paper_cached]`` until 2026-10-12, each repeating
+    these prepares on a solver of the same mode.
+    """
     positions, masses = _sample_problem()
     fmm = _paper_solver(mode="paper_cached")
+    before = _overridden_policy_knobs(fmm)
     calls = _count_paper_prepasses(monkeypatch, fmm)
 
-    for _ in range(3):
-        state = _prepare(fmm, positions, masses)
+    states = [_prepare(fmm, positions, masses)]
+    _assert_prepass_restored(fmm, before)  # after the one call that runs it
+    states += [_prepare(fmm, positions, masses) for _ in range(2)]
 
     assert calls[0] == 1
-    assert state.force_scale_nodes is not None
+    assert states[-1].force_scale_nodes is not None
+
+    first, second = states[0], states[1]
+    np.testing.assert_array_equal(
+        np.asarray(first.force_scale_nodes),
+        np.asarray(second.force_scale_nodes),
+    )
+    assert_reproducible(
+        np.asarray(fmm.evaluate_prepared_state(first)),
+        np.asarray(fmm.evaluate_prepared_state(second)),
+        err_msg="cache read-back changed the force beyond reduction noise",
+    )
 
 
 def test_paper_mode_runs_the_prepass_on_every_call(monkeypatch):
-    """``"paper"`` is retained deliberately as the history-free upper bound."""
+    """``"paper"`` is retained deliberately as the history-free upper bound.
+
+    Each of those prepasses must restore every knob it overrides (until
+    2026-10-12, ``test_force_scale_prepass_restores_the_overridden_policy_knobs
+    [paper]`` checked that on one prepare of its own).
+    """
 
     positions, masses = _sample_problem()
     fmm = _paper_solver(mode="paper")
+    before = _overridden_policy_knobs(fmm)
     calls = _count_paper_prepasses(monkeypatch, fmm)
 
     for _ in range(3):
         _prepare(fmm, positions, masses)
+        _assert_prepass_restored(fmm, before)
 
     assert calls[0] == 3
 
@@ -209,38 +265,6 @@ def test_paper_cached_rebuilds_the_scale_when_the_node_count_changes():
 # --------------------------------------------------------------------------- #
 # reuse must not make prepare_state itself history-dependent
 # --------------------------------------------------------------------------- #
-
-
-def test_repeated_prepare_state_gives_bit_identical_accelerations():
-    """Idempotency guard on the ``_last_force_scale_nodes`` statefulness.
-
-    Two ``prepare_state`` calls on identical inputs must agree: the first writes
-    the cache, the second reads it back, and reading it back must reproduce what
-    writing it produced.
-
-    The cached scale itself is compared to the bit -- that is the stateful thing
-    under test, and it is exactly reproducible on every backend. The accelerations
-    derived from it are compared within the atomic-reduction noise band, because
-    on GPU the near-field/M2L scatter-adds commit in nondeterministic order and no
-    repeat of *any* computation is bit-identical there. See
-    ``_reproducibility.py`` for the measurement.
-    """
-
-    positions, masses = _sample_problem()
-    fmm = _paper_solver(mode="paper_cached")
-
-    first = _prepare(fmm, positions, masses)
-    second = _prepare(fmm, positions, masses)
-
-    np.testing.assert_array_equal(
-        np.asarray(first.force_scale_nodes),
-        np.asarray(second.force_scale_nodes),
-    )
-    assert_reproducible(
-        np.asarray(fmm.evaluate_prepared_state(first)),
-        np.asarray(fmm.evaluate_prepared_state(second)),
-        err_msg="cache read-back changed the force beyond reduction noise",
-    )
 
 
 def test_paper_mode_is_history_free_across_repeated_solves():
@@ -464,29 +488,20 @@ def test_force_scale_prepass_restores_the_outer_gear_bookkeeping():
     assert len(fmm._impl._recent_far_pairs_by_gear_counts) == len(p_gears)
 
 
-@pytest.mark.parametrize("mode", ["paper", "paper_cached", "prepass"])
+# The "paper" and "paper_cached" cases are checked on the prepares of
+# test_paper_mode_runs_the_prepass_on_every_call and
+# test_paper_cached_runs_the_prepass_only_on_the_cold_call.
+@pytest.mark.parametrize("mode", ["prepass"])
 def test_force_scale_prepass_restores_the_overridden_policy_knobs(mode):
     """Every knob the prepass overrides must be back to its configured value."""
 
     positions, masses = _sample_problem()
     fmm = _paper_solver(mode=mode)
-    impl = fmm._impl
-    before = (
-        impl.p_gears,
-        impl.adaptive_order,
-        impl.adaptive_error_model,
-        impl.mac_type,
-    )
+    before = _overridden_policy_knobs(fmm)
 
     _prepare(fmm, positions, masses)
 
-    assert (
-        impl.p_gears,
-        impl.adaptive_order,
-        impl.adaptive_error_model,
-        impl.mac_type,
-    ) == before
-    assert impl._in_force_scale_prepass is False
+    _assert_prepass_restored(fmm, before)
 
 
 # --------------------------------------------------------------------------- #
