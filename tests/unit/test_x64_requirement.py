@@ -25,7 +25,7 @@ from jaccpot.distributed import (
     make_force_evaluator,
     partition_for_devices,
 )
-from jaccpot.distributed.rollout import FusedRollout
+from jaccpot.distributed.rollout import FusedRollout, RolloutConfig, ShardState
 from jaccpot.runtime._fmm_impl import FMMEngine
 from jaccpot.runtime.dtypes import require_x64
 
@@ -49,12 +49,26 @@ def _particles(n: int = 16):
     )
 
 
+def _fused_rollout():
+    """``FusedRollout`` with arguments that pass the runtime type check (CI runs one)."""
+    f32 = jnp.zeros((8, 3), jnp.float32)
+    state = ShardState(
+        positions=f32,
+        velocities=f32,
+        masses=jnp.ones((8,), jnp.float32),
+        ids=jnp.arange(8, dtype=jnp.int32),
+        count=jnp.asarray([8], jnp.int32),
+        accel=f32,
+    )
+    return FusedRollout(None, state, RolloutConfig(cap=8, dt=1e-3), lambda *a: ())
+
+
 _ENTRY_POINTS = {
     "FastMultipoleMethod": lambda: FastMultipoleMethod(),
     "FMMEngine": lambda: FMMEngine(),
     "BlockStepFMM": lambda: BlockStepFMM(softening=1e-2, k_max=2),
     "DistributedBlockStepFMM": lambda: DistributedBlockStepFMM(softening=1e-2, k_max=2),
-    "FusedRollout": lambda: FusedRollout(None, None, None, None),
+    "FusedRollout": _fused_rollout,
     "partition_for_devices": lambda: partition_for_devices(
         *_particles(), 1, leaf_size=4
     ),
