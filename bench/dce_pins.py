@@ -395,11 +395,7 @@ def case_m2(out: Path) -> dict:
         GATE_EVERY=str(every),
         GATE_OUT=str(gate_dir),
     )
-    # The gate selects XLA's NCCL ragged exchange (fused.RAGGED_EXCHANGE_XLA_FLAG);
-    # from jax 0.11 XLA refuses that fallback unless it is allowed explicitly.
-    allow = "--xla_gpu_allow_ragged_all_to_all_nccl_send_recv_fallback=true"
-    if allow.split("=")[0] not in env.get("XLA_FLAGS", ""):
-        env["XLA_FLAGS"] = (env.get("XLA_FLAGS", "") + " " + allow).strip()
+    # The gate sets XLA's NCCL ragged exchange itself (bench/_ragged_exchange_flags.py).
     subprocess.run(
         [sys.executable, str(HERE / "multigpu_rollout_gate.py")], env=env, check=True
     )

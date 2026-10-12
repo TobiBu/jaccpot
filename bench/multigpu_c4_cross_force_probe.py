@@ -63,13 +63,12 @@ if os.environ.get("PROBE_NAMED_CAPS") != "1":
 os.environ["JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET"] = f"{CAP},{N}"
 _TRAV = dict((FAST_LANE_ENV_BY_LEAF.get(LEAF) or {}).get("_traversal_overrides", {}))
 # The NCCL ragged exchange, not XLA's one-shot kernel: 4-6x faster per round on PCIe
-# (see `jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAG`). It has to be in XLA_FLAGS
+# (see `jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAGS`). It has to be in XLA_FLAGS
 # before the backend starts; PROBE_RAGGED_ONE_SHOT=1 keeps the old path for an A/B.
-_RAGGED = "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false"
-if os.environ.get("PROBE_RAGGED_ONE_SHOT") != "1" and _RAGGED.split("=")[0] not in (
-    os.environ.get("XLA_FLAGS", "")
-):
-    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _RAGGED).strip()
+if os.environ.get("PROBE_RAGGED_ONE_SHOT") != "1":
+    from _ragged_exchange_flags import add_ragged_exchange_flags
+
+    add_ragged_exchange_flags()
 # XLA's latency-hiding scheduler: lets the cross exchange overlap independent work.
 # 2-card cross arm, cards 1+2: 90.0 / 89.5 -> 88.0 / 87.6 ms at 2e6 and 21.7 -> 21.0
 # ms at 4e5, forces unchanged (2026-10-02). PROBE_LHS=0 leaves it out for an A/B.

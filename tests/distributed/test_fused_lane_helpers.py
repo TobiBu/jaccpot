@@ -212,7 +212,7 @@ def test_a_gpu_mesh_without_the_ragged_flag_warns_once(
     reads its flags once -- so the lane cannot fix it, only say so, once."""
     fused = _fresh_ragged_warning
     monkeypatch.setenv("XLA_FLAGS", "--xla_gpu_enable_command_buffer=FUSION")
-    with pytest.warns(RuntimeWarning, match="ragged_all_to_all"):
+    with pytest.warns(RuntimeWarning, match="4-6x slower"):
         fused._warn_if_slow_ragged_exchange(_FakeMesh(2, "gpu"))
     import warnings
 
@@ -220,6 +220,46 @@ def test_a_gpu_mesh_without_the_ragged_flag_warns_once(
         warnings.simplefilter("always")
         fused._warn_if_slow_ragged_exchange(_FakeMesh(2, "gpu"))
     assert not caught, "the warning must fire once per process"
+
+
+def test_the_one_shot_flag_alone_warns_that_it_deadlocks(
+    _fresh_ragged_warning, monkeypatch
+):
+    """The NCCL path without ``use_barrier_with_nccl=false`` -- the one-flag setting
+    jaccpot recommended until jax 0.11 turned the barrier on -- delivers no cross-device
+    rows and deadlocks (bench/repro_jax_ragged_all_to_all_nccl_fallback.py)."""
+    fused = _fresh_ragged_warning
+    one_shot = fused.RAGGED_EXCHANGE_XLA_FLAGS.split()[0]
+    monkeypatch.setenv("XLA_FLAGS", one_shot)
+    with pytest.warns(RuntimeWarning, match="deadlocks") as record:
+        fused._warn_if_slow_ragged_exchange(_FakeMesh(2, "gpu"))
+    assert "use_barrier_with_nccl=false" in str(record[0].message)
+
+
+@pytest.mark.parametrize(
+    "flags, missing",
+    [
+        ("RAGGED", 0),
+        ("--x=1 RAGGED --y", 0),
+        # XLA takes the later value of a repeated flag, and so does the check
+        (
+            "RAGGED --xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl=true",
+            1,
+        ),
+        (
+            "--xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl=true RAGGED",
+            0,
+        ),
+        # an A/B back to XLA's one-shot kernel
+        ("RAGGED --xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=true", 1),
+        ("", 3),
+    ],
+)
+def test_missing_ragged_exchange_flags(flags, missing):
+    from jaccpot.distributed import fused
+
+    text = flags.replace("RAGGED", fused.RAGGED_EXCHANGE_XLA_FLAGS)
+    assert len(fused._missing_ragged_exchange_flags(text)) == missing
 
 
 @pytest.mark.parametrize(
@@ -230,15 +270,15 @@ def test_a_gpu_mesh_without_the_ragged_flag_warns_once(
         (_FakeMesh(2, "cpu"), ""),
     ],
 )
-def test_no_warning_with_the_flag_one_device_or_cpu(
+def test_no_warning_with_the_flags_one_device_or_cpu(
     _fresh_ragged_warning, monkeypatch, mesh, flags
 ):
-    """CONTROLS: the flag set, a single device (no exchange), or CPU devices."""
+    """CONTROLS: the flags set, a single device (no exchange), or CPU devices."""
     import warnings
 
     fused = _fresh_ragged_warning
     monkeypatch.setenv(
-        "XLA_FLAGS", flags.replace("RAGGED", fused.RAGGED_EXCHANGE_XLA_FLAG)
+        "XLA_FLAGS", flags.replace("RAGGED", fused.RAGGED_EXCHANGE_XLA_FLAGS)
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

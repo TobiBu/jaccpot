@@ -49,7 +49,7 @@ from jaxtyping import Array
 
 __all__ = [
     "AXIS_NAME",
-    "RAGGED_EXCHANGE_XLA_FLAG",
+    "RAGGED_EXCHANGE_XLA_FLAGS",
     "assemble_prepared_states",
     "cube_bounds",
     "fused_force_step",
@@ -63,25 +63,63 @@ __all__ = [
 #: Mesh axis the distributed lanes agree on (matches ``yggdrax.distributed``).
 AXIS_NAME = "gpus"
 
-#: Add this to ``XLA_FLAGS`` before JAX starts its GPU backend. XLA's default
-#: ``ragged_all_to_all`` on GPU is a one-shot kernel that stores straight into peer
-#: memory; across PCIe (no NVLink) it moves ~2 GB/s, where the NCCL path this flag
-#: selects moves 11-13 GB/s at the cross field's message sizes
-#: (``bench/multigpu_exchange_bench.py``, 2026-10-02, A100 pairs on one PCIe switch
-#: and across switches alike). On the 2-card force that is 41.1 -> 33.2 ms at 2e5
-#: particles per card and 189 -> 138 ms at 1e6, with bit-identical forces. XLA reads
-#: its flags once, so jaccpot cannot set this for you; the mesh evaluator warns
-#: when it is missing. ``xla_gpu_ragged_all_to_all_mode=symmetric`` hangs on that
-#: hardware and ``=private`` is slower still.
-RAGGED_EXCHANGE_XLA_FLAG = (
-    "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false"
+#: Add these to ``XLA_FLAGS`` before JAX starts its GPU backend. XLA reads its flags
+#: once, so jaccpot cannot set them for you; the mesh evaluator warns when one is
+#: missing. Together they select XLA's NCCL send/recv ``ragged_all_to_all``:
+#:
+#: * ``one_shot_kernel=false``: XLA's default one-shot kernel stores straight into
+#:   peer memory and, across PCIe (no NVLink), takes 4-6x the NCCL path's time at the
+#:   cross field's message sizes (``bench/multigpu_exchange_bench.py``: 2026-10-02 on
+#:   jax 0.10.2, A100 pairs on one PCIe switch and across switches alike; 2026-10-12 on
+#:   jax 0.11.2 across sockets, e.g. 65,536 rows of 312 float32: 37.5 vs 6.4-7.0 ms).
+#:   On the 2-card force that was 41.1 -> 33.2 ms at 2e5 particles per card and
+#:   189 -> 138 ms at 1e6, with bit-identical forces.
+#: * ``allow_..._nccl_send_recv_fallback=true``: from jax 0.11, XLA refuses that path
+#:   without it (INVALID_ARGUMENT).
+#: * ``use_barrier_with_nccl=false``: jax 0.11 turned this on by default, and with it
+#:   on the NCCL path delivers none of the cross-device rows and the next call
+#:   deadlocks (``bench/repro_jax_ragged_all_to_all_nccl_fallback.py``, pure JAX: from
+#:   ~512 rows of 56 float32 per message up, on 0.11.2 and on 0.10.2 with the flag
+#:   set). It is how the fused two-card lane hung on 0.11.2.
+#:
+#: ``xla_gpu_ragged_all_to_all_mode=symmetric`` hangs on that hardware and
+#: ``=private`` is slower still; XLA's ragged decomposer is ~1.2x the NCCL time.
+RAGGED_EXCHANGE_XLA_FLAGS = (
+    "--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false "
+    "--xla_gpu_allow_ragged_all_to_all_nccl_send_recv_fallback=true "
+    "--xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl=false"
 )
 
 _WARNED_RAGGED_FLAG: list[bool] = []
 
 
+def _missing_ragged_exchange_flags(xla_flags: str) -> list[str]:
+    """The flags of :data:`RAGGED_EXCHANGE_XLA_FLAGS` that ``xla_flags`` does not set.
+
+    Parameters
+    ----------
+    xla_flags : str
+        An ``XLA_FLAGS`` string. A later ``--name=value`` wins, as in XLA.
+
+    Returns
+    -------
+    list[str]
+        The wanted ``--name=value`` tokens that are absent or set to another value.
+    """
+    values: dict[str, str] = {}
+    for token in xla_flags.split():
+        name, _, value = token.partition("=")
+        values[name] = value.lower() if value else "true"
+    missing = []
+    for wanted in RAGGED_EXCHANGE_XLA_FLAGS.split():
+        name, _, value = wanted.partition("=")
+        if values.get(name) != value:
+            missing.append(wanted)
+    return missing
+
+
 def _warn_if_slow_ragged_exchange(mesh: Any) -> None:
-    """Warn once when a multi-GPU mesh runs without :data:`RAGGED_EXCHANGE_XLA_FLAG`.
+    """Warn once when a multi-GPU mesh runs without :data:`RAGGED_EXCHANGE_XLA_FLAGS`.
 
     Parameters
     ----------
@@ -102,14 +140,26 @@ def _warn_if_slow_ragged_exchange(mesh: Any) -> None:
     devices = list(getattr(mesh, "devices", np.zeros(0)).flat)
     if len(devices) < 2 or getattr(devices[0], "platform", "") != "gpu":
         return
-    if RAGGED_EXCHANGE_XLA_FLAG.split("=")[0] in env_text("XLA_FLAGS"):
+    missing = _missing_ragged_exchange_flags(env_text("XLA_FLAGS"))
+    if not missing:
         return
     _WARNED_RAGGED_FLAG.append(True)
+    one_shot_flag = RAGGED_EXCHANGE_XLA_FLAGS.split()[0]
+    if one_shot_flag in missing:
+        why = (
+            "the multi-GPU fused lane is running with XLA's default one-shot "
+            "ragged_all_to_all, which is 4-6x slower than the NCCL path on PCIe GPUs"
+        )
+    else:
+        why = (
+            "XLA_FLAGS selects the NCCL ragged_all_to_all without "
+            f"{' '.join(missing)}; without the barrier flag that path delivers no "
+            "cross-device rows and deadlocks on the next call (jax 0.11 turned the "
+            "barrier on by default)"
+        )
     warnings.warn(
-        "the multi-GPU fused lane is running with XLA's default one-shot "
-        "ragged_all_to_all, which is 4-6x slower than the NCCL path on PCIe GPUs; "
-        f"start the process with XLA_FLAGS='{RAGGED_EXCHANGE_XLA_FLAG}' "
-        "(jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAG).",
+        f"{why}; start the process with XLA_FLAGS='{RAGGED_EXCHANGE_XLA_FLAGS}' "
+        "(jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAGS).",
         RuntimeWarning,
         stacklevel=3,
     )
