@@ -1509,7 +1509,10 @@ def _batched_ritter_leaf_spheres(
 
 @jaxtyped(typechecker=beartype)
 def compute_leaf_ritter_sphere_geometry(
-    *, tree: Tree, positions_sorted: Float[Array, "n 3"]
+    *,
+    tree: Tree,
+    positions_sorted: Float[Array, "n 3"],
+    max_leaf_size: Optional[int] = None,
 ) -> tuple[Array, Array]:
     """Return fast approximate leaf spheres using a batched JAX Ritter pass.
 
@@ -1519,6 +1522,12 @@ def compute_leaf_ritter_sphere_geometry(
         The tree whose nodes are being summarised.
     positions_sorted : Float[Array, 'n 3']
         Particle positions in tree order, shape ``(N, 3)``.
+    max_leaf_size : Optional[int]
+        Static upper bound on particles per leaf, the slot width of the batched
+        pass. ``None`` (default) reads the exact maximum off the device, which
+        raises inside ``jit``/``grad``; pass the bound there. It must be at least
+        the largest leaf: padding slots are masked, so a larger bound gives the
+        same spheres.
 
     Returns
     -------
@@ -1537,7 +1546,10 @@ def compute_leaf_ritter_sphere_geometry(
     if int(leaf_ranges.shape[0]) == 0:
         return centers, radii
     counts = leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1
-    max_leaf = int(jnp.max(counts)) if int(counts.shape[0]) > 0 else 0
+    if max_leaf_size is not None:
+        max_leaf = int(max_leaf_size)
+    else:
+        max_leaf = int(jnp.max(counts)) if int(counts.shape[0]) > 0 else 0
     idx = jnp.arange(max_leaf, dtype=jnp.int32)
     particle_idx = leaf_ranges[:, 0:1] + idx[None, :]
     valid = idx[None, :] < counts[:, None]
@@ -1703,7 +1715,11 @@ def merge_bounding_spheres(
 
 @jaxtyped(typechecker=beartype)
 def compute_tree_merged_sphere_geometry(
-    *, tree: Tree, positions_sorted: Float[Array, "n 3"], leaf_mode: str = "exact"
+    *,
+    tree: Tree,
+    positions_sorted: Float[Array, "n 3"],
+    leaf_mode: str = "exact",
+    max_leaf_size: Optional[int] = None,
 ) -> tuple[Array, Array]:
     """Return node spheres from leaf spheres and JAX upward merges.
 
@@ -1715,6 +1731,10 @@ def compute_tree_merged_sphere_geometry(
         Particle positions in tree order, shape ``(N, 3)``.
     leaf_mode : str
         See the module docstring.
+    max_leaf_size : Optional[int]
+        Static upper bound on particles per leaf, used by ``leaf_mode="approx"``
+        (see :func:`compute_leaf_ritter_sphere_geometry`); ``None`` reads it off the
+        device. The ``"exact"`` leaf mode is a host loop and ignores it.
 
     Returns
     -------
@@ -1734,7 +1754,7 @@ def compute_tree_merged_sphere_geometry(
         )
     elif leaf_mode_norm == "approx":
         centers, radii = compute_leaf_ritter_sphere_geometry(
-            tree=tree, positions_sorted=positions_sorted
+            tree=tree, positions_sorted=positions_sorted, max_leaf_size=max_leaf_size
         )
     else:
         raise ValueError("leaf_mode must be 'exact' or 'approx'")
@@ -2181,8 +2201,9 @@ def resolve_dehnen_geometry(
         Working dtype for the returned arrays.
     max_leaf_size : Optional[int]
         Static upper bound on particles per leaf, forwarded to the ``com`` mode's
-        radius pass. ``None`` (default) lets it read the exact maximum off the
-        device, which raises inside ``jit``/``shard_map``.
+        radius pass and the ``tree_approx`` mode's leaf spheres. ``None`` (default)
+        lets them read the exact maximum off the device, which raises inside
+        ``jit``/``grad``/``shard_map``.
 
     Returns
     -------
@@ -2203,8 +2224,8 @@ def resolve_dehnen_geometry(
     ):
         raise RuntimeError(
             f"dehnen_geometry_mode={mode!r} runs a numpy host loop over nodes and "
-            "cannot be traced; use 'com' (recommended), 'tree_approx', or "
-            "'runtime' under jax.jit/jax.grad"
+            "cannot be traced; under jax.jit/jax.grad use 'com' (recommended) or "
+            "'tree_approx' with a static max_leaf_size, or 'runtime'"
         )
     if mode == "com":
         mac_centers = jnp.asarray(upward.multipoles.centers, dtype=dtype)
@@ -2245,6 +2266,7 @@ def resolve_dehnen_geometry(
             tree=tree,
             positions_sorted=positions_sorted,
             leaf_mode="approx",
+            max_leaf_size=max_leaf_size,
         )
     elif mode == "runtime":
         mac_centers = jnp.asarray(upward.geometry.center, dtype=dtype)
