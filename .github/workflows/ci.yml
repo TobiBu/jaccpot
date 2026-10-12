@@ -184,12 +184,17 @@ jobs:
         with:
           path: ${{ github.workspace }}/.jax_cache
           # Keyed per shard: the shards compile disjoint sets and would otherwise
-          # race to save the same key. Keyed on source, so any `.py` edit misses the
-          # exact key and restores the prefix -- and a cancelled job never saves,
-          # which is why a cap that is too tight keeps the next run cold too.
-          key: jax-compile-py313-${{ matrix.shard }}-${{ hashFiles('jaccpot/**/*.py') }}
+          # race to save the same key. The `--` ends the shard name, so one shard's
+          # restore prefix cannot match another's (`unit-` matched `unit-runtime-...`
+          # until 2026-10-12, and the unit shard restored the runtime shard's cache).
+          # Keyed on library AND test sources: an edit to either misses the exact key,
+          # restores the prefix and saves a fresh cache at the end. Keyed on the library
+          # alone, a test-only change got an exact hit on a cache that lacked its new
+          # programs and never saved. A cancelled job never saves, which is why a cap
+          # that is too tight keeps the next run cold too.
+          key: jax-compile-py313-${{ matrix.shard }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
           restore-keys: |
-            jax-compile-py313-${{ matrix.shard }}-
+            jax-compile-py313-${{ matrix.shard }}--
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip
@@ -252,9 +257,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.jax_cache
-          key: jax-compile-py312-floor-${{ hashFiles('jaccpot/**/*.py') }}
+          key: jax-compile-py312-floor--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
           restore-keys: |
-            jax-compile-py312-floor-
+            jax-compile-py312-floor--
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip
@@ -585,9 +590,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .jax_cache
-          key: jax-cache-criterion-${{ runner.os }}-${{ hashFiles('jaccpot/**/*.py') }}
+          key: jax-cache-criterion-${{ runner.os }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
           restore-keys: |
-            jax-cache-criterion-${{ runner.os }}-
+            jax-cache-criterion-${{ runner.os }}--
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip
@@ -666,9 +671,9 @@ jobs:
           # Own key: every test here compiles its own `shard_map` program, which
           # no other job compiles, and three jobs racing one key means two lose.
           path: ${{ github.workspace }}/.jax_cache
-          key: jax-compile-py313-disttier-${{ hashFiles('jaccpot/**/*.py') }}
+          key: jax-compile-py313-disttier--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
           restore-keys: |
-            jax-compile-py313-disttier-
+            jax-compile-py313-disttier--
       - name: Install package + dev tools
         run: |
           python -m pip install --upgrade pip

@@ -311,7 +311,13 @@ if _jax_cache_dir and os.environ.get(
 }:
     os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", _jax_cache_dir)
     os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "-1")
-    os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "1.0")
+    # Every compile is written, however short. The suite is ~87 % compilation, and
+    # the bulk of it is tens of thousands of sub-second programs (90,041 backend
+    # compiles in tests/unit, 0.09 s on average, 2026-10-12). At the old 1.0 s
+    # threshold none of them reached the disk, so the per-test `clear_caches()` below
+    # recompiled them every time: tests/unit/runtime at -n 8 took 886 s cold / 708 s
+    # warm at 1.0 against 685 s / 392 s at 0, for a 180 MB cache instead of 102 MB.
+    os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "0")
 
 
 # --- Data-driven slow and smoke marking --------------------------------------
@@ -438,9 +444,10 @@ _DIFF_FMM_TEST_FILES_WARM_ONLY = frozenset(
 # WHAT IT COSTS, because it is more than the note above implies. Clearing after each of 94
 # solver tests takes that command from 269 s to 506 s, a 1.9x wall-clock cost, while peak
 # RSS drops to 3.33 GB. The on-disk cache recovers only ~12% of the recompiles (577 s cold
-# vs 506 s warm), NOT most of them: `JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS` is 1.0
-# above, so the many sub-second compiles this suite churns through are never written to
-# disk. The trade is taken anyway -- test-mac-runtime runs ~8 min against a 50 min cap, so
+# vs 506 s warm), NOT most of them: `JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS` was 1.0
+# then, so the many sub-second compiles this suite churns through never reached the disk.
+# It is 0 since 2026-10-12 (see above), which is what makes the per-test clearing cheap:
+# the recompiles are now disk hits. The trade is taken anyway -- test-mac-runtime runs ~8 min against a 50 min cap, so
 # there is room, and an intermittently-crashing job is worth more than the minutes. If that
 # ever stops being true, the lever is a coarser trigger (clear every k tests, or only above
 # an RSS watermark) rather than dropping this.

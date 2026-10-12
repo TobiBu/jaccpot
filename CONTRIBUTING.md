@@ -8,18 +8,10 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-### macOS
-
-The command above **cannot resolve on macOS**. `jax[cuda]` is an unconditional
-dependency and `jax-cuda12-plugin` has no darwin wheels, so pip fails with
-`No matching distribution found for jax-cuda12-plugin`. Install the CPU stack
-explicitly instead — this is the same JAX window `pyproject.toml` pins, and it is
-what the CPU CI legs exercise:
-
-```bash
-pip install "jax>=0.11.2,<0.12" "jaxlib>=0.11.2,<0.12" "jaxtyping>=0.2.23" "beartype>=0.14.0" "black==26.5.1" "isort==9.0.0b1" "pydoclint==0.9.1" "pytest>=8.3.0" "pytest-cov>=5.0.0" "pytest-xdist>=3.6.0" "pre-commit>=3.8.0"
-pip install -e . --no-deps
-```
+On a machine with an NVIDIA GPU add the CUDA plugin: `pip install -e ".[dev,cuda]"`.
+The base install is CPU-only, so the command above also works on macOS (before
+2026-10-12 `jax[cuda]` was an unconditional dependency and pip could not resolve it
+there).
 
 `yggdrax` is not on PyPI — install it from source first (`pip install
 git+https://github.com/TobiBu/yggdrax.git`, or `pip install -e` a local checkout).

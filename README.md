@@ -39,8 +39,12 @@ Tree construction and traversal artifacts are provided by the companion package
 Install from source:
 
 ```bash
-pip install -e .
+pip install -e .            # CPU
+pip install -e ".[cuda]"    # NVIDIA GPU: adds jax's CUDA plugin
 ```
+
+The base install is CPU-only; GPU runs (the Pallas kernels, the fused lane) need the
+`cuda` extra, or a `jax[cuda]` you installed yourself in the same version window.
 
 `yggdrax` is not on PyPI yet. Install it from GitHub first (use the latest
 `main`, which includes native `RadixTree` JAX pytree registration):
@@ -55,7 +59,7 @@ cd ..
 Install with development tooling:
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"          # add ,cuda for a GPU machine: ".[dev,cuda]"
 ```
 
 ## Quick Start

@@ -65,7 +65,15 @@ dependencies = [
   # kwarg was removed in 0.9.1 and the fused M2L kernels passed it. They now go
   # through `jaccpot/pallas/_compat.pallas_backend_kwargs`, which selects Triton
   # via `backend=` on the old API and via `triton.CompilerParams` on the new one.
-  "jax[cuda]>=0.11.2,<0.12",
+  #
+  # CUDA IS AN EXTRA (`pip install jaccpot[cuda]`), not part of the base install,
+  # since 2026-10-12. As `jax[cuda]` here it made every install pull ~3 GB of CUDA
+  # wheels: the CPU-only CI jobs downloaded and cached them (three 3.3 GB pip caches
+  # pushed the repository past GitHub's 10 GB cache limit, which then evicted the JAX
+  # compilation caches the test shards depend on), and macOS could not install the
+  # package at all (`jax-cuda12-plugin` has no darwin wheels). The JAX window is the
+  # same in both; the extra only adds the CUDA plugin.
+  "jax>=0.11.2,<0.12",
   "jaxlib>=0.11.2,<0.12",
   "jaxtyping>=0.2.23",
   "beartype>=0.14.0",
@@ -79,6 +87,11 @@ Issues = "https://github.com/AstroAI-Lab/jaccpot/issues"
 Documentation = "https://github.com/AstroAI-Lab/jaccpot#readme"
 
 [project.optional-dependencies]
+# The GPU backend: jax's CUDA plugin, in the same window as the base `jax` above.
+# Needed for every GPU run (the Pallas/Triton kernels, the fused lane on A100/H100).
+cuda = [
+  "jax[cuda]>=0.11.2,<0.12",
+]
 dev = [
   # Pinned to match .pre-commit-config.yaml's black-pre-commit-mirror rev so a
   # local `black` and the hook/CI format identically (a floating ">=" let CI
