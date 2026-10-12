@@ -1,0 +1,87 @@
+{
+ "cards": {
+  "two": "A100-PCIE-40GB x2, GPUs 3+5 of compgpu9 (across CPU sockets; GPU 5 user-approved, GPU 3 carried another user's ~3 GB job; untimed)"
+ },
+ "deterministic_ops": true,
+ "envelope": "main-15ceca4-b",
+ "library": "jaccpot main e25633d (dead-code cleanup concluded, #391-#397), frozen worktree; yggdrax main 1f0e36f (#94)",
+ "notes": {
+  "M1": "bitwise vs main-15ceca4 (rel-L2 1.853e-4 vs the matching-kernel direct sum, no overflow): every change merged since 15ceca4 leaves the mesh lane unchanged, on a different card pair (3+5 vs 2+3)",
+  "M3": "bitwise vs main-15ceca4 (momentum drift 6.85e-10)"
+ },
+ "pins": [
+  "M1",
+  "M3"
+ ],
+ "reference": "main-15ceca4",
+ "tag": "main-e25633d",
+ "vs_main_15ceca4": {
+  "M1": {
+   "arrays": {
+    "acc": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "cap": 65536,
+     "kernel": "ferrers3",
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.0001852711778779491
+    },
+    "ref": {
+     "cap": 65536,
+     "kernel": "ferrers3",
+     "n": 131072,
+     "overflow": {
+      "cross_far_overflow": 0.0,
+      "cross_near_overflow": 0.0,
+      "cross_queue_overflow": 0.0,
+      "l2l_level_overflow": 0.0,
+      "self_far_overflow": 0.0,
+      "self_near_overflow": 0.0,
+      "self_queue_overflow": 0.0
+     },
+     "rel_l2": 0.0001852711778779491
+    }
+   },
+   "pass": true
+  },
+  "M3": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    },
+    "ref": {
+     "momentum_drift": 6.853926824114361e-10,
+     "n": 8192
+    }
+   },
+   "pass": true
+  }
+ }
+}
