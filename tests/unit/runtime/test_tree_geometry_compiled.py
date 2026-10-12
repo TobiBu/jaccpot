@@ -36,6 +36,10 @@ from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
+# `prepared` is module-scoped: one xdist worker builds it, not every worker that runs
+# one of its tests (CI: `-n 2 --dist loadgroup`).
+pytestmark = pytest.mark.xdist_group("tree_geometry_compiled")
+
 
 @pytest.fixture(scope="module")
 def prepared():

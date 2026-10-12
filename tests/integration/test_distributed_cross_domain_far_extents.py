@@ -88,6 +88,10 @@ from jaccpot.upward.real_tree_expansions import (  # noqa: E402
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled  # noqa: E402
 
+# `cross_views` is module-scoped and builds both domain geometries: pinned to one
+# xdist worker so CI's `-n 2 --dist loadgroup` builds it once, not once per worker.
+pytestmark = pytest.mark.xdist_group("distributed_cross_domain_far_extents")
+
 # The mesh and per-device load this file mirrors. Declared before the config because
 # the traversal capacities are now derived from them.
 _NDEV = 2

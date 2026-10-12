@@ -133,6 +133,12 @@ _PAYLOAD_CAP_ENV = "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB"
 # reduction nondeterminism without letting a real regression through.
 _RTOL = 3e-3
 
+# A module- or class-scoped fixture is built once per xdist WORKER that requests it,
+# and CI runs `-n 2 --dist loadgroup`: unpinned, the ~25 s prepare and ~115 s reverse
+# compile behind `reverse_pass` ran on both workers. Each fixture's users share a
+# group, so `loadgroup` sends them to one worker; the groups still run in parallel.
+_PREPACKED_STATE_USERS = pytest.mark.xdist_group("large_n_reverse_prepacked_state")
+
 
 def _problem(seed: int = 11) -> tuple[Any, Any, Any]:
     """Build a small fp32 problem plus a random adjoint weight.
@@ -270,6 +276,7 @@ def reverse_pass(prepacked_state) -> dict[str, Any]:
     }
 
 
+@_PREPACKED_STATE_USERS
 def test_the_lane_under_test_is_actually_the_large_n_lane(prepacked_state) -> None:
     """``prepare_state`` must return a ``LargeNPreparedState``, not a radix one.
 
@@ -284,6 +291,7 @@ def test_the_lane_under_test_is_actually_the_large_n_lane(prepacked_state) -> No
     )
 
 
+@_PREPACKED_STATE_USERS
 def test_the_far_field_is_load_bearing(prepacked_state) -> None:
     """There must be far pairs, or the FMM is a direct sum wearing its clothes.
 
@@ -301,6 +309,7 @@ def test_the_far_field_is_load_bearing(prepacked_state) -> None:
     )
 
 
+@_PREPACKED_STATE_USERS
 def test_reverse_pass_is_finite(reverse_pass) -> None:
     """Neither gradient may contain a NaN or an inf."""
     for name in ("grad_positions", "grad_masses"):
@@ -309,6 +318,7 @@ def test_reverse_pass_is_finite(reverse_pass) -> None:
         ), f"{name} contains a non-finite entry"
 
 
+@_PREPACKED_STATE_USERS
 def test_forward_matches_the_direct_sum(reverse_pass) -> None:
     """The forward pass anchors the reverse: measured rel-L2 6.3e-04."""
     error = _relative_l2(
@@ -317,6 +327,7 @@ def test_forward_matches_the_direct_sum(reverse_pass) -> None:
     assert error < _RTOL, f"forward rel-L2 {error:.3e} exceeds {_RTOL:.0e}"
 
 
+@_PREPACKED_STATE_USERS
 def test_position_gradient_matches_the_direct_sum(reverse_pass) -> None:
     """d/dpositions against an exact O(N^2) adjoint: measured rel-L2 2.2e-05."""
     error = _relative_l2(
@@ -325,6 +336,7 @@ def test_position_gradient_matches_the_direct_sum(reverse_pass) -> None:
     assert error < _RTOL, f"d/dpos rel-L2 {error:.3e} exceeds {_RTOL:.0e}"
 
 
+@_PREPACKED_STATE_USERS
 def test_mass_gradient_matches_the_direct_sum(reverse_pass) -> None:
     """d/dmasses is the one that catches a far field frozen into a constant.
 
@@ -450,6 +462,7 @@ def _count_calls(monkeypatch, counts, module, name, key) -> None:
     monkeypatch.setattr(module, name, counted)
 
 
+@pytest.mark.xdist_group("large_n_reverse_every_pallas_kernel")
 class TestEveryFastPallasKernel:
     @pytest.fixture(scope="class", autouse=True)
     def _every_pallas_lane_on_cpu(self) -> Iterator[None]:
