@@ -77,6 +77,41 @@ def _num_far_pairs(state):
     return 0
 
 
+def _directional_fd_vs_ad(loss_fn, x, grad, direction, eps=1e-6):
+    """Relative gap between AD and a central difference of ``loss_fn`` along ``direction``.
+
+    The finite difference perturbs the SAME frozen-topology function the gradient
+    was taken of, so the two must agree to round-off (the self-consistency
+    contract in ``docs/differentiable_fmm_design.md``), whatever the far field's
+    truncation error. This is the FD-vs-AD half of the deep real config; it was
+    ``test_gradient_correctness.py``'s at the same (theta, N, order, leaf) until
+    2026-10-12, at the cost of a second prepare and reverse pass.
+
+    Parameters
+    ----------
+    loss_fn : Callable[[Array], Array]
+        The scalar loss, of the one argument differentiated.
+    x : Array
+        The point.
+    grad : Array
+        ``jax.grad(loss_fn)(x)``.
+    direction : Array
+        The direction, shaped like ``x``.
+    eps : float
+        Central-difference step.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        ``(rel, fd, ad)``.
+    """
+    ad = float(jnp.sum(grad * direction))
+    fd = float(
+        (loss_fn(x + eps * direction) - loss_fn(x - eps * direction)) / (2 * eps)
+    )
+    return abs(fd - ad) / (abs(fd) + 1e-300), fd, ad
+
+
 # Both solidfmm submodes at a single deliberately *multi-level* point:
 # ``leaf_size=4`` at ``theta=0.6`` builds a tree deep enough that the MAC accepts
 # a non-empty M2L interaction list (~16 pairs at n=64), so grad(FMM) genuinely
@@ -121,6 +156,12 @@ def test_grad_fmm_matches_grad_directsum_positions(basis, theta, order, leaf, to
         f"position grad rel-L2 {err:.3e} outside (1e-5, {tol:.1e}) "
         f"(basis={basis}, theta={theta}, far_pairs={n_far})"
     )
+    # FD vs AD on the same frozen function: config-independent, round-off level.
+    direction = jax.random.normal(
+        jax.random.PRNGKey(0), positions.shape, dtype=jnp.float64
+    )
+    rel, fd, ad = _directional_fd_vs_ad(fmm_loss, positions, g_fmm, direction)
+    assert rel < 1e-4, f"FD-vs-AD rel-err {rel:.3e} (fd={fd:.3e}, ad={ad:.3e})"
 
 
 @pytest.mark.parametrize("basis", ["real"])
@@ -163,10 +204,23 @@ def test_grad_fmm_matches_grad_directsum_masses(basis):
     assert (
         1e-5 < err < 5e-3
     ), f"mass grad rel-L2 {err:.3e} outside (1e-5, 5e-3) (basis={basis}, far_pairs={n_far})"
+    # FD vs AD on the same frozen function: config-independent, round-off level.
+    direction = jax.random.normal(
+        jax.random.PRNGKey(1), masses.shape, dtype=jnp.float64
+    )
+    rel, fd, ad = _directional_fd_vs_ad(fmm_loss, masses, g_fmm, direction)
+    assert rel < 1e-4, f"FD-vs-AD rel-err {rel:.3e} (fd={fd:.3e}, ad={ad:.3e})"
 
 
 def test_differentiable_matches_forward_compute_accelerations():
-    """The differentiable path must reproduce the forward FMM force it differentiates."""
+    """The differentiable path must reproduce the forward FMM force it differentiates.
+
+    Both are in the original (unsorted) input order, so this is also the check that
+    the differentiable output is reordered back from Morton order: the elementwise
+    bound below was ``test_gradient_correctness.py``'s
+    ``test_reorders_to_original_particle_order`` (same lane, theta, order and leaf
+    size, N=80) until 2026-10-12.
+    """
     n = 64
     positions, masses, _ = _system(n, seed=2)
     fmm = FastMultipoleMethod(
@@ -177,6 +231,7 @@ def test_differentiable_matches_forward_compute_accelerations():
     a_fwd = fmm.compute_accelerations(positions, masses, max_order=4, theta=0.4)
     assert a_diff.shape == positions.shape
     assert _rel_l2(a_diff, a_fwd) < 1e-6
+    assert jnp.allclose(a_diff, a_fwd, rtol=1e-6, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
