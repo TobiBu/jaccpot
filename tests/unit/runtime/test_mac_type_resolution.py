@@ -66,9 +66,9 @@ EXPECTED_TRAVERSAL_MAC_TYPE = {
     **{name: "dehnen" for name in JACCPOT_POLICY_MAC_TYPES},
 }
 
-# One (tree, upward) pair serves every capture below, so it is module-scoped and
-# pinned to one xdist worker (CI: `-n 2 --dist loadgroup`).
-pytestmark = pytest.mark.xdist_group("mac_type_resolution")
+# One (tree, upward) pair serves every capture below, so it is module-scoped and its
+# users share an xdist group (CI: `-n 2 --dist loadgroup`), built on one worker.
+_TREE_AND_UPWARD_USERS = pytest.mark.xdist_group("mac_type_resolution_tree_and_upward")
 
 
 #: The §5 policies are refused without one: ``adaptive_eps`` is the relative
@@ -141,6 +141,7 @@ def test_the_expected_resolution_names_every_requestable_value():
     assert set(EXPECTED_TRAVERSAL_MAC_TYPE) == ALL_REQUESTABLE
 
 
+@_TREE_AND_UPWARD_USERS
 @pytest.mark.parametrize("requested", sorted(ALL_REQUESTABLE))
 def test_downward_sweep_hands_the_traversal_a_value_yggdrax_accepts(
     monkeypatch, tree_and_upward, requested
@@ -201,6 +202,7 @@ def test_the_resolver_and_the_policy_flag_cover_the_same_names():
         assert _solver(name)._uses_dehnen_error_policy() is False
 
 
+@_TREE_AND_UPWARD_USERS
 def test_an_explicit_dehnen_error_override_is_resolved_too(
     monkeypatch, tree_and_upward
 ):

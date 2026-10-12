@@ -53,9 +53,9 @@ def _topology(n=256, seed=0, theta=THETA, leaf_size=LEAF):
 # is built once: four memoized builds plus three independent ones, where there
 # were 22. The configurations share one seed and two leaf sizes for the same reason
 # (2026-10-12: seeds 0/1/3, leaves 8/16/32). No test mutates a topology; the ones that need a variant build it with
-# `dataclasses.replace` on copied arrays. Pinned to one xdist worker, as a module
-# fixture is otherwise built once per worker (CI: `-n 2 --dist loadgroup`).
-pytestmark = pytest.mark.xdist_group("mutual_topology_identity")
+# `dataclasses.replace` on copied arrays. A module fixture is built once per xdist
+# worker that asks for it, so its users share a group (CI: `-n 2 --dist loadgroup`).
+_MEMO_USERS = pytest.mark.xdist_group("mutual_topology_identity_memo")
 
 
 @pytest.fixture(scope="module")
@@ -93,6 +93,7 @@ def test_the_same_positions_give_an_identical_fingerprint():
     assert diff_topologies(first, second).identical
 
 
+@_MEMO_USERS
 def test_equal_size_counters_do_not_mean_equal_structure(cached_topology):
     """The reason this module exists.
 
@@ -121,6 +122,7 @@ def test_equal_size_counters_do_not_mean_equal_structure(cached_topology):
     assert diff.interaction_lists_changed
 
 
+@_MEMO_USERS
 def test_a_permutation_only_change_is_not_an_interaction_change(cached_topology):
     """Reordering particles is a switch, but not of the interaction lists.
 
@@ -139,6 +141,7 @@ def test_a_permutation_only_change_is_not_an_interaction_change(cached_topology)
     assert not diff.identical
 
 
+@_MEMO_USERS
 def test_different_positions_change_the_structure(cached_topology):
     """A genuinely different system must not fingerprint the same."""
     first = cached_topology(seed=0)
@@ -148,6 +151,7 @@ def test_different_positions_change_the_structure(cached_topology):
     assert not topologies_identical(first, second)
 
 
+@_MEMO_USERS
 def test_theta_is_compared_exactly_not_by_rounding(cached_topology):
     """Two acceptance parameters that differ in the last bit are not the same.
 
@@ -162,6 +166,7 @@ def test_theta_is_compared_exactly_not_by_rounding(cached_topology):
     assert fingerprint_topology(topology).digest != fingerprint_topology(nudged).digest
 
 
+@_MEMO_USERS
 def test_max_leaf_size_is_part_of_identity(cached_topology):
     """Padding width sets kernel shapes, so a change in it is a change."""
     narrow = cached_topology(leaf_size=8)
@@ -171,6 +176,7 @@ def test_max_leaf_size_is_part_of_identity(cached_topology):
     assert "max_leaf_size" in diff.changed
 
 
+@_MEMO_USERS
 def test_the_two_entry_points_never_disagree(cached_topology):
     """``topologies_identical`` and ``diff_topologies`` must agree.
 
@@ -193,6 +199,7 @@ def test_the_two_entry_points_never_disagree(cached_topology):
             )
 
 
+@_MEMO_USERS
 def test_a_fingerprint_holds_no_arrays(cached_topology):
     """A long path retains one fingerprint per iteration, so it must be small."""
     fingerprint = fingerprint_topology(cached_topology())
@@ -222,6 +229,7 @@ def test_non_numpy_arrays_are_refused():
         _digest(jnp.asarray([1, 2, 3]))
 
 
+@_MEMO_USERS
 def test_the_switch_counter_counts_consecutive_changes(cached_topology):
     """Switch arithmetic on a known sequence A A B B A."""
     first = fingerprint_topology(cached_topology(seed=0))
@@ -239,6 +247,7 @@ def test_the_switch_counter_counts_consecutive_changes(cached_topology):
     assert counter.unique_topologies == 2  # the path revisits A
 
 
+@_MEMO_USERS
 def test_the_switch_counter_starts_empty_without_dividing_by_zero(cached_topology):
     """A counter that has seen nothing reports a rate of zero, not a crash."""
     counter = TopologySwitchCounter()
@@ -254,6 +263,7 @@ def test_the_switch_counter_starts_empty_without_dividing_by_zero(cached_topolog
     assert counter.switches == 0
 
 
+@_MEMO_USERS
 def test_the_switch_counter_summary_is_json_safe(cached_topology):
     """The summary goes straight into a results file, so no arrays."""
     import json
@@ -281,6 +291,7 @@ def test_the_switch_counter_summary_is_json_safe(cached_topology):
     }
 
 
+@_MEMO_USERS
 def test_interaction_switches_never_exceed_switches(cached_topology):
     """An interaction change is a switch, so the narrower count cannot lead."""
     counter = TopologySwitchCounter()

@@ -45,11 +45,12 @@ from jaccpot.runtime._adaptive_policy import (
 # `test_dehnen_mac_reference.py` is deliberately NOT marked: it checks eqs (12),
 # (13), (15) and (16a) against independent numpy references at 1-10 s per test, so
 # the criterion's correctness is still verified on every supported Python.
-#
+pytestmark = pytest.mark.slow
+
 # The prepare_state-parameter tests below need only the problem's node count, which
-# they each used to buy with a full prepare: it is a module fixture now, pinned to
-# one xdist worker (CI: `-n 2 --dist loadgroup`).
-pytestmark = [pytest.mark.slow, pytest.mark.xdist_group("force_scale_injection")]
+# they each used to buy with a full prepare: it is a module fixture now, and its
+# users share an xdist group so CI's `-n 2 --dist loadgroup` builds it on one worker.
+_NODE_COUNT_USERS = pytest.mark.xdist_group("force_scale_injection_node_count")
 
 
 N_PARTICLES = 512
@@ -217,6 +218,7 @@ def test_scalar_reduction_rejects_vector_input():
 # --------------------------------------------------------------------------- #
 
 
+@_NODE_COUNT_USERS
 def test_supplied_force_scale_is_used_verbatim(node_count):
     """On a solver with nothing cached; the warm-cache case is the next test's."""
     positions, masses = _sample_problem()
@@ -256,6 +258,7 @@ def test_supplied_force_scale_does_not_touch_the_reuse_cache():
     )
 
 
+@_NODE_COUNT_USERS
 def test_supplied_force_scale_skips_the_prepass(monkeypatch, node_count):
     positions, masses = _sample_problem()
     fmm = _paper_solver()
@@ -286,6 +289,7 @@ def test_supplied_force_scale_skips_the_prepass(monkeypatch, node_count):
     assert calls[0] == 0
 
 
+@_NODE_COUNT_USERS
 @pytest.mark.parametrize("bad", ["short", "two_dim"])
 def test_supplied_force_scale_rejects_a_mismatched_shape(node_count, bad):
     """A wrong length would otherwise fail deep inside the policy build."""

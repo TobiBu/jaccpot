@@ -44,12 +44,16 @@ from tests.unit.runtime._reproducibility import assert_reproducible
 # `test_dehnen_mac_reference.py` is deliberately NOT marked: it checks eqs (12),
 # (13), (15) and (16a) against independent numpy references at 1-10 s per test, so
 # the criterion's correctness is still verified on every supported Python.
-#
+pytestmark = pytest.mark.slow
+
 # One prepared state and ONE reverse pass serve every gradient test below (they all
 # used the same solver, system and seed). Module fixtures hold arrays, which survive
-# the per-test `jax.clear_caches()` conftest runs in this directory; the group keeps
-# them to one xdist worker under CI's `-n 2 --dist loadgroup`.
-pytestmark = [pytest.mark.slow, pytest.mark.xdist_group("dehnen_mac_gradients")]
+# the per-test `jax.clear_caches()` conftest runs in this directory. A module fixture
+# is built once per xdist worker that asks for it, so each fixture's users share a
+# group, which CI's `-n 2 --dist loadgroup` keeps on one worker; the fixture-free
+# tests still spread.
+_SHARED_PASS_USERS = pytest.mark.xdist_group("dehnen_mac_gradients_shared_pass")
+_UPWARD_USERS = pytest.mark.xdist_group("dehnen_mac_gradients_upward")
 
 
 # eq (16a) thresholds on `eps * min_b |a_b|` over the *target* cell, so the least
@@ -208,6 +212,7 @@ def mass_mac_reverse(mass_mac_problem):
 # ---------------------------------------------------------------------------
 
 
+@_SHARED_PASS_USERS
 @pytest.mark.parametrize("wrt", ["positions", "masses"])
 def test_fd_vs_ad_under_mass_dependent_mac(mass_mac_problem, mass_mac_reverse, wrt):
     """Reverse-mode AD must agree with FD of the same frozen-topology function.
@@ -239,6 +244,7 @@ def test_fd_vs_ad_under_mass_dependent_mac(mass_mac_problem, mass_mac_reverse, w
 # ---------------------------------------------------------------------------
 
 
+@_SHARED_PASS_USERS
 @pytest.mark.parametrize("wrt", ["positions", "masses"])
 def test_grad_matches_direct_sum_under_mass_dependent_mac(
     mass_mac_problem, mass_mac_reverse, wrt
@@ -290,6 +296,7 @@ def _signature_of(state) -> tuple[int, ...]:
     return tuple(sorted(zip(tgt[keep].tolist(), src[keep].tolist())))
 
 
+@_SHARED_PASS_USERS
 def test_mass_perturbation_that_crosses_no_mac_boundary_is_smooth(
     mass_mac_problem, mass_mac_reverse
 ):
@@ -337,6 +344,7 @@ def test_mass_perturbation_that_crosses_no_mac_boundary_is_smooth(
     )
 
 
+@_SHARED_PASS_USERS
 def test_force_scale_nodes_receives_no_cotangent(mass_mac_problem):
     """``force_scale_nodes`` is a pytree leaf but must never carry a gradient.
 
@@ -431,6 +439,7 @@ def _traced_geometry(mode, tree, upward):
     return run
 
 
+@_SHARED_PASS_USERS
 def test_the_com_geometry_mode_is_differentiable(mass_mac_reverse):
     """The default (``com``) device-side mode must survive jit and grad.
 
@@ -462,6 +471,7 @@ def test_device_side_geometry_modes_build_a_usable_state(mode):
     assert _num_far_pairs(state) > 0, f"{mode}: no far pairs to differentiate"
 
 
+@_UPWARD_USERS
 @pytest.mark.parametrize("mode", ["exact", "tree"])
 def test_host_loop_geometry_modes_reject_tracers_clearly(upward_artifacts, mode):
     """The numpy host-loop modes must fail with an actionable message.
