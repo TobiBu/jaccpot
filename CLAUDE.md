@@ -50,26 +50,9 @@ These override any instruction to "clean up", "optimise", or "simplify":
 - **Do not add, remove, or bump dependencies** without asking. The `black` and `isort` pins
   are deliberately equal to the pre-commit hook revs; unpinning them makes CI and local
   formatting disagree.
-- **Do not weaken a test, relax a tolerance, or delete a test.** Ever. (The one sanctioned
-  exception is the cleanup project below, and only under its tagging rule.)
+- **Do not weaken a test, relax a tolerance, or delete a test.** Ever.
 - **Do not rename anything public** without asking.
 - **Do not reformat files you are not otherwise touching.**
-
-### Cleanup project 2026-10 (temporary; reverted in its final phase)
-
-The maintainer approved removing the complex and Cartesian bases and the superseded slow
-and memory-heavy paths (octree backend, grouped/class-major far field, autotune and adaptive
-sizing, legacy strict APIs, superseded kernel variants, treecode), and trimming the test
-suite. The record is `docs/cleanup_2026-10.md`. While it runs, and only in its `cleanup/*`
-PRs:
-
-- A test may be deleted only if the PR's table tags it as (a) its subject was deleted,
-  (b) merged into a named test that keeps the assertion, or (c) a duplicate of a named owner
-  test. Tolerances are still never relaxed, and no lane loses its last direct-sum oracle.
-- A deletion-only diff (code with no remaining importer, plus its tests) is exempt from the
-  ~400-line split rule. Behaviour changes are not.
-- The public removals listed in the record are approved; any other public rename still
-  needs asking.
 
 ## Workflow
 
@@ -121,6 +104,7 @@ Faster inner loop while iterating:
 
 ```bash
 pytest -n 2 -m "not slow"                           # the fast subset (local only)
+pytest -n 2 -m smoke                                # ~60 curated tests, one per lane (CI's Python-floor job)
 JACCPOT_RUNTIME_TYPECHECK=1 pytest -q tests/unit    # jaxtyping + beartype runtime checks
 JACCPOT_RUNTIME_TYPECHECK=1 JACCPOT_TEST_TRIM_GRIDS=1 pytest -q tests/unit  # same, Pallas grids cut to one case
 ```
@@ -195,7 +179,8 @@ jaccpot/runtime/       orchestration, config resolution, lane selection, kernel 
 jaccpot/distributed/   domain decomposition, halo exchange, collectives
 
 tests/unit/            does the function do what its docstring says
-tests/integration/     end-to-end paths
+tests/integration/     end-to-end paths; strict/ holds the fused strict lane
+                       (strict_run_v2, the refresh, the fused eval fn)
 tests/characterization/ golden references — the tripwire for silent numerics changes
                        (forward accelerations + gradients, each with an inertness
                        gate and a direct-sum physics anchor)
@@ -203,16 +188,25 @@ tests/distributed/     multi-GPU; every file skips below 2 devices. CI runs it o
                        host devices (`test-distributed-tier`, `-criterion`); not a tier
                        you can rely on locally without the same XLA_FLAGS.
 tests/perf/            performance assertions
+bench/tests/           tests of the bench/ scripts (gate checks, annotation tools); run in
+                       CI's lint job, outside the partitioned suite
 
-No test files live directly under `tests/` — only `conftest.py` and `slow_tests.txt`.
-`slow_tests.txt` marks tests `slow` **by node id**, so moving or renaming a test file
-silently un-marks its entries; update it in the same change and check the collected counts
-under `-m "not slow"` are unchanged.
+No test files live directly under `tests/` — only `conftest.py`, `slow_tests.txt` and
+`smoke_tests.txt`. Both lists mark tests **by node id**: `slow` (the slowest tests, rebuilt
+from `--durations`; `-m "not slow"` is the local fast subset) and `smoke` (~60 curated fast
+tests, one per lane plus the API, contract and guard tests; CI's `test-py-floor` runs
+`-m smoke` on Python 3.12). Moving or renaming a test drops it from a list: update the list
+in the same change. `test-partition` fails on a listed id that is no longer collected.
 
 Which CI job runs which tests is defined once, in `.github/scripts/test_shards.py`; the
 `test-partition` job fails if two shards overlap or a collected test is in none. A new test
 directory or a file that needs its own job goes there, and
 `python .github/scripts/test_shards.py check` says whether the partition still holds.
+Two jobs are path-gated (`GATED_PATHS` there): `test-distributed-criterion` and
+`test-cross-repo-nornax-distributed` run on pushes to `main`, nightly, on manual dispatch,
+and on pull requests that touch `jaccpot/distributed/`, `jaccpot/mutual/`,
+`jaccpot/nornax_adapter.py` or `jaccpot/pallas/nearfield_*` (or their tests or the CI
+files). Every other job runs on every push.
 
 bench/                 profiling, audits, microbenchmarks, ci_benchmark_guard.py
 docs/                  design notes, audits, profiling records

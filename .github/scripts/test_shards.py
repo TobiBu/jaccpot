@@ -9,17 +9,29 @@ either lands in a shard or turns that job red -- before, the partition was
 checked by hand-counted comments in ``ci.yml``, which drifted.
 
 ``EXTRA`` holds selections that are not part of the partition: one that
-deliberately re-runs a subset (the Python-floor job), and the tests of the
-``bench/`` scripts, which live outside ``tests/`` and run in the lint job.
+deliberately re-runs a subset (the Python-floor job, the ``smoke`` marker), and the
+tests of the ``bench/`` scripts, which live outside ``tests/`` and run in the lint
+job.
+
+``GATED_SHARDS`` do not run on every pull request (``GATED_PATHS`` says when they
+do). They stay in ``SHARDS``, so the partition check accounts for their tests like
+any other's: skipping a job on a PR is a scheduling decision, not a gap.
+
+``check`` also fails on a node id in ``tests/slow_tests.txt`` or
+``tests/smoke_tests.txt`` that the default collection no longer contains: a moved
+or renamed test silently drops out of either marker otherwise.
 
 Usage::
 
     python .github/scripts/test_shards.py args unit      # one argument per line
     python .github/scripts/test_shards.py check          # exit 1 on any overlap or gap
+    git diff --name-only BASE HEAD | python .github/scripts/test_shards.py touches
+                                                         # "true" if a gated job must run
 """
 
 from __future__ import annotations
 
+import pathlib
 import subprocess
 import sys
 
@@ -79,15 +91,31 @@ SHARDS: dict[str, list[str]] = {
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
 }
 
+# The two jobs that do not run on every pull request. Each costs minutes of
+# forced-device compilation per configuration, and only changes to the code below
+# can move them. They run on pushes to main, on the nightly schedule, on a manual
+# dispatch, and on a pull request whose diff touches one of `GATED_PATHS` (prefix
+# match) -- the `changes` job in ci.yml asks `touches`.
+GATED_SHARDS: tuple[str, ...] = ("distributed-criterion", "nornax-distributed")
+GATED_PATHS: tuple[str, ...] = (
+    "jaccpot/distributed/",
+    "jaccpot/mutual/",
+    "jaccpot/nornax_adapter.py",
+    "jaccpot/pallas/nearfield_",
+    # their own tests, the fixtures every test shares, and the CI definition
+    "tests/distributed/",
+    _NORNAX_DISTRIBUTED,
+    "tests/conftest.py",
+    ".github/",
+    "pyproject.toml",
+)
+
 EXTRA: dict[str, list[str]] = {
     # The Python-floor job: version compatibility on the oldest supported
-    # interpreter, not a second run of the suite. The goldens plus the public
-    # API surface and the downstream (Odisseo) coupling contract.
-    "py-floor": [
-        "tests/characterization",
-        "tests/unit/test_public_api_surface.py",
-        "tests/unit/test_odisseo_coupling.py",
-    ],
+    # interpreter, not a second run of the suite. The curated `smoke` marker
+    # (tests/smoke_tests.txt): one fast representative per lane plus the public
+    # API, contract and guard tests.
+    "py-floor": ["tests", "-m", "smoke"],
     # The lint job: the tests of the bench/ scripts (the GPU and two-card gates'
     # own checks, the annotation tools, a comparison benchmark's exit code). They
     # test no library code, so they sit outside `tests/` and outside the partition,
@@ -96,6 +124,16 @@ EXTRA: dict[str, list[str]] = {
 }
 
 _UNIVERSE = ["tests"]
+_TESTS = pathlib.Path(__file__).resolve().parents[2] / "tests"
+_MARKER_LISTS = ("slow_tests.txt", "smoke_tests.txt")
+
+
+def _listed_node_ids(name: str) -> list[str]:
+    path = _TESTS / name
+    if not path.exists():
+        return []
+    lines = (line.strip() for line in path.read_text().splitlines())
+    return [line for line in lines if line and not line.startswith("#")]
 
 
 def _selection(name: str) -> list[str]:
@@ -142,7 +180,23 @@ def check() -> int:
         print(f"  NOT IN THE DEFAULT COLLECTION {node} ({owner[node]})")
     problems += len(missing) + len(extra)
     print(f"{'universe':24s} {len(universe):5d}; shards cover {len(owner)}")
+    for name in GATED_SHARDS:
+        if name not in SHARDS:
+            problems += 1
+            print(f"  GATED SHARD {name!r} IS NOT A SHARD")
+    for name in _MARKER_LISTS:
+        listed = _listed_node_ids(name)
+        stale = sorted(set(listed) - universe)
+        for node in stale:
+            print(f"  STALE ID IN tests/{name}: {node}")
+        problems += len(stale)
+        print(f"{name:24s} {len(listed):5d} ids; {len(stale)} stale")
     return 1 if problems else 0
+
+
+def touches(paths: list[str]) -> bool:
+    """Whether any changed path is one the gated jobs must run for."""
+    return any(path.startswith(GATED_PATHS) for path in paths)
 
 
 def main(argv: list[str]) -> int:
@@ -151,6 +205,10 @@ def main(argv: list[str]) -> int:
         return 0
     if argv == ["check"]:
         return check()
+    if argv == ["touches"]:
+        paths = [line.strip() for line in sys.stdin if line.strip()]
+        print("true" if touches(paths) else "false")
+        return 0
     raise SystemExit(__doc__)
 
 

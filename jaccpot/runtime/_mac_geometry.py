@@ -79,8 +79,9 @@ def mac_geometry_mode(default: str = "aabb") -> str:
         theta it is not equivalent to the box criterion: the box radius is the
         half-DIAGONAL, which is strictly larger than the exact COM radius, so the
         box test is the more conservative one and the same theta admits MORE far
-        pairs under COM. Measured on tests/integration/test_fmm.py's order sweep
-        (solidfmm+dehnen, theta 0.9, leaf 16, N=224), COM is worse at every order:
+        pairs under COM. Measured on the order sweep in
+        tests/integration/test_gravity_vs_direct.py (solidfmm+dehnen, theta 0.9,
+        leaf 16, N=224), COM is worse at every order:
         rel-L2 5.8e-3 / 2.1e-3 / 3.4e-4 at orders 1/2/4 under the box geometry
         against 2.1e-2 / 7.7e-3 / 1.9e-3 under COM. Making it the global default
         therefore silently degraded accuracy at every caller's existing theta.

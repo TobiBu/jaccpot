@@ -2,23 +2,38 @@
 
 ## Canonical Production Path
 
-For `preset="large_n_gpu"`, Jaccpot now canonicalizes runtime behavior to a single production path:
+For `preset="large_n_gpu"` with a radix tree and the real (`"solidfmm"`) basis,
+`FMMEngine._apply_large_n_gpu_production_contract` canonicalizes runtime behavior to a
+single production path. The call shape is the preset alone:
 
-- `runtime_path = "large_n"` (since the 2026-10 cleanup, X4, a recorded value only: the
-  preset alone selects the large-N lane, and `runtime_path="large_n"` under another
-  preset no longer opens it)
+```python
+FastMultipoleMethod(preset="large_n_gpu", precision="fp32")
+```
+
+and the contract sets:
+
 - `memory_objective = "minimum_memory"`
-- `farfield_mode = "pair_grouped"`
-- `grouped_interactions = False`
 - `streamed_far_pairs = True`
-- `nearfield_mode = "bucketed"`
-- radix fast-lane nearfield is used for acceleration evaluation
+- `nearfield_mode = "bucketed"`, `precompute_nearfield_scatter_schedules = False`
+- mixed-order far field off
+- the interaction cache on; the traversal result and the interaction lists not retained
+- the preset's tree build `tree_build_mode = "static_radix"` (since the 2026-10
+  cleanup, D2: the fused strict lane needs it)
+- radix fast-lane near field for acceleration evaluation
+
+The large-N lane itself (`can_use_large_n_prepare_path`) is gated on the preset alone.
+The far field has one mode, a flat pair list about the nodes' centres of mass; there is
+nothing to select.
 
 ## Deprecation Notes
 
-- `runtime_path="legacy"` was removed: only `"auto"` and `"large_n"` are accepted, and
-  since the 2026-10 cleanup (X4) neither selects a lane.
-- Conflicting large-N production overrides are accepted for compatibility but coerced to the canonical production values above.
+- The 2026-10 cleanup removed the options this contract used to pin: `runtime_path`
+  (X4 stopped it selecting a lane, Z-b removed it), the far-field `mode` /
+  `farfield_mode` and `grouped_interactions` (X3, Z-b). Passing one now fails like any
+  unknown keyword or field.
+- Conflicting large-N production overrides (`memory_objective`, `nearfield_mode`,
+  `streamed_far_pairs`) are accepted with a `FutureWarning` and coerced to the canonical
+  values above.
 - Auto-sized (preset) traversal seeds are capped on the large-N production GPU path to
   avoid memory regressions; an explicit `traversal_config` is used as given. Sizing is
   static: adaptive sizing went in the 2026-10 cleanup (X4).

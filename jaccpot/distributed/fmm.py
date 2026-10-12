@@ -188,8 +188,8 @@ _MIN_PAIR_QUEUE = 1 << 10
 #: when the traced wavefront started coming from ``max_pair_queue`` (yggdrax
 #: ``_walk_inputs_are_traced``). 256 is the floor the single-device lane documents and
 #: asserts (``_GPU_STREAMED_MINIMUM_MEMORY_EXPLICIT_PROCESS_BLOCK``,
-#: ``tests/unit/test_solver_api.py``); the mesh shipped 64, chosen back when it *was*
-#: a capacity.
+#: ``tests/unit/test_large_n_config_thresholds.py``); the mesh shipped 64, chosen
+#: back when it *was* a capacity.
 _DISTRIBUTED_PROCESS_BLOCK = 256
 
 #: The wavefront scales as ``num_leaves ** 1.5``, and this is the coefficient in

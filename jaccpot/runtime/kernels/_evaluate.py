@@ -951,8 +951,8 @@ def _evaluate_prepared_tree(
     # NOTE: deliberately an unresolvable forward reference. Every other module that
     # annotates the engine now imports it under `if TYPE_CHECKING:`, but this one must
     # not: `runtime/kernels/` is a true leaf and "never imports the engine" is the
-    # hinge of the layering (ARCHITECTURE §1), which `distributed/` and
-    # `experimental/` rely on by reaching past the orchestrator into here. A
+    # hinge of the layering (ARCHITECTURE §1), which `distributed/` relies on by
+    # reaching past the orchestrator into here. A
     # TYPE_CHECKING import would not run, but it would still make this file name the
     # engine, so the annotation stays documentation-only.
     fmm: "FMMEngine",  # noqa: F821 -- deliberate; see the comment above
@@ -1786,8 +1786,8 @@ def _evaluate_prepared_tree_targets(
     # NOTE: deliberately an unresolvable forward reference. Every other module that
     # annotates the engine now imports it under `if TYPE_CHECKING:`, but this one must
     # not: `runtime/kernels/` is a true leaf and "never imports the engine" is the
-    # hinge of the layering (ARCHITECTURE §1), which `distributed/` and
-    # `experimental/` rely on by reaching past the orchestrator into here. A
+    # hinge of the layering (ARCHITECTURE §1), which `distributed/` relies on by
+    # reaching past the orchestrator into here. A
     # TYPE_CHECKING import would not run, but it would still make this file name the
     # engine, so the annotation stays documentation-only.
     fmm: "FMMEngine",  # noqa: F821 -- deliberate; see the comment above

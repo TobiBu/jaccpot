@@ -1090,7 +1090,7 @@ def compute_leaf_p2p_accelerations(
     parametrised over N in {96, 256} x {float32, float64} x
     ``edge_chunk_size`` in {64, 128}, at ``1e-6`` (fp32) and ``1e-13`` (fp64).
     Those bounds are derived from measured round-off (~1 eps in each dtype), not
-    assumed, and the fp32/chunk-128 cases run in the CI smoke leg.
+    assumed, and every case runs in CI (``test-full``).
 
     The **float64 cases are the sharp instrument**: perturbing the bucketed path's
     softening by 3e-6 relative induces a ~1e-10 divergence, which fp64 catches

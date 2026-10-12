@@ -3,7 +3,7 @@
 `CLAUDE.md` says: *"If you are about to reason from first principles about why something
 is the way it is, check `docs/` first — the answer is usually already written down, with
 measurements."* That instruction is load-bearing and it is only cheap to follow if you
-can tell, without opening them, which of ~48 files answers your question and which of two
+can tell, without opening them, which of ~60 files answers your question and which of two
 similarly-named ones is current. That is what this index is for.
 
 **Two house rules it reflects.** A superseded note is **marked, never deleted** — this
@@ -26,9 +26,10 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | what does the **mutual / block-step** lane do? | `momentum_conserving_fmm.md` |
 | how do I take **gradients**? | `differentiable_fmm.md` |
 | which **MAC**, and at which leaf size? | `dehnen_mass_mac_status_and_plan.md` |
-| what is the **production single-GPU path**? | `large_n_runtime_contract_2026-04-21.md` |
+| what is the **production single-GPU path**? | `large_n_runtime_contract_2026-04-21.md`, then the fused-lane records below |
+| what did the **2026-10 cleanup** remove, and why? | `cleanup_2026-10.md` |
 | I am about to touch `operators/` | `operator_conventions.md` (and `agent_guides/NUMERICS_AND_JAX.md`) |
-| what is still **open** in the codebase? | `refactor_audit_2026-08.md` |
+| what is still **open** in the codebase? | `cleanup_2026-10.md` (its "Project summary"), then the F-table of `refactor_audit_2026-08.md` for the older items |
 | which module should the **jaxtyping rollout** convert next? | `annotation_pilot_phase2_2026-08-30.md` |
 
 ---
@@ -73,7 +74,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | `large_n_runtime_status_2026-03-23.md` | **[superseded]** Handoff from the earlier `large_N_performance` branch. Read the contract instead. |
 | `potential_falls_off_the_fast_lane.md` | **[open]** Diagnosed, not fixed: why a potential request leaves the large-N fast lane. |
 | `nearfield_structural_comparison_2026-04-15.md` | jaxFMM vs jaccpot near-field structure, with a 2026-04-20 status addendum. |
-| `nearfield_tonb_runbook.md` | The copy/paste path for the cross-repo TONB A/B checks. |
+| `nearfield_tonb_runbook.md` | **[closed]** The copy/paste path for the cross-repo TONB A/B checks. It drives `examples/benchmark_gpu_radix_worker.py`, deleted in the 2026-10 cleanup (X1), so it no longer runs as written. |
 | `radix_fast_lane_refactor_plan_2026-04-16.md` | **[closed]** The refactor plan… |
 | `radix_fast_lane_implementation_checklist_2026-04-16.md` | **[closed]** …its checklist, with a 2026-04-20 status snapshot… |
 | `radix_default_simplification_plan_2026-04-21.md` | **[closed]** …and the follow-up that removed the legacy branches and obsolete knobs. Read in that order. |
@@ -90,12 +91,28 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | `small_gpu_large_n_followup_2026-03-25.md` | Small-GPU large-N follow-up. |
 | `runtime_traversal_comparison_2026-03-20.md` | Traversal capacity/timing tables. **Caution:** predates the traced-wavefront fix. |
 
+## The fused single-GPU lane and its multi-GPU form (dated records, 2026-09 / 2026-10)
+
+Read as records of what was measured when, newest numbers last; the code they describe is
+the library default since the 2026-10 cleanup (D2).
+
+| file | |
+|---|---|
+| `small_leaves_2026-09.md` | Small leaves on the fused lane (2026-09-07..10). |
+| `tree_walk_2026-09.md` | The per-step tree walk on the fused lane (2026-09-10). |
+| `sub10ms_2026-09.md` | Below 10 ms per force at N = 2x10^5 (2026-09-11). |
+| `fast_gradients_2026-09.md` | Fast gradients for the sub-10 ms FMM (2026-09-13). |
+| `multigpu_fused_2026-09.md` | The fused lane on many GPUs (2026-09). |
+| `fused_memory_2026-10.md` | The fused lane's memory, sized by the pairs (2026-10-03). |
+| `softening_2026-10.md` | Compact softening kernels and the fused lane's far field (2026-10-08). |
+| `dehnen_error_fused_2026-10.md` | Dehnen's error criterion on the fused lane (2026-10-09). |
+
 ## Pallas kernels (phase 5)
 
 | file | |
 |---|---|
-| `phase5_pallas_plan.md` | **[open]** The plan and first prototype. Note its hardware constraint: Ampere+ only. |
-| `phase5_m2l_a100_findings_and_padding_plan.md` | **[open]** A100 fused-M2L findings, wiring, and the padding plan, with a 2026-07-14 update. |
+| `phase5_pallas_plan.md` | **[closed]** The plan and first prototype. Note its hardware constraint: Ampere+ only. The z-core prototype it led to was removed in the 2026-10 cleanup (X5); the CSR M2L lanes replaced it. |
+| `phase5_m2l_a100_findings_and_padding_plan.md` | **[closed]** A100 fused-M2L findings, wiring, and the padding plan, with a 2026-07-14 update. Written against the complex fast-lane M2L and the grouped far field, both removed in the 2026-10 cleanup (C, X3). |
 
 ## The MAC
 
@@ -104,7 +121,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | `dehnen_mass_mac_status_and_plan.md` | **[current]** Status, the leaf-size question, and a long trap list worth reading **before** any MAC measurement. |
 | `dehnen_mac_next_session_prompt.md` | **[current]** The fresh-session prompt. Supersedes → |
 | `dehnen_mac_step3prime_prompt.md` | **[closed]** …this, whose goal is done. Kept for its traps, not its task. |
-| `treecode_mac_stability.md` | **[current]** bh box vs dehnen sphere MAC over many steps. |
+| `treecode_mac_stability.md` | **[closed]** bh box vs dehnen sphere MAC over many steps, measured on the per-leaf treecode walk. The walk was removed in the 2026-10 cleanup (X1); the dual-tree walk's default (dehnen sphere radii) is the lesson that remains. |
 
 ## Operators and numerics
 
@@ -126,10 +143,11 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 
 | file | |
 |---|---|
-| `refactor_audit_2026-08.md` | **[current]** The 2026-08 refactor and code-hygiene audit, and its F-table of open items. |
+| `refactor_audit_2026-08.md` | **[closed]** The 2026-08 refactor and code-hygiene audit, maintained to 2026-08-29, and its F-table of the items then open. Dated: many of its subjects (autotune, the octree, the complex and Cartesian bases, `experimental/`) were removed in the 2026-10 cleanup. |
+| `cleanup_2026-10.md` | **[current]** The 2026-10 cleanup: one section per phase (what went, the tests deleted with their tags, the gates), and a project summary with what is still open. |
 | `handoff_g10_gpu_validation.md` | **[open]** GPU validation for the G.10 fix. Carries a 2026-08-26 status note: two things below it have moved. |
 | `handoff_tier1_gpu_validation.md` | **[closed]** **Discharged** 2026-08-14 on A100. |
-| `pytest_cleanup_handoff_2026-04-22.md` | Test-suite cleanup handoff and profiling rerun. |
+| `pytest_cleanup_handoff_2026-04-22.md` | Test-suite cleanup handoff and profiling rerun (dated; the 2026-10 cleanup trimmed the suite again). |
 
 ---
 

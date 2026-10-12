@@ -1,0 +1,72 @@
+# The curated `smoke` marker (applied by tests/conftest.py), run by CI's Python-floor
+# job as `pytest -m smoke tests`. One fast representative per lane -- baseline CPU radix,
+# the large-N CPU fallback, the fused strict lane, the multi-GPU drivers (the
+# tests/distributed entry skips below two devices), BlockStepFMM, the distributed
+# mutual lane, one test per gradient owner, the derivative tower and jerk, the softening
+# kernels -- plus the public API, Odisseo contract and repo-guard tests. Keep entries
+# cheap and out of slow_tests.txt. Node ids, byte-sorted; `test_shards.py check` fails
+# on an id the suite no longer collects.
+tests/characterization/test_constructor_state_golden.py::test_constructor_state_matches_the_committed_golden
+tests/characterization/test_fmm_golden.py::test_fmm_golden[uni_real_n256_p4]
+tests/characterization/test_fmm_grad_golden.py::test_fmm_grad_golden[uni_real_n128_p2]
+tests/characterization/test_lane_goldens.py::test_large_n_lane_golden
+tests/characterization/test_lane_goldens.py::test_strict_fused_lane_golden
+tests/distributed/test_distributed_fmm_driver.py::test_driver_real_basis_matches_direct
+tests/integration/test_grad_fmm_vs_directsum.py::test_autodiff_matches_direct_sum
+tests/integration/test_gravity_vs_direct.py::test_fmm_pipeline_matches_direct_sum
+tests/integration/test_mutual_fmm.py::test_level_accelerations_are_differentiable
+tests/integration/test_mutual_fmm.py::test_total_force_matches_direct_sum_within_fmm_tolerance[1.0-4-0.03]
+tests/unit/core/test_time_derivatives.py::test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter
+tests/unit/distributed/test_cross_near_acceleration.py::test_matches_direct_sum[multi-source]
+tests/unit/mutual/test_distributed_node_rungs.py::test_the_range_maximum_agrees_with_the_single_device_propagation
+tests/unit/nearfield/test_acc_derivatives.py::test_pair_tower_matches_autodiff[ferrers3]
+tests/unit/operators/test_pallas_nearfield_leafpair_csr_vjp.py::test_csr_reverse_matches_vjp_of_the_dense_twin[4-wide-True]
+tests/unit/runtime/test_large_n_grad_reverse_path.py::test_position_gradient_matches_the_direct_sum
+tests/unit/test_custom_vjp_parity.py::test_real_l2p_custom_vjp_matches_autodiff[2]
+tests/unit/test_downstream_contract.py::test_odisseo_blockstep_construction
+tests/unit/test_downstream_contract.py::test_odisseo_grad_config
+tests/unit/test_downstream_contract.py::test_odisseo_large_n_grad_plan_names
+tests/unit/test_downstream_contract.py::test_odisseo_mesh_lane_config_and_evaluator
+tests/unit/test_downstream_contract.py::test_odisseo_mutual_force_names
+tests/unit/test_downstream_contract.py::test_odisseo_solver_construction[fast]
+tests/unit/test_downstream_contract.py::test_odisseo_solver_construction[large_n_gpu]
+tests/unit/test_downstream_contract.py::test_odisseo_solver_method_keywords
+tests/unit/test_downstream_contract.py::test_odisseo_solver_with_traversal_capacities_and_grad_retention
+tests/unit/test_downstream_contract.py::test_odisseo_top_level_names_stay_exported
+tests/unit/test_downstream_contract.py::test_odisseo_velocity_verlet_helper
+tests/unit/test_gradient_correctness.py::test_fd_vs_ad_positions[real-0.4-64-2-16-0]
+tests/unit/test_mixin_engine_base_guard.py::test_engine_base_alias_is_object_at_runtime
+tests/unit/test_mixin_engine_base_guard.py::test_engine_mro_is_unchanged_by_the_alias
+tests/unit/test_mixin_engine_base_guard.py::test_every_mixin_inherits_the_engine_base_alias
+tests/unit/test_mixin_engine_base_guard.py::test_mixin_methods_are_actually_the_engine_surface
+tests/unit/test_mixin_engine_base_guard.py::test_no_mixin_method_annotates_self
+tests/unit/test_module_exports_guard.py::test_all_covers_every_public_callable_the_module_defines
+tests/unit/test_module_exports_guard.py::test_all_entries_are_bound_by_their_module
+tests/unit/test_module_exports_guard.py::test_no_module_silently_lacks_exports
+tests/unit/test_odisseo_coupling.py::test_coupler_active_subset_matches_solver_prepared_subset
+tests/unit/test_odisseo_coupling.py::test_coupler_differentiable_path_gives_nonzero_gradients
+tests/unit/test_odisseo_coupling.py::test_coupler_differentiable_path_matches_the_solver_entry_point
+tests/unit/test_odisseo_coupling.py::test_coupler_differentiable_path_rejects_potential
+tests/unit/test_odisseo_coupling.py::test_coupler_forward_path_rejects_traced_inputs
+tests/unit/test_odisseo_coupling.py::test_coupler_prepare_and_full_accelerations
+tests/unit/test_odisseo_coupling.py::test_coupler_requires_masses_on_first_call
+tests/unit/test_operators_do_not_import_pallas.py::test_either_package_may_be_imported_first[from jaccpot.pallas import m2l_real_fused]
+tests/unit/test_operators_do_not_import_pallas.py::test_either_package_may_be_imported_first[import jaccpot.operators]
+tests/unit/test_operators_do_not_import_pallas.py::test_operators_does_not_import_pallas
+tests/unit/test_operators_do_not_import_pallas.py::test_pallas_still_imports_operators
+tests/unit/test_public_api_surface.py::test_all_exports_are_frozen
+tests/unit/test_public_api_surface.py::test_every_export_is_importable_from_top_level
+tests/unit/test_public_api_surface.py::test_export_kinds
+tests/unit/test_public_api_surface.py::test_facade_constructor_surface_is_frozen
+tests/unit/test_public_api_surface.py::test_facade_public_method_set_is_frozen
+tests/unit/test_public_api_surface.py::test_preset_members_are_frozen
+tests/unit/test_public_api_surface.py::test_public_class_is_the_solver_facade
+tests/unit/test_public_overloads_guard.py::test_narrow_overloads_promise_narrow_returns[compute_accelerations]
+tests/unit/test_public_overloads_guard.py::test_narrow_overloads_promise_narrow_returns[evaluate_prepared_state]
+tests/unit/test_public_overloads_guard.py::test_public_method_declares_three_overloads[compute_accelerations]
+tests/unit/test_public_overloads_guard.py::test_public_method_declares_three_overloads[evaluate_prepared_state]
+tests/unit/test_public_overloads_guard.py::test_the_union_fallback_survives[compute_accelerations]
+tests/unit/test_public_overloads_guard.py::test_the_union_fallback_survives[evaluate_prepared_state]
+tests/unit/test_softening.py::test_force_potential_and_derivative_match_the_density[ferrers3]
+tests/unit/test_softening_kernel_paths.py::test_generic_jnp_kernels_and_their_reverse[ferrers3]
+tests/unit/test_yggdrax_symbol_contract.py::test_the_environment_satisfies_the_contract

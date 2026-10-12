@@ -171,9 +171,10 @@ once: `test_solidfmm_m2l_ignores_padded_compact_far_pairs` (now
 passed on JAX 0.9.x only because both fp32 paths shared the TF32 error floor (see
 `ARCHITECTURE.md` §7).
 
-**Markers.** Keep `slow` and `experimental` accurate — the smoke leg
-(`-m "not slow and not experimental"`) is what most people actually run, and a mismarked test
-either breaks it or hides from it.
+**Markers.** Keep `slow` and `smoke` accurate (`tests/slow_tests.txt`,
+`tests/smoke_tests.txt`) — `-m "not slow"` is what most people run locally and `-m smoke` is
+the Python-floor CI job, and a mismarked test either breaks them or hides from them. A smoke
+test must stay cheap.
 
 ---
 

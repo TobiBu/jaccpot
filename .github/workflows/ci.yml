@@ -4,17 +4,66 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  # Nightly, on main: the two path-gated jobs (see `changes`), so a pull request
+  # that skipped them is covered within a day. Every other job skips this event.
+  schedule:
+    - cron: "23 2 * * *"
+  # A manual run is a full run, gated jobs included.
+  workflow_dispatch:
 
 # A newer push to the same PR supersedes the run in flight; pushes to main always
 # finish, so every merge commit keeps a complete result (and saves its caches).
+# The event is part of the group so that a nightly run (also on main) can never
+# take the pending slot of a push to main, or the other way round.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    # Whether this run needs the two path-gated jobs, `test-distributed-criterion`
+    # and `test-cross-repo-nornax-distributed`. They cost ~10 and ~4 runner-minutes
+    # of forced-device compilation and only changes to the distributed, mutual and
+    # nornax-adapter code (or their own tests and the CI files) can move them, so a
+    # pull request runs them only if its diff touches one of those paths. Pushes to
+    # main, the nightly schedule and a manual dispatch always run them.
+    #
+    # The paths are `GATED_PATHS` in test_shards.py, next to the shards themselves;
+    # no third-party action. The diff is against the PR's base commit, which the
+    # full-history checkout makes available. Against the merge commit that
+    # `pull_request` checks out, a base that moved on since the event can only add
+    # files, i.e. run the jobs when they were not needed, never skip them.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      gated: ${{ steps.decide.outputs.gated }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Decide
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            # Its own assignment so that a failed diff fails the step (bash -e)
+            # instead of reading as an empty change list.
+            changed=$(git diff --name-only "$BASE_SHA" HEAD)
+            printf '%s\n' "$changed"
+            gated=$(printf '%s\n' "$changed" | python3 .github/scripts/test_shards.py touches)
+          else
+            gated=true
+          fi
+          echo "gated=$gated" | tee -a "$GITHUB_OUTPUT"
+
   lint:
     # Format/import checks are Python-version independent -- run once.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -78,12 +127,17 @@ jobs:
     # so it runs in `test-distributed-tier` / `test-distributed-criterion` on
     # forced host devices instead.
     name: test-full (${{ matrix.shard }})
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # A regression detector as much as a cap: it must sit above the real spread
     # and below the ~2.6x CPU slowdown that kept the JAX floor at 0.10.2 through
     # 0.11.0. If a shard starts timing out, split it by path in test_shards.py --
     # never raise this to fit it.
-    timeout-minutes: 60
+    #
+    # Per shard, about twice its measured job time (2026-10 cleanup, Z-c; the
+    # job times on main and on the cleanup PRs are in docs/cleanup_2026-10.md),
+    # never below 15 minutes.
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       # Every shard always reports: they cover disjoint parts of the suite.
       fail-fast: false
@@ -91,19 +145,25 @@ jobs:
         include:
           - shard: integration
             typecheck: "0"
+            timeout: 50
           - shard: mutual-static-device
             typecheck: "0"
+            timeout: 15
           - shard: unit
             typecheck: "1"
+            timeout: 45
           # tests/unit/runtime in two halves: the Dehnen-MAC / force-scale
           # criterion family (every case a full FMM solve, 26-95 s on CPU) and the
           # rest of the directory.
           - shard: unit-runtime-mac
             typecheck: "1"
+            timeout: 40
           - shard: unit-runtime
             typecheck: "1"
+            timeout: 40
           - shard: characterization
             typecheck: "0"
+            timeout: 15
     env:
       JAX_ENABLE_X64: "1"
       JACCPOT_RUNTIME_TYPECHECK: ${{ matrix.typecheck }}
@@ -170,9 +230,13 @@ jobs:
     # 3.13 is test-full's). This is a version-compatibility check, not a second run
     # of the suite: it replaces `test-smoke`, which ran every non-slow test again
     # in three shards. Selection in test_shards.py (`EXTRA["py-floor"]`): the
-    # goldens, the public API surface and the Odisseo coupling contract.
+    # curated `smoke` marker (tests/smoke_tests.txt), one fast representative per
+    # lane plus the public API, contract and guard tests: 64 tests, 3.5 min at
+    # `-n 2` on a loaded CPU host with a cold cache (2026-10, Z-c). The job measured
+    # 3.9-4.1 min with its previous selection; 15 is the floor.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     env:
       JAX_ENABLE_X64: "1"
       JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
@@ -196,7 +260,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install git+https://github.com/TobiBu/yggdrax.git
           pip install -e ".[dev]"
-      - name: Goldens and API contract on Python 3.12
+      - name: Smoke tests on Python 3.12
         run: |
           mapfile -t selection < <(python .github/scripts/test_shards.py args py-floor)
           pytest -n 2 "${selection[@]}" --durations=20
@@ -210,8 +274,14 @@ jobs:
     # Forced host devices and nornax are installed so that the distributed and
     # cross-repo modules collect their tests rather than skip at module level;
     # otherwise a missing shard for them would be invisible here.
+    #
+    # The two path-gated jobs' shards are checked like every other: whether a job
+    # runs on a given pull request does not change which tests it owns. The same
+    # check fails on a node id in tests/slow_tests.txt or tests/smoke_tests.txt
+    # that is no longer collected.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
@@ -267,9 +337,10 @@ jobs:
     runs-on: ubuntu-latest
     # Measured 6:09 for the four tests serially on a fast workstation; hosted
     # runners are the slower side of that, and every test compiles its own
-    # shard_map program. 35 leaves room for a 3-5x runner penalty without being
-    # so wide it stops detecting a real hang.
-    timeout-minutes: 35
+    # shard_map program. 12-16 min per job on the hosted runner (2026-10), so 30
+    # is about twice that.
+    if: github.event_name != 'schedule'
+    timeout-minutes: 30
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
@@ -353,13 +424,15 @@ jobs:
   # locally, skipped in CI, and nothing would have caught a protocol drift.
   test-cross-repo-nornax:
     name: test-cross-repo-nornax
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # Measured on ubuntu-latest: the adapter suite step took 13 min up to jaccpot#312
     # and 22 min once #316 added the multi-step FMM gradient tests (five FMM rollouts
     # differentiated, plus their finite differences). At 25 the job was cancelled
-    # mid-suite on the next PR with ~2 min of install in front of it. 45 restores
-    # the 2x headroom the original 25 had over 13. If the suite grows again, split
-    # the gradient tests into their own step rather than raising this further.
+    # mid-suite on the next PR with ~2 min of install in front of it. The 2026-10
+    # cleanup (Z-a, R7) dropped two of the rollout-gradient checks; the job measured
+    # 19-21.5 min after it, so 45 is about twice that. If the suite grows
+    # again, split the gradient tests into their own step rather than raising this.
     timeout-minutes: 45
     env:
       JAX_ENABLE_X64: "1"
@@ -420,14 +493,18 @@ jobs:
   #
   # MEASURED: the two files together, all 24 tests, took 32:48 on a fast workstation with
   # four forced devices throughout. Subtracting the adapter file at that device count
-  # (~36 s/test x 12) leaves ~26 min for this half alone. Hosted runners are the slower
-  # side of that, which is why the timeout is 90 rather than the 35 a naive reading of the
-  # local number would suggest -- and why this is not folded into the job above, where it
-  # would hold a 2-minute protocol check hostage to a 26-minute mesh suite.
+  # (~36 s/test x 12) leaves ~26 min for this half alone -- and it is not folded into the
+  # job above, where it would hold a protocol check hostage to a mesh suite. On the
+  # hosted runner it has measured 3.4-3.9 min per job since the suite was trimmed
+  # (2026-10), so its cap is the 15-minute floor.
+  #
+  # PATH-GATED: see the `changes` job.
   test-cross-repo-nornax-distributed:
     name: test-cross-repo-nornax-distributed
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 15
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
@@ -483,10 +560,15 @@ jobs:
   # Split rather than deselected: `slow` was the obvious marker to reuse and is the wrong
   # one, because the standard tier deliberately RUNS three slow-marked distributed tests
   # and excluding slow there would have silently dropped them.
+  #
+  # PATH-GATED: see the `changes` job. 6.5-9.7 min per job on the hosted runner
+  # (2026-10), so 20 is about twice that.
   test-distributed-criterion:
     name: test-distributed-criterion
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 20
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
@@ -561,9 +643,10 @@ jobs:
     runs-on: ubuntu-latest
     # Measured 12:55 at `-n 2` on a fast workstation (31 passed, 1 skipped);
     # 20:18 at `-n 0`, so xdist buys 36% and each worker gets its own forced
-    # devices with identical results. 60 leaves the ~4x runner penalty the
-    # sibling job budgets for, without being so wide it stops detecting a hang.
-    timeout-minutes: 60
+    # devices with identical results. On the hosted runner 10.7-14.1 min per job
+    # (2026-10), so 30 is about twice that.
+    if: github.event_name != 'schedule'
+    timeout-minutes: 30
     env:
       JAX_ENABLE_X64: "1"
       JAX_PLATFORMS: cpu
@@ -623,7 +706,10 @@ jobs:
           fi
 
   benchmark-guard:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
+    # 3.7-4.5 min per job (2026-10); the floor.
+    timeout-minutes: 15
     env:
       JAX_ENABLE_X64: "1"
     steps:

@@ -63,12 +63,12 @@ measurement was first mis-taken.
 
 ## 2. Two packed symmetric-tensor orderings, exact reverses
 
-**No longer a collision inside jaccpot.** jaccpot's copy of `multipole_utils.py` went
-with the Cartesian basis in the 2026-10 cleanup (K, `docs/cleanup_2026-10.md`); the
-ascending (Cartesian) packing now lives only in `yggdrax.multipole_utils`, which tests
-it, and `test_convention_contracts.py` no longer pins this section. The record stays
-because a caller combining yggdrax's packing with jaccpot's derivative towers still
-meets it.
+**No longer a collision anywhere.** jaccpot's copy of `multipole_utils.py` went
+with the Cartesian basis in the 2026-10 cleanup (K, `docs/cleanup_2026-10.md`), and
+yggdrax's `multipole_utils` with its Cartesian moments in the same project (yggdrax
+Y2), so neither package carries the ascending (Cartesian) packing any more and
+`test_convention_contracts.py` no longer pins this section. The record stays for
+anyone reading older results that used it.
 
 | module | ordering |
 | --- | --- |

@@ -15,10 +15,10 @@ This module re-exports all of them, so ``jaccpot.runtime.kernels.core`` remains 
 working import path and ``kernels/__init__.py``'s curated surface is unchanged.
 
 Leaf contract, unchanged and load-bearing: this package must NOT import the engine
-(``runtime.fmm.engine`` / the prepare pipeline), so ``distributed/`` and
-``experimental/`` can use the kernels without dragging in the orchestrator. The two
-engine annotations in ``_evaluate`` are deliberately left dangling for that reason;
-see the comment at the site.
+(``runtime.fmm.engine`` / the prepare pipeline), so ``distributed/`` can use the
+kernels without dragging in the orchestrator (``experimental/`` did too, until the
+2026-10 cleanup removed it). The two engine annotations in ``_evaluate`` are
+deliberately left dangling for that reason; see the comment at the site.
 """
 
 from __future__ import annotations

@@ -183,8 +183,8 @@ pairs on the host, so it was not traceable, and it was an *approximation*: one
 representative displacement per lattice class (the flat grad path was **6.6×
 more accurate** against an exact direct sum on a deliberately deep tree). The
 grad path used to force it off; it was removed in the 2026-10 cleanup
-(`docs/cleanup_2026-10.md`, X3), and `grouped_interactions=True` now raises at
-construction, so the forward and the gradient always run the same far field.
+(`docs/cleanup_2026-10.md`, X3, with its `grouped_interactions` option in Z-b), so
+the forward and the gradient always run the same far field.
 
 **Outer `jax.jit`.** Bare `jax.grad`/`jax.vjp` is the recommended usage — the
 inner kernels are already jit-compiled. Wrapping the entire call in `jax.jit`

@@ -1126,9 +1126,9 @@ class FastMultipoleMethod:
         not an upper bound on the error.
 
         Note what is *not* measured: the two direct-sum accuracy tests
-        (``tests/unit/test_solver_api.py``, ``5e-2`` for the default mode and
-        ``2e-3`` for ``"accurate"``) both run at ``theta=1e-4``, where almost
-        nothing is accepted as far-field. They therefore barely exercise the
+        (``tests/unit/core/test_time_derivatives.py``, ``5e-2`` for the default
+        mode and ``2e-3`` for ``"accurate"``) both run at ``theta=1e-4``, where
+        almost nothing is accepted as far-field. They therefore barely exercise the
         far-field term that distinguishes the modes, and the gap between those two
         tolerances should not be read as its size -- 3.826e-05 above is the figure
         to use.

@@ -1,6 +1,6 @@
 # jaccpot
 
-![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)
 ![Black](https://img.shields.io/badge/code%20style-black-000000.svg)
 ![isort](https://img.shields.io/badge/imports-isort-1674b1.svg)
 ![pytest](https://img.shields.io/badge/tests-pytest-0a9edc.svg)
@@ -27,7 +27,7 @@ Tree construction and traversal artifacts are provided by the companion package
 - Pure-JAX real spherical harmonic rotate+scale M2L path
 - Adaptive-order far-field evaluation with fixed `p_gears` buckets
 - Optional topology reuse for multiple nearby timesteps
-- Optional Pallas acceleration for the real-basis z-translation hotspot
+- Pallas (Triton) kernels for the hot loops on Ampere+ GPUs, with pure-JAX fallbacks on older GPUs and CPU (see [Pallas Acceleration](#pallas-acceleration))
 - Modular runtime with flat interaction pathways, streamed or materialised
 - Near-field and far-field execution paths with optional prepared state reuse
 - **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
@@ -160,37 +160,31 @@ coupler.prepare(primitive_state, masses)  # full source tree
 acc_active = coupler.accelerations(primitive_state, active_indices=active)
 ```
 
-## Octree Backend (removed)
+## Removed in the 2026-10 cleanup
 
-The octree execution backend (`RuntimePolicyConfig(execution_backend="octree")`,
-complex basis only, about 3x behind radix, no production caller) was removed in the
-2026-10 cleanup ([docs/cleanup_2026-10.md](docs/cleanup_2026-10.md), X2), and the
-`execution_backend` field with it (Z-b). `TreeConfig(tree_type="octree")` raises the
-generic "tree_type must be one of" `ValueError`. Radix is the only single-GPU
-execution backend.
+The 2026-10 cleanup ([docs/cleanup_2026-10.md](docs/cleanup_2026-10.md)) removed
+the complex and Cartesian bases, the octree execution backend, the grouped /
+class-major far field, M2L autotune and adaptive sizing, the legacy strict APIs,
+the treecode walk and the superseded GPU kernel variants, together with their
+options (`runtime_path`, `FarFieldConfig.mode`, `execution_backend`,
+`grouped_interactions`, `use_dense_interactions`, `complex_rotation`,
+`jerk_fd_dt`, ...). Passing one of them now fails like any unknown keyword or value
+(`TypeError` / `ValueError`); a removed `JACCPOT_*` environment value is simply not
+read. Radix is the only single-GPU tree.
 
 ## Basis Selection
 
-- `basis="real"` (**the default, and the production choice**):
-  real spherical harmonic coefficient layout (Dehnen, no sqrt-2) with
-  rotate+scale-to-z M2L. The large-N radix fast lane runs pure-real end to end,
-  with no complex<->real conversion.
-- `basis="solidfmm"` — the spherical-harmonic family's name, and since the
-  2026-10 cleanup (phase C) **an alias for `"real"`**: it resolves to the same
-  basis object and reports `basis == "real"`. Until C it selected the complex
-  basis.
-- `basis="complex"` — **removed** in the 2026-10 cleanup (phase C). Since Z-b it
-  is an unknown name like any other and raises the generic `ValueError` of its
-  validator, as do `FMMEngine(expansion_basis="complex")`, a basis object not named
-  `"real"`, and `DistributedFMMConfig(basis="complex")` or `basis="solidfmm"` (the
-  distributed driver's name for its complex far field); `ComplexSHBasis` is not
-  importable. The
-  complex basis agreed with the real one to round-off (4.5e-13 at N=2048/p=4/
-  theta=0.5 in float64), so `"real"` is a drop-in replacement.
-- `basis="cartesian"` — **removed** in the 2026-10 cleanup (phase K); an unknown name
-  since Z-b, likewise. Its relative L2 force error was ~1.8e-1 *independent of
-  expansion order*, a divergent-series signature rather than truncation error. See
-  `docs/cleanup_2026-10.md`.
+- `basis="real"` (**the default, and the only basis**): real spherical harmonic
+  coefficient layout (Dehnen, no sqrt-2) with rotate+scale-to-z M2L. The large-N
+  radix fast lane runs pure-real end to end.
+- `basis="solidfmm"`: the spherical-harmonic family's name, an alias for `"real"`
+  (it resolves to the same basis object and reports `basis == "real"`).
+
+Any other name raises the validator's `ValueError`. The complex basis agreed with
+the real one to round-off (4.5e-13 at N=2048/p=4/theta=0.5 in float64), so
+`"real"` replaces it as is; the Cartesian basis had a relative L2 force error of
+~1.8e-1 *independent of expansion order*, a divergent-series signature rather
+than truncation error (see the cleanup record, phases C and K).
 
 ## Multi-GPU: the JAX floor is a correctness floor
 
@@ -283,9 +277,14 @@ The current adaptive acceptance model is solver-owned and error-aware:
 - once accepted, the solver picks the smallest passing order from `p_gears`
 
 In other words, the highest candidate order decides whether a pair is safe to
-accept, while the first passing order decides how much far-field work is needed.
+accept, while the first passing order is the order the pair needs.
 The current notebook example prints the resulting tag-derived
 `far_pairs_by_gear_counts` from the solver runtime.
+
+**Known gap:** the downward sweep does not yet read the gear buckets. It evaluates
+every accepted far pair at the full `max_order`, so today adaptive order changes
+which pairs are accepted (and the `far_pairs_by_gear_counts` diagnostic), not the
+order or cost of their M2L. Measure before relying on it for speed.
 
 Adaptive traversal currently has two practical runtime modes:
 
@@ -439,26 +438,36 @@ exported as backend-specific traversal `node_features`.
 
 ## Pallas Acceleration
 
-The real-basis z-translation core can be accelerated with Pallas:
+On an Ampere-or-newer GPU (sm_80+) the hot loops run as Pallas (Triton) kernels;
+on older GPUs (sm_75), and on CPU, the same steps run in pure JAX. The choice is
+automatic:
 
 ```python
-solver = FastMultipoleMethod(
-    preset="accurate",
-    basis="real",
-    use_pallas=True,
-)
+solver = FastMultipoleMethod(preset="accurate")  # use_pallas=None: auto-detect
 ```
 
-Current behavior:
+`use_pallas` selects the near-field kernel (`None` auto-detects; an explicit
+`True` / `False` wins). The other kernels gate on the same hardware check. What
+runs as Pallas on sm_80+ (`jaccpot/pallas/`):
 
-- rotations stay in pure JAX
-- only the real-basis z-axis M2L core is offloaded
-- unsupported backends fall back to the pure-JAX kernel automatically
+- **near field:** the leaf-pair kernel driven by the neighbour CSR
+  (`nearfield_leafpair_csr.py`), the fused leaf-major kernel
+  (`nearfield_fused_leaf.py`), and the block-step lane's mutual P2P
+  (`nearfield_mutual.py`);
+- **far field:** the M2L over the target-sorted far-pair CSR, one pair per lane
+  (`m2l_real_csr_lanes.py`), and the fully fused rotate / z-translate / rotate-back
+  M2L (`m2l_real_fused.py`, opt-in via `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`);
+- **the rest of the fused strict lane's step:** the dual-tree walk, one launch per
+  wavefront round (`mutual_walk_pallas.py`), the directed pair CSR
+  (`csr_place.py`), the COM MAC radii (`com_radii_leaf.py`), leaf P2M
+  (`p2m_real_leaf.py`), the M2M / L2L cascades (`cascade_real_lanes.py`,
+  `cascade_real_level.py`) and L2P (`l2p_real.py`).
 
-On the current `expanse` CPU environment, the example reports fallback rather
-than true Pallas execution:
-
-- [examples/pallas_m2l_speed.py](examples/pallas_m2l_speed.py)
+The kernels on a gradient path carry a `custom_vjp`, so the Pallas lane stays
+differentiable.
+[ARCHITECTURE.md](ARCHITECTURE.md) section 7 has the gates and the
+version-dependent backend selection. On CPU, [examples/pallas_m2l_speed.py](examples/pallas_m2l_speed.py)
+reports the fallback rather than Pallas execution.
 
 ## Differentiable FMM
 
@@ -614,7 +623,9 @@ Or run pre-commit hooks:
 pre-commit run --all-files
 ```
 
-Coverage is enforced in CI via `pytest-cov`:
+CI measures branch coverage on every `test-full` shard and uploads the reports;
+there is no `fail_under` threshold, so a coverage drop does not fail the build on
+its own. Locally:
 
 ```bash
 pytest --cov=jaccpot --cov-report=term-missing
@@ -622,36 +633,31 @@ pytest --cov=jaccpot --cov-report=term-missing
 
 ### Performance Guard
 
-CI also runs a benchmark regression guard based on:
-
-- [bench/bench_parallel_paths.py](bench/bench_parallel_paths.py)
-- [bench/ci_benchmark_guard.py](bench/ci_benchmark_guard.py)
-- [bench/benchmark_baseline.json](bench/benchmark_baseline.json)
-
-Run the lightweight runtime-path benchmark and CI guard locally:
+CI also runs a runtime sanity guard,
+[bench/ci_benchmark_guard.py](bench/ci_benchmark_guard.py), on top of
+[bench/bench_parallel_paths.py](bench/bench_parallel_paths.py). It has no stored
+baseline: it checks broad ratio bounds between the acceleration, the two jerk modes and
+the time-derivative orders (broad, to avoid hardware-specific flakiness while still
+catching major runtime regressions), and that `jerk_mode="accurate"` still
+differs from `"fast_approx"` by more than 1e-6 rel-L2, a tripwire for the source-motion
+term going missing. Locally, as CI runs it:
 
 ```bash
-python -m bench.bench_parallel_paths --n 512 --runs 3 --warmup 1
-python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1
+python -m bench.ci_benchmark_guard --n 384 --runs 2 --warmup 1 --preset fast \
+    --basis real --theta 0.6 --leaf-size 16 --max-order 4 --dtype float32
+python -m bench.bench_parallel_paths --n 512 --runs 3 --warmup 1   # the timings alone
 ```
-
-If a performance change is intentional, refresh the baseline:
-
-1. Run `bench/bench_parallel_paths.py` with the CI benchmark arguments.
-2. Read the `timings_s` line and update:
-   `target_eval_mean_s` and `adaptive_prepare_mean_s` in
-   `bench/benchmark_baseline.json`.
-3. Re-run `bench/ci_benchmark_guard.py` to confirm the new baseline passes.
 
 ## Examples
 
-- `examples/benchmark_runtime_accuracy.ipynb`: main runtime/accuracy benchmark workflow
-- `examples/adaptive_vs_fixed_benchmark.ipynb`: adaptive-order vs fixed-order comparison
-- `examples/benchmark_gpu_radix_runtime.ipynb`: GPU/radix runtime and memory-pressure deep dive
-- `examples/benchmark_gpu_single_n_memory.ipynb`: interactive single-`N` GPU memory probe with plots/tables
 - `examples/time_derivatives_demo.ipynb`: usage plus direct-sum accuracy checks for jerk, snap, and crackle
 - `examples/jerk_modes_demo.ipynb`: compare jerk `fast_approx` vs `accurate`, including analytic source-motion behavior
 - `examples/real_sh_adaptive_order.ipynb`: real-basis adaptive-order demo
+
+The `benchmark_*` and `adaptive_vs_fixed_benchmark` notebooks are records of
+earlier measurements. Most predate the 2026-10 cleanup and no longer run end to
+end (they drive a deleted worker script, the removed complex basis or private
+helpers whose signatures changed); the cleanup record lists what each needs.
 
 ## Runtime Type Checking
 
@@ -670,21 +676,35 @@ export JACCPOT_RUNTIME_TYPECHECK=1
 - `jaccpot/solver.py`: preset-first user-facing FMM API
 - `jaccpot/config.py`: config model for solver/runtime knobs
 - `jaccpot/runtime`: execution internals and integration with yggdrax artifacts
+- `jaccpot/basis`: the real solid-harmonic basis
 - `jaccpot/operators`: harmonic, translation, and multipole operators
+- `jaccpot/pallas`: the Pallas kernels and their `custom_vjp` rules
+- `jaccpot/distributed`: the multi-GPU drivers
 - `jaccpot/upward`, `jaccpot/downward`, `jaccpot/nearfield`: sweep and near-field modules
 - `jaccpot/mutual`: momentum-conserving (mutual) evaluation path — a separate lane, not a variant of the above
 - `jaccpot/nornax_adapter.py`: `BlockStepFMM`, the block-step KDK facade over `jaccpot/mutual`
-- `tests`: unit, integration, and performance checks
+- `tests`: unit, integration (`tests/integration/strict/` for the fused strict lane), characterization (goldens), distributed and performance checks; `bench/tests` tests the `bench/` scripts
 
 ## CI
 
-GitHub Actions runs:
+GitHub Actions (`.github/workflows/ci.yml`) runs each test at most once per push,
+on CPU runners. `.github/scripts/test_shards.py` defines which tests each job runs, and
+the `test-partition` job checks that the shards cover the suite exactly once.
 
-- formatter checks (`black`, `isort`)
-- unit/integration tests with coverage threshold
-- release build and PyPI publish on version tags
+- `lint`: `black`, `isort`, and the `bench/` scripts' own tests;
+- `test-full`: the suite with branch coverage, in six shards (unit, unit-runtime,
+  unit-runtime-mac, integration, mutual-static-device, characterization); runtime
+  type checks are on for the unit shards;
+- `test-py-floor`: the `smoke`-marked tests on Python 3.12, the oldest supported;
+- `test-distributed-tier`, `test-distributed-mutual`: the multi-device tests on
+  forced host devices;
+- `test-cross-repo-nornax`: the `BlockStepFMM` conformance suite against nornax;
+- `benchmark-guard`: the performance regression guard (above);
+- `test-distributed-criterion` and `test-cross-repo-nornax-distributed`: on pushes
+  to `main`, nightly, on manual dispatch, and on pull requests that touch
+  `jaccpot/distributed/`, `jaccpot/mutual/`, `jaccpot/nornax_adapter.py`,
+  `jaccpot/pallas/nearfield_*` (or their own tests and the CI files).
 
-Workflow files:
-
-- `.github/workflows/ci.yml`
-- `.github/workflows/release.yml`
+There is no GPU job; `bench/gpu_gate.py` is the pre-release GPU gate (see
+`CLAUDE.md`). `.github/workflows/release.yml` builds and publishes to PyPI on
+version tags.

@@ -111,9 +111,9 @@ def test_nearfield_bucketed_matches_baseline(
     -- this exercises a near-field traversal, not the expansion. Adding that axis
     would cost compile time and measure nothing.
 
-    The fp32/chunk-128 cases run in the CI smoke leg; the N=256 cases are listed in
-    ``slow_tests.txt``. Before parametrisation the single case was slow-only, so no
-    fast leg checked this equivalence at all.
+    Every case runs in CI (``test-full``); whether one is ``slow`` follows its measured
+    cost (``slow_tests.txt`` is rebuilt from durations). Before parametrisation the
+    single case was slow-only, so no fast leg checked this equivalence at all.
     """
     key = jax.random.PRNGKey(515)
     positions = jax.random.uniform(
