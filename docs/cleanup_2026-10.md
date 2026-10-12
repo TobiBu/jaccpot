@@ -3091,3 +3091,176 @@ paths (2.65 h on main and gated PRs).
   `DistributedFMMConfig.local_walk`, `JACCPOT_LARGE_N_COMPILED_STATE_MODE` read nowhere,
   the prepared states' `execution_backend` tag; the notebooks above; Z-a's `[real]`
   parametrisations; the plan's item and file targets.
+
+## Test speed-ups (2026-10-12)
+
+Tests only (`jaccpot/` untouched). Source: a read-only audit of the slowest CI tests on
+7483fe9, whose every proposal (R1-R10 redundant, C1-C17 combinable, S1-S7 shrinkable,
+H1-H2 shape-sharing, medium and low confidence included) the maintainer approved on
+2026-10-12. Where the audit said "measure first" the measurement is below; nothing was
+relaxed, and every assertion of a removed or merged test survives in a named test.
+
+Two constraints shaped it. conftest clears JAX's caches after every test in
+`tests/unit/runtime`, the differentiable-FMM files and (with the disk cache, as in CI)
+the mutual files, so sharing a *shape* saves nothing there: the new module fixtures
+share computed *results* (arrays), or tests merge so the expensive call runs once. And CI
+runs `-n 2 --dist loadgroup`, where a module or class fixture is built once per worker
+that uses it, so every shared fixture's users carry an `xdist_group` -- only its users,
+one group per fixture: a first cut pinned whole modules and serialised their
+fixture-free tests behind the shared pass (test_dehnen_mac_gradients.py ran at 81 % of
+its 7483fe9 time that way, 55 % grouped per fixture, in two paired runs).
+
+**Found on the way.**
+- Under `--dist loadgroup` pytest-xdist renames a grouped test `<id>@<group>` before
+  conftest's marker hook ran, so `slow_tests.txt` / `smoke_tests.txt` never matched a
+  grouped test: `-m slow` selected 202 of 205 on 7483fe9 (the three
+  `mutual_block_step_heavy` tests lost the mark). The hook is `tryfirst` now: 187 of 187.
+- `dehnen_geometry_mode="tree_approx"` is not traceable: `jax.jit` of
+  `resolve_dehnen_geometry` raises `ConcretizationTypeError` at
+  `_adaptive_policy.py:1540` (`int(jnp.max(counts))`), although the host-loop modes'
+  error message recommends it "under jax.jit/jax.grad". The mode is consumed outside any
+  trace, so nothing in the library depends on it; the message is left for a library PR.
+- R9: on `test_far_near_partition`'s uniform problem (N=512, leaf 16) `dehnen_error`
+  accepted **no** far pair at eps 1e-3 or 1e-4, so both cases checked the near list
+  alone and could not see a policy-dropped pair -- the defect the file exists for.
+
+**Per item.**
+- C2: pins for `test_large_n_grad_reverse_path.py` (one group per fixture family),
+  `test_tree_geometry_compiled.py`, `test_distributed_cross_domain_far_extents.py`.
+  On 7483fe9 at `-n 12` the large-N reverse fixture was logged as built on four workers.
+- C1, R6: one Pallas-cascade reverse test (loop reverse, default Pallas reverse, direct
+  sum; all old assertions); the finite-only reverse test goes (NaN or inf fails the
+  rel-L2 checks on the same fixture).
+- C3, R7, R8: one module state and one `grad(jit(loss), argnums=(0, 1))` with its FD
+  references and direct-sum gradients serve FD-vs-AD, grad-vs-direct-sum, the
+  mass-smoothness check and the cotangent check. R8: `[com]` reads that pass;
+  `[tree_approx]`/`[runtime]` (the mode is consumed only in `prepare_state`) now build
+  the state and require far pairs (108, 80) instead of taking the same reverse pass -- the
+  audit's `jax.jit(resolve_dehnen_geometry)` replacement does not hold (above). R7: the
+  `paper_fb` FD check ran the same code under `jax.grad` (the f_b prepass and its cache
+  writes are in `prepare_state`; only `evaluate_prepared_state` records a force scale).
+- C4-C6, C14, S2, S5 (`test_mutual_fmm.py`): fixtures `rung_split` (N=1024 level split,
+  seven tests), `mutual_256` (one `argnums=(0, 1)` reverse pass and the FD reference: FD,
+  Pallas-reverse and direct-sum gradient checks; level-gradient and two near-field tests
+  read its state) and `mutual_512` (state and pure-JAX force for four Pallas tests). C6's
+  medium item, measured: grad-vs-direct-sum moves N=512 -> 256 at rel-L2 3.7e-3 /
+  6.1e-3 (positions / masses, 60 far pairs) against 9.1e-4 / 6.1e-3, at least 8x under
+  the unchanged 5e-2. C5: the uniform rungs loop over one order-6 build. C14, measured: the
+  scanned-vs-unrolled check is the rollout's first base step (same clear between the two
+  programs, then five more steps: the trajectory is unchanged); peak RSS 2835 MB
+  (rollout) and 1299 MB (scanned) before, 2662 MB merged (`-n 0`, jax 0.11.2). S2: the
+  momentum grid's diagonal (2, 0.5), (4, 0.7), (6, 1.0). S5: `_m2l_lane(True, True)`
+  directly.
+- C12, C17, R4: the deep-config FD-vs-AD checks (positions, masses) are two forward
+  evaluations inside `test_grad_fmm_vs_directsum.py`'s direct-sum tests, which already
+  take that reverse pass -- **R6 ownership moves**: FD-vs-AD for the deep real config is
+  now `test_grad_fmm_vs_directsum.py`'s. One rho == 0 test (the transverse system, plus
+  the one-sided smoothness check). The owner of the forward-vs-differentiable force
+  asserts both tolerances.
+- R1/R1b/C9, R2, R3, R5, R9, R10, C7, C8, C11: folded or deleted as tabled below.
+  R9 measured (far pairs, uniform / clustered): dehnen 4 / 50; `dehnen_error` 1e-2
+  38 / 50, 1e-3 0 / 146, 1e-4 0 / 94. The uniform 1e-4 case goes, the uniform 1e-3 case
+  runs at 1e-2, and every case asserts far pairs.
+- C10, C13: a `node_count` fixture (each test keeps a fresh solver; "used verbatim" is
+  now asserted on a cold and a warm cache), and near-field `payload_case` /
+  `fast_lane_256` fixtures.
+- C15, H1, C16, H2: the theta=1e-4 jerk tests at one (N, leaf) = (20, 10) (measured:
+  jerk 4.3e-5, snap 6.1e-5, crackle 7.3e-5 against unchanged bounds); the accurate-mode
+  call with both internal paths forbidden; the topology-identity memo (22 builds -> 4
+  memoized plus the 3 deliberately independent ones), seed 0 and leaves 8/16.
+- S1: the Pallas ladder starts at 512, one doubling below the measured 862 peak
+  wavefront (from a default flat walk in the test): 58.8 s -> 23.6 s. S3: pairwise
+  cover, 8 -> 4. S4: interpret orders 2 and 4 (4 is the default `max_order`), native
+  keeps 2, 4, 5. S6: `[n96-f32-chunk128]` goes. S7, measured: N=512 -> 256 (682 far
+  pairs; 63 s -> 49 s).
+
+**Deleted or merged** -- tag (a) subject gone, (b) merged into the named test, (c)
+duplicate of the named owner:
+
+| removed | tag | where it lives now |
+| --- | --- | --- |
+| `test_large_n_grad_reverse_path.py::test_reverse_pass_is_finite` | (c) | `test_position_gradient_matches_the_direct_sum`, `test_mass_gradient_...` |
+| `TestPallasCascades::test_pallas_and_pure_jax_reverses_agree` | (b) | `TestPallasCascades::test_grad_matches_the_direct_sum_through_the_reverse_pallas_kernels` |
+| `test_dehnen_mac_gradients.py::test_device_side_geometry_modes_are_differentiable[com]` | (b) | `test_the_com_geometry_mode_is_differentiable` (the shared pass) |
+| `...[tree_approx]`, `...[runtime]` | (b) | `test_device_side_geometry_modes_build_a_usable_state[*]` + the `[com]` pass |
+| `test_fb_force_scale_estimator.py::test_the_fb_prepass_does_not_break_the_reverse_pass` | (c) | `test_dehnen_mac_gradients.py::test_fd_vs_ad_under_mass_dependent_mac[positions]` |
+| `test_mutual_fmm.py::test_momentum_is_exact_independently_of_theta_and_order`, 6 off-diagonal cases | (c) | its diagonal cases `[2-0.5]`, `[4-0.7]`, `[6-1.0]` |
+| `test_uniform_rung_reproduces_the_oracle_level_split[0]`, `[2]`, `[3]` | (b) | `test_uniform_rung_reproduces_the_oracle_level_split` |
+| `test_scanned_base_step_matches_the_unrolled_one` | (b) | `test_block_step_rollout_conserves_momentum_and_bounds_energy` |
+| `test_mac_type_resolution.py::test_dehnen_error_resolves_...`, `test_dehnen_theta_resolves_...`, `test_the_sweep_resolves_exactly_as_base_mac_type_does[x5]` | (b) | `test_downward_sweep_hands_the_traversal_a_value_yggdrax_accepts[*]` |
+| `test_upward_node_mass_conservation.py::test_every_reachable_node_with_particles_has_a_nonzero_expansion[x4]` | (b) | `test_node_monopole_equals_the_mass_it_spans[*]`, now over the same four configs |
+| `test_cascade_real_level.py::test_m2m_levels_interpret_matches_the_level_loop[5,3]`, `test_l2l_levels_interpret_matches_the_cascade[5,3]` | (c) | `test_cascade_real_lanes.py::test_m2m_lanes_match_the_level_loop[32-*]`, `test_l2l_lanes_match_the_cascade[32-*]` |
+| `test_gradient_correctness.py::test_reorders_to_original_particle_order[real]` | (b) | `test_grad_fmm_vs_directsum.py::test_differentiable_matches_forward_compute_accelerations` |
+| `test_fd_vs_ad_positions[real-0.6-64-4-4-1]`, `test_fd_vs_ad_masses[real]` | (b) | `test_grad_fmm_matches_grad_directsum_positions`, `..._masses` |
+| `test_degenerate_azimuth_subgradient_is_correct[real]` | (b) | `test_fd_vs_ad_along_a_transverse_direction_at_rho_zero[real]` |
+| `test_differentiable_step_fn.py::test_it_stays_differentiable` | (b) | `test_the_gradient_matches_the_eager_gradient` |
+| `test_far_near_partition.py::...[dehnen_error-0.0001-False]` | (c) | `[dehnen_error-0.01-False]` (same problem and policy, with far pairs) |
+| `test_real_leaf_p2m_batching.py::...[24]` | (c) | itself: the reference runs at width 24 |
+| `test_split_build_carries_pair_policy.py::test_the_far_near_partition_survives_the_split_build_with_a_policy[False,True]` | (b) | `test_split_and_monolithic_builds_agree_on_the_accept_mask[uniform,clustered]` |
+| `test_criterion_reaches_the_split_build.py::test_the_streamed_config_reaches_...`, `test_the_retaining_config_still_takes_...` | (b) | `test_the_two_far_pair_payloads_agree` |
+| `test_force_scale_prepass_cost.py::test_force_scale_prepass_restores_the_overridden_policy_knobs[paper]` | (b) | `test_paper_mode_runs_the_prepass_on_every_call` |
+| `...[paper_cached]`, `test_repeated_prepare_state_gives_bit_identical_accelerations` | (b) | `test_paper_cached_runs_the_prepass_only_on_the_cold_call` |
+| `test_time_derivatives.py::test_compute_accelerations_and_jerk_accurate_mode_reuses_prepared_topology`, `..._accurate_solidfmm_uses_analytic_path` | (b) | `test_compute_accelerations_and_jerk_accurate_mode_matches_direct_sum_tighter` |
+| `test_mutual_walk_pallas.py::test_pallas_walk_lists_equal_the_flat_walk_as_sets`, 4 cases | (c) | its four pairwise-covering cases |
+| `test_cascade_real_level_vjp.py::` m2m and l2l `[5-True]` | (c) | `[2-True]`, `[4-True]` (bracket and production order) |
+| `test_fmm.py::test_nearfield_bucketed_matches_baseline[n96-f32-chunk128]` | (c) | `[n256-f32-chunk64]` (fp32), `[n96-f64-chunk128]` (N=96) |
+
+Added: `test_mac_type_resolution.py::test_the_expected_resolution_names_every_requestable_value`.
+
+**Counts.** Default collection 1,910 -> 1,863 (the 26 touched files: 355 -> 308);
+`-m slow` 205 -> 187, and under `-n 2 --dist loadgroup` 202 -> 187 (the marker fix);
+`-m smoke` 64 -> 64, same ids. `test_shards.py check` (four forced host devices): clean,
+0 stale ids in either list.
+
+**Timings.** Wall time per file, `pytest -n 2 --dist loadgroup <file>` as CI runs it
+(`JAX_ENABLE_X64=1`, `JACCPOT_RUNTIME_TYPECHECK=1` for `tests/unit`, a
+`JACCPOT_TEST_JAX_CACHE_DIR` so conftest clears as in CI), 7483fe9 (`git archive`)
+against this branch's head, on one loaded 64-core host (load 130-200), each file's two
+arms running at the same time so they see the same load. "Cold": a fresh cache directory
+per arm and file; "warm": the same run again on the directory the cold run filled, which
+is what CI's cache restore gives a PR that does not touch `jaccpot/`. Seconds:
+
+| file | cold before | cold after | warm before | warm after |
+| --- | ---: | ---: | ---: | ---: |
+| `integration/test_mutual_fmm.py` | 1116 | 819 | 893 | 641 |
+| `unit/runtime/test_large_n_grad_reverse_path.py` | 456 | 328 | 258 | 163 |
+| `unit/runtime/test_force_scale_prepass_cost.py` | 349 | 302 | 302 | 246 |
+| `unit/runtime/test_dehnen_mac_gradients.py` | 340 | 188 | 223 | 107 |
+| `unit/test_gradient_correctness.py` | 237 | 138 | 163 | 104 |
+| `unit/runtime/test_fb_force_scale_estimator.py` | 220 | 183 | 196 | 180 |
+| `integration/test_fmm.py` | 184 | 184 | 176 | 165 |
+| `unit/runtime/test_mutual_walk_pallas.py` | 163 | 131 | 125 | 98 |
+| `unit/test_nearfield_fastlane_grad_path.py` | 148 | 109 | 125 | 90 |
+| `unit/runtime/test_force_scale_injection.py` | 143 | 121 | 132 | 118 |
+| `unit/runtime/test_split_build_carries_pair_policy.py` | 130 | 113 | 115 | 85 |
+| `unit/runtime/test_mac_type_resolution.py` | 127 | 27 | 127 | 26 |
+| `unit/core/test_time_derivatives.py` | 122 | 120 | 116 | 91 |
+| `unit/runtime/test_flat_walk_default_dispatch.py` | 112 | 79 | 74 | 55 |
+| `unit/operators/test_cascade_real_level_vjp.py` | 101 | 59 | 43 | 35 |
+| `unit/mutual/test_topology_identity.py` | 91 | 74 | 64 | 60 |
+| `unit/runtime/test_criterion_reaches_the_split_build.py` | 91 | 54 | 77 | 49 |
+| `unit/runtime/test_upward_node_mass_conservation.py` | 88 | 69 | 68 | 50 |
+| `integration/test_grad_fmm_vs_directsum.py` | 82 | 89 | 61 | 66 |
+| `unit/runtime/test_differentiable_step_fn.py` | 80 | 64 | 67 | 53 |
+| `unit/runtime/test_far_near_partition.py` | 80 | 82 | 77 | 72 |
+| `unit/test_large_n_config_thresholds.py` | 76 | 81 | 51 | 50 |
+| `unit/operators/test_cascade_real_level.py` | 70 | 34 | 35 | 26 |
+| `integration/test_distributed_cross_domain_far_extents.py` | 36 | 40 | 31 | 34 |
+| `unit/runtime/test_tree_geometry_compiled.py` | 34 | 38 | 30 | 33 |
+| `unit/core/test_real_leaf_p2m_batching.py` | 34 | 34 | 30 | 28 |
+| **total** | **4713** | **3561** | **3661** | **2724** |
+
+Total -24 % cold (4,713 -> 3,561 s) and -26 % warm (3,661 -> 2,724 s). The Dehnen row's
+cold pair is a second paired run after the per-fixture regrouping (above). Both arms
+passed every run. Files under ~40 s, and those whose saving is one case at
+`-n 2` (`test_fmm.py`, `test_far_near_partition.py`, `test_large_n_config_thresholds.py`),
+are within the run-to-run noise; `test_grad_fmm_vs_directsum.py` gains the two FD
+evaluations that retire two reverse-pass tests in `test_gradient_correctness.py`.
+
+**Gates** (this host, jax 0.11.2, CPU): `pytest -n 12 tests/unit tests/integration
+tests/characterization` 1,616 passed, 191 skipped, 1 failed -- the known stale-nornax
+`test_mutual_fmm_nornax.py::test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`;
+`JACCPOT_RUNTIME_TYPECHECK=1 pytest -n 12 tests/unit` 1,425 passed, 113 skipped; the 26
+touched files under `JAX_ENABLE_X64=1` (the timing runs above, both arms) all passed;
+pre-commit clean on every touched file.
+
