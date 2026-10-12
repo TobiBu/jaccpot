@@ -99,43 +99,22 @@ def _build_spy(monkeypatch):
     return counts
 
 
-def test_the_streamed_config_reaches_the_split_build_with_a_policy(_build_spy):
-    positions, masses = _problem()
-    fmm = _solver(streamed=True, retain=False)
-    fmm.prepare_state(positions, masses, leaf_size=LEAF, max_order=ORDER)
+def test_the_two_far_pair_payloads_agree(_build_spy):
+    """Compact COO pairs and the node interaction list must give the same force.
 
-    assert _build_spy["split_with_policy"] >= 1, (
-        "the criterion never reached the split build with a policy installed "
-        f"(counts={_build_spy}); need_traversal_result is forcing the monolithic "
-        "build again"
-    )
-    assert (
-        _build_spy["monolithic"] == 0
-    ), f"the criterion still took the monolithic build (counts={_build_spy})"
+    The two arms are also the two build-routing checks, read off the spy per arm:
 
+    * the streamed config must reach the SPLIT build with the policy installed and
+      never take the monolithic one -- otherwise ``need_traversal_result`` is
+      forcing the monolithic build again;
+    * the retaining config (the control) must still take the MONOLITHIC build and
+      hand back its traversal result. Without this the first could pass because
+      the split build had become unconditional, which would silently drop
+      ``state.dual_tree_result`` for every caller that asked to retain it.
 
-def test_the_retaining_config_still_takes_the_monolithic_build(_build_spy):
-    """Control: asking for the traversal result must still get it.
-
-    Without this the test above could pass because the split build had become
-    unconditional, which would silently drop ``state.dual_tree_result`` for every
-    caller that asked to retain it.
+    Until 2026-10-12 each routing check was a test of its own, repeating one of
+    the two prepares below.
     """
-
-    positions, masses = _problem()
-    fmm = _solver(streamed=False, retain=True)
-    state = fmm.prepare_state(positions, masses, leaf_size=LEAF, max_order=ORDER)
-
-    assert _build_spy["monolithic"] >= 1, (
-        f"a caller that retained the traversal result got the split build "
-        f"(counts={_build_spy})"
-    )
-    assert state.dual_tree_result is not None
-    assert state.interactions is not None
-
-
-def test_the_two_far_pair_payloads_agree():
-    """Compact COO pairs and the node interaction list must give the same force."""
 
     positions, masses = _problem()
 
@@ -143,7 +122,25 @@ def test_the_two_far_pair_payloads_agree():
     far_counts = []
     for streamed, retain in ((False, True), (True, False)):
         fmm = _solver(streamed=streamed, retain=retain)
+        for key in _build_spy:
+            _build_spy[key] = 0
         state = fmm.prepare_state(positions, masses, leaf_size=LEAF, max_order=ORDER)
+        if retain:
+            assert _build_spy["monolithic"] >= 1, (
+                f"a caller that retained the traversal result got the split build "
+                f"(counts={_build_spy})"
+            )
+            assert state.dual_tree_result is not None
+            assert state.interactions is not None
+        else:
+            assert _build_spy["split_with_policy"] >= 1, (
+                "the criterion never reached the split build with a policy "
+                f"installed (counts={_build_spy}); need_traversal_result is "
+                "forcing the monolithic build again"
+            )
+            assert (
+                _build_spy["monolithic"] == 0
+            ), f"the criterion still took the monolithic build (counts={_build_spy})"
         accelerations.append(
             np.asarray(
                 jax.device_get(

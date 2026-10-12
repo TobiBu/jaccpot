@@ -52,6 +52,24 @@ JACCPOT_POLICY_MAC_TYPES = frozenset({"dehnen_error", "dehnen_theta"})
 #: Every value a caller may legally pass, which is what these tests sweep.
 ALL_REQUESTABLE = YGGDRAX_ACCEPTED | JACCPOT_POLICY_MAC_TYPES
 
+#: What each requestable name must reach the traversal as. Not just "something
+#: legal" -- the *right* legal value, since picking ``"bh"`` for a §5 policy would
+#: silently change the acceptance criterion and the force. ``dehnen_theta`` carries
+#: the same §5 criterion pre-applied (folded into one effective opening angle per
+#: node, a rescaled ``geometry.radius``) instead of into a pair policy, so the
+#: *geometric* test underneath is unchanged and it too must be handed ``"dehnen"``
+#: -- and since no pair policy is installed in that mode, nothing downstream would
+#: re-map it. Keyed exactly by ``ALL_REQUESTABLE`` (asserted), so a new name has to
+#: say where it resolves.
+EXPECTED_TRAVERSAL_MAC_TYPE = {
+    **{name: name for name in YGGDRAX_ACCEPTED},
+    **{name: "dehnen" for name in JACCPOT_POLICY_MAC_TYPES},
+}
+
+# One (tree, upward) pair serves every capture below, so it is module-scoped and
+# pinned to one xdist worker (CI: `-n 2 --dist loadgroup`).
+pytestmark = pytest.mark.xdist_group("mac_type_resolution")
+
 
 #: The §5 policies are refused without one: ``adaptive_eps`` is the relative
 #: force-accuracy target of eq (16a), and the theta-derived default is a far looser
@@ -70,23 +88,21 @@ def _solver(mac_type: str):
     )
 
 
-def _capture_traversal_mac_type(monkeypatch, solver, **sweep_kwargs) -> list[str]:
+def _capture_traversal_mac_type(
+    monkeypatch, solver, tree_and_upward, **sweep_kwargs
+) -> list[str]:
     """Run ``prepare_downward_sweep`` and record what the traversal was given.
 
-    Uses a **real** tree and upward sweep, built once per solver via
-    ``prepare_state``. An earlier draft passed placeholder objects, since the fake
-    sweep raises before reading them -- but ``prepare_downward_sweep`` declares
-    ``tree: Tree`` and ``upward_data: TreeUpwardData``, so that would have made
-    this test violate a contract while asserting about contracts. It is also
-    exactly the looseness F40 is about.
+    Uses a **real** tree and upward sweep (the ``tree_and_upward`` fixture). An
+    earlier draft passed placeholder objects, since the fake sweep raises before
+    reading them -- but ``prepare_downward_sweep`` declares ``tree: Tree`` and
+    ``upward_data: TreeUpwardData``, so that would have made this test violate a
+    contract while asserting about contracts. It is also exactly the looseness F40
+    is about. The fake raises before reading either, so one pair, built by a
+    ``bh`` solver, serves every requested MAC type.
     """
     seen: list[str] = []
-
-    # Build the real artifacts FIRST. `prepare_state` runs the downward sweep too,
-    # so patching before this point makes the fake fire during setup -- capturing
-    # prepare_state's (correctly resolved) value and raising outside the
-    # `pytest.raises` block.
-    tree, upward = _real_tree_and_upward(solver)
+    tree, upward = tree_and_upward
 
     def _fake_sweep(*args, **kwargs):
         seen.append(kwargs["mac_type"])
@@ -104,48 +120,53 @@ class _Stop(Exception):
     """Sentinel: stop once the traversal-facing value has been captured."""
 
 
-def _real_tree_and_upward(solver):
-    """A real ``Tree`` and ``TreeUpwardData`` from the solver's own prepare path."""
+@pytest.fixture(scope="module")
+def tree_and_upward():
+    """A real ``Tree`` and ``TreeUpwardData`` from a solver's own prepare path.
+
+    Built FIRST and outside any test's patch: ``prepare_state`` runs the downward
+    sweep too, so building it with the fake installed would fire the fake during
+    setup -- capturing prepare_state's (correctly resolved) value and raising
+    outside the ``pytest.raises`` block.
+    """
     rng = np.random.default_rng(0)
     positions = jnp.asarray(rng.uniform(-1.0, 1.0, (128, 3)))
     masses = jnp.asarray(rng.uniform(0.5, 1.5, (128,)))
-    state = solver.prepare_state(positions, masses, leaf_size=8, max_order=2)
+    state = _solver("bh").prepare_state(positions, masses, leaf_size=8, max_order=2)
     return state.tree, state.upward
+
+
+def test_the_expected_resolution_names_every_requestable_value():
+    """The table below the sweep must not silently skip a name."""
+    assert set(EXPECTED_TRAVERSAL_MAC_TYPE) == ALL_REQUESTABLE
 
 
 @pytest.mark.parametrize("requested", sorted(ALL_REQUESTABLE))
 def test_downward_sweep_hands_the_traversal_a_value_yggdrax_accepts(
-    monkeypatch, requested
+    monkeypatch, tree_and_upward, requested
 ):
-    """Whatever the solver is configured with, the traversal gets a legal value."""
-    (seen,) = _capture_traversal_mac_type(monkeypatch, _solver(requested))
+    """Whatever the solver is configured with, the traversal gets a legal value.
+
+    The right legal value (``EXPECTED_TRAVERSAL_MAC_TYPE``: the §5 policies resolve
+    to the geometric ``"dehnen"``), and exactly the one ``_base_mac_type`` resolves
+    to. That last is the bug this file was written for, an inconsistency rather
+    than a wrong formula: ``fmm_prepare`` and ``fmm_strict_run`` both went through
+    ``_base_mac_type()`` while this path did not. Asserting they agree is what stops
+    them drifting apart again.
+
+    Parametrised rather than looped: ``monkeypatch`` lasts for the whole test, and
+    a second iteration would run with the fake sweep still installed. (Until
+    2026-10-12 the ``"dehnen"`` target and the ``_base_mac_type`` agreement were
+    three more tests, seven more solver prepares.)
+    """
+    solver = _solver(requested)
+    (seen,) = _capture_traversal_mac_type(monkeypatch, solver, tree_and_upward)
     assert seen in YGGDRAX_ACCEPTED, (
         f"mac_type={requested!r} reached the traversal as {seen!r}, which yggdrax "
         f"rejects with ValueError('Unknown mac_type')"
     )
-
-
-def test_dehnen_error_resolves_to_the_geometric_dehnen_test(monkeypatch):
-    """And specifically: the §5 policy resolves to the geometric ``"dehnen"``.
-
-    Not just "something legal" -- the *right* legal value, since picking ``"bh"``
-    would silently change the acceptance criterion and the force.
-    """
-    (seen,) = _capture_traversal_mac_type(monkeypatch, _solver("dehnen_error"))
-    assert seen == "dehnen"
-
-
-def test_dehnen_theta_resolves_to_the_geometric_dehnen_test(monkeypatch):
-    """The folded-angle mode resolves to ``"dehnen"`` as well, not to itself.
-
-    ``dehnen_theta`` carries the same §5 criterion, but pre-applied: it is folded
-    into one effective opening angle per node (a rescaled ``geometry.radius``)
-    instead of into a pair policy. The *geometric* test underneath is unchanged,
-    so the traversal must be handed ``"dehnen"`` -- and since no pair policy is
-    installed in this mode, nothing downstream would re-map it.
-    """
-    (seen,) = _capture_traversal_mac_type(monkeypatch, _solver("dehnen_theta"))
-    assert seen == "dehnen"
+    assert seen == EXPECTED_TRAVERSAL_MAC_TYPE[requested], (requested, seen)
+    assert seen == solver._base_mac_type(), (requested, seen)
 
 
 def test_the_resolver_and_the_policy_flag_cover_the_same_names():
@@ -180,7 +201,9 @@ def test_the_resolver_and_the_policy_flag_cover_the_same_names():
         assert _solver(name)._uses_dehnen_error_policy() is False
 
 
-def test_an_explicit_dehnen_error_override_is_resolved_too(monkeypatch):
+def test_an_explicit_dehnen_error_override_is_resolved_too(
+    monkeypatch, tree_and_upward
+):
     """The override argument needs the same treatment as the default.
 
     ``prepare_downward_sweep(mac_type=...)`` bypasses ``self.mac_type`` entirely,
@@ -188,26 +211,9 @@ def test_an_explicit_dehnen_error_override_is_resolved_too(monkeypatch):
     caller that passes the value explicitly.
     """
     (seen,) = _capture_traversal_mac_type(
-        monkeypatch, _solver("bh"), mac_type="dehnen_error"
+        monkeypatch, _solver("bh"), tree_and_upward, mac_type="dehnen_error"
     )
     assert seen == "dehnen"
-
-
-@pytest.mark.parametrize("requested", sorted(ALL_REQUESTABLE))
-def test_the_sweep_resolves_exactly_as_base_mac_type_does(monkeypatch, requested):
-    """``prepare_downward_sweep`` must resolve exactly as ``_base_mac_type`` does.
-
-    The bug was an inconsistency, not a wrong formula: ``fmm_prepare`` and
-    ``fmm_strict_run`` both went through ``_base_mac_type()`` while this path did
-    not. Asserting they agree is what stops them drifting apart again.
-
-    Parametrised rather than looped: ``monkeypatch`` lasts for the whole test, and
-    a second iteration would build its solver state with the fake sweep still
-    installed.
-    """
-    solver = _solver(requested)
-    (seen,) = _capture_traversal_mac_type(monkeypatch, solver)
-    assert seen == solver._base_mac_type()
 
 
 def test_the_policy_flag_still_sees_the_unresolved_value():

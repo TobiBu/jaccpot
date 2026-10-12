@@ -23,6 +23,7 @@ run with a different force and no signal at all. So the two assertions here are
   making both builds geometric.
 
 The far/near partition invariant is re-checked through the split path as well,
+on the policy-carrying split build of the ``uniform`` and ``clustered`` cases,
 reusing :mod:`tests.unit.runtime.test_far_near_partition`'s own coverage counter
 so the two cannot drift apart.
 """
@@ -208,7 +209,10 @@ def test_split_and_monolithic_builds_agree_on_the_accept_mask(case):
     monolithic = _mask(
         _build(engine, tree_artifacts, split=False, policy_state=policy_state)
     )
-    split = _mask(_build(engine, tree_artifacts, split=True, policy_state=policy_state))
+    split_artifacts = _build(
+        engine, tree_artifacts, split=True, policy_state=policy_state
+    )
+    split = _mask(split_artifacts)
     geometric_split = _mask(
         _build(engine, tree_artifacts, split=True, policy_state=None)
     )
@@ -229,23 +233,20 @@ def test_split_and_monolithic_builds_agree_on_the_accept_mask(case):
             f"{len(monolithic)}: the two builds disagree about the criterion."
         ),
     )
+    if case == "deep":
+        return  # the coverage counter is sized for test_far_near_partition's N
 
-
-@pytest.mark.parametrize("clustered", [False, True])
-def test_the_far_near_partition_survives_the_split_build_with_a_policy(clustered):
-    """Every source particle covered exactly once, per target leaf.
-
-    The invariant that catches a dropped pair -- and eq (16a) is asymmetric in
-    target<->source, so a policy-driven leaf-leaf disagreement is exactly how
-    pairs go missing.
-    """
-
-    positions, masses = _problem(clustered=clustered)
-    engine, tree_artifacts, policy_state = _policy_inputs(positions, masses)
-    artifacts = _build(engine, tree_artifacts, split=True, policy_state=policy_state)
-
+    # Every source particle covered exactly once, per target leaf, through the
+    # split build. The invariant that catches a dropped pair -- and eq (16a) is
+    # asymmetric in target<->source, so a policy-driven leaf-leaf disagreement is
+    # exactly how pairs go missing. (Its own test, on the same problem, inputs
+    # and build, until 2026-10-12.)
     counts = _coverage_counts(
-        _StateShim(tree_artifacts.tree, artifacts.interactions, artifacts.neighbor_list)
+        _StateShim(
+            tree_artifacts.tree,
+            split_artifacts.interactions,
+            split_artifacts.neighbor_list,
+        )
     )
     missing = int(np.sum(counts == 0))
     doubled = int(np.sum(counts > 1))

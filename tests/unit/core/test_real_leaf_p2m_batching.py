@@ -19,7 +19,9 @@ pytestmark = pytest.mark.skipif(
 ORDER = 4
 
 
-@pytest.mark.parametrize("leaf_batch_size", [1, 5, 24, 64])
+# Not 24: the reference below runs at width 24, so that case compared the call with
+# itself (dropped 2026-10-12). The kept widths still straddle the 24 leaves.
+@pytest.mark.parametrize("leaf_batch_size", [1, 5, 64])
 def test_leaf_p2m_does_not_depend_on_the_batch_width(leaf_batch_size):
     """A batch wider than the leaf count must not drop the first leaf.
 

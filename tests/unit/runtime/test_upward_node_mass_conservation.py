@@ -82,47 +82,17 @@ def _reachable_from_root(tree) -> set[int]:
     "n,leaf_size,order",
     [(1024, 16, 4), (2048, 16, 8), (4096, 16, 8), (4096, 32, 8)],
 )
-def test_every_reachable_node_with_particles_has_a_nonzero_expansion(
-    n, leaf_size, order
-):
-    """A node reachable from the root that spans particles must not be empty.
+def test_node_monopole_equals_the_mass_it_spans(n, leaf_size, order):
+    """Every reachable node's monopole must equal the mass it spans.
 
+    The defect this file was written for left nodes with an all-zero expansion.
     Measured before the fix: 19 of 255 internal nodes at N=4096/leaf=16 spanned 32
     real particles each, had valid parents and two real leaf children, and had all
-    81 packed coefficients exactly zero.
-    """
-
-    positions, masses = _uniform_problem(n)
-    state = _solver().prepare_state(
-        positions, masses, leaf_size=leaf_size, max_order=order
-    )
-
-    packed = np.asarray(state.upward.multipoles.packed)
-    node_ranges = np.asarray(state.tree.node_ranges)
-    spans = np.maximum(node_ranges[:, 1] - node_ranges[:, 0] + 1, 0)
-    reachable = _reachable_from_root(state.tree)
-
-    empty_expansion = np.abs(packed).sum(axis=1) == 0.0
-    offenders = [
-        node
-        for node in range(packed.shape[0])
-        if node in reachable and spans[node] > 0 and empty_expansion[node]
-    ]
-
-    assert not offenders, (
-        f"{len(offenders)} reachable nodes span particles but have an all-zero "
-        f"multipole expansion, so their mass is dropped from every M2L that uses "
-        f"them as a source; first few: "
-        f"{[(node, int(spans[node])) for node in offenders[:5]]}"
-    )
-
-
-@pytest.mark.parametrize("n,leaf_size,order", [(1024, 16, 4), (4096, 16, 8)])
-def test_node_monopole_equals_the_mass_it_spans(n, leaf_size, order):
-    """Stronger form: the monopole must actually equal the enclosed mass.
-
-    Catches partial M2M failures that leave a node with *some* coefficients but
-    the wrong total, which the all-zero check above would pass.
+    81 packed coefficients exactly zero. With unit masses every node that spans a
+    particle encloses a mass >= 1, so a monopole within 1e-10 of it is non-zero:
+    this also catches that defect, at every configuration its own all-zero check
+    ran (a separate test until 2026-10-12), and additionally the partial M2M
+    failures that leave *some* coefficients but the wrong total.
     """
 
     positions, masses = _uniform_problem(n)
