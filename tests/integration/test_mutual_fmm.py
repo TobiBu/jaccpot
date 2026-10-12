@@ -585,7 +585,10 @@ def mutual_256():
     )
     h = 1e-6
     fd = float(
-        (loss(positions + h * direction, masses) - loss(positions - h * direction, masses))
+        (
+            loss(positions + h * direction, masses)
+            - loss(positions - h * direction, masses)
+        )
         / (2 * h)
     )
     return {
@@ -651,9 +654,7 @@ def test_gradient_matches_direct_sum_gradient(mutual_256):
 def test_finite_difference_matches_autodiff(mutual_256):
     """FD-vs-AD on the mutual force itself, independent of any oracle."""
     assert mutual_256["topology"].num_far_pairs > 0
-    analytic = float(
-        jnp.vdot(mutual_256["grad_positions"], mutual_256["direction"])
-    )
+    analytic = float(jnp.vdot(mutual_256["grad_positions"], mutual_256["direction"]))
     numeric = mutual_256["fd"]
     assert abs(analytic - numeric) <= 1e-5 * max(abs(numeric), 1.0)
 

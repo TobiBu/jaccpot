@@ -174,7 +174,10 @@ def mass_mac_reverse(mass_mac_problem):
     )
     step = _FD_STEP
     fd_positions = float(
-        (loss(positions + step * probe, masses) - loss(positions - step * probe, masses))
+        (
+            loss(positions + step * probe, masses)
+            - loss(positions - step * probe, masses)
+        )
         / (2 * step)
     )
     fd_masses = float(
