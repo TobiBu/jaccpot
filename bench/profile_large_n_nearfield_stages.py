@@ -136,6 +136,9 @@ import numpy as np  # noqa: E402
 from bench.validation.mac_error_distribution import make_distribution  # noqa: E402
 from jaccpot.solver import FastMultipoleMethod  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 _RESULTS = REPO_ROOT / "bench" / "results" / "near_field"
 
 #: Cumulative ablation modes, cheapest first. Order matters only for readability.

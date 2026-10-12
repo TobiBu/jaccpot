@@ -23,6 +23,9 @@ import numpy as np
 
 from jaccpot.pallas.csr_place import directed_csr_pallas  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 ap = argparse.ArgumentParser()
 ap.add_argument("capture")
 ap.add_argument("--variants", nargs="+", default=["base"])

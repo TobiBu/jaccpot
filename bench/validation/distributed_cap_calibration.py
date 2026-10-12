@@ -27,10 +27,14 @@ import math
 import os
 import time
 
+import jax
 import numpy as np
 from yggdrax.distributed import device_count, make_mesh
 
 from jaccpot.distributed import DistributedFMMConfig, distributed_fmm_accelerations
+
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
 
 SP = "/tmp/claude-2701/-export-home-tbuck-jaccpot/dbf56a41-2e29-4b34-83a5-303b4a7e8552/scratchpad"
 ndev = device_count()

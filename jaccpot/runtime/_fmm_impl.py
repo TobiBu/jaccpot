@@ -115,6 +115,7 @@ from .kernels.core import (  # noqa: F401
     _prepare_solidfmm_downward_sweep,
 )
 from .reference import compute_gravitational_potential as reference_compute_potential
+from .dtypes import require_x64
 
 # RE-EXPORTS. The names below are imported for other modules to reach through
 # this one, and are unused *here*. Holding references makes that a fact the
@@ -410,6 +411,7 @@ class FMMEngine(
         nearfield: Optional[NearFieldConfig] = None,
         runtime_policy: Optional[RuntimePolicyConfig] = None,
     ):
+        require_x64("FMMEngine")
         # The seventeen execution-policy knobs arrive as one frozen group
         # (audit F09). Unpacked into the same locals the flat parameters used,
         # so every line below this point is untouched and the resolution order

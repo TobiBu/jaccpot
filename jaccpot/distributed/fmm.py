@@ -102,6 +102,7 @@ from jaccpot.runtime._adaptive_policy import (
     adaptive_pair_policy,
     build_adaptive_policy_state,
 )
+from jaccpot.runtime.dtypes import require_x64
 from jaccpot.runtime.kernels.core import (
     _accumulate_m2l_fullbatch,
     _apply_real_m2l,
@@ -1120,6 +1121,7 @@ def partition_for_devices(
         real particle to pad from, or if ``partitioner`` is not a known name.
     """
 
+    require_x64("partition_for_devices")
     positions = np.asarray(positions)
     masses = np.asarray(masses)
     n = positions.shape[0]
@@ -2726,6 +2728,7 @@ def make_force_evaluator(
         ``accel`` in the padded per-device Morton order that ``gid`` maps back.
     """
 
+    require_x64("make_force_evaluator")
     # ``cap`` IS per-device N -- the padded capacity the local tree is built over --
     # so this is the one place a direct caller's unset capacities can be sized. A
     # no-op when they are already numbers, which is the case coming through
@@ -2850,6 +2853,7 @@ def distributed_fmm_accelerations(
         non-overflowing forces.
     """
 
+    require_x64("distributed_fmm_accelerations")
     if config is None:
         config = DistributedFMMConfig()
     if mesh is None:

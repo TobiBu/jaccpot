@@ -13,6 +13,9 @@ from yggdrax.interactions import DualTreeTraversalConfig
 
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 def _direct_sum(
     positions: np.ndarray, masses: np.ndarray, softening: float

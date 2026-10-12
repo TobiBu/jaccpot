@@ -20,6 +20,9 @@ import jax.numpy as jnp
 from examples.benchmark_utils import time_callable
 from jaccpot import FastMultipoleMethod
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 def _sample_problem(
     n: int,

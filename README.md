@@ -62,11 +62,46 @@ Install with development tooling:
 pip install -e ".[dev]"          # add ,cuda for a GPU machine: ".[dev,cuda]"
 ```
 
+## Requirement: `jax_enable_x64`
+
+jaccpot needs JAX's 64-bit mode. Turn it on at the top of your program, before
+creating any arrays:
+
+```python
+import jax
+
+jax.config.update("jax_enable_x64", True)  # or set JAX_ENABLE_X64=1
+```
+
+The reasons are correctness first, then accuracy:
+
+- The trees are built on 63-bit `uint64` Morton codes (yggdrax). Without x64, JAX
+  narrows them to 32 bits with at most a warning, and the trees come out wrong:
+  forces were 19 % off (rel-L2) on the float32 lanes, with no error.
+- Several accuracy fixes are defined in 64 bits: the float64 centre-of-mass prefix
+  sums of large-N trees, the `accum="wide"` near-field accumulator, the float64
+  precompute of the rotation constants, and `precision="fp64"`. The multi-GPU
+  lanes also use int64 global particle ids.
+
+x64 makes 64-bit types *available*; it does not make jaccpot compute in float64.
+The working precision follows your input dtype (or `working_dtype` /
+`precision`), so float32 positions and masses stay a float32 run. Arrays you create
+yourself without a dtype do become 64-bit under x64, so pass `dtype=jnp.float32`
+where you want float32.
+
+`FastMultipoleMethod`, `BlockStepFMM`, `DistributedBlockStepFMM`, `FMMEngine`,
+`FusedRollout` and the `jaccpot.distributed` entry points raise a `RuntimeError`
+naming the flag when it is off. Until 2026-10 yggdrax switched x64 on when it was
+imported, so jaccpot programs had it on without asking for it; neither library
+changes JAX's configuration any more.
+
 ## Quick Start
 
 ```python
 import jax
 import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)  # required, see above
 
 from jaccpot import FastMultipoleMethod
 
@@ -250,8 +285,9 @@ solver_fp64 = FastMultipoleMethod(
 )
 ```
 
-`precision="fp64"` requires `jax_enable_x64=True`. You can still pass
-`working_dtype` directly; if both are set, they must match.
+Both need `jax_enable_x64=True` (see [the requirement](#requirement-jax_enable_x64));
+it does not pick the precision for you. You can still pass `working_dtype`
+directly; if both are set, they must match.
 
 ## Adaptive Order
 

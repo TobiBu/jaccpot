@@ -953,6 +953,11 @@ def main(argv: list[str] | None = None) -> int:
     replay_parser.add_argument("path", type=Path, help="the pickle the plugin wrote")
     args = parser.parse_args(argv)
 
+    import jax
+
+    # jaccpot needs 64-bit types (README) and no longer gets them from importing
+    # yggdrax; the replay imports jaccpot's modules before it builds any array.
+    jax.config.update("jax_enable_x64", True)
     try:
         recorded = _load_recordings(args.path)
     except FileNotFoundError:

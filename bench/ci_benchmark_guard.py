@@ -10,11 +10,15 @@ import argparse
 import json
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
 from bench.bench_parallel_paths import _sample_problem, collect_metrics
 from jaccpot import FastMultipoleMethod
+
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
 
 
 def _validate_metrics(metrics: dict[str, float]) -> None:

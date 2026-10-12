@@ -64,6 +64,8 @@ def main() -> None:
     import jax
     import jax.numpy as jnp
     import numpy as np
+
+    jax.config.update("jax_enable_x64", True)
     from yggdrax.tree import build_tree, get_level_offsets, get_num_levels
 
     from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep

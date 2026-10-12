@@ -496,6 +496,11 @@ def _record(args) -> int:
 
 
 def _case(args) -> int:
+    import jax
+
+    # jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on. Each
+    # case imports jaccpot before it makes an array, which is where yggdrax used to.
+    jax.config.update("jax_enable_x64", True)
     out = Path(args.out).with_suffix(".npz")
     meta = CASES[args.pin](out)
     out.with_suffix(".json").write_text(json.dumps(meta, indent=1, sort_keys=True))

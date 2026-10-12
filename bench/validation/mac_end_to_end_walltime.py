@@ -56,6 +56,9 @@ import numpy as np
 from bench.validation.mac_error_distribution import make_distribution
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 __all__ = ["time_arm", "timed_median"]
 
 

@@ -96,6 +96,9 @@ except ModuleNotFoundError as exc:
         f"before running this benchmark. Original error: {exc}"
     ) from exc
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 @dataclass(frozen=True)
 class StageArtifacts:

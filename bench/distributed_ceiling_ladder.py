@@ -411,6 +411,7 @@ def _one_point(
 
     from jax.sharding import Mesh
 
+    jax.config.update("jax_enable_x64", True)
     from jaccpot.distributed.fmm import (
         DIAG_FIELDS,
         DistributedFMMConfig,

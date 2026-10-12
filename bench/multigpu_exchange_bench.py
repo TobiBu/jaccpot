@@ -46,6 +46,9 @@ except ImportError:  # pragma: no cover
 
 from yggdrax.distributed.comm import ragged_all_to_all_exchange
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 AXIS = "gpus"
 LABEL = os.environ.get("BENCH_LABEL", "default")
 REPS = int(os.environ.get("BENCH_REPS", "15"))

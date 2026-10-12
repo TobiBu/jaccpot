@@ -143,6 +143,9 @@ from jaccpot.upward.real_tree_expansions import (  # noqa: E402
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 ORDER = 3
 LEAF = 8
 G = 1.0

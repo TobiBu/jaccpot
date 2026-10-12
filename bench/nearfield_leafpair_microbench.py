@@ -31,6 +31,9 @@ from jaccpot.pallas.nearfield_fused_leaf import (
     pallas_nearfield_fused_supported,
 )
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 def _make_inputs(L, W, S, valid_frac, seed=0):
     rng = np.random.default_rng(seed)

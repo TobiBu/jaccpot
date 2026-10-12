@@ -11,6 +11,9 @@ from yggdrax.interactions import DualTreeTraversalConfig
 from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, RuntimePolicyConfig
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 def _sample_problem(n: int = 1024, dtype=jnp.float32):
     key = jax.random.PRNGKey(7)

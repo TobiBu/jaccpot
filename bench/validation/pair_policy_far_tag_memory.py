@@ -58,6 +58,9 @@ from yggdrax.interactions import (  # noqa: E402
 )
 from yggdrax.tree import Tree  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 MIB = 1024.0 * 1024.0
 
 

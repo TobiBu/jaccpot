@@ -120,6 +120,7 @@ def main() -> None:
     import jax.numpy as jnp
     import numpy as np
 
+    jax.config.update("jax_enable_x64", True)
     from jaccpot import (
         FastMultipoleMethod,
         FMMAdvancedConfig,

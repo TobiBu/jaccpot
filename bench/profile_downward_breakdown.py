@@ -106,8 +106,10 @@ def _system(n):
 
 
 def _solver():
+    import jax
     import jax.numpy as jnp
 
+    jax.config.update("jax_enable_x64", True)
     from jaccpot import (
         FastMultipoleMethod,
         FMMAdvancedConfig,
@@ -194,6 +196,9 @@ def _print_stage_timers(diagnostics: dict) -> dict[str, float]:
         The reported counters, in seconds per refresh call. Empty when the counters
         did not record.
     """
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
     from jaccpot.runtime.fmm_stage_timing import aggregate_counter_names
 
     aggregates = aggregate_counter_names()

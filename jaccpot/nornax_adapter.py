@@ -82,6 +82,7 @@ from jaccpot.mutual.force import (
     resolve_mutual_capacities,
 )
 from jaccpot.mutual.topology import build_mutual_topology_from_tree
+from jaccpot.runtime.dtypes import require_x64
 from jaccpot.softening import resolve_softening_kernel, support_radius
 
 __all__ = [
@@ -341,6 +342,7 @@ class BlockStepFMM:
         caps: Optional[MutualCapacities] = None,
         validate_rung: bool = True,
     ) -> None:
+        require_x64("BlockStepFMM")
         basis = str(basis).lower()
         if basis not in _SUPPORTED_BASES:
             raise ValueError(
@@ -1579,6 +1581,7 @@ class DistributedBlockStepFMM:
         cross_caps: Optional[dict] = None,
         validate_rung: bool = True,
     ) -> None:
+        require_x64("DistributedBlockStepFMM")
         backend = str(backend).lower()
         if backend not in _SUPPORTED_BACKENDS:
             raise ValueError(
