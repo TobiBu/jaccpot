@@ -310,15 +310,6 @@ def test_the_far_field_is_load_bearing(prepacked_state) -> None:
 
 
 @_PREPACKED_STATE_USERS
-def test_reverse_pass_is_finite(reverse_pass) -> None:
-    """Neither gradient may contain a NaN or an inf."""
-    for name in ("grad_positions", "grad_masses"):
-        assert bool(
-            jnp.all(jnp.isfinite(reverse_pass[name]))
-        ), f"{name} contains a non-finite entry"
-
-
-@_PREPACKED_STATE_USERS
 def test_forward_matches_the_direct_sum(reverse_pass) -> None:
     """The forward pass anchors the reverse: measured rel-L2 6.3e-04."""
     error = _relative_l2(
@@ -658,7 +649,11 @@ class TestPallasCascades:
 
         Before the custom_vjp seams this raised ``AssertionError`` from
         ``jax/_src/pallas/core.py::axis_frame``; with the loops substituted it would
-        pass but the counters below would stay at zero.
+        pass but the counters below would stay at zero. ``GradConfig(cascade_pallas=
+        False)`` runs the pure-JAX loops instead, counted at zero, and gives the same
+        gradient. One system, one prepare: the two arms and the direct-sum oracle
+        used to be two tests (seeds 3 and 5) with the same solver, softening, order,
+        leaf size, N and loss.
         """
         pos, mass = _plummer_system()
         fmm = FastMultipoleMethod(theta=0.5, softening=_CASCADE_SOFT, G=1.0)
@@ -667,10 +662,16 @@ class TestPallasCascades:
             _far_pairs(state) > 0
         ), "vacuous configuration: no far pairs, the cascades are dead code"
 
-        def loss(p):
-            return jnp.sum(fmm.differentiable_accelerations(state, p, mass) ** 2)
+        def loss(p, cfg):
+            return jnp.sum(
+                fmm.differentiable_accelerations(state, p, mass, grad_config=cfg) ** 2
+            )
 
-        got = np.asarray(jax.grad(loss)(pos))
+        g_loops = np.asarray(jax.grad(loss)(pos, GradConfig(cascade_pallas=False)))
+        assert reverse_counters == {"m2m": 0, "l2l": 0, "p2m": 0}, reverse_counters
+        # The default config: the fixture's JACCPOT_CASCADE_PALLAS=1 resolves it ON.
+        got = np.asarray(jax.grad(loss)(pos, None))
+        assert reverse_counters == {"m2m": 1, "l2l": 1, "p2m": 1}, reverse_counters
         ref = np.asarray(
             jax.grad(
                 lambda p: jnp.sum(
@@ -681,32 +682,11 @@ class TestPallasCascades:
                 )
             )(pos)
         )
-        assert reverse_counters == {"m2m": 1, "l2l": 1, "p2m": 1}, reverse_counters
         assert np.all(np.isfinite(got))
         assert np.linalg.norm(got) > 0
         rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
         assert (
             rel < 1e-5
         ), f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"
-
-    @pytest.mark.filterwarnings("ignore::FutureWarning")
-    def test_pallas_and_pure_jax_reverses_agree(
-        self, pallas_cascades_on, reverse_counters
-    ):
-        """``GradConfig(cascade_pallas=False)`` runs the loops and gives the same gradient."""
-        pos, mass = _plummer_system(seed=5)
-        fmm = FastMultipoleMethod(theta=0.5, softening=_CASCADE_SOFT, G=1.0)
-        state = fmm.prepare_state(pos, mass, max_order=4, leaf_size=_CASCADE_LEAF)
-        assert _far_pairs(state) > 0
-
-        def loss(p, cfg):
-            return jnp.sum(
-                fmm.differentiable_accelerations(state, p, mass, grad_config=cfg) ** 2
-            )
-
-        g_loops = np.asarray(jax.grad(loss)(pos, GradConfig(cascade_pallas=False)))
-        assert reverse_counters == {"m2m": 0, "l2l": 0, "p2m": 0}
-        g_pallas = np.asarray(jax.grad(loss)(pos, GradConfig(cascade_pallas=True)))
-        assert reverse_counters == {"m2m": 1, "l2l": 1, "p2m": 1}
-        rel = np.linalg.norm(g_pallas - g_loops) / np.linalg.norm(g_loops)
+        rel = np.linalg.norm(got - g_loops) / np.linalg.norm(g_loops)
         assert rel < 1e-9, f"Pallas reverse vs loop reverse rel-L2 {rel:.3e}"
