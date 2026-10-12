@@ -58,7 +58,7 @@ On `main` at 6cca378 (2026-10-06):
 | Z-a | #392 | Test consolidation (T1, rules R2-R7): the bench-tooling tests move to `bench/tests`; one signature-contract table; grid corners; `tests/integration/strict/`; one owner per gradient property; `test_fmm.py` and `test_solver_api.py` split by subject; the removed-option and shim tests collected in `test_removed_options.py` for Z-b. Tests only | CPU suite, shard partition, bench-tooling tests | merged |
 | Z-b | #393 | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | open |
 | Z-c | | CI and docs: `slow_tests.txt` rebuilt from durations; a curated `smoke` marker run by the Python-floor job; the criterion and nornax-distributed jobs path-gated (main, nightly, dispatch, PRs touching their code); caps at about twice the measured times; stale marker ids fail `test-partition`; ARCHITECTURE, README, the docs index and the current docs follow the cleanup; notebooks stop passing removed options; the `CLAUDE.md` amendment reverted. Library: comments only | CPU suite, shard partition, smoke run, actionlint, bench tooling | open |
-| fix | | The fused two-card lane on jax 0.11.2: XLA's NCCL ragged exchange needs `use_barrier_with_nccl=false`; `RAGGED_EXCHANGE_XLA_FLAGS`, bench flag helper, pure-JAX repro; yggdrax guard (companion PR) | pure-JAX repro matrix, rollout gate, exchange bench, distributed grad tier, pins M1-M3 (two cards) | open |
+| fix | #398 | The fused two-card lane on jax 0.11.2: XLA's NCCL ragged exchange needs `use_barrier_with_nccl=false`; `RAGGED_EXCHANGE_XLA_FLAGS`, bench flag helper, pure-JAX repro; yggdrax guard (yggdrax #95) | pure-JAX repro matrix, rollout gate, exchange bench, distributed grad tier, pins M1-M3 (two cards) | open |
 
 ### P0: CI runs each test once
 
@@ -3320,7 +3320,7 @@ A100s in one process (GPUs 3+5, across sockets), width 56 float32, 10 calls each
   library's constant and fails on any script that hardcodes the one-shot flag again: a
   stale copy in the gate, the C4 probe and pin M2 is how this went unnoticed. They all
   use the helper now.
-- **yggdrax companion PR:** `ragged_all_to_all_exchange` raises at trace time when a
+- **yggdrax #95:** `ragged_all_to_all_exchange` raises at trace time when a
   native GPU exchange would run under the broken flags (`ragged_native_flag_hazard`).
   That covers the mesh, fused, rollout and mutual lanes alike.
 - **Upstream:** `docs/xla_ragged_nccl_barrier_bug_report.md`, a draft for openxla/xla.
