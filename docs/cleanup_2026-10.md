@@ -59,7 +59,7 @@ On `main` at 6cca378 (2026-10-06):
 | Z-b | #393 | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | open |
 | Z-c | | CI and docs: `slow_tests.txt` rebuilt from durations; a curated `smoke` marker run by the Python-floor job; the criterion and nornax-distributed jobs path-gated (main, nightly, dispatch, PRs touching their code); caps at about twice the measured times; stale marker ids fail `test-partition`; ARCHITECTURE, README, the docs index and the current docs follow the cleanup; notebooks stop passing removed options; the `CLAUDE.md` amendment reverted. Library: comments only | CPU suite, shard partition, smoke run, actionlint, bench tooling | open |
 | fix | #398 | The fused two-card lane on jax 0.11.2: XLA's NCCL ragged exchange needs `use_barrier_with_nccl=false`; `RAGGED_EXCHANGE_XLA_FLAGS`, bench flag helper, pure-JAX repro; yggdrax guard (yggdrax #95) | pure-JAX repro matrix, rollout gate, exchange bench, distributed grad tier, pins M1-M3 (two cards) | open |
-| x64 | | `jax_enable_x64` becomes a checked, documented requirement of yggdrax and jaccpot; yggdrax stops switching it on at import; benches, Odisseo's tests and scripts enable it themselves. Library: one `RuntimeError` at the entry points, no numerical change | yggdrax suite + distributed tier + x64-off guard sweep, CPU suite, CPU bitwise A/B (110 arrays), Odisseo tests, nornax adapter, GPU pins S1-S6 | open |
+| x64 | #400 | `jax_enable_x64` becomes a checked, documented requirement of yggdrax and jaccpot; yggdrax stops switching it on and starting the backend at import (yggdrax #97); benches, Odisseo's tests and scripts enable it themselves. Library: one `RuntimeError` at the entry points, no numerical change | yggdrax suite + distributed tier + x64-off guard sweep, CPU suite, CPU bitwise A/B (110 arrays), Odisseo tests (Odisseo #33), nornax adapter, GPU pins S1-S6 bitwise | open |
 
 ### P0: CI runs each test once
 
@@ -3409,7 +3409,12 @@ still changes the configuration of every program, and the opt-out leads to the s
   `RuntimeError` naming the flag in every helper that makes a 64-bit array (~25 sites);
   the Morton masks and the partition sentinel are numpy scalars, so the import works with
   x64 off; `tree_moments` raises instead of falling back; the conftest enables x64
-  (an explicit `JAX_ENABLE_X64=0` keeps it off); README, docs, three scripts.
+  (an explicit `JAX_ENABLE_X64=0` keeps it off); README, docs, three scripts. Also:
+  importing yggdrax no longer starts the JAX backend. Its last module-level `jnp`
+  arrays (`_interactions_impl._FILLER_PAIR`, `_EMPTY_REFINEMENT_PAIRS`) are numpy, so
+  none of the 161 yggdrax and jaccpot modules initialises a backend on import (on
+  `main` all 161 did), and `jax.distributed.initialize()` or XLA flags can follow
+  `import jaccpot`.
 - jaccpot (this repo): `runtime/dtypes.require_x64` at the top of `FastMultipoleMethod`,
   `FMMEngine`, `BlockStepFMM`, `DistributedBlockStepFMM`, `FusedRollout`,
   `partition_for_devices`, `make_force_evaluator` and `distributed_fmm_accelerations`
@@ -3425,11 +3430,12 @@ still changes the configuration of every program, and the opt-out leads to the s
 - Landing order: Odisseo, jaccpot, yggdrax. The jaccpot change works with yggdrax `main`
   as it is (which still enables x64 at import).
 
-**Gates** (jaccpot 28ee414 on `main` a0e418c, yggdrax cdc07b6 on `main` 4bb8b62; CPU
-unless noted):
-- **yggdrax suite**: 812 passed, 42 skipped (coverage 85.4 %); distributed tier on four
+**Gates** (final heads: jaccpot 5a04a30 on `main` a0e418c, yggdrax 634f00c on `main`
+4bb8b62; CPU unless noted; the first round ran at jaccpot 28ee414 / yggdrax cdc07b6 and
+gave the same numbers):
+- **yggdrax suite**: 813 passed, 42 skipped (coverage 85.4 %); distributed tier on four
   forced devices: 43 passed; the CI smoke script passes.
-- **x64-off guard sweep** (yggdrax suite, `JAX_ENABLE_X64=0`, the truncation warning
+- **x64-off guard sweep** (at cdc07b6; yggdrax suite, `JAX_ENABLE_X64=0`, the truncation warning
   turned into an error): 854 tests, 276 raise `require_x64`'s error, and the 10
   truncations are all in test inputs that ask for 64-bit dtypes themselves. No library
   path the suite reaches narrows a 64-bit request silently.
@@ -3449,11 +3455,21 @@ unless noted):
 - **Odisseo** (`git archive` of the branch, with nornax 2eab7a5 and the overlay env):
   `test_integration_api`, `test_differentiable_fmm`, `test_strict_velocity_verlet_policy`,
   `test_softening`, `test_dehnen_error_config`: 52 passed; `test_mesh_lane` on two forced
-  devices: 15 passed; `test_blockstep_fmm`: 49 passed; the direct-sum files: 105 passed,
+  devices: 15 passed; at 28ee414 / cdc07b6 also `test_blockstep_fmm`: 49 passed, and the
+  direct-sum files: 105 passed,
   3 failed, and the same 3 fail on `jaccpot-integration` with the old libraries, with x64
   off and on (below). nornax's jaccpot adapter tests: 9 passed.
+- **GPU pins S1-S6** (one A100, tag `x64-634f00c`): **all bitwise** against `main-15ceca4`
+  (S1-S5) and `main-17de581` (S6), with equal metadata (S1 rel-L2 7.764e-4, S2 1.604e-3,
+  S5 momentum drift 2.245e-9). S3-S5 now get x64 from `dce_pins._case` instead of from
+  importing yggdrax. Summary: `bench/results/dce/pins_x64-634f00c.json`.
 - **New tests**: `tests/unit/test_x64_requirement.py` here (10 passed + 1 skipped against
-  yggdrax `main`, 11 passed against the change) and in yggdrax.
+  yggdrax `main`, 11 passed against the change, with and without
+  `JACCPOT_RUNTIME_TYPECHECK`; CI's typecheck run first failed on `None` placeholders for
+  `FusedRollout`, which now gets typed arguments), and in yggdrax
+  `test_x64_requirement.py` and `test_import_side_effects.py` (the latter fails on
+  `main`).
+- **CI**: all checks green on jaccpot #400 and yggdrax #97 (including jaccpot-compat).
 
 **Findings:**
 - Three Odisseo tests fail on `jaccpot-integration` independent of this change:
@@ -3463,6 +3479,5 @@ unless noted):
 - This suite cannot run with x64 off: at least nine test modules call
   `jax.config.update("jax_enable_x64", True)` at import, so collection turns it on
   whatever the environment says.
-- Importing yggdrax still initialises the JAX backend (`_interactions_impl._FILLER_PAIR`
-  is a module-level `jnp` array), which rules out `jax.distributed.initialize()` after
-  the import. Not changed here.
+- Importing yggdrax initialised the JAX backend (module-level `jnp` arrays), which ruled
+  out `jax.distributed.initialize()` after `import jaccpot`. Fixed in yggdrax #97 (above).

@@ -1,0 +1,201 @@
+{
+ "cards": {
+  "one": "A100-PCIE-40GB, GPU 6 of compgpu9 (free when booked via autocvd; untimed)"
+ },
+ "deterministic_ops": true,
+ "envelope": "main-15ceca4-b (S1-S5), main-17de581-b (S6)",
+ "library": "jaccpot fix/x64-explicit-requirement 5a04a30 (#400) on main a0e418c, frozen worktree; yggdrax fix/x64-explicit-requirement 634f00c (#97: no x64 switch and no backend start at import, require_x64) on main 4bb8b62",
+ "notes": {
+  "S1-S6": "bitwise vs their references with metadata equal: x64 now enabled explicitly (dce_pins._case, fused_memory_budget.py) instead of by importing yggdrax, and yggdrax's module constants are numpy; neither moved a pin"
+ },
+ "pins": [
+  "S1",
+  "S2",
+  "S3",
+  "S4",
+  "S4b",
+  "S5",
+  "S6"
+ ],
+ "reference": "main-15ceca4 (S1-S5), main-17de581 (S6)",
+ "tag": "x64-634f00c",
+ "vs_main_15ceca4": {
+  "S1": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    },
+    "ref": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    }
+   },
+   "pass": true
+  },
+  "S2": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 50000,
+     "rel_l2": 0.001603913653729269
+    },
+    "ref": {
+     "n": 50000,
+     "rel_l2": 0.001603913653729269
+    }
+   },
+   "pass": true
+  },
+  "S3": {
+   "arrays": {
+    "acc_100000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "acc_30000": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n100000": "ok",
+     "n30000": "ok"
+    },
+    "ref": {
+     "n100000": "ok",
+     "n30000": "ok"
+    }
+   },
+   "pass": true
+  },
+  "S4": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.3372802734375,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.3372802734375,
+     "n": 20000
+    }
+   },
+   "pass": true
+  },
+  "S4b": {
+   "arrays": {
+    "g_mass": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "g_pos": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "loss": 54.333518981933594,
+     "n": 20000
+    },
+    "ref": {
+     "loss": 54.333518981933594,
+     "n": 20000
+    }
+   },
+   "pass": true
+  },
+  "S5": {
+   "arrays": {
+    "positions": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "velocities": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "momentum_drift": 2.244967659008715e-09,
+     "n": 20000
+    },
+    "ref": {
+     "momentum_drift": 2.244967659008715e-09,
+     "n": 20000
+    }
+   },
+   "pass": true
+  }
+ },
+ "vs_main_17de581": {
+  "S6": {
+   "arrays": {
+    "force": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    },
+    "state": {
+     "bitwise": true,
+     "max_abs": 0.0,
+     "rel_l2": 0.0
+    }
+   },
+   "meta": {
+    "new": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    },
+    "ref": {
+     "n": 200000,
+     "rel_l2": 0.0007763740039873738
+    }
+   },
+   "pass": true
+  }
+ }
+}
