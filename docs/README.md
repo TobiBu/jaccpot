@@ -45,6 +45,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | `distributed_cross_domain_far_diagnosis.md` | **[closed]** The cross-domain far field was wrong; fixed upstream in yggdrax #47. |
 | `distributed_padding_force_defect.md` | **[closed]** The per-device padding "force defect" was a **readout error**, not a defect. |
 | `jax_ragged_all_to_all_bug_report.md` | **[closed]** Draft upstream report — **do not file**: not a JAX bug, and already fixed upstream. |
+| `xla_ragged_nccl_barrier_bug_report.md` | **[open]** Draft upstream report (openxla/xla), not filed yet: XLA's NCCL ragged exchange returns no remote rows and then deadlocks while `use_barrier_with_nccl` is on, the jax 0.11 default. Why `fused.RAGGED_EXCHANGE_XLA_FLAGS` sets it off. |
 
 ## The mutual (momentum-conserving) lane
 

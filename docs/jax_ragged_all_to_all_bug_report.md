@@ -20,6 +20,9 @@
 > A100-PCIE but **not** on a box without P2P -- a CLEAN result there proves
 > nothing. Workaround without upgrading:
 > `XLA_FLAGS=--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false`.
+> **On jax >= 0.11 that flag alone deadlocks** (the NCCL path needs
+> `use_barrier_with_nccl=false` too): use `fused.RAGGED_EXCHANGE_XLA_FLAGS`, see
+> `docs/xla_ragged_nccl_barrier_bug_report.md`.
 >
 > JAX's autodiff rules for the collective are fine.
 

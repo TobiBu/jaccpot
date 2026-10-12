@@ -1398,6 +1398,9 @@ have to take <= 1.5 x 42.0 = 63 ms. They take 71.7.
    switches. `xla_gpu_ragged_all_to_all_mode` takes `peer|private|symmetric` (not the enum names); `symmetric`
    hangs and `private` is 0.75 GB/s. XLA reads its flags once, so the library cannot set this: the mesh evaluator
    warns when it is missing (`fused.RAGGED_EXCHANGE_XLA_FLAG`) and the probe and rollout gate set it.
+   **Since jax 0.11 this one flag deadlocks:** the NCCL path also needs the fallback allowed and
+   `use_barrier_with_nccl=false`, now `fused.RAGGED_EXCHANGE_XLA_FLAGS` (`docs/cleanup_2026-10.md`, "The
+   fused two-card lane on jax 0.11.2").
 2. **Padding piled on one address.** The near-field segment sum sent every padding chunk to one extra row (520k
    of 655k chunks at 1e6 per card, 10 ms of a 74 ms local force in a trace without command buffers), and the
    cross near term sent every dead leaf slot to one discard row. Both now drop padding (`FILL_OR_DROP`). The
