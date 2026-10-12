@@ -78,6 +78,7 @@ from jaccpot.softening import resolve_softening_kernel, support_factor
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
 from ._interaction_cache import _InteractionCacheEntry
 from ._large_n_types import LargeNPreparedState
+from .dtypes import require_x64
 from .fmm_caches import _clear_global_runtime_caches
 from .fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 from .fmm_derivatives import DerivativesMixin
@@ -115,7 +116,6 @@ from .kernels.core import (  # noqa: F401
     _prepare_solidfmm_downward_sweep,
 )
 from .reference import compute_gravitational_potential as reference_compute_potential
-from .dtypes import require_x64
 
 # RE-EXPORTS. The names below are imported for other modules to reach through
 # this one, and are unused *here*. Holding references makes that a fact the
