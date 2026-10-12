@@ -348,6 +348,12 @@ _SLOW_NODE_IDS = _listed_node_ids("slow_tests.txt")
 _SMOKE_NODE_IDS = _listed_node_ids("smoke_tests.txt")
 
 
+# `tryfirst`: under `--dist loadgroup` pytest-xdist rewrites a grouped test's node id
+# to `<id>@<group>` in its own `pytest_collection_modifyitems`, and a plain hook here
+# would run after it (pluggy calls later-registered plugins first), so no grouped test
+# matched the lists: `-n 2 --dist loadgroup -m slow` selected 18 of the 21 slow ids in
+# test_mutual_fmm.py, dropping the three `mutual_block_step_heavy` tests (2026-10-12).
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """Apply `slow` / `smoke` to the node ids in slow_tests.txt / smoke_tests.txt."""
     for item in items:
