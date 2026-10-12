@@ -756,7 +756,11 @@ def _build_tree_stand_in(spec: dict[str, Any]) -> Any:
         If no seed reproduces the recorded node count, so the caller reports
         INCONCLUSIVE rather than replaying against a differently shaped tree.
     """
+    import jax
     import jax.numpy as jnp
+
+    # yggdrax needs 64-bit types and no longer switches them on when imported.
+    jax.config.update("jax_enable_x64", True)
     from yggdrax.tree import build_tree
 
     n = int(spec["num_particles"])
