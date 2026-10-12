@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot.config import FarFieldConfig, NearFieldConfig, TreeConfig
+from jaccpot.config import NearFieldConfig, TreeConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 
@@ -36,9 +36,7 @@ MAX_ORDER = 2
 def _engine():
     return FMMEngine(
         preset="large_n_gpu",
-        runtime_path="large_n",
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         theta=0.6,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
@@ -74,9 +72,8 @@ def test_requires_the_particle_count_in_the_profile_set(strict_env, monkeypatch)
 
     It names the variable and both remedies in its message rather than failing
     obscurely later, which is the behaviour worth pinning -- a benchmark that
-    cannot run should say which setting would let it. The fused-mode switch this
-    guard also named is gone: ``JACCPOT_STATIC_STRICT_FUSED_MODE=off`` raises
-    before it (2026-10 cleanup, X6), checked last here.
+    cannot run should say which setting would let it. (The fused-mode switch this
+    guard also named went in the 2026-10 cleanup, X6.)
     """
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", "999999")
     fmm = _engine()
@@ -91,13 +88,6 @@ def test_requires_the_particle_count_in_the_profile_set(strict_env, monkeypatch)
     assert "leave it empty to allow all N" in message
     assert not fmm._strict_fused_mode_active
 
-    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "off")
-    with pytest.raises(ValueError, match=r"JACCPOT_STATIC_STRICT_FUSED_MODE=.*X6"):
-        _engine().strict_fused_prepared_eval_fn(
-            positions=positions, masses=masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
-        )
-
 
 @pytest.mark.slow
 def test_returns_a_prepared_state_and_an_eval_closure(strict_env, monkeypatch):
@@ -108,7 +98,6 @@ def test_returns_a_prepared_state_and_an_eval_closure(strict_env, monkeypatch):
     same state, which is what a benchmark comparing it to another library would
     implicitly be claiming.
     """
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")  # accepted, inert
     fmm = _engine()
     positions, masses = _particles()
 
@@ -136,8 +125,6 @@ def test_returns_a_prepared_state_and_an_eval_closure(strict_env, monkeypatch):
 
 def test_strict_run_v2_api(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     # Pin the fused static-sizing caps to fixed adequate values (mirroring the
     # sibling strict-fused tests below). Without this the fused lane sizes the
     # static neighbour-edge cap from the *first* build's active-edge count, which
@@ -174,9 +161,7 @@ def test_strict_run_v2_api(monkeypatch):
 
     fmm = FMMEngine(
         preset="large_n_gpu",
-        runtime_path="large_n",
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,
@@ -206,13 +191,6 @@ def test_strict_run_v2_api(monkeypatch):
 
 def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY", "1")
-    monkeypatch.setenv(
-        "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "1"
-    )
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "32768")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
@@ -239,9 +217,7 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
 
     kwargs = dict(
         preset="large_n_gpu",
-        runtime_path="large_n",
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,
@@ -280,13 +256,6 @@ def test_strict_fused_moved_endpoint_matches_fresh_prepare(monkeypatch):
 
 def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY", "1")
-    monkeypatch.setenv(
-        "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK", "0"
-    )
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS", "1")
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")
@@ -312,9 +281,7 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
 
     fmm = FMMEngine(
         preset="large_n_gpu",
-        runtime_path="large_n",
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,

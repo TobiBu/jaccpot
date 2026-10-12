@@ -23,8 +23,6 @@ from jaxtyping import Array, DTypeLike, Float, Int
 
 from .basis import BasisInterface, RealSHBasis
 from .config import (
-    _CARTESIAN_BASIS_REMOVED,
-    _COMPLEX_BASIS_REMOVED,
     Basis,
     FarFieldConfig,
     FMMAdvancedConfig,
@@ -74,8 +72,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             ),
             farfield=replace(
                 cfg.farfield,
-                mode="auto",
-                rotation="solidfmm",
                 m2l_chunk_size=None,
                 l2l_chunk_size=None,
                 streamed_far_pairs=True,
@@ -109,7 +105,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
         cfg = FMMAdvancedConfig()
         return replace(
             cfg,
-            farfield=replace(cfg.farfield, mode="pair_grouped"),
             nearfield=replace(cfg.nearfield, mode="bucketed", edge_chunk_size=512),
         )
     # ACCURATE
@@ -117,7 +112,6 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
     return replace(
         cfg,
         tree=replace(cfg.tree, mode="lbvh", refine_local=True, max_refine_levels=1),
-        farfield=replace(cfg.farfield, mode="pair_grouped"),
         # "auto", not "baseline". This preset's accuracy comes from the tree
         # (refine_local + an extra refinement level) and from the expansion, not
         # from how the near field is traversed: baseline and bucketed visit the
@@ -181,8 +175,8 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     same runtime basis and the same :class:`~jaccpot.RealSHBasis`, so they produce
     bit-identical forces. Until the 2026-10 cleanup (C) ``"solidfmm"`` meant the
     complex basis, which agreed with the real one to round-off (4.5e-13 relative
-    L2 in float64 at N=2048, p=4, theta=0.5). ``"complex"`` and ``"cartesian"``
-    raise their migration errors (C and K).
+    L2 in float64 at N=2048, p=4, theta=0.5). The complex and Cartesian bases were
+    removed (C and K): their names are unknown strings.
 
     Parameters
     ----------
@@ -199,10 +193,9 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
     Raises
     ------
     ValueError
-        If ``basis`` is a string that names no known basis, or names the
-        Cartesian or the complex basis (removed in the 2026-10 cleanup, K and C),
-        either as a string or as a basis object's ``runtime_expansion_basis``; or
-        if a basis object's ``name`` is not ``"real"``.
+        If ``basis`` is a string that names no known basis, or a basis object's
+        ``runtime_expansion_basis`` is not ``"solidfmm"`` or its ``name`` is not
+        ``"real"``.
     TypeError
         If ``basis`` is neither a string nor a :class:`BasisInterface`.
     """
@@ -215,24 +208,16 @@ def _resolve_basis_input(basis: Union[Basis, BasisInterface, str]) -> _BasisReso
                 runtime_basis="solidfmm",
                 basis_impl=RealSHBasis(),
             )
-        if basis_norm == "complex":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
-        if basis_norm == "cartesian":
-            raise ValueError(_CARTESIAN_BASIS_REMOVED)
         raise ValueError(
             f"basis must be one of 'real' or 'solidfmm' (the same basis), got '{basis}'"
         )
 
     if isinstance(basis, BasisInterface):
         runtime_basis = str(basis.runtime_expansion_basis).strip().lower()
-        if runtime_basis == "complex":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
-        if runtime_basis == "cartesian":
-            raise ValueError(_CARTESIAN_BASIS_REMOVED)
         if runtime_basis != "solidfmm":
             raise ValueError("basis.runtime_expansion_basis must be 'solidfmm'")
         if str(basis.name).strip().lower() != "real":
-            raise ValueError(_COMPLEX_BASIS_REMOVED)
+            raise ValueError(f"basis.name must be 'real'; got {basis.name!r}")
         return _BasisResolution(
             public_name=str(basis.name),
             runtime_basis=runtime_basis,  # type: ignore[arg-type]
@@ -315,14 +300,9 @@ class _LegacyRuntimeOverrides(NamedTuple):
 
     Attributes
     ----------
-    complex_rotation : str
-        Rotation backend; falls back to ``"solidfmm"`` when the config leaves it
-        ``None``. Legacy name: ``complex_rotation``.
     tree_type : Optional[str]
         Tree family. ``None`` here becomes ``"radix"`` at the engine call.
         Legacy name: ``tree_type``.
-    execution_backend : str
-        Engine execution backend. Legacy name: ``execution_backend``.
     tree_mode : Optional[str]
         Tree build mode. Legacy name: ``tree_build_mode``.
     target_leaf_particles : Optional[int]
@@ -334,12 +314,6 @@ class _LegacyRuntimeOverrides(NamedTuple):
     mac_type : str
         Acceptance criterion; defaults to ``"dehnen"`` for the solidfmm basis
         and ``"bh"`` otherwise. Legacy name: ``mac_type``.
-    grouped_interactions : Optional[bool]
-        Grouped traversal toggle. Legacy name: ``grouped_interactions``. Only
-        ``None``/``False`` construct: the engine raises on ``True``, since the
-        grouped far field was removed in the 2026-10 cleanup (X3).
-    farfield_mode : str
-        Far-field interaction mode. Legacy name: ``farfield_mode``.
     nearfield_mode : str
         Near-field interaction mode. Legacy name: ``nearfield_mode``.
     nearfield_edge_chunk_size : int
@@ -355,15 +329,11 @@ class _LegacyRuntimeOverrides(NamedTuple):
         Threaded in and out so both poppers contribute to one warning decision.
     """
 
-    complex_rotation: str
     tree_type: Optional[str]
-    execution_backend: str
     tree_mode: Optional[str]
     target_leaf_particles: Optional[int]
     expanse_preset: Optional[str]
     mac_type: str
-    grouped_interactions: Optional[bool]
-    farfield_mode: str
     nearfield_mode: str
     nearfield_edge_chunk_size: int
     fixed_order: Optional[int]
@@ -400,24 +370,10 @@ def _pop_legacy_runtime_overrides(
     _LegacyRuntimeOverrides
         Resolved settings, with ``legacy_used`` folded in.
     """
-    complex_rotation = advanced_cfg.farfield.rotation
-    if complex_rotation is None:
-        complex_rotation = "solidfmm"
-    legacy_rotation = legacy_kwargs.pop("complex_rotation", None)
-    if legacy_rotation is not None:
-        complex_rotation = str(legacy_rotation)
-        legacy_used = True
-
     tree_type = advanced_cfg.tree.tree_type
     legacy_tree_type = legacy_kwargs.pop("tree_type", None)
     if legacy_tree_type is not None:
         tree_type = str(legacy_tree_type)
-        legacy_used = True
-
-    execution_backend = advanced_cfg.runtime.execution_backend
-    legacy_execution_backend = legacy_kwargs.pop("execution_backend", None)
-    if legacy_execution_backend is not None:
-        execution_backend = str(legacy_execution_backend)
         legacy_used = True
 
     tree_mode = advanced_cfg.tree.mode
@@ -456,18 +412,6 @@ def _pop_legacy_runtime_overrides(
         mac_type = str(legacy_mac_type)
         legacy_used = True
 
-    grouped_interactions = advanced_cfg.farfield.grouped_interactions
-    legacy_grouped = legacy_kwargs.pop("grouped_interactions", None)
-    if legacy_grouped is not None:
-        grouped_interactions = bool(legacy_grouped)
-        legacy_used = True
-
-    farfield_mode = advanced_cfg.farfield.mode
-    legacy_farfield_mode = legacy_kwargs.pop("farfield_mode", None)
-    if legacy_farfield_mode is not None:
-        farfield_mode = str(legacy_farfield_mode)
-        legacy_used = True
-
     nearfield_mode = advanced_cfg.nearfield.mode
     legacy_nearfield_mode = legacy_kwargs.pop("nearfield_mode", None)
     if legacy_nearfield_mode is not None:
@@ -497,15 +441,11 @@ def _pop_legacy_runtime_overrides(
         fixed_max_leaf_size = int(fixed_max_leaf_size)
 
     return _LegacyRuntimeOverrides(
-        complex_rotation=complex_rotation,
         tree_type=tree_type,
-        execution_backend=execution_backend,
         tree_mode=tree_mode,
         target_leaf_particles=target_leaf_particles,
         expanse_preset=expanse_preset,
         mac_type=mac_type,
-        grouped_interactions=grouped_interactions,
-        farfield_mode=farfield_mode,
         nearfield_mode=nearfield_mode,
         nearfield_edge_chunk_size=nearfield_edge_chunk_size,
         fixed_order=fixed_order,
@@ -532,10 +472,10 @@ class FastMultipoleMethod:
     per-argument docs:
 
     * ``basis`` defaults to ``"real"`` (Dehnen real harmonics), the only basis;
-      ``"solidfmm"`` (the family name) is the same basis. ``"complex"`` raises: it
-      was removed in the 2026-10 cleanup (C), and agreed with the real basis to
-      round-off. ``"cartesian"`` raises too: it was removed in K, having had a
-      relative L2 force error of ~1.8e-1 *independent of expansion order*.
+      ``"solidfmm"`` (the family name) is the same basis. Any other name raises.
+      The complex basis was removed in the 2026-10 cleanup (C), and agreed with
+      the real basis to round-off; the Cartesian basis was removed in K, having
+      had a relative L2 force error of ~1.8e-1 *independent of expansion order*.
     * ``use_pallas=None`` resolves at construction: Pallas near field on where it
       can run (Ampere sm_80+), pure-JAX on sm_75 and CPU. An explicit ``True`` or
       ``False`` wins.
@@ -551,9 +491,8 @@ class FastMultipoleMethod:
         config, and for ``"large_n_gpu"`` also forces fp32 when no dtype was
         requested, because that lane's kernels are fp32-only.
     basis : Union[Basis, BasisInterface, str]
-        ``"real"`` (default) or its alias ``"solidfmm"``, as above.
-        ``"complex"`` and ``"cartesian"`` raise a ``ValueError`` (removed in the
-        2026-10 cleanup, C and K). May also be a constructed
+        ``"real"`` (default) or its alias ``"solidfmm"``, as above; any other
+        name raises a ``ValueError``. May also be a constructed
         :class:`~jaccpot.BasisInterface` named ``"real"``.
     m2l_impl : Optional[str]
         M2L translation implementation. ``None`` means "let the basis decide",
@@ -651,7 +590,6 @@ class FastMultipoleMethod:
         *,
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
         # Real (Dehnen) harmonics, the only basis; 'solidfmm' is its family name.
-        # 'complex' and 'cartesian' raise (removed in the 2026-10 cleanup, C and K).
         basis: Union[Basis, BasisInterface, str] = "real",
         m2l_impl: Optional[str] = None,
         adaptive_order: bool = False,
@@ -739,7 +677,6 @@ class FastMultipoleMethod:
             expansion_basis=runtime_basis,
             basis_impl=basis_resolution.basis_impl,
             m2l_impl=resolved_m2l_impl,
-            runtime_path=str(legacy_kwargs.pop("runtime_path", "auto")),
             adaptive_order=adaptive_order,
             p_gears=p_gears,
             use_pallas=use_pallas,
@@ -753,13 +690,10 @@ class FastMultipoleMethod:
             dehnen_geometry_mode=dehnen_geometry_mode,
             mac_theta_max=mac_theta_max,
             farfield=FarFieldConfig(
-                rotation=runtime_overrides.complex_rotation,
-                grouped_interactions=runtime_overrides.grouped_interactions,
                 retain_far_pairs_for_grad=legacy_kwargs.pop(
                     "retain_far_pairs_for_grad",
                     advanced_cfg.farfield.retain_far_pairs_for_grad,
                 ),
-                mode=runtime_overrides.farfield_mode,
                 streamed_far_pairs=legacy_kwargs.pop(
                     "streamed_far_pairs", advanced_cfg.farfield.streamed_far_pairs
                 ),
@@ -795,7 +729,6 @@ class FastMultipoleMethod:
             ),
             runtime_policy=dataclasses.replace(
                 advanced_cfg.runtime,
-                execution_backend=runtime_overrides.execution_backend,
                 host_refine_mode=legacy_kwargs.pop(
                     "host_refine_mode", advanced_cfg.runtime.host_refine_mode
                 ),
@@ -840,19 +773,6 @@ class FastMultipoleMethod:
                     "prepare_stage_memory_split_enabled",
                     advanced_cfg.runtime.prepare_stage_memory_split_enabled,
                 ),
-                autotune_m2l_chunk=bool(
-                    legacy_kwargs.pop(
-                        "autotune_m2l_chunk", advanced_cfg.runtime.autotune_m2l_chunk
-                    )
-                ),
-                precompute_grouped_class_segments=legacy_kwargs.pop(
-                    "precompute_grouped_class_segments",
-                    advanced_cfg.runtime.precompute_grouped_class_segments,
-                ),
-                grouped_schedule_budget_bytes=legacy_kwargs.pop(
-                    "grouped_schedule_budget_bytes",
-                    advanced_cfg.runtime.grouped_schedule_budget_bytes,
-                ),
                 nearfield_schedule_item_cap=legacy_kwargs.pop(
                     "nearfield_schedule_item_cap",
                     advanced_cfg.runtime.nearfield_schedule_item_cap,
@@ -882,7 +802,6 @@ class FastMultipoleMethod:
                 if advanced_cfg.softening_floor is None
                 else float(advanced_cfg.softening_floor)
             ),
-            use_dense_interactions=legacy_kwargs.pop("use_dense_interactions", None),
             fixed_order=runtime_overrides.fixed_order,
             fixed_max_leaf_size=runtime_overrides.fixed_max_leaf_size,
             mac_type=runtime_overrides.mac_type,
@@ -1150,7 +1069,6 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         reuse_prepared_state: bool = False,
         jerk_mode: str = "fast_approx",
-        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Compute accelerations and jerk estimates for particle data.
 
@@ -1182,11 +1100,6 @@ class FastMultipoleMethod:
             convective jerk from the far-field acceleration Jacobian.
             ``"accurate"`` uses an analytic far-field source-motion term
             (`dM -> dL`) plus the convective and exact near-field terms.
-        jerk_fd_dt : float
-            Accepted and unused, with no check on its value. It was the step of
-            the ``"accurate"`` mode's finite-difference fallback for the
-            Cartesian basis, removed in the 2026-10 cleanup (K); kept because
-            callers pass it (nornax's jaccpot adapter does, on every call).
 
         Returns
         -------
@@ -1233,7 +1146,6 @@ class FastMultipoleMethod:
             jit_tree=self.advanced.runtime.jit_tree,
             jit_traversal=self.advanced.runtime.jit_traversal,
             jerk_mode=jerk_mode,
-            jerk_fd_dt=jerk_fd_dt,
         )
 
     def compute_accelerations_with_time_derivatives(
@@ -1605,7 +1517,6 @@ class FastMultipoleMethod:
         *,
         target_indices: Optional[Int[Array, "t"]] = None,
         jerk_mode: str = "fast_approx",
-        jerk_fd_dt: float = 1e-3,
     ) -> tuple[Array, Array]:
         """Evaluate accelerations and jerk for a prepared state.
 
@@ -1625,8 +1536,6 @@ class FastMultipoleMethod:
             ``"fast_approx"`` or ``"accurate"``; see
             :meth:`compute_accelerations_and_jerk`, including the note that the
             two are not numerically equivalent.
-        jerk_fd_dt : float
-            Accepted and unused; see :meth:`compute_accelerations_and_jerk`.
 
         Returns
         -------
@@ -1652,7 +1561,6 @@ class FastMultipoleMethod:
             target_indices=target_indices,
             jit_traversal=jit_traversal,
             jerk_mode=jerk_mode,
-            jerk_fd_dt=jerk_fd_dt,
         )
 
     def evaluate_prepared_state_with_time_derivatives(
@@ -2045,19 +1953,9 @@ class FastMultipoleMethod:
         return bool(getattr(self._impl, "_recent_topology_reused", False))
 
     @property
-    def complex_rotation(self: "FastMultipoleMethod") -> str:
-        """Active complex-rotation backend identifier."""
-        return str(self._impl.complex_rotation)
-
-    @property
     def mac_type(self: "FastMultipoleMethod") -> str:
         """Active multipole-acceptance criterion policy."""
         return str(self._impl.mac_type)
-
-    @property
-    def farfield_mode(self: "FastMultipoleMethod") -> str:
-        """Resolved far-field interaction mode."""
-        return str(self._impl.farfield_mode)
 
     @property
     def nearfield_mode(self: "FastMultipoleMethod") -> str:
@@ -2068,44 +1966,6 @@ class FastMultipoleMethod:
     def nearfield_edge_chunk_size(self: "FastMultipoleMethod") -> int:
         """Chunk size used by bucketed near-field edge processing."""
         return int(self._impl.nearfield_edge_chunk_size)
-
-    @property
-    def grouped_interactions(self: "FastMultipoleMethod") -> bool:
-        """Always ``False``: the grouped far field was removed (2026-10 cleanup, X3)."""
-        return False
-
-    @grouped_interactions.setter
-    def grouped_interactions(self: "FastMultipoleMethod", value: bool) -> None:
-        """Accept ``False`` (a no-op mirrored into ``advanced``); refuse ``True``.
-
-        The grouped far field was removed in the 2026-10 cleanup
-        (docs/cleanup_2026-10.md, X3). The setter stays so old code that turns it
-        off keeps running; turning it on raises rather than silently running the
-        flat far field.
-
-        Parameters
-        ----------
-        value : bool
-            Must be falsy.
-
-        Raises
-        ------
-        ValueError
-            If ``value`` is true.
-        """
-        if bool(value):
-            raise ValueError(
-                "grouped_interactions=True is no longer available: grouped "
-                "interactions were removed in the 2026-10 cleanup (X3); see "
-                "docs/cleanup_2026-10.md. The far field runs the flat pair list."
-            )
-        self.advanced = replace(
-            self.advanced,
-            farfield=replace(
-                self.advanced.farfield,
-                grouped_interactions=False,
-            ),
-        )
 
 
 __all__ = [

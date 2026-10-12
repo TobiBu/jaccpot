@@ -36,7 +36,7 @@ import jax.numpy as jnp
 from jax import lax
 from jaxtyping import Array
 
-from jaccpot._env import env_choice, env_int, env_reject_removed
+from jaccpot._env import env_choice, env_int
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 from jaccpot.runtime._walk_criterion import WALK_TABLE_POWER0, dehnen_pair_accept
@@ -669,9 +669,8 @@ def mutual_walk_pallas(
     ------
     ValueError
         If the seed is longer than ``max_pair_queue`` or only one half is given,
-        ``node_layout`` is not ``"soa"`` or ``"record"``, ``error_order > 0``
-        comes without an ``error_table`` wide enough for it, or
-        ``JACCPOT_WALK_FUSED_EMIT=0`` asks for the removed unfused emission.
+        ``node_layout`` is not ``"soa"`` or ``"record"``, or ``error_order > 0``
+        comes without an ``error_table`` wide enough for it.
     """
     if (seed_a is None) != (seed_b is None):
         raise ValueError("seed_a and seed_b go together")
@@ -695,14 +694,6 @@ def mutual_walk_pallas(
         node_layout = env_choice(
             "JACCPOT_WALK_NODE_LAYOUT", "record", ("soa", "record")
         )
-    # one counter atomic for the four child pairs of a block is the only emission
-    # since the 2026-10 cleanup (X5)
-    env_reject_removed(
-        "JACCPOT_WALK_FUSED_EMIT",
-        ("0", "false", "no", "off"),
-        phase="X5",
-        default="the fused emission",
-    )
     if node_layout not in ("soa", "record"):
         raise ValueError(f"node_layout must be 'soa' or 'record', got {node_layout!r}")
     if jnp.asarray(centers).dtype != jnp.float32:

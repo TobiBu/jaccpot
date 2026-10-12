@@ -133,9 +133,10 @@ def test_blocked_p2m_matches_the_batched_reference(order, block, chunk):
 
 
 @pytest.mark.parametrize("block", [0, -1])
-def test_the_removed_per_leaf_forward_raises(block, monkeypatch):
-    """``block=0`` (and ``JACCPOT_P2M_BLOCK=0``) selected one program per leaf,
-    removed in the 2026-10 cleanup (X5): refused by name, not run blocked."""
+def test_a_non_positive_block_raises(block, monkeypatch):
+    """``block`` (and ``JACCPOT_P2M_BLOCK``) must be a positive number of leaves per
+    program. ``0`` selected one program per leaf, removed in the 2026-10 cleanup
+    (X5); since Z-b it is just an invalid value."""
     n, leaf = 200, 16
     P = jnp.asarray(_plummer(n, 5), jnp.float32)
     M = jnp.ones((n,), jnp.float32)
@@ -147,8 +148,8 @@ def test_the_removed_per_leaf_forward_raises(block, monkeypatch):
     com = jnp.asarray(compute_tree_mass_moments(topo, ps, ms).center_of_mass)
     kw = dict(order=3, num_internal=ni, total_nodes=tot, leaf_width=leaf)
     args = (ps, ms, com[ni:], topo.node_ranges[ni:])
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+    with pytest.raises(ValueError, match="must be positive"):
         p2m_real_leaves_pallas(*args, block=block, interpret=True, **kw)
     monkeypatch.setenv("JACCPOT_P2M_BLOCK", str(block))
-    with pytest.raises(ValueError, match="JACCPOT_P2M_BLOCK"):
+    with pytest.raises(ValueError, match="JACCPOT_P2M_BLOCK.*must be positive"):
         p2m_real_leaves_pallas(*args, interpret=True, **kw)

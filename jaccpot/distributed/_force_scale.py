@@ -136,10 +136,7 @@ def policy_upward_view(*, upward: Any, geometry: Any, mass_moments: Any) -> Any:
         multipoles=NodeMultipoleData(
             order=int(upward.multipoles.order),
             centers=jax.lax.stop_gradient(upward.multipoles.centers),
-            moments=None,
             packed=jax.lax.stop_gradient(upward.multipoles.packed),
-            component_matrix=None,
-            source_motion_packed=None,
         ),
     )
 

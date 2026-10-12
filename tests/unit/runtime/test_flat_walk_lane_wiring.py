@@ -22,15 +22,10 @@ pytestmark = pytest.mark.skipif(
 _N = 70_000
 
 _ENV = {
-    "JACCPOT_STATIC_STRICT_GPU_MODE": "on",
-    "JACCPOT_STATIC_STRICT_FUSED_MODE": "on",
     "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS": "1",
     "JACCPOT_LARGE_N_TARGET_BLOCK_SIZE": "4",
     "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto",
     "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "4194304",
-    "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH": "0",
-    "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY": "1",
-    "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK": "1",
     "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
     "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "1048576",
     "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED": "1",
@@ -54,7 +49,6 @@ def _force(monkeypatch, n, leaf, flat):
     import jax.numpy as jnp
 
     from jaccpot import (
-        FarFieldConfig,
         FastMultipoleMethod,
         FMMAdvancedConfig,
         NearFieldConfig,
@@ -73,7 +67,6 @@ def _force(monkeypatch, n, leaf, flat):
     pos, mass = _plummer(n)
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=0.6,
         G=1.0,
@@ -81,7 +74,6 @@ def _force(monkeypatch, n, leaf, flat):
         working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix", leaf_target=leaf),
-            farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
             mac_type="dehnen",
         ),
@@ -119,16 +111,3 @@ def test_default_on_and_flag_zero_takes_the_dual_walk(monkeypatch):
     rel = np.linalg.norm(a_flat - a_dual) / np.linalg.norm(a_dual)
     # same lists as sets; only the fp32 summation order differs
     assert rel < 2e-5, rel
-
-
-@pytest.mark.parametrize("flat", [None, True])
-def test_the_removed_treecode_flag_is_refused(monkeypatch, flat):
-    """The treecode walk is gone (cleanup 2026-10); its env switch must raise, also
-    next to an explicit flat-walk request (which used to raise "pick one walk").
-
-    Silently running the default walk under a switch that asked for another one is
-    the failure mode this guards against.
-    """
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK", "1")
-    with pytest.raises(RuntimeError, match="TREECODE_WALK was removed"):
-        _force(monkeypatch, _N, 64, flat=flat)

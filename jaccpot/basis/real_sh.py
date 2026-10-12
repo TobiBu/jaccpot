@@ -64,8 +64,7 @@ class RealSHBasis:
     runtime_expansion_basis : str
         Which runtime operator family backs this basis. It is ``"solidfmm"`` rather
         than ``"real"`` because the runtime's basis seam names the *operator*
-        family, and the real operators are reached through it via a static
-        ``basis_mode`` discriminator.
+        family, whose only basis is the real one.
     """
 
     p_max: int = 32
@@ -152,7 +151,7 @@ class RealSHBasis:
         Present to satisfy the basis protocol, not to be called. The real
         rotations that production uses are not routed through this class at all:
         they live in :mod:`jaccpot.operators.m2l_real_rot_scale`, which the
-        runtime reaches directly via its static ``basis_mode`` discriminator.
+        runtime reaches directly.
 
         Parameters
         ----------
@@ -211,8 +210,7 @@ class RealSHBasis:
         Unimplemented here for the same reason as the two rotations above: the
         production real rot-scale M2L is
         :func:`~jaccpot.operators.m2l_real_rot_scale.m2l_rot_scale_real_batch`,
-        reached through the runtime's ``basis_mode`` seam rather than through
-        this object.
+        reached by the runtime directly rather than through this object.
 
         Parameters
         ----------

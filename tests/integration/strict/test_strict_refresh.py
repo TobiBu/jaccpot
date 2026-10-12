@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot.config import FarFieldConfig, NearFieldConfig, TreeConfig
+from jaccpot.config import NearFieldConfig, TreeConfig
 from jaccpot.runtime._fmm_impl import FMMEngine
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 
@@ -55,9 +55,7 @@ COUNTERS = {
 def _engine():
     return FMMEngine(
         preset="large_n_gpu",
-        runtime_path="large_n",
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         theta=0.6,
         working_dtype=jnp.float32,
         tree=TreeConfig(mode="static_radix"),
@@ -333,11 +331,6 @@ def test_upward_only_diagnostic_returns_after_the_upward_sweep(strict_env, monke
 
 def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    # This test profiles the strict cap on the fly (there is no pre-recorded
-    # profile for its key), so do not require an exact cap-profile match --
-    # otherwise it depends on another test having recorded one first (order
-    # dependence). Matches the sibling strict-lane tests below.
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
 
     key = jax.random.PRNGKey(123)
     core = 0.01 * jax.random.normal(key, (160, 3), dtype=jnp.float32)
@@ -353,10 +346,8 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
 
     fmm = FMMEngine(
         preset="large_n_gpu",
-        runtime_path="large_n",
         working_dtype=jnp.float32,
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm"),
         tree=TreeConfig(mode="static_radix"),
         fixed_order=2,
         softening_kernel="plummer",
@@ -392,9 +383,6 @@ def test_prepare_refresh_static_radix_tree_preserves_static_shape(monkeypatch):
 
 def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    # Profile the strict cap on the fly rather than requiring a pre-recorded
-    # profile match (which would make this test depend on run order).
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_TARGET_BLOCK_SIZE", "4")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "16")
@@ -427,9 +415,7 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
 
     kwargs = dict(
         preset="large_n_gpu",
-        runtime_path="large_n",
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,
@@ -513,8 +499,6 @@ def test_static_radix_refresh_rebuilds_current_large_n_payloads(monkeypatch):
 
 def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
 
     key = jax.random.PRNGKey(20260513)
     key_pos, key_mass = jax.random.split(key)
@@ -543,9 +527,7 @@ def test_strict_prepare_refresh_and_evaluate_api_and_diagnostics(monkeypatch):
 
     fmm = FMMEngine(
         preset="large_n_gpu",
-        runtime_path="large_n",
         expansion_basis="solidfmm",
-        farfield=FarFieldConfig(rotation="solidfmm", grouped_interactions=False),
         theta=0.6,
         nearfield=NearFieldConfig(mode="bucketed", edge_chunk_size=64),
         working_dtype=jnp.float32,

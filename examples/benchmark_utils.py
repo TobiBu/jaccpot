@@ -108,18 +108,6 @@ def generate_random_distribution(
     return positions, masses, key
 
 
-def apply_runtime_path(
-    kwargs: dict[str, Any],
-    *,
-    runtime_path: str = "auto",
-) -> dict[str, Any]:
-    """Return solver kwargs with an explicit runtime-path selection."""
-
-    updated = dict(kwargs)
-    updated["runtime_path"] = str(runtime_path).strip().lower()
-    return updated
-
-
 def canonical_large_n_production_config(
     *,
     leaf_target: int = 256,
@@ -138,8 +126,6 @@ def canonical_large_n_production_config(
         "tree_type": "radix",
         "tree_build_mode": "lbvh",
         "leaf_target": int(leaf_target),
-        "farfield_rotation": "solidfmm",
-        "farfield_mode": "pair_grouped",
         "streamed_far_pairs": True,
         "mixed_order": False,
         "mixed_order_min_order": None,
@@ -152,7 +138,6 @@ def canonical_large_n_production_config(
         "enable_interaction_cache": False,
         "retain_traversal_result": False,
         "retain_interactions": False,
-        "autotune_m2l_chunk": True,
         "mac_type": "dehnen",
     }
 
@@ -163,7 +148,6 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
     impl = getattr(fmm, "_impl", None)
     if impl is None:
         return {
-            "resolved_runtime_path": None,
             "resolved_memory_objective": None,
             "resolved_streamed_far_pairs": None,
             "resolved_retain_traversal_result": None,
@@ -172,11 +156,6 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
         }
 
     memory_objective = str(getattr(impl, "memory_objective", "")).strip().lower()
-    runtime_path = (
-        str(getattr(fmm, "runtime_path", getattr(impl, "runtime_path", "auto")))
-        .strip()
-        .lower()
-    )
     streamed_far_pairs = bool(getattr(impl, "streamed_far_pairs", False))
     retain_traversal_result = bool(getattr(impl, "retain_traversal_result", True))
     retain_interactions = bool(getattr(impl, "retain_interactions", True))
@@ -187,7 +166,6 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
         and not retain_interactions
     )
     return {
-        "resolved_runtime_path": runtime_path,
         "resolved_memory_objective": memory_objective,
         "resolved_streamed_far_pairs": streamed_far_pairs,
         "resolved_retain_traversal_result": retain_traversal_result,
@@ -198,7 +176,6 @@ def resolved_large_n_memory_path_report(fmm: Any) -> dict[str, Any]:
 
 __all__ = [
     "TimingResult",
-    "apply_runtime_path",
     "canonical_large_n_production_config",
     "generate_random_distribution",
     "resolved_large_n_memory_path_report",

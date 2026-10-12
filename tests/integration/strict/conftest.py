@@ -17,7 +17,5 @@ import pytest
 def strict_env(monkeypatch):
     """Make the large-N production profile reachable on CPU."""
     monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_GPU_MODE", "on")
-    monkeypatch.setenv("JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH", "0")
     monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF", "32")

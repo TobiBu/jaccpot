@@ -63,7 +63,6 @@ from yggdrax.morton import morton_encode
 
 from jaccpot import FastMultipoleMethod, TraversalOverrides
 from jaccpot.config import (
-    FarFieldConfig,
     FMMAdvancedConfig,
     NearFieldConfig,
     RuntimePolicyConfig,
@@ -91,7 +90,6 @@ print(f"N={N} cells={k} leaf_capacity={CAPACITY}", flush=True)
 
 solver = FastMultipoleMethod(
     preset="large_n_gpu",
-    runtime_path="large_n",
     basis="real",
     theta=THETA,
     G=1.0,
@@ -104,7 +102,6 @@ solver = FastMultipoleMethod(
             leaf_partition="cells",
             leaf_capacity=CAPACITY,
         ),
-        farfield=FarFieldConfig(mode="auto"),
         nearfield=NearFieldConfig(mode="auto"),
         runtime=(
             RuntimePolicyConfig(

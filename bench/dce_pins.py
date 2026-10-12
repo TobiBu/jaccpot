@@ -196,7 +196,7 @@ def case_s4(out: Path) -> dict:
         softening=1e-3,
         working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(mode="auto", retain_far_pairs_for_grad=True),
+            farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
             mac_type="dehnen",
         ),
     )
@@ -238,7 +238,7 @@ def case_s4b(out: Path) -> dict:
         working_dtype=jnp.float32,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix", leaf_target=32),
-            farfield=FarFieldConfig(mode="auto", retain_far_pairs_for_grad=True),
+            farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
             nearfield=NearFieldConfig(mode="auto"),
             mac_type="dehnen",
         ),

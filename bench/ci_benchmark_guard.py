@@ -90,7 +90,6 @@ def _validate_accurate_jerk_differs_from_fast(
     theta: float,
     leaf_size: int,
     max_order: int,
-    jerk_fd_dt: float,
     seed: int,
     dtype,
 ) -> float:
@@ -122,7 +121,6 @@ def _validate_accurate_jerk_differs_from_fast(
             leaf_size=int(leaf_size),
             max_order=int(max_order),
             jerk_mode=mode,
-            jerk_fd_dt=float(jerk_fd_dt),
         )
 
     acc_fast, jerk_fast = run("fast_approx")
@@ -176,7 +174,6 @@ def main() -> None:
     parser.add_argument("--theta", type=float, default=0.6)
     parser.add_argument("--leaf-size", type=int, default=16)
     parser.add_argument("--max-order", type=int, default=4)
-    parser.add_argument("--jerk-fd-dt", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--json-out", type=Path, default=None)
@@ -192,7 +189,6 @@ def main() -> None:
         theta=float(args.theta),
         leaf_size=int(args.leaf_size),
         max_order=int(args.max_order),
-        jerk_fd_dt=float(args.jerk_fd_dt),
         seed=int(args.seed),
         dtype=dtype,
     )
@@ -205,7 +201,6 @@ def main() -> None:
         theta=float(args.theta),
         leaf_size=int(args.leaf_size),
         max_order=int(args.max_order),
-        jerk_fd_dt=float(args.jerk_fd_dt),
         seed=int(args.seed),
         dtype=dtype,
     )

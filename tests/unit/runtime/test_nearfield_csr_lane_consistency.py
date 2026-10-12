@@ -92,7 +92,6 @@ _CSR_INTERPRET_ENV = {
 
 def _csr_lane_forces(monkeypatch, **env) -> np.ndarray:
     from jaccpot import (
-        FarFieldConfig,
         FastMultipoleMethod,
         FMMAdvancedConfig,
         NearFieldConfig,
@@ -110,7 +109,6 @@ def _csr_lane_forces(monkeypatch, **env) -> np.ndarray:
     # call, because the compiled evaluation is cached on the solver
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=THETA,
         G=G_CONST,
@@ -119,7 +117,6 @@ def _csr_lane_forces(monkeypatch, **env) -> np.ndarray:
         use_pallas=True,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix", leaf_target=LEAF),
-            farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
             mac_type="dehnen",
         ),
@@ -188,10 +185,6 @@ def test_wide_accumulation_runs_the_table_layout(monkeypatch):
     assert _rel_l2(wide, reference) < 1e-2
     # the same pairs and far field; only the near sums' rounding differs
     assert _rel_l2(wide, default) < 1e-5
-
-    monkeypatch.setenv("JACCPOT_NEARFIELD_LAYOUT", "sorted")
-    with pytest.raises(ValueError, match="JACCPOT_NEARFIELD_LAYOUT"):
-        _csr_lane_forces(monkeypatch)
 
 
 def _csr_lane_forces_at_budget(monkeypatch, payload_budget_mb: str):

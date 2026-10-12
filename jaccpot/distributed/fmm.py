@@ -78,11 +78,7 @@ from yggdrax.tree import (
 )
 from yggdrax.tree_moments import compute_tree_mass_moments
 
-from jaccpot.config import (
-    _CARTESIAN_BASIS_REMOVED,
-    _COMPLEX_BASIS_REMOVED,
-    MACTypeInput,
-)
+from jaccpot.config import MACTypeInput
 from jaccpot.distributed._force_scale import (
     DISTRIBUTED_FORCE_SCALE_MODES,
     cross_policy_state,
@@ -658,7 +654,6 @@ class DistributedFMMConfig:
     softening_kernel: Optional[str] = None
     softening_floor: Optional[float] = None
     G: float = 1.0
-    rotation: str = "solidfmm"
     # dehnen bounding-SPHERE MAC extents (the correct multipole-radius bound, matching
     # the single-GPU fast lane and required for stable multi-step use). "bh" (box) is
     # cheaper but under-bounds the source radius; keep it only for single-shot use.
@@ -725,9 +720,8 @@ class DistributedFMMConfig:
     # per-device far field converged onto the single-GPU fast-lane path (native-real
     # P2M + M2M, and the fused real M2L Pallas kernel when
     # JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS is set). Anything else raises when the
-    # evaluator is built: "cartesian" (removed in the 2026-10 cleanup, K; before, it
-    # silently ran the complex path), "complex" and "solidfmm" (the complex far field,
-    # removed in C), and any other string (which also used to run complex).
+    # evaluator is built (the Cartesian and complex far fields were removed in the
+    # 2026-10 cleanup, K and C).
     basis: str = "real"
     # Near-field backend: "baseline" (pure-JAX combined [local;halo] P2P) or
     # "pallas" (fused leafpair Pallas kernel, sm_80+, the single-GPU fast-lane
@@ -1772,25 +1766,17 @@ def _make_fn(
         if config.softening_floor is None
         else float(config.softening_floor)
     )
-    rot = config.rotation
     theta = config.theta
     basis = str(config.basis).strip().lower()
-    if basis == "cartesian":
-        raise ValueError(_CARTESIAN_BASIS_REMOVED)
-    if basis in ("complex", "solidfmm"):
-        raise ValueError(_COMPLEX_BASIS_REMOVED)
     if basis != "real":
         raise ValueError(
             f"DistributedFMMConfig.basis must be 'real'; got {config.basis!r}"
         )
 
-    # The self walk is the dual-tree walk; "treecode" was removed (cleanup 2026-10).
+    # The self walk is the dual-tree walk (the only one since the 2026-10 cleanup).
     lw = str(config.local_walk).strip().lower()
     if lw != "dual_tree":
-        raise ValueError(
-            f"local_walk must be 'dual_tree'; got {config.local_walk!r} (the "
-            "'treecode' local walk was removed in the 2026-10 cleanup)"
-        )
+        raise ValueError(f"local_walk must be 'dual_tree'; got {config.local_walk!r}")
 
     # Dehnen section 5 criterion resolution (trace-time). `mac_type="dehnen_error"`
     # is a jaccpot-level POLICY: yggdrax's traversal only knows the three geometric
@@ -2349,9 +2335,7 @@ def _make_fn(
                 rc_full,
                 node_levels,
                 order=p,
-                rotation=rot,
                 total_nodes=int(total_nodes),
-                basis_mode="real",
                 num_levels=l2l_levels,
             )
             ld = LocalExpansionData(order=p, centers=centers, coefficients=loc_coeffs)
@@ -2413,7 +2397,6 @@ def _make_fn(
                 s_tgt,
                 s_active,
                 order=p,
-                basis_mode="real",
                 m2l_impl="rot_scale",
                 total_nodes=int(total_nodes),
             )

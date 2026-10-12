@@ -14,9 +14,10 @@ Three distinct failures were reachable on the DEFAULT configuration once
 grouped/class-major M2L. Two of them -- ``farfield_mode`` left unresolved at
 ``"auto"`` by the static-fixed-sizing branch of the override resolver, and the
 grouped M2L building its classes on the host, which broke every reverse pass --
-went with the grouped far field in the 2026-10 cleanup (X3); the resolver checks
-below still pin that the far field resolves to the flat pair list about COM
-centres at every N. The third is fp32 far-field gradients: see
+went with the grouped far field in the 2026-10 cleanup (X3), and the
+``farfield_mode`` field itself in Z-b; the resolver check below still pins that the
+far field is expanded about COM centres at every N. The third is fp32 far-field
+gradients: see
 ``test_fp32_farfield_gradient_is_finite``.
 
 The resolver assertions are pure host-side policy checks (no tree build), so they
@@ -77,13 +78,14 @@ def _num_far_pairs(state):
     "n", [_GPU_LARGE_PARTICLE_THRESHOLD, 4 * _GPU_LARGE_PARTICLE_THRESHOLD]
 )
 @pytest.mark.parametrize("backend", ["gpu", "cpu"])
-def test_farfield_mode_never_resolves_to_auto_at_large_n(n, backend):
-    """``farfield_mode`` must reach the kernels as a concrete mode at every N.
+def test_the_far_field_is_expanded_about_com_centres_at_large_n(n, backend):
+    """The resolver hands the kernels COM expansion centres at every N.
 
-    Regression: the static-fixed-sizing branch (the production default) returned
-    ``"auto"`` once the grouped M2L auto-enabled at ``n >= 65536`` on GPU. The
-    grouped far field is gone (X3), so the only value left is the flat pair list,
-    about COM centres. (This also carries the centre assertion of
+    Was ``test_farfield_mode_never_resolves_to_auto_at_large_n``. Regression: the
+    static-fixed-sizing branch (the production default) returned ``farfield_mode=
+    "auto"`` once the grouped M2L auto-enabled at ``n >= 65536`` on GPU; the grouped
+    far field went in X3 and the always-``"pair_grouped"`` field in Z-b. (This also
+    carries the centre assertion of
     ``test_static_sizing_does_not_inherit_the_adaptive_grouped_rewrite``, merged
     here when adaptive sizing went in the 2026-10 cleanup, X4.)
     """
@@ -91,10 +93,7 @@ def test_farfield_mode_never_resolves_to_auto_at_large_n(n, backend):
     overrides = fmm._impl._resolve_runtime_execution_overrides(
         num_particles=n, backend=backend
     )
-    assert (
-        overrides.farfield_mode == "pair_grouped"
-    ), f"farfield_mode={overrides.farfield_mode!r} at n={n} backend={backend}"
-    assert overrides.center_mode == "com"
+    assert overrides.center_mode == "com", f"n={n} backend={backend}"
 
 
 # --------------------------------------------------------------------------
@@ -188,7 +187,7 @@ def test_large_gpu_minimum_memory_streamed_path_keeps_small_explicit_traversal()
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
-        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
+        farfield=FarFieldConfig(streamed_far_pairs=True),
         runtime_policy=RuntimePolicyConfig(
             memory_objective="minimum_memory",
             fail_fast=True,
@@ -258,7 +257,7 @@ def test_large_gpu_minimum_memory_streamed_path_clamps_auto_traversal_seed():
         preset=FMMPreset.LARGE_N_GPU,
         expansion_basis="solidfmm",
         mac_type="engblom",
-        farfield=FarFieldConfig(streamed_far_pairs=True, grouped_interactions=False),
+        farfield=FarFieldConfig(streamed_far_pairs=True),
         runtime_policy=RuntimePolicyConfig(
             memory_objective="minimum_memory", fail_fast=True
         ),

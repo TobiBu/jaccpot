@@ -55,7 +55,8 @@ On `main` at 6cca378 (2026-10-06):
 | K | #388 | The Cartesian basis (`FMMEngine`'s default flips to real first: a behaviour change), `operators/multipole_utils.py`, the dense interaction buffers, the finite-difference jerk fallback. Every Cartesian spelling raises one migration error; `use_dense_interactions=True` raises; `jerk_fd_dt` is accepted and unused | CPU suite (also at the default flip alone), shard partition, distributed tier, CPU bitwise A/B, GPU pins S1-S6, M1, M3 | merged |
 | C | #389 | The complex basis: the distributed driver's complex far field (C2), then single GPU (C1): `basis="complex"` raises one migration error, `basis="solidfmm"` is the real basis, the six complex modules and the runtime's complex branches go; direct-sum oracles replace the real basis's complex-only cross-checks first | CPU suite (also at the behaviour change alone), shard partition, distributed tier, CPU bitwise A/B, CI benchmark guard on real | merged |
 | tower | #390 | The acceleration-derivative tower includes the near field (C's finding); `evaluate_local_real_with_grad`'s docstring sign; a GPU-only failure of K's `jerk_fd_dt` test | CPU suite, A100 tests + fp32 check, GPU pins S3/S4/S4b | merged |
-| Z-a | | Test consolidation (T1, rules R2-R7): the bench-tooling tests move to `bench/tests`; one signature-contract table; grid corners; `tests/integration/strict/`; one owner per gradient property; `test_fmm.py` and `test_solver_api.py` split by subject; the removed-option and shim tests collected in `test_removed_options.py` for Z-b. Tests only | CPU suite, shard partition, bench-tooling tests | open |
+| Z-a | #392 | Test consolidation (T1, rules R2-R7): the bench-tooling tests move to `bench/tests`; one signature-contract table; grid corners; `tests/integration/strict/`; one owner per gradient property; `test_fmm.py` and `test_solver_api.py` split by subject; the removed-option and shim tests collected in `test_removed_options.py` for Z-b. Tests only | CPU suite, shard partition, bench-tooling tests | merged |
+| Z-b | | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | open |
 
 ### P0: CI runs each test once
 
@@ -2529,3 +2530,305 @@ rejections). The file count is 154 against the 125 target.
   `tests/characterization` file changed).
 - **Not run:** any GPU. The merged GPU-only `strict/test_strict_run_v2.py` and the
   sm_80-only cases are for the next G2 run.
+
+### Z-b: shims, inert options and removal errors
+
+Every earlier phase left a compatibility layer behind it: a removed option still
+constructed and was ignored, or a removed env value or option was refused by name
+(`env_reject_removed` and its hand-rolled siblings, the basis migration errors). Z-b
+removes that layer. Library -1,473 / +192 lines (`jaccpot/`); benches and examples
+-1,341 / +8 (one of them a 1,200-line example that had not imported since X1).
+
+**Maintainer decisions (2026-10-11).** They override the "kept so old configs
+construct" notes of X3-X6, K and C:
+1. The protective removal errors go. A removed env value is simply not read; a removed
+   option name hits whatever generic validation remains (an unknown basis gets the
+   validator's "must be ..." message, an unknown keyword or dataclass field a
+   `TypeError`). A knob whose other values are live keeps its generic validation.
+2. `runtime_path` and `FarFieldConfig.mode` go (Odisseo stopped passing both, its #31).
+3. `jerk_fd_dt` goes from the four jerk signatures (nornax stopped passing it, its #14).
+4. The other inert shims go; none has an external caller. Kept: `basis="solidfmm"`
+   (the real basis; nornax and Odisseo pass it), the refine family of `TreeConfig`
+   (external callers), every live diagnostic key.
+5. The X4/X6-era switches that nothing reads go from benches and tests; benches that
+   passed a removed option are updated so they still run.
+
+**Removed, by commit** (library lines):
+- **The removal errors (2581498, -572 / +79).**
+  - `_env.env_reject_removed` and its 15 call sites. A knob left with no live value
+    besides its default is no longer read at all: `CASCADE_KERNEL`,
+    `WALK_FUSED_EMIT`, `NEARFIELD_TARGET_CLASSES`, `NEARFIELD_DIRECT_ROWS`, the strict
+    walk's `..._WALK_DETERMINISTIC`, `FASTLANE_UNPERMUTE`, `..._MAC_RADIUS` (with its
+    single-valued "must be 'exact'" check), `COM_RADII_VARIANT`, `M2L_CSR_KERNEL` /
+    `M2L_CSR_TILED` (with their "expected lanes" check),
+    `LOCAL_EVAL_DIRECT_LEAF_FLATTEN`, `M2L_DEGREE_BATCHED`, and the six X6 strict-lane
+    switches.
+  - A knob with other live values keeps its generic validation: `NEARFIELD_LAYOUT`
+    (`env_choice`: `sorted` now warns and runs the default), `MUTUAL_M2L` (`zcore` gets
+    "must be one of 'auto', 'jax', 'fused'"), `P2M_BLOCK` / `block` (`<= 0` gets "must
+    be positive"), the CSR kernel's `source_flags` (the letters a, l, p, r: `g` is no
+    longer one of them; a lone `p`, the prefetch that is part of `r`, is ignored like
+    `p` beside `r` always was), the distributed `local_walk` ("must be 'dual_tree'").
+  - The hand-rolled refusals: the strict treecode walk (`RuntimeError`), the z-core
+    lane, the distributed `local_walk` message.
+  - The basis migration errors: `_CARTESIAN_BASIS_REMOVED`, `_COMPLEX_BASIS_REMOVED`,
+    the `ComplexSHBasis` `__getattr__` of `jaccpot` and `jaccpot.basis`, and the
+    `"cartesian"` / `"complex"` entries of `config.Basis` and `ExpansionBasis`. The
+    names now get their validator's message: "basis must be one of 'real' or
+    'solidfmm'" (the facade), "expansion_basis must be 'solidfmm'" (the engine; under
+    `JACCPOT_RUNTIME_TYPECHECK=1` its `Literal["solidfmm"]` refuses first),
+    "basis.name must be 'real'" / "basis_impl.name must be 'real'" (a basis object,
+    facade / engine), "DistributedFMMConfig.basis must be 'real'".
+  - `tree_type="octree"`, `tree_build_mode="fixed_depth"` and
+    `execution_backend="octree"` reach the generic lists.
+  - `_fresh_compact_pair_rebuild_enabled` (always `True` once its refusals went) is
+    folded into its two callers.
+- **`runtime_path` and `FarFieldConfig.mode` (cf65382, -109 / +26).** The engine
+  keyword, attribute and validation, the large-N contract's `runtime_path =
+  "large_n"`, its entry in the strict compiled-profile fingerprint (a diagnostic);
+  `FarFieldConfig.mode`, both `FarFieldMode` aliases, `FARFIELD_MODE_DOC`, the
+  engine's and facade's `farfield_mode`, the facade's legacy `farfield_mode=`, the
+  presets' far-field `mode` entries, and the always-`"pair_grouped"`
+  `_RuntimeExecutionOverrides.farfield_mode`.
+- **`jerk_fd_dt` (7b9156b, -24 / +2)** from `compute_accelerations_and_jerk` and
+  `evaluate_prepared_state_with_jerk` (facade and engine).
+  `bench/ci_benchmark_guard.py` and `bench/bench_parallel_paths.py` lose
+  `--jerk-fd-dt` (CI never set it).
+- **Grouped, autotune, dense, backend (3d2e284, -219 / +7).**
+  `RuntimePolicyConfig.autotune_m2l_chunk`, `.precompute_grouped_class_segments`,
+  `.grouped_schedule_budget_bytes` and their legacy keywords;
+  `FarFieldConfig.grouped_interactions`, its legacy keyword, the facade's
+  always-`False` property and refusing setter, `_reject_removed_farfield_options`;
+  `use_dense_interactions` (engine keyword, legacy keyword, the refusal, the
+  always-`False` fields of `FMMResolvedConfig` and `FMMPresetConfig`);
+  `RuntimePolicyConfig.execution_backend`, the `FMMExecutionBackend` alias, the
+  engine attribute and its validation, the legacy keyword. The prepared states' own
+  `execution_backend` tag (`"radix"` / `"large_n"`, a static pytree field) stays.
+- **The complex basis's leftovers (69e0c1d, -274 / +40).** `complex_rotation` (engine
+  attribute and validation, facade property, legacy keyword),
+  `FarFieldConfig.rotation` (and the large-N preset's `rotation="solidfmm"`),
+  `DistributedFMMConfig.rotation`;
+  the kernels' `rotation` / `complex_rotation` keywords and static jit arguments
+  (`_accumulate_m2l_fullbatch`, `_accumulate_m2l_chunked_scan`,
+  `_m2l_chunk_contributions`, `_propagate_solidfmm_locals_by_level`,
+  `_prepare_solidfmm_downward_sweep`, the downward-prep helpers,
+  `_SolidFMMDownwardMultipoleInputs.rotation_mode`); the kernels' `basis_mode`
+  keyword and its five "must be 'real'" checks; `_apply_m2l`, which only checked
+  `basis_mode`
+  before calling `_apply_real_m2l`; the engine's always-`"real"`
+  `_solidfmm_basis_mode()`. **Load-bearing:** the large-N gate
+  (`can_use_large_n_prepare_path`) required `complex_rotation == "solidfmm"` through
+  `getattr(fmm, "complex_rotation", "")`; the conjunct went in the same commit, or the
+  lane would silently have declined on the missing attribute.
+  `test_the_lane_accepts_the_dehnen_error_criterion` and the A/B's large-N rows (the
+  lane taken, its counters equal) pin it.
+- **Always-`None` pytree fields (b662b00, -61 / +35).** `NodeMultipoleData.moments`,
+  `.component_matrix`, `.source_motion_packed`,
+  `TreeDownwardData.source_motion_locals`.
+  The time-derivative tower set `component_matrix` to a copy of its packed
+  source-motion multipoles, which nothing read. `Inexact` -> `Float` on the packed
+  multipoles (`NodeMultipoleData.packed`, the M2L accumulators); the real L2P's
+  `offsets_complex` locals are `offsets_solid` / `offsets`.
+- **Template, gear chain, timings (88cdb24, -231 / +20).**
+  `_build_locals_template_for_prepare_state` (always `None` since K),
+  `_update_locals_template_cache_after_prepare`, their six calls,
+  `_PrepareStateTreeUpwardArtifacts.locals_template`, the engine's
+  `_locals_template`;
+  `_gear_pairs_for_autotune` and the `far_pairs_by_gear` parameter of
+  `_prepare_downward_with_artifacts`, `prepare_downward_sweep` and
+  `_prepare_solidfmm_downward_sweep`, which never read it (the adaptive-order gear
+  bucketing that feeds `recent_dual_far_pairs_by_gear_counts` stays);
+  `strict_fused_device_only_hot_path` is `strict_fused_hot_path` (its device-only half
+  is the only fused refresh since X6; it is still a real condition, the fused
+  lane's
+  traced refresh, so it was renamed rather than folded); the five never-written
+  `refresh_upward_{geometry,mass_moments,p2m,m2m,source_motion}_seconds` diagnostics
+  (`upward_compute` is a leaf of the stage-timing tree now; Odisseo reads them with
+  `.get(key, 0.0)`).
+- **Benches and examples (c3ffe89).** See the commit; `bench/dce_pins.py` S4/S4b drop
+  `FarFieldConfig(mode="auto")`, and `fused_memory_budget.py` its `runtime_path` and
+  far-field mode, so the GPU pins run on this branch with the same configuration.
+
+`import jaccpot` and every module import; no file in `jaccpot/`, `tests/`, `bench/` or
+`examples/` imports a removed name.
+
+**Tests** (`pytest --collect-only -q -o addopts="" tests`):
+
+| | 4f05686 | Z-b |
+| --- | --- | --- |
+| items (files) | 2,009 (154) | 1,913 (151) |
+| default collection (`test_shards.py` universe) | 2,006 | 1,910 |
+| `tests/unit` | 1,645 (122) | 1,575 (121) |
+| `tests/integration` | 286 (18) | 260 (16) |
+| `tests/distributed`, `characterization`, `perf` | 55 (9), 20 (4), 3 (1) | unchanged |
+| `-m "not slow"` (default collection) | 1,761 | 1,668 |
+
+105 node ids go and 9 appear: 96 deletions under the tag rule (below) and 9 renames.
+
+Deleted (the tag rule):
+
+| test | items | tag | owner / note |
+| --- | --- | --- | --- |
+| `tests/unit/test_removed_options.py` (whole file) | 46 | (a) | every test's subject is a removed option, shim or removal error; Z-a collected them for Z-b |
+| `tests/integration/strict/test_strict_lane_removed_switches.py` (whole file) | 24 | (a) | the X6 removed-value refusals and the accepted-and-ignored X6 switches; nothing reads either |
+| `tests/integration/strict/test_strict_cap_profile_removed.py` (whole file) | 2 | (a) | the X4 `/tmp` cap-profile file; nothing names it any more |
+| `test_env_readers.py::TestEnvRejectRemoved` | 6 | (a) | `env_reject_removed` deleted |
+| `test_shared_env_switches.py::TestTheDegreeBatchedSwitchWasRemoved::test_setting_it_after_import_raises` | 1 | (a) | the `M2L_DEGREE_BATCHED` refusal; the module reads no env now, which its sibling test still pins |
+| `test_large_n_fast_path_policy.py::test_the_removed_gather_unpermute_raises` | 1 | (a) | the `FASTLANE_UNPERMUTE=gather` refusal |
+| `operators/test_pallas_nearfield_leafpair_csr_sorted.py::test_the_removed_layout_options_raise` | 2 | (a) | `NEARFIELD_TARGET_CLASSES`, `NEARFIELD_DIRECT_ROWS=chunked`: read nowhere |
+| `runtime/test_engine_config_resolution.py::TestLaneModeNormalisation`, the `runtime_path` and `execution_backend` cases of both tests | 4 | (a) | both options deleted; the `nearfield_mode` cases stay |
+| `runtime/test_flat_walk_lane_wiring.py::test_the_removed_treecode_flag_is_refused` | 2 | (a) | `..._FUSED_TREECODE_WALK` read nowhere (GPU-only test) |
+| `runtime/test_mac_geometry_com.py::test_the_removed_chain_variant_raises` | 1 | (a) | `COM_RADII_VARIANT` read nowhere |
+| `runtime/test_strict_carry_helpers.py::test_fresh_rebuild_flag` | 5 | (a) | the always-`True` helper folded away, its two refusals deleted |
+| `test_solver_api.py::test_prepare_state_does_not_retain_duplicate_component_matrix` | 1 | (a) | `NodeMultipoleData.component_matrix` deleted |
+| `runtime/test_l2p_particle_major.py::test_the_removed_leaf_flatten_switch_raises` | 1 | (b) | `test_particle_major_equals_leaf_major` now also asserts its live half: the leaf-major scatter leaves dead rows zero |
+
+By tag: (a) 95, (b) 1. No tolerance changed, and no lane lost a direct-sum oracle (only
+refusal and shim tests went).
+
+Kept on the generic validation that remains, renamed where the subject changed (the
+old ids are the 9 renames):
+- `test_mutual_fmm.py::test_an_unknown_mutual_m2l_lane_raises` (`zcore` -> "must be
+  one of");
+- `operators/test_p2m_real_leaf.py::test_a_non_positive_block_raises` (2);
+- `distributed/test_distributed_dehnen_error_mac.py::test_an_unknown_local_walk_is_refused`;
+- `test_large_n_config_thresholds.py::test_the_far_field_is_expanded_about_com_centres_at_large_n`
+  (4; the `farfield_mode` half went, the COM-centre half stays);
+- `test_large_n_fast_path_policy.py::test_a_zero_target_block_size_means_the_default`
+  (the inert `LARGE_N_RADIX_FAST_LANE=0` half went).
+
+The removal halves of eight live tests went: `test_lanes_jit_and_the_vjp_forward`,
+`test_csr_lane_is_taken_and_matches_the_chunked_lane`, `test_pallas_walk_flags_overflow`,
+`test_walk_backend_flag_parsing`, `test_mode_knob`,
+`test_wide_accumulation_runs_the_table_layout`,
+`test_requires_the_particle_count_in_the_profile_set`, and the `p` / `ap` cases of
+`test_source_flags_are_validated` (its `g` cases now assert the generic letters error).
+
+Edited without an assertion lost: live tests stop passing `runtime_path=` (23 sites
+in 13 files), `FarFieldConfig(rotation=, mode=, grouped_interactions=)`, `jerk_fd_dt`,
+`execution_backend`, the kernels' `rotation` / `basis_mode`, and the switches nothing
+reads (`STATIC_STRICT_GPU_MODE`, `_FUSED_MODE`, `_FUSED_DEVICE_ONLY`,
+`_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK`, `_REQUIRE_EXACT_CAP_PROFILE_MATCH`,
+`_FUSED_FRESH_COMPACT_PAIR_REBUILD`, `_FUSED_TREECODE_WALK` in fixture clear-lists);
+assertions on the removed attributes `runtime_path` / `farfield_mode` /
+`_solidfmm_basis_mode()` go. `test_downstream_contract.py` follows Odisseo's
+`_build_fmm_solver` on `jaccpot-integration` (ac3cb5d, after #31):
+`FarFieldConfig(m2l_chunk_size=None)` without `mode`, no `runtime_path`, plus the
+`softening_kernel` it now passes.
+`tests/perf/test_perf_metrics.py` compared the far-field modes `pair_grouped` and
+`class_major` (the latter raised since X3; the perf tier is opt-in, so nobody saw);
+it compares the near-field modes it ran with. `slow_tests.txt` drops the
+`test_removed_options.py` id; every remaining id matches a collected test.
+
+**Constructor golden**, regenerated once (`JACCPOT_REGEN_GOLDEN=1`, in the record
+commit): the base state goes from 236 to 226 attributes (`_locals_template`,
+`complex_rotation`, `execution_backend`, `farfield_mode`, `runtime_path` and the five
+upward timings), the matrix from 36 to 33 cases (`farfield_pair_grouped`,
+`runtime_path_large_n`, `backend_radix`), and the `FMMResolvedConfig` /
+`FMMPresetConfig` reprs lose `use_dense_interactions=False`. A semantic diff of the two
+files finds nothing else. Every other golden (`golden/`, `golden_grad/`,
+`golden_lanes/`, `golden_modes/*.npz`) is byte-identical.
+
+**Bitwise A/B against 4f05686 on CPU** (`git archive` exports of main and of the final
+library c3ffe89, every switch unset, separate processes, yggdrax 1f0e36f on both
+sides). Each array is compared with `np.array_equal` and its dtype:
+
+| section | what | arrays | equal |
+| --- | --- | --- | --- |
+| general | default, fast, accurate and balanced (real), fast and accurate spelled `"solidfmm"`, `dehnen_error`, `large_n_gpu` in fp32 (forces and potentials); a bare `FastMultipoleMethod()`; position and mass gradients through `differentiable_accelerations` on both spellings | 21 | 21 |
+| deriv | `compute_accelerations_and_jerk` in both modes (and on a target subset), `evaluate_prepared_state_with_jerk`, `compute_accelerations_with_time_derivatives` to crackle, `evaluate_prepared_state_with_time_derivatives` on a subset, `compute_accelerations(max_acc_derivative_order=2)` (the near-field tower), on `"real"` and `"solidfmm"` | 32 | 32 |
+| engine default | `FMMEngine()` at orders 2 and 4, `compute_gravitational_acceleration`, the direct sum | 4 | 4 |
+| block step | `BlockStepFMM(backend="jax")`: total accelerations and one base step | 3 | 3 |
+| large-N | the lane with the GPU gate opened, N = 2,048: prepare + evaluate, `refresh_prepared_state`, two `strict_prepare_refresh_and_evaluate` calls, the fused `strict_run_v2` scan plain and with history, callback, external field, initial acceleration and returned state, `carry="particles"` on cell leaves (two chained calls), `strict_fused_prepared_eval_fn`, the prepacked differentiable lane's forces and gradients | 19 | 19 |
+| `dehnen_error` | the fused scan, both carries, through the CSR near field in Pallas interpret mode, N = 768 | 5 | 5 |
+| mesh | `distributed/fmm.py` on four forced host devices, N = 1,024: forces with the Dehnen and BH MACs, the differentiable evaluator's forward and its position and mass gradients | 5 | 5 |
+| fp32 | float32 inputs and working dtype: six configurations' forces and potentials, jerk in both modes, time derivatives to crackle, the acceleration-derivative tower, the gradients | 21 | 21 |
+
+**110 arrays and 72 diagnostic rows bitwise equal, none different** (the rows: the
+strict-lane and fast-lane counters, the large-N lane taken, the mesh's cross-domain
+pair counts). The two cases that fail on this CPU configuration at K and C fail on both
+sides with the same messages (`carry="particles"` on bucket leaves: a fixed capacity
+saturates; `dehnen_error` through the non-CSR route: `return_force_scale` needs the CSR
+lane). The first seven sections ran twice per side, with `JAX_ENABLE_X64=1` and `=0`:
+both times 89 / 89. That second arm is a repeat, not an fp32 run: yggdrax's
+`__init__` switches `jax_enable_x64` on at import, so the variable cannot turn it off
+once `jaccpot` is imported. The fp32 section is the float32 coverage, with float32
+inputs and `working_dtype` (the large-N, `dehnen_error` and mesh sections are float32
+too).
+
+**Gates:**
+- **CPU suite** (`pytest -p no:cacheprovider -n 12 --timeout=1800 tests/unit
+  tests/integration tests/characterization -rf`, CPU, at 9dccd98 with the regenerated
+  golden): 1,663 passed, 191 skipped, 1 failed in 26 min. The failure is the stale
+  local nornax checkout
+  (`test_rollout_gradient_with_the_topology_rebuilt_inside_the_scan`), as at K, C,
+  the tower follow-up and Z-a.
+- **Distributed tier** (`tests/distributed`, `JAX_ENABLE_X64=1`, four forced host
+  devices, `-n 4`): 53 passed, 2 skipped (the two opt-in upstream ragged-all-to-all
+  checks) in 21 min.
+- **`test_shards.py check`** (four forced host devices, x64): 1,910 tests, each in
+  exactly one of the 11 shards; no overlap, no gap.
+- **Bench tooling** (`pytest -n 0 bench/tests`): 93 passed.
+- **CI benchmark guard on real**, run the way CI runs it (`--n 384 --runs 2 --warmup 1
+  --preset fast --basis real --theta 0.6 --leaf-size 16 --max-order 4 --dtype
+  float32`, `JAX_ENABLE_X64=1`, plus this host's jax 0.11.2 `-vectorize-loops=false`):
+  passes. jerk_fast / acc 1.00 (bound 0.4-8), jerk_accurate / fast 1.84 (0.9-15),
+  td2 / jerk 1.48 (0.8-12), td3 / td2 1.26 (0.8-12); accurate-vs-fast jerk rel-L2
+  2.116e-5 (floor 1e-6), as at C.
+- **Odisseo (G4, CPU)** against this branch, from a `git archive` of
+  `jaccpot-integration` ac3cb5d (after #31), with nornax 2eab7a5 (its #14) and the
+  overlay env: `test_integration_api.py`, `test_strict_velocity_verlet_policy.py`,
+  `test_softening.py`, `test_dehnen_error_config.py`, `test_differentiable_fmm.py`
+  (`-n 8`): 52 passed in 4 min; `test_mesh_lane.py` on two forced host devices: 15
+  passed. nornax's `tests/unit/test_jaccpot_adapter.py` and
+  `tests/integration/test_jaccpot_adapter_smoke.py`: 9 passed.
+- **pre-commit** on the 112 changed files: clean.
+- **Goldens:** as above; `test_constructor_state_golden.py` passes on the regenerated
+  file, and no other golden changed.
+- `bench/annotation_census.py`: shape-annotated array parameters 696 -> 696, bare
+  `Array` parameters 1,543 -> 1,535, non-array parameters 3,399 -> 3,353, shaped
+  share 31.1 % -> 31.2 %, `@jaxtyped` functions 111 -> 111, modules 118 -> 118.
+- **GPU pins** on one A100 (GPU 2), frozen worktree at 59d781b with yggdrax main
+  1f0e36f (after its #94), tag `zb-59d781b`: S1-S5 are **bitwise** against
+  `main-15ceca4`, and S6 (no `JACCPOT_*` env) is **bitwise** against `main-17de581`.
+  `dce_pins.py` S4 / S4b and `fused_memory_budget.py` drop only removed keywords, so
+  the pins ran the same configuration as their references. The two-card pins M1 / M3
+  were not run (no two free cards); the mesh lane is in the CPU A/B above.
+
+**Findings:**
+- `tests/perf/test_perf_metrics.py` compared the far fields `pair_grouped` and
+  `class_major`; the latter has raised since X3, and the perf tier is opt-in, so
+  nobody saw. It now compares the near-field modes it ran with.
+- `JAX_ENABLE_X64=0` is not an fp32 switch for jaccpot (above).
+- Also never written, besides the five upward timings:
+  `refresh_dual_final_symmetry_seconds` and `refresh_dual_source_motion_seconds`
+  (always 0.0; conditional on
+  `_refresh_timing_substages_measured`). Left, since the decision named the upward
+  ones.
+- `_prepare_solidfmm_downward_sweep` reads neither `adaptive_order`, `p_gears` nor
+  `use_pallas` (the siblings of the `far_pairs_by_gear` it also ignored), so the
+  adaptive-order gear buckets only feed the `recent_dual_far_pairs_by_gear_counts`
+  diagnostic: the downward runs every pair at the full order. Left as decided (the
+  bucketing stays); worth a look before adaptive order is claimed anywhere.
+
+**Left for Z-c:**
+- Docs and notebooks name removed options: `ARCHITECTURE.md` (the `basis_mode` /
+  `rotation` seam of §5 and §10's static-discriminator invariant), 21 files in
+  `docs/` (most of them dated plans and audits), and nine notebooks
+  (`adaptive_vs_fixed_benchmark`, `benchmark_gpu_radix_runtime`,
+  `benchmark_gpu_single_n_memory` (it also runs the deleted
+  `profile_prepare_memory_split.py`), `benchmark_runtime_accuracy_copy`,
+  `benchmark_runtime_accuracy_new`, `benchmark_runtime_large_N`,
+  `benchmark_runtime_large_N_accuracy`, `benchmark_runtime_large_N_performance`,
+  `benchmark_runtime_rtx2080_focused`; `benchmark_runtime_breakdown_h200`'s one
+  source cell was cheap and is done). `README.md`'s octree and basis paragraphs are
+  updated here, since they described this PR's behaviour.
+- Remaining names in `jaccpot/`, `tests/`, `bench/`, `examples/` are history in
+  comments and docstrings, `cleanup_inventory.py`'s regexes, the generic-validation
+  tests that pass `"cartesian"` / `"complex"` as unknown names, and the prepared
+  states' own `execution_backend` tag (`"radix"` / `"large_n"`, a static pytree field
+  read only by the compiled-profile fingerprint): a Z-c candidate.
+- `_adaptive_policy.py` keeps `Inexact` on `multipole_packed` (its docstring
+  describes the complex packing); `DistributedFMMConfig.local_walk` is single-valued;
+  `JACCPOT_LARGE_N_COMPILED_STATE_MODE` is read nowhere (the harness sets it).
+- The four comments in `jaccpot/` that name a test Z-a moved (Z-a's list).

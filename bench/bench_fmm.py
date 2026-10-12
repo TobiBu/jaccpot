@@ -71,16 +71,6 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional direct adaptive tolerance overriding the theta-derived heuristic",
     )
-    parser.add_argument(
-        "--runtime-path",
-        choices=("auto", "large_n"),
-        default="auto",
-        help=(
-            "Passed through as runtime_path. Since the 2026-10 cleanup (X4) it no "
-            "longer selects a lane: the large-N lane runs only under "
-            "--preset large_n_gpu, which pins it"
-        ),
-    )
     return parser.parse_args()
 
 
@@ -238,21 +228,15 @@ def _run_m2l_downward(fmm: FastMultipoleMethod, staged: StageArtifacts, dual_art
         _compact_far_pairs,
     ) = impl._unpack_dual_tree_artifacts(dual_artifacts)
 
-    far_pairs_by_gear = _adaptive_far_pairs_by_gear(fmm, dual_artifacts)
-
     return impl._prepare_downward_with_artifacts(
         tree=tree_artifacts.tree,
         upward=tree_artifacts.upward,
         theta_val=float(ARGS.theta),
-        # The SH downward pass allocates its own accumulator; only the Cartesian
-        # basis (removed in the 2026-10 cleanup, K) reused a locals template.
-        locals_template=None,
         interactions=interactions,
         runtime_m2l_chunk_size=runtime_overrides.m2l_chunk_size,
         runtime_l2l_chunk_size=runtime_overrides.l2l_chunk_size,
         runtime_traversal_config=runtime_overrides.traversal_config,
         record_retry=lambda _: None,
-        far_pairs_by_gear=far_pairs_by_gear,
         adaptive_order=impl.adaptive_order,
         p_gears=impl.p_gears,
     )
@@ -321,7 +305,6 @@ def main() -> None:
     fmm = FastMultipoleMethod(
         preset=str(ARGS.preset),
         basis=basis,
-        runtime_path=str(ARGS.runtime_path).strip().lower(),
         theta=float(ARGS.theta),
         softening=1.0e-3,
         adaptive_order=bool(ARGS.adaptive_order),

@@ -33,7 +33,7 @@ from jaxtyping import Array, Bool, Float, Int, jaxtyped
 from yggdrax.interactions import NodeNeighborList
 from yggdrax.tree import Tree
 
-from jaccpot._env import env_flag, env_reject_removed
+from jaccpot._env import env_flag
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.downward.local_expansions import (
     LocalExpansionData,
@@ -1738,7 +1738,6 @@ def _evaluate_local_expansions_for_target_particles(
 
     if expansion_basis == "solidfmm":
         offsets_solid = centers - target_positions
-        offsets_complex = offsets_solid
 
         # Real (Dehnen no-sqrt2) locals, evaluated with the real L2P operator.
         if int(max_acc_derivative_order) <= 0:
@@ -1746,7 +1745,7 @@ def _evaluate_local_expansions_for_target_particles(
                 lambda coeff_row, offset_row: evaluate_local_real_with_grad(
                     coeff_row, offset_row, order=int(order)
                 )
-            )(coeffs, offsets_complex)
+            )(coeffs, offsets_solid)
             if return_potential:
                 return grads, pots, None
             return grads, None, None
@@ -1761,7 +1760,7 @@ def _evaluate_local_expansions_for_target_particles(
                 )
             ),
             in_axes=(0, 0),
-        )(coeffs, offsets_complex)
+        )(coeffs, offsets_solid)
         potentials = tower[0][:, 0, 0]
         gradients = tower[1][:, 0, :]
         derivatives_real: list[Array] = []
@@ -2163,8 +2162,8 @@ def _evaluate_local_expansions_for_particles(
         p = int(order)
 
         # delta = center - eval_point (the Dehnen convention)
-        offsets_complex = centers[:, None, :] - leaf_positions
-        offsets_complex = jnp.where(valid[..., None], offsets_complex, 0.0)
+        offsets = centers[:, None, :] - leaf_positions
+        offsets = jnp.where(valid[..., None], offsets, 0.0)
 
         # Real (Dehnen no-sqrt2) locals: compute grad_field / potentials /
         # derivative_fields with the real L2P operators, then fall through to the
@@ -2194,7 +2193,7 @@ def _evaluate_local_expansions_for_particles(
 
             grad_field, potentials = jax.vmap(evaluate_leaf_real)(
                 coeffs,
-                offsets_complex,
+                offsets,
                 valid,
             )
             derivative_fields: list[Array] = []
@@ -2233,20 +2232,11 @@ def _evaluate_local_expansions_for_particles(
                 evaluate_leaf_real_with_derivatives
             )(
                 coeffs,
-                offsets_complex,
+                offsets,
                 valid,
             )
             derivative_fields = list(derivative_fields_tuple)
 
-        # JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN=1 reshaped the leaf block into
-        # particle order instead of scattering it, which is only right when every
-        # leaf is full and in order; removed in the 2026-10 cleanup (X5)
-        env_reject_removed(
-            "JACCPOT_LOCAL_EVAL_DIRECT_LEAF_FLATTEN",
-            ("1", "true", "yes", "on"),
-            phase="X5",
-            default="the scatter by particle index",
-        )
         gradients = _scatter_vectors(
             jnp.zeros_like(positions),
             safe_idx,

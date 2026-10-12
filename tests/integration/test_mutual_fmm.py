@@ -724,9 +724,10 @@ def test_pallas_m2l_kernel_matches_pure_jax_in_interpret_mode():
     assert _momentum_residual(a_pallas, masses) < 1e-13
 
 
-def test_the_removed_zcore_lane_raises(monkeypatch):
-    """``JACCPOT_MUTUAL_M2L=zcore`` selected the Pallas z-core lane, removed in the
-    2026-10 cleanup (X5): refused by name rather than run as another lane."""
+def test_an_unknown_mutual_m2l_lane_raises(monkeypatch):
+    """``JACCPOT_MUTUAL_M2L`` takes ``auto``, ``jax`` or ``fused``; anything else
+    raises rather than run another lane. ``zcore`` selected the Pallas z-core lane,
+    removed in the 2026-10 cleanup (X5); since Z-b it is just an unknown value."""
     positions, masses, topology, _ = _build(256, theta=1.0, order=4, leaf_size=8)
     assert topology.num_far_pairs > 0
     pallas_state = build_mutual_state(
@@ -737,7 +738,7 @@ def test_the_removed_zcore_lane_raises(monkeypatch):
         softening_kernel="plummer",
     )
     monkeypatch.setenv("JACCPOT_MUTUAL_M2L", "zcore")
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+    with pytest.raises(ValueError, match="must be one of 'auto', 'jax', 'fused'"):
         mutual_accelerations(pallas_state, positions, masses)
 
 

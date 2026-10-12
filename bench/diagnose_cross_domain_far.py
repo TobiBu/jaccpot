@@ -148,7 +148,6 @@ LEAF = 8
 G = 1.0
 SOFTENING = 0.02
 MAC = "dehnen"
-ROTATION = "solidfmm"
 
 
 def direct_sum(targets, sources, source_masses):
@@ -578,9 +577,7 @@ def isolate_cross_far(per, thetas, interpenetrating, com_only_extents, target_de
             right_child,
             node_levels,
             order=ORDER,
-            rotation=ROTATION,
             total_nodes=total_nodes,
-            basis_mode="real",
             num_levels=None,
         )
         expansion = LocalExpansionData(

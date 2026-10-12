@@ -156,9 +156,7 @@ def test_l2l_levels_interpret_matches_the_cascade(tree_data, order):
         topo.right_child,
         topo.node_level,  # donated by its jit
         order=order,
-        rotation="solidfmm",
         total_nodes=total,
-        basis_mode="real",
         num_levels=num_levels - 1,
     )
     got = l2l_real_levels_lanes_pallas(

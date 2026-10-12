@@ -22,11 +22,10 @@ __all__ = [
     "PackedAccelerationDerivatives",
 ]
 
-#: ``"cartesian"`` and ``"complex"`` stay only so that a typed caller naming them
-#: reaches the engine's migration error rather than a type-check error: the Cartesian
-#: and complex bases were removed in the 2026-10 cleanup (docs/cleanup_2026-10.md, K
-#: and C). ``"solidfmm"`` is the real basis.
-ExpansionBasis = Literal["cartesian", "solidfmm", "complex"]
+#: The engine's expansion family: ``"solidfmm"``, the spherical harmonics, whose
+#: only basis is the real one (the Cartesian and complex bases were removed in the
+#: 2026-10 cleanup, docs/cleanup_2026-10.md, K and C).
+ExpansionBasis = Literal["solidfmm"]
 PackedAccelerationDerivatives = tuple[Array, ...]
 _STRICT_REFRESH_DETAIL_DIAG_MODES = frozenset(
     {

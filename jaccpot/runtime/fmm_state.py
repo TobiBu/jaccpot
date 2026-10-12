@@ -34,7 +34,7 @@ from yggdrax.interactions import (
 from yggdrax.tree import Tree
 
 from jaccpot._jax_compat import Tracer
-from jaccpot.downward.local_expansions import LocalExpansionData, TreeDownwardData
+from jaccpot.downward.local_expansions import TreeDownwardData
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
 from ..config import FMMPreset
@@ -235,10 +235,6 @@ class TraversalExecutionConfig:
     traversal_config : Optional[DualTreeTraversalConfig]
         Full dual-tree traversal override; ``None`` builds one from the fields
         above.
-    use_dense_interactions : bool
-        Always ``False``, and read by nothing: the dense interaction buffers were
-        removed with the Cartesian basis in the 2026-10 cleanup (K). Kept so the
-        resolved config keeps its shape (phase Z).
     jit_tree : Union[bool, Literal['auto']]
         Compile the tree build. ``"auto"`` decides per call, which is why this is
         not a plain ``bool``.
@@ -251,7 +247,6 @@ class TraversalExecutionConfig:
     max_pair_queue: Optional[int]
     pair_process_block: Optional[int]
     traversal_config: Optional[DualTreeTraversalConfig]
-    use_dense_interactions: bool
     jit_tree: Union[bool, Literal["auto"]]
     jit_traversal: bool
 
@@ -428,12 +423,9 @@ class _RuntimeExecutionOverrides(NamedTuple):
         M2L chunk override; ``None`` keeps the engine's.
     l2l_chunk_size : Optional[int]
         L2L chunk override; ``None`` keeps the engine's.
-    farfield_mode : str
-        Resolved far-field interaction mode. Always ``"pair_grouped"``, the flat
-        pair list, since the grouped far field went in the 2026-10 cleanup (X3).
     center_mode : str
         Expansion-centre mode for the upward sweep. Always ``"com"`` since the
-        AABB expansion centres went in the same cleanup.
+        AABB expansion centres went in the 2026-10 cleanup (X3).
     refine_local_override : Optional[bool]
         Forces local refinement on or off; ``None`` keeps the tree config's.
     """
@@ -441,7 +433,6 @@ class _RuntimeExecutionOverrides(NamedTuple):
     traversal_config: Optional[DualTreeTraversalConfig]
     m2l_chunk_size: Optional[int]
     l2l_chunk_size: Optional[int]
-    farfield_mode: str
     center_mode: str
     refine_local_override: Optional[bool]
 
@@ -544,9 +535,8 @@ def _resolve_fmm_config(
     Raises
     ------
     ValueError
-        If ``tree_build_mode`` names no known mode (``"fixed_depth"`` with a
-        removal message), ``target_leaf_particles`` is below 1, or ``jit_tree``
-        is neither a bool nor ``"auto"``.
+        If ``tree_build_mode`` names no known mode, ``target_leaf_particles`` is
+        below 1, or ``jit_tree`` is neither a bool nor ``"auto"``.
     """
     preset_name = preset_config.name if preset_config is not None else None
 
@@ -555,11 +545,6 @@ def _resolve_fmm_config(
         preset_config.tree_build_mode if preset_config else None,
         "lbvh",
     )
-    if tree_mode == "fixed_depth":
-        raise ValueError(
-            "tree_build_mode='fixed_depth' was removed in the 2026-10 cleanup (X4); "
-            "use 'lbvh' or 'static_radix'"
-        )
     valid_tree_modes = {"lbvh", "adaptive", "static_radix"}
     if tree_mode not in valid_tree_modes:
         allowed_modes = sorted(valid_tree_modes)
@@ -633,9 +618,6 @@ def _resolve_fmm_config(
             preset_config.traversal_config if preset_config else None,
             None,
         ),
-        # Removed with the Cartesian basis (2026-10 cleanup, K); the engine
-        # refuses `use_dense_interactions=True`, and no preset sets it.
-        use_dense_interactions=False,
         jit_tree=jit_tree_cfg,
         jit_traversal=bool(
             _resolve_optional(
@@ -897,7 +879,7 @@ def _restore_static_leaf_size(tree: Tree) -> Tree:
     place the FMM runtime obtains a tree, so one coercion covers every jitted
     entry point that later sees the prepared state.
 
-    Since the 2026-10 cleanup (X2) the single-GPU solver refuses
+    Since the 2026-10 cleanup (X2) the single-GPU solver takes no
     ``tree_type="octree"``, and on 2026-10-07 no radix, kd-tree or octree build
     through this function handed it an array leaf size, so this is now insurance
     rather than a live fix.
@@ -1247,9 +1229,6 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
         Topology signature, when one was computed.
     upward : TreeUpwardData
         Upward-sweep result.
-    locals_template : Optional[LocalExpansionData]
-        Zero-filled locals matching the tree's shape, kept so the downward sweep
-        can allocate without re-deriving the layout.
     leaf_capacity_overflow : Optional[Array]
         Cell-leaf partitions only; see :class:`_TreeBuildArtifacts`.
     walk_geometry : Optional[tuple]
@@ -1269,7 +1248,6 @@ class _PrepareStateTreeUpwardArtifacts(NamedTuple):
     leaf_parameter: int
     topology_key: Optional[str]
     upward: TreeUpwardData
-    locals_template: Optional[LocalExpansionData]
     leaf_capacity_overflow: Optional[Array] = None
     walk_geometry: Optional[tuple] = None
 

@@ -7,7 +7,7 @@ the ``large_n_gpu`` preset to ``test_large_n_fast_path_policy.py``, jerk and the
 time derivatives to ``core/test_time_derivatives.py``, configuration flow to
 ``runtime/test_engine_config_resolution.py``, the upward's default leaf batch to
 ``core/test_real_upward_sweep.py``, and the removed options and shims to
-``test_removed_options.py``.
+``test_removed_options.py`` (deleted with the shims in Z-b).
 """
 
 import jax
@@ -66,7 +66,6 @@ def test_solver_matches_expanse_fast_path():
         preset=FMMPreset.FAST,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(mode="pair_grouped"),
             nearfield=NearFieldConfig(mode="bucketed"),
         ),
     )
@@ -77,7 +76,6 @@ def test_solver_matches_expanse_fast_path():
         working_dtype=jnp.float32,
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(mode="pair_grouped", rotation="solidfmm"),
             nearfield=NearFieldConfig(mode="bucketed"),
             mac_type="dehnen",
         ),
@@ -393,8 +391,6 @@ def test_prepare_state_streamed_can_drop_interaction_storage():
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
             farfield=FarFieldConfig(
-                mode="auto",
-                grouped_interactions=False,
                 streamed_far_pairs=True,
             ),
             runtime=RuntimePolicyConfig(
@@ -426,8 +422,6 @@ def test_prepare_state_streamed_uses_compact_far_pairs_without_node_interactions
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
             farfield=FarFieldConfig(
-                mode="pair_grouped",
-                grouped_interactions=False,
                 streamed_far_pairs=True,
                 mixed_order=False,
             ),
@@ -481,19 +475,6 @@ def test_prepare_state_non_streamed_without_retention_omits_interactions():
     assert acc.shape == positions.shape
 
 
-def test_prepare_state_does_not_retain_duplicate_component_matrix():
-    positions, masses = _sample_problem(n=64)
-    fmm = FastMultipoleMethod(
-        preset=FMMPreset.FAST,
-        basis="solidfmm",
-    )
-
-    state = fmm.prepare_state(positions, masses, leaf_size=16, max_order=2)
-    assert state.upward.multipoles.component_matrix is None
-    acc = fmm.evaluate_prepared_state(state)
-    assert acc.shape == positions.shape
-
-
 def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
     positions, masses = _sample_problem(n=64)
     fmm = ExpanseFMM(
@@ -503,9 +484,7 @@ def test_prepare_state_streamed_without_adaptive_skips_traversal_result_build():
         basis="solidfmm",
         advanced=FMMAdvancedConfig(
             farfield=FarFieldConfig(
-                grouped_interactions=False,
                 streamed_far_pairs=True,
-                rotation="solidfmm",
             ),
             runtime=RuntimePolicyConfig(
                 retain_traversal_result=False,
@@ -544,7 +523,6 @@ def test_prepare_state_adaptive_order_requests_compact_far_pairs():
         adaptive_order=True,
         p_gears=(2, 3),
         advanced=FMMAdvancedConfig(
-            farfield=FarFieldConfig(rotation="solidfmm"),
             runtime=RuntimePolicyConfig(retain_traversal_result=False),
             mac_type="dehnen",
         ),

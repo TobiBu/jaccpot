@@ -384,10 +384,7 @@ class SweepsMixin(_EngineBase):
             real_multipoles = NodeMultipoleData(
                 order=int(real_upward.multipoles.order),
                 centers=real_upward.multipoles.centers,
-                moments=None,
                 packed=real_upward.multipoles.packed,
-                component_matrix=None,
-                source_motion_packed=None,
             )
             return TreeUpwardData(
                 geometry=geometry_real,
@@ -417,7 +414,6 @@ class SweepsMixin(_EngineBase):
         retry_logger: Optional[Callable[[DualTreeRetryEvent], None]] = None,
         dehnen_radius_scale: Optional[float] = None,
         far_pairs_coo: Optional[_FarPairCOO] = None,
-        far_pairs_by_gear: Optional[tuple[tuple[Array, Array], ...]] = None,
         adaptive_order: Optional[bool] = None,
         p_gears: Optional[tuple[int, ...]] = None,
         n_targets: Optional[int] = None,
@@ -459,8 +455,6 @@ class SweepsMixin(_EngineBase):
         far_pairs_coo : Optional[_FarPairCOO]
             Pre-built COO far pairs, which take precedence over
             ``interactions``.
-        far_pairs_by_gear : Optional[tuple[tuple[Array, Array], ...]]
-            Per-gear far-pair lists for the adaptive-order path.
         adaptive_order : Optional[bool]
             Choose the order per interaction; ``None`` takes the engine's.
         p_gears : Optional[tuple[int, ...]]
@@ -551,13 +545,10 @@ class SweepsMixin(_EngineBase):
                 interactions=interactions,
                 m2l_chunk_size=m2l_chunk_size,
                 l2l_chunk_size=l2l_chunk_size,
-                complex_rotation=self.complex_rotation,
-                basis_mode=self._solidfmm_basis_mode(),
                 m2l_impl=self.m2l_impl,
                 retry_logger=retry_callback,
                 traversal_config=config,
                 far_pairs_coo=far_pairs_coo,
-                far_pairs_by_gear=far_pairs_by_gear,
                 adaptive_order=adaptive_order_val,
                 p_gears=p_gears_val,
                 dehnen_radius_scale=dehnen_scale_val,

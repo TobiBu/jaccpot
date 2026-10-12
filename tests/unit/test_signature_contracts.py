@@ -1797,8 +1797,6 @@ def _m2l_chunk_args():
         "tgt_idx": idx,
         "valid": jnp.ones((2,), dtype=bool),
         "order": 2,
-        "basis_mode": "real",
-        "rotation": "solidfmm",
         "m2l_impl": "rot_scale",
         "out_dtype": _float(),
     }

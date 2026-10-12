@@ -1,14 +1,14 @@
-"""Helpers of ``strict_run_v2``'s carry: unaliasing a donated pytree, the fresh-rebuild flag."""
+"""A helper of ``strict_run_v2``'s carry: unaliasing a donated pytree.
+
+(The fresh-rebuild flag it also pinned was always on, and went in the 2026-10
+cleanup, Z-b.)
+"""
 
 from __future__ import annotations
 
 import jax.numpy as jnp
-import pytest
 
-from jaccpot.runtime.fmm_strict_run import (
-    _fresh_compact_pair_rebuild_enabled,
-    _unaliased,
-)
+from jaccpot.runtime.fmm_strict_run import _unaliased
 
 
 def test_a_repeated_array_is_copied_once_seen():
@@ -29,31 +29,3 @@ def test_an_unaliased_tree_is_returned_as_is():
     tree = (jnp.zeros(2), jnp.ones(2))
     out = _unaliased(tree)
     assert out[0] is tree[0] and out[1] is tree[1]
-
-
-@pytest.mark.parametrize(
-    "fresh, unsafe, removed",
-    [
-        (None, None, None),
-        ("on", "0", None),
-        ("1", None, None),
-        # the stale reuse and the far list in the carry: removed in the 2026-10
-        # cleanup (X6), refused by name rather than read as the default
-        ("0", None, "FRESH_COMPACT_PAIR_REBUILD"),
-        ("1", "1", "ALLOW_UNSAFE_COMPACT_PAIR_REUSE"),
-    ],
-)
-def test_fresh_rebuild_flag(monkeypatch, fresh, unsafe, removed):
-    for name, value in (
-        ("JACCPOT_STATIC_STRICT_FUSED_FRESH_COMPACT_PAIR_REBUILD", fresh),
-        ("JACCPOT_STATIC_STRICT_FUSED_ALLOW_UNSAFE_COMPACT_PAIR_REUSE", unsafe),
-    ):
-        if value is None:
-            monkeypatch.delenv(name, raising=False)
-        else:
-            monkeypatch.setenv(name, value)
-    if removed is None:
-        assert _fresh_compact_pair_rebuild_enabled() is True
-    else:
-        with pytest.raises(ValueError, match=rf"{removed}=.*\(X6\)"):
-            _fresh_compact_pair_rebuild_enabled()

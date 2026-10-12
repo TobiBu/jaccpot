@@ -134,10 +134,9 @@ For the currently supported public orders:
 - analytic far-field source-motion jerk via source-motion multipole/local
   contractions (`dM -> dL`) plus convective far-field and exact near-field terms
 - no finite-difference solves
-- `jerk_fd_dt` is accepted and unused, with no warning and no check on its
-  value: it stepped the finite-difference fallback of `basis="cartesian"`, which
-  was removed in the 2026-10 cleanup (K). It stays on all four jerk signatures
-  because callers pass it (nornax's jaccpot adapter does, on every call)
+- no `jerk_fd_dt`: it stepped the finite-difference fallback of
+  `basis="cartesian"`, which was removed in the 2026-10 cleanup (K); the keyword
+  left the four jerk signatures in Z-b, once nornax's adapter stopped passing it
 - slower than `fast_approx`, but typically faster than finite-difference
   accurate-mode equivalents
 - builds the source-motion multipoles `d^k M / dt^k` directly for the prepared

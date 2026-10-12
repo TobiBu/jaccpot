@@ -288,12 +288,10 @@ elif ARGS.caps == "unnamed":
 if ARGS.library_defaults:
     # What Odisseo's env block and the harness set that the library now defaults to
     # (D2). The caps, the payload budget and the index precision stay the harness's.
+    # (The GPU_MODE / FUSED_MODE / DEVICE_ONLY / DISALLOW_HOST_SEGMENT_FALLBACK /
+    # REQUIRE_EXACT_CAP_PROFILE_MATCH switches the harness also sets are read
+    # nowhere since the 2026-10 cleanup, X4 and X6.)
     for v in (
-        "JACCPOT_STATIC_STRICT_GPU_MODE",
-        "JACCPOT_STATIC_STRICT_FUSED_MODE",
-        "JACCPOT_STATIC_STRICT_REQUIRE_EXACT_CAP_PROFILE_MATCH",
-        "JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY",
-        "JACCPOT_STATIC_STRICT_FUSED_DISALLOW_HOST_SEGMENT_FALLBACK",
         "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS",
         "JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET",
         "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS",
@@ -322,7 +320,6 @@ import jaccpot.pallas.mutual_walk_pallas as _mwp  # noqa: E402
 import jaccpot.runtime._interaction_cache as _ic  # noqa: E402
 from jaccpot import FastMultipoleMethod, TraversalOverrides  # noqa: E402
 from jaccpot.config import (  # noqa: E402
-    FarFieldConfig,
     FMMAdvancedConfig,
     NearFieldConfig,
     RuntimePolicyConfig,
@@ -647,7 +644,6 @@ def _leaf_capacity(pos: np.ndarray) -> tuple[int, int]:
 def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
     return FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=ARGS.theta,
         G=1.0,
@@ -663,7 +659,6 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
                 leaf_capacity=leaf_cap,
                 cell_min_level=ARGS.cell_min_level or None,
             ),
-            farfield=FarFieldConfig(mode="auto"),
             nearfield=NearFieldConfig(mode="auto"),
             runtime=(
                 RuntimePolicyConfig(

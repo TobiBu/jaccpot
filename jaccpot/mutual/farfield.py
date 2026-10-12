@@ -111,8 +111,7 @@ def _m2l_lane(use_pallas: bool, interpret: bool) -> str:
     The fused lane stays wired, differentiable and covered by the interpret
     tests; set ``JACCPOT_MUTUAL_M2L=fused`` to force it on hardware and reproduce
     the A/B. The z-core lane (``zcore``: Pallas only for the z-translation,
-    between the two pure-JAX rotations) was removed in the 2026-10 cleanup (X5)
-    and raises.
+    between the two pure-JAX rotations) was removed in the 2026-10 cleanup (X5).
 
     Parameters
     ----------
@@ -130,17 +129,12 @@ def _m2l_lane(use_pallas: bool, interpret: bool) -> str:
     Raises
     ------
     ValueError
-        If ``JACCPOT_MUTUAL_M2L`` is ``"zcore"`` (removed) or anything other than
-        ``"auto"``, ``"jax"`` or ``"fused"``.
+        If ``JACCPOT_MUTUAL_M2L`` is anything other than ``"auto"``, ``"jax"`` or
+        ``"fused"``.
     """
     if not use_pallas:
         return "jax"
     choice = os.environ.get("JACCPOT_MUTUAL_M2L", "auto").strip().lower()
-    if choice == "zcore":
-        raise ValueError(
-            "JACCPOT_MUTUAL_M2L='zcore' was removed in the 2026-10 cleanup (X5); "
-            "the default is 'auto'. Unset the variable, or choose 'fused' or 'jax'."
-        )
     if choice not in {"auto", "jax", "fused"}:
         raise ValueError(
             "JACCPOT_MUTUAL_M2L must be one of 'auto', 'jax', 'fused'; "

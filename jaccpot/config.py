@@ -6,10 +6,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Literal, Optional
 
-FARFIELD_MODE_DOC = (
-    "For large_n_gpu production, far-field execution is canonicalized to "
-    "'pair_grouped'."
-)
 NEARFIELD_MODE_DOC = (
     "For large_n_gpu production, near-field execution is canonicalized to "
     "'bucketed'."
@@ -19,40 +15,10 @@ MEMORY_OBJECTIVE_DOC = (
     "'minimum_memory'."
 )
 
-#: ``"cartesian"`` and ``"complex"`` stay in the alias only so that an old config
-#: naming them still type-checks, and its caller sees :data:`_CARTESIAN_BASIS_REMOVED`
-#: / :data:`_COMPLEX_BASIS_REMOVED` rather than a type-check error: the Cartesian
-#: and complex bases were removed in the 2026-10 cleanup (docs/cleanup_2026-10.md, K
-#: and C). ``"solidfmm"`` names the spherical-harmonic family and resolves to the
-#: real basis, like ``"real"``.
-Basis = Literal["cartesian", "solidfmm", "complex", "real"]
-#: The one message every spelling of the removed Cartesian basis raises with: the
-#: facade's ``basis=`` and legacy ``expansion_basis=``, a ``BasisInterface`` whose
-#: ``runtime_expansion_basis`` is ``"cartesian"``, the engine's
-#: ``expansion_basis=`` and ``DistributedFMMConfig(basis=...)``.
-_CARTESIAN_BASIS_REMOVED = (
-    "basis='cartesian' was removed in the 2026-10 cleanup (K); see "
-    "docs/cleanup_2026-10.md. Use basis='real' (the default)."
-)
-#: The one message every spelling of the removed complex spherical-harmonic basis
-#: raises with (2026-10 cleanup, C): the facade's ``basis="complex"`` and legacy
-#: ``expansion_basis="complex"``, a basis object whose ``name`` is not ``"real"``
-#: (or whose ``runtime_expansion_basis`` is ``"complex"``), the engine's
-#: ``expansion_basis="complex"`` and ``basis_impl``, and
-#: ``DistributedFMMConfig(basis=...)`` naming ``"complex"`` or ``"solidfmm"`` (the
-#: distributed driver's name for its complex far field). The facade and the engine
-#: resolve ``"solidfmm"`` to the real basis instead.
-_COMPLEX_BASIS_REMOVED = (
-    "basis='complex' was removed in the 2026-10 cleanup (C); see "
-    "docs/cleanup_2026-10.md. Use basis='real' (the default) -- it agrees with the "
-    "complex basis to round-off."
-)
-#: ``"class_major"`` stays in the alias only so that an old config naming it still
-#: constructs (and type-checks); the solver then raises, because the class-major far
-#: field was removed with the grouped one in the 2026-10 cleanup
-#: (docs/cleanup_2026-10.md, X3). ``"auto"`` and ``"pair_grouped"`` both run the flat
-#: far-pair list.
-FarFieldMode = Literal["auto", "pair_grouped", "class_major"]
+#: ``"solidfmm"`` names the spherical-harmonic family and resolves to the real
+#: basis, like ``"real"`` (the Cartesian and complex bases were removed in the
+#: 2026-10 cleanup, docs/cleanup_2026-10.md, K and C).
+Basis = Literal["solidfmm", "real"]
 NearFieldMode = Literal["auto", "baseline", "bucketed"]
 GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
 #: How the runtime should trade peak memory against throughput when it resolves
@@ -60,11 +26,6 @@ GradNearFieldLane = Literal["auto", "bucketed", "fast_lane"]
 #: ``"minimum_memory"`` is what ``FMMPreset.LARGE_N_GPU`` canonicalizes to, and is
 #: what makes galaxy-scale runs fit. Public: exported from ``jaccpot``.
 MemoryObjective = Literal["balanced", "throughput", "minimum_memory"]
-#: ``"octree"`` stays in the alias only so that an old config naming it still
-#: constructs (and type-checks); the solver then raises, because the octree
-#: execution backend was removed in the 2026-10 cleanup (docs/cleanup_2026-10.md,
-#: X2). ``"auto"`` and ``"radix"`` both run the radix backend.
-FMMExecutionBackend = Literal["auto", "radix", "octree"]
 
 #: Multipole acceptance criteria a **caller** may ask for -- a strict superset of
 #: yggdrax's ``MACType``.
@@ -147,12 +108,12 @@ class TreeConfig:
     ----------
     tree_type : Optional[str]
         Yggdrax tree family, e.g. ``"radix"`` (the production default) or
-        ``"kdtree"``. ``"octree"`` is refused by the single-GPU solver since the
-        octree execution backend was removed in the 2026-10 cleanup.
+        ``"kdtree"``. Not ``"octree"``: the single-GPU solver's octree path went
+        with the octree execution backend in the 2026-10 cleanup.
     mode : Optional[str]
         Builder selector: ``"lbvh"`` or ``"static_radix"`` (the ``large_n_gpu``
-        preset's default, required by the fused strict lane). ``"fixed_depth"``
-        was removed in the 2026-10 cleanup (X4) and raises.
+        preset's default, required by the fused strict lane). (``"fixed_depth"``
+        was removed in the 2026-10 cleanup, X4.)
     leaf_target : Optional[int]
         Desired particles per leaf. It sized the removed fixed-depth builder; a
         radix build's leaves are set by the ``leaf_size`` argument instead.
@@ -209,29 +170,6 @@ class FarFieldConfig:
 
     Attributes
     ----------
-    grouped_interactions : Optional[bool]
-        Removed in the 2026-10 cleanup (docs/cleanup_2026-10.md, X3). ``None`` and
-        ``False`` construct; ``True`` raises at solver construction. Grouping put
-        M2L pairs into displacement classes so one rotation block served a whole
-        class; it needed geometric (AABB) expansion centres, and it was less
-        accurate than the flat pair list, because it rotated by one representative
-        lattice displacement per class rather than by each pair's own direction.
-        That residual did not shrink with expansion order. Measured relative L2
-        versus a direct sum (``preset="accurate"``, solidfmm, leaf 8, theta 0.5,
-        uniform N=256), orders 2 / 4 / 6:
-
-        ==============  =========  =========  =========
-        mode            p=2        p=4        p=6
-        ==============  =========  =========  =========
-        default         7.230e-04  8.148e-05  1.128e-05
-        grouped         8.927e-04  2.049e-04  1.887e-04
-        ==============  =========  =========  =========
-    mode : FarFieldMode
-        ``"auto"`` or ``"pair_grouped"``; both run the flat far-pair list (the
-        name is historical). ``"class_major"`` raises at solver construction: it
-        was the grouped far field's other batching and went with it (X3).
-    rotation : Optional[str]
-        M2L rotation implementation, e.g. ``"solidfmm"`` or ``"cached"``.
     m2l_chunk_size : Optional[int]
         Pairs per chunk in the chunked M2L ``lax.scan``. A memory/throughput knob;
         it bounds peak memory rather than changing the result.
@@ -251,9 +189,6 @@ class FarFieldConfig:
         memory); **required** to differentiate the large-N path.
     """
 
-    grouped_interactions: Optional[bool] = None
-    mode: FarFieldMode = "auto"
-    rotation: Optional[str] = None
     m2l_chunk_size: Optional[int] = None
     l2l_chunk_size: Optional[int] = None
     streamed_far_pairs: Optional[bool] = None
@@ -396,8 +331,8 @@ class RuntimePolicyConfig:
     Notes
     -----
     For ``preset="large_n_gpu"``, runtime policy is canonicalized to the production
-    low-memory fast path (``minimum_memory`` + streamed ``pair_grouped`` + bucketed
-    near field), so overrides that contradict that profile are overridden back.
+    low-memory fast path (``minimum_memory`` + streamed far pairs + bucketed near
+    field), so overrides that contradict that profile are overridden back.
 
     ``traversal_config`` accepts a :class:`TraversalOverrides` (or a ``dict`` with
     the same keys) for a field-by-field merge onto the preset's resolved capacities,
@@ -408,10 +343,6 @@ class RuntimePolicyConfig:
 
     Attributes
     ----------
-    execution_backend : FMMExecutionBackend
-        ``"auto"`` or ``"radix"``; both run the radix backend. ``"octree"`` still
-        constructs, but the solver raises on it: the octree execution backend was
-        removed in the 2026-10 cleanup.
     host_refine_mode : str
         Whether leaf refinement runs on the host, on device, or by policy.
     fail_fast : bool
@@ -441,17 +372,6 @@ class RuntimePolicyConfig:
         Keep the resolved M2L interaction list on the prepared state.
     prepare_stage_memory_split_enabled : Optional[bool]
         Split the prepare stage to lower peak memory at some throughput cost.
-    autotune_m2l_chunk : bool
-        Ignored since the 2026-10 cleanup (X4), which removed the M2L chunk
-        autotune it switched on. Kept so old configs construct; it goes in a
-        later phase.
-    precompute_grouped_class_segments : Optional[bool]
-        Ignored since the 2026-10 cleanup (X3), which removed the grouped far
-        field whose segment tables it built. Kept so old configs construct; it
-        goes in a later phase.
-    grouped_schedule_budget_bytes : Optional[int]
-        Ignored since the 2026-10 cleanup (X3), like
-        ``precompute_grouped_class_segments``.
     nearfield_schedule_item_cap : Optional[int]
         Item cap above which the near-field scatter schedules fall back to being
         recomputed per evaluation.
@@ -469,7 +389,6 @@ class RuntimePolicyConfig:
         ``fixed_max_leaf_size``.
     """
 
-    execution_backend: FMMExecutionBackend = "auto"
     host_refine_mode: str = "auto"
     fail_fast: bool = False
     jit_tree: Optional[bool] = None
@@ -483,9 +402,6 @@ class RuntimePolicyConfig:
     retain_traversal_result: bool = True
     retain_interactions: bool = True
     prepare_stage_memory_split_enabled: Optional[bool] = None
-    autotune_m2l_chunk: bool = False
-    precompute_grouped_class_segments: Optional[bool] = None
-    grouped_schedule_budget_bytes: Optional[int] = None
     nearfield_schedule_item_cap: Optional[int] = None
     upward_leaf_batch_size: Optional[int] = None
     fixed_order: Optional[int] = None
@@ -651,10 +567,8 @@ class FMMAdvancedConfig:
 __all__ = [
     "Basis",
     "FMMAdvancedConfig",
-    "FMMExecutionBackend",
     "FMMPreset",
     "FarFieldConfig",
-    "FarFieldMode",
     "GradConfig",
     "GradNearFieldLane",
     "MACTypeInput",

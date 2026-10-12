@@ -109,7 +109,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--basis",
-        choices=("real", "solidfmm", "complex"),
+        choices=("real", "solidfmm"),
         default="real",
         help="jaccpot basis to benchmark.",
     )

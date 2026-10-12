@@ -99,7 +99,6 @@ def main() -> int:
     leaf_capacity = 1 << int(np.ceil(np.log2(1.25 * k)))
     solver = FastMultipoleMethod(
         preset="large_n_gpu",
-        runtime_path="large_n",
         basis="real",
         theta=args.theta,
         G=1.0,
@@ -112,7 +111,7 @@ def main() -> int:
                 leaf_partition="cells",
                 leaf_capacity=leaf_capacity,
             ),
-            farfield=FarFieldConfig(mode="auto", retain_far_pairs_for_grad=True),
+            farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
             nearfield=NearFieldConfig(mode="auto"),
             runtime=runtime_cfg,
             mac_type="dehnen",

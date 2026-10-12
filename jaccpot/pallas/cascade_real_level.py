@@ -902,10 +902,9 @@ def l2l_real_levels_reverse_pallas(
 def _cascade_lanes_k() -> int:
     """``JACCPOT_CASCADE_LANES_K``: nodes per program of the lane forward kernels.
 
-    ``JACCPOT_CASCADE_KERNEL=level`` selected the one-program-per-node level
-    forward kernels, which the 2026-10 cleanup (X5) removed; it raises a
-    ``ValueError`` (:func:`jaccpot._env.env_reject_removed`). ``lanes`` (the
-    default) is accepted, and any other value warns and is ignored.
+    The lane kernels are the only forward since the 2026-10 cleanup (X5) removed
+    the one-program-per-node level kernels (``JACCPOT_CASCADE_KERNEL=level``, no
+    longer read).
 
     Returns
     -------
@@ -914,12 +913,8 @@ def _cascade_lanes_k() -> int:
         :func:`~jaccpot.pallas.cascade_real_lanes.m2m_real_levels_lanes_pallas`
         and :func:`~jaccpot.pallas.cascade_real_lanes.l2l_real_levels_lanes_pallas`.
     """
-    from jaccpot._env import env_choice, env_int, env_reject_removed
+    from jaccpot._env import env_int
 
-    env_reject_removed(
-        "JACCPOT_CASCADE_KERNEL", ("level",), phase="X5", default="lanes"
-    )
-    env_choice("JACCPOT_CASCADE_KERNEL", "lanes", ("lanes",))
     return env_int("JACCPOT_CASCADE_LANES_K", 32, minimum=1)
 
 

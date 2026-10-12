@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from jaccpot._env import env_choice, env_int, env_reject_removed
+from jaccpot._env import env_choice, env_int
 from jaccpot._jax_compat import Tracer
 
 # `_read_large_n_env_config` is re-imported although only its memoising wrapper
@@ -1200,7 +1200,6 @@ def prepare_large_n_state(
     # signature change only -- the 880 lines below are untouched.
     bounds = request.bounds
     leaf_size = request.leaf_size
-    max_order = request.max_order
     theta_val = request.theta_val
     mac_type_val = request.mac_type_val
     refine_local_val = request.refine_local_val
@@ -1271,13 +1270,6 @@ def prepare_large_n_state(
     )
 
     stage_t0 = _now()
-    if allow_stateful_cache:
-        fmm._update_locals_template_cache_after_prepare(
-            locals_template=tree_artifacts.locals_template,
-            upward=tree_artifacts.upward,
-            max_order=int(max_order),
-        )
-
     retry_events_tuple = tuple(collected_retries)
     if allow_stateful_cache:
         fmm._recent_retry_events = retry_events_tuple
@@ -2113,12 +2105,6 @@ def evaluate_large_n_state(
         l2p_kernel = env_choice(
             "JACCPOT_L2P_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
         )
-        # the force returns to input order by a scatter (each sorted row to its
-        # input row); the gather through the inverse permutation
-        # (JACCPOT_FASTLANE_UNPERMUTE=gather) was removed in the 2026-10 cleanup (X5)
-        env_reject_removed(
-            "JACCPOT_FASTLANE_UNPERMUTE", ("gather",), phase="X5", default="scatter"
-        )
         if l2p_kernel == "auto":
             from jaccpot.pallas.cascade_real_level import (
                 pallas_cascade_level_supported,
@@ -2503,12 +2489,10 @@ def can_use_large_n_prepare_path(
 
     Notes
     -----
-    The lane is gated on the ``large_n_gpu`` preset alone. ``runtime_path`` is
-    accepted (``"auto"`` or ``"large_n"``) but no longer consulted here: an
-    explicit ``"large_n"`` used to open the lane under any preset and turn the
-    ``dehnen_theta`` decline into a raise. The preset's contract pins
-    ``runtime_path="large_n"`` anyway, so on that preset nothing changed; under
-    another preset the general path now runs (2026-10 cleanup, X4).
+    The lane is gated on the ``large_n_gpu`` preset alone. The engine's
+    ``runtime_path="large_n"`` used to open it under any preset too (and turn the
+    ``dehnen_theta`` decline into a raise); X4 of the 2026-10 cleanup stopped
+    consulting it, and Z-b removed it.
     """
 
     if str(getattr(fmm, "preset", "")).strip().lower() != "large_n_gpu":
@@ -2524,8 +2508,6 @@ def can_use_large_n_prepare_path(
     if bool(getattr(fmm, "adaptive_order", False)):
         return False
     if bool(getattr(fmm, "mixed_order_farfield", False)):
-        return False
-    if str(getattr(fmm, "complex_rotation", "")).strip().lower() != "solidfmm":
         return False
     if (
         bool(getattr(fmm, "_uses_per_node_effective_theta", None))

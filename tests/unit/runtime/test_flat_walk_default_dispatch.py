@@ -47,7 +47,6 @@ def _clean_env(monkeypatch):
         _FLAG,
         _NEAR_CAP,
         _FAR_CAP,
-        "JACCPOT_STATIC_STRICT_FUSED_TREECODE_WALK",
         "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS",
     ):
         monkeypatch.delenv(k, raising=False)

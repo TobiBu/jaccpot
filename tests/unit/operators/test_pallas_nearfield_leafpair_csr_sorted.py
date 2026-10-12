@@ -300,41 +300,12 @@ def test_source_flags_are_validated():
         )
     with pytest.raises(ValueError, match="power of two"):
         nearfield_leafpair_csr_sorted_direct_pallas(*args, source_tile=6, **common)
-    # the 2D-indexed operands and the prefetch without the runs: removed (X5)
-    for flags in ("alg", "g", "p", "ap"):
-        with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
+    # `g` (the 2D-indexed operands, removed in X5) is no letter of the flags now
+    for flags in ("alg", "g"):
+        with pytest.raises(ValueError, match="takes the letters a, l, p, r"):
             nearfield_leafpair_csr_sorted_direct_pallas(
                 *args, source_tile=4, source_flags=flags, **common
             )
-
-
-@pytest.mark.parametrize(
-    "var, value",
-    [
-        ("JACCPOT_NEARFIELD_TARGET_CLASSES", "4,8,16"),
-        ("JACCPOT_NEARFIELD_DIRECT_ROWS", "chunked"),
-    ],
-)
-def test_the_removed_layout_options_raise(var, value, monkeypatch):
-    """Per-class target launches and chunked rows were removed (2026-10 cleanup,
-    X5): setting either is refused by name rather than run as the default."""
-    c = _case(7, num_live=4, num_pad=0, W=4, n_dead=0, max_row=2)
-    monkeypatch.setenv(var, value)
-    with pytest.raises(ValueError, match=f"{var}.*removed in the 2026-10 cleanup"):
-        nearfield_leafpair_csr_sorted_direct_pallas(
-            c["pos"],
-            c["mass"],
-            c["starts"],
-            c["counts"],
-            c["nbr"],
-            c["offsets"],
-            c["row_counts"],
-            leaf_width=4,
-            softening_sq=jnp.float32(0.01),
-            G=jnp.float32(1.0),
-            chunk=2,
-            interpret=True,
-        )
 
 
 def test_the_default_is_the_tiled_kernel(monkeypatch):

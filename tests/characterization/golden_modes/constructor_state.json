@@ -54,7 +54,6 @@
   "_large_n_target_block_source_leaf_padded_shape": "()",
   "_last_force_scale_nodes": "None",
   "_last_force_scale_particles": "None",
-  "_locals_template": "None",
   "_prepare_stage_memory_split_env_override": "None",
   "_prepared_state_cache_key": "None",
   "_prepared_state_cache_masses": "None",
@@ -116,11 +115,6 @@
   "_refresh_timing_tree_build_seconds": "0.0",
   "_refresh_timing_tree_upward_seconds": "0.0",
   "_refresh_timing_upward_compute_seconds": "0.0",
-  "_refresh_timing_upward_geometry_seconds": "0.0",
-  "_refresh_timing_upward_m2m_seconds": "0.0",
-  "_refresh_timing_upward_mass_moments_seconds": "0.0",
-  "_refresh_timing_upward_p2m_seconds": "0.0",
-  "_refresh_timing_upward_source_motion_seconds": "0.0",
   "_static_radix_far_pair_count": "0",
   "_static_radix_l2l_edge_count": "0",
   "_static_radix_m2l_chunk_count": "0",
@@ -183,15 +177,12 @@
   "adaptive_order": "False",
   "aspect_threshold": "8.0",
   "basis_impl": "RealSHBasis(p_max=32, name='real', coefficient_ordering='ell-major, m=-ell..+ell (packed real SH)', runtime_expansion_basis='solidfmm')",
-  "complex_rotation": "'solidfmm'",
-  "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=False, max_refine_levels=2, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, use_dense_interactions=False, jit_tree='auto', jit_traversal=True), preset=None)",
+  "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=False, max_refine_levels=2, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, jit_tree='auto', jit_traversal=True), preset=None)",
   "dehnen_geometry_mode": "'com'",
   "dehnen_radius_scale": "1.0",
   "enable_interaction_cache": "True",
-  "execution_backend": "'auto'",
   "expansion_basis": "'solidfmm'",
   "fail_fast": "False",
-  "farfield_mode": "'auto'",
   "fixed_max_leaf_size": "None",
   "fixed_order": "None",
   "host_refine_mode": "'auto'",
@@ -224,7 +215,6 @@
   "retain_interactions": "True",
   "retain_traversal_result": "True",
   "reuse_topology": "False",
-  "runtime_path": "'auto'",
   "softening": "1e-12",
   "softening_floor": "None",
   "softening_kernel": "'ferrers3'",
@@ -249,13 +239,10 @@
   "adaptive_order_on": {
    "adaptive_order": "True"
   },
-  "backend_radix": {
-   "execution_backend": "'radix'"
-  },
   "engine_preset_fast": {
-   "_preset_config": "FMMPresetConfig(name=<FMMPreset.FAST: 'fast'>, tree_build_mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), use_dense_interactions=False, jit_tree='auto', jit_traversal=True, description='Single-tree gravitational preset optimised for throughput. Uses the LBVH radix builder, disables host-side refinement, relies on a single dual-tree traversal, and favours compiled evaluation while keeping memory usage bounded.')",
+   "_preset_config": "FMMPresetConfig(name=<FMMPreset.FAST: 'fast'>, tree_build_mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), jit_tree='auto', jit_traversal=True, description='Single-tree gravitational preset optimised for throughput. Uses the LBVH radix builder, disables host-side refinement, relies on a single dual-tree traversal, and favours compiled evaluation while keeping memory usage bounded.')",
    "aspect_threshold": "16.0",
-   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), use_dense_interactions=False, jit_tree='auto', jit_traversal=True), preset='fast')",
+   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), jit_tree='auto', jit_traversal=True), preset='fast')",
    "m2l_chunk_size": "512",
    "max_refine_levels": "0",
    "preset": "'fast'",
@@ -265,10 +252,9 @@
   "engine_preset_large_n_gpu": {
    "_jit_tree_default": "True",
    "_large_n_gpu_production_profile_cached": "True",
-   "_preset_config": "FMMPresetConfig(name=<FMMPreset.LARGE_N_GPU: 'large_n_gpu'>, tree_build_mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), use_dense_interactions=False, jit_tree=True, jit_traversal=True, description='Large-N GPU preset prioritizing stable memory behavior and high throughput on streamed far-field execution.')",
+   "_preset_config": "FMMPresetConfig(name=<FMMPreset.LARGE_N_GPU: 'large_n_gpu'>, tree_build_mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), jit_tree=True, jit_traversal=True, description='Large-N GPU preset prioritizing stable memory behavior and high throughput on streamed far-field execution.')",
    "aspect_threshold": "16.0",
-   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), use_dense_interactions=False, jit_tree=True, jit_traversal=True), preset='large_n_gpu')",
-   "farfield_mode": "'pair_grouped'",
+   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), jit_tree=True, jit_traversal=True), preset='large_n_gpu')",
    "max_refine_levels": "0",
    "memory_objective": "'minimum_memory'",
    "nearfield_mode": "'bucketed'",
@@ -276,7 +262,6 @@
    "preset": "'large_n_gpu'",
    "retain_interactions": "False",
    "retain_traversal_result": "False",
-   "runtime_path": "'large_n'",
    "streamed_far_pairs": "True",
    "target_leaf_particles": "64",
    "traversal_config": "DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024)",
@@ -286,9 +271,6 @@
   "fail_fast": {
    "fail_fast": "True",
    "host_refine_mode": "'off'"
-  },
-  "farfield_pair_grouped": {
-   "farfield_mode": "'pair_grouped'"
   },
   "fixed_order_and_leaf": {
    "fixed_max_leaf_size": "32",
@@ -352,8 +334,7 @@
    "enable_interaction_cache": "False"
   },
   "preset_accurate": {
-   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=True, max_refine_levels=1, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, use_dense_interactions=False, jit_tree='auto', jit_traversal=True), preset=None)",
-   "farfield_mode": "'pair_grouped'",
+   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=True, max_refine_levels=1, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, jit_tree='auto', jit_traversal=True), preset=None)",
    "host_refine_mode": "'on'",
    "mac_type": "'dehnen'",
    "max_refine_levels": "1",
@@ -363,8 +344,7 @@
   },
   "preset_balanced": {
    "_explicit_nearfield_mode": "True",
-   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=False, max_refine_levels=2, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, use_dense_interactions=False, jit_tree='auto', jit_traversal=True), preset=None)",
-   "farfield_mode": "'pair_grouped'",
+   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=False, max_refine_levels=2, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, jit_tree='auto', jit_traversal=True), preset=None)",
    "mac_type": "'dehnen'",
    "nearfield_edge_chunk_size": "512",
    "nearfield_mode": "'bucketed'",
@@ -372,9 +352,9 @@
    "theta": "0.6"
   },
   "preset_fast": {
-   "_preset_config": "FMMPresetConfig(name=<FMMPreset.FAST: 'fast'>, tree_build_mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), use_dense_interactions=False, jit_tree='auto', jit_traversal=True, description='Single-tree gravitational preset optimised for throughput. Uses the LBVH radix builder, disables host-side refinement, relies on a single dual-tree traversal, and favours compiled evaluation while keeping memory usage bounded.')",
+   "_preset_config": "FMMPresetConfig(name=<FMMPreset.FAST: 'fast'>, tree_build_mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), jit_tree='auto', jit_traversal=True, description='Single-tree gravitational preset optimised for throughput. Uses the LBVH radix builder, disables host-side refinement, relies on a single dual-tree traversal, and favours compiled evaluation while keeping memory usage bounded.')",
    "aspect_threshold": "16.0",
-   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), use_dense_interactions=False, jit_tree='auto', jit_traversal=True), preset='fast')",
+   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=512, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=65536, process_block=512, max_interactions_per_node=8192, max_neighbors_per_leaf=4096), jit_tree='auto', jit_traversal=True), preset='fast')",
    "m2l_chunk_size": "512",
    "mac_type": "'dehnen'",
    "max_refine_levels": "0",
@@ -390,10 +370,9 @@
    "_explicit_streamed_far_pairs": "True",
    "_jit_tree_default": "True",
    "_large_n_gpu_production_profile_cached": "True",
-   "_preset_config": "FMMPresetConfig(name=<FMMPreset.LARGE_N_GPU: 'large_n_gpu'>, tree_build_mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), use_dense_interactions=False, jit_tree=True, jit_traversal=True, description='Large-N GPU preset prioritizing stable memory behavior and high throughput on streamed far-field execution.')",
+   "_preset_config": "FMMPresetConfig(name=<FMMPreset.LARGE_N_GPU: 'large_n_gpu'>, tree_build_mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0, m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), jit_tree=True, jit_traversal=True, description='Large-N GPU preset prioritizing stable memory behavior and high throughput on streamed far-field execution.')",
    "aspect_threshold": "16.0",
-   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=<class 'jax.numpy.float32'>, tree=TreeBuilderConfig(mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), use_dense_interactions=False, jit_tree=True, jit_traversal=True), preset='large_n_gpu')",
-   "farfield_mode": "'pair_grouped'",
+   "config": "FMMResolvedConfig(theta=0.6, G=1.0, softening=0.001, working_dtype=<class 'jax.numpy.float32'>, tree=TreeBuilderConfig(mode='static_radix', target_leaf_particles=64, refine_local=False, max_refine_levels=0, aspect_threshold=16.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=DualTreeTraversalConfig(max_pair_queue=262144, process_block=256, max_interactions_per_node=4096, max_neighbors_per_leaf=1024), jit_tree=True, jit_traversal=True), preset='large_n_gpu')",
    "host_refine_mode": "'off'",
    "mac_type": "'dehnen'",
    "max_refine_levels": "0",
@@ -403,7 +382,6 @@
    "preset": "'large_n_gpu'",
    "retain_interactions": "False",
    "retain_traversal_result": "False",
-   "runtime_path": "'large_n'",
    "softening": "0.001",
    "streamed_far_pairs": "True",
    "target_leaf_particles": "64",
@@ -416,9 +394,6 @@
   "retain_far_pairs_for_grad": {
    "retain_far_pairs_for_grad": "True"
   },
-  "runtime_path_large_n": {
-   "runtime_path": "'large_n'"
-  },
   "streamed_far_pairs_off": {
    "_explicit_streamed_far_pairs": "True"
   },
@@ -427,7 +402,7 @@
    "streamed_far_pairs": "True"
   },
   "tree_refine_local": {
-   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=True, max_refine_levels=3, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, use_dense_interactions=False, jit_tree='auto', jit_traversal=True), preset=None)",
+   "config": "FMMResolvedConfig(theta=0.5, G=1.0, softening=1e-12, working_dtype=None, tree=TreeBuilderConfig(mode='lbvh', target_leaf_particles=32, refine_local=True, max_refine_levels=3, aspect_threshold=8.0), traversal=TraversalExecutionConfig(m2l_chunk_size=None, l2l_chunk_size=None, max_pair_queue=None, pair_process_block=None, traversal_config=None, jit_tree='auto', jit_traversal=True), preset=None)",
    "max_refine_levels": "3",
    "refine_local": "True"
   },

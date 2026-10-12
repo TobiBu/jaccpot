@@ -118,7 +118,6 @@ class StrictCapProfileMixin(_EngineBase):
 
         return {
             "preset": str(self.preset),
-            "runtime_path": str(self.runtime_path),
             "tree_type": str(self.tree_type),
             "execution_backend": str(getattr(state, "execution_backend", "unknown")),
             "expansion_basis": str(

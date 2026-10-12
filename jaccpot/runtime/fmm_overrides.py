@@ -660,7 +660,6 @@ class OverridesMixin(_EngineBase):
             traversal_config=traversal_config,
             m2l_chunk_size=m2l_chunk_size,
             l2l_chunk_size=l2l_chunk_size,
-            farfield_mode="pair_grouped",
             center_mode="com",
             refine_local_override=refine_local_override,
         )

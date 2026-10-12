@@ -5,8 +5,9 @@ the rotation blocks into straight-line code and build ``r^k`` by repeated
 multiplication). Pinned on a real static-radix tree with lane counts that do and
 do not divide the level widths, on a degenerate edge (a child at its parent's
 centre: the identity translation), and under ``jax.jit``; plus the custom VJP's
-forward, which is this kernel, and the removed ``JACCPOT_CASCADE_KERNEL=level``.
-Until the 2026-10 cleanup (X5) the reference here was the level forward kernel.
+forward, which is this kernel. Until the 2026-10 cleanup (X5) the reference here
+was the level forward kernel, which ``JACCPOT_CASCADE_KERNEL=level`` selected (that
+variable is read nowhere since Z-b).
 """
 
 from __future__ import annotations
@@ -117,9 +118,7 @@ def test_l2l_lanes_match_the_cascade(tree_data, order, k_lanes):
         topo.right_child,
         topo.node_level,  # donated by its jit
         order=order,
-        rotation="solidfmm",
         total_nodes=total,
-        basis_mode="real",
         num_levels=num_levels - 1,
     )
     got = l2l_real_levels_lanes_pallas(*args, k_lanes=k_lanes, **kw)
@@ -128,7 +127,7 @@ def test_l2l_lanes_match_the_cascade(tree_data, order, k_lanes):
     assert not np.allclose(np.asarray(got), np.asarray(locals0))
 
 
-def test_lanes_jit_and_the_vjp_forward(tree_data, monkeypatch):
+def test_lanes_jit_and_the_vjp_forward(tree_data):
     topo, com, num_levels, width = tree_data
     total = int(topo.parent.shape[0])
     order = 3
@@ -169,12 +168,4 @@ def test_lanes_jit_and_the_vjp_forward(tree_data, monkeypatch):
             )
         )
 
-    monkeypatch.delenv("JACCPOT_CASCADE_KERNEL", raising=False)
     assert np.array_equal(cvjp(), lanes)
-    monkeypatch.setenv("JACCPOT_CASCADE_KERNEL", "lanes")
-    assert np.array_equal(cvjp(), lanes)
-    # the level forward kernel was removed (cleanup 2026-10, X5): asking for it
-    # raises rather than running the lane kernel under its name
-    monkeypatch.setenv("JACCPOT_CASCADE_KERNEL", "level")
-    with pytest.raises(ValueError, match="removed in the 2026-10 cleanup"):
-        cvjp()
