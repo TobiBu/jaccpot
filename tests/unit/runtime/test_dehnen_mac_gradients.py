@@ -422,7 +422,7 @@ def upward_artifacts():
     return tree, positions_sorted, upward
 
 
-def _traced_geometry(mode, tree, upward):
+def _traced_geometry(mode, tree, upward, max_leaf_size=None):
     """``resolve_dehnen_geometry`` for ``mode`` as a function of traced positions."""
 
     from jaccpot.runtime._adaptive_policy import resolve_dehnen_geometry
@@ -434,6 +434,7 @@ def _traced_geometry(mode, tree, upward):
             positions_sorted=pos,
             upward=upward,
             dtype=jnp.float64,
+            max_leaf_size=max_leaf_size,
         )
 
     return run
@@ -459,9 +460,8 @@ def test_device_side_geometry_modes_build_a_usable_state(mode):
     differentiates the same frozen pytree whichever mode built it, and
     :func:`test_the_com_geometry_mode_is_differentiable` covers that pass. So these
     cases stop at the prepare; until 2026-10-12 each took a reverse pass of its
-    own. (They are not traceable themselves, despite ``resolve_dehnen_geometry``'s
-    error message: under ``jax.jit`` ``tree_approx`` raises a
-    ``ConcretizationTypeError`` reading its leaf width off the device.)
+    own. That the geometry itself traces is
+    :func:`test_device_side_geometry_modes_trace_with_a_static_leaf_bound`.
     """
 
     positions, masses, _ = _system(N_PARTICLES, seed=1)
@@ -469,6 +469,35 @@ def test_device_side_geometry_modes_build_a_usable_state(mode):
         positions, masses, leaf_size=LEAF_SIZE, max_order=MAX_ORDER
     )
     assert _num_far_pairs(state) > 0, f"{mode}: no far pairs to differentiate"
+
+
+@_UPWARD_USERS
+@pytest.mark.parametrize("mode", ["com", "tree_approx"])
+def test_device_side_geometry_modes_trace_with_a_static_leaf_bound(
+    upward_artifacts, mode
+):
+    """What the host-loop modes' error recommends must hold under ``jax.jit``.
+
+    ``com`` and ``tree_approx`` read the leaf width off the device unless given a
+    static ``max_leaf_size``, so traced they need the bound. With it they must give
+    the eager result, and a looser bound must change nothing (the extra slots are
+    masked). Until 2026-10-12 ``tree_approx`` ignored the bound and raised a
+    ``ConcretizationTypeError`` under ``jit`` although the message recommended it.
+    """
+
+    from yggdrax.tree import get_num_internal_nodes
+
+    tree, positions_sorted, upward = upward_artifacts
+    ranges = np.asarray(tree.node_ranges)[get_num_internal_nodes(tree) :]
+    widest = int(np.max(ranges[:, 1] - ranges[:, 0] + 1))
+    eager = _traced_geometry(mode, tree, upward)(positions_sorted)
+    for bound in (widest, widest + 7):
+        run = _traced_geometry(mode, tree, upward, max_leaf_size=bound)
+        traced = jax.jit(run)(positions_sorted)
+        for got, want in zip(traced, eager):
+            np.testing.assert_allclose(
+                np.asarray(got), np.asarray(want), rtol=1e-12, atol=0
+            )
 
 
 @_UPWARD_USERS
@@ -483,5 +512,7 @@ def test_host_loop_geometry_modes_reject_tracers_clearly(upward_artifacts, mode)
 
     tree, positions_sorted, upward = upward_artifacts
     run = _traced_geometry(mode, tree, upward)
-    with pytest.raises(RuntimeError, match="cannot be traced"):
+    with pytest.raises(RuntimeError, match="cannot be traced") as excinfo:
         jax.jit(lambda pos: run(pos)[1])(positions_sorted)
+    # the advice must name what makes the recommended modes traceable
+    assert "static max_leaf_size" in str(excinfo.value)
