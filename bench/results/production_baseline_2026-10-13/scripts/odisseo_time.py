@@ -43,9 +43,12 @@ import jax  # noqa: E402
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-
 from odisseo.integration_api import integrate, resolve_lane  # noqa: E402
-from odisseo.option_classes import FMM_ACC, SimulationConfig, SimulationParams  # noqa: E402
+from odisseo.option_classes import (  # noqa: E402
+    FMM_ACC,
+    SimulationConfig,
+    SimulationParams,
+)
 
 
 def plummer_clipped(n: int, seed: int = 0, rmax: float = 20.0):
@@ -56,7 +59,9 @@ def plummer_clipped(n: int, seed: int = 0, rmax: float = 20.0):
     mu = rng.uniform(-1.0, 1.0, size=n)
     phi = rng.uniform(0.0, 2.0 * np.pi, size=n)
     st = np.sqrt(1.0 - mu * mu)
-    pos = np.stack([r * st * np.cos(phi), r * st * np.sin(phi), r * mu], 1).astype(np.float32)
+    pos = np.stack([r * st * np.cos(phi), r * st * np.sin(phi), r * mu], 1).astype(
+        np.float32
+    )
     rng = np.random.default_rng(7)
     rr = np.linalg.norm(pos.astype(np.float64), axis=1)
     q = np.empty(n)
@@ -71,9 +76,9 @@ def plummer_clipped(n: int, seed: int = 0, rmax: float = 20.0):
     mu = rng.uniform(-1.0, 1.0, n)
     phi = rng.uniform(0.0, 2.0 * np.pi, n)
     st = np.sqrt(1.0 - mu * mu)
-    vel = (speed[:, None] * np.stack([st * np.cos(phi), st * np.sin(phi), mu], 1)).astype(
-        np.float32
-    )
+    vel = (
+        speed[:, None] * np.stack([st * np.cos(phi), st * np.sin(phi), mu], 1)
+    ).astype(np.float32)
     return pos, vel, np.full(n, 1.0 / n, np.float32)
 
 
@@ -106,7 +111,9 @@ if ARGS.theta:
     kw["fmm_theta"] = ARGS.theta
 config = SimulationConfig(**kw)
 lane = resolve_lane(config)
-print(f"[odisseo_time] lane={lane} config={ {k: v for k, v in kw.items()} }", flush=True)
+print(
+    f"[odisseo_time] lane={lane} config={ {k: v for k, v in kw.items()} }", flush=True
+)
 
 
 def run(steps: int):
@@ -120,11 +127,19 @@ def run(steps: int):
     return time.perf_counter() - t0, out
 
 
-row = {"n": ARGS.n, "args": vars(ARGS), "lane": lane, "config": {k: str(v) for k, v in kw.items()}}
+row = {
+    "n": ARGS.n,
+    "args": vars(ARGS),
+    "lane": lane,
+    "config": {k: str(v) for k, v in kw.items()},
+}
 ta, out = run(ARGS.steps)
 row["t_a_s"] = ta
 row["peak_a_gib"] = peak_gib()
-print(f"[odisseo_time] A {ta:.2f} s peak {row['peak_a_gib']:.2f} GiB out {out.shape} {out.dtype}", flush=True)
+print(
+    f"[odisseo_time] A {ta:.2f} s peak {row['peak_a_gib']:.2f} GiB out {out.shape} {out.dtype}",
+    flush=True,
+)
 del out
 tb, out = run(ARGS.steps)
 row["t_b_s"] = tb
@@ -134,10 +149,16 @@ if not ARGS.skip_c:
     tc, out = run(3 * ARGS.steps)
     row["t_c_s"] = tc
     row["step_ms_est"] = 1e3 * (tc - tb) / (2 * ARGS.steps)
-    print(f"[odisseo_time] C {tc:.2f} s -> per step {row['step_ms_est']:.1f} ms", flush=True)
+    print(
+        f"[odisseo_time] C {tc:.2f} s -> per step {row['step_ms_est']:.1f} ms",
+        flush=True,
+    )
     fin = np.asarray(out, np.float64)
     row["finite"] = bool(np.isfinite(fin).all())
 row["peak_gib"] = peak_gib()
 row["peak_b_per_particle"] = row["peak_gib"] * 2**30 / ARGS.n
-print(f"[odisseo_time] peak {row['peak_gib']:.2f} GiB ({row['peak_b_per_particle']:.0f} B/p)", flush=True)
+print(
+    f"[odisseo_time] peak {row['peak_gib']:.2f} GiB ({row['peak_b_per_particle']:.0f} B/p)",
+    flush=True,
+)
 json.dump(row, open(ARGS.out, "w"), indent=1)

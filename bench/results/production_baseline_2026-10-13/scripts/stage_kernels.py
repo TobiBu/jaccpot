@@ -19,8 +19,21 @@ import json
 import os
 import re
 
-BYTES = {"pred": 1, "s8": 1, "u8": 1, "s16": 2, "u16": 2, "f16": 2, "bf16": 2,
-         "s32": 4, "u32": 4, "f32": 4, "s64": 8, "u64": 8, "f64": 8}
+BYTES = {
+    "pred": 1,
+    "s8": 1,
+    "u8": 1,
+    "s16": 2,
+    "u16": 2,
+    "f16": 2,
+    "bf16": 2,
+    "s32": 4,
+    "u32": 4,
+    "f32": 4,
+    "s64": 8,
+    "u64": 8,
+    "f64": 8,
+}
 SHAPE = re.compile(r"\b(pred|[suf]\d+|bf16)\[([\d,]*)\]")
 INST = re.compile(r"^\s*(?:ROOT\s+)?%?([\w.\-]+)\s*=\s*(.*)$")
 OPND = re.compile(r"%([\w.\-]+)(?:#(\d+))?")
@@ -42,7 +55,9 @@ def load_frames(path: str):
     files, funcs, locs, frames = {}, {}, {}, {}
     sec = None
     for line in open(path):
-        if line.startswith(("FileNames", "FunctionNames", "FileLocations", "StackFrames")):
+        if line.startswith(
+            ("FileNames", "FunctionNames", "FileLocations", "StackFrames")
+        ):
             sec = line.strip()
             continue
         if sec is None:
@@ -60,8 +75,11 @@ def load_frames(path: str):
             funcs[int(k)] = rest.strip('"')
         elif sec == "FileLocations":
             d = dict(x.split("=") for x in rest.strip("{}").split())
-            locs[int(k)] = (files.get(int(d["file_name_id"]), "?"), int(d["line"]),
-                            funcs.get(int(d["function_name_id"]), "?"))
+            locs[int(k)] = (
+                files.get(int(d["file_name_id"]), "?"),
+                int(d["line"]),
+                funcs.get(int(d["function_name_id"]), "?"),
+            )
         elif sec == "StackFrames":
             d = dict(x.split("=") for x in rest.strip("{}").split())
             frames[int(k)] = (int(d["file_location_id"]), int(d["parent_frame_id"]))
@@ -98,15 +116,20 @@ def load_module(path: str):
         # output shapes: everything before the opcode's '('
         k = re.search(r"\s([a-z][\w\-]*)\(", head)
         out_txt = head[: k.start()] if k else head
-        args_txt = head[k.end():] if k else ""
+        args_txt = head[k.end() :] if k else ""
         args_txt = args_txt.split("), ")[0]
         sizes = [shape_bytes(dt, d) for dt, d in SHAPE.findall(out_txt)]
         refs = [(o, int(i) if i else None) for o, i in OPND.findall(args_txt)]
         sf = SF.search(rest)
         prev = out.get(nm)
         if prev is None or in_entry:
-            out[nm] = (n.group(1) if n else (prev[0] if prev else ""), sizes, refs, head,
-                       int(sf.group(1)) if sf else (prev[4] if prev else 0))
+            out[nm] = (
+                n.group(1) if n else (prev[0] if prev else ""),
+                sizes,
+                refs,
+                head,
+                int(sf.group(1)) if sf else (prev[4] if prev else 0),
+            )
     return out, load_frames(path)
 
 
@@ -148,8 +171,11 @@ def main() -> None:
     scope_re = re.compile(a.scope_re)
     f = sorted(glob.glob(f"{a.trace_dir}/**/*.trace.json.gz", recursive=True))[-1]
     ev = json.load(gzip.open(f, "rt"))["traceEvents"]
-    pid_name = {e["pid"]: e["args"]["name"] for e in ev
-                if e.get("ph") == "M" and e.get("name") == "process_name"}
+    pid_name = {
+        e["pid"]: e["args"]["name"]
+        for e in ev
+        if e.get("ph") == "M" and e.get("name") == "process_name"
+    }
     gpus = sorted(p for p, n in pid_name.items() if re.search(r"/device:GPU:\d+$", n))
     want = set(filter(None, a.scopes.split(",")))
     for p in gpus:
@@ -161,7 +187,9 @@ def main() -> None:
             args = e.get("args", {})
             hop, hm = args.get("hlo_op", ""), args.get("hlo_module", "")
             if hm and hm not in mods:
-                mods[hm] = load_module(by_mod[hm]) if hm in by_mod else ({}, lambda i: [])
+                mods[hm] = (
+                    load_module(by_mod[hm]) if hm in by_mod else ({}, lambda i: [])
+                )
             rec = mods.get(hm, ({},))[0].get(hop)
             path = rec[0] if rec else ""
             hits = scope_re.findall(path)
@@ -192,14 +220,22 @@ def main() -> None:
                     continue
                 rec = mod.get(hop, ("", [], [], "", 0))
                 d = rec[3]
-                print(f"   {ms:7.2f} ms x{n:<5.1f} {hop[:36]:<36} {b/2**20:8.1f} MiB floor {fl*n:6.2f} ms"
-                      f"  {d[:a.wide]}")
+                print(
+                    f"   {ms:7.2f} ms x{n:<5.1f} {hop[:36]:<36} {b/2**20:8.1f} MiB floor {fl*n:6.2f} ms"
+                    f"  {d[:a.wide]}"
+                )
                 if a.stack:
-                    fr = [x for x in chain(rec[4]) if "/jax/" not in x[0] and "/jax/_src" not in x[0]]
+                    fr = [
+                        x
+                        for x in chain(rec[4])
+                        if "/jax/" not in x[0] and "/jax/_src" not in x[0]
+                    ]
                     for fpath, line, fn in fr[: a.stack]:
                         short = "/".join(fpath.split("/")[-3:])
                         print(f"              {short}:{line} {fn}")
-            print(f"   {rest_ms:7.2f} ms in {rest_n:.0f} launches below {a.min_ms} ms (floor {rest_floor:.2f})")
+            print(
+                f"   {rest_ms:7.2f} ms in {rest_n:.0f} launches below {a.min_ms} ms (floor {rest_floor:.2f})"
+            )
 
 
 if __name__ == "__main__":
