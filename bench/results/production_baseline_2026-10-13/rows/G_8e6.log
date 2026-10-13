@@ -1,79 +1,132 @@
-[G_8e6] devices=[7] load=(31.33056640625, 29.84912109375, 30.24365234375) overrides={"JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "134217728", "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "268435456", "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto"}
+[G_8e6] devices=[7] load=(34.65234375, 33.80078125, 30.77001953125) overrides={"JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "134217728", "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "268435456", "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto"}
 [G_8e6] cell leaves: 404185 live -> leaf_capacity 524288
-W1013 13:02:19.306217  427341 bfc_allocator.cc:371] Allocator (GPU_0_bfc) ran out of memory trying to allocate 61.05GiB from the lower end with freed_by_count=0. The caller indicates that this is not a failure, but this may mean that there could be performance gains if more memory were available.
-(param_0.18: f64[1024,8000000], param_1.27: f64[3,8000000], param_2.18: f64[1024,3]) -> f64[1024,3,3125] {
-  %param_0.18 = f64[1024,8000000]{1,0} parameter(0)
-  %broadcast.4.1 = f64[1024,3,8000000]{2,1,0} broadcast(%param_0.18), dimensions={0,2}, metadata={op_name="jit(_block_accel)/ij,ijk->ik/dot_general" stack_frame_id=17}
-  %param_2.18 = f64[1024,3]{1,0} parameter(2)
-  %broadcast.2.3 = f64[1024,3,8000000]{2,1,0} broadcast(%param_2.18), dimensions={0,1}, metadata={op_name="jit(_block_accel)/sub" stack_frame_id=12}
-  %param_1.27 = f64[3,8000000]{1,0} parameter(1)
-  %broadcast.3.3 = f64[1024,3,8000000]{2,1,0} broadcast(%param_1.27), dimensions={1,2}, metadata={op_name="jit(_block_accel)/sub" stack_frame_id=12}
-  %subtract.4 = f64[1024,3,8000000]{2,1,0} subtract(%broadcast.2.3, %broadcast.3.3), metadata={op_name="jit(_block_accel)/sub" stack_frame_id=12}
-  %multiply.3.1 = f64[1024,3,8000000]{2,1,0} multiply(%broadcast.4.1, %subtract.4), metadata={op_name="jit(_block_accel)/ij,ijk->ik/dot_general" stack_frame_id=17}
-  %bitcast.17.1 = f64[1024,3,3125,2560]{3,2,1,0} bitcast(%multiply.3.1), metadata={op_name="jit(_block_accel)/ij,ijk->ik/dot_general" stack_frame_id=17}
-  %constant.7.2 = f64[] constant(0)
-  ROOT %reduce.4.1 = f64[1024,3,3125]{2,1,0} reduce(%bitcast.17.1, %constant.7.2), dimensions={3}, to_apply=
-  (reduce_sum.0: f64[], reduce_sum.1: f64[]) -> f64[] {
-    %reduce_sum.0 = f64[] parameter(0), metadata={op_name="reduce_sum"}
-    %reduce_sum.1 = f64[] parameter(1), metadata={op_name="reduce_sum"}
-    ROOT %reduce_sum.2.0 = f64[] add(%reduce_sum.0, %reduce_sum.1), metadata={op_name="jit(_block_accel)/reduce_sum" stack_frame_id=8}
-  }, metadata={op_name="jit(_block_accel)/ij,ijk->ik/dot_general" stack_frame_id=17}
-}, metadata={op_name="jit(_block_accel)/ij,ijk->ik/dot_general" stack_frame_id=17}. Status: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 61.05GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error='']
+[G_8e6] production eval aggL2 vs direct sum 8.307e-04
+[G_8e6] eval_production: min 74.47 ms (IQR 0.71, med 75.13) flags=['loadavg>=8 (34.4)', 'other-gpus-busy (100%)'] load=34
+[G_8e6] state LargeNPreparedState in 18.7 s
+[G_8e6] far pairs cap 134217728 active 25746982 near edges 19464396 symmetric=True tree {'total_nodes': 1048575, 'num_internal': 524287, 'levels_live': 55, 'widest_level': 184710, 'single_child_parents': 0}
+[G_8e6] forward_differentiable_eager: min 15161.57 ms (IQR 3531.00, med 15348.45) flags=['loadavg>=8 (37.7)', 'other-gpus-busy (100%)'] load=37
+[G_8e6] differentiable forward vs production eval rel-L2 1.404e-03; vs direct sum aggL2 1.245e-03
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jaxtyping/_decorator.py:465: UserWarning: differentiable_accelerations is being traced (an outer jax.jit or jax.grad is in charge). Compiling this pipeline takes tens of seconds to minutes and XLA reports no progress, so it looks like a hang: measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the gradient, and one inner module alone at 3m28s. It is a one-time cost. To pay it deliberately rather than inside a timed region, use FMMEngine.differentiable_step_fn(state, compile_now=(pos, mass)). This warning is issued once per process.
+  out = fn(*args, **kwargs)
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/interpreters/mlir.py:1333: UserWarning: A large amount of constants were captured during lowering (2.44GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
 
-W1013 13:02:24.001125  427356 bfc_allocator.cc:371] Allocator (GPU_0_bfc) ran out of memory trying to allocate 61.05GiB from the lower end with freed_by_count=0. The caller indicates that this is not a failure, but this may mean that there could be performance gains if more memory were available.
-W1013 13:02:24.001202  427356 bfc_allocator.cc:371] Allocator (GPU_0_bfc) ran out of memory trying to allocate 61.05GiB from the lower end with freed_by_count=0. The caller indicates that this is not a failure, but this may mean that there could be performance gains if more memory were available.
-(param_0.17: f64[3,8000000], param_1.26: f64[1024,3], param_2.17: f64[8000000], param_3.11: s64[8000000], param_4.8: s64[1024]) -> f64[1024,8000000] {
-  %param_4.8 = s64[1024]{0} parameter(4)
-  %eq.9.1 = s64[1024,8000000]{1,0} broadcast(%param_4.8), dimensions={0}, metadata={op_name="jit(_block_accel)/eq" stack_frame_id=9}
-  %param_3.11 = s64[8000000]{0} parameter(3)
-  %eq.12.1 = s64[1024,8000000]{1,0} broadcast(%param_3.11), dimensions={1}, metadata={op_name="jit(_block_accel)/eq" stack_frame_id=9}
-  %eq.13.1 = pred[1024,8000000]{1,0} compare(%eq.9.1, %eq.12.1), direction=EQ, metadata={op_name="jit(_block_accel)/eq" stack_frame_id=9}
-  %constant.7.1 = f64[] constant(0)
-  %broadcast_in_dim.0.1 = f64[1024,8000000]{1,0} broadcast(%constant.7.1), dimensions={}, metadata={op_name="jit(_block_accel)/jit(_where)/broadcast_in_dim" stack_frame_id=16}
-  %param_2.17 = f64[8000000]{0} parameter(2)
-  %mul.11.1 = f64[1024,8000000]{1,0} broadcast(%param_2.17), dimensions={1}, metadata={op_name="jit(_block_accel)/mul" stack_frame_id=11}
-  %param_1.26 = f64[1024,3]{1,0} parameter(1)
-  %broadcast.2.7 = f64[1024,3,8000000]{2,1,0} broadcast(%param_1.26), dimensions={0,1}, metadata={op_name="jit(_block_accel)/sub" stack_frame_id=12}
-  %param_0.17 = f64[3,8000000]{1,0} parameter(0)
-  %broadcast.3.7 = f64[1024,3,8000000]{2,1,0} broadcast(%param_0.17), dimensions={1,2}, metadata={op_name="jit(_block_accel)/sub" stack_frame_id=12}
-  %subtract.8 = f64[1024,3,8000000]{2,1,0} subtract(%broadcast.2.7, %broadcast.3.7), metadata={op_name="jit(_block_accel)/sub" stack_frame_id=12}
-  %multiply.2.3 = f64[1024,3,8000000]{2,1,0} multiply(%subtract.8, %subtract.8), metadata={op_name="jit(_block_accel)/mul" stack_frame_id=14}
-  %reduce_sum.7.3 = f64[1024,8000000]{1,0} reduce(%multiply.2.3, %constant.7.1), dimensions={1}, to_apply=
-  (reduce_sum.3: f64[], reduce_sum.4: f64[]) -> f64[] {
-    %reduce_sum.3 = f64[] parameter(0), metadata={op_name="reduce_sum"}
-    %reduce_sum.4 = f64[] parameter(1), metadata={op_name="reduce_sum"}
-    ROOT %reduce_sum.5.0 = f64[] add(%reduce_sum.3, %reduce_sum.4), metadata={op_name="jit(_block_accel)/reduce_sum" stack_frame_id=8}
-  }, metadata={op_name="jit(_block_accel)/reduce_sum" stack_frame_id=8}
-  %constant.6.1 = f64[] constant(9.9999999999999984e-15)
-  %add.2.1 = f64[1024,8000000]{1,0} broadcast(%constant.6.1), dimensions={}, metadata={op_name="jit(_block_accel)/add" stack_frame_id=8}
-  %add.3.1 = f64[1024,8000000]{1,0} add(%reduce_sum.7.3, %add.2.1), metadata={op_name="jit(_block_accel)/add" stack_frame_id=8}
-  %constant.5.1 = f64[] constant(-1.5)
-  %pow.2.1 = f64[1024,8000000]{1,0} broadcast(%constant.5.1), dimensions={}, metadata={op_name="jit(_block_accel)/pow" stack_frame_id=15}
-  %pow.3.3 = f64[1024,8000000]{1,0} power(%add.3.1, %pow.2.1), metadata={op_name="jit(_block_accel)/pow" stack_frame_id=15}
-  %mul.12.3 = f64[1024,8000000]{1,0} multiply(%mul.11.1, %pow.3.3), metadata={op_name="jit(_block_accel)/mul" stack_frame_id=11}
-  ROOT %select_n.0.1 = f64[1024,8000000]{1,0} select(%eq.13.1, %broadcast_in_dim.0.1, %mul.12.3), metadata={op_name="jit(_block_accel)/jit(_where)/select_n" stack_frame_id=16}
-}, metadata={op_name="jit(_block_accel)/jit(_where)/select_n" stack_frame_id=16}. Status: NOT_FOUND: All configs failed during profiling or were excluded from selection.
-Failures (2):
-EXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 61.05GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error='']
-EXECUTION FAILED: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 61.05GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error='']
+  %reduce-window.4 = s32[32768,16]{0,1} reduce-window(%constant.4905, %constant.973), window={size=1x16 pad=0_0x15_0}, to_apply=%region_34.63_rw_wrapper
 
-[grad_wrap] process device peak 5.18 GiB
-Traceback (most recent call last):
-  File "/tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/grad_wrap.py", line 5, in <module>
-    runpy.run_path("bench/grad_step_profile.py", run_name="__main__")
-  File "<frozen runpy>", line 286, in run_path
-  File "<frozen runpy>", line 98, in _run_module_code
-  File "<frozen runpy>", line 88, in _run_code
-  File "bench/grad_step_profile.py", line 558, in <module>
-    sys.exit(main())
-             ^^^^^^
-  File "bench/grad_step_profile.py", line 301, in main
-    a_ref = direct_accelerations(
-            ^^^^^^^^^^^^^^^^^^^^^
-  File "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu/common/reference.py", line 75, in direct_accelerations
-    acc = _block_accel(tgt_pos[s:e], pos, mass, tgt_gid[s:e], gid, softening, G)
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-jax.errors.JaxRuntimeError: RESOURCE_EXHAUSTED: Failed to get configs for: 2 out of 5 instructions. See logs for all failures. Example failure: 
-Out of memory while trying to allocate 61.05GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error='']
---------------------
-For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1s:
+
+  %reduce-window.4 = s32[32768,16]{0,1} reduce-window(%constant.4905, %constant.973), window={size=1x16 pad=0_0x15_0}, to_apply=%region_34.63_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.2 = s32[32768,16]{0,1} map(%constant.4906, %broadcast.928), dimensions={0,1}, to_apply=%region_34.63_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 2s:
+
+  %map.2 = s32[32768,16]{0,1} map(%constant.4906, %broadcast.928), dimensions={0,1}, to_apply=%region_34.63_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.3 = s32[32768,16]{0,1} map(%constant.5734, %broadcast.929), dimensions={0,1}, to_apply=%region_34.63.clone_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 4s:
+
+  %map.3 = s32[32768,16]{0,1} map(%constant.5734, %broadcast.929), dimensions={0,1}, to_apply=%region_34.63.clone_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %reduce-window.8 = s32[500000,16]{0,1} reduce-window(%constant.5768, %constant.1147), window={size=1x16 pad=0_0x15_0}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 8s:
+
+  %reduce-window.8 = s32[500000,16]{0,1} reduce-window(%constant.5768, %constant.1147), window={size=1x16 pad=0_0x15_0}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.4 = s32[500000,16]{0,1} map(%constant.5769, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 16s:
+
+  %map.4 = s32[500000,16]{0,1} map(%constant.5769, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+W1013 14:41:42.963616  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 27.37GiB (rounded to 29388225536) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:41:42.964266  550858 bfc_allocator.cc:609] ***__*********______________________________________________________________________________________
+[G_8e6] jit(grad) FAILED: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 27.37GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit_loss']
+[G_8e6] upward_forward_eager: min 12350.61 ms (IQR 2145.60, med 12675.97) flags=['loadavg>=8 (42.0)', 'other-gpus-busy (100%)'] load=35
+[G_8e6] upward_grad_eager: min 15714.71 ms (IQR 4061.06, med 16551.24) flags=['loadavg>=8 (35.4)', 'other-gpus-busy (100%)'] load=34
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.142, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 32s:
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.142, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[G_8e6] upward_grad_jit: min 70.49 ms (IQR 1.36, med 72.48) flags=['loadavg>=8 (34.9)', 'other-gpus-busy (100%)'] load=35
+[G_8e6] far_forward_eager: min 14346.43 ms (IQR 2419.96, med 14423.92) flags=['loadavg>=8 (34.9)', 'other-gpus-busy (100%)'] load=32
+W1013 14:50:30.118010  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 19.41GiB (rounded to 20845697280) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:50:30.118872  550858 bfc_allocator.cc:609] *********************__*****________________________________________________________________________
+[G_8e6] far_grad_eager: FAILED JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 19.41GiB with allocator GPU_0_bfc on device 0. [executable_name='jit_add'] [tf-allocator-allocation-error='']
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.5412, %broadcast.906), dimensions={0,1}, to_apply=%region_192.238_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1m4s:
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.5412, %broadcast.906), dimensions={0,1}, to_apply=%region_192.238_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+W1013 14:54:46.097399  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 27.35GiB (rounded to 29371823360) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:54:46.098508  550858 bfc_allocator.cc:609] ***__*********___*_**_______________________________________________________________________________
+[G_8e6] jit(far grad) FAILED: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 27.35GiB with allocator GPU_0_bfc on device 0. [executable_name='jit_far_loss'] [tf-allocator-allocation-error='']
+[G_8e6] near_forward_eager: min 495.60 ms (IQR 23.34, med 509.65) flags=['loadavg>=8 (35.2)', 'other-gpus-busy (100%)'] load=35
+W1013 14:55:01.516064  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 9.00GiB (rounded to 9663676416) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:55:01.517454  550858 bfc_allocator.cc:609] **************************_*******____________________**********************************____________
+[G_8e6] near_grad_eager: FAILED JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 9.00GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit_broadcast_in_dim']
+[G_8e6] near_grad_jit: min 330.54 ms (IQR 0.86, med 330.87) flags=['loadavg>=8 (33.4)', 'other-gpus-busy (100%)'] load=33
+[G_8e6] wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/rows/G_8e6.json
+[grad_wrap] exit 0
+[grad_wrap] process device peak 19.49 GiB

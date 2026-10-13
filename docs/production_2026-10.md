@@ -96,16 +96,28 @@ device peak taken over the whole process.
 | --- | --- | --- | --- | --- | --- |
 | 2e5 | 4.63 ms | **31.9 ms** (Sept: 22.1) | 5.0 / 20.8 / 11.7 ms | 3.22 GiB | 1.27e-3 / **1.60e-3** |
 | 1e6 | 13.0 ms | **101.6 ms** | 14.5 / 56.8 / 47.1 ms | 15.8 GiB | 1.22e-3 / **2.41e-3** |
-| 8e6 | — | (first run: the bench's own direct-sum reference ran out of memory, a fixed 1024-target block = 61 GiB; fixed on this branch and re-run, see below) | | | |
+| 8e6 | 74.5 ms | **out of memory** (a 27.37 GiB request in `jit_loss`) | 70.5 / **OOM** (27.35 GiB, `jit_far_loss`) / 330.5 ms | 19.5 GiB | 8.31e-4 / **1.24e-3** |
 
+The first 8e6 run failed earlier, in the bench's own direct-sum reference: a fixed 1024-target block is 61 GiB at
+8e6. The block is sized to the budget on this branch, and the row above is the re-run.
+
+- **A single-force gradient at 8e6 does not fit on one 40 GB card through today's gradient seam.**
+  - The full and the far-field gradients each ask for about 27.4 GiB on top of the prepared state; the eager arms
+    fail too.
+  - The near-field gradient alone takes 330 ms (4.4x the whole production eval).
+  - The far field's reverse goes through the leaf-major padded L2P and the leaf-table layouts that the forward
+    left in round 2. Those are what plan S8 replaces (a Pallas L2P reverse reducing into per-leaf cotangents, a
+    direct-layout near reverse).
 - **A correctness regression.** In September the differentiable forward equalled the production forward to
-  1.8e-11, at the same aggL2 of 1.27e-3 (`docs/fast_gradients_2026-09.md`). Now it is 1.3x less accurate at 2e5
-  and 2.0x less accurate at 1e6. Pin S4b compares the gradient lane only with itself, so it could not see this.
-  S1 bisects it and adds a pin asserting that the differentiable forward equals the production forward on the
-  fused lane.
+  1.8e-11, at the same aggL2 of 1.27e-3 (`docs/fast_gradients_2026-09.md`). Now:
+  - it is 1.3x less accurate at 2e5, 2.0x at 1e6 and 1.5x at 8e6;
+  - at 8e6 the bench prints it directly: the differentiable forward against the production eval, rel-L2 1.40e-3.
+
+  Pin S4b compares the gradient lane only with itself, so it could not see this. S1 bisects it and adds a pin
+  asserting that the differentiable forward equals the production forward on the fused lane.
 - **The 2e5 grad went from 22.1 to 31.9 ms.** Both rows were taken on a loaded host; S8 profiles it.
-- **The gradient's memory grows faster than the forward's** (15.8 GiB at 1e6). The process peak includes the
-  bench's eager stage arms, so S8 measures the jitted gradient alone.
+- **The gradient's memory grows faster than the forward's** (15.8 GiB at 1e6, out of memory at 8e6). The process
+  peak includes the bench's eager stage arms, so S8 measures the jitted gradient alone.
 
 ### The block-step lane
 
@@ -284,14 +296,16 @@ step (1.4 s) also carries 2.3x the far pairs.
 
 ### Findings that change the plan
 - **S1 (correctness):**
-  - the differentiable forward's accuracy regression (1.3-2x the production error; bisect, plus a pin
-    differentiable == production);
+  - the differentiable forward's accuracy regression (1.3-2x the production error; rel-L2 1.4e-3 against the
+    production forward at 8e6; bisect, plus a pin differentiable == production);
   - `BlockStepFMM`'s frozen lists blow up in the tail of a galaxy from k_max 3 (rebuild per boundary, or a
     drift-margin MAC, or refuse k_max/dt_max beyond a measured displacement);
   - the grad bench's reference block (fixed here).
 - **S2/S3:** the ferrers3 near kernel (+5.75 ms at 8e6, +74 ms at 1e8): skip the polynomial for tiles entirely
   beyond the support.
 - **S3b:** the far f_b into the M2L and L2L kernels, as above.
+- **S8:** the single-force gradient does not fit at 8e6. The production-layout reverses come before any rollout
+  gradient work.
 - **S4:** Odisseo's 40-1600x is the largest single lever for any Odisseo user. The fixed cost per `integrate()` and
   the missing cell leaves come first.
 - **D1:** HOLD is recommended, but the block-step track's priority depends on the production ICs' rung
