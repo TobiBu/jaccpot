@@ -18,7 +18,7 @@ Record: `docs/production_2026-10.md`, section "S0".
 | --- | --- |
 | `rows/` | `bench/fused_memory_budget.py` rows and their logs; `scripts/chainA.sh` and `scripts/chainB.sh` hold the command lines |
 | `pins/` | L1-L3 / DET1-2 records: `main-5bc4959` and the A-vs-A control `-b`, plus the `compare` outputs |
-| `probes/` | the three D1 probes: `activity_25m`, `frozen_1e6`, `ab_2e4` (k 3, 4) and `ab_2e4_k5` |
+| `probes/` | the three D1 probes: `activity_25m`, `frozen_1e6`, `ab_2e4` (k 3, 4) and `ab_2e4_k5`; the criterion follow-up: `ab_dyn` (orbit-time criterion, N 5e3, k 4 and 6), `ab_acc` (acceleration criterion, N 5e3, k 4), `timestep_spread_3e4.txt` (dt vs radius) |
 | `traces/` | per-stage (`stages_*`) and per-kernel (`kernels_*`) tables of the step traces |
 | `scripts/` | the drivers, the Odisseo / block-step / gradient timing scripts, and `stage_kernels.py` (per-kernel attribution, from round 7) |
 

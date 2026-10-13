@@ -1,0 +1,55 @@
+{
+ "args": {
+  "out": "/tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/d1why/ab_acc.json",
+  "n": 5000,
+  "kmax": "4",
+  "n_base": 8,
+  "eta": 0.1,
+  "softening_rdisk": 0.0063,
+  "block": 1000,
+  "criterion": "acc"
+ },
+ "n": 5000,
+ "softening": 0.0015119999999999999,
+ "rows": {
+  "4": {
+   "dt_min": 0.00019916904629797968,
+   "dt_max": 0.003186704740767675,
+   "steps": 128,
+   "shared_dt_min": {
+    "dE_over_W0": 1.030540424488191e-06,
+    "dx_median_over_eps": 1.852277745218119e-05,
+    "dx_p99_over_eps": 0.0023624324708432435
+   },
+   "max": {
+    "dE_over_W0": 1.4516200761979865e-06,
+    "dx_median_over_eps": 0.000154248085721989,
+    "dx_p99_over_eps": 0.015563146191232403,
+    "pair_evaluations_vs_shared": 0.422633690625,
+    "mean_rung_hist": [
+     10.0,
+     46.125,
+     2928.0,
+     1957.0,
+     58.875
+    ],
+    "pair_impulse_imbalance": 1.7531402486031127e-17
+   },
+   "hold": {
+    "dE_over_W0": 7.689951322106938e-06,
+    "dx_median_over_eps": 0.00022631527297985768,
+    "dx_p99_over_eps": 0.030537758862777292,
+    "pair_evaluations_vs_shared": 0.287667575625,
+    "mean_rung_hist": [
+     10.0,
+     46.125,
+     2928.125,
+     1956.875,
+     58.875
+    ],
+    "pair_impulse_imbalance": 5.221308286584247e-17
+   },
+   "seconds": 251.59338453412056
+  }
+ }
+}

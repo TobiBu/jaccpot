@@ -245,6 +245,53 @@ against the reference, in eps.
 priority. On this disc, S2-S4 (Odisseo's 40-1600x), S3b (`dehnen_error`'s 2.9x) and the ferrers3 near kernel (9 %)
 are worth more.
 
+**5. The cap comes from the timestep criterion, not from the disc** (`bench/blockstep_timestep_spread.py`: a 3e4
+direct-sum prefix, NFW halo included, eps 1.5e-3).
+
+| R / R_d | fraction | median \|a\| | dt / dt_min, `sqrt(eps/\|a\|)` | dt / dt_min, `sqrt(r/\|a\|)` |
+| --- | --- | --- | --- | --- |
+| < 0.25 | 3.3 % | 71 | 1.9 | 13 |
+| 1-2 | 28.9 % | 25 | 3.2 | 64 |
+| 4-6 | 10.7 % | 13 | 4.5 | 156 |
+| 6-10 | 3.2 % | 8 | 5.6 | 241 |
+
+- **Why the acceleration criterion (nornax's, GADGET's) spreads so little.** |a| varies only about 10x across the
+  galaxy (max/median 10.9): the rotation curve is nearly flat (|a| = v_c^2 / R) and the softening caps the centre.
+  The criterion then takes the square root, so dt grows only as R^0.26.
+  - The median particle wants 3.3x dt_min, and 99 % are within 6.8x.
+  - The shared step set by the centre is therefore almost right for every particle, and the bound is about 2x.
+- **An orbit-time criterion spreads much more.** `sqrt(r / |a|)`, which scales with the orbital time, spreads about
+  35x from the 1st to the 99th percentile. The bound at k_max 6 is then about 40x.
+- At equal eta the acceleration criterion's step is `sqrt(eps / r)` of the orbit-time step, about 1/25 at 4 R_d.
+  Most of the outer disc's steps resolve the softening scale, not its orbit.
+
+**6. HOLD keeps its accuracy when the rungs are far apart.** The A/B was rerun with `--criterion dyn` (eta 0.02,
+N = 5000, eps 1.5e-3, scored against the shared-step reference):
+
+| k_max | rung histogram | shared: dE | max: dE, dx median / p99, pair work | HOLD: dE, dx median / p99, pair work |
+| --- | --- | --- | --- | --- |
+| 4 | [4794, 145, 41, 12, 8] | 7.1e-7 | 1.4e-8, 5.3e-5 / 2.7e-3, 7.4 % | 4.6e-7, 5.5e-5 / 2.9e-3, 6.3 % |
+| 6 | [2040, 2340, 414, 141, 45, 12, 8] | 7.4e-7 | 9.6e-5, 9.2e-4 / 5.2e-2, 4.8 % | 8.1e-5, 1.2e-3 / 1.2e-1, 2.2 % |
+
+The same run with the acceleration criterion (k_max 4, eta 0.1) gave:
+- max: dE 1.5e-6, dx median 1.5e-4, pair work 42 %;
+- HOLD: dE 7.7e-6, dx median 2.3e-4, pair work 29 %;
+- shared: dE 1.0e-6.
+
+At k_max 6 both maps lose accuracy together. That is the coarsest rung's step being too long for eta 0.02, which
+is the criterion's calibration, not the map. The comparison that decides is accuracy at equal cost, which these
+fixed-rung runs do not give.
+
+**Decision (2026-10-13):**
+- **HOLD is the map to build.**
+- **Production keeps the acceleration criterion for now**, and the block-step track is deferred behind the
+  gradient work.
+- **Before it resumes, a criterion calibration run.** Shared vs HOLD, the acceleration vs the orbit-time criterion
+  (possibly with a softening floor), at equal cost over at least one orbit. Scored on energy, angular momentum,
+  Sigma(R), sigma_z(R) (disc heating) and A2(t).
+- That run decides whether galaxy discs use the orbit-time criterion, which would make block steps worth about
+  10-40x on this IC.
+
 ### Where the ferrers3 and `dehnen_error` time goes
 
 Traces were taken without command buffers, per kernel (`bench/analyse_trace_by_stage.py`; kernel ms per call).

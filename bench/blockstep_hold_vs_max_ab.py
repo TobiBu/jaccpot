@@ -1,7 +1,7 @@
 """Accuracy and cost of two momentum-exact block-step maps, by direct summation.
 
 usage: python bench/blockstep_hold_vs_max_ab.py OUT.json [--n 20000] [--kmax 3,4]
-           [--n-base 32] [--eta 0.1] [--softening-rdisk 0.02]
+           [--n-base 32] [--eta 0.1] [--softening-rdisk 0.02] [--criterion acc|dyn]
 
 Both schemes give each interaction ONE level and kick both partners with it, so both
 conserve momentum to round-off; they differ in which level, and so in what an FMM
@@ -19,8 +19,9 @@ would have to evaluate at a fine boundary:
 
 The IC is a random prefix of the 25M disc+bulge (masses rescaled) in its NFW halo
 (external field kicked on each particle's own rung), Plummer-softened pair forces in
-fp64. Rungs are assigned at each base step from ``eta * sqrt(eps / |a|)`` with the
-fastest particle on the finest rung at t=0. Each scheme is scored at the end against
+fp64. Rungs are assigned at each base step from ``eta * sqrt(eps / |a|)`` (``--criterion
+acc``, nornax's and GADGET's) or from an orbit-time criterion ``eta * sqrt(sqrt(r^2 + eps^2) /
+|a|)`` (``dyn``), with the fastest particle on the finest rung at t=0. Each scheme is scored at the end against
 a shared-step reference at ``dt_min / 4``: energy error ``|E - E0| / |W0|``, the
 position error distribution, momentum, and the pair evaluations relative to a shared
 ``dt_min`` run (the cost a pruned FMM would track). Total momentum is not conserved
@@ -42,6 +43,7 @@ ap.add_argument("--n-base", type=int, default=32)
 ap.add_argument("--eta", type=float, default=0.1)
 ap.add_argument("--softening-rdisk", type=float, default=0.02)
 ap.add_argument("--block", type=int, default=1024)
+ap.add_argument("--criterion", default="acc", choices=("acc", "dyn"))
 ARGS = ap.parse_args()
 
 import jax  # noqa: E402
@@ -128,8 +130,15 @@ def total_acc(x):
     return pair_acc(x, jnp.zeros(N, jnp.int32), ALL) + ext_acc(x)
 
 
-def rungs_for(a, dt_max, k):
-    dt = ARGS.eta * jnp.sqrt(EPS / (jnp.linalg.norm(a, axis=1) + 1e-30))
+def dt_req(a, x):
+    an = jnp.linalg.norm(a, axis=1) + 1e-30
+    if ARGS.criterion == "dyn":  # ~ orbital time / 2pi, softened at the centre
+        return ARGS.eta * jnp.sqrt(jnp.sqrt(jnp.sum(x * x, 1) + EPS * EPS) / an)
+    return ARGS.eta * jnp.sqrt(EPS / an)
+
+
+def rungs_for(a, dt_max, k, x):
+    dt = dt_req(a, x)
     return jnp.clip(jnp.ceil(jnp.log2(dt_max / dt)), 0, k).astype(jnp.int32)
 
 
@@ -148,7 +157,7 @@ def shared(x, v, dt, steps):
 def max_base_step(x, v, k, dt_max):
     """One base step of the MAX map: global drift by dt_min, boundary weights per level."""
     dtl = dt_max / 2.0 ** jnp.arange(k + 1)
-    rung = rungs_for(total_acc(x), dt_max, k)
+    rung = rungs_for(total_acc(x), dt_max, k, x)
     n_sub = 1 << k
     pairs = 0.0
     for s in range(n_sub + 1):
@@ -175,7 +184,7 @@ def max_base_step(x, v, k, dt_max):
 
 def hold_base_step(x, v, k, dt_max):
     """One base step of the HOLD map (min level), unrolled: K(1/2) D_S [F twice] K(1/2)."""
-    rung = rungs_for(total_acc(x), dt_max, k)
+    rung = rungs_for(total_acc(x), dt_max, k, x)
     pairs = [0.0]
 
     def kick(x, v, l, h):
@@ -212,7 +221,7 @@ report = {"args": vars(ARGS), "n": N, "softening": EPS, "rows": {}}
 E0, W0 = energy(X0, V0)
 p0 = momentum(V0)
 a0 = total_acc(X0)
-dt_req0 = ARGS.eta * jnp.sqrt(EPS / (jnp.linalg.norm(a0, axis=1) + 1e-30))
+dt_req0 = dt_req(a0, X0)
 dt_min = float(jnp.min(dt_req0))
 for k in [int(s) for s in ARGS.kmax.split(",")]:
     dt_max = dt_min * (1 << k)
@@ -246,7 +255,7 @@ for k in [int(s) for s in ARGS.kmax.split(",")]:
         out[nm]["mean_rung_hist"] = rows[nm][3].tolist()
     # the halo changes the total momentum, so check the pair forces themselves: a
     # symmetric level map must give a zero net pair impulse (here, at t = 0)
-    r0 = rungs_for(a0, dt_max, k)
+    r0 = rungs_for(a0, dt_max, k, X0)
     for nm, w in (
         ("max", lambda ri, rj: jnp.maximum(ri, rj).astype(jnp.float64) + 1.0),
         ("hold", lambda ri, rj: jnp.minimum(ri, rj).astype(jnp.float64) + 1.0),

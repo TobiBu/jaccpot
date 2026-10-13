@@ -1,0 +1,98 @@
+{
+ "args": {
+  "out": "/tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/d1why/ab_dyn.json",
+  "n": 5000,
+  "kmax": "4,6",
+  "n_base": 4,
+  "eta": 0.02,
+  "softening_rdisk": 0.0063,
+  "block": 1000,
+  "criterion": "dyn"
+ },
+ "n": 5000,
+ "softening": 0.0015119999999999999,
+ "rows": {
+  "4": {
+   "dt_min": 5.277549769138847e-05,
+   "dt_max": 0.0008444079630622155,
+   "steps": 64,
+   "shared_dt_min": {
+    "dE_over_W0": 7.121450230308751e-07,
+    "dx_median_over_eps": 2.0412590495532093e-07,
+    "dx_p99_over_eps": 1.5827659730715078e-05
+   },
+   "max": {
+    "dE_over_W0": 1.3525346370787834e-08,
+    "dx_median_over_eps": 5.255325850685765e-05,
+    "dx_p99_over_eps": 0.002672339765698214,
+    "pair_evaluations_vs_shared": 0.0741823175,
+    "mean_rung_hist": [
+     4794.0,
+     144.75,
+     41.25,
+     12.0,
+     8.0
+    ],
+    "pair_impulse_imbalance": 8.778906702177764e-17
+   },
+   "hold": {
+    "dE_over_W0": 4.604652454300098e-07,
+    "dx_median_over_eps": 5.502861270468722e-05,
+    "dx_p99_over_eps": 0.002884313844641919,
+    "pair_evaluations_vs_shared": 0.0626301825,
+    "mean_rung_hist": [
+     4794.0,
+     144.75,
+     41.25,
+     12.0,
+     8.0
+    ],
+    "pair_impulse_imbalance": 9.405530097149056e-17
+   },
+   "seconds": 127.26105204410851
+  },
+  "6": {
+   "dt_min": 5.277549769138847e-05,
+   "dt_max": 0.003377631852248862,
+   "steps": 256,
+   "shared_dt_min": {
+    "dE_over_W0": 7.412993843203528e-07,
+    "dx_median_over_eps": 7.498933244495214e-07,
+    "dx_p99_over_eps": 7.04676649043092e-05
+   },
+   "max": {
+    "dE_over_W0": 9.57763311823254e-05,
+    "dx_median_over_eps": 0.000915017555219977,
+    "dx_p99_over_eps": 0.051932417631288384,
+    "pair_evaluations_vs_shared": 0.0478902978125,
+    "mean_rung_hist": [
+     2040.0,
+     2339.5,
+     414.0,
+     141.25,
+     45.0,
+     12.0,
+     8.25
+    ],
+    "pair_impulse_imbalance": 1.0957297197703893e-16
+   },
+   "hold": {
+    "dE_over_W0": 8.05479947432721e-05,
+    "dx_median_over_eps": 0.0012346387846403305,
+    "dx_p99_over_eps": 0.12237333567149088,
+    "pair_evaluations_vs_shared": 0.02171465140625,
+    "mean_rung_hist": [
+     2040.25,
+     2339.5,
+     413.75,
+     141.25,
+     45.0,
+     12.0,
+     8.25
+    ],
+    "pair_impulse_imbalance": 5.825928834652565e-17
+   },
+   "seconds": 499.6753011830151
+  }
+ }
+}
