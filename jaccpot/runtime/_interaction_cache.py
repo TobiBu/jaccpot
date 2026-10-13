@@ -1185,7 +1185,7 @@ def _lex_sorted(
         wide = jnp.int32
     elif jax.config.jax_enable_x64:
         wide = jnp.int64
-    else:  # pragma: no cover - the lane always runs with x64 on
+    else:  # pragma: no cover - jaccpot requires x64 (runtime/dtypes.require_x64)
         p1 = jnp.argsort(secondary, stable=True, dtype=jnp.int32)
         p2 = jnp.argsort(primary[p1], stable=True, dtype=jnp.int32)
         perm = p1[p2]

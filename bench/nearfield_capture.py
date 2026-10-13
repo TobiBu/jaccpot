@@ -28,6 +28,9 @@ if rest and rest[0] == "--":
 import jax  # noqa: E402
 import numpy as np  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 import jaccpot.pallas.nearfield_leafpair_csr as _nf  # noqa: E402
 
 _orig = _nf.nearfield_leafpair_csr_sorted_direct_pallas

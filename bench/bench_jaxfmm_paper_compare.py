@@ -154,6 +154,9 @@ import jax.numpy as jnp
 
 from jaccpot import FastMultipoleMethod
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 # Both layouts: jaxFMM >= 0.3 exports these at the package root, and removed the
 # `jaxfmm.fmm` / `jaxfmm.hierarchy` submodules this script used to import from.
 # That removal is why the comparison arm was dead for months -- the import raised,

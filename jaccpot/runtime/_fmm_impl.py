@@ -78,6 +78,7 @@ from jaccpot.softening import resolve_softening_kernel, support_factor
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
 from ._interaction_cache import _InteractionCacheEntry
 from ._large_n_types import LargeNPreparedState
+from .dtypes import require_x64
 from .fmm_caches import _clear_global_runtime_caches
 from .fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
 from .fmm_derivatives import DerivativesMixin
@@ -410,6 +411,7 @@ class FMMEngine(
         nearfield: Optional[NearFieldConfig] = None,
         runtime_policy: Optional[RuntimePolicyConfig] = None,
     ):
+        require_x64("FMMEngine")
         # The seventeen execution-policy knobs arrive as one frozen group
         # (audit F09). Unpacked into the same locals the flat parameters used,
         # so every line below this point is untouched and the resolution order

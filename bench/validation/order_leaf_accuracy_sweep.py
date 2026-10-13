@@ -135,6 +135,9 @@ from bench.validation.mac_error_distribution import (  # noqa: E402
 )
 from jaccpot.solver import FastMultipoleMethod  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 _RESULTS = REPO_ROOT / "bench" / "results" / "near_field"
 
 # THE FP32 FLOOR IS MEASURED HERE, NOT PREDICTED.

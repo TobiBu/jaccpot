@@ -1,4 +1,4 @@
-"""Centralized dtypes for integer indices.
+"""Centralized dtypes for integer indices, and the ``jax_enable_x64`` requirement.
 
 Keep a single source of truth for index dtype so the codebase can be
 switched between 32-bit and 64-bit indices easily.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 
+import jax
 import jax.numpy as jnp
 from jaxtyping import DTypeLike
 
@@ -37,9 +38,9 @@ def _resolve_index_dtype() -> DTypeLike:
     Returns
     -------
     DTypeLike
-        ``jnp.int32`` or ``jnp.int64``. The ``int64`` request is honoured in
-        practice because importing yggdrax sets ``jax_enable_x64``; without that
-        JAX would quietly demote it to int32.
+        ``jnp.int32`` or ``jnp.int64``. The ``int64`` request is honoured because
+        jaccpot requires ``jax_enable_x64`` (:func:`require_x64`); without it JAX
+        would quietly demote it to int32.
     """
     raw = str(os.environ.get("JACCPOT_INDEX_PRECISION", "")).strip().lower()
     if raw in ("int64", "i64", "64"):
@@ -83,6 +84,39 @@ def require_index_capacity(**sizes: int) -> None:
         )
 
 
+def require_x64(what: str) -> None:
+    """Raise unless ``jax_enable_x64`` is on; jaccpot needs JAX's 64-bit types.
+
+    The trees are built on 63-bit ``uint64`` Morton codes, and the large-N centre of
+    mass prefix sums, the ``accum="wide"`` near-field accumulator, the precomputed
+    rotation constants, the multi-GPU global ids and ``precision="fp64"`` are 64-bit.
+    With x64 off, JAX narrows those requests to 32 bits with at most a warning: the
+    trees come out wrong and the forces with them (rel-L2 0.19 on the float32 lanes
+    when this was tried), with no error. yggdrax switched x64 on at import until
+    2026-10; jaccpot now asks for it instead of relying on that.
+
+    x64 does not make jaccpot compute in float64: the working precision follows the
+    input dtype (``working_dtype`` / ``precision``), so float32 inputs stay float32.
+
+    Parameters
+    ----------
+    what : str
+        The class or function that needs it, named in the message.
+
+    Raises
+    ------
+    RuntimeError
+        If ``jax_enable_x64`` is off.
+    """
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            f"{what} needs jax_enable_x64=True. Enable it at the top of your program, "
+            'before creating arrays: jax.config.update("jax_enable_x64", True), or '
+            "set JAX_ENABLE_X64=1. It does not switch jaccpot to float64: the input "
+            "dtype (or working_dtype / precision) still sets the working precision."
+        )
+
+
 def as_index(x: object) -> jnp.ndarray:
     """Convert a Python or JAX scalar/array to INDEX_DTYPE.
 
@@ -110,4 +144,5 @@ __all__ = [
     "INDEX_DTYPE",
     "as_index",
     "require_index_capacity",
+    "require_x64",
 ]

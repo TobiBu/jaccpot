@@ -475,7 +475,7 @@ def csr_by_target(
     key = jnp.where(valid, tgt, jnp.asarray(total_nodes, jnp.int32))
     # One stable key-value sort carries the sources along: no permutation, no
     # gathers. (An argsort here also carried an int64 iota through this
-    # every-step sort -- yggdrax enables x64 -- twice the bytes per pass.)
+    # every-step sort -- x64 is on, jaccpot requires it -- twice the bytes per pass.)
     sorted_key, src_sorted = jax.lax.sort(
         (key, jnp.where(valid, src, 0)), num_keys=1, is_stable=True
     )

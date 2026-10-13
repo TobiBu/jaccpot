@@ -23,6 +23,9 @@ import numpy as np
 
 from jaccpot.runtime._mac_geometry import _com_radii  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 ap = argparse.ArgumentParser()
 ap.add_argument("capture")
 ap.add_argument("--variants", nargs="+", default=["table", "table:block=32"])

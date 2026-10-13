@@ -117,12 +117,14 @@ def _clear_queue_cache() -> None:
     Imported from ``_interactions_impl`` rather than a re-export: the module that
     defines a private name is the only place it is guaranteed to still exist.
     """
+    jax.config.update("jax_enable_x64", True)
     from yggdrax._interactions_impl import _DUAL_TREE_QUEUE_CACHE
 
     _DUAL_TREE_QUEUE_CACHE.clear()
 
 
 def _build_tree(n: int, leaf: int, seed: int) -> tuple[Any, Any, int]:
+    jax.config.update("jax_enable_x64", True)
     from yggdrax.tree import Tree
 
     from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
@@ -152,6 +154,7 @@ def _walk_once(
     jit: bool,
 ) -> dict:
     """One walk, cold cache, returning the counts and every overflow flag."""
+    jax.config.update("jax_enable_x64", True)
     from yggdrax.interactions import (
         DualTreeTraversalConfig,
         build_interactions_and_neighbors,
@@ -262,6 +265,7 @@ def _occupancy(args: argparse.Namespace) -> dict:
     budgets) or only with leaf size (it should -- a bigger leaf has more
     particles behind each neighbour).
     """
+    jax.config.update("jax_enable_x64", True)
     from yggdrax.interactions import (
         DualTreeTraversalConfig,
         build_interactions_and_neighbors,
@@ -411,6 +415,7 @@ def _driver_point(*, ndev: int, args: argparse.Namespace, **caps: Any) -> dict:
 
     from jax.sharding import Mesh
 
+    jax.config.update("jax_enable_x64", True)
     from jaccpot.distributed.fmm import (
         DIAG_FIELDS,
         DistributedFMMConfig,

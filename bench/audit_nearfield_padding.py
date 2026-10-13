@@ -36,6 +36,7 @@ import os
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -45,6 +46,9 @@ from jaccpot.runtime._nearfield_fastlane import (
     leaf_major_nearfield_payload_cached,
     nearfield_topology_arrays,
 )
+
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
 
 
 def make_system(n: int, geometry: str, seed: int = 0):

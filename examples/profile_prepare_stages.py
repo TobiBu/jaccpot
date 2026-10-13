@@ -10,6 +10,9 @@ import jax.numpy as jnp
 
 from jaccpot import FastMultipoleMethod, FMMPreset
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 def _sample_problem(n: int, *, dtype):
     key = jax.random.PRNGKey(0)

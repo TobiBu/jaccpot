@@ -28,6 +28,9 @@ from jaccpot.pallas.nearfield_leafpair_csr import (
     nearfield_leafpair_csr_sorted_direct_pallas,
 )
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 ap = argparse.ArgumentParser()
 ap.add_argument("capture")
 ap.add_argument("--variants", nargs="+", default=["32:0:1"])

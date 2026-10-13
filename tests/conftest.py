@@ -288,8 +288,9 @@ def pytest_configure(config):
 
 
 # --- Test-suite performance setup -------------------------------------------
-# The FMM correctness tests assume float64; set it once here so individual
-# tests/modules do not each have to depend on the ambient environment.
+# jaccpot requires jax_enable_x64 (README), and neither it nor yggdrax switches it
+# on; the FMM correctness tests also assume float64 by default. Set it once here,
+# before jax is imported, so modules do not each depend on the ambient environment.
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 # Opt-in persistent JAX compilation cache. JAX already caches compiled

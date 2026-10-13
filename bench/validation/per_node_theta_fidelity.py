@@ -58,6 +58,9 @@ from .mac_error_distribution import (  # noqa: E402
     per_particle_dehnen_scaled_error,
 )
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 def _advanced(mac_type: str, cfg_runtime) -> FMMAdvancedConfig:
     cfg = FMMAdvancedConfig()

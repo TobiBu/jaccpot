@@ -31,6 +31,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | I am about to touch `operators/` | `operator_conventions.md` (and `agent_guides/NUMERICS_AND_JAX.md`) |
 | what is still **open** in the codebase? | `cleanup_2026-10.md` (its "Project summary"), then the F-table of `refactor_audit_2026-08.md` for the older items |
 | which module should the **jaxtyping rollout** convert next? | `annotation_pilot_phase2_2026-08-30.md` |
+| why must **`jax_enable_x64`** be on, and does it make the run float64? | the top-level README's "Requirement: `jax_enable_x64`", then `cleanup_2026-10.md` ("The x64 requirement") |
 
 ---
 

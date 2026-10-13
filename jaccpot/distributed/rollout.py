@@ -40,6 +40,7 @@ from jax.sharding import PartitionSpec as P
 from jaxtyping import Array
 
 from jaccpot.distributed.fused import AXIS_NAME, global_mesh_bounds
+from jaccpot.runtime.dtypes import require_x64
 from jaccpot.softening import (
     masked_pair_factors,
     resolve_softening_kernel,
@@ -588,6 +589,7 @@ class FusedRollout:
         *,
         route_velocities: bool = True,
     ) -> None:
+        require_x64("FusedRollout")
         self.mesh = mesh
         self.state = state
         self.config = config

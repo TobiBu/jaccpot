@@ -32,6 +32,7 @@ from .config import (
     TreeConfig,
 )
 from .runtime._large_n_types import LargeNPreparedState
+from .runtime.dtypes import require_x64
 from .runtime.fmm import FMMEngine as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
@@ -551,7 +552,7 @@ class FastMultipoleMethod:
         far field carries no softening error.
     precision : Optional[Literal['fp32', 'fp64']]
         Convenience spelling of ``working_dtype``. Passing both is an error unless
-        they agree; ``"fp64"`` additionally requires ``jax_enable_x64``.
+        they agree.
     working_dtype : Optional[DTypeLike]
         Explicit working dtype. ``None`` lets the preset decide.
     advanced : Optional[FMMAdvancedConfig]
@@ -565,9 +566,12 @@ class FastMultipoleMethod:
 
     Raises
     ------
+    RuntimeError
+        If ``jax_enable_x64`` is off (:func:`jaccpot.runtime.dtypes.require_x64`):
+        every lane needs 64-bit types, whatever the working precision.
     ValueError
-        If ``precision`` is not one of ``"fp32"``/``"fp64"``, conflicts with an
-        explicit ``working_dtype``, or requests fp64 without ``jax_enable_x64``.
+        If ``precision`` is not one of ``"fp32"``/``"fp64"`` or conflicts with an
+        explicit ``working_dtype``.
     TypeError
         If any keyword argument was neither in the signature nor recognized as a
         legacy spelling.
@@ -585,7 +589,7 @@ class FastMultipoleMethod:
     through this constructor.
     """
 
-    def __init__(
+    def __init__(  # noqa: DOC503 - RuntimeError is require_x64's
         self,
         *,
         preset: Union[FMMPreset, str] = FMMPreset.FAST,
@@ -615,6 +619,7 @@ class FastMultipoleMethod:
         advanced: Optional[FMMAdvancedConfig] = None,
         **legacy_kwargs: Any,
     ):
+        require_x64("FastMultipoleMethod")
         # Transitional compatibility: allow legacy expanse-style kwargs so
         # notebooks/scripts can migrate import paths incrementally.
         legacy_kwargs = dict(legacy_kwargs)
@@ -640,8 +645,6 @@ class FastMultipoleMethod:
                     "precision conflicts with explicit working_dtype; "
                     "use only one or ensure they match"
                 )
-            if precision_norm == "fp64" and not bool(jax.config.jax_enable_x64):
-                raise ValueError("precision='fp64' requires jax_enable_x64=True")
             working_dtype = precision_dtype
         basis_resolution = _resolve_basis_input(basis)
         runtime_basis = basis_resolution.runtime_basis

@@ -21,7 +21,9 @@ A refactor does not change results.
   `sum(a) + sum(b)` is not `sum(a + b)`, and the error budget here is set by expansion
   truncation, not by slack we can spend on sloppy accumulation.
 - **Do not change accumulation dtypes**, and do not touch anything conditioned on
-  `jax_enable_x64`. The default test invocation is `JAX_ENABLE_X64=1`.
+  `jax_enable_x64`. jaccpot requires x64 (README; `runtime/dtypes.require_x64`) and
+  neither it nor yggdrax switches it on; the default test invocation is
+  `JAX_ENABLE_X64=1`.
 - **Do not change matmul precision.** `jaccpot/operators/_precision.py` pins fp32 matmuls to
   `lax.Precision.HIGHEST` via the `highest_matmul_precision` decorator, because XLA otherwise
   lowers them to TF32 on Ampere+ and caps M2L relative accuracy at ~6e-04 from order 4

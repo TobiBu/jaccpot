@@ -43,6 +43,7 @@ def main() -> None:
     import jax.numpy as jnp
     from jax import lax
 
+    jax.config.update("jax_enable_x64", True)
     from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
     from jaccpot.operators.real_harmonics import sh_size
     from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas

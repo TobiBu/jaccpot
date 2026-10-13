@@ -53,6 +53,9 @@ from bench.validation.mac_error_distribution import make_distribution  # noqa: E
 from jaccpot.config import FMMAdvancedConfig  # noqa: E402
 from jaccpot.solver import FastMultipoleMethod  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 
 def _floats(text: str) -> tuple[float, ...]:
     return tuple(float(v) for v in str(text).split(",") if v.strip())

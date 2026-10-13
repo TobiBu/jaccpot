@@ -68,6 +68,9 @@ from jaccpot.runtime._adaptive_policy import (  # noqa: E402
 )
 from jaccpot.solver import FastMultipoleMethod  # noqa: E402
 
+# jaccpot needs 64-bit types (README); neither it nor yggdrax turns them on.
+jax.config.update("jax_enable_x64", True)
+
 QUANTILES = (0.5, 0.9, 0.99, 0.999)
 
 
