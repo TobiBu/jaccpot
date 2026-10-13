@@ -1,0 +1,60 @@
+  [    0.8s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=25000000 live leaves 1502983 -> leaf capacity 1728512
+  [   11.6s] before_prepare                     in-use   0.47 GiB  peak   0.65 GiB  
+  [   11.6s] prepare:start                      in-use   0.47 GiB  peak   0.65 GiB  
+  [   11.6s] tree+upward:start                  in-use   0.47 GiB  peak   0.65 GiB  
+  [   49.2s] tree+upward:end                    in-use   2.06 GiB  peak   3.44 GiB  
+  [   49.2s] dual+downward:start                in-use   2.06 GiB  peak   3.44 GiB  
+  [   51.9s] walk+lists:start                   in-use   2.11 GiB  peak   3.44 GiB  
+  [   53.4s] walk:start                         in-use   2.17 GiB  peak   3.44 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [   55.4s] walk:end                           in-use   2.18 GiB  peak   3.44 GiB  
+  [   55.4s] walk:start                         in-use   2.17 GiB  peak   3.44 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [   57.2s] walk:end                           in-use   2.18 GiB  peak   3.44 GiB  
+  [   57.2s] walk:start                         in-use   2.17 GiB  peak   3.44 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [   59.0s] walk:end                           in-use   2.18 GiB  peak   3.44 GiB  
+  [   59.1s] walk:start                         in-use   2.17 GiB  peak   3.44 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [   60.9s] walk:end                           in-use   2.18 GiB  peak   3.44 GiB  
+  [   60.9s] walk:start                         in-use   2.17 GiB  peak   3.44 GiB  {'queue': 8388608, 'far_cap': 65536, 'near_cap': 1048576}
+  [   62.8s] walk:end                           in-use   2.18 GiB  peak   3.44 GiB  
+  [   62.8s] walk:start                         in-use   2.17 GiB  peak   3.44 GiB  {'queue': 16777216, 'far_cap': 65536, 'near_cap': 1048576}
+  [   64.8s] walk:end                           in-use   2.18 GiB  peak   3.44 GiB  
+  [   64.8s] walk:start                         in-use   2.17 GiB  peak   3.44 GiB  {'queue': 16777216, 'far_cap': 71303168, 'near_cap': 28311552}
+  [   66.7s] walk:end                           in-use   3.00 GiB  peak   3.44 GiB  
+  [   68.3s] walk+lists:end                     in-use   2.90 GiB  peak   4.30 GiB  
+  [   68.3s] downward:start                     in-use   2.90 GiB  peak   4.30 GiB  
+  [   84.5s] downward:end                       in-use   3.56 GiB  peak   4.83 GiB  
+  [   84.5s] dual+downward:end                  in-use   3.50 GiB  peak   4.83 GiB  
+  [   85.8s] prepare:end                        in-use   3.45 GiB  peak   4.83 GiB  
+  [   85.8s] after_prepare                      in-use   3.45 GiB  peak   4.83 GiB  
+  [   89.7s] after_eval_compile                 in-use   3.73 GiB  peak   4.83 GiB  
+  [   91.7s] after_eval_timing                  in-use   3.45 GiB  peak   4.83 GiB  
+eval-only min 326.28 ms
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/s0/activity_25m_bench.json
+[probe] N=25000000 nodes 3457023 leaves 1502983 near entries 37575550 far pairs 94801662 (directed)
+[probe] k_max 3: rungs [100298, 1098213, 22320242, 1481247] | bound 1.93x | predicted vs shared dt_min: max 2.19x, max+B1 2.17x, HOLD 1.93x | leaves single-rung 0.99
+    floor 0: near tiles 1.000 pairs 1.000 far 1.000 (B1 1.000) kicked 1.000 HOLD subset 1.0000
+    floor 1: near tiles 0.998 pairs 1.000 far 0.978 (B1 0.977) kicked 1.000 HOLD subset 0.9960
+    floor 2: near tiles 0.964 pairs 0.969 far 0.921 (B1 0.911) kicked 1.000 HOLD subset 0.9521
+    floor 3: near tiles 0.138 pairs 0.124 far 0.073 (B1 0.077) kicked 1.000 HOLD subset 0.0592
+[probe] k_max 4: rungs [12583, 87715, 1098213, 22320242, 1481247] | bound 1.93x | predicted vs shared dt_min: max 2.30x, max+B1 2.28x, HOLD 1.93x | leaves single-rung 0.99
+    floor 0: near tiles 1.000 pairs 1.000 far 1.000 (B1 1.000) kicked 1.000 HOLD subset 1.0000
+    floor 1: near tiles 1.000 pairs 1.000 far 0.998 (B1 0.997) kicked 1.000 HOLD subset 0.9995
+    floor 2: near tiles 0.998 pairs 1.000 far 0.978 (B1 0.974) kicked 1.000 HOLD subset 0.9960
+    floor 3: near tiles 0.964 pairs 0.969 far 0.921 (B1 0.909) kicked 1.000 HOLD subset 0.9521
+    floor 4: near tiles 0.138 pairs 0.124 far 0.073 (B1 0.077) kicked 1.000 HOLD subset 0.0592
+[probe] k_max 5: rungs [0, 12583, 87715, 1098213, 22320242, 1481247] | bound 1.93x | predicted vs shared dt_min: max 2.37x, max+B1 2.34x, HOLD 1.93x | leaves single-rung 0.99
+    floor 0: near tiles 1.000 pairs 1.000 far 1.000 (B1 1.000) kicked 1.000 HOLD subset 1.0000
+    floor 1: near tiles 1.000 pairs 1.000 far 1.000 (B1 1.000) kicked 1.000 HOLD subset 1.0000
+    floor 2: near tiles 1.000 pairs 1.000 far 0.998 (B1 0.997) kicked 1.000 HOLD subset 0.9995
+    floor 3: near tiles 0.998 pairs 1.000 far 0.978 (B1 0.974) kicked 1.000 HOLD subset 0.9960
+    floor 4: near tiles 0.964 pairs 0.969 far 0.921 (B1 0.909) kicked 1.000 HOLD subset 0.9521
+    floor 5: near tiles 0.138 pairs 0.124 far 0.073 (B1 0.077) kicked 1.000 HOLD subset 0.0592
+[probe] k_max 6: rungs [0, 0, 12583, 87715, 1098213, 22320242, 1481247] | bound 1.93x | predicted vs shared dt_min: max 2.40x, max+B1 2.38x, HOLD 1.93x | leaves single-rung 0.99
+    floor 0: near tiles 1.000 pairs 1.000 far 1.000 (B1 1.000) kicked 1.000 HOLD subset 1.0000
+    floor 1: near tiles 1.000 pairs 1.000 far 1.000 (B1 1.000) kicked 1.000 HOLD subset 1.0000
+    floor 2: near tiles 1.000 pairs 1.000 far 1.000 (B1 1.000) kicked 1.000 HOLD subset 1.0000
+    floor 3: near tiles 1.000 pairs 1.000 far 0.998 (B1 0.997) kicked 1.000 HOLD subset 0.9995
+    floor 4: near tiles 0.998 pairs 1.000 far 0.978 (B1 0.974) kicked 1.000 HOLD subset 0.9960
+    floor 5: near tiles 0.964 pairs 0.969 far 0.921 (B1 0.909) kicked 1.000 HOLD subset 0.9521
+    floor 6: near tiles 0.138 pairs 0.124 far 0.073 (B1 0.077) kicked 1.000 HOLD subset 0.0592
+[probe] wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/s0/activity_25m.json

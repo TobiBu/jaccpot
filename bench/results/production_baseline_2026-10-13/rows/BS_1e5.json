@@ -1,0 +1,46 @@
+{
+ "args": {
+  "n": 100000,
+  "k_max": 3,
+  "extra": 3,
+  "dt_max": 0.02,
+  "softening": 0.01,
+  "leaf": 64,
+  "theta": 0.6,
+  "out": "/tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/rows/BS_1e5.json"
+ },
+ "t_a_s": 42.02305882051587,
+ "t_b_s": 22.496043715626,
+ "t_c_s": 29.058925243094563,
+ "base_step_s_est": 2.187627175822854,
+ "seconds_per_base_step_reported": 6.662585225887597,
+ "rungs": [
+  [
+   42876,
+   57124,
+   0,
+   0
+  ],
+  [
+   42914,
+   57086,
+   0,
+   0
+  ],
+  [
+   42874,
+   57126,
+   0,
+   0
+  ],
+  [
+   42890,
+   57110,
+   0,
+   0
+  ]
+ ],
+ "mom_drift_max": 8.608810254698834e-19,
+ "peak_gib": 0.3446841239929199,
+ "peak_b_per_particle": 3701.0176
+}

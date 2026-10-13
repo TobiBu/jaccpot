@@ -1,0 +1,55 @@
+
+  %reduce-window.838 = f64[62500,16]{0,1} reduce-window(%broadcast.28809, %constant.36896), window={size=1x16 pad=0_0x15_0}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1s:
+
+  %reduce-window.838 = f64[62500,16]{0,1} reduce-window(%broadcast.28809, %constant.36896), window={size=1x16 pad=0_0x15_0}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.1776 = f64[62500,16]{0,1} map(%constant.37830, %broadcast.28813), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 2s:
+
+  %map.1776 = f64[62500,16]{0,1} map(%constant.37830, %broadcast.28813), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[bs] A 79.7 s rungs [[428230, 571770, 0, 0]] far 3616858 near 6854652
+
+  %map.1776 = f64[62500,16]{0,1} map(%constant.37830, %broadcast.28813), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 4s:
+
+  %map.1776 = f64[62500,16]{0,1} map(%constant.37830, %broadcast.28813), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[bs] B 55.8 s
+
+  %map.46 = f64[62500,16]{0,1} map(%constant.36893, %broadcast.1522), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 8s:
+
+  %map.46 = f64[62500,16]{0,1} map(%constant.36893, %broadcast.1522), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[bs] C 86.6 s -> base step 15.40 s (reported 26.97); peak 0.96 GiB (1031 B/p) mom 2.2e-18

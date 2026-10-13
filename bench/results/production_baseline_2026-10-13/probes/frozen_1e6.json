@@ -1,0 +1,100 @@
+{
+ "args": {
+  "out": "/tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/s0/frozen_1e6.json",
+  "n": 1000000,
+  "kmax": "3,4,5,6",
+  "dt_min": 0.0005,
+  "theta": 0.8,
+  "order": 6,
+  "leaf": 64,
+  "softening": 0.0015,
+  "kernel": "ferrers3",
+  "targets": 4096
+ },
+ "rows": {
+  "3": {
+   "dt_max": 0.004,
+   "displacement_median": 0.012089015197745183,
+   "displacement_p99": 0.02262910312400045,
+   "displacement_over_softening_p99": 15.086068749333633,
+   "frozen": {
+    "rel_l2": 0.012979435122336522,
+    "median": 0.00031220072504481043,
+    "p99": 0.006684612668060094,
+    "max": 0.13248432241460417
+   },
+   "fresh": {
+    "rel_l2": 0.0007619600870437102,
+    "median": 0.00028005025328027317,
+    "p99": 0.003078667600343033,
+    "max": 0.14160008867648302
+   },
+   "overflow_frozen": false,
+   "overflow_fresh": false,
+   "seconds": 62.03898340277374
+  },
+  "4": {
+   "dt_max": 0.008,
+   "displacement_median": 0.024178030395490366,
+   "displacement_p99": 0.0452582062480009,
+   "displacement_over_softening_p99": 30.172137498667265,
+   "frozen": {
+    "rel_l2": 0.15921590751936018,
+    "median": 0.0004221200763982199,
+    "p99": 0.0647496838284911,
+    "max": 1.55225805789559
+   },
+   "fresh": {
+    "rel_l2": 0.0006134352216009555,
+    "median": 0.0002781731257131268,
+    "p99": 0.0027086565710384004,
+    "max": 0.12377771043815884
+   },
+   "overflow_frozen": false,
+   "overflow_fresh": false,
+   "seconds": 23.730623437091708
+  },
+  "5": {
+   "dt_max": 0.016,
+   "displacement_median": 0.04835606079098073,
+   "displacement_p99": 0.0905164124960018,
+   "displacement_over_softening_p99": 60.34427499733453,
+   "frozen": {
+    "rel_l2": 6.540633482158814,
+    "median": 0.001240242484345314,
+    "p99": 1.9173742126649869,
+    "max": 130.75679374679487
+   },
+   "fresh": {
+    "rel_l2": 0.0007550012556335323,
+    "median": 0.0002773693022149568,
+    "p99": 0.0031026503754147013,
+    "max": 0.130183972365198
+   },
+   "overflow_frozen": false,
+   "overflow_fresh": false,
+   "seconds": 23.69665666669607
+  },
+  "6": {
+   "dt_max": 0.032,
+   "displacement_median": 0.09671212158196146,
+   "displacement_p99": 0.1810328249920036,
+   "displacement_over_softening_p99": 120.68854999466906,
+   "frozen": {
+    "rel_l2": 1802.9994917606814,
+    "median": 0.02312892777526404,
+    "p99": 134.97144236048595,
+    "max": 58143.021917201324
+   },
+   "fresh": {
+    "rel_l2": 0.0007065171417987466,
+    "median": 0.0002778723849675696,
+    "p99": 0.002875982345713497,
+    "max": 0.08767128609789085
+   },
+   "overflow_frozen": false,
+   "overflow_fresh": false,
+   "seconds": 23.615773098543286
+  }
+ }
+}

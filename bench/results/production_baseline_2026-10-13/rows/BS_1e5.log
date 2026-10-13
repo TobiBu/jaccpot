@@ -1,0 +1,16 @@
+[bs] A 42.0 s rungs [[42876, 57124, 0, 0]] far 192746 near 488104
+
+  %map.1589 = f64[6250,16]{0,1} map(%constant.37567, %broadcast.28501), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1s:
+
+  %map.1589 = f64[6250,16]{0,1} map(%constant.37567, %broadcast.28501), dimensions={0,1}, to_apply=%region_5.13.clone_rw_wrapper, metadata={stack_frame_id=72}
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[bs] B 22.5 s
+[bs] C 29.1 s -> base step 2.19 s (reported 6.66); peak 0.34 GiB (3701 B/p) mom 8.6e-19

@@ -1,0 +1,4 @@
+[frozen] k_max 3 dt_max 4.00e-03: displacement p99 2.263e-02 (15.1 eps) | frozen rel-L2 1.298e-02 max 1.32e-01 | fresh rel-L2 7.620e-04 max 1.42e-01 | 62 s
+[frozen] k_max 4 dt_max 8.00e-03: displacement p99 4.526e-02 (30.2 eps) | frozen rel-L2 1.592e-01 max 1.55e+00 | fresh rel-L2 6.134e-04 max 1.24e-01 | 24 s
+[frozen] k_max 5 dt_max 1.60e-02: displacement p99 9.052e-02 (60.3 eps) | frozen rel-L2 6.541e+00 max 1.31e+02 | fresh rel-L2 7.550e-04 max 1.30e-01 | 24 s
+[frozen] k_max 6 dt_max 3.20e-02: displacement p99 1.810e-01 (120.7 eps) | frozen rel-L2 1.803e+03 max 5.81e+04 | fresh rel-L2 7.065e-04 max 8.77e-02 | 24 s

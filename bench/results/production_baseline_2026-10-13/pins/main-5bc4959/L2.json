@@ -1,0 +1,14 @@
+{
+ "n": 100000000,
+ "step": {
+  "bytes_per_particle": 257.3823872,
+  "contaminated": false,
+  "far_pair_count": 402173018,
+  "foreign_pids": [],
+  "loadavg_max": 27.240234375,
+  "ms_median": 872.180282138288,
+  "ms_min": 871.8046098947525,
+  "peak_gib": 23.9706027507782
+ },
+ "timing": true
+}

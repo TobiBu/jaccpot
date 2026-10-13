@@ -1,0 +1,39 @@
+{
+ "n": 8000000,
+ "args": {
+  "n": 8000000,
+  "steps": 4,
+  "leaf": 64,
+  "order": 6,
+  "theta": 0.8,
+  "softening": 1e-07,
+  "kernel": null,
+  "state_dtype": "float64",
+  "history": true,
+  "dt": 0.01,
+  "prealloc": 0.88,
+  "skip_c": false,
+  "out": "/tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/rows/O_tun_hist.json"
+ },
+ "lane": "fmm_forward",
+ "config": {
+  "N_particles": "8000000",
+  "acceleration_scheme": "6",
+  "num_timesteps": "4",
+  "softening": "1e-07",
+  "return_snapshots": "True",
+  "num_snapshots": "4",
+  "fmm_leaf_size": "64",
+  "fmm_max_order": "6",
+  "fmm_fixed_order": "6",
+  "fmm_theta": "0.8"
+ },
+ "t_a_s": 215.1960323639214,
+ "peak_a_gib": 4.683409690856934,
+ "t_b_s": 173.46726334095,
+ "t_c_s": 459.4652102403343,
+ "step_ms_est": 35749.74336242303,
+ "finite": true,
+ "peak_gib": 10.659212589263916,
+ "peak_b_per_particle": 1430.655296
+}

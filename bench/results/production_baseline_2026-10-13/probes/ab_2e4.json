@@ -1,0 +1,91 @@
+{
+ "args": {
+  "out": "/tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/s0/ab_2e4.json",
+  "n": 20000,
+  "kmax": "3,4",
+  "n_base": 32,
+  "eta": 0.1,
+  "softening_rdisk": 0.02,
+  "block": 1024
+ },
+ "n": 20000,
+ "softening": 0.0048,
+ "rows": {
+  "3": {
+   "dt_min": 0.0005847952851565059,
+   "dt_max": 0.004678362281252047,
+   "steps": 256,
+   "shared_dt_min": {
+    "dE_over_W0": 9.694760973525965e-07,
+    "dx_median_over_eps": 0.00025942154465607135,
+    "dx_p99_over_eps": 0.009105807926264671
+   },
+   "max": {
+    "dE_over_W0": 3.281336795295388e-06,
+    "dx_median_over_eps": 0.001253234252533236,
+    "dx_p99_over_eps": 0.029792209992157714,
+    "pair_evaluations_vs_shared": 0.5796312925,
+    "mean_rung_hist": [
+     63.0,
+     589.1875,
+     17679.6875,
+     1668.125
+    ],
+    "pair_impulse_imbalance": 2.4687275648220305e-18
+   },
+   "hold": {
+    "dE_over_W0": 7.802956937772025e-07,
+    "dx_median_over_eps": 0.0013226521303297163,
+    "dx_p99_over_eps": 0.031092736793045826,
+    "pair_evaluations_vs_shared": 0.486682766875,
+    "mean_rung_hist": [
+     63.0,
+     589.1875,
+     17679.6875,
+     1668.125
+    ],
+    "pair_impulse_imbalance": 2.310982419863209e-18
+   },
+   "seconds": 39.06150772795081
+  },
+  "4": {
+   "dt_min": 0.0005847952851565059,
+   "dt_max": 0.009356724562504094,
+   "steps": 512,
+   "shared_dt_min": {
+    "dE_over_W0": 9.793640033776423e-07,
+    "dx_median_over_eps": 0.0007496168362440437,
+    "dx_p99_over_eps": 0.0600720042298456
+   },
+   "max": {
+    "dE_over_W0": 2.2141895331821307e-06,
+    "dx_median_over_eps": 0.00499309467097566,
+    "dx_p99_over_eps": 0.09480981515132716,
+    "pair_evaluations_vs_shared": 0.5880569615234374,
+    "mean_rung_hist": [
+     10.0,
+     53.0,
+     584.40625,
+     17499.03125,
+     1853.5625
+    ],
+    "pair_impulse_imbalance": 9.244394566928454e-19
+   },
+   "hold": {
+    "dE_over_W0": 4.000761640955022e-06,
+    "dx_median_over_eps": 0.00525216795863237,
+    "dx_p99_over_eps": 0.10996755604649444,
+    "pair_evaluations_vs_shared": 0.48758434013671875,
+    "mean_rung_hist": [
+     10.0,
+     53.0,
+     584.4375,
+     17499.1875,
+     1853.375
+    ],
+    "pair_impulse_imbalance": 1.5476786882432163e-18
+   },
+   "seconds": 75.3215067666024
+  }
+ }
+}

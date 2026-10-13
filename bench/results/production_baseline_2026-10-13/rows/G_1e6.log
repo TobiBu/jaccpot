@@ -1,0 +1,75 @@
+[G_1e6] devices=[7] load=(29.40869140625, 30.7744140625, 31.2421875) overrides={"JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "16777216", "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "33554432", "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto"}
+[G_1e6] cell leaves: 51907 live -> leaf_capacity 65536
+[G_1e6] production eval aggL2 vs direct sum 1.218e-03
+[G_1e6] eval_production: min 13.00 ms (IQR 2.25, med 13.18) flags=['loadavg>=8 (27.7)', 'other-gpus-busy (100%)'] load=28
+[G_1e6] state LargeNPreparedState in 16.3 s
+[G_1e6] far pairs cap 16777216 active 3801516 near edges 2701004 symmetric=True tree {'total_nodes': 131071, 'num_internal': 65535, 'levels_live': 46, 'widest_level': 23248, 'single_child_parents': 0}
+[G_1e6] forward_differentiable_eager: min 13920.76 ms (IQR 650.30, med 14379.58) flags=['loadavg>=8 (32.8)', 'other-gpus-busy (100%)'] load=31
+[G_1e6] differentiable forward vs production eval rel-L2 2.240e-03; vs direct sum aggL2 2.412e-03
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jaxtyping/_decorator.py:465: UserWarning: differentiable_accelerations is being traced (an outer jax.jit or jax.grad is in charge). Compiling this pipeline takes tens of seconds to minutes and XLA reports no progress, so it looks like a hang: measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the gradient, and one inner module alone at 3m28s. It is a one-time cost. To pay it deliberately rather than inside a timed region, use FMMEngine.differentiable_step_fn(state, compile_now=(pos, mass)). This warning is issued once per process.
+  out = fn(*args, **kwargs)
+
+  %reduce-window.8 = s32[62500,16]{0,1} reduce-window(%constant.5602, %constant.1129), window={size=1x16 pad=0_0x15_0}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1s:
+
+  %reduce-window.8 = s32[62500,16]{0,1} reduce-window(%constant.5602, %constant.1129), window={size=1x16 pad=0_0x15_0}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.4 = s32[62500,16]{0,1} map(%constant.5603, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 2s:
+
+  %map.4 = s32[62500,16]{0,1} map(%constant.5603, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[G_1e6] grad_jit: min 101.60 ms (IQR 0.60, med 102.22) flags=['loadavg>=8 (33.7)', 'other-gpus-busy (100%)'] load=34
+[G_1e6] upward_forward_eager: min 12129.72 ms (IQR 581.86, med 12285.29) flags=['loadavg>=8 (33.7)', 'other-gpus-busy (100%)'] load=29
+[G_1e6] upward_grad_eager: min 15183.36 ms (IQR 675.26, med 15476.42) flags=['loadavg>=8 (31.3)', 'other-gpus-busy (100%)'] load=29
+
+  %map.3 = s32[62500,16]{0,1} map(%constant.135, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 4s:
+
+  %map.3 = s32[62500,16]{0,1} map(%constant.135, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[G_1e6] upward_grad_jit: min 14.54 ms (IQR 2.10, med 17.25) flags=['loadavg>=8 (31.8)', 'other-gpus-busy (100%)'] load=32
+[G_1e6] far_forward_eager: min 13944.43 ms (IQR 579.69, med 14026.48) flags=['loadavg>=8 (31.8)', 'other-gpus-busy (100%)'] load=29
+[G_1e6] far_grad_eager: min 30019.94 ms (IQR 1219.43, med 31145.09) flags=['loadavg>=8 (29.1)', 'other-gpus-busy (100%)'] load=28
+
+  %map.3 = s32[62500,16]{0,1} map(%constant.5273, %broadcast.906), dimensions={0,1}, to_apply=%region_192.238_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 8s:
+
+  %map.3 = s32[62500,16]{0,1} map(%constant.5273, %broadcast.906), dimensions={0,1}, to_apply=%region_192.238_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[G_1e6] far_grad_jit: min 56.79 ms (IQR 4.15, med 57.14) flags=['loadavg>=8 (30.1)', 'other-gpus-busy (100%)'] load=30
+[G_1e6] near_forward_eager: min 289.65 ms (IQR 14.36, med 298.92) flags=['loadavg>=8 (29.5)', 'other-gpus-busy (100%)'] load=29
+[G_1e6] near_grad_eager: min 731.28 ms (IQR 21.55, med 747.31) flags=['loadavg>=8 (29.5)', 'other-gpus-busy (100%)'] load=29
+[G_1e6] near_grad_jit: min 47.13 ms (IQR 0.51, med 47.71) flags=['loadavg>=8 (32.4)', 'other-gpus-busy (100%)'] load=32
+[G_1e6] wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/rows/G_1e6.json
+[grad_wrap] exit 0
+[grad_wrap] process device peak 15.80 GiB

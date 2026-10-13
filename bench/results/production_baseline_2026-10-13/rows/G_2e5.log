@@ -1,0 +1,49 @@
+[G_2e5] devices=[7] load=(26.4951171875, 28.134765625, 30.38427734375) overrides={"JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "2097152", "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "4194304", "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto"}
+[G_2e5] cell leaves: 10956 live -> leaf_capacity 16384
+[G_2e5] production eval aggL2 vs direct sum 1.271e-03
+[G_2e5] eval_production: min 4.63 ms (IQR 1.72, med 5.21) flags=['loadavg>=8 (28.4)', 'other-gpus-busy (100%)'] load=28
+[G_2e5] state LargeNPreparedState in 16.4 s
+[G_2e5] far pairs cap 2097152 active 719178 near edges 324588 symmetric=True tree {'total_nodes': 32767, 'num_internal': 16383, 'levels_live': 40, 'widest_level': 4166, 'single_child_parents': 0}
+[G_2e5] forward_differentiable_eager: min 14054.25 ms (IQR 277.37, med 14207.61) flags=['loadavg>=8 (32.0)', 'other-gpus-busy (100%)'] load=32
+[G_2e5] differentiable forward vs production eval rel-L2 1.460e-03; vs direct sum aggL2 1.602e-03
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jaxtyping/_decorator.py:465: UserWarning: differentiable_accelerations is being traced (an outer jax.jit or jax.grad is in charge). Compiling this pipeline takes tens of seconds to minutes and XLA reports no progress, so it looks like a hang: measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the gradient, and one inner module alone at 3m28s. It is a one-time cost. To pay it deliberately rather than inside a timed region, use FMMEngine.differentiable_step_fn(state, compile_now=(pos, mass)). This warning is issued once per process.
+  out = fn(*args, **kwargs)
+
+  %map.4 = s32[12500,16]{0,1} map(%constant.5486, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1s:
+
+  %map.4 = s32[12500,16]{0,1} map(%constant.5486, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[G_2e5] grad_jit: min 31.85 ms (IQR 0.68, med 32.53) flags=['loadavg>=8 (32.3)', 'other-gpus-busy (100%)'] load=32
+[G_2e5] upward_forward_eager: min 12241.23 ms (IQR 347.49, med 12469.48) flags=['loadavg>=8 (38.3)', 'other-gpus-busy (100%)'] load=38
+[G_2e5] upward_grad_eager: min 15489.09 ms (IQR 449.15, med 15619.72) flags=['loadavg>=8 (38.3)', 'other-gpus-busy (100%)'] load=34
+
+  %map.3 = s32[12500,16]{0,1} map(%constant.132, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 2s:
+
+  %map.3 = s32[12500,16]{0,1} map(%constant.132, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[G_2e5] upward_grad_jit: min 5.01 ms (IQR 0.65, med 5.69) flags=['loadavg>=8 (32.2)', 'other-gpus-busy (100%)'] load=32
+[G_2e5] far_forward_eager: min 13867.09 ms (IQR 610.44, med 13925.06) flags=['loadavg>=8 (37.7)', 'other-gpus-busy (100%)'] load=36
+[G_2e5] far_grad_eager: min 29704.53 ms (IQR 781.77, med 30314.70) flags=['loadavg>=8 (37.4)', 'other-gpus-busy (100%)'] load=28
+[G_2e5] far_grad_jit: min 20.79 ms (IQR 1.04, med 20.87) flags=['loadavg>=8 (27.6)', 'other-gpus-busy (100%)'] load=28
+[G_2e5] near_forward_eager: min 257.95 ms (IQR 8.43, med 264.62) flags=['loadavg>=8 (28.2)', 'other-gpus-busy (100%)'] load=28
+[G_2e5] near_grad_eager: min 649.72 ms (IQR 22.10, med 661.79) flags=['loadavg>=8 (28.9)', 'other-gpus-busy (100%)'] load=29
+[G_2e5] near_grad_jit: min 11.72 ms (IQR 0.16, med 11.96) flags=['loadavg>=8 (29.3)', 'other-gpus-busy (100%)'] load=29
+[G_2e5] wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/rows/G_2e5.json
+[grad_wrap] exit 0
+[grad_wrap] process device peak 3.22 GiB
