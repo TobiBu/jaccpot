@@ -1,0 +1,14 @@
+acceleration sqrt(eps/|a|): dt/dt_min percentiles 1/10/50/90/99 = [1.71, 2.81, 3.31, 4.43, 6.81]; rungs(k6) [0, 0, 32, 140, 4918, 24277, 633]; bound 2.14x
+dynamical sqrt(r/|a|): dt/dt_min percentiles 1/10/50/90/99 = [9.98, 40.77, 78.23, 153.7, 347.0]; rungs(k6) [20747, 7369, 1216, 459, 166, 33, 10]; bound 39.69x
+R/R_d  0.00- 0.25: frac 0.033 |a| median 70.6 dt_acc/dt_min median 1.89 dt_dyn/dt_dyn_min median 13.3
+R/R_d  0.25- 0.50: frac 0.037 |a| median 41 dt_acc/dt_min median 2.48 dt_dyn/dt_dyn_min median 27.6
+R/R_d  0.50- 1.00: frac 0.096 |a| median 29.8 dt_acc/dt_min median 2.92 dt_dyn/dt_dyn_min median 43.6
+R/R_d  1.00- 2.00: frac 0.289 |a| median 25.4 dt_acc/dt_min median 3.16 dt_dyn/dt_dyn_min median 64.0
+R/R_d  2.00- 3.00: frac 0.256 |a| median 22.5 dt_acc/dt_min median 3.36 dt_dyn/dt_dyn_min median 85.3
+R/R_d  3.00- 4.00: frac 0.143 |a| median 17.8 dt_acc/dt_min median 3.78 dt_dyn/dt_dyn_min median 113.0
+R/R_d  4.00- 6.00: frac 0.107 |a| median 12.8 dt_acc/dt_min median 4.45 dt_dyn/dt_dyn_min median 156.1
+R/R_d  6.00-10.00: frac 0.032 |a| median 8.06 dt_acc/dt_min median 5.60 dt_dyn/dt_dyn_min median 240.6
+R/R_d 10.00-99.00: frac 0.007 |a| median 2.9 dt_acc/dt_min median 9.35 dt_dyn/dt_dyn_min median 638.8
+fit dt_acc ~ R^0.26 beyond 0.3 R_d; R_d=0.24, eps=0.0015 (0.0063 R_d); |a| max/median 10.9
+component 0: frac 0.834 dt_acc/dt_min median 3.34
+component 1: frac 0.166 dt_acc/dt_min median 2.95

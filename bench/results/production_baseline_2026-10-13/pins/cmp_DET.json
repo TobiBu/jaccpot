@@ -1,0 +1,52 @@
+{
+ "DET1": {
+  "arrays": {
+   "force": {
+    "bitwise": true,
+    "max_abs": 0.0,
+    "rel_l2": 0.0
+   },
+   "state": {
+    "bitwise": true,
+    "max_abs": 0.0,
+    "rel_l2": 0.0
+   }
+  },
+  "meta": {
+   "new": {
+    "n": 200000,
+    "rel_l2": 0.0007763740039873738
+   },
+   "ref": {
+    "n": 200000,
+    "rel_l2": 0.0007763740039873738
+   }
+  },
+  "pass": true
+ },
+ "DET2": {
+  "arrays": {
+   "g_mass": {
+    "bitwise": true,
+    "max_abs": 0.0,
+    "rel_l2": 0.0
+   },
+   "g_pos": {
+    "bitwise": true,
+    "max_abs": 0.0,
+    "rel_l2": 0.0
+   }
+  },
+  "meta": {
+   "new": {
+    "loss": 54.33352279663086,
+    "n": 20000
+   },
+   "ref": {
+    "loss": 54.33352279663086,
+    "n": 20000
+   }
+  },
+  "pass": true
+ }
+}

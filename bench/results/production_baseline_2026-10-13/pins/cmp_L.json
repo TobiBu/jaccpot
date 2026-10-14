@@ -1,0 +1,177 @@
+{
+ "L1": {
+  "meta": {
+   "new": {
+    "n": 8000000,
+    "step": {
+     "bytes_per_particle": 317.152736,
+     "contaminated": false,
+     "far_pair_count": 39093974,
+     "foreign_pids": [],
+     "loadavg_max": 28.6064453125,
+     "ms_median": 78.53828649967909,
+     "ms_min": 78.52254714816809,
+     "peak_gib": 2.3629720211029053
+    },
+    "timing": true
+   },
+   "ref": {
+    "n": 8000000,
+    "step": {
+     "bytes_per_particle": 317.152736,
+     "contaminated": false,
+     "far_pair_count": 39093974,
+     "foreign_pids": [],
+     "loadavg_max": 27.1689453125,
+     "ms_median": 78.30882631242275,
+     "ms_min": 78.30558298155665,
+     "peak_gib": 2.3629720211029053
+    },
+    "timing": true
+   }
+  },
+  "pass": true,
+  "rows": {
+   "step": {
+    "contaminated": false,
+    "lists_equal": true,
+    "ms_new": 78.52254714816809,
+    "ms_ref": 78.30558298155665,
+    "pass": true,
+    "peak_change": 0.0,
+    "peak_limit": 0.02,
+    "time_change": 0.002770736879163963,
+    "time_limit": 0.03
+   }
+  }
+ },
+ "L2": {
+  "meta": {
+   "new": {
+    "n": 100000000,
+    "step": {
+     "bytes_per_particle": 257.3823872,
+     "contaminated": false,
+     "far_pair_count": 402173018,
+     "foreign_pids": [],
+     "loadavg_max": 27.41650390625,
+     "ms_median": 873.5489710234106,
+     "ms_min": 873.0336902663112,
+     "peak_gib": 23.9706027507782
+    },
+    "timing": true
+   },
+   "ref": {
+    "n": 100000000,
+    "step": {
+     "bytes_per_particle": 257.3823872,
+     "contaminated": false,
+     "far_pair_count": 402173018,
+     "foreign_pids": [],
+     "loadavg_max": 27.240234375,
+     "ms_median": 872.180282138288,
+     "ms_min": 871.8046098947525,
+     "peak_gib": 23.9706027507782
+    },
+    "timing": true
+   }
+  },
+  "pass": true,
+  "rows": {
+   "step": {
+    "contaminated": false,
+    "lists_equal": true,
+    "ms_new": 873.0336902663112,
+    "ms_ref": 871.8046098947525,
+    "pass": true,
+    "peak_change": 0.0,
+    "peak_limit": 0.02,
+    "time_change": 0.0014098117371816208,
+    "time_limit": 0.03
+   }
+  }
+ },
+ "L3": {
+  "meta": {
+   "new": {
+    "force": {
+     "bytes_per_particle": 205.49062656,
+     "contaminated": false,
+     "far_pair_count": 94801662,
+     "foreign_pids": [],
+     "loadavg_max": 26.44970703125,
+     "ms_median": 100.38392804563046,
+     "ms_min": 100.01281648874283,
+     "peak_gib": 4.784451484680176,
+     "rel_l2": 0.0004179115652402862
+    },
+    "n": 25000000,
+    "step": {
+     "bytes_per_particle": 264.81129472,
+     "contaminated": false,
+     "far_pair_count": 94801662,
+     "foreign_pids": [],
+     "loadavg_max": 26.44775390625,
+     "ms_median": 240.9243448637426,
+     "ms_min": 239.32073405012488,
+     "peak_gib": 6.165618419647217
+    },
+    "timing": true
+   },
+   "ref": {
+    "force": {
+     "bytes_per_particle": 209.3456384,
+     "contaminated": false,
+     "far_pair_count": 94801662,
+     "foreign_pids": [],
+     "loadavg_max": 25.0615234375,
+     "ms_median": 100.14639608561993,
+     "ms_min": 100.12467578053474,
+     "peak_gib": 4.874207973480225,
+     "rel_l2": 0.0004179115652402862
+    },
+    "n": 25000000,
+    "step": {
+     "bytes_per_particle": 264.81129472,
+     "contaminated": false,
+     "far_pair_count": 94801662,
+     "foreign_pids": [],
+     "loadavg_max": 25.0625,
+     "ms_median": 240.02152495086193,
+     "ms_min": 239.98887510970235,
+     "peak_gib": 6.165618419647217
+    },
+    "timing": true
+   }
+  },
+  "pass": true,
+  "rows": {
+   "force": {
+    "contaminated": false,
+    "lists_equal": true,
+    "ms_new": 100.01281648874283,
+    "ms_ref": 100.12467578053474,
+    "pass": true,
+    "peak_change": -0.01841457920720645,
+    "peak_limit": 0.0368291584144129,
+    "rel_l2": [
+     0.0004179115652402862,
+     0.0004179115652402862
+    ],
+    "time_change": -0.0011172000400490932,
+    "time_limit": 0.03
+   },
+   "step": {
+    "contaminated": false,
+    "lists_equal": true,
+    "ms_new": 239.32073405012488,
+    "ms_ref": 239.98887510970235,
+    "pass": true,
+    "peak_change": 0.0,
+    "peak_limit": 0.02,
+    "time_change": -0.002784050132624057,
+    "time_limit": 0.03
+   }
+  }
+ }
+}

@@ -1,0 +1,29 @@
+  [    0.0s] start                              in-use   0.00 GiB  peak   0.00 GiB  
+N=8000000 live leaves 763545 -> leaf capacity 878592
+  [    8.7s] before_prepare                     in-use   0.12 GiB  peak   0.21 GiB  
+  [    8.7s] prepare:start                      in-use   0.12 GiB  peak   0.21 GiB  
+  [    8.7s] tree+upward:start                  in-use   0.12 GiB  peak   0.21 GiB  
+  [   46.6s] tree+upward:end                    in-use   0.79 GiB  peak   1.49 GiB  
+  [   46.6s] dual+downward:start                in-use   0.79 GiB  peak   1.49 GiB  
+  [   50.3s] walk+lists:start                   in-use   0.82 GiB  peak   1.49 GiB  
+  [   51.9s] walk:start                         in-use   0.85 GiB  peak   1.49 GiB  {'queue': 524288, 'far_cap': 65536, 'near_cap': 1048576}
+  [   53.7s] walk:end                           in-use   0.86 GiB  peak   1.49 GiB  
+  [   53.7s] walk:start                         in-use   0.85 GiB  peak   1.49 GiB  {'queue': 1048576, 'far_cap': 65536, 'near_cap': 1048576}
+  [   55.5s] walk:end                           in-use   0.86 GiB  peak   1.49 GiB  
+  [   55.5s] walk:start                         in-use   0.85 GiB  peak   1.49 GiB  {'queue': 2097152, 'far_cap': 65536, 'near_cap': 1048576}
+  [   57.3s] walk:end                           in-use   0.86 GiB  peak   1.49 GiB  
+  [   57.3s] walk:start                         in-use   0.85 GiB  peak   1.49 GiB  {'queue': 4194304, 'far_cap': 65536, 'near_cap': 1048576}
+  [   59.1s] walk:end                           in-use   0.86 GiB  peak   1.49 GiB  
+  [   59.1s] walk:start                         in-use   0.85 GiB  peak   1.49 GiB  {'queue': 4194304, 'far_cap': 29360128, 'near_cap': 7340032}
+  [   61.1s] walk:end                           in-use   1.13 GiB  peak   1.49 GiB  
+  [   62.5s] walk+lists:end                     in-use   1.12 GiB  peak   1.63 GiB  
+  [   62.5s] downward:start                     in-use   1.12 GiB  peak   1.63 GiB  
+  [   78.7s] downward:end                       in-use   1.45 GiB  peak   2.09 GiB  
+  [   78.7s] dual+downward:end                  in-use   1.43 GiB  peak   2.09 GiB  
+  [   79.9s] prepare:end                        in-use   1.37 GiB  peak   2.09 GiB  
+  [   79.9s] after_prepare                      in-use   1.37 GiB  peak   2.09 GiB  
+  [   83.7s] after_eval_compile                 in-use   1.46 GiB  peak   2.09 GiB  
+  [   86.0s] after_eval_timing                  in-use   1.37 GiB  peak   2.09 GiB  
+eval-only min 25.47 ms
+accuracy vs fp64 direct (4096 targets): {'targets': 4096, 'rel_l2': 0.0004333369306478814, 'median': 0.00018748024357216793, 'p90': 0.0006242931279636325, 'max': 0.01177690129972073}
+wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/rows/R7_8e6_f.json

@@ -303,7 +303,9 @@ def main() -> int:
         mass,
         G=1.0,
         softening=args.softening,
-        block_size=1024,
+        # 0 = sized to the budget: a fixed 1024-target block is (1024, N) fp64 per
+        # temporary, 61 GiB at 8e6 -- the reference, not the gradient, then fails
+        block_size=0,
         target_indices=ref_idx,
     )
     result["eval_production_aggL2"] = float(rel_errors(a_eval[ref_idx], a_ref)["aggL2"])

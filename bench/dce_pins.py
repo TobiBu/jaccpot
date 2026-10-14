@@ -32,10 +32,30 @@ M2     two cards: ``bench/multigpu_rollout_gate.py`` (``FusedRollout``,
        at steps 1, 16 and 17
 M3     two cards: ``DistributedBlockStepFMM`` (jax backend, cross_theta 0.5,
        Plummer), 4 base steps at 8192
+L1     TIMING: the fused production sequence (``--skip-eval``, particle carry,
+       unnamed caps, arena 0.88), clipped Plummer 8e6, default kernel: step ms
+       and B/particle
+L2     TIMING: the same at 1e8 (the 1 s / step budget)
+L3     TIMING: the 25M disc+bulge (ferrers3, eps 1.5e-3): step ms, B/particle,
+       and the force's rel-L2 on 4096 targets
+DET1   S1 recorded WITHOUT ``--xla_gpu_deterministic_ops`` (the production flags)
+DET2   S4b's large-N gradient, recorded the same way
 =====  ===========================================================================
 
 The M pins need two cards (``autocvd -n 2``) and are recorded separately:
 ``record --pins M1,M2,M3``.
+
+The L pins time the lane, so they run without the deterministic-ops flag, on a
+FREE card (``autocvd -n 1`` without ``-l``), and are compared on their scalars:
+``compare <ref> <new> --pins L1,L2,L3 --envelope <ref>-b`` passes a pin when
+neither row is contaminated, the step time is within max(3 %, twice the A-vs-A
+spread) and the peak within max(2 %, twice the spread). L2 needs a 40 GB card for
+about 10 minutes.
+
+The DET pins answer one question: is the production path bitwise reproducible?
+Record them twice under the same code (``record --tag X --pins DET1,DET2`` and
+``--tag X-b``); ``compare X X-b --pins DET1,DET2`` passes only when every array
+is bitwise equal.
 
 Usage (book the card with autocvd first; the org rule)::
 
@@ -63,6 +83,13 @@ HERE = Path(__file__).resolve().parent
 ROOT_DEFAULT = "/export/scratch/tbuck/dce_pins"
 PINS = ("S1", "S2", "S3", "S4", "S4b", "S5", "S6")
 PINS_TWO_CARD = ("M1", "M2", "M3")
+PINS_LARGE = ("L1", "L2", "L3")
+PINS_DET = ("DET1", "DET2")
+#: recorded without --xla_gpu_deterministic_ops: they time the lane, or test whether
+#: the production flags alone reproduce it
+_PRODUCTION_FLAGS = frozenset(PINS_LARGE + PINS_DET)
+#: the 25M disc+bulge production softening (docs/softening_2026-10.md)
+_DISC_SOFTENING = "1.5e-3"
 
 
 # --------------------------------------------------------------------- cases
@@ -457,7 +484,101 @@ def case_m3(out: Path) -> dict:
     return {"momentum_drift": float(np.linalg.norm(p1 - p0)), "n": n}
 
 
+def _timed_row(js: Path, n: int, args: list[str]) -> dict:
+    """One ``fused_memory_budget.py`` process; its scalars, as ``_compare_timed`` reads them."""
+    cmd = [
+        sys.executable,
+        str(HERE / "fused_memory_budget.py"),
+        "--n",
+        str(n),
+        "--caps",
+        "unnamed",
+        "--prealloc",
+        "0.88",
+        "--no-analysis",
+        "--out",
+        str(js),
+        *args,
+        "--env",
+        "JACCPOT_STRICT_CARRY=particles",
+    ]
+    subprocess.run(cmd, check=True)
+    d = json.loads(js.read_text())
+    peak = (
+        d.get("final_peak_gib")
+        or d.get("peak_after_scan_gib")
+        or d.get("peak_after_eval_gib")
+        or 0.0
+    )
+    cont = d.get("scan_contention") or d.get("eval_contention") or {}
+    row = {
+        "peak_gib": float(peak),
+        "bytes_per_particle": float(peak) * 2**30 / n,
+        "far_pair_count": d.get("counts", {}).get("far_pair_count"),
+        "contaminated": bool(cont.get("contaminated", True)),
+        "foreign_pids": cont.get("foreign_pids_on_devices"),
+        "loadavg_max": cont.get("loadavg1_max"),
+    }
+    if d.get("step_ms"):
+        row["ms_min"] = float(d["step_ms"]["min"])
+        row["ms_median"] = float(d["step_ms"]["median"])
+    if d.get("eval_ms"):
+        row["ms_min"] = float(d["eval_ms"]["min"])
+        row["ms_median"] = float(d["eval_ms"]["median"])
+    if d.get("accuracy"):
+        row["rel_l2"] = float(d["accuracy"]["rel_l2"])
+    return row
+
+
+_STEP_ROW = ["--skip-eval", "--steps", "4", "--reps", "3"]
+_FORCE_ROW = ["--no-scan", "--accuracy-targets", "4096", "--eval-repeats", "5"]
+
+
+def _timed_pin(out: Path, n: int, ic: list[str], force_row: bool) -> dict:
+    meta = {
+        "timing": True,
+        "n": n,
+        "step": _timed_row(out.with_suffix(".step.json"), n, ic + _STEP_ROW),
+    }
+    if force_row:
+        meta["force"] = _timed_row(out.with_suffix(".force.json"), n, ic + _FORCE_ROW)
+    return meta
+
+
+def case_l1(out: Path) -> dict:
+    return _timed_pin(out, 8_000_000, ["--ic", "plummer_clipped"], force_row=False)
+
+
+def case_l2(out: Path) -> dict:
+    return _timed_pin(out, 100_000_000, ["--ic", "plummer_clipped"], force_row=False)
+
+
+def case_l3(out: Path) -> dict:
+    disc = [
+        "--ic",
+        "disc",
+        "--softening",
+        _DISC_SOFTENING,
+        "--softening-kernel",
+        "ferrers3",
+    ]
+    return _timed_pin(out, 25_000_000, disc, force_row=True)
+
+
+def case_det1(out: Path) -> dict:
+    return case_s1(out)
+
+
+def case_det2(out: Path) -> dict:
+    return case_s4b(out)
+
+
 CASES = {
+    "DET1": case_det1,
+    "DET2": case_det2,
+    "L1": case_l1,
+    "L2": case_l2,
+    "L3": case_l3,
     "M1": case_m1,
     "M2": case_m2,
     "M3": case_m3,
@@ -477,16 +598,16 @@ CASES = {
 def _record(args) -> int:
     out_dir = Path(args.root) / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env["XLA_FLAGS"] = (
-        env.get("XLA_FLAGS", "") + " --xla_gpu_deterministic_ops=true"
+    deterministic = dict(os.environ)
+    deterministic["XLA_FLAGS"] = (
+        deterministic.get("XLA_FLAGS", "") + " --xla_gpu_deterministic_ops=true"
     ).strip()
     failed = []
     for pin in args.pins.split(","):
         print(f"[{args.tag}] {pin} ...", flush=True)
         rc = subprocess.run(
             [sys.executable, __file__, "case", pin, "--out", str(out_dir / pin)],
-            env=env,
+            env=dict(os.environ) if pin in _PRODUCTION_FLAGS else deterministic,
             check=False,
         ).returncode
         if rc != 0:
@@ -544,12 +665,88 @@ def _meta_matches(ref, new) -> bool:
     return ref == new
 
 
+#: the timing pins' floors: a step-time change below 3 % or a peak change below 2 %
+#: is never a failure, whatever the A-vs-A control's spread
+_TIME_FLOOR, _PEAK_FLOOR = 0.03, 0.02
+
+
+def _rel(a: float, b: float) -> float:
+    return abs(b - a) / abs(a) if a else float("inf")
+
+
+def _compare_timed(pin: str, ref: dict, new: dict, control: dict | None) -> dict:
+    """An L pin passes on clean rows within the time and peak envelopes, rel-L2 at 2 digits."""
+    entry: dict = {"meta": {"ref": ref, "new": new}, "rows": {}}
+    passed = True
+    for name in ("step", "force"):
+        r, n = ref.get(name), new.get(name)
+        if r is None:
+            continue
+        if n is None:
+            entry["rows"][name] = {"missing": True}
+            passed = False
+            continue
+        c = (control or {}).get(name) or {}
+        t_lim = (
+            max(_TIME_FLOOR, 2.0 * _rel(r["ms_min"], c["ms_min"])) if c else _TIME_FLOOR
+        )
+        p_lim = (
+            max(_PEAK_FLOOR, 2.0 * _rel(r["peak_gib"], c["peak_gib"]))
+            if c
+            else _PEAK_FLOOR
+        )
+        row = {
+            "ms_ref": r["ms_min"],
+            "ms_new": n["ms_min"],
+            "time_change": (n["ms_min"] - r["ms_min"]) / r["ms_min"],
+            "time_limit": t_lim,
+            "peak_change": (n["peak_gib"] - r["peak_gib"]) / r["peak_gib"],
+            "peak_limit": p_lim,
+            "lists_equal": r.get("far_pair_count") == n.get("far_pair_count"),
+            "contaminated": bool(r.get("contaminated") or n.get("contaminated")),
+        }
+        ok_row = (
+            not row["contaminated"]
+            and abs(row["time_change"]) <= t_lim
+            and abs(row["peak_change"]) <= p_lim
+        )
+        if "rel_l2" in r:
+            row["rel_l2"] = [r["rel_l2"], n.get("rel_l2")]
+            ok_row = (
+                ok_row
+                and f"{r['rel_l2']:.2g}" == f"{n.get('rel_l2', float('nan')):.2g}"
+            )
+        row["pass"] = ok_row
+        passed = passed and ok_row
+        entry["rows"][name] = row
+    entry["pass"] = passed
+    return entry
+
+
 def _compare(args) -> int:
     root = Path(args.root)
     ref, new = root / args.ref, root / args.new
     env = root / args.envelope if args.envelope else None
     report, ok = {}, True
     wanted = args.pins.split(",")
+    for pin in [p for p in wanted if p in PINS_LARGE]:
+        if not (ref / f"{pin}.json").exists() or not (new / f"{pin}.json").exists():
+            report[pin] = {"missing": True}
+            ok = False
+            continue
+        control = (
+            json.loads((env / f"{pin}.json").read_text())
+            if env is not None and (env / f"{pin}.json").exists()
+            else None
+        )
+        report[pin] = _compare_timed(
+            pin,
+            json.loads((ref / f"{pin}.json").read_text()),
+            json.loads((new / f"{pin}.json").read_text()),
+            control,
+        )
+        ok = ok and report[pin]["pass"]
+    wanted = [p for p in wanted if p not in PINS_LARGE]
     for pin in wanted:
         if not (ref / f"{pin}.npz").exists():
             report[pin] = {"missing_in_ref": True}
@@ -566,7 +763,11 @@ def _compare(args) -> int:
         meta_ref = json.loads(npz.with_suffix(".json").read_text())
         meta_new = json.loads((new / npz.name).with_suffix(".json").read_text())
         entry = {"arrays": rows, "meta": {"ref": meta_ref, "new": meta_new}}
-        if env is not None:
+        if pin in PINS_DET:
+            # no envelope: the question is whether the production flags reproduce
+            entry["pass"] = all(row.get("bitwise") for row in rows.values())
+            ok = ok and entry["pass"]
+        elif env is not None:
             control = _diff(npz, env / npz.name)
             passed = True
             for key, row in rows.items():
@@ -604,7 +805,9 @@ def main(argv: list[str]) -> int:
     cmp_.add_argument("new")
     cmp_.add_argument("--envelope", default=None)
     cmp_.add_argument(
-        "--pins", default=",".join(PINS), help="M1,M2,M3 for the two-card set"
+        "--pins",
+        default=",".join(PINS),
+        help="M1,M2,M3 for the two-card set; L1,L2,L3 timing; DET1,DET2 determinism",
     )
     cmp_.add_argument("--root", default=ROOT_DEFAULT)
     cmp_.add_argument("--json", default=None)

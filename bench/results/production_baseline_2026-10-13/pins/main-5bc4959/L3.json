@@ -1,0 +1,25 @@
+{
+ "force": {
+  "bytes_per_particle": 209.3456384,
+  "contaminated": false,
+  "far_pair_count": 94801662,
+  "foreign_pids": [],
+  "loadavg_max": 25.0615234375,
+  "ms_median": 100.14639608561993,
+  "ms_min": 100.12467578053474,
+  "peak_gib": 4.874207973480225,
+  "rel_l2": 0.0004179115652402862
+ },
+ "n": 25000000,
+ "step": {
+  "bytes_per_particle": 264.81129472,
+  "contaminated": false,
+  "far_pair_count": 94801662,
+  "foreign_pids": [],
+  "loadavg_max": 25.0625,
+  "ms_median": 240.02152495086193,
+  "ms_min": 239.98887510970235,
+  "peak_gib": 6.165618419647217
+ },
+ "timing": true
+}

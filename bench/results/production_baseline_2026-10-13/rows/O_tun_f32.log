@@ -1,0 +1,5 @@
+[odisseo_time] lane=fmm_forward config={'N_particles': 8000000, 'acceleration_scheme': 6, 'num_timesteps': 4, 'softening': 1e-07, 'return_snapshots': False, 'num_snapshots': 4, 'fmm_leaf_size': 64, 'fmm_max_order': 6, 'fmm_fixed_order': 6, 'fmm_theta': 0.8}
+[odisseo_time] A 240.41 s peak 4.03 GiB out (8000000, 2, 3) float32
+[odisseo_time] B 199.57 s
+[odisseo_time] C 223.57 s -> per step 2999.7 ms
+[odisseo_time] peak 4.13 GiB (554 B/p)

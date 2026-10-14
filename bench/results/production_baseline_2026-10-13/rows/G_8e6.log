@@ -1,0 +1,132 @@
+[G_8e6] devices=[7] load=(34.65234375, 33.80078125, 30.77001953125) overrides={"JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "134217728", "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "268435456", "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto"}
+[G_8e6] cell leaves: 404185 live -> leaf_capacity 524288
+[G_8e6] production eval aggL2 vs direct sum 8.307e-04
+[G_8e6] eval_production: min 74.47 ms (IQR 0.71, med 75.13) flags=['loadavg>=8 (34.4)', 'other-gpus-busy (100%)'] load=34
+[G_8e6] state LargeNPreparedState in 18.7 s
+[G_8e6] far pairs cap 134217728 active 25746982 near edges 19464396 symmetric=True tree {'total_nodes': 1048575, 'num_internal': 524287, 'levels_live': 55, 'widest_level': 184710, 'single_child_parents': 0}
+[G_8e6] forward_differentiable_eager: min 15161.57 ms (IQR 3531.00, med 15348.45) flags=['loadavg>=8 (37.7)', 'other-gpus-busy (100%)'] load=37
+[G_8e6] differentiable forward vs production eval rel-L2 1.404e-03; vs direct sum aggL2 1.245e-03
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jaxtyping/_decorator.py:465: UserWarning: differentiable_accelerations is being traced (an outer jax.jit or jax.grad is in charge). Compiling this pipeline takes tens of seconds to minutes and XLA reports no progress, so it looks like a hang: measured on an A100 at N=4096/fp64, 19 s for the forward, 160 s for the gradient, and one inner module alone at 3m28s. It is a one-time cost. To pay it deliberately rather than inside a timed region, use FMMEngine.differentiable_step_fn(state, compile_now=(pos, mass)). This warning is issued once per process.
+  out = fn(*args, **kwargs)
+/export/scratch/tbuck/jax0112-venv/lib/python3.12/site-packages/jax/_src/interpreters/mlir.py:1333: UserWarning: A large amount of constants were captured during lowering (2.44GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+
+  %reduce-window.4 = s32[32768,16]{0,1} reduce-window(%constant.4905, %constant.973), window={size=1x16 pad=0_0x15_0}, to_apply=%region_34.63_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1s:
+
+  %reduce-window.4 = s32[32768,16]{0,1} reduce-window(%constant.4905, %constant.973), window={size=1x16 pad=0_0x15_0}, to_apply=%region_34.63_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.2 = s32[32768,16]{0,1} map(%constant.4906, %broadcast.928), dimensions={0,1}, to_apply=%region_34.63_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 2s:
+
+  %map.2 = s32[32768,16]{0,1} map(%constant.4906, %broadcast.928), dimensions={0,1}, to_apply=%region_34.63_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.3 = s32[32768,16]{0,1} map(%constant.5734, %broadcast.929), dimensions={0,1}, to_apply=%region_34.63.clone_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 4s:
+
+  %map.3 = s32[32768,16]{0,1} map(%constant.5734, %broadcast.929), dimensions={0,1}, to_apply=%region_34.63.clone_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %reduce-window.8 = s32[500000,16]{0,1} reduce-window(%constant.5768, %constant.1147), window={size=1x16 pad=0_0x15_0}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 8s:
+
+  %reduce-window.8 = s32[500000,16]{0,1} reduce-window(%constant.5768, %constant.1147), window={size=1x16 pad=0_0x15_0}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+
+  %map.4 = s32[500000,16]{0,1} map(%constant.5769, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 16s:
+
+  %map.4 = s32[500000,16]{0,1} map(%constant.5769, %broadcast.930), dimensions={0,1}, to_apply=%region_200.262_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+W1013 14:41:42.963616  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 27.37GiB (rounded to 29388225536) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:41:42.964266  550858 bfc_allocator.cc:609] ***__*********______________________________________________________________________________________
+[G_8e6] jit(grad) FAILED: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 27.37GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit_loss']
+[G_8e6] upward_forward_eager: min 12350.61 ms (IQR 2145.60, med 12675.97) flags=['loadavg>=8 (42.0)', 'other-gpus-busy (100%)'] load=35
+[G_8e6] upward_grad_eager: min 15714.71 ms (IQR 4061.06, med 16551.24) flags=['loadavg>=8 (35.4)', 'other-gpus-busy (100%)'] load=34
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.142, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 32s:
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.142, %broadcast.12), dimensions={0,1}, to_apply=%region_7.25_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+[G_8e6] upward_grad_jit: min 70.49 ms (IQR 1.36, med 72.48) flags=['loadavg>=8 (34.9)', 'other-gpus-busy (100%)'] load=35
+[G_8e6] far_forward_eager: min 14346.43 ms (IQR 2419.96, med 14423.92) flags=['loadavg>=8 (34.9)', 'other-gpus-busy (100%)'] load=32
+W1013 14:50:30.118010  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 19.41GiB (rounded to 20845697280) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:50:30.118872  550858 bfc_allocator.cc:609] *********************__*****________________________________________________________________________
+[G_8e6] far_grad_eager: FAILED JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 19.41GiB with allocator GPU_0_bfc on device 0. [executable_name='jit_add'] [tf-allocator-allocation-error='']
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.5412, %broadcast.906), dimensions={0,1}, to_apply=%region_192.238_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+Constant folding an instruction is taking > 1m4s:
+
+  %map.3 = s32[500000,16]{0,1} map(%constant.5412, %broadcast.906), dimensions={0,1}, to_apply=%region_192.238_rw_wrapper
+
+This isn't necessarily a bug; constant-folding is inherently a trade-off between compilation time and speed at runtime. XLA has some guards that attempt to keep constant folding from taking too long, but fundamentally you'll always be able to come up with an input program that takes a long time.
+
+If you'd like to file a bug, run with envvar XLA_FLAGS=--xla_dump_to=/tmp/foo and attach the results.
+W1013 14:54:46.097399  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 27.35GiB (rounded to 29371823360) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:54:46.098508  550858 bfc_allocator.cc:609] ***__*********___*_**_______________________________________________________________________________
+[G_8e6] jit(far grad) FAILED: JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 27.35GiB with allocator GPU_0_bfc on device 0. [executable_name='jit_far_loss'] [tf-allocator-allocation-error='']
+[G_8e6] near_forward_eager: min 495.60 ms (IQR 23.34, med 509.65) flags=['loadavg>=8 (35.2)', 'other-gpus-busy (100%)'] load=35
+W1013 14:55:01.516064  550858 bfc_allocator.cc:598] Allocator (GPU_0_bfc) ran out of memory trying to allocate 9.00GiB (rounded to 9663676416) from the lower end requested by op 
+If this is caused by memory fragmentation, the environment variable 'TF_GPU_ALLOCATOR=cuda_malloc_async' may improve the situation.
+Current allocation summary follows.
+W1013 14:55:01.517454  550858 bfc_allocator.cc:609] **************************_*******____________________**********************************____________
+[G_8e6] near_grad_eager: FAILED JaxRuntimeError: RESOURCE_EXHAUSTED: Out of memory while trying to allocate 9.00GiB with allocator GPU_0_bfc on device 0. [tf-allocator-allocation-error=''] [executable_name='jit_broadcast_in_dim']
+[G_8e6] near_grad_jit: min 330.54 ms (IQR 0.86, med 330.87) flags=['loadavg>=8 (33.4)', 'other-gpus-busy (100%)'] load=33
+[G_8e6] wrote /tmp/claude-2701/-export-home-tbuck-Odisseo/d2b6dfa5-c9ef-4494-93c4-f91e320f46c5/scratchpad/retime/rows/G_8e6.json
+[grad_wrap] exit 0
+[grad_wrap] process device peak 19.49 GiB
