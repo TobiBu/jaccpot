@@ -304,3 +304,282 @@ def test_strict_fused_compact_far_pair_cap_fails(monkeypatch):
             theta=0.6,
             return_history=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# The walk's MAC geometry is the TREE's, not the engine's call history (S1, J5)
+# ---------------------------------------------------------------------------
+#
+# Until 2026-10-15 the dual walk took its MAC geometry default from
+# `_strict_fused_mode_active`, a flag every strict call set and nothing cleared:
+# a fresh engine's `compute_accelerations` / `prepare_state` walked the box
+# geometry, the same engine after one strict call the COM geometry of the fused
+# lane. On an A100 (the S4b pin's configuration, N=2e4) that moved the force's
+# rel-L2 against the direct sum from 1.16e-3 to 6.73e-4 -- and the differentiable
+# lane, built on a fresh engine, was the less accurate one. The geometry now
+# follows the tree (`walk_geometry_default`: COM on a static-radix tree), so
+# every entry point walks the same MAC, whatever ran before.
+#
+# N=2048 at leaf 16 is the size the large-N reverse tests use for the same
+# reason: at leaf 64 this set has no far pair and the geometry decides nothing.
+
+_GEOMETRY_N = 2048
+_GEOMETRY_LEAF = 16
+_GEOMETRY_ORDER = 4
+
+
+@pytest.fixture
+def geometry_env(strict_env, monkeypatch):
+    """The large-N lane on CPU, with the payload the differentiable lane accepts."""
+    # the prepacked near-field layout production runs at 2e5 (see
+    # tests/unit/runtime/test_large_n_grad_reverse_path.py): the gradient plan
+    # refuses the per-particle pairs payload small N would otherwise select
+    monkeypatch.setenv("JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB", "0")
+    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", raising=False)
+    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET", raising=False)
+
+
+def _geometry_solver():
+    from jaccpot import FastMultipoleMethod
+
+    return FastMultipoleMethod(
+        preset="large_n_gpu", G=1.0, softening=1e-2, retain_far_pairs_for_grad=True
+    )
+
+
+def _geometry_particles():
+    rng = np.random.default_rng(11)
+    positions = jnp.asarray(rng.normal(size=(_GEOMETRY_N, 3)), dtype=jnp.float32)
+    masses = jnp.asarray(rng.uniform(0.5, 1.5, size=(_GEOMETRY_N,)), jnp.float32)
+    return positions, masses
+
+
+def _production_force(solver, positions, masses):
+    prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
+        positions=positions,
+        masses=masses,
+        leaf_size=_GEOMETRY_LEAF,
+        max_order=_GEOMETRY_ORDER,
+    )
+    return np.asarray(eval_fn(prepared))
+
+
+@pytest.mark.slow
+def test_a_strict_call_does_not_change_what_the_engine_returns_next(geometry_env):
+    """``compute_accelerations`` on one engine, before and after a strict call: the
+    same bits. On main the second call walked the COM geometry the strict call
+    left switched on, the first the box geometry."""
+    solver = _geometry_solver()
+    positions, masses = _geometry_particles()
+    kwargs = dict(leaf_size=_GEOMETRY_LEAF, max_order=_GEOMETRY_ORDER)
+    before = np.asarray(solver.compute_accelerations(positions, masses, **kwargs))
+    far = solver.prepare_state(positions, masses, **kwargs).compact_far_pairs
+    assert int(np.asarray(far.far_pair_count)) > 0, "vacuous: no far pair"
+
+    _production_force(solver, positions, masses)
+    assert solver._impl._strict_fused_mode_active  # still set, as a diagnostic
+
+    after = np.asarray(solver.compute_accelerations(positions, masses, **kwargs))
+    np.testing.assert_array_equal(after, before)
+
+
+@pytest.mark.slow
+def test_every_entry_point_walks_the_com_mac_on_a_static_radix_tree(
+    geometry_env, monkeypatch
+):
+    """The strict lane keeps its COM MAC, and a fresh engine's non-strict calls
+    walk it too; the environment still overrides both."""
+    from jaccpot.runtime import fmm_prepare
+
+    asked: list[str] = []
+    resolve = fmm_prepare.resolve_walk_geometry
+
+    def _recording(*args, **kwargs):
+        asked.append(fmm_prepare.mac_geometry_mode(kwargs["default_mode"]))
+        return resolve(*args, **kwargs)
+
+    monkeypatch.setattr(fmm_prepare, "resolve_walk_geometry", _recording)
+    positions, masses = _geometry_particles()
+    kwargs = dict(leaf_size=_GEOMETRY_LEAF, max_order=_GEOMETRY_ORDER)
+
+    _geometry_solver().compute_accelerations(positions, masses, **kwargs)
+    assert asked and set(asked) == {"com"}, asked
+    asked.clear()
+    _production_force(_geometry_solver(), positions, masses)
+    assert asked and set(asked) == {"com"}, asked
+
+    asked.clear()
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "aabb")
+    _production_force(_geometry_solver(), positions, masses)
+    assert asked and set(asked) == {"aabb"}, asked
+
+
+@pytest.mark.slow
+def test_the_differentiable_forward_is_the_production_forward(geometry_env):
+    """The gradient lane differentiates the force production computes.
+
+    ``differentiable_accelerations`` freezes the lists ``prepare_state`` built on
+    a FRESH engine; the production eval is the strict fused lane's. On main the
+    first walked the box geometry and the second the COM one, so the gradient was
+    taken of a different (there: less accurate) force. They now walk the same
+    MAC; what is left is the two evaluation paths' float32 rounding.
+    """
+    positions, masses = _geometry_particles()
+    production = _production_force(_geometry_solver(), positions, masses)
+
+    solver = _geometry_solver()
+    state = solver.prepare_state(
+        positions, masses, leaf_size=_GEOMETRY_LEAF, max_order=_GEOMETRY_ORDER
+    )
+    assert isinstance(state, LargeNPreparedState)
+    forward = np.asarray(solver.differentiable_accelerations(state, positions, masses))
+
+    scale = float(np.max(np.linalg.norm(production, axis=1)))
+    assert np.max(np.abs(forward - production)) <= 1e-5 * scale
+
+
+@pytest.mark.slow
+def test_a_public_refresh_never_takes_the_strict_lanes_traced_path(geometry_env):
+    """``refresh_prepared_state(fused_device_mode=True)`` is the same call before and
+    after a strict call. On main the strict call's flag also switched it onto the
+    fused scan's traced hot path (streamed fast lane or raise, host effects off, the
+    input's far list handed back as the carry placeholder); only the strict lane's
+    own refreshes take that path now, and they say so (``strict_fused_lane``)."""
+    solver = _geometry_solver()
+    engine = solver._impl
+    positions, masses = _geometry_particles()
+    kwargs = dict(leaf_size=_GEOMETRY_LEAF, max_order=_GEOMETRY_ORDER)
+    state = solver.prepare_state(positions, masses, fused_device_mode=True, **kwargs)
+    moved = positions * jnp.float32(1.01)
+
+    def _refresh():
+        attempts = int(engine._strict_fused_fastlane_attempts)
+        out = solver.refresh_prepared_state(
+            state, moved, masses, fused_device_mode=True, **kwargs
+        )
+        assert int(engine._strict_fused_fastlane_attempts) == attempts, "hot path"
+        return out
+
+    before = _refresh()
+    _production_force(solver, positions, masses)
+    after = _refresh()
+
+    far_before, far_after = before.compact_far_pairs, after.compact_far_pairs
+    count = int(np.asarray(far_before.far_pair_count))
+    assert count > 0 and int(np.asarray(far_after.far_pair_count)) == count
+    for name in ("sources", "targets"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(far_after, name))[:count],
+            np.asarray(getattr(far_before, name))[:count],
+        )
+    np.testing.assert_array_equal(
+        np.asarray(solver.evaluate_prepared_state(after)),
+        np.asarray(solver.evaluate_prepared_state(before)),
+    )
+
+
+def _far_pair_set(prepared):
+    from jaccpot.runtime._interaction_cache import far_pair_targets
+
+    far = prepared.compact_far_pairs
+    count = int(np.asarray(far.far_pair_count))
+    sources = np.asarray(far.sources)[:count]
+    targets = np.asarray(far_pair_targets(far))[:count]
+    return set(zip(sources.tolist(), targets.tolist()))
+
+
+def test_the_returned_state_is_refused_by_the_gradient_path(monkeypatch):
+    """``strict_run_v2``'s returned state has no far list, so it is not differentiated.
+
+    The fused scan rebuilds the far list every step and keeps none. The list the
+    call started with was detached before the scan and, until 2026-10-15,
+    re-attached to the returned state -- whose tree and positions are the END's --
+    so ``differentiable_accelerations`` of it ran the M2L over the start's pairs:
+    rel-L2 3.2e-02 against the direct sum at the returned positions, where a fresh
+    prepare there gives 1.7e-04 (this configuration, CPU; the review measured
+    7.5e-3 against 7.9e-5 at N=768). The state now carries
+    ``compact_far_pairs=None``, and the gradient path raises with the remedy,
+    which is checked to work on the same engine.
+    """
+    from jaccpot import FastMultipoleMethod, FMMAdvancedConfig
+    from jaccpot.autodiff import direct_sum_gravitational_acceleration
+
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # the prepacked near-field layout, which the gradient plan needs
+    monkeypatch.setenv("JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB", "0")
+    monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
+    n, leaf, order, theta, softening = 1024, 16, 4, 0.6, 1e-2
+
+    def solver():
+        return FastMultipoleMethod(
+            preset="large_n_gpu",
+            basis="real",
+            theta=theta,
+            G=1.0,
+            softening=softening,
+            working_dtype=jnp.float32,
+            advanced=FMMAdvancedConfig(
+                tree=TreeConfig(mode="static_radix", leaf_target=leaf),
+                nearfield=NearFieldConfig(mode="auto"),
+                mac_type="dehnen",
+            ),
+            fixed_order=order,
+            retain_far_pairs_for_grad=True,
+        )
+
+    rng = np.random.default_rng(3)
+    positions = rng.normal(size=(n, 3))
+    velocities = 0.6 * rng.normal(size=(n, 3))
+    masses = jnp.asarray(rng.uniform(0.5, 1.5, size=n) / n, jnp.float32)
+    fmm = solver()
+    out, returned, _ = fmm.strict_run_v2(
+        state=jnp.asarray(np.stack([positions, velocities], 1), jnp.float32),
+        masses=masses,
+        dt=0.05,
+        num_steps=3,
+        refresh_every=1,
+        leaf_size=leaf,
+        max_order=order,
+        theta=theta,
+        return_prepared_state=True,
+    )
+    assert fmm.get_runtime_diagnostics()["strict_fused_mode_active"] is True
+    end = jnp.asarray(out)[:, 0, :]
+
+    # Non-vacuous: the far field is there, and it moved with the particles, so the
+    # start's list is not the end's.
+    start_pairs = _far_pair_set(
+        solver().prepare_state(
+            jnp.asarray(positions, jnp.float32),
+            masses,
+            leaf_size=leaf,
+            max_order=order,
+        )
+    )
+    end_pairs = _far_pair_set(
+        solver().prepare_state(end, masses, leaf_size=leaf, max_order=order)
+    )
+    assert end_pairs and start_pairs != end_pairs
+
+    with pytest.raises(RuntimeError, match="returned by strict_run_v2"):
+        fmm.differentiable_accelerations(returned, end, masses)
+    assert returned.compact_far_pairs is None
+
+    # the remedy the error names
+    fresh = fmm.prepare_state(end, masses, leaf_size=leaf, max_order=order)
+    differentiable = np.asarray(fmm.differentiable_accelerations(fresh, end, masses))
+    production = np.asarray(fmm.evaluate_prepared_state(fresh))
+    reference = np.asarray(
+        direct_sum_gravitational_acceleration(
+            end.astype(jnp.float64),
+            masses.astype(jnp.float64),
+            G=1.0,
+            softening=softening,
+        )
+    )
+
+    def rel(a, b):
+        return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+    assert rel(differentiable, production) < 1e-5
+    assert rel(differentiable, reference) < 1e-3

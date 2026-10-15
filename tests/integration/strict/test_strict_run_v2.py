@@ -447,8 +447,10 @@ class TestDonation:
     2.5e7 particles. With ``donate_prepared_state=True`` (and always for a state the
     call prepares itself) the runner writes the returned state into the passed one's
     buffers. On the fused lane's default fresh far-pair rebuild the carried far list is
-    a placeholder the refresh never reads; it is detached before the scan and
-    re-attached to the returned state, which the gradient path reads.
+    a placeholder the refresh never reads; it is detached before the scan (so a
+    caller's list is never donated) and not put back: it is the START positions'
+    list, and the returned state's tree and positions are the end's (the gradient
+    path read it: 7.5e-3 against 7.9e-5, review 2026-10-13).
 
     Pinned here: donating changes no number (A-vs-A controlled), consumes exactly what
     it says, leaves no deleted array reachable from the engine, and a later prepare and
@@ -476,13 +478,29 @@ class TestDonation:
         _, p1, far, _, p2 = _chain(donate=False)
         assert not any(x.is_deleted() for x in _arrays(p1))
         _, p1, far, _, p2 = _chain(donate=True)
-        far_leaves = {id(x) for x in _arrays(far)}
-        rest = [x for x in _arrays(p1) if id(x) not in far_leaves]
-        assert rest and all(x.is_deleted() for x in rest)
-        # the far list rode outside the scan: the returned state carries the same one
-        assert p2.compact_far_pairs is far
-        assert not any(x.is_deleted() for x in _arrays(far))
+        # a returned state carries no far list: it would be the start positions'
+        assert far is None and p2.compact_far_pairs is None
+        assert _arrays(p1) and all(x.is_deleted() for x in _arrays(p1))
         assert not any(x.is_deleted() for x in _arrays(p2))
+        # a caller's fused-lane state with a far list: the list rides outside the
+        # scan, so donating consumes everything else and never the list
+        state, masses = _state()
+        solver = _solver()
+        prepared, _ = solver.strict_fused_prepared_eval_fn(
+            positions=state[:, 0],
+            masses=masses,
+            leaf_size=_LEAF,
+            max_order=_ORDER,
+            theta=_THETA,
+        )
+        far = prepared.compact_far_pairs
+        assert far is not None
+        _, p_out = _donation_run(solver, state, masses, prepared, donate=True)
+        far_leaves = {id(x) for x in _arrays(far)}
+        rest = [x for x in _arrays(prepared) if id(x) not in far_leaves]
+        assert rest and all(x.is_deleted() for x in rest)
+        assert not any(x.is_deleted() for x in _arrays(far))
+        assert p_out.compact_far_pairs is None
 
     def test_nothing_deleted_stays_reachable_and_the_engine_keeps_working(self):
         solver, _, _, s2, p2 = _chain(donate=True)

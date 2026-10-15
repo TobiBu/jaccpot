@@ -222,14 +222,18 @@ def prepare_large_n_grad_plan(
     compact = getattr(state, "compact_far_pairs", None)
     if compact is None:
         raise RuntimeError(
-            "LargeNPreparedState.compact_far_pairs is None: the frozen M2L pair "
-            "list was discarded during prepare_state (it is retained only for "
-            "adaptive_order or the strict static_radix lane). Without it the far "
-            "field would have to be treated as a CONSTANT, which yields a silently "
-            "wrong gradient -- zero mass-sensitivity through P2M/M2M/M2L/L2L -- "
-            "rather than an error. Rebuild the state with "
-            "retain_far_pairs_for_grad=True (FarFieldConfig field, constructor "
-            "kwarg, or JACCPOT_RETAIN_FAR_PAIRS_FOR_GRAD=1)."
+            "LargeNPreparedState.compact_far_pairs is None: this state has no "
+            "frozen M2L pair list. Without it the far field would have to be "
+            "treated as a CONSTANT, which yields a silently wrong gradient -- zero "
+            "mass-sensitivity through P2M/M2M/M2L/L2L -- rather than an error. "
+            "Either prepare_state discarded it (it is retained only for "
+            "adaptive_order or the strict static_radix lane): rebuild the state "
+            "with retain_far_pairs_for_grad=True (FarFieldConfig field, "
+            "constructor kwarg, or JACCPOT_RETAIN_FAR_PAIRS_FOR_GRAD=1). Or the "
+            "state was returned by strict_run_v2, whose scan rebuilds the far list "
+            "every step and keeps none (the one it started with belongs to the "
+            "start positions): call prepare_state at the returned positions and "
+            "differentiate that state."
         )
 
     positions = state.positions_sorted

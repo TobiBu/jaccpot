@@ -23,6 +23,7 @@ from jaccpot._env import env_choice, env_flag
 
 from ._large_n_pipeline import evaluate_large_n_state, prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
+from ._mac_geometry import walk_geometry_default
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import (
@@ -117,15 +118,22 @@ def _unaliased(tree: Any) -> Any:
 
 class StrictRunMixin(_EngineBase):
     def _strict_far_pairs_ride_outside_the_scan(self, prepared: Any) -> bool:
-        """Whether ``strict_run_v2`` may keep the state's far list out of the scan.
+        """Whether ``strict_run_v2`` keeps the state's far list out of the scan.
 
         On the static-radix fused lane the fresh far-pair rebuild (its only mode
         since the 2026-10 cleanup, X6) makes the carried far list a placeholder:
         every refresh builds its own and returns the input's unchanged, so it is
         dead inside the scan, yet it was an argument AND an output of the
         compiled runner (3 x P int32 each, 1.1 GB at 2.5e7 on the disc+bulge IC).
-        It is detached before the scan and re-attached to the returned state,
-        which the gradient path reads.
+        It is detached before the scan and NOT put back: it belongs to the
+        positions the call started from, while the returned tree and positions
+        are the end's, so the gradient path read the wrong far field from it
+        (rel-L2 7.5e-3 against 7.9e-5 at N=768, the 2026-10-13 review). The
+        returned state carries ``compact_far_pairs=None``, which
+        ``differentiable_accelerations`` refuses with a clear error.
+
+        A state without a far list (one this method returned) qualifies too: the
+        lane, not the list, is what makes a step read none of it.
 
         Parameters
         ----------
@@ -135,14 +143,13 @@ class StrictRunMixin(_EngineBase):
         Returns
         -------
         bool
-            ``True`` when the list can ride outside.
+            ``True`` on the lane whose scan rebuilds the far list every step.
         """
         mode = str(getattr(self.config.tree, "mode", "")).strip().lower()
         return (
             self.tree_type == "radix"
             and mode == "static_radix"
             and isinstance(prepared, LargeNPreparedState)
-            and getattr(prepared, "compact_far_pairs", None) is not None
         )
 
     def _replan_walk_caps_from_needs(self, needs: np.ndarray) -> bool:
@@ -504,8 +511,9 @@ class StrictRunMixin(_EngineBase):
         runtime_overrides : Optional[_RuntimeExecutionOverrides]
             Replacement runtime overrides for this call.
         fused_device_mode : Optional[bool]
-            Use the fused device-resident layout; ``None`` takes the engine's
-            current setting.
+            Use the fused device-resident layout; ``None`` means ``False``. (It
+            used to take the engine's ``_strict_fused_mode_active``, so the same
+            call built a different layout after any ``strict_run_v2``.)
 
         Returns
         -------
@@ -550,11 +558,7 @@ class StrictRunMixin(_EngineBase):
                 theta=theta,
                 jit_tree=self._jit_tree_default,
                 runtime_overrides_override=runtime_overrides,
-                fused_device_mode=bool(
-                    self._strict_fused_mode_active
-                    if fused_device_mode is None
-                    else fused_device_mode
-                ),
+                fused_device_mode=bool(fused_device_mode),
             )
         else:
             if not isinstance(prepared_state, LargeNPreparedState):
@@ -571,11 +575,7 @@ class StrictRunMixin(_EngineBase):
                 max_order=int(max_order),
                 theta=theta,
                 runtime_overrides_override=runtime_overrides,
-                fused_device_mode=bool(
-                    self._strict_fused_mode_active
-                    if fused_device_mode is None
-                    else fused_device_mode
-                ),
+                fused_device_mode=bool(fused_device_mode),
             )
             if next_state_try is None:
                 self._strict_runner_fail_fast_reject_count += 1
@@ -693,7 +693,13 @@ class StrictRunMixin(_EngineBase):
         return_history : bool
             Return every step's state rather than only the last.
         return_prepared_state : bool
-            Return the prepared state so the next call can reuse it.
+            Return the prepared state so the next call can reuse it. On the
+            static-radix lane it carries no far-pair list
+            (``compact_far_pairs=None``): the scan builds one per step and keeps
+            none, and the one the call started from belongs to the start
+            positions. To differentiate at the returned positions,
+            ``prepare_state`` there first; ``differentiable_accelerations``
+            refuses the returned state.
         step_callback : Optional[Callable[[Array, Array], None]]
             Fire-and-forget streaming hook; see above.
         step_callback_stride : int
@@ -817,6 +823,9 @@ class StrictRunMixin(_EngineBase):
         # The fused scan is the strict lane's only loop: the host-driven one
         # (`JACCPOT_STATIC_STRICT_FUSED_MODE=off`) went in the 2026-10 cleanup (X6).
         # The profile set only restricts it to the particle counts it names.
+        # The flag is a DIAGNOSTIC ("a strict call engaged the fused lane"): no
+        # later call reads it to choose numerics. The MAC geometry is the tree's
+        # (`walk_geometry_default`), and the refreshes below name their lane.
         self._strict_fused_mode_active = self._strict_fused_profile_allows_n(
             int(state_arr.shape[0])
         )
@@ -1065,6 +1074,7 @@ class StrictRunMixin(_EngineBase):
                     runtime_overrides_override=None,
                     fused_device_mode=True,
                     force_scale_particles=scale_in if scale_carry else None,
+                    strict_fused_lane=True,
                 )
                 if prepared_new is None:
                     raise RuntimeError(
@@ -1197,6 +1207,7 @@ class StrictRunMixin(_EngineBase):
                 theta=theta,
                 runtime_overrides_override=None,
                 fused_device_mode=True,
+                strict_fused_lane=True,
             )
             if prepared_new is None:
                 raise RuntimeError(
@@ -1449,14 +1460,11 @@ class StrictRunMixin(_EngineBase):
             scale_curr = _force_scale_seed(prepared_curr)
             while True:
                 # the far list is dead inside the scan (fresh rebuild): keep it
-                # out of the carry and put it back on the returned state
-                far_outside = self._strict_far_pairs_ride_outside_the_scan(
-                    prepared_curr
-                )
-                far_kept = prepared_curr.compact_far_pairs if far_outside else None
+                # out of the carry, and off the returned state too -- it is the
+                # START positions' list, and the gradient path would read it
                 prepared_in = (
                     replace(prepared_curr, compact_far_pairs=None)
-                    if far_outside
+                    if self._strict_far_pairs_ride_outside_the_scan(prepared_curr)
                     else prepared_curr
                 )
                 if donate_carry:
@@ -1492,11 +1500,7 @@ class StrictRunMixin(_EngineBase):
                     np.asarray(jax.device_get(capacity_ok_all))
                 )
                 if self._strict_static_target_block_capacity_ok:
-                    prepared_curr = (
-                        replace(prepared_out, compact_far_pairs=far_kept)
-                        if far_outside
-                        else prepared_out
-                    )
+                    prepared_curr = prepared_out
                     state_curr = state_out
                     break
                 needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
@@ -1513,7 +1517,7 @@ class StrictRunMixin(_EngineBase):
                 ):
                     self._raise_scan_capacity_saturated(needs)
                 retried = True
-                del prepared_out, state_out, history_out, far_kept
+                del prepared_out, state_out, history_out
                 replanned_peak = int(
                     (self._strict_fused_validated_caps or {}).get("peak_wavefront", 0)
                 )
@@ -1698,9 +1702,9 @@ class StrictRunMixin(_EngineBase):
             if not self._strict_far_pairs_ride_outside_the_scan(prepared):
                 raise ValueError(
                     "carry='particles' needs the fused static-radix lane's fresh "
-                    "far-pair rebuild inside the scan (a LargeNPreparedState with "
-                    "a far list on a static_radix tree): otherwise a step reads "
-                    "the carried far list"
+                    "far-pair rebuild inside the scan (a LargeNPreparedState on a "
+                    "static_radix tree): otherwise a step reads the carried far "
+                    "list"
                 )
             return shape_template(replace(prepared, compact_far_pairs=None))
 
@@ -2143,6 +2147,7 @@ class StrictRunMixin(_EngineBase):
             raise RuntimeError(
                 "strict_fused_prepared_eval_fn requires large_n_gpu production profile."
             )
+        # diagnostic only, as in `strict_run_v2`
         self._strict_fused_mode_active = self._strict_fused_profile_allows_n(
             int(positions_arr.shape[0])
         )
@@ -2208,6 +2213,7 @@ class StrictRunMixin(_EngineBase):
         num_valid: Optional[Array] = None,
         cross_hook: Optional[Callable[[Any], None]] = None,
         force_scale_particles: Optional[Array] = None,
+        strict_fused_lane: bool = False,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged.
 
@@ -2257,6 +2263,15 @@ class StrictRunMixin(_EngineBase):
             order, carried from the previous step's evaluation. Reduced to the
             per-node ``min_b f_b`` on this step's tree, it sets eq (16a)'s
             thresholds for the walk. ``None`` (default) keeps the state's own.
+        strict_fused_lane : bool
+            This is the strict fused lane's per-step refresh (``strict_run_v2``'s
+            scan, the multi-GPU ``fused_force_step``): with ``fused_device_mode``
+            it takes the traced hot path -- the streamed fast lane or a raise, no
+            host side effects, the eager pass's caps widened, a fresh far list
+            returned as the input's placeholder. ``False`` (default, every public
+            refresh) never does. The caller states it: it used to be read off the
+            engine's ``_strict_fused_mode_active``, which the first strict call
+            left set, so ``refresh_prepared_state`` changed path after one.
 
         Returns
         -------
@@ -2505,7 +2520,7 @@ class StrictRunMixin(_EngineBase):
                 self.interaction_retry_logger(event)
 
         strict_fused_traced_hot_path = bool(fused_device_mode) and bool(
-            getattr(self, "_strict_fused_mode_active", False)
+            strict_fused_lane
         )
         # The fused refresh builds its far-pair list fresh every step and returns
         # the input's as a shape placeholder: the list a state carries in is never
@@ -2534,15 +2549,17 @@ class StrictRunMixin(_EngineBase):
         if cross_hook is not None:
             # ONE exact-radius COM geometry for the hook and the local walk below:
             # each used to resolve its own, 9.7 ms per force at 1e6 particles per
-            # A100. Shared only where the two would compute the same thing -- the
-            # strict fused lane (COM by default) and no folded per-node radius scale
-            # (`dehnen_theta` folds one the hook does not apply).
+            # A100. Shared only where the two would compute the same thing -- a
+            # tree whose walk defaults to COM (static radix, the fused lane's) and
+            # no folded per-node radius scale (`dehnen_theta` folds one the hook
+            # does not apply).
             if (
-                getattr(self, "_strict_fused_mode_active", False)
+                walk_geometry_default(tree_artifacts.tree_mode, upward_center_mode)
+                == "com"
                 and self._folded_criterion_radius_scale() is None
             ):
                 tree_artifacts = tree_artifacts._replace(
-                    walk_geometry=self._strict_walk_geometry(tree_artifacts)
+                    walk_geometry=self._walk_geometry(tree_artifacts)
                 )
             cross_far = cross_hook(tree_artifacts)
         force_scale_nodes_now = prepared_state.force_scale_nodes

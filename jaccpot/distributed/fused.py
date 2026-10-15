@@ -358,8 +358,7 @@ def fused_force_step(
     Parameters
     ----------
     solver : Any
-        A ``FastMultipoleMethod`` on the large-N production profile with the
-        fused mode active.
+        A ``FastMultipoleMethod`` on the large-N production profile.
     prepared : Any
         The device's ``LargeNPreparedState``; supplies the static template.
     positions : Array
@@ -425,6 +424,9 @@ def fused_force_step(
         fused_device_mode=True,
         num_valid=num_valid,
         cross_hook=cross_hook,
+        # the strict lane's per-step refresh, stated here rather than read off
+        # the engine's flag (which `strict_fused_prepared_eval_fn` happened to set)
+        strict_fused_lane=True,
     )
     if refreshed is None:
         raise RuntimeError(

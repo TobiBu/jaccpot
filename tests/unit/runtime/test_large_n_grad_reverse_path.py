@@ -66,7 +66,10 @@ two former modules are classes here, each with its own lane setup:
   the five reverse kernels COUNTED;
 * ``TestPallasCascades`` (was ``test_grad_path_pallas_cascades.py``): the default
   solver's gradient through the Pallas M2M/L2L cascades and the leaf P2M, on the
-  real (CPU) backend profile.
+  real (CPU) backend profile;
+* ``TestSofteningKernelsOnTheCsrLane``: the solver's softening kernel reaches the
+  differentiable CSR near field (forward and reverse), checked through the public
+  entries for every kernel.
 """
 
 from __future__ import annotations
@@ -79,7 +82,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, GradConfig, TreeConfig
+from jaccpot import (
+    FarFieldConfig,
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    GradConfig,
+    TreeConfig,
+)
 from jaccpot.autodiff import direct_sum_gravitational_acceleration
 from jaccpot.pallas import (
     cascade_real_level,
@@ -90,6 +99,7 @@ from jaccpot.pallas import (
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 from jaccpot.runtime._level_shapes import pallas_cascades_enabled
 from jaccpot.runtime.grad_options import grad_option_overrides, resolve_grad_options
+from jaccpot.softening import DEFAULT_SOFTENING_KERNEL, SOFTENING_KERNELS
 
 #: The real backend query, captured before `_open_the_backend_gate` patches it, for
 #: the tests that must run on the CPU's own profile (`TestPallasCascades`).
@@ -549,6 +559,166 @@ class TestEveryFastPallasKernel:
 
 
 # ---------------------------------------------------------------------------
+# The softening kernel on the differentiable CSR near field.
+#
+# The differentiable CSR call passes its arguments positionally (a custom_vjp
+# primal) and dropped the trailing ``softening_kernel``, so the gradient lane's
+# forward AND reverse ran the default kernel whatever the solver's: 4.2e-2 off the
+# production forward with plummer (review 2026-10-13). Every kernel-level parity
+# test passed -- each kernel is right; the DISPATCH dropped the argument. So this
+# compares the two public entries, ``differentiable_accelerations`` and
+# ``evaluate_prepared_state``, for every kernel in ``jaccpot.softening``, at a
+# softening where the kernels differ.
+#
+# Measured on CPU (N=1024, leaf 8, order 4, eps 0.05, 2444 far pairs) before the
+# fix: forward vs production 5.96e-02 (plummer), 1.02e-02 (wendland_c2), 3.4e-07
+# (ferrers3, the default); d/dpos vs the plummer direct-sum gradient 0.380.
+# ---------------------------------------------------------------------------
+
+_KERNEL_N = 1024
+_KERNEL_LEAF = 8  # 2444 far pairs: both forwards carry a far field
+_KERNEL_SOFTENING = 0.05  # direct sums vs ferrers3: wendland_c2 1.0e-2, plummer 5.9e-2
+_KERNEL_ENV = {
+    "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
+    "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    _PAYLOAD_CAP_ENV: "0",  # the prepacked layout the grad plan needs
+}
+# The two forwards differ by the near-field layout (the gradient lane's ``table``
+# kernel, production's ``direct``) and the far field's L2P: fp32 rounding, 3.4e-07
+# measured. A dropped kernel is 1e-2 or more.
+_KERNEL_FORWARD_RTOL = 1e-5
+# The plummer gradient against its direct-sum oracle: d/dpos 7.6e-04, d/dmass
+# 3.8e-03 measured, the FMM's own error at leaf 8 (ferrers3 gives 6.9e-04 /
+# 3.4e-03 here). With the default kernel's reverse: 0.38 / 0.19.
+_KERNEL_GRAD_RTOL = 1e-2
+
+
+@pytest.mark.xdist_group("large_n_reverse_softening_kernels")
+class TestSofteningKernelsOnTheCsrLane:
+    @pytest.fixture(scope="class", autouse=True)
+    def _csr_lane_on_cpu(self) -> Iterator[None]:
+        patcher = pytest.MonkeyPatch()
+        for key, value in _KERNEL_ENV.items():
+            patcher.setenv(key, value)
+        yield
+        patcher.undo()
+
+    @pytest.fixture(scope="class")
+    def problem(self) -> tuple[Any, Any, Any]:
+        rng = np.random.default_rng(11)
+        positions = jnp.asarray(rng.normal(size=(_KERNEL_N, 3)), jnp.float32)
+        masses = jnp.asarray(rng.uniform(0.5, 1.5, size=_KERNEL_N), jnp.float32)
+        weight = jnp.asarray(rng.normal(size=(_KERNEL_N, 3)), jnp.float32)
+        return positions, masses, weight
+
+    @pytest.fixture(scope="class")
+    def solvers(self, _csr_lane_on_cpu, problem) -> Any:
+        """One solver and prepared state per kernel, built on first use."""
+        cache: dict[str, tuple[Any, Any]] = {}
+        positions, masses, _ = problem
+
+        def get(kernel: str) -> tuple[Any, Any]:
+            if kernel not in cache:
+                fmm = FastMultipoleMethod(
+                    preset="large_n_gpu",
+                    G=_G,
+                    softening=_KERNEL_SOFTENING,
+                    softening_kernel=kernel,
+                    retain_far_pairs_for_grad=True,
+                    use_pallas=True,
+                )
+                state = fmm.prepare_state(
+                    positions, masses, leaf_size=_KERNEL_LEAF, max_order=_ORDER
+                )
+                assert isinstance(state, LargeNPreparedState)
+                assert int(np.asarray(state.compact_far_pairs.far_pair_count)) > 0
+                cache[kernel] = (fmm, state)
+            return cache[kernel]
+
+        return get
+
+    @staticmethod
+    def _direct(problem, kernel: str) -> Any:
+        """The fp64 direct sum with ``kernel``."""
+        positions, masses, _ = problem
+        return direct_sum_gravitational_acceleration(
+            positions.astype(jnp.float64),
+            masses.astype(jnp.float64),
+            G=_G,
+            softening=_KERNEL_SOFTENING,
+            softening_kernel=kernel,
+        )
+
+    @pytest.fixture
+    def csr_counters(self, monkeypatch) -> dict[str, int]:
+        counts = {"table": 0, "direct": 0, "reverse": 0}
+        for name, key in (
+            ("nearfield_leafpair_csr_pallas", "table"),
+            ("nearfield_leafpair_csr_sorted_direct_pallas", "direct"),
+            ("nearfield_leafpair_csr_reverse_pallas", "reverse"),
+        ):
+            _count_calls(monkeypatch, counts, nearfield_leafpair_csr, name, key)
+        return counts
+
+    def test_the_kernels_differ_at_this_softening(self, problem):
+        """Non-vacuous: a dropped kernel must move the force far past the gate."""
+        refs = {k: np.asarray(self._direct(problem, k)) for k in SOFTENING_KERNELS}
+        for kernel in SOFTENING_KERNELS:
+            if kernel != DEFAULT_SOFTENING_KERNEL:
+                gap = _relative_l2(refs[kernel], refs[DEFAULT_SOFTENING_KERNEL])
+                assert gap > 100 * _KERNEL_FORWARD_RTOL, (kernel, gap)
+
+    @pytest.mark.parametrize("kernel", SOFTENING_KERNELS)
+    def test_the_differentiable_forward_is_the_production_forward(
+        self, kernel, solvers, problem, csr_counters
+    ):
+        positions, masses, _ = problem
+        fmm, state = solvers(kernel)
+        production = np.asarray(fmm.evaluate_prepared_state(state))
+        assert csr_counters["direct"] >= 1, csr_counters
+        differentiable = np.asarray(
+            fmm.differentiable_accelerations(state, positions, masses)
+        )
+        # the gradient lane reached the CSR near field, through its table kernel
+        assert csr_counters["table"] >= 1, csr_counters
+        error = _relative_l2(differentiable, production)
+        assert error < _KERNEL_FORWARD_RTOL, f"{kernel}: rel-L2 {error:.3e}"
+        reference = np.asarray(self._direct(problem, kernel))
+        assert _relative_l2(differentiable, reference) < _RTOL
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_the_reverse_runs_the_solvers_kernel(self, solvers, problem, csr_counters):
+        """d/dpos and d/dmass with plummer, the kernel furthest from the default."""
+        positions, masses, weight = problem
+        fmm, state = solvers("plummer")
+
+        def loss(p, m):
+            return jnp.sum(weight * fmm.differentiable_accelerations(state, p, m))
+
+        def oracle(p, m):
+            return jnp.sum(
+                weight.astype(jnp.float64)
+                * direct_sum_gravitational_acceleration(
+                    p,
+                    m,
+                    G=_G,
+                    softening=_KERNEL_SOFTENING,
+                    softening_kernel="plummer",
+                )
+            )
+
+        got_p, got_m = jax.grad(loss, argnums=(0, 1))(positions, masses)
+        assert csr_counters["reverse"] == 1, csr_counters
+        want_p, want_m = jax.grad(oracle, argnums=(0, 1))(
+            positions.astype(jnp.float64), masses.astype(jnp.float64)
+        )
+        rel_p = _relative_l2(got_p, want_p)
+        rel_m = _relative_l2(got_m, want_m)
+        assert rel_p < _KERNEL_GRAD_RTOL, f"d/dpos rel-L2 {rel_p:.3e}"
+        assert rel_m < _KERNEL_GRAD_RTOL, f"d/dmass rel-L2 {rel_m:.3e}"
+
+
+# ---------------------------------------------------------------------------
 # The Pallas cascades under jax.grad (was test_grad_path_pallas_cascades.py).
 #
 # Phase 6 of the sub-10 ms plan made the per-level Pallas M2M/L2L cascades and the
@@ -690,3 +860,126 @@ class TestPallasCascades:
         ), f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"
         rel = np.linalg.norm(got - g_loops) / np.linalg.norm(g_loops)
         assert rel < 1e-9, f"Pallas reverse vs loop reverse rel-L2 {rel:.3e}"
+
+
+# ---------------------------------------------------------------------------
+# The forward this module differentiates is the production force (plan S1; the GPU
+# pin is G1 in bench/dce_pins.py).
+#
+# ``differentiable_accelerations`` re-evaluates the lists ``prepare_state`` froze, so
+# it is the production force only if that walk tested the MAC on the same geometry
+# as the fused lane's. Since bc62978 the geometry followed the engine's
+# ``_strict_fused_mode_active``, which only a strict call sets: a FRESH engine's
+# ``prepare_state`` walked the box MAC and the fused eval the centre-of-mass one.
+# ``docs/fast_gradients_2026-09.md``'s 1.8e-11 was measured on the branch before
+# that commit; on main the two lanes were 1.46e-3 apart at the operating point of
+# bench/grad_step_profile.py (2e5), the differentiable forward the less accurate
+# (aggL2 1.60e-3 against 1.27e-3). Here, on CPU (~70 s): 5.3e-3 apart with 2640
+# against 2168 far pairs, and 5.5e-8 with the same geometry
+# (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com).
+#
+# Both call orders: a fresh solver (what the bench does) and the production solver
+# after its strict call.
+# ---------------------------------------------------------------------------
+
+_FUSED_ENV = {
+    "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "1048576",
+    "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto",
+    "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
+    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "262144",
+    _PAYLOAD_CAP_ENV: "0",  # the prepacked layout the gradient lane requires
+}
+#: Two lanes that walk the same lists differ by fp32 summation order only (5.5e-8
+#: here, 1.7e-7 at 2e5 on an A100); the geometry split is 5.3e-3 here, 1.2e-3 there.
+_SAME_FORCE_RTOL = 1e-5
+_FUSED_THETA = 0.8
+
+
+def _fused_solver() -> FastMultipoleMethod:
+    """The fused lane's configuration at test size, far pairs retained.
+
+    Returns
+    -------
+    FastMultipoleMethod
+        A new solver: real basis, fp32, static radix tree, theta 0.8, order 4.
+    """
+    return FastMultipoleMethod(
+        preset="large_n_gpu",
+        basis="real",
+        theta=_FUSED_THETA,
+        G=_G,
+        softening=_SOFTENING,
+        working_dtype=jnp.float32,
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(mode="static_radix", leaf_target=_LEAF),
+            farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
+            mac_type="dehnen",
+        ),
+        fixed_order=_ORDER,
+    )
+
+
+@pytest.mark.xdist_group("large_n_forward_is_the_fused_force")
+class TestTheForwardIsTheFusedForce:
+    @pytest.fixture(scope="class")
+    def forces(self) -> dict[str, Any]:
+        """The fused eval, then the differentiable forward on a fresh solver and on
+        the production one.
+
+        Returns
+        -------
+        dict[str, Any]
+            The three force arrays, keyed ``production``, ``fresh`` and
+            ``same_engine``, and the far-pair count of each lane's walk.
+        """
+        patcher = pytest.MonkeyPatch()
+        for key, value in _FUSED_ENV.items():
+            patcher.setenv(key, value)
+        try:
+            positions = jnp.asarray(_plummer(_N, seed=0), jnp.float32)
+            masses = jnp.full((_N,), 1.0 / _N, jnp.float32)
+            production = _fused_solver()
+            prepared, eval_fn = production.strict_fused_prepared_eval_fn(
+                positions=positions,
+                masses=masses,
+                leaf_size=_LEAF,
+                max_order=_ORDER,
+                theta=_FUSED_THETA,
+            )
+            out = {
+                "production": np.asarray(eval_fn(prepared)),
+                "far_pairs_production": int(
+                    np.asarray(prepared.compact_far_pairs.far_pair_count)
+                ),
+            }
+            for arm, fmm in (("fresh", _fused_solver()), ("same_engine", production)):
+                state = fmm.prepare_state(
+                    positions,
+                    masses,
+                    leaf_size=_LEAF,
+                    max_order=_ORDER,
+                    theta=_FUSED_THETA,
+                )
+                assert isinstance(state, LargeNPreparedState)
+                out[arm] = np.asarray(
+                    fmm.differentiable_accelerations(state, positions, masses)
+                )
+                out[f"far_pairs_{arm}"] = int(
+                    np.asarray(state.compact_far_pairs.far_pair_count)
+                )
+        finally:
+            patcher.undo()
+        return out
+
+    def test_the_far_field_is_load_bearing(self, forces):
+        assert forces["far_pairs_production"] > 0
+
+    @pytest.mark.parametrize("arm", ["fresh", "same_engine"])
+    def test_the_differentiable_forward_is_the_fused_force(self, forces, arm):
+        """Round-off apart, in either call order (a geometry split is 5.3e-3 here)."""
+        rel = _relative_l2(forces[arm], forces["production"])
+        assert rel < _SAME_FORCE_RTOL, (
+            f"{arm}: the differentiable forward is {rel:.3e} from the fused eval, "
+            f"with {forces[f'far_pairs_{arm}']} far pairs against the fused lane's "
+            f"{forces['far_pairs_production']}"
+        )

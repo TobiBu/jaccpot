@@ -155,6 +155,38 @@ def test_large_n_lane_golden():
     _check_golden("large_n_real_clu_n512_p4", {"accel": accel}, float32=True)
 
 
+@pytest.mark.usefixtures("_large_n_lane")
+def test_large_n_lane_is_the_strict_lanes_first_force():
+    """A fresh engine's large-N ``prepare_state`` force IS the fused lane's first force.
+
+    Both walk the static-radix tree with its COM MAC (``walk_geometry_default``),
+    so on this golden's configuration the general prepare and the strict fused
+    prepare (the bootstrap of ``test_strict_fused_lane_golden``'s scan) build the
+    same lists and evaluate to the same force -- bitwise on CPU (2026-10-15).
+    Until then the general prepare walked the box geometry unless a strict call had
+    run on the engine first: rel-L2 3.9147e-4 against the direct sum where the
+    strict lane has 4.1210e-4 (256 far pairs each, not the same ones), 2.25e-4
+    apart. That is what moved ``large_n_real_clu_n512_p4``.
+    """
+    positions, masses = _make_inputs("clustered", N)
+    p = jnp.asarray(positions, jnp.float32)
+    m = jnp.asarray(masses, jnp.float32)
+    general = _large_n_solver()
+    accel = np.asarray(
+        general.evaluate_prepared_state(
+            general.prepare_state(p, m, leaf_size=LEAF, max_order=ORDER)
+        )
+    )
+    strict = _large_n_solver()
+    prepared, eval_fn = strict.strict_fused_prepared_eval_fn(
+        positions=p, masses=m, leaf_size=LEAF, max_order=ORDER
+    )
+    first = np.asarray(eval_fn(prepared))
+    # a round-off gate rather than bit equality: the two layouts evaluate through
+    # different kernels on a GPU; the geometry defect it guards is 200x above it
+    assert _rel_l2(accel, first) <= 1e-6, f"{_rel_l2(accel, first):.3e}"
+
+
 def _direct_velocity_verlet(state: np.ndarray, masses, *, dt: float, steps: int):
     """The fused lane's kick-drift-kick with direct-sum forces, in float64."""
     pos, vel = state[:, 0].copy(), state[:, 1].copy()

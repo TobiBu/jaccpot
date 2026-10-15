@@ -40,6 +40,11 @@ L3     TIMING: the 25M disc+bulge (ferrers3, eps 1.5e-3): step ms, B/particle,
        and the force's rel-L2 on 4096 targets
 DET1   S1 recorded WITHOUT ``--xla_gpu_deterministic_ops`` (the production flags)
 DET2   S4b's large-N gradient, recorded the same way
+G1     the differentiable forward against the production forward on the fused
+       lane, ``bench/grad_step_profile.py``'s operating point at 2e5 (cells of
+       64, theta 0.8, p5, fp32, softening 1e-7): the production eval, then the
+       differentiable forward on a FRESH solver (the bench's call order) and on
+       the production solver after its strict call
 =====  ===========================================================================
 
 The M pins need two cards (``autocvd -n 2``) and are recorded separately:
@@ -56,6 +61,14 @@ The DET pins answer one question: is the production path bitwise reproducible?
 Record them twice under the same code (``record --tag X --pins DET1,DET2`` and
 ``--tag X-b``); ``compare X X-b --pins DET1,DET2`` passes only when every array
 is bitwise equal.
+
+G1 checks itself: ``compare <ref> X --pins G1`` passes when X's own record has the
+differentiable forward within ``_G1_REL_L2_LIMIT`` (fp32 round-off) of the
+production forward, in both call orders; the ref is only reported (``compare X X``
+works). ``docs/fast_gradients_2026-09.md`` measured the two equal to 1.8e-11, on its
+branch before bc62978; S0 found them 1.46e-3 apart (``docs/production_2026-10.md``),
+which S4b and DET2 could not see because they compare the gradient lane only with
+itself. G1 on 63587f2: 1.21e-3 on the fresh solver, 1.66e-7 on the production one.
 
 Usage (book the card with autocvd first; the org rule)::
 
@@ -85,11 +98,19 @@ PINS = ("S1", "S2", "S3", "S4", "S4b", "S5", "S6")
 PINS_TWO_CARD = ("M1", "M2", "M3")
 PINS_LARGE = ("L1", "L2", "L3")
 PINS_DET = ("DET1", "DET2")
+#: pass or fail on their own record, whatever the reference
+PINS_SELF = ("G1",)
 #: recorded without --xla_gpu_deterministic_ops: they time the lane, or test whether
 #: the production flags alone reproduce it
 _PRODUCTION_FLAGS = frozenset(PINS_LARGE + PINS_DET)
 #: the 25M disc+bulge production softening (docs/softening_2026-10.md)
 _DISC_SOFTENING = "1.5e-3"
+#: G1's limit on rel-L2(differentiable forward - production forward). On the same
+#: lists the two lanes differ only in fp32 summation order. At the bench's operating
+#: point with the COM MAC forced: 1.3e-11 on 0c36f36, 3.7e-9 from #363 (round 4),
+#: 7.3e-8 from #367 (round 6), 1.7e-7 from #368 (round 7) on, every time with equal
+#: far-pair and near-edge counts. A geometry split is 1.2e-3 to 1.5e-3.
+_G1_REL_L2_LIMIT = 1e-5
 
 
 # --------------------------------------------------------------------- cases
@@ -271,6 +292,150 @@ def case_s4b(out: Path) -> dict:
         ),
     )
     return _grad_pin(out, solver, n, plan_fn=prepare_large_n_grad_plan)
+
+
+def case_g1(out: Path) -> dict:
+    """The differentiable forward against the production forward, the bench's way.
+
+    ``bench/grad_step_profile.py`` evaluates the production force on one solver and
+    builds the differentiable state on a NEW one. Which MAC geometry a walk tests
+    (box or centre of mass) followed the engine's ``_strict_fused_mode_active``,
+    which only a strict call sets (bc62978), so the two lanes walked different
+    lists. The second differentiable arm runs on the production solver after its
+    strict call: equal there and not on the fresh solver means the geometry.
+    """
+    import os
+
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    sys.path.insert(
+        0,
+        os.environ.get(
+            "BENCH_DIR",
+            "/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu",
+        ),
+    )
+    from codes.compare_force import (
+        FAST_LANE_ENV_BY_LEAF,
+        apply_fast_lane_env,
+        fast_lane_overrides_for_leaf,
+    )
+
+    n, leaf, order, theta, softening = 200_000, 64, 5, 0.8, 1e-7
+    apply_fast_lane_env(n, overrides=fast_lane_overrides_for_leaf(leaf, n))
+    trav = dict(FAST_LANE_ENV_BY_LEAF[leaf]["_traversal_overrides"])
+    from yggdrax._cell_partition import adaptive_cell_leaf_partition_numpy
+    from yggdrax.bounds import infer_bounds
+    from yggdrax.morton import morton_encode
+
+    from jaccpot import (
+        FarFieldConfig,
+        FastMultipoleMethod,
+        FMMAdvancedConfig,
+        NearFieldConfig,
+        RuntimePolicyConfig,
+        TraversalOverrides,
+        TreeConfig,
+    )
+    from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
+
+    pos, _, mass = _plummer(n)
+    p, m = jnp.asarray(pos), jnp.asarray(mass)
+    codes = np.sort(np.asarray(morton_encode(p, infer_bounds(p))).astype(np.uint64))
+    leaves = adaptive_cell_leaf_partition_numpy(codes, leaf_size=leaf)[0].size
+
+    def solver():
+        return FastMultipoleMethod(
+            preset="large_n_gpu",
+            basis="real",
+            theta=theta,
+            G=1.0,
+            softening=softening,
+            working_dtype=jnp.float32,
+            advanced=FMMAdvancedConfig(
+                tree=TreeConfig(
+                    mode="static_radix",
+                    leaf_target=leaf,
+                    leaf_partition="cells",
+                    leaf_capacity=1 << int(np.ceil(np.log2(1.25 * leaves))),
+                ),
+                farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
+                nearfield=NearFieldConfig(mode="auto"),
+                runtime=RuntimePolicyConfig(
+                    traversal_config=TraversalOverrides(**trav)
+                ),
+                mac_type="dehnen",
+            ),
+            fixed_order=order,
+        )
+
+    def differentiable(fmm):
+        state = fmm.prepare_state(p, m, leaf_size=leaf, max_order=order, theta=theta)
+        plan = prepare_large_n_grad_plan(fmm, state)
+        acc = fmm.differentiable_accelerations(state, p, m, grad_plan=plan)
+        lists = {
+            "far_pairs": int(plan.far_pair_active_count),
+            "near_edges": int(np.asarray(state.neighbor_list.counts).sum()),
+        }
+        return np.asarray(jax.block_until_ready(acc)), lists
+
+    production = solver()
+    prepared, eval_fn = production.strict_fused_prepared_eval_fn(
+        positions=p, masses=m, leaf_size=leaf, max_order=order, theta=theta
+    )
+    acc_prod = np.asarray(jax.block_until_ready(eval_fn(prepared)))
+    lists_prod = {"far_pairs": int(prepared.compact_far_pairs.far_pair_count)}
+    prepared = eval_fn = None
+    acc_fresh, lists_fresh = differentiable(solver())
+    acc_same, lists_same = differentiable(production)
+
+    # fp64 direct sum on 1024 targets (informative; the pin is the difference)
+    targets = np.random.default_rng(3).choice(n, 1024, replace=False)
+    p64, m64 = pos.astype(np.float64), mass.astype(np.float64)
+    ref = np.empty((targets.size, 3))
+    for s in range(0, targets.size, 32):
+        t = targets[s : s + 32]
+        dx = p64[None, :, :] - p64[t, None, :]
+        r2 = np.sum(dx * dx, -1)
+        g = np.where(r2 > 0.0, (r2 + softening * softening) ** -1.5, 0.0)
+        ref[s : s + 32] = np.sum(m64[None, :, None] * dx * g[..., None], 1)
+
+    def rel(a, b):
+        a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+        return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+    np.savez(
+        out,
+        acc_production=acc_prod,
+        acc_differentiable_fresh=acc_fresh,
+        acc_differentiable_same_engine=acc_same,
+    )
+    return {
+        "n": n,
+        "limit": _G1_REL_L2_LIMIT,
+        "rel_l2_fresh": rel(acc_fresh, acc_prod),
+        "rel_l2_same_engine": rel(acc_same, acc_prod),
+        "lists": {
+            "production": lists_prod,
+            "fresh": lists_fresh,
+            "same_engine": lists_same,
+        },
+        "direct_rel_l2": {
+            "production": rel(acc_prod[targets], ref),
+            "fresh": rel(acc_fresh[targets], ref),
+            "same_engine": rel(acc_same[targets], ref),
+        },
+    }
+
+
+def _g1_pass(meta: dict) -> bool:
+    """G1 passes when both differentiable arms equal production to round-off."""
+    return all(
+        meta.get(key, float("inf")) <= _G1_REL_L2_LIMIT
+        for key in ("rel_l2_fresh", "rel_l2_same_engine")
+    )
 
 
 def case_s5(out: Path) -> dict:
@@ -576,6 +741,7 @@ def case_det2(out: Path) -> dict:
 CASES = {
     "DET1": case_det1,
     "DET2": case_det2,
+    "G1": case_g1,
     "L1": case_l1,
     "L2": case_l2,
     "L3": case_l3,
@@ -767,6 +933,10 @@ def _compare(args) -> int:
             # no envelope: the question is whether the production flags reproduce
             entry["pass"] = all(row.get("bitwise") for row in rows.values())
             ok = ok and entry["pass"]
+        elif pin in PINS_SELF:
+            # the question is inside the new record: do the two lanes agree?
+            entry["pass"] = _g1_pass(meta_new)
+            ok = ok and entry["pass"]
         elif env is not None:
             control = _diff(npz, env / npz.name)
             passed = True
@@ -807,7 +977,10 @@ def main(argv: list[str]) -> int:
     cmp_.add_argument(
         "--pins",
         default=",".join(PINS),
-        help="M1,M2,M3 for the two-card set; L1,L2,L3 timing; DET1,DET2 determinism",
+        help=(
+            "M1,M2,M3 for the two-card set; L1,L2,L3 timing; DET1,DET2 determinism; "
+            "G1 differentiable == production"
+        ),
     )
     cmp_.add_argument("--root", default=ROOT_DEFAULT)
     cmp_.add_argument("--json", default=None)
