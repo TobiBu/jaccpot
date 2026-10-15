@@ -118,15 +118,22 @@ def _unaliased(tree: Any) -> Any:
 
 class StrictRunMixin(_EngineBase):
     def _strict_far_pairs_ride_outside_the_scan(self, prepared: Any) -> bool:
-        """Whether ``strict_run_v2`` may keep the state's far list out of the scan.
+        """Whether ``strict_run_v2`` keeps the state's far list out of the scan.
 
         On the static-radix fused lane the fresh far-pair rebuild (its only mode
         since the 2026-10 cleanup, X6) makes the carried far list a placeholder:
         every refresh builds its own and returns the input's unchanged, so it is
         dead inside the scan, yet it was an argument AND an output of the
         compiled runner (3 x P int32 each, 1.1 GB at 2.5e7 on the disc+bulge IC).
-        It is detached before the scan and re-attached to the returned state,
-        which the gradient path reads.
+        It is detached before the scan and NOT put back: it belongs to the
+        positions the call started from, while the returned tree and positions
+        are the end's, so the gradient path read the wrong far field from it
+        (rel-L2 7.5e-3 against 7.9e-5 at N=768, the 2026-10-13 review). The
+        returned state carries ``compact_far_pairs=None``, which
+        ``differentiable_accelerations`` refuses with a clear error.
+
+        A state without a far list (one this method returned) qualifies too: the
+        lane, not the list, is what makes a step read none of it.
 
         Parameters
         ----------
@@ -136,14 +143,13 @@ class StrictRunMixin(_EngineBase):
         Returns
         -------
         bool
-            ``True`` when the list can ride outside.
+            ``True`` on the lane whose scan rebuilds the far list every step.
         """
         mode = str(getattr(self.config.tree, "mode", "")).strip().lower()
         return (
             self.tree_type == "radix"
             and mode == "static_radix"
             and isinstance(prepared, LargeNPreparedState)
-            and getattr(prepared, "compact_far_pairs", None) is not None
         )
 
     def _replan_walk_caps_from_needs(self, needs: np.ndarray) -> bool:
@@ -687,7 +693,13 @@ class StrictRunMixin(_EngineBase):
         return_history : bool
             Return every step's state rather than only the last.
         return_prepared_state : bool
-            Return the prepared state so the next call can reuse it.
+            Return the prepared state so the next call can reuse it. On the
+            static-radix lane it carries no far-pair list
+            (``compact_far_pairs=None``): the scan builds one per step and keeps
+            none, and the one the call started from belongs to the start
+            positions. To differentiate at the returned positions,
+            ``prepare_state`` there first; ``differentiable_accelerations``
+            refuses the returned state.
         step_callback : Optional[Callable[[Array, Array], None]]
             Fire-and-forget streaming hook; see above.
         step_callback_stride : int
@@ -1448,14 +1460,11 @@ class StrictRunMixin(_EngineBase):
             scale_curr = _force_scale_seed(prepared_curr)
             while True:
                 # the far list is dead inside the scan (fresh rebuild): keep it
-                # out of the carry and put it back on the returned state
-                far_outside = self._strict_far_pairs_ride_outside_the_scan(
-                    prepared_curr
-                )
-                far_kept = prepared_curr.compact_far_pairs if far_outside else None
+                # out of the carry, and off the returned state too -- it is the
+                # START positions' list, and the gradient path would read it
                 prepared_in = (
                     replace(prepared_curr, compact_far_pairs=None)
-                    if far_outside
+                    if self._strict_far_pairs_ride_outside_the_scan(prepared_curr)
                     else prepared_curr
                 )
                 if donate_carry:
@@ -1491,11 +1500,7 @@ class StrictRunMixin(_EngineBase):
                     np.asarray(jax.device_get(capacity_ok_all))
                 )
                 if self._strict_static_target_block_capacity_ok:
-                    prepared_curr = (
-                        replace(prepared_out, compact_far_pairs=far_kept)
-                        if far_outside
-                        else prepared_out
-                    )
+                    prepared_curr = prepared_out
                     state_curr = state_out
                     break
                 needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
@@ -1512,7 +1517,7 @@ class StrictRunMixin(_EngineBase):
                 ):
                     self._raise_scan_capacity_saturated(needs)
                 retried = True
-                del prepared_out, state_out, history_out, far_kept
+                del prepared_out, state_out, history_out
                 replanned_peak = int(
                     (self._strict_fused_validated_caps or {}).get("peak_wavefront", 0)
                 )
@@ -1697,9 +1702,9 @@ class StrictRunMixin(_EngineBase):
             if not self._strict_far_pairs_ride_outside_the_scan(prepared):
                 raise ValueError(
                     "carry='particles' needs the fused static-radix lane's fresh "
-                    "far-pair rebuild inside the scan (a LargeNPreparedState with "
-                    "a far list on a static_radix tree): otherwise a step reads "
-                    "the carried far list"
+                    "far-pair rebuild inside the scan (a LargeNPreparedState on a "
+                    "static_radix tree): otherwise a step reads the carried far "
+                    "list"
                 )
             return shape_template(replace(prepared, compact_far_pairs=None))
 

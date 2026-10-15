@@ -144,8 +144,11 @@ twice: as its argument and as its output.
   `strict_run_v2` prepares itself (`prepared_state=None`) is always donated, since nothing else holds it.
   `strict_fused_prepared_eval_fn(..., donate_prepared=True)` gives a one-shot eval closure.
 * **The far list rides outside the scan.** On the default fresh far-pair rebuild the carried far list is a
-  placeholder: each refresh builds its own and returns the input's unchanged. It is detached before the scan and
-  re-attached to the returned state, which the gradient path reads (3 x P int32, 1.0 GiB at 2.5e7 on the disc).
+  placeholder: each refresh builds its own and returns the input's unchanged. It is detached before the scan
+  (3 x P int32, 1.0 GiB at 2.5e7 on the disc). It used to be re-attached to the returned state, but that list
+  is the START positions', so `differentiable_accelerations` of the returned state read the wrong far field
+  (rel-L2 7.5e-3 against 7.9e-5, review 2026-10-13). Since S1 (2026-10-15) the returned state carries
+  `compact_far_pairs=None`, and the gradient path refuses it with an error that says to re-prepare.
 * **Two things donation exposed:**
   * the flat-walk neighbour list holds one array under two fields, and XLA refuses to donate a buffer twice, so
     repeats are copied first (`_unaliased`);

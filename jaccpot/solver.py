@@ -1810,7 +1810,10 @@ class FastMultipoleMethod:
         return_history : bool
             Return every step's state rather than only the last.
         return_prepared_state : bool
-            Return the prepared state, so the next call can reuse it.
+            Return the prepared state, so the next call can reuse it. On the
+            static-radix lane it carries no far-pair list (the one the call
+            started from is the start positions'), so to differentiate at the
+            returned positions call ``prepare_state`` there first.
         step_callback : Optional[Callable[[Array, Array], None]]
             Fire-and-forget streaming hook; see above.
         step_callback_stride : int

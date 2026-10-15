@@ -166,7 +166,10 @@ trusting the 3.0 threshold on other hardware.
 * `LargeNPreparedState` from `preset="large_n_gpu"`, with
   `retain_far_pairs_for_grad=True`. Without it the frozen M2L pair list is
   discarded at `prepare_state` and the call raises — it does not silently give
-  you a far field with zero mass-sensitivity.
+  you a far field with zero mass-sensitivity. The state `strict_run_v2` returns
+  carries no far list either (its scan rebuilds the list every step; the one it
+  started with is the start positions'), so it raises too: `prepare_state` at
+  the returned positions and differentiate that.
 
 **Not supported** (all raise, none degrade silently)
 

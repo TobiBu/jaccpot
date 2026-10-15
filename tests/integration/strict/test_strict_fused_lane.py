@@ -476,3 +476,110 @@ def test_a_public_refresh_never_takes_the_strict_lanes_traced_path(geometry_env)
         np.asarray(solver.evaluate_prepared_state(after)),
         np.asarray(solver.evaluate_prepared_state(before)),
     )
+
+
+def _far_pair_set(prepared):
+    from jaccpot.runtime._interaction_cache import far_pair_targets
+
+    far = prepared.compact_far_pairs
+    count = int(np.asarray(far.far_pair_count))
+    sources = np.asarray(far.sources)[:count]
+    targets = np.asarray(far_pair_targets(far))[:count]
+    return set(zip(sources.tolist(), targets.tolist()))
+
+
+def test_the_returned_state_is_refused_by_the_gradient_path(monkeypatch):
+    """``strict_run_v2``'s returned state has no far list, so it is not differentiated.
+
+    The fused scan rebuilds the far list every step and keeps none. The list the
+    call started with was detached before the scan and, until 2026-10-15,
+    re-attached to the returned state -- whose tree and positions are the END's --
+    so ``differentiable_accelerations`` of it ran the M2L over the start's pairs:
+    rel-L2 3.2e-02 against the direct sum at the returned positions, where a fresh
+    prepare there gives 1.7e-04 (this configuration, CPU; the review measured
+    7.5e-3 against 7.9e-5 at N=768). The state now carries
+    ``compact_far_pairs=None``, and the gradient path raises with the remedy,
+    which is checked to work on the same engine.
+    """
+    from jaccpot import FastMultipoleMethod, FMMAdvancedConfig
+    from jaccpot.autodiff import direct_sum_gravitational_acceleration
+
+    monkeypatch.setattr(jax, "default_backend", lambda: "gpu")
+    # the prepacked near-field layout, which the gradient plan needs
+    monkeypatch.setenv("JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB", "0")
+    monkeypatch.setenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP", "65536")
+    n, leaf, order, theta, softening = 1024, 16, 4, 0.6, 1e-2
+
+    def solver():
+        return FastMultipoleMethod(
+            preset="large_n_gpu",
+            basis="real",
+            theta=theta,
+            G=1.0,
+            softening=softening,
+            working_dtype=jnp.float32,
+            advanced=FMMAdvancedConfig(
+                tree=TreeConfig(mode="static_radix", leaf_target=leaf),
+                nearfield=NearFieldConfig(mode="auto"),
+                mac_type="dehnen",
+            ),
+            fixed_order=order,
+            retain_far_pairs_for_grad=True,
+        )
+
+    rng = np.random.default_rng(3)
+    positions = rng.normal(size=(n, 3))
+    velocities = 0.6 * rng.normal(size=(n, 3))
+    masses = jnp.asarray(rng.uniform(0.5, 1.5, size=n) / n, jnp.float32)
+    fmm = solver()
+    out, returned, _ = fmm.strict_run_v2(
+        state=jnp.asarray(np.stack([positions, velocities], 1), jnp.float32),
+        masses=masses,
+        dt=0.05,
+        num_steps=3,
+        refresh_every=1,
+        leaf_size=leaf,
+        max_order=order,
+        theta=theta,
+        return_prepared_state=True,
+    )
+    assert fmm.get_runtime_diagnostics()["strict_fused_mode_active"] is True
+    end = jnp.asarray(out)[:, 0, :]
+
+    # Non-vacuous: the far field is there, and it moved with the particles, so the
+    # start's list is not the end's.
+    start_pairs = _far_pair_set(
+        solver().prepare_state(
+            jnp.asarray(positions, jnp.float32),
+            masses,
+            leaf_size=leaf,
+            max_order=order,
+        )
+    )
+    end_pairs = _far_pair_set(
+        solver().prepare_state(end, masses, leaf_size=leaf, max_order=order)
+    )
+    assert end_pairs and start_pairs != end_pairs
+
+    with pytest.raises(RuntimeError, match="returned by strict_run_v2"):
+        fmm.differentiable_accelerations(returned, end, masses)
+    assert returned.compact_far_pairs is None
+
+    # the remedy the error names
+    fresh = fmm.prepare_state(end, masses, leaf_size=leaf, max_order=order)
+    differentiable = np.asarray(fmm.differentiable_accelerations(fresh, end, masses))
+    production = np.asarray(fmm.evaluate_prepared_state(fresh))
+    reference = np.asarray(
+        direct_sum_gravitational_acceleration(
+            end.astype(jnp.float64),
+            masses.astype(jnp.float64),
+            G=1.0,
+            softening=softening,
+        )
+    )
+
+    def rel(a, b):
+        return float(np.linalg.norm(a - b) / np.linalg.norm(b))
+
+    assert rel(differentiable, production) < 1e-5
+    assert rel(differentiable, reference) < 1e-3
