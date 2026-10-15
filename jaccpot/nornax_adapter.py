@@ -1471,13 +1471,18 @@ class DistributedBlockStepFMM:
     resolve-eagerly-then-freeze discipline
     :meth:`BlockStepFMM.freeze_template` applies on one device.
 
-    **Eager, not traceable.** Every method returns concrete arrays: the driver
-    assembles the result back into input order with NumPy, and the partition itself is
-    host work. So there is no distributed counterpart to
-    :meth:`BlockStepFMM.rebuild_state` or to ``advance_base_step(scan_boundaries=True)``
-    -- a ``lax.scan`` over boundaries cannot cross this seam. A driver gets its
-    per-boundary traversals from :meth:`boundary_kick`, which is the seam nornax uses
-    anyway.
+    **The forces trace; the partition does not.** :meth:`prepare` is host work (a
+    NumPy domain assignment) and must run eagerly. The force methods are traceable:
+    the evaluator scatters its result back to input order with ``jnp``, which is what
+    lets nornax's ``block_kdk_rollout`` drive this lane from a ``lax.scan``
+    (``tests/integration/test_mutual_distributed_nornax.py``). Two checks are eager
+    only and are skipped under a trace: the capacity-overflow raise and the rung range
+    check. A traced driver should therefore evaluate once eagerly first. What does not
+    exist is a traceable TOPOLOGY rebuild: there is no counterpart to
+    :meth:`BlockStepFMM.rebuild_state`, an explicit ``topology`` is refused
+    (:meth:`_refuse_topology`), and :meth:`advance_base_step` has no
+    ``scan_boundaries``. Repartitioning means calling :meth:`prepare` again, outside
+    any trace.
 
     Parameters
     ----------
@@ -1496,7 +1501,10 @@ class DistributedBlockStepFMM:
         accepted, so all of them refine to leaf-leaf and are summed particle by
         particle. Above zero, accepted cross pairs go through M2L against the remote
         leaf's multipole, which is what collapses the halo import from the whole remote
-        system to a surface.
+        system to a surface. Above zero it needs ``softening_kernel="plummer"``: with
+        a compact kernel (``"ferrers3"``, the default, or ``"wendland_c2"``) the first
+        force evaluation raises ``NotImplementedError``, because the cross walk has no
+        separation floor yet (``mutual/distributed.py``).
     max_order : int
         Multipole expansion order ``p``.
     G : float
@@ -1522,9 +1530,9 @@ class DistributedBlockStepFMM:
         ``near_cap``, ``max_pair_queue``, ``recv_capacity``, ``max_req_leaves``,
         ``max_recv_leaves``, ``far_cap``, ``far_recv_capacity``, ``coarse_depth_cap``.
     validate_rung : bool
-        Check that rungs lie in ``[0, k_max]``. Here the check is free rather than a
-        device sync -- the rung is laid out on the host anyway -- so leaving it on
-        costs nothing.
+        Check that rungs lie in ``[0, k_max]``. The check reads the rung's minimum
+        and maximum back to the host on every eager evaluation; under a trace it is
+        skipped, and the kernels' clamp is what stands.
 
     Attributes
     ----------
@@ -1644,7 +1652,9 @@ class DistributedBlockStepFMM:
 
         Host work, and not traceable: the domain assignment is a NumPy sort. Call it
         before any force method, and again when the partition should change -- see the
-        class docstring for why that is not once per base step.
+        class docstring for why that is not once per base step. It needs two or more
+        devices; on one the evaluator refuses with a ``ValueError`` (a single domain
+        has no cross-domain half, and :class:`BlockStepFMM` is the whole force there).
 
         The program is *built* here and compiled on its FIRST evaluation, lazily and
         per weighting mode -- the unweighted force takes three operands and a weighted
@@ -1763,8 +1773,9 @@ class DistributedBlockStepFMM:
         over explicitly, as a traced value rebuilt inside its scan. The
         single-device :class:`BlockStepFMM` honours that with
         :meth:`BlockStepFMM.rebuild_state`; the distributed lane's topology is the
-        partition plus each device's tree, built on the host by :meth:`prepare`,
-        and there is nothing an explicit ``MutualFMMState`` could stand in for.
+        partition, built on the host by :meth:`prepare`, plus each device's tree,
+        rebuilt inside the mapped program from the positions of every call, and
+        there is nothing an explicit ``MutualFMMState`` could stand in for.
         Accepting the keyword keeps the signature contract; refusing a value
         keeps a caller from believing a rebuild happened when it did not.
 
@@ -1787,13 +1798,13 @@ class DistributedBlockStepFMM:
             )
 
     def _validate_rung(self, rung: Array) -> Array:
-        """Reject rungs outside ``[0, k_max]``.
+        """Pass the rung through; the ``[0, k_max]`` check is the evaluator's.
 
-        Unconditional here, unlike :meth:`BlockStepFMM._validate_rung`, and cheaper:
-        that one pays a device-to-host sync to read the bound, while this lane lays
-        the rung out on the host anyway, so the reduction is free. The check itself
-        happens inside the evaluator, which is where the layout is; this only enforces
-        that a rung was supplied at all.
+        The check happens inside the evaluator, which is where the layout is
+        (``DistributedMutualEvaluator.rung_layout``), and only with ``validate_rung``
+        (it is the config's ``k_max`` that switches it on). Like
+        :meth:`BlockStepFMM._validate_rung` it reads the rung's minimum and maximum
+        back to the host, so it runs on eager calls and is skipped under a trace.
 
         Parameters
         ----------
@@ -2105,11 +2116,11 @@ class DistributedBlockStepFMM:
         is held fixed for the whole step, which is what makes the map symplectic and
         time-reversible.
 
-        There is no ``scan_boundaries`` counterpart here: this lane's readout is a
-        NumPy scatter back to input order, so the boundary loop cannot be traced. The
-        loop is therefore always the unrolled Python one, which on this lane costs
-        nothing extra -- the mapped program is compiled once by :meth:`prepare` and
-        every boundary reuses it.
+        There is no ``scan_boundaries`` option here: the loop is always the unrolled
+        Python one. That costs no extra compiles -- :meth:`prepare` builds the mapped
+        program, its first evaluation compiles it, and every boundary reuses it. (The
+        evaluations themselves do trace, since the readout became a ``jnp`` scatter;
+        a scanned driver is nornax's ``block_kdk_rollout``.)
 
         Returns ``(positions, velocities, acceleration)`` with the acceleration the
         full field at the end-of-step positions, ready to seed the next base step's

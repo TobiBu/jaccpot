@@ -2489,7 +2489,10 @@ def can_use_large_n_prepare_path(
 
     Notes
     -----
-    The lane is gated on the ``large_n_gpu`` preset alone. The engine's
+    The ``large_n_gpu`` preset is the only switch that opens the lane, and the lane
+    still declines (silently) off a GPU backend, off the radix tree or the real
+    basis, with adaptive or mixed order, and for a traced call. So on a CPU the
+    preset prepares an ``FMMPreparedState`` on the general path. The engine's
     ``runtime_path="large_n"`` used to open it under any preset too (and turn the
     ``dehnen_theta`` decline into a raise); X4 of the 2026-10 cleanup stopped
     consulting it, and Z-b removed it.

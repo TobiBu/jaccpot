@@ -422,12 +422,29 @@ class GradConfig:
     cannot differ between two solvers in one program, which matters as soon as
     Jaccpot is embedded in someone else's simulation loop.
 
+    **Several fields do nothing on the default GPU path** (checked 2026-10-15). On
+    an Ampere+ GPU the gradient path's M2L runs the CSR Pallas lane, and so does
+    its leaf-major near field (a large-N state's only one, a radix state's from
+    ``nearfield_fast_lane_min_particles`` up), each with a reverse kernel of its
+    own. There:
+
+    * ``fused_m2l_pallas`` acts only with ``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0``:
+      it picks a kernel for the chunked M2L lanes, which the CSR lane replaces;
+    * the five ``reverse_*`` fields tune the prepacked rectangle lane's reverse,
+      which runs only with ``JACCPOT_NEARFIELD_LEAFPAIR_CSR=0`` (or in Pallas
+      interpret mode), and only for a radix ``FMMPreparedState``: the large-N
+      state does not pass them on (it reads their environment variables);
+    * ``nearfield_lane`` is ignored for a ``LargeNPreparedState``
+      (``preset="large_n_gpu"`` on a GPU), which has one differentiable near
+      field; an explicit ``"bucketed"`` raises there.
+
     Attributes
     ----------
     nearfield_lane : GradNearFieldLane
-        Which near-field traversal the gradient path takes. The near field is
-        ~83% of the forward and ~91% of the reverse, so this is the choice that
-        matters.
+        Which near-field traversal the gradient path takes on a radix
+        ``FMMPreparedState``. The near field was ~83% of the forward and ~91% of
+        the reverse (N=1024, p=4, before the Pallas reverses of 2026-09), so this
+        was the choice that mattered.
 
         * ``"auto"`` (default) -- ``"bucketed"`` below
           ``nearfield_fast_lane_min_particles``, ``"fast_lane"`` at or above it.
@@ -442,8 +459,11 @@ class GradConfig:
           bit-equality. The bit-identical *force checksums* reported in
           ``docs/differentiable_fmm.md`` come from the benchmark harness, which is
           not part of the test suite; do not read this as an asserted invariant.
-          With ``use_pallas`` on an Ampere+ GPU the reverse is the analytic O(N)
-          leaf-pair rule, which is what makes 200k--1M gradients feasible.
+          With ``use_pallas`` on an Ampere+ GPU it takes the CSR row-chunk kernel
+          and its Pallas reverse (``docs/fast_gradients_2026-09.md``). The analytic
+          O(N) leaf-pair rule of the prepacked rectangle, which made 200k--1M
+          gradients feasible in 2026-07, is the fallback
+          (``JACCPOT_NEARFIELD_LEAFPAIR_CSR=0``).
     nearfield_fast_lane_min_particles : int
         Crossover for ``nearfield_lane="auto"``. The default 100000 comes from
         the measured 200k OOM; below ~10^4 the two lanes are within +-20% with
@@ -451,9 +471,10 @@ class GradConfig:
     fused_m2l_pallas : Optional[bool]
         Opt into the differentiable fused-Pallas M2L (Ampere+; falls back to
         pure-JAX elsewhere). ``None`` defers to
-        ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS``. Roughly halves the forward
-        at small N; the reverse is near-field-bound, so the end-to-end win is
-        ~1.3-1.5x.
+        ``JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS``. Inert where the CSR M2L runs
+        (above). Measured in 2026-07, before the CSR M2L: roughly halves the
+        forward at small N; the reverse is near-field-bound, so the end-to-end win
+        is ~1.3-1.5x.
     analytic_p2p_vjp : Optional[bool]
         Analytic reverse rule for the near-field P2P, on by default. Turning it
         off restores plain autodiff and is for A/B measurement, not production.

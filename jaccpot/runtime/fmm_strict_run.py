@@ -686,8 +686,13 @@ class StrictRunMixin(_EngineBase):
         add_external : bool
             Add ``external_acceleration_fn`` to the self-gravity each step.
         external_acceleration_fn : Optional[Callable[[Array], Array]]
-            ``positions -> accelerations``; traced into the scan, so it must be
-            jittable.
+            ``state -> accelerations``: called with the packed state ``[N, 2, 3]``
+            (positions ``state[:, 0]``), not with the positions alone, and returns
+            ``[N, 3]``. Traced into the scan, so it must be jittable. It should
+            depend on the positions only: at a step's endpoint the velocity half
+            still holds the step's starting velocities. The rows come in the
+            caller's order, except under ``JACCPOT_STRICT_CARRY_ORDER=tree`` (see
+            ``carry``).
         rematerialize_between_refresh : bool
             Rebuild device arrays at refresh boundaries.
         return_history : bool
