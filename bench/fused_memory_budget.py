@@ -34,6 +34,11 @@ Cap settings (``--caps``):
 * ``named`` -- ``--far-cap`` / ``--near-cap`` exactly (directed pairs, even);
 * ``unnamed`` -- neither cap in the environment: the library sizes them.
 
+Precision (``--state-dtype`` x ``--force-dtype``, both ``float32`` by default, which
+is every row recorded before 2026-10-15): the dtype of the state the solver is handed
+and the solver's ``working_dtype``. ``--force-dtype float64`` is the large-N lane's
+float64 validation lane; its time and memory are recorded, no budget applies.
+
 Run on one card, one process per row::
 
     PYTHONPATH=/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu/sitecustom_wt \\
@@ -225,6 +230,21 @@ def _args() -> argparse.Namespace:
         action="store_true",
         help="with --accuracy-targets: also score da/f (f = sum G m / r^2, fp64) and "
         "save every target's errors next to --out (<out>.err.npz)",
+    )
+    ap.add_argument(
+        "--state-dtype",
+        default="float32",
+        choices=("float32", "float64"),
+        help="dtype of the positions, velocities and masses handed to the solver (the "
+        "IC is drawn in float32 either way, so both dtypes hold the same particles and "
+        "share one direct-sum reference)",
+    )
+    ap.add_argument(
+        "--force-dtype",
+        default="float32",
+        choices=("float32", "float64"),
+        help="the solver's working_dtype: float64 is the large-N lane's validation "
+        "lane (precision='fp64'; Pallas where the kernels are dtype-generic)",
     )
     ap.add_argument("--env", nargs="*", default=[], metavar="KEY=VAL")
     ap.add_argument("--out", required=True)
@@ -657,7 +677,11 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
         G=ARGS.G,
         softening=soft,
         softening_kernel=ARGS.softening_kernel,
-        working_dtype=jnp.float32,
+        # the scalar types, not jnp.dtype(...): the float32 row passes exactly what
+        # it passed before the flag existed
+        working_dtype={"float32": jnp.float32, "float64": jnp.float64}[
+            ARGS.force_dtype
+        ],
         use_pallas={"auto": None, "on": True, "off": False}[ARGS.use_pallas],
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(
@@ -732,8 +756,8 @@ def run_budget(result: dict) -> None:
     live, leaf_cap = _leaf_capacity(pos)
     result.update(live_leaves=live, leaf_capacity=leaf_cap, softening=soft, dt=dt)
     print(f"N={ARGS.n} live leaves {live} -> leaf capacity {leaf_cap}", flush=True)
-    P = jnp.asarray(pos)
-    M = jnp.asarray(mass)
+    P = jnp.asarray(pos, ARGS.state_dtype)
+    M = jnp.asarray(mass, ARGS.state_dtype)
     solver = _solver(leaf_cap, soft)
     _event("before_prepare")
     a_host = None
@@ -793,7 +817,7 @@ def run_budget(result: dict) -> None:
             np.savez(ARGS.save_forces, **saved)
         _accuracy(result, pos, mass, soft, a_host)
         return
-    state0 = jnp.stack([P, jnp.asarray(vel)], axis=1)
+    state0 = jnp.stack([P, jnp.asarray(vel, ARGS.state_dtype)], axis=1)
 
     def run(state, prep, k):
         out = solver.strict_run_v2(
@@ -1053,10 +1077,13 @@ def run_drift(result: dict) -> None:
         f"N={ARGS.n} {ARGS.ic} live leaves {live} -> leaf capacity {leaf_cap}",
         flush=True,
     )
-    M = jnp.asarray(mass)
+    M = jnp.asarray(mass, ARGS.state_dtype)
     solver = _solver(leaf_cap, soft)
     marks = sorted(int(s) for s in ARGS.drift_steps.split(","))
-    state = jnp.stack([jnp.asarray(pos), jnp.asarray(vel)], axis=1)
+    state = jnp.stack(
+        [jnp.asarray(pos, ARGS.state_dtype), jnp.asarray(vel, ARGS.state_dtype)],
+        axis=1,
+    )
     rows = []
     done = 0
     for mark in marks:
@@ -1079,7 +1106,7 @@ def run_drift(result: dict) -> None:
         p_now = np.asarray(state[:, 0])
         live_now, _ = _leaf_capacity(p_now)
         prepared, _ = solver.strict_fused_prepared_eval_fn(
-            positions=jnp.asarray(p_now),
+            positions=jnp.asarray(p_now, ARGS.state_dtype),
             masses=M,
             leaf_size=ARGS.leaf,
             max_order=ARGS.order,
@@ -1130,6 +1157,8 @@ def main() -> int:
         order=ARGS.order,
         cell_min_level=ARGS.cell_min_level,
         caps=ARGS.caps,
+        state_dtype=ARGS.state_dtype,
+        force_dtype=ARGS.force_dtype,
         donate=not ARGS.no_donate,
         cap_env={v: os.environ.get(v) for v in _CAP_VARS},
         xla_flags=os.environ.get("XLA_FLAGS"),
