@@ -68,6 +68,17 @@ Usage (book the card with autocvd first; the org rule)::
 ``compare`` with ``--envelope`` passes a pin when it is bitwise equal to the
 reference, or -- if the A-vs-A control itself was not bitwise -- within twice the
 control's max difference with the rel-L2 scalars equal to two significant figures.
+
+Nightly: ``bench/nightly_pins.sh`` (cron at 02:30; the driver and its rules are in
+``bench/nightly_pins.py``) records every pin on the ``main`` heads of jaccpot,
+yggdrax and nornax and on Odisseo's ``jaccpot-integration``, from dedicated
+worktrees under ``/export/home/tbuck/nightly``, as ``nightly-<date>-<jaccpot sha7>``.
+S1-S6, M1 and M3 must be bitwise against the previous nightly on a different stack,
+M2 within that nightly's own ``-b`` control, DET1/DET2 bitwise against a same-night
+``-b`` record, and L1-L3 within the ``main-5bc4959`` envelope (on a free card, or
+skipped). ``bench/gpu_gate.py`` runs too. The verdicts are in
+``/export/scratch/tbuck/nightly/<tag>/SUMMARY.md``, one line per run in
+``history.log`` there; ``nightly_pins.sh --dry-run`` prints the plan.
 """
 
 from __future__ import annotations
