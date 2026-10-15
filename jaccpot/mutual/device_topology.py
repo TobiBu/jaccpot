@@ -35,6 +35,7 @@ from jax import lax
 from jax.typing import ArrayLike
 from jaxtyping import Array
 
+from jaccpot.mutual.topology import drift_radius_pad
 from jaccpot.softening import resolve_softening_kernel, support_factor
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime
@@ -334,6 +335,7 @@ def build_mutual_state_device(
     pallas_interpret: bool = False,
     max_pair_queue: int = 1 << 16,
     freeze_topology_gradient: bool = True,
+    drift_margin: Optional[float] = None,
 ) -> "MutualFMMState":
     """Build a :class:`~jaccpot.mutual.force.MutualFMMState` entirely on device.
 
@@ -412,6 +414,11 @@ def build_mutual_state_device(
         Wavefront capacity for the device traversal.
     freeze_topology_gradient : bool
         ``stop_gradient`` the copy of positions feeding the MAC geometry.
+    drift_margin : Optional[float]
+        Build lists that stay valid while no particle moves further than this
+        from ``positions_sorted``: every node radius handed to the walk is
+        inflated by :func:`~jaccpot.mutual.topology.drift_radius_pad`. Static.
+        ``None`` (default) walks the plain MAC.
 
     Returns
     -------
@@ -468,6 +475,12 @@ def build_mutual_state_device(
         leaf_of_particle,
         depth_cap=int(caps.depth) + 1,
     )
+    # Inflated here, after the exact radii, so the walk -- yggdrax's, unchanged --
+    # accepts only pairs that stay inside the MAC under the drift (see
+    # jaccpot.mutual.topology, "Drift margin"). Skipped outright without a margin.
+    pad = drift_radius_pad(theta, drift_margin)
+    if pad > 0.0:
+        radii = radii + jnp.asarray(pad, dtype=radii.dtype)
     kernel = resolve_softening_kernel(softening_kernel)
     floor = (
         support_factor(kernel) if softening_floor is None else float(softening_floor)

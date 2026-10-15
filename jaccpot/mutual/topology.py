@@ -35,10 +35,40 @@ distance from the centre of mass to a particle in the node). This is the
 lets the same acceptance decision serve both directions of the interaction. A
 target-centric MAC (``R_source / d < theta``) is not symmetric and would accept a
 pair in one direction only.
+
+Drift margin
+------------
+A block-step base step evaluates the force at all ``2**k_max + 1`` boundaries
+against lists built once, at its start, while the particles drift. The far
+field recomputes its centres from the live positions, but the accept decision
+is not revisited, so a pair accepted at the build can violate the MAC by a late
+boundary -- and its expansion diverges once a particle of one cell drifts into
+the other's convergence sphere. Measured on a 1e6 prefix of the 25M disc at its
+production step (S0, ``docs/production_2026-10.md``): frozen-list rel-L2 1.3e-2
+at ``k_max = 3`` against 7.6e-4 with fresh lists, 6.5 at ``k_max = 5``.
+
+If no particle moves further than ``m`` from where the lists were built, a
+node's centre of mass moves by at most ``m`` (it is a mass-weighted mean of the
+displacements) and its radius grows by at most ``2 m``. So building with
+
+    ``theta * |c_B - c_A| > (R_A + (2 + theta) m) + (R_B + (2 + theta) m)``
+
+keeps the live configuration inside the build MAC,
+``theta * |c_B' - c_A'| >= theta (|c_B - c_A| - 2 m) > R_A' + R_B'``. The pad
+``(2 + theta) m`` is the supremum, not a loose bound: a light particle moving
+outward while the rest of its cell moves toward the partner approaches it.
+:func:`drift_radius_pad` returns it and both builders add it to every node
+radius before the walk. A uniform shift leaves the walk's larger-node split
+comparisons as they were (up to rounding of exact ties), so only acceptance
+moves, and only towards stricter: the lists are still a symmetric canonical
+partition, and momentum is still exact. A compact kernel's separation floor
+tests the same inflated radii, which is conservative -- a particle-particle
+distance shrinks by at most ``2 m``.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
@@ -49,7 +79,45 @@ __all__ = [
     "MutualTopology",
     "build_mutual_topology",
     "build_mutual_topology_from_tree",
+    "drift_radius_pad",
 ]
+
+
+def drift_radius_pad(theta: float, drift_margin: Optional[float]) -> float:
+    """Return the radius inflation that keeps the mutual MAC valid under drift.
+
+    See the module docstring's "Drift margin" for the derivation: with every
+    particle within ``drift_margin`` of its build position, a pair accepted at
+    radii ``R + (2 + theta) * drift_margin`` still satisfies the un-inflated MAC
+    at the drifted positions.
+
+    Parameters
+    ----------
+    theta : float
+        Opening angle of the mutual MAC.
+    drift_margin : Optional[float]
+        Largest displacement any particle may make before the lists are rebuilt,
+        in length units. ``None`` means no margin.
+
+    Returns
+    -------
+    float
+        ``(2 + theta) * drift_margin``, or ``0.0`` for ``None``.
+
+    Raises
+    ------
+    ValueError
+        If ``drift_margin`` is not a finite positive length.
+    """
+    if drift_margin is None:
+        return 0.0
+    margin = float(drift_margin)
+    if not (math.isfinite(margin) and margin > 0.0):
+        raise ValueError(
+            "drift_margin must be a finite positive length or None; got "
+            f"{drift_margin!r}"
+        )
+    return (2.0 + float(theta)) * margin
 
 
 @dataclass(frozen=True)
@@ -455,6 +523,7 @@ def build_mutual_topology_from_tree(
     theta: float,
     order: int,
     separation_floor: float = 0.0,
+    drift_margin: Optional[float] = None,
 ) -> MutualTopology:
     """Build a :class:`MutualTopology` from a prebuilt yggdrax tree.
 
@@ -482,6 +551,11 @@ def build_mutual_topology_from_tree(
 
     separation_floor : float
         Minimum gap of an accepted far pair (length units); ``0`` for none.
+    drift_margin : Optional[float]
+        Build lists that stay valid while no particle moves further than this
+        from ``positions_sorted``: every node radius is inflated by
+        :func:`drift_radius_pad` before the walk. ``None`` (default) builds the
+        plain MAC.
 
     Returns
     -------
@@ -526,6 +600,9 @@ def build_mutual_topology_from_tree(
             centers[node] = (weighted[e + 1] - weighted[s]) / total
         offsets = positions[s : e + 1] - centers[node]
         radii[node] = float(np.sqrt(np.einsum("ij,ij->i", offsets, offsets)).max())
+    pad = drift_radius_pad(theta, drift_margin)
+    if pad > 0.0:
+        radii = radii + pad
 
     far_a, far_b, near_a, near_b = _dual_traverse(
         centers,
@@ -581,6 +658,7 @@ def build_mutual_topology(
     leaf_size: int = 16,
     solver: Optional[Any] = None,
     separation_floor: float = 0.0,
+    drift_margin: Optional[float] = None,
 ) -> Tuple[MutualTopology, Any]:
     """Build a tree with jaccpot's production builder, then a mutual topology.
 
@@ -610,6 +688,9 @@ def build_mutual_topology(
 
     separation_floor : float
         Minimum gap of an accepted far pair (length units); ``0`` for none.
+    drift_margin : Optional[float]
+        Drift the lists must stay valid under; see
+        :func:`build_mutual_topology_from_tree`. ``None`` for none.
 
     Returns
     -------
@@ -636,5 +717,6 @@ def build_mutual_topology(
         theta=float(theta),
         separation_floor=float(separation_floor),
         order=int(order),
+        drift_margin=drift_margin,
     )
     return topology, state
