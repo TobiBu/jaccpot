@@ -1397,7 +1397,8 @@ def make_cross_hook(
     caps:
         Static capacities; see :class:`CrossCapacities`.
     mac_type:
-        MAC variant for the export and receiver walks. Static.
+        MAC variant for the export and receiver walks: a geometric one (``"bh"``,
+        ``"dehnen"``, ``"engblom"``). Static.
     axis_name:
         Mesh axis; must match the enclosing ``shard_map``.
     record:
@@ -1441,7 +1442,22 @@ def make_cross_hook(
     Callable
         ``hook(tree_artifacts) -> (multipoles, centers, src, tgt) | None``, with the
         imported sources indexed from ``n_local``.
+
+    Raises
+    ------
+    NotImplementedError
+        For ``mac_type`` ``"dehnen_error"`` / ``"dehnen_theta"``: the cross walks
+        have no per-node force scale to evaluate Dehnen's eq (16a) with (see
+        :func:`jaccpot.distributed.fused._refuse_error_criterion`).
     """
+    if str(mac_type) in ("dehnen_error", "dehnen_theta"):
+        raise NotImplementedError(
+            f"make_cross_hook: mac_type={mac_type!r} (Dehnen's error criterion, eq "
+            "16a) is not supported on the fused multi-GPU lane yet: the cross walks "
+            "test a geometric MAC and carry no per-node force scale. Use "
+            "mac_type='dehnen' here, or run the criterion on the single-card fused "
+            "lane or the mesh lane (jaccpot.distributed.fmm)."
+        )
     cap = caps if caps is not None else CrossCapacities()
     walk_fn = cross_walk_fn(mac_type)
     floor = float(separation_floor)

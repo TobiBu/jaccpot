@@ -495,6 +495,39 @@ def _prepare_solidfmm_downward_child_inputs(
     )
 
 
+def _compact_live_pairs(src: Array, tgt: Array) -> tuple[Array, Array, Array]:
+    """Move the live entries of a pair list to its front, in their order.
+
+    A local far list with the cross-domain pairs concatenated behind it
+    (:func:`jaccpot.runtime.kernels._l2l._prepare_solidfmm_downward_sweep`) is
+    ``-1``-padded in the middle and has holes in its cross half, so no count marks
+    a live prefix. One prefix sum gives each live entry its slot.
+
+    Parameters
+    ----------
+    src : Array
+        Source node index per pair; ``-1`` marks a dead entry.
+    tgt : Array
+        Target node index per pair, same convention.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(src, tgt, live_count)``: the same length, the live entries (both
+        indices ``>= 0``) first in their original order and ``-1`` behind them,
+        and the number of live entries.
+    """
+    src = jnp.asarray(src)
+    tgt = jnp.asarray(tgt)
+    live = (src >= 0) & (tgt >= 0)
+    slot = jnp.cumsum(live.astype(INDEX_DTYPE)) - 1
+    # dead entries aim one past the end and are dropped
+    slot = jnp.where(live, slot, src.shape[0])
+    src_live = jnp.full_like(src, -1).at[slot].set(src, mode="drop")
+    tgt_live = jnp.full_like(tgt, -1).at[slot].set(tgt, mode="drop")
+    return src_live, tgt_live, jnp.sum(live, dtype=INDEX_DTYPE)
+
+
 def _solidfmm_downward_accumulate_from_multipoles(
     initial_locals_coeffs: Array,
     multipoles_coeffs: Array,
@@ -504,7 +537,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     src: Array,
     tgt: Array,
     pair_count: int,
-    active_pair_count: Array,
+    active_pair_count: Optional[Array],
     order: int,
     total_nodes: int,
     chunk_size: int,
@@ -530,7 +563,9 @@ def _solidfmm_downward_accumulate_from_multipoles(
     initial_locals_coeffs : Array
         Local coefficients to accumulate into, ``[total_nodes, sh_size(order)]``.
     multipoles_coeffs : Array
-        Packed source multipoles, same node ordering.
+        Packed source multipoles, same node ordering; with cross-domain sources
+        concatenated behind the local nodes it has more rows than
+        ``initial_locals_coeffs`` (every target is still local).
     n_targets : Optional[int]
         Number of leading nodes that receive M2L contributions. ``None`` means
         all. Set to the local node count when cross-domain sources sit behind the
@@ -544,12 +579,14 @@ def _solidfmm_downward_accumulate_from_multipoles(
         Target node index of each far pair.
     pair_count : int
         Allocated pair capacity. Static: it selects full-batch versus chunked.
-    active_pair_count : Array
-        Live pair count, traced; entries beyond it contribute nothing.
+    active_pair_count : Optional[Array]
+        Live pair count, traced; entries beyond it contribute nothing. ``None``:
+        the list has no live prefix (a local list with cross-domain pairs behind
+        its padding) and every entry with both indices ``>= 0`` is live.
     order : int
         Expansion order.
     total_nodes : int
-        Node count, i.e. the scatter extent.
+        Node count, i.e. the scatter extent (the local nodes).
     chunk_size : int
         Pairs per chunk, and the threshold that selects the chunked lane.
     m2l_impl : str
@@ -572,6 +609,11 @@ def _solidfmm_downward_accumulate_from_multipoles(
 
         tgt = targets_from_csr_offsets(tgt, int(jnp.asarray(src).shape[0]))
         targets_sorted = False
+    if active_pair_count is None and not csr_lane:
+        # The CSR build drops -1 entries wherever they sit; the flat lanes read
+        # `active_pair_count` as a live PREFIX (and the chunked scan skips every
+        # chunk past it), so give them one.
+        src, tgt, active_pair_count = _compact_live_pairs(src, tgt)
 
     if csr_lane:
         from jaccpot._env import env_flag
