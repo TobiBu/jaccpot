@@ -155,9 +155,10 @@ def resolve_large_n_execution_config(
         If the engine's configuration is not the locked fast-lane combination.
         All four requirements are checked separately, so the message names the
         one that failed: ``tree_type='radix'``, ``preset='large_n_gpu'``,
-        ``expansion_basis='solidfmm'`` and ``working_dtype=float32``. (A fifth,
-        ``grouped_interactions=False``, always holds since the grouped far field
-        went in the 2026-10 cleanup, X3.)
+        ``expansion_basis='solidfmm'`` and a ``working_dtype`` of float32 (the
+        production force, the preset's default) or float64 (the validation lane,
+        asked for explicitly). (A fifth, ``grouped_interactions=False``, always
+        holds since the grouped far field went in the 2026-10 cleanup, X3.)
     """
 
     nearfield_mode = "bucketed"
@@ -187,8 +188,14 @@ def resolve_large_n_execution_config(
         raise ValueError("radix_fast_lane requires preset='large_n_gpu'")
     if basis != "solidfmm":
         raise ValueError("radix_fast_lane requires expansion_basis='solidfmm'")
-    if working_dtype != jnp.float32:
-        raise ValueError("radix_fast_lane requires working_dtype=float32")
+    # float64 is the validation lane (S2, 2026-10-15): the fused lane's Pallas
+    # kernels are dtype-generic and pinned against their float64 XLA lanes
+    # (tests/unit/operators/test_pallas_float64_sweep.py); no budget applies to it
+    if working_dtype not in (jnp.dtype(jnp.float32), jnp.dtype(jnp.float64)):
+        raise ValueError(
+            "radix_fast_lane requires working_dtype float32 or float64, "
+            f"got {working_dtype}"
+        )
     if int(target_owned_block_size) <= 0:
         target_owned_block_size = int(_RADIX_FAST_LANE_DEFAULT_TARGET_BLOCK_SIZE)
 

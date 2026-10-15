@@ -554,7 +554,10 @@ class FastMultipoleMethod:
         Convenience spelling of ``working_dtype``. Passing both is an error unless
         they agree.
     working_dtype : Optional[DTypeLike]
-        Explicit working dtype. ``None`` lets the preset decide.
+        Explicit working dtype. ``None`` lets the preset decide: ``large_n_gpu``
+        computes the force in float32 (the production lane); float64 there is the
+        validation lane -- the same fused lane in float64, no time or memory
+        budget. The state keeps the dtype it is passed in either way.
     advanced : Optional[FMMAdvancedConfig]
         Replaces the preset's advanced defaults wholesale -- it is not merged into
         them. Build it from the preset's own config if you mean to override only a
@@ -654,7 +657,8 @@ class FastMultipoleMethod:
 
         preset_norm = _normalize_preset(preset)
         if preset_norm is FMMPreset.LARGE_N_GPU and working_dtype is None:
-            # Large-N radix fast lane is currently specialized for fp32 kernels.
+            # The large-N lane's production force is float32; an explicit float64
+            # (precision="fp64") selects its validation lane.
             working_dtype = jnp.float32
         advanced_cfg = (
             _default_advanced_for_preset(preset_norm) if advanced is None else advanced
