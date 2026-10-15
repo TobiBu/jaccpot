@@ -443,6 +443,9 @@ class Nightly:
         )
         if top != path.resolve() or common.resolve() != source_common.resolve():
             raise RuntimeError(f"{path} is not a worktree of {repo.source}")
+        # the shared checkout passes both tests above; it is never ours to reset
+        if top == Path(repo.source).resolve():
+            raise RuntimeError(f"{path} is the shared checkout {repo.source}")
         _git(path, "checkout", "--quiet", "--force", "--detach", sha)
         _git(path, "clean", "-ffdxq")
 
