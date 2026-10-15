@@ -1873,7 +1873,10 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         donate_prepared: bool = False,
-    ) -> tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]:
+    ) -> tuple[
+        Union[FMMPreparedState, LargeNPreparedState],
+        Callable[[Union[FMMPreparedState, LargeNPreparedState]], Array],
+    ]:
         """Fused-lane eval-only closure for apples-to-apples eval benchmarking.
 
         The prepared state is built with the fused device-mode layout, and
@@ -1903,9 +1906,12 @@ class FastMultipoleMethod:
 
         Returns
         -------
-        tuple[FMMPreparedState, Callable[[FMMPreparedState], Array]]
+        tuple[Union[FMMPreparedState, LargeNPreparedState], Callable[[Union[FMMPreparedState, LargeNPreparedState]], Array]]
             ``(prepared_state, eval_fn)``. Call ``eval_fn(prepared_state)``
-            repeatedly to time evaluation alone.
+            repeatedly to time evaluation alone. The state is the engine's
+            ``PreparedStateLike`` -- a ``LargeNPreparedState`` on the fused
+            large-N lane, which the ``FMMPreparedState``-only annotation this
+            had turned into a runtime type-check failure (A100, 2026-10-15).
         """
         return self._impl.strict_fused_prepared_eval_fn(
             positions=positions,
