@@ -818,5 +818,7 @@ Then (updated after round 7):
   JAX drops Triton.
 * **Production.** Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` and `donate_state` (and, with a row-wise
   external field, `JACCPOT_STRICT_CARRY_ORDER=tree`); the int32 index default is in (#361, yggdrax #84).
-* Still open: a segment retry for the multi-GPU `FusedRollout`, and the GPU-only unit test failures that predate
-  0.11.2 (10 in the Pallas unit files on an A100, two of them on ARCHITECTURE section 9's list).
+* Still open: a segment retry for the multi-GPU `FusedRollout`. (The GPU-only failures of the Pallas unit files,
+  11 on an A100 by 2026-10-15, are fixed: 1 from a kernel bug -- the Pallas cascade and CSR M2L reverses lacked
+  the `rho == 0` transverse limit -- 2 from one return annotation (one of them also compared ferrers3 with a
+  Plummer reference), and 8 from tests that assumed the CPU's lanes; ARCHITECTURE section 9.)
