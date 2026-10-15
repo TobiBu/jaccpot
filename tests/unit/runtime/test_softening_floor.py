@@ -152,6 +152,12 @@ def _force(monkeypatch, pos, mass, eps, floor):
             softening_floor=floor,
         ),
         fixed_order=_ORDER,
+        # `_direct` is a Plummer sum. The library default became ferrers3 the day
+        # after this module was written (5a5e0b0), and against a Plummer reference
+        # the cluster -- all of it inside one softening length -- is then wrong by
+        # the kernels' difference, not by the walk: median 0.28 with the floor on
+        # an A100 (2026-10-15), hidden until then behind a type-check failure.
+        softening_kernel="plummer",
     )
     prepared, ev = solver.strict_fused_prepared_eval_fn(
         positions=jnp.asarray(pos),

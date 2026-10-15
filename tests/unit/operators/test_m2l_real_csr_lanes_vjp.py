@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.operators.m2l_real_rot_scale import m2l_rot_scale_real_batch
 from jaccpot.pallas.m2l_real_csr import m2l_real_csr_jax, pallas_m2l_real_csr_supported
 from jaccpot.pallas.m2l_real_csr_lanes import (
     m2l_real_csr_lanes_pallas,
@@ -178,3 +179,57 @@ def test_presorted_row_offsets_equal_the_coo_read_forward_and_reverse(order):
     assert np.array_equal(np.asarray(out_s), np.asarray(out_c))
     for x, y in zip(vjp_s(cot), vjp_c(cot)):
         assert np.array_equal(np.asarray(x), np.asarray(y))
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("order", [2, 4])
+def test_lanes_reverse_matches_the_operator_rule_on_the_axis(order, interpret):
+    """On-axis pairs: the centre half equals the pure-JAX operator's, not zero.
+
+    The test above can only compare where the unguarded twin is finite, which
+    leaves out exactly the nodes with an on-axis pair. The reference here is
+    :func:`m2l_rot_scale_real_batch`, which carries the analytic transverse
+    derivative (``operators/_transverse_degeneracy_jvp``), so the comparison
+    covers every node -- pairs at ``rho == 0`` and pairs one band-width off it
+    (``rho/r = 1e-12``, inside ``rho^2 <= eps r^2``), where the polar route's
+    guards give zero and a cancellation-dominated value respectively. Before the
+    kernel took that limit the centre half missed by O(1) here.
+    """
+    _native_or_skip(interpret)
+    n = 10
+    rng = np.random.default_rng(31 + order)
+    C = (order + 1) ** 2
+    mult = jnp.asarray(rng.standard_normal((n, C)), jnp.float64)
+    cent = np.zeros((n, 3))
+    cent[:, 2] = np.arange(n) * 1.5
+    cent[n // 2 :, 0] = 1.0e-12  # in the band, not exactly on the axis
+    cent[-1, :2] = [0.3, -0.2]  # one node off the axis, so both kinds of pair meet
+    cent = jnp.asarray(cent)
+    tgt = np.repeat(np.arange(n), n - 1)
+    src = np.concatenate([np.delete(np.arange(n), t) for t in range(n)])
+    src, tgt = jnp.asarray(src, jnp.int32), jnp.asarray(tgt, jnp.int32)
+    cot = jnp.asarray(rng.standard_normal((n, C)), jnp.float64)
+
+    deltas = np.asarray(cent)[np.asarray(tgt)] - np.asarray(cent)[np.asarray(src)]
+    rho2 = deltas[:, 0] ** 2 + deltas[:, 1] ** 2
+    on_axis = rho2 <= np.finfo(np.float64).eps * (rho2 + deltas[:, 2] ** 2)
+    assert np.any(on_axis & (rho2 == 0)) and np.any(on_axis & (rho2 > 0))
+    assert not np.all(on_axis)
+
+    def ref(m, c):
+        contrib = m2l_rot_scale_real_batch(m[src], c[tgt] - c[src], order=order)
+        return jax.ops.segment_sum(contrib, tgt, num_segments=n)
+
+    def got(m, c):
+        return m2l_real_csr_lanes_pallas_cvjp(
+            m, c, src, tgt, None, order, 8, interpret, "triton", 1
+        )
+
+    out_r, vjp_r = jax.vjp(ref, mult, cent)
+    out_g, vjp_g = jax.vjp(got, mult, cent)
+    assert _rel(out_g, out_r) < 1e-10
+    mb_r, cb_r = vjp_r(cot)
+    mb_g, cb_g = vjp_g(cot)
+    assert np.all(np.isfinite(np.asarray(cb_r)))
+    assert _rel(mb_g, mb_r) < 1e-9, f"multipole half rel-L2 {_rel(mb_g, mb_r):.3e}"
+    assert _rel(cb_g, cb_r) < 1e-9, f"centre half rel-L2 {_rel(cb_g, cb_r):.3e}"

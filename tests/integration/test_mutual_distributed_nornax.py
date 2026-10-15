@@ -66,8 +66,8 @@ if _needs_yggdrax is not None:  # pragma: no cover
         allow_module_level=True,
     )
 
-# `except Exception` rather than ImportError, as the single-device file does: an
-# import-time incompatibility should report as skipped, not errored.
+# Skips only when nornax is ABSENT, as in the single-device file: a present but
+# stale or broken nornax is stopped by tests/conftest.py before collection.
 try:  # pragma: no cover - environment dependent
     from nornax.forces.base import FusedMutualForceModel, MutualForceModel
     from nornax.solvers.leapfrog_kdk import (
@@ -335,10 +335,7 @@ def test_the_distributed_model_passes_nornax_conformance_kit(prepared):
     checks are at the kit's round-off defaults, and the momentum ones are the
     GLOBAL sums this module is about.
     """
-    try:
-        from nornax.conformance import check_mutual_force_model
-    except ImportError:  # pragma: no cover - depends on the installed nornax
-        pytest.skip("installed nornax has no conformance kit")
+    from nornax.conformance import check_mutual_force_model
     from nornax.forces.mutual_direct import MutualDirectSumGravity
 
     fmm, pos, _vel, mass, rung = prepared

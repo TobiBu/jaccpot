@@ -37,6 +37,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jaxtyping import Array
 
+from jaccpot.operators.real_rotations import _real_rotation_generator_block
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import (
     csr_by_target,
@@ -64,7 +65,10 @@ def _lane_tables(order: int) -> dict:
     dict
         ``B[l][i][j]`` (``i, j`` in ``0 .. 2l``, ``= m + l``), ``Zf[n][k]``,
         ``signm[m]`` for ``m = -p .. p`` (index ``m + p``), ``packed[(l, m)]``
-        the packed coefficient index, ``C``.
+        the packed coefficient index, ``C``, and the rotation generators in
+        ``B``'s layout that the reverse needs on the axis
+        (:func:`_on_axis_pair_cotangent`): ``GmpX`` / ``GmpY`` on the multipole
+        (input) side, ``GlocX`` / ``GlocY`` on the local (output) side.
     """
     tb = m2l_real_csr_tables(int(order))
     p = int(order)
@@ -81,7 +85,24 @@ def _lane_tables(order: int) -> dict:
         for ell in range(p + 1)
         for m in range(-ell, ell + 1)
     }
-    return dict(p=p, C=int(tb["C"]), B=B, Zf=zf, signm=signm, packed=packed)
+    generators = {
+        key: [
+            [
+                [float(x) for x in row]
+                for row in _real_rotation_generator_block(ell, axis, representation)
+            ]
+            for ell in range(p + 1)
+        ]
+        for key, axis, representation in (
+            ("GmpX", "x", "multipole"),
+            ("GmpY", "y", "multipole"),
+            ("GlocX", "x", "local"),
+            ("GlocY", "y", "local"),
+        )
+    }
+    return dict(
+        p=p, C=int(tb["C"]), B=B, Zf=zf, signm=signm, packed=packed, **generators
+    )
 
 
 def _bapply_lanes(v: dict, B: list, *, transpose: bool, p: int) -> dict:
@@ -204,7 +225,9 @@ def _m2l_lane_pair(
     safe : bool
         Guard ``sqrt(rho2)`` at ``rho == 0`` with a double-``where`` so the
         transpose stays finite (the reverse pass; every padding lane sits at
-        ``rho == 0``). The primal is bit-identical.
+        ``rho == 0``). The primal is bit-identical. The transverse cotangent it
+        gives on the axis is zero, and the reverse replaces it there
+        (:func:`_on_axis_pair_cotangent`).
 
     Returns
     -------
@@ -476,6 +499,90 @@ def m2l_real_csr_lanes_pallas(
 # padded list at N = 2x10^5, the second pass ~0.5 ms.
 
 
+def _on_axis_pair_cotangent(
+    keys: list,
+    vs: tuple,
+    w: tuple,
+    vb: tuple,
+    gb: tuple,
+    delta3: tuple,
+    valid: Array,
+    dxb: Array,
+    dyb: Array,
+    *,
+    p: int,
+    tables: dict,
+) -> tuple[Array, Array]:
+    """The pairs' transverse cotangents, with on-axis lanes given the analytic limit.
+
+    :func:`_m2l_lane_pair` reaches ``dx`` and ``dy`` only through ``rho`` and the
+    azimuth, so on the axis its guards give a zero transverse cotangent and just
+    off it (``rho/r`` below ``sqrt(eps)``) a cancellation-dominated one, while the
+    M2L itself is differentiable there. For such a lane this returns the limit the
+    pure-JAX operators' rule supplies (:mod:`jaccpot.operators._transverse_degeneracy_jvp`,
+    formula (2)/(3), transposed); with ``in_bar = F^T out_bar``,
+
+        dL/dx = +(1/z) (<out_bar, G_loc^y out> - <in_bar, G_mp^y in>)
+        dL/dy = -(1/z) (<out_bar, G_loc^x out> - <in_bar, G_mp^x in>)
+
+    and the polar values everywhere else, bit for bit. Same band as that rule
+    (``rho^2 <= eps r^2``, ``z != 0``). The generator images are computed only for
+    a tile that has an on-axis lane.
+
+    Parameters
+    ----------
+    keys : list
+        The ``(degree, m)`` keys, in the order of the tuples below.
+    vs : tuple
+        Source multipoles per key, lane vectors.
+    w : tuple
+        The pairs' local outputs per key.
+    vb : tuple
+        ``F^T gb`` per key.
+    gb : tuple
+        The cotangent of ``w`` per key.
+    delta3 : tuple
+        ``(dx, dy, dz)`` lane vectors, target minus source.
+    valid : Array
+        Lane mask of real pairs.
+    dxb : Array
+        The polar route's ``x`` cotangent per lane.
+    dyb : Array
+        Same, ``y``.
+    p : int
+        Order. Static.
+    tables : dict
+        :func:`_lane_tables`. Static.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(dxb, dyb)`` per lane.
+    """
+    dx, dy, dz_ = delta3
+    rho2 = dx * dx + dy * dy
+    epsilon = float(jnp.finfo(dx.dtype).eps)
+    on_axis = valid & (rho2 <= epsilon * (rho2 + dz_ * dz_)) & (dz_ != 0)
+
+    def _pair(g_in: list, g_out: list) -> Array:
+        image_out = _bapply_lanes(dict(zip(keys, w)), g_out, transpose=False, p=p)
+        image_in = _bapply_lanes(dict(zip(keys, vs)), g_in, transpose=False, p=p)
+        acc = jnp.zeros_like(dx)
+        for i, key in enumerate(keys):
+            acc = acc + gb[i] * image_out[key] - vb[i] * image_in[key]
+        return acc
+
+    def _analytic() -> tuple[Array, Array]:
+        inverse_z = jnp.where(on_axis, 1.0 / jnp.where(on_axis, dz_, 1.0), 0.0)
+        axis_x = inverse_z * _pair(tables["GmpY"], tables["GlocY"])
+        axis_y = -inverse_z * _pair(tables["GmpX"], tables["GlocX"])
+        return jnp.where(on_axis, axis_x, dxb), jnp.where(on_axis, axis_y, dyb)
+
+    # a count, not `jnp.any`: Pallas Triton has no lowering for `reduce_or`
+    any_on_axis = jnp.sum(on_axis.astype(jnp.int32)) > 0
+    return lax.cond(any_on_axis, _analytic, lambda: (dxb, dyb))
+
+
 def _m2l_rev_lanes_kernel(
     mult_ref: KernelRef,
     cent_ref: KernelRef,
@@ -589,8 +696,11 @@ def _m2l_rev_lanes_kernel(
         else:
             vs = v_const
             gb = tuple(lbar_ref[other, packed[key]] * mask for key in keys)
-        _, vjp = jax.vjp(pair, vs, dx, dy, dz_)
+        w, vjp = jax.vjp(pair, vs, dx, dy, dz_)
         vb, dxb, dyb, dzb = vjp(gb)
+        dxb, dyb = _on_axis_pair_cotangent(
+            keys, vs, w, vb, gb, (dx, dy, dz_), valid, dxb, dyb, p=p, tables=tables
+        )
         if by_target:
             return (accs, ax_ + dxb, ay_ + dyb, az_ + dzb)
         return (tuple(a + b for a, b in zip(accs, vb)), ax_ + dxb, ay_ + dyb, az_ + dzb)

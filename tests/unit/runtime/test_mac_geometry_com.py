@@ -29,6 +29,7 @@ from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.runtime._interaction_cache import (
     _build_flat_walk_artifacts_strict_streamed,
+    far_pair_targets,
 )
 from jaccpot.runtime._mac_geometry import (
     com_mac_geometry,
@@ -108,7 +109,10 @@ def _far_pair_ratios(tree, geometry, centers, exact_r, *, theta):
     cfp = art.compact_far_pairs
     cnt = int(cfp.far_pair_count)
     src = np.asarray(cfp.sources)[:cnt]
-    tgt = np.asarray(cfp.targets)[:cnt]
+    # `far_pair_targets`, not `.targets`: where the Pallas walk is the default (an
+    # Ampere GPU) the list is a `TargetSortedFarPairs`, whose `targets` holds the
+    # CSR row offsets (`total_nodes + 1` of them), not one target per entry
+    tgt = np.asarray(far_pair_targets(cfp))[:cnt]
     keep = (src >= 0) & (tgt >= 0) & (src < tgt)
     src, tgt = src[keep], tgt[keep]
     c = np.asarray(centers)
@@ -268,7 +272,7 @@ def _table_radii_reference(topo, ps, centers, leaf_cap):
 
 
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
-def test_level_passes_equal_the_ancestor_table(tree_data, dtype):
+def test_level_passes_equal_the_ancestor_table(tree_data, dtype, monkeypatch):
     """The per-level passes give the radii of the (leaves x 64) table they replaced.
 
     Max is exact in any order; what differs is each distance's rounding: the
@@ -281,6 +285,12 @@ def test_level_passes_equal_the_ancestor_table(tree_data, dtype):
     from yggdrax.tree import get_node_levels
 
     tree, topo, ps, ms, com, _box = tree_data
+    # The XLA passes are the subject. The Pallas kernel, the default on an Ampere
+    # GPU, walks whole chunks of eight levels, so it rounds `num_levels=2` below up
+    # to eight, which on this tree already gives every full radius (A100,
+    # 2026-10-15) and leaves the non-vacuity check nothing to find. It has its own
+    # test against these passes (next).
+    monkeypatch.setenv("JACCPOT_COM_RADII_KERNEL", "xla")
     ps = ps.astype(dtype)
     com = com.astype(dtype)
     ref = np.asarray(_table_radii_reference(topo, ps, com, _LEAF))
@@ -289,7 +299,13 @@ def test_level_passes_equal_the_ancestor_table(tree_data, dtype):
     full = np.asarray(com_mac_geometry(topo, ps, com, leaf_cap=_LEAF).radius)
     np.testing.assert_allclose(full, ref, rtol=8 * eps, atol=0)
     num_internal = int(topo.left_child.shape[0])
-    assert np.array_equal(full[num_internal:], ref[num_internal:])  # leaves: same op
+    # Leaves: one formula spelled two ways, sqrt(max d^2) and max sqrt(d^2), equal
+    # to the bit wherever d^2 rounds the same -- on CPU. On an A100 XLA fuses the
+    # two 3-term sums differently and they come out up to one ulp apart
+    # (2026-10-15: 16 of 128 float64 leaves in one compile, none in another, and
+    # float32 the other way round; each program bitwise equal to itself on a
+    # repeat call, so it is not a reduction order that moves between runs).
+    np.testing.assert_array_max_ulp(full[num_internal:], ref[num_internal:], maxulp=1)
     bounded = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF, num_levels=depth)
     assert np.array_equal(np.asarray(bounded.radius), full)
     # non-vacuity of the bound: a short one (rounded up to whole passes of four

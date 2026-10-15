@@ -36,7 +36,7 @@ import pytest
 
 from tests.conftest import (
     _JACCPOT_PACKAGE,
-    _missing_yggdrax_symbols,
+    _missing_symbols,
     _yggdrax_symbols_jaccpot_imports,
 )
 
@@ -47,7 +47,7 @@ def test_the_environment_satisfies_the_contract() -> None:
     # Vacuity guard: an empty scan would satisfy the assertion below while
     # checking nothing, which is exactly how the version floor failed.
     assert len(required) > 5, f"scan found almost nothing: {sorted(required)}"
-    assert _missing_yggdrax_symbols(required) == []
+    assert _missing_symbols(required) == []
 
 
 # The distributed mutual path is where jaccpot and yggdrax move together --
@@ -152,13 +152,13 @@ def test_only_the_try_body_is_guarded(tmp_path: pathlib.Path) -> None:
 
 def test_a_missing_symbol_is_reported_by_name() -> None:
     """A name yggdrax does not define comes back as a dotted string."""
-    missing = _missing_yggdrax_symbols({"yggdrax.dtypes": {"INDEX_DTYPE", "nope"}})
+    missing = _missing_symbols({"yggdrax.dtypes": {"INDEX_DTYPE", "nope"}})
     assert missing == ["yggdrax.dtypes.nope"]
 
 
 def test_a_missing_module_is_reported_with_its_error() -> None:
     """An unimportable module is reported once, not once per name."""
-    missing = _missing_yggdrax_symbols({"yggdrax.no_such_module": {"a", "b"}})
+    missing = _missing_symbols({"yggdrax.no_such_module": {"a", "b"}})
     assert len(missing) == 1
     assert missing[0].startswith("yggdrax.no_such_module (")
 
@@ -170,4 +170,4 @@ def test_a_submodule_import_counts_as_present() -> None:
     check would report `yggdrax.distributed.let` missing on a perfectly good
     install -- a false alarm that would make the whole guard untrustworthy.
     """
-    assert _missing_yggdrax_symbols({"yggdrax.distributed": {"let"}}) == []
+    assert _missing_symbols({"yggdrax.distributed": {"let"}}) == []

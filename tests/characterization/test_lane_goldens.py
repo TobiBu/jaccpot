@@ -102,7 +102,7 @@ def _check_golden(name: str, values: dict[str, np.ndarray], *, float32: bool):
             )
 
 
-def _large_n_solver():
+def _large_n_solver(**overrides):
     from jaccpot import (
         FastMultipoleMethod,
         FMMAdvancedConfig,
@@ -111,6 +111,7 @@ def _large_n_solver():
     )
 
     return FastMultipoleMethod(
+        **overrides,
         preset="large_n_gpu",
         basis="real",
         theta=THETA,

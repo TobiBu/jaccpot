@@ -435,17 +435,15 @@ decides whether the gate goes red.
 |---|---|---|---|
 | `test_constructor_state_matches_the_committed_golden` | 3/3 | **3/3** | platform |
 | `test_every_matrix_case_resolves_to_a_distinct_state` | 3/3 | **3/3** | platform |
-| `test_the_state_under_test_actually_carries_target_blocks` | 3/3 | **3/3** | platform |
-| `test_potential_does_not_delegate_to_the_generic_path` | 3/3 | **3/3** | platform |
 | `test_the_far_field_term_is_load_bearing` | 3/3 | **3/3** | resource, see below |
 | `test_boundary_kick_accepts_supplied_level_weights` | 3/3 | 0/3 | assertion strength |
 | `test_compiled_dispatch_is_bit_identical[None]` | 1/3 | 0/3 | reduction order |
 | `test_compiled_dispatch_is_bit_identical[32]` | 2/3 | 0/3 | reduction order |
 
-**The two `constructor_state` rows and the two `potential_stays_on_fast_lane` rows are
-genuine platform differences.** The constructor golden resolves `use_pallas: False -> True`
-because it was generated on CPU and is being read on an A100; the fast-lane pair is the GPU
-resolving a different lane, so the state under test carries no target-block payload.
+**The two `constructor_state` rows are genuine platform differences.** The constructor
+golden resolves `use_pallas: False -> True` because it was generated on CPU and is being read
+on an A100. (The two `potential_stays_on_fast_lane` rows this paragraph used to call platform
+differences were not: see the Pallas unit files below.)
 
 **`test_the_far_field_term_is_load_bearing` is not a numerical failure at all.** It is
 `RESOURCE_EXHAUSTED` under this gate's own caps — `-n 6` at a 12% per-worker share is
@@ -463,19 +461,73 @@ two things being compared (2..8 ULP against 2..6 ULP, ~670-770 of 1536 elements 
 over six draws), so no tolerance makes the comparison informative about dispatch. The fix is
 to split the claim — assert the weight rows exactly, the kicks to a bound — not to loosen it.
 
+#### The Pallas unit files on an A100, jax 0.11.2 (fixed 2026-10-15)
+
+Every `tests/unit` file that mentions Pallas (48 files, 733 tests) was run on one A100 under
+`JACCPOT_RUNTIME_TYPECHECK=1`, `-n 3`, default XLA flags: 11 failed on main 63587f2. After
+the fixes below none does: the rerun (`-n 2`) passed 741 of 742, the one left being the
+reference fixed last (`3802a3c`, then 3/3 alone); every touched test passed three more runs,
+and the same files are green on CPU. Five causes, and only the first is a library defect in
+numbers:
+
+* **A kernel bug** -- `test_fd_vs_ad_along_a_transverse_direction_at_rho_zero[real]`
+  (1.62e-06 against its 1e-06 bound; CPU 1.6e-10). The Pallas reverses that replace the
+  pure-JAX M2M/L2L cascades and the M2L on an Ampere card by default differentiated the
+  polar route only, without the analytic transverse limit at `rho == 0` that
+  `operators/_transverse_degeneracy_jvp` gives the operators they replace; bisected on the
+  A100 (2.98e-06 with only the CSR M2L lane on, 2.65e-10 with both off) and reproduced on
+  CPU in interpret mode. `9112733` adds the limit to both reverses (FD-vs-AD 2.65e-10 on the
+  A100 after, default lanes); `test_cascade_real_level_vjp.py` and
+  `test_m2l_real_csr_lanes_vjp.py` now check them on on-axis edges, where the old kernels
+  missed the centre half by 0.30-2.1 relative. Off the band the reverses are unchanged: pins
+  S4 and S4b (and the forward S1-S3) are bitwise against main.
+* **A wrong annotation** -- both `test_softening_floor.py` GPU tests: the facade typed
+  `strict_fused_prepared_eval_fn`'s state as `FMMPreparedState`, and the fused lane returns a
+  `LargeNPreparedState`, so the runtime type check raised. `968f1fb`.
+* **A reference behind it** -- with the type check passing,
+  `test_a_cluster_smaller_than_epsilon_is_near_field` still failed (cluster median 0.2825
+  against 1e-3, also without the type check on main): it compares the library's default kernel,
+  ferrers3 since `5a5e0b0`, with a Plummer direct sum. `3802a3c` pins Plummer, as that commit
+  did for the other Plummer-reference tests; the numbers are then the 2026-10-07 ones (cluster
+  1.28e-4 / 4.91e-4 with the floor, 0.153 / 4.0 without).
+* **A lane the test did not expect** (`3d879bc`) -- the GPU's default Pallas walk returns
+  CSR row offsets in the far list's `targets` (`test_flat_walk_with_com_geometry...`, x2);
+  its default Pallas COM-radii kernel rounds `num_levels` up to chunks of eight
+  (`test_level_passes_equal_the_ancestor_table`, x2, which then also needed one ulp on the
+  leaves: XLA:GPU fuses the two spellings of the sum differently, each bitwise repeatable);
+  its default CSR near-field lane leaves no pairs payload to reject
+  (`test_the_pairs_layout_is_rejected...`); and the engine resolves `use_pallas=True`, the
+  opposite of what `test_csr_lane_enabled_without_pallas...` pins. Each test now names the
+  lane it is about.
+* **A premise read from the wrong field** (`3d879bc`) -- the two `potential_stays_on_fast_lane`
+  rows above. The A100 builds the static target-block layout: the flat
+  `nearfield_target_block_source_leaf_ids` is `(0, 4)` and the blocks are in the padded field,
+  `(8, 1, 4)` with 32 valid entries. The same module's value test passed vacuously there (its
+  "generic path" reference was the fused lane, since `use_pallas` resolves True) and, made
+  real, needed a per-particle bound: the generic lane differs from ITSELF in 159 of 768
+  components between two identical calls (up to 3.1e-05), and from the fused lane by at most
+  1.9e-06 of `|a|`.
+
+The ten failures `fused_memory_2026-10.md` counted on 2026-10-05 were not the same set:
+`test_direct_equals_the_table_kernel_in_particle_order` (x2) and
+`test_walk_backend_flag_parsing` pass on today's main, and the softening-floor, pairs-layout
+and CSR-consistency rows are new since.
+
 #### Resolved since the previous revision of this table
 
-Three entries measured on 2026-08-12 were fixed two days later and are gone. They are
-recorded here so they are not re-added from a stale copy of this section, and so the next
-person to find this list wrong knows it happens:
+Entries that were fixed are recorded here so they are not re-added from a stale copy of this
+section, and so the next person to find this list wrong knows it happens. The first three
+were measured on 2026-08-12 and fixed two days later:
 
 | test | was | fixed by |
 |---|---|---|
 | `test_fmm_grad_golden[clu_real_n128_p4]` | 3/3 default, 3/3 deterministic | `aacd3cf` — gate the gradient golden per particle, not per array element |
 | `test_real_basis_tracks_complex_basis[nearfield-only-f32]` | 3/3 default | `86163f1` — make two fp32 path-equivalence tests actually test something |
 | `test_solidfmm_chunked_m2l_matches_fullbatch` | 1/3 default | `86163f1`, as above |
+| `test_the_state_under_test_actually_carries_target_blocks` | 3/3 default, 3/3 deterministic | `3d879bc` -- read the padded target-block field too (above) |
+| `test_potential_does_not_delegate_to_the_generic_path` | 3/3 default, 3/3 deterministic | `3d879bc`, as above |
 
-All three now pass 3/3 in isolation and did not fail in either whole-suite run. The
+Those three passed 3/3 in isolation and did not fail in either whole-suite run. The
 `test_fmm_grad_golden` entry is the one worth noting: it was described here as "a genuine
 platform difference, not noise" and survived the determinism flag, which made it look
 permanent. It was a per-element tolerance on a 384-element array, and `aacd3cf` replaced it

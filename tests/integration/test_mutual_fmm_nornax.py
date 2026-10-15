@@ -32,13 +32,12 @@ from jaccpot.mutual import (
 )
 from jaccpot.nornax_adapter import BlockStepFMM
 
-# nornax is a test-only dependency, so skip cleanly when it is absent. The
-# `except Exception` (rather than ImportError) is deliberate: nornax used to fail
-# to *import* against equinox < 0.13 / diffrax < 0.7.2, because
-# `nornax.terms.NBodyTerm` was a non-frozen dataclass inheriting a frozen
-# `AbstractTerm`. That is fixed upstream and no version overlay is needed any
-# more, but an import-time TypeError should still report as "skipped", not
-# "errored".
+# nornax is a test-only dependency, so skip cleanly when it is ABSENT. A nornax that
+# is present but lacks one of these names, or fails to import at all, never gets
+# here: tests/conftest.py stops the run first and names what it lacks, because a
+# skip is how a stale sibling checkout used to pass unseen. (nornax used to fail to
+# *import* against equinox < 0.13 / diffrax < 0.7.2 -- `nornax.terms.NBodyTerm` was
+# a non-frozen dataclass inheriting a frozen `AbstractTerm`; fixed upstream.)
 try:  # pragma: no cover - environment dependent
     from nornax.blockstep.rungs import assign_rungs
     from nornax.blockstep.schedule import (
@@ -49,6 +48,7 @@ try:  # pragma: no cover - environment dependent
     )
     from nornax.blockstep.schedule import is_sync_boundary as nornax_is_sync_boundary
     from nornax.blockstep.schedule import n_sub as nornax_n_sub
+    from nornax.conformance import check_mutual_force_model
     from nornax.forces.base import FusedMutualForceModel, MutualForceModel
     from nornax.forces.mutual_direct import MutualDirectSumGravity
     from nornax.solvers.leapfrog_kdk import (
@@ -539,14 +539,6 @@ def test_jaccpot_base_step_matches_nornax_fused_base_step():
 # rollout is the same map as ODISSEO's own scan-with-rebuild lane.
 
 
-def _requires_topology_hook():
-    """Skip when the installed nornax predates ``block_kdk_rollout(rebuild_fn=...)``."""
-    import inspect
-
-    if "rebuild_fn" not in inspect.signature(block_kdk_rollout).parameters:
-        pytest.skip("installed nornax has no topology hook on block_kdk_rollout")
-
-
 def _two_clumps(n=256, seed=25, separation=8.0, sigma=0.6):
     """Two well-separated Gaussian clumps, so the mutual MAC accepts far pairs.
 
@@ -734,7 +726,6 @@ def test_the_frozen_topology_is_identical_across_a_segment_and_rebuilt_after_it(
     traced base step every fused call receives the same carried object, and none
     receives ``None``.
     """
-    _requires_topology_hook()
     k_max, every, dt_max = 2, 2, 2.0e-2
     positions, velocities, masses = _two_clumps(seed=23)
     velocities = 10.0 * velocities  # move far enough per step to change pairs
@@ -858,7 +849,6 @@ def test_the_rollout_with_rebuild_every_one_matches_odisseos_jitted_lane():
     ``[8, 234, 14]`` for three base steps and ``[8, 233, 15]`` at the fourth, on
     both sides.
     """
-    _requires_topology_hook()
     # dt_max and eta were chosen by measuring the rung occupancy on this IC:
     # [8, 234, 14] over rungs 0..2, so all three levels are live and the two
     # lanes' rung assignments are genuinely compared rather than trivially equal.
@@ -925,15 +915,6 @@ def test_the_rollout_with_rebuild_every_one_matches_odisseos_jitted_lane():
 # lands here without a new hand-written test.
 
 
-def _conformance_kit():
-    """The kit, or a skip on a nornax that predates it."""
-    try:
-        from nornax.conformance import check_mutual_force_model
-    except ImportError:  # pragma: no cover - depends on the installed nornax
-        pytest.skip("installed nornax has no conformance kit")
-    return check_mutual_force_model
-
-
 @pytest.mark.parametrize("backend", ["host", "device"])
 def test_the_adapter_passes_nornax_conformance_kit(backend):
     """Every check in nornax's kit, on both topology backends, non-vacuously.
@@ -948,7 +929,6 @@ def test_the_adapter_passes_nornax_conformance_kit(backend):
     defaults; measured, the per-level momentum residuals were ~1e-17 and the
     fused-kick parities ~2.5e-16.
     """
-    check = _conformance_kit()
     k_max = 2
     positions, velocities, masses = _two_clumps(seed=27)
     fmm = BlockStepFMM(
@@ -967,7 +947,7 @@ def test_the_adapter_passes_nornax_conformance_kit(backend):
         dtype=jnp.int32,
     )
 
-    report = check(
+    report = check_mutual_force_model(
         fmm,
         positions,
         masses,
@@ -1000,7 +980,6 @@ def test_the_carried_topology_can_be_checked_for_overflow_after_the_rollout():
     pattern ODISSEO's deletion (B5 step 2) will use for its last base step. On a
     healthy system it is silent and the far field is exercised.
     """
-    _requires_topology_hook()
     from jaccpot.nornax_adapter import assert_far_field_is_exercised, raise_on_overflow
 
     k_max = 2

@@ -1,5 +1,6 @@
 import ast
 import importlib
+import importlib.util
 import os
 import pathlib
 import sys
@@ -41,7 +42,8 @@ if YGGDRAX_ROOT.exists() and str(YGGDRAX_ROOT) not in sys.path:
 # nornax is a TEST-ONLY dependency, used by the cross-repo momentum/block-step
 # checks. The library never imports it -- the dependency graph is
 # Jaccpot -> Yggdrax, Nornax standalone, ODISSEO -> both -- so it is put on the
-# path here rather than declared as a package dependency. Absent, those tests skip.
+# path here rather than declared as a package dependency. Absent, those tests skip;
+# present but too old, the run stops (`_nornax_symbols_the_tests_import` below).
 #
 # Searched across REPO_ROOT's ancestors rather than just `REPO_ROOT.parent`,
 # because a git worktree checkout sits at `<repo>/.claude/worktrees/<name>`, so its
@@ -55,8 +57,25 @@ def _find_sibling_checkout(name: str) -> pathlib.Path | None:
     return None
 
 
-NORNAX_ROOT = _find_sibling_checkout("nornax")
-if NORNAX_ROOT is not None and str(NORNAX_ROOT) not in sys.path:
+def _nornax_checkout() -> pathlib.Path | None:
+    """Return the nornax checkout to put first on ``sys.path``, if any.
+
+    ``NORNAX_WORKTREE`` names one, exactly as ``YGGDRAX_WORKTREE`` does above and
+    for the same reason: the shared sibling is on whatever commit someone last
+    left it (it sat on 8fe9dbd, five commits behind nornax main, until 2026-10-15),
+    and a test run must be able to pin the nornax it exercises. Unset, the sibling
+    checkout; neither, ``None`` and an installed nornax (CI's) is used as is.
+    """
+    override = os.environ.get("NORNAX_WORKTREE")
+    return pathlib.Path(override) if override else _find_sibling_checkout("nornax")
+
+
+NORNAX_ROOT = _nornax_checkout()
+if (
+    NORNAX_ROOT is not None
+    and NORNAX_ROOT.exists()
+    and str(NORNAX_ROOT) not in sys.path
+):
     sys.path.insert(0, str(NORNAX_ROOT))
 
 
@@ -211,14 +230,15 @@ def _yggdrax_symbols_jaccpot_imports(
     return required
 
 
-def _missing_yggdrax_symbols(required: dict[str, set[str]]) -> list[str]:
-    """Report which of ``required`` the importable yggdrax does not provide.
+def _missing_symbols(required: dict[str, set[str]]) -> list[str]:
+    """Report which of ``required`` the importable packages do not provide.
 
     Parameters
     ----------
     required : dict[str, set[str]]
         Module-to-names mapping as returned by
-        :func:`_yggdrax_symbols_jaccpot_imports`.
+        :func:`_yggdrax_symbols_jaccpot_imports` or
+        :func:`_nornax_symbols_the_tests_import`.
 
     Returns
     -------
@@ -246,8 +266,98 @@ def _missing_yggdrax_symbols(required: dict[str, set[str]]) -> list[str]:
     return missing
 
 
+# --- nornax: absent is a skip, stale is an error ---------------------------------
+# The same contract for the test-only dependency, with one rule changed and one
+# added.
+#
+# CHANGED: what counts as a requirement is every `from nornax... import ...` in the
+# TESTS, handler or not. The yggdrax rule spares a `try` with an `except` because
+# there the handler is jaccpot degrading on purpose; in the tests every handler
+# around a nornax import is a skip, and the skip is exactly how a stale nornax went
+# unseen. The sibling sat on 8fe9dbd, which predates the conformance kit (nornax#12)
+# and the topology hook (#11): five cross-repo tests reported "installed nornax has
+# no conformance kit" / "... no topology hook" as SKIPPED, and green.
+#
+# ADDED: the check runs only when nornax is PRESENT (`find_spec` finds it). Absent
+# is legitimate -- every CI job but the cross-repo ones (and `test-partition`) runs
+# without nornax, and those modules skip at module level as before. Present means
+# someone meant those tests to run, so a nornax that cannot serve them stops the
+# run with the names it lacks and where it was imported from. Present but failing
+# to import at all is reported the same way, for the same reason.
+#
+# Symbols cannot see signatures: `block_kdk_rollout(rebuild_fn=...)` is a keyword,
+# not a name. The tests that need it call it and fail on a nornax without it; they
+# no longer probe for it and skip.
+def _nornax_symbols_the_tests_import(
+    tests_root: pathlib.Path,
+) -> dict[str, set[str]]:
+    """Collect every nornax name the test suite imports.
+
+    Parameters
+    ----------
+    tests_root : pathlib.Path
+        Root of the test tree to scan.
+
+    Returns
+    -------
+    dict[str, set[str]]
+        Maps each imported ``nornax`` module to the names taken from it; a plain
+        ``import nornax...`` contributes its module with no names. Imports inside
+        a ``try`` count: in the tests a handler around a nornax import is a skip,
+        not a fallback.
+    """
+    required: dict[str, set[str]] = {}
+    for path in sorted(tests_root.rglob("*.py")):
+        try:
+            module_ast = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):  # pragma: no cover - unreadable source
+            continue
+        for node in ast.walk(module_ast):
+            if isinstance(node, ast.ImportFrom) and not node.level:
+                module = node.module or ""
+                if module == "nornax" or module.startswith("nornax."):
+                    required.setdefault(module, set()).update(
+                        alias.name for alias in node.names if alias.name != "*"
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "nornax" or alias.name.startswith("nornax."):
+                        required.setdefault(alias.name, set())
+    return required
+
+
+def _check_nornax() -> None:
+    """Raise if a nornax is present but lacks a name the tests import.
+
+    Raises
+    ------
+    pytest.UsageError
+        If ``nornax`` is findable on ``sys.path`` and any name collected by
+        :func:`_nornax_symbols_the_tests_import` fails to resolve.
+    """
+    if importlib.util.find_spec("nornax") is None:
+        return  # absent: the cross-repo modules skip, as they always have
+    missing = _missing_symbols(_nornax_symbols_the_tests_import(_TESTS_DIR))
+    if not missing:
+        return
+    origin = importlib.util.find_spec("nornax").origin
+    source = (
+        "NORNAX_WORKTREE"
+        if os.environ.get("NORNAX_WORKTREE")
+        else "sibling checkout" if NORNAX_ROOT is not None else "installed package"
+    )
+    raise pytest.UsageError(
+        "the nornax on sys.path is missing "
+        f"{len(missing)} name(s) that jaccpot's cross-repo tests import:\n  "
+        + "\n  ".join(missing)
+        + f"\n\nnornax resolves to: {os.path.dirname(origin or '?')} ({source})"
+        + "\n\nPoint NORNAX_WORKTREE at a current nornax checkout (CI tests against"
+        " nornax main), or update the one above."
+    )
+
+
 def pytest_configure(config):
-    """Fail the run, once and by name, if the yggdrax on the path is too old.
+    """Fail the run, once and by name, if the yggdrax or nornax on the path is too old.
 
     Parameters
     ----------
@@ -258,16 +368,27 @@ def pytest_configure(config):
     ------
     pytest.UsageError
         If the importable yggdrax is missing a symbol ``jaccpot`` imports
-        without a handler over it. Raised here rather than reported per test so
-        the run stops with one message naming the drift instead of a scatter of
-        skips.
+        without a handler over it, or a nornax is present and missing a name the
+        cross-repo tests import (:func:`_check_nornax`). Raised here rather than
+        reported per test so the run stops with one message naming the drift
+        instead of a scatter of skips.
     """
     del config
-    if not _JACCPOT_PACKAGE.is_dir():  # pragma: no cover - installed, not a checkout
-        return
-    missing = _missing_yggdrax_symbols(
-        _yggdrax_symbols_jaccpot_imports(_JACCPOT_PACKAGE)
-    )
+    if _JACCPOT_PACKAGE.is_dir():  # an installed jaccpot has no source to scan
+        _check_yggdrax()
+    _check_nornax()
+
+
+def _check_yggdrax() -> None:
+    """Raise if the importable yggdrax lacks a name ``jaccpot`` imports unguarded.
+
+    Raises
+    ------
+    pytest.UsageError
+        If any name collected by :func:`_yggdrax_symbols_jaccpot_imports` fails
+        to resolve.
+    """
+    missing = _missing_symbols(_yggdrax_symbols_jaccpot_imports(_JACCPOT_PACKAGE))
     if not missing:
         return
     try:
