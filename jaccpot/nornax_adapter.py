@@ -252,7 +252,7 @@ def suggest_drift_margin(
     dt: float,
     accelerations: Optional[Float[Array, "n 3"]] = None,
     *,
-    safety: float = 1.0,
+    safety: float = 1.05,
 ) -> float:
     """A ``drift_margin`` for :class:`BlockStepFMM`, from the state at a build.
 
@@ -279,7 +279,9 @@ def suggest_drift_margin(
     accelerations : Optional[Float[Array, 'n 3']]
         ``(n, 3)`` accelerations at the build, adding the ``|a| dt**2 / 2`` term.
     safety : float
-        Multiplier on the estimate. Default 1.
+        Multiplier on the estimate. The default 1.05 keeps a drift that equals the
+        estimate (a particle at constant velocity) from tripping the strict guard
+        on round-off.
 
     Returns
     -------

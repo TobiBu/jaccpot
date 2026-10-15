@@ -492,7 +492,7 @@ def test_the_device_walk_applies_the_same_margin_as_the_host_traversal():
 def test_suggest_drift_margin_is_the_furthest_reach():
     v = jnp.asarray([[3.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
     a = jnp.asarray([[0.0, 0.0, 0.0], [0.0, 40.0, 0.0]])
-    assert suggest_drift_margin(v, 0.1) == pytest.approx(0.3)
+    assert suggest_drift_margin(v, 0.1) == pytest.approx(0.3 * 1.05)
     # |v| dt + |a| dt^2 / 2: 0.3 for the first, 0.1 + 0.2 = 0.3 for the second
     assert suggest_drift_margin(v, 0.1, a, safety=2.0) == pytest.approx(0.6)
     with pytest.raises(ValueError):
