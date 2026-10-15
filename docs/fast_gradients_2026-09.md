@@ -49,7 +49,8 @@ Wiring: the call sites (`upward/real_tree_expansions.py`, `runtime/kernels/_l2l.
 forward-mode `jax.jvp` is refused, which nothing here uses); the near-field fast lane takes the CSR `custom_vjp`
 when `differentiable` and no potential is requested. `GradConfig.cascade_pallas` (env `JACCPOT_CASCADE_PALLAS`,
 default on) is the A/B switch back to the pure-JAX loops; `on_grad_path()` forces the lanes M2L kernel on the
-gradient path since only that CSR kernel is differentiable.
+gradient path since only that CSR kernel is differentiable. (Since the 2026-10 cleanup, X5a, the lanes kernel is
+the only CSR M2L kernel, so nothing called `on_grad_path()` any more; it was removed on 2026-10-15.)
 
 ## Validation
 
