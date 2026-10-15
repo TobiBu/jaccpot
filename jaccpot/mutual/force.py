@@ -41,6 +41,7 @@ rather than level by level. Keeping one multipole set per cell is what avoids th
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any, Literal, NamedTuple, Optional, overload
 
@@ -68,6 +69,8 @@ __all__ = [
     "MutualFMMState",
     "MutualForceResult",
     "build_mutual_state",
+    "drift_distance",
+    "flag_drift",
     "resolve_mutual_capacities",
     "mutual_accelerations",
     "mutual_level_accelerations",
@@ -276,8 +279,17 @@ def _no_cause() -> Array:
 
 
 #: Bit positions in ``MutualFMMState.overflow_causes``, in the order a report
-#: should read them.
-OVERFLOW_CAUSES = ("far", "near", "pair_queue", "level_width", "tree_depth")
+#: should read them. The first five are capacities a device build exceeded;
+#: ``drift_margin`` is set by :func:`flag_drift`, when particles moved further
+#: from the build positions than the margin the lists were built for.
+OVERFLOW_CAUSES = (
+    "far",
+    "near",
+    "pair_queue",
+    "level_width",
+    "tree_depth",
+    "drift_margin",
+)
 
 
 @dataclass(frozen=True)
@@ -347,9 +359,16 @@ class MutualFMMState:
     num_far_pairs : Array
         Live entries in the canonical far pair list, same caveat.
     topology_overflow : Array
-        True when a capacity was exceeded while building this state on device.
+        True when a capacity was exceeded while building this state on device,
+        or when :func:`flag_drift` found the particles outside the drift margin.
     overflow_causes : Array
         Bitmask over :data:`OVERFLOW_CAUSES` naming which capacities overflowed.
+    drift_reference : Optional[Array]
+        ``(n, 3)`` positions the lists were built at, in the caller's original
+        order, kept only when they were built with a drift margin
+        (:func:`~jaccpot.mutual.topology.drift_radius_pad`) so
+        :func:`drift_distance` can measure how far the particles have moved
+        since. ``None`` otherwise, which adds no leaf to the pytree.
     """
 
     tree: MutualTreeArrays
@@ -380,6 +399,7 @@ class MutualFMMState:
     num_far_pairs: Array = 0
     topology_overflow: Array = field(default_factory=_no_overflow)
     overflow_causes: Array = field(default_factory=_no_cause)
+    drift_reference: Optional[Array] = None
 
     @property
     def num_particles(self: "MutualFMMState") -> int:
@@ -599,6 +619,91 @@ def build_mutual_state(
 
 
 # ---------------------------------------------------------------------------
+# drift guard
+# ---------------------------------------------------------------------------
+#
+# Lists built with a drift margin are valid only while no particle has moved
+# further than the margin from where they were built (jaccpot.mutual.topology,
+# "Drift margin"). Nothing in the force can see a violation -- a stale list is
+# still a symmetric partition, so momentum stays exact -- so it is measured and
+# carried on the same overflow flag a capacity overflow uses: that flag already
+# travels through a scan carry and into a driver's records, and
+# ``raise_on_overflow`` already turns it into an exception on the host.
+
+
+def drift_distance(state: MutualFMMState, positions: ArrayLike) -> Array:
+    """Return ``max_i |x_i - x_i^build|``, the furthest any particle has drifted.
+
+    Traceable. One subtraction and one reduction over ``(n, 3)``: negligible next
+    to a traversal, so a driver can afford it at every boundary.
+
+    Parameters
+    ----------
+    state : MutualFMMState
+        A state built with a drift margin, so it carries ``drift_reference``.
+    positions : ArrayLike
+        ``(n, 3)`` current positions, in the caller's original order.
+
+    Returns
+    -------
+    Array
+        0-d distance in the positions' dtype.
+
+    Raises
+    ------
+    ValueError
+        If the state was built without a drift margin: there is no reference to
+        measure from, and no margin the lists would be valid within.
+    """
+    if state.drift_reference is None:
+        raise ValueError(
+            "this state was built without a drift margin, so it keeps no "
+            "reference positions and its lists are valid only at the build "
+            "configuration; build it with drift_margin=... to measure drift"
+        )
+    delta = jnp.asarray(positions) - state.drift_reference
+    return jnp.sqrt(jnp.max(jnp.sum(delta * delta, axis=-1)))
+
+
+def flag_drift(
+    state: MutualFMMState, distance: ArrayLike, drift_margin: float
+) -> MutualFMMState:
+    """Return ``state`` with the ``drift_margin`` cause set if ``distance`` exceeds it.
+
+    Traceable, so it can run inside the scan that carries the state; a host-side
+    driver then reads the flag with
+    :func:`jaccpot.nornax_adapter.raise_on_overflow`. The flag is sticky: a state
+    already flagged stays flagged.
+
+    Parameters
+    ----------
+    state : MutualFMMState
+        The state whose lists the drifted positions were evaluated against.
+    distance : ArrayLike
+        The drift to test, typically :func:`drift_distance` -- or the running
+        maximum of it over every boundary of a base step, which is the precise
+        condition: the lists are only ever used at the boundaries.
+    drift_margin : float
+        The margin the state's lists were built for.
+
+    Returns
+    -------
+    MutualFMMState
+        The same state, with ``topology_overflow`` and the ``drift_margin`` bit of
+        ``overflow_causes`` set when the drift exceeded the margin.
+    """
+    distance = jnp.asarray(distance)
+    exceeded = distance > jnp.asarray(drift_margin, dtype=distance.dtype)
+    bit = 1 << OVERFLOW_CAUSES.index("drift_margin")
+    return dataclasses.replace(
+        state,
+        topology_overflow=jnp.asarray(state.topology_overflow) | exceeded,
+        overflow_causes=jnp.asarray(state.overflow_causes, jnp.int32)
+        | (exceeded.astype(jnp.int32) * bit),
+    )
+
+
+# ---------------------------------------------------------------------------
 # pytree registration
 # ---------------------------------------------------------------------------
 #
@@ -629,6 +734,7 @@ _STATE_CHILDREN = (
     "num_far_pairs",
     "topology_overflow",
     "overflow_causes",
+    "drift_reference",
 )
 _STATE_AUX = (
     "softening",

@@ -59,6 +59,8 @@ rather than attempting a host traversal on tracers.
 
 from __future__ import annotations
 
+import dataclasses
+import warnings
 from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
@@ -74,6 +76,8 @@ from jaccpot.mutual.force import (
     active_level_floor,
     boundary_weight_table,
     build_mutual_state,
+    drift_distance,
+    flag_drift,
     is_sync_boundary,
     level_weights_from_floor,
     mutual_level_accelerations,
@@ -81,7 +85,7 @@ from jaccpot.mutual.force import (
     n_sub,
     resolve_mutual_capacities,
 )
-from jaccpot.mutual.topology import build_mutual_topology_from_tree
+from jaccpot.mutual.topology import build_mutual_topology_from_tree, drift_radius_pad
 from jaccpot.runtime.dtypes import require_x64
 from jaccpot.softening import resolve_softening_kernel, support_radius
 
@@ -90,6 +94,7 @@ __all__ = [
     "DistributedBlockStepFMM",
     "assert_far_field_is_exercised",
     "raise_on_overflow",
+    "suggest_drift_margin",
 ]
 
 _SUPPORTED_BASES = ("real",)
@@ -168,7 +173,9 @@ def raise_on_overflow(state: Any, force: Any) -> None:
     A device topology that exceeded a capacity dropped interactions, and that is
     invisible in the force: a dropped canonical pair loses *both* of its halves,
     so momentum stays exactly conserved and every momentum assertion passes.
-    Hence a raise, not a report.
+    Hence a raise, not a report. The same flag carries the ``drift_margin``
+    cause (:meth:`BlockStepFMM.check_drift`): particles left the margin their
+    lists were built for, equally invisible, and raised with its own message.
 
     :meth:`BlockStepFMM.prepare` calls this on the state it builds. A driver
     that rebuilds *inside* a scan -- nornax's ``block_kdk_rollout(...,
@@ -186,8 +193,9 @@ def raise_on_overflow(state: Any, force: Any) -> None:
         ``overflow_causes`` (a bitmask over
         :data:`~jaccpot.mutual.force.OVERFLOW_CAUSES`).
     force : Any
-        The model whose ``capacities`` profile the message quotes; anything
-        without a readable ``capacities`` is described as "unknown profile".
+        The model whose ``capacities`` profile (and ``drift_margin``) the message
+        quotes; anything without a readable ``capacities`` is described as
+        "unknown profile".
 
     Raises
     ------
@@ -204,20 +212,131 @@ def raise_on_overflow(state: Any, force: Any) -> None:
     from jaccpot.mutual.force import OVERFLOW_CAUSES
 
     bits = int(state.overflow_causes)
-    blamed = [name for index, name in enumerate(OVERFLOW_CAUSES) if bits & (1 << index)]
-    caps = getattr(force, "capacities", None)
-    profile = (
-        f"far={caps.far}, near={caps.near}, depth={caps.depth}, width={caps.width}"
-        if caps is not None
-        else "unknown profile"
-    )
-    raise RuntimeError(
-        "the device topology overflowed its capacity profile: "
-        f"{', '.join(blamed) or 'unknown'} exceeded. Profile was {profile}. "
-        "Interactions were dropped, and that is invisible in the force -- a "
-        "dropped canonical pair loses both halves, so momentum stays exact -- "
-        "hence the raise. Rebuild with larger caps, or pass caps=None to resolve "
-        "them from this configuration."
+    drift_bit = 1 << OVERFLOW_CAUSES.index("drift_margin")
+    blamed = [
+        name
+        for index, name in enumerate(OVERFLOW_CAUSES)
+        if bits & (1 << index) and name != "drift_margin"
+    ]
+    problems = []
+    if bits & drift_bit:
+        problems.append(
+            "the particles drifted further than drift_margin="
+            f"{getattr(force, 'drift_margin', 'unknown')} from the positions the "
+            "lists were built at, so a far pair accepted then may no longer "
+            "satisfy the MAC. That is a force error in the tail, invisible to "
+            "momentum -- a stale list is still a symmetric partition -- hence the "
+            "raise. Rebuild the topology more often, shorten dt_max, or build with "
+            "a larger margin (suggest_drift_margin)."
+        )
+    if blamed or not bits & drift_bit:
+        caps = getattr(force, "capacities", None)
+        profile = (
+            f"far={caps.far}, near={caps.near}, depth={caps.depth}, width={caps.width}"
+            if caps is not None
+            else "unknown profile"
+        )
+        problems.append(
+            "the device topology overflowed its capacity profile: "
+            f"{', '.join(blamed) or 'unknown'} exceeded. Profile was {profile}. "
+            "Interactions were dropped, and that is invisible in the force -- a "
+            "dropped canonical pair loses both halves, so momentum stays exact -- "
+            "hence the raise. Rebuild with larger caps, or pass caps=None to "
+            "resolve them from this configuration."
+        )
+    raise RuntimeError(" ".join(problems))
+
+
+def suggest_drift_margin(
+    velocities: Float[Array, "n 3"],
+    dt: float,
+    accelerations: Optional[Float[Array, "n 3"]] = None,
+    *,
+    safety: float = 1.05,
+) -> float:
+    """A ``drift_margin`` for :class:`BlockStepFMM`, from the state at a build.
+
+    ``safety * max_i (|v_i| dt + |a_i| dt**2 / 2)``: the distance each particle
+    would cover in ``dt`` at its current speed and acceleration, maximised over
+    particles. Without ``accelerations`` it is ``safety * max_i |v_i| dt``.
+
+    It is an estimate, not a bound -- a particle that speeds up during ``dt``
+    can outrun it -- which is why the margin is also *measured*:
+    :meth:`BlockStepFMM.check_drift` flags the state when the actual drift
+    exceeds it. ``safety`` above 1 trades pairs for fewer such refusals.
+
+    The margin is one number for every cell, so the fastest particle sets it
+    everywhere. Every node radius grows by ``(2 + theta) * margin``, which on a
+    galaxy costs the most where the cells are smallest (the centre).
+
+    Parameters
+    ----------
+    velocities : Float[Array, 'n 3']
+        ``(n, 3)`` velocities at the build.
+    dt : float
+        How long one topology stays in use: ``dt_max`` when it is rebuilt every
+        base step, ``rebuild_every * dt_max`` when several base steps share it.
+    accelerations : Optional[Float[Array, 'n 3']]
+        ``(n, 3)`` accelerations at the build, adding the ``|a| dt**2 / 2`` term.
+    safety : float
+        Multiplier on the estimate. The default 1.05 keeps a drift that equals the
+        estimate (a particle at constant velocity) from tripping the strict guard
+        on round-off.
+
+    Returns
+    -------
+    float
+        The margin, in the velocities' length unit.
+
+    Raises
+    ------
+    ValueError
+        If ``dt`` or ``safety`` is not positive, or the estimate is not a finite
+        positive length (all particles at rest and no acceleration, say).
+    """
+    if not float(dt) > 0.0 or not float(safety) > 0.0:
+        raise ValueError(f"dt and safety must be > 0; got dt={dt!r}, safety={safety!r}")
+    v = np.asarray(velocities, dtype=np.float64)
+    reach = np.linalg.norm(v, axis=-1) * float(dt)
+    if accelerations is not None:
+        a = np.asarray(accelerations, dtype=np.float64)
+        reach = reach + 0.5 * np.linalg.norm(a, axis=-1) * float(dt) ** 2
+    margin = float(safety) * float(np.max(reach))
+    if not (np.isfinite(margin) and margin > 0.0):
+        raise ValueError(
+            f"the drift estimate is {margin!r}; a margin must be a finite positive "
+            "length"
+        )
+    return margin
+
+
+# One warning per process: the limitation is a property of the configuration, not
+# of each instance, and a test suite or a sweep builds many.
+_FROZEN_LIST_WARNING_ISSUED = False
+
+
+def _warn_frozen_lists_once(k_max: int) -> None:
+    """Warn, once per process, that ``k_max`` >= 3 without a margin is unguarded.
+
+    Parameters
+    ----------
+    k_max : int
+        The model's highest rung, quoted in the message.
+    """
+    global _FROZEN_LIST_WARNING_ISSUED
+    if _FROZEN_LIST_WARNING_ISSUED:
+        return
+    _FROZEN_LIST_WARNING_ISSUED = True
+    warnings.warn(
+        f"BlockStepFMM(k_max={k_max}, drift_margin=None) evaluates every boundary "
+        "of a base step against interaction lists built at its start. On a galaxy "
+        "at the production dt that is wrong in the force tail from k_max = 3 (the "
+        "25M disc, a 1e6 prefix: rel-L2 1.3e-2 against 7.6e-4 with fresh lists, "
+        "divergent from k_max = 5), and neither momentum nor the overflow flag "
+        "shows it. Pass drift_margin= (see suggest_drift_margin) for drift-safe "
+        "lists and a measured guard.",
+        UserWarning,
+        stacklevel=3,
     )
 
 
@@ -255,6 +374,28 @@ class BlockStepFMM:
     The share columns are the reason this note exists. M2L is 2.5% of a traversal
     at leaf 256 and 68.7% at leaf 16; the near field is 94.7% and 17.8%. Any claim
     that one stage "is the hotspot" is a claim about this knob.
+
+    **Frozen lists, and the drift margin.** Every boundary of a base step is
+    evaluated against the lists built at its start (:meth:`prepare`, or
+    :meth:`rebuild_state` in a driver's scan) while the particles drift for
+    ``dt_max``. Particles then sit inside cells whose far expansions they still
+    use. On a galaxy at the production ``dt_min`` that is wrong in the force tail
+    from ``k_max = 3``: a 1e6 prefix of the 25M disc, frozen against fresh lists,
+    rel-L2 1.3e-2 vs 7.6e-4 at ``k_max = 3``, 0.16 at 4, 6.5 at 5 and 1.8e3 at 6
+    (S0, ``docs/production_2026-10.md``). Neither momentum -- a stale list is still a
+    symmetric partition -- nor the overflow flag shows it. With
+    ``drift_margin=None``, the default, nothing guards against it, and a
+    one-time ``UserWarning`` says so when ``k_max >= 3``.
+
+    ``drift_margin`` builds lists that stay inside the MAC while no particle moves
+    further than the margin from where they were built (every node radius grows
+    by ``(2 + theta) * drift_margin``; :mod:`jaccpot.mutual.topology`, "Drift
+    margin"), and keeps the build positions on the state so the drift is
+    *measured*: :meth:`check_drift` flags a state whose particles left the
+    margin, through the overflow flag, and :func:`raise_on_overflow` raises on
+    it. :meth:`advance_base_step` checks every boundary and raises itself; a
+    driver stepping :meth:`boundary_kick` must call :meth:`check_drift` (see
+    there). :func:`suggest_drift_margin` picks a margin from the velocities.
 
     Parameters
     ----------
@@ -316,11 +457,20 @@ class BlockStepFMM:
         Check that rungs lie in ``[0, k_max]``. The check is a device-to-host
         sync on concrete inputs, so a driver that has already established the
         range can turn it off; see :meth:`_validate_rung`.
+    drift_margin : Optional[float]
+        Largest distance, in length units, any particle may drift from the
+        positions a topology was built at while that topology is in use. The
+        MAC is built on radii inflated by ``(2 + theta) * drift_margin``, so the
+        lists hold more near and fewer far pairs, and stay valid within it; the
+        state keeps the ``(n, 3)`` build positions (24 B/particle in fp64) for
+        :meth:`check_drift`. ``None`` (default) builds the plain MAC, unchanged,
+        with no guard.
 
     Raises
     ------
     ValueError
-        If ``basis`` or ``backend`` is unsupported, or ``k_max`` is negative.
+        If ``basis`` or ``backend`` is unsupported, ``k_max`` is negative, or
+        ``drift_margin`` is not a finite positive length.
     """
 
     def __init__(
@@ -341,6 +491,7 @@ class BlockStepFMM:
         static_shapes: bool = False,
         caps: Optional[MutualCapacities] = None,
         validate_rung: bool = True,
+        drift_margin: Optional[float] = None,
     ) -> None:
         require_x64("BlockStepFMM")
         basis = str(basis).lower()
@@ -358,6 +509,10 @@ class BlockStepFMM:
             )
         if int(k_max) < 0:
             raise ValueError(f"k_max must be >= 0; got {k_max!r}")
+        drift_radius_pad(theta, drift_margin)  # validates the margin
+        self.drift_margin = None if drift_margin is None else float(drift_margin)
+        if self.drift_margin is None and int(k_max) >= 3:
+            _warn_frozen_lists_once(int(k_max))
 
         self.theta = float(theta)
         self.max_order = int(max_order)
@@ -473,6 +628,7 @@ class BlockStepFMM:
             theta=self.theta,
             order=self.max_order,
             separation_floor=support_radius(self.softening_kernel, self.softening),
+            drift_margin=self.drift_margin,
         )
         if self.static_shapes and self._caps is None:
             # Only the host lane asks for drift headroom. It rebuilds an LBVH
@@ -480,17 +636,44 @@ class BlockStepFMM:
             # the device lane's static-radix linkage is frozen, so freeze_template
             # overrides depth with the invariant measured value instead.
             self._caps = resolve_mutual_capacities(topology, drift_headroom=True)
-        self._state = build_mutual_state(
-            topology,
-            softening=self.softening,
-            softening_kernel=self.softening_kernel,
-            G=self.G,
-            use_pallas=(self.backend == "pallas"),
-            near_chunk_size=self.near_chunk_size,
-            pallas_interpret=self.pallas_interpret,
-            caps=self._caps,
+        self._state = self._keep_drift_reference(
+            build_mutual_state(
+                topology,
+                softening=self.softening,
+                softening_kernel=self.softening_kernel,
+                G=self.G,
+                use_pallas=(self.backend == "pallas"),
+                near_chunk_size=self.near_chunk_size,
+                pallas_interpret=self.pallas_interpret,
+                caps=self._caps,
+            ),
+            positions,
         )
         return self._state
+
+    def _keep_drift_reference(
+        self: "BlockStepFMM", state: MutualFMMState, positions: Array
+    ) -> MutualFMMState:
+        """Attach the build positions a drift is measured from, if there is a margin.
+
+        Parameters
+        ----------
+        state : MutualFMMState
+            The freshly built state.
+        positions : Array
+            ``(n, 3)`` positions it was built at, in the caller's order.
+
+        Returns
+        -------
+        MutualFMMState
+            ``state`` itself without a margin; with one, ``state`` carrying the
+            positions (severed from the gradient, like the rest of the topology).
+        """
+        if self.drift_margin is None:
+            return state
+        return dataclasses.replace(
+            state, drift_reference=lax.stop_gradient(jnp.asarray(positions))
+        )
 
     # -- device topology backend -------------------------------------------
 
@@ -568,6 +751,7 @@ class BlockStepFMM:
                     separation_floor=support_radius(
                         self.softening_kernel, self.softening
                     ),
+                    drift_margin=self.drift_margin,
                 )
             )
         # The generous depth bound `resolve_mutual_capacities` applies exists for
@@ -692,6 +876,7 @@ class BlockStepFMM:
                 softening_kernel=self.softening_kernel,
                 G=self.G,
                 max_pair_queue=queue,
+                drift_margin=self.drift_margin,
             )
             # Only the pair-queue cause is this resolver's business. Doubling the
             # wavefront cannot fix a starved far/near/level cap, so conflating the
@@ -841,7 +1026,7 @@ class BlockStepFMM:
                 positions, masses, self._template, return_reordered=True
             )
         )
-        return build_mutual_state_device(
+        state = build_mutual_state_device(
             sorted_positions,
             sorted_masses,
             node_ranges=refreshed.node_ranges,
@@ -857,8 +1042,10 @@ class BlockStepFMM:
             near_chunk_size=self.near_chunk_size,
             pallas_interpret=self.pallas_interpret,
             max_pair_queue=int(self._caps.queue) or (1 << 16),
+            drift_margin=self.drift_margin,
             **self._tree_static,
         )
+        return self._keep_drift_reference(state, positions)
 
     def refresh(
         self: "BlockStepFMM", positions: Float[Array, "n 3"], masses: Float[Array, "n"]
@@ -881,6 +1068,65 @@ class BlockStepFMM:
             The rebuilt state.
         """
         return self.prepare(positions, masses)
+
+    def check_drift(
+        self: "BlockStepFMM", state: MutualFMMState, positions: Float[Array, "n 3"]
+    ) -> MutualFMMState:
+        """Flag ``state`` if a particle is further than ``drift_margin`` from its build position.
+
+        **Traceable.** The flag is the state's overflow flag, with the
+        ``drift_margin`` cause, so it rides a scan carry or a per-step record
+        exactly as a capacity overflow does, and :func:`raise_on_overflow` raises
+        on it on the host.
+
+        The lists are only used at the sub-step boundaries, so the precise check
+        is every boundary's positions against the state the boundary was kicked
+        with -- :meth:`advance_base_step` does that, carrying the running maximum
+        of :func:`~jaccpot.mutual.force.drift_distance` and flagging once with
+        :func:`~jaccpot.mutual.force.flag_drift`. Checking only the end of each
+        base step is cheaper to wire in and misses a particle that turns back
+        within the step (a short orbit near the centre at a long ``dt_max``).
+        The distance is measured from the positions the *state* was built at, so
+        a state shared by ``rebuild_every > 1`` base steps is measured across all
+        of them. Where a driver can call it:
+
+        * nornax ``block_kdk_rollout(..., rebuild_fn=force.rebuild_state,
+          record_fn=...)``: ``record_fn(carry)`` sees the base step's end
+          positions and the topology it was stepped with, so
+          ``force.check_drift(carry.topology, carry.positions).topology_overflow``
+          as a record, reduced and raised on after the rollout, needs no nornax
+          change (end of step only). Every boundary needs the running maximum in
+          ``advance_base_step``'s boundary scan, returned on the topology.
+        * a driver holding the topology on the model (:meth:`prepare` per rebuild
+          interval): ``raise_on_overflow(force.check_drift(force.state,
+          positions), force)`` after each interval.
+
+        Parameters
+        ----------
+        state : MutualFMMState
+            A state this model built, which carries its build positions.
+        positions : Float[Array, 'n 3']
+            ``(n, 3)`` positions the state's lists were (or will be) used at, in
+            the caller's original order.
+
+        Returns
+        -------
+        MutualFMMState
+            ``state``, flagged if the drift exceeded the margin.
+
+        Raises
+        ------
+        ValueError
+            If the model has no ``drift_margin``, or the state was built without
+            one.
+        """
+        if self.drift_margin is None:
+            raise ValueError(
+                "check_drift needs a drift margin: build the model with "
+                "drift_margin=... (see suggest_drift_margin). Without one the lists "
+                "carry no drift budget to check against."
+            )
+        return flag_drift(state, drift_distance(state, positions), self.drift_margin)
 
     _NO_TOPOLOGY_UNDER_TRACE = (
         "BlockStepFMM has no prepared topology and cannot build one while tracing "
@@ -1356,6 +1602,12 @@ class BlockStepFMM:
         :meth:`boundary_kick` with rows of
         :func:`~jaccpot.mutual.force.boundary_weight_table` from its own scan.
 
+        With a ``drift_margin`` the positions at every boundary are measured
+        against those the cached state was built at, and a step on which any of
+        them lies beyond the margin ends in a ``RuntimeError`` from
+        :func:`raise_on_overflow` (see :meth:`check_drift`): its lists are no
+        longer inside the MAC.
+
         Returns ``(positions, velocities, acceleration)`` where the acceleration
         is the full field at the end-of-step positions, ready to seed the next
         base step's rung assignment. It is a separate evaluation on purpose: a
@@ -1390,25 +1642,31 @@ class BlockStepFMM:
         steps = n_sub(self.k_max)
         dt_min = jnp.asarray(dt_max, dtype=dtype) / steps
         pos, vel = jnp.asarray(positions), jnp.asarray(velocities)
+        # With a margin, the furthest drift from the build positions over every
+        # boundary this step evaluates at -- the precise validity condition of the
+        # lists. Without one nothing is tracked (`None` is an empty carry leaf),
+        # so the default step is the same program as before.
+        guard = self.drift_margin is not None
+        worst = drift_distance(state, pos) if guard else None
 
         if scan_boundaries:
             table = boundary_weight_table(self.k_max, dt_max, dtype=dtype)
             zero = jnp.asarray(0.0, dtype=dtype)
 
-            def body(
-                carry: Tuple[Array, Array], s: Array
-            ) -> Tuple[Tuple[Array, Array], None]:
-                position, velocity = carry
+            def body(carry: Tuple[Array, Array, Any], s: Array) -> Tuple[Any, None]:
+                position, velocity, furthest = carry
                 velocity = velocity + mutual_weighted_accelerations(
                     state, position, masses, rung=rung, level_weights=table[s]
                 )
                 # The drift is a no-op after the final kick, expressed as a select
                 # so every scan iteration has the same shape.
                 position = position + jnp.where(s < steps, dt_min, zero) * velocity
-                return (position, velocity), None
+                if guard:
+                    furthest = jnp.maximum(furthest, drift_distance(state, position))
+                return (position, velocity, furthest), None
 
-            (pos, vel), _ = lax.scan(
-                body, (pos, vel), jnp.arange(steps + 1, dtype=jnp.int32)
+            (pos, vel, worst), _ = lax.scan(
+                body, (pos, vel, worst), jnp.arange(steps + 1, dtype=jnp.int32)
             )
         else:
             for s in range(steps + 1):
@@ -1424,8 +1682,12 @@ class BlockStepFMM:
                 )
                 if s < steps:
                     pos = pos + dt_min * vel
+                    if guard:
+                        worst = jnp.maximum(worst, drift_distance(state, pos))
 
         acc = mutual_weighted_accelerations(state, pos, masses)
+        if guard:
+            raise_on_overflow(flag_drift(state, worst, self.drift_margin), self)
         return pos, vel, acc
 
 
