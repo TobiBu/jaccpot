@@ -106,6 +106,14 @@ def engine_and_state(request: pytest.FixtureRequest):
 def _has_target_blocks(state: LargeNPreparedState) -> bool:
     """Report whether the state carries a target-block payload.
 
+    Either layout counts. The large-N prepare on an A100 builds the STATIC one: the
+    blocks live in ``nearfield_target_block_source_leaf_ids_padded`` (``(8, 1, 4)``
+    with 32 valid entries for this module's state, 2026-10-15), while the flat
+    ``nearfield_target_block_source_leaf_ids`` is ``(0, 4)``. Reading only the flat
+    field, this premise failed on every GPU run -- which is the same misreading
+    as the guard the module pins (docs/potential_falls_off_the_fast_lane.md, "A
+    third guard").
+
     Parameters
     ----------
     state : LargeNPreparedState
@@ -114,10 +122,14 @@ def _has_target_blocks(state: LargeNPreparedState) -> bool:
     Returns
     -------
     bool
-        True when the target-block source-leaf ids are present and non-empty.
+        True when either the flat or the padded target-block source-leaf ids are
+        present and non-empty.
     """
-    ids = state.nearfield_target_block_source_leaf_ids
-    return ids is not None and int(ids.size) > 0
+    flat = state.nearfield_target_block_source_leaf_ids
+    padded = state.nearfield_target_block_valid_mask_padded
+    return (flat is not None and int(flat.size) > 0) or (
+        padded is not None and bool(jnp.any(padded))
+    )
 
 
 def test_the_state_under_test_actually_carries_target_blocks(engine_and_state):
@@ -151,6 +163,10 @@ def test_potential_matches_the_generic_path(engine_and_state, monkeypatch):
     """
     engine, state = engine_and_state
 
+    # The reference is the generic path by construction: on an Ampere GPU the
+    # engine resolves `use_pallas=True`, and without this the "reference" was the
+    # fused lane itself, compared against its own interpret mode.
+    monkeypatch.setattr(engine, "use_pallas", False, raising=False)
     ref_acc, ref_pot = evaluate_large_n_nearfield_fast_lane(
         engine, state, return_potential=True
     )
@@ -161,12 +177,21 @@ def test_potential_matches_the_generic_path(engine_and_state, monkeypatch):
         engine, state, return_potential=True
     )
 
-    np.testing.assert_allclose(
-        np.asarray(acc), np.asarray(ref_acc), rtol=2e-5, atol=1e-6
-    )
-    np.testing.assert_allclose(
-        np.asarray(pot), np.asarray(ref_pot), rtol=2e-5, atol=1e-6
-    )
+    # Per PARTICLE, against the vector's norm, not per component: two fp32 lanes
+    # summing the same pairs in different orders differ by round-off on the scale of
+    # the whole vector, and a component near zero turns that into a large relative
+    # error (an A100 run failed elementwise on a 0.045 component of a vector of
+    # norm >= 22). Measured on an A100 (2026-10-15): the generic lane is not even
+    # reproducible against ITSELF -- 159 of 768 components differ between two
+    # identical calls, by up to 3.1e-05 -- and the two lanes differ by at most
+    # 1.9e-06 of |a| and 6.8e-07 of |phi|. The bound stays the 2e-5 it was, now on
+    # the quantity round-off actually scales with.
+    acc, ref_acc = np.asarray(acc, np.float64), np.asarray(ref_acc, np.float64)
+    acc_err = np.linalg.norm(acc - ref_acc, axis=1) / np.linalg.norm(ref_acc, axis=1)
+    assert float(acc_err.max()) < 2e-5, f"max per-particle |da|/|a| {acc_err.max():.3e}"
+    pot, ref_pot = np.asarray(pot, np.float64), np.asarray(ref_pot, np.float64)
+    pot_err = np.abs(pot - ref_pot) / np.abs(ref_pot)
+    assert float(pot_err.max()) < 2e-5, f"max |dphi|/|phi| {pot_err.max():.3e}"
 
 
 def test_potential_does_not_delegate_to_the_generic_path(engine_and_state, monkeypatch):

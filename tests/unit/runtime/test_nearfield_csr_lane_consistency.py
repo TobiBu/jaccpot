@@ -49,8 +49,11 @@ def _forces(monkeypatch, csr_flag: str) -> np.ndarray:
     monkeypatch.setenv("JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS", "1")
     monkeypatch.setenv("JACCPOT_NEARFIELD_LEAFPAIR_CSR", csr_flag)
     positions, masses = _make_inputs("clustered", N)
-    solver = _large_n_solver()
-    assert not bool(getattr(solver._impl, "use_pallas", False))  # CPU: no Pallas
+    # The near field off Pallas, as it is on CPU -- and, named, on an Ampere card,
+    # which is where the bug this module pins was found and where the engine
+    # would otherwise resolve `use_pallas=True` and never reach it.
+    solver = _large_n_solver(use_pallas=False)
+    assert not bool(getattr(solver._impl, "use_pallas", False))
     prepared = solver.prepare_state(
         jnp.asarray(positions, jnp.float32),
         jnp.asarray(masses, jnp.float32),

@@ -343,13 +343,26 @@ def test_mass_gradient_matches_the_direct_sum(reverse_pass) -> None:
     assert error < _RTOL, f"d/dmass rel-L2 {error:.3e} exceeds {_RTOL:.0e}"
 
 
-def test_the_pairs_layout_is_rejected_rather_than_silently_dropped() -> None:
+def test_the_pairs_layout_is_rejected_rather_than_silently_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Without the cap override, small N materializes the pairs layout and must reject.
 
     This is the guard that makes the payload-cap override in this module honest:
     the unsupported layout raises instead of quietly differentiating a different
     force than the forward computed.
+
+    The CSR near-field lane is switched off: it is the default where it lowers
+    (an Ampere GPU), and its prepare shrinks the rectangle payload to a one-block
+    placeholder, so on an A100 no pairs layout exists to reject (the premise
+    below failed there, 2026-10-15). Off, the same N materializes it on both.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Switches the CSR near-field lane off.
     """
+    monkeypatch.setenv("JACCPOT_NEARFIELD_LEAFPAIR_CSR", "0")
     positions, masses, _ = _problem()
     fmm = _solver()
     state = fmm.prepare_state(positions, masses, leaf_size=_LEAF, max_order=_ORDER)
