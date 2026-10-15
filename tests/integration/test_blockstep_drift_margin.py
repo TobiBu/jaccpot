@@ -40,7 +40,7 @@ DRIFT_BIT = 1 << OVERFLOW_CAUSES.index("drift_margin")
 
 
 def _two_clumps(n=512, seed=23, separation=8.0, sigma=0.6):
-    """Two well-separated clumps, with far pairs inside and between them."""
+    """Two well-separated clumps, with far pairs between them at ``THETA``."""
     rng = np.random.default_rng(seed)
     half = n // 2
     centres = ([-separation / 2.0, 0.0, 0.0], [separation / 2.0, 0.0, 0.0])
@@ -66,10 +66,11 @@ def _blob(n=1024, seed=1):
 def _exploding_clumps(side=8, per=16, sigma=0.02, seed=4):
     """Tight clumps on a unit grid, every particle at unit speed in a random direction.
 
-    Over ``dt`` each clump swells from ``sigma`` to about ``dt``, so a pair of
-    neighbouring clumps accepted as far at the build is inside each other's
-    convergence sphere by ``dt = 0.25`` -- the S0 failure at test scale -- while
-    clumps further apart stay far, so a margin keeps a far field.
+    Over ``dt`` each clump swells from ``sigma`` to about ``dt``: neighbouring
+    clumps, accepted as a far pair at an opening ratio near 0.1, are at about 0.5
+    by ``dt = 0.25``, where their frozen expansion is no longer accurate -- the S0
+    failure at test scale. Clumps further apart stay far, so a margin keeps a far
+    field.
     """
     rng = np.random.default_rng(seed)
     grid = np.stack(
@@ -129,9 +130,9 @@ def _drifts(topology, positions, masses, margin, seed=5):
     """Displacement fields with ``|dx_i| <= margin`` that push the MAC hardest.
 
     Every particle flying straight out of its leaf's centre of mass swells every
-    cell by about the margin; contraction towards the origin brings the clumps
-    together; random kicks do some of both. Each is scaled to the full margin,
-    less a hair for round-off.
+    cell by about the margin; contraction towards the origin brings cells on
+    opposite sides together; random kicks do some of both. Each is scaled to the
+    full margin, less a hair for round-off.
     """
     x = np.asarray(positions)
     unit = lambda d: d / np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-300)
@@ -313,6 +314,53 @@ def test_advance_base_step_raises_once_the_drift_leaves_the_margin(scan_boundari
     with pytest.raises(RuntimeError, match="drifted further than drift_margin"):
         fmm.advance_base_step(
             x, v, masses, rung=rung, dt_max=dt_max, scan_boundaries=scan_boundaries
+        )
+
+
+@pytest.mark.parametrize("scan_boundaries", [False, True])
+def test_the_guard_sees_a_drift_that_turns_back_inside_the_base_step(scan_boundaries):
+    """A full orbit inside one base step: back home at the end, 2r away halfway.
+
+    Light particles circle a heavy one at r = 0.1 with dt_max one period, so the
+    end positions are within the margin of the build and an end-of-step check
+    passes -- but the lists were used at every boundary in between, so the step
+    must be refused.
+    """
+    n, r = 64, 0.1
+    rng = np.random.default_rng(2)
+    normal = rng.normal(size=(n - 1, 3))
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    radial = np.cross(normal, rng.normal(size=(n - 1, 3)))
+    radial /= np.linalg.norm(radial, axis=1, keepdims=True)
+    # circular in the softened field, so the orbit closes
+    speed = np.sqrt(r**2 / (r**2 + SOFTENING**2) ** 1.5)
+    positions = jnp.asarray(np.vstack([np.zeros(3), r * radial]))
+    velocities = jnp.asarray(np.vstack([np.zeros(3), speed * np.cross(normal, radial)]))
+    masses = jnp.asarray(np.concatenate([[1.0], np.full(n - 1, 1e-9)]))
+    k_max = 4
+    rung = jnp.full((n,), k_max, jnp.int32)
+    dt_max = 2.0 * np.pi * r / speed
+    margin = 0.5 * r
+    fmm = _model(k_max=k_max, drift_margin=margin)
+    state = fmm.prepare(positions, masses)
+
+    # Where the base step ends: stepped under a margin too wide to fire (its
+    # lists are all near, so the force is the direct sum the orbit was set up in).
+    unguarded = _model(k_max=k_max, drift_margin=10.0)
+    unguarded.prepare(positions, masses)
+    x_end, _, _ = unguarded.advance_base_step(
+        positions, velocities, masses, rung=rung, dt_max=dt_max
+    )
+    assert float(drift_distance(state, x_end)) < margin  # an end-only check passes
+    assert not bool(fmm.check_drift(state, x_end).topology_overflow)
+    with pytest.raises(RuntimeError, match="drifted further than drift_margin"):
+        fmm.advance_base_step(
+            positions,
+            velocities,
+            masses,
+            rung=rung,
+            dt_max=dt_max,
+            scan_boundaries=scan_boundaries,
         )
 
 
