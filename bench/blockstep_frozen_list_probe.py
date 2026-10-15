@@ -2,6 +2,7 @@
 
 usage: python bench/blockstep_frozen_list_probe.py OUT.json [--n 1000000] [--kmax 3,4,5,6]
            [--dt-min 5e-4] [--theta 0.8] [--order 6] [--leaf 64] [--targets 4096]
+           [--margin-safety 1.01]
 
 A block-step base step drifts every particle for ``dt_max = 2**k_max * dt_min`` while
 the mutual lane keeps the pair lists it built at the start (nornax hands one
@@ -15,6 +16,12 @@ mutual lane's device topology is built at ``x0``, the particles drift straight t
 
 both scored against an fp64 direct sum (same kernel) on random targets. Momentum
 checks cannot see this error: a stale list is still a symmetric partition.
+
+``--margin-safety S`` adds the drift-margin arm (S1): lists built at ``x0`` with
+``drift_margin = S * max|v0| dt_max`` (``suggest_drift_margin``), scored at ``x1`` like
+the frozen arm, with their far/near pair counts against the plain lists' and whether
+``check_drift`` flags the drift. ``S`` a hair above 1 keeps the straight drift inside
+the margin through round-off.
 """
 
 from __future__ import annotations
@@ -36,6 +43,12 @@ ap.add_argument("--leaf", type=int, default=64)
 ap.add_argument("--softening", type=float, default=1.5e-3)
 ap.add_argument("--kernel", default="ferrers3")
 ap.add_argument("--targets", type=int, default=4096)
+ap.add_argument(
+    "--margin-safety",
+    type=float,
+    default=0.0,
+    help="add the drift-margin arm at this safety factor (0: off)",
+)
 ARGS = ap.parse_args()
 
 import jax  # noqa: E402
@@ -45,6 +58,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
 from jaccpot import BlockStepFMM  # noqa: E402
+from jaccpot.nornax_adapter import suggest_drift_margin  # noqa: E402
 from jaccpot.softening import pair_factors, softening_params  # noqa: E402
 
 ic = np.load("/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz")
@@ -105,7 +119,7 @@ report = {"args": vars(ARGS), "rows": {}}
 for k in [int(s) for s in ARGS.kmax.split(",")]:
     t0 = time.perf_counter()
     dt_max = (1 << k) * ARGS.dt_min
-    force = BlockStepFMM(
+    lane = dict(
         softening=ARGS.softening,
         softening_kernel=ARGS.kernel,
         k_max=k,
@@ -117,6 +131,7 @@ for k in [int(s) for s in ARGS.kmax.split(",")]:
         static_shapes=True,
         topology_backend="device",
     )
+    force = BlockStepFMM(**lane)
     X0, M = jnp.asarray(x0), jnp.asarray(mass)
     force.prepare(X0, M)
     topo0 = force.rebuild_state(X0, M)
@@ -136,8 +151,26 @@ for k in [int(s) for s in ARGS.kmax.split(",")]:
         fresh=score(fresh, ref),
         overflow_frozen=bool(np.asarray(getattr(topo0, "topology_overflow", False))),
         overflow_fresh=bool(np.asarray(getattr(topo1, "topology_overflow", False))),
+        far_pairs=int(topo0.num_far_pairs),
+        near_pairs=int(topo0.num_near_pairs),
         seconds=time.perf_counter() - t0,
     )
+    if ARGS.margin_safety > 0.0:
+        margin = suggest_drift_margin(v0, dt_max, safety=ARGS.margin_safety)
+        guarded = BlockStepFMM(**lane, drift_margin=margin)
+        guarded.prepare(X0, M)
+        topo_m = guarded.rebuild_state(X0, M)
+        row["margin"] = dict(
+            drift_margin=margin,
+            far_pairs=int(topo_m.num_far_pairs),
+            near_pairs=int(topo_m.num_near_pairs),
+            frozen=score(
+                np.asarray(guarded.weighted_accelerations(topo_m, X1, M)), ref
+            ),
+            guard_fired=bool(guarded.check_drift(topo_m, X1).topology_overflow),
+            overflow=bool(np.asarray(topo_m.topology_overflow)),
+            seconds=time.perf_counter() - t0 - row["seconds"],
+        )
     report["rows"][k] = row
     print(
         f"[frozen] k_max {k} dt_max {dt_max:.2e}: displacement p99 {row['displacement_p99']:.3e} "
@@ -146,5 +179,14 @@ for k in [int(s) for s in ARGS.kmax.split(",")]:
         f"max {row['fresh']['max']:.2e} | {row['seconds']:.0f} s",
         flush=True,
     )
+    if "margin" in row:
+        arm = row["margin"]
+        print(
+            f"[margin] k_max {k}: drift_margin {arm['drift_margin']:.3e} | far "
+            f"{row['far_pairs']} -> {arm['far_pairs']}, near {row['near_pairs']} -> "
+            f"{arm['near_pairs']} | frozen rel-L2 {arm['frozen']['rel_l2']:.3e} max "
+            f"{arm['frozen']['max']:.2e} | guard {arm['guard_fired']}",
+            flush=True,
+        )
     with open(ARGS.out, "w") as fh:
         json.dump(report, fh, indent=1)
