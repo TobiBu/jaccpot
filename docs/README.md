@@ -64,7 +64,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | `differentiable_fmm_audit.md` | **[closed]** Phase 0: can autodiff produce exact fixed-topology gradients at all, and where it breaks. The question that started the work. |
 | `differentiable_fmm_design.md` | **[closed]** Phase 1 design. Points at the user guide for usage. |
 | `differentiable_fmm_pallas_vjp_plan.md` | **[closed]** PR-2 spec — **implemented**. |
-| `differentiable_fmm_nearfield_fastlane_plan.md` | **[open]** PR-3 spec, ready to implement; self-contained. |
+| `differentiable_fmm_nearfield_fastlane_plan.md` | **[closed]** The spec it calls PR-3 -- **implemented** as PR-4 (`differentiable_fmm_design.md`, "PR-4 outcomes"): today `GradConfig(nearfield_lane="fast_lane")`, the `"auto"` choice at N >= 100000. |
 | `differentiable_fmm_csr_sources_plan.md` | **[closed]** Investigation, **not implemented** — the measured go/no-go for CSR sources in the near-field reverse. |
 | `handoff_g9_grad_golden_gpu.md` | **[superseded]** The handoff. Answered by → |
 | `g9_grad_golden_gpu_diagnosis.md` | **[current]** …this: the drift is ordinary float64 reassociation, bounded at 55 ULP. Benign. |

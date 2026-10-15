@@ -1,6 +1,9 @@
 # PR-3 implementation spec — differentiable FMM near-field fast lane (the real reverse win)
 
 **Status:** ready to implement in a fresh session. Self-contained; assumes no prior context.
+**Status (2026-10-15): implemented** as PR-4 (`docs/differentiable_fmm_design.md`, "PR-4 outcomes"). The
+lane is `GradConfig(nearfield_lane="fast_lane")`, chosen by `"auto"` at N >= 100000; on an Ampere+ GPU it now
+runs the CSR row-chunk kernel's reverse (`docs/fast_gradients_2026-09.md`). Kept for its record.
 Companion to `docs/differentiable_fmm_pallas_vjp_plan.md` (PR-2, done) and
 `docs/differentiable_fmm_design.md`.
 

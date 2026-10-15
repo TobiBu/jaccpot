@@ -30,9 +30,9 @@ Those twins remain the correctness oracles in
 **Nothing here imports from ``near_field``**, which is what keeps the two files
 acyclic. The split follows that constraint rather than a tidier one: the bucketed
 rule is self-contained, so its whole ``custom_vjp`` lives here, while the
-leaf-major rule's forward *is* a Pallas kernel in ``near_field``, so only its
-mathematics (:func:`_leafpair_accel_analytic_vjp`) moved and the wrapper stayed
-behind next to the kernel it wraps.
+leaf-major rule's forward *is* a Pallas kernel (in ``_fast_lane`` since that split
+out of ``near_field``), so only its mathematics (:func:`_leafpair_accel_analytic_vjp`)
+moved and the wrapper stayed behind next to the kernel it wraps.
 """
 
 from __future__ import annotations

@@ -21,9 +21,17 @@ and the contract sets:
   cleanup, D2: the fused strict lane needs it)
 - radix fast-lane near field for acceleration evaluation
 
-The large-N lane itself (`can_use_large_n_prepare_path`) is gated on the preset alone.
+The large-N lane itself (`can_use_large_n_prepare_path`) is opened by the preset alone:
+no other switch reaches it. It still declines, silently, off a GPU backend, off the radix
+tree or the real basis, with adaptive or mixed order, and for a traced call; the preset
+then prepares an `FMMPreparedState` on the general path (so a CPU run never takes it).
 The far field has one mode, a flat pair list about the nodes' centres of mass; there is
 nothing to select.
+
+On the lane, evaluation is all particles' accelerations (or potentials): a
+`target_indices` subset and `max_acc_derivative_order > 0` raise `NotImplementedError`
+(`runtime/_large_n_pipeline.py:2012-2019`), so jerk and the time derivatives do not run
+there either (`docs/derivatives_and_jerk.md`).
 
 ## Deprecation Notes
 

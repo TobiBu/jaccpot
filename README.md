@@ -141,6 +141,13 @@ solver = FastMultipoleMethod(
 for large particle-count single-GPU runs (streamed far-pair mode, reduced
 near-field precompute retention, and cache retention disabled).
 
+On a GPU this preset runs the large-N lane, which evaluates all particles'
+accelerations (or potentials) and nothing finer: `target_indices`, jerk and
+`max_acc_derivative_order > 0` raise `NotImplementedError` there, and the time
+derivatives, written for the general path's prepared state, fail on the lane's.
+So the two examples below need another preset (`fast`, `balanced` or `accurate`).
+On a CPU `large_n_gpu` declines the lane and runs the general path, where they work.
+
 For split-step integrators (for example active-particle substeps), you can
 evaluate only a subset while still using all particles as FMM sources:
 
@@ -227,7 +234,8 @@ than truncation error (see the cleanup record, phases C and K).
 
 ## Multi-GPU: the JAX floor is a correctness floor
 
-`jaccpot` pins `jax>=0.10.2`. If you import it from a checkout on an older JAX
+`jaccpot` pins `jax>=0.11.2,<0.12` (`pyproject.toml`; the floor was 0.10.2 until
+2026-10-05). If you import it from a checkout on an older JAX
 anyway, know what you are giving up on the distributed path: **on jax < 0.9.1 the
 halo exchange (`jax.lax.ragged_all_to_all`) silently returns its fill value once its
 buffers move**, and input donation alone — any leapfrog loop — moves them. The
@@ -496,7 +504,9 @@ runs as Pallas on sm_80+ (`jaccpot/pallas/`):
   (`nearfield_mutual.py`);
 - **far field:** the M2L over the target-sorted far-pair CSR, one pair per lane
   (`m2l_real_csr_lanes.py`), and the fully fused rotate / z-translate / rotate-back
-  M2L (`m2l_real_fused.py`, opt-in via `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`);
+  M2L (`m2l_real_fused.py`, opt-in via `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1`;
+  it serves the chunked M2L lanes, so on one GPU it acts only with the CSR M2L off,
+  `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0`, and otherwise on the multi-GPU mesh lane);
 - **the rest of the fused strict lane's step:** the dual-tree walk, one launch per
   wavefront round (`mutual_walk_pallas.py`), the directed pair CSR
   (`csr_place.py`), the COM MAC radii (`com_radii_leaf.py`), leaf P2M
@@ -504,7 +514,10 @@ runs as Pallas on sm_80+ (`jaccpot/pallas/`):
   `cascade_real_level.py`) and L2P (`l2p_real.py`).
 
 The kernels on a gradient path carry a `custom_vjp`, so the Pallas lane stays
-differentiable.
+differentiable. Two forward kernels have no reverse yet, and the gradient path
+takes a slower layout instead: the near field's direct layout (the gradient runs
+the CSR lane's table layout) and the particle-major L2P (the gradient runs the
+leaf-major XLA L2P).
 [ARCHITECTURE.md](ARCHITECTURE.md) section 7 has the gates and the
 version-dependent backend selection. On CPU, [examples/pallas_m2l_speed.py](examples/pallas_m2l_speed.py)
 reports the fallback rather than Pallas execution.
@@ -540,40 +553,56 @@ accuracy, not to machine precision.
 
 The `large_n_gpu` preset is differentiable and is the leanest configuration
 measured. It needs `retain_far_pairs_for_grad=True` so the frozen M2L pair list
-survives `prepare_state`:
+survives `prepare_state`. It is a constructor option (or
+`FarFieldConfig(retain_far_pairs_for_grad=True)`, or
+`JACCPOT_RETAIN_FAR_PAIRS_FOR_GRAD=1`); `prepare_state` does not take it:
 
 ```python
-fmm = FastMultipoleMethod(preset="large_n_gpu", basis="real")
-state = fmm.prepare_state(
-    positions0, masses0, max_order=4, leaf_size=256,
-    retain_far_pairs_for_grad=True,
+fmm = FastMultipoleMethod(
+    preset="large_n_gpu", basis="real", retain_far_pairs_for_grad=True
 )
+state = fmm.prepare_state(positions0, masses0, max_order=4, leaf_size=256)
 ```
 
-A100 40 GB, fp32, θ=0.7, order 4, clustered galaxy disc (steady-state):
+Measured 2026-07, A100 40 GB, fp32, θ=0.7, order 4, clustered galaxy disc
+(steady-state), before the Pallas reverses of 2026-09:
 
 | N | forward | forward+backward | reverse peak memory |
 |---|---|---|---|
 | 200 k | 0.86 s | 2.59 s | 2.62 GB |
 | 1 M | 2.50 s | 66.4 s | 11.07 GB |
 
+The current numbers (2026-10-13, cells of 64, θ=0.8, order 5, fp32, jitted
+gradient w.r.t. positions and masses): 31.9 ms at 2e5, 101.6 ms at 1e6, and out of
+memory at 8e6 on one 40 GB card ([docs/production_2026-10.md](docs/production_2026-10.md)).
+
+**What the gradient covers.** Positions and masses only: `G` and the softening
+enter as Python floats, so there is no d/dG or d/dε. Reverse mode only: every fast
+kernel is a `custom_vjp`, which refuses `jax.jvp` (and so forward-mode adjoints).
+One force at a time: `strict_run_v2` and the multi-GPU `FusedRollout` are
+forward-only, so a rollout gradient has to differentiate its own integrator around
+`differentiable_accelerations`.
+
 ### Tuning
 
-Pass a `GradConfig`. Its most important field is `nearfield_lane`, which selects
-the near-field traversal — the near field is ~83% of the forward and ~91% of the
-reverse. It defaults to `"auto"`, which switches to the leaf-major fast lane at
-N ≥ 100 000 because the bucketed reverse **OOMs** at that scale (30 GB peak at
-200 k against the fast lane's 6.8 GB):
+Pass a `GradConfig`. On a radix state its most important field is
+`nearfield_lane`, which selects the near-field traversal. It defaults to `"auto"`,
+which switches to the leaf-major fast lane at N ≥ 100 000 because the bucketed
+reverse **OOMs** at that scale (30 GB peak at 200 k against the fast lane's 6.8 GB):
 
 ```python
 from jaccpot import GradConfig
 
-cfg = GradConfig(nearfield_lane="fast_lane", fused_m2l_pallas=True)
+cfg = GradConfig(nearfield_lane="fast_lane")
 accel = fmm.differentiable_accelerations(state, positions, masses, grad_config=cfg)
 ```
 
 Every field falls back to a `JACCPOT_*` environment variable when left `None`, so
-existing env-configured scripts keep working; an explicit field always wins.
+existing env-configured scripts keep working; an explicit field always wins. On an
+Ampere+ GPU several fields do nothing: `nearfield_lane` on a `large_n_gpu` state
+(it has one differentiable near field), and `fused_m2l_pallas` and the `reverse_*`
+fields wherever the CSR lanes run, which is the default there (see
+`GradConfig`'s docstring).
 
 Full guide, contract, limits, and troubleshooting:
 **[docs/differentiable_fmm.md](docs/differentiable_fmm.md)**.
