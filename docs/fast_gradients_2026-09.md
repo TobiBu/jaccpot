@@ -86,6 +86,8 @@ the differentiable forward is now the production force (1.8e-11 is fp32 reassoci
 `prepare_state` bakes into the rectangle payload when the CSR lane is the production near field, not from
 the lane arithmetic (mechanism not chased further: the gradient path no longer touches the rectangle).
 
+**Correction (2026-10-15):** the 1.8e-11 held on this branch only. It reached main rebased onto `bc62978`, which scoped the COM MAC geometry to the strict lane, so a fresh solver's gradient lane walked the box MAC and sat 1.2-1.5e-3 off production (`docs/production_2026-10.md`, S1). The S1 fix makes the geometry the tree's: 1.7e-7 at 2e5, pin G1.
+
 Stage split on this branch (jitted grad of the stage's own loss; the stages overlap in the COM/upward chain):
 
 | stage | grad jitted, Phase 0 lanes on this branch | grad jitted, this branch |

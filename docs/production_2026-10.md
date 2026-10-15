@@ -115,6 +115,9 @@ The first 8e6 run failed earlier, in the bench's own direct-sum reference: a fix
 
   Pin S4b compares the gradient lane only with itself, so it could not see this. S1 bisects it and adds a pin
   asserting that the differentiable forward equals the production forward on the fused lane.
+
+  **S1:** not a regression of main but a MAC-geometry split since `bc62978`: the bench's fresh solver walked the
+  box MAC, the production eval the COM one. Fixed in S1 (see there); pin G1 guards it.
 - **The 2e5 grad went from 22.1 to 31.9 ms.** Both rows were taken on a loaded host; S8 profiles it.
 - **The gradient's memory grows faster than the forward's** (15.8 GiB at 1e6, out of memory at 8e6). The process
   peak includes the bench's eager stage arms, so S8 measures the jitted gradient alone.
@@ -357,3 +360,101 @@ step (1.4 s) also carries 2.3x the far pairs.
   the missing cell leaves come first.
 - **D1:** HOLD is recommended, but the block-step track's priority depends on the production ICs' rung
   distribution. This disc caps it at 1.93x.
+
+## S1 — correctness fixes and test infrastructure (2026-10-15)
+
+**Setup.** Code: jaccpot main `63587f2`, yggdrax `2758fa9`, nornax `c1b9ff6`, Odisseo `jaccpot-integration` `adca4f6`;
+jax 0.11.2. Each fix is its own branch; the gate ran on a local merge of all the S1 jaccpot branches. GPU runs used
+shared A100s booked through autocvd (`-l`): accuracy and pins only, no timings.
+
+### The differentiable forward was on a different MAC than production (the S0 "regression")
+- **Cause: the walk's MAC geometry followed the engine's call history.** Phase 6 (`9912f5b`) made the COM geometry
+  every lane's default; `bc62978` (2026-09-14) scoped it to the strict lane through `_strict_fused_mode_active`,
+  which only a strict call sets. A fresh engine's `compute_accelerations`, `prepare_state` and the gradient lane
+  walked the box (AABB) MAC; the same engine after any strict call walked COM.
+- `bench/grad_step_profile.py` builds a NEW solver for the differentiable state, so its gradient lane walked AABB
+  against the production eval's COM. The Sept "1.8e-11" was measured on the branch before `bc62978`; it never
+  held on main.
+- **Fix: the geometry is the tree's.** COM on a static-radix tree expanded about the COMs, AABB on every other tree
+  (LBVH presets unchanged); the env override still wins. Only the strict lane's in-scan refreshes take the traced
+  hot path, never a public refresh.
+- Measured (fp64 direct sum):
+
+| case | AABB (fresh engine on main) | COM (fix) |
+| --- | --- | --- |
+| S4b config, 2e4, leaf 32, theta 0.6, p4 | 72,430 far, rel-L2 1.16e-3 | 67,120 far, 6.73e-4 |
+| 1e5, leaf 64, theta 0.8, p6 | 236,080 far, **1.54e-2** | 262,714 far, 6.36e-4 |
+| G1: 2e5 grad-bench point, differentiable vs production | **1.21e-3** | **1.66e-7** (equal lists, 750,196 far) |
+
+  The COM MAC is not the less conservative one on this tree, as `_mac_geometry.py` used to claim: it is more
+  accurate with fewer far pairs at 2e4. On the LBVH order sweep (N=224) the box stays better, which is why only
+  static radix changes.
+- The 1.7e-7 left over is fp32 summation order (it grew 1.3e-11 -> 1.7e-7 through rounds 4, 6 and 7, every
+  time with identical list counts).
+- **Pin G1** (`bench/dce_pins.py`) checks itself: both call orders within 1e-5 of production. Fails on main.
+
+### The other gradient-lane bugs
+- **J1:** the differentiable CSR near field dropped `softening_kernel` and ran ferrers3. At eps 0.05, N=1024:
+  plummer 5.96e-2 -> 3.3e-7 off production, wendland_c2 1.02e-2 -> 3.3e-7; plummer d/dpos 0.38 -> 7.6e-4 vs its
+  direct-sum gradient.
+- **J2:** `strict_run_v2`'s returned state carried the START's far list: `differentiable_accelerations` of it gave
+  3.2e-2 vs 1.7e-4 from a fresh prepare (N=1024, 3 steps). The list is now dropped and the gradient path raises
+  with the remedy. A second source (an eager public refresh after a strict call returned the input's list:
+  4.4e-2) went with the J5 fix: 9.47e-5, equal to production.
+- **J8:** the Pallas M2M/L2L cascade and CSR M2L-lane reverses lacked the on-axis (rho = 0) transverse limit: FD
+  vs AD 1.6e-6 -> 2.7e-10 on a z-stacked system. Forward and pins S4/S4b unaffected (bitwise).
+
+### Multi-GPU fused lane
+- **J3:** the non-CSR M2L (pre-Ampere, `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0`, CPU) could not take the cross
+  pairs. Fixed; a 2-device CPU end-to-end arm runs decompose -> setup -> force -> `FusedRollout`: rel-L2 3.643e-3
+  flat and CSR-interpreted alike, 3.578e-3 on one device, 329 cross pairs per device.
+- **J4:** `dehnen_error` (and `adaptive_error_model='dehnen_paper'`) is refused at every fused multi-GPU entry
+  point until S12. The mesh lane keeps it.
+
+### Block steps: frozen lists (J10)
+- Opt-in `BlockStepFMM(drift_margin=m)`: radii inflated by `(2+theta)·m` (the tight bound: a centre moves m, a
+  radius grows 2m), lists stay symmetric (momentum 1e-18). A measured guard flags drift beyond m at every
+  boundary through the overflow flag (bit 5). `suggest_drift_margin`. Default bitwise (S5); one warning at
+  k_max >= 3 without a margin.
+- 25M disc+bulge prefix at 2e4 (rel-L2 / max): k3 frozen 7.7e-4 / 8.1e-2 (fresh lists 7.9e-4 / 8.2e-2), with
+  margin 5.6e-5 / 3.0e-2; k6 frozen 4.9e-2 / 2.43, with margin 4e-15 (the margin makes every pair near: a direct
+  sum). At 1e6, k3: frozen 1.30e-2 (S0 reproduced), fresh 7.6e-4, margin 7.1e-5.
+- **Cost grows with N** (the drift is fixed, the cells shrink): near pairs x1.56 / x2.82 / x5.64 at 2e4 / 2e5 /
+  1e6 for k3. A correctness option; HOLD (S6) with fresh subset trees is the real fix.
+
+### Smaller jaccpot items
+- Jerk and time derivatives on the GPU large-N lane raise `NotImplementedError` (they failed in jaxtyping).
+- Doc contradictions (review P0.7) fixed; dead `on_grad_path` removed.
+- The 11 A100-only Pallas unit failures: one kernel bug (above), one facade annotation, the rest the tests' own.
+- conftest: `NORNAX_WORKTREE`; a nornax lacking what the tests import stops the run instead of skipping 5 tests.
+- `bench/nightly_pins.py`: the local nightly (S/M/DET/L pins + `gpu_gate.py` on the main heads). Not PR-triggered.
+
+### Odisseo and nornax
+- **The leapfrog of every non-strict run was first order in the self-gravity**, not only history runs: the `fast`
+  preset, every CPU run and every GPU run below `fmm_large_n_min_particles` kicked both halves with a(x_n).
+  Fixed (one extra force per segment): convergence ratio 1.9 -> 4.0. A large_n_gpu history run against the strict
+  lane, 2e4, 8 steps, max |dv|: 1.5e-3 on main, 6.1e-5 with the KDK fix, **4.8e-7 with the J5 fix as well**.
+- The masked scatter of the active-subset lane dropped particle 0's update when a schedule row had padding (6 of 7
+  layouts on an A100).
+- The block-step jitted lane raises on the five host-lane options it ignored; the stale "111x dt_max" warning went.
+- A CPU CI workflow (Odisseo had none); `sample_position_on_sphere/circle` accept a traced radius.
+- nornax: `IntScalar` import for `shooting_node`, and a test that every annotation resolves.
+
+### Gate
+| pin | result |
+| --- | --- |
+| S1, S2, S3, S4, S5, S6 | bitwise vs main `63587f2` (main itself bitwise vs the 2026-10-13 record) |
+| S4b | **moves (intended)**: the gradient lane now walks COM. g_mass rel 1.24e-3, g_pos 2.79e-5; vs fp64 direct sum forward 1.18e-3 -> 7.60e-4, g_mass 1.60e-3 -> 9.63e-4 |
+| M1, M3 | bitwise |
+| M2 | within main's A-vs-A envelope (max 2.4e-7) |
+| G1 | passes (1.66e-7); fails on main (1.21e-3) |
+| DET1 | bitwise A-vs-A, and bitwise vs S0's `main-5bc4959` |
+| DET2 | **not bitwise A-vs-A** (g_mass rel 2.0e-9) -- nor is MAIN today (2.6e-9); S0 had it bitwise |
+
+- **DET2 is bitwise on a free card only.** S0 recorded it on a free GPU 7; today's records on a shared card differ
+  at 2-3e-9 relative on main and on the S1 code alike, so it is not an S1 change. The reverse kernels' fp32
+  accumulation order follows the scheduling. The plan's bitwise-gradient assumptions (S6 gates, R1) need a free
+  card, the deterministic-ops flag, or an atomic-free reverse.
+- **CPU:** every jaccpot CI shard (unit, unit-runtime, unit-runtime-mac, integration, characterization,
+  mutual-static-device, the distributed and nornax tiers, bench tooling) exits 0 on the merged code; Odisseo's new
+  CI selection: 219 passed, 2 xfailed, mesh lane 15 passed.
