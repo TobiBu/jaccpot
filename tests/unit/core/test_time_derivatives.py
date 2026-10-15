@@ -561,6 +561,34 @@ def test_compute_accelerations_and_jerk_invalid_mode_raises():
         )
 
 
+@pytest.mark.parametrize(
+    "evaluate",
+    [
+        lambda fmm, state, v: fmm.evaluate_prepared_state_with_jerk(state, v),
+        lambda fmm, state, v: fmm.evaluate_prepared_state_with_time_derivatives(
+            state, v, max_time_derivative_order=2
+        ),
+    ],
+    ids=["jerk", "time_derivatives"],
+)
+def test_the_large_n_state_refuses_jerk_and_time_derivatives(evaluate):
+    """The large-N lane evaluates accelerations only, so these must refuse it.
+
+    They used to fail on a jaxtyping ``TypeCheckError`` (the state annotation
+    said ``FMMPreparedState``; confirmed on an A100 at N = 2e4,
+    ``preset="large_n_gpu"``), and the time derivatives would otherwise have
+    reached ``state.downward.locals``, which the large-N state's compat view
+    does not have. The refusal comes before the state is read, so an
+    uninitialised instance stands in for the GPU-only prepared state.
+    """
+    from jaccpot.runtime._large_n_types import LargeNPreparedState
+
+    state = object.__new__(LargeNPreparedState)
+    fmm = FastMultipoleMethod(preset=FMMPreset.LARGE_N_GPU, basis="solidfmm")
+    with pytest.raises(NotImplementedError, match="Large-N runtime path"):
+        evaluate(fmm, state, _sample_velocities(n=16))
+
+
 def test_compute_accelerations_with_time_derivatives_k3_matches_direct_sum():
     n = _NEAR_ONLY_N
     positions, masses = _sample_problem(n=n)

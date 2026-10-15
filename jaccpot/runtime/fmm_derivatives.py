@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 from math import comb
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +23,7 @@ from jaccpot.upward.real_tree_expansions import prepare_real_source_motion_multi
 from jaccpot.upward.tree_expansions import NodeMultipoleData, TreeUpwardData
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
+from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
 from .fmm_state import FMMPreparedState
 from .kernels.core import (
@@ -376,7 +377,7 @@ class DerivativesMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_jerk(
         self,
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         velocities: Array,
         *,
         target_indices: Optional[Array] = None,
@@ -399,8 +400,9 @@ class DerivativesMixin(_EngineBase):
 
         Parameters
         ----------
-        state : FMMPreparedState
-            Prepared state to evaluate; not mutated.
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Prepared state to evaluate; not mutated. A ``LargeNPreparedState`` is
+            accepted only to be refused (below).
         velocities : Array
             Particle velocities, in the caller's original order, with the same
             shape as the state's positions.
@@ -421,10 +423,19 @@ class DerivativesMixin(_EngineBase):
 
         Raises
         ------
+        NotImplementedError
+            For a ``LargeNPreparedState`` (``preset="large_n_gpu"`` on a GPU), whose
+            lane evaluates accelerations only, as for ``target_indices`` and the
+            derivative tower there. Raised before any work.
         ValueError
             If ``velocities`` does not match the state's position shape, or if
             ``jerk_mode`` is neither ``"fast_approx"`` nor ``"accurate"``.
         """
+        if isinstance(state, LargeNPreparedState):
+            raise NotImplementedError(
+                "Large-N runtime path currently does not support jerk; use a "
+                "preset other than large_n_gpu."
+            )
         vel_arr = jnp.asarray(velocities, dtype=state.working_dtype)
         if vel_arr.shape != state.positions_sorted.shape:
             raise ValueError(
@@ -515,7 +526,7 @@ class DerivativesMixin(_EngineBase):
     @jaxtyped(typechecker=beartype)
     def evaluate_prepared_state_with_time_derivatives(
         self,
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         velocities: Array,
         *,
         target_indices: Optional[Array] = None,
@@ -534,8 +545,9 @@ class DerivativesMixin(_EngineBase):
 
         Parameters
         ----------
-        state : FMMPreparedState
-            Prepared state to evaluate; not mutated.
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Prepared state to evaluate; not mutated. A ``LargeNPreparedState`` is
+            accepted only to be refused (below).
         velocities : Array
             Particle velocities, in the caller's original order, with the same
             shape as the state's positions.
@@ -565,8 +577,16 @@ class DerivativesMixin(_EngineBase):
             ``"accurate"``, or if ``velocities`` does not match the state's
             position shape.
         NotImplementedError
-            If ``max_time_derivative_order > 3``.
+            If ``max_time_derivative_order > 3``; or for a ``LargeNPreparedState``
+            (``preset="large_n_gpu"`` on a GPU), whose lane evaluates accelerations
+            only and keeps no ``downward.locals`` to differentiate. Raised before any
+            work.
         """
+        if isinstance(state, LargeNPreparedState):
+            raise NotImplementedError(
+                "Large-N runtime path currently does not support time derivatives; "
+                "use a preset other than large_n_gpu."
+            )
         k_max = int(max_time_derivative_order)
         if k_max < 1:
             raise ValueError("max_time_derivative_order must be >= 1")

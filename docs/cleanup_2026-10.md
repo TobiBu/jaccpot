@@ -56,10 +56,10 @@ On `main` at 6cca378 (2026-10-06):
 | C | #389 | The complex basis: the distributed driver's complex far field (C2), then single GPU (C1): `basis="complex"` raises one migration error, `basis="solidfmm"` is the real basis, the six complex modules and the runtime's complex branches go; direct-sum oracles replace the real basis's complex-only cross-checks first | CPU suite (also at the behaviour change alone), shard partition, distributed tier, CPU bitwise A/B, CI benchmark guard on real | merged |
 | tower | #390 | The acceleration-derivative tower includes the near field (C's finding); `evaluate_local_real_with_grad`'s docstring sign; a GPU-only failure of K's `jerk_fd_dt` test | CPU suite, A100 tests + fp32 check, GPU pins S3/S4/S4b | merged |
 | Z-a | #392 | Test consolidation (T1, rules R2-R7): the bench-tooling tests move to `bench/tests`; one signature-contract table; grid corners; `tests/integration/strict/`; one owner per gradient property; `test_fmm.py` and `test_solver_api.py` split by subject; the removed-option and shim tests collected in `test_removed_options.py` for Z-b. Tests only | CPU suite, shard partition, bench-tooling tests | merged |
-| Z-b | #393 | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | open |
-| Z-c | | CI and docs: `slow_tests.txt` rebuilt from durations; a curated `smoke` marker run by the Python-floor job; the criterion and nornax-distributed jobs path-gated (main, nightly, dispatch, PRs touching their code); caps at about twice the measured times; stale marker ids fail `test-partition`; ARCHITECTURE, README, the docs index and the current docs follow the cleanup; notebooks stop passing removed options; the `CLAUDE.md` amendment reverted. Library: comments only | CPU suite, shard partition, smoke run, actionlint, bench tooling | open |
-| fix | #398 | The fused two-card lane on jax 0.11.2: XLA's NCCL ragged exchange needs `use_barrier_with_nccl=false`; `RAGGED_EXCHANGE_XLA_FLAGS`, bench flag helper, pure-JAX repro; yggdrax guard (yggdrax #95) | pure-JAX repro matrix, rollout gate, exchange bench, distributed grad tier, pins M1-M3 (two cards) | open |
-| x64 | #400 | `jax_enable_x64` becomes a checked, documented requirement of yggdrax and jaccpot; yggdrax stops switching it on and starting the backend at import (yggdrax #97); benches, Odisseo's tests and scripts enable it themselves. Library: one `RuntimeError` at the entry points, no numerical change | yggdrax suite + distributed tier + x64-off guard sweep, CPU suite, CPU bitwise A/B (110 arrays), Odisseo tests (Odisseo #33), nornax adapter, GPU pins S1-S6 bitwise | open |
+| Z-b | #393 | Shims, inert options and removal errors: `env_reject_removed` and every removal error (env values, basis migration, octree / `fixed_depth` / backend), `runtime_path`, `FarFieldConfig.mode`, `jerk_fd_dt`, the grouped / autotune / dense / `execution_backend` shims, the complex basis's `rotation` / `basis_mode` leftovers (with the large-N gate's `complex_rotation` conjunct), the always-`None` pytree fields, the locals template, the dead gear chain; benches and tests follow | CPU suite, distributed tier, shard partition, CPU bitwise A/B (110 arrays), CI benchmark guard on real, Odisseo G4, nornax adapter | merged |
+| Z-c | #394 | CI and docs: `slow_tests.txt` rebuilt from durations; a curated `smoke` marker run by the Python-floor job; the criterion and nornax-distributed jobs path-gated (main, nightly, dispatch, PRs touching their code); caps at about twice the measured times; stale marker ids fail `test-partition`; ARCHITECTURE, README, the docs index and the current docs follow the cleanup; notebooks stop passing removed options; the `CLAUDE.md` amendment reverted. Library: comments only | CPU suite, shard partition, smoke run, actionlint, bench tooling | merged |
+| fix | #398 | The fused two-card lane on jax 0.11.2: XLA's NCCL ragged exchange needs `use_barrier_with_nccl=false`; `RAGGED_EXCHANGE_XLA_FLAGS`, bench flag helper, pure-JAX repro; yggdrax guard (yggdrax #95) | pure-JAX repro matrix, rollout gate, exchange bench, distributed grad tier, pins M1-M3 (two cards) | merged |
+| x64 | #400 | `jax_enable_x64` becomes a checked, documented requirement of yggdrax and jaccpot; yggdrax stops switching it on and starting the backend at import (yggdrax #97); benches, Odisseo's tests and scripts enable it themselves. Library: one `RuntimeError` at the entry points, no numerical change | yggdrax suite + distributed tier + x64-off guard sweep, CPU suite, CPU bitwise A/B (110 arrays), Odisseo tests (Odisseo #33), nornax adapter, GPU pins S1-S6 bitwise | merged |
 
 ### P0: CI runs each test once
 
@@ -3025,10 +3025,11 @@ run, and are left for it:
 | pins at 15ceca4 | #377 | tower: near field in the derivative tower | #390 |
 | D2 fused lane default | #378 | Z-a test consolidation | #392 |
 | X3 grouped far field, AABB centres | #380 | Z-b shims and removal errors | #393 |
-| Z-c CI and docs | (this) | | |
+| Z-c CI and docs | #394 | fix: NCCL ragged barrier (jax 0.11.2) | #398 |
+| x64 requirement | #400 | | |
 
 yggdrax: Y3 #90 (with the `jaccpot-compat` CI job), Y1 #91, Y2 #92. Odisseo
-(`jaccpot-integration`): #27, #29 (O2), #31 (O3), #32 (open, Z-b's follow-up). nornax:
+(`jaccpot-integration`): #27, #29 (O2), #31 (O3), #32 (Z-b's follow-up). nornax:
 #14.
 
 **Library size.**
@@ -3080,10 +3081,13 @@ paths (2.65 h on main and gated PRs).
 
 **Still open:**
 - **The jax 0.11.2 two-card fused-lane hang** (`ragged_all_to_all`): pin M2 cannot be
-  recorded until it is fixed; a separate investigation.
+  recorded until it is fixed; a separate investigation. Resolved 2026-10-12 (#398): XLA's
+  NCCL ragged exchange deadlocks while `use_barrier_with_nccl` is on, the jax 0.11
+  default; M2 is recorded (section "The fused two-card lane on jax 0.11.2" below).
 - **The two-card pins M1 / M3 were not re-run** after C (last bitwise on main 944e6ba
   and at C); Z-a, Z-b and Z-c did not run them (no two free cards), though the mesh lane
-  is in Z-b's CPU A/B and Z-c changes no library code.
+  is in Z-b's CPU A/B and Z-c changes no library code. Resolved 2026-10-12: M1 and M3
+  on main e25633d are bitwise against main-15ceca4 (same section).
 - **Adaptive order does not reach the downward sweep**: `_prepare_solidfmm_downward_sweep`
   reads neither `adaptive_order` nor `p_gears`, so every accepted pair runs at
   `max_order` and the gears only feed `far_pairs_by_gear_counts` (README notes it).

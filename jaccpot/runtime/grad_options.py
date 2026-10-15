@@ -265,12 +265,6 @@ _analytic_l2p_vjp_override: ContextVar[Optional[bool]] = ContextVar(
 _cascade_pallas_override: ContextVar[Optional[bool]] = ContextVar(
     "jaccpot_cascade_pallas_override", default=None
 )
-#: True while a ``differentiable_accelerations`` call is being traced. Read by
-#: dispatch sites that must pick a differentiable kernel variant (the fast
-#: M2L CSR kernel family has one differentiable member).
-_grad_path_active: ContextVar[bool] = ContextVar(
-    "jaccpot_grad_path_active", default=False
-)
 
 
 def cascade_pallas_override() -> Optional[bool]:
@@ -284,17 +278,6 @@ def cascade_pallas_override() -> Optional[bool]:
         the environment".
     """
     return _cascade_pallas_override.get()
-
-
-def on_grad_path() -> bool:
-    """Whether a ``differentiable_accelerations`` call is currently being traced.
-
-    Returns
-    -------
-    bool
-        ``True`` inside :func:`grad_option_overrides`.
-    """
-    return bool(_grad_path_active.get())
 
 
 def fused_m2l_pallas_enabled() -> bool:
@@ -365,7 +348,6 @@ def grad_option_overrides(options: ResolvedGradOptions) -> Iterator[None]:
         _analytic_p2p_vjp_override.set(options.analytic_p2p_vjp),
         _analytic_l2p_vjp_override.set(options.analytic_l2p_vjp),
         _cascade_pallas_override.set(options.cascade_pallas),
-        _grad_path_active.set(True),
     )
     try:
         yield
@@ -374,7 +356,6 @@ def grad_option_overrides(options: ResolvedGradOptions) -> Iterator[None]:
         _analytic_p2p_vjp_override.reset(tokens[1])
         _analytic_l2p_vjp_override.reset(tokens[2])
         _cascade_pallas_override.reset(tokens[3])
-        _grad_path_active.reset(tokens[4])
 
 
 __all__ = [
@@ -385,6 +366,5 @@ __all__ = [
     "cascade_pallas_override",
     "fused_m2l_pallas_enabled",
     "grad_option_overrides",
-    "on_grad_path",
     "resolve_grad_options",
 ]

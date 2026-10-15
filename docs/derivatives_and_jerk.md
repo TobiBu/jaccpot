@@ -20,7 +20,12 @@ limits:
 - public time derivatives above crackle (`max_time_derivative_order > 3`) are
   not implemented yet.
 - all of these paths work both on full solves and on prepared-state/subset
-  evaluation APIs.
+  evaluation APIs -- on the general path. None of them runs on the large-N lane
+  (`preset="large_n_gpu"` on a GPU), which evaluates all particles'
+  accelerations (or potentials) only: `target_indices` and
+  `max_acc_derivative_order > 0` raise `NotImplementedError` there
+  (`runtime/_large_n_pipeline.py:2012-2019`), and so do jerk and the time
+  derivatives (`runtime/fmm_derivatives.py`). Use another preset for them.
 
 ## Acceleration Derivatives
 

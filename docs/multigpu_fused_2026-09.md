@@ -19,6 +19,11 @@ One-sided cross-domain evaluation on the receiving device (jz-fmm's scheme: no r
 canonicalisation); multi-node from the start, so nothing host-global may remain; forward force first, gradients
 later.
 
+(Note 2026-10-15: the multi-node goal is not met as built. One process drives every card and nothing in jaccpot
+calls `jax.distributed.initialize`; `decompose`, `setup_fused_force`, `FusedRollout.step` and `gather` read global
+arrays on the host (`distributed/rollout.py:219-262, 485-505, 673-677, 708-744`). Multi-node is now future work,
+decision D5 in `docs/production_2026-10.md`. The gradients are not started: the cross-domain reverses raise.)
+
 ## Built so far
 
 ### Padded shards (yggdrax)

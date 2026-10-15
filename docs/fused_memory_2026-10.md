@@ -9,6 +9,21 @@ on #357. Rows: `bench/results/fused_memory/` (its README names each arm's commit
 named both flat-walk list caps as pow2(200k fit x ceil(N / 200k)) while its N-max script said they were unnamed,
 and N does not decide the pair counts (the 4e6 draw has 3x the far pairs of 8e6).
 
+**"Default" in this record means the bench's default, not the library's** (note added 2026-10-15). Every row
+here, the headline ones included (1e8 at 803.1 ms and 23.97 GiB, 1.68e8 at 214 B/p), ran
+`bench/fused_memory_budget.py`'s configuration: cell leaves of 64 with a leaf capacity of 1.15x the live cells,
+cell_min_level 8, theta 0.8, p5 (p6 from round 5), `JACCPOT_STRICT_CARRY=particles` (from Step 3), the prepared
+state donated, `donate_state=True` on the rows marked `--donate-state`, Plummer softening 1e-7. The library's
+defaults on main 63587f2 differ in each of those:
+- bucket leaves (`TreeConfig.leaf_partition=None`, `runtime/_fmm_impl.py:448-450`); cell leaves need an explicit
+  `leaf_capacity`;
+- cell_min_level 0 (`None`, `_fmm_impl.py:461-463`), and a non-zero level needs cell leaves (`:464-465`);
+- `carry="state"` (`JACCPOT_STRICT_CARRY` unset, `runtime/fmm_strict_run.py:769-773`), no donation of either kind;
+- the facade's theta 0.6 (`solver.py:613`); `max_order` has no default in `strict_run_v2`;
+- `ferrers3` softening since #375 (`softening.py:62`).
+
+Re-measured on 2026-10-13 at the bench configuration: `docs/production_2026-10.md`.
+
 ## Step 0: where the bytes were
 
 Card 3, Plummer seed 0, cell_min_level 8, leaf capacity 1.15x the live cells in steps of 1024; three interleaved
@@ -492,7 +507,7 @@ near 287, walk 292, lists 146 (of which the far CSR placement 85, superlinear: 3
 pairs), COM radii 112, upward 96 (P2M 78), M2L 92, tree 92. COM radii and P2M ran one program per leaf over the
 64-lane capacity for ~10-20 particles.
 
-**Defaults** (`defaults/`, jax 0.11.2, the frozen round-4 tree). Step ms / fp64 rel-L2 / longest near row:
+**Bench defaults** (`defaults/`, jax 0.11.2, the frozen round-4 tree). Step ms / fp64 rel-L2 / longest near row:
 
 | case | p5 cml8 (old) | p6 cml8 | p5 cml6 | p6 cml6 |
 | --- | --- | --- | --- | --- |
@@ -507,7 +522,7 @@ pairs), COM radii 112, upward 96 (P2M 78), M2L 92, tree 92. COM radii and P2M ra
   error is the softening's, the known follow-up). Memory +4-7 % at 8e6-1e8.
 * **cell_min_level 6 broke the near field on outliers**: an outskirt cell of the unclipped draw stays one leaf near
   101,870 leaves, and round 4's whole-row near field ran that row in ONE program -- 16.6 s per step. It helps
-  the clipped draw only (8e6 101 -> 83 ms, 1e8 1252 -> 1155 ms), so level 8 stays the default.
+  the clipped draw only (8e6 101 -> 83 ms, 1e8 1252 -> 1155 ms), so level 8 stays the bench default.
 * **Two long-row fixes.** The force at level 6 on the unclipped draw went 240.8 -> 34.2 ms with the first; the
   step needed the second (a trace put 19.87 s of its 19.93 s in one kernel):
   * near field (`851e1fa`): a row's own program runs it up to 1024 entries, the rest goes in pieces of 1024
@@ -574,7 +589,7 @@ off when it preallocates, and production runs with a preallocated arena should s
 
 **The one-card ceiling on jax 0.11.2** (`ceiling/`, `--donate-state`, arena 0.88): round 4's configuration (p5,
 round-4 code) still fits 1.68e8 (33.68 GiB, 215 B/p, 2960 ms/step, one recovered allocator retry; 33.45 GiB on
-0.10.2). The new default, p6 with round 5, fits 1.60e8 (33.34 GiB, 224 B/p, 2667 ms/step, one recovered retry;
+0.10.2). The new bench default, p6 with round 5, fits 1.60e8 (33.34 GiB, 224 B/p, 2667 ms/step, one recovered retry;
 1.44e8 30.23 GiB at 2561 ms, 1.52e8 31.76 GiB at 2551 ms) and runs out at 1.68e8, in the eager prepare, where the
 p6 coefficient tables (2 x nodes x 49) are 8.7 GiB: order 6 costs ~5 % of the ceiling. Runs at the limit can pass
 order 5.
@@ -763,7 +778,7 @@ the 2026-10 cleanup, X5.)
 fast: 8e6 72.9 / 73.2 against 73.0 / 73.2 ms (+20 B/p), 1e8 801.6 against 805.7 ms (+3.5 GiB, 24.78 -> 28.27). It
 stays opt-in; Step 4 of the plan (its memory) is moot.
 
-**The defaults as of this round** (`final/`; main = `base`, the round = frozen `a8` + yggdrax `y1`, then `a10` =
+**The defaults as of this round** (the bench configuration; `final/`; main = `base`, the round = frozen `a8` + yggdrax `y1`, then `a10` =
 `a8` + the bisecting L2P, interleaved with `a8` in chain 10):
 
 | N | main | round 7 (`a8`) | round 7 (`a10`, as merged) | jz-fmm at its nearest error (force incl. tree) |
@@ -812,7 +827,8 @@ Then (updated after round 7):
 * **cell_min_level per IC.** Level 6 saves 6-19 % (and 6-33 % memory) on bounded distributions and costs 3.5x on
   the unclipped draw at 2e6. An adaptive cut (split a cell leaf whose particles are spread wide relative to its
   neighbours) would take the gain without the outlier leaf; the library default (`None`, unconstrained) should
-  become 8.
+  become 8. A recommendation, not done: on main 63587f2 (2026-10-15) it is still `None`, i.e. 0, and a level needs
+  cell leaves, which the library does not default to either (see the note at the top).
 * **Memory: the eager prepare binds** (~215 B/p at 1.5-1.7e8, its list build). The particle carry needs only the
   walk's caps, the shape template and the initial verdict from it: a prepare that stops after the walk and
   derives the template's shapes would drop the eager list build and downward pass. Re-measure the one-card ceiling
