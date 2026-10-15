@@ -24,6 +24,18 @@ S5     ``BlockStepFMM`` with Odisseo's ``BlockStepOptions`` defaults (jax
        backend, leaf 64, static shapes, device topology), 20 base steps at 2e4
 S6     S1 with ``--clean-env``: no JACCPOT_* / YGGDRAX_* variables at all, so
        the fused lane runs on the library's own defaults
+S1p    S1 on the particle carry (``JACCPOT_STRICT_CARRY=particles``): the start
+       program, the shape template, the chain through the handle
+S1t    S1p with ``JACCPOT_STRICT_CARRY_ORDER=tree``: the rows in Morton order
+S1e    S1 with ``mac_type="dehnen_error"`` (eq 16a per pair inside the flat walk,
+       ``adaptive_eps`` ``_S1E_EPS``, f_b carried through the scan), on the state
+       carry (``force``, ``state``) and the particle carry (``*_particles``), with
+       each arm's far-pair count
+S1x    a 2e5 prefix of the 25M disc+bulge IC with its NFW halo as
+       ``external_acceleration_fn`` (traced inside the scan), eps 1.5e-3, on the
+       state and the particle carry
+S1g    S1 at G = 4.3e-6 (``--G``), the masses divided by G: G m, the orbits and the
+       forces are S1's, through a G that is not 1
 M1     two cards: ``distributed/fmm.py`` built as Odisseo's mesh lane builds it
        (``MeshOptions`` defaults: leaf 512, theta 0.7, p6, rcb), one force at
        131,072, in input order
@@ -49,6 +61,11 @@ G1     the differentiable forward against the production forward on the fused
 
 The M pins need two cards (``autocvd -n 2``) and are recorded separately:
 ``record --pins M1,M2,M3``.
+
+The S1 variants (S1p, S1t, S1e, S1x, S1g) pin what S1 does not run: they were added
+for the FusedForceProvider refactor (S2, 2026-10-15), which must keep every variant
+of the scan bitwise, and are not in the default set yet:
+``record --pins S1p,S1t,S1e,S1x,S1g``, ``compare ... --pins S1p,S1t,S1e,S1x,S1g``.
 
 The L pins time the lane, so they run without the deterministic-ops flag, on a
 FREE card (``autocvd -n 1`` without ``-l``), and are compared on their scalars:
@@ -95,6 +112,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT_DEFAULT = "/export/scratch/tbuck/dce_pins"
 PINS = ("S1", "S2", "S3", "S4", "S4b", "S5", "S6")
+#: the fused scan's variants beyond S1's state carry (S2 provider refactor); not in
+#: the default set
+PINS_S1_VARIANTS = ("S1p", "S1t", "S1e", "S1x", "S1g")
 PINS_TWO_CARD = ("M1", "M2", "M3")
 PINS_LARGE = ("L1", "L2", "L3")
 PINS_DET = ("DET1", "DET2")
@@ -111,6 +131,14 @@ _DISC_SOFTENING = "1.5e-3"
 #: 7.3e-8 from #367 (round 6), 1.7e-7 from #368 (round 7) on, every time with equal
 #: far-pair and near-edge counts. A geometry split is 1.2e-3 to 1.5e-3.
 _G1_REL_L2_LIMIT = 1e-5
+#: S1e's eq (16) accuracy target: where the criterion, not theta 0.8, decides the
+#: lists at S1's operating point. Eval-only rows on f967805 (A100, 2026-10-15): far
+#: pairs 3,350,146 against the geometric MAC's 1,876,324, rel-L2 1.45e-4 against
+#: 7.76e-4 (1e-3: 1,366,602 and 1.33e-3, looser than theta; 1e-5: 8,047,234 and
+#: 1.98e-5). The pin's meta records each arm's far-pair count.
+_S1E_EPS = "1e-4"
+#: S1g's gravitational constant: kpc, km/s, Msun
+_S1G_G = "4.3e-6"
 
 
 # --------------------------------------------------------------------- cases
@@ -132,7 +160,9 @@ def _plummer(n: int, seed: int = 0):
     return pos.astype(np.float32), vel.astype(np.float32), mass.astype(np.float32)
 
 
-def _fused_bench(out: Path, n: int, extra: list[str]) -> dict:
+def _fused_bench(
+    out: Path, n: int, extra: list[str], ic: str = "plummer_clipped"
+) -> dict:
     """S1 / S2: the production bench, unchanged, with its bitwise save."""
     import numpy as np
 
@@ -144,7 +174,7 @@ def _fused_bench(out: Path, n: int, extra: list[str]) -> dict:
         "--n",
         str(n),
         "--ic",
-        "plummer_clipped",
+        ic,
         "--caps",
         "unnamed",
         "--steps",
@@ -184,6 +214,57 @@ def case_s6(out: Path) -> dict:
     payload bug (#384) behind its RADIX_FAST_PAYLOAD_MAX_MB=0.
     """
     return _fused_bench(out, 200_000, ["--clean-env"])
+
+
+_PARTICLE_CARRY = ["--env", "JACCPOT_STRICT_CARRY=particles"]
+
+
+def _fused_arms(
+    out: Path, n: int, extra: list[str], ic: str = "plummer_clipped"
+) -> dict:
+    """``_fused_bench`` on the state carry and on the particle carry, one process
+    each: ``force`` / ``state`` and ``force_particles`` / ``state_particles``."""
+    import numpy as np
+
+    arrays, meta = {}, {}
+    for arm, more in (("", []), ("_particles", _PARTICLE_CARRY)):
+        part = out.with_name(f"{out.stem}{arm or '_state'}.npz")
+        row = _fused_bench(part, n, extra + more, ic=ic)
+        counts = json.loads(part.with_suffix(".bench.json").read_text())["counts"]
+        with np.load(part) as data:
+            arrays.update({f"{k}{arm}": data[k] for k in data.files})
+        meta[f"rel_l2{arm}"] = row["rel_l2"]
+        meta[f"far_pair_count{arm}"] = counts.get("far_pair_count")
+    np.savez(out, **arrays)
+    return {"n": n, **meta}
+
+
+def case_s1p(out: Path) -> dict:
+    return _fused_bench(out, 200_000, _PARTICLE_CARRY)
+
+
+def case_s1t(out: Path) -> dict:
+    return _fused_bench(
+        out,
+        200_000,
+        _PARTICLE_CARRY + ["JACCPOT_STRICT_CARRY_ORDER=tree"],
+    )
+
+
+def case_s1e(out: Path) -> dict:
+    """Dehnen (2014) eq (16a) per pair, both carries; f_b rides the scan."""
+    return _fused_arms(
+        out, 200_000, ["--mac-type", "dehnen_error", "--adaptive-eps", _S1E_EPS]
+    )
+
+
+def case_s1x(out: Path) -> dict:
+    """The disc+bulge with its NFW halo traced inside the scan, both carries."""
+    return _fused_arms(out, 200_000, ["--softening", _DISC_SOFTENING], ic="disc")
+
+
+def case_s1g(out: Path) -> dict:
+    return _fused_bench(out, 200_000, ["--G", _S1G_G])
 
 
 def case_s3(out: Path) -> dict:
@@ -749,6 +830,11 @@ CASES = {
     "M2": case_m2,
     "M3": case_m3,
     "S1": case_s1,
+    "S1e": case_s1e,
+    "S1g": case_s1g,
+    "S1p": case_s1p,
+    "S1t": case_s1t,
+    "S1x": case_s1x,
     "S2": case_s2,
     "S3": case_s3,
     "S4": case_s4,
@@ -811,6 +897,8 @@ def _diff(a: Path, b: Path) -> dict:
         ref = np.linalg.norm(x.astype(np.float64))
         rows[key] = {
             "bitwise": bool(np.array_equal(x, y)),
+            "n_diff": int(np.count_nonzero(x != y)),
+            "size": int(x.size),
             "max_abs": float(d.max()) if d.size else 0.0,
             "rel_l2": float(np.linalg.norm(d) / ref) if ref else 0.0,
         }

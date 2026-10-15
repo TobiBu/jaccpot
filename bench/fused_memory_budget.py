@@ -188,6 +188,14 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--drift-steps", default="0,50,100")
     ap.add_argument("--softening", type=float, default=None)
     ap.add_argument(
+        "--G",
+        type=float,
+        default=1.0,
+        help="the solver's gravitational constant (4.3e-6: kpc, km/s, Msun); the "
+        "masses are divided by it, so G m -- and with it the system, its orbits, "
+        "dt and the reference forces -- is the G = 1 one",
+    )
+    ap.add_argument(
         "--softening-kernel",
         default=None,
         choices=("ferrers3", "wendland_c2", "plummer"),
@@ -646,7 +654,7 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
         preset="large_n_gpu",
         basis="real",
         theta=ARGS.theta,
-        G=1.0,
+        G=ARGS.G,
         softening=soft,
         softening_kernel=ARGS.softening_kernel,
         working_dtype=jnp.float32,
@@ -711,8 +719,16 @@ def _write(result: dict) -> None:
 # --------------------------------------------------------------------------- modes
 
 
+def _in_g_units(mass: np.ndarray) -> np.ndarray:
+    """``mass / G`` (``--G``): the same system in units where G is not 1."""
+    if ARGS.G == 1.0:
+        return mass
+    return (np.asarray(mass, np.float64) / ARGS.G).astype(np.float32)
+
+
 def run_budget(result: dict) -> None:
     pos, vel, mass, soft, dt, ext = _initial_conditions()
+    mass = _in_g_units(mass)
     live, leaf_cap = _leaf_capacity(pos)
     result.update(live_leaves=live, leaf_capacity=leaf_cap, softening=soft, dt=dt)
     print(f"N={ARGS.n} live leaves {live} -> leaf capacity {leaf_cap}", flush=True)
@@ -907,7 +923,7 @@ def _direct_kernel_fp64(pos, mass, idx, soft: float, kernel: str):
     for b in range(0, len(idx), 256):
         ib = jnp.asarray(idx[b : b + 256])
         out.append(np.asarray(block(p[ib], ib)))
-    return np.concatenate(out)
+    return ARGS.G * np.concatenate(out)
 
 
 def _force_scale_reference(pos, mass, soft: float, idx, acc_cache: str) -> np.ndarray:
@@ -938,6 +954,7 @@ def _force_scale_reference(pos, mass, soft: float, idx, acc_cache: str) -> np.nd
     for a in range(0, len(idx), block):
         b = min(a + block, len(idx))
         out[a:b] = np.asarray(_block(p64[ti[a:b]], ti[a:b], p64, m64, gid))
+    out *= ARGS.G
     np.save(cache, out)
     return out
 
@@ -967,7 +984,8 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
         "artifacts",
         "reference",
         f"direct_fp64_{ARGS.ic}{ARGS.n}_soft{soft:g}"
-        f"{'' if kernel == 'plummer' else '_' + kernel}_ref{len(idx)}_seed12345.npy",
+        f"{'' if kernel == 'plummer' else '_' + kernel}"
+        f"{'' if ARGS.G == 1.0 else f'_G{ARGS.G:g}'}_ref{len(idx)}_seed12345.npy",
     )
     if os.path.exists(cache):
         ref = np.load(cache)
@@ -981,7 +999,7 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
         ref = direct_accelerations(
             np.asarray(pos, np.float64),
             np.asarray(mass, np.float64),
-            G=1.0,
+            G=ARGS.G,
             softening=soft,
             target_indices=idx,
         )
@@ -1028,6 +1046,7 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
 
 def run_drift(result: dict) -> None:
     pos, vel, mass, soft, dt, ext = _initial_conditions()
+    mass = _in_g_units(mass)
     live, leaf_cap = _leaf_capacity(pos)
     result.update(live_leaves=live, leaf_capacity=leaf_cap, softening=soft, dt=dt)
     print(
@@ -1117,6 +1136,7 @@ def main() -> int:
         mem_fraction=os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
         preallocate=os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
         rmax=ARGS.rmax if ARGS.ic == "plummer_clipped" else None,
+        G=ARGS.G,
         worktree=os.environ.get("JACCPOT_WORKTREE"),
         yggdrax_worktree=os.environ.get("YGGDRAX_WORKTREE"),
         device=str(jax.devices()[0]),
