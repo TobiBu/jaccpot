@@ -52,7 +52,8 @@ COM, since a single-child internal node shares its child's COM) and
 z-axis-aligned -- the rotation-angle builders return a zero cotangent by
 construction (``docs/operator_conventions.md`` and
 ``jaccpot/operators/_transverse_degeneracy_jvp.py`` record how the axis-aligned
-transverse derivative is carried instead).
+transverse derivative is carried instead; the Pallas cascades' and the CSR M2L
+lane's reverse kernels carry the same limit since 2026-10-15).
 
 (This note lived on the Cartesian ``compute_node_multipoles`` until that sweep
 was removed in the 2026-10 cleanup, K.)

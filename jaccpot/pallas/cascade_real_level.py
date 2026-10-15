@@ -49,6 +49,7 @@ import numpy as np
 from jax import lax
 from jaxtyping import Array
 
+from jaccpot.operators.real_rotations import _real_rotation_generator_block
 from jaccpot.pallas._compat import KernelRef, pallas_backend_kwargs
 from jaccpot.pallas.m2l_real_csr import (
     _TABLE_KEYS,
@@ -146,16 +147,39 @@ def cascade_level_tables(order: int) -> dict:
     t["kpow"] = np.arange(Bp, dtype=np.float64)
     t["Binv"] = Binv
     t["BinvT"] = np.swapaxes(Binv, -1, -2).copy()
+    # The rotation generators about x and y per degree, centred like Bstack: the
+    # reverse kernels' on-axis edge cotangent (`_write_on_axis_edge_cotangent`).
+    # Taken from the block builder the pure-JAX operators' rule uses, so the two
+    # lanes share one calibration of every sign.
+    for key, axis, representation in _AXIS_GENERATORS:
+        stack = np.zeros((Bp, t["Wp"], t["Wp"]), dtype=np.float64)
+        for ell in range(p + 1):
+            stack[ell, p - ell : p + ell + 1, p - ell : p + ell + 1] = (
+                _real_rotation_generator_block(ell, axis, representation)
+            )
+        t[key] = stack
     return t
 
 
 _CORE_KEYS = ("Sm2m", "Sl2l", "invfact", "kpow", "Binv", "BinvT")
 
+# (table key, rotation axis, representation). M2M maps multipoles to multipoles and
+# L2L locals to locals, so each reverse kernel takes one pair: the input and output
+# generators of formula (2)/(3) in `operators/_transverse_degeneracy_jvp` coincide.
+_AXIS_GENERATORS = (
+    ("GmpX", "x", "multipole"),
+    ("GmpY", "y", "multipole"),
+    ("GlocX", "x", "local"),
+    ("GlocY", "y", "local"),
+)
+_M2M_AXIS_KEYS = ("GmpX", "GmpY")
+_L2L_AXIS_KEYS = ("GlocX", "GlocY")
+
 
 def _core_tables_to_jnp(order: int, dtype: Any) -> dict[str, Array]:
     t = cascade_level_tables(int(order))
     out = _tables_to_jnp(int(order), dtype)
-    for k in _CORE_KEYS:
+    for k in (*_CORE_KEYS, *(key for key, _, _ in _AXIS_GENERATORS)):
         out[k] = jnp.asarray(t[k], dtype=dtype)
     return out
 
@@ -235,10 +259,11 @@ def _translate_rows(
         # Every branch selects the same VALUE the unguarded form gives
         # (arctan2(0, 0) = 0, sqrt(0) = 0); the guards only keep the transpose
         # finite. On the axis the transverse cotangent comes out zero -- the
-        # polar route cannot resolve it (see operators/_transverse_degeneracy_jvp
-        # for the analytic limit the pure-JAX operators add); at delta == 0 the
-        # two centres are the same function of the positions and the cotangent
-        # cancels whatever finite value it takes.
+        # polar route cannot resolve it -- and the reverse kernels overwrite it
+        # with the analytic limit the pure-JAX operators use
+        # (`_write_on_axis_edge_cotangent`); at delta == 0 the two centres are
+        # the same function of the positions and the cotangent cancels whatever
+        # finite value it takes.
         one = jnp.asarray(1.0, dtype=dtype)
         zero = jnp.asarray(0.0, dtype=dtype)
         rho_pos = rho2 > 0
@@ -389,6 +414,86 @@ def _dbar_row(dxb: Array, dyb: Array, dzb: Array, valid: Array, dtype: Any) -> A
     return jnp.where(valid, row, zero).astype(dtype)
 
 
+def _write_on_axis_edge_cotangent(
+    dbar_ref: KernelRef,
+    target: Array,
+    valid: Array,
+    delta3: tuple,
+    rows_in: Array,
+    rows_out: Array,
+    rows_in_bar: Array,
+    rows_out_bar: Array,
+    dzb: Array,
+    gen_x_ref: KernelRef,
+    gen_y_ref: KernelRef,
+) -> None:
+    """Overwrite an on-axis edge's transverse cotangent with its analytic limit.
+
+    The polar route :func:`_translate_rows` differentiates reaches ``x`` and ``y``
+    only through ``rho`` and the azimuth, so on the axis its guards hand back a zero
+    transverse cotangent and just off it (``rho/r`` below ``sqrt(eps)``) a
+    cancellation-dominated one -- while the translation itself is differentiable
+    there. This writes, for such an edge, the limit the pure-JAX operators' rule
+    supplies (:mod:`jaccpot.operators._transverse_degeneracy_jvp`, formula (2)/(3),
+    transposed): with ``F`` the edge's operator, ``in``/``out`` its input and output
+    rows and ``in_bar = F^T out_bar``,
+
+        dL/dx = +(1/z) (<out_bar, G^y out> - <in_bar, G^y in>)
+        dL/dy = -(1/z) (<out_bar, G^x out> - <in_bar, G^x in>)
+
+    and keeps the polar route's ``z`` cotangent, exactly as that rule routes the
+    tangent. Same band (``rho^2 <= eps r^2``, ``z != 0``), so the two lanes agree
+    on every edge. Off the band nothing is written and the row stays the polar
+    one, bit for bit; the generators are loaded only inside the band.
+
+    Parameters
+    ----------
+    dbar_ref : KernelRef
+        Geometry-cotangent table ``[nodes + 1, 4]``.
+    target : Array
+        Row of ``dbar_ref`` that holds this edge's cotangent.
+    valid : Array
+        Scalar bool: the edge exists.
+    delta3 : tuple
+        ``(x, y, z)`` of the edge vector, the operator's ``delta``.
+    rows_in : Array
+        The operator's input, centred rows ``(Bp, Wp)``.
+    rows_out : Array
+        Its output ``F(delta) rows_in``, same layout.
+    rows_in_bar : Array
+        ``F^T rows_out_bar``, same layout.
+    rows_out_bar : Array
+        The cotangent of ``rows_out``, same layout.
+    dzb : Array
+        The polar route's ``z`` cotangent, kept.
+    gen_x_ref : KernelRef
+        Per-degree generator of rotations about ``x``, ``(Bp, Wp, Wp)``.
+    gen_y_ref : KernelRef
+        Same about ``y``.
+
+    Returns
+    -------
+    None
+        Writes ``dbar_ref[target]`` for an on-axis edge.
+    """
+    x, y, z = delta3
+    rho2 = x * x + y * y
+    epsilon = float(jnp.finfo(rows_in.dtype).eps)
+    on_axis = valid & (rho2 <= epsilon * (rho2 + z * z)) & (z != 0)
+
+    def _pair(gen: Array) -> Array:
+        image_out = jnp.sum(rows_out_bar * _bapply(gen, rows_out), axis=1)
+        image_in = jnp.sum(rows_in_bar * _bapply(gen, rows_in), axis=1)
+        return jnp.sum(image_out - image_in, axis=0)
+
+    @pl.when(on_axis)
+    def _on_axis():
+        inverse_z = 1.0 / jnp.where(on_axis, z, jnp.asarray(1.0, z.dtype))
+        dxb = inverse_z * _pair(gen_y_ref[...])
+        dyb = -inverse_z * _pair(gen_x_ref[...])
+        dbar_ref[target, :] = _dbar_row(dxb, dyb, dzb, on_axis, dbar_ref.dtype)
+
+
 def _m2m_rev_level_kernel(
     g_ref: KernelRef,
     _dbar_in_ref: KernelRef,
@@ -425,7 +530,8 @@ def _m2m_rev_level_kernel(
     count_ref : KernelRef
         This level's node count ``[1]``.
     *table_and_out_refs : KernelRef
-        Constant tables, then the two aliased outputs (``g``, ``dbar``).
+        Constant tables, the multipole generators about ``x`` and ``y``, then the
+        two aliased outputs (``g``, ``dbar``).
     bp : int
         ``Bp``. Static.
     wp : int
@@ -438,7 +544,7 @@ def _m2m_rev_level_kernel(
     """
     n_tables = len(_TABLE_KEYS) + len(_CORE_KEYS)
     table_refs = table_and_out_refs[:n_tables]
-    g_out_ref, dbar_ref = table_and_out_refs[n_tables:]
+    gen_x_ref, gen_y_ref, g_out_ref, dbar_ref = table_and_out_refs[n_tables:]
     slot = pl.program_id(0)
     start = start_ref[0]
     count = count_ref[0]
@@ -466,7 +572,7 @@ def _m2m_rev_level_kernel(
         def translate(r: Array, d: tuple) -> Array:
             return _translate_rows(r, d, t, "m2m", safe=True)
 
-        _, vjp = jax.vjp(translate, rows_c, (dx, dy, dz_))
+        out_c, vjp = jax.vjp(translate, rows_c, (dx, dy, dz_))
         rb, (dxb, dyb, dzb) = vjp(g_p)
         own = g_ref[node_safe, :].reshape(bp, wp)
         new = own + jnp.where(valid, rb, 0.0)
@@ -474,6 +580,19 @@ def _m2m_rev_level_kernel(
         target = jnp.where(valid, node_safe, dead)
         g_out_ref[target, :] = new.reshape(bp * wp).astype(g_out_ref.dtype)
         dbar_ref[target, :] = _dbar_row(dxb, dyb, dzb, valid, dbar_ref.dtype)
+        _write_on_axis_edge_cotangent(
+            dbar_ref,
+            target,
+            valid,
+            (dx, dy, dz_),
+            rows_c,
+            out_c,
+            rb,
+            g_p,
+            dzb,
+            gen_x_ref,
+            gen_y_ref,
+        )
 
 
 def _l2l_rev_level_kernel(
@@ -521,7 +640,8 @@ def _l2l_rev_level_kernel(
     count_ref : KernelRef
         This level's node count ``[1]``.
     *table_and_out_refs : KernelRef
-        Constant tables, then the two aliased outputs (``g``, ``dbar``).
+        Constant tables, the local generators about ``x`` and ``y``, then the two
+        aliased outputs (``g``, ``dbar``).
     bp : int
         ``Bp``. Static.
     wp : int
@@ -536,7 +656,7 @@ def _l2l_rev_level_kernel(
     """
     n_tables = len(_TABLE_KEYS) + len(_CORE_KEYS)
     table_refs = table_and_out_refs[:n_tables]
-    g_out_ref, dbar_ref = table_and_out_refs[n_tables:]
+    gen_x_ref, gen_y_ref, g_out_ref, dbar_ref = table_and_out_refs[n_tables:]
     slot = pl.program_id(0)
     start = start_ref[0]
     count = count_ref[0]
@@ -564,10 +684,23 @@ def _l2l_rev_level_kernel(
         dx = px - cent_ref[c_safe, 0]
         dy = py - cent_ref[c_safe, 1]
         dz_ = pz - cent_ref[c_safe, 2]
-        _, vjp = jax.vjp(translate, rows_p, (dx, dy, dz_))
+        out_c, vjp = jax.vjp(translate, rows_p, (dx, dy, dz_))
         rb, (dxb, dyb, dzb) = vjp(g_c)
         ctarget = jnp.where(c_valid, c_safe, dead)
         dbar_ref[ctarget, :] = _dbar_row(dxb, dyb, dzb, c_valid, dbar_ref.dtype)
+        _write_on_axis_edge_cotangent(
+            dbar_ref,
+            ctarget,
+            c_valid,
+            (dx, dy, dz_),
+            rows_p,
+            out_c,
+            rb,
+            g_c,
+            dzb,
+            gen_x_ref,
+            gen_y_ref,
+        )
         own = g_ref[node_safe, :].reshape(bp, wp)
         new_row = own + jnp.where(c_valid, rb, 0.0)
         target = jnp.where(valid, node_safe, dead)
@@ -726,7 +859,7 @@ def m2m_real_levels_reverse_pallas(
     if int(num_internal) <= 0:
         return jnp.asarray(out_bar, dtype), jnp.zeros_like(centers)
     tables = _core_tables_to_jnp(p, dtype)
-    table_arrays = [tables[k] for k in (*_TABLE_KEYS, *_CORE_KEYS)]
+    table_arrays = [tables[k] for k in (*_TABLE_KEYS, *_CORE_KEYS, *_M2M_AXIS_KEYS)]
     dead = jnp.zeros((1, Bp * Wp), dtype)
     rows = jnp.concatenate([pack_centred(out_packed, order=p), dead], axis=0)
     g = jnp.concatenate(
@@ -832,7 +965,7 @@ def l2l_real_levels_reverse_pallas(
     if num_internal <= 0 or int(num_levels) <= 1:
         return jnp.asarray(out_bar, dtype), jnp.zeros_like(centers)
     tables = _core_tables_to_jnp(p, dtype)
-    table_arrays = [tables[k] for k in (*_TABLE_KEYS, *_CORE_KEYS)]
+    table_arrays = [tables[k] for k in (*_TABLE_KEYS, *_CORE_KEYS, *_L2L_AXIS_KEYS)]
     dead = jnp.zeros((1, Bp * Wp), dtype)
     rows = jnp.concatenate([pack_centred(out_locals, order=p), dead], axis=0)
     g = jnp.concatenate(
