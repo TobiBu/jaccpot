@@ -364,7 +364,9 @@ step (1.4 s) also carries 2.3x the far pairs.
 ## S1 — correctness fixes and test infrastructure (2026-10-15)
 
 **Setup.** Code: jaccpot main `63587f2`, yggdrax `2758fa9`, nornax `c1b9ff6`, Odisseo `jaccpot-integration` `adca4f6`;
-jax 0.11.2. Each fix is its own branch; the gate ran on a local merge of all the S1 jaccpot branches. GPU runs used
+jax 0.11.2. Each fix is its own PR (jaccpot #402 MAC geometry + gradient lane, #403 multi-GPU, #404 block-step
+drift, #405 tests, #406 nightly, #407 docs + this record; nornax #16; Odisseo #34-#36); the gate ran on a local
+merge of all the S1 jaccpot branches. GPU runs used
 shared A100s booked through autocvd (`-l`): accuracy and pins only, no timings.
 
 ### The differentiable forward was on a different MAC than production (the S0 "regression")
