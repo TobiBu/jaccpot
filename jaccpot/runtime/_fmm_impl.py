@@ -1453,6 +1453,10 @@ class FMMEngine(
             self._strict_refresh_diag_downward_active,
             self._strict_refresh_diag_eval_active,
         ) = _strict_refresh_diag_stage_flags(self._strict_refresh_diag_mode)
+        # Set by the strict fused entry points; a diagnostic only. Nothing reads it
+        # to choose numerics: the walk's MAC geometry is the tree's and the fused
+        # refresh is named by its caller (`strict_fused_lane`), so a later call on
+        # this engine returns what it would on a fresh one.
         self._strict_fused_mode_active: bool = False
         self._strict_fused_compile_count: int = 0
         self._strict_fused_execute_count: int = 0

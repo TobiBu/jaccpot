@@ -23,6 +23,7 @@ from jaccpot._env import env_choice, env_flag
 
 from ._large_n_pipeline import evaluate_large_n_state, prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
+from ._mac_geometry import walk_geometry_default
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import (
@@ -504,8 +505,9 @@ class StrictRunMixin(_EngineBase):
         runtime_overrides : Optional[_RuntimeExecutionOverrides]
             Replacement runtime overrides for this call.
         fused_device_mode : Optional[bool]
-            Use the fused device-resident layout; ``None`` takes the engine's
-            current setting.
+            Use the fused device-resident layout; ``None`` means ``False``. (It
+            used to take the engine's ``_strict_fused_mode_active``, so the same
+            call built a different layout after any ``strict_run_v2``.)
 
         Returns
         -------
@@ -550,11 +552,7 @@ class StrictRunMixin(_EngineBase):
                 theta=theta,
                 jit_tree=self._jit_tree_default,
                 runtime_overrides_override=runtime_overrides,
-                fused_device_mode=bool(
-                    self._strict_fused_mode_active
-                    if fused_device_mode is None
-                    else fused_device_mode
-                ),
+                fused_device_mode=bool(fused_device_mode),
             )
         else:
             if not isinstance(prepared_state, LargeNPreparedState):
@@ -571,11 +569,7 @@ class StrictRunMixin(_EngineBase):
                 max_order=int(max_order),
                 theta=theta,
                 runtime_overrides_override=runtime_overrides,
-                fused_device_mode=bool(
-                    self._strict_fused_mode_active
-                    if fused_device_mode is None
-                    else fused_device_mode
-                ),
+                fused_device_mode=bool(fused_device_mode),
             )
             if next_state_try is None:
                 self._strict_runner_fail_fast_reject_count += 1
@@ -817,6 +811,9 @@ class StrictRunMixin(_EngineBase):
         # The fused scan is the strict lane's only loop: the host-driven one
         # (`JACCPOT_STATIC_STRICT_FUSED_MODE=off`) went in the 2026-10 cleanup (X6).
         # The profile set only restricts it to the particle counts it names.
+        # The flag is a DIAGNOSTIC ("a strict call engaged the fused lane"): no
+        # later call reads it to choose numerics. The MAC geometry is the tree's
+        # (`walk_geometry_default`), and the refreshes below name their lane.
         self._strict_fused_mode_active = self._strict_fused_profile_allows_n(
             int(state_arr.shape[0])
         )
@@ -1065,6 +1062,7 @@ class StrictRunMixin(_EngineBase):
                     runtime_overrides_override=None,
                     fused_device_mode=True,
                     force_scale_particles=scale_in if scale_carry else None,
+                    strict_fused_lane=True,
                 )
                 if prepared_new is None:
                     raise RuntimeError(
@@ -1197,6 +1195,7 @@ class StrictRunMixin(_EngineBase):
                 theta=theta,
                 runtime_overrides_override=None,
                 fused_device_mode=True,
+                strict_fused_lane=True,
             )
             if prepared_new is None:
                 raise RuntimeError(
@@ -2143,6 +2142,7 @@ class StrictRunMixin(_EngineBase):
             raise RuntimeError(
                 "strict_fused_prepared_eval_fn requires large_n_gpu production profile."
             )
+        # diagnostic only, as in `strict_run_v2`
         self._strict_fused_mode_active = self._strict_fused_profile_allows_n(
             int(positions_arr.shape[0])
         )
@@ -2208,6 +2208,7 @@ class StrictRunMixin(_EngineBase):
         num_valid: Optional[Array] = None,
         cross_hook: Optional[Callable[[Any], None]] = None,
         force_scale_particles: Optional[Array] = None,
+        strict_fused_lane: bool = False,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged.
 
@@ -2257,6 +2258,15 @@ class StrictRunMixin(_EngineBase):
             order, carried from the previous step's evaluation. Reduced to the
             per-node ``min_b f_b`` on this step's tree, it sets eq (16a)'s
             thresholds for the walk. ``None`` (default) keeps the state's own.
+        strict_fused_lane : bool
+            This is the strict fused lane's per-step refresh (``strict_run_v2``'s
+            scan, the multi-GPU ``fused_force_step``): with ``fused_device_mode``
+            it takes the traced hot path -- the streamed fast lane or a raise, no
+            host side effects, the eager pass's caps widened, a fresh far list
+            returned as the input's placeholder. ``False`` (default, every public
+            refresh) never does. The caller states it: it used to be read off the
+            engine's ``_strict_fused_mode_active``, which the first strict call
+            left set, so ``refresh_prepared_state`` changed path after one.
 
         Returns
         -------
@@ -2505,7 +2515,7 @@ class StrictRunMixin(_EngineBase):
                 self.interaction_retry_logger(event)
 
         strict_fused_traced_hot_path = bool(fused_device_mode) and bool(
-            getattr(self, "_strict_fused_mode_active", False)
+            strict_fused_lane
         )
         # The fused refresh builds its far-pair list fresh every step and returns
         # the input's as a shape placeholder: the list a state carries in is never
@@ -2534,15 +2544,17 @@ class StrictRunMixin(_EngineBase):
         if cross_hook is not None:
             # ONE exact-radius COM geometry for the hook and the local walk below:
             # each used to resolve its own, 9.7 ms per force at 1e6 particles per
-            # A100. Shared only where the two would compute the same thing -- the
-            # strict fused lane (COM by default) and no folded per-node radius scale
-            # (`dehnen_theta` folds one the hook does not apply).
+            # A100. Shared only where the two would compute the same thing -- a
+            # tree whose walk defaults to COM (static radix, the fused lane's) and
+            # no folded per-node radius scale (`dehnen_theta` folds one the hook
+            # does not apply).
             if (
-                getattr(self, "_strict_fused_mode_active", False)
+                walk_geometry_default(tree_artifacts.tree_mode, upward_center_mode)
+                == "com"
                 and self._folded_criterion_radius_scale() is None
             ):
                 tree_artifacts = tree_artifacts._replace(
-                    walk_geometry=self._strict_walk_geometry(tree_artifacts)
+                    walk_geometry=self._walk_geometry(tree_artifacts)
                 )
             cross_far = cross_hook(tree_artifacts)
         force_scale_nodes_now = prepared_state.force_scale_nodes

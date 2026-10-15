@@ -62,7 +62,11 @@ from ._interaction_cache import (
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
 from ._large_n_types import LargeNPrepareRequest
 from ._level_shapes import level_width_overflow
-from ._mac_geometry import mac_geometry_mode, resolve_walk_geometry
+from ._mac_geometry import (
+    mac_geometry_mode,
+    resolve_walk_geometry,
+    walk_geometry_default,
+)
 from ._nearfield_cache import (
     NearfieldPrecomputeArtifacts,
     nearfield_cache_matches,
@@ -972,10 +976,10 @@ class PrepareMixin(_EngineBase):
         # Under the COM MAC geometry the walk never reads the box geometry (only
         # the dehnen_error policy does), and on a cell-leaf tree its level loop
         # is nodes x depth work: build it lazily instead.
-        # The mode is asked with the strict fused lane's default, as its walk
-        # resolves it (`_strict_walk_geometry`): asked bare it said "aabb" there,
-        # and the eager prepare built the box geometry every time -- its (L, 3, w)
-        # leaf gather was the prepare's largest transient (1.3 GiB at 8e6).
+        # The mode is asked with the tree's own default, as its walk resolves it
+        # (`_walk_geometry`): asked bare it said "aabb" there, and the eager
+        # prepare built the box geometry every time -- its (L, 3, w) leaf gather
+        # was the prepare's largest transient (1.3 GiB at 8e6).
         if self._defers_box_geometry(tree_config.mode, upward_center_mode):
             defer_geometry = True
         upward = self.prepare_upward_sweep(
@@ -1403,7 +1407,7 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
-        walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
+        walk_geometry, geometry_factory = self._walk_geometry(tree_artifacts)
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
             walk_geometry,
@@ -1699,10 +1703,11 @@ class PrepareMixin(_EngineBase):
         )
         # The fused lane's traced refresh. It always takes the streamed fast path:
         # the host-routed alternative (`JACCPOT_STATIC_STRICT_FUSED_DEVICE_ONLY=0`)
-        # was removed in the 2026-10 cleanup (X6).
-        strict_fused_hot_path = bool(suppress_host_side_effects) and bool(
-            getattr(self, "_strict_fused_mode_active", False)
-        )
+        # was removed in the 2026-10 cleanup (X6). Only that refresh suppresses
+        # host side effects (`_refresh_large_n_same_topology` with
+        # `strict_fused_lane=True`), so the argument names the lane; the engine's
+        # `_strict_fused_mode_active` (diagnostics only) is not read.
+        strict_fused_hot_path = bool(suppress_host_side_effects)
         adaptive_order_active = bool(self.adaptive_order) and not bool(
             strict_fused_hot_path
         )
@@ -2015,12 +2020,10 @@ class PrepareMixin(_EngineBase):
                 active_count=None,
             )
         max_order_int = int(upward.multipoles.order)
-        strict_fused_active = bool(getattr(self, "_strict_fused_mode_active", False))
-        if (
-            self.mixed_order_farfield
-            and max_order_int >= 1
-            and (not strict_fused_active)
-        ):
+        # (No strict-lane exception here: the large-N production profile, the only
+        # one a strict call accepts, switches mixed-order far fields off, and the
+        # fused refresh never reaches this general-path plan.)
+        if self.mixed_order_farfield and max_order_int >= 1:
             if interactions is None:
                 raise RuntimeError(
                     "mixed-order streamed farfield requires node interaction lists"
@@ -2722,28 +2725,34 @@ class PrepareMixin(_EngineBase):
         Returns
         -------
         bool
-            True on a static-radix COM tree whose walk geometry resolves to
-            ``"com"`` (with the strict fused lane's default), outside the
-            paper-style force scale -- the walk then never reads the box geometry,
-            and ``_strict_walk_geometry`` builds it lazily if a caller does.
+            True on a tree whose walk geometry resolves to ``"com"`` (the tree's
+            own :func:`walk_geometry_default` -- a static-radix COM tree -- unless
+            the environment overrides it), outside the paper-style force scale --
+            the walk then never reads the box geometry, and ``_walk_geometry``
+            builds it lazily if a caller does.
         """
-        default = "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
+        # an environment "com" on another tree does not defer: the deferral is
+        # only measured on the static-radix COM tree
+        default = walk_geometry_default(tree_mode, center_mode)
         return (
-            str(tree_mode) == "static_radix"
-            and str(center_mode).strip().lower() == "com"
+            default == "com"
             and mac_geometry_mode(default) == "com"
             and not self._uses_paper_style_force_scale()
         )
 
-    def _strict_walk_geometry(self, tree_artifacts: Any) -> tuple[Any, Any]:
-        """The geometry this lane's dual walk tests the MAC on, resolved ONCE per tree.
+    def _walk_geometry(self, tree_artifacts: Any) -> tuple[Any, Any]:
+        """The geometry this tree's dual walk tests the MAC on, resolved ONCE per tree.
 
         Plan sub-10ms Phase 1.2: the walk must test the MAC about the centres the
-        expansions use (``JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com``), see
-        :mod:`jaccpot.runtime._mac_geometry`. Only this lane gets the COM MAC by
-        default: at a fixed theta it is LESS conservative than the box
-        half-diagonal, so a global default would quietly change every caller's
-        accuracy (see ``mac_geometry_mode``).
+        expansions use, see :mod:`jaccpot.runtime._mac_geometry`. Which geometry
+        is the TREE's (:func:`walk_geometry_default`: the COM MAC on a
+        static-radix tree, the box geometry on every other), so every entry point
+        that walks a tree -- the strict fused lane, ``compute_accelerations``,
+        ``prepare_state``, the differentiable lane's frozen lists -- tests the
+        same MAC on it, whatever ran on the engine before. (Until 2026-10-15 the
+        default followed ``_strict_fused_mode_active``, a flag the first strict
+        call left set: the same engine walked the box geometry before it and the
+        COM one after.)
 
         A refresh that has already resolved it (``tree_artifacts.walk_geometry``,
         set once for the multi-GPU cross hook and the local walk together) is reused.
@@ -2779,9 +2788,9 @@ class PrepareMixin(_EngineBase):
             leaf_cap=int(tree_artifacts.leaf_cap),
             geometry_factory=geometry_factory,
             radius_scale=self._folded_criterion_radius_scale(),
-            default_mode=(
-                "com" if getattr(self, "_strict_fused_mode_active", False) else "aabb"
-            ),
+            # the only upward sweep expands about the COMs (`prepare_upward_sweep`
+            # refuses any other centre mode), so the tree mode decides
+            default_mode=walk_geometry_default(tree_artifacts.tree_mode, "com"),
             num_levels=self._resolve_upward_num_levels(tree_artifacts.tree),
         )
 
@@ -2978,7 +2987,7 @@ class PrepareMixin(_EngineBase):
             runtime_traversal_config=runtime_traversal_config,
             suppress_host_side_effects=suppress_host_side_effects,
         )
-        walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
+        walk_geometry, geometry_factory = self._walk_geometry(tree_artifacts)
         walk_criterion = None
         if walk_criterion_active:
             if force_scale_nodes is None:
@@ -3167,7 +3176,7 @@ class PrepareMixin(_EngineBase):
         tree = tree_artifacts.tree
         override = getattr(self, "mac_force_scale_prepass_theta", None)
         theta_seed = 0.8 if override is None else float(override)
-        walk_geometry, geometry_factory = self._strict_walk_geometry(tree_artifacts)
+        walk_geometry, geometry_factory = self._walk_geometry(tree_artifacts)
         dual_artifacts, _ = _build_dual_tree_artifacts(
             tree,
             walk_geometry,

@@ -31,9 +31,18 @@ the 2026-10 cleanup (X5), and the variable is no longer read.
 ``half_extent`` and ``max_extent`` are set to the radius too, so the ``bh`` box
 test degrades to the sphere test rather than to a stale box.
 
-Selected in the fused lane by ``JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY``
-(``"aabb"`` = the historical box geometry, ``"com"`` = this module); see
-:func:`resolve_walk_geometry`.
+Which geometry a walk tests is a function of the tree it walks
+(:func:`walk_geometry_default`): ``"com"`` on a static-radix tree expanded about
+the COMs -- every entry point that builds one, the strict fused lane,
+``compute_accelerations``, ``prepare_state`` and the differentiable lane alike --
+and the box geometry on every other tree. It used to follow the engine's call
+history instead: only the strict fused lane asked for ``"com"``, through a flag
+its first call left set, so a fresh engine's ``compute_accelerations`` walked the
+box geometry and the same engine after any strict call the COM one (2026-10-15:
+rel-L2 1.16e-3 against 6.73e-4 on one Plummer set, see
+:func:`mac_geometry_mode`). ``JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY``
+(``"aabb"`` = the historical box geometry, ``"com"`` = this module) overrides it
+for every walk; see :func:`resolve_walk_geometry`.
 """
 
 from __future__ import annotations
@@ -57,6 +66,7 @@ __all__ = [
     "com_mac_geometry",
     "mac_geometry_mode",
     "resolve_walk_geometry",
+    "walk_geometry_default",
 ]
 
 _MAC_GEOMETRY_ENV = "JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY"
@@ -64,29 +74,40 @@ _MAC_GEOMETRY_MODES = ("aabb", "com")
 
 
 def mac_geometry_mode(default: str = "aabb") -> str:
-    """Which geometry the fused lane's walk tests the MAC against.
+    """Which geometry a dual walk tests the MAC against.
 
     Read at call time (never captured at import), like every runtime knob.
 
     Parameters
     ----------
     default : str
-        Mode to use when the environment does not name one. The strict fused lane
-        passes ``"com"``; every other lane leaves it at ``"aabb"``.
+        Mode to use when the environment does not name one: the tree's own, from
+        :func:`walk_geometry_default`.
 
-        WHY NOT "com" EVERYWHERE. The COM MAC is *consistent* -- it tests the
-        criterion about the centres the expansions actually use -- but at a fixed
-        theta it is not equivalent to the box criterion: the box radius is the
-        half-DIAGONAL, which is strictly larger than the exact COM radius, so the
-        box test is the more conservative one and the same theta admits MORE far
-        pairs under COM. Measured on the order sweep in
-        tests/integration/test_gravity_vs_direct.py (solidfmm+dehnen, theta 0.9,
-        leaf 16, N=224), COM is worse at every order:
-        rel-L2 5.8e-3 / 2.1e-3 / 3.4e-4 at orders 1/2/4 under the box geometry
-        against 2.1e-2 / 7.7e-3 / 1.9e-3 under COM. Making it the global default
-        therefore silently degraded accuracy at every caller's existing theta.
-        It was measured and tuned on the strict fused lane at theta 0.6-1.0 with
-        cell leaves, which is the only lane that gets it by default.
+        NEITHER GEOMETRY IS THE MORE CONSERVATIVE ONE. The COM MAC is
+        *consistent* -- it tests the criterion about the centres the expansions
+        actually use -- but at a fixed theta it is not the box criterion. An
+        earlier version of this note said the box half-diagonal is strictly
+        larger than the exact COM radius; it is not (a COM near one corner of
+        its node's box is up to the full diagonal from the far corner), and which
+        test admits more far pairs depends on the tree:
+
+        * static-radix tree, the ``S4b`` pin's configuration (Plummer N=2e4,
+          leaf 32, theta 0.6, p4, ``dehnen``, eps 1e-3, fp32; 2048 targets
+          against an fp64 direct sum, A100, 2026-10-15): the box geometry
+          accepts 72,430 far pairs with 233,032 near edges, rel-L2 1.16e-3;
+          the COM geometry 67,120 far pairs with 255,316 near edges, rel-L2
+          6.73e-4 -- FEWER far pairs and 1.7x more accurate. At N=1e5, leaf
+          64, theta 0.8, p6 the box geometry's 236,080 far pairs gave 1.54e-2
+          (expansions accepted about the box centre that diverge about the COM,
+          see the module docstring), the COM geometry's 262,714 gave 6.36e-4;
+        * the default (LBVH) tree, the order sweep in
+          tests/integration/test_gravity_vs_direct.py (``dehnen``, theta 0.9,
+          leaf 16, N=224): rel-L2 5.8e-3 / 2.1e-3 / 3.4e-4 at orders 1/2/4
+          under the box geometry against 2.1e-2 / 7.7e-3 / 1.9e-3 under COM.
+
+        So only the static-radix tree gets ``"com"`` by default; every other tree
+        keeps the box geometry it was tuned with.
 
     Returns
     -------
@@ -105,6 +126,34 @@ def mac_geometry_mode(default: str = "aabb") -> str:
             f"{_MAC_GEOMETRY_ENV} must be one of {_MAC_GEOMETRY_MODES}, got {raw!r}"
         )
     return raw
+
+
+def walk_geometry_default(tree_mode: str, center_mode: str) -> str:
+    """The MAC geometry a walk over this tree uses when the environment names none.
+
+    A function of the tree and its expansion centres only -- never of which entry
+    point builds the walk or what ran before on the engine. ``"com"`` on a
+    static-radix tree expanded about the COMs, the strict fused lane's tree, so
+    ``compute_accelerations``, ``prepare_state`` and the differentiable lane
+    test the same MAC on it as the fused scan; ``"aabb"`` on every other tree
+    (see :func:`mac_geometry_mode` for why the default is per tree).
+
+    Parameters
+    ----------
+    tree_mode : str
+        The tree builder mode that built the tree (``"static_radix"``,
+        ``"lbvh"``, ...).
+    center_mode : str
+        The upward sweep's expansion-centre mode.
+
+    Returns
+    -------
+    str
+        ``"com"`` or ``"aabb"``.
+    """
+    static_radix = str(tree_mode).strip().lower() == "static_radix"
+    com_centres = str(center_mode).strip().lower() == "com"
+    return "com" if static_radix and com_centres else "aabb"
 
 
 @jax.named_scope("fmm_com_radii")
@@ -430,8 +479,8 @@ def resolve_walk_geometry(
         ``r_t/theta_t + r_s/theta_s <= d`` about the expansion centres.
 
     default_mode : str
-        Geometry to use when the environment names none; see
-        :func:`mac_geometry_mode`. Only the strict fused lane passes ``"com"``.
+        Geometry to use when the environment names none: the tree's
+        :func:`walk_geometry_default`; see :func:`mac_geometry_mode`.
     num_levels : Optional[int]
         Static level-count bound for :func:`com_mac_geometry`.
 

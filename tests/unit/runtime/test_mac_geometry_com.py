@@ -34,6 +34,7 @@ from jaccpot.runtime._mac_geometry import (
     com_mac_geometry,
     mac_geometry_mode,
     resolve_walk_geometry,
+    walk_geometry_default,
 )
 
 _LEAF = 8
@@ -132,10 +133,9 @@ def test_flat_walk_with_com_geometry_accepts_only_convergent_pairs(tree_data, th
 def test_mode_knob(monkeypatch, tree_data):
     tree, topo, ps, ms, com, box = tree_data
     monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", raising=False)
-    # The default belongs to the CALLER, not the environment: only the strict
-    # fused lane passes "com". A global "com" default silently changed the
-    # meaning of theta for every other lane -- the box radius is the
-    # half-diagonal, so the same theta admits more far pairs under COM.
+    # The default belongs to the TREE (`walk_geometry_default`), not to the
+    # environment: a global "com" default changed the meaning of theta on the
+    # trees it was not tuned on (the LBVH order sweep got worse under COM).
     assert mac_geometry_mode() == "aabb"
     assert mac_geometry_mode("com") == "com"
     monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "aabb")
@@ -159,6 +159,26 @@ def test_mode_knob(monkeypatch, tree_data):
     g_e, _ = resolve_walk_geometry(topo, ps, box, com, leaf_cap=_LEAF)
     exact = com_mac_geometry(topo, ps, com, leaf_cap=_LEAF)
     assert np.array_equal(np.asarray(g_e.radius), np.asarray(exact.radius))
+
+
+def test_the_default_geometry_is_the_trees(monkeypatch):
+    """COM on the static-radix tree (expanded about the COMs), the box elsewhere.
+
+    A function of the tree alone: whichever entry point walks a static-radix
+    tree -- the strict fused lane, ``compute_accelerations``, ``prepare_state``,
+    the differentiable lane -- asks for the same geometry, and the environment
+    still overrides it for all of them.
+    """
+    monkeypatch.delenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", raising=False)
+    assert walk_geometry_default("static_radix", "com") == "com"
+    assert walk_geometry_default(" Static_Radix ", "COM") == "com"
+    assert walk_geometry_default("lbvh", "com") == "aabb"
+    assert walk_geometry_default("static_radix", "geometric") == "aabb"
+    assert mac_geometry_mode(walk_geometry_default("static_radix", "com")) == "com"
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "aabb")
+    assert mac_geometry_mode(walk_geometry_default("static_radix", "com")) == "aabb"
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY", "com")
+    assert mac_geometry_mode(walk_geometry_default("lbvh", "com")) == "com"
 
 
 def test_com_geometry_is_jittable(tree_data):
