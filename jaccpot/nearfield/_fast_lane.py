@@ -1604,8 +1604,9 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     neighbor_list : Any
         The prepared state's leaf neighbour CSR. Present, it enables the CSR
         row-chunk lane, whose rows are the real ones rather than a padded
-        rectangle; ``None`` keeps the rectangle kernel. Forward only -- the
-        differentiable path never takes the CSR branch.
+        rectangle; ``None`` keeps the rectangle kernel. The differentiable path
+        takes it too, through the kernel's ``custom_vjp`` and the ``table``
+        layout (acceleration only).
     leaf_ranges : Any
         ``(L, 2)`` inclusive particle range per CSR leaf, in leaf order. Given,
         the forward CSR lane can read the sorted particles directly instead of
@@ -1884,6 +1885,10 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
             offsets, counts, chunk=chunk, capacity=capacity
         )
         if differentiable:
+            # Positional (a custom_vjp primal), so the trailing defaults are easy to
+            # drop: without `softening_kernel` the forward AND the reverse ran the
+            # default kernel whatever the solver's, 4.2e-2 off the production
+            # forward with plummer (2026-10-13 review).
             out = nearfield_leafpair_csr_pallas_cvjp(
                 leaf_positions,
                 leaf_masses,
@@ -1900,6 +1905,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
                 accum,
                 True,
                 None,  # num_target_leaves: single-tree lane, targets == the pool
+                softening_kernel,
             )
         else:
             out = nearfield_leafpair_csr_pallas(

@@ -66,7 +66,10 @@ two former modules are classes here, each with its own lane setup:
   the five reverse kernels COUNTED;
 * ``TestPallasCascades`` (was ``test_grad_path_pallas_cascades.py``): the default
   solver's gradient through the Pallas M2M/L2L cascades and the leaf P2M, on the
-  real (CPU) backend profile.
+  real (CPU) backend profile;
+* ``TestSofteningKernelsOnTheCsrLane``: the solver's softening kernel reaches the
+  differentiable CSR near field (forward and reverse), checked through the public
+  entries for every kernel.
 """
 
 from __future__ import annotations
@@ -96,6 +99,7 @@ from jaccpot.pallas import (
 from jaccpot.runtime._large_n_types import LargeNPreparedState
 from jaccpot.runtime._level_shapes import pallas_cascades_enabled
 from jaccpot.runtime.grad_options import grad_option_overrides, resolve_grad_options
+from jaccpot.softening import DEFAULT_SOFTENING_KERNEL, SOFTENING_KERNELS
 
 #: The real backend query, captured before `_open_the_backend_gate` patches it, for
 #: the tests that must run on the CPU's own profile (`TestPallasCascades`).
@@ -552,6 +556,166 @@ class TestEveryFastPallasKernel:
             )
         )
         assert _relative_l2(forward, ref_fwd) < 5e-3
+
+
+# ---------------------------------------------------------------------------
+# The softening kernel on the differentiable CSR near field.
+#
+# The differentiable CSR call passes its arguments positionally (a custom_vjp
+# primal) and dropped the trailing ``softening_kernel``, so the gradient lane's
+# forward AND reverse ran the default kernel whatever the solver's: 4.2e-2 off the
+# production forward with plummer (review 2026-10-13). Every kernel-level parity
+# test passed -- each kernel is right; the DISPATCH dropped the argument. So this
+# compares the two public entries, ``differentiable_accelerations`` and
+# ``evaluate_prepared_state``, for every kernel in ``jaccpot.softening``, at a
+# softening where the kernels differ.
+#
+# Measured on CPU (N=1024, leaf 8, order 4, eps 0.05, 2444 far pairs) before the
+# fix: forward vs production 5.96e-02 (plummer), 1.02e-02 (wendland_c2), 3.4e-07
+# (ferrers3, the default); d/dpos vs the plummer direct-sum gradient 0.380.
+# ---------------------------------------------------------------------------
+
+_KERNEL_N = 1024
+_KERNEL_LEAF = 8  # 2444 far pairs: both forwards carry a far field
+_KERNEL_SOFTENING = 0.05  # direct sums vs ferrers3: wendland_c2 1.0e-2, plummer 5.9e-2
+_KERNEL_ENV = {
+    "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
+    "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    _PAYLOAD_CAP_ENV: "0",  # the prepacked layout the grad plan needs
+}
+# The two forwards differ by the near-field layout (the gradient lane's ``table``
+# kernel, production's ``direct``) and the far field's L2P: fp32 rounding, 3.4e-07
+# measured. A dropped kernel is 1e-2 or more.
+_KERNEL_FORWARD_RTOL = 1e-5
+# The plummer gradient against its direct-sum oracle: d/dpos 7.6e-04, d/dmass
+# 3.8e-03 measured, the FMM's own error at leaf 8 (ferrers3 gives 6.9e-04 /
+# 3.4e-03 here). With the default kernel's reverse: 0.38 / 0.19.
+_KERNEL_GRAD_RTOL = 1e-2
+
+
+@pytest.mark.xdist_group("large_n_reverse_softening_kernels")
+class TestSofteningKernelsOnTheCsrLane:
+    @pytest.fixture(scope="class", autouse=True)
+    def _csr_lane_on_cpu(self) -> Iterator[None]:
+        patcher = pytest.MonkeyPatch()
+        for key, value in _KERNEL_ENV.items():
+            patcher.setenv(key, value)
+        yield
+        patcher.undo()
+
+    @pytest.fixture(scope="class")
+    def problem(self) -> tuple[Any, Any, Any]:
+        rng = np.random.default_rng(11)
+        positions = jnp.asarray(rng.normal(size=(_KERNEL_N, 3)), jnp.float32)
+        masses = jnp.asarray(rng.uniform(0.5, 1.5, size=_KERNEL_N), jnp.float32)
+        weight = jnp.asarray(rng.normal(size=(_KERNEL_N, 3)), jnp.float32)
+        return positions, masses, weight
+
+    @pytest.fixture(scope="class")
+    def solvers(self, _csr_lane_on_cpu, problem) -> Any:
+        """One solver and prepared state per kernel, built on first use."""
+        cache: dict[str, tuple[Any, Any]] = {}
+        positions, masses, _ = problem
+
+        def get(kernel: str) -> tuple[Any, Any]:
+            if kernel not in cache:
+                fmm = FastMultipoleMethod(
+                    preset="large_n_gpu",
+                    G=_G,
+                    softening=_KERNEL_SOFTENING,
+                    softening_kernel=kernel,
+                    retain_far_pairs_for_grad=True,
+                    use_pallas=True,
+                )
+                state = fmm.prepare_state(
+                    positions, masses, leaf_size=_KERNEL_LEAF, max_order=_ORDER
+                )
+                assert isinstance(state, LargeNPreparedState)
+                assert int(np.asarray(state.compact_far_pairs.far_pair_count)) > 0
+                cache[kernel] = (fmm, state)
+            return cache[kernel]
+
+        return get
+
+    @staticmethod
+    def _direct(problem, kernel: str) -> Any:
+        """The fp64 direct sum with ``kernel``."""
+        positions, masses, _ = problem
+        return direct_sum_gravitational_acceleration(
+            positions.astype(jnp.float64),
+            masses.astype(jnp.float64),
+            G=_G,
+            softening=_KERNEL_SOFTENING,
+            softening_kernel=kernel,
+        )
+
+    @pytest.fixture
+    def csr_counters(self, monkeypatch) -> dict[str, int]:
+        counts = {"table": 0, "direct": 0, "reverse": 0}
+        for name, key in (
+            ("nearfield_leafpair_csr_pallas", "table"),
+            ("nearfield_leafpair_csr_sorted_direct_pallas", "direct"),
+            ("nearfield_leafpair_csr_reverse_pallas", "reverse"),
+        ):
+            _count_calls(monkeypatch, counts, nearfield_leafpair_csr, name, key)
+        return counts
+
+    def test_the_kernels_differ_at_this_softening(self, problem):
+        """Non-vacuous: a dropped kernel must move the force far past the gate."""
+        refs = {k: np.asarray(self._direct(problem, k)) for k in SOFTENING_KERNELS}
+        for kernel in SOFTENING_KERNELS:
+            if kernel != DEFAULT_SOFTENING_KERNEL:
+                gap = _relative_l2(refs[kernel], refs[DEFAULT_SOFTENING_KERNEL])
+                assert gap > 100 * _KERNEL_FORWARD_RTOL, (kernel, gap)
+
+    @pytest.mark.parametrize("kernel", SOFTENING_KERNELS)
+    def test_the_differentiable_forward_is_the_production_forward(
+        self, kernel, solvers, problem, csr_counters
+    ):
+        positions, masses, _ = problem
+        fmm, state = solvers(kernel)
+        production = np.asarray(fmm.evaluate_prepared_state(state))
+        assert csr_counters["direct"] >= 1, csr_counters
+        differentiable = np.asarray(
+            fmm.differentiable_accelerations(state, positions, masses)
+        )
+        # the gradient lane reached the CSR near field, through its table kernel
+        assert csr_counters["table"] >= 1, csr_counters
+        error = _relative_l2(differentiable, production)
+        assert error < _KERNEL_FORWARD_RTOL, f"{kernel}: rel-L2 {error:.3e}"
+        reference = np.asarray(self._direct(problem, kernel))
+        assert _relative_l2(differentiable, reference) < _RTOL
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_the_reverse_runs_the_solvers_kernel(self, solvers, problem, csr_counters):
+        """d/dpos and d/dmass with plummer, the kernel furthest from the default."""
+        positions, masses, weight = problem
+        fmm, state = solvers("plummer")
+
+        def loss(p, m):
+            return jnp.sum(weight * fmm.differentiable_accelerations(state, p, m))
+
+        def oracle(p, m):
+            return jnp.sum(
+                weight.astype(jnp.float64)
+                * direct_sum_gravitational_acceleration(
+                    p,
+                    m,
+                    G=_G,
+                    softening=_KERNEL_SOFTENING,
+                    softening_kernel="plummer",
+                )
+            )
+
+        got_p, got_m = jax.grad(loss, argnums=(0, 1))(positions, masses)
+        assert csr_counters["reverse"] == 1, csr_counters
+        want_p, want_m = jax.grad(oracle, argnums=(0, 1))(
+            positions.astype(jnp.float64), masses.astype(jnp.float64)
+        )
+        rel_p = _relative_l2(got_p, want_p)
+        rel_m = _relative_l2(got_m, want_m)
+        assert rel_p < _KERNEL_GRAD_RTOL, f"d/dpos rel-L2 {rel_p:.3e}"
+        assert rel_m < _KERNEL_GRAD_RTOL, f"d/dmass rel-L2 {rel_m:.3e}"
 
 
 # ---------------------------------------------------------------------------
