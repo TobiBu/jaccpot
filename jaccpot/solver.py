@@ -1515,7 +1515,7 @@ class FastMultipoleMethod:
 
     def evaluate_prepared_state_with_jerk(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         velocities: Float[Array, "n 3"],
         *,
         target_indices: Optional[Int[Array, "t"]] = None,
@@ -1525,10 +1525,12 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        state : FMMPreparedState
+        state : Union[FMMPreparedState, LargeNPreparedState]
             Tree and interaction lists from :meth:`prepare_state`. Reused as-is;
             the topology is not rebuilt, so this is only valid while the
-            positions it was built from remain appropriate.
+            positions it was built from remain appropriate. A
+            ``LargeNPreparedState`` (``preset="large_n_gpu"`` on a GPU) raises
+            ``NotImplementedError``: that lane evaluates accelerations only.
         velocities : Float[Array, 'n 3']
             Particle velocities ``[N, 3]`` in the original (unsorted) particle
             order.
@@ -1568,7 +1570,7 @@ class FastMultipoleMethod:
 
     def evaluate_prepared_state_with_time_derivatives(
         self: "FastMultipoleMethod",
-        state: FMMPreparedState,
+        state: Union[FMMPreparedState, LargeNPreparedState],
         velocities: Float[Array, "n 3"],
         *,
         target_indices: Optional[Int[Array, "t"]] = None,
@@ -1585,8 +1587,10 @@ class FastMultipoleMethod:
 
         Parameters
         ----------
-        state : FMMPreparedState
-            Tree and interaction lists from :meth:`prepare_state`.
+        state : Union[FMMPreparedState, LargeNPreparedState]
+            Tree and interaction lists from :meth:`prepare_state`. A
+            ``LargeNPreparedState`` (``preset="large_n_gpu"`` on a GPU) raises
+            ``NotImplementedError``: that lane evaluates accelerations only.
         velocities : Float[Array, 'n 3']
             Particle velocities ``[N, 3]`` in the original (unsorted) particle
             order.

@@ -142,9 +142,8 @@ for large particle-count single-GPU runs (streamed far-pair mode, reduced
 near-field precompute retention, and cache retention disabled).
 
 On a GPU this preset runs the large-N lane, which evaluates all particles'
-accelerations (or potentials) and nothing finer: `target_indices`, jerk and
-`max_acc_derivative_order > 0` raise `NotImplementedError` there, and the time
-derivatives, written for the general path's prepared state, fail on the lane's.
+accelerations (or potentials) and nothing finer: `target_indices`, jerk, the time
+derivatives and `max_acc_derivative_order > 0` raise `NotImplementedError` there.
 So the two examples below need another preset (`fast`, `balanced` or `accurate`).
 On a CPU `large_n_gpu` declines the lane and runs the general path, where they work.
 

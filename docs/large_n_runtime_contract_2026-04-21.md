@@ -30,8 +30,8 @@ nothing to select.
 
 On the lane, evaluation is all particles' accelerations (or potentials): a
 `target_indices` subset and `max_acc_derivative_order > 0` raise `NotImplementedError`
-(`runtime/_large_n_pipeline.py:2012-2019`), so jerk and the time derivatives do not run
-there either (`docs/derivatives_and_jerk.md`).
+(`runtime/_large_n_pipeline.py:2012-2019`), and so do jerk and the time derivatives
+(`runtime/fmm_derivatives.py`, before reading the state; `docs/derivatives_and_jerk.md`).
 
 ## Deprecation Notes
 
