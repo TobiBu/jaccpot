@@ -108,3 +108,99 @@ def test_csr_lane_is_taken_and_matches_the_chunked_lane(monkeypatch):
     rel = np.linalg.norm(a_csr - a_ref) / np.linalg.norm(a_ref)
     assert np.all(np.isfinite(a_csr))
     assert rel < 2e-5, rel
+
+
+def _merged_cross_list(seed=0, n_local=40, n_import=24, order=4):
+    """A local far list with cross-domain pairs behind it, as the multi-GPU lane
+    hands it to the M2L (``_prepare_solidfmm_downward_sweep``): the local half is a
+    live prefix padded with -1, the cross half has -1 holes, and the imported
+    sources sit at ``[n_local, n_local + n_import)``. No count marks a live prefix.
+    """
+    import jax.numpy as jnp
+
+    from jaccpot.operators.real_harmonics import sh_size
+    from jaccpot.runtime.dtypes import INDEX_DTYPE
+
+    rng = np.random.default_rng(seed)
+    n = n_local + n_import
+    # unit-lattice centres, so no pair is closer than 1 and neither half dominates
+    lattice = np.stack(np.meshgrid(*[np.arange(4.0)] * 3, indexing="ij"), -1)
+    lattice = lattice.reshape(-1, 3)
+    centers = np.concatenate(
+        [
+            lattice[rng.permutation(64)[:n_local]],
+            lattice[rng.permutation(64)[:n_import]] + np.array([2.0, 0.5, 0.5]),
+        ]
+    )
+    multipoles = rng.normal(size=(n, sh_size(order)))
+    local_live, local_cap, cross_cap = 90, 128, 96
+    loc_t = rng.integers(0, n_local, local_live)
+    loc_s = (loc_t + rng.integers(1, n_local, local_live)) % n_local
+    pad = np.full(local_cap - local_live, -1)
+    cross_t = rng.integers(0, n_local, cross_cap)
+    cross_s = rng.integers(n_local, n, cross_cap)
+    hole = rng.uniform(size=cross_cap) < 0.3
+    src = np.concatenate([loc_s, pad, np.where(hole, -1, cross_s)])
+    tgt = np.concatenate([loc_t, pad, np.where(hole, -1, cross_t)])
+    return (
+        jnp.asarray(multipoles, jnp.float32),
+        jnp.asarray(centers, jnp.float32),
+        jnp.asarray(src, INDEX_DTYPE),
+        jnp.asarray(tgt, INDEX_DTYPE),
+        n_local,
+        local_cap,
+    )
+
+
+def _accumulate(multipoles, centers, src, tgt, n_local, *, chunk_size, order=4):
+    import jax.numpy as jnp
+
+    from jaccpot.runtime.kernels._downward_prep import (
+        _solidfmm_downward_accumulate_from_multipoles,
+    )
+
+    out = _solidfmm_downward_accumulate_from_multipoles(
+        jnp.zeros((n_local, multipoles.shape[1]), multipoles.dtype),
+        multipoles,
+        n_targets=n_local,
+        centers=centers,
+        src=src,
+        tgt=tgt,
+        pair_count=int(src.shape[0]),
+        active_pair_count=None,
+        order=order,
+        total_nodes=n_local,
+        chunk_size=chunk_size,
+    )
+    return np.asarray(out, np.float64)
+
+
+def test_flat_lanes_take_a_merged_cross_domain_list_like_the_csr_lane(monkeypatch):
+    """Review G8: with the CSR lane off (pre-Ampere, ``..._FUSED_M2L_CSR=0``, or a
+    CPU) the multi-GPU lane's merged list reached the flat lanes with more source
+    rows than targets (a jaxtyping ``nodes`` mismatch) and no live-prefix count
+    (``start_idx < None``). Both flat lanes must now give the CSR lane's field."""
+    multipoles, centers, src, tgt, n_local, local_cap = _merged_cross_list()
+
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", "1")
+    monkeypatch.setenv("JACCPOT_M2L_CSR_INTERPRET", "1")
+    csr = _accumulate(multipoles, centers, src, tgt, n_local, chunk_size=4096)
+
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_M2L_CSR", "0")
+    full = _accumulate(multipoles, centers, src, tgt, n_local, chunk_size=4096)
+    chunked = _accumulate(multipoles, centers, src, tgt, n_local, chunk_size=16)
+    local_only = _accumulate(
+        multipoles,
+        centers,
+        src[:local_cap],
+        tgt[:local_cap],
+        n_local,
+        chunk_size=4096,
+    )
+
+    scale = np.linalg.norm(csr)
+    # the cross half is a real part of the field, not lost behind the padding
+    assert np.linalg.norm(csr - local_only) > 0.1 * scale
+    for name, got in (("full-batch", full), ("chunked", chunked)):
+        rel = np.linalg.norm(got - csr) / scale
+        assert rel < 1e-5, f"{name} lane vs CSR lane: rel {rel:.3e}"

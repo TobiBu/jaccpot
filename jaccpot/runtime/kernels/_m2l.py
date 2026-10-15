@@ -396,8 +396,8 @@ def _apply_real_m2l(
 
 @jaxtyped(typechecker=beartype)
 def _m2l_chunk_contributions(
-    multip_packed: Float[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
+    multip_packed: Float[Array, "sources sh"],
+    centers: Float[Array, "sources 3"],
     src_idx: Array,
     tgt_idx: Array,
     valid: Array,
@@ -431,10 +431,10 @@ def _m2l_chunk_contributions(
 
     Parameters
     ----------
-    multip_packed : Float[Array, 'nodes sh']
+    multip_packed : Float[Array, 'sources sh']
         Packed multipole coefficients for every node. Loop-invariant, so hoisted
         out of the scan and counted once.
-    centers : Float[Array, 'nodes 3']
+    centers : Float[Array, 'sources 3']
         Node centres. Loop-invariant on the same terms; the pair displacement is
         formed here rather than passed in, which is what keeps the guard inside
         the rematerialized region.
@@ -477,8 +477,8 @@ def _m2l_chunk_contributions(
 @jaxtyped(typechecker=beartype)
 def _accumulate_m2l_fullbatch(
     locals_coeffs: Float[Array, "nodes sh"],
-    multip_packed: Float[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
+    multip_packed: Float[Array, "sources sh"],
+    centers: Float[Array, "sources 3"],
     src: Array,
     tgt: Array,
     active_pair_count: Array,
@@ -499,10 +499,12 @@ def _accumulate_m2l_fullbatch(
     ----------
     locals_coeffs : Float[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Float[Array, 'nodes sh']
-        Packed multipole coefficients for every node.
-    centers : Float[Array, 'nodes 3']
-        Node centres.
+    multip_packed : Float[Array, 'sources sh']
+        Packed multipole coefficients for every node. ``sources > nodes`` when
+        cross-domain sources sit behind the local nodes (the multi-GPU fused
+        lane); every target is still local.
+    centers : Float[Array, 'sources 3']
+        Node centres, same rows as ``multip_packed``.
     src : Array
         Source node index per pair. Negative entries are treated as padding.
     tgt : Array
@@ -560,8 +562,8 @@ def _accumulate_m2l_fullbatch(
 @jaxtyped(typechecker=beartype)
 def _accumulate_m2l_chunked_scan(
     locals_coeffs: Float[Array, "nodes sh"],
-    multip_packed: Float[Array, "nodes sh"],
-    centers: Float[Array, "nodes 3"],
+    multip_packed: Float[Array, "sources sh"],
+    centers: Float[Array, "sources 3"],
     src: Array,
     tgt: Array,
     active_pair_count: Array,
@@ -581,10 +583,12 @@ def _accumulate_m2l_chunked_scan(
     ----------
     locals_coeffs : Float[Array, 'nodes sh']
         Local coefficient accumulator.
-    multip_packed : Float[Array, 'nodes sh']
-        Packed multipole coefficients for every node.
-    centers : Float[Array, 'nodes 3']
-        Node centres.
+    multip_packed : Float[Array, 'sources sh']
+        Packed multipole coefficients for every node. ``sources > nodes`` when
+        cross-domain sources sit behind the local nodes (the multi-GPU fused
+        lane); every target is still local.
+    centers : Float[Array, 'sources 3']
+        Node centres, same rows as ``multip_packed``.
     src : Array
         Source node index per pair; negative entries are padding.
     tgt : Array

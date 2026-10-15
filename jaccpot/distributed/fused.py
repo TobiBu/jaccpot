@@ -446,6 +446,7 @@ def fused_force_step(
     # through the prepared state. Gravity is linear in the sources, so adding is
     # exact.
     if cross_near_sink:
+        from jaccpot._env import env_flag
         from jaccpot.distributed.cross import cross_near_acceleration
 
         tree = refreshed.tree
@@ -501,6 +502,9 @@ def fused_force_step(
             softening_sq=jnp.asarray(engine.softening, acceleration.dtype) ** 2,
             softening_kernel=getattr(engine, "softening_kernel", None),
             G=jnp.asarray(engine.G, acceleration.dtype),
+            # the local near field's interpret switch: this term is Pallas only,
+            # so off a GPU (the CPU end-to-end test) it needs interpret mode
+            interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
         )
     return refreshed, acceleration
 
