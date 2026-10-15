@@ -165,6 +165,56 @@ def _warn_if_slow_ragged_exchange(mesh: Any) -> None:
     )
 
 
+def _refuse_error_criterion(solver: Any, *, entry: str) -> None:
+    """Refuse Dehnen's error criterion (eq 16a) on the fused multi-GPU lane.
+
+    The single-card fused lane runs ``mac_type='dehnen_error'`` by carrying eq
+    (16b)'s per-particle force scale ``f_b`` from one step's evaluation into the
+    next step's walk. This lane carries none: :func:`fused_force_step` refreshes
+    without a force scale, so the local walks keep the eager prepare's ``f_b`` for
+    good, and the cross-domain walks test the geometric MAC at ``theta`` whatever
+    the solver asked for. A run would silently use another criterion, so every
+    entry point raises instead, before anything is built. The mesh lane
+    (:mod:`jaccpot.distributed.fmm`) carries the criterion and is not affected.
+
+    Parameters
+    ----------
+    solver : Any
+        The ``FastMultipoleMethod`` (or its runtime impl) the lane would run.
+    entry : str
+        The entry point's name, for the message.
+
+    Returns
+    -------
+    None
+        Returns normally when the solver uses a geometric MAC.
+
+    Raises
+    ------
+    NotImplementedError
+        If the solver evaluates Dehnen's error criterion: ``mac_type`` is
+        ``'dehnen_error'`` (or the refuted ``'dehnen_theta'``), or
+        ``adaptive_error_model`` is ``'dehnen_paper'``.
+    """
+    engine = getattr(solver, "_impl", solver)
+    uses_criterion = getattr(engine, "_uses_paper_style_traversal_policy", None)
+    if uses_criterion is None or not uses_criterion():
+        return
+    mac_type = str(getattr(engine, "mac_type", ""))
+    if mac_type in ("dehnen_error", "dehnen_theta"):
+        asked = f"mac_type={mac_type!r}"
+    else:
+        asked = f"adaptive_error_model={engine.adaptive_error_model!r}"
+    raise NotImplementedError(
+        f"{entry}: {asked} (Dehnen's error criterion, eq 16a) is not supported on "
+        "the fused multi-GPU lane yet: its force step carries no per-particle force "
+        "scale f_b and its cross-domain walks test the geometric MAC only, so the "
+        "criterion would be silently replaced. Run the criterion on the single-card "
+        "fused lane (one device) or on the mesh lane (jaccpot.distributed.fmm), or "
+        "use the geometric criterion mac_type='dehnen' here."
+    )
+
+
 def global_mesh_bounds(
     positions: Array,
     *,
@@ -394,9 +444,13 @@ def fused_force_step(
     ------
     RuntimeError
         If the refresh rejects the state (topology or profile mismatch).
+    NotImplementedError
+        If the solver asks for Dehnen's error criterion
+        (:func:`_refuse_error_criterion`).
     """
     from jaccpot.runtime._large_n_pipeline import evaluate_large_n_state
 
+    _refuse_error_criterion(solver, entry="fused_force_step")
     # ``FastMultipoleMethod`` is a facade; the refresh and the evaluator both
     # live on the runtime impl it delegates to. Accept either so callers can
     # pass whichever object they already hold.
@@ -701,11 +755,18 @@ def make_fused_force_evaluator(
         ``(ndev,)``. The acceleration comes back flat too, dead rows included and
         meaningless. ``overflow`` is one replicated boolean: a capacity that
         saturated on ANY device.
+
+    Raises
+    ------
+    NotImplementedError
+        If the solver asks for Dehnen's error criterion
+        (:func:`_refuse_error_criterion`).
     """
     from jax.sharding import PartitionSpec as P
 
     from jaccpot.runtime.capacity_plan import fused_capacity_plan_overrides
 
+    _refuse_error_criterion(solver, entry="make_fused_force_evaluator")
     _warn_if_slow_ragged_exchange(mesh)
 
     def body(prepared: Any, positions: Array, masses: Array, num_valid: Array) -> tuple:

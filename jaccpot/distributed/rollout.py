@@ -464,9 +464,17 @@ def setup_fused_force(
     -------
     tuple[ForceFn, Any, Optional[dict]]
         ``(force, merged plan, merged walk caps)``.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``solver`` asks for Dehnen's error criterion, which this lane does not
+        carry yet (:func:`~jaccpot.distributed.fused._refuse_error_criterion`);
+        raised before any shard is prepared.
     """
     from jaccpot.distributed.cross import make_cross_hook
     from jaccpot.distributed.fused import (
+        _refuse_error_criterion,
         assemble_prepared_states,
         host_mesh_bounds,
         make_fused_force_evaluator,
@@ -479,6 +487,7 @@ def setup_fused_force(
         merge_walk_caps,
     )
 
+    _refuse_error_criterion(solver, entry="setup_fused_force")
     devices = _mesh_devices(mesh)
     ndev = len(devices)
 
