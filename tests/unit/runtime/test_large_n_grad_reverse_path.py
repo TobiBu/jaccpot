@@ -79,7 +79,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaccpot import FastMultipoleMethod, FMMAdvancedConfig, GradConfig, TreeConfig
+from jaccpot import (
+    FarFieldConfig,
+    FastMultipoleMethod,
+    FMMAdvancedConfig,
+    GradConfig,
+    TreeConfig,
+)
 from jaccpot.autodiff import direct_sum_gravitational_acceleration
 from jaccpot.pallas import (
     cascade_real_level,
@@ -690,3 +696,126 @@ class TestPallasCascades:
         ), f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"
         rel = np.linalg.norm(got - g_loops) / np.linalg.norm(g_loops)
         assert rel < 1e-9, f"Pallas reverse vs loop reverse rel-L2 {rel:.3e}"
+
+
+# ---------------------------------------------------------------------------
+# The forward this module differentiates is the production force (plan S1; the GPU
+# pin is G1 in bench/dce_pins.py).
+#
+# ``differentiable_accelerations`` re-evaluates the lists ``prepare_state`` froze, so
+# it is the production force only if that walk tested the MAC on the same geometry
+# as the fused lane's. Since bc62978 the geometry followed the engine's
+# ``_strict_fused_mode_active``, which only a strict call sets: a FRESH engine's
+# ``prepare_state`` walked the box MAC and the fused eval the centre-of-mass one.
+# ``docs/fast_gradients_2026-09.md``'s 1.8e-11 was measured on the branch before
+# that commit; on main the two lanes were 1.46e-3 apart at the operating point of
+# bench/grad_step_profile.py (2e5), the differentiable forward the less accurate
+# (aggL2 1.60e-3 against 1.27e-3). Here, on CPU (~70 s): 5.3e-3 apart with 2640
+# against 2168 far pairs, and 5.5e-8 with the same geometry
+# (JACCPOT_STATIC_STRICT_FUSED_MAC_GEOMETRY=com).
+#
+# Both call orders: a fresh solver (what the bench does) and the production solver
+# after its strict call.
+# ---------------------------------------------------------------------------
+
+_FUSED_ENV = {
+    "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "1048576",
+    "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF": "auto",
+    "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
+    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "262144",
+    _PAYLOAD_CAP_ENV: "0",  # the prepacked layout the gradient lane requires
+}
+#: Two lanes that walk the same lists differ by fp32 summation order only (5.5e-8
+#: here, 1.7e-7 at 2e5 on an A100); the geometry split is 5.3e-3 here, 1.2e-3 there.
+_SAME_FORCE_RTOL = 1e-5
+_FUSED_THETA = 0.8
+
+
+def _fused_solver() -> FastMultipoleMethod:
+    """The fused lane's configuration at test size, far pairs retained.
+
+    Returns
+    -------
+    FastMultipoleMethod
+        A new solver: real basis, fp32, static radix tree, theta 0.8, order 4.
+    """
+    return FastMultipoleMethod(
+        preset="large_n_gpu",
+        basis="real",
+        theta=_FUSED_THETA,
+        G=_G,
+        softening=_SOFTENING,
+        working_dtype=jnp.float32,
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(mode="static_radix", leaf_target=_LEAF),
+            farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
+            mac_type="dehnen",
+        ),
+        fixed_order=_ORDER,
+    )
+
+
+@pytest.mark.xdist_group("large_n_forward_is_the_fused_force")
+class TestTheForwardIsTheFusedForce:
+    @pytest.fixture(scope="class")
+    def forces(self) -> dict[str, Any]:
+        """The fused eval, then the differentiable forward on a fresh solver and on
+        the production one.
+
+        Returns
+        -------
+        dict[str, Any]
+            The three force arrays, keyed ``production``, ``fresh`` and
+            ``same_engine``, and the far-pair count of each lane's walk.
+        """
+        patcher = pytest.MonkeyPatch()
+        for key, value in _FUSED_ENV.items():
+            patcher.setenv(key, value)
+        try:
+            positions = jnp.asarray(_plummer(_N, seed=0), jnp.float32)
+            masses = jnp.full((_N,), 1.0 / _N, jnp.float32)
+            production = _fused_solver()
+            prepared, eval_fn = production.strict_fused_prepared_eval_fn(
+                positions=positions,
+                masses=masses,
+                leaf_size=_LEAF,
+                max_order=_ORDER,
+                theta=_FUSED_THETA,
+            )
+            out = {
+                "production": np.asarray(eval_fn(prepared)),
+                "far_pairs_production": int(
+                    np.asarray(prepared.compact_far_pairs.far_pair_count)
+                ),
+            }
+            for arm, fmm in (("fresh", _fused_solver()), ("same_engine", production)):
+                state = fmm.prepare_state(
+                    positions,
+                    masses,
+                    leaf_size=_LEAF,
+                    max_order=_ORDER,
+                    theta=_FUSED_THETA,
+                )
+                assert isinstance(state, LargeNPreparedState)
+                out[arm] = np.asarray(
+                    fmm.differentiable_accelerations(state, positions, masses)
+                )
+                out[f"far_pairs_{arm}"] = int(
+                    np.asarray(state.compact_far_pairs.far_pair_count)
+                )
+        finally:
+            patcher.undo()
+        return out
+
+    def test_the_far_field_is_load_bearing(self, forces):
+        assert forces["far_pairs_production"] > 0
+
+    @pytest.mark.parametrize("arm", ["fresh", "same_engine"])
+    def test_the_differentiable_forward_is_the_fused_force(self, forces, arm):
+        """Round-off apart, in either call order (a geometry split is 5.3e-3 here)."""
+        rel = _relative_l2(forces[arm], forces["production"])
+        assert rel < _SAME_FORCE_RTOL, (
+            f"{arm}: the differentiable forward is {rel:.3e} from the fused eval, "
+            f"with {forces[f'far_pairs_{arm}']} far pairs against the fused lane's "
+            f"{forces['far_pairs_production']}"
+        )
