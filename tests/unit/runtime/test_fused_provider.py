@@ -10,8 +10,7 @@ exactly what the lane computes today:
   elimination keeps none of its leaves), so a caller can carry a template;
 * the rebuild's capacity verdict and walk needs move into the topology, and the
   engine's side channels are left empty (no tracer outlives the trace);
-* the overflow bits agree with the scan's verdict, and also see a cell-leaf
-  overflow that the verdict misses.
+* the overflow bits agree with the scan's verdict, a cell-leaf overflow included.
 
 CPU, N = 512, the lane goldens' operating point on the production leaf partition
 (cells), with ``jax.default_backend`` reporting ``"gpu"`` as
@@ -291,7 +290,7 @@ def cell_overflow(lane):
             theta=THETA,
         )
         ref = jax.jit(lambda t: ref_prov.accelerations(t))(ref_topo)
-        yield dict(acc=acc, ok=ok, bits=int(bits), ref=ref)
+        yield dict(acc=acc, ok=ok, needs=needs, bits=int(bits), ref=ref)
     finally:
         for key in _CSR_ON_CPU:
             lane.delenv(key, raising=False)
@@ -307,15 +306,12 @@ def test_a_cell_leaf_overflow_fails_the_overflow_bits(cell_overflow):
     assert not bool(ft.overflow_ok(jnp.asarray(cell_overflow["bits"], jnp.uint32)))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the traced refresh does not fold the cell-leaf overflow into the "
-    "walk's saturation (_refresh_large_n_same_topology drops "
-    "leaf_capacity_overflow), so the strict scan's verdict misses it; kept "
-    "bitwise in S2's refactor, to be fixed on its own",
-)
 def test_the_scans_verdict_sees_a_cell_leaf_overflow(cell_overflow):
+    """The provider's verdict folds the tree's own flag: the traced refresh never
+    lets the walk see a cell-leaf overflow, so its far list does not saturate and
+    nothing else on the CSR lane fails. Missed, the verdict was True (S2 C1)."""
     assert not bool(cell_overflow["ok"])
+    assert int(cell_overflow["needs"][-1]) == 1  # named in the segment's needs
 
 
 def test_the_key_holds_the_walk_caps_and_the_template(base):

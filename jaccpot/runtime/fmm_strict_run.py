@@ -132,7 +132,8 @@ class StrictRunMixin(_EngineBase):
         ----------
         needs : np.ndarray
             The segment's running maximum of
-            :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs`.
+            :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs` (its walk
+            entries; a cell-leaf tree overflow is not re-planned).
 
         Returns
         -------
@@ -187,14 +188,16 @@ class StrictRunMixin(_EngineBase):
         Parameters
         ----------
         needs : Optional[np.ndarray]
-            The segment's walk needs, named in the message when given.
+            The segment's needs (``fused_topology.NEEDS_FIELDS``), named in the
+            message when given; a cell-leaf tree overflow among them is named
+            first, with its remedy, and the walk's saturation after it.
 
         Raises
         ------
         RuntimeError
             Always.
         """
-        from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
         max_blocks = os.environ.get(
             "JACCPOT_LARGE_N_STATIC_TARGET_BLOCKS_MAX_PER_LEAF",
@@ -205,10 +208,15 @@ class StrictRunMixin(_EngineBase):
             ""
             if needs is None
             else " The segment's walks needed: "
-            + ", ".join(f"{k}={int(v)}" for k, v in zip(WALK_NEEDS_FIELDS, needs))
+            + ", ".join(f"{k}={int(v)}" for k, v in zip(NEEDS_FIELDS, needs))
             + "."
         )
-        raise RuntimeError(
+        named = (
+            dict(zip(NEEDS_FIELDS, (int(v) for v in needs)))
+            if needs is not None
+            else {}
+        )
+        saturated = (
             "a fixed capacity saturated inside the compiled velocity-Verlet "
             "scan, so the refreshed interaction lists are truncated and the "
             "forces from that step on are wrong. Checked: static target-block "
@@ -229,6 +237,28 @@ class StrictRunMixin(_EngineBase):
                 if traced_caps.get("flat_walk")
                 else ""
             )
+        )
+        if not named.get("tree_overflow"):
+            raise RuntimeError(saturated + walk)
+        # the cell-leaf tree is not a walk cap and is not re-planned: its remedy
+        # first, then the walk's when its lists saturated in the same segment
+        walk_saturated = any(
+            named.get(k) for k in ("far_overflow", "near_overflow", "queue_overflow")
+        )
+        raise RuntimeError(
+            "the cell-leaf tree overflowed inside the compiled velocity-Verlet "
+            "scan: a step's rebuild needed more cell leaves than "
+            f"TreeConfig(leaf_capacity={getattr(self, '_tree_leaf_capacity', None)})"
+            " holds, a tree deeper than the level-loop bound (the eager "
+            "prepare's depth + 8) or a level wider than the level loops' batch "
+            "(1.25 x the eager prepare's widest), so the forces from that step "
+            "on are wrong. It is not re-planned: raise "
+            "TreeConfig(leaf_capacity=...), with headroom over the live "
+            "cell-leaf count of every configuration the run reaches (it grows "
+            "as the particles cluster), or start a new call with "
+            "prepared_state=None, whose prepare at the current positions raises "
+            "the depth and level bounds."
+            + (" In the same segment, " + saturated if walk_saturated else "")
             + walk
         )
 
@@ -1227,7 +1257,7 @@ class StrictRunMixin(_EngineBase):
                 donate_state=bool(donate_state),
             )
         else:
-            from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
+            from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
             def _compiled_runner_for(prepared_ref: PreparedStateLike) -> Callable:
                 # The integrator's part of the key here, the force's from the
@@ -1337,7 +1367,7 @@ class StrictRunMixin(_EngineBase):
                             prov.capacity_ok(
                                 FusedTopology.from_prepared(prepared_initial)
                             ),
-                            jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+                            jnp.zeros((len(NEEDS_FIELDS),), jnp.int32),
                             scale_initial,
                         ),
                         xs=scan_xs,
@@ -1583,7 +1613,7 @@ class StrictRunMixin(_EngineBase):
             If the criterion is on and no force scale came from the eager prepare
             or the handle.
         """
-        from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
         from jaccpot.runtime.strict_carry import StrictParticleCarry
 
         def _runner_for(
@@ -1748,7 +1778,7 @@ class StrictRunMixin(_EngineBase):
                     jnp.zeros_like(acceleration_initial),
                     masses_in,
                     ok_initial,
-                    jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+                    jnp.zeros((len(NEEDS_FIELDS),), jnp.int32),
                     scale_initial,
                 )
 
@@ -1790,7 +1820,7 @@ class StrictRunMixin(_EngineBase):
                 )
                 ok0 = ok_initial & prov_i.capacity_ok(topology0)
                 needs0 = jnp.maximum(
-                    jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+                    jnp.zeros((len(NEEDS_FIELDS),), jnp.int32),
                     topology0.needs(),
                 )
                 return acc_self0, ok0, needs0, scale0

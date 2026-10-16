@@ -101,8 +101,19 @@ def test_the_caller_adds_its_own_bits():
 def test_an_eager_topology_has_no_rebuild_verdict():
     topo = ft.FusedTopology.from_prepared(_prepared())
     assert not topo.fresh and topo.refresh_ok is None and topo.walk_needs is None
-    np.testing.assert_array_equal(topo.needs(), np.zeros(len(WALK_NEEDS_FIELDS)))
+    np.testing.assert_array_equal(topo.needs(), np.zeros(len(ft.NEEDS_FIELDS)))
     assert int(topo.overflow_bits()) == 0
+
+
+def test_the_needs_carry_the_tree_overflow_after_the_walks():
+    """A segment folds them into one running maximum: the walk's entries re-plan
+    the walk caps, the last says the cell-leaf tree overflowed (no walk cap fixes
+    that)."""
+    walk = _needs(far_needed=10, near_needed=20, peak_wavefront=30, near_overflow=1)
+    needs = _rebuilt(walk_needs=walk, tree_overflow=jnp.asarray(True)).needs()
+    assert ft.NEEDS_FIELDS == (*WALK_NEEDS_FIELDS, "tree_overflow")
+    assert needs.dtype == jnp.int32
+    np.testing.assert_array_equal(needs, np.concatenate([np.asarray(walk), [1]]))
 
 
 def test_the_topology_is_a_pytree_with_static_flags():

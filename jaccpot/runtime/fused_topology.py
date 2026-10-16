@@ -30,6 +30,7 @@ from jaxtyping import Array
 from .capacity_guard import WALK_NEEDS_FIELDS
 
 __all__ = [
+    "NEEDS_FIELDS",
     "OVERFLOW_CROSS",
     "OVERFLOW_FAIL_MASK",
     "OVERFLOW_FAR_CAP",
@@ -56,10 +57,11 @@ OVERFLOW_WALK_FAR = 1 << 0
 OVERFLOW_WALK_NEAR = 1 << 1
 OVERFLOW_WALK_QUEUE = 1 << 2
 #: the cell-leaf rebuild: a leaf over capacity, a tree deeper than the level-loop
-#: bound, or a level wider than the level loops' static batch. A verdict bit: the
-#: traced refresh does not fold it into the walk's saturation (the prepare does),
-#: so bit 4 does not imply it -- a capacity overflow of the cell leaves left the
-#: scan's verdict ``True`` with the force 55 % off (rel-L2, N = 512, CSR lane)
+#: bound, or a level wider than the level loops' static batch. A verdict bit of its
+#: own: the traced refresh does not fold it into the walk's saturation (the eager
+#: prepare raises on it), so bit 4 does not imply it, and the provider's verdict
+#: folds it directly -- missed, it left the scan's verdict ``True`` with the force
+#: 55 % off (rel-L2, N = 512, CSR lane)
 OVERFLOW_TREE = 1 << 3
 #: a far list this rebuild built is saturated (the flat walk's overflow signal)
 OVERFLOW_SATURATED = 1 << 4
@@ -75,6 +77,10 @@ OVERFLOW_LEVEL_PLAN = 1 << 8
 OVERFLOW_CROSS = 1 << 9
 #: traced force parameters outside what the topology was built for (C4)
 OVERFLOW_PARAMS = 1 << 10
+#: Entries of :meth:`FusedTopology.needs`, in order: the walk's
+#: (``capacity_guard.WALK_NEEDS_FIELDS``) and whether the cell-leaf tree overflowed,
+#: which a re-plan of the walk caps cannot fix.
+NEEDS_FIELDS = (*WALK_NEEDS_FIELDS, "tree_overflow")
 #: the verdict bits: ``ok = (bits & OVERFLOW_FAIL_MASK) == 0``
 OVERFLOW_FAIL_MASK = 0x7F8
 
@@ -388,24 +394,36 @@ class FusedTopology:
         return cls(prepared=prepared)
 
     def needs(self) -> Array:
-        """What the rebuild's walk needed, ``int32[7]`` (zeros when unreported).
+        """What the rebuild needed: the walk's needs and the tree's overflow flag.
+
+        A segment folds them into a running maximum (the strict scan's carry) and
+        re-plans the walk caps from the first seven; the eighth says the cell-leaf
+        tree overflowed, which no walk cap fixes.
 
         Returns
         -------
         Array
-            ``capacity_guard.WALK_NEEDS_FIELDS`` in order.
+            ``int32[8]``, :data:`NEEDS_FIELDS` in order; zeros for what the rebuild
+            did not report.
         """
-        if self.walk_needs is None:
-            return jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32)
-        return jnp.asarray(self.walk_needs, jnp.int32)
+        walk = (
+            jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32)
+            if self.walk_needs is None
+            else jnp.asarray(self.walk_needs, jnp.int32)
+        )
+        tree = (
+            jnp.zeros((1,), jnp.int32)
+            if self.tree_overflow is None
+            else jnp.reshape(jnp.asarray(self.tree_overflow, jnp.int32), (1,))
+        )
+        return jnp.concatenate([walk, tree])
 
     def overflow_bits(self, extra: Union[int, Array] = 0) -> Array:
         """Every fixed capacity of this topology, one bit each (``OVERFLOW_*``).
 
-        ``overflow_ok(bits)`` is the verdict (bits 3-10); bits 0-2 name what the
-        walk overflowed. It is :meth:`FusedForceProvider.capacity_ok`'s verdict and
-        the tree's (bit 3), which ``capacity_ok`` -- the strict scan's verdict,
-        kept bitwise -- does not see on the cell-leaf rebuild.
+        ``overflow_ok(bits)`` is the verdict (bits 3-10), the one
+        :meth:`FusedForceProvider.capacity_ok` returns; bits 0-2 name what the walk
+        overflowed.
 
         Parameters
         ----------
@@ -424,7 +442,7 @@ class FusedTopology:
         prepared = self.prepared
         bits = jnp.asarray(extra, jnp.uint32)
         if self.walk_needs is not None:
-            needs = self.needs()
+            needs = jnp.asarray(self.walk_needs, jnp.int32)
             bits = bits | bit(needs[3] != 0, OVERFLOW_WALK_FAR)
             bits = bits | bit(needs[4] != 0, OVERFLOW_WALK_NEAR)
             bits = bits | bit(needs[5] != 0, OVERFLOW_WALK_QUEUE)

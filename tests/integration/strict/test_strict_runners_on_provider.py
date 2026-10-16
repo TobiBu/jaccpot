@@ -59,7 +59,7 @@ def _lane(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-def _solver():
+def _solver(*, leaf_capacity: int = 1024, use_pallas: bool = False):
     from jaccpot import FastMultipoleMethod
     from jaccpot.config import FMMAdvancedConfig, NearFieldConfig, TreeConfig
 
@@ -70,13 +70,13 @@ def _solver():
         G=1.0,
         softening=SOFTENING,
         working_dtype=jnp.float32,
-        use_pallas=False,
+        use_pallas=use_pallas,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(
                 mode="static_radix",
                 leaf_target=LEAF,
                 leaf_partition="cells",
-                leaf_capacity=1024,
+                leaf_capacity=leaf_capacity,
             ),
             nearfield=NearFieldConfig(mode="auto"),
             mac_type="dehnen",
@@ -306,3 +306,32 @@ def test_chained_dehnen_error_calls_are_one_call(carry, monkeypatch):
         f"{differ} of {got.size} elements differ, max "
         f"{float(np.max(np.abs(got - want))):.3e}"
     )
+
+
+@pytest.mark.parametrize("carry", ["state", "particles"])
+def test_a_cell_leaf_overflow_inside_the_scan_is_refused(carry, monkeypatch):
+    """Cell leaves sized on a uniform draw (capacity 66), the scan stepped on four
+    blobs (105 live leaves): a step's rebuild overflows the leaf capacity.
+
+    The traced refresh never lets the walk see that overflow, and on the CSR near
+    field (production's) nothing else fails, so the scan ran on with the force
+    55 % off (rel-L2). The verdict now folds the tree's flag, and as no walk cap
+    can fix it, the call raises at once, naming the tree and its remedy.
+    """
+    for key, val in _CSR_ON_CPU.items():
+        monkeypatch.setenv(key, val)
+    blobs, plummer_state, masses = _systems()
+    uniform = jnp.asarray(
+        np.random.default_rng(2).uniform(-1.0, 1.0, (N, 3)), jnp.float32
+    )
+    state = plummer_state.at[:, 0].set(blobs)
+    solver = _solver(leaf_capacity=66, use_pallas=True)
+    small = _caps_from(solver, uniform, masses)
+    before = int(solver.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+    with pytest.raises(RuntimeError, match="cell-leaf tree overflowed") as err:
+        _run(solver, state, masses, carry=carry, prepared=small)
+    assert "TreeConfig(leaf_capacity=66)" in str(err.value)
+    assert "tree_overflow=1" in str(err.value)
+    # not re-planned: no retry ran
+    diag = solver.get_runtime_diagnostics()
+    assert int(diag["strict_fused_fallback_count"] or 0) == before

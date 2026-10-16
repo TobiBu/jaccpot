@@ -357,8 +357,9 @@ class FusedForceProvider:
         -------
         Optional[tuple[FusedForceProvider, FusedTopology]]
             The provider and topology for the re-run, or ``None`` when nothing can
-            be re-planned (no walk flag fired, a named cap overflowed, not the
-            flat walk): the caller raises.
+            be re-planned (no walk flag fired -- a cell-leaf tree overflow alone
+            is not re-planned --, a named cap overflowed, not the flat walk): the
+            caller raises.
         """
         engine = self.engine
         if not engine._replan_walk_caps_from_needs(needs):
@@ -747,9 +748,10 @@ class FusedForceProvider:
 
         Every fixed capacity of the returned state (``fused_state_capacity_ok``
         with the engine's traced caps, read NOW -- inside the trace that recorded
-        them) and, for a rebuilt topology, the far list the rebuild built. Equal to
-        ``overflow_ok(topology.overflow_bits())`` but for the tree's own overflow
-        (``OVERFLOW_TREE``), which it misses on the cell-leaf rebuild.
+        them) and, for a rebuilt topology, the far list the rebuild built and the
+        cell-leaf tree it rebuilt (leaf capacity, depth bound, level width: the
+        walk never sees that overflow, so it is folded here). Equal to
+        ``overflow_ok(topology.overflow_bits())``.
 
         Parameters
         ----------
@@ -774,6 +776,8 @@ class FusedForceProvider:
                 if topology.refresh_ok is None
                 else jnp.asarray(topology.refresh_ok, jnp.bool_)
             )
+            if topology.tree_overflow is not None:
+                ok = ok & ~jnp.asarray(topology.tree_overflow, jnp.bool_)
         return ok
 
     def step(
