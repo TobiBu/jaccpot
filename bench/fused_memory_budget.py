@@ -246,6 +246,14 @@ def _args() -> argparse.Namespace:
         help="the solver's working_dtype: float64 is the large-N lane's validation "
         "lane (precision='fp64'; Pallas where the kernels are dtype-generic)",
     )
+    ap.add_argument(
+        "--traced-params",
+        action="store_true",
+        help="hand the solver G and the softening squared (ForceParams, in the "
+        "force dtype) and dt (in the state dtype) as ARRAYS: traced arguments of the "
+        "compiled programs instead of literals (S2's opt-in; the GPU A/B against "
+        "the default)",
+    )
     ap.add_argument("--env", nargs="*", default=[], metavar="KEY=VAL")
     ap.add_argument("--out", required=True)
     return ap.parse_args()
@@ -346,7 +354,7 @@ from yggdrax.morton import morton_encode  # noqa: E402
 
 import jaccpot.pallas.mutual_walk_pallas as _mwp  # noqa: E402
 import jaccpot.runtime._interaction_cache as _ic  # noqa: E402
-from jaccpot import FastMultipoleMethod, TraversalOverrides  # noqa: E402
+from jaccpot import FastMultipoleMethod, ForceParams, TraversalOverrides  # noqa: E402
 from jaccpot.config import (  # noqa: E402
     FMMAdvancedConfig,
     NearFieldConfig,
@@ -750,6 +758,17 @@ def _in_g_units(mass: np.ndarray) -> np.ndarray:
     return (np.asarray(mass, np.float64) / ARGS.G).astype(np.float32)
 
 
+def _param_args(soft: float, dt: float) -> tuple[dict, object]:
+    """``(force kwargs, dt)``: the default floats, or arrays (``--traced-params``)."""
+    if not ARGS.traced_params:
+        return {}, dt
+    force_dtype = jnp.dtype(ARGS.force_dtype)
+    params = ForceParams(
+        G=jnp.asarray(ARGS.G, force_dtype), eps2=jnp.asarray(soft**2, force_dtype)
+    )
+    return {"force_params": params}, jnp.asarray(dt, ARGS.state_dtype)
+
+
 def run_budget(result: dict) -> None:
     pos, vel, mass, soft, dt, ext = _initial_conditions()
     mass = _in_g_units(mass)
@@ -759,6 +778,10 @@ def run_budget(result: dict) -> None:
     P = jnp.asarray(pos, ARGS.state_dtype)
     M = jnp.asarray(mass, ARGS.state_dtype)
     solver = _solver(leaf_cap, soft)
+    force_kw, dt_arg = _param_args(soft, dt)
+    # the traced programs take the parameters as arguments: lowering them from the
+    # cached callables would need those too
+    analysis = not ARGS.no_analysis and not ARGS.traced_params
     _event("before_prepare")
     a_host = None
     saved = None
@@ -772,6 +795,7 @@ def run_budget(result: dict) -> None:
             leaf_size=ARGS.leaf,
             max_order=ARGS.order,
             theta=ARGS.theta,
+            **force_kw,
         )
         _sync(prepared)
         result["prepare_s"] = time.perf_counter() - t0
@@ -803,7 +827,7 @@ def run_budget(result: dict) -> None:
             samples=[s * 1e3 for s in samples],
         )
         print(f"eval-only min {result['eval_ms']['min']:.2f} ms", flush=True)
-        if not ARGS.no_analysis:
+        if analysis:
             result["eval_memory_analysis"] = _analysis(
                 eval_fn.lower(prepared).compile()
             )
@@ -823,7 +847,7 @@ def run_budget(result: dict) -> None:
         out = solver.strict_run_v2(
             state=state,
             masses=M,
-            dt=dt,
+            dt=dt_arg,
             num_steps=k,
             refresh_every=1,
             leaf_size=ARGS.leaf,
@@ -835,6 +859,7 @@ def run_budget(result: dict) -> None:
             external_acceleration_fn=ext,
             **({} if ARGS.no_donate else {"donate_prepared_state": True}),
             **({"donate_state": True} if ARGS.donate_state else {}),
+            **force_kw,
         )
         jax.block_until_ready(out[0])
         return out
@@ -874,7 +899,7 @@ def run_budget(result: dict) -> None:
     _write(result)
     if saved is not None:
         np.savez(ARGS.save_forces, state=np.asarray(state), **saved)
-    if not ARGS.no_analysis:
+    if analysis:
         cache = getattr(solver._impl, "_strict_fused_jit_function_cache", {}) or {}
         runner = next(
             (fn for key, fn in cache.items() if int(key[6]) == int(ARGS.steps)), None
@@ -1159,6 +1184,7 @@ def main() -> int:
         caps=ARGS.caps,
         state_dtype=ARGS.state_dtype,
         force_dtype=ARGS.force_dtype,
+        traced_params=bool(ARGS.traced_params),
         donate=not ARGS.no_donate,
         cap_env={v: os.environ.get(v) for v in _CAP_VARS},
         xla_flags=os.environ.get("XLA_FLAGS"),
