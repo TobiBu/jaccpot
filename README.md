@@ -673,6 +673,28 @@ traced softening beyond the one the walk was built for sets the `OVERFLOW_PARAMS
 Guide, the overflow bits, the limits and the float64 validation lane:
 **[docs/fused_provider.md](docs/fused_provider.md)**.
 
+### A long production run: `ProductionRunner`
+
+`ProductionRunner` runs a simulation as K-step `strict_run_v2(carry="particles")`
+segments chained through the handle -- bit for bit one long call (CPU gates) -- with
+fp64 momentum / angular momentum / centre-of-mass / kinetic-energy diagnostics at each
+segment edge, host-side callbacks, snapshots and restart files that continue a run
+bitwise in a fresh process:
+
+```python
+from jaccpot import FastMultipoleMethod, ProductionRunner, SegmentConfig
+
+solver = FastMultipoleMethod(preset="galaxy", softening=1.5e-3)
+runner = ProductionRunner(
+    solver, segment=SegmentConfig(steps=50, restart_every=4, restart_path="restart.npz")
+)
+res = runner.run(state, masses, dt=5e-4, num_steps=500)    # state: [N, 2, 3]
+res = runner.run(dt=5e-4, num_steps=500, restart_from="restart.npz")  # after a kill
+```
+
+Choose `steps` to divide `num_steps` (each segment length compiles its own scan).
+Guide: **[docs/production.md](docs/production.md)**.
+
 ## Momentum-Conserving FMM
 
 `FastMultipoleMethod` is target-centric: the near field gathers and the far field
