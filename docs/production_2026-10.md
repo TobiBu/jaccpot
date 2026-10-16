@@ -465,7 +465,9 @@ shared A100s booked through autocvd (`-l`): accuracy and pins only, no timings.
 ## S2 — the fused force as an object, the fp64 validation lane, traced parameters (2026-10-15/16)
 
 **Setup.** Code: jaccpot main `f967805` (the base), yggdrax `2758fa9`, nornax `763096e`, Odisseo `8fa0c18`; jax 0.11.2.
-The work is a linear stack of local branches on `f967805` (`s2/1` to `s2/13`, table below). GPU runs used shared A100s
+The work is a linear stack on `f967805` (`s2/1` to `s2/13`, table below), published as five stacked PRs:
+#408 (`s2/1`-`s2/2`, bench), #409 (`s2/3`-`s2/4`, provider), #410 (`s2/5`-`s2/7`, strict lane on it + fixes),
+#411 (`s2/8`-`s2/10`, fp64), #412 (`s2/11`-`s2/13`, traced parameters, docs, this record). GPU runs used shared A100s
 booked through autocvd for accuracy, program identity and pins; the L1-L3 timing gate ran on a free GPU 7.
 
 **The user's decisions (2026-10-15):**
