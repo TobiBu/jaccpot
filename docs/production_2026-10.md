@@ -495,7 +495,7 @@ booked through autocvd for accuracy, program identity and pins; the L1-L3 timing
 | `s2/10-tree-order-fp64` | `86844a4` | the tree-order carry keeps a float64 state |
 | `s2/11-traced-params-runtime` | `9aee0e1` | G and eps^2 as arguments of the fused evaluation |
 | `s2/12-traced-params-strict` | `4f7f606`, `475b61e` | `strict_run_v2(force_params=, external_params=, dt=array)`; `fused_memory_budget.py --traced-params` |
-| `s2/13-docs-and-record` | | the user-scan test, `docs/fused_provider.md`, this section |
+| `s2/13-docs-and-record` | `17e1cca`, `d1ca5b1`, `7bdd90f`, `4ba7bc2` + the timing rows | the user-scan test, `docs/fused_provider.md`, this section |
 
 ### `FusedForceProvider`: the fused lane's force, public
 - **Two halves.** `rebuild(pos, m)` is the tree from a shape template, P2M/M2M, the flat walk, M2L and L2L.
@@ -597,7 +597,24 @@ programs identical (above), so the row stands for them.
   either dtype); at p12 in float64 it had not finished after 12 minutes. GPU validation at p12 needs
   `JACCPOT_CASCADE_PALLAS=0` (the cascades as XLA level loops).
 
-<!-- LEAD: precision rows -->
+**Time and memory per mode** (free GPU 7, 2026-10-16, every row clean; the L-pin settings: clipped Plummer, cells of
+64, p6, theta 0.8, particle carry, unnamed caps, arena 0.88, no donation; the `s2/12` tip; step = min of 3 x 4 steps;
+rel-L2 on 4096 targets):
+
+| state / force | 8e6 step | 8e6 B/p | 8e6 force eval, rel-L2 | 1e8 step | 1e8 peak, B/p |
+| --- | --- | --- | --- | --- | --- |
+| fp32 / fp32 | 78.7 ms | 325 | 27.8 ms, 4.333e-4 | 872.0 ms | 23.9 GiB, 257 |
+| fp64 / fp32 | 81.4 ms (+3 %) | 442 | 28.3 ms, 4.333e-4 | out of memory (a 14.5 GiB request) | |
+| fp32 / fp64 | 151.5 ms (1.92x) | 558 | 66.4 ms, 4.339e-4 | 1721.8 ms (1.97x) | 31.9 GiB, 342 |
+| fp64 / fp64 | 150.7 ms (1.91x) | 575 | 66.6 ms, 4.339e-4 | out of memory (a 20.9 GiB request) | |
+
+- **The largest N that fits** (same settings): fp64 state with fp32 force 8e7 (722.7 ms, 406 B/p; 9e7 out of memory);
+  fp64 / fp64 at least 7e7 (1220.1 ms, 479 B/p; the first size tried). Donation (`--donate-state`) was not tried.
+- **fp64 force costs about 2x the step** and 1.3x the memory at 1e8. **An fp64 state costs 3 % of the step** but
+  about +117 B/p, which is what stops it below 1e8 on a 40 GB card.
+- **At the production configuration fp64 buys no accuracy:** 4.333e-4 against 4.339e-4. The error is the expansion's
+  truncation (p6, theta 0.8), not round-off; fp64 matters where the expansion is pushed (p8 theta 0.4: 6.4e-7 against
+  6.9e-7) or exact (1.1e-15 against 1.4e-4).
 
 ### Traced parameters: static against traced
 - **API.** `strict_run_v2(dt=float | Array, force_params=ForceParams(G, eps2), external_params=pytree)` and
@@ -628,7 +645,15 @@ programs identical (above), so the row stands for them.
   differences: 1e-10; in eps^2: 1e-6 (float64 force, pure-JAX near field). Not verified on the Pallas lane, whose
   production forward has two kernels without a reverse rule.
 
-<!-- LEAD: traced timing -->
+**Timing** (free GPU 7, the same settings as the precision rows, `--traced-params`: G, eps^2 and dt as arguments):
+
+| | static | traced |
+| --- | --- | --- |
+| 8e6 step | 78.7 ms / 79.3 ms (two runs) | 79.3 ms (325 B/p) |
+| 1e8 step | 872.0 ms (257 B/p) | 873.2 ms (+0.13 %, 257 B/p) |
+
+Traced parameters cost nothing measurable: the difference is inside the run-to-run spread (the A-vs-A of the same
+day's L-pins is 0.2-0.7 %).
 
 ### For S3
 - **Leaf capacity:** size the cell-leaf capacity automatically, with headroom over the live cells the run will reach,
@@ -637,5 +662,5 @@ programs identical (above), so the row stands for them.
 - **Traced parameters as the default:** consider flipping it. On the GPU the traced programs are bitwise the static
   ones (S1, S1g, the 25M force), and a run that varies dt, G or eps then compiles once instead of once per value. On
   CPU, ferrers3 results would move by one float32 rounding (the lane goldens run Plummer, which stays bitwise). The
-  traced timing row above decides the cost.
+  traced timing above shows no cost.
 - **The preset's carry** (`"state"` or `"particles"`), deferred to S3 by the user.
