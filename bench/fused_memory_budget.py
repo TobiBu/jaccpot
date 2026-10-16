@@ -1019,9 +1019,13 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
         res = runner.run(dt=dt, num_steps=0, restart_from=ARGS.runner_resume)
         result["runner_restored"] = res.restored
     calls, samples = [], []
+    monitor = None
     for i, target in enumerate(targets):
         if res is not None and target <= res.step:
             continue
+        if i == 2 and not ARGS.runner_once:
+            # the timed calls, under the contention monitor as the plain scan's
+            monitor = GpuMonitor(_PHYS).__enter__()
         t0 = time.perf_counter()
         if res is None:
             res = runner.run(state0, masses, dt=dt, num_steps=target)
@@ -1049,6 +1053,9 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
         if ARGS.runner_restart and res.step == ARGS.runner_restart_at:
             runner.save_restart(ARGS.runner_restart)
             result["runner_restart_bytes"] = os.path.getsize(ARGS.runner_restart)
+    if monitor is not None:
+        monitor.__exit__(None, None, None)
+        result["scan_contention"] = monitor.summary().as_dict()
     del state0
     result["runner"] = dict(
         calls=calls, step=res.step, segment=dataclasses.asdict(segment)
