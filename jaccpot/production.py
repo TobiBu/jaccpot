@@ -1,4 +1,4 @@
-"""Galaxy-scale production settings of the fused lane: what ``preset="galaxy"`` runs.
+"""Galaxy-scale production on the fused lane: what ``preset="galaxy"`` runs, and the runner.
 
 ``FastMultipoleMethod(preset="galaxy")`` is the configuration every production row
 of the fused lane was measured with (``bench/fused_memory_budget.py``'s defaults:
@@ -8,16 +8,60 @@ so a caller no longer copies it from the bench. It is built from ONE
 opening angle, the softening kernel, the precision) and the run-time half (leaf
 size, expansion order, carry -- arguments of ``strict_run_v2``) cannot drift apart.
 
-The module imports nothing heavy; the production runner that reads the run-time
-half is not here yet.
+THE RUNNER. :class:`ProductionRunner` runs a long simulation as a host loop of
+``SegmentConfig.steps``-step segments, each ONE ``strict_run_v2(carry="particles")``
+call that continues from the previous call's
+:class:`~jaccpot.runtime.strict_carry.StrictParticleCarry` handle. It is not a new
+scan over ``FusedForceProvider.step``: the segments ARE the library's programs, so
+"the runner equals one long call" is "chained calls equal one call" -- bitwise on
+CPU, with the handle's total acceleration (``carry_total_acceleration``; without it
+an external field is evaluated again outside the scan at every edge, 1.9e-6 on one
+of 3072 components at N = 512) -- and every memory optimisation of the scan, its
+segment retry and its re-plan come with it. Between segments, on the host: the
+diagnostics (momentum, angular momentum, centre of mass and kinetic energy, fp64
+reductions on device; the energy needs the fast-lane potential, S3 session 2),
+callbacks (:class:`SnapshotWriter`, :class:`DiagnosticsLog`, or any callable; one
+returning ``True`` stops the run after that edge).
+
+SEGMENT LENGTHS. ``num_steps`` is part of a scan's compile key, so every distinct
+segment length compiles its own scan: a ragged last segment of 14 steps recompiled
+for 52.8 s at 25M on an A100 (S3 probe). Choose ``SegmentConfig.steps`` to divide
+``num_steps``; otherwise the run is ``num_steps // steps`` segments of ``steps`` and
+one of the remainder, last, and the runner warns once (:func:`segment_lengths`).
+
+COMPILES. A fresh run compiles the eager prepare's programs, the start force and one
+scan; with ``donate_input=False`` (the default: the caller's state survives) the
+second segment compiles the scan once more, with the state donated, and every later
+segment reuses it. ``donate_input=True`` gives every segment the same program.
+
+The module imports nothing heavy at import time (``jaccpot.solver`` imports it).
 """
 
 from __future__ import annotations
 
+import dataclasses
+import json
+import os
+import time
+import warnings
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Any, Callable, Literal, Optional, Sequence, Union
 
-__all__ = ["GALAXY_SETTINGS", "GalaxySettings"]
+import numpy as np
+
+__all__ = [
+    "DIAGNOSTICS",
+    "GALAXY_SETTINGS",
+    "DiagnosticsLog",
+    "GalaxySettings",
+    "ProductionRunner",
+    "RunResult",
+    "SegmentConfig",
+    "SegmentEdge",
+    "SnapshotWriter",
+    "run",
+    "segment_lengths",
+]
 
 
 @dataclass(frozen=True)
@@ -76,3 +120,1006 @@ class GalaxySettings:
 
 #: ``preset="galaxy"``.
 GALAXY_SETTINGS = GalaxySettings()
+
+#: the diagnostics a :class:`SegmentConfig` may name
+DIAGNOSTICS = ("momentum", "angular_momentum", "com", "kinetic", "energy")
+
+
+@dataclass(frozen=True)
+class SegmentConfig:
+    """How :class:`ProductionRunner` cuts a run into ``strict_run_v2`` calls.
+
+    Frozen.
+
+    Attributes
+    ----------
+    steps : int
+        Steps per segment (one ``strict_run_v2`` call). Choose it to divide the
+        run's ``num_steps``: a remainder segment compiles its own scan
+        (:func:`segment_lengths`).
+    traced_params : bool
+        Pass ``dt``, ``G`` and the softening squared (not under
+        ``mac_type='dehnen_error'``, which takes the solver's own) and the external
+        field's float parameters as ARRAYS: arguments of the compiled programs, so
+        a run with other values compiles nothing new. The runner's default;
+        ``strict_run_v2`` itself keeps literals by default (under ``ferrers3`` a
+        traced softening is not bitwise the literal one: one float32 rounding,
+        ``tests/integration/strict/test_traced_params.py``).
+    donate_input : bool
+        Let the first segment consume the caller's ``state`` (its buffer becomes
+        the returned state). Segments 2 and later always donate: their input is the
+        runner's own.
+    diagnostics_every : int
+        Moments (momentum, angular momentum, centre of mass, kinetic energy) at
+        step 0, every ``diagnostics_every``-th segment edge and the last one; ``0``
+        turns the diagnostics off.
+    diagnostics : tuple
+        Which to report, of :data:`DIAGNOSTICS`. ``"energy"`` (the potential and
+        total energy, every ``diagnostics_every_energy``-th edge) needs the
+        fast-lane potential of S3 session 2: until then its fields are ``None``.
+    diagnostics_every_energy : int
+        Segment edges between energy diagnostics (the potential program costs about
+        one step).
+    """
+
+    steps: int = 50
+    traced_params: bool = True
+    donate_input: bool = False
+    diagnostics_every: int = 1
+    diagnostics: tuple = DIAGNOSTICS
+    diagnostics_every_energy: int = 10
+
+    def __post_init__(self) -> None:
+        if int(self.steps) < 1:
+            raise ValueError(f"SegmentConfig.steps must be >= 1, got {self.steps}")
+        for name in ("diagnostics_every", "diagnostics_every_energy"):
+            if int(getattr(self, name)) < 0:
+                raise ValueError(f"SegmentConfig.{name} must be >= 0")
+        unknown = sorted(set(self.diagnostics) - set(DIAGNOSTICS))
+        if unknown:
+            raise ValueError(
+                f"unknown diagnostics {unknown}; known: {list(DIAGNOSTICS)}"
+            )
+
+
+@dataclass(frozen=True)
+class SegmentEdge:
+    """What a callback sees between two segments.
+
+    The arrays are the run's own and only valid DURING the callback: the next
+    segment consumes the state (donation). Copy what you keep (:meth:`state_host`).
+    The edges in :attr:`RunResult.edges` hold none of them.
+
+    Attributes
+    ----------
+    step : int
+        Steps done since the run's start (``t0``).
+    time : float
+        Simulation time at ``step``.
+    segment : int
+        Segments done (``0``: the initial state, before any step).
+    retries : int
+        Segment retries (capacity re-plans) the segment that ended here needed.
+    wall_s : float
+        Host wall time of that segment.
+    state : Any
+        ``[N, 2, 3]`` positions and velocities at ``step`` (``None`` once kept in
+        :attr:`RunResult.edges`).
+    masses : Any
+        ``[N]``.
+    self_acceleration : Any
+        ``[N, 3]`` self-gravity at ``state`` (``None`` at step 0).
+    diagnostics : Optional[dict]
+        The moments and their drifts against step 0 (:class:`ProductionRunner`),
+        or ``None`` on an edge without diagnostics.
+    plan : dict
+        The plan the segment ran with: leaf capacity, validated walk caps, level
+        registry, depth bound, force key.
+    """
+
+    step: int
+    time: float
+    segment: int
+    retries: int
+    wall_s: float
+    state: Any
+    masses: Any
+    self_acceleration: Any
+    diagnostics: Optional[dict]
+    plan: dict
+
+    def state_host(self) -> np.ndarray:
+        """The state as a host array (a copy).
+
+        Returns
+        -------
+        np.ndarray
+            ``[N, 2, 3]``.
+
+        Raises
+        ------
+        RuntimeError
+            Outside the callback, where the edge holds no state any more.
+        """
+        import jax
+
+        if self.state is None:
+            raise RuntimeError(
+                "this edge holds no state: the next segment consumed it. Copy the "
+                "state inside the callback (SnapshotWriter does)."
+            )
+        return np.asarray(jax.device_get(self.state))
+
+
+@dataclass
+class RunResult:
+    """What :meth:`ProductionRunner.run` returns.
+
+    Pass it as ``restart_from`` to continue the run in this process; that run
+    consumes ``state`` and ``handle``.
+
+    Attributes
+    ----------
+    state : Any
+        ``[N, 2, 3]`` final state (device).
+    masses : Any
+        ``[N]``.
+    handle : Any
+        The last segment's :class:`~jaccpot.runtime.strict_carry.StrictParticleCarry`.
+    step : int
+        Steps done since ``t0``.
+    time : float
+        Simulation time at ``step``.
+    dt : float
+        Timestep.
+    t0 : float
+        The run's start time.
+    segment : int
+        Segments done since ``t0``.
+    edges : list
+        One :class:`SegmentEdge` per edge of THIS call (arrays dropped).
+    baselines : Optional[dict]
+        Step 0's moments (``None`` without diagnostics).
+    stopped : bool
+        Whether a callback stopped the run.
+    restored : Optional[dict]
+        Where this call continued from (``from``, ``step``); ``None`` for a fresh
+        run.
+    wall_s : float
+        Host wall time of this call.
+    time_anchor : tuple
+        ``(time, step)`` edge times are counted from with ``dt``.
+    """
+
+    state: Any
+    masses: Any
+    handle: Any
+    step: int
+    time: float
+    dt: float
+    t0: float
+    segment: int
+    edges: list
+    baselines: Optional[dict]
+    stopped: bool
+    restored: Optional[dict]
+    wall_s: float
+    time_anchor: tuple = (0.0, 0)
+
+
+def segment_lengths(num_steps: int, steps: int) -> tuple:
+    """The runner's segment plan: ``num_steps // steps`` segments, then the rest.
+
+    Every distinct length compiles its own scan (``num_steps`` is in the compile
+    key), so a run whose ``num_steps`` is a multiple of ``steps`` compiles ONE
+    scan; otherwise the remainder segment, last, compiles a second.
+
+    Parameters
+    ----------
+    num_steps : int
+        Steps to run; ``>= 0``.
+    steps : int
+        Segment length; ``>= 1``.
+
+    Returns
+    -------
+    tuple
+        Segment lengths, in order; empty for ``num_steps == 0``.
+    """
+    full, rest = divmod(int(num_steps), int(steps))
+    return (int(steps),) * full + ((rest,) if rest else ())
+
+
+# --------------------------------------------------------------------------
+# Diagnostics: moments of the particle state, fp64 on device.
+# --------------------------------------------------------------------------
+
+_MOMENTS_FN: list = []
+
+
+def _moments(state: Any, masses: Any) -> dict:
+    """Total mass, momentum, angular momentum, mass moment and kinetic energy.
+
+    One small jitted reduction in float64 (the float32 state is converted inside
+    the fused reductions, never materialised), fetched to the host.
+
+    Parameters
+    ----------
+    state : Any
+        ``[N, 2, 3]``.
+    masses : Any
+        ``[N]``.
+
+    Returns
+    -------
+    dict
+        Host float64 values: ``mass``, ``momentum`` ``[3]``, ``angular_momentum``
+        ``[3]``, ``mass_moment`` ``[3]`` (``sum m x``), ``kinetic``,
+        ``momentum_scale`` (``sum m |v|``).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    if not _MOMENTS_FN:
+
+        def moments(state_in: Any, masses_in: Any) -> dict:
+            x = state_in[:, 0].astype(jnp.float64)
+            v = state_in[:, 1].astype(jnp.float64)
+            m = masses_in.astype(jnp.float64)
+            return {
+                "mass": jnp.sum(m),
+                "momentum": jnp.sum(m[:, None] * v, axis=0),
+                "angular_momentum": jnp.sum(m[:, None] * jnp.cross(x, v), axis=0),
+                "mass_moment": jnp.sum(m[:, None] * x, axis=0),
+                "kinetic": 0.5 * jnp.sum(m * jnp.sum(v * v, axis=1)),
+                "momentum_scale": jnp.sum(m * jnp.sqrt(jnp.sum(v * v, axis=1))),
+            }
+
+        _MOMENTS_FN.append(jax.jit(moments))
+    values = jax.device_get(_MOMENTS_FN[0](state, masses))
+    return {k: np.asarray(v, np.float64) for k, v in values.items()}
+
+
+def _baselines(moments: dict, time_now: float) -> dict:
+    """Step 0's moments, the reference of every drift (JSON-able).
+
+    Parameters
+    ----------
+    moments : dict
+        :func:`_moments` at step 0.
+    time_now : float
+        The time of step 0.
+
+    Returns
+    -------
+    dict
+        ``time``, ``mass``, ``momentum``, ``angular_momentum``, ``com``,
+        ``kinetic``, ``momentum_scale`` and ``energy`` (``None`` until the
+        potential exists).
+    """
+    mass = float(moments["mass"])
+    return {
+        "time": float(time_now),
+        "mass": mass,
+        "momentum": moments["momentum"].tolist(),
+        "angular_momentum": moments["angular_momentum"].tolist(),
+        "com": (moments["mass_moment"] / mass).tolist(),
+        "kinetic": float(moments["kinetic"]),
+        "momentum_scale": float(moments["momentum_scale"]),
+        "energy": None,
+    }
+
+
+def _diagnostics_row(
+    moments: dict, base: dict, time_now: float, names: Sequence, energy_due: bool
+) -> dict:
+    """The diagnostics of one edge, against step 0's ``base``.
+
+    Drifts: ``momentum_drift = |P - P0| / sum m |v|_0`` (a scale that is not ~0
+    when P0 is); ``angular_momentum_drift = |L - L0| / |L0|``; ``com_drift = |COM
+    - COM0 - P0 / M (t - t0)|``, the centre of mass against its free motion; and
+    ``kinetic_change = (K - K0) / K0``. An external field changes P and L
+    physically; the drifts then measure that, not an error.
+
+    Parameters
+    ----------
+    moments : dict
+        :func:`_moments` at the edge.
+    base : dict
+        :func:`_baselines`.
+    time_now : float
+        The edge's time.
+    names : Sequence
+        The diagnostics to report (:data:`DIAGNOSTICS`).
+    energy_due : bool
+        Whether the energy diagnostic is due at this edge.
+
+    Returns
+    -------
+    dict
+        Host floats and lists (JSON-able).
+    """
+    mass = float(moments["mass"])
+    p0 = np.asarray(base["momentum"])
+    row: dict = {"mass": mass}
+    if "momentum" in names:
+        p = moments["momentum"]
+        scale = base["momentum_scale"]
+        row["momentum"] = p.tolist()
+        row["momentum_drift"] = (
+            float(np.linalg.norm(p - p0) / scale) if scale > 0 else None
+        )
+    if "angular_momentum" in names:
+        lv = moments["angular_momentum"]
+        l0 = np.asarray(base["angular_momentum"])
+        norm0 = float(np.linalg.norm(l0))
+        row["angular_momentum"] = lv.tolist()
+        row["angular_momentum_drift"] = (
+            float(np.linalg.norm(lv - l0) / norm0) if norm0 > 0 else None
+        )
+    if "com" in names:
+        com = moments["mass_moment"] / mass
+        free = np.asarray(base["com"]) + p0 / base["mass"] * (
+            float(time_now) - base["time"]
+        )
+        row["com"] = com.tolist()
+        row["com_drift"] = float(np.linalg.norm(com - free))
+    if "kinetic" in names:
+        kin = float(moments["kinetic"])
+        row["kinetic"] = kin
+        row["kinetic_change"] = (
+            (kin - base["kinetic"]) / base["kinetic"] if base["kinetic"] else None
+        )
+    if "energy" in names and energy_due:
+        # the potential program is S3 session 2 (the fast-lane potential)
+        row.update(potential=None, energy=None, energy_drift=None)
+    return row
+
+
+def _plan_record(engine: Any, handle: Any) -> dict:
+    """The trace-time plan a segment ran with (host values, JSON-able).
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine.
+    handle : Any
+        The segment's :class:`~jaccpot.runtime.strict_carry.StrictParticleCarry`,
+        or ``None`` before the first.
+
+    Returns
+    -------
+    dict
+        ``leaf_capacity``, ``walk_caps`` (the validated caps the traced walk is
+        sized from), ``level_widths`` / ``level_counts`` (the level registry, as
+        ``[total_nodes, num_internal, value]`` rows), ``upward_num_levels`` (the
+        depth bound) and ``force_key``.
+    """
+    from jaccpot.runtime import _level_shapes
+
+    caps = getattr(engine, "_strict_fused_validated_caps", None)
+    force_key = getattr(handle, "force_key", None)
+    return {
+        "leaf_capacity": getattr(engine, "_tree_leaf_capacity", None),
+        "walk_caps": None if caps is None else _jsonable(dict(caps)),
+        "level_widths": [
+            [int(a), int(b), int(w)] for (a, b), w in _level_shapes._WIDTHS.items()
+        ],
+        "level_counts": [
+            [int(a), int(b), int(n)] for (a, b), n in _level_shapes._LEVELS.items()
+        ],
+        "upward_num_levels": getattr(engine, "_cells_upward_num_levels", None),
+        "force_key": None if force_key is None else [float(v) for v in force_key],
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    """``value`` with numpy scalars as Python numbers and tuples as lists.
+
+    Parameters
+    ----------
+    value : Any
+        Nested dicts, lists, tuples and scalars.
+
+    Returns
+    -------
+    Any
+        The same, JSON-able.
+    """
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+# --------------------------------------------------------------------------
+# Built-in callbacks.
+# --------------------------------------------------------------------------
+
+
+class SnapshotWriter:
+    """A callback that keeps the state every ``every`` segments.
+
+    To ``directory`` as ``<prefix>_<step:08d>.npz`` (``state``, ``step``, ``time``;
+    written to a temporary file and renamed), or in memory (``directory=None``:
+    :attr:`snapshots`, host copies -- small runs only).
+
+    Parameters
+    ----------
+    directory : Optional[str]
+        Output directory (created), or ``None`` for memory.
+    every : int
+        Segments between snapshots.
+    initial : bool
+        Also the initial state (segment 0).
+    prefix : str
+        File name prefix.
+
+    Raises
+    ------
+    ValueError
+        If ``every`` is below 1.
+    """
+
+    def __init__(
+        self,
+        directory: Optional[str] = None,
+        *,
+        every: int = 1,
+        initial: bool = True,
+        prefix: str = "snapshot",
+    ) -> None:
+        if int(every) < 1:
+            raise ValueError("SnapshotWriter.every must be >= 1")
+        self.directory = directory
+        self.every = int(every)
+        self.initial = bool(initial)
+        self.prefix = str(prefix)
+        self.snapshots: list = []
+        self.paths: list = []
+        if directory is not None:
+            os.makedirs(directory, exist_ok=True)
+
+    def __call__(self, edge: SegmentEdge) -> None:
+        """Keep ``edge``'s state if it is due.
+
+        Parameters
+        ----------
+        edge : SegmentEdge
+            The edge.
+        """
+        if edge.segment == 0 and not self.initial:
+            return
+        if edge.segment % self.every:
+            return
+        state = edge.state_host()
+        if self.directory is None:
+            self.snapshots.append(
+                {"step": edge.step, "time": edge.time, "state": state}
+            )
+            return
+        path = os.path.join(self.directory, f"{self.prefix}_{edge.step:08d}.npz")
+        _atomic_savez(
+            path,
+            state=state,
+            step=np.asarray(edge.step),
+            time=np.asarray(edge.time, np.float64),
+        )
+        self.paths.append(path)
+
+
+class DiagnosticsLog:
+    """A callback that logs each edge's diagnostics, one JSON line per edge.
+
+    Parameters
+    ----------
+    path : Optional[str]
+        A ``.jsonl`` file appended to (flushed per line), or ``None`` to keep the
+        rows in :attr:`rows` only (they are kept either way).
+    """
+
+    def __init__(self, path: Optional[str] = None) -> None:
+        self.path = path
+        self.rows: list = []
+
+    def __call__(self, edge: SegmentEdge) -> None:
+        """Log ``edge``.
+
+        Parameters
+        ----------
+        edge : SegmentEdge
+            The edge.
+        """
+        caps = edge.plan.get("walk_caps") or {}
+        row = {
+            "step": edge.step,
+            "time": edge.time,
+            "segment": edge.segment,
+            "retries": edge.retries,
+            "wall_s": edge.wall_s,
+            "diagnostics": edge.diagnostics,
+            "leaf_capacity": edge.plan.get("leaf_capacity"),
+            "far_capacity": caps.get("compact_far_pair_capacity"),
+            "near_capacity": caps.get("near_edge_capacity"),
+        }
+        self.rows.append(row)
+        if self.path is not None:
+            with open(self.path, "a") as fh:
+                fh.write(json.dumps(row) + "\n")
+                fh.flush()
+
+
+def _atomic_savez(path: str, **arrays: Any) -> None:
+    """``np.savez`` to ``path`` through a temporary file and a rename.
+
+    Parameters
+    ----------
+    path : str
+        Output file.
+    **arrays : Any
+        The entries.
+    """
+    tmp = f"{path}.tmp-{os.getpid()}"
+    with open(tmp, "wb") as fh:
+        np.savez(fh, **arrays)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+# --------------------------------------------------------------------------
+# The runner.
+# --------------------------------------------------------------------------
+
+
+class ProductionRunner:
+    """A long fused-lane run: ``strict_run_v2(carry="particles")`` segments on a host loop.
+
+    Each segment is one ``strict_run_v2`` call of ``segment.steps`` steps that
+    continues from the previous call's handle, with ``carry_total_acceleration``,
+    so the run computes what ONE call of all its steps computes, bit for bit
+    (``tests/integration/strict/test_production_runner.py``). Between segments,
+    at an EDGE: the diagnostics, then the callbacks.
+
+    * Donation: the first segment consumes the caller's state only with
+      ``SegmentConfig.donate_input``; later segments always consume their input
+      (the runner's own), so the scan writes the next state into the last one's
+      buffer. ``strict_run_v2`` keeps a host copy of a donated start state for its
+      segment retry (24 B per particle on the host, one device-to-host copy per
+      segment).
+    * Parameters: ``SegmentConfig.traced_params`` (the default) passes ``dt``,
+      ``G``, the softening squared and the field's float parameters as arrays.
+    * Retry: a segment whose lists overflow is re-planned and re-run once by
+      ``strict_run_v2`` itself; a second failure raises.
+    * Callbacks: ``Callable[[SegmentEdge], Optional[bool]]``, called at step 0 and
+      after every segment; a truthy return stops the run after that edge.
+      ``step_callback`` is ``strict_run_v2``'s in-scan hook, passed through: its
+      step index counts from 0 in EACH segment.
+
+    Parameters
+    ----------
+    solver : Any
+        ``FastMultipoleMethod`` on the fused lane (``preset="galaxy"``, or any
+        ``large_n_gpu`` solver on cell leaves).
+    settings : GalaxySettings
+        The run-time half read here: ``leaf_size``, ``max_order`` and ``carry``
+        (``"particles"`` only).
+    segment : SegmentConfig
+        Segment length, parameters, donation, diagnostics.
+    external_acceleration_fn : Optional[Callable[..., Any]]
+        ``field(state)`` or, with ``external_params``, ``field(state,
+        external_params)`` -> ``[N, 3]`` (``strict_run_v2``'s contract: the packed
+        state, positions only read). Keep ONE function object for the run: its
+        identity is part of the compile keys.
+    external_potential_fn : Optional[Callable[..., Any]]
+        The field's potential, for the energy diagnostic (S3 session 2; unused
+        until then).
+    callbacks : Sequence[Callable[[SegmentEdge], Optional[bool]]]
+        Host-side, at every edge, in order.
+    step_callback : Optional[Callable[[Any, Any], None]]
+        ``strict_run_v2``'s in-scan streaming hook.
+    step_callback_stride : int
+        Its stride.
+
+    Raises
+    ------
+    ValueError
+        If ``settings.carry`` is not ``"particles"``.
+    """
+
+    def __init__(
+        self,
+        solver: Any,
+        *,
+        settings: GalaxySettings = GALAXY_SETTINGS,
+        segment: SegmentConfig = SegmentConfig(),
+        external_acceleration_fn: Optional[Callable[..., Any]] = None,
+        external_potential_fn: Optional[Callable[..., Any]] = None,
+        callbacks: Sequence[Callable[[SegmentEdge], Optional[bool]]] = (),
+        step_callback: Optional[Callable[[Any, Any], None]] = None,
+        step_callback_stride: int = 1,
+    ) -> None:
+        if settings.carry != "particles":
+            raise ValueError(
+                "ProductionRunner chains strict_run_v2(carry='particles') calls "
+                f"through their handle; settings.carry={settings.carry!r}"
+            )
+        self.solver = solver
+        self.engine = getattr(solver, "_impl", solver)
+        self.settings = settings
+        self.segment = segment
+        self.external_acceleration_fn = external_acceleration_fn
+        self.external_potential_fn = external_potential_fn
+        self.callbacks = tuple(callbacks)
+        self.step_callback = step_callback
+        self.step_callback_stride = int(step_callback_stride)
+        #: (steps, remainder) plans already warned about
+        self._warned: set = set()
+
+    # ------------------------------------------------------------------
+    # The loop.
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        state: Any = None,
+        masses: Any = None,
+        *,
+        dt: Union[float, Any],
+        num_steps: int,
+        t0: float = 0.0,
+        force_params: Any = None,
+        external_params: Any = None,
+        restart_from: Any = None,
+    ) -> RunResult:
+        """Run to step ``num_steps`` (counted from ``t0``), segment by segment.
+
+        Parameters
+        ----------
+        state : Any
+            ``[N, 2, 3]`` positions and velocities; ``None`` with ``restart_from``.
+        masses : Any
+            ``[N]``; ``None`` with ``restart_from``.
+        dt : Union[float, Any]
+            Timestep.
+        num_steps : int
+            The run's total length in steps from ``t0``: a continued run
+            (``restart_from``) runs the steps still missing.
+        t0 : float
+            Start time (a continued run keeps its own).
+        force_params : Any
+            ``ForceParams(G, eps2)``; ``None`` takes the solver's.
+        external_params : Any
+            The external field's parameters (a pytree), or ``None`` for a
+            one-argument field.
+        restart_from : Any
+            A :class:`RunResult` of this runner to continue in memory (its state
+            and handle are consumed), or ``None``.
+
+        Returns
+        -------
+        RunResult
+            The final state, handle, counters and the edges of this call.
+
+        Raises
+        ------
+        ValueError
+            Without ``state`` and ``masses`` for a fresh run.
+        TypeError
+            For a ``restart_from`` that is not a :class:`RunResult`.
+        RuntimeError
+            When a segment fails after ``strict_run_v2``'s own re-plan.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        started = time.perf_counter()
+        dt_value = float(np.asarray(dt))
+        restored: Optional[dict] = None
+        if restart_from is None:
+            if state is None or masses is None:
+                raise ValueError("a fresh run needs state and masses")
+            state_now = jnp.asarray(state)
+            masses_now = jnp.asarray(masses)
+            handle = None
+            step, segment_done = 0, 0
+            t0_run = float(t0)
+            anchor: tuple = (t0_run, 0)
+            baselines: Optional[dict] = None
+            # the caller's state: consumed by the first segment only on request
+            owned = bool(self.segment.donate_input)
+        elif isinstance(restart_from, RunResult):
+            res = restart_from
+            state_now, masses_now, handle = res.state, res.masses, res.handle
+            step, segment_done, t0_run = res.step, res.segment, res.t0
+            # edge times count from the same anchor while dt is unchanged
+            anchor = res.time_anchor if dt_value == res.dt else (res.time, res.step)
+            baselines = res.baselines
+            owned = True
+            restored = {"from": "RunResult", "step": step, "bitwise": True}
+            res.state = res.handle = None  # consumed
+        else:
+            raise TypeError(
+                f"restart_from must be a RunResult, got {type(restart_from).__name__}"
+            )
+        dt_arg, force_arg, external_arg = self._call_args(
+            dt, force_params, external_params, state_now.dtype
+        )
+
+        def time_at(step_now: int) -> float:
+            return anchor[0] + (step_now - anchor[1]) * dt_value
+
+        names = tuple(self.segment.diagnostics)
+        every = int(self.segment.diagnostics_every)
+        every_energy = int(self.segment.diagnostics_every_energy)
+        edges: list = []
+        stopped = False
+
+        def diagnostics_at(step_now: int, state_in: Any, due: bool) -> Optional[dict]:
+            nonlocal baselines
+            if every == 0 or not due:
+                return None
+            moments = _moments(state_in, masses_now)
+            if baselines is None:
+                baselines = dict(_baselines(moments, time_at(step_now)), step=step_now)
+            energy_due = every_energy > 0 and segment_done % every_energy == 0
+            return _diagnostics_row(
+                moments, baselines, time_at(step_now), names, energy_due
+            )
+
+        def edge_at(retries: int, wall_s: float, due: bool) -> SegmentEdge:
+            return SegmentEdge(
+                step=step,
+                time=time_at(step),
+                segment=segment_done,
+                retries=retries,
+                wall_s=wall_s,
+                state=state_now,
+                masses=masses_now,
+                self_acceleration=getattr(handle, "self_acceleration", None),
+                diagnostics=diagnostics_at(step, state_now, due),
+                plan=_plan_record(self.engine, handle),
+            )
+
+        def at_edge(edge: SegmentEdge) -> bool:
+            stop = False
+            for callback in self.callbacks:
+                result = callback(edge)
+                if result is not None and bool(result):
+                    stop = True
+            edges.append(
+                dataclasses.replace(
+                    edge, state=None, masses=None, self_acceleration=None
+                )
+            )
+            return stop
+
+        if restart_from is None:
+            stopped = at_edge(edge_at(0, 0.0, due=True))
+        missing = max(0, int(num_steps) - step)
+        lengths = () if stopped else segment_lengths(missing, self.segment.steps)
+        self._warn_remainder(lengths)
+        external = self.external_acceleration_fn
+        for index, steps in enumerate(lengths):
+            retries_before = int(
+                getattr(self.engine, "_strict_fused_fallback_count", 0)
+            )
+            begun = time.perf_counter()
+            try:
+                state_now, handle, _ = self.solver.strict_run_v2(
+                    state=state_now,
+                    masses=masses_now,
+                    dt=dt_arg,
+                    num_steps=int(steps),
+                    refresh_every=1,
+                    leaf_size=int(self.settings.leaf_size),
+                    max_order=int(self.settings.max_order),
+                    prepared_state=handle,
+                    return_prepared_state=True,
+                    add_external=external is not None,
+                    external_acceleration_fn=external,
+                    external_params=external_arg,
+                    step_callback=self.step_callback,
+                    step_callback_stride=self.step_callback_stride,
+                    carry="particles",
+                    donate_state=owned or index > 0,
+                    force_params=force_arg,
+                    carry_total_acceleration=True,
+                )
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"ProductionRunner: segment {segment_done + 1} (steps {step} to "
+                    f"{step + int(steps)}) failed after strict_run_v2's own re-plan. "
+                    f"{exc}"
+                ) from exc
+            jax.block_until_ready(state_now)
+            wall_s = time.perf_counter() - begun
+            step += int(steps)
+            segment_done += 1
+            last = index == len(lengths) - 1
+            retries = (
+                int(getattr(self.engine, "_strict_fused_fallback_count", 0))
+                - retries_before
+            )
+            due = every > 0 and (segment_done % every == 0 or last)
+            if at_edge(edge_at(retries, wall_s, due)):
+                stopped = True
+                break
+        return RunResult(
+            state=state_now,
+            masses=masses_now,
+            handle=handle,
+            step=step,
+            time=time_at(step),
+            dt=dt_value,
+            t0=t0_run,
+            segment=segment_done,
+            edges=edges,
+            baselines=baselines,
+            stopped=stopped,
+            restored=restored,
+            wall_s=time.perf_counter() - started,
+            time_anchor=anchor,
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers.
+    # ------------------------------------------------------------------
+
+    def _call_args(
+        self, dt: Any, force_params: Any, external_params: Any, state_dtype: Any
+    ) -> tuple:
+        """``(dt, force_params, external_params)`` as the segments pass them.
+
+        With ``traced_params`` as arrays: ``dt`` in the state's dtype, ``G`` and
+        ``eps2`` in the working dtype (as ``fused_memory_budget.py
+        --traced-params``; not under ``dehnen_error``), the field's floats in the
+        state's dtype. The same objects every segment, so one compile key.
+
+        Parameters
+        ----------
+        dt : Any
+            The timestep.
+        force_params : Any
+            The caller's ``ForceParams`` or ``None``.
+        external_params : Any
+            The caller's field parameters or ``None``.
+        state_dtype : Any
+            The state's dtype.
+
+        Returns
+        -------
+        tuple
+            ``(dt, force_params, external_params)``.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        if not self.segment.traced_params:
+            return dt, force_params, external_params
+        from jaccpot.runtime.fused_topology import ForceParams
+
+        dt_arg = jnp.asarray(dt, state_dtype)
+        force_arg = force_params
+        if not self.engine._flat_walk_criterion_active():
+            own = force_params
+            if own is None:
+                own = ForceParams(
+                    G=float(self.engine.G), eps2=float(self.engine.softening) ** 2
+                )
+            dtype = self.engine.working_dtype
+            force_arg = ForceParams(
+                G=jnp.asarray(own.G, dtype), eps2=jnp.asarray(own.eps2, dtype)
+            )
+        external_arg = (
+            None
+            if external_params is None
+            else jax.tree_util.tree_map(
+                lambda x: jnp.asarray(x, state_dtype) if isinstance(x, float) else x,
+                external_params,
+            )
+        )
+        return dt_arg, force_arg, external_arg
+
+    def _warn_remainder(self, lengths: tuple) -> None:
+        """Warn once per plan whose last segment is shorter than the others.
+
+        Parameters
+        ----------
+        lengths : tuple
+            :func:`segment_lengths`.
+        """
+        if len(lengths) < 2 or lengths[-1] == lengths[0]:
+            return
+        plan = (lengths[0], lengths[-1])
+        if plan in self._warned:
+            return
+        self._warned.add(plan)
+        warnings.warn(
+            f"the run's last segment is {lengths[-1]} steps, the others "
+            f"{lengths[0]}: it compiles its own scan (num_steps is part of the "
+            "compile key; 52.8 s at 25M on an A100). Choose SegmentConfig.steps to "
+            "divide num_steps.",
+            stacklevel=3,
+        )
+
+
+def run(
+    solver: Any,
+    state: Any,
+    masses: Any,
+    *,
+    dt: Union[float, Any],
+    num_steps: int,
+    settings: GalaxySettings = GALAXY_SETTINGS,
+    segment: SegmentConfig = SegmentConfig(),
+    external_acceleration_fn: Optional[Callable[..., Any]] = None,
+    external_potential_fn: Optional[Callable[..., Any]] = None,
+    callbacks: Sequence[Callable[[SegmentEdge], Optional[bool]]] = (),
+    step_callback: Optional[Callable[[Any, Any], None]] = None,
+    step_callback_stride: int = 1,
+    t0: float = 0.0,
+    force_params: Any = None,
+    external_params: Any = None,
+) -> RunResult:
+    """One-shot :class:`ProductionRunner` run.
+
+    Parameters
+    ----------
+    solver : Any
+        As :class:`ProductionRunner`.
+    state : Any
+        ``[N, 2, 3]``.
+    masses : Any
+        ``[N]``.
+    dt : Union[float, Any]
+        Timestep.
+    num_steps : int
+        Steps.
+    settings : GalaxySettings
+        As :class:`ProductionRunner`.
+    segment : SegmentConfig
+        As :class:`ProductionRunner`.
+    external_acceleration_fn : Optional[Callable[..., Any]]
+        As :class:`ProductionRunner`.
+    external_potential_fn : Optional[Callable[..., Any]]
+        As :class:`ProductionRunner`.
+    callbacks : Sequence[Callable[[SegmentEdge], Optional[bool]]]
+        As :class:`ProductionRunner`.
+    step_callback : Optional[Callable[[Any, Any], None]]
+        As :class:`ProductionRunner`.
+    step_callback_stride : int
+        As :class:`ProductionRunner`.
+    t0 : float
+        Start time.
+    force_params : Any
+        As :meth:`ProductionRunner.run`.
+    external_params : Any
+        As :meth:`ProductionRunner.run`.
+
+    Returns
+    -------
+    RunResult
+        As :meth:`ProductionRunner.run`.
+    """
+    return ProductionRunner(
+        solver,
+        settings=settings,
+        segment=segment,
+        external_acceleration_fn=external_acceleration_fn,
+        external_potential_fn=external_potential_fn,
+        callbacks=callbacks,
+        step_callback=step_callback,
+        step_callback_stride=step_callback_stride,
+    ).run(
+        state,
+        masses,
+        dt=dt,
+        num_steps=num_steps,
+        t0=t0,
+        force_params=force_params,
+        external_params=external_params,
+    )
