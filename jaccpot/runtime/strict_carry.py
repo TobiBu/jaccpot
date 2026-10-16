@@ -24,7 +24,8 @@ gone too.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Optional
+import hashlib
+from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
@@ -34,6 +35,7 @@ from jaxtyping import Array
 __all__ = [
     "PreparedShapeTemplate",
     "StrictParticleCarry",
+    "external_field_key",
     "materialize_template",
     "shape_template",
 ]
@@ -105,6 +107,16 @@ class StrictParticleCarry:
         ``(G, eps2)`` as host floats: the force parameters ``self_acceleration``
         was computed with (``None``: the solver's own). A call with others
         evaluates its initial force again instead of taking this one.
+    acceleration : Optional[Array]
+        ``strict_run_v2(carry_total_acceleration=True)`` only: the TOTAL
+        acceleration ``[N, 3]`` at the returned state as the scan's last step
+        computed it -- the self-gravity plus the external field (without a field,
+        ``self_acceleration`` itself). The next call with the same field,
+        parameters and force parameters starts its scan from it, and consumes it.
+        ``None`` otherwise.
+    external_key : Optional[tuple]
+        :func:`external_field_key` of the field and parameters ``acceleration``
+        was computed with (``None``: no field).
     """
 
     template: PreparedShapeTemplate
@@ -113,6 +125,44 @@ class StrictParticleCarry:
     force_scale: Optional[Array] = None
     provider: Any = None
     force_key: Optional[tuple] = None
+    acceleration: Optional[Array] = None
+    external_key: Optional[tuple] = None
+
+
+def external_field_key(
+    external_acceleration_fn: Optional[Callable[..., Array]], external_params: Any
+) -> Optional[tuple]:
+    """What a handle's total acceleration was computed with: the field and its values.
+
+    ``(id(field), sha256 of the parameters)``: the function's identity, as the
+    compile caches key it, and the parameters' structure and VALUES (traced arrays
+    are fetched; they are small), so a call with other parameter values never
+    starts from a total computed with the old ones.
+
+    Parameters
+    ----------
+    external_acceleration_fn : Optional[Callable[..., Array]]
+        The external field, or ``None``.
+    external_params : Any
+        Its parameters (any pytree), or ``None`` for a one-argument field.
+
+    Returns
+    -------
+    Optional[tuple]
+        ``None`` without a field.
+    """
+    if external_acceleration_fn is None:
+        return None
+    leaves, treedef = jax.tree_util.tree_flatten(external_params)
+    digest = hashlib.sha256(repr(treedef).encode())
+    for leaf in leaves:
+        if isinstance(leaf, (jax.Array, np.ndarray, np.generic)):
+            value = np.asarray(jax.device_get(leaf))
+            digest.update(f"{value.dtype}{value.shape}".encode())
+            digest.update(value.tobytes(order="C"))
+        else:
+            digest.update(repr(leaf).encode())
+    return (id(external_acceleration_fn), digest.hexdigest())
 
 
 def shape_template(prepared: Any) -> PreparedShapeTemplate:

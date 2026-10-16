@@ -17,6 +17,9 @@ walk overflows, on both carries:
 * the particle carry refuses bucket leaves, whose rebuild reads template values;
 * ``mac_type='dehnen_error'``: 1 + 2 chained steps are one call of 3, bitwise, on
   both carries (the CSR near field in interpret mode: the force scale needs it);
+* an external field: 3 x 2 chained particle-carry steps are one call of 6 with
+  ``carry_total_acceleration`` (the handle carries the scan's own total), and not
+  without it (each call evaluates the field again outside the scan).
 * the TREE re-plan (S3): a cell-leaf tree that outgrows its leaf capacity, or a
   level that outgrows the level loops' batch, in the middle of a segment is
   re-planned at the segment's start, and the re-run equals a run started there
@@ -403,6 +406,77 @@ def test_a_cell_leaf_overflow_inside_the_scan_is_refused(carry, monkeypatch):
     # not re-planned: no retry ran
     diag = solver.get_runtime_diagnostics()
     assert int(diag["strict_fused_fallback_count"] or 0) == before
+
+
+def _halo(state_rows):
+    """provider_hlo_identity.py's analytic NFW halo (mass 10, scale radius 1)."""
+    pos = state_rows[:, 0, :]
+    r2 = jnp.sum(pos * pos, axis=1)
+    r = jnp.sqrt(jnp.maximum(r2, 1e-30))
+    big = jnp.log1p(r) / jnp.maximum(r2 * r, 1e-30) - 1.0 / jnp.maximum(
+        r2 * (1.0 + r), 1e-30
+    )
+    coeff = jnp.where(r < 1e-3, 0.5 * (1.0 - (4.0 / 3.0) * r), big)
+    return -10.0 * coeff[:, None] * pos
+
+
+@pytest.mark.parametrize("total", [False, True], ids=["eager_start", "carried_total"])
+def test_chained_calls_with_an_external_field(total):
+    """3 x 2 chained particle-carry steps with an external field against one call of 6.
+
+    Without ``carry_total_acceleration`` each call starts from the self-gravity
+    plus the field evaluated again, eagerly, at its start positions -- not the
+    scan's fused value (CPU, N = 512, 2026-10-16: 1 of 3072 components, 1.9e-6).
+    With it the handle carries the scan's own total, the next call starts from it
+    and consumes it: bitwise, and the chain compiles one scan program.
+    """
+    blobs, plummer_state, masses = _systems()
+    state0 = plummer_state.at[:, 0].set(blobs)
+    kw = dict(
+        dt=DT,
+        refresh_every=1,
+        leaf_size=LEAF,
+        max_order=ORDER,
+        theta=THETA,
+        carry="particles",
+        add_external=True,
+        external_acceleration_fn=_halo,
+    )
+    whole, _, _ = _solver().strict_run_v2(
+        state=state0, masses=masses, num_steps=6, **kw
+    )
+    solver = _solver()
+    state, handle = state0, None
+    for _ in range(3):
+        previous = handle
+        state, handle, _ = solver.strict_run_v2(
+            state=state,
+            masses=masses,
+            num_steps=2,
+            prepared_state=handle,
+            carry_total_acceleration=total,
+            **kw,
+        )
+        if total and previous is not None:
+            assert previous.acceleration.is_deleted()  # consumed by this call
+    got, want = np.asarray(state), np.asarray(whole)
+    differ = int(np.sum(got != want))
+    if not total:
+        assert handle.acceleration is None
+        # if this ever becomes bitwise, the carried total stops being needed
+        assert differ > 0
+        return
+    assert differ == 0, (
+        f"{differ} of {got.size} elements differ, max "
+        f"{float(np.max(np.abs(got - want))):.3e}"
+    )
+    assert handle.external_key[0] == id(_halo)
+    runners = [
+        k
+        for k in solver._impl._strict_fused_jit_function_cache
+        if k[0] == "strict_velocity_verlet_particles"
+    ]
+    assert len(runners) == 1
 
 
 # --------------------------------------------------------------------------

@@ -836,6 +836,7 @@ class StrictRunMixin(_EngineBase):
         donate_state: bool = False,
         force_params: Optional[ForceParams] = None,
         external_params: Any = None,
+        carry_total_acceleration: bool = False,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -967,6 +968,22 @@ class StrictRunMixin(_EngineBase):
             arrays among them traced like ``dt``, the Python numbers literals --
             instead of ``external_acceleration_fn(state)``. Needs ``add_external``
             and ``external_acceleration_fn``.
+        carry_total_acceleration : bool
+            ``carry="particles"`` only; off by default. The returned handle also
+            carries the scan's TOTAL acceleration at the returned state
+            (``StrictParticleCarry.acceleration``: the self-gravity plus the
+            external field, as the last step computed it) and the field's identity
+            (:func:`~jaccpot.runtime.strict_carry.external_field_key`). A call
+            continuing from such a handle with the same field, field parameters
+            and force parameters starts its scan from that total and CONSUMES it
+            (its buffer is donated to the scan, as a start force this call
+            evaluated itself is); otherwise the call evaluates the field again at
+            its start positions, eagerly, outside the scan -- which can differ
+            from the scan's fused evaluation in the last bit (CPU, N = 512, the
+            pure-JAX near field: 1 of 3072 components, 1.9e-6, 3 x 2 chained
+            steps against 6). Chained calls with it are one call of all the steps,
+            bit for bit, and compile one scan program. The production runner
+            (:class:`jaccpot.production.ProductionRunner`) passes it.
 
         Returns
         -------
@@ -992,7 +1009,10 @@ class StrictRunMixin(_EngineBase):
             the walk's softening; or if ``external_params`` come without an
             external field.
         """
-        from jaccpot.runtime.strict_carry import StrictParticleCarry
+        from jaccpot.runtime.strict_carry import (
+            StrictParticleCarry,
+            external_field_key,
+        )
 
         state_arr = jnp.asarray(state)
         masses_arr = jnp.asarray(masses)
@@ -1013,6 +1033,11 @@ class StrictRunMixin(_EngineBase):
             raise ValueError(
                 "donate_state needs carry='particles' (the state carry donates its "
                 "prepared state instead: donate_prepared_state)"
+            )
+        if carry_total_acceleration and carry_mode != "particles":
+            raise ValueError(
+                "carry_total_acceleration needs carry='particles' (its handle "
+                "carries the total acceleration)"
             )
         if external_params is not None and not (
             bool(add_external) and external_acceleration_fn is not None
@@ -1548,6 +1573,29 @@ class StrictRunMixin(_EngineBase):
             )
 
         if particle_carry:
+            # carry_total_acceleration: the field's identity, for the returned
+            # handle and to check the one passed in; and the scan's own total at
+            # the start positions when that handle carries one of this very field,
+            # its parameters and this call's force (see the parameter)
+            external_key: Optional[tuple] = None
+            start_total: Optional[Array] = None
+            handle_total = getattr(handle_in, "acceleration", None)
+            if carry_total_acceleration or handle_total is not None:
+                external_on = (
+                    bool(add_external) and external_acceleration_fn is not None
+                )
+                external_key = external_field_key(
+                    external_acceleration_fn if external_on else None,
+                    external_params if external_on else None,
+                )
+            if (
+                handle_total is not None
+                and initial_self_acceleration is None
+                and self_eval_active
+                and handle_in.force_key == force_key
+                and handle_in.external_key == external_key
+            ):
+                start_total = handle_total
             # handed over in a box the callee empties: a local here would keep the
             # concrete state (and its far list) alive through the whole scan
             scale_seed = _force_scale_seed(prepared_curr) if handle_in is None else None
@@ -1596,6 +1644,9 @@ class StrictRunMixin(_EngineBase):
                 donate_state=bool(donate_state),
                 step_params=step_params,
                 force_key=force_key,
+                start_total=start_total,
+                return_total=bool(carry_total_acceleration),
+                external_key=external_key,
             )
         else:
             from jaccpot.runtime.fused_topology import NEEDS_FIELDS
@@ -1871,6 +1922,9 @@ class StrictRunMixin(_EngineBase):
         advance_tree: Optional[Callable[..., Any]] = None,
         step_params: Optional[StepParams] = None,
         force_key: Optional[tuple] = None,
+        start_total: Optional[Array] = None,
+        return_total: bool = False,
+        external_key: Optional[tuple] = None,
     ) -> tuple[Array, Any, Optional[Array]]:
         """The fused scan of ``strict_run_v2(carry="particles")``.
 
@@ -1959,6 +2013,19 @@ class StrictRunMixin(_EngineBase):
         force_key : Optional[tuple]
             The call's force parameters as host floats (``None``: the solver's
             own), recorded on the returned handle.
+        start_total : Optional[Array]
+            The handle's total acceleration at the start state
+            (``carry_total_acceleration``), already matched to this call's field
+            and force: the first attempt's scan starts from it instead of the
+            self-gravity plus an eager field evaluation, and consumes it. A retry
+            builds the total again.
+        return_total : bool
+            ``carry_total_acceleration``: the returned handle carries the total
+            acceleration at the final state (with a field, an extra output of the
+            scan; without, the self-gravity) and ``external_key``.
+        external_key : Optional[tuple]
+            The field's identity (``external_field_key``), recorded on the handle
+            when ``return_total``.
 
         Returns
         -------
@@ -1976,6 +2043,11 @@ class StrictRunMixin(_EngineBase):
         """
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
         from jaccpot.runtime.strict_carry import StrictParticleCarry
+
+        external_active = bool(add_external) and external_acceleration_fn is not None
+        # the scan's total acceleration as an output of its own: with a field only
+        # (without one it is the self-gravity, which is returned anyway)
+        total_out = bool(return_total) and external_active
 
         def _runner_for(
             prov_i: FusedForceProvider,
@@ -1996,6 +2068,8 @@ class StrictRunMixin(_EngineBase):
                 bool(donate_state_i),
                 bool(donate_acc_i),
                 *prov_i.key(),
+                # the tree-order flag stays last (tests read key[-1])
+                total_out,
                 advance_tree is not None,
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
@@ -2106,7 +2180,7 @@ class StrictRunMixin(_EngineBase):
                     xs=scan_xs,
                     length=int(n_steps),
                 )
-                state_f, _, acc_self_f, ok_f, needs_f, done_f, scale_f = carry_f[:7]
+                state_f, acc_f, acc_self_f, ok_f, needs_f, done_f, scale_f = carry_f[:7]
                 if advance_tree is not None:
                     # back to input order, once: row j is particle ids[j]
                     ids_f = carry_f[8]
@@ -2120,7 +2194,14 @@ class StrictRunMixin(_EngineBase):
                         .at[ids_f]
                         .set(acc_self_f, unique_indices=True)
                     )
-                return (state_f, acc_self_f, ok_f, needs_f, done_f, scale_f), history
+                    if total_out:
+                        acc_f = (
+                            jnp.zeros_like(acc_f)
+                            .at[ids_f]
+                            .set(acc_f, unique_indices=True)
+                        )
+                outputs = (state_f, acc_self_f, ok_f, needs_f, done_f, scale_f)
+                return outputs + ((acc_f,) if total_out else ()), history
 
             donate = ((0,) if donate_state_i else ()) + ((1,) if donate_acc_i else ())
 
@@ -2197,11 +2278,14 @@ class StrictRunMixin(_EngineBase):
             self._strict_fused_jit_function_cache = jit_cache
             return _compiled_runner_start
 
-        external_active = bool(add_external) and external_acceleration_fn is not None
         params_args: tuple = () if step_params is None else (step_params,)
         # the self-gravity is this call's own (evaluated here, or zeros) unless it
-        # came from the caller or from the handle: only then may it be donated
-        self_owned = handle_in is None and initial_self_acceleration is None
+        # came from the caller or from the handle: only then may it be donated.
+        # A handle's total acceleration is the call's to consume (without a field
+        # it IS the handle's self-gravity, then donated like an owned one)
+        self_owned = (
+            handle_in is None and initial_self_acceleration is None
+        ) or start_total is not None
 
         def _initial_acceleration(acc_self: Array, state_now: Array) -> Array:
             acc_self = jnp.asarray(acc_self, dtype=state_now.dtype)
@@ -2271,6 +2355,7 @@ class StrictRunMixin(_EngineBase):
                     ran_scan = False
                     ok_all, done = ok_initial, jnp.zeros((), jnp.int32)
                     state_out = acc_self_out = history_out = scale_out = None
+                    acc_total_out = None
             if ran_scan:
                 runner = _runner_for(
                     prov_i,
@@ -2279,9 +2364,17 @@ class StrictRunMixin(_EngineBase):
                     external_active or acc_self_owned,
                 )
                 assert acc_self_now is not None
-                acc0 = _initial_acceleration(acc_self_now, state_now)
+                if start_total is not None:
+                    # the previous scan's own total at these positions (first
+                    # attempt only: a retry builds it again)
+                    acc0, start_total = start_total, None
+                else:
+                    acc0 = _initial_acceleration(acc_self_now, state_now)
                 if acc_self_owned and not external_active:
                     acc_self_now = None  # it is acc0, which the call consumes
+                outputs, history_out = runner(
+                    state_now, acc0, masses_arr, ok_initial, scale_now, *params_args
+                )
                 (
                     state_out,
                     acc_self_out,
@@ -2289,10 +2382,9 @@ class StrictRunMixin(_EngineBase):
                     walk_needs,
                     done,
                     scale_out,
-                ), history_out = runner(
-                    state_now, acc0, masses_arr, ok_initial, scale_now, *params_args
-                )
-                del acc0
+                ) = outputs[:6]
+                acc_total_out = outputs[6] if total_out else acc_self_out
+                del acc0, outputs
             self._strict_static_target_block_capacity_ok = bool(
                 np.asarray(jax.device_get(ok_all))
             )
@@ -2304,6 +2396,8 @@ class StrictRunMixin(_EngineBase):
                     force_scale=scale_out,
                     provider=prov_i,
                     force_key=force_key,
+                    acceleration=acc_total_out if return_total else None,
+                    external_key=external_key if return_total else None,
                 )
                 return state_out, handle, history_out
             needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
@@ -2322,7 +2416,7 @@ class StrictRunMixin(_EngineBase):
             if retries == 0:
                 tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
             retries += 1
-            del state_out, history_out, acc_self_out
+            del state_out, history_out, acc_self_out, acc_total_out
             if donate_state_now and ran_scan:
                 assert start_host is not None
                 state_now = jax.device_put(start_host, masses_arr.sharding)

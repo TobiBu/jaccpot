@@ -1850,6 +1850,7 @@ class FastMultipoleMethod:
         donate_state: bool = False,
         force_params: Optional[ForceParams] = None,
         external_params: Any = None,
+        carry_total_acceleration: bool = False,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -1943,6 +1944,14 @@ class FastMultipoleMethod:
             Parameters of the external field (a pytree). Given, the field is called
             as ``external_acceleration_fn(state, external_params)``, its arrays
             traced like ``dt``; ``None`` keeps the one-argument form.
+        carry_total_acceleration : bool
+            ``carry="particles"`` only, off by default: the returned handle also
+            carries the scan's total acceleration (self-gravity plus the external
+            field) at the returned state, and the next call with the same field and
+            parameters starts from it -- and consumes it -- instead of evaluating
+            the field again outside the scan. Chained calls are then one call of
+            all their steps, bit for bit (see the impl docstring). The production
+            runner passes it.
 
         Returns
         -------
@@ -1976,6 +1985,7 @@ class FastMultipoleMethod:
             donate_state=bool(donate_state),
             force_params=force_params,
             external_params=external_params,
+            carry_total_acceleration=bool(carry_total_acceleration),
         )
 
     def strict_fused_prepared_eval_fn(
