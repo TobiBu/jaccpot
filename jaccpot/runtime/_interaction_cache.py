@@ -7,7 +7,7 @@ import os
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -80,6 +80,84 @@ class _DualTreeArtifacts:
     traversal_result: Optional[DualTreeWalkResult]
     compact_far_pairs: Optional[CompactTaggedFarPairs]
     cache_hit: bool = False
+
+
+@dataclass(frozen=True)
+class _FlatWalkCaps:
+    """What the eager flat walk measured, without its lists (``caps_only``).
+
+    The strict particle carry's caps-only prepare needs the walk's capacities
+    (recorded through the capacity report, as the full build records them) and the
+    eager verdict's inputs, not the lists: their placement is the eager prepare's
+    peak (21.3 GiB in use plus 9.3 GiB transient at 1.52e8).
+
+    Attributes
+    ----------
+    far_pair_count : int
+        Live directed far pairs (twice the walk's canonical count).
+    compact_far_pair_capacity : int
+        The directed far width the list would be built at.
+    near_edge_capacity : int
+        The directed near width the CSR would be built at.
+    max_leaf_neighbors : int
+        The longest directed near row: the CSR's largest per-leaf count.
+    num_leaves : int
+        Leaf rows of the CSR.
+    """
+
+    far_pair_count: int
+    compact_far_pair_capacity: int
+    near_edge_capacity: int
+    max_leaf_neighbors: int
+    num_leaves: int
+
+
+class _CapsOnlyUnavailable(RuntimeError):
+    """The strict streamed build did not take the flat walk, so no caps-only walk."""
+
+
+@partial(jax.jit, static_argnames=("num_internal", "num_leaves"))
+def _near_leaf_counts(
+    near_a: Array,
+    near_b: Array,
+    near_count: Array,
+    *,
+    num_internal: int,
+    num_leaves: int,
+) -> Array:
+    """Directed near edges per leaf, as ``_flat_walk_lists``' CSR counts them.
+
+    Every live canonical pair ``(a, b)`` (``a < b``) is the two directed entries
+    ``b -> a`` and ``a -> b``: one in row ``a`` and one in row ``b``. Counted
+    without placing a single edge.
+
+    Parameters
+    ----------
+    near_a : Array
+        Walk output, lower leaf node of each canonical near pair (live prefix).
+    near_b : Array
+        Upper leaf node.
+    near_count : Array
+        Live canonical near pairs.
+    num_internal : int
+        Internal nodes (leaves are the last ``num_leaves`` nodes). Static.
+    num_leaves : int
+        Leaves. Static.
+
+    Returns
+    -------
+    Array
+        ``(num_leaves,)`` counts.
+    """
+    live = jnp.arange(near_a.shape[0]) < near_count
+    dead = jnp.asarray(num_leaves, near_a.dtype)
+    counts = jnp.bincount(
+        jnp.where(live, near_a - num_internal, dead), length=num_leaves + 1
+    )
+    counts = counts + jnp.bincount(
+        jnp.where(live, near_b - num_internal, dead), length=num_leaves + 1
+    )
+    return counts[:num_leaves]
 
 
 class _InteractionCacheEntry(NamedTuple):
@@ -746,7 +824,8 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     flat_walk_capacity_floor: Optional[dict] = None,
     extra_overflow: Optional[Array] = None,
     walk_criterion: Optional[FlatWalkCriterion] = None,
-) -> _DualTreeArtifacts:
+    caps_only: bool = False,
+) -> Union[_DualTreeArtifacts, _FlatWalkCaps]:
     """Strict static fast-lane: single compact shared far+near build call.
 
     ``capacity_report`` receives, after a successful build, the capacities the
@@ -820,12 +899,17 @@ def _build_dual_tree_artifacts_split_strict_streamed(
         eq (16a) inside the flat walk (``mac_type='dehnen_error'``). Refused
         together with a pair policy, and raised on rather than dropped when the
         flat walk is unavailable.
+    caps_only : bool
+        Run the eager flat walk's ladder and report its capacities, but build no
+        list (:func:`_build_flat_walk_artifacts_strict_streamed`). Only the flat
+        walk can: anywhere else this raises :class:`_CapsOnlyUnavailable`.
 
     Returns
     -------
-    _DualTreeArtifacts
+    Union[_DualTreeArtifacts, _FlatWalkCaps]
         Compact far pairs and leaf neighbour lists; no node interaction list and
-        no walk result, which is what makes this lane cheap.
+        no walk result, which is what makes this lane cheap. With ``caps_only``,
+        what the lists would have been.
 
     Raises
     ------
@@ -834,6 +918,8 @@ def _build_dual_tree_artifacts_split_strict_streamed(
     RuntimeError
         On a capacity overflow this lane cannot grow out of, and when the removed
         treecode walk's env switch is set.
+    _CapsOnlyUnavailable
+        For ``caps_only`` off the flat walk.
     Exception
         Re-raised unchanged when the retry loop sees a failure it does not
         recognise as a capacity overflow -- it grows capacities only for the two
@@ -970,6 +1056,12 @@ def _build_dual_tree_artifacts_split_strict_streamed(
             near_floor=0 if near_edge_named else near_floor,
             separation_floor=separation_floor,
             walk_criterion=walk_criterion,
+            caps_only=caps_only,
+        )
+    if caps_only:
+        raise _CapsOnlyUnavailable(
+            "the caps-only walk needs the flat walk; this configuration takes the "
+            "dual walk (" + (flat_walk_blocker or "flat walk switched off") + ")"
         )
     # Re-plan on a capacity overflow instead of surfacing it. The generic
     # `_build_dual_tree_artifacts` has retried since it was written; this strict
@@ -1709,7 +1801,8 @@ def _build_flat_walk_artifacts_strict_streamed(
     near_floor: int = 0,
     separation_floor: float = 0.0,
     walk_criterion: Optional[FlatWalkCriterion] = None,
-) -> _DualTreeArtifacts:
+    caps_only: bool = False,
+) -> Union[_DualTreeArtifacts, _FlatWalkCaps]:
     """Far pairs and leaf neighbours from yggdrax's flat-emission wavefront walk.
 
     The strict fused lane's alternative to ``build_compact_far_pairs_and_leaf_
@@ -1804,11 +1897,16 @@ def _build_flat_walk_artifacts_strict_streamed(
         Accept by Dehnen's eq (16a) instead of the opening angle: the table is
         built here on ``mac_extents`` and both walks evaluate the same symmetrised
         per-pair test (:mod:`jaccpot.runtime._walk_criterion`).
+    caps_only : bool
+        Eager only: the ladder and the capacity report as always, then no list --
+        the widths, the far count and the longest near row the lists would have
+        (:class:`_FlatWalkCaps`; the strict particle carry's caps-only prepare).
 
     Returns
     -------
-    _DualTreeArtifacts
+    Union[_DualTreeArtifacts, _FlatWalkCaps]
         Compact far pairs and the leaf neighbour list; no interactions payload.
+        With ``caps_only``, what they would have been.
 
     Raises
     ------
@@ -2077,6 +2175,72 @@ def _build_flat_walk_artifacts_strict_streamed(
                 )
         else:
             any_overflow = any_overflow | jnp.asarray(extra_overflow, dtype=bool)
+
+    def _report(counts: Array) -> None:
+        # what the walk ran with and, eagerly, what it observed; ``counts`` are the
+        # CSR's directed near edges per leaf
+        if capacity_report is None:
+            return
+        report = dict(
+            traced=bool(traced),
+            flat_walk=True,
+            max_pair_queue_requested=int(queue),
+            queue_capacity=int(queue),
+            compact_far_pair_capacity=int(compact_far_pair_capacity),
+            near_edge_capacity=int(near_edge_capacity),
+            far_named=bool(far_named),
+            near_edge_named=bool(near_edge_named),
+            # no per-leaf row cap on this lane; None switches the guard's row arm off
+            max_neighbors_per_leaf_used=None,
+            grew=list(grew),
+            headroom=float(headroom),
+        )
+        if not traced:
+            report["far_pair_count"] = 2 * int(walk.far_count)
+            report["total_neighbors"] = 2 * int(walk.near_count)
+            report["max_neighbors_observed"] = int(jnp.max(counts)) if num_leaves else 0
+            report["peak_wavefront"] = int(walk.peak_wavefront)
+            report["rounds"] = int(walk.rounds)
+        else:
+            # What this traced walk needed, as TRACERS: the receiver keeps them on
+            # the engine for the scan to fold into its carry (they must never
+            # reach host-side state). `strict_run_v2` sizes a segment retry from
+            # them -- the Pallas walk's counts are exact past a list overflow; the
+            # flat walk's are lower bounds, marked by the last entry.
+            report["walk_needs"] = jnp.stack(
+                [
+                    2 * jnp.asarray(getattr(walk, "far_needed", walk.far_count)),
+                    2 * jnp.asarray(getattr(walk, "near_needed", walk.near_count)),
+                    jnp.asarray(walk.peak_wavefront),
+                    jnp.asarray(walk.far_overflow),
+                    jnp.asarray(walk.near_overflow),
+                    jnp.asarray(walk.queue_overflow),
+                    jnp.asarray(not hasattr(walk, "far_needed")),
+                ]
+            ).astype(jnp.int32)
+        capacity_report(report)
+
+    if caps_only:
+        if traced:
+            raise ValueError("the caps-only flat walk is an eager pass")
+        # the CSR's row lengths, counted from the canonical pairs: the lists
+        # themselves (the eager prepare's peak) are never placed
+        counts = _near_leaf_counts(
+            walk.near_a,
+            walk.near_b,
+            walk.near_count,
+            num_internal=num_internal,
+            num_leaves=num_leaves,
+        )
+        _report(counts)
+        return _FlatWalkCaps(
+            far_pair_count=2 * int(walk.far_count),
+            compact_far_pair_capacity=int(compact_far_pair_capacity),
+            near_edge_capacity=int(near_edge_capacity),
+            max_leaf_neighbors=int(jnp.max(counts)) if num_leaves else 0,
+            num_leaves=int(num_leaves),
+        )
+
     # Eager overflow raised above, so the saturation inside only bites in the
     # compiled scan.
     (
@@ -2127,45 +2291,7 @@ def _build_flat_walk_artifacts_strict_streamed(
         target_block_size=0,
     )
 
-    if capacity_report is not None:
-        report = dict(
-            traced=bool(traced),
-            flat_walk=True,
-            max_pair_queue_requested=int(queue),
-            queue_capacity=int(queue),
-            compact_far_pair_capacity=int(compact_far_pair_capacity),
-            near_edge_capacity=int(near_edge_capacity),
-            far_named=bool(far_named),
-            near_edge_named=bool(near_edge_named),
-            # no per-leaf row cap on this lane; None switches the guard's row arm off
-            max_neighbors_per_leaf_used=None,
-            grew=list(grew),
-            headroom=float(headroom),
-        )
-        if not traced:
-            report["far_pair_count"] = 2 * int(walk.far_count)
-            report["total_neighbors"] = 2 * int(walk.near_count)
-            report["max_neighbors_observed"] = int(jnp.max(counts)) if num_leaves else 0
-            report["peak_wavefront"] = int(walk.peak_wavefront)
-            report["rounds"] = int(walk.rounds)
-        else:
-            # What this traced walk needed, as TRACERS: the receiver keeps them on
-            # the engine for the scan to fold into its carry (they must never
-            # reach host-side state). `strict_run_v2` sizes a segment retry from
-            # them -- the Pallas walk's counts are exact past a list overflow; the
-            # flat walk's are lower bounds, marked by the last entry.
-            report["walk_needs"] = jnp.stack(
-                [
-                    2 * jnp.asarray(getattr(walk, "far_needed", walk.far_count)),
-                    2 * jnp.asarray(getattr(walk, "near_needed", walk.near_count)),
-                    jnp.asarray(walk.peak_wavefront),
-                    jnp.asarray(walk.far_overflow),
-                    jnp.asarray(walk.near_overflow),
-                    jnp.asarray(walk.queue_overflow),
-                    jnp.asarray(not hasattr(walk, "far_needed")),
-                ]
-            ).astype(jnp.int32)
-        capacity_report(report)
+    _report(counts)
 
     return _DualTreeArtifacts(
         interactions=None,
@@ -2686,7 +2812,8 @@ def _build_dual_tree_artifacts(
     strict_flat_walk_capacity_floor: Optional[dict] = None,
     strict_extra_overflow: Optional[Array] = None,
     walk_criterion: Optional[FlatWalkCriterion] = None,
-) -> tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]:
+    strict_caps_only: bool = False,
+) -> tuple[Union[_DualTreeArtifacts, _FlatWalkCaps], Optional[_InteractionCacheEntry]]:
     """Construct or reuse dual-tree traversal products for a tree.
 
     The top of this module: resolve the cache, choose a build strategy (split,
@@ -2760,12 +2887,17 @@ def _build_dual_tree_artifacts(
         ``mac_type='dehnen_error'`` on the strict fused lane: eq (16a) evaluated
         inside the flat walk. Only the strict streamed split build carries it; any
         other route raises rather than run the geometric MAC instead.
+    strict_caps_only : bool
+        The strict streamed flat walk's eager ladder and capacity report without
+        its lists: returns ``(_FlatWalkCaps, None)``. Any other route raises
+        :class:`_CapsOnlyUnavailable`.
 
     Returns
     -------
-    tuple[_DualTreeArtifacts, Optional[_InteractionCacheEntry]]
+    tuple[Union[_DualTreeArtifacts, _FlatWalkCaps], Optional[_InteractionCacheEntry]]
         The artifacts, and an entry to store when a ``cache_key`` was supplied --
-        ``None`` when there is nothing worth caching.
+        ``None`` when there is nothing worth caching. With ``strict_caps_only``,
+        the walk's capacities and no entry.
 
     Raises
     ------
@@ -2774,6 +2906,8 @@ def _build_dual_tree_artifacts(
     RuntimeError
         If ``walk_criterion`` is given but the build does not take the strict
         streamed flat walk, the only route that evaluates it.
+    _CapsOnlyUnavailable
+        If ``strict_caps_only`` is asked of another route.
 
     """
 
@@ -2820,6 +2954,10 @@ def _build_dual_tree_artifacts(
                 "split build (the fused lane's flat walk); this build took another "
                 "route and would apply the geometric MAC instead"
             )
+        if strict_caps_only and not (use_split_build and strict_streamed_split):
+            raise _CapsOnlyUnavailable(
+                "the caps-only walk runs only on the strict streamed split build"
+            )
         if use_split_build:
             split_artifacts = (
                 _build_dual_tree_artifacts_split_strict_streamed(
@@ -2841,6 +2979,7 @@ def _build_dual_tree_artifacts(
                     flat_walk_capacity_floor=strict_flat_walk_capacity_floor,
                     extra_overflow=strict_extra_overflow,
                     walk_criterion=walk_criterion,
+                    caps_only=strict_caps_only,
                 )
                 if strict_streamed_split
                 else _build_dual_tree_artifacts_split(
@@ -2861,6 +3000,8 @@ def _build_dual_tree_artifacts(
                     timing_callback=timing_callback,
                 )
             )
+            if isinstance(split_artifacts, _FlatWalkCaps):
+                return split_artifacts, None
             interactions = split_artifacts.interactions
             neighbor_list = split_artifacts.neighbor_list
             traversal_result = split_artifacts.traversal_result
