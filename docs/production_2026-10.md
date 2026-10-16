@@ -686,13 +686,13 @@ card); accuracy, identity and pins on shared ones.
 ### What S3a built
 | branch | what |
 | --- | --- |
-| yggdrax `feat/s3-return-num-leaves` | the cell template rebuild can return the partition's live leaf count (computed, dropped before) |
-| `s3/1-auto-leaf-capacity` | `TreeConfig(leaf_capacity="auto", leaf_headroom=)`: the live cell leaves counted ON DEVICE, x1.15 in steps of 1024, once, at the first prepare |
-| `s3/2-galaxy-preset` | `preset="galaxy"` (`GalaxySettings`): cells of 64, cml 8, p6, theta 0.8, ferrers3, auto capacity, particle carry; `theta=None` sentinel (0.6 for every other preset) |
-| `s3/3-tree-replan` | a cell-leaf tree that outgrows its leaf capacity, its depth bound or its level width is re-planned at the segment's start (needs 8 -> 11 fields); after a tree re-plan, one walk-only retry more |
-| `s3/4-production-runner` | `ProductionRunner`: K-step `strict_run_v2(carry="particles")` segments chained through the handle; callbacks, snapshots, a jsonl log; `carry_total_acceleration` |
-| `s3/5-runner-restart` | restart files: a fresh process continues a run bitwise |
-| `s3/6-runner-bench-docs` | `fused_memory_budget.py --runner`, pins R1p / R1x / R1r / DET3, `docs/production.md`, this section |
+| yggdrax `feat/s3-return-num-leaves` (yggdrax #101) | the cell template rebuild can return the partition's live leaf count (computed, dropped before) |
+| `s3/1-auto-leaf-capacity` (#414) | `TreeConfig(leaf_capacity="auto", leaf_headroom=)`: the live cell leaves counted ON DEVICE, x1.15 in steps of 1024, once, at the first prepare |
+| `s3/2-galaxy-preset` (#415) | `preset="galaxy"` (`GalaxySettings`): cells of 64, cml 8, p6, theta 0.8, ferrers3, auto capacity, particle carry; `theta=None` sentinel (0.6 for every other preset) |
+| `s3/3-tree-replan` (#416) | a cell-leaf tree that outgrows its leaf capacity, its depth bound or its level width is re-planned at the segment's start (needs 8 -> 11 fields); after a tree re-plan, one walk-only retry more |
+| `s3/4-production-runner` (#417) | `ProductionRunner`: K-step `strict_run_v2(carry="particles")` segments chained through the handle; callbacks, snapshots, a jsonl log; `carry_total_acceleration` |
+| `s3/5-runner-restart` (#418) | restart files: a fresh process continues a run bitwise |
+| `s3/6-runner-bench-docs` (#419) | `fused_memory_budget.py --runner`, pins R1p / R1x / R1r / DET3, `docs/production.md`, this section |
 
 ### Findings
 - **The leaf capacity is not what a production run outgrows first.** Over a 25M disc+bulge quarter orbit (489 steps)
