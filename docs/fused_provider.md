@@ -23,10 +23,18 @@ One force at new positions, in two halves:
 |---|---|---|
 | `rebuild(positions, masses)` | the static-radix tree rebuilt from a shape template, P2M and M2M, the flat walk with fresh far and near lists, M2L and L2L | yes |
 | `accelerations(topology, params)` | the near field (P2P), L2P and the scatter back to the input order | yes |
+| `potential(topology, params)` | the potential per particle, `-G sum_{j != i} m_j psi(r_ij)`: the CSR direct kernel's fourth lane, the far field's L2P value, the scatter (S3 session 2) | yes |
 
 `accelerations` takes no positions or masses: the rebuild already ran the far field at
 the positions it was given. `step(positions, masses, params, aux)` is the two in a row,
-with the capacity verdict.
+with the capacity verdict. `potential` is O(N) and compiles a program of its own
+(`evaluate_large_n_potential`; no acceleration program changes): the runner's energy
+diagnostic. On an A100 (preset galaxy, clipped Plummer) its rel-L2 against an fp64
+direct sum is 1.0e-5 at 2e5 (the force's 8.0e-4), and a rebuild plus the potential
+costs 1.1x a rebuild plus the accelerations (25M: 247 against 220 ms; 1e8: 960 against
+851 ms, on a shared card) with fewer temporaries (123-133 against 133-143 B/particle).
+Traced parameters reach its near field on the fused Pallas lane; the generic near field
+(`use_pallas=False`) takes Python floats.
 
 The provider holds no device buffer. It holds the engine, the static configuration
 (leaf size, order, opening angle, runtime overrides) and the **shape template** of the
