@@ -199,3 +199,43 @@ def test_the_compile_keys_keep_their_layout():
     assert by_tag["strict_velocity_verlet"][6] == STEPS
     # the tree-order flag stays last (test_strict_run_v2.py reads key[-1])
     assert by_tag["strict_velocity_verlet_particles"][-1] is False
+
+
+def test_the_particle_carry_refuses_bucket_leaves():
+    """Bucket leaves keep the eager tree's node ranges and children on a rebuild.
+
+    A shape template does not hold them: the particle carry materialised zeros,
+    the walk's queue overflowed on every step and the call raised a capacity error
+    after its retry (a peak wavefront of 3^11 = 177,147 at N = 512). It is refused
+    up front, before any prepare; the state carry, which carries the values, still
+    runs.
+    """
+    from jaccpot import FastMultipoleMethod
+    from jaccpot.config import FMMAdvancedConfig, NearFieldConfig, TreeConfig
+
+    def buckets():
+        return FastMultipoleMethod(
+            preset="large_n_gpu",
+            basis="real",
+            theta=THETA,
+            G=1.0,
+            softening=SOFTENING,
+            working_dtype=jnp.float32,
+            use_pallas=False,
+            advanced=FMMAdvancedConfig(
+                tree=TreeConfig(mode="static_radix", leaf_target=LEAF),
+                nearfield=NearFieldConfig(mode="auto"),
+                mac_type="dehnen",
+            ),
+            fixed_order=ORDER,
+        )
+
+    blobs, _, masses = _systems()
+    state = jnp.stack([blobs, jnp.zeros_like(blobs)], axis=1)
+    solver = buckets()
+    with pytest.raises(ValueError, match="needs cell leaves"):
+        _run(solver, state, masses, carry="particles")
+    # refused before any prepare: no walk caps were validated
+    assert getattr(solver._impl, "_strict_fused_validated_caps", None) is None
+    out, _, _ = _run(buckets(), state, masses, carry="state")
+    assert bool(jnp.all(jnp.isfinite(out)))

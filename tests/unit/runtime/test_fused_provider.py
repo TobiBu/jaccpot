@@ -377,3 +377,25 @@ def test_a_criterion_rebuild_needs_the_previous_force_scale():
     )
     with pytest.raises(ValueError, match="force scale"):
         prov.rebuild(jnp.zeros((N, 3)), jnp.ones((N,)))
+
+
+def test_a_template_rebuild_refuses_bucket_leaves():
+    """Bucket leaves keep the eager tree's node ranges and children: values a shape
+    template does not hold (``require_cell_leaves``)."""
+    from jaccpot.runtime.fused_provider import FusedForceProvider
+    from jaccpot.runtime.strict_carry import shape_template
+
+    class _BucketEngine:
+        _tree_leaf_partition = "buckets"
+
+        def _flat_walk_criterion_active(self) -> bool:
+            return False
+
+    prov = FusedForceProvider(
+        _BucketEngine(),
+        leaf_size=LEAF,
+        max_order=ORDER,
+        template=shape_template({"x": jnp.zeros((4,))}),
+    )
+    with pytest.raises(ValueError, match="needs cell leaves"):
+        prov.rebuild(jnp.zeros((N, 3)), jnp.ones((N,)))

@@ -33,7 +33,7 @@ from .fmm_state import (
     _TopologyReuseEntry,
     _velocity_verlet_kick_drifted,
 )
-from .fused_provider import FusedForceProvider
+from .fused_provider import FusedForceProvider, require_cell_leaves
 from .fused_topology import FusedTopology
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
@@ -690,8 +690,9 @@ class StrictRunMixin(_EngineBase):
             What the fused scan carries between steps: ``"state"`` (the prepared
             state) or ``"particles"`` (positions, velocities and forces only; the
             in-scan refresh rebuilds the rest from a shape template, see
-            :mod:`jaccpot.runtime.strict_carry`). ``None`` reads
-            ``JACCPOT_STRICT_CARRY`` (default ``"state"``). With ``"particles"``
+            :mod:`jaccpot.runtime.strict_carry`; cell leaves only, see
+            :func:`~jaccpot.runtime.fused_provider.require_cell_leaves`). ``None``
+            reads ``JACCPOT_STRICT_CARRY`` (default ``"state"``). With ``"particles"``
             the returned prepared state is a
             :class:`~jaccpot.runtime.strict_carry.StrictParticleCarry` handle that
             only the next ``strict_run_v2(carry="particles")`` call accepts; it
@@ -732,8 +733,9 @@ class StrictRunMixin(_EngineBase):
         ValueError
             If ``num_steps`` is not positive, or ``refresh_every`` is not 1; if
             ``carry="particles"`` is asked of a lane that cannot rebuild the state
-            from its shapes, or a :class:`StrictParticleCarry` comes without it;
-            or if ``donate_state`` is asked without ``carry="particles"``.
+            from its shapes (bucket leaves, or a far list read from the carry), or
+            a :class:`StrictParticleCarry` comes without it; or if
+            ``donate_state`` is asked without ``carry="particles"``.
         """
         from jaccpot.runtime.strict_carry import StrictParticleCarry
 
@@ -753,6 +755,9 @@ class StrictRunMixin(_EngineBase):
                 "donate_state needs carry='particles' (the state carry donates its "
                 "prepared state instead: donate_prepared_state)"
             )
+        if carry_mode == "particles":
+            # before any work: the particle carry rebuilds from shapes alone
+            require_cell_leaves(self)
         handle_in = (
             prepared_state if isinstance(prepared_state, StrictParticleCarry) else None
         )

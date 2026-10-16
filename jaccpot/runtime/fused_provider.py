@@ -48,6 +48,7 @@ from .strict_carry import PreparedShapeTemplate, materialize_template, shape_tem
 
 __all__ = [
     "FusedForceProvider",
+    "require_cell_leaves",
 ]
 
 
@@ -82,6 +83,39 @@ def _walk_caps_key(validated: Optional[dict]) -> tuple:
         validated.get("near_edge_capacity"),
         queue_target,
     )
+
+
+def require_cell_leaves(solver: Any) -> None:
+    """Refuse a rebuild from a shape template on bucket leaves.
+
+    On cell leaves (``TreeConfig(leaf_partition="cells")``) the static-radix
+    rebuild builds the cells and the radix structure over them from the new
+    positions: it reads only the template's shapes. On bucket leaves it keeps
+    the eager tree's structure -- its node ranges and children
+    (``yggdrax`` ``rebuild_static_radix_tree_from_template``) -- so it reads
+    those VALUES, which a shape template does not hold: the particle carry
+    materialises them as zeros and the walk overflows its queue (a peak
+    wavefront of 3^11 = 177,147 at N = 512) on every step.
+
+    Parameters
+    ----------
+    solver : Any
+        ``FastMultipoleMethod`` or its engine.
+
+    Raises
+    ------
+    ValueError
+        If the solver's leaves are buckets.
+    """
+    engine = _engine_of(solver)
+    if getattr(engine, "_tree_leaf_partition", "buckets") != "cells":
+        raise ValueError(
+            "carry='particles' (a rebuild from a shape template) needs cell "
+            "leaves: TreeConfig(leaf_partition='cells', leaf_capacity=...). On "
+            "bucket leaves the rebuild keeps the eager tree's node ranges and "
+            "children, values a shape template does not hold; carry='state' "
+            "runs on bucket leaves."
+        )
 
 
 def _engine_of(solver: Any) -> Any:
@@ -474,7 +508,8 @@ class FusedForceProvider:
         ValueError
             If the lane reads its carried far list (not the static-radix fused
             lane's fresh far-pair rebuild): a rebuild from shapes alone would read
-            a list that is not there.
+            a list that is not there; or if the leaves are buckets
+            (:func:`require_cell_leaves`).
         """
         if self.template is None:
             raise ValueError(
@@ -483,6 +518,7 @@ class FusedForceProvider:
                 "static_radix tree): otherwise a step reads the carried far "
                 "list"
             )
+        require_cell_leaves(self.engine)
         return self.template
 
     def like(self) -> Any:
