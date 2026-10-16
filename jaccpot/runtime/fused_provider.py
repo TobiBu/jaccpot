@@ -39,6 +39,11 @@ the engine's softening, so a compact kernel's separation floor stays static and 
 ``eps2`` above the one it covers sets ``OVERFLOW_PARAMS`` (:meth:`params_overflow`).
 ``mac_type='dehnen_error'`` takes the engine's own only (its thresholds and far
 f_b are built with them).
+
+**A caller's integrator.** ``step`` inside the caller's ``lax.scan``, with the
+drift and kick around it, is the force ``strict_run_v2(carry="particles")`` steps
+with (``tests/integration/strict/test_strict_runners_on_provider.py``). User guide:
+``docs/fused_provider.md``.
 """
 
 from __future__ import annotations

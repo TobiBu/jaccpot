@@ -14,7 +14,8 @@ of a step to the other, and what the force is parameterised by:
     bitwise the closure constants they replace) and whose arrays are traced.
 
 Containers and their arithmetic only: nothing here builds a tree or evaluates a
-force, so a caller can carry and inspect them without the engine.
+force, so a caller can carry and inspect them without the engine. User guide:
+``docs/fused_provider.md``.
 """
 
 from __future__ import annotations
