@@ -52,6 +52,7 @@ __all__ = [
     "env_flag_optional",
     "env_float",
     "env_int",
+    "env_snapshot",
     "env_text",
 ]
 
@@ -292,3 +293,31 @@ def env_text(name: str, default: str = "") -> str:
     """
     raw = os.environ.get(name)
     return default if raw is None else str(raw)
+
+
+def env_snapshot(prefixes: tuple, *, exclude_suffixes: tuple = ()) -> dict:
+    """Every variable with one of ``prefixes``, verbatim: a record, not a knob.
+
+    For what a run must write down about the environment it ran in (a restart
+    file's fingerprint, ``jaccpot.production``), where no single variable is
+    parsed and an unknown one matters as much as a known one.
+
+    Parameters
+    ----------
+    prefixes : tuple
+        Name prefixes, e.g. ``("JACCPOT_", "YGGDRAX_")``.
+    exclude_suffixes : tuple
+        Names ending in one of these are left out (``("_WORKTREE",)``: where the
+        source lives, not how it runs).
+
+    Returns
+    -------
+    dict
+        ``{name: value}``, sorted by name.
+    """
+    return {
+        name: str(value)
+        for name, value in sorted(os.environ.items())
+        if name.startswith(tuple(prefixes))
+        and not (exclude_suffixes and name.endswith(tuple(exclude_suffixes)))
+    }

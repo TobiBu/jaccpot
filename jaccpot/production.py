@@ -1598,6 +1598,8 @@ class ProductionRunner:
         import jax
         import jax.numpy as jnp
 
+        from jaccpot._env import env_snapshot, env_text
+
         engine = self.engine
         if getattr(self, "_static_fingerprint", None) is None:
             self._static_fingerprint = {"versions": _versions()}
@@ -1624,13 +1626,10 @@ class ProductionRunner:
             ),
             "settings": _jsonable(dataclasses.asdict(self.settings)),
             "traced_params": bool(self.segment.traced_params),
-            "env": {
-                k: v
-                for k, v in sorted(os.environ.items())
-                if k.startswith(("JACCPOT_", "YGGDRAX_"))
-                and not k.endswith("_WORKTREE")
-            },
-            "xla_flags": os.environ.get("XLA_FLAGS"),
+            "env": env_snapshot(
+                ("JACCPOT_", "YGGDRAX_"), exclude_suffixes=("_WORKTREE",)
+            ),
+            "xla_flags": env_text("XLA_FLAGS"),
             "device": [device.platform, str(device.device_kind)],
             "x64": bool(jax.config.jax_enable_x64),
             **self._static_fingerprint,
