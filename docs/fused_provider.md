@@ -183,8 +183,15 @@ wrong**, not merely slow. Before S2 a tree overflow inside the scan left the ver
 (`TREE_NEEDS_FIELDS`): `leaf_needed` (the live cell leaves, counted before the cut to
 `leaf_capacity`, so exact past an overflow), `depth_needed` (levels) and
 `widest_needed` (the widest level's node count). A failed segment re-plans from their
-running maximum with `prov.replanned`. The tree overflow is not re-planned (S2): raise
-`leaf_capacity`.
+running maximum with `prov.replanned`, once per segment, at the segment's start: the
+walk's caps from the first seven, the tree's bounds from the last three (S3) -- the leaf
+capacity grows to `auto_leaf_capacity(leaf_needed, headroom)` (`TreeConfig.leaf_headroom`
+under `leaf_capacity="auto"`, x1.15 for an explicit capacity; rounded up to 1024; sticky
+on the engine), the level-loop depth bound to `depth_needed + 8`, and the level loops'
+batch width to `ceil(1.25 x widest_needed)`. The width is what a long galaxy run reaches
+first (the 25M quarter-orbit probe: the widest radix level +10.9 % in 489 steps, the
+live leaves +0.26 %). A grown capacity is a new template shape, so the re-run compiles;
+a second failure raises and names what overflowed against which bound.
 
 ## Force and step parameters
 
@@ -244,7 +251,8 @@ and the particle-major L2P; `ARCHITECTURE.md` section 6).
   with the largest softening the run uses. Plummer has no support and no limit.
 - **Bucket leaves are refused** for a rebuild from the template (above); the state carry
   (`strict_run_v2(carry="state")`, the library default) still runs on them.
-- **A tree overflow is not re-planned** (S2): the call raises and names `leaf_capacity`.
+- **A tree overflow is re-planned once per segment** (S3; S2 raised): see the needs
+  above. A walk that overflowed a NAMED cap declines the retry altogether, tree or not.
 - **Not yet on the provider:** the fused multi-GPU lane (`jaccpot/distributed/fused.py`)
   has its own force step; nornax's block-step integrators do not call it yet.
 

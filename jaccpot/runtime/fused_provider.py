@@ -358,12 +358,17 @@ class FusedForceProvider:
         positions: Array,
         masses: Array,
     ) -> Optional[tuple["FusedForceProvider", FusedTopology]]:
-        """Re-plan the walk caps from what a failed segment needed and re-prepare.
+        """Re-plan from what a failed segment needed and re-prepare at its start.
 
-        The segment retry: the unnamed flat-walk caps grow to cover ``needs``
-        (``engine._replan_walk_caps_from_needs``), the lane is prepared again at
-        the segment's START, and the peak wavefront the segment needed is kept so
-        the retraced walk's queue covers it.
+        The segment retry. The WALK: the unnamed flat-walk caps grow to cover
+        ``needs`` (``engine._replan_walk_caps_from_needs``), and the peak wavefront
+        the segment needed is kept so the retraced walk's queue covers it. The
+        TREE (cell leaves): the leaf capacity, the level-loop depth bound and the
+        level loops' batch width grow to what the segment's trees needed
+        (``engine._replan_tree_from_needs``; the width is registered for the shape
+        the re-prepare builds). Either or both; then the lane is prepared again at
+        the segment's START. A grown leaf capacity is a new template shape, so
+        the re-run's programs have new keys and compile.
 
         Parameters
         ----------
@@ -378,12 +383,21 @@ class FusedForceProvider:
         -------
         Optional[tuple[FusedForceProvider, FusedTopology]]
             The provider and topology for the re-run, or ``None`` when nothing can
-            be re-planned (no walk flag fired -- a cell-leaf tree overflow alone
-            is not re-planned --, a named cap overflowed, not the flat walk): the
-            caller raises.
+            be re-planned (neither a walk flag nor a tree overflow a bound can
+            fix, a named cap overflowed -- then not even the tree --, not the flat
+            walk): the caller raises.
         """
+        from ._level_shapes import widen_registered_levels
+        from .fused_topology import NEEDS_FIELDS
+
         engine = self.engine
-        if not engine._replan_walk_caps_from_needs(needs):
+        if engine._walk_overflowed_a_named_cap(needs):
+            # a deliberate bound the re-run would overflow again, tree or not
+            return None
+        # both: a segment can outgrow the walk caps and the tree at once
+        walk = engine._replan_walk_caps_from_needs(needs)
+        tree = engine._replan_tree_from_needs(needs)
+        if not (walk or tree):
             return None
         replanned_peak = int(
             (engine._strict_fused_validated_caps or {}).get("peak_wavefront", 0)
@@ -405,6 +419,19 @@ class FusedForceProvider:
             int(validated.get("peak_wavefront") or 0), replanned_peak
         )
         engine._strict_fused_validated_caps = validated
+        if tree:
+            # the prepare registered the START tree's widest level and depth for
+            # its shape; the re-run's rebuilds reach the segment's
+            tree_now = prepared.tree
+            widen_registered_levels(
+                total_nodes=int(tree_now.parent.shape[0]),
+                num_internal=int(tree_now.left_child.shape[0]),
+                widest=int(needs[NEEDS_FIELDS.index("widest_needed")]),
+                num_levels=min(
+                    int(tree_now.level_offsets.shape[0]) - 1,
+                    int(engine._cells_upward_num_levels),
+                ),
+            )
         provider = type(self).freeze_template(
             engine,
             prepared,

@@ -25,6 +25,8 @@ partition (cells), with ``jax.default_backend`` reporting ``"gpu"`` as
 
 from __future__ import annotations
 
+import re
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -370,11 +372,13 @@ def test_a_cell_leaf_overflow_inside_the_scan_is_refused(carry, monkeypatch):
 
     The traced refresh never lets the walk see that overflow, and on the CSR near
     field (production's) nothing else fails, so the scan ran on with the force
-    55 % off (rel-L2). The verdict now folds the tree's flag, and as no walk cap
-    can fix it, the call raises at once, naming the tree and its remedy.
+    55 % off (rel-L2). The verdict now folds the tree's flag; with the segment
+    retry off the call raises at once, naming what the tree needed against which
+    bound, and the remedy.
     """
     for key, val in _CSR_ON_CPU.items():
         monkeypatch.setenv(key, val)
+    monkeypatch.setenv("JACCPOT_STRICT_SEGMENT_RETRY", "0")
     blobs, plummer_state, masses = _systems()
     uniform = jnp.asarray(
         np.random.default_rng(2).uniform(-1.0, 1.0, (N, 3)), jnp.float32
@@ -385,7 +389,12 @@ def test_a_cell_leaf_overflow_inside_the_scan_is_refused(carry, monkeypatch):
     before = int(solver.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
     with pytest.raises(RuntimeError, match="cell-leaf tree overflowed") as err:
         _run(solver, state, masses, carry=carry, prepared=small)
-    assert "TreeConfig(leaf_capacity=66)" in str(err.value)
+    # 105 live leaves at the blobs; the state carry's steps drift to 119
+    assert re.search(
+        r"needed 1[01]\d cell leaves, more than TreeConfig\(leaf_capacity=66\)",
+        str(err.value),
+    )
+    assert "JACCPOT_STRICT_SEGMENT_RETRY=0" in str(err.value)
     assert "tree_overflow=1" in str(err.value)
     # not re-planned: no retry ran
     diag = solver.get_runtime_diagnostics()

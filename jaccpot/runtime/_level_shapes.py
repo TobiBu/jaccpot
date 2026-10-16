@@ -49,6 +49,7 @@ __all__ = [
     "registered_level_batch_width",
     "registered_num_levels",
     "pallas_cascades_enabled",
+    "widen_registered_levels",
     "widest_level",
 ]
 
@@ -181,6 +182,40 @@ def registered_num_levels(*, total_nodes: int, num_internal: int) -> int | None:
     if plan is not None:
         return int(plan.num_levels)
     return _LEVELS.get(_key(total_nodes, num_internal))
+
+
+def widen_registered_levels(
+    *,
+    total_nodes: int,
+    num_internal: int,
+    widest: int,
+    num_levels: int,
+) -> None:
+    """Raise this shape's entry to cover a tree no eager visit has seen.
+
+    The TREE re-plan's second half: the eager re-prepare at a failed segment's
+    start registers that START tree's widest level and depth, but the segment's
+    rebuilds went wider or deeper. The batch width becomes ``ceil(1.25 x
+    widest)`` (as :func:`level_batch_width` sizes it) and the level count at
+    least ``num_levels`` -- the engine's depth bound, which the traced rebuild
+    checks against, so the per-level cascades (whose trip count this is) loop
+    over every level a tree that passes the check can have. Neither is lowered.
+
+    Parameters
+    ----------
+    total_nodes : int
+        Node count (registry key).
+    num_internal : int
+        Internal node count (registry key).
+    widest : int
+        Node count of the widest level to cover.
+    num_levels : int
+        Level-loop trip count to cover, capped by the caller at the level table.
+    """
+    key = _key(total_nodes, num_internal)
+    width = min(max(1, int(math.ceil(int(widest) * _HEADROOM))), max(total_nodes, 1))
+    _WIDTHS[key] = max(width, _WIDTHS.get(key, 0))
+    _LEVELS[key] = max(int(num_levels), _LEVELS.get(key, 0))
 
 
 def pallas_cascades_enabled() -> bool:
