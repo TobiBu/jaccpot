@@ -734,6 +734,7 @@ class FastMultipoleMethod:
                 leaf_partition=advanced_cfg.tree.leaf_partition,
                 leaf_capacity=advanced_cfg.tree.leaf_capacity,
                 cell_min_level=advanced_cfg.tree.cell_min_level,
+                leaf_headroom=advanced_cfg.tree.leaf_headroom,
             ),
             runtime_policy=dataclasses.replace(
                 advanced_cfg.runtime,

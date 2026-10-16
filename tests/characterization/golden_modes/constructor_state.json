@@ -170,6 +170,7 @@
   "_traversal_field_overrides": "{}",
   "_tree_cell_min_level": "0",
   "_tree_leaf_capacity": "None",
+  "_tree_leaf_capacity_auto": "None",
   "_tree_leaf_partition": "'buckets'",
   "_tree_workspace": "None",
   "adaptive_eps": "None",

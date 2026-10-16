@@ -756,6 +756,56 @@ class PrepareMixin(_EngineBase):
             leaf_capacity_overflow=leaf_capacity_overflow,
         )
 
+    def _resolve_auto_leaf_capacity(
+        self,
+        positions: Array,
+        *,
+        leaf_size: int,
+        bounds: Tuple[Array, Array],
+    ) -> None:
+        """Size ``TreeConfig(leaf_capacity="auto")`` from this prepare's particles.
+
+        Once, at the first eager build: the headroom times the cell leaves these
+        positions cut into in this prepare's own bounds
+        (:func:`~jaccpot.runtime.capacity_plan.live_cell_leaves`), rounded up to a
+        multiple of 1024. The capacity then sticks -- every later build, traced
+        refreshes included, keeps the shapes it set -- so this is a no-op unless
+        the capacity is ``"auto"`` and not yet sized.
+
+        Parameters
+        ----------
+        positions : Array
+            Positions at the working dtype, as the tree build receives them.
+        leaf_size : int
+            The build's leaf size.
+        bounds : Tuple[Array, Array]
+            The build's Morton box.
+
+        Raises
+        ------
+        ValueError
+            If the capacity is still unsized when the build is traced: the count
+            needs concrete positions.
+        """
+        headroom = getattr(self, "_tree_leaf_capacity_auto", None)
+        if headroom is None or getattr(self, "_tree_leaf_capacity", None) is not None:
+            return
+        if isinstance(positions, Tracer):
+            raise ValueError(
+                "TreeConfig(leaf_capacity='auto') is sized at the first EAGER "
+                "prepare; this build is traced. Prepare once outside the trace, "
+                "or pass an explicit leaf_capacity."
+            )
+        from .capacity_plan import auto_leaf_capacity, live_cell_leaves
+
+        live = live_cell_leaves(
+            positions,
+            leaf_size=int(leaf_size),
+            cell_min_level=int(getattr(self, "_tree_cell_min_level", 0)),
+            bounds=bounds,
+        )
+        self._tree_leaf_capacity = auto_leaf_capacity(live, float(headroom))
+
     def _prepare_state_tree_and_upward(
         self,
         *,
@@ -862,6 +912,9 @@ class PrepareMixin(_EngineBase):
                 reuse_count=int(cached_topology.reuse_count) + 1,
             )
         else:
+            self._resolve_auto_leaf_capacity(
+                positions_arr, leaf_size=int(leaf_size), bounds=inferred_bounds
+            )
             build_artifacts = _build_tree_with_config(
                 positions_arr,
                 masses_arr,

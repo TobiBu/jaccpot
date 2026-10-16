@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 NEARFIELD_MODE_DOC = (
     "For large_n_gpu production, near-field execution is canonicalized to "
@@ -134,10 +134,16 @@ class TreeConfig:
         low-density shell no longer produces huge leaves that the mutual MAC
         makes neighbours of the whole tree (near-field volume 24x lower at
         N=2e5 Plummer, theta 0.8; plan sub-10ms Phase 1.2).
-    leaf_capacity : Optional[int]
+    leaf_capacity : Optional[Union[int, Literal["auto"]]]
         Static leaf count for ``leaf_partition="cells"`` (the tree is padded to
         it; exceeding it raises eagerly and trips the strict runner's capacity
-        guard under trace). Required with ``"cells"``.
+        guard under trace). Required with ``"cells"``. ``"auto"`` sizes it at the
+        solver's first eager prepare, from the cell leaves of the particles it is
+        given (:func:`jaccpot.runtime.capacity_plan.live_cell_leaves`, on device,
+        in the prepare's own bounds): ``leaf_headroom`` times that count, rounded
+        up to a multiple of 1024. It then stays fixed, so the compiled programs
+        keep their shapes; a run whose particles cluster past it raises the
+        capacity error like an explicit value.
     cell_min_level : Optional[int]
         ``leaf_partition="cells"`` only: no leaf coarser than this Morton level
         (``None``/``0``: unconstrained). Leaves are the coarsest cells holding at
@@ -148,6 +154,9 @@ class TreeConfig:
         domain into the cross-domain near export. Level 8 (cells at most 1/256 of
         the box) adds ~0.7 % leaves on a 2e6 Plummer and was measured at 110.7 ->
         90.8 ms on one A100 and 87.2 -> 76.8 ms on two, forces unchanged.
+    leaf_headroom : Optional[float]
+        ``leaf_capacity="auto"`` only: the factor over the live count (``None``:
+        1.15, the benches' ``--leaf-cap-factor``). At least 1.
     """
 
     tree_type: Optional[str] = None
@@ -157,8 +166,9 @@ class TreeConfig:
     max_refine_levels: Optional[int] = None
     aspect_threshold: Optional[float] = None
     leaf_partition: Optional[str] = None
-    leaf_capacity: Optional[int] = None
+    leaf_capacity: Optional[Union[int, Literal["auto"]]] = None
     cell_min_level: Optional[int] = None
+    leaf_headroom: Optional[float] = None
 
 
 @dataclass(frozen=True)

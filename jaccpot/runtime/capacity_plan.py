@@ -30,21 +30,30 @@ put it in every static cache key.
 **A ContextVar is read at trace time and does not retrace by itself.** Put
 :meth:`FusedCapacityPlan.fingerprint` into the compile cache key of anything that
 caches a traced program, or a re-plan will silently reuse the old shapes.
+
+The cell-leaf tree's ``leaf_capacity`` is one more static shape, and the one a caller
+had to size by hand: :func:`live_cell_leaves` counts the leaves a configuration cuts
+into, on device, and :func:`auto_leaf_capacity` adds the headroom. Together they are
+``TreeConfig(leaf_capacity="auto")``, resolved once at the first eager prepare.
 """
 
 from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
+import math
 from dataclasses import dataclass, replace
 from typing import Any, Iterable, Iterator, Optional
 
 __all__ = [
     "FusedCapacityPlan",
+    "auto_leaf_capacity",
     "fused_capacity_plan",
     "fused_capacity_plan_overrides",
     "install_walk_caps",
     "list_widths",
+    "live_cell_leaves",
     "measure_shard_plan",
     "merge_plans",
     "merge_walk_caps",
@@ -583,3 +592,132 @@ def measure_shard_plan(
     )
     caps = getattr(impl, "_strict_fused_validated_caps", None)
     return prepared, plan, (dict(caps) if isinstance(caps, dict) else None)
+
+
+# --------------------------------------------------------------------- leaf capacity
+
+#: ``TreeConfig.leaf_headroom`` when it is not set: the benches' ``--leaf-cap-factor``
+#: (``bench/fused_memory_budget.py``), which every production row was sized with.
+DEFAULT_LEAF_HEADROOM = 1.15
+#: Capacities are rounded up to a multiple of this, so a slightly different draw
+#: compiles the same shapes.
+LEAF_CAPACITY_QUANTUM = 1024
+
+
+@functools.lru_cache(maxsize=None)
+def _live_cell_leaf_counter(leaf_size: int, min_level: int) -> Any:
+    """The jitted sort + live-leaf count for one ``(leaf_size, min_level)``.
+
+    Built on first use (this module imports no jax at import) and kept, so a second
+    count of the same shape reuses the compiled program.
+
+    Parameters
+    ----------
+    leaf_size : int
+        Maximum particles per leaf.
+    min_level : int
+        No leaf coarser than this Morton level.
+
+    Returns
+    -------
+    Any
+        ``codes (N,) uint64 -> live leaves (scalar)``.
+    """
+    import jax
+    import jax.numpy as jnp
+    from yggdrax._cell_partition import adaptive_cell_leaf_partition
+
+    def live_cell_leaf_count(codes: Any) -> Any:
+        # ``num_leaves`` sums the run starts over every particle, before the leaf
+        # arrays are cut to the capacity (yggdrax ``_cell_partition``): the exact
+        # count at ``capacity=1``, where the padded arrays cost nothing and, being
+        # unused, are not computed at all
+        return adaptive_cell_leaf_partition(
+            jnp.sort(codes), leaf_size=leaf_size, capacity=1, min_level=min_level
+        ).num_leaves
+
+    return jax.jit(live_cell_leaf_count)
+
+
+def live_cell_leaves(
+    positions: Any,
+    *,
+    leaf_size: int,
+    cell_min_level: int,
+    bounds: Any,
+) -> int:
+    """The number of cell leaves ``positions`` cut into, counted on device.
+
+    ``TreeConfig(leaf_partition="cells")`` pads the tree to a static ``leaf_capacity``,
+    and the count it must hold is data dependent. This is the count the eager tree
+    build reaches, computed the way the build computes it: the same jitted yggdrax
+    ``morton_encode`` in the same box, a sort, and the cell partition's live-leaf
+    count. It replaces the benches' host count (numpy
+    ``adaptive_cell_leaf_partition_numpy`` over host-sorted codes), which copied the
+    codes to the host and sorted them there -- 0.8 GB and a host sort at 1e8.
+
+    Parameters
+    ----------
+    positions : Any
+        Particle positions ``(N, 3)``, at the dtype the tree is built from.
+    leaf_size : int
+        Maximum particles per leaf (the prepare's ``leaf_size``).
+    cell_min_level : int
+        ``TreeConfig.cell_min_level``; ``0`` is unconstrained.
+    bounds : Any
+        ``(lower, upper)`` Morton box: the one the tree is built in (the prepare's
+        own inferred bounds), or the codes, and the count, belong to another box.
+
+    Returns
+    -------
+    int
+        Live cell leaves.
+    """
+    import jax.numpy as jnp
+    from yggdrax.morton import morton_encode
+
+    lower, upper = bounds
+    pos = jnp.asarray(positions)
+    codes = morton_encode(
+        pos, (jnp.asarray(lower, pos.dtype), jnp.asarray(upper, pos.dtype))
+    )
+    return int(_live_cell_leaf_counter(int(leaf_size), int(cell_min_level))(codes))
+
+
+def auto_leaf_capacity(
+    live: int,
+    headroom: float = DEFAULT_LEAF_HEADROOM,
+    quantum: int = LEAF_CAPACITY_QUANTUM,
+) -> int:
+    """``headroom x live`` cell leaves, rounded up to a multiple of ``quantum``.
+
+    The headroom is how far the live count may grow, as the particles cluster,
+    before a rebuilt tree outgrows the capacity. The default is the benches' factor.
+
+    Parameters
+    ----------
+    live : int
+        Live cell leaves (:func:`live_cell_leaves`).
+    headroom : float
+        Factor over ``live``; at least 1.
+    quantum : int
+        Rounding step; at least 1.
+
+    Returns
+    -------
+    int
+        The leaf capacity.
+
+    Raises
+    ------
+    ValueError
+        If ``live`` is negative, ``headroom`` below 1 or ``quantum`` below 1.
+    """
+    if int(live) < 0:
+        raise ValueError(f"live must be >= 0, got {live}")
+    if not float(headroom) >= 1.0:
+        raise ValueError(f"headroom must be >= 1, got {headroom}")
+    if int(quantum) < 1:
+        raise ValueError(f"quantum must be >= 1, got {quantum}")
+    need = max(1, math.ceil(float(headroom) * int(live)))
+    return -(-need // int(quantum)) * int(quantum)

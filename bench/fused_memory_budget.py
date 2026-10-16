@@ -349,8 +349,6 @@ jax.config.update("jax_enable_x64", True)
 
 from common.gpu_guard import GpuMonitor  # noqa: E402
 from common.ic import IC_GENERATORS  # noqa: E402
-from yggdrax._cell_partition import adaptive_cell_leaf_partition_numpy  # noqa: E402
-from yggdrax.morton import morton_encode  # noqa: E402
 
 import jaccpot.pallas.mutual_walk_pallas as _mwp  # noqa: E402
 import jaccpot.runtime._interaction_cache as _ic  # noqa: E402
@@ -360,6 +358,10 @@ from jaccpot.config import (  # noqa: E402
     NearFieldConfig,
     RuntimePolicyConfig,
     TreeConfig,
+)
+from jaccpot.runtime.capacity_plan import (  # noqa: E402
+    auto_leaf_capacity,
+    live_cell_leaves,
 )
 from jaccpot.runtime.fmm_prepare import PrepareMixin  # noqa: E402
 from jaccpot.runtime.kernels._evaluate import _infer_bounds  # noqa: E402
@@ -666,15 +668,18 @@ def _initial_conditions():
 
 
 def _leaf_capacity(pos: np.ndarray) -> tuple[int, int]:
+    # the library's TreeConfig(leaf_capacity="auto") count, on device in the bounds
+    # the prepare infers. It replaced a numpy count over host-sorted codes and gives
+    # the same number (S3 R7: Plummer, clipped Plummer and the disc, 1e4-2e6 on CPU,
+    # 2e5 and 8e6 on an A100) in 8 ms instead of 3.2 s at the 25M disc
     p = jnp.asarray(pos)
-    codes = np.sort(np.asarray(morton_encode(p, _infer_bounds(p))).astype(np.uint64))
-    live = int(
-        adaptive_cell_leaf_partition_numpy(
-            codes, leaf_size=ARGS.leaf, min_level=ARGS.cell_min_level or None
-        )[0].size
+    live = live_cell_leaves(
+        p,
+        leaf_size=ARGS.leaf,
+        cell_min_level=ARGS.cell_min_level,
+        bounds=_infer_bounds(p),
     )
-    cap = int(-(-int(np.ceil(ARGS.leaf_cap_factor * live)) // 1024) * 1024)
-    return live, cap
+    return live, auto_leaf_capacity(live, ARGS.leaf_cap_factor)
 
 
 def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:

@@ -78,6 +78,7 @@ from jaccpot.softening import resolve_softening_kernel, support_factor
 from ._adaptive_policy import adaptive_pair_policy  # noqa: F401
 from ._interaction_cache import _InteractionCacheEntry
 from ._large_n_types import LargeNPreparedState
+from .capacity_plan import DEFAULT_LEAF_HEADROOM
 from .dtypes import require_x64
 from .fmm_caches import _clear_global_runtime_caches
 from .fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
@@ -448,16 +449,49 @@ class FMMEngine(
         self._tree_leaf_partition: str = (
             "buckets" if _tree.leaf_partition is None else str(_tree.leaf_partition)
         )
-        self._tree_leaf_capacity: Optional[int] = (
-            None if _tree.leaf_capacity is None else int(_tree.leaf_capacity)
-        )
         if self._tree_leaf_partition not in ("buckets", "cells"):
             raise ValueError(
                 "TreeConfig.leaf_partition must be 'buckets' or 'cells', "
                 f"got {self._tree_leaf_partition!r}"
             )
-        if self._tree_leaf_partition == "cells" and self._tree_leaf_capacity is None:
-            raise ValueError("TreeConfig(leaf_partition='cells') needs leaf_capacity")
+        # leaf_capacity="auto": the capacity is sized at the first eager prepare
+        # (PrepareMixin._resolve_auto_leaf_capacity), so it stays None until then and
+        # the headroom marks that it is still to come
+        self._tree_leaf_capacity: Optional[int] = None
+        self._tree_leaf_capacity_auto: Optional[float] = None
+        if isinstance(_tree.leaf_capacity, str):
+            if _tree.leaf_capacity.strip().lower() != "auto":
+                raise ValueError(
+                    "TreeConfig.leaf_capacity must be an int or 'auto', got "
+                    f"{_tree.leaf_capacity!r}"
+                )
+            if self._tree_leaf_partition != "cells":
+                raise ValueError(
+                    "TreeConfig(leaf_capacity='auto') needs leaf_partition='cells'"
+                )
+            headroom = (
+                DEFAULT_LEAF_HEADROOM
+                if _tree.leaf_headroom is None
+                else float(_tree.leaf_headroom)
+            )
+            if not headroom >= 1.0:
+                raise ValueError(
+                    f"TreeConfig.leaf_headroom must be >= 1, got {headroom}"
+                )
+            self._tree_leaf_capacity_auto = headroom
+        else:
+            if _tree.leaf_headroom is not None:
+                raise ValueError("TreeConfig.leaf_headroom needs leaf_capacity='auto'")
+            if _tree.leaf_capacity is not None:
+                self._tree_leaf_capacity = int(_tree.leaf_capacity)
+            if (
+                self._tree_leaf_partition == "cells"
+                and self._tree_leaf_capacity is None
+            ):
+                raise ValueError(
+                    "TreeConfig(leaf_partition='cells') needs leaf_capacity "
+                    "(an int, or 'auto')"
+                )
         self._tree_cell_min_level: int = (
             0 if _tree.cell_min_level is None else int(_tree.cell_min_level)
         )
