@@ -432,15 +432,22 @@ def _drifting(start: np.ndarray, end: np.ndarray):
     return state, jnp.full((N,), 1e-9, jnp.float32)
 
 
-#: walk caps NAMED wide enough for every configuration below (they are never
-#: widened, and do not overflow): the walk's needs in a segment whose tree
-#: overflowed are measured on that broken tree, and a re-run after the TREE
-#: re-plan would otherwise overflow the walk caps the start sized -- these tests
-#: are about the tree
-_ROOMY_WALK = {
-    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "16384",
-    "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "32768",
+#: The walk caps of the R6 tests. ``named``: wide enough for every configuration
+#: below (never widened, never overflowed), so only the tree is re-planned.
+#: ``unnamed``: the library's own. The walk's needs in a segment whose tree
+#: overflowed are measured on that broken tree, and these drifts change the
+#: configuration completely in two steps, so the tree re-plan's re-run overflows
+#: the walk caps the start sized: the segment's SECOND retry, walk-only, re-plans
+#: them from the re-run's needs.
+_WALK_CAPS = {
+    "named": {
+        "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "16384",
+        "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "32768",
+    },
+    "unnamed": {},
 }
+#: retries a drift runs: the tree re-plan, then (unnamed) the walk's
+_RETRIES = {"named": 1, "unnamed": 2}
 
 
 @pytest.fixture()
@@ -464,16 +471,35 @@ def _final_states_equal(got, want):
     )
 
 
+def _fallbacks(solver) -> int:
+    return int(solver.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+
+
+def _reference_run(solver, leaf_capacity, state, masses, *, carry):
+    """A fresh solver's run from the same start with the retried run's final walk
+    caps (the floors its eager prepare sizes from): it must fit at once."""
+    from jaccpot.runtime.capacity_plan import install_walk_caps
+
+    reference = _solver(leaf_capacity=leaf_capacity, use_pallas=True)
+    install_walk_caps(reference, solver._impl._strict_fused_validated_caps)
+    want, _, _ = _run(reference, state, masses, carry=carry)
+    assert _fallbacks(reference) == 0
+    return want
+
+
+@pytest.mark.parametrize("walk_caps", ["named", "unnamed"])
 @pytest.mark.parametrize("carry", ["state", "particles"])
 def test_a_tree_outgrowing_its_leaf_capacity_mid_segment_is_replanned(
-    carry, monkeypatch, _fresh_level_registry
+    carry, walk_caps, monkeypatch, _fresh_level_registry
 ):
     """Prepared on a uniform draw at capacity 66 (64 live leaves, the start fits),
     drifting into four blobs: the first step's rebuild needs 109 leaves, the second
     105. The verdict fails; the segment is re-planned at its start -- capacity
     ``auto_leaf_capacity(109) = 1024``, the depth bound to the deepest tree + 8 --
-    and run once more; the re-run equals a run started there at capacity 1024."""
-    for key, val in (_CSR_ON_CPU | _ROOMY_WALK).items():
+    and run again (twice with the library's walk caps, the second time for the
+    walk); the result equals a run started there at capacity 1024 with the final
+    walk caps."""
+    for key, val in (_CSR_ON_CPU | _WALK_CAPS[walk_caps]).items():
         monkeypatch.setenv(key, val)
     blobs, _, _ = _systems()
     uniform = np.random.default_rng(2).uniform(-1.0, 1.0, (N, 3))
@@ -481,25 +507,21 @@ def test_a_tree_outgrowing_its_leaf_capacity_mid_segment_is_replanned(
 
     solver = _solver(leaf_capacity=66, use_pallas=True)
     impl = solver._impl
-    before = int(solver.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+    before = _fallbacks(solver)
     got, _, _ = _run(solver, state, masses, carry=carry)
     diag = solver.get_runtime_diagnostics()
-    assert int(diag["strict_fused_fallback_count"] or 0) == before + 1
+    assert _fallbacks(solver) == before + _RETRIES[walk_caps]
     assert diag["strict_fused_last_fallback_reason"] == "capacity_segment_retry"
     assert impl._tree_leaf_capacity == 1024  # sticky: later prepares use it
 
-    reference = _solver(leaf_capacity=1024, use_pallas=True)
-    want, _, _ = _run(reference, state, masses, carry=carry)
-    assert (
-        int(reference.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
-        == 0
-    )
+    want = _reference_run(solver, 1024, state, masses, carry=carry)
     _final_states_equal(got, want)
 
 
+@pytest.mark.parametrize("walk_caps", ["named", "unnamed"])
 @pytest.mark.parametrize("carry", ["state", "particles"])
 def test_a_level_wider_than_the_level_loops_batch_mid_segment_is_replanned(
-    carry, monkeypatch, _fresh_level_registry
+    carry, walk_caps, monkeypatch, _fresh_level_registry
 ):
     """The bound a long galaxy run reaches first (the 25M quarter-orbit probe: the
     widest radix level +10.9 % in 489 steps, against 1.25x the eager widest): the
@@ -510,10 +532,10 @@ def test_a_level_wider_than_the_level_loops_batch_mid_segment_is_replanned(
     live leaves, widest levels 44 and 46). The re-prepare at the segment's start
     sees the cusp again and would register 23 once more: the batch must come from
     what the segment's trees needed, ceil(1.25 x 46) = 58, or the re-run overflows
-    the same way. The leaf capacity stays 128; the re-run equals a run started
-    there with the widened batch.
+    the same way. The leaf capacity stays 128; the result equals a run started
+    there with the widened batch and the final walk caps.
     """
-    for key, val in (_CSR_ON_CPU | _ROOMY_WALK).items():
+    for key, val in (_CSR_ON_CPU | _WALK_CAPS[walk_caps]).items():
         monkeypatch.setenv(key, val)
     blobs, _, _ = _systems()
     state, masses = _drifting(_cusp(), np.asarray(blobs))
@@ -521,19 +543,45 @@ def test_a_level_wider_than_the_level_loops_batch_mid_segment_is_replanned(
     solver = _solver(leaf_capacity=128, use_pallas=True)
     impl = solver._impl
     shape = (2 * 128 - 1, 128 - 1)
-    before = int(solver.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+    before = _fallbacks(solver)
     got, _, _ = _run(solver, state, masses, carry=carry)
-    diag = solver.get_runtime_diagnostics()
-    assert int(diag["strict_fused_fallback_count"] or 0) == before + 1
+    assert _fallbacks(solver) == before + _RETRIES[walk_caps]
     assert impl._tree_leaf_capacity == 128  # the leaves never overflowed
     assert _fresh_level_registry._WIDTHS[shape] == 58
 
     # the registry is process-global: a fresh solver started at the same state
-    # compiles with the widened batch and fits without a retry
-    reference = _solver(leaf_capacity=128, use_pallas=True)
-    want, _, _ = _run(reference, state, masses, carry=carry)
-    assert (
-        int(reference.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
-        == 0
-    )
+    # compiles with the widened batch
+    want = _reference_run(solver, 128, state, masses, carry=carry)
     _final_states_equal(got, want)
+
+
+@pytest.mark.parametrize("carry", ["state", "particles"])
+def test_a_walk_retry_after_a_tree_replan_is_the_last(carry, monkeypatch):
+    """At most two retries per segment, the second only for the walk: with the
+    tree re-planned and then the walk's caps overflowing again (the second re-run
+    measures nothing new here -- the walk's re-plan is switched off), the call
+    raises and says two retries ran."""
+    for key, val in _CSR_ON_CPU.items():
+        monkeypatch.setenv(key, val)
+    blobs, _, _ = _systems()
+    uniform = np.random.default_rng(2).uniform(-1.0, 1.0, (N, 3))
+    state, masses = _drifting(uniform, np.asarray(blobs))
+    solver = _solver(leaf_capacity=66, use_pallas=True)
+    impl = solver._impl
+    replan_walk = impl._replan_walk_caps_from_needs
+    calls = []
+
+    def walk_replan_without_growth(needs):
+        # the first call (the tree re-plan's) re-plans as usual; later ones claim
+        # to re-plan but grow nothing, so the re-run overflows the walk again
+        calls.append(np.asarray(needs))
+        return replan_walk(needs) if len(calls) == 1 else True
+
+    monkeypatch.setattr(
+        impl, "_replan_walk_caps_from_needs", walk_replan_without_growth
+    )
+    with pytest.raises(RuntimeError, match="capacity saturated") as err:
+        _run(solver, state, masses, carry=carry)
+    assert "Segment retries run: 2" in str(err.value)
+    assert len(calls) == 2  # no third re-plan
+    assert impl._tree_leaf_capacity == 1024

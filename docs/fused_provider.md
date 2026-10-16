@@ -190,8 +190,12 @@ under `leaf_capacity="auto"`, x1.15 for an explicit capacity; rounded up to 1024
 on the engine), the level-loop depth bound to `depth_needed + 8`, and the level loops'
 batch width to `ceil(1.25 x widest_needed)`. The width is what a long galaxy run reaches
 first (the 25M quarter-orbit probe: the widest radix level +10.9 % in 489 steps, the
-live leaves +0.26 %). A grown capacity is a new template shape, so the re-run compiles;
-a second failure raises and names what overflowed against which bound.
+live leaves +0.26 %). A grown capacity is a new template shape, so the re-run compiles.
+A segment whose first retry re-planned the tree may retry once more, for the walk only
+(`prov.replanned(..., walk_only=True)`): the walk's needs in a segment whose tree
+overflowed were measured on that broken tree and can fall short, the re-run's are real.
+At most two retries per segment; a further failure raises, names what overflowed against
+which bound, and says how many retries ran.
 
 ## Force and step parameters
 
@@ -251,7 +255,7 @@ and the particle-major L2P; `ARCHITECTURE.md` section 6).
   with the largest softening the run uses. Plummer has no support and no limit.
 - **Bucket leaves are refused** for a rebuild from the template (above); the state carry
   (`strict_run_v2(carry="state")`, the library default) still runs on them.
-- **A tree overflow is re-planned once per segment** (S3; S2 raised): see the needs
+- **A tree overflow is re-planned at the segment's start** (S3; S2 raised): see the needs
   above. A walk that overflowed a NAMED cap declines the retry altogether, tree or not.
 - **Not yet on the provider:** the fused multi-GPU lane (`jaccpot/distributed/fused.py`)
   has its own force step; nornax's block-step integrators do not call it yet.

@@ -357,6 +357,8 @@ class FusedForceProvider:
         needs: Any,
         positions: Array,
         masses: Array,
+        *,
+        walk_only: bool = False,
     ) -> Optional[tuple["FusedForceProvider", FusedTopology]]:
         """Re-plan from what a failed segment needed and re-prepare at its start.
 
@@ -378,6 +380,9 @@ class FusedForceProvider:
             ``[N, 3]`` positions the segment started from.
         masses : Array
             ``[N]`` masses.
+        walk_only : bool
+            Re-plan the walk caps only: the second retry after a tree re-plan,
+            whose re-run measured the walk on a tree that fits.
 
         Returns
         -------
@@ -396,7 +401,7 @@ class FusedForceProvider:
             return None
         # both: a segment can outgrow the walk caps and the tree at once
         walk = engine._replan_walk_caps_from_needs(needs)
-        tree = engine._replan_tree_from_needs(needs)
+        tree = False if walk_only else engine._replan_tree_from_needs(needs)
         if not (walk or tree):
             return None
         replanned_peak = int(
