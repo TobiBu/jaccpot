@@ -91,7 +91,11 @@ against 2.4 s at N = 512 on CPU).
 grew the tree (the second for the walk only, see `docs/fused_provider.md`). A failure
 after that raises a `RuntimeError` naming the last restart file. A donated segment keeps
 a host copy of its start state for the re-runs (24 B per particle, one device-to-host
-copy per segment).
+copy per segment). On a GPU it is an asynchronous copy into pinned host memory
+(`strict_carry.host_copy`): 0.10 s at 1e8 on an A100 (the run's first 1.4 s), where the
+synchronous copy into NumPy memory took 1.0-1.5 s per segment, the larger part of an
+edge's cost at 1e8. The moments themselves cost 15 ms at 1e8 (their first call compiles,
+0.6 s once per process).
 
 ## Edges, callbacks, diagnostics
 

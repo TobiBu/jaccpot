@@ -2042,7 +2042,7 @@ class StrictRunMixin(_EngineBase):
             or the handle.
         """
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
-        from jaccpot.runtime.strict_carry import StrictParticleCarry
+        from jaccpot.runtime.strict_carry import StrictParticleCarry, host_copy
 
         external_active = bool(add_external) and external_acceleration_fn is not None
         # the scan's total acceleration as an output of its own: with a field only
@@ -2322,12 +2322,13 @@ class StrictRunMixin(_EngineBase):
         self._prepared_state_cache_positions = None
         self._prepared_state_cache_masses = None
         retry_enabled = env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True)
-        start_host: Optional[np.ndarray] = None
+        start_host: Optional[Any] = None
         if donate_state and retry_enabled:
             # the scan consumes the start state, and a capacity retry re-runs the
             # segment from it: keep it on the host (one copy per call, only when
-            # donating -- the scan itself stays as lean as it can be)
-            start_host = np.asarray(jax.device_get(state_arr))
+            # donating -- the scan itself stays as lean as it can be; on a GPU
+            # asynchronous, into pinned memory)
+            start_host = host_copy(state_arr)
         if handle_in is not None:
             scale_seed = getattr(handle_in, "force_scale", None)
         if scale_carry and scale_seed is None:

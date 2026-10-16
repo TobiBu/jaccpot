@@ -36,6 +36,7 @@ __all__ = [
     "PreparedShapeTemplate",
     "StrictParticleCarry",
     "external_field_key",
+    "host_copy",
     "materialize_template",
     "shape_template",
 ]
@@ -219,3 +220,38 @@ def materialize_template(template: PreparedShapeTemplate) -> Any:
     return jax.tree_util.tree_unflatten(
         template.treedef, [_fill(x) for x in template.leaves]
     )
+
+
+def host_copy(state: Array) -> Any:
+    """A copy of a device state off the device, for a state about to be donated.
+
+    ``strict_run_v2(donate_state=True)`` hands its start state to the scan, and a
+    capacity retry re-runs the segment from this copy; the runner keeps step 0's
+    state this way for its energy when ``donate_input`` consumes it. On a GPU the
+    copy is an asynchronous ``device_put`` into pinned host memory: the call
+    returns at once, and a program that consumes ``state`` waits for the DMA (PjRt
+    orders a donation after the buffer's pending reads). 2.4 GB at 1e8 particles
+    on an A100: 0.10 s per copy (the run's first 1.4 s, the pinned allocation),
+    against 0.97-1.11 s for the synchronous ``device_get`` into pageable NumPy
+    memory it replaces -- the larger part of the runner's edge at 1e8. Elsewhere
+    that NumPy copy. ``jax.device_put(copy, sharding)`` restores either, bitwise.
+
+    Parameters
+    ----------
+    state : Array
+        The state, about to be donated.
+
+    Returns
+    -------
+    Any
+        A ``pinned_host`` array (GPU) or a NumPy array.
+    """
+    devices = list(state.devices())
+    pinned = all(
+        d.platform == "gpu"
+        and any(m.kind == "pinned_host" for m in d.addressable_memories())
+        for d in devices
+    )
+    if pinned:
+        return jax.device_put(state, state.sharding.with_memory_kind("pinned_host"))
+    return np.asarray(jax.device_get(state))

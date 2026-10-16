@@ -1141,6 +1141,8 @@ class ProductionRunner:
         import jax
         import jax.numpy as jnp
 
+        from jaccpot.runtime.strict_carry import host_copy
+
         started = time.perf_counter()
         dt_value = float(np.asarray(dt))
         restored: Optional[dict] = None
@@ -1228,7 +1230,7 @@ class ProductionRunner:
             if energy_on and handle is not None:
                 if start_state is not None and baselines.get("energy") is None:
                     start = self.potential_energy(
-                        jnp.asarray(start_state),
+                        jax.device_put(start_state, masses_now.sharding),
                         masses_now,
                         handle,
                         external_params=external_arg,
@@ -1293,9 +1295,8 @@ class ProductionRunner:
 
         if restart_from is None:
             if energy_on:
-                start_state = (
-                    np.asarray(jax.device_get(state_now)) if owned else state_now
-                )
+                # a donated input: an asynchronous copy (pinned, on a GPU)
+                start_state = host_copy(state_now) if owned else state_now
             stopped = at_edge(edge_at(0, 0.0, due=True))
         missing = max(0, int(num_steps) - step)
         lengths = () if stopped else segment_lengths(missing, self.segment.steps)
