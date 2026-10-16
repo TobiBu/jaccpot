@@ -65,7 +65,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     # resolved byte-identically to it and went: the distinctness guard caught it.
     "real_default": {},
     # --- presets: the gap audit 2.1 names explicitly. Routed through the PUBLIC
-    # facade (`_VIA_FACADE`), because that is the only path that resolves all four.
+    # facade (`_VIA_FACADE`), because that is the only path that resolves them all.
     # The engine's own `preset=` argument accepts any `FMMPreset` but `get_preset_config`
     # only implements FAST and LARGE_N_GPU, so `Engine(preset="balanced")` raises
     # `AssertionError: Missing config for preset`. The facade never passes those two
@@ -75,6 +75,8 @@ CONFIGS: dict[str, dict[str, Any]] = {
     "preset_balanced": {"preset": "balanced", _VIA_FACADE: True},
     "preset_accurate": {"preset": "accurate", _VIA_FACADE: True},
     "preset_large_n_gpu": {"preset": "large_n_gpu", _VIA_FACADE: True},
+    # the large_n_gpu engine profile under its own advanced defaults (S3)
+    "preset_galaxy": {"preset": "galaxy", _VIA_FACADE: True},
     # The engine's own two supported values, direct, so the engine-level `preset`
     # attribute is snapshotted too (it stays None on every facade route).
     "engine_preset_fast": {"preset": "fast"},

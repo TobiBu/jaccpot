@@ -42,11 +42,13 @@ EXPECTED_ALL = {
 }
 
 # Frozen preset members (name -> value). ODISSEO selects presets by these.
+# GALAXY (S3): the fused lane's production configuration, jaccpot.production.
 EXPECTED_PRESETS = {
     "FAST": "fast",
     "BALANCED": "balanced",
     "ACCURATE": "accurate",
     "LARGE_N_GPU": "large_n_gpu",
+    "GALAXY": "galaxy",
 }
 
 # Frozen keyword-only constructor surface of the public facade.

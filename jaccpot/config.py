@@ -60,7 +60,7 @@ class FMMPreset(str, Enum):
     """User-facing quality/speed presets.
 
     A ``str`` enum, so ``preset="fast"`` and ``preset=FMMPreset.FAST`` are
-    interchangeable everywhere. The four members are frozen by
+    interchangeable everywhere. The five members are frozen by
     ``tests/unit/test_public_api_surface.py``.
 
     Presets resolve by two different routes, which matters when tracing why a knob
@@ -68,7 +68,8 @@ class FMMPreset(str, Enum):
     bundles in :func:`jaccpot.runtime.fmm_presets.get_preset_config`, while
     ``BALANCED`` and ``ACCURATE`` resolve through advanced-config defaults in
     ``solver._default_advanced_for_preset`` and never reach ``get_preset_config``
-    at all. See ARCHITECTURE.md section 6.
+    at all. ``GALAXY`` takes both: the ``LARGE_N_GPU`` engine bundle, under advanced
+    defaults of its own. See ARCHITECTURE.md section 6.
 
     Attributes
     ----------
@@ -89,12 +90,22 @@ class FMMPreset(str, Enum):
         ``static_radix`` tree (64 particles per leaf, no host-side refinement)
         that the fused strict lane (``strict_run_v2``) runs on; ``FAST`` keeps
         ``lbvh``.
+    GALAXY :
+        ``"galaxy"``. The fused lane's production configuration
+        (:class:`jaccpot.production.GalaxySettings`): the ``large_n_gpu`` engine
+        profile on cell leaves of 64 (``cell_min_level`` 8, ``leaf_capacity``
+        ``"auto"``), p6, the geometric Dehnen MAC at ``theta`` 0.8, ferrers3
+        softening, fp32 -- what ``bench/fused_memory_budget.py`` measures at its
+        defaults, with the same compiled programs. Leaf size, order and the
+        particle carry are ``strict_run_v2`` arguments; take them from
+        :data:`jaccpot.production.GALAXY_SETTINGS`.
     """
 
     FAST = "fast"
     BALANCED = "balanced"
     ACCURATE = "accurate"
     LARGE_N_GPU = "large_n_gpu"
+    GALAXY = "galaxy"
 
 
 @dataclass(frozen=True)
