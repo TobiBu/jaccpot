@@ -1156,6 +1156,9 @@ def _compare(args) -> int:
         other = ref / f"{_REFERENCE_PIN.get(pin, pin)}.npz"
         if own.exists() or other.exists():
             refs[pin] = own if own.exists() else other
+        elif pin in PINS_SELF and (new / f"{pin}.npz").exists():
+            # it judges its own record; a reference older than the pin has none
+            refs[pin] = new / f"{pin}.npz"
         else:
             report[pin] = {"missing_in_ref": True}
             ok = False
