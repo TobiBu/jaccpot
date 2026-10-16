@@ -430,6 +430,7 @@ shared A100s booked through autocvd (`-l`): accuracy and pins only, no timings.
 - The 11 A100-only Pallas unit failures: one kernel bug (above), one facade annotation, the rest the tests' own.
 - conftest: `NORNAX_WORKTREE`; a nornax lacking what the tests import stops the run instead of skipping 5 tests.
 - `bench/nightly_pins.py`: the local nightly (S/M/DET/L pins + `gpu_gate.py` on the main heads). Not PR-triggered.
+  **Correction (S2): not landed.** PR #406 was not merged (the user deferred the nightly); the script is not on main.
 
 ### Odisseo and nornax
 - **The leapfrog of every non-strict run was first order in the self-gravity**, not only history runs: the `fast`
@@ -460,3 +461,206 @@ shared A100s booked through autocvd (`-l`): accuracy and pins only, no timings.
 - **CPU:** every jaccpot CI shard (unit, unit-runtime, unit-runtime-mac, integration, characterization,
   mutual-static-device, the distributed and nornax tiers, bench tooling) exits 0 on the merged code; Odisseo's new
   CI selection: 219 passed, 2 xfailed, mesh lane 15 passed.
+
+## S2 — the fused force as an object, the fp64 validation lane, traced parameters (2026-10-15/16)
+
+**Setup.** Code: jaccpot main `f967805` (the base), yggdrax `2758fa9`, nornax `763096e`, Odisseo `8fa0c18`; jax 0.11.2.
+The work is a linear stack of local branches on `f967805` (`s2/1` to `s2/13`, table below). GPU runs used shared A100s
+booked through autocvd for accuracy, program identity and pins; the L1-L3 timing gate ran on a free GPU 7.
+
+**The user's decisions (2026-10-15):**
+
+| | decision |
+| --- | --- |
+| traced parameters | **Static by default:** Python floats stay compile-time literals, bitwise by construction. **Traced is opt-in** (arrays as arguments, one compile per run). The GPU A/B in S3 decides whether traced becomes the default. |
+| fp64 force | **A validation lane:** selectable and correct, Pallas where the kernels are dtype-generic, XLA elsewhere; time and memory recorded, no budget; the 1e8 row is the largest N that fits. |
+| `dehnen_error` | A traced G or eps^2 is refused in S2. |
+| compact kernels | The walk's separation floor stays static; a traced eps^2 above the walk's sets the PARAMS overflow bit. eps_max and the f_b normalisation are decided in S10. |
+| `accelerations(topology, params)` | Takes no positions or masses (lead's decision): the rebuild already ran M2L and L2L at its positions. S8 adds live overrides. |
+| carry | The library default stays `"state"`; S3 decides the preset's carry. |
+
+### What S2 built
+
+| branch | commits | what |
+| --- | --- | --- |
+| `s2/1-bench-pins` | `6fef4ba` | pins S1p, S1t, S1e, S1x, S1g (`bench/dce_pins.py`) |
+| `s2/2-hlo-identity-tool` | `c403015`, `c10d826` | `bench/provider_hlo_identity.py` and its tests |
+| `s2/3-fused-topology` | `aeb9da8` | `runtime/fused_topology.py`: `FusedTopology`, the overflow bits, `ForceParams`, `StepParams` |
+| `s2/4-fused-provider` | `e1b0035` | `runtime/fused_provider.py`: `FusedForceProvider` (no callers yet) |
+| `s2/5-strict-steps-on-provider` | `efd2354` | the scan's step closures on the provider (C2) |
+| `s2/6-strict-runners-on-provider` | `a1d8786` | the runners on it: compile keys, re-plan, handle, eval seam (C3) |
+| `s2/7-strict-fixes` | `4bb1e5e`, `c3fadd4`, `3acbb09`, `c7ab4e4` | bucket leaves refused on the particle carry; the `dehnen_error` chain; slow markers; the tree-overflow verdict |
+| `s2/8-fp64-kernel-sweep` | `e81f9ca` | every fused-lane Pallas kernel at float64 against its XLA lane |
+| `s2/9-fp64-validation-lane` | `28a8dfe`, `12ad662` | `precision="fp64"` on `large_n_gpu`; `fused_memory_budget.py --state-dtype / --force-dtype` |
+| `s2/10-tree-order-fp64` | `86844a4` | the tree-order carry keeps a float64 state |
+| `s2/11-traced-params-runtime` | `9aee0e1` | G and eps^2 as arguments of the fused evaluation |
+| `s2/12-traced-params-strict` | `4f7f606`, `475b61e` | `strict_run_v2(force_params=, external_params=, dt=array)`; `fused_memory_budget.py --traced-params` |
+| `s2/13-docs-and-record` | `17e1cca`, `d1ca5b1`, `7bdd90f`, `4ba7bc2` + the timing rows | the user-scan test, `docs/fused_provider.md`, this section |
+
+### `FusedForceProvider`: the fused lane's force, public
+- **Two halves.** `rebuild(pos, m)` is the tree from a shape template, P2M/M2M, the flat walk, M2L and L2L.
+  `accelerations(topology, params)` is the near field (P2P), L2P and the scatter. `step(pos, m, params, aux)` is both,
+  with the overflow bits. `jaccpot.FusedForceProvider` and `jaccpot.ForceParams` are exported; the guide is
+  [`fused_provider.md`](fused_provider.md).
+- **`strict_run_v2` runs on it.** Every refresh, evaluation, verdict, compile key and segment re-plan of the fused scan
+  goes through the provider: both carries, the tree order, the particle carry's start program, the eval seam.
+- **A caller's integrator gets the lane's bits.** A velocity Verlet written in five lines over `prov.step` (a start
+  force, then a `lax.scan` of drift, step, kick) reproduces `strict_run_v2(carry="particles")` bitwise (CPU, N = 512,
+  3 steps; `test_strict_runners_on_provider.py`). The masses must be an argument of the caller's jit, as they are of
+  the lane's runner: closed over, they are a program constant, XLA compiles a different program, and one float32
+  rounding of one force component moved at step 3 (1 of 3,072 state elements, 1.5e-8; steps 1-2 bitwise either way).
+  Carrying `x`, `v` apart or as the packed `[N, 2, 3]` state makes no difference. S3 and S4 build on this surface.
+
+### Findings that changed the plan
+- **"Refresh" is the whole far field.** The in-scan refresh is tree + P2M/M2M + walk + M2L + L2L; "evaluate" is only
+  near P2P + L2P + scatter. So `accelerations` takes no positions: at other positions its far field would be stale.
+- **The fp64 force was blocked by one guard.** `_large_n_nearfield.py` refused any working dtype but float32 (the
+  preset defaults to float32, so an explicit float64 raised). Every kernel turned out dtype-generic (below), so S2 lifted the guard and routed nothing to XLA.
+- **The tree-order carry rounded a float64 state to float32 at every step.** `_advance_tree_order` took the new rows
+  from the refresh's `positions_sorted`, which are in the force's dtype; a 1e-12 shift of one particle was lost. It now
+  gathers from the carry when the dtypes differ. The float32 programs are unchanged (36/36 identical), and S1t and
+  S1p are bitwise.
+- **The pin gap.** S1, S6 and DET1 run the state carry only. The particle carry, the tree order, `dehnen_error`, an
+  external field and G != 1 had no bitwise pin; C0 added S1p, S1t, S1e, S1x and S1g.
+- **`dehnen_error`: chained state-carry calls were not one call.** A call continuing from a returned prepared state
+  reseeded f_b from the engine's last eager prepass: the first call's start positions, in that tree's order. 1 + 2
+  steps differed from 3 in 1,349 of 3,072 elements (max 5.7e-5; CPU, N = 512). The identity tool's chain variants
+  found it. The returned state now holds the scan's last f_b. This moves S1e's state-carry state, whose bench chains
+  calls (749,302 of 1,200,000 elements, max 4.27e-4, rel-L2 6.8e-7), as intended; nothing else moves.
+- **Bucket leaves cannot run the particle carry.** Its template rebuild reads the eager tree's node ranges and
+  children, which the template holds as zeros: the walk's queue overflowed on every step (peak wavefront
+  177,147 = 3^11 at N = 512) and the retry failed the same way. It is now refused before any prepare, with the remedy
+  (cell leaves, or `carry="state"`, which runs on buckets).
+- **A tree overflow inside the scan gave silently wrong forces.** The traced refresh never folded the cell-leaf
+  rebuild's own overflow (a leaf over `leaf_capacity`, a tree deeper than the level-loop bound, a level wider than the
+  level loops' batch) into the verdict. On the CSR near field nothing else failed. Cells sized for 66 leaves and
+  stepped on 105 live ones (N = 512): verdict `True`, force rel-L2 0.546. `OVERFLOW_TREE` now fails the verdict, and
+  the call raises naming `leaf_capacity`; it is not re-planned. Cost: +22 StableHLO ops per runner (on a GPU at 2e5,
+  +40 compiled HLO instructions in the state runner, +53 in the particle runner and its start program); every value
+  is bitwise.
+
+### Gates
+**Program identity** (`bench/provider_hlo_identity.py`). It records every jitted program a `strict_run_v2` variant runs
+(lowered text, and on a GPU the compiled HLO) and the sha256 of every array: 36 variants on CPU at N = 512 (534 s at
+`--jobs 4`), 18 on a GPU at 2e5. A negative control (reassociating the drift) fails it. GPU compares need `--control`:
+the eager walk ladder's raw outputs are order-nondeterministic, everything after them bitwise. Triton IR embeds the
+kernel source paths, so record base and candidate from the same path.
+
+| step | CPU programs (36) | GPU programs (18) | GPU pins S1, S6, DET1, G1, S1p, S1t, S1e, S1x, S1g |
+| --- | --- | --- | --- |
+| C2: step closures on the provider | identical | identical | 9/9 bitwise |
+| C3: runners on the provider | identical | identical | 9/9 bitwise |
+| `dehnen_error` chain fix | 35/36; `dehnen_error_chain_state`'s second call moves | 17/18, the same | 8/9; S1e's state-carry state moves |
+| tree-overflow verdict | the runners' text (+22 ops); values bitwise, `needs` 7 -> 8 entries | the same | 9/9 bitwise |
+| tree-order fp64 fix | identical | | S1t, S1p bitwise |
+| traced parameters, default path | identical | identical | 9/9 bitwise |
+
+**New pins** (`bench/dce_pins.py`, 2e5, each bitwise A-vs-A, 0 elements):
+
+| pin | what | rel-L2 |
+| --- | --- | --- |
+| S1p | S1 on the particle carry | force and final state bitwise S1's |
+| S1t | S1p in tree order | force and final state bitwise S1's |
+| S1e | `dehnen_error`, `adaptive_eps` 1e-4, both carries: 3,350,146 far pairs (geometric: 1,876,324) | 1.45e-4 (geometric: 7.76e-4) |
+| S1x | a 2e5 prefix of the 25M disc+bulge in its NFW halo (external field traced in the scan), eps 1.5e-3, both carries | 8.24e-4 |
+| S1g | G = 4.3e-6, masses divided by G | 7.7637e-4 (= S1) |
+
+**L1-L3** (free GPU 7, A-B-A, 2026-10-16, every row clean; `s2/7` tip `c7ab4e4` against main `f967805`):
+
+| pin | main | `s2/7` tip | main again (A-vs-A) |
+| --- | --- | --- | --- |
+| L1, 8e6 step | 78.36 ms, 317 B/p | 78.64 ms (+0.35 %), 318 B/p | 78.50 ms (+0.17 %) |
+| L2, 1e8 step | 873.27 ms, 257 B/p | 873.41 ms (+0.02 %), 257 B/p | 871.29 ms (-0.23 %) |
+| L3, 25M disc step | 238.57 ms, 255 B/p | 238.88 ms (+0.13 %), 255 B/p | 240.30 ms (+0.72 %) |
+| L3 force | 100.17 ms, rel-L2 4.179e-4 | 100.49 ms (+0.33 %), 4.179e-4 | 100.21 ms (+0.05 %) |
+
+`compare --envelope` passes L1, L2 and L3: the provider costs nothing measurable. `s2/8`-`s2/12` leave the float32
+programs identical (above), so the row stands for them.
+
+### The fp64 validation lane
+- **Every fused-lane Pallas kernel runs float64 natively** (A100): the walk (`soa` nodes), the COM radii, the leaf
+  P2M, the M2M/L2L and M2L CSR lanes, the L2P, the CSR near field's table and direct kernels. 23 native cases, the
+  largest error 6.4e-15 of the XLA reference. **No XLA fallback was needed**; the API is the facade's
+  (`precision="fp64"` / `working_dtype=jnp.float64`), and only the guard moved.
+- **Accuracy:**
+
+| configuration | float64 | float32 |
+| --- | --- | --- |
+| CPU, p12, theta 0.4, unsoftened, vs direct sum | 7.93e-10 | 9.20e-6 |
+| CPU, exact FMM (theta 1e-3): Verlet vs direct-sum Verlet | 1.11e-15 | 1.43e-4 |
+| GPU 2e5, the S1 configuration (truncation-bound) | 7.7656e-4 | 7.7637e-4 |
+| GPU 2e5, p8, theta 0.4 | 6.434e-7 | 6.946e-7 |
+
+- **Memory at 2e6** (shared card, `fused_memory_budget.py` defaults, no donation), state / force bits: 32/32 508 B/p,
+  64/32 632, 32/64 707, 64/64 820.
+- **Compile time grows steeply with the order:** the M2M/L2L cascade kernels' Triton compile takes 140 s at p8 (in
+  either dtype); at p12 in float64 it had not finished after 12 minutes. GPU validation at p12 needs
+  `JACCPOT_CASCADE_PALLAS=0` (the cascades as XLA level loops).
+
+**Time and memory per mode** (free GPU 7, 2026-10-16, every row clean; the L-pin settings: clipped Plummer, cells of
+64, p6, theta 0.8, particle carry, unnamed caps, arena 0.88, no donation; the `s2/12` tip; step = min of 3 x 4 steps;
+rel-L2 on 4096 targets):
+
+| state / force | 8e6 step | 8e6 B/p | 8e6 force eval, rel-L2 | 1e8 step | 1e8 peak, B/p |
+| --- | --- | --- | --- | --- | --- |
+| fp32 / fp32 | 78.7 ms | 325 | 27.8 ms, 4.333e-4 | 872.0 ms | 23.9 GiB, 257 |
+| fp64 / fp32 | 81.4 ms (+3 %) | 442 | 28.3 ms, 4.333e-4 | out of memory (a 14.5 GiB request) | |
+| fp32 / fp64 | 151.5 ms (1.92x) | 558 | 66.4 ms, 4.339e-4 | 1721.8 ms (1.97x) | 31.9 GiB, 342 |
+| fp64 / fp64 | 150.7 ms (1.91x) | 575 | 66.6 ms, 4.339e-4 | out of memory (a 20.9 GiB request) | |
+
+- **The largest N that fits** (same settings): fp64 state with fp32 force 8e7 (722.7 ms, 406 B/p; 9e7 out of memory);
+  fp64 / fp64 at least 7e7 (1220.1 ms, 479 B/p; the first size tried). Donation (`--donate-state`) was not tried.
+- **fp64 force costs about 2x the step** and 1.3x the memory at 1e8. **An fp64 state costs 3 % of the step** but
+  about +117 B/p, which is what stops it below 1e8 on a 40 GB card.
+- **At the production configuration fp64 buys no accuracy:** 4.333e-4 against 4.339e-4. The error is the expansion's
+  truncation (p6, theta 0.8), not round-off; fp64 matters where the expansion is pushed (p8 theta 0.4: 6.4e-7 against
+  6.9e-7) or exact (1.1e-15 against 1.4e-4).
+
+### Traced parameters: static against traced
+- **API.** `strict_run_v2(dt=float | Array, force_params=ForceParams(G, eps2), external_params=pytree)` and
+  `strict_fused_prepared_eval_fn(force_params=)`. Floats stay literals (no extra argument: every program unchanged).
+  Arrays ride in one `StepParams`, the last argument of the scan and of the particle carry's start program, after the
+  donated ones. Three calls with three different (dt, G, eps2, external) values: one key, one executable, one trace.
+- **Refusals before any work:** `dehnen_error` with anything but the solver's own G and softening; an eps^2 beyond the
+  walk's under a compact kernel (`OVERFLOW_PARAMS`; `provider.step` sets the bit for a traced caller); external
+  parameters without an external field. A particle-carry handle records its force parameters (`force_key`), and a
+  call continuing with others evaluates its start force again.
+- **GPU A/B (deterministic ops, A-vs-A control 0 elements):**
+
+| pin | traced against static |
+| --- | --- |
+| S1 | force 0 of 600,000 elements, final state 0 of 1,200,000 |
+| S1g | force 0 of 600,000, final state 0 of 1,200,000 |
+| L3 force (25M, ferrers3, eps 1.5e-3) | 0 of 75,000,000; rel-L2 4.179e-4 in every arm |
+
+  **On the GPU production path traced is bitwise static.**
+- **CPU is not bitwise under ferrers3.** Plummer: bitwise. ferrers3 (the library default): 753 of 1,536 elements on
+  the pure-JAX near field and 732 on the CSR lane (interpret mode) differ by one float32 rounding, at most 1.35e-7 of
+  the largest component. The lowered programs differ only in the constant becoming a parameter. XLA's algebraic
+  simplifier then rewrites `rsqrt(x)^3` into `rsqrt(x) / x` only where it can prove `x = max(r^2, h^2) > 0`, which a
+  literal `h^2` gives it and a parameter does not. The tree-order carry with any one traced argument moves 2 of 3,072
+  velocity components on CPU (2.4e-7 and 6e-8: 1 and 8 ulps of their own values, the second a kick that nearly
+  cancels), with the positions bitwise: the extra argument changes XLA's compilation, not the arithmetic.
+- **Linearity and gradients (CPU):** `acc(2G) == 2 acc(G)` bitwise under one compile. `jax.grad` in G against central
+  differences: 1e-10; in eps^2: 1e-6 (float64 force, pure-JAX near field). Not verified on the Pallas lane, whose
+  production forward has two kernels without a reverse rule.
+
+**Timing** (free GPU 7, the same settings as the precision rows, `--traced-params`: G, eps^2 and dt as arguments):
+
+| | static | traced |
+| --- | --- | --- |
+| 8e6 step | 78.7 ms / 79.3 ms (two runs) | 79.3 ms (325 B/p) |
+| 1e8 step | 872.0 ms (257 B/p) | 873.2 ms (+0.13 %, 257 B/p) |
+
+Traced parameters cost nothing measurable: the difference is inside the run-to-run spread (the A-vs-A of the same
+day's L-pins is 0.2-0.7 %).
+
+### For S3
+- **Leaf capacity:** size the cell-leaf capacity automatically, with headroom over the live cells the run will reach,
+  and make `OVERFLOW_TREE` re-plannable at the segment start. Today a tree overflow raises (the S2 fix makes it loud
+  instead of wrong) and the bench sizes the capacity by hand.
+- **Traced parameters as the default:** consider flipping it. On the GPU the traced programs are bitwise the static
+  ones (S1, S1g, the 25M force), and a run that varies dt, G or eps then compiles once instead of once per value. On
+  CPU, ferrers3 results would move by one float32 rounding (the lane goldens run Plummer, which stays bitwise). The
+  traced timing above shows no cost.
+- **The preset's carry** (`"state"` or `"particles"`), deferred to S3 by the user.

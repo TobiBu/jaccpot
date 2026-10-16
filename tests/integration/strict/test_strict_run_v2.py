@@ -886,7 +886,7 @@ class TestParticleCarry:
 
         from jax._src.interpreters import partial_eval as pe
 
-        from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
         captured = {}
         orig = jax.lax.scan
@@ -908,7 +908,7 @@ class TestParticleCarry:
             s1,
             jnp.zeros_like(s1[:, 0]),
             jnp.asarray(True),
-            jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
+            jnp.zeros((len(NEEDS_FIELDS),), jnp.int32),
             # the force-scale slot: None (no leaf) unless mac_type='dehnen_error'
             None,
         )

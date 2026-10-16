@@ -27,6 +27,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | how do I take **gradients**? | `differentiable_fmm.md` |
 | which **MAC**, and at which leaf size? | `dehnen_mass_mac_status_and_plan.md` |
 | what is the **production single-GPU path**? | `large_n_runtime_contract_2026-04-21.md`, then the fused-lane records below |
+| how do I run the fused lane's **force inside my own integrator**, trace `G` / the softening / `dt`, or validate in **float64**? | `fused_provider.md` |
 | what did the **2026-10 cleanup** remove, and why? | `cleanup_2026-10.md` |
 | what does a **production galaxy run** cost today (time, B/particle, Odisseo, gradients, block steps), and what is planned? | `production_2026-10.md` |
 | I am about to touch `operators/` | `operator_conventions.md` (and `agent_guides/NUMERICS_AND_JAX.md`) |
@@ -74,6 +75,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | file | |
 |---|---|
 | `large_n_runtime_contract_2026-04-21.md` | **[current]** The canonical production path for `preset="large_n_gpu"`. This is the contract; the status note below is the history. |
+| `fused_provider.md` | **[current]** The user guide to `FusedForceProvider`, the fused lane's per-step force as an object (S2, 2026-10): the eager / traced split, `FusedTopology` and its overflow bits, `ForceParams` / `StepParams` (static default, traced opt-in), the limits, and the float64 validation lane. |
 | `large_n_runtime_status_2026-03-23.md` | **[superseded]** Handoff from the earlier `large_N_performance` branch. Read the contract instead. |
 | `potential_falls_off_the_fast_lane.md` | **[open]** Diagnosed, not fixed: why a potential request leaves the large-N fast lane. |
 | `nearfield_structural_comparison_2026-04-15.md` | jaxFMM vs jaccpot near-field structure, with a 2026-04-20 status addendum. |
@@ -147,7 +149,7 @@ the library default since the 2026-10 cleanup (D2).
 | file | |
 |---|---|
 | `refactor_audit_2026-08.md` | **[closed]** The 2026-08 refactor and code-hygiene audit, maintained to 2026-08-29, and its F-table of the items then open. Dated: many of its subjects (autotune, the octree, the complex and Cartesian bases, `experimental/`) were removed in the 2026-10 cleanup. |
-| `production_2026-10.md` | **[open]** The production-readiness sessions (S0 onward): the 2026-10-13 baseline (1e8 872.6 ms at ferrers3, the 25M disc at 239 ms/step on one card), the L/DET pins, the block-step map probes (HOLD recommended; 1.93x bound on the disc), the ferrers3 and `dehnen_error` cost splits. |
+| `production_2026-10.md` | **[open]** The production-readiness sessions (S0 onward): the 2026-10-13 baseline (1e8 872.6 ms at ferrers3, the 25M disc at 239 ms/step on one card), the L/DET pins, the block-step map probes (HOLD recommended; 1.93x bound on the disc), the ferrers3 and `dehnen_error` cost splits; S1's correctness fixes; S2's force provider, float64 validation lane and traced parameters. |
 | `cleanup_2026-10.md` | **[current]** The 2026-10 cleanup: one section per phase (what went, the tests deleted with their tags, the gates), and a project summary with what is still open. |
 | `handoff_g10_gpu_validation.md` | **[open]** GPU validation for the G.10 fix. Carries a 2026-08-26 status note: two things below it have moved. |
 | `handoff_tier1_gpu_validation.md` | **[closed]** **Discharged** 2026-08-14 on A100. |

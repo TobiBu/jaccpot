@@ -1857,9 +1857,9 @@ def _large_n_fastlane_eval_fn(
     fmm: Any,
     state: Any,
     *,
-    body: Callable[[Any], Array],
+    body: Callable[..., Any],
     cache_key: tuple[Any, ...],
-) -> Optional[Callable[[Any], Array]]:
+) -> Optional[Callable[..., Any]]:
     """Return a cached ``jax.jit`` of ``body``, or None to run it eagerly.
 
     The radix fast-lane acceleration evaluate was dispatched **op by op**: the
@@ -1901,16 +1901,18 @@ def _large_n_fastlane_eval_fn(
     fmm : Any
         The engine, whose per-solver cache the compiled function is stored on.
     state : Any
-        Prepared state; its pytree structure participates in the jit key.
-    body : Callable[[Any], Array]
-        The evaluation to compile.
+        Prepared state -- with the traced force parameters, ``(state, params)``,
+        when ``body`` takes them -- whose tracers mean "run eagerly"; jit keys on
+        its pytree structure itself.
+    body : Callable[..., Any]
+        The evaluation to compile: ``body(state)`` or ``body(state, params)``.
     cache_key : tuple[Any, ...]
         The Python-level constants ``body`` closes over. These are invisible to
         ``jax.jit``, so omitting one would silently reuse a stale executable.
 
     Returns
     -------
-    Optional[Callable[[Any], Array]]
+    Optional[Callable[..., Any]]
         The cached compiled callable, or ``None`` to signal the caller should
         run ``body`` eagerly -- which is the escape hatch for measuring the
         compile's benefit and for bisecting a suspected compile problem.
@@ -1949,6 +1951,7 @@ def evaluate_large_n_state(
     max_acc_derivative_order: int,
     sorted_output: bool = False,
     return_force_scale: bool = False,
+    force_params: Any = None,
 ) -> Any:
     """Evaluate large-N prepared state for the full particle set.
 
@@ -1983,6 +1986,12 @@ def evaluate_large_n_state(
         (``force_scale_far_sorted``; zero when absent). The per-step threshold
         of ``mac_type='dehnen_error'`` on the fused lane. Fast-lane accelerations
         only.
+    force_params : Any
+        A :class:`~jaccpot.runtime.fused_topology.ForceParams` overriding the
+        engine's ``G`` and softening: Python floats are compile-time literals, as
+        the engine's own are; arrays (in the working dtype) are arguments of the
+        compiled evaluation, so one program serves every value. ``None`` takes
+        the engine's. Fast-lane accelerations only.
 
     Returns
     -------
@@ -1995,8 +2004,8 @@ def evaluate_large_n_state(
     ------
     NotImplementedError
         If ``target_indices`` is given, or ``max_acc_derivative_order`` is
-        non-zero, or ``sorted_output`` or ``return_force_scale`` off the
-        fast-lane acceleration route. All are unimplemented rather than invalid,
+        non-zero, or ``sorted_output``, ``return_force_scale`` or
+        ``force_params`` off the fast-lane acceleration route. All are unimplemented rather than invalid,
         so they raise loudly instead of silently ignoring the request.
     RuntimeError
         If the state was not prepared with ``nearfield_mode='bucketed'``, or
@@ -2114,7 +2123,14 @@ def evaluate_large_n_state(
 
         want_scale = bool(return_force_scale)
 
-        def _fastlane_body(state_in: Any) -> Any:
+        def _fastlane_body(state_in: Any, params_in: Any = None) -> Any:
+            # the engine's G and softening (literals), or the caller's parameters
+            g_far = float(getattr(fmm, "G")) if params_in is None else params_in.G
+            near_kw = (
+                {}
+                if params_in is None
+                else {"G": params_in.G, "softening_sq": params_in.eps2}
+            )
             near_scale = jnp.zeros_like(state_in.positions_sorted[:, 0])
             if bool(disable_near_eval):
                 near_acc = jnp.zeros_like(state_in.positions_sorted)
@@ -2124,12 +2140,14 @@ def evaluate_large_n_state(
                     state_in,
                     return_potential=False,
                     return_force_scale=True,
+                    **near_kw,
                 )
             else:
                 near_acc = evaluate_large_n_nearfield_fast_lane(
                     fmm,
                     state_in,
                     return_potential=False,
+                    **near_kw,
                 )
             scale_sorted = None
             if want_scale:
@@ -2153,7 +2171,7 @@ def evaluate_large_n_state(
                     chunk=l2p_chunk,
                     kernel=l2p_kernel,
                 )
-                far_acc = -float(getattr(fmm, "G")) * far_grad
+                far_acc = -g_far * far_grad
             else:
                 far_grad, _, _ = _evaluate_local_expansions_for_particles(
                     state_in.local_data,
@@ -2170,7 +2188,7 @@ def evaluate_large_n_state(
                     return_potential=False,
                     max_acc_derivative_order=0,
                 )
-                far_acc = -float(getattr(fmm, "G")) * far_grad
+                far_acc = -g_far * far_grad
             if eval_diag_mode == "permutation_only":
                 accelerations_sorted = state_in.positions_sorted * jnp.asarray(
                     0.0,
@@ -2215,9 +2233,22 @@ def evaluate_large_n_state(
                 return acc_out, scale_out
             return acc_out
 
+        # the parameters' part of the key: the engine's values, or the caller's
+        # static values and the structure of its traced ones (not their values)
+        params_key: tuple = (
+            (float(getattr(fmm, "G")), float(getattr(fmm, "softening")))
+            if force_params is None
+            else (
+                jax.tree_util.tree_structure(force_params),
+                tuple(
+                    (jnp.shape(x), jnp.result_type(x).name)
+                    for x in jax.tree_util.tree_leaves(force_params)
+                ),
+            )
+        )
         compiled = _large_n_fastlane_eval_fn(
             fmm,
-            state_prepared,
+            state_prepared if force_params is None else (state_prepared, force_params),
             body=_fastlane_body,
             cache_key=(
                 "fastlane_accel",
@@ -2227,8 +2258,7 @@ def evaluate_large_n_state(
                 int(max_leaf_size),
                 int(local_order),
                 jnp.dtype(output_dtype).name,
-                float(getattr(fmm, "G")),
-                float(getattr(fmm, "softening")),
+                *params_key,
                 str(getattr(fmm, "softening_kernel", "plummer")),
                 bool(getattr(fmm, "use_pallas", False)),
                 l2p_layout,
@@ -2238,10 +2268,18 @@ def evaluate_large_n_state(
                 want_scale,
             ),
         )
+        if force_params is None:
+            if compiled is not None:
+                return compiled(state_prepared)
+            return _fastlane_body(state_prepared)
         if compiled is not None:
-            return compiled(state_prepared)
-        return _fastlane_body(state_prepared)
+            return compiled(state_prepared, force_params)
+        return _fastlane_body(state_prepared, force_params)
 
+    if force_params is not None:
+        raise NotImplementedError(
+            "force_params is wired on the radix fast-lane acceleration route only"
+        )
     if sorted_output:
         raise NotImplementedError(
             "sorted_output is wired on the radix fast-lane acceleration route only"

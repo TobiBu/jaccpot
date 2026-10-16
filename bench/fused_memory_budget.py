@@ -34,6 +34,11 @@ Cap settings (``--caps``):
 * ``named`` -- ``--far-cap`` / ``--near-cap`` exactly (directed pairs, even);
 * ``unnamed`` -- neither cap in the environment: the library sizes them.
 
+Precision (``--state-dtype`` x ``--force-dtype``, both ``float32`` by default, which
+is every row recorded before 2026-10-15): the dtype of the state the solver is handed
+and the solver's ``working_dtype``. ``--force-dtype float64`` is the large-N lane's
+float64 validation lane; its time and memory are recorded, no budget applies.
+
 Run on one card, one process per row::
 
     PYTHONPATH=/export/home/tbuck/Odisseo-bench-multigpu/benchmark_multigpu/sitecustom_wt \\
@@ -188,6 +193,14 @@ def _args() -> argparse.Namespace:
     ap.add_argument("--drift-steps", default="0,50,100")
     ap.add_argument("--softening", type=float, default=None)
     ap.add_argument(
+        "--G",
+        type=float,
+        default=1.0,
+        help="the solver's gravitational constant (4.3e-6: kpc, km/s, Msun); the "
+        "masses are divided by it, so G m -- and with it the system, its orbits, "
+        "dt and the reference forces -- is the G = 1 one",
+    )
+    ap.add_argument(
         "--softening-kernel",
         default=None,
         choices=("ferrers3", "wendland_c2", "plummer"),
@@ -217,6 +230,29 @@ def _args() -> argparse.Namespace:
         action="store_true",
         help="with --accuracy-targets: also score da/f (f = sum G m / r^2, fp64) and "
         "save every target's errors next to --out (<out>.err.npz)",
+    )
+    ap.add_argument(
+        "--state-dtype",
+        default="float32",
+        choices=("float32", "float64"),
+        help="dtype of the positions, velocities and masses handed to the solver (the "
+        "IC is drawn in float32 either way, so both dtypes hold the same particles and "
+        "share one direct-sum reference)",
+    )
+    ap.add_argument(
+        "--force-dtype",
+        default="float32",
+        choices=("float32", "float64"),
+        help="the solver's working_dtype: float64 is the large-N lane's validation "
+        "lane (precision='fp64'; Pallas where the kernels are dtype-generic)",
+    )
+    ap.add_argument(
+        "--traced-params",
+        action="store_true",
+        help="hand the solver G and the softening squared (ForceParams, in the "
+        "force dtype) and dt (in the state dtype) as ARRAYS: traced arguments of the "
+        "compiled programs instead of literals (S2's opt-in; the GPU A/B against "
+        "the default)",
     )
     ap.add_argument("--env", nargs="*", default=[], metavar="KEY=VAL")
     ap.add_argument("--out", required=True)
@@ -318,7 +354,7 @@ from yggdrax.morton import morton_encode  # noqa: E402
 
 import jaccpot.pallas.mutual_walk_pallas as _mwp  # noqa: E402
 import jaccpot.runtime._interaction_cache as _ic  # noqa: E402
-from jaccpot import FastMultipoleMethod, TraversalOverrides  # noqa: E402
+from jaccpot import FastMultipoleMethod, ForceParams, TraversalOverrides  # noqa: E402
 from jaccpot.config import (  # noqa: E402
     FMMAdvancedConfig,
     NearFieldConfig,
@@ -646,10 +682,14 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
         preset="large_n_gpu",
         basis="real",
         theta=ARGS.theta,
-        G=1.0,
+        G=ARGS.G,
         softening=soft,
         softening_kernel=ARGS.softening_kernel,
-        working_dtype=jnp.float32,
+        # the scalar types, not jnp.dtype(...): the float32 row passes exactly what
+        # it passed before the flag existed
+        working_dtype={"float32": jnp.float32, "float64": jnp.float64}[
+            ARGS.force_dtype
+        ],
         use_pallas={"auto": None, "on": True, "off": False}[ARGS.use_pallas],
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(
@@ -711,14 +751,37 @@ def _write(result: dict) -> None:
 # --------------------------------------------------------------------------- modes
 
 
+def _in_g_units(mass: np.ndarray) -> np.ndarray:
+    """``mass / G`` (``--G``): the same system in units where G is not 1."""
+    if ARGS.G == 1.0:
+        return mass
+    return (np.asarray(mass, np.float64) / ARGS.G).astype(np.float32)
+
+
+def _param_args(soft: float, dt: float) -> tuple[dict, object]:
+    """``(force kwargs, dt)``: the default floats, or arrays (``--traced-params``)."""
+    if not ARGS.traced_params:
+        return {}, dt
+    force_dtype = jnp.dtype(ARGS.force_dtype)
+    params = ForceParams(
+        G=jnp.asarray(ARGS.G, force_dtype), eps2=jnp.asarray(soft**2, force_dtype)
+    )
+    return {"force_params": params}, jnp.asarray(dt, ARGS.state_dtype)
+
+
 def run_budget(result: dict) -> None:
     pos, vel, mass, soft, dt, ext = _initial_conditions()
+    mass = _in_g_units(mass)
     live, leaf_cap = _leaf_capacity(pos)
     result.update(live_leaves=live, leaf_capacity=leaf_cap, softening=soft, dt=dt)
     print(f"N={ARGS.n} live leaves {live} -> leaf capacity {leaf_cap}", flush=True)
-    P = jnp.asarray(pos)
-    M = jnp.asarray(mass)
+    P = jnp.asarray(pos, ARGS.state_dtype)
+    M = jnp.asarray(mass, ARGS.state_dtype)
     solver = _solver(leaf_cap, soft)
+    force_kw, dt_arg = _param_args(soft, dt)
+    # the traced programs take the parameters as arguments: lowering them from the
+    # cached callables would need those too
+    analysis = not ARGS.no_analysis and not ARGS.traced_params
     _event("before_prepare")
     a_host = None
     saved = None
@@ -732,6 +795,7 @@ def run_budget(result: dict) -> None:
             leaf_size=ARGS.leaf,
             max_order=ARGS.order,
             theta=ARGS.theta,
+            **force_kw,
         )
         _sync(prepared)
         result["prepare_s"] = time.perf_counter() - t0
@@ -763,7 +827,7 @@ def run_budget(result: dict) -> None:
             samples=[s * 1e3 for s in samples],
         )
         print(f"eval-only min {result['eval_ms']['min']:.2f} ms", flush=True)
-        if not ARGS.no_analysis:
+        if analysis:
             result["eval_memory_analysis"] = _analysis(
                 eval_fn.lower(prepared).compile()
             )
@@ -777,13 +841,13 @@ def run_budget(result: dict) -> None:
             np.savez(ARGS.save_forces, **saved)
         _accuracy(result, pos, mass, soft, a_host)
         return
-    state0 = jnp.stack([P, jnp.asarray(vel)], axis=1)
+    state0 = jnp.stack([P, jnp.asarray(vel, ARGS.state_dtype)], axis=1)
 
     def run(state, prep, k):
         out = solver.strict_run_v2(
             state=state,
             masses=M,
-            dt=dt,
+            dt=dt_arg,
             num_steps=k,
             refresh_every=1,
             leaf_size=ARGS.leaf,
@@ -795,6 +859,7 @@ def run_budget(result: dict) -> None:
             external_acceleration_fn=ext,
             **({} if ARGS.no_donate else {"donate_prepared_state": True}),
             **({"donate_state": True} if ARGS.donate_state else {}),
+            **force_kw,
         )
         jax.block_until_ready(out[0])
         return out
@@ -834,7 +899,7 @@ def run_budget(result: dict) -> None:
     _write(result)
     if saved is not None:
         np.savez(ARGS.save_forces, state=np.asarray(state), **saved)
-    if not ARGS.no_analysis:
+    if analysis:
         cache = getattr(solver._impl, "_strict_fused_jit_function_cache", {}) or {}
         runner = next(
             (fn for key, fn in cache.items() if int(key[6]) == int(ARGS.steps)), None
@@ -907,7 +972,7 @@ def _direct_kernel_fp64(pos, mass, idx, soft: float, kernel: str):
     for b in range(0, len(idx), 256):
         ib = jnp.asarray(idx[b : b + 256])
         out.append(np.asarray(block(p[ib], ib)))
-    return np.concatenate(out)
+    return ARGS.G * np.concatenate(out)
 
 
 def _force_scale_reference(pos, mass, soft: float, idx, acc_cache: str) -> np.ndarray:
@@ -938,6 +1003,7 @@ def _force_scale_reference(pos, mass, soft: float, idx, acc_cache: str) -> np.nd
     for a in range(0, len(idx), block):
         b = min(a + block, len(idx))
         out[a:b] = np.asarray(_block(p64[ti[a:b]], ti[a:b], p64, m64, gid))
+    out *= ARGS.G
     np.save(cache, out)
     return out
 
@@ -967,7 +1033,8 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
         "artifacts",
         "reference",
         f"direct_fp64_{ARGS.ic}{ARGS.n}_soft{soft:g}"
-        f"{'' if kernel == 'plummer' else '_' + kernel}_ref{len(idx)}_seed12345.npy",
+        f"{'' if kernel == 'plummer' else '_' + kernel}"
+        f"{'' if ARGS.G == 1.0 else f'_G{ARGS.G:g}'}_ref{len(idx)}_seed12345.npy",
     )
     if os.path.exists(cache):
         ref = np.load(cache)
@@ -981,7 +1048,7 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
         ref = direct_accelerations(
             np.asarray(pos, np.float64),
             np.asarray(mass, np.float64),
-            G=1.0,
+            G=ARGS.G,
             softening=soft,
             target_indices=idx,
         )
@@ -1028,16 +1095,20 @@ def _accuracy(result: dict, pos, mass, soft: float, a_host) -> None:
 
 def run_drift(result: dict) -> None:
     pos, vel, mass, soft, dt, ext = _initial_conditions()
+    mass = _in_g_units(mass)
     live, leaf_cap = _leaf_capacity(pos)
     result.update(live_leaves=live, leaf_capacity=leaf_cap, softening=soft, dt=dt)
     print(
         f"N={ARGS.n} {ARGS.ic} live leaves {live} -> leaf capacity {leaf_cap}",
         flush=True,
     )
-    M = jnp.asarray(mass)
+    M = jnp.asarray(mass, ARGS.state_dtype)
     solver = _solver(leaf_cap, soft)
     marks = sorted(int(s) for s in ARGS.drift_steps.split(","))
-    state = jnp.stack([jnp.asarray(pos), jnp.asarray(vel)], axis=1)
+    state = jnp.stack(
+        [jnp.asarray(pos, ARGS.state_dtype), jnp.asarray(vel, ARGS.state_dtype)],
+        axis=1,
+    )
     rows = []
     done = 0
     for mark in marks:
@@ -1060,7 +1131,7 @@ def run_drift(result: dict) -> None:
         p_now = np.asarray(state[:, 0])
         live_now, _ = _leaf_capacity(p_now)
         prepared, _ = solver.strict_fused_prepared_eval_fn(
-            positions=jnp.asarray(p_now),
+            positions=jnp.asarray(p_now, ARGS.state_dtype),
             masses=M,
             leaf_size=ARGS.leaf,
             max_order=ARGS.order,
@@ -1111,12 +1182,16 @@ def main() -> int:
         order=ARGS.order,
         cell_min_level=ARGS.cell_min_level,
         caps=ARGS.caps,
+        state_dtype=ARGS.state_dtype,
+        force_dtype=ARGS.force_dtype,
+        traced_params=bool(ARGS.traced_params),
         donate=not ARGS.no_donate,
         cap_env={v: os.environ.get(v) for v in _CAP_VARS},
         xla_flags=os.environ.get("XLA_FLAGS"),
         mem_fraction=os.environ.get("XLA_PYTHON_CLIENT_MEM_FRACTION"),
         preallocate=os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE"),
         rmax=ARGS.rmax if ARGS.ic == "plummer_clipped" else None,
+        G=ARGS.G,
         worktree=os.environ.get("JACCPOT_WORKTREE"),
         yggdrax_worktree=os.environ.get("YGGDRAX_WORKTREE"),
         device=str(jax.devices()[0]),

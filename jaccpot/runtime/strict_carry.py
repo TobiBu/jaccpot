@@ -96,12 +96,23 @@ class StrictParticleCarry:
         ``mac_type='dehnen_error'``: eq (16b)'s ``f_b`` per particle (input order)
         at the returned state -- the next call's first thresholds. ``None``
         otherwise.
+    provider : Any
+        The :class:`~jaccpot.runtime.fused_provider.FusedForceProvider` the call
+        stepped with (its ``template`` is ``template``): the force at the returned
+        positions for a caller that drives the steps itself. The next
+        ``strict_run_v2`` call builds its own from ``template`` and its arguments.
+    force_key : Optional[tuple]
+        ``(G, eps2)`` as host floats: the force parameters ``self_acceleration``
+        was computed with (``None``: the solver's own). A call with others
+        evaluates its initial force again instead of taking this one.
     """
 
     template: PreparedShapeTemplate
     self_acceleration: Array
     num_particles: int
     force_scale: Optional[Array] = None
+    provider: Any = None
+    force_key: Optional[tuple] = None
 
 
 def shape_template(prepared: Any) -> PreparedShapeTemplate:

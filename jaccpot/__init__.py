@@ -21,6 +21,8 @@ from .config import (
 )
 from .nornax_adapter import BlockStepFMM, DistributedBlockStepFMM
 from .odisseo import OdisseoFMMCoupler
+from .runtime.fused_provider import FusedForceProvider
+from .runtime.fused_topology import ForceParams
 from .solver import FastMultipoleMethod
 
 __all__ = [
@@ -29,8 +31,10 @@ __all__ = [
     "FMMAdvancedConfig",
     "FMMPreset",
     "FarFieldConfig",
+    "ForceParams",
     "GradConfig",
     "FastMultipoleMethod",
+    "FusedForceProvider",
     "MemoryObjective",
     "RealSHBasis",
     "NearFieldConfig",

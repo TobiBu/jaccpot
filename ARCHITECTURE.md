@@ -83,6 +83,8 @@ ODISSEO coupling) depends on. It is frozen by
 | `OdisseoFMMCoupler` | ODISSEO integration adapter |
 | `BlockStepFMM` | momentum-conserving force for a block-step individual-timestep KDK (in `nornax_adapter.py`; see section 1) |
 | `DistributedBlockStepFMM` | the same contract over a device mesh, on the distributed mutual lane (`mutual/distributed.py`) |
+| `FusedForceProvider` | the fused single-GPU lane's per-step force as an object: eager `prepare`, traced `rebuild` / `accelerations` / `step` (in `runtime/fused_provider.py`; section 4, [`docs/fused_provider.md`](docs/fused_provider.md)) |
+| `ForceParams` | `G` and the softening squared for the fused lane: Python floats static, arrays traced (in `runtime/fused_topology.py`) |
 | `direct_sum_gravitational_acceleration` | autodiff-able **direct-sum** oracle (the differentiable FMM itself is `FastMultipoleMethod.differentiable_accelerations`; see section 6) |
 
 `FastMultipoleMethod` in `solver.py` is the facade for the production force. The
@@ -92,9 +94,10 @@ document flagged as confusing; audit 2.4 renamed the engine, so a reference to
 `FastMultipoleMethod` now unambiguously means the public class.
 
 `BlockStepFMM` (and its mesh twin `DistributedBlockStepFMM`) is the only other
-public class, and it is **not** an alternative spelling of the same thing -- it
-computes a different number (momentum-exact rather than target-centric) through a
-separate path.
+public solver class, and it is **not** an alternative spelling of the same thing --
+it computes a different number (momentum-exact rather than target-centric) through a
+separate path. `FusedForceProvider` is not a second solver either: it is the
+facade's fused lane, opened up per step (section 4).
 
 ## 3. runtime/ package map
 
@@ -157,13 +160,45 @@ class FMMEngine(
 |---|---|
 | `PrepareMixin` (`fmm_prepare`) | build the `FMMPreparedState`: tree upward pass, downward/far-pairs, nearfield setup |
 | `EvaluateMixin` (`fmm_evaluate`) | evaluate a prepared state into accelerations/potential (L2P + nearfield) |
-| `StrictRunMixin` (`fmm_strict_run`) | static-radix hot path: `refresh_prepared_state`, `strict_run_v2`, same-topology refresh, velocity-Verlet update |
+| `StrictRunMixin` (`fmm_strict_run`) | static-radix hot path: `refresh_prepared_state`, `strict_run_v2` (its scans and runners, on the `FusedForceProvider`), same-topology refresh, velocity-Verlet update |
 | `StrictCapProfileMixin` (`fmm_strict_cap_profile`) | compiled-profile fingerprints for the strict lane's compile-reuse diagnostics, and the fused lane's `PROFILE_SET` gate (the on-disk cap profile went in X4) |
 | `PolicyMixin` (`fmm_policy`) | adaptive execution-policy decisions |
 | `OverridesMixin` (`fmm_overrides`) | resolve runtime execution knobs (farfield/nearfield mode, traversal caps; static sizing only since X4) |
 | `SweepsMixin` (`fmm_sweeps`) | delta-sign / convention sweeps |
 | `DerivativesMixin` (`fmm_derivatives`) | jerk / time-derivative towers |
 | `DiagnosticsMixin` (`fmm_diagnostics`) | `get_runtime_diagnostics` + shape diagnostics |
+
+### The fused strict lane and its force provider
+
+`strict_run_v2` runs velocity Verlet as one device-resident `lax.scan`. Each step
+drifts, computes the self-force at the new positions in two halves, adds the external
+field and kicks. Since S2 (2026-10) the two halves are the methods of
+`runtime/fused_provider.py`'s `FusedForceProvider`, and the scan, both carries
+(`carry="state"`, the default, and `carry="particles"`), the tree-order carry, the
+particle carry's start program, the eval seam (`strict_fused_prepared_eval_fn`), the
+compile keys (`provider.key()`) and the segment re-plan (`provider.replanned`) all go
+through it:
+
+| half | provider method | what runs |
+|---|---|---|
+| refresh | `rebuild` (`_rebuild_like` for the state carry, which rebuilds from the state it carries) | `_refresh_large_n_same_topology`: tree from the shape template, P2M/M2M, flat walk, M2L, L2L |
+| evaluate | `accelerations` | `evaluate_large_n_state`: near P2P, L2P, scatter |
+| verdict | `capacity_ok` / `FusedTopology.overflow_bits` | every fixed capacity, the cell-leaf tree's included |
+
+`runtime/fused_topology.py` holds what the halves hand on: `FusedTopology` (the
+refreshed prepared state plus the walk's and the tree's capacity reports, moved off
+the engine's side channels so no tracer outlives its trace), the `OVERFLOW_*` bits, and
+`ForceParams` / `StepParams`, whose Python floats are compile-time literals (the
+default: every program as before) and whose arrays are traced (the opt-in:
+`strict_run_v2(dt=array, force_params=..., external_params=...)`, one compile for every
+value). `runtime/strict_carry.py` holds the shape template the particle carry rebuilds
+from. The refactor (stages C1-C3) kept every program text identical
+(`bench/provider_hlo_identity.py`, section 9); the S2 fixes on top changed only what they
+meant to ([`docs/production_2026-10.md`](docs/production_2026-10.md), S2). User guide:
+[`docs/fused_provider.md`](docs/fused_provider.md).
+
+The fused multi-GPU lane (`distributed/fused.py`) still has its own force step; plan
+session S11 moves it onto the provider.
 
 ## 5. Kernel-family map (`runtime/kernels/`)
 
@@ -244,7 +279,11 @@ cleanup (`docs/cleanup_2026-10.md`: X3, K, C, Z-b).
 
   **What it does not cover.** Positions and masses only: `G` and the softening are
   Python floats (`_large_n_grad.py`'s `-float(engine.G)`, the near field's
-  `float(softening)`), so there is no d/dG or d/dε. Reverse mode only: a
+  `float(softening)`), so there is no d/dG or d/dε. (The fused forward takes them as
+  traced `ForceParams` since S2, and `jax.grad` through `FusedForceProvider.accelerations`
+  in them equals central differences on the pure-JAX near field in float64 (CPU). Not
+  verified on the Pallas lane, whose direct near-field kernel and particle-major L2P
+  have no reverse rule (below). See [`docs/fused_provider.md`](docs/fused_provider.md).) Reverse mode only: a
   `custom_vjp` refuses `jax.jvp`, so forward-mode adjoints fail. One force only:
   `strict_run_v2` evaluates the forward-only `evaluate_large_n_state`, and the
   fused multi-GPU lane's cross-domain M2L and near-field reverses raise
@@ -447,10 +486,19 @@ Which CI job runs which of them is defined once, in `.github/scripts/test_shards
   numerical one. Regenerate goldens intentionally with `JACCPOT_REGEN_GOLDEN=1`.
 - **Public-API guard** —
   [`tests/unit/test_public_api_surface.py`](tests/unit/test_public_api_surface.py)
-  freezes the 15 `__all__` names + `FMMPreset` members. Red = the refactor leaked
+  freezes the 17 `__all__` names + `FMMPreset` members. Red = the refactor leaked
   into the public contract.
 - **Runtime typecheck** — set `JACCPOT_RUNTIME_TYPECHECK=1` to enable beartype
   runtime checks over the suite.
+- **Program identity of the fused scan** —
+  [`bench/provider_hlo_identity.py`](bench/provider_hlo_identity.py) records, per
+  variant of `strict_run_v2` (state / particle / tree-order carry, `dehnen_error`,
+  external field, history, callback, G != 1, chained calls, the segment retry, the eval
+  seam; 36 on CPU at N = 512, 18 on a GPU at 2e5), the lowered text of every program
+  that runs and the sha256 of every array; `compare` fails on one character or one bit.
+  Built for the provider refactor (S2), it is the gate for any change that must keep
+  the fused lane's programs as they are. The GPU pins of the same lane are in
+  `bench/dce_pins.py`.
 - **GPU/Pallas parity (A100, manual/nightly):** run the fused-Pallas M2L parity
   tests + golden with `JACCPOT_STATIC_STRICT_FUSED_M2L_PALLAS=1` under
   `JAX_ENABLE_X64=1` to confirm the Pallas paths match the pure-JAX reference.

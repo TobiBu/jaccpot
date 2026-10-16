@@ -36,6 +36,7 @@ from .runtime.dtypes import require_x64
 from .runtime.fmm import FMMEngine as _RuntimeFMM
 from .runtime.fmm import FMMPreparedState
 from .runtime.fmm_constants import _LARGE_N_GPU_UPWARD_LEAF_BATCH_SIZE
+from .runtime.fused_topology import ForceParams, _is_static
 from .runtime.strict_carry import StrictParticleCarry
 from .softening import resolve_softening_kernel
 
@@ -554,7 +555,10 @@ class FastMultipoleMethod:
         Convenience spelling of ``working_dtype``. Passing both is an error unless
         they agree.
     working_dtype : Optional[DTypeLike]
-        Explicit working dtype. ``None`` lets the preset decide.
+        Explicit working dtype. ``None`` lets the preset decide: ``large_n_gpu``
+        computes the force in float32 (the production lane); float64 there is the
+        validation lane -- the same fused lane in float64, no time or memory
+        budget. The state keeps the dtype it is passed in either way.
     advanced : Optional[FMMAdvancedConfig]
         Replaces the preset's advanced defaults wholesale -- it is not merged into
         them. Build it from the preset's own config if you mean to override only a
@@ -654,7 +658,8 @@ class FastMultipoleMethod:
 
         preset_norm = _normalize_preset(preset)
         if preset_norm is FMMPreset.LARGE_N_GPU and working_dtype is None:
-            # Large-N radix fast lane is currently specialized for fp32 kernels.
+            # The large-N lane's production force is float32; an explicit float64
+            # (precision="fp64") selects its validation lane.
             working_dtype = jnp.float32
         advanced_cfg = (
             _default_advanced_for_preset(preset_norm) if advanced is None else advanced
@@ -1742,7 +1747,7 @@ class FastMultipoleMethod:
         *,
         state: Float[Array, "n 2 3"],
         masses: Float[Array, "n"],
-        dt: float,
+        dt: Union[float, Array],
         num_steps: int,
         refresh_every: int,
         leaf_size: int,
@@ -1763,6 +1768,8 @@ class FastMultipoleMethod:
         donate_prepared_state: bool = False,
         carry: Optional[str] = None,
         donate_state: bool = False,
+        force_params: Optional[ForceParams] = None,
+        external_params: Any = None,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -1784,8 +1791,10 @@ class FastMultipoleMethod:
             stacked on axis 1.
         masses : Float[Array, 'n']
             Particle masses ``[N]``.
-        dt : float
-            Timestep.
+        dt : Union[float, Array]
+            Timestep. A Python (or NumPy) number is a compile-time literal, the
+            default; a JAX array is TRACED -- an argument of the compiled scan, so
+            one compile serves every value.
         num_steps : int
             Total steps. Must be positive.
         refresh_every : int
@@ -1843,6 +1852,17 @@ class FastMultipoleMethod:
             the scan, which writes the returned state into it (24 B per particle
             fewer at the scan's peak). The passed ``state`` is CONSUMED (a host copy
             is kept for a capacity retry). Leave it off to keep the input state.
+        force_params : Optional[ForceParams]
+            ``ForceParams(G, eps2)`` (the softening squared) for the self-gravity;
+            ``None`` takes the solver's. Floats are compile-time literals, arrays
+            are traced (one compile for every value). The walk is built for the
+            solver's softening: with a compact softening kernel a larger ``eps2``
+            is refused, and ``mac_type='dehnen_error'`` takes the solver's own
+            only (see the impl docstring).
+        external_params : Any
+            Parameters of the external field (a pytree). Given, the field is called
+            as ``external_acceleration_fn(state, external_params)``, its arrays
+            traced like ``dt``; ``None`` keeps the one-argument form.
 
         Returns
         -------
@@ -1854,7 +1874,8 @@ class FastMultipoleMethod:
         return self._impl.strict_run_v2(
             state=state,
             masses=masses,
-            dt=float(dt),
+            # a number stays a literal (as it always was); an array is traced
+            dt=float(dt) if _is_static(dt) else dt,
             num_steps=int(num_steps),
             refresh_every=int(refresh_every),
             leaf_size=int(leaf_size),
@@ -1873,6 +1894,8 @@ class FastMultipoleMethod:
             donate_prepared_state=bool(donate_prepared_state),
             carry=carry,
             donate_state=bool(donate_state),
+            force_params=force_params,
+            external_params=external_params,
         )
 
     def strict_fused_prepared_eval_fn(
@@ -1885,6 +1908,7 @@ class FastMultipoleMethod:
         theta: Optional[float] = None,
         bounds: Optional[Tuple[Float[Array, "3"], Float[Array, "3"]]] = None,
         donate_prepared: bool = False,
+        force_params: Optional[ForceParams] = None,
     ) -> tuple[
         Union[FMMPreparedState, LargeNPreparedState],
         Callable[[Union[FMMPreparedState, LargeNPreparedState]], Array],
@@ -1915,6 +1939,9 @@ class FastMultipoleMethod:
         donate_prepared : bool
             ``eval_fn`` consumes its state (one call per state) and may reuse its
             buffers for temporaries. Off by default, for repeated timing calls.
+        force_params : Optional[ForceParams]
+            As in :meth:`strict_run_v2`; traced arrays are arguments of
+            ``eval_fn``'s program, bound to the values given.
 
         Returns
         -------
@@ -1933,6 +1960,7 @@ class FastMultipoleMethod:
             theta=theta,
             bounds=bounds,
             donate_prepared=bool(donate_prepared),
+            force_params=force_params,
         )
 
     def get_runtime_diagnostics(self: "FastMultipoleMethod") -> dict[str, Any]:

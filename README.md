@@ -32,6 +32,7 @@ Tree construction and traversal artifacts are provided by the companion package
 - Near-field and far-field execution paths with optional prepared state reuse
 - **End-to-end differentiable FMM force** — exact `jax.grad`/`jax.vjp` gradients w.r.t. positions and masses at fixed topology, verified from N=64 to N=1,000,000 (see [Differentiable FMM](#differentiable-fmm))
 - **Momentum-conserving (mutual) force** for block-step individual timesteps — `sum_i m_i a_i` cancels to round-off instead of to the truncation error (see [Momentum-Conserving FMM](#momentum-conserving-fmm))
+- **The fused lane's per-step force as an object** — `FusedForceProvider` runs the force `strict_run_v2` steps with inside your own jitted integrator, with `G` and the softening as compile-time literals or traced arrays (see [The fused lane's force in your own integrator](#the-fused-lanes-force-in-your-own-integrator))
 - Differentiable direct-sum helper via JAX autodiff, retained as the exact-gradient oracle
 
 ## Installation
@@ -295,6 +296,14 @@ solver_fp64 = FastMultipoleMethod(
 Both need `jax_enable_x64=True` (see [the requirement](#requirement-jax_enable_x64));
 it does not pick the precision for you. You can still pass `working_dtype`
 directly; if both are set, they must match.
+
+`preset="large_n_gpu"` computes the force in float32 unless you ask otherwise.
+`precision="fp64"` there selects the **float64 validation lane**: the same fused
+lane with every Pallas kernel natively in float64, for checking a float32 run, with no
+time or memory budget (2e6 particles, the bench's defaults: 820 B/particle with
+float64 state and force, against 508 in float32). The state keeps the dtype you pass,
+so a float64 state under the float32 force is a supported mix. Details and measurements:
+[docs/fused_provider.md](docs/fused_provider.md#the-fp64-validation-lane).
 
 ## Adaptive Order
 
@@ -580,7 +589,9 @@ enter as Python floats, so there is no d/dG or d/dε. Reverse mode only: every f
 kernel is a `custom_vjp`, which refuses `jax.jvp` (and so forward-mode adjoints).
 One force at a time: `strict_run_v2` and the multi-GPU `FusedRollout` are
 forward-only, so a rollout gradient has to differentiate its own integrator around
-`differentiable_accelerations`.
+`differentiable_accelerations`. (The fused forward takes `G` and the softening as
+traced `ForceParams`, see [below](#the-fused-lanes-force-in-your-own-integrator);
+`jax.grad` in them is verified on the pure-JAX near field in float64 only.)
 
 ### Tuning
 
@@ -605,6 +616,47 @@ fields wherever the CSR lanes run, which is the default there (see
 
 Full guide, contract, limits, and troubleshooting:
 **[docs/differentiable_fmm.md](docs/differentiable_fmm.md)**.
+
+## The fused lane's force in your own integrator
+
+`strict_run_v2` runs velocity Verlet as one device-resident scan on the fused
+`large_n_gpu` lane. Its per-step force is public: `FusedForceProvider` is prepared
+eagerly and then called inside your own `jax.jit`. A caller-written velocity Verlet
+reproduces `strict_run_v2(carry="particles")` bit for bit (CPU test, N = 512):
+
+```python
+from jaccpot import FusedForceProvider
+
+# solver: preset="large_n_gpu", static-radix tree with cell leaves (see the guide)
+prov, _ = FusedForceProvider.prepare(solver, x0, m, leaf_size=64, max_order=6)
+dt = jnp.asarray(1e-3, x0.dtype)
+
+def verlet(carry, m):
+    x, v, a, aux = carry
+    x = x + v * dt + 0.5 * a * dt**2
+    a_new, aux = prov.step(x, m, aux=aux)  # rebuild + accelerations + overflow bits
+    return (x, v + 0.5 * (a + a_new) * dt, a_new, aux), None
+
+@jax.jit
+def run(carry, m):  # the masses an argument, as in the lane's runner
+    return jax.lax.scan(lambda c, _: verlet(c, m), carry, None, length=100)[0]
+
+a0, aux0 = jax.jit(prov.step)(x0, m)
+x, v, a, (f_b, bits, needs) = run((x0, v0, a0, aux0), m)
+```
+
+`bits` holds one bit per fixed capacity (tree, walk lists, near rows, ...); any of
+bits 3-10 means a step's force was wrong, and `needs` is what a re-plan needs.
+`prov.step(x, m, params)` takes `G` and the softening squared as `ForceParams(G, eps2)`
+(`None`: the solver's own). Python floats are compile-time literals (the default, every
+program unchanged), arrays are traced (one compile for every value; measured bitwise
+the literal program on an A100). `strict_run_v2`
+takes the same opt-in as `force_params=`, an array `dt` and `external_params=`.
+`mac_type="dehnen_error"` refuses any `G` or softening but the solver's own, and a
+traced softening beyond the one the walk was built for sets the `OVERFLOW_PARAMS` bit.
+
+Guide, the overflow bits, the limits and the float64 validation lane:
+**[docs/fused_provider.md](docs/fused_provider.md)**.
 
 ## Momentum-Conserving FMM
 
@@ -751,6 +803,7 @@ export JACCPOT_RUNTIME_TYPECHECK=1
 - `jaccpot/upward`, `jaccpot/downward`, `jaccpot/nearfield`: sweep and near-field modules
 - `jaccpot/mutual`: momentum-conserving (mutual) evaluation path — a separate lane, not a variant of the above
 - `jaccpot/nornax_adapter.py`: `BlockStepFMM`, the block-step KDK facade over `jaccpot/mutual`
+- `jaccpot/runtime/fused_provider.py`, `fused_topology.py`: `FusedForceProvider`, the fused lane's per-step force, and what it hands on (`FusedTopology`, `ForceParams`, `StepParams`, the overflow bits)
 - `tests`: unit, integration (`tests/integration/strict/` for the fused strict lane), characterization (goldens), distributed and performance checks; `bench/tests` tests the `bench/` scripts
 
 ## CI
