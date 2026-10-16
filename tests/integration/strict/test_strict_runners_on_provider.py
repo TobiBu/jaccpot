@@ -16,7 +16,11 @@ walk overflows, on both carries:
 * the compile keys keep the layout the benches read;
 * the particle carry refuses bucket leaves, whose rebuild reads template values;
 * ``mac_type='dehnen_error'``: 1 + 2 chained steps are one call of 3, bitwise, on
-  both carries (the CSR near field in interpret mode: the force scale needs it).
+  both carries (the CSR near field in interpret mode: the force scale needs it);
+* the TREE re-plan (S3): a cell-leaf tree that outgrows its leaf capacity, or a
+  level that outgrows the level loops' batch, in the middle of a segment is
+  re-planned at the segment's start, and the re-run equals a run started there
+  with the grown bound, bitwise.
 
 CPU, the pure-JAX near field (``use_pallas=False``), the production leaf
 partition (cells), with ``jax.default_backend`` reporting ``"gpu"`` as
@@ -399,3 +403,137 @@ def test_a_cell_leaf_overflow_inside_the_scan_is_refused(carry, monkeypatch):
     # not re-planned: no retry ran
     diag = solver.get_runtime_diagnostics()
     assert int(diag["strict_fused_fallback_count"] or 0) == before
+
+
+# --------------------------------------------------------------------------
+# The TREE re-plan (S3, R6): a tree that outgrows its bounds MID-segment is
+# re-planned at the segment's start and the segment re-run once.
+# --------------------------------------------------------------------------
+
+
+def _cusp(seed: int = 3) -> np.ndarray:
+    """Radii log-uniform over e^-20..1: nested cells, a deep and narrow radix tree
+    (N = 512, leaf 16, capacity 128: 107 live leaves, 58 levels, widest level 18)."""
+    rng = np.random.default_rng(seed)
+    radius = np.exp(-20.0 * rng.uniform(0.0, 1.0, N))
+    direction = rng.normal(size=(N, 3))
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+    return radius[:, None] * direction
+
+
+def _drifting(start: np.ndarray, end: np.ndarray):
+    """``(state, masses)``: particles at ``start`` whose free drift reaches ``end``
+    at the end of the call's STEPS steps (halfway after the first), with masses so
+    small (1e-9 each) that gravity moves nothing measurably. The start fits the
+    tree it is prepared on; the steps' rebuilds see the configurations the bounds
+    were not sized for."""
+    vel = (np.asarray(end) - np.asarray(start)) / (STEPS * DT)
+    state = jnp.asarray(np.stack([np.asarray(start), vel], axis=1), jnp.float32)
+    return state, jnp.full((N,), 1e-9, jnp.float32)
+
+
+#: walk caps NAMED wide enough for every configuration below (they are never
+#: widened, and do not overflow): the walk's needs in a segment whose tree
+#: overflowed are measured on that broken tree, and a re-run after the TREE
+#: re-plan would otherwise overflow the walk caps the start sized -- these tests
+#: are about the tree
+_ROOMY_WALK = {
+    "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "16384",
+    "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP": "32768",
+}
+
+
+@pytest.fixture()
+def _fresh_level_registry(monkeypatch):
+    """An empty level-shape registry: it is process-global and never lowered, so a
+    width another test registered for the same tree shape would hide the overflow
+    (or the re-plan) this test needs."""
+    from jaccpot.runtime import _level_shapes
+
+    monkeypatch.setattr(_level_shapes, "_WIDTHS", {})
+    monkeypatch.setattr(_level_shapes, "_LEVELS", {})
+    return _level_shapes
+
+
+def _final_states_equal(got, want):
+    got, want = np.asarray(got), np.asarray(want)
+    differ = int(np.sum(got != want))
+    assert differ == 0, (
+        f"{differ} of {got.size} elements differ, max "
+        f"{float(np.max(np.abs(got - want))):.3e}"
+    )
+
+
+@pytest.mark.parametrize("carry", ["state", "particles"])
+def test_a_tree_outgrowing_its_leaf_capacity_mid_segment_is_replanned(
+    carry, monkeypatch, _fresh_level_registry
+):
+    """Prepared on a uniform draw at capacity 66 (64 live leaves, the start fits),
+    drifting into four blobs: the first step's rebuild needs 109 leaves, the second
+    105. The verdict fails; the segment is re-planned at its start -- capacity
+    ``auto_leaf_capacity(109) = 1024``, the depth bound to the deepest tree + 8 --
+    and run once more; the re-run equals a run started there at capacity 1024."""
+    for key, val in (_CSR_ON_CPU | _ROOMY_WALK).items():
+        monkeypatch.setenv(key, val)
+    blobs, _, _ = _systems()
+    uniform = np.random.default_rng(2).uniform(-1.0, 1.0, (N, 3))
+    state, masses = _drifting(uniform, np.asarray(blobs))
+
+    solver = _solver(leaf_capacity=66, use_pallas=True)
+    impl = solver._impl
+    before = int(solver.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+    got, _, _ = _run(solver, state, masses, carry=carry)
+    diag = solver.get_runtime_diagnostics()
+    assert int(diag["strict_fused_fallback_count"] or 0) == before + 1
+    assert diag["strict_fused_last_fallback_reason"] == "capacity_segment_retry"
+    assert impl._tree_leaf_capacity == 1024  # sticky: later prepares use it
+
+    reference = _solver(leaf_capacity=1024, use_pallas=True)
+    want, _, _ = _run(reference, state, masses, carry=carry)
+    assert (
+        int(reference.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+        == 0
+    )
+    _final_states_equal(got, want)
+
+
+@pytest.mark.parametrize("carry", ["state", "particles"])
+def test_a_level_wider_than_the_level_loops_batch_mid_segment_is_replanned(
+    carry, monkeypatch, _fresh_level_registry
+):
+    """The bound a long galaxy run reaches first (the 25M quarter-orbit probe: the
+    widest radix level +10.9 % in 489 steps, against 1.25x the eager widest): the
+    leaves fit, a level does not.
+
+    Prepared on a cusp at capacity 128 (107 live leaves, widest level 18: the level
+    loops' batch is ceil(1.25 x 18) = 23), drifting into four blobs (113 and 105
+    live leaves, widest levels 44 and 46). The re-prepare at the segment's start
+    sees the cusp again and would register 23 once more: the batch must come from
+    what the segment's trees needed, ceil(1.25 x 46) = 58, or the re-run overflows
+    the same way. The leaf capacity stays 128; the re-run equals a run started
+    there with the widened batch.
+    """
+    for key, val in (_CSR_ON_CPU | _ROOMY_WALK).items():
+        monkeypatch.setenv(key, val)
+    blobs, _, _ = _systems()
+    state, masses = _drifting(_cusp(), np.asarray(blobs))
+
+    solver = _solver(leaf_capacity=128, use_pallas=True)
+    impl = solver._impl
+    shape = (2 * 128 - 1, 128 - 1)
+    before = int(solver.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+    got, _, _ = _run(solver, state, masses, carry=carry)
+    diag = solver.get_runtime_diagnostics()
+    assert int(diag["strict_fused_fallback_count"] or 0) == before + 1
+    assert impl._tree_leaf_capacity == 128  # the leaves never overflowed
+    assert _fresh_level_registry._WIDTHS[shape] == 58
+
+    # the registry is process-global: a fresh solver started at the same state
+    # compiles with the widened batch and fits without a retry
+    reference = _solver(leaf_capacity=128, use_pallas=True)
+    want, _, _ = _run(reference, state, masses, carry=carry)
+    assert (
+        int(reference.get_runtime_diagnostics()["strict_fused_fallback_count"] or 0)
+        == 0
+    )
+    _final_states_equal(got, want)
