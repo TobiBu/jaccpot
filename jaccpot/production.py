@@ -696,8 +696,9 @@ class ProductionRunner:
       segment).
     * Parameters: ``SegmentConfig.traced_params`` (the default) passes ``dt``,
       ``G``, the softening squared and the field's float parameters as arrays.
-    * Retry: a segment whose lists overflow is re-planned and re-run once by
-      ``strict_run_v2`` itself; a second failure raises.
+    * Retry: a segment whose lists or tree overflow is re-planned and re-run by
+      ``strict_run_v2`` itself, once (twice when the first re-plan grew the tree:
+      the second for the walk only); a failure after that raises.
     * Callbacks: ``Callable[[SegmentEdge], Optional[bool]]``, called at step 0 and
       after every segment; a truthy return stops the run after that edge.
       ``step_callback`` is ``strict_run_v2``'s in-scan hook, passed through: its
