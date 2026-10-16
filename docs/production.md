@@ -77,10 +77,12 @@ segment one program. Chained `strict_run_v2` calls without `carry_total_accelera
 also recompiled at the second call (the handle's start force was not donated: 17.7 s
 against 2.4 s at N = 512 on CPU).
 
-**Retry.** A segment whose lists overflow is re-planned and re-run once by
-`strict_run_v2` (`FusedForceProvider.replanned`); a second failure raises a
-`RuntimeError` naming the last restart file. A donated segment keeps a host copy of its
-start state for that re-run (24 B per particle, one device-to-host copy per segment).
+**Retry.** A segment whose lists or tree overflow is re-planned and re-run by
+`strict_run_v2` (`FusedForceProvider.replanned`): once, or twice when the first re-plan
+grew the tree (the second for the walk only, see `docs/fused_provider.md`). A failure
+after that raises a `RuntimeError` naming the last restart file. A donated segment keeps
+a host copy of its start state for the re-runs (24 B per particle, one device-to-host
+copy per segment).
 
 ## Edges, callbacks, diagnostics
 
