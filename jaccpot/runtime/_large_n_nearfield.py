@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -541,6 +541,8 @@ def evaluate_large_n_nearfield_fast_lane(
     masses_sorted: Any = None,
     differentiable: bool = False,
     return_force_scale: bool = False,
+    G: Optional[Union[float, Array]] = None,
+    softening_sq: Optional[Union[float, Array]] = None,
 ) -> Any:
     """Evaluate the radix fast-lane nearfield path (payload-driven).
 
@@ -575,6 +577,13 @@ def evaluate_large_n_nearfield_fast_lane(
         per-step ``dehnen_error`` threshold. The overflow additions below are
         acceleration only, so their pairs are missing from ``f_near``: the scale
         errs low, i.e. the criterion stricter, never looser. Accelerations only.
+    G : Optional[Union[float, Array]]
+        The gravitational constant, overriding the engine's: a Python float is a
+        compile-time literal, an array may be traced (the fused lane's traced force
+        parameters). ``None`` takes ``fmm.G``. Accelerations only.
+    softening_sq : Optional[Union[float, Array]]
+        The softening squared, overriding the engine's, likewise. ``None`` squares
+        ``fmm.softening``. Accelerations only.
 
     Returns
     -------
@@ -589,11 +598,17 @@ def evaluate_large_n_nearfield_fast_lane(
         rather than user input, as above.
     ValueError
         If both ``return_potential`` and ``return_force_scale`` are set: they
-        share the near-field kernel's fourth lane.
+        share the near-field kernel's fourth lane; or if ``G`` or
+        ``softening_sq`` comes with ``return_potential``.
     """
 
     if bool(return_potential) and bool(return_force_scale):
         raise ValueError("return_potential and return_force_scale are exclusive")
+    if bool(return_potential) and (G is not None or softening_sq is not None):
+        raise ValueError("G / softening_sq overrides are wired for accelerations only")
+    # the engine's own parameters unless overridden (the fused lane's force params)
+    g_value = getattr(fmm, "G") if G is None else G
+    soft_kw = {} if softening_sq is None else {"softening_sq": softening_sq}
     use_pallas = bool(getattr(fmm, "use_pallas", False))
     # Resolve once: every read below goes through these, never through the state,
     # so a live-input gradient evaluation cannot silently pick up frozen arrays
@@ -694,8 +709,9 @@ def evaluate_large_n_nearfield_fast_lane(
             positions_sorted=live_positions,
             masses_sorted=live_masses,
             payload=state.radix_fast_payload,
-            G=getattr(fmm, "G"),
+            G=g_value,
             softening=float(getattr(fmm, "softening")),
+            **soft_kw,
             softening_kernel=getattr(fmm, "softening_kernel", None),
             return_potential=False,
             use_pallas=use_pallas,
@@ -720,8 +736,9 @@ def evaluate_large_n_nearfield_fast_lane(
             positions_sorted=live_positions,
             masses_sorted=live_masses,
             payload=overflow_payload,
-            G=getattr(fmm, "G"),
+            G=g_value,
             softening=float(getattr(fmm, "softening")),
+            **soft_kw,
             softening_kernel=getattr(fmm, "softening_kernel", None),
             use_pallas=use_pallas,
         )
@@ -746,8 +763,9 @@ def evaluate_large_n_nearfield_fast_lane(
         state.nearfield_target_block_leaf_ids,
         state.nearfield_target_block_source_leaf_ids,
         state.nearfield_target_block_valid_mask,
-        G=getattr(fmm, "G"),
+        G=g_value,
         softening=float(getattr(fmm, "softening")),
+        **soft_kw,
         softening_kernel=getattr(fmm, "softening_kernel", None),
         target_leaf_batch_size=int(state.nearfield_target_leaf_batch_size),
         target_block_tile_size=int(state.nearfield_target_block_tile_size),

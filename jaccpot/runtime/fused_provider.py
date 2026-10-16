@@ -28,8 +28,17 @@ program. ``key()`` is what a compile cache keyed on the provider must hold.
 Its inputs and outputs -- :class:`~jaccpot.runtime.fused_topology.FusedTopology`
 and the force parameters (:class:`~jaccpot.runtime.fused_topology.ForceParams`,
 :class:`~jaccpot.runtime.fused_topology.StepParams`) -- live in
-:mod:`jaccpot.runtime.fused_topology`. Only the engine's own ``G`` and softening
-are accepted for now; traced values come later (S2 stage C4).
+:mod:`jaccpot.runtime.fused_topology`.
+
+**Force parameters.** ``accelerations`` / ``step`` take ``G`` and the softening
+squared from ``params``: ``None`` (or the engine's own values as Python floats) is
+the engine's, compile-time literals in the program exactly as before; other Python
+floats are literals too; arrays are TRACED -- cast to the working dtype here, one
+program for every value. The rebuild does not read them: the walk is built for
+the engine's softening, so a compact kernel's separation floor stays static and an
+``eps2`` above the one it covers sets ``OVERFLOW_PARAMS`` (:meth:`params_overflow`).
+``mac_type='dehnen_error'`` takes the engine's own only (its thresholds and far
+f_b are built with them).
 """
 
 from __future__ import annotations
@@ -41,9 +50,16 @@ import jax.numpy as jnp
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array
 
+from ..softening import support_factor
 from ._large_n_pipeline import evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState
-from .fused_topology import ForceParams, FusedTopology, StepParams
+from .fused_topology import (
+    OVERFLOW_PARAMS,
+    ForceParams,
+    FusedTopology,
+    StepParams,
+    _is_static,
+)
 from .strict_carry import PreparedShapeTemplate, materialize_template, shape_template
 
 __all__ = [
@@ -697,8 +713,11 @@ class FusedForceProvider:
         topology : FusedTopology
             From :meth:`rebuild` (or :meth:`FusedTopology.from_prepared`).
         params : Optional[Union[ForceParams, StepParams]]
-            ``None`` or the engine's own (:meth:`params`); other values arrive with
-            traced parameters (S2 stage C4).
+            ``G`` and the softening squared (a :class:`StepParams`' force part).
+            ``None`` or the engine's own as Python floats: the engine's literals,
+            the program unchanged. Other floats are literals; arrays are traced
+            (cast to the working dtype). See :meth:`params_overflow` for an
+            ``eps2`` the walk was not built for.
         order : str
             ``"input"`` (the caller's row order) or ``"tree"`` (the topology's
             Morton order: row ``j`` is particle ``tree.particle_indices[j]``; no
@@ -714,11 +733,12 @@ class FusedForceProvider:
         Raises
         ------
         ValueError
-            On an unknown ``order``.
+            On an unknown ``order``, or parameters other than the engine's own
+            under ``mac_type='dehnen_error'``.
         RuntimeError
             If the topology does not hold a ``LargeNPreparedState``.
         """
-        self._check_params(params)
+        force = self.resolve_params(params)
         if order not in ("input", "tree"):
             raise ValueError(f"order must be 'input' or 'tree', got {order!r}")
         prepared = topology.prepared
@@ -734,6 +754,8 @@ class FusedForceProvider:
             extra["sorted_output"] = True
         if force_scale:
             extra["return_force_scale"] = True
+        if force is not None:
+            extra["force_params"] = force
         return evaluate_large_n_state(
             self.engine,
             prepared,
@@ -806,8 +828,8 @@ class FusedForceProvider:
         -------
         tuple[Any, tuple]
             ``(acc, (f_b, bits, needs))``: f_b for the next step (``None`` without
-            the criterion), the overflow bits OR-ed and the walk needs max-ed over
-            the steps ``aux`` has seen.
+            the criterion), the overflow bits (``OVERFLOW_PARAMS`` included) OR-ed
+            and the walk needs max-ed over the steps ``aux`` has seen.
         """
         f_b_in, bits_in, needs_in = (None, None, None) if aux is None else aux
         topology = self.rebuild(positions, masses, force_scale=f_b_in)
@@ -815,7 +837,9 @@ class FusedForceProvider:
             acc, f_b = self.accelerations(topology, params, force_scale=True)
         else:
             acc, f_b = self.accelerations(topology, params), None
-        bits = topology.overflow_bits()
+        bits = topology.overflow_bits(
+            extra=0 if params is None else self.params_overflow(params)
+        )
         needs = topology.needs()
         if bits_in is not None:
             bits = bits | jnp.asarray(bits_in, jnp.uint32)
@@ -827,30 +851,106 @@ class FusedForceProvider:
     # Helpers.
     # ----------------------------------------------------------------------
 
-    def _check_params(self, params: Optional[Union[ForceParams, StepParams]]) -> None:
-        """Refuse parameters the lane cannot honour yet.
+    def walk_eps2(self) -> Optional[float]:
+        """The largest softening squared the rebuild's walk is correct for.
+
+        A compact kernel is exactly Newtonian beyond its support ``h = k eps``,
+        and the walk keeps every pair closer than its separation floor (the
+        engine's ``softening_floor`` x softening; ``k`` x softening unset) out of
+        the far field: so it covers ``eps <= floor / k``, and at least the
+        engine's own softening (a floor set below ``k eps`` is the caller's
+        choice). Plummer has no support and no floor.
+
+        Returns
+        -------
+        Optional[float]
+            ``max((floor / k)^2, softening^2)``; ``None`` for a kernel without
+            compact support.
+        """
+        engine = self.engine
+        k = float(support_factor(getattr(engine, "softening_kernel", "plummer")))
+        if k <= 0.0:
+            return None
+        floor = float(engine._walk_separation_floor())
+        return max((floor / k) ** 2, float(engine.softening) ** 2)
+
+    def params_overflow(
+        self, params: Optional[Union[ForceParams, StepParams]]
+    ) -> Array:
+        """``OVERFLOW_PARAMS`` when ``params``' softening is beyond the walk's.
+
+        The walk is built for the engine's softening (its separation floor is
+        static); a compact kernel's support grows with ``eps2``, so a larger one
+        reaches pairs the far field took unsoftened.
 
         Parameters
         ----------
         params : Optional[Union[ForceParams, StepParams]]
             As in :meth:`accelerations`.
 
+        Returns
+        -------
+        Array
+            ``uint32`` scalar: ``OVERFLOW_PARAMS`` or ``0`` (a tracer for a traced
+            ``eps2``).
+        """
+        force = self.resolve_params(params)
+        limit = self.walk_eps2()
+        if force is None or limit is None:
+            return jnp.uint32(0)
+        if _is_static(force.eps2):
+            return jnp.uint32(OVERFLOW_PARAMS if float(force.eps2) > limit else 0)
+        eps2 = jnp.asarray(force.eps2)
+        return jnp.where(
+            eps2 > jnp.asarray(limit, eps2.dtype),
+            jnp.uint32(OVERFLOW_PARAMS),
+            jnp.uint32(0),
+        )
+
+    def resolve_params(
+        self, params: Optional[Union[ForceParams, StepParams]]
+    ) -> Optional[ForceParams]:
+        """The force parameters to evaluate with; ``None`` for the engine's own.
+
+        Needs no template: ``strict_run_v2`` checks a call's parameters with a
+        provider of the call's configuration before it prepares anything.
+
+        Parameters
+        ----------
+        params : Optional[Union[ForceParams, StepParams]]
+            As in :meth:`accelerations`.
+
+        Returns
+        -------
+        Optional[ForceParams]
+            ``None`` when nothing differs from the engine's literals (the default
+            program), else the parameters with their arrays in the working dtype.
+
         Raises
         ------
-        NotImplementedError
-            For traced values, or values other than the engine's own.
+        ValueError
+            For anything but the engine's own under ``mac_type='dehnen_error'``.
         """
         if params is None:
-            return
+            return None
         force = params.force if isinstance(params, StepParams) else params
-        if not force.is_static():
-            raise NotImplementedError(
-                "traced force parameters are not supported yet: pass Python floats"
-            )
         own = self.params()
-        if float(force.G) != own.G or float(force.eps2) != own.eps2:
-            raise NotImplementedError(
-                "force parameters other than the solver's own G and softening are "
-                f"not supported yet (got G={force.G}, eps2={force.eps2}; the solver "
-                f"has G={own.G}, eps2={own.eps2}): pass provider.params() or None"
+        if (
+            force.is_static()
+            and float(force.G) == own.G
+            and float(force.eps2) == own.eps2
+        ):
+            return None
+        if self.scale_carry:
+            raise ValueError(
+                "mac_type='dehnen_error' takes the solver's own G and softening "
+                f"only (G={own.G}, eps2={own.eps2}): eq (16a)'s thresholds and the "
+                "far half of its force scale are built with them in the rebuild. "
+                "Traced or other force parameters need another MAC."
             )
+        dtype = self.engine.working_dtype
+
+        def cast(value: Any) -> Any:
+            return value if _is_static(value) else jnp.asarray(value, dtype)
+
+        return ForceParams(G=cast(force.G), eps2=cast(force.eps2))

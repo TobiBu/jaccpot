@@ -344,19 +344,27 @@ def test_the_key_holds_the_walk_caps_and_the_template(base):
         impl._strict_fused_validated_caps = saved
 
 
-def test_only_the_engines_own_parameters_are_accepted(base):
+def test_force_parameters_resolve_to_literals_or_working_dtype_arrays(base):
+    """The engine's own floats are the default program (``None``); other floats stay
+    literals; arrays are cast to the working dtype (S2 C4,
+    ``tests/integration/strict/test_traced_params.py`` runs them)."""
     from jaccpot.runtime.fused_topology import ForceParams, StepParams
 
     prov, topo0 = base["prov"], base["topo0"]
     own = prov.params()
     assert own == ForceParams(G=1.0, eps2=SOFTENING**2)
+    assert prov.resolve_params(own) is None
+    assert prov.resolve_params(StepParams(own, 1e-3)) is None
+    other = prov.resolve_params(ForceParams(G=2.0, eps2=own.eps2))
+    assert other == ForceParams(G=2.0, eps2=own.eps2)
+    traced = prov.resolve_params(
+        ForceParams(G=jnp.asarray(1.0, jnp.float64), eps2=own.eps2)
+    )
+    assert traced.G.dtype == jnp.float32 and traced.eps2 == own.eps2
     shape = jax.eval_shape(lambda t: prov.accelerations(t, own), topo0)
     assert shape.shape == (N, 3)
-    jax.eval_shape(lambda t: prov.accelerations(t, StepParams(own, 1e-3)), topo0)
-    with pytest.raises(NotImplementedError, match="other than the solver's own"):
-        prov.accelerations(topo0, ForceParams(G=2.0, eps2=own.eps2))
-    with pytest.raises(NotImplementedError, match="traced"):
-        prov.accelerations(topo0, ForceParams(G=jnp.asarray(1.0), eps2=own.eps2))
+    shape = jax.eval_shape(lambda t, p: prov.accelerations(t, p), topo0, traced)
+    assert shape.shape == (N, 3)
     with pytest.raises(ValueError, match="order"):
         prov.accelerations(topo0, order="morton")
 

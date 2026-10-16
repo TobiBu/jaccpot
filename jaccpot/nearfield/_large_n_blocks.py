@@ -1384,6 +1384,7 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
     *,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_sq: Optional[Union[float, Array]] = None,
     softening_kernel: Optional[str] = None,
     target_leaf_batch_size: int = 32,
     target_block_tile_size: int = 8,
@@ -1424,6 +1425,9 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
     softening : float
         Plummer softening **length** (squared internally). Must be a concrete
         Python float, not a tracer. Default ``0.0``.
+    softening_sq : Optional[Union[float, Array]]
+        The softening **squared**, overriding ``softening`` (a traced array
+        allowed); ``None`` squares ``softening``.
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     target_leaf_batch_size : int
@@ -1459,7 +1463,10 @@ def compute_leaf_p2p_accelerations_target_block_pairs_only(
             masses,
         )
     )
-    softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
+    softening_sq = jnp.asarray(
+        float(softening) ** 2 if softening_sq is None else softening_sq,
+        dtype=positions.dtype,
+    )
     use_tiled_overflow = int(block_source_leaf_ids.shape[0]) <= int(
         target_block_overflow_fast_max_blocks
     )

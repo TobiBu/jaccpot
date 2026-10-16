@@ -1489,6 +1489,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
+    softening_sq: Optional[Union[float, Array]] = ...,
     softening_kernel: Optional[str] = ...,
     return_potential: Literal[False] = ...,
     use_pallas: bool = ...,
@@ -1508,6 +1509,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
+    softening_sq: Optional[Union[float, Array]] = ...,
     softening_kernel: Optional[str] = ...,
     return_potential: Literal[False] = ...,
     use_pallas: bool = ...,
@@ -1527,6 +1529,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     payload: Any,
     G: Union[float, Array] = ...,
     softening: float = ...,
+    softening_sq: Optional[Union[float, Array]] = ...,
     softening_kernel: Optional[str] = ...,
     return_potential: Literal[True],
     use_pallas: bool = ...,
@@ -1546,6 +1549,7 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_sq: Optional[Union[float, Array]] = None,
     softening_kernel: Optional[str] = None,
     return_potential: bool = False,
     use_pallas: bool = False,
@@ -1588,6 +1592,10 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     softening : float
         Plummer softening **length** (squared internally). Must be a concrete
         Python float, not a tracer. Default ``0.0``.
+    softening_sq : Optional[Union[float, Array]]
+        The softening **squared**, overriding ``softening``: a Python float is a
+        compile-time literal, an array may be traced (the fused lane's traced
+        force parameters). ``None`` squares ``softening``.
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     return_potential : bool
@@ -1747,7 +1755,10 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     if diag_mode == "zero":
         return _zeros_result()
 
-    softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
+    softening_sq = jnp.asarray(
+        float(softening) ** 2 if softening_sq is None else softening_sq,
+        dtype=positions.dtype,
+    )
     self_acc = jnp.zeros_like(positions)
     self_pot = jnp.zeros(positions.shape[:1], dtype=dtype)
     pallas_num_warps = _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0)
@@ -2131,6 +2142,7 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     payload: Any,
     G: Union[float, Array] = 1.0,
     softening: float = 0.0,
+    softening_sq: Optional[Union[float, Array]] = None,
     softening_kernel: Optional[str] = None,
     use_pallas: bool = False,
 ) -> Array:
@@ -2162,6 +2174,9 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
         Plummer softening **length**; defaults to 0. Squared here, which is the
         opposite convention from the ``softening_sq`` arguments elsewhere in this
         module -- passing an already-squared value softens by its square.
+    softening_sq : Optional[Union[float, Array]]
+        The softening **squared**, overriding ``softening`` (a traced array
+        allowed); ``None`` squares ``softening``.
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
     use_pallas : bool
@@ -2188,7 +2203,10 @@ def compute_leaf_p2p_accelerations_radix_payload_pairs_only(
     if int(target_particle_ids.size) == 0 or int(source_particle_ids.size) == 0:
         return jnp.zeros_like(positions)
 
-    softening_sq = jnp.asarray(float(softening) ** 2, dtype=positions.dtype)
+    softening_sq = jnp.asarray(
+        float(softening) ** 2 if softening_sq is None else softening_sq,
+        dtype=positions.dtype,
+    )
     if bool(use_pallas):
         from jaccpot.pallas.nearfield_fused_leaf import (
             pallas_nearfield_fused_supported,
