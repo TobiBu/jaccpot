@@ -2095,7 +2095,8 @@ class StrictRunMixin(_EngineBase):
                 scale_initial: Optional[Array] = None,
                 params_in: Optional[StepParams] = None,
             ) -> tuple[
-                tuple[Array, Array, Array, Array, Array, Optional[Array]],
+                # (state, self-gravity, ok, needs, done, f_b[, total acceleration])
+                tuple[Optional[Array], ...],
                 Optional[Array],
             ]:
                 def _step(carry, scan_x):
@@ -2214,7 +2215,8 @@ class StrictRunMixin(_EngineBase):
                 scale_initial: Optional[Array] = None,
                 params_in: Optional[StepParams] = None,
             ) -> tuple[
-                tuple[Array, Array, Array, Array, Array, Optional[Array]],
+                # (state, self-gravity, ok, needs, done, f_b[, total acceleration])
+                tuple[Optional[Array], ...],
                 Optional[Array],
             ]:
                 # the self-gravity slot is written by every step (num_steps >= 1)
