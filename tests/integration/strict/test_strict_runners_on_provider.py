@@ -185,6 +185,59 @@ def test_the_handle_carries_the_calls_provider():
     assert np.array_equal(np.asarray(end), np.asarray(whole))
 
 
+def test_a_user_written_scan_over_the_provider_is_the_particle_carry():
+    """``FusedForceProvider.step`` is the public surface of the fused lane's force.
+
+    Velocity Verlet written by a caller -- a start force, then a scan of drift,
+    ``prov.step`` and kick, in the scan's own expressions -- reproduces
+    ``strict_run_v2(carry="particles")`` bit for bit: nothing the lane computes is
+    hidden in the runner. The later sessions' integrators (Odisseo's, nornax's)
+    build on this.
+
+    The masses are an ARGUMENT of the jitted scan, as they are of the lane's runner.
+    Closed over, they are a constant of the program, which XLA compiles differently:
+    one float32 rounding of one force component moved at the third step (CPU,
+    2026-10-16: particle 305's a_y, -4.7830286 against the lane's -4.783032, |a| =
+    178; so 1 of 3072 state elements, 1.5e-8). Steps 1 and 2 were bitwise either
+    way; the packed ``[N, 2, 3]`` state instead of ``x`` and ``v`` changes nothing.
+    """
+    from jaccpot import FusedForceProvider
+
+    _, state, masses = _systems()
+    steps = 3
+    want, _, _ = _run(_solver(), state, masses, carry="particles", steps=steps)
+
+    x0, v0 = state[:, 0], state[:, 1]
+    prov, _ = FusedForceProvider.prepare(
+        _solver(), x0, masses, leaf_size=LEAF, max_order=ORDER, theta=THETA
+    )
+    # --- the caller's integrator --------------------------------------------
+    dt = jnp.asarray(DT, state.dtype)
+
+    def verlet(carry, m):
+        x, v, a, aux = carry
+        x = x + v * dt + 0.5 * a * dt**2
+        a_new, aux = prov.step(x, m, aux=aux)
+        return (x, v + 0.5 * (a + a_new) * dt, a_new, aux), None
+
+    @jax.jit
+    def run(carry, m):
+        return jax.lax.scan(lambda c, _: verlet(c, m), carry, None, length=steps)[0]
+
+    a0, aux0 = jax.jit(prov.step)(x0, masses)
+    x, v, _, (f_b, bits, needs) = run((x0, v0, a0, aux0), masses)
+    # -------------------------------------------------------------------------
+    assert f_b is None and int(bits) == 0
+    assert int(np.asarray(needs)[-1]) == 0  # no tree overflow
+    got = np.asarray(jnp.stack([x, v], axis=1))
+    want = np.asarray(want)
+    differ = int(np.sum(got != want))
+    assert differ == 0, (
+        f"{differ} of {got.size} elements differ, max "
+        f"{float(np.max(np.abs(got - want))):.3e}"
+    )
+
+
 def test_the_compile_keys_keep_their_layout():
     """What the benches and tests read off the runner cache."""
     _, state, masses = _systems()
