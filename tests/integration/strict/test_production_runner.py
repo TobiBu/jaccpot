@@ -16,7 +16,12 @@ partition, the pure-JAX near field), each bitwise:
 * R4: the diagnostics leave the trajectory alone; their values are the moments;
 * R9: donating the input changes no number, and consumes the input only when asked;
 * a callback stops the run after its edge, and a run continued from the
-  :class:`~jaccpot.production.RunResult` finishes it as the straight run does.
+  :class:`~jaccpot.production.RunResult` finishes it as the straight run does;
+* R6 through the runner: a tree that outgrows its leaf capacity in the SECOND
+  segment (``test_strict_runners_on_provider.py``'s drift into four blobs, the CSR
+  near field in interpret mode) is re-planned at that segment's start -- from the
+  handle, the donated state's host copy -- and the run equals ONE
+  ``strict_run_v2`` call that re-planned at its own start.
 """
 
 from __future__ import annotations
@@ -36,6 +41,10 @@ from jaccpot.production import (
     SegmentConfig,
     SnapshotWriter,
     segment_lengths,
+)
+from tests.integration.strict import test_strict_runners_on_provider as r6
+from tests.integration.strict.test_strict_runners_on_provider import (  # noqa: F401
+    _fresh_level_registry,
 )
 
 N = 512
@@ -351,3 +360,51 @@ def test_segment_config_is_checked():
             dt=DT, num_steps=1, restart_from=object()
         )
     assert isinstance(RunResult, type)
+
+
+# --------------------------------------------------------------------------
+# R6 through the runner: a segment whose tree outgrows its bounds is re-planned
+# at its start, and the run finishes as strict_run_v2's re-planned run does.
+# --------------------------------------------------------------------------
+
+
+def test_a_segment_that_outgrows_its_tree_is_replanned_and_the_run_finishes(
+    monkeypatch, _fresh_level_registry
+):
+    """``test_strict_runners_on_provider.py``'s R6 drift at a quarter of its speed:
+    from a uniform draw prepared at leaf capacity 96 (64 live leaves) the particles
+    reach the four blobs at step 8, and steps 1-4 cut 64, 90, 110 and 109 live
+    leaves. The first segment (steps 1-2) fits; the second (steps 3-4) outgrows 96
+    leaves. ``strict_run_v2`` re-plans it at ITS start -- the runner's handle, the
+    host copy of the state the segment donated, capacity ``auto_leaf_capacity(110)
+    = 1024`` -- and runs it again; the edge reports the retry. The walk caps are
+    R6's named ones (never overflowed), so only the tree is re-planned.
+
+    The run equals one ``strict_run_v2`` call of the 4 steps, bitwise: that call
+    re-plans at step 0 and runs every step at capacity 1024, the runner's first
+    segment ran at 96 -- the capacity a tree is padded to changes no force."""
+    for key, val in (r6._CSR_ON_CPU | r6._WALK_CAPS["named"]).items():
+        monkeypatch.setenv(key, val)
+    blobs, _, _ = r6._systems()
+    uniform = np.random.default_rng(2).uniform(-1.0, 1.0, (N, 3))
+    # a quarter of the way to the blobs after R6's 2 steps: the blobs at step 8
+    state, masses = r6._drifting(
+        uniform, uniform + 0.25 * (np.asarray(blobs) - uniform)
+    )
+
+    solver = r6._solver(leaf_capacity=96, use_pallas=True)
+    res = ProductionRunner(solver, settings=SETTINGS, segment=_static(steps=2)).run(
+        state, masses, dt=DT, num_steps=4
+    )
+    assert res.step == 4 and not res.stopped
+    assert [(e.step, e.retries) for e in res.edges] == [(0, 0), (2, 0), (4, 1)]
+    assert [e.plan["leaf_capacity"] for e in res.edges] == [96, 96, 1024]
+    diag = solver.get_runtime_diagnostics()
+    assert diag["strict_fused_last_fallback_reason"] == "capacity_segment_retry"
+
+    reference = r6._solver(leaf_capacity=96, use_pallas=True)
+    want, handle, _ = r6._run(reference, state, masses, carry="particles", steps=4)
+    assert r6._fallbacks(reference) == 1  # re-planned at step 0
+    assert reference._impl._tree_leaf_capacity == 1024
+    r6._final_states_equal(res.state, want)
+    r6._final_states_equal(res.handle.self_acceleration, handle.self_acceleration)
