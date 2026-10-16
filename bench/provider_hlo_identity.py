@@ -96,7 +96,9 @@ the previous call's start positions, in that tree's order, scattered through the
 returned tree's permutation -- so 1 + 2 chained steps differ from 3 in one call
 (1,349 elements, max 5.7e-5), where the particle carry's handle continues bitwise.
 The geometric MAC is bitwise on both counts. A refactor that changes either moves
-the ``dehnen_error`` variants; that is a decision, not a side effect.
+the ``dehnen_error`` variants; that is a decision, not a side effect. S2 made it for
+the second (``c3fadd4``: a state-carry call continues from the scan's own f_b, and
+``dehnen_error_chain_state``'s second call moves from the base).
 
 CPU runs as the lane goldens do (``tests/characterization/test_lane_goldens.py``):
 ``jax.default_backend`` reports ``"gpu"``; the CSR variants add

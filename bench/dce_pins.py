@@ -66,6 +66,30 @@ The S1 variants (S1p, S1t, S1e, S1x, S1g) pin what S1 does not run: they were ad
 for the FusedForceProvider refactor (S2, 2026-10-15), which must keep every variant
 of the scan bitwise, and are not in the default set yet:
 ``record --pins S1p,S1t,S1e,S1x,S1g``, ``compare ... --pins S1p,S1t,S1e,S1x,S1g``.
+S2 gated every commit on nine of them, ``S1,S6,DET1,G1,S1p,S1t,S1e,S1x,S1g``.
+
+**A change that must keep the fused lane's programs** (a refactor of
+``strict_run_v2`` or ``FusedForceProvider``) runs ``bench/provider_hlo_identity.py``
+first: it fails on one character of any program's text or one bit of any array,
+on CPU (36 variants at N = 512, about 9 min at ``--jobs 4``) and on a GPU (18 at
+2e5), and says which program moved, where a pin only says that a number did.
+Record the base and the candidate from the SAME worktree path (the Triton IR embeds
+the kernel source paths), the GPU base twice for the ``--control``, on a card booked
+as under Usage below::
+
+    cd <worktree>                      # at the base commit
+    JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES= \
+        python bench/provider_hlo_identity.py record --tag base-cpu --jobs 4
+    python bench/provider_hlo_identity.py record --device gpu --tag base-gpu
+    python bench/provider_hlo_identity.py record --device gpu --tag base-gpu-b
+    git checkout <candidate>           # the same worktree
+    JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES= \
+        python bench/provider_hlo_identity.py record --tag cand-cpu --jobs 4
+    python bench/provider_hlo_identity.py compare base-cpu cand-cpu
+    python bench/provider_hlo_identity.py record --device gpu --tag cand-gpu
+    python bench/provider_hlo_identity.py compare base-gpu cand-gpu --control base-gpu-b
+
+Then the pins above (``record --pins ...`` on base and candidate, ``compare``).
 
 The L pins time the lane, so they run without the deterministic-ops flag, on a
 FREE card (``autocvd -n 1`` without ``-l``), and are compared on their scalars:
