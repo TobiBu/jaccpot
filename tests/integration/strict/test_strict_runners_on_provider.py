@@ -426,9 +426,12 @@ def test_chained_calls_with_an_external_field(total):
 
     Without ``carry_total_acceleration`` each call starts from the self-gravity
     plus the field evaluated again, eagerly, at its start positions -- not the
-    scan's fused value (CPU, N = 512, 2026-10-16: 1 of 3072 components, 1.9e-6).
-    With it the handle carries the scan's own total, the next call starts from it
-    and consumes it: bitwise, and the chain compiles one scan program.
+    scan's fused value. Whether the two round alike depends on how XLA compiles the
+    eager start on the host: 1 of 3072 components differed by 1.9e-6 on one CPU
+    (2026-10-16), and nothing differed on a CI runner and on an A100. So that arm
+    pins only that no total is carried. With it the handle carries the scan's own
+    total, the next call starts from it and consumes it: bitwise on every platform,
+    and the chain compiles one scan program.
     """
     blobs, plummer_state, masses = _systems()
     state0 = plummer_state.at[:, 0].set(blobs)
@@ -463,8 +466,6 @@ def test_chained_calls_with_an_external_field(total):
     differ = int(np.sum(got != want))
     if not total:
         assert handle.acceleration is None
-        # if this ever becomes bitwise, the carried total stops being needed
-        assert differ > 0
         return
     assert differ == 0, (
         f"{differ} of {got.size} elements differ, max "
