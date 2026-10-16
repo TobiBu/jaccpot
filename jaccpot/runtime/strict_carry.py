@@ -33,6 +33,7 @@ import numpy as np
 from jaxtyping import Array
 
 __all__ = [
+    "PreparedCaps",
     "PreparedShapeTemplate",
     "StrictParticleCarry",
     "external_field_key",
@@ -76,6 +77,57 @@ class PreparedShapeTemplate:
                 for x in self.leaves
             ),
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedCaps:
+    """What the caps-only prepare leaves in place of a prepared state.
+
+    The particle carry reads four things from the eager prepare: the template's
+    SHAPES, the engine's trace-time state (validated walk caps, level registry,
+    depth bound), the initial capacity verdict and, under
+    ``mac_type='dehnen_error'``, the eq (16b) seed with the eager permutation. Its
+    start force comes from the start program. So the caps-only prepare
+    (``PrepareMixin.prepare_state_caps_only``) builds the tree and the upward pass
+    and runs the eager flat walk's ladder, and stops: no list, no M2L or L2L, no
+    near-field payload, no far f_b. The template is derived from a rebuild of
+    :attr:`stub` under ``jax.eval_shape``
+    (:meth:`~jaccpot.runtime.fused_provider.FusedForceProvider.prepare` with
+    ``caps_only=True``).
+
+    Attributes
+    ----------
+    stub : Any
+        A ``LargeNPreparedState`` holding the eager tree and the state's static
+        fields, nothing else: what a rebuild reads of a prepared state. Its tree's
+        ``particle_indices`` are the eager permutation the f_b seed is scattered
+        through.
+    walk : Any
+        The eager walk's ``_FlatWalkCaps``: the inputs of the verdict.
+    capacity_ok : Optional[bool]
+        The verdict the full prepare's state would get
+        (``capacity_guard.fused_state_capacity_ok``), set with the template;
+        ``None`` before.
+    shapes : Any
+        The rebuild's output under ``jax.eval_shape`` (a ``LargeNPreparedState``
+        of ``jax.ShapeDtypeStruct``) the template was taken from; ``None`` before.
+    """
+
+    stub: Any
+    walk: Any
+    capacity_ok: Optional[bool] = None
+    shapes: Any = None
+
+    @property
+    def tree(self) -> Any:
+        """The eager tree (the full prepare's ``prepared.tree``).
+
+        Returns
+        -------
+        Any
+            The stub's tree.
+        """
+        return self.stub.tree
 
 
 @dataclasses.dataclass(frozen=True)
