@@ -461,19 +461,20 @@ class FusedForceProvider:
     # Traced: rebuild, evaluate, verdict, step.
     # ----------------------------------------------------------------------
 
-    def like(self) -> Any:
-        """The template as a prepared state of broadcasts (inside a trace).
+    def template_or_raise(self) -> PreparedShapeTemplate:
+        """The shape template, or the reason this lane has none.
 
         Returns
         -------
-        Any
-            :func:`~jaccpot.runtime.strict_carry.materialize_template` of the
-            template; nothing reads its values.
+        PreparedShapeTemplate
+            The template :meth:`rebuild` materialises.
 
         Raises
         ------
         ValueError
-            If the provider has no template (the lane reads its carried far list).
+            If the lane reads its carried far list (not the static-radix fused
+            lane's fresh far-pair rebuild): a rebuild from shapes alone would read
+            a list that is not there.
         """
         if self.template is None:
             raise ValueError(
@@ -482,7 +483,18 @@ class FusedForceProvider:
                 "static_radix tree): otherwise a step reads the carried far "
                 "list"
             )
-        return materialize_template(self.template)
+        return self.template
+
+    def like(self) -> Any:
+        """The template as a prepared state of broadcasts (inside a trace).
+
+        Returns
+        -------
+        Any
+            :func:`~jaccpot.runtime.strict_carry.materialize_template` of the
+            template; nothing reads its values.
+        """
+        return materialize_template(self.template_or_raise())
 
     def rebuild(
         self,
@@ -522,8 +534,9 @@ class FusedForceProvider:
         Raises
         ------
         ValueError
-            If the criterion needs a force scale and none was given: the template
-            holds no thresholds of its own.
+            If the criterion needs a force scale and none was given (the template
+            holds no thresholds of its own), or the provider has no template
+            (:meth:`template_or_raise`).
         """
         if force_scale is None and self.scale_carry:
             raise ValueError(
