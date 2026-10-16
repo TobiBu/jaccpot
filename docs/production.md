@@ -137,12 +137,15 @@ bitwise.
 | gate | what | result |
 |---|---|---|
 | R1 | 3 x 2 segments vs one call of 6; 2 + 2 + 1 vs 5 (CPU, N = 512) | bitwise |
-| R1p | `bench/dce_pins.py` S1p's calls through the runner (A100, 2e5) | see the S3 record |
-| R2 | an external field across edges (CPU; GPU pin R1x) | bitwise with the carried total |
-| R3 | runner (traced) vs `strict_run_v2` (traced) | bitwise |
-| R4 | diagnostics on vs off | bitwise |
-| R5 | restart in a fresh process (CPU x 4 variants; GPU pin R1r) | bitwise |
-| R9 | `donate_input` on vs off | bitwise |
+| R1p | `bench/dce_pins.py` S1p's calls through the runner (A100, 2e5, deterministic ops) | bitwise S1p (force and state) |
+| R2 | an NFW field across edges, one-argument and traced parameters (CPU, pure-JAX near field) | bitwise with the carried total; without it 1 of 3072 components differs (1.9e-6) |
+| R1x | S1x's disc + NFW through the runner, chained vs one segment of 13 (A100, 2e5) | bitwise (and bitwise the plain chained S1x: on this card the eager field matched the fused one) |
+| R3 | runner (traced) vs `strict_run_v2` (traced), CPU | bitwise |
+| R4 | diagnostics on vs off, CPU | bitwise |
+| R5 | restart in a fresh process: geometric, `dehnen_error`, external (traced parameters), traced (CPU) | bitwise, digests matched |
+| R1r | R1p with a restart at step 5, resumed in a fresh process without the eval prepare (A100, 2e5) | bitwise, digests matched (file 8,005,201 B) |
+| R9 | `donate_input` on vs off, CPU | bitwise; one scan program with it, two without |
+| DET3 | R1p on the production flags (no deterministic ops), recorded twice on one card | bitwise |
 
 `bench/fused_memory_budget.py --runner` runs the bench's scan phase through the runner
 (the same calls as continuing runs, one segment each), so its timings include the
