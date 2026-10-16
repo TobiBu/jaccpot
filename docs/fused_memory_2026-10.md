@@ -796,6 +796,50 @@ the L2P forms are bitwise against each other (`C` vs `C2`, `C3`). At 2e6 the rou
 (of it the per-particle leaf array `a10` removed: 0.38 / 9.0), the scatter back to input order 1.3 / 18.6, the
 integrator's state updates ~1.5 / ~17. Kernel time 80.3 -> 72.7 ms (8e6), 915 -> 808 (1e8).
 
+## S3 session 2: the caps-only prepare (2026-10-17)
+
+Branch `s32/caps-only-prepare` on main `392061d`. The particle carry reads four things of its eager prepare: the
+template's shapes, the engine's trace-time state (walk caps, level registry, depth bound, the near-field stage's
+static caps), the initial verdict and, under `dehnen_error`, the f_b seed with the eager permutation; its start
+force comes from the start program. `FusedForceProvider.prepare(caps_only=True)` builds the tree and the upward pass
+and runs the eager walk's ladder (which records the caps), and places no list: no M2L or L2L, no near-field payload,
+no far f_b. The template is the shapes of a rebuild of the eager tree under `jax.eval_shape` -- the steps' own trace.
+It is the particle carry's default for the bootstrap, the segment retry and the runner's restore
+(`JACCPOT_STRICT_CAPS_ONLY_PREPARE=0`: the full prepare); the state carry keeps the full one.
+
+**Bitwise.** The template key, the provider key, the verdict and the trace-time state equal the full prepare's on
+CPU (pure-JAX, CSR, `dehnen_error`; every particle variant of `provider_hlo_identity.py`) and on an A100 at 2e5, 8e6
+and the 25M disc. Identity on CPU: 36/36 variants identical in their start programs, scans and returns
+(`compare --programs compiled_runner`), the 18 state-carry variants identical in full, the switch off identical in
+full; the particle variants lose the eager `_flat_walk_lists`, M2L and L2L programs and gain `_near_leaf_counts`.
+
+**Rows** (one free A100, `fused_memory_budget.py` L-pin rows: `--skip-eval`, particle carry, unnamed caps, arena
+0.88; main `392061d` against the branch on the same card, every timed call uncontaminated; the wall times include the
+eager programs' compiles on a loaded host, ~41 s of them the tree and upward pass's):
+
+| N | prepare: wall, peak (B/p) | in use after it | first call: peak (B/p), wall | process peak, step |
+| --- | --- | --- | --- | --- |
+| 8e6 main | 78.8 s, 2.425 GiB (325.5) | 1.685 GiB | 2.425 GiB (325.5), 181.7 s | 325.5 B/p, 78.72 ms |
+| 8e6 caps-only | 60.2 s, 1.805 GiB (242.3) | 0.740 GiB | 1.995 GiB (267.7), 154.3 s | 315.7 B/p, 78.18 ms |
+| 25M disc main | 76.6 s, 5.673 GiB (243.6) | 4.273 GiB | 5.673 GiB (243.6), 169.9 s | 255.4 B/p, 239.54 ms |
+| 25M disc caps-only | 62.2 s, 4.304 GiB (184.9) | 2.172 GiB | 5.666 GiB (243.4), 159.0 s | 255.4 B/p, 239.54 ms |
+| 1e8 main | 80.5 s, 23.558 GiB (253.0) | 17.022 GiB | 23.558 GiB (253.0), 172.7 s | 256.8 B/p, 872.55 ms |
+| 1e8 caps-only | 63.2 s, 17.989 GiB (193.2) | 8.510 GiB | 21.678 GiB (232.8), 155.9 s | 256.8 B/p, 872.81 ms |
+
+The prepare's own peak is now its tree and upward pass's (17.7 GiB at 1e8 on both). Without donation the process
+peak is the 4-step scan's at 25M and 1e8, unchanged; the steps are unchanged.
+
+**The runner at 25M** (the disc, ferrers3, 1-step segments, no diagnostics): the first segment 172.2 -> 163.2 s
+(its prepare 75.9 -> 65.0 s); a **restore 80.0 -> 60.4 s** (its prepare 77.5 -> 57.9 s), its peak 6.271 GiB (269.4
+B/p) -> 4.879 GiB (209.5 B/p), bitwise, the digests the run's own.
+
+**The one-card ceiling** (the runner, `--donate-state`, 2-step segments, no diagnostics, clipped Plummer, arena
+0.88): **1.92e8** particles, peak 31.32 GiB (175.2 B/p), 2845 ms per step with the edges (1.68e8: 28.43 GiB, 181.7
+B/p; 1.84e8: 30.83 GiB, 179.9 B/p). 1.96e8 and 2e8 run out in the caps-only prepare's walk ladder (a 4.4 GiB queue
+attempt that finds no block after the tree and upward pass's 29 GiB peak). Before: 1.68e8 at 214 B/p, set by the
+full prepare. What binds now is the tree and upward pass (its transient peak, ~180 B/p) and the ladder's
+queue-doubling attempts after it (nine at 1.84e8, from 524,288 to 134,217,728).
+
 ## Next
 
 Two follow-ups stand between the fused lane and the 25M disc+bulge production rollout (both recorded
@@ -829,10 +873,8 @@ Then (updated after round 7):
   neighbours) would take the gain without the outlier leaf; the library default (`None`, unconstrained) should
   become 8. A recommendation, not done: on main 63587f2 (2026-10-15) it is still `None`, i.e. 0, and a level needs
   cell leaves, which the library does not default to either (see the note at the top).
-* **Memory: the eager prepare binds** (~215 B/p at 1.5-1.7e8, its list build). The particle carry needs only the
-  walk's caps, the shape template and the initial verdict from it: a prepare that stops after the walk and
-  derives the template's shapes would drop the eager list build and downward pass. Re-measure the one-card ceiling
-  on jax 0.11.2 first (+5 % peak at 1e8 on the same code).
+* **Memory: the eager prepare binds** (~215 B/p at 1.5-1.7e8, its list build). Done for the particle carry in S3
+  session 2 (the caps-only prepare, above); its peak is now the tree and upward pass.
 * **The Pallas Triton backend is deprecated** in jax 0.11.2: every kernel will need its Mosaic GPU form before
   JAX drops Triton.
 * **Production.** Odisseo can opt into `JACCPOT_STRICT_CARRY=particles` and `donate_state` (and, with a row-wise
