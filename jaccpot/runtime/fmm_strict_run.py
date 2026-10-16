@@ -33,6 +33,7 @@ from .fmm_state import (
     _TopologyReuseEntry,
     _velocity_verlet_kick_drifted,
 )
+from .fused_provider import _walk_caps_key
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
@@ -50,39 +51,6 @@ else:  # pragma: no cover - annotations only, never an import at runtime
 __all__ = [
     "StrictRunMixin",
 ]
-
-
-def _walk_caps_key(validated: Optional[dict]) -> tuple:
-    """The part of the validated walk caps a traced refresh is sized from.
-
-    The traced flat walk builds its lists at the validated widths and sizes its
-    queue from the validated peak wavefront (``pow2(1.5 x peak)``, see
-    ``_strict_fused_capacity_handoff``), both read when the runner TRACES. A
-    runner cached under a key without them would keep the old sizes after a
-    re-plan. The queue enters as its pow2 target, so a re-prepare whose peak moved a
-    little does not recompile.
-
-    Parameters
-    ----------
-    validated : Optional[dict]
-        ``engine._strict_fused_validated_caps``.
-
-    Returns
-    -------
-    tuple
-        Hashable key fragment.
-    """
-    if not isinstance(validated, dict):
-        return ()
-    peak = validated.get("peak_wavefront")
-    queue_target = (
-        None if peak is None else 1 << (max(1, int(1.5 * int(peak))) - 1).bit_length()
-    )
-    return (
-        validated.get("compact_far_pair_capacity"),
-        validated.get("near_edge_capacity"),
-        queue_target,
-    )
 
 
 def _unaliased(tree: Any) -> Any:
@@ -2289,6 +2257,7 @@ class StrictRunMixin(_EngineBase):
         # the end of this method and `capacity_guard.last_refresh_walk_needs`.
         self._last_refresh_capacity_ok = None
         self._last_refresh_walk_needs = None
+        self._last_refresh_tree_overflow = None
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):
@@ -2370,6 +2339,11 @@ class StrictRunMixin(_EngineBase):
             )
             if refresh_topology_key is None:
                 refresh_topology_key = "static_fused_template"
+            # the cell-leaf rebuild's own capacity flag (leaf cap, depth, level
+            # width; a tracer under trace), for `FusedTopology.overflow_bits`
+            self._last_refresh_tree_overflow = getattr(
+                build_artifacts, "leaf_capacity_overflow", None
+            )
         else:
             previous_topology_key = refresh_topology_key
             if previous_topology_key is None:

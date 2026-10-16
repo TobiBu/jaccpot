@@ -203,7 +203,7 @@ class SweepsMixin(_EngineBase):
             softening_kernel=getattr(self, "softening_kernel", None),
         )
 
-    def _resolve_upward_num_levels(self, tree: Tree) -> Optional[int]:
+    def _resolve_upward_num_levels(self, tree: Optional[Tree]) -> Optional[int]:
         """Return the concrete (unpadded) tree depth for the M2M level loop.
 
         When ``tree`` is concrete (full prepare / template build) this computes
@@ -217,8 +217,9 @@ class SweepsMixin(_EngineBase):
 
         Parameters
         ----------
-        tree : Tree
-            Tree whose depth is wanted. May be concrete or traced.
+        tree : Optional[Tree]
+            Tree whose depth is wanted. May be concrete or traced; ``None`` reads
+            the stash (the particle carry, which holds no tree).
 
         Returns
         -------
