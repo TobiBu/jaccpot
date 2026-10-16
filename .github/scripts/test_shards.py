@@ -61,16 +61,31 @@ _MUTUAL_DISTRIBUTED = "tests/integration/test_mutual_distributed.py"
 _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _MUTUAL_STATIC_DEVICE = "tests/integration/test_mutual_fmm_static_device.py"
+# The fused strict lane's CPU tests (every case a full fused-lane solve, 60-245 s on
+# CPU) left the integration shard in 2026-10 (S3): with them it ran 42 of its 50
+# minutes before the production runner's tests arrived, and was cancelled at the
+# cap after. The provider-runner and production-runner files are the heaviest half.
+_STRICT = "tests/integration/strict"
+_STRICT_RUNNER_FILES: tuple[str, ...] = (
+    "tests/integration/strict/test_strict_runners_on_provider.py",
+    "tests/integration/strict/test_production_runner.py",
+)
 
 SHARDS: dict[str, list[str]] = {
     # test-full matrix
     "integration": [
         "tests/integration",
+        f"--ignore={_STRICT}",
         f"--ignore={_MUTUAL_STATIC_DEVICE}",
         f"--ignore={_MUTUAL_DISTRIBUTED}",
         f"--ignore={_NORNAX_ADAPTER}",
         f"--ignore={_NORNAX_DISTRIBUTED}",
     ],
+    "integration-strict": [
+        _STRICT,
+        *(f"--ignore={path}" for path in _STRICT_RUNNER_FILES),
+    ],
+    "integration-strict-runner": list(_STRICT_RUNNER_FILES),
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
     "unit": ["tests/unit", "--ignore=tests/unit/runtime"],
     "unit-runtime-mac": list(_RUNTIME_MAC_FILES),

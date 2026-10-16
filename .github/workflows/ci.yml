@@ -146,6 +146,16 @@ jobs:
           - shard: integration
             typecheck: "0"
             timeout: 50
+          # tests/integration/strict out of `integration` (S3): every case a full
+          # fused-lane solve on CPU; the provider and production-runner files, the
+          # heaviest, in a shard of their own. Provisional caps: re-set them to
+          # about twice the first measured job times.
+          - shard: integration-strict
+            typecheck: "0"
+            timeout: 40
+          - shard: integration-strict-runner
+            typecheck: "0"
+            timeout: 50
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15
