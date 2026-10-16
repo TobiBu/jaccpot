@@ -13,7 +13,10 @@ walk overflows, on both carries:
 * the retry can be switched off, and then the call raises;
 * the handle's provider is the call's force: its step at the returned positions is
   the handle's self-gravity;
-* the compile keys keep the layout the benches read.
+* the compile keys keep the layout the benches read;
+* the particle carry refuses bucket leaves, whose rebuild reads template values;
+* ``mac_type='dehnen_error'``: 1 + 2 chained steps are one call of 3, bitwise, on
+  both carries (the CSR near field in interpret mode: the force scale needs it).
 
 CPU, the pure-JAX near field (``use_pallas=False``), the production leaf
 partition (cells), with ``jax.default_backend`` reporting ``"gpu"`` as
@@ -239,3 +242,67 @@ def test_the_particle_carry_refuses_bucket_leaves():
     assert getattr(solver._impl, "_strict_fused_validated_caps", None) is None
     out, _, _ = _run(buckets(), state, masses, carry="state")
     assert bool(jnp.all(jnp.isfinite(out)))
+
+
+#: the CSR near-field lane on CPU (Pallas interpret mode): the eq (16b) force scale
+#: needs its direct kernel
+_CSR_ON_CPU = {
+    "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
+    "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB": "0",
+}
+
+
+def _dehnen_error_solver():
+    from jaccpot import FastMultipoleMethod
+    from jaccpot.config import FMMAdvancedConfig, NearFieldConfig, TreeConfig
+
+    return FastMultipoleMethod(
+        preset="large_n_gpu",
+        basis="real",
+        theta=THETA,
+        G=1.0,
+        softening=SOFTENING,
+        working_dtype=jnp.float32,
+        use_pallas=True,
+        adaptive_eps=1e-5,
+        adaptive_error_model="dehnen_paper",
+        mac_force_scale_mode="paper_fb",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(
+                mode="static_radix",
+                leaf_target=LEAF,
+                leaf_partition="cells",
+                leaf_capacity=1024,
+            ),
+            nearfield=NearFieldConfig(mode="auto"),
+            mac_type="dehnen_error",
+        ),
+        fixed_order=ORDER,
+    )
+
+
+@pytest.mark.parametrize("carry", ["state", "particles"])
+def test_chained_dehnen_error_calls_are_one_call(carry, monkeypatch):
+    """1 + 2 chained steps are 3 steps in one call, bitwise, on both carries.
+
+    Each refresh takes eq (16a)'s thresholds from the previous evaluation's f_b.
+    The particle carry's handle always carried it; the state carry's next call
+    used to reseed it from the engine's last eager prepass -- the FIRST call's
+    start positions, in that tree's order, scattered through the returned tree's
+    permutation.
+    """
+    for key, val in _CSR_ON_CPU.items():
+        monkeypatch.setenv(key, val)
+    blobs, plummer_state, masses = _systems()
+    state = plummer_state.at[:, 0].set(blobs)
+    whole, _, _ = _run(_dehnen_error_solver(), state, masses, carry=carry, steps=3)
+    solver = _dehnen_error_solver()
+    mid, returned, _ = _run(solver, state, masses, carry=carry, steps=1)
+    end, _, _ = _run(solver, mid, masses, carry=carry, steps=2, prepared=returned)
+    got, want = np.asarray(end), np.asarray(whole)
+    differ = int(np.sum(got != want))
+    assert differ == 0, (
+        f"{differ} of {got.size} elements differ, max "
+        f"{float(np.max(np.abs(got - want))):.3e}"
+    )

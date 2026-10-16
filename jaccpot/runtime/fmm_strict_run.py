@@ -53,6 +53,10 @@ __all__ = [
     "StrictRunMixin",
 ]
 
+#: The attribute of a state carry's returned ``LargeNPreparedState`` that holds the
+#: scan's last eq (16b) ``f_b`` under ``mac_type='dehnen_error'`` (input order).
+_CARRIED_FORCE_SCALE = "_strict_force_scale"
+
 
 def _unaliased(tree: Any) -> Any:
     """``tree`` with every array that appears under more than one leaf copied.
@@ -673,7 +677,10 @@ class StrictRunMixin(_EngineBase):
             none, and the one the call started from belongs to the start
             positions. To differentiate at the returned positions,
             ``prepare_state`` there first; ``differentiable_accelerations``
-            refuses the returned state.
+            refuses the returned state. Under ``mac_type='dehnen_error'`` it also
+            holds the scan's last f_b, and a call continuing from it starts its
+            thresholds there (as the particle carry's handle does), so calls of
+            1 and 2 steps are one call of 3.
         step_callback : Optional[Callable[[Array, Array], None]]
             Fire-and-forget streaming hook; see above.
         step_callback_stride : int
@@ -1342,7 +1349,25 @@ class StrictRunMixin(_EngineBase):
                 return _compiled_runner
 
             retried = False
-            scale_curr = _force_scale_seed(prepared_curr)
+            # A state an earlier call's scan returned holds that scan's own f_b
+            # (set below): the next refresh's thresholds continue from it, as the
+            # particle carry's handle does. The eager prepare's prepass is at the
+            # EARLIER call's start positions, in its tree's order -- scattered
+            # through this state's permutation it was another step's f_b of the
+            # wrong particles, and 1 + 2 chained steps differed from 3 in one
+            # call (1,349 of 3,072 state elements at N = 512, max 5.7e-5).
+            carried_scale = (
+                getattr(prepared_state, _CARRIED_FORCE_SCALE, None)
+                if scale_carry
+                else None
+            )
+            if carried_scale is not None and int(carried_scale.shape[0]) == int(
+                state_arr.shape[0]
+            ):
+                scale_curr = jnp.asarray(carried_scale, dtype=state_arr.dtype)
+            else:
+                scale_curr = _force_scale_seed(prepared_curr)
+            del carried_scale
             while True:
                 # the far list is dead inside the scan (fresh rebuild): keep it
                 # out of the carry, and off the returned state too -- it is the
@@ -1387,6 +1412,14 @@ class StrictRunMixin(_EngineBase):
                 if self._strict_static_target_block_capacity_ok:
                     prepared_curr = prepared_out
                     state_curr = state_out
+                    if scale_carry:
+                        # the scan's f_b at the returned positions (input order),
+                        # for a call that continues from this state; an attribute
+                        # of this object, not a pytree field, so it lives and dies
+                        # with the returned state and never enters a carry
+                        object.__setattr__(
+                            prepared_curr, _CARRIED_FORCE_SCALE, _scale_out
+                        )
                     break
                 needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
                 # Segment retry: a walk list or queue of the traced refresh
