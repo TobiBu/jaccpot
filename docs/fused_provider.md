@@ -35,18 +35,30 @@ template's shapes: no leaf value of a carried state reaches a step's outputs (th
 dead-code test in `tests/integration/strict/test_strict_run_v2.py`). So a caller carries
 particles and a template, never a stale far list.
 
-**Requirements.** The `large_n_gpu` preset on a GPU (the lane needs a
-`LargeNPreparedState`; on a CPU the preset declines the lane, and the CPU tests reach it
+**Requirements.** The `large_n_gpu` engine profile on a GPU (the lane needs a
+`LargeNPreparedState`; on a CPU the profile declines the lane, and the CPU tests reach it
 by making `jax.default_backend` report `"gpu"`, as
 `tests/characterization/test_lane_goldens.py` does), a static-radix tree
 (`TreeConfig(mode="static_radix")`) and, for a rebuild from the template, **cell
-leaves** (`TreeConfig(leaf_partition="cells", leaf_capacity=...)`). On bucket leaves
+leaves** (`TreeConfig(leaf_partition="cells", leaf_capacity=...)`). `preset="galaxy"`
+is all of that in one name (below). On bucket leaves
 the rebuild keeps the eager tree's node ranges and children, values a shape template
 does not hold, so `rebuild`, `step` and `strict_run_v2(carry="particles")` refuse them
 (`require_cell_leaves`, `ValueError`). If `JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET` is
 set, N must be in it.
 
 ## Quick start: velocity Verlet in your own scan
+
+`FastMultipoleMethod(preset="galaxy", softening=...)` is the production configuration
+(S3, `jaccpot/production.py`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8),
+p6, the geometric Dehnen MAC at theta 0.8, ferrers3, fp32, and
+`leaf_capacity="auto"` -- sized at the first eager prepare from the live cell leaves of
+the particles it is given (x1.15, in steps of 1024; on device,
+`capacity_plan.live_cell_leaves`), then fixed. It compiles the same programs as the
+explicit configuration below with that capacity
+(`bench/provider_hlo_identity.py compare TAG TAG --pair galaxy_explicit:galaxy_preset`).
+Leaf size and order are call arguments: `GALAXY_SETTINGS.leaf_size` / `.max_order`
+from `jaccpot.production`. Spelled out:
 
 ```python
 import jax
@@ -68,7 +80,8 @@ solver = FastMultipoleMethod(
             mode="static_radix",
             leaf_target=64,
             leaf_partition="cells",
-            leaf_capacity=leaf_capacity,  # above the live cell count at every step
+            leaf_capacity=leaf_capacity,  # or "auto"; above the live count at every step
+            cell_min_level=8,
         ),
         nearfield=NearFieldConfig(mode="auto"),
         mac_type="dehnen",
