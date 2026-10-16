@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -34,7 +34,7 @@ from .fmm_state import (
     _velocity_verlet_kick_drifted,
 )
 from .fused_provider import FusedForceProvider, require_cell_leaves
-from .fused_topology import FusedTopology
+from .fused_topology import ForceParams, FusedTopology, StepParams, _is_static
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
@@ -621,7 +621,7 @@ class StrictRunMixin(_EngineBase):
         *,
         state: Array,
         masses: Array,
-        dt: float,
+        dt: Union[float, Array],
         num_steps: int,
         refresh_every: int,
         leaf_size: int,
@@ -640,6 +640,8 @@ class StrictRunMixin(_EngineBase):
         donate_prepared_state: bool = False,
         carry: Optional[str] = None,
         donate_state: bool = False,
+        force_params: Optional[ForceParams] = None,
+        external_params: Any = None,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -667,8 +669,10 @@ class StrictRunMixin(_EngineBase):
             stacked on axis 1.
         masses : Array
             Particle masses ``[N]``.
-        dt : float
-            Timestep.
+        dt : Union[float, Array]
+            Timestep. A Python number is a compile-time literal of the scan (the
+            default); an array is TRACED: an argument of the compiled scan, cast to
+            the state's dtype, so one program serves every value.
         num_steps : int
             Total steps. Must be positive.
         refresh_every : int
@@ -752,6 +756,23 @@ class StrictRunMixin(_EngineBase):
             next call. A capacity retry re-runs the segment from its start, so the
             call keeps a host copy of the start state (one device-to-host copy
             per call, only when donating).
+        force_params : Optional[ForceParams]
+            ``G`` and the softening squared of the self-gravity
+            (:class:`~jaccpot.runtime.fused_topology.ForceParams`); ``None`` takes
+            the solver's. Python floats are compile-time literals (the solver's own
+            values give the default program); arrays are TRACED, cast to the
+            working dtype and passed to the compiled scan after its other
+            arguments: one compile for every value. The walk is the solver's
+            either way: under a compact softening kernel an ``eps2`` beyond the
+            softening its separation floor covers is refused (``OVERFLOW_PARAMS``,
+            :meth:`FusedForceProvider.params_overflow`), and
+            ``mac_type='dehnen_error'`` takes the solver's own only.
+        external_params : Any
+            Parameters of the external field (any pytree). Given, the field is
+            called as ``external_acceleration_fn(state, external_params)`` -- the
+            arrays among them traced like ``dt``, the Python numbers literals --
+            instead of ``external_acceleration_fn(state)``. Needs ``add_external``
+            and ``external_acceleration_fn``.
 
         Returns
         -------
@@ -771,14 +792,21 @@ class StrictRunMixin(_EngineBase):
             If ``num_steps`` is not positive, or ``refresh_every`` is not 1; if
             ``carry="particles"`` is asked of a lane that cannot rebuild the state
             from its shapes (bucket leaves, or a far list read from the carry), or
-            a :class:`StrictParticleCarry` comes without it; or if
-            ``donate_state`` is asked without ``carry="particles"``.
+            a :class:`StrictParticleCarry` comes without it; if
+            ``donate_state`` is asked without ``carry="particles"``; if
+            ``force_params`` are refused (``mac_type='dehnen_error'``) or beyond
+            the walk's softening; or if ``external_params`` come without an
+            external field.
         """
         from jaccpot.runtime.strict_carry import StrictParticleCarry
 
         state_arr = jnp.asarray(state)
         masses_arr = jnp.asarray(masses)
-        dt_arr = jnp.asarray(float(dt), dtype=state_arr.dtype)
+        # A Python timestep is a closure constant of the scan (a literal of its
+        # program); an array is one of its arguments (``step_params`` below), cast
+        # to the state's dtype and never closed over
+        dt_static = _is_static(dt)
+        dt_arr = jnp.asarray(float(dt), dtype=state_arr.dtype) if dt_static else None
         num_steps_i = int(num_steps)
         carry_mode = (
             env_choice("JACCPOT_STRICT_CARRY", "state", ("state", "particles"))
@@ -791,6 +819,13 @@ class StrictRunMixin(_EngineBase):
             raise ValueError(
                 "donate_state needs carry='particles' (the state carry donates its "
                 "prepared state instead: donate_prepared_state)"
+            )
+        if external_params is not None and not (
+            bool(add_external) and external_acceleration_fn is not None
+        ):
+            raise ValueError(
+                "external_params needs add_external=True and an "
+                "external_acceleration_fn(state, external_params)"
             )
         if carry_mode == "particles":
             # before any work: the particle carry rebuilds from shapes alone
@@ -825,7 +860,8 @@ class StrictRunMixin(_EngineBase):
         profile_key = (
             f"n={int(state_arr.shape[0])}|leaf={int(leaf_size)}|"
             f"order={int(max_order)}|refresh=1|"
-            f"dt={float(dt):.12g}|external={int(bool(add_external))}|"
+            f"dt={f'{float(dt):.12g}' if dt_static else 'traced'}|"
+            f"external={int(bool(add_external))}|"
             f"theta={float(self.theta if theta is None else theta):.12g}"
         )
         if profile_key in self._strict_v2_seen_profile_keys:
@@ -903,6 +939,71 @@ class StrictRunMixin(_EngineBase):
             else 0
         )
 
+        # The step's parameters. ``None`` (Python dt, the solver's own G and
+        # softening, a one-argument external field) keeps every program as it
+        # was: literals, no extra argument. Otherwise they ride in one
+        # ``StepParams`` argument after the others -- Python numbers as aux data
+        # (literals, part of the compile key), arrays as its traced leaves.
+        force_resolved: Optional[ForceParams] = None
+        if force_params is not None:
+            # checked before any work: refused under the criterion, or beyond the
+            # softening the walk is built for
+            force_resolved = FusedForceProvider(
+                self, leaf_size=int(leaf_size), max_order=int(max_order), theta=theta
+            ).resolve_params(force_params)
+        step_params: Optional[StepParams] = None
+        if force_resolved is not None or not dt_static or external_params is not None:
+            step_params = StepParams(
+                force=(
+                    ForceParams(G=float(self.G), eps2=float(self.softening) ** 2)
+                    if force_resolved is None
+                    else force_resolved
+                ),
+                dt=float(dt) if dt_static else jnp.asarray(dt, state_arr.dtype),
+                external=external_params,
+            )
+        # the integrator's part of the compile keys: the literal dt, or the
+        # parameters' structure (their literals, not their traced values)
+        dt_key: Any = (
+            float(dt)
+            if step_params is None
+            else (
+                jax.tree_util.tree_structure(step_params),
+                tuple(
+                    (jnp.shape(x), jnp.result_type(x).name)
+                    for x in jax.tree_util.tree_leaves(step_params)
+                ),
+            )
+        )
+        params_args: tuple = () if step_params is None else (step_params,)
+        two_arg_external = external_params is not None
+        # what a particle carry's handle records its self-gravity was computed with
+        force_key: Optional[tuple] = (
+            None
+            if force_resolved is None
+            else (
+                float(np.asarray(force_resolved.G)),
+                float(np.asarray(force_resolved.eps2)),
+            )
+        )
+
+        def _dt(params: Optional[StepParams]) -> Array:
+            # the step's timestep: the closure literal, or the traced argument
+            if params is None or _is_static(params.dt):
+                assert dt_arr is not None
+                return dt_arr
+            return params.dt
+
+        def _external(state_rows: Array, params: Optional[StepParams]) -> Array:
+            assert external_acceleration_fn is not None
+            if two_arg_external:
+                assert params is not None
+                return external_acceleration_fn(state_rows, params.external)
+            return external_acceleration_fn(state_rows)
+
+        def _force(params: Optional[StepParams]) -> Optional[ForceParams]:
+            return None if params is None else params.force
+
         runtime_overrides = self._resolve_runtime_execution_overrides(
             num_particles=int(state_arr.shape[0])
         )
@@ -953,7 +1054,21 @@ class StrictRunMixin(_EngineBase):
                 runtime_overrides=runtime_overrides,
             )
 
-        def _evaluate_self(prepared_in: PreparedStateLike, state_in: Array) -> Array:
+        if force_resolved is not None and int(prov.params_overflow(force_resolved)):
+            raise ValueError(
+                f"force_params eps2={force_resolved.eps2} is beyond the softening the "
+                f"walk is built for (eps2 <= {prov.walk_eps2()}, the "
+                f"{getattr(self, 'softening_kernel', 'plummer')} kernel's support at "
+                "the solver's separation floor): the far field would take pairs "
+                "inside the kernel's support unsoftened (OVERFLOW_PARAMS). Build the "
+                "solver with the largest softening the run uses."
+            )
+
+        def _evaluate_self(
+            prepared_in: PreparedStateLike,
+            state_in: Array,
+            params: Optional[StepParams] = None,
+        ) -> Array:
             if not self_eval_active:
                 return jnp.zeros_like(state_in[:, 0, :])
             if eval_diag_mode == "permutation_only":
@@ -962,19 +1077,25 @@ class StrictRunMixin(_EngineBase):
                 ] * jnp.asarray(0.0, dtype=state_in.dtype)
             # the provider states the large-N requirement where it relies on it
             return jnp.asarray(
-                prov.accelerations(FusedTopology.from_prepared(prepared_in)),
+                prov.accelerations(
+                    FusedTopology.from_prepared(prepared_in), _force(params)
+                ),
                 dtype=state_in.dtype,
             )
 
         def _evaluate_self_scaled(
-            prepared_in: PreparedStateLike, state_in: Array
+            prepared_in: PreparedStateLike,
+            state_in: Array,
+            params: Optional[StepParams] = None,
         ) -> tuple[Array, Optional[Array]]:
             # `_evaluate_self`, plus eq (16b)'s f_b (input order) when the scan
             # carries it; the same single evaluation, the force bitwise unchanged
             if not scale_carry:
-                return _evaluate_self(prepared_in, state_in), None
+                return _evaluate_self(prepared_in, state_in, params), None
             acc, scale = prov.accelerations(
-                FusedTopology.from_prepared(prepared_in), force_scale=True
+                FusedTopology.from_prepared(prepared_in),
+                _force(params),
+                force_scale=True,
             )
             return (
                 jnp.asarray(acc, dtype=state_in.dtype),
@@ -996,7 +1117,11 @@ class StrictRunMixin(_EngineBase):
         acceleration_self_current: Optional[Array]
         if not self_eval_active:
             acceleration_self_current = jnp.zeros_like(state_arr[:, 0, :])
-        elif initial_self_acceleration is None and handle_in is not None:
+        elif (
+            initial_self_acceleration is None
+            and handle_in is not None
+            and handle_in.force_key == force_key
+        ):
             acceleration_self_current = jnp.asarray(
                 handle_in.self_acceleration, dtype=state_arr.dtype
             )
@@ -1007,7 +1132,9 @@ class StrictRunMixin(_EngineBase):
             # allocation to fail from 1.36e8 particles on (a fragmented arena)
             acceleration_self_current = None
         elif initial_self_acceleration is None:
-            acceleration_self_current = _evaluate_self(prepared_curr, state_arr)
+            acceleration_self_current = _evaluate_self(
+                prepared_curr, state_arr, step_params
+            )
         else:
             acceleration_self_current = jnp.asarray(
                 initial_self_acceleration, dtype=state_arr.dtype
@@ -1018,7 +1145,7 @@ class StrictRunMixin(_EngineBase):
             acceleration_current = None
         elif add_external and external_acceleration_fn is not None:
             acceleration_current = acceleration_self_current + jnp.asarray(
-                external_acceleration_fn(state_arr), dtype=state_arr.dtype
+                _external(state_arr, step_params), dtype=state_arr.dtype
             )
         else:
             acceleration_current = acceleration_self_current
@@ -1028,6 +1155,7 @@ class StrictRunMixin(_EngineBase):
             state_position: Array,
             masses_in: Array,
             scale_in: Optional[Array] = None,
+            params: Optional[StepParams] = None,
         ) -> tuple[FusedTopology, Array, Optional[Array]]:
             # the step's topology at the drifted positions (rebuilt from
             # ``prepared_in``'s shapes; the state carry passes its carry, the
@@ -1047,7 +1175,7 @@ class StrictRunMixin(_EngineBase):
                     force_scale=scale_in if scale_carry else None,
                 )
             acc_self, scale_new = _evaluate_self_scaled(
-                topology.prepared, state_position
+                topology.prepared, state_position, params
             )
             return topology, acc_self, scale_new
 
@@ -1080,25 +1208,27 @@ class StrictRunMixin(_EngineBase):
             scan_x: Any,
             emit: bool = True,
             scale_now: Optional[Array] = None,
+            params: Optional[StepParams] = None,
         ) -> tuple[FusedTopology, Array, Array, Array, Optional[Array]]:
             # one velocity-Verlet step of the fused scan: drift, refresh + self
             # force at the new positions, kick; shared by both carries. The
             # step's verdict is the caller's, from the returned topology, after
             # the kick (where the scan has always folded it)
+            dt_now = _dt(params)
             position_new = (
                 state_now[:, 0]
-                + state_now[:, 1] * dt_arr
-                + 0.5 * acceleration_now * dt_arr**2
+                + state_now[:, 1] * dt_now
+                + 0.5 * acceleration_now * dt_now**2
             )
             state_position = state_now.at[:, 0].set(position_new)
             topology_new, acceleration_self_new, scale_new = (
                 _refresh_and_evaluate_endpoint(
-                    prepared_now, state_position, masses_in, scale_now
+                    prepared_now, state_position, masses_in, scale_now, params
                 )
             )
             if add_external and external_acceleration_fn is not None:
                 acceleration_new = acceleration_self_new + jnp.asarray(
-                    external_acceleration_fn(state_position),
+                    _external(state_position, params),
                     dtype=state_now.dtype,
                 )
             else:
@@ -1110,7 +1240,7 @@ class StrictRunMixin(_EngineBase):
                 state_position,
                 acceleration_now,
                 acceleration_new,
-                dt_arr,
+                dt_now,
             )
             if rematerialize_between_refresh:
                 state_new = jnp.asarray(state_new, dtype=state_now.dtype)
@@ -1153,13 +1283,15 @@ class StrictRunMixin(_EngineBase):
             acceleration_now: Array,
             masses_now: Array,
             ids_now: Array,
+            params: Optional[StepParams] = None,
         ) -> tuple[FusedTopology, Array, Array, Array, Array, Array]:
             # `_advance` with the rows in the carry's order; returns the state, the
             # accelerations, masses and input indices in the NEW tree order
+            dt_now = _dt(params)
             position_new = (
                 state_now[:, 0]
-                + state_now[:, 1] * dt_arr
-                + 0.5 * acceleration_now * dt_arr**2
+                + state_now[:, 1] * dt_now
+                + 0.5 * acceleration_now * dt_now**2
             )
             state_position = state_now.at[:, 0].set(position_new)
             topology_new = prov._rebuild_like(
@@ -1171,7 +1303,7 @@ class StrictRunMixin(_EngineBase):
                 prepared_new.tree.topology.particle_indices, dtype=INDEX_DTYPE
             )
             acceleration_self_new = jnp.asarray(
-                prov.accelerations(topology_new, order="tree"),
+                prov.accelerations(topology_new, _force(params), order="tree"),
                 dtype=state_now.dtype,
             )
             # The tree's own sorted positions and masses are this very gather
@@ -1199,7 +1331,7 @@ class StrictRunMixin(_EngineBase):
             ids_new = ids_now[perm]
             if add_external and external_acceleration_fn is not None:
                 acceleration_new = acceleration_self_new + jnp.asarray(
-                    external_acceleration_fn(state_sorted),
+                    _external(state_sorted, params),
                     dtype=state_now.dtype,
                 )
             else:
@@ -1208,7 +1340,7 @@ class StrictRunMixin(_EngineBase):
                 state_sorted,
                 acceleration_prev,
                 acceleration_new,
-                dt_arr,
+                dt_now,
             )
             if rematerialize_between_refresh:
                 state_new = jnp.asarray(state_new, dtype=state_now.dtype)
@@ -1245,7 +1377,7 @@ class StrictRunMixin(_EngineBase):
                 # the integrator's part of the compile keys; the provider's
                 # key() holds the force's
                 cache_parts=(
-                    float(dt),
+                    dt_key,
                     bool(add_external),
                     (
                         id(external_acceleration_fn)
@@ -1262,8 +1394,14 @@ class StrictRunMixin(_EngineBase):
                 emit_step=_emit_step if step_callback is not None else None,
                 initial_self_acceleration=initial_self_acceleration,
                 add_external=bool(add_external),
-                external_acceleration_fn=external_acceleration_fn,
+                external_acceleration_fn=(
+                    None
+                    if external_acceleration_fn is None
+                    else partial(_external, params=step_params)
+                ),
                 donate_state=bool(donate_state),
+                step_params=step_params,
+                force_key=force_key,
             )
         else:
             from jaccpot.runtime.fused_topology import NEEDS_FIELDS
@@ -1282,7 +1420,7 @@ class StrictRunMixin(_EngineBase):
                     str(state_arr.dtype),
                     tuple(int(v) for v in masses_arr.shape),
                     str(masses_arr.dtype),
-                    float(dt),
+                    dt_key,
                     num_steps_i,
                     bool(add_external),
                     (
@@ -1318,6 +1456,7 @@ class StrictRunMixin(_EngineBase):
                     acceleration_initial: Array,
                     masses_in: Array,
                     scale_initial: Optional[Array] = None,
+                    params_in: Optional[StepParams] = None,
                 ) -> tuple[
                     tuple[
                         LargeNPreparedState, Array, Array, Array, Array, Optional[Array]
@@ -1341,6 +1480,7 @@ class StrictRunMixin(_EngineBase):
                                 masses_in,
                                 scan_x,
                                 scale_now=scale_now,
+                                params=params_in,
                             )
                         )
                         capacity_ok_new = capacity_ok_now & (
@@ -1443,6 +1583,7 @@ class StrictRunMixin(_EngineBase):
                     jnp.asarray(acceleration_current, dtype=state_arr.dtype),
                     masses_arr,
                     scale_curr,
+                    *params_args,
                 )
                 del prepared_in
                 self._strict_static_target_block_capacity_ok = bool(
@@ -1481,10 +1622,12 @@ class StrictRunMixin(_EngineBase):
                 # the starting force from the state the segment now starts from
                 # (the same field when the caller's state matched its positions)
                 if initial_self_acceleration is None:
-                    acceleration_current = _evaluate_self(prepared_curr, state_arr)
+                    acceleration_current = _evaluate_self(
+                        prepared_curr, state_arr, step_params
+                    )
                     if add_external and external_acceleration_fn is not None:
                         acceleration_current = acceleration_current + jnp.asarray(
-                            external_acceleration_fn(state_arr),
+                            _external(state_arr, step_params),
                             dtype=state_arr.dtype,
                         )
                 self._strict_fused_fallback_count += 1
@@ -1526,6 +1669,8 @@ class StrictRunMixin(_EngineBase):
         external_acceleration_fn: Optional[Callable[[Array], Array]],
         donate_state: bool,
         advance_tree: Optional[Callable[..., Any]] = None,
+        step_params: Optional[StepParams] = None,
+        force_key: Optional[tuple] = None,
     ) -> tuple[Array, Any, Optional[Array]]:
         """The fused scan of ``strict_run_v2(carry="particles")``.
 
@@ -1598,7 +1743,7 @@ class StrictRunMixin(_EngineBase):
         add_external : bool
             Whether an external field is added.
         external_acceleration_fn : Optional[Callable[[Array], Array]]
-            The external field.
+            The external field at the start state (its parameters bound).
         donate_state : bool
             Hand ``state_arr``'s buffer to the scan (``strict_run_v2``'s
             ``donate_state``).
@@ -1607,6 +1752,13 @@ class StrictRunMixin(_EngineBase):
             carries the rows in tree order with their masses and input indices
             (``advance`` is then unused), and the final state and self-gravity
             are put back into input order once, after the scan.
+        step_params : Optional[StepParams]
+            ``strict_run_v2``'s traced step parameters: the last argument of the
+            start program and of the scan, after the donated ones; ``None`` adds
+            none.
+        force_key : Optional[tuple]
+            The call's force parameters as host floats (``None``: the solver's
+            own), recorded on the returned handle.
 
         Returns
         -------
@@ -1667,6 +1819,7 @@ class StrictRunMixin(_EngineBase):
                 ok_initial: Array,
                 needs_initial: Array,
                 scale_initial: Optional[Array] = None,
+                params_in: Optional[StepParams] = None,
             ) -> tuple[
                 tuple[Array, Array, Array, Array, Array, Optional[Array]],
                 Optional[Array],
@@ -1689,6 +1842,7 @@ class StrictRunMixin(_EngineBase):
                             acc_now,
                             carry[7],
                             carry[8],
+                            params=params_in,
                         )
                         tree_rows: tuple = (masses_new, ids_new)
                         scale_new = scale_now  # never both (see tree_order)
@@ -1702,6 +1856,7 @@ class StrictRunMixin(_EngineBase):
                                 scan_x,
                                 emit=False,
                                 scale_now=scale_now,
+                                params=params_in,
                             )
                         )
                         tree_rows = ()
@@ -1776,6 +1931,7 @@ class StrictRunMixin(_EngineBase):
                 masses_in: Array,
                 ok_initial: Array,
                 scale_initial: Optional[Array] = None,
+                params_in: Optional[StepParams] = None,
             ) -> tuple[
                 tuple[Array, Array, Array, Array, Array, Optional[Array]],
                 Optional[Array],
@@ -1789,6 +1945,7 @@ class StrictRunMixin(_EngineBase):
                     ok_initial,
                     jnp.zeros((len(NEEDS_FIELDS),), jnp.int32),
                     scale_initial,
+                    params_in,
                 )
 
             jit_cache[cache_key] = _compiled_runner
@@ -1820,12 +1977,14 @@ class StrictRunMixin(_EngineBase):
                 masses_in: Array,
                 ok_initial: Array,
                 scale_initial: Optional[Array] = None,
+                params_in: Optional[StepParams] = None,
             ) -> tuple[Array, Array, Array, Optional[Array]]:
                 topology0, acc_self0, scale0 = refresh_evaluate(
                     prov_i.like(),
                     state_initial,
                     masses_in,
                     scale_initial,
+                    params_in,
                 )
                 ok0 = ok_initial & prov_i.capacity_ok(topology0)
                 needs0 = jnp.maximum(
@@ -1839,6 +1998,7 @@ class StrictRunMixin(_EngineBase):
             return _compiled_runner_start
 
         external_active = bool(add_external) and external_acceleration_fn is not None
+        params_args: tuple = () if step_params is None else (step_params,)
         # the self-gravity is this call's own (evaluated here, or zeros) unless it
         # came from the caller or from the handle: only then may it be donated
         self_owned = handle_in is None and initial_self_acceleration is None
@@ -1904,7 +2064,7 @@ class StrictRunMixin(_EngineBase):
             if in_scan_force:
                 acc_self_now, ok_initial, walk_needs, scale_now = _start_force_for(
                     prov_i
-                )(state_now, masses_arr, ok_initial, scale_now)
+                )(state_now, masses_arr, ok_initial, scale_now, *params_args)
                 acc_self_owned = True
                 if not bool(np.asarray(jax.device_get(ok_initial))):
                     # the start itself overflows: no scan, straight to a retry
@@ -1930,7 +2090,7 @@ class StrictRunMixin(_EngineBase):
                     done,
                     scale_out,
                 ), history_out = runner(
-                    state_now, acc0, masses_arr, ok_initial, scale_now
+                    state_now, acc0, masses_arr, ok_initial, scale_now, *params_args
                 )
                 del acc0
             self._strict_static_target_block_capacity_ok = bool(
@@ -1943,6 +2103,7 @@ class StrictRunMixin(_EngineBase):
                     num_particles=int(state_arr.shape[0]),
                     force_scale=scale_out,
                     provider=prov_i,
+                    force_key=force_key,
                 )
                 return state_out, handle, history_out
             needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
@@ -1969,7 +2130,7 @@ class StrictRunMixin(_EngineBase):
             elif acc_self_now is None:
                 # consumed by the failed segment: the same self-gravity
                 # again, from the same positions
-                acc_self_now = evaluate_self(prepared, state_now)
+                acc_self_now = evaluate_self(prepared, state_now, step_params)
             prov_i.template_or_raise()
             if scale_carry and force_scale_seed is not None:
                 # the re-prepare's own eq (16b) prepass at the segment's start
@@ -1994,6 +2155,7 @@ class StrictRunMixin(_EngineBase):
         theta: Optional[float] = None,
         bounds: Optional[tuple[Array, Array]] = None,
         donate_prepared: bool = False,
+        force_params: Optional[ForceParams] = None,
     ) -> tuple[PreparedStateLike, Callable[[PreparedStateLike], Array]]:
         """Build a fused-lane prepared state and return a jitted eval-only closure.
 
@@ -2031,6 +2193,10 @@ class StrictRunMixin(_EngineBase):
             the state's buffers for its temporaries. ``eval_fn`` then CONSUMES the
             state: one call per state. Off by default -- the seam exists to time
             repeated calls on one state.
+        force_params : Optional[ForceParams]
+            As in :meth:`strict_run_v2`: ``None`` (or the solver's own floats) is
+            the default program; arrays are arguments of ``eval_fn``'s program,
+            bound to the values given here.
 
         Returns
         -------
@@ -2045,6 +2211,9 @@ class StrictRunMixin(_EngineBase):
         RuntimeError
             If the profile is not large-N production, or the particle count is not
             in ``JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET``.
+        ValueError
+            If ``force_params`` are refused or beyond the walk's softening (as in
+            :meth:`strict_run_v2`).
         """
         positions_arr = jnp.asarray(positions)
         masses_arr = jnp.asarray(masses)
@@ -2086,6 +2255,27 @@ class StrictRunMixin(_EngineBase):
             self._topology_reuse_entry = None
             self._prepared_state_cache_value = None
             self._prepared_state_cache_key = None
+
+        force = prov.resolve_params(force_params)
+        if force is not None and int(prov.params_overflow(force)):
+            raise ValueError(
+                f"force_params eps2={force.eps2} is beyond the softening the walk "
+                f"is built for (eps2 <= {prov.walk_eps2()}; OVERFLOW_PARAMS)"
+            )
+        if force is not None:
+            # the parameters are an argument of the program, bound to this call's
+            # values: one compile for any of them
+            @partial(jax.jit, donate_argnums=(0,) if donate_prepared else ())
+            def _eval_params(
+                prepared_in: LargeNPreparedState, params_in: ForceParams
+            ) -> Array:
+                return jnp.asarray(
+                    prov.accelerations(
+                        FusedTopology.from_prepared(prepared_in), params_in
+                    )
+                )
+
+            return prepared, partial(_eval_params, params_in=force)
 
         # the provider's evaluation of the state as it stands: no rebuild
         @partial(jax.jit, donate_argnums=(0,) if donate_prepared else ())
