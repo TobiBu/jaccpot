@@ -17,16 +17,29 @@ partition, the pure-JAX near field), each bitwise:
 * R9: donating the input changes no number, and consumes the input only when asked;
 * a callback stops the run after its edge, and a run continued from the
   :class:`~jaccpot.production.RunResult` finishes it as the straight run does;
+* R5: 2 segments, a restart file, 4 more segments in a FRESH process (a child that
+  imports this module) are the 6 segments of the straight run -- geometric MAC,
+  ``dehnen_error`` (CSR near field in interpret mode), an external field with traced
+  parameters, traced force parameters -- and a restore whose configuration differs
+  says so;
 * R6 through the runner: a tree that outgrows its leaf capacity in the SECOND
   segment (``test_strict_runners_on_provider.py``'s drift into four blobs, the CSR
   near field in interpret mode) is re-planned at that segment's start -- from the
   handle, the donated state's host copy -- and the run equals ONE
   ``strict_run_v2`` call that re-planned at its own start.
+
+``jax.default_backend`` reports ``"gpu"``, as
+``tests/characterization/test_lane_goldens.py`` does.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
+import os
+import subprocess
+import sys
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -40,6 +53,7 @@ from jaccpot.production import (
     RunResult,
     SegmentConfig,
     SnapshotWriter,
+    load_restart,
     segment_lengths,
 )
 from tests.integration.strict import test_strict_runners_on_provider as r6
@@ -353,6 +367,8 @@ def test_segment_config_is_checked():
         SegmentConfig(steps=0)
     with pytest.raises(ValueError, match="unknown diagnostics"):
         SegmentConfig(diagnostics=("momentum", "virial"))
+    with pytest.raises(ValueError, match="restart_path"):
+        SegmentConfig(restart_every=2)
     with pytest.raises(ValueError, match="particles"):
         ProductionRunner(None, settings=dataclasses.replace(SETTINGS, carry="state"))
     with pytest.raises(TypeError, match="RunResult"):
@@ -360,6 +376,158 @@ def test_segment_config_is_checked():
             dt=DT, num_steps=1, restart_from=object()
         )
     assert isinstance(RunResult, type)
+
+
+# --------------------------------------------------------------------------
+# R5: a restart in a fresh process continues the run bitwise.
+# --------------------------------------------------------------------------
+
+#: the CSR near field in interpret mode: dehnen_error's force scale needs it
+_CSR_ON_CPU = {
+    "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
+    "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    "JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_MAX_MB": "0",
+}
+_RESTART_VARIANTS = ("geometric", "dehnen_error", "external", "traced")
+
+
+def _restart_solver(variant):
+    if variant != "dehnen_error":
+        return _solver()
+    from jaccpot import FastMultipoleMethod
+    from jaccpot.config import FMMAdvancedConfig, NearFieldConfig, TreeConfig
+
+    return FastMultipoleMethod(
+        preset="large_n_gpu",
+        basis="real",
+        theta=THETA,
+        G=1.0,
+        softening=SOFTENING,
+        working_dtype=jnp.float32,
+        use_pallas=True,
+        adaptive_eps=1e-5,
+        adaptive_error_model="dehnen_paper",
+        mac_force_scale_mode="paper_fb",
+        advanced=FMMAdvancedConfig(
+            tree=TreeConfig(
+                mode="static_radix",
+                leaf_target=LEAF,
+                leaf_partition="cells",
+                leaf_capacity=1024,
+            ),
+            nearfield=NearFieldConfig(mode="auto"),
+            mac_type="dehnen_error",
+        ),
+        fixed_order=ORDER,
+    )
+
+
+def _restart_runner(variant, **segment):
+    """The variant's runner: 2-step segments, diagnostics every edge."""
+    config = SegmentConfig(
+        steps=2, traced_params=variant in ("external", "traced"), **segment
+    )
+    return ProductionRunner(
+        _restart_solver(variant),
+        settings=SETTINGS,
+        segment=config,
+        external_acceleration_fn=nfw_halo_params if variant == "external" else None,
+    )
+
+
+def _restart_params(variant):
+    return {"m": HALO_M, "rs": HALO_RS} if variant == "external" else None
+
+
+def _resume(variant, path, out):
+    """The fresh process: continue ``path`` to step 12; save what it computed."""
+    jax.config.update("jax_enable_x64", True)
+    jax.default_backend = lambda: "gpu"  # as the _lane fixture
+    if variant == "dehnen_error":
+        os.environ.update(_CSR_ON_CPU)
+    runner = _restart_runner(variant)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = runner.run(
+            dt=DT,
+            num_steps=12,
+            restart_from=path,
+            external_params=_restart_params(variant),
+        )
+    np.savez(
+        out,
+        state=np.asarray(res.state),
+        self_acceleration=np.asarray(res.handle.self_acceleration),
+        steps=np.asarray([e.step for e in res.edges]),
+        restored=np.asarray(json.dumps(res.restored)),
+        warned=np.asarray(json.dumps([str(w.message) for w in caught])),
+    )
+
+
+@pytest.mark.parametrize("variant", _RESTART_VARIANTS)
+def test_a_restart_in_a_fresh_process_continues_bitwise(variant, tmp_path, monkeypatch):
+    """R5: 6 segments straight (writing a restart after each) against 2 of them, the
+    restart file, and 4 more segments in a fresh process: the same state and
+    self-gravity, bit for bit, with the restore's digests matching."""
+    if variant == "dehnen_error":
+        for key, val in _CSR_ON_CPU.items():
+            monkeypatch.setenv(key, val)
+    state, masses = _system()
+    runner = _restart_runner(
+        variant, restart_every=1, restart_path=str(tmp_path / "restart_{segment}.npz")
+    )
+    straight = runner.run(
+        state, masses, dt=DT, num_steps=12, external_params=_restart_params(variant)
+    )
+    assert len(straight.restarts) == 6
+    path = tmp_path / "restart_2.npz"
+    arrays, meta = load_restart(path)
+    expected = {"state", "masses", "self_acceleration"}
+    expected |= {"force_scale"} if variant == "dehnen_error" else set()
+    expected |= {"acceleration"} if variant == "external" else set()
+    assert set(arrays) == expected
+    assert meta["counters"]["step"] == 4 and meta["counters"]["segment"] == 2
+    assert meta["baselines"] == straight.baselines
+    out = tmp_path / "resumed.npz"
+    # the module by its own name, so the field is the same function by name
+    child = f"import {__name__} as m; m._resume(*{[variant, str(path), str(out)]!r})"
+    proc = subprocess.run(
+        [sys.executable, "-c", child],
+        env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)),
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    with np.load(out) as got:
+        restored = json.loads(str(got["restored"]))
+        assert restored["bitwise"], (restored, str(got["warned"]))
+        assert json.loads(str(got["warned"])) == []
+        assert got["steps"].tolist() == [6, 8, 10, 12]
+        assert np.array_equal(got["state"], np.asarray(straight.state))
+        assert np.array_equal(
+            got["self_acceleration"], np.asarray(straight.handle.self_acceleration)
+        )
+
+
+def test_a_restore_says_when_it_cannot_be_bitwise(tmp_path):
+    """A restore in this process with the run's own configuration matches its
+    digests; with another dt it warns and records why (and still continues)."""
+    state, masses = _system()
+    path = tmp_path / "restart.npz"
+    first = _runner(_static(steps=2, restart_every=2, restart_path=str(path))).run(
+        state, masses, dt=DT, num_steps=4
+    )
+    assert first.restarts == [str(path)]
+    # num_steps reached already: the restore alone, no segment
+    same = _runner(_static(steps=2)).run(dt=DT, num_steps=4, restart_from=path)
+    assert same.restored["bitwise"] and same.restored["mismatches"] == []
+    assert np.array_equal(np.asarray(same.state), np.asarray(first.state))
+    with pytest.warns(UserWarning, match="not bitwise"):
+        other = _runner(_static(steps=2)).run(dt=2 * DT, num_steps=4, restart_from=path)
+    assert other.restored["mismatches"] == ["dt"]
+    with pytest.raises(RuntimeError, match="has done a segment"):
+        _runner(_static(steps=2)).save_restart(tmp_path / "nothing.npz")
 
 
 # --------------------------------------------------------------------------
