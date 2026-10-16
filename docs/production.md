@@ -27,10 +27,15 @@ def halo(state, p):          # module level: ONE function object for the whole r
     r = jnp.sqrt(jnp.sum(x * x, axis=1, keepdims=True))
     return -p["gm"] * x / (r * (r + p["rs"]) ** 2)   # a Hernquist halo
 
+def halo_potential(state, p):   # its potential per unit mass, for the energy
+    r = jnp.sqrt(jnp.sum(state[:, 0] ** 2, axis=1))
+    return -p["gm"] / (r + p["rs"])
+
 runner = ProductionRunner(
     solver,
     segment=SegmentConfig(steps=50, restart_every=4, restart_path="run/restart.npz"),
     external_acceleration_fn=halo,
+    external_potential_fn=halo_potential,
     callbacks=(SnapshotWriter("run/snapshots", every=2), DiagnosticsLog("run/diag.jsonl")),
 )
 res = runner.run(state, masses, dt=5e-4, num_steps=500,
@@ -109,9 +114,23 @@ fetched to the host), against step 0's baselines (`RunResult.baselines`):
 | `angular_momentum`, `angular_momentum_drift` | `L = sum m x x v`; `|L - L0| / |L0|` |
 | `com`, `com_drift` | `sum m x / M`; `|COM - COM0 - P0/M (t - t0)|` (against its free motion) |
 | `kinetic`, `kinetic_change` | `K = 1/2 sum m v^2`; `(K - K0) / K0` |
-| `potential`, `energy`, `energy_drift` | **`None` until S3 session 2**: the energy needs an O(N) potential the fused lane does not have yet (the generic potential path ran out of memory at 25M) |
+| `potential_self`, `potential_external`, `potential` | `W_self = 1/2 sum m phi` (the fused lane's O(N) potential at the edge's positions), `W_ext = sum m Phi_ext` (`external_potential_fn`; 0 without), `W = W_self + W_ext` |
+| `energy`, `energy_drift`, `energy_ok` | `E = K + W`; `(E - E0) / |E0|`; whether the potential's rebuild fitted its capacities (otherwise the energy fields are `None`) |
 
 An external field changes P and L physically; the drifts then measure that.
+
+**The energy** is due at every `diagnostics_every_energy`-th edge (10; the user's
+cadence: the moments are nearly free, the energy costs a force evaluation). Its program -- the topology rebuilt at the edge's positions from the handle's
+provider, `FusedForceProvider.potential`, the external potential, the sums in fp64 -- is
+compiled once per plan and costs about one force evaluation (1.1x at 25M and 1e8 on an
+A100). Step 0's `E0` needs a provider, so the runner keeps step 0's state (the caller's
+array, or a host copy when `donate_input` consumes it) and evaluates it at the first
+diagnostics edge after a segment: the step-0 row's energy fields are `None`, and
+`RunResult.baselines` holds `energy` and `potential`. `external_potential_fn(state[,
+external_params]) -> [N]` is the field's potential per unit mass, with the field's
+contract and parameters. The energy program's trace leaves the engine's trace-time state
+as it was (`_trace_state_kept`), so the trajectory with it is the one without (R4,
+bitwise).
 
 ## Restart files
 
@@ -147,7 +166,7 @@ bitwise.
 | R2 | an NFW field across edges, one-argument and traced parameters (CPU, pure-JAX near field) | bitwise with the carried total; without it 1 of 3072 components differs (1.9e-6) |
 | R1x | S1x's disc + NFW through the runner, chained vs one segment of 13 (A100, 2e5) | bitwise (and bitwise the plain chained S1x: on this card the eager field matched the fused one) |
 | R3 | runner (traced) vs `strict_run_v2` (traced), CPU | bitwise |
-| R4 | diagnostics on vs off, CPU | bitwise |
+| R4 | diagnostics on vs off, CPU; with the energy at every edge (S3 session 2), and with an NFW field and its potential, traced parameters | bitwise, the same scan programs; `W_self` within 1e-3 of the fp64 direct sum, `W_ext` within 1e-6 |
 | R5 | restart in a fresh process: geometric, `dehnen_error`, external (traced parameters), traced (CPU) | bitwise, digests matched |
 | R1r | R1p with a restart at step 5, resumed in a fresh process without the eval prepare (A100, 2e5) | bitwise, digests matched (file 8,005,201 B) |
 | R9 | `donate_input` on vs off, CPU | bitwise; one scan program with it, two without |

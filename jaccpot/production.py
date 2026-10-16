@@ -19,8 +19,8 @@ an external field is evaluated again outside the scan at every edge, 1.9e-6 on o
 of 3072 components at N = 512) -- and every memory optimisation of the scan, its
 segment retry and its re-plan come with it. Between segments, on the host: the
 diagnostics (momentum, angular momentum, centre of mass and kinetic energy, fp64
-reductions on device; the energy needs the fast-lane potential, S3 session 2),
-callbacks (:class:`SnapshotWriter`, :class:`DiagnosticsLog`, or any callable; one
+reductions on device; at every ``diagnostics_every_energy``-th edge also the total
+energy, from the fused lane's O(N) potential), callbacks (:class:`SnapshotWriter`, :class:`DiagnosticsLog`, or any callable; one
 returning ``True`` stops the run after that edge) and restart files.
 
 SEGMENT LENGTHS. ``num_steps`` is part of a scan's compile key, so every distinct
@@ -48,6 +48,7 @@ The module imports nothing heavy at import time (``jaccpot.solver`` imports it).
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -55,7 +56,7 @@ import os
 import time
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Sequence, Union
+from typing import Any, Callable, Iterator, Literal, Optional, Sequence, Union
 
 import numpy as np
 
@@ -166,12 +167,13 @@ class SegmentConfig:
         step 0, every ``diagnostics_every``-th segment edge and the last one; ``0``
         turns the diagnostics off.
     diagnostics : tuple
-        Which to report, of :data:`DIAGNOSTICS`. ``"energy"`` (the potential and
-        total energy, every ``diagnostics_every_energy``-th edge) needs the
-        fast-lane potential of S3 session 2: until then its fields are ``None``.
+        Which to report, of :data:`DIAGNOSTICS`. ``"energy"``: the potential
+        energies of the self-gravity and the external field and the total energy,
+        at every ``diagnostics_every_energy``-th edge
+        (:meth:`ProductionRunner.potential_energy`).
     diagnostics_every_energy : int
         Segment edges between energy diagnostics (the potential program costs about
-        one step).
+        one force evaluation, 1.1x at 25M and 1e8); ``0`` turns the energy off.
     restart_every : int
         Write a restart file every ``restart_every`` segments (``0``: never).
     restart_path : Optional[str]
@@ -231,8 +233,8 @@ class SegmentEdge:
     self_acceleration : Any
         ``[N, 3]`` self-gravity at ``state`` (``None`` at step 0).
     diagnostics : Optional[dict]
-        The moments and their drifts against step 0 (:class:`ProductionRunner`),
-        or ``None`` on an edge without diagnostics.
+        The moments and their drifts against step 0 and, when due, the energy
+        (:class:`ProductionRunner`), or ``None`` on an edge without diagnostics.
     plan : dict
         The plan the segment ran with: leaf capacity, validated walk caps, level
         registry, depth bound, force key.
@@ -432,8 +434,8 @@ def _baselines(moments: dict, time_now: float) -> dict:
     -------
     dict
         ``time``, ``mass``, ``momentum``, ``angular_momentum``, ``com``,
-        ``kinetic``, ``momentum_scale`` and ``energy`` (``None`` until the
-        potential exists).
+        ``kinetic``, ``momentum_scale``, and ``energy`` / ``potential`` (``None``
+        until step 0's potential is evaluated, after the first segment).
     """
     mass = float(moments["mass"])
     return {
@@ -445,18 +447,68 @@ def _baselines(moments: dict, time_now: float) -> dict:
         "kinetic": float(moments["kinetic"]),
         "momentum_scale": float(moments["momentum_scale"]),
         "energy": None,
+        "potential": None,
     }
 
 
+def _energy_fields(kinetic: float, potential: Optional[dict], base: dict) -> dict:
+    """The energy diagnostic's fields: ``W``, ``E = K + W`` and its drift.
+
+    Parameters
+    ----------
+    kinetic : float
+        ``K`` at the edge (fp64).
+    potential : Optional[dict]
+        :meth:`ProductionRunner.potential_energy` at the edge, or ``None`` when it
+        cannot be evaluated yet (step 0, before the first segment's provider).
+    base : dict
+        :func:`_baselines` (``energy``: ``E0``, or ``None``).
+
+    Returns
+    -------
+    dict
+        ``potential_self``, ``potential_external``, ``potential``, ``energy``,
+        ``energy_drift`` (``(E - E0) / |E0|``) and ``energy_ok`` (the potential's
+        rebuild fitted its capacities); ``None`` where unknown or not fitted.
+    """
+    fields: dict = dict(
+        potential_self=None,
+        potential_external=None,
+        potential=None,
+        energy=None,
+        energy_drift=None,
+        energy_ok=None if potential is None else bool(potential["ok"]),
+    )
+    if potential is None or not fields["energy_ok"]:
+        return fields
+    w = potential["self"] + potential["external"]
+    energy = float(kinetic) + w
+    e0 = base.get("energy")
+    fields.update(
+        potential_self=potential["self"],
+        potential_external=potential["external"],
+        potential=w,
+        energy=energy,
+        energy_drift=(energy - e0) / abs(e0) if e0 else None,
+    )
+    return fields
+
+
 def _diagnostics_row(
-    moments: dict, base: dict, time_now: float, names: Sequence, energy_due: bool
+    moments: dict,
+    base: dict,
+    time_now: float,
+    names: Sequence,
+    energy_due: bool,
+    potential: Optional[dict] = None,
 ) -> dict:
     """The diagnostics of one edge, against step 0's ``base``.
 
     Drifts: ``momentum_drift = |P - P0| / sum m |v|_0`` (a scale that is not ~0
     when P0 is); ``angular_momentum_drift = |L - L0| / |L0|``; ``com_drift = |COM
-    - COM0 - P0 / M (t - t0)|``, the centre of mass against its free motion; and
-    ``kinetic_change = (K - K0) / K0``. An external field changes P and L
+    - COM0 - P0 / M (t - t0)|``, the centre of mass against its free motion;
+    ``kinetic_change = (K - K0) / K0``; and with the energy ``energy_drift = (E -
+    E0) / |E0|`` (:func:`_energy_fields`). An external field changes P and L
     physically; the drifts then measure that, not an error.
 
     Parameters
@@ -471,6 +523,9 @@ def _diagnostics_row(
         The diagnostics to report (:data:`DIAGNOSTICS`).
     energy_due : bool
         Whether the energy diagnostic is due at this edge.
+    potential : Optional[dict]
+        The edge's potential energies (:meth:`ProductionRunner.potential_energy`),
+        when due and available.
 
     Returns
     -------
@@ -509,8 +564,7 @@ def _diagnostics_row(
             (kin - base["kinetic"]) / base["kinetic"] if base["kinetic"] else None
         )
     if "energy" in names and energy_due:
-        # the potential program is S3 session 2 (the fast-lane potential)
-        row.update(potential=None, energy=None, energy_drift=None)
+        row.update(_energy_fields(float(moments["kinetic"]), potential, base))
     return row
 
 
@@ -549,6 +603,49 @@ def _plan_record(engine: Any, handle: Any) -> dict:
         "upward_num_levels": getattr(engine, "_cells_upward_num_levels", None),
         "force_key": None if force_key is None else [float(v) for v in force_key],
     }
+
+
+@contextlib.contextmanager
+def _trace_state_kept(engine: Any) -> Iterator[None]:
+    """Leave the engine's trace-time state as it was, whatever runs inside.
+
+    Tracing a program that rebuilds a topology -- the energy diagnostic's -- runs
+    the rebuild's trace-time side effects on the engine (the walk's traced caps and
+    needs, the refresh side channels, the level stash) and on the level registry. A
+    LATER scan trace reads some of them (the second segment's donated program, a
+    remainder segment, a re-plan's), so a diagnostic must leave nothing behind:
+    with and without it the run is the same, bitwise (S3 R4). Every attribute of
+    the engine is put back, the objects and, for dicts, their contents; attributes
+    the trace added are removed; the level registry is restored.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine.
+
+    Yields
+    ------
+    None
+        Inside the block.
+    """
+    from jaccpot.runtime import _level_shapes
+
+    saved = dict(vars(engine))
+    contents = {k: dict(v) for k, v in saved.items() if isinstance(v, dict)}
+    registry = (dict(_level_shapes._WIDTHS), dict(_level_shapes._LEVELS))
+    try:
+        yield
+    finally:
+        for key in set(vars(engine)) - set(saved):
+            delattr(engine, key)
+        for key, value in saved.items():
+            setattr(engine, key, value)
+            if key in contents:
+                value.clear()
+                value.update(contents[key])
+        for live, kept in zip((_level_shapes._WIDTHS, _level_shapes._LEVELS), registry):
+            live.clear()
+            live.update(kept)
 
 
 def _jsonable(value: Any) -> Any:
@@ -919,8 +1016,11 @@ class ProductionRunner:
         state, positions only read). Keep ONE function object for the run: its
         identity is part of the compile keys.
     external_potential_fn : Optional[Callable[..., Any]]
-        The field's potential, for the energy diagnostic (S3 session 2; unused
-        until then).
+        The external field's potential per unit mass, for the energy diagnostic:
+        ``potential(state)`` or ``potential(state, external_params)`` -> ``[N]``,
+        the same contract and parameters as ``external_acceleration_fn`` (its
+        gradient is minus that field). ``None``: no external potential energy
+        (``W_ext = 0``; with a field, the energy then omits it).
     callbacks : Sequence[Callable[[SegmentEdge], Optional[bool]]]
         Host-side, at every edge, in order.
     step_callback : Optional[Callable[[Any, Any], None]]
@@ -932,6 +1032,19 @@ class ProductionRunner:
     ------
     ValueError
         If ``settings.carry`` is not ``"particles"``.
+
+    Notes
+    -----
+    THE ENERGY. ``E = K + W_self + W_ext``: ``K = 1/2 sum m v^2``, ``W_self = 1/2
+    sum m phi`` with the fused lane's potential at the edge's positions
+    (:meth:`potential_energy`: a rebuild there and ``FusedForceProvider.potential``,
+    in a program of its own, compiled once per plan) and ``W_ext = sum m Phi_ext``,
+    each summed in fp64 on device. Step 0's ``E0`` needs a provider, so it is
+    evaluated at the first diagnostics edge after a segment, from step 0's state
+    (kept: the caller's array, or a host copy when ``donate_input`` consumes it);
+    the step-0 edge reports its energy fields as ``None``. The energy program's
+    trace leaves the engine as it found it (:func:`_trace_state_kept`), so the
+    trajectory is the one without diagnostics, bitwise.
     """
 
     def __init__(
@@ -965,6 +1078,8 @@ class ProductionRunner:
         #: the run's position at its last edge (what save_restart writes)
         self._current: Optional[dict] = None
         self._last_restart: Optional[str] = None
+        #: the energy programs, by plan (potential_energy)
+        self._energy_programs: dict = {}
 
     # ------------------------------------------------------------------
     # The loop.
@@ -1093,20 +1208,42 @@ class ProductionRunner:
         names = tuple(self.segment.diagnostics)
         every = int(self.segment.diagnostics_every)
         every_energy = int(self.segment.diagnostics_every_energy)
+        energy_on = every > 0 and every_energy > 0 and "energy" in names
         edges: list = []
         restarts: list = []
         stopped = False
+        # step 0's state, for its potential once a provider exists (the first
+        # segment's): the caller's array, or a host copy when it is consumed
+        start_state: Any = None
 
         def diagnostics_at(step_now: int, state_in: Any, due: bool) -> Optional[dict]:
-            nonlocal baselines
+            nonlocal baselines, start_state
             if every == 0 or not due:
                 return None
             moments = _moments(state_in, masses_now)
             if baselines is None:
                 baselines = dict(_baselines(moments, time_at(step_now)), step=step_now)
             energy_due = every_energy > 0 and segment_done % every_energy == 0
+            potential = None
+            if energy_on and handle is not None:
+                if start_state is not None and baselines.get("energy") is None:
+                    start = self.potential_energy(
+                        jnp.asarray(start_state),
+                        masses_now,
+                        handle,
+                        external_params=external_arg,
+                    )
+                    if start["ok"]:
+                        w0 = start["self"] + start["external"]
+                        baselines["potential"] = w0
+                        baselines["energy"] = float(baselines["kinetic"]) + w0
+                start_state = None
+                if energy_due:
+                    potential = self.potential_energy(
+                        state_in, masses_now, handle, external_params=external_arg
+                    )
             return _diagnostics_row(
-                moments, baselines, time_at(step_now), names, energy_due
+                moments, baselines, time_at(step_now), names, energy_due, potential
             )
 
         def edge_at(retries: int, wall_s: float, due: bool) -> SegmentEdge:
@@ -1155,6 +1292,10 @@ class ProductionRunner:
             return stop
 
         if restart_from is None:
+            if energy_on:
+                start_state = (
+                    np.asarray(jax.device_get(state_now)) if owned else state_now
+                )
             stopped = at_edge(edge_at(0, 0.0, due=True))
         missing = max(0, int(num_steps) - step)
         lengths = () if stopped else segment_lengths(missing, self.segment.steps)
@@ -1226,6 +1367,92 @@ class ProductionRunner:
             # without a segment the state is still the one this call was given
             state_owned=owned or ran,
         )
+
+    # ------------------------------------------------------------------
+    # The energy.
+    # ------------------------------------------------------------------
+
+    def potential_energy(
+        self,
+        state: Any,
+        masses: Any,
+        handle: Any,
+        *,
+        external_params: Any = None,
+    ) -> dict:
+        """The potential energies at ``state``: ``1/2 sum m phi`` and ``sum m Phi_ext``.
+
+        One jitted program per plan (the handle's provider key, its force
+        parameters, the external potential): the topology rebuilt at ``state``'s
+        positions from the provider's template, ``FusedForceProvider.potential``
+        on it with the force parameters the handle's self-gravity was computed
+        with (as Python floats: the energy is a diagnostic, compiled once per run),
+        the external potential, and both sums in fp64 on device. Its trace leaves
+        the engine's trace-time state alone (:func:`_trace_state_kept`).
+
+        Parameters
+        ----------
+        state : Any
+            ``[N, 2, 3]``; positions only are read.
+        masses : Any
+            ``[N]``.
+        handle : Any
+            A :class:`~jaccpot.runtime.strict_carry.StrictParticleCarry` of this
+            run: its provider (template, plan), force parameters and, under
+            ``mac_type='dehnen_error'``, its force scale for the rebuild's
+            thresholds.
+        external_params : Any
+            The external potential's parameters, as the segments pass them.
+
+        Returns
+        -------
+        dict
+            Host values: ``self`` (fp64 ``W_self``), ``external`` (``W_ext``, ``0``
+            without ``external_potential_fn``) and ``ok`` (the rebuild fitted its
+            capacities; the energies are meaningless otherwise).
+        """
+        import jax
+        import jax.numpy as jnp
+
+        from jaccpot.runtime.fused_topology import ForceParams
+
+        prov = handle.provider
+        field = self.external_potential_fn
+        force_key = handle.force_key
+        params = (
+            None
+            if force_key is None
+            else ForceParams(G=float(force_key[0]), eps2=float(force_key[1]))
+        )
+        key = (prov.key(), force_key, None if field is None else id(field))
+        program = self._energy_programs.get(key)
+        if program is None:
+
+            def energy(
+                state_in: Any, masses_in: Any, scale_in: Any, external_in: Any
+            ) -> tuple:
+                topology = prov.rebuild(state_in[:, 0], masses_in, force_scale=scale_in)
+                phi = prov.potential(topology, params)
+                m = jnp.asarray(masses_in).astype(jnp.float64)
+                w_self = 0.5 * jnp.sum(m * phi.astype(jnp.float64))
+                if field is None:
+                    w_ext = jnp.zeros((), jnp.float64)
+                else:
+                    ext = (
+                        field(state_in)
+                        if external_in is None
+                        else field(state_in, external_in)
+                    )
+                    w_ext = jnp.sum(m * jnp.asarray(ext).astype(jnp.float64))
+                return w_self, w_ext, prov.capacity_ok(topology)
+
+            program = jax.jit(energy)
+            self._energy_programs[key] = program
+        scale = handle.force_scale if prov.scale_carry else None
+        with _trace_state_kept(self.engine):
+            out = program(state, masses, scale, external_params)
+        w_self, w_ext, ok = jax.device_get(out)
+        return {"self": float(w_self), "external": float(w_ext), "ok": bool(ok)}
 
     # ------------------------------------------------------------------
     # Helpers.
