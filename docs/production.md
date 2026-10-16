@@ -80,7 +80,9 @@ one long call (2 + 2 + 1 differed from 5 on a CI runner). For the same reason
 `SegmentConfig(steps=1)` gives the trajectory to round-off, not bitwise one long call.
 
 **Compiles.** A fresh run compiles the eager prepare's programs, the start force and one
-scan. With `donate_input=False` the second segment compiles the scan once more (with
+scan. The first segment's prepare is caps-only (`FusedForceProvider.prepare(caps_only=True)`:
+the tree, the upward pass and the walk's caps, no list and no downward pass -- the start
+program evaluates the force), and so are a segment retry's and a restore's. With `donate_input=False` the second segment compiles the scan once more (with
 the state donated) and every later segment reuses it; `donate_input=True` gives every
 segment one program. Chained `strict_run_v2` calls without `carry_total_acceleration`
 also recompiled at the second call (the handle's start force was not donated: 17.7 s
@@ -151,7 +153,7 @@ Size: 40 B per particle in float32 (52 with an external field, +4 under
 `dehnen_error`) plus a few kB of `meta`: about 1.0 GB at 25M (1.3 GB with the halo).
 
 `run(..., restart_from=path)` restores: the file's leaf capacity and walk caps are
-installed, the lane is prepared at the restart's positions, the caps are installed
+installed, the lane is prepared (caps-only) at the restart's positions, the caps are installed
 again and the level registry and depth bound set exactly, then the digests are checked.
 Equal (and an equal fingerprint, `dt`, force and field parameters), the next segments
 trace the programs the uninterrupted run would have, and the continuation is bitwise

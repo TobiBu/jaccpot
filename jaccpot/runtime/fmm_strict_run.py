@@ -933,7 +933,11 @@ class StrictRunMixin(_EngineBase):
             :class:`~jaccpot.runtime.strict_carry.StrictParticleCarry` handle that
             only the next ``strict_run_v2(carry="particles")`` call accepts; it
             carries the self-gravity at the returned positions, so that call needs
-            neither a prepare nor an initial force evaluation.
+            neither a prepare nor an initial force evaluation. A call without one
+            prepares caps-only (``FusedForceProvider.prepare(caps_only=True)``: the
+            template, the walk's caps, the verdict and the f_b seed, no list and no
+            downward pass; its start program evaluates the force), as does its
+            segment retry; ``JACCPOT_STRICT_CAPS_ONLY_PREPARE=0`` prepares in full.
             ``JACCPOT_STRICT_CARRY_ORDER=tree`` (particles only; default
             ``input``) carries the rows in the previous step's Morton order: no
             per-step gather of the force back into input order and no inverse
@@ -1235,6 +1239,13 @@ class StrictRunMixin(_EngineBase):
         # prepared state (or the handle's); the state carry rebuilds from the
         # state it carries instead.
         prov: FusedForceProvider
+        # The particle carry's bootstrap and segment retry prepare caps-only: the
+        # template's shapes, the trace-time engine state, the verdict and the f_b
+        # seed, no list and no downward pass (its start program evaluates the
+        # force). The same template and programs as the full prepare.
+        caps_only = particle_carry and env_flag(
+            "JACCPOT_STRICT_CAPS_ONLY_PREPARE", True
+        )
         if prepared_curr is None and handle_in is None:
             prov, topology_start = FusedForceProvider.prepare(
                 self,
@@ -1244,6 +1255,7 @@ class StrictRunMixin(_EngineBase):
                 max_order=int(max_order),
                 theta=theta,
                 runtime_overrides=runtime_overrides,
+                caps_only=caps_only,
             )
             prepared_curr = topology_start.prepared
             del topology_start
@@ -1647,6 +1659,7 @@ class StrictRunMixin(_EngineBase):
                 start_total=start_total,
                 return_total=bool(carry_total_acceleration),
                 external_key=external_key,
+                caps_only=caps_only,
             )
         else:
             from jaccpot.runtime.fused_topology import NEEDS_FIELDS
@@ -1925,6 +1938,7 @@ class StrictRunMixin(_EngineBase):
         start_total: Optional[Array] = None,
         return_total: bool = False,
         external_key: Optional[tuple] = None,
+        caps_only: bool = False,
     ) -> tuple[Array, Any, Optional[Array]]:
         """The fused scan of ``strict_run_v2(carry="particles")``.
 
@@ -2026,6 +2040,10 @@ class StrictRunMixin(_EngineBase):
         external_key : Optional[tuple]
             The field's identity (``external_field_key``), recorded on the handle
             when ``return_total``.
+        caps_only : bool
+            A segment retry re-prepares caps-only (``FusedForceProvider.replanned``):
+            the start force a handle's call consumed comes from the start program
+            then, as a first call's does, with the re-prepare's f_b seed kept.
 
         Returns
         -------
@@ -2042,7 +2060,11 @@ class StrictRunMixin(_EngineBase):
             or the handle.
         """
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
-        from jaccpot.runtime.strict_carry import StrictParticleCarry, host_copy
+        from jaccpot.runtime.strict_carry import (
+            PreparedCaps,
+            StrictParticleCarry,
+            host_copy,
+        )
 
         external_active = bool(add_external) and external_acceleration_fn is not None
         # the scan's total acceleration as an output of its own: with a field only
@@ -2425,16 +2447,24 @@ class StrictRunMixin(_EngineBase):
                 state_now = jax.device_put(start_host, masses_arr.sharding)
                 donate_state_now = True  # our own copy
             replanned = prov_i.replanned(
-                needs, state_now[:, 0, :], masses_arr, walk_only=mode == "walk"
+                needs,
+                state_now[:, 0, :],
+                masses_arr,
+                walk_only=mode == "walk",
+                caps_only=caps_only,
             )
             if replanned is None:
                 self._raise_scan_capacity_saturated(needs, retries=retries - 1)
             prov_i, topology_start = replanned
             prepared = topology_start.prepared
             del replanned, topology_start
+            # a caps-only re-prepare holds no list to evaluate on
+            start_program_force = acc_self_now is None and isinstance(
+                prepared, PreparedCaps
+            )
             if in_scan_force:
                 acc_self_now = None  # the start program evaluates it again
-            elif acc_self_now is None:
+            elif acc_self_now is None and not start_program_force:
                 # consumed by the failed segment: the same self-gravity
                 # again, from the same positions
                 acc_self_now = evaluate_self(prepared, state_now, step_params)
@@ -2447,6 +2477,19 @@ class StrictRunMixin(_EngineBase):
                 prov_i.capacity_ok(FusedTopology.from_prepared(prepared))
             )
             del prepared
+            if start_program_force and not in_scan_force:
+                # the same self-gravity as the steps' own refresh at the segment's
+                # start, in its own program; the scan's first thresholds stay the
+                # re-prepare's seed, as after a full re-prepare
+                acc_self_now, ok_start, _, _ = _start_force_for(prov_i)(
+                    state_now, masses_arr, ok_initial, scale_now, *params_args
+                )
+                if bool(np.asarray(jax.device_get(ok_start))):
+                    ok_initial = ok_start
+                else:
+                    # the start itself overflows: the loop's start program runs
+                    # it again and the re-plan sizes from its needs
+                    acc_self_now, in_scan_force = None, True
             self._topology_reuse_entry = None
             self._prepared_state_cache_value = None
             self._strict_fused_fallback_count += 1

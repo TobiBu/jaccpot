@@ -1701,6 +1701,7 @@ class ProductionRunner:
         """
         import jax.numpy as jnp
 
+        from jaccpot._env import env_flag
         from jaccpot.runtime import _level_shapes
         from jaccpot.runtime.capacity_plan import install_walk_caps
         from jaccpot.runtime.fused_provider import FusedForceProvider
@@ -1719,12 +1720,16 @@ class ProductionRunner:
         if plan["leaf_capacity"] is not None:
             engine._tree_leaf_capacity = int(plan["leaf_capacity"])
         install_walk_caps(engine, plan["walk_caps"])
+        # caps-only (as the particle carry's own bootstrap): the template and the
+        # trace-time state, no list and no downward pass -- the handle brings the
+        # start force
         provider, topology = FusedForceProvider.prepare(
             self.solver,
             state[:, 0],
             masses,
             leaf_size=int(self.settings.leaf_size),
             max_order=int(self.settings.max_order),
+            caps_only=env_flag("JACCPOT_STRICT_CAPS_ONLY_PREPARE", True),
         )
         del topology
         # what the prepare re-measured at these positions goes back to the plan
