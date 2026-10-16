@@ -53,6 +53,7 @@ __all__ = [
     "evaluate_large_n_potential",
     "evaluate_large_n_state",
     "prepare_large_n_state",
+    "record_fused_nearfield_caps",
 ]
 
 
@@ -1127,6 +1128,156 @@ def _build_tree_and_dual_downward_artifacts(
     return tree_artifacts, dual_downward_artifacts, stage_t0
 
 
+#: the static target-block cap an eager prepare settled on, which the traced strict
+#: refresh builds its fixed shape with
+_STATIC_TARGET_BLOCKS_CAP_ATTR = "_large_n_fused_static_target_blocks_resolved_cap"
+#: ``(num_leaves, block_size, cap)`` an eager prepare built the static target blocks
+#: with; the traced strict refresh refuses to start without it
+_STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR = (
+    "_large_n_fused_payload_static_target_block_preflight"
+)
+
+
+def _eager_static_target_block_cap(
+    fmm: "FMMEngine",
+    *,
+    max_count: int,
+    block_size: int,
+    large_n_env_cfg: dict[str, Any],
+) -> int:
+    """The static target-block cap an EAGER prepare settles on, kept on ``fmm``.
+
+    The densest leaf's directed near edges (``max_count``) in blocks of
+    ``block_size``, with the configured headroom and caps ladder when the cap is
+    ``auto`` or too small, never below the cap an earlier eager prepare kept (it
+    grows monotonically), so the traced strict refresh reuses the identical fixed
+    shape (zero recompile). Extracted from :func:`prepare_large_n_state` for the
+    strict particle carry's caps-only prepare, which measures ``max_count``
+    without building the neighbour CSR.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        Engine whose ``_large_n_fused_static_target_blocks_resolved_cap`` is read
+        and written.
+    max_count : int
+        The longest directed near-neighbour row.
+    block_size : int
+        Target-owned block size.
+    large_n_env_cfg : dict[str, Any]
+        ``_large_n_env_config_for_fmm(fmm)``.
+
+    Returns
+    -------
+    int
+        The cap, at least 1.
+    """
+    cached = int(getattr(fmm, _STATIC_TARGET_BLOCKS_CAP_ATTR, 0) or 0)
+    max_per_leaf = int(large_n_env_cfg["static_target_blocks_max_per_leaf"])
+    required = (
+        (int(max_count) + int(block_size) - 1) // int(block_size)
+        if int(block_size) > 0
+        else 0
+    )
+    required = max(1, int(required))
+    if bool(large_n_env_cfg.get("static_target_blocks_auto", False)) or (
+        max_per_leaf < required
+    ):
+        target = max(
+            1,
+            int(
+                np.ceil(
+                    required
+                    * float(large_n_env_cfg.get("static_target_blocks_headroom", 1.25))
+                )
+            ),
+        )
+        # the first rung of the ladder that fits, else the target itself
+        candidate = next(
+            (
+                int(cap)
+                for cap in large_n_env_cfg.get("static_target_blocks_cap_options", ())
+                if int(cap) >= target
+            ),
+            target,
+        )
+    else:
+        candidate = max_per_leaf
+    cap = max(cached, int(candidate), 1)
+    setattr(fmm, _STATIC_TARGET_BLOCKS_CAP_ATTR, int(cap))
+    return int(cap)
+
+
+def record_fused_nearfield_caps(
+    fmm: "FMMEngine",
+    *,
+    num_particles: int,
+    num_leaves: int,
+    leaf_cap: int,
+    max_leaf_neighbors: int,
+) -> None:
+    """What an eager fused prepare's near-field stage leaves on the engine.
+
+    The strict particle carry's caps-only prepare builds no near-field payload,
+    but the traced refresh is sized from what an eager one records: the static
+    target-block cap (:func:`_eager_static_target_block_cap`, 1 on the CSR lane)
+    and the preflight key the traced refresh refuses to start without. Recorded
+    exactly as :func:`prepare_large_n_state` records them on a fused eager build
+    (whose static blocks always fit: the cap is sized to the densest row). The
+    neighbour-edge and overflow-profile caps it also keeps follow from shapes
+    alone, and the traced refresh records the same.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine.
+    num_particles : int
+        ``N`` (the execution configuration is resolved for it).
+    num_leaves : int
+        Leaf rows of the neighbour CSR.
+    leaf_cap : int
+        The tree's leaf capacity (the leaf groups' width).
+    max_leaf_neighbors : int
+        The longest directed near-neighbour row the eager walk measured.
+    """
+    from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
+
+    execution_config = resolve_large_n_execution_config(
+        fmm, num_particles=int(num_particles)
+    )
+    large_n_env_cfg = _large_n_env_config_for_fmm(fmm)
+    block_size = int(execution_config.target_owned_block_size)
+    cap = _eager_static_target_block_cap(
+        fmm,
+        max_count=int(max_leaf_neighbors),
+        block_size=block_size,
+        large_n_env_cfg=large_n_env_cfg,
+    )
+    if _nearfield_csr_lane_active(bool(getattr(fmm, "use_pallas", False))):
+        cap = 1
+        setattr(fmm, _STATIC_TARGET_BLOCKS_CAP_ATTR, 1)
+    fused_payload_enabled = str(
+        os.environ.get("JACCPOT_LARGE_N_RADIX_FAST_PAYLOAD_IN_FUSED", "1")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    leaf_groups = (
+        bool(execution_config.retain_leaf_groups)
+        and int(num_leaves) > 0
+        and int(leaf_cap) > 0
+    )
+    if (
+        fused_payload_enabled
+        and bool(large_n_env_cfg["static_target_blocks_enabled"])
+        and bool(execution_config.speed_prepared_layout)
+        and block_size > 0
+        and leaf_groups
+    ):
+        setattr(
+            fmm,
+            _STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR,
+            (int(num_leaves), int(block_size), int(cap)),
+        )
+
+
 @jax.named_scope("fmm_large_n_state")
 def prepare_large_n_state(
     fmm: "FMMEngine",
@@ -1326,28 +1477,12 @@ def prepare_large_n_state(
     static_target_blocks_max_per_leaf = int(
         large_n_env_cfg["static_target_blocks_max_per_leaf"]
     )
-    static_target_blocks_auto = bool(
-        large_n_env_cfg.get("static_target_blocks_auto", False)
-    )
-    static_target_blocks_headroom = float(
-        large_n_env_cfg.get("static_target_blocks_headroom", 1.25)
-    )
-    static_target_blocks_cap_options = tuple(
-        int(v) for v in large_n_env_cfg.get("static_target_blocks_cap_options", ())
-    )
     overflow_profile_fixed_cap = int(
         large_n_env_cfg.get("overflow_profile_fixed_cap", 0)
     )
     neighbor_profile_fixed_cap = int(
         large_n_env_cfg.get("neighbor_profile_fixed_cap", 0)
     )
-
-    def _pick_static_target_blocks_capacity(required: int) -> int:
-        required = max(1, int(required))
-        for cap in static_target_blocks_cap_options:
-            if int(cap) >= required:
-                return int(cap)
-        return int(required)
 
     nearfield_total_t0 = stage_t0
     nearfield_stage_sum = 0.0
@@ -1457,7 +1592,7 @@ def prepare_large_n_state(
     # densest leaf (mirrors the neighbor/overflow cap profiling); the resolved
     # cap is cached on the fmm so the traced strict refresh reuses the identical
     # fixed shape (zero-recompile). Grows monotonically across eager refreshes.
-    resolved_cap_attr = "_large_n_fused_static_target_blocks_resolved_cap"
+    resolved_cap_attr = _STATIC_TARGET_BLOCKS_CAP_ATTR
     cached_static_cap = int(getattr(fmm, resolved_cap_attr, 0) or 0)
     from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
 
@@ -1480,21 +1615,12 @@ def prepare_large_n_state(
             _sb_max_count = int(jnp.max(_sb_offsets[1:] - _sb_offsets[:-1]))
         else:
             _sb_max_count = 0
-        _sb_required = (
-            (_sb_max_count + int(block_size) - 1) // int(block_size)
-            if int(block_size) > 0
-            else 0
+        effective_static_cap = _eager_static_target_block_cap(
+            fmm,
+            max_count=_sb_max_count,
+            block_size=int(block_size),
+            large_n_env_cfg=large_n_env_cfg,
         )
-        _sb_required = max(1, int(_sb_required))
-        if bool(static_target_blocks_auto) or (
-            int(static_target_blocks_max_per_leaf) < _sb_required
-        ):
-            _sb_target = int(np.ceil(_sb_required * static_target_blocks_headroom))
-            _sb_candidate = _pick_static_target_blocks_capacity(_sb_target)
-        else:
-            _sb_candidate = int(static_target_blocks_max_per_leaf)
-        effective_static_cap = max(cached_static_cap, int(_sb_candidate), 1)
-        setattr(fmm, resolved_cap_attr, int(effective_static_cap))
     if csr_lane:
         effective_static_cap = 1
         setattr(fmm, resolved_cap_attr, 1)
@@ -1504,7 +1630,7 @@ def prepare_large_n_state(
         int(block_size),
         int(effective_static_cap),
     )
-    preflight_attr = "_large_n_fused_payload_static_target_block_preflight"
+    preflight_attr = _STATIC_TARGET_BLOCKS_PREFLIGHT_ATTR
     preflight_ok = getattr(fmm, preflight_attr, None) == preflight_key
     if (
         bool(fused_device_mode)
