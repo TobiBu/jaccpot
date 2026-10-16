@@ -289,6 +289,9 @@ class RunResult:
         Host wall time of this call.
     time_anchor : tuple
         ``(time, step)`` edge times are counted from with ``dt``.
+    state_owned : bool
+        Whether ``state`` is the runner's own -- a continuation consumes it --,
+        and not the caller's input (a fresh run that did no segment).
     """
 
     state: Any
@@ -305,6 +308,7 @@ class RunResult:
     restored: Optional[dict]
     wall_s: float
     time_anchor: tuple = (0.0, 0)
+    state_owned: bool = True
 
 
 def segment_lengths(num_steps: int, steps: int) -> tuple:
@@ -838,7 +842,7 @@ class ProductionRunner:
             # edge times count from the same anchor while dt is unchanged
             anchor = res.time_anchor if dt_value == res.dt else (res.time, res.step)
             baselines = res.baselines
-            owned = True
+            owned = bool(res.state_owned) or bool(self.segment.donate_input)
             restored = {"from": "RunResult", "step": step, "bitwise": True}
             res.state = res.handle = None  # consumed
         else:
@@ -903,6 +907,7 @@ class ProductionRunner:
         lengths = () if stopped else segment_lengths(missing, self.segment.steps)
         self._warn_remainder(lengths)
         external = self.external_acceleration_fn
+        ran = False
         for index, steps in enumerate(lengths):
             retries_before = int(
                 getattr(self.engine, "_strict_fused_fallback_count", 0)
@@ -937,6 +942,7 @@ class ProductionRunner:
                 ) from exc
             jax.block_until_ready(state_now)
             wall_s = time.perf_counter() - begun
+            ran = True
             step += int(steps)
             segment_done += 1
             last = index == len(lengths) - 1
@@ -963,6 +969,8 @@ class ProductionRunner:
             restored=restored,
             wall_s=time.perf_counter() - started,
             time_anchor=anchor,
+            # without a segment the state is still the one this call was given
+            state_owned=owned or ran,
         )
 
     # ------------------------------------------------------------------

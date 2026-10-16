@@ -318,6 +318,20 @@ def test_a_callback_stops_the_run_and_a_continuation_finishes_it(six_steps):
     assert np.array_equal(snaps.snapshots[0]["state"], np.asarray(state))
 
 
+def test_a_run_without_segments_keeps_the_callers_state():
+    """A run with nothing to do returns the caller's own array, marked as not the
+    runner's, so a continuation from it does not consume it (``donate_input``
+    off): only a segment's output is the runner's to donate."""
+    state, masses = _system()
+    res = _runner(_static(steps=2)).run(state, masses, dt=DT, num_steps=0)
+    assert res.state is state and not res.state_owned
+    assert [e.step for e in res.edges] == [0] and res.handle is None
+    given = _runner(_static(steps=2, donate_input=True)).run(
+        state, masses, dt=DT, num_steps=0
+    )
+    assert given.state_owned  # the caller handed it over
+
+
 def test_segment_lengths_put_the_remainder_last():
     assert segment_lengths(6, 2) == (2, 2, 2)
     assert segment_lengths(5, 2) == (2, 2, 1)
