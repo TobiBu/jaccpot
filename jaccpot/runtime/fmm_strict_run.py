@@ -1176,17 +1176,26 @@ class StrictRunMixin(_EngineBase):
             )
             # The tree's own sorted positions and masses are this very gather
             # (``x[perm]``), already alive through the near field: reused, they
-            # cost no second copy. Velocities, the old acceleration and the input
+            # cost no second copy. Only in the force's dtype, though: a state or
+            # masses in another one (a float64 state under the float32 force) are
+            # gathered from the carry, or every step would round them to the
+            # force's dtype. Velocities, the old acceleration and the input
             # indices follow the permutation here.
+            positions_sorted = prepared_new.positions_sorted
+            if positions_sorted.dtype != state_now.dtype:
+                positions_sorted = state_position[:, 0][perm]
+            masses_sorted = prepared_new.masses_sorted
+            if masses_sorted.dtype != masses_now.dtype:
+                masses_sorted = masses_now[perm]
             state_sorted = jnp.stack(
                 [
-                    jnp.asarray(prepared_new.positions_sorted, state_now.dtype),
+                    jnp.asarray(positions_sorted, state_now.dtype),
                     state_position[:, 1][perm],
                 ],
                 axis=1,
             )
             acceleration_prev = acceleration_now[perm]
-            masses_new = jnp.asarray(prepared_new.masses_sorted, masses_now.dtype)
+            masses_new = jnp.asarray(masses_sorted, masses_now.dtype)
             ids_new = ids_now[perm]
             if add_external and external_acceleration_fn is not None:
                 acceleration_new = acceleration_self_new + jnp.asarray(

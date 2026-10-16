@@ -268,12 +268,8 @@ def test_a_float64_state_is_never_rounded_to_the_float32_force(monkeypatch, carr
     _offset_survives(monkeypatch, carry, None)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="finding 4 of the S2 design: the tree-order carry reuses the refresh's "
-    "working-dtype positions_sorted / masses_sorted as its state rows "
-    "(_advance_tree_order), rounding a float64 state to float32 every step; the fix "
-    "goes in with the fmm_strict_run.py refactor",
-)
 def test_the_tree_order_carry_keeps_a_float64_state(monkeypatch):
+    """The tree-order carry reused the refresh's sorted positions and masses as its
+    state rows, which are in the force's dtype: a float64 state lost the shift on
+    the first step (finding 4 of the S2 design)."""
     _offset_survives(monkeypatch, "particles", "tree")
