@@ -33,7 +33,8 @@ from .fmm_state import (
     _TopologyReuseEntry,
     _velocity_verlet_kick_drifted,
 )
-from .fused_provider import _walk_caps_key
+from .fused_provider import FusedForceProvider, _walk_caps_key
+from .fused_topology import FusedTopology
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
     # The engine lives in `_fmm_impl`, which imports *these mixins* -- so this import
@@ -127,7 +128,7 @@ class StrictRunMixin(_EngineBase):
         ----------
         needs : np.ndarray
             The segment's running maximum of
-            :func:`jaccpot.runtime.capacity_guard.last_refresh_walk_needs`.
+            :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs`.
 
         Returns
         -------
@@ -863,6 +864,14 @@ class StrictRunMixin(_EngineBase):
         runtime_overrides = self._resolve_runtime_execution_overrides(
             num_particles=int(state_arr.shape[0])
         )
+        # the step's force: every refresh and evaluation below goes through it
+        prov = FusedForceProvider(
+            self,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            runtime_overrides=runtime_overrides,
+        )
         prepared_curr = prepared_state
         # a state built here is held by nothing else, so the scan may consume it
         donate_carry = bool(donate_prepared_state) or prepared_state is None
@@ -893,26 +902,9 @@ class StrictRunMixin(_EngineBase):
                 return jnp.asarray(prepared_in.positions_sorted)[
                     prepared_in.inverse_permutation
                 ] * jnp.asarray(0.0, dtype=state_in.dtype)
-            # `evaluate_large_n_state` takes only the large-N state. The profile
-            # guard at the top of `strict_run_v2` already admits nothing else --
-            # verified by calling the method on a non-large-N engine, which raises
-            # there and never reaches this closure -- but the parameter carries the
-            # wider union, so the requirement is stated where it is relied on.
-            if not isinstance(prepared_in, LargeNPreparedState):
-                raise RuntimeError(
-                    "strict_run_v2 reached the large-N self-evaluation with a "
-                    f"{type(prepared_in).__name__}. Only the large_n_gpu "
-                    "production profile gets this far, so this is an internal "
-                    "invariant, not a configuration error."
-                )
+            # the provider states the large-N requirement where it relies on it
             return jnp.asarray(
-                evaluate_large_n_state(
-                    self,
-                    prepared_in,
-                    target_indices=None,
-                    return_potential=False,
-                    max_acc_derivative_order=0,
-                ),
+                prov.accelerations(FusedTopology.from_prepared(prepared_in)),
                 dtype=state_in.dtype,
             )
 
@@ -923,17 +915,8 @@ class StrictRunMixin(_EngineBase):
             # carries it; the same single evaluation, the force bitwise unchanged
             if not scale_carry:
                 return _evaluate_self(prepared_in, state_in), None
-            if not isinstance(prepared_in, LargeNPreparedState):
-                raise RuntimeError(
-                    "the fused lane's force-scale evaluation needs the large-N state"
-                )
-            acc, scale = evaluate_large_n_state(
-                self,
-                prepared_in,
-                target_indices=None,
-                return_potential=False,
-                max_acc_derivative_order=0,
-                return_force_scale=True,
+            acc, scale = prov.accelerations(
+                FusedTopology.from_prepared(prepared_in), force_scale=True
             )
             return (
                 jnp.asarray(acc, dtype=state_in.dtype),
@@ -982,79 +965,33 @@ class StrictRunMixin(_EngineBase):
         else:
             acceleration_current = acceleration_self_current
 
-        from jaccpot.nearfield._fast_lane import _nearfield_csr_lane_active
-
-        # the CSR near-field lane never reads the rectangle, so its capacity is
-        # not a correctness condition there (plan sub-10ms 4.1)
-        rectangle_guard_active = not _nearfield_csr_lane_active(
-            bool(getattr(self, "use_pallas", False))
-        )
-
-        def _static_target_block_capacity_ok(
-            prepared_in: PreparedStateLike,
-            after_refresh: bool = False,
-        ) -> Array:
-            # The guard is shared with the multi-GPU lane (`capacity_guard`); the
-            # traced caps are host constants recorded while the refresh traced.
-            # `after_refresh`: the call directly follows a refresh IN THIS TRACE, so
-            # the verdict on the lists it built (which the returned state no longer
-            # carries in the fresh-rebuild mode) is live and must be folded in. The
-            # initial-state call must not read it: it could be a previous trace's.
-            from jaccpot.runtime.capacity_guard import (
-                fused_state_capacity_ok,
-                last_refresh_capacity_ok,
-            )
-
-            ok = fused_state_capacity_ok(
-                prepared_in,
-                traced_caps=getattr(self, "_strict_fused_traced_caps", None),
-                rectangle_guard_active=rectangle_guard_active,
-            )
-            if after_refresh:
-                ok = ok & last_refresh_capacity_ok(self)
-            return ok
-
         def _refresh_and_evaluate_endpoint(
             prepared_in: PreparedStateLike,
             state_position: Array,
             masses_in: Array,
             scale_in: Optional[Array] = None,
-        ) -> tuple[PreparedStateLike, Array, Optional[Array]]:
+        ) -> tuple[FusedTopology, Array, Optional[Array]]:
+            # the step's topology at the drifted positions (rebuilt from
+            # ``prepared_in``'s shapes; the state carry passes its carry, the
+            # particle carry a materialised template) and its self-force
             if diag_mode in {"integrator_only", "eval_only"}:
-                prepared_new = prepared_in
                 # no refresh in this trace: the capacity side channels must not
-                # carry a previous trace's verdict into this one
+                # carry a previous trace's verdict into this one, and the verdict
+                # folds an empty one (``fresh`` without ``refresh_ok``)
                 self._last_refresh_capacity_ok = None
                 self._last_refresh_walk_needs = None
+                topology = FusedTopology(prepared=prepared_in, fresh=True)
             else:
-                # Same invariant as `_evaluate_self` above, restated at the
-                # second place that relies on it.
-                if not isinstance(prepared_in, LargeNPreparedState):
-                    raise RuntimeError(
-                        "strict_run_v2 reached the large-N refresh with a "
-                        f"{type(prepared_in).__name__}. Only the large_n_gpu "
-                        "production profile gets this far, so this is an "
-                        "internal invariant, not a configuration error."
-                    )
-                prepared_new = self._refresh_large_n_same_topology(
+                topology = prov._rebuild_like(
                     prepared_in,
                     state_position[:, 0, :],
                     masses_in,
-                    bounds=None,
-                    leaf_size=int(leaf_size),
-                    max_order=int(max_order),
-                    theta=theta,
-                    runtime_overrides_override=None,
-                    fused_device_mode=True,
-                    force_scale_particles=scale_in if scale_carry else None,
-                    strict_fused_lane=True,
+                    force_scale=scale_in if scale_carry else None,
                 )
-                if prepared_new is None:
-                    raise RuntimeError(
-                        "strict velocity-Verlet refresh failed: topology/profile mismatch"
-                    )
-            acc_self, scale_new = _evaluate_self_scaled(prepared_new, state_position)
-            return prepared_new, acc_self, scale_new
+            acc_self, scale_new = _evaluate_self_scaled(
+                topology.prepared, state_position
+            )
+            return topology, acc_self, scale_new
 
         def _emit_step(step_index: Array, state_new: Array, fire: Array) -> None:
             # Fire-and-forget streaming hook (e.g. render). Gated by stride (and by
@@ -1085,16 +1022,18 @@ class StrictRunMixin(_EngineBase):
             scan_x: Any,
             emit: bool = True,
             scale_now: Optional[Array] = None,
-        ) -> tuple[PreparedStateLike, Array, Array, Array, Optional[Array]]:
+        ) -> tuple[FusedTopology, Array, Array, Array, Optional[Array]]:
             # one velocity-Verlet step of the fused scan: drift, refresh + self
-            # force at the new positions, kick; shared by both carries
+            # force at the new positions, kick; shared by both carries. The
+            # step's verdict is the caller's, from the returned topology, after
+            # the kick (where the scan has always folded it)
             position_new = (
                 state_now[:, 0]
                 + state_now[:, 1] * dt_arr
                 + 0.5 * acceleration_now * dt_arr**2
             )
             state_position = state_now.at[:, 0].set(position_new)
-            prepared_new, acceleration_self_new, scale_new = (
+            topology_new, acceleration_self_new, scale_new = (
                 _refresh_and_evaluate_endpoint(
                     prepared_now, state_position, masses_in, scale_now
                 )
@@ -1120,7 +1059,7 @@ class StrictRunMixin(_EngineBase):
             if emit and step_callback is not None:
                 _emit_step(scan_x, state_new, jnp.asarray(True))
             return (
-                prepared_new,
+                topology_new,
                 state_new,
                 acceleration_new,
                 acceleration_self_new,
@@ -1156,7 +1095,7 @@ class StrictRunMixin(_EngineBase):
             acceleration_now: Array,
             masses_now: Array,
             ids_now: Array,
-        ) -> tuple[PreparedStateLike, Array, Array, Array, Array, Array]:
+        ) -> tuple[FusedTopology, Array, Array, Array, Array, Array]:
             # `_advance` with the rows in the carry's order; returns the state, the
             # accelerations, masses and input indices in the NEW tree order
             position_new = (
@@ -1165,40 +1104,16 @@ class StrictRunMixin(_EngineBase):
                 + 0.5 * acceleration_now * dt_arr**2
             )
             state_position = state_now.at[:, 0].set(position_new)
-            if not isinstance(prepared_now, LargeNPreparedState):
-                raise RuntimeError(
-                    "strict_run_v2 reached the large-N refresh with a "
-                    f"{type(prepared_now).__name__}: an internal invariant"
-                )
-            prepared_new = self._refresh_large_n_same_topology(
-                prepared_now,
-                state_position[:, 0, :],
-                masses_now,
-                bounds=None,
-                leaf_size=int(leaf_size),
-                max_order=int(max_order),
-                theta=theta,
-                runtime_overrides_override=None,
-                fused_device_mode=True,
-                strict_fused_lane=True,
+            topology_new = prov._rebuild_like(
+                prepared_now, state_position[:, 0, :], masses_now
             )
-            if prepared_new is None:
-                raise RuntimeError(
-                    "strict velocity-Verlet refresh failed: topology/profile mismatch"
-                )
+            prepared_new = topology_new.prepared
             # row j of the tree is row perm[j] of the carry
             perm = jnp.asarray(
                 prepared_new.tree.topology.particle_indices, dtype=INDEX_DTYPE
             )
             acceleration_self_new = jnp.asarray(
-                evaluate_large_n_state(
-                    self,
-                    prepared_new,
-                    target_indices=None,
-                    return_potential=False,
-                    max_acc_derivative_order=0,
-                    sorted_output=True,
-                ),
+                prov.accelerations(topology_new, order="tree"),
                 dtype=state_now.dtype,
             )
             # The tree's own sorted positions and masses are this very gather
@@ -1231,7 +1146,7 @@ class StrictRunMixin(_EngineBase):
             if rematerialize_between_refresh:
                 state_new = jnp.asarray(state_new, dtype=state_now.dtype)
             return (
-                prepared_new,
+                topology_new,
                 state_new,
                 acceleration_new,
                 acceleration_self_new,
@@ -1256,7 +1171,7 @@ class StrictRunMixin(_EngineBase):
                 acceleration_self_current=acceleration_self_current,
                 advance=_advance,
                 refresh_evaluate=_refresh_and_evaluate_endpoint,
-                capacity_ok=_static_target_block_capacity_ok,
+                capacity_ok=prov.capacity_ok,
                 evaluate_self=_evaluate_self,
                 advance_tree=_advance_tree_order if tree_order else None,
                 num_steps_i=num_steps_i,
@@ -1294,10 +1209,7 @@ class StrictRunMixin(_EngineBase):
                 donate_state=bool(donate_state),
             )
         else:
-            from jaccpot.runtime.capacity_guard import (
-                WALK_NEEDS_FIELDS,
-                last_refresh_walk_needs,
-            )
+            from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
 
             def _compiled_runner_for(prepared_ref: PreparedStateLike) -> Callable:
                 # Stash the concrete tree depth now, while the state is concrete,
@@ -1375,7 +1287,7 @@ class StrictRunMixin(_EngineBase):
                             walk_needs_now,
                             scale_now,
                         ) = carry
-                        prepared_new, state_new, acceleration_new, _, scale_new = (
+                        topology_new, state_new, acceleration_new, _, scale_new = (
                             _advance(
                                 prepared_now,
                                 state_now,
@@ -1386,17 +1298,15 @@ class StrictRunMixin(_EngineBase):
                             )
                         )
                         capacity_ok_new = capacity_ok_now & (
-                            _static_target_block_capacity_ok(
-                                prepared_new, after_refresh=True
-                            )
+                            prov.capacity_ok(topology_new)
                         )
                         # what the walks of this segment needed, at most: a failed
                         # segment is re-planned from it
                         walk_needs_new = jnp.maximum(
-                            walk_needs_now, last_refresh_walk_needs(self)
+                            walk_needs_now, topology_new.needs()
                         )
                         return (
-                            prepared_new,
+                            topology_new.prepared,
                             state_new,
                             acceleration_new,
                             capacity_ok_new,
@@ -1417,7 +1327,9 @@ class StrictRunMixin(_EngineBase):
                             prepared_initial,
                             state_initial,
                             acceleration_initial,
-                            _static_target_block_capacity_ok(prepared_initial),
+                            prov.capacity_ok(
+                                FusedTopology.from_prepared(prepared_initial)
+                            ),
                             jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
                             scale_initial,
                         ),
@@ -1605,12 +1517,13 @@ class StrictRunMixin(_EngineBase):
             this call owns it. ``None``: the scan evaluates it itself, as a
             refresh at the start positions before its first step.
         advance : Callable[..., Any]
-            ``strict_run_v2``'s step body.
+            ``strict_run_v2``'s step body; returns the step's topology first.
         refresh_evaluate : Callable[..., Any]
             ``strict_run_v2``'s refresh + self-force at given positions (the
-            step's own), for the scan's start force.
+            step's own), for the scan's start force; returns the topology first.
         capacity_ok : Callable[..., Array]
-            ``strict_run_v2``'s capacity verdict on a (refreshed) state.
+            The provider's capacity verdict on a topology
+            (:meth:`~jaccpot.runtime.fused_provider.FusedForceProvider.capacity_ok`).
         evaluate_self : Callable[..., Array]
             ``strict_run_v2``'s self-force evaluation.
         num_steps_i : int
@@ -1661,10 +1574,7 @@ class StrictRunMixin(_EngineBase):
             If the criterion is on and no force scale came from the eager prepare
             or the handle.
         """
-        from jaccpot.runtime.capacity_guard import (
-            WALK_NEEDS_FIELDS,
-            last_refresh_walk_needs,
-        )
+        from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
         from jaccpot.runtime.strict_carry import (
             StrictParticleCarry,
             materialize_template,
@@ -1732,7 +1642,7 @@ class StrictRunMixin(_EngineBase):
                     ]
                     if advance_tree is not None:
                         (
-                            prepared_new,
+                            topology_new,
                             state_new,
                             acc_new,
                             acc_self_new,
@@ -1748,7 +1658,7 @@ class StrictRunMixin(_EngineBase):
                         tree_rows: tuple = (masses_new, ids_new)
                         scale_new = scale_now  # never both (see tree_order)
                     else:
-                        prepared_new, state_new, acc_new, acc_self_new, scale_new = (
+                        topology_new, state_new, acc_new, acc_self_new, scale_new = (
                             advance(
                                 materialize_template(template),
                                 state_now,
@@ -1760,8 +1670,8 @@ class StrictRunMixin(_EngineBase):
                             )
                         )
                         tree_rows = ()
-                    ok_new = ok_now & capacity_ok(prepared_new, after_refresh=True)
-                    needs_new = jnp.maximum(needs_now, last_refresh_walk_needs(self))
+                    ok_new = ok_now & capacity_ok(topology_new)
+                    needs_new = jnp.maximum(needs_now, topology_new.needs())
                     # a segment that overflowed is re-run from its start, so the
                     # carry is NOT frozen (keeping the step's old state for a
                     # where() held 36 B per particle through every step); only
@@ -1879,16 +1789,16 @@ class StrictRunMixin(_EngineBase):
                 ok_initial: Array,
                 scale_initial: Optional[Array] = None,
             ) -> tuple[Array, Array, Array, Optional[Array]]:
-                prepared0, acc_self0, scale0 = refresh_evaluate(
+                topology0, acc_self0, scale0 = refresh_evaluate(
                     materialize_template(template),
                     state_initial,
                     masses_in,
                     scale_initial,
                 )
-                ok0 = ok_initial & capacity_ok(prepared0, after_refresh=True)
+                ok0 = ok_initial & capacity_ok(topology0)
                 needs0 = jnp.maximum(
                     jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32),
-                    last_refresh_walk_needs(self),
+                    topology0.needs(),
                 )
                 return acc_self0, ok0, needs0, scale0
 
@@ -1921,7 +1831,9 @@ class StrictRunMixin(_EngineBase):
             # not a traced-caps record an earlier trace may have left
             saved_caps = getattr(self, "_strict_fused_traced_caps", None)
             self._strict_fused_traced_caps = None
-            ok_initial = jnp.asarray(capacity_ok(prepared_curr))
+            ok_initial = jnp.asarray(
+                capacity_ok(FusedTopology.from_prepared(prepared_curr))
+            )
             self._strict_fused_traced_caps = saved_caps
         prepared_curr = None
         # caches that would keep the prepare's buffers alive through the scan
@@ -2045,7 +1957,7 @@ class StrictRunMixin(_EngineBase):
                 # the re-prepare's own eq (16b) prepass at the segment's start
                 scale_now = force_scale_seed(prepared)
             self._strict_fused_traced_caps = None
-            ok_initial = jnp.asarray(capacity_ok(prepared))
+            ok_initial = jnp.asarray(capacity_ok(FusedTopology.from_prepared(prepared)))
             del prepared
             self._topology_reuse_entry = None
             self._prepared_state_cache_value = None
