@@ -128,6 +128,13 @@ Usage::
         --variants galaxy_explicit,galaxy_preset --jobs 2
     python bench/provider_hlo_identity.py compare s3-galaxy-cpu s3-galaxy-cpu \
         --pair galaxy_explicit:galaxy_preset
+    # a library switch A/B (S3 session 2: the particle carry's caps-only prepare
+    # compiles fewer EAGER programs; its start programs and scans, what every call
+    # returns and the handles' compile keys must not move)
+    python bench/provider_hlo_identity.py record --tag full-cpu --jobs 4 \
+        --env JACCPOT_STRICT_CAPS_ONLY_PREPARE=0
+    python bench/provider_hlo_identity.py compare full-cpu caps-cpu \
+        --programs compiled_runner
 
     export CUDA_VISIBLE_DEVICES=$(autocvd -n 1 -o -q -i 20)   # the org rule
     python bench/provider_hlo_identity.py record --device gpu --tag s2-base-gpu
@@ -707,6 +714,7 @@ def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
         run_theta = None
     env = v.env + (_CSR_ON_CPU if v.pallas and setup.device == "cpu" else ())
     returns: dict = {}
+    keys: list[dict] = []
     emitted: list = []
     warnings: list[str] = []
 
@@ -782,6 +790,18 @@ def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
                 returns.update(cap.digest(f"ret:call{i}:state", out))
                 if history is not None:
                     returns.update(cap.digest(f"ret:call{i}:history", history))
+                template = getattr(handle, "template", None)
+                if template is not None:
+                    # what the next call's programs are keyed on (S3 R8: the
+                    # caps-only prepare's must be the full prepare's); not an array,
+                    # so a record field of its own rather than a digest
+                    keys.append(
+                        {
+                            "call": i,
+                            "template_key": _key_sha256(template.key()),
+                            "provider_key": _key_sha256(handle.provider.key()),
+                        }
+                    )
                 if hasattr(handle, "self_acceleration"):
                     # the handle's contract, by name: what the next call reads
                     returns.update(
@@ -834,11 +854,17 @@ def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
         "seconds": time.perf_counter() - t0,
         "programs": program_rows(cap),
         "returns": returns,
+        "handle_keys": keys,
         "callback_emissions": len(emitted),
         "fallback_count": diag.get("strict_fused_fallback_count"),
         "last_fallback_reason": fallback,
         "warnings": warnings,
     }
+
+
+def _key_sha256(key: Any) -> str:
+    """sha256 of a compile key's ``repr`` (as the runner's restart digests)."""
+    return hashlib.sha256(repr(key).encode()).hexdigest()
 
 
 def program_rows(cap: Capture) -> list[dict]:
@@ -961,6 +987,7 @@ def _record(args) -> int:
         "jax": jax.__version__,
         "device": str(jax.devices()[0]),
         "xla_flags": os.environ.get("XLA_FLAGS"),
+        "env": list(args.env),
         "jobs": args.jobs,
         "variants": {},
     }
@@ -1010,7 +1037,9 @@ def _record(args) -> int:
                 "--device",
                 args.device,
                 "--save-arrays" if keep else "--no-save-arrays",
-            ] + (["--n", str(args.n)] if args.n else [])
+            ]
+            cmd += ["--n", str(args.n)] if args.n else []
+            cmd += [f"--env={kv}" for kv in args.env]
             running.append(
                 (name, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT), log)
             )
@@ -1040,10 +1069,22 @@ def _text_diff(a: str, b: str, limit: int = 40) -> dict:
     return {"only_module_name": only_module, "diff_head": diff[:limit]}
 
 
-def _compare_arrays(ref: dict, new: dict, ref_npz, new_npz) -> dict:
-    """The digests that differ, with element counts where both arrays were kept."""
+def _compare_arrays(
+    ref: dict,
+    new: dict,
+    ref_npz,
+    new_npz,
+    ref_names: Optional[dict] = None,
+    new_names: Optional[dict] = None,
+) -> dict:
+    """The digests that differ, with element counts where both arrays were kept.
+
+    ``ref_names`` / ``new_names`` map a digest key to its name in the record's
+    ``arrays.npz`` where the two differ (``compare --programs`` re-keys them).
+    """
     import numpy as np
 
+    ref_names, new_names = ref_names or {}, new_names or {}
     rows = {}
     for key in sorted(set(ref) | set(new)):
         r, n = ref.get(key), new.get(key)
@@ -1053,14 +1094,15 @@ def _compare_arrays(ref: dict, new: dict, ref_npz, new_npz) -> dict:
         if r == n:
             continue
         row: dict = {"ref": r, "new": n}
+        rk, nk = ref_names.get(key, key), new_names.get(key, key)
         if (
             ref_npz is not None
             and new_npz is not None
-            and key in ref_npz.files
-            and key in new_npz.files
+            and rk in ref_npz.files
+            and nk in new_npz.files
             and r.get("shape") == n.get("shape")
         ):
-            x, y = ref_npz[key], new_npz[key]
+            x, y = ref_npz[rk], new_npz[nk]
             differ = x != y
             if np.issubdtype(x.dtype, np.floating):
                 differ &= ~(np.isnan(x) & np.isnan(y))
@@ -1074,31 +1116,77 @@ def _compare_arrays(ref: dict, new: dict, ref_npz, new_npz) -> dict:
     return rows
 
 
+def _select_programs(
+    rec: dict, programs_re: Optional[str]
+) -> tuple[list[dict], list[str], dict, dict]:
+    """``(programs, labels, digests, npz names)`` of a record, as ``compare`` reads it.
+
+    With ``programs_re``, only the programs whose label matches (``re.search``),
+    labelled and their array digests keyed by their place among those, not in the
+    whole run: ``compare --programs`` pairs the k-th matching program of each
+    record whatever ran before it.
+    """
+    progs = rec["programs"]
+    names: dict = {}
+    digests: dict = {}
+    if programs_re is None:
+        labels = [p["label"] for p in progs]
+        for p in progs:
+            digests.update(p["inputs"])
+            digests.update(p["outputs"])
+    else:
+        rx = re.compile(programs_re)
+        progs = [p for p in progs if rx.search(p["label"])]
+        labels = []
+        for k, p in enumerate(progs):
+            module = p["label"].split("_", 1)[1]
+            labels.append(f"#{k}_{module}")
+            old, new = f"prog:{p['label']}:", f"prog:#{k}_{module}:"
+            for key, row in [*p["inputs"].items(), *p["outputs"].items()]:
+                renamed = new + key[len(old) :] if key.startswith(old) else key
+                digests[renamed] = row
+                names[renamed] = key
+    digests.update(rec["returns"])
+    return progs, labels, digests, names
+
+
 def compare_variant(
-    ref_dir: Path, new_dir: Path, control_dir: Optional[Path] = None
+    ref_dir: Path,
+    new_dir: Path,
+    control_dir: Optional[Path] = None,
+    programs_re: Optional[str] = None,
 ) -> dict:
     """``compare``'s verdict on one variant's two records.
 
     With ``control_dir`` (an A-vs-A control of ``ref_dir``), a text or array that
     differs between ref and control too is not run to run reproducible: it is
-    listed under ``noise`` and does not fail the variant.
+    listed under ``noise`` and does not fail the variant. ``programs_re``
+    restricts the comparison to the programs it matches (and what the variant
+    returns); see :func:`_select_programs`. Records that both carry the handles'
+    compile-key digests (``handle_keys``) must agree on them.
     """
     import numpy as np
 
     noise: set = set()
     if control_dir is not None and (control_dir / "record.json").exists():
-        control = compare_variant(ref_dir, control_dir)
+        control = compare_variant(ref_dir, control_dir, programs_re=programs_re)
         noise = set(control.get("texts", {})) | set(control.get("arrays", {}))
 
     r = json.loads((ref_dir / "record.json").read_text())
     n = json.loads((new_dir / "record.json").read_text())
     entry: dict = {}
-    rl = [p["label"] for p in r["programs"]]
-    nl = [p["label"] for p in n["programs"]]
+    r_progs, rl, r_digests, r_names = _select_programs(r, programs_re)
+    n_progs, nl, n_digests, n_names = _select_programs(n, programs_re)
     if rl != nl:
         entry["programs"] = {"ref": rl, "new": nl}
+    if (
+        "handle_keys" in r
+        and "handle_keys" in n
+        and r["handle_keys"] != n["handle_keys"]
+    ):
+        entry["handle_keys"] = {"ref": r["handle_keys"], "new": n["handle_keys"]}
     texts = {}
-    for rp, np_ in zip(r["programs"], n["programs"]):
+    for rp, np_ in zip(r_progs, n_progs):
         for kind in ("lowered", "compiled"):
             rs, ns = rp.get(f"{kind}_sha256"), np_.get(f"{kind}_sha256")
             if rs == ns:
@@ -1112,18 +1200,14 @@ def compare_variant(
             )
     if texts:
         entry["texts"] = texts
-    digests: list[dict] = [{}, {}]
-    for rec, into in zip((r, n), digests):
-        for p in rec["programs"]:
-            into.update(p["inputs"])
-            into.update(p["outputs"])
-        into.update(rec["returns"])
     rz, nz = ref_dir / "arrays.npz", new_dir / "arrays.npz"
     arrays = _compare_arrays(
-        digests[0],
-        digests[1],
+        r_digests,
+        n_digests,
         np.load(rz) if rz.exists() else None,
         np.load(nz) if nz.exists() else None,
+        r_names,
+        n_names,
     )
     if arrays:
         entry["arrays"] = arrays
@@ -1131,10 +1215,13 @@ def compare_variant(
     if noisy:
         entry["noise"] = noisy
     entry["pass"] = not (
-        entry.get("programs") or set(texts) - noise or set(arrays) - noise
+        entry.get("programs")
+        or entry.get("handle_keys")
+        or set(texts) - noise
+        or set(arrays) - noise
     )
     entry["n_programs"] = len(nl)
-    entry["n_arrays"] = len(digests[1])
+    entry["n_arrays"] = len(n_digests)
     return entry
 
 
@@ -1149,7 +1236,7 @@ def _compare(args) -> int:
         if args.variants
         else sorted(set(ref_m["variants"]) | set(new_m["variants"]))
     )
-    keys = ("git_head", "git_dirty", "jax", "device", "xla_flags")
+    keys = ("git_head", "git_dirty", "jax", "device", "xla_flags", "env")
     report: dict = {
         "ref": {k: ref_m.get(k) for k in keys},
         "new": {k: new_m.get(k) for k in keys},
@@ -1169,7 +1256,10 @@ def _compare(args) -> int:
             ok = False
             continue
         entry = compare_variant(
-            rv, nv, None if control_dir is None else control_dir / a
+            rv,
+            nv,
+            None if control_dir is None else control_dir / a,
+            programs_re=args.programs,
         )
         ok = ok and entry["pass"]
         report["variants"][name] = entry
@@ -1189,14 +1279,18 @@ def _compare(args) -> int:
 # --------------------------------------------------------------------- main
 
 
-def _prepare_process_env(device: str) -> None:
+def _prepare_process_env(device: str, env: tuple = ()) -> None:
     """Scrub the jaccpot/yggdrax environment and set the device's XLA flags.
 
     Must run before jax is imported: the flags are read when the backend starts.
+    ``env`` (``record --env KEY=VAL``) is set after the scrub, in the record's
+    process and every variant's: a library switch under test (an A/B of one
+    record against another), on top of the variants' own environment.
     """
     for key in [k for k in os.environ if k.startswith(("JACCPOT_", "YGGDRAX_"))]:
         if not key.endswith("_WORKTREE"):
             os.environ.pop(key)
+    os.environ.update(dict(kv.split("=", 1) for kv in env))
     flags = os.environ.get("XLA_FLAGS", "")
     for flag in _CPU_FLAGS if device == "cpu" else _GPU_FLAGS:
         if flag.split("=", 1)[0] not in flags:
@@ -1233,11 +1327,19 @@ def main(argv: list[str]) -> int:
         help="keep every array next to its sha256 (default: on cpu only)",
     )
     rec.add_argument("--root", default=ROOT_DEFAULT)
+    rec.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VAL",
+        help="set in every variant's process after the scrub (repeatable)",
+    )
     var = sub.add_parser("variant", help="(internal) one variant, in this process")
     var.add_argument("name", choices=sorted(VARIANTS))
     var.add_argument("--out", required=True)
     var.add_argument("--device", default="cpu", choices=("cpu", "gpu"))
     var.add_argument("--n", type=int, default=None)
+    var.add_argument("--env", action="append", default=[], metavar="KEY=VAL")
     var.add_argument(
         "--save-arrays", default=True, action=argparse.BooleanOptionalAction
     )
@@ -1258,12 +1360,21 @@ def main(argv: list[str]) -> int:
         help="compare variant A of ref with variant B of new instead (ref and new "
         "may be one tag): galaxy_explicit:galaxy_preset",
     )
+    cmp_.add_argument(
+        "--programs",
+        default=None,
+        metavar="REGEX",
+        help="compare only the programs whose label matches (re.search), paired "
+        "in order among themselves, plus what the variants return: "
+        "'compiled_runner' compares the strict calls' start programs and scans "
+        "whatever their eager prepares compiled",
+    )
     cmp_.add_argument("--root", default=ROOT_DEFAULT)
     cmp_.add_argument("--json", default=None)
     args = ap.parse_args(argv)
     if args.cmd == "compare":
         return _compare(args)
-    _prepare_process_env(args.device)
+    _prepare_process_env(args.device, tuple(args.env))
     return _record(args) if args.cmd == "record" else _variant(args)
 
 

@@ -187,3 +187,60 @@ def test_pair_compares_two_variants_of_one_record(tmp_path, capsys):
     assert "PASS: 1/1" in capsys.readouterr().out
     assert phi.main(argv + ["explicit:drifted"]) == 1
     assert "differ: explicit:drifted" in capsys.readouterr().out
+
+
+def _record_programs(tmp_path, name, fns, x, handle_keys=None):
+    """A record of ``fns`` run one after another at the top level, on ``x``."""
+    cap = phi.Capture()
+    with phi.wrapped_jit():
+        jitted = [jax.jit(fn) for fn in fns]
+        with phi.capturing(cap):
+            for fn in jitted:
+                fn(x)
+    rec = {"programs": phi.program_rows(cap), "returns": {}}
+    if handle_keys is not None:
+        rec["handle_keys"] = handle_keys
+    phi.write_variant(tmp_path / name, rec, cap)
+    return tmp_path / name
+
+
+def test_programs_compares_the_matching_programs_whatever_ran_before(tmp_path):
+    """``compare --programs RE`` (S3 session 2's caps-only prepare: fewer eager
+    programs, the same runners): the k-th matching program of each record against
+    each other, text and arrays; a bit flipped there, or other handle keys, fail."""
+
+    def eager_walk(x):
+        return x + 1.0
+
+    def eager_lists(x):
+        return x - 1.0
+
+    def compiled_runner(x):
+        return x * 2.0
+
+    x = jnp.linspace(0.0, 1.0, 8, dtype=jnp.float32)
+    full = _record_programs(
+        tmp_path, "full", [eager_walk, eager_lists, compiled_runner], x, [{"k": 1}]
+    )
+    caps = _record_programs(
+        tmp_path, "caps", [eager_walk, compiled_runner], x, [{"k": 1}]
+    )
+    assert not phi.compare_variant(full, caps)["pass"]  # a program fewer
+    entry = phi.compare_variant(full, caps, programs_re="compiled_runner")
+    assert entry["pass"] and entry["n_programs"] == 1
+
+    flipped = np.asarray(x).copy()
+    flipped[3] = np.nextafter(flipped[3], np.float32(2.0))
+    moved = _record_programs(
+        tmp_path, "moved", [compiled_runner], jnp.asarray(flipped), [{"k": 1}]
+    )
+    entry = phi.compare_variant(full, moved, programs_re="compiled_runner")
+    assert not entry["pass"]
+    counts = sorted(row.get("n_diff") for row in entry["arrays"].values())
+    assert counts == [1, 1]  # the runner's input and output, found in arrays.npz
+
+    rekeyed = _record_programs(
+        tmp_path, "rekeyed", [eager_walk, compiled_runner], x, [{"k": 2}]
+    )
+    entry = phi.compare_variant(full, rekeyed, programs_re="compiled_runner")
+    assert not entry["pass"] and "handle_keys" in entry
