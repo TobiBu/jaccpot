@@ -690,6 +690,7 @@ class FusedForceProvider:
             refresh_ok=getattr(engine, "_last_refresh_capacity_ok", None),
             walk_needs=getattr(engine, "_last_refresh_walk_needs", None),
             tree_overflow=getattr(engine, "_last_refresh_tree_overflow", None),
+            tree_needs=getattr(engine, "_last_refresh_tree_needs", None),
             fresh=True,
             caps=(
                 traced_caps.get("max_neighbors_per_leaf_used"),
@@ -701,6 +702,7 @@ class FusedForceProvider:
         engine._last_refresh_capacity_ok = None
         engine._last_refresh_walk_needs = None
         engine._last_refresh_tree_overflow = None
+        engine._last_refresh_tree_needs = None
         return topo
 
     def accelerations(

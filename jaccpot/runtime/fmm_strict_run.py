@@ -2373,6 +2373,7 @@ class StrictRunMixin(_EngineBase):
         self._last_refresh_capacity_ok = None
         self._last_refresh_walk_needs = None
         self._last_refresh_tree_overflow = None
+        self._last_refresh_tree_needs = None
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):
@@ -2455,10 +2456,12 @@ class StrictRunMixin(_EngineBase):
             if refresh_topology_key is None:
                 refresh_topology_key = "static_fused_template"
             # the cell-leaf rebuild's own capacity flag (leaf cap, depth, level
-            # width; a tracer under trace), for `FusedTopology.overflow_bits`
+            # width; a tracer under trace), for `FusedTopology.overflow_bits`,
+            # and what it needed of each, for the segment's re-plan
             self._last_refresh_tree_overflow = getattr(
                 build_artifacts, "leaf_capacity_overflow", None
             )
+            self._last_refresh_tree_needs = getattr(build_artifacts, "tree_needs", None)
         else:
             previous_topology_key = refresh_topology_key
             if previous_topology_key is None:

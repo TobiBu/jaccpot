@@ -30,6 +30,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
 N = 512
 LEAF, ORDER, THETA = 16, 4, 0.6
 SOFTENING, DT, STEPS = 1e-2, 1e-3, 2
@@ -228,7 +230,7 @@ def test_a_user_written_scan_over_the_provider_is_the_particle_carry():
     x, v, _, (f_b, bits, needs) = run((x0, v0, a0, aux0), masses)
     # -------------------------------------------------------------------------
     assert f_b is None and int(bits) == 0
-    assert int(np.asarray(needs)[-1]) == 0  # no tree overflow
+    assert int(np.asarray(needs)[NEEDS_FIELDS.index("tree_overflow")]) == 0
     got = np.asarray(jnp.stack([x, v], axis=1))
     want = np.asarray(want)
     differ = int(np.sum(got != want))

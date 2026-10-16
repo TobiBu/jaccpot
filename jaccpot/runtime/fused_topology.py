@@ -47,6 +47,7 @@ __all__ = [
     "ForceParams",
     "FusedTopology",
     "StepParams",
+    "TREE_NEEDS_FIELDS",
     "overflow_ok",
 ]
 
@@ -78,10 +79,15 @@ OVERFLOW_LEVEL_PLAN = 1 << 8
 OVERFLOW_CROSS = 1 << 9
 #: traced force parameters outside what the topology was built for (C4)
 OVERFLOW_PARAMS = 1 << 10
+#: What the cell-leaf template rebuild needed of the three bounds its overflow flag
+#: checks: the live leaf count (exact past an overflow), the depth (levels) and the
+#: widest level's node count -- the TREE re-plan's inputs
+TREE_NEEDS_FIELDS = ("leaf_needed", "depth_needed", "widest_needed")
 #: Entries of :meth:`FusedTopology.needs`, in order: the walk's
-#: (``capacity_guard.WALK_NEEDS_FIELDS``) and whether the cell-leaf tree overflowed,
-#: which a re-plan of the walk caps cannot fix.
-NEEDS_FIELDS = (*WALK_NEEDS_FIELDS, "tree_overflow")
+#: (``capacity_guard.WALK_NEEDS_FIELDS``), whether the cell-leaf tree overflowed
+#: (which a re-plan of the walk caps cannot fix) and what the tree needed
+#: (:data:`TREE_NEEDS_FIELDS`, which a re-plan of the tree sizes from).
+NEEDS_FIELDS = (*WALK_NEEDS_FIELDS, "tree_overflow", *TREE_NEEDS_FIELDS)
 #: the verdict bits: ``ok = (bits & OVERFLOW_FAIL_MASK) == 0``
 OVERFLOW_FAIL_MASK = 0x7F8
 
@@ -332,6 +338,9 @@ class FusedTopology:
     tree_overflow : Any
         Boolean scalar: the cell-leaf rebuild overflowed its leaf capacity, depth
         bound or level width. ``None`` on bucket leaves or eagerly.
+    tree_needs : Any
+        ``int32[3]`` (:data:`TREE_NEEDS_FIELDS`): the live cell-leaf count, depth
+        and widest level the rebuild needed. ``None`` when ``tree_overflow`` is.
     fresh : bool
         Made by a rebuild in this trace, so ``refresh_ok`` belongs to it. Static.
     caps : tuple
@@ -344,6 +353,7 @@ class FusedTopology:
     refresh_ok: Any = None
     walk_needs: Any = None
     tree_overflow: Any = None
+    tree_needs: Any = None
     fresh: bool = False
     caps: tuple = (None, None, False)
 
@@ -356,7 +366,13 @@ class FusedTopology:
             ``(children, aux)``.
         """
         return (
-            (self.prepared, self.refresh_ok, self.walk_needs, self.tree_overflow),
+            (
+                self.prepared,
+                self.refresh_ok,
+                self.walk_needs,
+                self.tree_overflow,
+                self.tree_needs,
+            ),
             (bool(self.fresh), tuple(self.caps)),
         )
 
@@ -369,7 +385,7 @@ class FusedTopology:
         aux : tuple
             ``(fresh, caps)``.
         children : Any
-            ``(prepared, refresh_ok, walk_needs, tree_overflow)``.
+            ``(prepared, refresh_ok, walk_needs, tree_overflow, tree_needs)``.
 
         Returns
         -------
@@ -395,17 +411,18 @@ class FusedTopology:
         return cls(prepared=prepared)
 
     def needs(self) -> Array:
-        """What the rebuild needed: the walk's needs and the tree's overflow flag.
+        """What the rebuild needed: the walk's needs and the tree's.
 
-        A segment folds them into a running maximum (the strict scan's carry) and
-        re-plans the walk caps from the first seven; the eighth says the cell-leaf
-        tree overflowed, which no walk cap fixes.
+        A segment folds them into a running maximum (the strict scan's carry). The
+        first seven re-plan the walk caps; the eighth says the cell-leaf tree
+        overflowed, which no walk cap fixes, and the last three (the live leaf
+        count, depth and widest level) re-plan the tree.
 
         Returns
         -------
         Array
-            ``int32[8]``, :data:`NEEDS_FIELDS` in order; zeros for what the rebuild
-            did not report.
+            ``int32[11]``, :data:`NEEDS_FIELDS` in order; zeros for what the
+            rebuild did not report.
         """
         walk = (
             jnp.zeros((len(WALK_NEEDS_FIELDS),), jnp.int32)
@@ -417,7 +434,12 @@ class FusedTopology:
             if self.tree_overflow is None
             else jnp.reshape(jnp.asarray(self.tree_overflow, jnp.int32), (1,))
         )
-        return jnp.concatenate([walk, tree])
+        tree_needs = (
+            jnp.zeros((len(TREE_NEEDS_FIELDS),), jnp.int32)
+            if self.tree_needs is None
+            else jnp.asarray(self.tree_needs, jnp.int32)
+        )
+        return jnp.concatenate([walk, tree, tree_needs])
 
     def overflow_bits(self, extra: Union[int, Array] = 0) -> Array:
         """Every fixed capacity of this topology, one bit each (``OVERFLOW_*``).

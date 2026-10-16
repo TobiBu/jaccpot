@@ -24,6 +24,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
 N = 512
 LEAF, ORDER, THETA = 16, 4, 0.6
 SOFTENING = 1e-2
@@ -214,18 +216,25 @@ def test_the_rebuild_moves_its_side_channels_into_the_topology(base):
             impl._last_refresh_capacity_ok,
             impl._last_refresh_walk_needs,
             impl._last_refresh_tree_overflow,
+            impl._last_refresh_tree_needs,
         )
         return prov.accelerations(topo)
 
     jax.make_jaxpr(step)(base["pos"], base["masses"])
     topo = seen["topo"]
     # the flat walk reported its needs, the rebuild its far-list verdict, the cell
-    # partition its overflow flag -- all on the topology, as this trace's tracers
+    # partition its overflow flag and what its tree needed -- all on the topology,
+    # as this trace's tracers
     assert topo.fresh
-    for value in (topo.refresh_ok, topo.walk_needs, topo.tree_overflow):
+    for value in (
+        topo.refresh_ok,
+        topo.walk_needs,
+        topo.tree_overflow,
+        topo.tree_needs,
+    ):
         assert isinstance(value, jax.core.Tracer)
     # and none of them is left on the engine
-    assert seen["after"] == (None, None, None)
+    assert seen["after"] == (None, None, None, None)
 
 
 def test_a_rebuild_at_the_prepare_positions_is_the_prepares_force(base):
@@ -235,6 +244,19 @@ def test_a_rebuild_at_the_prepare_positions_is_the_prepares_force(base):
     assert np.array_equal(np.asarray(acc), eager)
     assert bool(ok) and int(bits) == 0
     assert int(needs[0]) > 0 and int(needs[1]) > 0  # the walk reported counts
+    # the tree's needs are the prepare's own tree: its live leaves, depth and
+    # widest level (the same partition at the same positions)
+    tree = topo0.prepared.tree
+    ranges = np.asarray(tree.node_ranges)[int(tree.left_child.shape[0]) :]
+    offsets = np.asarray(tree.level_offsets)
+    want = {
+        "leaf_needed": int(np.sum(ranges[:, 1] >= ranges[:, 0])),
+        "depth_needed": int(np.max(np.asarray(tree.node_level))) + 1,
+        "widest_needed": int(np.max(np.diff(offsets))),
+    }
+    got = {k: int(needs[NEEDS_FIELDS.index(k)]) for k in want}
+    assert got == want
+    assert int(needs[NEEDS_FIELDS.index("tree_overflow")]) == 0
     # one step is the same rebuild and evaluation, its aux the same verdict
     acc_s, (f_b, bits_s, needs_s) = jax.jit(prov.step)(base["pos"], base["masses"])
     assert f_b is None  # no criterion, no force scale
@@ -311,7 +333,11 @@ def test_the_scans_verdict_sees_a_cell_leaf_overflow(cell_overflow):
     lets the walk see a cell-leaf overflow, so its far list does not saturate and
     nothing else on the CSR lane fails. Missed, the verdict was True (S2 C1)."""
     assert not bool(cell_overflow["ok"])
-    assert int(cell_overflow["needs"][-1]) == 1  # named in the segment's needs
+    needs = cell_overflow["needs"]
+    # named in the segment's needs, with the leaves the blobs need: the count is
+    # the partition's before its cut to the capacity (66), what a re-plan sizes from
+    assert int(needs[NEEDS_FIELDS.index("tree_overflow")]) == 1
+    assert int(needs[NEEDS_FIELDS.index("leaf_needed")]) == 105
 
 
 def test_the_key_holds_the_walk_caps_and_the_template(base):

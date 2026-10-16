@@ -177,10 +177,13 @@ The verdict is `overflow_ok(bits)`, i.e. `(bits & OVERFLOW_FAIL_MASK) == 0` with
 wrong**, not merely slow. Before S2 a tree overflow inside the scan left the verdict
 `True` (rel-L2 0.546 at N = 512); bit 3 now fails it.
 
-`topology.needs()` is `int32[8]` (`NEEDS_FIELDS`): the walk's `far_needed`,
+`topology.needs()` is `int32[11]` (`NEEDS_FIELDS`): the walk's `far_needed`,
 `near_needed`, `peak_wavefront`, `far_overflow`, `near_overflow`, `queue_overflow`,
-`lower_bound`, then `tree_overflow`. A failed segment re-plans from their running
-maximum with `prov.replanned`. The tree overflow is not re-planned (S2): raise
+`lower_bound`, then `tree_overflow`, then what the cell-leaf tree needed
+(`TREE_NEEDS_FIELDS`): `leaf_needed` (the live cell leaves, counted before the cut to
+`leaf_capacity`, so exact past an overflow), `depth_needed` (levels) and
+`widest_needed` (the widest level's node count). A failed segment re-plans from their
+running maximum with `prov.replanned`. The tree overflow is not re-planned (S2): raise
 `leaf_capacity`.
 
 ## Force and step parameters

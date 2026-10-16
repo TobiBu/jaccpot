@@ -49,6 +49,7 @@ __all__ = [
     "registered_level_batch_width",
     "registered_num_levels",
     "pallas_cascades_enabled",
+    "widest_level",
 ]
 
 _WIDTHS: dict[tuple[int, int], int] = {}
@@ -220,8 +221,29 @@ def pallas_cascades_enabled() -> bool:
     return bool(pallas_cascade_level_supported())
 
 
+def widest_level(level_offsets: Array) -> Array:
+    """The node count of a tree's widest level (traced or concrete).
+
+    Parameters
+    ----------
+    level_offsets : Array
+        ``(levels + 1,)`` start offsets into ``nodes_by_level``.
+
+    Returns
+    -------
+    Array
+        Integer scalar, in the offsets' dtype.
+    """
+    offs = jnp.asarray(level_offsets)
+    return jnp.max(offs[1:] - offs[:-1])
+
+
 def level_width_overflow(
-    level_offsets: Array, *, total_nodes: int, num_internal: int
+    level_offsets: Array,
+    *,
+    total_nodes: int,
+    num_internal: int,
+    widest: Optional[Array] = None,
 ) -> Array:
     """Traced check that no level of a rebuilt tree exceeds the registered width.
 
@@ -233,6 +255,9 @@ def level_width_overflow(
         Node count (registry key).
     num_internal : int
         Internal node count (registry key).
+    widest : Optional[Array]
+        :func:`widest_level` of ``level_offsets`` when the caller has it already
+        (the template rebuild reports it as well); ``None`` computes it.
 
     Returns
     -------
@@ -244,5 +269,5 @@ def level_width_overflow(
     )
     if width is None:
         return jnp.asarray(False)
-    offs = jnp.asarray(level_offsets)
-    return jnp.max(offs[1:] - offs[:-1]) > jnp.asarray(int(width), offs.dtype)
+    widest_now = widest_level(level_offsets) if widest is None else widest
+    return widest_now > jnp.asarray(int(width), jnp.asarray(level_offsets).dtype)
