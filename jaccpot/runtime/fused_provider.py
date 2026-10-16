@@ -55,7 +55,9 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Optional, Union
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from beartype.typing import Callable, Tuple
 from jaxtyping import Array
 
@@ -69,7 +71,12 @@ from .fused_topology import (
     StepParams,
     _is_static,
 )
-from .strict_carry import PreparedShapeTemplate, materialize_template, shape_template
+from .strict_carry import (
+    PreparedCaps,
+    PreparedShapeTemplate,
+    materialize_template,
+    shape_template,
+)
 
 __all__ = [
     "FusedForceProvider",
@@ -108,6 +115,18 @@ def _walk_caps_key(validated: Optional[dict]) -> tuple:
         validated.get("near_edge_capacity"),
         queue_target,
     )
+
+
+#: what a traced rebuild leaves on the engine for the trace that runs it (its walk
+#: caps and the side channels its verdict and needs are moved from): saved and
+#: restored around the caps-only template's ``eval_shape``, which must leave none
+_TRACE_STATE = (
+    "_strict_fused_traced_caps",
+    "_last_refresh_capacity_ok",
+    "_last_refresh_walk_needs",
+    "_last_refresh_tree_overflow",
+    "_last_refresh_tree_needs",
+)
 
 
 def require_cell_leaves(solver: Any) -> None:
@@ -225,6 +244,7 @@ class FusedForceProvider:
         theta: Optional[float] = None,
         bounds: Optional[Tuple[Array, Array]] = None,
         runtime_overrides: Any = None,
+        caps_only: bool = False,
     ) -> tuple["FusedForceProvider", FusedTopology]:
         """Prepare the fused lane at ``positions`` and freeze its template.
 
@@ -232,6 +252,17 @@ class FusedForceProvider:
         device-resident layout, validated walk caps recorded on the engine (the
         traced rebuild is sized from them) and, under ``mac_type='dehnen_error'``,
         the eq (16b) prepass.
+
+        ``caps_only``: what the particle carry reads of that prepare, and no more
+        (``PrepareMixin.prepare_state_caps_only``: the tree, the upward pass, the
+        eager walk's caps, the seed; no list, no downward pass, no near-field
+        payload). The template is then the SHAPES of a rebuild of the eager tree
+        under ``jax.eval_shape`` -- what the scan's steps trace -- and the topology
+        holds a :class:`~jaccpot.runtime.strict_carry.PreparedCaps` (the eager
+        tree, the verdict) instead of a prepared state: nothing can be evaluated
+        on it. The same template key, provider key and engine trace-time state as
+        the full prepare (``tests/integration/strict/test_caps_only_prepare.py``).
+        A lane without the flat walk gets the full prepare.
 
         Parameters
         ----------
@@ -251,11 +282,14 @@ class FusedForceProvider:
             Morton box; ``None`` infers it from ``positions``.
         runtime_overrides : Any
             Already-resolved runtime overrides; ``None`` resolves them for ``N``.
+        caps_only : bool
+            The caps-only prepare (above).
 
         Returns
         -------
         tuple[FusedForceProvider, FusedTopology]
-            The provider and the topology at ``positions`` (``from_prepared``).
+            The provider and the topology at ``positions`` (``from_prepared``; a
+            ``PreparedCaps`` under ``caps_only``).
 
         Raises
         ------
@@ -282,17 +316,43 @@ class FusedForceProvider:
             runtime_overrides = engine._resolve_runtime_execution_overrides(
                 num_particles=n
             )
-        prepared = engine.prepare_state(
-            positions_arr,
-            masses_arr,
-            leaf_size=int(leaf_size),
-            max_order=int(max_order),
-            theta=theta,
-            jit_tree=engine._jit_tree_default,
-            runtime_overrides_override=runtime_overrides,
-            fused_device_mode=True,
-            **({} if bounds is None else {"bounds": bounds}),
-        )
+        prepared: Any = None
+        if caps_only:
+            prepared = engine.prepare_state_caps_only(
+                positions_arr,
+                masses_arr,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_tree=engine._jit_tree_default,
+                runtime_overrides_override=runtime_overrides,
+                **({} if bounds is None else {"bounds": bounds}),
+            )
+            if isinstance(prepared, PreparedCaps):
+                provider = cls(
+                    engine,
+                    leaf_size=leaf_size,
+                    max_order=max_order,
+                    theta=theta,
+                    runtime_overrides=runtime_overrides,
+                )
+                provider, prepared = provider._with_caps_template(
+                    prepared, positions_arr, masses_arr
+                )
+                engine._record_large_n_eval_shape_diagnostics(prepared.shapes)
+                return provider, FusedTopology.from_prepared(prepared)
+        if prepared is None:
+            prepared = engine.prepare_state(
+                positions_arr,
+                masses_arr,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                theta=theta,
+                jit_tree=engine._jit_tree_default,
+                runtime_overrides_override=runtime_overrides,
+                fused_device_mode=True,
+                **({} if bounds is None else {"bounds": bounds}),
+            )
         if not isinstance(prepared, LargeNPreparedState):
             raise RuntimeError(
                 "the fused lane's prepare returned a "
@@ -363,6 +423,7 @@ class FusedForceProvider:
         masses: Array,
         *,
         walk_only: bool = False,
+        caps_only: bool = False,
     ) -> Optional[tuple["FusedForceProvider", FusedTopology]]:
         """Re-plan from what a failed segment needed and re-prepare at its start.
 
@@ -387,6 +448,10 @@ class FusedForceProvider:
         walk_only : bool
             Re-plan the walk caps only: the second retry after a tree re-plan,
             whose re-run measured the walk on a tree that fits.
+        caps_only : bool
+            Re-prepare caps-only (:meth:`prepare`): the particle carry's retry,
+            whose re-run starts from the start program. The topology then holds
+            a ``PreparedCaps``, on which nothing can be evaluated.
 
         Returns
         -------
@@ -411,16 +476,22 @@ class FusedForceProvider:
         replanned_peak = int(
             (engine._strict_fused_validated_caps or {}).get("peak_wavefront", 0)
         )
-        prepared = engine.prepare_state(
-            positions,
-            masses,
+        prepare_kw: dict = dict(
             leaf_size=int(self.leaf_size),
             max_order=int(self.max_order),
             theta=self.theta,
             jit_tree=engine._jit_tree_default,
             runtime_overrides_override=self.runtime_overrides,
-            fused_device_mode=True,
         )
+        prepared: Any = (
+            engine.prepare_state_caps_only(positions, masses, **prepare_kw)
+            if caps_only
+            else None
+        )
+        if prepared is None:
+            prepared = engine.prepare_state(
+                positions, masses, fused_device_mode=True, **prepare_kw
+            )
         # the eager walk saw the segment's START; keep the wavefront the segment
         # needed, so the retraced walk's queue covers it
         validated = dict(engine._strict_fused_validated_caps or {})
@@ -441,6 +512,15 @@ class FusedForceProvider:
                     int(engine._cells_upward_num_levels),
                 ),
             )
+        if isinstance(prepared, PreparedCaps):
+            provider, prepared = type(self)(
+                engine,
+                leaf_size=self.leaf_size,
+                max_order=self.max_order,
+                theta=self.theta,
+                runtime_overrides=self.runtime_overrides,
+            )._with_caps_template(prepared, positions, masses)
+            return provider, FusedTopology.from_prepared(prepared)
         provider = type(self).freeze_template(
             engine,
             prepared,
@@ -450,6 +530,105 @@ class FusedForceProvider:
             runtime_overrides=self.runtime_overrides,
         )
         return provider, FusedTopology.from_prepared(prepared)
+
+    def _with_caps_template(
+        self, caps: PreparedCaps, positions: Array, masses: Array
+    ) -> tuple["FusedForceProvider", PreparedCaps]:
+        """The template and verdict the full prepare would give, from a caps-only one.
+
+        The rebuild of ``caps.stub`` (the eager tree and the state's static
+        fields) at abstract positions under ``jax.eval_shape`` is the trace the
+        particle carry's steps run, so its output's SHAPES are the prepared
+        state's: the template the full prepare freezes, the far list detached.
+        Tracing it leaves the engine's trace-time side channels (the traced walk
+        caps, the verdict and needs a rebuild moves off the engine) as they were.
+
+        The verdict is ``fused_state_capacity_ok`` of the state the full prepare
+        would have built (no traced caps): its far list not full, and on the
+        rectangle near-field route every row within the static target blocks --
+        from the eager walk's counts and the template's block shape.
+
+        Parameters
+        ----------
+        caps : PreparedCaps
+            From ``prepare_state_caps_only``.
+        positions : Array
+            ``[N, 3]`` positions of the prepare (their shape and dtype).
+        masses : Array
+            ``[N]`` masses (their shape and dtype).
+
+        Returns
+        -------
+        tuple[FusedForceProvider, PreparedCaps]
+            This configuration with the template, and ``caps`` with the verdict
+            and the shapes.
+        """
+        engine = self.engine
+        n = int(positions.shape[0])
+        x = jax.ShapeDtypeStruct(tuple(positions.shape), positions.dtype)
+        m = jax.ShapeDtypeStruct(tuple(masses.shape), masses.dtype)
+        # the scan's f_b carry: the state's dtype, input order
+        fb = jax.ShapeDtypeStruct((n,), positions.dtype) if self.scale_carry else None
+
+        # The state's leaves that are not arrays (a tree's particle count, an
+        # expansion order: Python numbers the rebuild reads statically) stay what
+        # they are, as the full prepare's template keeps them; eval_shape would
+        # make them scalars. So only the arrays leave the trace.
+        static: dict = {}
+        array = object()  # marks an array leaf in ``static["leaves"]``
+
+        def _shapes(like: Any, x_in: Any, m_in: Any, fb_in: Any) -> list:
+            topology = self._rebuild_like(like, x_in, m_in, force_scale=fb_in)
+            leaves, static["treedef"] = jax.tree_util.tree_flatten(
+                replace(topology.prepared, compact_far_pairs=None)
+            )
+            is_array = [isinstance(leaf, (jax.Array, np.ndarray)) for leaf in leaves]
+            static["leaves"] = [
+                array if flag else leaf for leaf, flag in zip(leaves, is_array)
+            ]
+            return [leaf for leaf, flag in zip(leaves, is_array) if flag]
+
+        saved = {name: getattr(engine, name, None) for name in _TRACE_STATE}
+        try:
+            arrays = iter(jax.eval_shape(_shapes, caps.stub, x, m, fb))
+        finally:
+            for name, value in saved.items():
+                setattr(engine, name, value)
+        # the array leaves as an eager array's template records them (no weak types)
+        leaves = []
+        for leaf in static["leaves"]:
+            if leaf is array:
+                sds = next(arrays)
+                leaf = jax.ShapeDtypeStruct(tuple(sds.shape), sds.dtype)
+            leaves.append(leaf)
+        template = PreparedShapeTemplate(
+            treedef=static["treedef"], leaves=tuple(leaves)
+        )
+        shapes = jax.tree_util.tree_unflatten(template.treedef, leaves)
+        walk = caps.walk
+        ok = int(walk.compact_far_pair_capacity) <= 0 or int(walk.far_pair_count) < int(
+            walk.compact_far_pair_capacity
+        )
+        padded = getattr(shapes, "nearfield_target_block_source_leaf_ids_padded", None)
+        if (
+            ok
+            and padded is not None
+            and self.rectangle_guard_active
+            and len(padded.shape) == 3
+            and int(padded.shape[1]) > 0
+        ):
+            ok = int(walk.max_leaf_neighbors) <= int(padded.shape[1]) * int(
+                padded.shape[2]
+            )
+        provider = type(self)(
+            engine,
+            leaf_size=self.leaf_size,
+            max_order=self.max_order,
+            theta=self.theta,
+            runtime_overrides=self.runtime_overrides,
+            template=template,
+        )
+        return provider, replace(caps, capacity_ok=bool(ok), shapes=shapes)
 
     # ----------------------------------------------------------------------
     # Static configuration and the compile key.
@@ -871,12 +1050,14 @@ class FusedForceProvider:
         them) and, for a rebuilt topology, the far list the rebuild built and the
         cell-leaf tree it rebuilt (leaf capacity, depth bound, level width: the
         walk never sees that overflow, so it is folded here). Equal to
-        ``overflow_ok(topology.overflow_bits())``.
+        ``overflow_ok(topology.overflow_bits())``. A caps-only prepare's topology
+        (a ``PreparedCaps``) has its eager verdict.
 
         Parameters
         ----------
         topology : FusedTopology
-            A rebuilt topology, or an eager one (``fresh=False``: its own widths).
+            A rebuilt topology, or an eager one (``fresh=False``: its own widths,
+            or a caps-only prepare's verdict).
 
         Returns
         -------
@@ -885,6 +1066,9 @@ class FusedForceProvider:
         """
         from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
 
+        if isinstance(topology.prepared, PreparedCaps):
+            # a caps-only prepare's: the verdict the full prepare's state gets
+            return jnp.asarray(bool(topology.prepared.capacity_ok))
         ok = fused_state_capacity_ok(
             topology.prepared,
             traced_caps=getattr(self.engine, "_strict_fused_traced_caps", None),
