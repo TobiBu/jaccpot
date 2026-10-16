@@ -84,6 +84,14 @@ retry_state                   the segment retry: caps sized on the blobs, the st
                               must, or the variant fails)
 retry_particles               the same, particle carry (the start program overflows)
 eval_seam                     ``strict_fused_prepared_eval_fn`` and one ``eval_fn`` call
+galaxy_explicit               (S3, not in the default sets) the particle carry on
+                              ``fused_memory_budget.py``'s explicit configuration at
+                              its defaults (leaf 64, p6, theta 0.8, cell level 8, its
+                              leaf-64 traversal overrides), capacity counted inside
+                              the capture as the bench counts it
+galaxy_preset                 the same run on ``preset="galaxy"`` (``leaf_capacity=
+                              "auto"``, theta from the preset): ``compare --pair
+                              galaxy_explicit:galaxy_preset`` must find nothing
 ============================  ========================================================
 
 What the base pins down includes two behaviours of ``mac_type="dehnen_error"`` that
@@ -116,6 +124,10 @@ Usage::
     JAX_PLATFORMS=cpu CUDA_VISIBLE_DEVICES= python bench/provider_hlo_identity.py \\
         record --tag s2-base-cpu --jobs 4
     python bench/provider_hlo_identity.py compare s2-base-cpu c2-<sha>-cpu
+    python bench/provider_hlo_identity.py record --tag s3-galaxy-cpu \
+        --variants galaxy_explicit,galaxy_preset --jobs 2
+    python bench/provider_hlo_identity.py compare s3-galaxy-cpu s3-galaxy-cpu \
+        --pair galaxy_explicit:galaxy_preset
 
     export CUDA_VISIBLE_DEVICES=$(autocvd -n 1 -o -q -i 20)   # the org rule
     python bench/provider_hlo_identity.py record --device gpu --tag s2-base-gpu
@@ -466,6 +478,79 @@ def _solver(setup: Setup, leaf_cap: int, v: "Variant"):
     )
 
 
+#: fused_memory_budget.py's defaults (its L1-L3 rows): leaf, order, theta, cell level
+_BENCH_GALAXY = dict(leaf=64, order=6, theta=0.8, cell_min_level=8)
+#: and the TraversalOverrides it passes at leaf 64 (the harness's
+#: FAST_LANE_ENV_BY_LEAF[64]["_traversal_overrides"])
+_BENCH_TRAVERSAL_LEAF64 = dict(
+    max_neighbors_per_leaf=4096, max_interactions_per_node=16384
+)
+
+
+def _galaxy_solver(setup: Setup, v: "Variant", positions):
+    """The galaxy pair: ``preset="galaxy"``, or the bench's explicit configuration.
+
+    ``"explicit"`` is ``fused_memory_budget.py``'s ``_solver`` at its defaults, its
+    leaf capacity counted as the bench counts it (the library's device count, since
+    S3), inside the capture -- where ``"preset"``'s ``leaf_capacity="auto"`` counts
+    it, in its first eager prepare. Both then run the same counting programs on the
+    same codes, so the two records must agree program for program.
+    """
+    import warnings
+
+    import jax.numpy as jnp
+
+    from jaccpot import FastMultipoleMethod, TraversalOverrides
+    from jaccpot.config import (
+        FMMAdvancedConfig,
+        NearFieldConfig,
+        RuntimePolicyConfig,
+        TreeConfig,
+    )
+    from jaccpot.runtime.capacity_plan import auto_leaf_capacity, live_cell_leaves
+    from jaccpot.runtime.kernels._evaluate import _infer_bounds
+
+    use_pallas = True if setup.device == "cpu" else None
+    if v.galaxy == "preset":
+        return FastMultipoleMethod(
+            preset="galaxy", G=v.G, softening=setup.softening, use_pallas=use_pallas
+        )
+    p = jnp.asarray(positions)
+    live = live_cell_leaves(
+        p,
+        leaf_size=setup.leaf,
+        cell_min_level=setup.cell_min_level,
+        bounds=_infer_bounds(p),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)  # fixed_order, as the bench
+        return FastMultipoleMethod(
+            preset="large_n_gpu",
+            basis="real",
+            theta=setup.theta,
+            G=v.G,
+            softening=setup.softening,
+            softening_kernel=None,
+            working_dtype=jnp.float32,
+            use_pallas=use_pallas,
+            advanced=FMMAdvancedConfig(
+                tree=TreeConfig(
+                    mode="static_radix",
+                    leaf_target=setup.leaf,
+                    leaf_partition="cells",
+                    leaf_capacity=auto_leaf_capacity(live, 1.15),
+                    cell_min_level=setup.cell_min_level or None,
+                ),
+                nearfield=NearFieldConfig(mode="auto"),
+                runtime=RuntimePolicyConfig(
+                    traversal_config=TraversalOverrides(**_BENCH_TRAVERSAL_LEAF64)
+                ),
+                mac_type="dehnen",
+            ),
+            fixed_order=setup.order,
+        )
+
+
 #: the analytic halo of the external-field variants (fused_memory_budget.py's NFW
 #: in AGAMA's convention), module level so its id is fixed for the process
 _HALO_M, _HALO_RS = 10.0, 1.0
@@ -515,6 +600,9 @@ class Variant:
     pallas: bool = True
     #: prepare on a uniform cube, then step the real state: a segment retry
     retry: bool = False
+    #: the galaxy pair (S3 R7b): ``"explicit"`` (the bench's configuration) or
+    #: ``"preset"`` (``preset="galaxy"``), compared with each other by ``--pair``
+    galaxy: str = ""
 
 
 _TREE_ORDER = (("JACCPOT_STRICT_CARRY_ORDER", "tree"),)
@@ -562,11 +650,19 @@ VARIANTS.update(
         if v.mac_type != "dehnen_error"
     }
 )
+#: S3 R7b: ``preset="galaxy"`` must compile and compute what the bench's explicit
+#: configuration does (``compare TAG TAG --pair galaxy_explicit:galaxy_preset``).
+#: Not in the default sets, which stay the S2 base's.
+_GALAXY = {
+    "galaxy_explicit": Variant(calls=(_PARTICLES,), galaxy="explicit"),
+    "galaxy_preset": Variant(calls=(_PARTICLES,), galaxy="preset"),
+}
+VARIANTS.update(_GALAXY)
 
 
 def _default_variants(device: str) -> list[str]:
     if device == "cpu":
-        return list(VARIANTS)
+        return [name for name in VARIANTS if name not in _GALAXY]
     # no retry pair at 2e5: a uniform cube cut into cells of level >= 8 has a leaf
     # per particle, and a second clipped Plummer draw has the first one's counts
     return [name for name, v in _BASE.items() if not v.retry]
@@ -593,11 +689,22 @@ def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
     import numpy as np
 
     v = VARIANTS[name]
+    if v.galaxy:
+        # the bench's operating point on this device's problem (CPU: the blobs)
+        setup = dataclasses.replace(setup, **_BENCH_GALAXY)
     state_np, mass_np = _initial_state(setup)
     if v.G != 1.0:
         # the same system in units where G != 1: G m is unchanged
         mass_np = (mass_np.astype(np.float64) / v.G).astype(np.float32)
-    leaf_cap = _leaf_capacity(setup, state_np[:, 0])
+    # the galaxy pair counts its capacity inside the capture
+    leaf_cap = 0 if v.galaxy else _leaf_capacity(setup, state_np[:, 0])
+    run_leaf, run_order, run_theta = setup.leaf, setup.order, setup.theta
+    if v.galaxy == "preset":
+        from jaccpot.production import GALAXY_SETTINGS
+
+        # the run-time half from the settings; theta from the preset's default
+        run_leaf, run_order = GALAXY_SETTINGS.leaf_size, GALAXY_SETTINGS.max_order
+        run_theta = None
     env = v.env + (_CSR_ON_CPU if v.pallas and setup.device == "cpu" else ())
     returns: dict = {}
     emitted: list = []
@@ -611,7 +718,11 @@ def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
 
     t0 = time.perf_counter()
     with _env(env), capturing(cap):
-        solver = _solver(setup, leaf_cap, v)
+        solver = (
+            _galaxy_solver(setup, v, state_np[:, 0])
+            if v.galaxy
+            else _solver(setup, leaf_cap, v)
+        )
         masses = jnp.asarray(mass_np)
         if v.seam:
             prepared, eval_fn = solver.strict_fused_prepared_eval_fn(
@@ -653,9 +764,9 @@ def _run_variant(name: str, setup: Setup, cap: Capture) -> dict:
                     dt=setup.dt,
                     num_steps=setup.steps,
                     refresh_every=1,
-                    leaf_size=setup.leaf,
-                    max_order=setup.order,
-                    theta=setup.theta,
+                    leaf_size=run_leaf,
+                    max_order=run_order,
+                    theta=run_theta,
                     prepared_state=handle if call.chain or v.retry else None,
                     return_prepared_state=True,
                     add_external=call.external,
@@ -1044,9 +1155,12 @@ def _compare(args) -> int:
         "new": {k: new_m.get(k) for k in keys},
         "variants": {},
     }
+    # ``--pair A:B``: variant A of ref against variant B of new (the galaxy pair)
+    pairs = [tuple(args.pair.split(":", 1))] if args.pair else [(n, n) for n in names]
     ok = True
-    for name in names:
-        rv, nv = ref_dir / name, new_dir / name
+    for a, b in pairs:
+        name = a if a == b else f"{a}:{b}"
+        rv, nv = ref_dir / a, new_dir / b
         missing = [
             t for t, p in (("ref", rv), ("new", nv)) if not (p / "record.json").exists()
         ]
@@ -1055,7 +1169,7 @@ def _compare(args) -> int:
             ok = False
             continue
         entry = compare_variant(
-            rv, nv, None if control_dir is None else control_dir / name
+            rv, nv, None if control_dir is None else control_dir / a
         )
         ok = ok and entry["pass"]
         report["variants"][name] = entry
@@ -1136,6 +1250,13 @@ def main(argv: list[str]) -> int:
         default=None,
         help="an A-vs-A control of ref: what differs there too is reported as "
         "noise, not a failure (on a GPU, the eager walk's raw lists)",
+    )
+    cmp_.add_argument(
+        "--pair",
+        default=None,
+        metavar="A:B",
+        help="compare variant A of ref with variant B of new instead (ref and new "
+        "may be one tag): galaxy_explicit:galaxy_preset",
     )
     cmp_.add_argument("--root", default=ROOT_DEFAULT)
     cmp_.add_argument("--json", default=None)

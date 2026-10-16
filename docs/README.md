@@ -28,6 +28,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | which **MAC**, and at which leaf size? | `dehnen_mass_mac_status_and_plan.md` |
 | what is the **production single-GPU path**? | `large_n_runtime_contract_2026-04-21.md`, then the fused-lane records below |
 | how do I run the fused lane's **force inside my own integrator**, trace `G` / the softening / `dt`, or validate in **float64**? | `fused_provider.md` |
+| how do I run a **long production simulation** (segments, diagnostics, snapshots, restarts)? | `production.md` |
 | what did the **2026-10 cleanup** remove, and why? | `cleanup_2026-10.md` |
 | what does a **production galaxy run** cost today (time, B/particle, Odisseo, gradients, block steps), and what is planned? | `production_2026-10.md` |
 | I am about to touch `operators/` | `operator_conventions.md` (and `agent_guides/NUMERICS_AND_JAX.md`) |
@@ -75,6 +76,7 @@ first · **[closed]** the task is done; kept for its traps or its record ·
 | file | |
 |---|---|
 | `large_n_runtime_contract_2026-04-21.md` | **[current]** The canonical production path for `preset="large_n_gpu"`. This is the contract; the status note below is the history. |
+| `production.md` | **[current]** The user guide to `ProductionRunner` (S3, 2026-10): K-step `strict_run_v2(carry="particles")` segments chained through the handle, the segment-length rule, donation, traced parameters, the edge diagnostics and callbacks, restart files and their bitwise restore, the S3 gates. |
 | `fused_provider.md` | **[current]** The user guide to `FusedForceProvider`, the fused lane's per-step force as an object (S2, 2026-10): the eager / traced split, `FusedTopology` and its overflow bits, `ForceParams` / `StepParams` (static default, traced opt-in), the limits, and the float64 validation lane. |
 | `large_n_runtime_status_2026-03-23.md` | **[superseded]** Handoff from the earlier `large_N_performance` branch. Read the contract instead. |
 | `potential_falls_off_the_fast_lane.md` | **[open]** Diagnosed, not fixed: why a potential request leaves the large-N fast lane. |

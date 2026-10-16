@@ -174,6 +174,22 @@ class TestEnvText:
         assert not caught
 
 
+class TestEnvSnapshot:
+    """The environment as a record: every variable of a prefix, verbatim."""
+
+    def test_the_prefixed_variables_come_back_sorted_and_verbatim(self, monkeypatch):
+        """Prefixed names only, values as written, the excluded suffixes left out."""
+        monkeypatch.setenv("JACCPOT_TEST_SNAP_B", " 2 ")
+        monkeypatch.setenv("JACCPOT_TEST_SNAP_A", "1")
+        monkeypatch.setenv("JACCPOT_TEST_SNAP_WORKTREE", "/somewhere")
+        monkeypatch.setenv("OTHER_TEST_SNAP", "x")
+        got = _env.env_snapshot(
+            ("JACCPOT_TEST_SNAP_", "OTHER_NONE_"), exclude_suffixes=("_WORKTREE",)
+        )
+        assert got == {"JACCPOT_TEST_SNAP_A": "1", "JACCPOT_TEST_SNAP_B": " 2 "}
+        assert list(got) == sorted(got)
+
+
 class TestMalformedWarning:
     """Falling back silently is what lets a typo survive a whole session."""
 

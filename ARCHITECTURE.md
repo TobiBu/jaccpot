@@ -242,7 +242,10 @@ cleanup (`docs/cleanup_2026-10.md`: X3, K, C, Z-b).
 - **Presets** (`config.FMMPreset`): FAST and LARGE_N_GPU resolve through
   first-class bundles in `fmm_presets.get_preset_config`; BALANCED and ACCURATE
   resolve through advanced-config defaults in `solver._default_advanced_for_preset`
-  (they map to `expanse_preset=None` and never reach `get_preset_config`).
+  (they map to `expanse_preset=None` and never reach `get_preset_config`). GALAXY
+  takes both: the LARGE_N_GPU bundle (`expanse_preset="large_n_gpu"`) under advanced
+  defaults built from `production.GalaxySettings` (`solver._galaxy_advanced`), which
+  also sets the preset's default theta, softening kernel and precision.
 - **Advanced config** is the `FMMAdvancedConfig` group (tree / farfield /
   nearfield / runtime); `fmm_state._resolve_fmm_config` normalises constructor
   inputs into a validated `FMMResolvedConfig`.

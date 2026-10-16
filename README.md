@@ -22,7 +22,7 @@ Tree construction and traversal artifacts are provided by the companion package
 
 ## Features
 
-- High-level `FastMultipoleMethod` API with `fast`, `balanced`, `accurate`, and `large_n_gpu` presets
+- High-level `FastMultipoleMethod` API with `fast`, `balanced`, `accurate`, `large_n_gpu` and `galaxy` presets
 - Real (Dehnen) spherical-harmonic expansions, the only basis (`"solidfmm"` is its family name; the complex and Cartesian bases were removed in the 2026-10 cleanup)
 - Pure-JAX real spherical harmonic rotate+scale M2L path
 - Adaptive-order far-field evaluation with fixed `p_gears` buckets
@@ -147,6 +147,21 @@ accelerations (or potentials) and nothing finer: `target_indices`, jerk, the tim
 derivatives and `max_acc_derivative_order > 0` raise `NotImplementedError` there.
 So the two examples below need another preset (`fast`, `balanced` or `accurate`).
 On a CPU `large_n_gpu` declines the lane and runs the general path, where they work.
+
+| preset | what it is |
+|---|---|
+| `fast` (default) | lowest cost; `lbvh` tree |
+| `balanced` | middle ground; bucketed near field |
+| `accurate` | tightest settings; what the golden suite uses |
+| `large_n_gpu` | the large-N GPU lane: static-radix tree, streamed far field, minimum memory, fp32 |
+| `galaxy` | the fused lane's production configuration (`jaccpot.production.GalaxySettings`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8, `leaf_capacity="auto"`), p6, geometric Dehnen MAC at `theta` 0.8, ferrers3, fp32 -- the benches' L1-L3 configuration, same compiled programs |
+
+`theta` defaults to the preset's: 0.8 for `galaxy`, 0.6 for the others.
+`leaf_capacity="auto"` (`TreeConfig`) sizes the cell-leaf tree at the first eager
+prepare: 1.15x the live cell leaves of those particles, in steps of 1024, counted on
+device; it then stays fixed, so a run that clusters past it raises the capacity error.
+The run-time half of `galaxy` -- `leaf_size` 64, `max_order` 6, `carry="particles"` --
+is passed to `strict_run_v2` (`GALAXY_SETTINGS` holds it).
 
 For split-step integrators (for example active-particle substeps), you can
 evaluate only a subset while still using all particles as FMM sources:
@@ -657,6 +672,28 @@ traced softening beyond the one the walk was built for sets the `OVERFLOW_PARAMS
 
 Guide, the overflow bits, the limits and the float64 validation lane:
 **[docs/fused_provider.md](docs/fused_provider.md)**.
+
+### A long production run: `ProductionRunner`
+
+`ProductionRunner` runs a simulation as K-step `strict_run_v2(carry="particles")`
+segments chained through the handle -- bit for bit one long call (CPU gates) -- with
+fp64 momentum / angular momentum / centre-of-mass / kinetic-energy diagnostics at each
+segment edge, host-side callbacks, snapshots and restart files that continue a run
+bitwise in a fresh process:
+
+```python
+from jaccpot import FastMultipoleMethod, ProductionRunner, SegmentConfig
+
+solver = FastMultipoleMethod(preset="galaxy", softening=1.5e-3)
+runner = ProductionRunner(
+    solver, segment=SegmentConfig(steps=50, restart_every=4, restart_path="restart.npz")
+)
+res = runner.run(state, masses, dt=5e-4, num_steps=500)    # state: [N, 2, 3]
+res = runner.run(dt=5e-4, num_steps=500, restart_from="restart.npz")  # after a kill
+```
+
+Choose `steps` to divide `num_steps` (each segment length compiles its own scan).
+Guide: **[docs/production.md](docs/production.md)**.
 
 ## Momentum-Conserving FMM
 

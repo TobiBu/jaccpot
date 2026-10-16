@@ -105,15 +105,31 @@ def test_an_eager_topology_has_no_rebuild_verdict():
     assert int(topo.overflow_bits()) == 0
 
 
-def test_the_needs_carry_the_tree_overflow_after_the_walks():
+def test_the_needs_carry_the_tree_after_the_walks():
     """A segment folds them into one running maximum: the walk's entries re-plan
-    the walk caps, the last says the cell-leaf tree overflowed (no walk cap fixes
-    that)."""
+    the walk caps, the eighth says the cell-leaf tree overflowed (no walk cap fixes
+    that) and the last three -- live leaves, depth, widest level -- are what the
+    tree re-plan sizes the next tree from."""
     walk = _needs(far_needed=10, near_needed=20, peak_wavefront=30, near_overflow=1)
-    needs = _rebuilt(walk_needs=walk, tree_overflow=jnp.asarray(True)).needs()
-    assert ft.NEEDS_FIELDS == (*WALK_NEEDS_FIELDS, "tree_overflow")
+    tree = jnp.asarray([105, 14, 40], jnp.int32)
+    needs = _rebuilt(
+        walk_needs=walk, tree_overflow=jnp.asarray(True), tree_needs=tree
+    ).needs()
+    assert ft.NEEDS_FIELDS == (
+        *WALK_NEEDS_FIELDS,
+        "tree_overflow",
+        "leaf_needed",
+        "depth_needed",
+        "widest_needed",
+    )
+    assert ft.TREE_NEEDS_FIELDS == ft.NEEDS_FIELDS[-3:]
     assert needs.dtype == jnp.int32
-    np.testing.assert_array_equal(needs, np.concatenate([np.asarray(walk), [1]]))
+    np.testing.assert_array_equal(
+        needs, np.concatenate([np.asarray(walk), [1], np.asarray(tree)])
+    )
+    # a rebuild that reported no tree (bucket leaves): zeros after the walk's
+    bare = _rebuilt(walk_needs=walk, tree_overflow=None).needs()
+    np.testing.assert_array_equal(bare, np.concatenate([np.asarray(walk), [0] * 4]))
 
 
 def test_the_topology_is_a_pytree_with_static_flags():

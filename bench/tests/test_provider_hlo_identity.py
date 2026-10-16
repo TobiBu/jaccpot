@@ -162,3 +162,28 @@ def test_the_compiled_text_carries_no_source_lines():
     text = phi._compiled_text(compiled)
     assert "source_line" not in text and "FileNames" not in text
     assert "sine" in text
+
+
+def test_pair_compares_two_variants_of_one_record(tmp_path, capsys):
+    """``compare TAG TAG --pair A:B`` (S3's galaxy pair): A against B, nothing else."""
+    import json
+
+    def body(x):
+        return x * 2.0
+
+    def other(x):
+        return x * 3.0
+
+    x = jnp.ones(4)
+    tag = tmp_path / "tag"
+    _record(tag, "explicit", body, x)
+    _record(tag, "preset", body, x)
+    _record(tag, "drifted", other, x)
+    (tag / "manifest.json").write_text(
+        json.dumps({"variants": {"explicit": {}, "preset": {}, "drifted": {}}})
+    )
+    argv = ["compare", "tag", "tag", "--root", str(tmp_path), "--pair"]
+    assert phi.main(argv + ["explicit:preset"]) == 0
+    assert "PASS: 1/1" in capsys.readouterr().out
+    assert phi.main(argv + ["explicit:drifted"]) == 1
+    assert "differ: explicit:drifted" in capsys.readouterr().out

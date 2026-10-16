@@ -49,6 +49,8 @@ __all__ = [
     "registered_level_batch_width",
     "registered_num_levels",
     "pallas_cascades_enabled",
+    "widen_registered_levels",
+    "widest_level",
 ]
 
 _WIDTHS: dict[tuple[int, int], int] = {}
@@ -182,6 +184,40 @@ def registered_num_levels(*, total_nodes: int, num_internal: int) -> int | None:
     return _LEVELS.get(_key(total_nodes, num_internal))
 
 
+def widen_registered_levels(
+    *,
+    total_nodes: int,
+    num_internal: int,
+    widest: int,
+    num_levels: int,
+) -> None:
+    """Raise this shape's entry to cover a tree no eager visit has seen.
+
+    The TREE re-plan's second half: the eager re-prepare at a failed segment's
+    start registers that START tree's widest level and depth, but the segment's
+    rebuilds went wider or deeper. The batch width becomes ``ceil(1.25 x
+    widest)`` (as :func:`level_batch_width` sizes it) and the level count at
+    least ``num_levels`` -- the engine's depth bound, which the traced rebuild
+    checks against, so the per-level cascades (whose trip count this is) loop
+    over every level a tree that passes the check can have. Neither is lowered.
+
+    Parameters
+    ----------
+    total_nodes : int
+        Node count (registry key).
+    num_internal : int
+        Internal node count (registry key).
+    widest : int
+        Node count of the widest level to cover.
+    num_levels : int
+        Level-loop trip count to cover, capped by the caller at the level table.
+    """
+    key = _key(total_nodes, num_internal)
+    width = min(max(1, int(math.ceil(int(widest) * _HEADROOM))), max(total_nodes, 1))
+    _WIDTHS[key] = max(width, _WIDTHS.get(key, 0))
+    _LEVELS[key] = max(int(num_levels), _LEVELS.get(key, 0))
+
+
 def pallas_cascades_enabled() -> bool:
     """Whether the M2M/L2L cascades run as one Pallas launch per level (plan sub-10ms 3).
 
@@ -220,8 +256,29 @@ def pallas_cascades_enabled() -> bool:
     return bool(pallas_cascade_level_supported())
 
 
+def widest_level(level_offsets: Array) -> Array:
+    """The node count of a tree's widest level (traced or concrete).
+
+    Parameters
+    ----------
+    level_offsets : Array
+        ``(levels + 1,)`` start offsets into ``nodes_by_level``.
+
+    Returns
+    -------
+    Array
+        Integer scalar, in the offsets' dtype.
+    """
+    offs = jnp.asarray(level_offsets)
+    return jnp.max(offs[1:] - offs[:-1])
+
+
 def level_width_overflow(
-    level_offsets: Array, *, total_nodes: int, num_internal: int
+    level_offsets: Array,
+    *,
+    total_nodes: int,
+    num_internal: int,
+    widest: Optional[Array] = None,
 ) -> Array:
     """Traced check that no level of a rebuilt tree exceeds the registered width.
 
@@ -233,6 +290,9 @@ def level_width_overflow(
         Node count (registry key).
     num_internal : int
         Internal node count (registry key).
+    widest : Optional[Array]
+        :func:`widest_level` of ``level_offsets`` when the caller has it already
+        (the template rebuild reports it as well); ``None`` computes it.
 
     Returns
     -------
@@ -244,5 +304,5 @@ def level_width_overflow(
     )
     if width is None:
         return jnp.asarray(False)
-    offs = jnp.asarray(level_offsets)
-    return jnp.max(offs[1:] - offs[:-1]) > jnp.asarray(int(width), offs.dtype)
+    widest_now = widest_level(level_offsets) if widest is None else widest
+    return widest_now > jnp.asarray(int(width), jnp.asarray(level_offsets).dtype)

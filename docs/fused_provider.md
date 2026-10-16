@@ -35,18 +35,30 @@ template's shapes: no leaf value of a carried state reaches a step's outputs (th
 dead-code test in `tests/integration/strict/test_strict_run_v2.py`). So a caller carries
 particles and a template, never a stale far list.
 
-**Requirements.** The `large_n_gpu` preset on a GPU (the lane needs a
-`LargeNPreparedState`; on a CPU the preset declines the lane, and the CPU tests reach it
+**Requirements.** The `large_n_gpu` engine profile on a GPU (the lane needs a
+`LargeNPreparedState`; on a CPU the profile declines the lane, and the CPU tests reach it
 by making `jax.default_backend` report `"gpu"`, as
 `tests/characterization/test_lane_goldens.py` does), a static-radix tree
 (`TreeConfig(mode="static_radix")`) and, for a rebuild from the template, **cell
-leaves** (`TreeConfig(leaf_partition="cells", leaf_capacity=...)`). On bucket leaves
+leaves** (`TreeConfig(leaf_partition="cells", leaf_capacity=...)`). `preset="galaxy"`
+is all of that in one name (below). On bucket leaves
 the rebuild keeps the eager tree's node ranges and children, values a shape template
 does not hold, so `rebuild`, `step` and `strict_run_v2(carry="particles")` refuse them
 (`require_cell_leaves`, `ValueError`). If `JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET` is
 set, N must be in it.
 
 ## Quick start: velocity Verlet in your own scan
+
+`FastMultipoleMethod(preset="galaxy", softening=...)` is the production configuration
+(S3, `jaccpot/production.py`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8),
+p6, the geometric Dehnen MAC at theta 0.8, ferrers3, fp32, and
+`leaf_capacity="auto"` -- sized at the first eager prepare from the live cell leaves of
+the particles it is given (x1.15, in steps of 1024; on device,
+`capacity_plan.live_cell_leaves`), then fixed. It compiles the same programs as the
+explicit configuration below with that capacity
+(`bench/provider_hlo_identity.py compare TAG TAG --pair galaxy_explicit:galaxy_preset`).
+Leaf size and order are call arguments: `GALAXY_SETTINGS.leaf_size` / `.max_order`
+from `jaccpot.production`. Spelled out:
 
 ```python
 import jax
@@ -68,7 +80,8 @@ solver = FastMultipoleMethod(
             mode="static_radix",
             leaf_target=64,
             leaf_partition="cells",
-            leaf_capacity=leaf_capacity,  # above the live cell count at every step
+            leaf_capacity=leaf_capacity,  # or "auto"; above the live count at every step
+            cell_min_level=8,
         ),
         nearfield=NearFieldConfig(mode="auto"),
         mac_type="dehnen",
@@ -164,11 +177,25 @@ The verdict is `overflow_ok(bits)`, i.e. `(bits & OVERFLOW_FAIL_MASK) == 0` with
 wrong**, not merely slow. Before S2 a tree overflow inside the scan left the verdict
 `True` (rel-L2 0.546 at N = 512); bit 3 now fails it.
 
-`topology.needs()` is `int32[8]` (`NEEDS_FIELDS`): the walk's `far_needed`,
+`topology.needs()` is `int32[11]` (`NEEDS_FIELDS`): the walk's `far_needed`,
 `near_needed`, `peak_wavefront`, `far_overflow`, `near_overflow`, `queue_overflow`,
-`lower_bound`, then `tree_overflow`. A failed segment re-plans from their running
-maximum with `prov.replanned`. The tree overflow is not re-planned (S2): raise
-`leaf_capacity`.
+`lower_bound`, then `tree_overflow`, then what the cell-leaf tree needed
+(`TREE_NEEDS_FIELDS`): `leaf_needed` (the live cell leaves, counted before the cut to
+`leaf_capacity`, so exact past an overflow), `depth_needed` (levels) and
+`widest_needed` (the widest level's node count). A failed segment re-plans from their
+running maximum with `prov.replanned`, once per segment, at the segment's start: the
+walk's caps from the first seven, the tree's bounds from the last three (S3) -- the leaf
+capacity grows to `auto_leaf_capacity(leaf_needed, headroom)` (`TreeConfig.leaf_headroom`
+under `leaf_capacity="auto"`, x1.15 for an explicit capacity; rounded up to 1024; sticky
+on the engine), the level-loop depth bound to `depth_needed + 8`, and the level loops'
+batch width to `ceil(1.25 x widest_needed)`. The width is what a long galaxy run reaches
+first (the 25M quarter-orbit probe: the widest radix level +10.9 % in 489 steps, the
+live leaves +0.26 %). A grown capacity is a new template shape, so the re-run compiles.
+A segment whose first retry re-planned the tree may retry once more, for the walk only
+(`prov.replanned(..., walk_only=True)`): the walk's needs in a segment whose tree
+overflowed were measured on that broken tree and can fall short, the re-run's are real.
+At most two retries per segment; a further failure raises, names what overflowed against
+which bound, and says how many retries ran.
 
 ## Force and step parameters
 
@@ -228,7 +255,8 @@ and the particle-major L2P; `ARCHITECTURE.md` section 6).
   with the largest softening the run uses. Plummer has no support and no limit.
 - **Bucket leaves are refused** for a rebuild from the template (above); the state carry
   (`strict_run_v2(carry="state")`, the library default) still runs on them.
-- **A tree overflow is not re-planned** (S2): the call raises and names `leaf_capacity`.
+- **A tree overflow is re-planned at the segment's start** (S3; S2 raised): see the needs
+  above. A walk that overflowed a NAMED cap declines the retry altogether, tree or not.
 - **Not yet on the provider:** the fused multi-GPU lane (`jaccpot/distributed/fused.py`)
   has its own force step; nornax's block-step integrators do not call it yet.
 

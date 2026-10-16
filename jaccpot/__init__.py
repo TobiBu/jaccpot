@@ -21,6 +21,7 @@ from .config import (
 )
 from .nornax_adapter import BlockStepFMM, DistributedBlockStepFMM
 from .odisseo import OdisseoFMMCoupler
+from .production import GalaxySettings, ProductionRunner, SegmentConfig
 from .runtime.fused_provider import FusedForceProvider
 from .runtime.fused_topology import ForceParams
 from .solver import FastMultipoleMethod
@@ -35,11 +36,14 @@ __all__ = [
     "GradConfig",
     "FastMultipoleMethod",
     "FusedForceProvider",
+    "GalaxySettings",
     "MemoryObjective",
     "RealSHBasis",
     "NearFieldConfig",
     "OdisseoFMMCoupler",
+    "ProductionRunner",
     "RuntimePolicyConfig",
+    "SegmentConfig",
     "TraversalOverrides",
     "TreeConfig",
     "direct_sum_gravitational_acceleration",

@@ -29,8 +29,10 @@ from .config import (
     FMMPreset,
     GradConfig,
     NearFieldConfig,
+    RuntimePolicyConfig,
     TreeConfig,
 )
+from .production import GALAXY_SETTINGS, GalaxySettings
 from .runtime._large_n_types import LargeNPreparedState
 from .runtime.dtypes import require_x64
 from .runtime.fmm import FMMEngine as _RuntimeFMM
@@ -47,7 +49,7 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
     Parameters
     ----------
     preset : FMMPreset
-        Normalized preset. Any value other than the three named below falls
+        Normalized preset. Any value other than the four named below falls
         through to ``ACCURATE``, which is therefore the default rather than an
         error case.
 
@@ -103,6 +105,8 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
             mac_type="dehnen",
             dehnen_radius_scale=1.0,
         )
+    if preset is FMMPreset.GALAXY:
+        return _galaxy_advanced(GALAXY_SETTINGS)
     if preset is FMMPreset.BALANCED:
         cfg = FMMAdvancedConfig()
         return replace(
@@ -125,6 +129,66 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
         nearfield=replace(cfg.nearfield, mode="auto"),
         runtime=replace(cfg.runtime, host_refine_mode="on"),
     )
+
+
+def _galaxy_advanced(settings: GalaxySettings) -> FMMAdvancedConfig:
+    """The advanced config of ``preset="galaxy"``, from its settings.
+
+    Field for field what ``bench/fused_memory_budget.py`` passes at its defaults --
+    built on :class:`FMMAdvancedConfig`'s defaults, not on ``LARGE_N_GPU``'s, and
+    with the near field ``"auto"``, not that preset's ``"bucketed"`` -- so the
+    preset compiles the programs the production rows were measured with (S3 R7b,
+    ``bench/provider_hlo_identity.py``'s ``galaxy_*`` pair). The engine's
+    ``large_n_gpu`` profile canonicalizes the rest.
+
+    Parameters
+    ----------
+    settings : GalaxySettings
+        The constructor half is read here: leaf size (as the leaf target), cell
+        level floor, leaf capacity and headroom, expansion order (as
+        ``fixed_order``) and MAC.
+
+    Returns
+    -------
+    FMMAdvancedConfig
+        A fresh config.
+    """
+    return FMMAdvancedConfig(
+        tree=TreeConfig(
+            mode="static_radix",
+            leaf_target=int(settings.leaf_size),
+            leaf_partition="cells",
+            leaf_capacity=settings.leaf_capacity,
+            cell_min_level=int(settings.cell_min_level),
+            leaf_headroom=(
+                float(settings.leaf_headroom)
+                if settings.leaf_capacity == "auto"
+                else None
+            ),
+        ),
+        nearfield=NearFieldConfig(mode="auto"),
+        runtime=RuntimePolicyConfig(fixed_order=int(settings.max_order)),
+        mac_type=str(settings.mac_type),
+    )
+
+
+def _default_theta_for_preset(preset: FMMPreset) -> float:
+    """The opening angle a preset uses when the constructor is given none.
+
+    Parameters
+    ----------
+    preset : FMMPreset
+        Normalized preset.
+
+    Returns
+    -------
+    float
+        ``GalaxySettings.theta`` (0.8) for ``GALAXY``; 0.6, the constructor's
+        historical default, for every other preset.
+    """
+    if preset is FMMPreset.GALAXY:
+        return float(GALAXY_SETTINGS.theta)
+    return 0.6
 
 
 def _normalize_preset(preset: Union[FMMPreset, str]) -> FMMPreset:
@@ -392,7 +456,9 @@ def _pop_legacy_runtime_overrides(
 
     if preset_norm is FMMPreset.FAST:
         expanse_preset = "fast"
-    elif preset_norm is FMMPreset.LARGE_N_GPU:
+    elif preset_norm in (FMMPreset.LARGE_N_GPU, FMMPreset.GALAXY):
+        # galaxy runs on the large_n_gpu engine profile (its predicate,
+        # `_is_large_n_gpu_production_profile`, matches this string)
         expanse_preset = "large_n_gpu"
     else:
         expanse_preset = None
@@ -481,7 +547,8 @@ class FastMultipoleMethod:
     * ``use_pallas=None`` resolves at construction: Pallas near field on where it
       can run (Ampere sm_80+), pure-JAX on sm_75 and CPU. An explicit ``True`` or
       ``False`` wins.
-    * ``theta`` is the opening angle; smaller is more accurate and slower.
+    * ``theta`` is the opening angle; smaller is more accurate and slower. Unset,
+      it is the preset's: 0.8 for ``"galaxy"``, 0.6 for every other.
 
     Nothing is computed at construction: it only resolves configuration and builds
     the engine.
@@ -491,7 +558,10 @@ class FastMultipoleMethod:
     preset : Union[FMMPreset, str]
         Starting point for everything below. Determines the default ``advanced``
         config, and for ``"large_n_gpu"`` also forces fp32 when no dtype was
-        requested, because that lane's kernels are fp32-only.
+        requested, because that lane's kernels are fp32-only. ``"galaxy"`` is the
+        fused lane's production configuration
+        (:class:`jaccpot.production.GalaxySettings`): it also sets the defaults of
+        ``theta``, ``softening_kernel`` and the precision from those settings.
     basis : Union[Basis, BasisInterface, str]
         ``"real"`` (default) or its alias ``"solidfmm"``, as above; any other
         name raises a ``ValueError``. May also be a constructed
@@ -537,8 +607,10 @@ class FastMultipoleMethod:
         Some modes run a host loop over nodes and warn.
     mac_theta_max : float
         Upper clamp on the opening angle the adaptive MAC may choose.
-    theta : float
-        Opening angle. Smaller is more accurate and slower.
+    theta : Optional[float]
+        Opening angle. Smaller is more accurate and slower. ``None`` (default)
+        takes the preset's: ``GalaxySettings.theta`` (0.8) for ``"galaxy"``, 0.6
+        for every other preset.
     G : float
         Gravitational constant.
     softening : float
@@ -614,7 +686,7 @@ class FastMultipoleMethod:
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
         mac_theta_max: float = 1.0,
-        theta: float = 0.6,
+        theta: Optional[float] = None,
         G: float = 1.0,
         softening: float = 1e-3,
         softening_kernel: Optional[str] = None,
@@ -624,6 +696,14 @@ class FastMultipoleMethod:
         **legacy_kwargs: Any,
     ):
         require_x64("FastMultipoleMethod")
+        preset_norm = _normalize_preset(preset)
+        if theta is None:
+            theta = _default_theta_for_preset(preset_norm)
+        if preset_norm is FMMPreset.GALAXY:
+            if softening_kernel is None:
+                softening_kernel = GALAXY_SETTINGS.softening_kernel
+            if precision is None and working_dtype is None:
+                precision = GALAXY_SETTINGS.precision
         # Transitional compatibility: allow legacy expanse-style kwargs so
         # notebooks/scripts can migrate import paths incrementally.
         legacy_kwargs = dict(legacy_kwargs)
@@ -656,7 +736,6 @@ class FastMultipoleMethod:
         if resolved_m2l_impl is None and basis_resolution.public_name == "real":
             resolved_m2l_impl = "rot_scale"
 
-        preset_norm = _normalize_preset(preset)
         if preset_norm is FMMPreset.LARGE_N_GPU and working_dtype is None:
             # The large-N lane's production force is float32; an explicit float64
             # (precision="fp64") selects its validation lane.
@@ -734,6 +813,7 @@ class FastMultipoleMethod:
                 leaf_partition=advanced_cfg.tree.leaf_partition,
                 leaf_capacity=advanced_cfg.tree.leaf_capacity,
                 cell_min_level=advanced_cfg.tree.cell_min_level,
+                leaf_headroom=advanced_cfg.tree.leaf_headroom,
             ),
             runtime_policy=dataclasses.replace(
                 advanced_cfg.runtime,
@@ -1770,6 +1850,7 @@ class FastMultipoleMethod:
         donate_state: bool = False,
         force_params: Optional[ForceParams] = None,
         external_params: Any = None,
+        carry_total_acceleration: bool = False,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Strict V2 segmented runner with raw tensor API.
 
@@ -1863,6 +1944,14 @@ class FastMultipoleMethod:
             Parameters of the external field (a pytree). Given, the field is called
             as ``external_acceleration_fn(state, external_params)``, its arrays
             traced like ``dt``; ``None`` keeps the one-argument form.
+        carry_total_acceleration : bool
+            ``carry="particles"`` only, off by default: the returned handle also
+            carries the scan's total acceleration (self-gravity plus the external
+            field) at the returned state, and the next call with the same field and
+            parameters starts from it -- and consumes it -- instead of evaluating
+            the field again outside the scan. Chained calls are then one call of
+            all their steps, bit for bit (see the impl docstring). The production
+            runner passes it.
 
         Returns
         -------
@@ -1896,6 +1985,7 @@ class FastMultipoleMethod:
             donate_state=bool(donate_state),
             force_params=force_params,
             external_params=external_params,
+            carry_total_acceleration=bool(carry_total_acceleration),
         )
 
     def strict_fused_prepared_eval_fn(

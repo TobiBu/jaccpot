@@ -254,6 +254,42 @@ def _args() -> argparse.Namespace:
         "compiled programs instead of literals (S2's opt-in; the GPU A/B against "
         "the default)",
     )
+    ap.add_argument(
+        "--runner",
+        action="store_true",
+        help="drive the scan phase through jaccpot.production.ProductionRunner: the "
+        "same calls (1 step, --steps, then --reps x --steps) as runs continuing each "
+        "other's RunResult, one segment of --steps each, so the state is the plain "
+        "bench's and the timed calls include the runner's edges (S3); "
+        "--traced-params and --donate-state map onto its SegmentConfig",
+    )
+    ap.add_argument(
+        "--runner-once",
+        action="store_true",
+        help="with --runner: the whole sequence's steps in ONE segment (the "
+        "reference of the chained calls)",
+    )
+    ap.add_argument(
+        "--runner-diagnostics-every",
+        type=int,
+        default=1,
+        help="with --runner: SegmentConfig.diagnostics_every (0: off)",
+    )
+    ap.add_argument(
+        "--runner-restart",
+        default=None,
+        metavar="NPZ",
+        help="with --runner: write a restart file after the call ending at "
+        "--runner-restart-at",
+    )
+    ap.add_argument("--runner-restart-at", type=int, default=0)
+    ap.add_argument(
+        "--runner-resume",
+        default=None,
+        metavar="NPZ",
+        help="with --runner: continue the sequence from this restart file (with "
+        "--skip-eval, the restart pin's fresh process)",
+    )
     ap.add_argument("--env", nargs="*", default=[], metavar="KEY=VAL")
     ap.add_argument("--out", required=True)
     return ap.parse_args()
@@ -349,8 +385,6 @@ jax.config.update("jax_enable_x64", True)
 
 from common.gpu_guard import GpuMonitor  # noqa: E402
 from common.ic import IC_GENERATORS  # noqa: E402
-from yggdrax._cell_partition import adaptive_cell_leaf_partition_numpy  # noqa: E402
-from yggdrax.morton import morton_encode  # noqa: E402
 
 import jaccpot.pallas.mutual_walk_pallas as _mwp  # noqa: E402
 import jaccpot.runtime._interaction_cache as _ic  # noqa: E402
@@ -360,6 +394,10 @@ from jaccpot.config import (  # noqa: E402
     NearFieldConfig,
     RuntimePolicyConfig,
     TreeConfig,
+)
+from jaccpot.runtime.capacity_plan import (  # noqa: E402
+    auto_leaf_capacity,
+    live_cell_leaves,
 )
 from jaccpot.runtime.fmm_prepare import PrepareMixin  # noqa: E402
 from jaccpot.runtime.kernels._evaluate import _infer_bounds  # noqa: E402
@@ -666,15 +704,18 @@ def _initial_conditions():
 
 
 def _leaf_capacity(pos: np.ndarray) -> tuple[int, int]:
+    # the library's TreeConfig(leaf_capacity="auto") count, on device in the bounds
+    # the prepare infers. It replaced a numpy count over host-sorted codes and gives
+    # the same number (S3 R7: Plummer, clipped Plummer and the disc, 1e4-2e6 on CPU,
+    # 2e5 and 8e6 on an A100) in 8 ms instead of 3.2 s at the 25M disc
     p = jnp.asarray(pos)
-    codes = np.sort(np.asarray(morton_encode(p, _infer_bounds(p))).astype(np.uint64))
-    live = int(
-        adaptive_cell_leaf_partition_numpy(
-            codes, leaf_size=ARGS.leaf, min_level=ARGS.cell_min_level or None
-        )[0].size
+    live = live_cell_leaves(
+        p,
+        leaf_size=ARGS.leaf,
+        cell_min_level=ARGS.cell_min_level,
+        bounds=_infer_bounds(p),
     )
-    cap = int(-(-int(np.ceil(ARGS.leaf_cap_factor * live)) // 1024) * 1024)
-    return live, cap
+    return live, auto_leaf_capacity(live, ARGS.leaf_cap_factor)
 
 
 def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
@@ -842,6 +883,10 @@ def run_budget(result: dict) -> None:
         _accuracy(result, pos, mass, soft, a_host)
         return
     state0 = jnp.stack([P, jnp.asarray(vel, ARGS.state_dtype)], axis=1)
+    if ARGS.runner:
+        _run_through_runner(result, solver, state0, M, dt, ext, saved)
+        _accuracy(result, pos, mass, soft, a_host)
+        return
 
     def run(state, prep, k):
         out = solver.strict_run_v2(
@@ -937,6 +982,97 @@ def run_budget(result: dict) -> None:
     _write(result)
     del state, prep
     _accuracy(result, pos, mass, soft, a_host)
+
+
+def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) -> None:
+    """``--runner``: the scan phase through ``jaccpot.production.ProductionRunner``.
+
+    The plain bench's sequence -- 1 step, ``--steps`` (the compile call), then
+    ``--reps`` timed calls of ``--steps`` -- as runs that continue each other's
+    ``RunResult``, each one segment, so the final state can be compared with the
+    plain bench's bit for bit (the segments ARE the lane's calls: R1p) and the timed
+    calls include what the runner adds at an edge (diagnostics, host loop).
+    """
+    from jaccpot.production import GalaxySettings, ProductionRunner, SegmentConfig
+
+    s = int(ARGS.steps)
+    targets = [1, 1 + s] + [1 + s * (2 + i) for i in range(ARGS.reps)]
+    if ARGS.runner_once:
+        targets = targets[-1:]
+    segment = SegmentConfig(
+        steps=targets[-1] if ARGS.runner_once else s,
+        traced_params=bool(ARGS.traced_params),
+        donate_input=bool(ARGS.donate_state),
+        diagnostics_every=int(ARGS.runner_diagnostics_every),
+    )
+    runner = ProductionRunner(
+        solver,
+        settings=GalaxySettings(
+            leaf_size=ARGS.leaf, max_order=ARGS.order, theta=ARGS.theta
+        ),
+        segment=segment,
+        external_acceleration_fn=ext,
+    )
+    res = None
+    if ARGS.runner_resume:
+        # the restore alone: no step is missing up to the restart's own
+        res = runner.run(dt=dt, num_steps=0, restart_from=ARGS.runner_resume)
+        result["runner_restored"] = res.restored
+    calls, samples = [], []
+    monitor = None
+    for i, target in enumerate(targets):
+        if res is not None and target <= res.step:
+            continue
+        if i == 2 and not ARGS.runner_once:
+            # the timed calls, under the contention monitor as the plain scan's
+            monitor = GpuMonitor(_PHYS).__enter__()
+        t0 = time.perf_counter()
+        if res is None:
+            res = runner.run(state0, masses, dt=dt, num_steps=target)
+        else:
+            res = runner.run(dt=dt, num_steps=target, restart_from=res)
+        wall = time.perf_counter() - t0
+        calls.append(
+            dict(
+                step=res.step,
+                wall_s=wall,
+                edges=[
+                    dict(
+                        step=e.step,
+                        wall_s=e.wall_s,
+                        retries=e.retries,
+                        diagnostics=e.diagnostics,
+                    )
+                    for e in res.edges
+                ],
+            )
+        )
+        print(f"runner: step {res.step} in {wall:.2f} s", flush=True)
+        if i >= 2 and not ARGS.runner_once:
+            samples.append(wall / s)
+        if ARGS.runner_restart and res.step == ARGS.runner_restart_at:
+            runner.save_restart(ARGS.runner_restart)
+            result["runner_restart_bytes"] = os.path.getsize(ARGS.runner_restart)
+    if monitor is not None:
+        monitor.__exit__(None, None, None)
+        result["scan_contention"] = monitor.summary().as_dict()
+    del state0
+    result["runner"] = dict(
+        calls=calls, step=res.step, segment=dataclasses.asdict(segment)
+    )
+    if samples:
+        result["step_ms"] = dict(
+            min=min(samples) * 1e3,
+            median=float(np.median(samples)) * 1e3,
+            samples=[x * 1e3 for x in samples],
+        )
+        print(f"runner min {result['step_ms']['min']:.2f} ms/step", flush=True)
+    result["peak_after_scan_gib"] = _mem()["peak"] / GIB
+    if ARGS.skip_eval:
+        result["counts"] = _counts(solver)
+    _write(result)
+    if ARGS.save_forces:
+        np.savez(ARGS.save_forces, state=np.asarray(res.state), **(saved or {}))
 
 
 def _direct_kernel_fp64(pos, mass, idx, soft: float, kernel: str):

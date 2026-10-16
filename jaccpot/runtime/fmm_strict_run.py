@@ -24,6 +24,7 @@ from jaccpot._env import env_choice, env_flag
 from ._large_n_pipeline import prepare_large_n_state
 from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
 from ._mac_geometry import walk_geometry_default
+from .capacity_plan import auto_leaf_capacity
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import (
@@ -133,7 +134,7 @@ class StrictRunMixin(_EngineBase):
         needs : np.ndarray
             The segment's running maximum of
             :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs` (its walk
-            entries; a cell-leaf tree overflow is not re-planned).
+            entries; :meth:`_replan_tree_from_needs` reads the tree's).
 
         Returns
         -------
@@ -155,9 +156,7 @@ class StrictRunMixin(_EngineBase):
             return False
         if not (n["far_overflow"] or n["near_overflow"] or n["queue_overflow"]):
             return False
-        if (n["far_overflow"] and validated.get("far_named")) or (
-            n["near_overflow"] and validated.get("near_edge_named")
-        ):
+        if self._walk_overflowed_a_named_cap(needs):
             return False
         headroom = flat_walk_cap_headroom()
         # the counts are lower bounds when the walk stops at its first overflow or
@@ -182,7 +181,150 @@ class StrictRunMixin(_EngineBase):
         self._strict_fused_validated_caps = validated
         return True
 
-    def _raise_scan_capacity_saturated(self, needs: Optional[np.ndarray]) -> None:
+    def _walk_overflowed_a_named_cap(self, needs: np.ndarray) -> bool:
+        """Whether a list a failed segment's walk overflowed was NAMED by the caller.
+
+        A named cap is a deliberate memory bound and never widened, so no re-plan
+        makes such a segment fit: the retry declines at once rather than re-prepare
+        and recompile for a re-run that must fail too.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            The segment's running maximum of
+            :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs`.
+
+        Returns
+        -------
+        bool
+            ``True`` when the far list overflowed a named far cap or the near list
+            a named near cap.
+        """
+        from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
+
+        n = dict(zip(WALK_NEEDS_FIELDS, (int(v) for v in needs)))
+        validated = getattr(self, "_strict_fused_validated_caps", None) or {}
+        return bool(
+            (n["far_overflow"] and validated.get("far_named"))
+            or (n["near_overflow"] and validated.get("near_edge_named"))
+        )
+
+    def _replan_tree_from_needs(self, needs: np.ndarray) -> bool:
+        """Grow the cell-leaf tree's bounds to what a failed segment's trees needed.
+
+        The TREE half of the segment retry (the walk's is
+        :meth:`_replan_walk_caps_from_needs`). A rebuild's tree overflows on one of
+        three bounds; each grows from the segment's running maximum of
+        :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs`:
+
+        * the leaf capacity to ``auto_leaf_capacity(leaf_needed)`` when the
+          positions needed more cell leaves than it holds (sticky: later prepares
+          on this engine use it);
+        * the level-loop depth bound to ``max(bound, depth_needed + 8)``;
+        * the level loops' batch width -- registered per tree shape, so the caller
+          widens it after the re-prepare, for the shape that prepare built.
+
+        Every bound only grows. The topology-reuse entry and the prepared-state
+        slot are cleared (they hold a tree of the old capacity), and so are the
+        engine's compiled runners: a program reads the level loops' batch width
+        from the registry when it traces, and that width is not in its key.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            The segment's running maximum of ``FusedTopology.needs``
+            (``fused_topology.NEEDS_FIELDS``).
+
+        Returns
+        -------
+        bool
+            Whether a bound grew. ``False`` -- the caller raises -- when no tree
+            overflowed, the leaves are buckets, an installed capacity plan fixes
+            the bounds (multi-GPU), or every bound already covers the needs.
+        """
+        from jaccpot.runtime._level_shapes import registered_level_batch_width
+        from jaccpot.runtime.capacity_plan import fused_capacity_plan
+        from jaccpot.runtime.fmm_sweeps import _CELLS_DEPTH_HEADROOM
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        n = dict(zip(NEEDS_FIELDS, (int(v) for v in needs)))
+        if not n.get("tree_overflow"):
+            return False
+        if getattr(self, "_tree_leaf_partition", "buckets") != "cells":
+            return False
+        if fused_capacity_plan() is not None:
+            return False
+        capacity = int(getattr(self, "_tree_leaf_capacity", None) or 0)
+        bound = getattr(self, "_cells_upward_num_levels", None)
+        # the bounds the failed programs checked: the template's capacity (a cell
+        # tree of C leaves has 2C - 1 nodes), the stashed depth bound, and the
+        # batch width registered for that shape
+        width = registered_level_batch_width(
+            total_nodes=2 * capacity - 1, num_internal=capacity - 1
+        )
+        leaf_over = n["leaf_needed"] > capacity
+        depth_over = bound is not None and n["depth_needed"] > int(bound)
+        width_over = width is not None and n["widest_needed"] > int(width)
+        if not (leaf_over or depth_over or width_over):
+            return False
+        if leaf_over:
+            # the configured headroom (TreeConfig.leaf_headroom under
+            # leaf_capacity="auto"), the bench's 1.15 for an explicit capacity
+            headroom = getattr(self, "_tree_leaf_capacity_auto", None) or 1.15
+            self._tree_leaf_capacity = max(
+                capacity, auto_leaf_capacity(n["leaf_needed"], float(headroom))
+            )
+        # the depth bound covers the deepest tree too, whichever bound overflowed:
+        # the re-prepare only raises it to the START's depth + 8
+        self._cells_upward_num_levels = max(
+            int(bound or 0), min(64, n["depth_needed"] + _CELLS_DEPTH_HEADROOM)
+        )
+        self.clear_prepared_state_cache()
+        self._strict_fused_jit_function_cache = {}
+        return True
+
+    def _segment_retry_mode(
+        self, needs: np.ndarray, retries: int, tree_first: bool
+    ) -> Optional[str]:
+        """How a failed segment may be retried, or ``None`` when it must raise.
+
+        At most two retries per segment. The first re-plans whatever overflowed
+        (walk caps and/or tree bounds). A second is allowed only after a first
+        that re-planned the TREE, and only for the walk: the walk's needs in a
+        segment whose tree overflowed were measured on that broken tree (a
+        truncated leaf set, or level loops that dropped nodes) and can fall short,
+        while the re-run's, on a tree that fits, are the walk's real needs.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            The failed run's running maximum of
+            :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs`.
+        retries : int
+            Retries this segment has run so far.
+        tree_first : bool
+            The first failure was a tree overflow (so the first retry re-planned
+            the tree).
+
+        Returns
+        -------
+        Optional[str]
+            ``"full"`` (walk and tree), ``"walk"`` (walk only), or ``None``.
+        """
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        if not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True):
+            return None
+        if retries == 0:
+            return "full"
+        tree_now = int(needs[NEEDS_FIELDS.index("tree_overflow")])
+        if retries == 1 and tree_first and not tree_now:
+            return "walk"
+        return None
+
+    def _raise_scan_capacity_saturated(
+        self, needs: Optional[np.ndarray], *, retries: int = 0
+    ) -> None:
         """Raise the fused scan's capacity error (after any retry was spent).
 
         Parameters
@@ -190,13 +332,18 @@ class StrictRunMixin(_EngineBase):
         needs : Optional[np.ndarray]
             The segment's needs (``fused_topology.NEEDS_FIELDS``), named in the
             message when given; a cell-leaf tree overflow among them is named
-            first, with its remedy, and the walk's saturation after it.
+            first, with what overflowed and its remedy, and the walk's saturation
+            after it.
+        retries : int
+            Retries the segment ran before this failure (each a re-plan and a
+            re-run from its start); the bounds named are then the grown ones.
 
         Raises
         ------
         RuntimeError
             Always.
         """
+        from jaccpot.runtime._level_shapes import registered_level_batch_width
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
         max_blocks = os.environ.get(
@@ -216,6 +363,11 @@ class StrictRunMixin(_EngineBase):
             if needs is not None
             else {}
         )
+        ran = (
+            f" Segment retries run: {int(retries)} (at most two per segment, "
+            "the second only for the walk after a tree re-plan; "
+            "JACCPOT_STRICT_SEGMENT_RETRY=0 turns them off)."
+        )
         saturated = (
             "a fixed capacity saturated inside the compiled velocity-Verlet "
             "scan, so the refreshed interaction lists are truncated and the "
@@ -232,33 +384,75 @@ class StrictRunMixin(_EngineBase):
                 "the far-pair count saturates on ANY overflow -- far, near "
                 "(JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP) or queue "
                 "(TraversalOverrides(max_pair_queue=...)) -- so check all three; "
-                "unnamed caps are re-planned once per segment "
-                "(JACCPOT_STRICT_SEGMENT_RETRY=0 turns that off), named ones never."
+                "unnamed caps are re-planned once per segment (twice after a tree "
+                "re-plan; JACCPOT_STRICT_SEGMENT_RETRY=0 turns that off), named "
+                "ones never."
                 if traced_caps.get("flat_walk")
                 else ""
             )
         )
         if not named.get("tree_overflow"):
-            raise RuntimeError(saturated + walk)
-        # the cell-leaf tree is not a walk cap and is not re-planned: its remedy
-        # first, then the walk's when its lists saturated in the same segment
+            raise RuntimeError(saturated + ran + walk)
+        # the cell-leaf tree first -- what overflowed, against which bound -- then
+        # the walk's saturation when its lists saturated in the same segment
         walk_saturated = any(
             named.get(k) for k in ("far_overflow", "near_overflow", "queue_overflow")
         )
+        capacity = getattr(self, "_tree_leaf_capacity", None)
+        bound = getattr(self, "_cells_upward_num_levels", None)
+        width = (
+            None
+            if capacity is None
+            else registered_level_batch_width(
+                total_nodes=2 * int(capacity) - 1, num_internal=int(capacity) - 1
+            )
+        )
+        failed = []
+        if named.get("leaf_needed", 0) > int(capacity or 0):
+            failed.append(
+                f"{named['leaf_needed']} cell leaves, more than "
+                f"TreeConfig(leaf_capacity={capacity}) holds"
+            )
+        if bound is not None and named.get("depth_needed", 0) > int(bound):
+            failed.append(
+                f"a tree {named['depth_needed']} levels deep, past the level-loop "
+                f"bound ({bound})"
+            )
+        if width is not None and named.get("widest_needed", 0) > int(width):
+            failed.append(
+                f"a level of {named['widest_needed']} nodes, wider than the level "
+                f"loops' batch ({width})"
+            )
+        if not failed:
+            failed.append(
+                "more than its bounds hold (leaf capacity "
+                f"{capacity}, level-loop bound {bound}, level batch {width}; an "
+                "installed capacity plan sets them on the multi-GPU lane)"
+            )
+        if retries:
+            replan = (
+                " The segment was re-planned at its start (the leaf capacity, depth "
+                "bound and level batch grown to what its trees needed) and the "
+                "re-run overflowed again: the bounds named are the grown ones."
+            )
+        elif not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True):
+            replan = (
+                " The segment retry is off (JACCPOT_STRICT_SEGMENT_RETRY=0), which "
+                "would re-plan the tree once at the segment's start."
+            )
+        else:
+            replan = " It could not be re-planned."
         raise RuntimeError(
             "the cell-leaf tree overflowed inside the compiled velocity-Verlet "
-            "scan: a step's rebuild needed more cell leaves than "
-            f"TreeConfig(leaf_capacity={getattr(self, '_tree_leaf_capacity', None)})"
-            " holds, a tree deeper than the level-loop bound (the eager "
-            "prepare's depth + 8) or a level wider than the level loops' batch "
-            "(1.25 x the eager prepare's widest), so the forces from that step "
-            "on are wrong. It is not re-planned: raise "
-            "TreeConfig(leaf_capacity=...), with headroom over the live "
-            "cell-leaf count of every configuration the run reaches (it grows "
-            "as the particles cluster), or start a new call with "
-            "prepared_state=None, whose prepare at the current positions raises "
-            "the depth and level bounds."
+            "scan: a step's rebuild needed "
+            + "; ".join(failed)
+            + ", so the forces from that step on are wrong."
+            + replan
+            + " Raise TreeConfig(leaf_capacity=...), with headroom over the live "
+            "cell-leaf count of every configuration the run reaches (it grows as "
+            "the particles cluster), or run shorter segments."
             + (" In the same segment, " + saturated if walk_saturated else "")
+            + ran
             + walk
         )
 
@@ -642,6 +836,7 @@ class StrictRunMixin(_EngineBase):
         donate_state: bool = False,
         force_params: Optional[ForceParams] = None,
         external_params: Any = None,
+        carry_total_acceleration: bool = False,
     ) -> tuple[Array, Optional[Any], Optional[Array]]:
         """Run endpoint-correct velocity Verlet with strict prepared-state refresh.
 
@@ -773,6 +968,22 @@ class StrictRunMixin(_EngineBase):
             arrays among them traced like ``dt``, the Python numbers literals --
             instead of ``external_acceleration_fn(state)``. Needs ``add_external``
             and ``external_acceleration_fn``.
+        carry_total_acceleration : bool
+            ``carry="particles"`` only; off by default. The returned handle also
+            carries the scan's TOTAL acceleration at the returned state
+            (``StrictParticleCarry.acceleration``: the self-gravity plus the
+            external field, as the last step computed it) and the field's identity
+            (:func:`~jaccpot.runtime.strict_carry.external_field_key`). A call
+            continuing from such a handle with the same field, field parameters
+            and force parameters starts its scan from that total and CONSUMES it
+            (its buffer is donated to the scan, as a start force this call
+            evaluated itself is); otherwise the call evaluates the field again at
+            its start positions, eagerly, outside the scan -- which can differ
+            from the scan's fused evaluation in the last bit (CPU, N = 512, the
+            pure-JAX near field: 1 of 3072 components, 1.9e-6, 3 x 2 chained
+            steps against 6). Chained calls with it are one call of all the steps,
+            bit for bit, and compile one scan program. The production runner
+            (:class:`jaccpot.production.ProductionRunner`) passes it.
 
         Returns
         -------
@@ -798,7 +1009,10 @@ class StrictRunMixin(_EngineBase):
             the walk's softening; or if ``external_params`` come without an
             external field.
         """
-        from jaccpot.runtime.strict_carry import StrictParticleCarry
+        from jaccpot.runtime.strict_carry import (
+            StrictParticleCarry,
+            external_field_key,
+        )
 
         state_arr = jnp.asarray(state)
         masses_arr = jnp.asarray(masses)
@@ -819,6 +1033,11 @@ class StrictRunMixin(_EngineBase):
             raise ValueError(
                 "donate_state needs carry='particles' (the state carry donates its "
                 "prepared state instead: donate_prepared_state)"
+            )
+        if carry_total_acceleration and carry_mode != "particles":
+            raise ValueError(
+                "carry_total_acceleration needs carry='particles' (its handle "
+                "carries the total acceleration)"
             )
         if external_params is not None and not (
             bool(add_external) and external_acceleration_fn is not None
@@ -1354,6 +1573,29 @@ class StrictRunMixin(_EngineBase):
             )
 
         if particle_carry:
+            # carry_total_acceleration: the field's identity, for the returned
+            # handle and to check the one passed in; and the scan's own total at
+            # the start positions when that handle carries one of this very field,
+            # its parameters and this call's force (see the parameter)
+            external_key: Optional[tuple] = None
+            start_total: Optional[Array] = None
+            handle_total = getattr(handle_in, "acceleration", None)
+            if carry_total_acceleration or handle_total is not None:
+                external_on = (
+                    bool(add_external) and external_acceleration_fn is not None
+                )
+                external_key = external_field_key(
+                    external_acceleration_fn if external_on else None,
+                    external_params if external_on else None,
+                )
+            if (
+                handle_total is not None
+                and initial_self_acceleration is None
+                and self_eval_active
+                and handle_in.force_key == force_key
+                and handle_in.external_key == external_key
+            ):
+                start_total = handle_total
             # handed over in a box the callee empties: a local here would keep the
             # concrete state (and its far list) alive through the whole scan
             scale_seed = _force_scale_seed(prepared_curr) if handle_in is None else None
@@ -1402,6 +1644,9 @@ class StrictRunMixin(_EngineBase):
                 donate_state=bool(donate_state),
                 step_params=step_params,
                 force_key=force_key,
+                start_total=start_total,
+                return_total=bool(carry_total_acceleration),
+                external_key=external_key,
             )
         else:
             from jaccpot.runtime.fused_topology import NEEDS_FIELDS
@@ -1527,7 +1772,7 @@ class StrictRunMixin(_EngineBase):
                 self._strict_fused_jit_function_cache = jit_cache
                 return _compiled_runner
 
-            retried = False
+            retries, tree_first = 0, False
             # A state an earlier call's scan returned holds that scan's own f_b
             # (set below): the next refresh's thresholds continue from it, as the
             # particle carry's handle does. The eager prepare's prepass is at the
@@ -1603,18 +1848,24 @@ class StrictRunMixin(_EngineBase):
                     break
                 needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
                 # Segment retry: a walk list or queue of the traced refresh
-                # outgrew the caps the eager prepare sized. Re-plan them from
-                # what the segment's walks needed, re-prepare from the
-                # segment's START (`FusedForceProvider.replanned`), recompile and
-                # run the segment once more. Anything else (a named cap, a leaf
-                # capacity, a second failure) raises below.
-                if retried or not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True):
-                    self._raise_scan_capacity_saturated(needs)
-                retried = True
+                # outgrew the caps the eager prepare sized, or the cell-leaf tree
+                # its bounds. Re-plan them from what the segment needed,
+                # re-prepare from the segment's START
+                # (`FusedForceProvider.replanned`), recompile and run the segment
+                # once more -- after a tree re-plan, a second time for the walk
+                # (`_segment_retry_mode`). Anything else raises below.
+                mode = self._segment_retry_mode(needs, retries, tree_first)
+                if mode is None:
+                    self._raise_scan_capacity_saturated(needs, retries=retries)
+                if retries == 0:
+                    tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
+                retries += 1
                 del prepared_out, state_out, history_out
-                replanned = prov.replanned(needs, state_arr[:, 0, :], masses_arr)
+                replanned = prov.replanned(
+                    needs, state_arr[:, 0, :], masses_arr, walk_only=mode == "walk"
+                )
                 if replanned is None:
-                    self._raise_scan_capacity_saturated(needs)
+                    self._raise_scan_capacity_saturated(needs, retries=retries - 1)
                 prov, topology_start = replanned
                 prepared_curr = topology_start.prepared
                 del replanned, topology_start
@@ -1671,6 +1922,9 @@ class StrictRunMixin(_EngineBase):
         advance_tree: Optional[Callable[..., Any]] = None,
         step_params: Optional[StepParams] = None,
         force_key: Optional[tuple] = None,
+        start_total: Optional[Array] = None,
+        return_total: bool = False,
+        external_key: Optional[tuple] = None,
     ) -> tuple[Array, Any, Optional[Array]]:
         """The fused scan of ``strict_run_v2(carry="particles")``.
 
@@ -1759,6 +2013,19 @@ class StrictRunMixin(_EngineBase):
         force_key : Optional[tuple]
             The call's force parameters as host floats (``None``: the solver's
             own), recorded on the returned handle.
+        start_total : Optional[Array]
+            The handle's total acceleration at the start state
+            (``carry_total_acceleration``), already matched to this call's field
+            and force: the first attempt's scan starts from it instead of the
+            self-gravity plus an eager field evaluation, and consumes it. A retry
+            builds the total again.
+        return_total : bool
+            ``carry_total_acceleration``: the returned handle carries the total
+            acceleration at the final state (with a field, an extra output of the
+            scan; without, the self-gravity) and ``external_key``.
+        external_key : Optional[tuple]
+            The field's identity (``external_field_key``), recorded on the handle
+            when ``return_total``.
 
         Returns
         -------
@@ -1776,6 +2043,11 @@ class StrictRunMixin(_EngineBase):
         """
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
         from jaccpot.runtime.strict_carry import StrictParticleCarry
+
+        external_active = bool(add_external) and external_acceleration_fn is not None
+        # the scan's total acceleration as an output of its own: with a field only
+        # (without one it is the self-gravity, which is returned anyway)
+        total_out = bool(return_total) and external_active
 
         def _runner_for(
             prov_i: FusedForceProvider,
@@ -1796,6 +2068,8 @@ class StrictRunMixin(_EngineBase):
                 bool(donate_state_i),
                 bool(donate_acc_i),
                 *prov_i.key(),
+                # the tree-order flag stays last (tests read key[-1])
+                total_out,
                 advance_tree is not None,
             )
             jit_cache = getattr(self, "_strict_fused_jit_function_cache", {})
@@ -1821,7 +2095,8 @@ class StrictRunMixin(_EngineBase):
                 scale_initial: Optional[Array] = None,
                 params_in: Optional[StepParams] = None,
             ) -> tuple[
-                tuple[Array, Array, Array, Array, Array, Optional[Array]],
+                # (state, self-gravity, ok, needs, done, f_b[, total acceleration])
+                tuple[Optional[Array], ...],
                 Optional[Array],
             ]:
                 def _step(carry, scan_x):
@@ -1906,7 +2181,7 @@ class StrictRunMixin(_EngineBase):
                     xs=scan_xs,
                     length=int(n_steps),
                 )
-                state_f, _, acc_self_f, ok_f, needs_f, done_f, scale_f = carry_f[:7]
+                state_f, acc_f, acc_self_f, ok_f, needs_f, done_f, scale_f = carry_f[:7]
                 if advance_tree is not None:
                     # back to input order, once: row j is particle ids[j]
                     ids_f = carry_f[8]
@@ -1920,7 +2195,14 @@ class StrictRunMixin(_EngineBase):
                         .at[ids_f]
                         .set(acc_self_f, unique_indices=True)
                     )
-                return (state_f, acc_self_f, ok_f, needs_f, done_f, scale_f), history
+                    if total_out:
+                        acc_f = (
+                            jnp.zeros_like(acc_f)
+                            .at[ids_f]
+                            .set(acc_f, unique_indices=True)
+                        )
+                outputs = (state_f, acc_self_f, ok_f, needs_f, done_f, scale_f)
+                return outputs + ((acc_f,) if total_out else ()), history
 
             donate = ((0,) if donate_state_i else ()) + ((1,) if donate_acc_i else ())
 
@@ -1933,7 +2215,8 @@ class StrictRunMixin(_EngineBase):
                 scale_initial: Optional[Array] = None,
                 params_in: Optional[StepParams] = None,
             ) -> tuple[
-                tuple[Array, Array, Array, Array, Array, Optional[Array]],
+                # (state, self-gravity, ok, needs, done, f_b[, total acceleration])
+                tuple[Optional[Array], ...],
                 Optional[Array],
             ]:
                 # the self-gravity slot is written by every step (num_steps >= 1)
@@ -1997,11 +2280,14 @@ class StrictRunMixin(_EngineBase):
             self._strict_fused_jit_function_cache = jit_cache
             return _compiled_runner_start
 
-        external_active = bool(add_external) and external_acceleration_fn is not None
         params_args: tuple = () if step_params is None else (step_params,)
         # the self-gravity is this call's own (evaluated here, or zeros) unless it
-        # came from the caller or from the handle: only then may it be donated
-        self_owned = handle_in is None and initial_self_acceleration is None
+        # came from the caller or from the handle: only then may it be donated.
+        # A handle's total acceleration is the call's to consume (without a field
+        # it IS the handle's self-gravity, then donated like an owned one)
+        self_owned = (
+            handle_in is None and initial_self_acceleration is None
+        ) or start_total is not None
 
         def _initial_acceleration(acc_self: Array, state_now: Array) -> Array:
             acc_self = jnp.asarray(acc_self, dtype=state_now.dtype)
@@ -2050,7 +2336,7 @@ class StrictRunMixin(_EngineBase):
                 "start from: none came from the eager prepare or the handle (a handle "
                 "from a run without the criterion cannot continue one with it)"
             )
-        retried = False
+        retries, tree_first = 0, False
         state_now = state_arr
         scale_now: Optional[Array] = scale_seed
         acc_self_now: Optional[Array] = acceleration_self_current
@@ -2071,6 +2357,7 @@ class StrictRunMixin(_EngineBase):
                     ran_scan = False
                     ok_all, done = ok_initial, jnp.zeros((), jnp.int32)
                     state_out = acc_self_out = history_out = scale_out = None
+                    acc_total_out = None
             if ran_scan:
                 runner = _runner_for(
                     prov_i,
@@ -2079,9 +2366,17 @@ class StrictRunMixin(_EngineBase):
                     external_active or acc_self_owned,
                 )
                 assert acc_self_now is not None
-                acc0 = _initial_acceleration(acc_self_now, state_now)
+                if start_total is not None:
+                    # the previous scan's own total at these positions (first
+                    # attempt only: a retry builds it again)
+                    acc0, start_total = start_total, None
+                else:
+                    acc0 = _initial_acceleration(acc_self_now, state_now)
                 if acc_self_owned and not external_active:
                     acc_self_now = None  # it is acc0, which the call consumes
+                outputs, history_out = runner(
+                    state_now, acc0, masses_arr, ok_initial, scale_now, *params_args
+                )
                 (
                     state_out,
                     acc_self_out,
@@ -2089,10 +2384,9 @@ class StrictRunMixin(_EngineBase):
                     walk_needs,
                     done,
                     scale_out,
-                ), history_out = runner(
-                    state_now, acc0, masses_arr, ok_initial, scale_now, *params_args
-                )
-                del acc0
+                ) = outputs[:6]
+                acc_total_out = outputs[6] if total_out else acc_self_out
+                del acc0, outputs
             self._strict_static_target_block_capacity_ok = bool(
                 np.asarray(jax.device_get(ok_all))
             )
@@ -2104,24 +2398,36 @@ class StrictRunMixin(_EngineBase):
                     force_scale=scale_out,
                     provider=prov_i,
                     force_key=force_key,
+                    acceleration=acc_total_out if return_total else None,
+                    external_key=external_key if return_total else None,
                 )
                 return state_out, handle, history_out
             needs = np.asarray(jax.device_get(walk_needs)).astype(np.int64)
             # diagnostics: the steps the failed segment completed
             self._strict_particle_failed_step = int(np.asarray(jax.device_get(done)))
-            # segment retry: re-plan the walk caps from what the segment
-            # needed, re-prepare at the segment's START, run it once more
-            if retried or not retry_enabled:
-                self._raise_scan_capacity_saturated(needs)
-            retried = True
-            del state_out, history_out, acc_self_out
+            # segment retry: re-plan the walk caps and the tree from what the
+            # segment needed, re-prepare at the segment's START, run it once more
+            # (after a tree re-plan, a second time for the walk)
+            mode = (
+                self._segment_retry_mode(needs, retries, tree_first)
+                if retry_enabled
+                else None
+            )
+            if mode is None:
+                self._raise_scan_capacity_saturated(needs, retries=retries)
+            if retries == 0:
+                tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
+            retries += 1
+            del state_out, history_out, acc_self_out, acc_total_out
             if donate_state_now and ran_scan:
                 assert start_host is not None
                 state_now = jax.device_put(start_host, masses_arr.sharding)
                 donate_state_now = True  # our own copy
-            replanned = prov_i.replanned(needs, state_now[:, 0, :], masses_arr)
+            replanned = prov_i.replanned(
+                needs, state_now[:, 0, :], masses_arr, walk_only=mode == "walk"
+            )
             if replanned is None:
-                self._raise_scan_capacity_saturated(needs)
+                self._raise_scan_capacity_saturated(needs, retries=retries - 1)
             prov_i, topology_start = replanned
             prepared = topology_start.prepared
             del replanned, topology_start
@@ -2373,6 +2679,7 @@ class StrictRunMixin(_EngineBase):
         self._last_refresh_capacity_ok = None
         self._last_refresh_walk_needs = None
         self._last_refresh_tree_overflow = None
+        self._last_refresh_tree_needs = None
 
         self._large_n_same_topology_refresh_attempts += 1
         if not isinstance(prepared_state.tree, RadixTree):
@@ -2455,10 +2762,12 @@ class StrictRunMixin(_EngineBase):
             if refresh_topology_key is None:
                 refresh_topology_key = "static_fused_template"
             # the cell-leaf rebuild's own capacity flag (leaf cap, depth, level
-            # width; a tracer under trace), for `FusedTopology.overflow_bits`
+            # width; a tracer under trace), for `FusedTopology.overflow_bits`,
+            # and what it needed of each, for the segment's re-plan
             self._last_refresh_tree_overflow = getattr(
                 build_artifacts, "leaf_capacity_overflow", None
             )
+            self._last_refresh_tree_needs = getattr(build_artifacts, "tree_needs", None)
         else:
             previous_topology_key = refresh_topology_key
             if previous_topology_key is None:

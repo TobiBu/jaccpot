@@ -61,7 +61,7 @@ from ._interaction_cache import (
 )
 from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
 from ._large_n_types import LargeNPrepareRequest
-from ._level_shapes import level_width_overflow
+from ._level_shapes import level_width_overflow, widest_level
 from ._mac_geometry import (
     mac_geometry_mode,
     resolve_walk_geometry,
@@ -701,18 +701,26 @@ class PrepareMixin(_EngineBase):
             leaf_partition=leaf_partition,
             return_overflow=cells,
             cell_min_level=int(getattr(self, "_tree_cell_min_level", 0)),
+            # the live leaf count (exact past an overflow), for the re-plan
+            return_num_leaves=cells,
             **({"num_valid": num_valid} if num_valid is not None else {}),
         )
-        expected = 5 if cells else 4
+        expected = 6 if cells else 4
         if not isinstance(rebuilt_result, tuple) or len(rebuilt_result) != expected:
             raise RuntimeError(
                 "static radix template rebuild must return tree and reordered arrays"
             )
         leaf_capacity_overflow: Optional[Array] = None
+        tree_needs: Optional[Array] = None
         if cells:
-            rebuilt_tree, positions_sorted, masses_sorted, inverse, overflow = (
-                rebuilt_result
-            )
+            (
+                rebuilt_tree,
+                positions_sorted,
+                masses_sorted,
+                inverse,
+                overflow,
+                num_leaves,
+            ) = rebuilt_result
             # a rebuilt tree deeper than the level-loop bound would truncate
             # the M2M/L2L sweeps: make it a capacity failure like the leaf cap
             # the SAME bound the upward sweep loops to: an installed capacity plan
@@ -723,18 +731,30 @@ class PrepareMixin(_EngineBase):
             depth_bound = _planned_upward_num_levels(rebuilt_tree)
             if depth_bound is None:
                 depth_bound = getattr(self, "_cells_upward_num_levels", None)
+            depth_now = jnp.max(jnp.asarray(rebuilt_tree.node_level)) + 1
             if depth_bound is not None:
-                depth_now = jnp.max(jnp.asarray(rebuilt_tree.node_level)) + 1
                 overflow = jnp.asarray(overflow) | (depth_now > int(depth_bound))
             # the level loops' static batch is the eager widest level (+25 %):
             # a rebuilt tree with a wider level would drop nodes -> capacity failure
+            widest_now = widest_level(rebuilt_tree.level_offsets)
             overflow = jnp.asarray(overflow) | level_width_overflow(
                 rebuilt_tree.level_offsets,
                 total_nodes=int(rebuilt_tree.parent.shape[0]),
                 num_internal=int(rebuilt_tree.left_child.shape[0]),
+                widest=widest_now,
             )
             if isinstance(overflow, Tracer):
                 leaf_capacity_overflow = overflow
+                # what the tree needed of each bound the flag checks: the scan
+                # max-es them over a segment, and a failed one is re-planned
+                # from them (`FusedForceProvider.replanned`)
+                tree_needs = jnp.stack(
+                    [
+                        jnp.asarray(num_leaves, jnp.int32),
+                        jnp.asarray(depth_now, jnp.int32),
+                        jnp.asarray(widest_now, jnp.int32),
+                    ]
+                )
             elif bool(overflow):
                 raise RuntimeError(
                     "static_radix cell leaves overflowed the leaf capacity on refresh: "
@@ -754,7 +774,58 @@ class PrepareMixin(_EngineBase):
             max_leaf_size=int(max_leaf_size),
             cache_leaf_parameter=int(cache_leaf_parameter),
             leaf_capacity_overflow=leaf_capacity_overflow,
+            tree_needs=tree_needs,
         )
+
+    def _resolve_auto_leaf_capacity(
+        self,
+        positions: Array,
+        *,
+        leaf_size: int,
+        bounds: Tuple[Array, Array],
+    ) -> None:
+        """Size ``TreeConfig(leaf_capacity="auto")`` from this prepare's particles.
+
+        Once, at the first eager build: the headroom times the cell leaves these
+        positions cut into in this prepare's own bounds
+        (:func:`~jaccpot.runtime.capacity_plan.live_cell_leaves`), rounded up to a
+        multiple of 1024. The capacity then sticks -- every later build, traced
+        refreshes included, keeps the shapes it set -- so this is a no-op unless
+        the capacity is ``"auto"`` and not yet sized.
+
+        Parameters
+        ----------
+        positions : Array
+            Positions at the working dtype, as the tree build receives them.
+        leaf_size : int
+            The build's leaf size.
+        bounds : Tuple[Array, Array]
+            The build's Morton box.
+
+        Raises
+        ------
+        ValueError
+            If the capacity is still unsized when the build is traced: the count
+            needs concrete positions.
+        """
+        headroom = getattr(self, "_tree_leaf_capacity_auto", None)
+        if headroom is None or getattr(self, "_tree_leaf_capacity", None) is not None:
+            return
+        if isinstance(positions, Tracer):
+            raise ValueError(
+                "TreeConfig(leaf_capacity='auto') is sized at the first EAGER "
+                "prepare; this build is traced. Prepare once outside the trace, "
+                "or pass an explicit leaf_capacity."
+            )
+        from .capacity_plan import auto_leaf_capacity, live_cell_leaves
+
+        live = live_cell_leaves(
+            positions,
+            leaf_size=int(leaf_size),
+            cell_min_level=int(getattr(self, "_tree_cell_min_level", 0)),
+            bounds=bounds,
+        )
+        self._tree_leaf_capacity = auto_leaf_capacity(live, float(headroom))
 
     def _prepare_state_tree_and_upward(
         self,
@@ -862,6 +933,9 @@ class PrepareMixin(_EngineBase):
                 reuse_count=int(cached_topology.reuse_count) + 1,
             )
         else:
+            self._resolve_auto_leaf_capacity(
+                positions_arr, leaf_size=int(leaf_size), bounds=inferred_bounds
+            )
             build_artifacts = _build_tree_with_config(
                 positions_arr,
                 masses_arr,

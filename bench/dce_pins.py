@@ -50,8 +50,18 @@ L1     TIMING: the fused production sequence (``--skip-eval``, particle carry,
 L2     TIMING: the same at 1e8 (the 1 s / step budget)
 L3     TIMING: the 25M disc+bulge (ferrers3, eps 1.5e-3): step ms, B/particle,
        and the force's rel-L2 on 4096 targets
+R1p    S1p through ``jaccpot.production.ProductionRunner`` (``fused_memory_budget.py
+       --runner``): the same calls as runs continuing each other, one segment each;
+       compared with S1p's arrays (the segments are the lane's own calls)
+R1x    S1x's particle arm through the runner, chained (1, 4, 4, 4 steps) and in one
+       segment of 13 (``--runner-once``): passes when the two states are bitwise --
+       the external field across segment edges (S3 R2)
+R1r    R1p with a restart file written at step 5, then the sequence continued from
+       it in a FRESH process (``--runner-resume``, no eval prepare): passes when that
+       state is the straight run's, bitwise, and the restore's digests matched
 DET1   S1 recorded WITHOUT ``--xla_gpu_deterministic_ops`` (the production flags)
 DET2   S4b's large-N gradient, recorded the same way
+DET3   R1p recorded the same way (the runner on the production flags)
 G1     the differentiable forward against the production forward on the fused
        lane, ``bench/grad_step_profile.py``'s operating point at 2e5 (cells of
        64, theta 0.8, p5, fp32, softening 1e-7): the production eval, then the
@@ -98,6 +108,11 @@ neither row is contaminated, the step time is within max(3 %, twice the A-vs-A
 spread) and the peak within max(2 %, twice the spread). L2 needs a 40 GB card for
 about 10 minutes.
 
+The runner pins (S3: R1p, R1x, R1r) are not in the default set either:
+``record --pins R1p,R1x,R1r`` and ``compare <ref> <new> --pins R1p,R1x,R1r
+--envelope <ref>-b``. R1p is compared with the reference's S1p when the reference has
+no R1p of its own (``_REFERENCE_PIN``); R1x and R1r check their own two arms.
+
 The DET pins answer one question: is the production path bitwise reproducible?
 Record them twice under the same code (``record --tag X --pins DET1,DET2`` and
 ``--tag X-b``); ``compare X X-b --pins DET1,DET2`` passes only when every array
@@ -141,9 +156,14 @@ PINS = ("S1", "S2", "S3", "S4", "S4b", "S5", "S6")
 PINS_S1_VARIANTS = ("S1p", "S1t", "S1e", "S1x", "S1g")
 PINS_TWO_CARD = ("M1", "M2", "M3")
 PINS_LARGE = ("L1", "L2", "L3")
-PINS_DET = ("DET1", "DET2")
+PINS_DET = ("DET1", "DET2", "DET3")
+#: the production runner's pins (S3); not in the default set
+PINS_RUNNER = ("R1p", "R1x", "R1r")
 #: pass or fail on their own record, whatever the reference
-PINS_SELF = ("G1",)
+PINS_SELF = ("G1", "R1x", "R1r")
+#: a pin compared with ANOTHER pin's arrays in the reference tag when the reference
+#: has none of its own: the runner's R1p computes S1p's numbers
+_REFERENCE_PIN = {"R1p": "S1p"}
 #: recorded without --xla_gpu_deterministic_ops: they time the lane, or test whether
 #: the production flags alone reproduce it
 _PRODUCTION_FLAGS = frozenset(PINS_LARGE + PINS_DET)
@@ -289,6 +309,101 @@ def case_s1x(out: Path) -> dict:
 
 def case_s1g(out: Path) -> dict:
     return _fused_bench(out, 200_000, ["--G", _S1G_G])
+
+
+_RUNNER = ["--runner"]
+
+
+def case_r1p(out: Path) -> dict:
+    """S1p's calls through the ProductionRunner (S3 R1p)."""
+    return _fused_bench(out, 200_000, _PARTICLE_CARRY + _RUNNER)
+
+
+def case_r1x(out: Path) -> dict:
+    """S1x's particle arm through the runner: chained calls against one segment."""
+    import numpy as np
+
+    arrays, meta = {}, {}
+    for arm, more in (("", []), ("_once", ["--runner-once"])):
+        part = out.with_name(f"{out.stem}{arm or '_chained'}.npz")
+        row = _fused_bench(
+            part,
+            200_000,
+            ["--softening", _DISC_SOFTENING] + _PARTICLE_CARRY + _RUNNER + more,
+            ic="disc",
+        )
+        with np.load(part) as data:
+            arrays.update({f"{k}{arm}": data[k] for k in data.files})
+        meta[f"rel_l2{arm}"] = row["rel_l2"]
+    np.savez(out, **arrays)
+    differ = arrays["state"] != arrays["state_once"]
+    return {
+        "n": 200_000,
+        **meta,
+        "bitwise": bool(not differ.any()),
+        "n_diff": int(np.count_nonzero(differ)),
+        "max_abs": float(np.max(np.abs(arrays["state"] - arrays["state_once"]))),
+    }
+
+
+def case_r1r(out: Path) -> dict:
+    """R1p with a restart at step 5, continued in a fresh process (S3 R5 on a card)."""
+    import numpy as np
+
+    restart = out.with_name(f"{out.stem}_restart.npz")
+    straight = out.with_name(f"{out.stem}_straight.npz")
+    _fused_bench(
+        straight,
+        200_000,
+        _PARTICLE_CARRY
+        + _RUNNER
+        + ["--runner-restart", str(restart), "--runner-restart-at", "5"],
+    )
+    resumed = out.with_name(f"{out.stem}_resumed.npz")
+    js = resumed.with_suffix(".bench.json")
+    subprocess.run(
+        [
+            sys.executable,
+            str(HERE / "fused_memory_budget.py"),
+            "--n",
+            "200000",
+            "--ic",
+            "plummer_clipped",
+            "--caps",
+            "unnamed",
+            "--steps",
+            "4",
+            "--reps",
+            "2",
+            "--no-analysis",
+            "--skip-eval",
+            "--save-forces",
+            str(resumed),
+            "--out",
+            str(js),
+            *_PARTICLE_CARRY,
+            *_RUNNER,
+            "--runner-resume",
+            str(restart),
+        ],
+        check=True,
+    )
+    with np.load(straight) as a, np.load(resumed) as b:
+        state, state_resumed = a["state"], b["state"]
+    np.savez(out, state=state, state_resumed=state_resumed)
+    restored = json.loads(js.read_text())["runner_restored"]
+    differ = state != state_resumed
+    return {
+        "n": 200_000,
+        "bitwise": bool(not differ.any()) and bool(restored["bitwise"]),
+        "n_diff": int(np.count_nonzero(differ)),
+        "restored": restored,
+        "restart_bytes": restart.stat().st_size,
+    }
+
+
+def case_det3(out: Path) -> dict:
+    return case_r1p(out)
 
 
 def case_s3(out: Path) -> dict:
@@ -533,6 +648,11 @@ def case_g1(out: Path) -> dict:
             "same_engine": rel(acc_same[targets], ref),
         },
     }
+
+
+def _bitwise_pass(meta: dict) -> bool:
+    """R1x / R1r: the record's own two arms agreed bitwise."""
+    return bool(meta.get("bitwise"))
 
 
 def _g1_pass(meta: dict) -> bool:
@@ -846,6 +966,10 @@ def case_det2(out: Path) -> dict:
 CASES = {
     "DET1": case_det1,
     "DET2": case_det2,
+    "DET3": case_det3,
+    "R1p": case_r1p,
+    "R1r": case_r1r,
+    "R1x": case_r1x,
     "G1": case_g1,
     "L1": case_l1,
     "L2": case_l2,
@@ -1025,21 +1149,27 @@ def _compare(args) -> int:
         )
         ok = ok and report[pin]["pass"]
     wanted = [p for p in wanted if p not in PINS_LARGE]
+    # a pin's reference arrays: its own, else the pin it reproduces (R1p: S1p)
+    refs: dict = {}
     for pin in wanted:
-        if not (ref / f"{pin}.npz").exists():
+        own = ref / f"{pin}.npz"
+        other = ref / f"{_REFERENCE_PIN.get(pin, pin)}.npz"
+        if own.exists() or other.exists():
+            refs[pin] = own if own.exists() else other
+        elif pin in PINS_SELF and (new / f"{pin}.npz").exists():
+            # it judges its own record; a reference older than the pin has none
+            refs[pin] = new / f"{pin}.npz"
+        else:
             report[pin] = {"missing_in_ref": True}
             ok = False
-    for npz in sorted(ref.glob("*.npz")):
-        if npz.name.endswith(".bench.npz") or npz.stem not in wanted:
-            continue
-        pin = npz.stem
-        if not (new / npz.name).exists():
+    for pin, npz in sorted(refs.items()):
+        if not (new / f"{pin}.npz").exists():
             report[pin] = {"missing": True}
             ok = False
             continue
-        rows = _diff(npz, new / npz.name)
+        rows = _diff(npz, new / f"{pin}.npz")
         meta_ref = json.loads(npz.with_suffix(".json").read_text())
-        meta_new = json.loads((new / npz.name).with_suffix(".json").read_text())
+        meta_new = json.loads((new / f"{pin}.npz").with_suffix(".json").read_text())
         entry = {"arrays": rows, "meta": {"ref": meta_ref, "new": meta_new}}
         if pin in PINS_DET:
             # no envelope: the question is whether the production flags reproduce
@@ -1047,7 +1177,7 @@ def _compare(args) -> int:
             ok = ok and entry["pass"]
         elif pin in PINS_SELF:
             # the question is inside the new record: do the two lanes agree?
-            entry["pass"] = _g1_pass(meta_new)
+            entry["pass"] = (_g1_pass if pin == "G1" else _bitwise_pass)(meta_new)
             ok = ok and entry["pass"]
         elif env is not None:
             control = _diff(npz, env / npz.name)
@@ -1090,8 +1220,9 @@ def main(argv: list[str]) -> int:
         "--pins",
         default=",".join(PINS),
         help=(
-            "M1,M2,M3 for the two-card set; L1,L2,L3 timing; DET1,DET2 determinism; "
-            "G1 differentiable == production"
+            "M1,M2,M3 for the two-card set; L1,L2,L3 timing; DET1,DET2,DET3 "
+            "determinism; G1 differentiable == production; R1p,R1x,R1r the "
+            "production runner"
         ),
     )
     cmp_.add_argument("--root", default=ROOT_DEFAULT)

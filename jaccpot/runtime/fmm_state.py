@@ -316,6 +316,11 @@ class _TreeBuildArtifacts:
         ``TreeConfig.leaf_capacity``, which means the arrays cover only the first
         ``leaf_capacity`` leaves and the rest of the particles are NOT covered.
         The walk's saturation guard treats it exactly like its own overflows.
+    tree_needs : Optional[Array]
+        Cell-leaf template rebuilds under trace only: ``int32[3]``, what the
+        rebuilt tree needed of the three bounds its overflow flag checks -- the
+        live cell-leaf count (exact past an overflow), the depth and the widest
+        level -- so a failed segment can be re-planned from them.
     """
 
     tree: Tree
@@ -329,6 +334,9 @@ class _TreeBuildArtifacts:
     #: (more leaves needed than ``leaf_capacity``); ``None`` otherwise. Eager
     #: builds raise on it instead.
     leaf_capacity_overflow: Optional[Array] = None
+    #: ``leaf_partition="cells"`` template rebuild under trace: ``(leaves, depth,
+    #: widest level)`` the tree needed, ``int32[3]``; ``None`` otherwise
+    tree_needs: Optional[Array] = None
 
 
 @dataclass(frozen=True)

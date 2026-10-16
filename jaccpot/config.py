@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 NEARFIELD_MODE_DOC = (
     "For large_n_gpu production, near-field execution is canonicalized to "
@@ -60,7 +60,7 @@ class FMMPreset(str, Enum):
     """User-facing quality/speed presets.
 
     A ``str`` enum, so ``preset="fast"`` and ``preset=FMMPreset.FAST`` are
-    interchangeable everywhere. The four members are frozen by
+    interchangeable everywhere. The five members are frozen by
     ``tests/unit/test_public_api_surface.py``.
 
     Presets resolve by two different routes, which matters when tracing why a knob
@@ -68,7 +68,8 @@ class FMMPreset(str, Enum):
     bundles in :func:`jaccpot.runtime.fmm_presets.get_preset_config`, while
     ``BALANCED`` and ``ACCURATE`` resolve through advanced-config defaults in
     ``solver._default_advanced_for_preset`` and never reach ``get_preset_config``
-    at all. See ARCHITECTURE.md section 6.
+    at all. ``GALAXY`` takes both: the ``LARGE_N_GPU`` engine bundle, under advanced
+    defaults of its own. See ARCHITECTURE.md section 6.
 
     Attributes
     ----------
@@ -89,12 +90,22 @@ class FMMPreset(str, Enum):
         ``static_radix`` tree (64 particles per leaf, no host-side refinement)
         that the fused strict lane (``strict_run_v2``) runs on; ``FAST`` keeps
         ``lbvh``.
+    GALAXY :
+        ``"galaxy"``. The fused lane's production configuration
+        (:class:`jaccpot.production.GalaxySettings`): the ``large_n_gpu`` engine
+        profile on cell leaves of 64 (``cell_min_level`` 8, ``leaf_capacity``
+        ``"auto"``), p6, the geometric Dehnen MAC at ``theta`` 0.8, ferrers3
+        softening, fp32 -- what ``bench/fused_memory_budget.py`` measures at its
+        defaults, with the same compiled programs. Leaf size, order and the
+        particle carry are ``strict_run_v2`` arguments; take them from
+        :data:`jaccpot.production.GALAXY_SETTINGS`.
     """
 
     FAST = "fast"
     BALANCED = "balanced"
     ACCURATE = "accurate"
     LARGE_N_GPU = "large_n_gpu"
+    GALAXY = "galaxy"
 
 
 @dataclass(frozen=True)
@@ -134,10 +145,16 @@ class TreeConfig:
         low-density shell no longer produces huge leaves that the mutual MAC
         makes neighbours of the whole tree (near-field volume 24x lower at
         N=2e5 Plummer, theta 0.8; plan sub-10ms Phase 1.2).
-    leaf_capacity : Optional[int]
+    leaf_capacity : Optional[Union[int, Literal["auto"]]]
         Static leaf count for ``leaf_partition="cells"`` (the tree is padded to
         it; exceeding it raises eagerly and trips the strict runner's capacity
-        guard under trace). Required with ``"cells"``.
+        guard under trace). Required with ``"cells"``. ``"auto"`` sizes it at the
+        solver's first eager prepare, from the cell leaves of the particles it is
+        given (:func:`jaccpot.runtime.capacity_plan.live_cell_leaves`, on device,
+        in the prepare's own bounds): ``leaf_headroom`` times that count, rounded
+        up to a multiple of 1024. It then stays fixed, so the compiled programs
+        keep their shapes; a run whose particles cluster past it raises the
+        capacity error like an explicit value.
     cell_min_level : Optional[int]
         ``leaf_partition="cells"`` only: no leaf coarser than this Morton level
         (``None``/``0``: unconstrained). Leaves are the coarsest cells holding at
@@ -148,6 +165,9 @@ class TreeConfig:
         domain into the cross-domain near export. Level 8 (cells at most 1/256 of
         the box) adds ~0.7 % leaves on a 2e6 Plummer and was measured at 110.7 ->
         90.8 ms on one A100 and 87.2 -> 76.8 ms on two, forces unchanged.
+    leaf_headroom : Optional[float]
+        ``leaf_capacity="auto"`` only: the factor over the live count (``None``:
+        1.15, the benches' ``--leaf-cap-factor``). At least 1.
     """
 
     tree_type: Optional[str] = None
@@ -157,8 +177,9 @@ class TreeConfig:
     max_refine_levels: Optional[int] = None
     aspect_threshold: Optional[float] = None
     leaf_partition: Optional[str] = None
-    leaf_capacity: Optional[int] = None
+    leaf_capacity: Optional[Union[int, Literal["auto"]]] = None
     cell_min_level: Optional[int] = None
+    leaf_headroom: Optional[float] = None
 
 
 @dataclass(frozen=True)

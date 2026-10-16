@@ -31,22 +31,27 @@ EXPECTED_ALL = {
     "GradConfig",
     "FastMultipoleMethod",
     "FusedForceProvider",
+    "GalaxySettings",
     "MemoryObjective",
     "NearFieldConfig",
     "OdisseoFMMCoupler",
+    "ProductionRunner",
     "RealSHBasis",
     "RuntimePolicyConfig",
+    "SegmentConfig",
     "TraversalOverrides",
     "TreeConfig",
     "direct_sum_gravitational_acceleration",
 }
 
 # Frozen preset members (name -> value). ODISSEO selects presets by these.
+# GALAXY (S3): the fused lane's production configuration, jaccpot.production.
 EXPECTED_PRESETS = {
     "FAST": "fast",
     "BALANCED": "balanced",
     "ACCURATE": "accurate",
     "LARGE_N_GPU": "large_n_gpu",
+    "GALAXY": "galaxy",
 }
 
 # Frozen keyword-only constructor surface of the public facade.
@@ -119,10 +124,13 @@ def test_export_kinds() -> None:
         "GradConfig",
         "FastMultipoleMethod",
         "FusedForceProvider",
+        "GalaxySettings",
         "NearFieldConfig",
         "OdisseoFMMCoupler",
+        "ProductionRunner",
         "RealSHBasis",
         "RuntimePolicyConfig",
+        "SegmentConfig",
         "TraversalOverrides",
         "TreeConfig",
     ):

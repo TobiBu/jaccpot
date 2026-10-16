@@ -465,7 +465,9 @@ shared A100s booked through autocvd (`-l`): accuracy and pins only, no timings.
 ## S2 — the fused force as an object, the fp64 validation lane, traced parameters (2026-10-15/16)
 
 **Setup.** Code: jaccpot main `f967805` (the base), yggdrax `2758fa9`, nornax `763096e`, Odisseo `8fa0c18`; jax 0.11.2.
-The work is a linear stack of local branches on `f967805` (`s2/1` to `s2/13`, table below). GPU runs used shared A100s
+The work is a linear stack on `f967805` (`s2/1` to `s2/13`, table below), published as five stacked PRs:
+#408 (`s2/1`-`s2/2`, bench), #409 (`s2/3`-`s2/4`, provider), #410 (`s2/5`-`s2/7`, strict lane on it + fixes),
+#411 (`s2/8`-`s2/10`, fp64), #412 (`s2/11`-`s2/13`, traced parameters, docs, this record). GPU runs used shared A100s
 booked through autocvd for accuracy, program identity and pins; the L1-L3 timing gate ran on a free GPU 7.
 
 **The user's decisions (2026-10-15):**
@@ -664,3 +666,99 @@ day's L-pins is 0.2-0.7 %).
   CPU, ferrers3 results would move by one float32 rounding (the lane goldens run Plummer, which stays bitwise). The
   traced timing above shows no cost.
 - **The preset's carry** (`"state"` or `"particles"`), deferred to S3 by the user.
+
+## S3a — the production runner, `preset="galaxy"`, automatic leaf capacity, the tree re-plan (2026-10-16)
+
+**Setup.** jaccpot main `dd1ac36` (S2 merged), yggdrax main `3299b70` plus `return_num_leaves`; jax 0.11.2. Design and
+user decisions: the plan's S3 design note. Timings on free A100s booked through autocvd (no foreign process on the
+card); accuracy, identity and pins on shared ones.
+
+**The user's decisions (2026-10-16):**
+
+| | decision |
+| --- | --- |
+| traced parameters | the **runner's** default (`SegmentConfig.traced_params=True`); `strict_run_v2` keeps static literals |
+| `preset="galaxy"` MAC | geometric theta 0.8 (`dehnen_error` only once S3b brings its step within 1.3x) |
+| diagnostics | momentum, angular momentum, COM, kinetic energy every segment edge; energy every 10th edge (session 2) |
+| ferrers3 tile skip | opt-in unless bitwise |
+| restart files, carry | `.npz` + JSON meta (tmp + rename); the preset's carry is `"particles"` (lead, per the design) |
+
+### What S3a built
+| branch | what |
+| --- | --- |
+| yggdrax `feat/s3-return-num-leaves` (yggdrax #101) | the cell template rebuild can return the partition's live leaf count (computed, dropped before) |
+| `s3/1-auto-leaf-capacity` (#414) | `TreeConfig(leaf_capacity="auto", leaf_headroom=)`: the live cell leaves counted ON DEVICE, x1.15 in steps of 1024, once, at the first prepare |
+| `s3/2-galaxy-preset` (#415) | `preset="galaxy"` (`GalaxySettings`): cells of 64, cml 8, p6, theta 0.8, ferrers3, auto capacity, particle carry; `theta=None` sentinel (0.6 for every other preset) |
+| `s3/3-tree-replan` (#416) | a cell-leaf tree that outgrows its leaf capacity, its depth bound or its level width is re-planned at the segment's start (needs 8 -> 11 fields); after a tree re-plan, one walk-only retry more |
+| `s3/4-production-runner` (#417) | `ProductionRunner`: K-step `strict_run_v2(carry="particles")` segments chained through the handle; callbacks, snapshots, a jsonl log; `carry_total_acceleration` |
+| `s3/5-runner-restart` (#418) | restart files: a fresh process continues a run bitwise |
+| `s3/6-runner-bench-docs` (#419) | `fused_memory_budget.py --runner`, pins R1p / R1x / R1r / DET3, `docs/production.md`, this section |
+
+### Findings
+- **The leaf capacity is not what a production run outgrows first.** Over a 25M disc+bulge quarter orbit (489 steps)
+  the live cell leaves moved +0.26 % (1,502,983 -> 1,506,881): 1.15x headroom lasts thousands of steps. The widest
+  tree level grew +10.9 % against its 1.25x bound (extrapolated trip at ~1,700-2,600 steps). The re-plan therefore
+  grows the level width and the depth bound as well as the capacity.
+- **The device count is ~400x the host count:** 25M 8-14 ms (host 3.2 s), 1e8 27 ms (host 10.9 s), ~25 B/p transient,
+  equal on all 72 (IC, N, leaf, cml) rows.
+- **`preset="galaxy"` compiles the bench's explicit L-configuration's programs** (CPU 12/12 programs, 84/84 arrays; GPU
+  14/14 texts); a theta 0.75 control fails the compare.
+- **Two latent faults in a width-only re-plan**, found by the R6 tests: the level batch width is read at trace time and
+  is not in any compile key (the runner cache is now dropped on a re-plan), and the Pallas L2L cascade loops the shape's
+  registered level count, so a deeper depth bound alone left levels unswept (it is raised with the bound).
+- **An external field across segment edges** was not bitwise: a chained call rebuilt `acc0 = acc_self + ext(state)`
+  outside the scan (1 of 3,072 components, 1.9e-6, CPU). `strict_run_v2(carry_total_acceleration=True)` (opt-in; the
+  runner uses it) carries the scan's own total; it also removes a second compile at segment 2.
+- **A ragged last segment recompiles** (`num_steps` is in the key): 53 s at 25M. The runner splits into equal segments
+  and warns once on a remainder.
+
+### Gates
+- CPU: every CI shard exits 0 on the integration and on each stack branch; `provider_hlo_identity.py` 36/36 identical
+  on `s3/1`-`s3/2` (vs S2) and on `s3/4`-`s3/6` (vs the integration); `s3/3` changes the runners' text only (+5 StableHLO
+  ops, the `needs` vector 8 -> 11), every value bitwise.
+- GPU: pins S1, S6, DET1, G1, S1p, S1t, S1e, S1x, S1g bitwise; R1p (the runner) bitwise to S1p; R1x (external field,
+  chained = one call) bitwise; R1r (restart in a fresh process = straight) bitwise; DET3 A-vs-A bitwise. Two cards: M1
+  and M3 bitwise, M2 within main's A-vs-A envelope.
+- R6: a tree outgrown mid-segment (leaf capacity, or level width) is re-planned and equals a fresh run with the grown
+  bounds, bitwise; with unnamed walk caps the walk-only second retry finishes it, bitwise to a fresh run with the final
+  caps. The runner driven through a re-plan in its second segment equals one `strict_run_v2` call, bitwise.
+
+### Timing (free GPU 0, every row clean; L-pin settings, particle carry)
+| pin | main `dd1ac36` | S3a | main again (A-vs-A) |
+| --- | --- | --- | --- |
+| L1, 8e6 step | 78.82 ms, 325 B/p | 78.81 ms (-0.01 %) | +1.84 % |
+| L2, 1e8 step | 875.18 ms, 257 B/p | 877.23 ms (+0.23 %) | +0.24 % |
+| L3, 25M step | 241.92 ms, 256 B/p | 241.04 ms (-0.37 %) | +0.42 % |
+| L3 force | 101.03 ms, rel-L2 4.18e-4 | 100.27 ms | -0.61 % |
+
+**Through the runner** (segments of 50 steps, traced parameters, donation; the per-step time includes the edges):
+
+| N | plain `strict_run_v2` | runner | runner, diagnostics off |
+| --- | --- | --- | --- |
+| 8e6 | 78.5 ms, 324 B/p | 84.1 ms (+7.2 %), 320 B/p | 82.3 ms (+4.8 %) |
+| 1e8 | 889.9 ms, 257 B/p | **919.4 ms (+3.3 %)**, 255 B/p | 909.2 ms (+2.2 %) |
+
+**1e8 stays below 1 s per step through the runner.** The edges cost ~0.3 s per segment at 8e6 and ~0.5-1.5 s at 1e8: the
+24 B/p host copy `strict_run_v2(donate_state=True)` keeps for its retry, and the diagnostics (~0.5 s per edge at 1e8,
+more than four fp64 reductions should take). Session 2 makes both cheaper.
+
+### The 25M disc+bulge through the runner (free GPU 7)
+`preset="galaxy"`, eps 1.5e-3, the NFW halo as an external field, dt 5e-4, 500 steps in 10 segments of 50, traced
+parameters, a restart file every 5 segments, snapshots at 250 and 500:
+- **354 s for the 500 steps**, edges, two restarts and two snapshots included; 246.8 ms/step in the segment calls,
+  249.0 ms with the edges. No re-plan, no recompile after the first segment. The automatic capacity resolved to the
+  bench's 1,728,512 (live 1,502,983 -> 1,507,252, at most 0.872 of it).
+- **A kill and resume** from the step-250 restart in a fresh process ends bitwise on the uninterrupted run (0 of
+  1.5e8 elements; both digests matched).
+- |dL|/L = 4.97e-7 after 500 steps; peak 5.52 GiB (237 B/p), set by the eager prepare. The mesh lane ran this disc at
+  82 s/step on 8 cards (another configuration; this force is the more accurate one).
+- **Costs to remove in session 2:** the first segment, 232 s (the eager prepare 96 s and 333 compiles on a loaded host);
+  a restore, 101 s, almost all of it a full eager prepare (the caps-only prepare); a restart file is 1.3 GB (52 B/p) and
+  takes 3-3.7 s to write.
+
+### For S3 session 2
+- the fast-lane O(N) potential and the energy diagnostic (the generic potential path needs a 30.75 GiB buffer at 25M);
+- the caps-only prepare (first segment, restore, re-plan);
+- cheaper edges (diagnostics, the retry's host copy);
+- the 25M production gate with energy, and a 1e8 run through the runner with energy on;
+- the ferrers3 tile skip (opt-in unless bitwise).
