@@ -99,6 +99,22 @@ synchronous copy into NumPy memory took 1.0-1.5 s per segment, the larger part o
 edge's cost at 1e8. The moments themselves cost 15 ms at 1e8 (their first call compiles,
 0.6 s once per process).
 
+**List limit.** A re-plan sizes an outgrown list at 1.5x what the segment needed
+(`JACCPOT_FLAT_WALK_CAP_HEADROOM`), but never past the largest list the int32 index range
+builds, `_interaction_cache.flat_walk_list_limit`: 1,431,306,240 directed entries on the
+Pallas walk, whose CSR build addresses 3x the canonical width. A list that needs more
+raises the `RuntimeError` before the re-prepare, naming the remedies. A far list that
+keeps growing usually means the per-axis Morton box stretched. In the S3 gate's clipped
+Plummer (softening 1e-7, dt 1e-2) close encounters fling a few particles out from step
+~200, every cell elongates, and at 1e8 the far list needed 402M directed entries at the
+start, 632M by step 301 and 1,005M by step 401. The third re-plan clamped the far list
+at the limit instead of 1,508,900,864 (which raised `pair width 754450432 overflows
+int32`), and the run went on to step 551 without another re-plan: the step took 874 ms
+on the cubic box, 1,596 ms at the stretched one (steps 452-501) and 1,004 ms once
+particles flung along z had made the box cubic again (502-551). On the same IC at 1e7 the
+far count grows 44 % by step 451 with the per-axis box; with `JACCPOT_CUBIC_BOUNDS=1` the
+same positions need 22 % fewer pairs than at step 0.
+
 ## Edges, callbacks, diagnostics
 
 A callback is `Callable[[SegmentEdge], Optional[bool]]`, called at step 0 and after every
