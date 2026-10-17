@@ -267,7 +267,12 @@ and the particle-major L2P; `ARCHITECTURE.md` section 6).
 - **A tree overflow is re-planned at the segment's start** (S3; S2 raised): see the needs
   above. A walk that overflowed a NAMED cap declines the retry altogether, tree or not.
 - **Not yet on the provider:** the fused multi-GPU lane (`jaccpot/distributed/fused.py`)
-  has its own force step; nornax's block-step integrators do not call it yet.
+  has its own force step; nornax's block-step (multi-rung) integrators do not call it
+  yet. nornax's single-rung KDK leapfrog does (S4): `nornax.adapters.FusedProviderForce`
+  carries `step`'s aux through `leapfrog_kdk_rollout`, and `nornax.retry_segment`
+  re-plans a segment with `retry_mode` and `replanned`. Its forces are this lane's; nornax's
+  `tests/integration/test_jaccpot_provider_rollout.py` compares its rollout with
+  `strict_run_v2(carry="particles")` and the production runner.
 
 ## The fp64 validation lane
 
