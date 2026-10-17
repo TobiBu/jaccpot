@@ -765,6 +765,10 @@ parameters, a restart file every 5 segments, snapshots at 250 and 500:
 
 ## S3 session 2 — the energy, the caps-only prepare, the production gate (2026-10-16/17)
 
+Published as seven stacked PRs on main after #421 (the 1-step-segment hotfix): #428 fast-lane potential, #422 runner
+energy, #423 caps-only walk, #424 caps-only default, #425 ferrers3 tile skip, #426 int32 list limit, #427 the
+autotuner flag and this record.
+
 **Setup.** jaccpot main `392061d` (S3a merged) with #421, yggdrax main `ca3a93c`, jax 0.11.2. Four tracks on
 branches of their own (the potential and the energy, the caps-only prepare, the ferrers3 tile skip, the int32 list
 limit), merged into one integration for the gates. Timings on free A100s booked through autocvd (no foreign process
