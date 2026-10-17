@@ -87,8 +87,9 @@ eval_seam                     ``strict_fused_prepared_eval_fn`` and one ``eval_f
 galaxy_explicit               (S3, not in the default sets) the particle carry on
                               ``fused_memory_budget.py``'s explicit configuration at
                               its defaults (leaf 64, p6, theta 0.8, cell level 8, its
-                              leaf-64 traversal overrides), capacity counted inside
-                              the capture as the bench counts it
+                              leaf-64 traversal overrides) with ``--cubic-bounds``
+                              (S3b), capacity counted inside the capture as the
+                              bench counts it
 galaxy_preset                 the same run on ``preset="galaxy"`` (``leaf_capacity=
                               "auto"``, theta from the preset): ``compare --pair
                               galaxy_explicit:galaxy_preset`` must find nothing
@@ -502,11 +503,12 @@ _BENCH_TRAVERSAL_LEAF64 = dict(
 def _galaxy_solver(setup: Setup, v: "Variant", positions):
     """The galaxy pair: ``preset="galaxy"``, or the bench's explicit configuration.
 
-    ``"explicit"`` is ``fused_memory_budget.py``'s ``_solver`` at its defaults, its
-    leaf capacity counted as the bench counts it (the library's device count, since
-    S3), inside the capture -- where ``"preset"``'s ``leaf_capacity="auto"`` counts
-    it, in its first eager prepare. Both then run the same counting programs on the
-    same codes, so the two records must agree program for program.
+    ``"explicit"`` is ``fused_memory_budget.py --cubic-bounds``'s ``_solver`` (its
+    defaults and the cubic Morton box, S3b), its leaf capacity counted as the bench
+    counts it (the library's device count, since S3, in the cube), inside the
+    capture -- where ``"preset"``'s ``leaf_capacity="auto"`` counts it, in its first
+    eager prepare. Both then run the same counting programs on the same codes, so
+    the two records must agree program for program.
     """
     import warnings
 
@@ -532,7 +534,7 @@ def _galaxy_solver(setup: Setup, v: "Variant", positions):
         p,
         leaf_size=setup.leaf,
         cell_min_level=setup.cell_min_level,
-        bounds=_infer_bounds(p),
+        bounds=_infer_bounds(p, cubic=True),
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)  # fixed_order, as the bench
@@ -552,6 +554,7 @@ def _galaxy_solver(setup: Setup, v: "Variant", positions):
                     leaf_partition="cells",
                     leaf_capacity=auto_leaf_capacity(live, 1.15),
                     cell_min_level=setup.cell_min_level or None,
+                    cubic_bounds=True,
                 ),
                 nearfield=NearFieldConfig(mode="auto"),
                 runtime=RuntimePolicyConfig(
