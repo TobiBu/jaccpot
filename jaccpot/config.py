@@ -94,9 +94,10 @@ class FMMPreset(str, Enum):
         ``"galaxy"``. The fused lane's production configuration
         (:class:`jaccpot.production.GalaxySettings`): the ``large_n_gpu`` engine
         profile on cell leaves of 64 (``cell_min_level`` 8, ``leaf_capacity``
-        ``"auto"``), p6, the geometric Dehnen MAC at ``theta`` 0.8, ferrers3
-        softening, fp32 -- what ``bench/fused_memory_budget.py`` measures at its
-        defaults, with the same compiled programs. Leaf size, order and the
+        ``"auto"``, a cubic Morton box), p6, the geometric Dehnen MAC at
+        ``theta`` 0.8, ferrers3 softening, fp32 -- what
+        ``bench/fused_memory_budget.py --cubic-bounds`` measures, with the same
+        compiled programs. Leaf size, order and the
         particle carry are ``strict_run_v2`` arguments; take them from
         :data:`jaccpot.production.GALAXY_SETTINGS`.
     """
@@ -168,6 +169,18 @@ class TreeConfig:
     leaf_headroom : Optional[float]
         ``leaf_capacity="auto"`` only: the factor over the live count (``None``:
         1.15, the benches' ``--leaf-cap-factor``). At least 1.
+    cubic_bounds : Optional[bool]
+        Shape of the Morton box the single-GPU lane infers from the particles.
+        ``None``/``False`` (the library default): padded per axis, so
+        ``morton_encode``, which normalises each axis by its own extent, gives
+        every cell the box's aspect. ``True``: a cube on the longest extent, so
+        every cell is a cube (``preset="galaxy"``). On the disc of the 25M
+        production IC without its bulge (box 3:1, thin in z) the cube needs 63 %
+        fewer far and 50 % fewer near pairs and halves the force error; where the
+        box is a cube anyway (the disc + bulge, a clipped Plummer) the lists
+        agree to ~1 %. ``JACCPOT_CUBIC_BOUNDS`` overrides it when set (``1``: cube,
+        ``0``: per axis). The multi-GPU lane (:mod:`jaccpot.distributed`) reads
+        only the environment variable.
     """
 
     tree_type: Optional[str] = None
@@ -180,6 +193,7 @@ class TreeConfig:
     leaf_capacity: Optional[Union[int, Literal["auto"]]] = None
     cell_min_level: Optional[int] = None
     leaf_headroom: Optional[float] = None
+    cubic_bounds: Optional[bool] = None
 
 
 @dataclass(frozen=True)

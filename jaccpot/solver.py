@@ -134,10 +134,10 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
 def _galaxy_advanced(settings: GalaxySettings) -> FMMAdvancedConfig:
     """The advanced config of ``preset="galaxy"``, from its settings.
 
-    Field for field what ``bench/fused_memory_budget.py`` passes at its defaults --
+    Field for field what ``bench/fused_memory_budget.py --cubic-bounds`` passes --
     built on :class:`FMMAdvancedConfig`'s defaults, not on ``LARGE_N_GPU``'s, and
     with the near field ``"auto"``, not that preset's ``"bucketed"`` -- so the
-    preset compiles the programs the production rows were measured with (S3 R7b,
+    preset compiles the programs the production rows are measured with (S3 R7b,
     ``bench/provider_hlo_identity.py``'s ``galaxy_*`` pair). The engine's
     ``large_n_gpu`` profile canonicalizes the rest.
 
@@ -145,8 +145,8 @@ def _galaxy_advanced(settings: GalaxySettings) -> FMMAdvancedConfig:
     ----------
     settings : GalaxySettings
         The constructor half is read here: leaf size (as the leaf target), cell
-        level floor, leaf capacity and headroom, expansion order (as
-        ``fixed_order``) and MAC.
+        level floor, leaf capacity and headroom, the Morton box's shape,
+        expansion order (as ``fixed_order``) and MAC.
 
     Returns
     -------
@@ -165,6 +165,7 @@ def _galaxy_advanced(settings: GalaxySettings) -> FMMAdvancedConfig:
                 if settings.leaf_capacity == "auto"
                 else None
             ),
+            cubic_bounds=bool(settings.cubic_bounds),
         ),
         nearfield=NearFieldConfig(mode="auto"),
         runtime=RuntimePolicyConfig(fixed_order=int(settings.max_order)),
@@ -814,6 +815,7 @@ class FastMultipoleMethod:
                 leaf_capacity=advanced_cfg.tree.leaf_capacity,
                 cell_min_level=advanced_cfg.tree.cell_min_level,
                 leaf_headroom=advanced_cfg.tree.leaf_headroom,
+                cubic_bounds=advanced_cfg.tree.cubic_bounds,
             ),
             runtime_policy=dataclasses.replace(
                 advanced_cfg.runtime,

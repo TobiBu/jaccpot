@@ -367,7 +367,10 @@ class PrepareMixin(_EngineBase):
         positions : Array
             Particle positions, shape ``(N, 3)``.
         bounds : Optional[Tuple[Array, Array]]
-            Explicit domain bounds, or None to infer them from the particles.
+            Explicit domain bounds, or None to infer them from the particles: per
+            axis or a cube, as ``TreeConfig.cubic_bounds`` (``preset="galaxy"``:
+            a cube) and a set ``JACCPOT_CUBIC_BOUNDS`` decide. The eager prepare
+            and the fused lane's traced refresh both infer here.
 
         Returns
         -------
@@ -375,7 +378,9 @@ class PrepareMixin(_EngineBase):
             ``(lower, upper)`` domain bounds at the working dtype.
         """
         if bounds is None:
-            min_corner, max_corner = _infer_bounds(positions)
+            min_corner, max_corner = _infer_bounds(
+                positions, cubic=bool(getattr(self, "_tree_cubic_bounds", False))
+            )
             return min_corner, max_corner
         min_corner, max_corner = bounds
         return (

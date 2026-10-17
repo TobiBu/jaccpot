@@ -69,27 +69,52 @@ from ._shared import (
 __all__: list[str] = []
 
 
+def _cubic_bounds_active(configured: bool = False) -> bool:
+    """Whether the inferred Morton box is a cube: the environment, else the config.
+
+    Parameters
+    ----------
+    configured : bool
+        The engine's ``TreeConfig.cubic_bounds`` (``preset="galaxy"``: ``True``).
+
+    Returns
+    -------
+    bool
+        ``JACCPOT_CUBIC_BOUNDS`` when it is set (``1``: cube, ``0``: per axis),
+        otherwise ``configured``. Read at call time: under a trace it is a
+        trace-time constant, so a compile cache must key it
+        (``FusedForceProvider.key``).
+    """
+    return env_flag("JACCPOT_CUBIC_BOUNDS", bool(configured))
+
+
 @jaxtyped(typechecker=beartype)
-def _infer_bounds(positions: Float[Array, "n 3"]) -> tuple[Array, Array]:
+def _infer_bounds(
+    positions: Float[Array, "n 3"], cubic: bool = False
+) -> tuple[Array, Array]:
     """Infer generous bounds for tree construction from particle positions.
 
     Parameters
     ----------
     positions : Float[Array, 'n 3']
         Particle positions ``[N, 3]``.
+    cubic : bool
+        The configured box shape (``TreeConfig.cubic_bounds``); a set
+        ``JACCPOT_CUBIC_BOUNDS`` wins (:func:`_cubic_bounds_active`).
 
     Returns
     -------
     tuple[Array, Array]
         ``(lower, upper)``, the bounding box padded by 5% of its span per axis,
-        floored at 1e-6 so a degenerate axis still yields a non-empty domain.
-        "Generous" is deliberate: particles exactly on a boundary are a tree
-        build hazard, and the padding costs nothing.
+        floored at 1e-6 so a degenerate axis still yields a non-empty domain --
+        or, cubic, the cube on the longest span padded the same way about the
+        box's centre. "Generous" is deliberate: particles exactly on a boundary
+        are a tree build hazard, and the padding costs nothing.
     """
 
     minimum = jnp.min(positions, axis=0)
     maximum = jnp.max(positions, axis=0)
-    if not env_flag("JACCPOT_CUBIC_BOUNDS", False):
+    if not _cubic_bounds_active(cubic):
         span = maximum - minimum
         padding = jnp.maximum(span * 0.05, jnp.full_like(span, 1e-6))
         return minimum - padding, maximum + padding

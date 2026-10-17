@@ -71,6 +71,7 @@ from .fused_topology import (
     StepParams,
     _is_static,
 )
+from .kernels._evaluate import _cubic_bounds_active
 from .strict_carry import (
     PreparedCaps,
     PreparedShapeTemplate,
@@ -691,8 +692,11 @@ class FusedForceProvider:
         what the engine fixes for its lifetime (``G``, softening, MAC, kernels --
         the engine's own cache is per engine): the leaf, order and opening angle,
         whether f_b is carried, the diagnostic modes, the level-loop bound and the
-        validated walk caps the traced walk is sized from, and the template's
-        shapes when the rebuild materialises it.
+        validated walk caps the traced walk is sized from, the template's shapes
+        when the rebuild materialises it, and a cubic Morton box (appended only
+        when the box is a cube, so a per-axis key is the one it always was:
+        ``JACCPOT_CUBIC_BOUNDS`` can flip the box between two calls of one
+        engine).
 
         The level bound is resolved now (``engine._resolve_upward_num_levels``):
         from ``like``'s tree when it is a concrete prepared state -- which stashes
@@ -726,6 +730,8 @@ class FusedForceProvider:
         )
         if like is None and self.template is not None:
             parts = parts + (self.template.key(),)
+        if _cubic_bounds_active(getattr(engine, "_tree_cubic_bounds", False)):
+            parts = parts + ("cubic_bounds",)
         return parts
 
     # ----------------------------------------------------------------------
