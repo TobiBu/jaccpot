@@ -27,7 +27,9 @@ SEGMENT LENGTHS. ``num_steps`` is part of a scan's compile key, so every distinc
 segment length compiles its own scan: a ragged last segment of 14 steps recompiled
 for 52.8 s at 25M on an A100 (S3 probe). Choose ``SegmentConfig.steps`` to divide
 ``num_steps``; otherwise the run is ``num_steps // steps`` segments of ``steps`` and
-one of the remainder, last, and the runner warns once (:func:`segment_lengths`).
+one of the remainder, last, and the runner warns once (:func:`segment_lengths`). A
+remainder of one step joins the last segment: a 1-step scan compiles to different
+code from a longer one's loop, so it would not be bitwise one long call.
 
 COMPILES. A fresh run compiles the eager prepare's programs, the start force and one
 scan; with ``donate_input=False`` (the default: the caller's state survives) the
@@ -340,6 +342,14 @@ def segment_lengths(num_steps: int, steps: int) -> tuple:
     key), so a run whose ``num_steps`` is a multiple of ``steps`` compiles ONE
     scan; otherwise the remainder segment, last, compiles a second.
 
+    A remainder of ONE step joins the last full segment instead (5 steps of 2 run as
+    2 + 3, not 2 + 2 + 1). XLA inlines a scan of length one into straight-line code
+    and fuses it differently from the loop body of every longer scan, so a 1-step
+    segment does not round like the steps of one long call: 2 + 2 + 1 differed from
+    5 on a CI runner (#419 on main, 2026-10-16) where 2 + 2 + 2 matched 6 bitwise.
+    With ``steps=1`` every segment is a 1-step scan; such a run is the same
+    trajectory to round-off, not bitwise one long call.
+
     Parameters
     ----------
     num_steps : int
@@ -353,6 +363,8 @@ def segment_lengths(num_steps: int, steps: int) -> tuple:
         Segment lengths, in order; empty for ``num_steps == 0``.
     """
     full, rest = divmod(int(num_steps), int(steps))
+    if rest == 1 and full >= 1 and int(steps) > 1:
+        return (int(steps),) * (full - 1) + (int(steps) + 1,)
     return (int(steps),) * full + ((rest,) if rest else ())
 
 

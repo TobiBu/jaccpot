@@ -68,7 +68,11 @@ N = 512: 1 of 3072 state components, 1.9e-6, after 3 x 2 steps against 6).
 **Segment lengths.** `num_steps` is part of a scan's compile key: every distinct segment
 length compiles its own scan (a ragged 14-step last segment recompiled for 52.8 s at 25M
 on an A100). The plan is `num_steps // steps` segments, then the remainder, last
-(`segment_lengths`); the runner warns once when there is one.
+(`segment_lengths`); the runner warns once when there is one. A remainder of one step joins
+the last segment (5 steps of 2 run as 2 + 3): XLA inlines a scan of length one and fuses it
+differently from a longer scan's loop body, so a 1-step segment is not bitwise the steps of
+one long call (2 + 2 + 1 differed from 5 on a CI runner). For the same reason
+`SegmentConfig(steps=1)` gives the trajectory to round-off, not bitwise one long call.
 
 **Compiles.** A fresh run compiles the eager prepare's programs, the start force and one
 scan. With `donate_input=False` the second segment compiles the scan once more (with

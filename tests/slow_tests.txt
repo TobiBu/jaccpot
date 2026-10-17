@@ -20,7 +20,7 @@ tests/integration/strict/test_production_runner.py::test_a_segment_that_outgrows
 tests/integration/strict/test_production_runner.py::test_an_external_field_crosses_the_segment_edges[closure]
 tests/integration/strict/test_production_runner.py::test_an_external_field_crosses_the_segment_edges[traced_params]
 tests/integration/strict/test_production_runner.py::test_donating_the_input_changes_no_number
-tests/integration/strict/test_production_runner.py::test_segments_are_one_long_call[2+2+1_vs_5]
+tests/integration/strict/test_production_runner.py::test_segments_are_one_long_call[2+3_vs_5]
 tests/integration/strict/test_production_runner.py::test_segments_are_one_long_call[3x2_vs_6]
 tests/integration/strict/test_production_runner.py::test_the_diagnostics_leave_the_trajectory_alone
 tests/integration/strict/test_production_runner.py::test_the_traced_runner_is_the_traced_call
