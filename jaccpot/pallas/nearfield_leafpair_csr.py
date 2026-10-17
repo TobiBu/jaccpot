@@ -44,7 +44,7 @@ cleanup (X5).
 from __future__ import annotations
 
 import functools
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -151,6 +151,200 @@ def _force_scale_term(
     d2 = r_sq + eps_sq
     ok = active & (d2 > 0.0)
     return jnp.where(ok, mass / jnp.where(ok, d2, 1.0), 0.0)
+
+
+#: A source leaf takes the Newtonian factors only when its box's squared gap to the
+#: target leaf's box is at least this many ``h^2``. The gap bounds every pair's
+#: separation from below up to the few roundings of a 3-term sum of squares (a
+#: relative 4e-7), so the margin keeps every pair's clipped ``c`` at exactly 1.
+_BEYOND_SUPPORT_MARGIN = 1.0 + 2.0**-12
+
+
+def _ferrers3_newton_factors(
+    r_sq: Array,
+    active: Array,
+    params: Any,
+    kernel: str,
+    *,
+    potential: bool = False,
+) -> tuple[Array, Optional[Array], None]:
+    """:func:`masked_pair_factors`' ``"ferrers3"`` values on pairs beyond the support.
+
+    Past the support the clipped ``c = min(r^2 / h^2, 1)`` is exactly ``1``, so
+    :func:`jaccpot.softening.pair_factors` returns ``(1 + 0 R(c)) s^3 = s^3`` and
+    ``s`` with ``s = rsqrt(max(r^2, h^2))``. This computes those, op for op, without
+    the polynomials: on pairs whose ``fl(r^2 / h^2)`` is at least ``1`` the values
+    are the polynomial's, bit for bit. The caller guarantees that
+    (:func:`_beyond_support`).
+
+    Parameters
+    ----------
+    r_sq : Array
+        Squared separations, softening NOT added.
+    active : Array
+        Live pairs, broadcastable to ``r_sq``.
+    params : Any
+        ``(h^2, 1/h^2)`` (:func:`jaccpot.softening.softening_params_from_sq`).
+    kernel : str
+        ``"ferrers3"`` (the signature is :func:`masked_pair_factors`').
+    potential : bool
+        Also return the potential factor. Static.
+
+    Returns
+    -------
+    tuple[Array, Optional[Array], None]
+        ``(g, psi or None, None)``, zero on inactive pairs.
+
+    Raises
+    ------
+    ValueError
+        For any other kernel (Wendland's ``c`` goes through a square root).
+    """
+    if kernel != "ferrers3":
+        raise ValueError(f"the tile skip is ferrers3's; got {kernel!r}")
+    safe = jnp.where(active, r_sq, 1.0)
+    s = lax.rsqrt(jnp.maximum(safe, params[0]))
+    g = jnp.where(active, s * s * s, 0.0)
+    return g, (jnp.where(active, s, 0.0) if potential else None), None
+
+
+def _leaf_box_kernel(
+    pm_ref: KernelRef,
+    start_ref: KernelRef,
+    count_ref: KernelRef,
+    box_ref: KernelRef,
+    *,
+    lanes: int,
+) -> None:
+    """Each leaf's bounding box: ``B`` leaves per program, ``lanes`` particles a step.
+
+    Parameters
+    ----------
+    pm_ref : KernelRef
+        ``(N + pad, 4)`` sorted x, y, z, mass.
+    start_ref : KernelRef
+        ``(B,)`` block of first particles.
+    count_ref : KernelRef
+        ``(B,)`` block of particle counts (``0``: an empty box).
+    box_ref : KernelRef
+        ``(B, 8)`` output block: ``lo_x, hi_x, lo_y, hi_y, lo_z, hi_z, 0, 0``.
+    lanes : int
+        Particles per leaf per step (a power of two). Static.
+
+    Returns
+    -------
+    None
+        Writes the output block.
+    """
+    start = start_ref[...]
+    count = count_ref[...]
+    lane = lax.broadcasted_iota(start.dtype, (start.shape[0], lanes), 1)
+
+    def body(t: Array, acc: tuple) -> tuple:
+        off = t * lanes + lane
+        valid = off < count[:, None]
+        idx = jnp.where(valid, start[:, None] + off, 0)
+        out = []
+        for k in range(3):
+            p = pm_ref[idx, k]
+            lo = jnp.min(jnp.where(valid, p, jnp.inf), axis=1)
+            hi = jnp.max(jnp.where(valid, p, -jnp.inf), axis=1)
+            out += [jnp.minimum(acc[2 * k], lo), jnp.maximum(acc[2 * k + 1], hi)]
+        return tuple(out)
+
+    trips = (jnp.max(count) + (lanes - 1)) // lanes
+    init = tuple(
+        jnp.full(start.shape, v, pm_ref.dtype) for v in (jnp.inf, -jnp.inf) * 3
+    )
+    acc = lax.fori_loop(0, trips, body, init)
+    for k in range(6):
+        box_ref[:, k] = acc[k]
+    for k in range(6, 8):
+        box_ref[:, k] = jnp.zeros(start.shape, pm_ref.dtype)
+
+
+def _leaf_boxes(
+    pm: Array, leaf_start: Array, leaf_count: Array, *, interpret: bool
+) -> Array:
+    """Per-leaf bounding boxes for the tile skip, ``(L', 8)`` with ``L' >= L``.
+
+    One more read of the particles; 32 B per leaf.
+
+    Parameters
+    ----------
+    pm : Array
+        ``(N + pad, 4)`` sorted x, y, z, mass.
+    leaf_start : Array
+        ``(L,)`` int32 first particle per leaf.
+    leaf_count : Array
+        ``(L,)`` int32 particles per leaf.
+    interpret : bool
+        Pallas interpret mode.
+
+    Returns
+    -------
+    Array
+        Rows ``lo_x, hi_x, lo_y, hi_y, lo_z, hi_z, 0, 0``; an empty leaf's box is
+        ``(inf, -inf)`` on every axis.
+    """
+    block, lanes = 128, 8
+    L = int(leaf_start.shape[0])
+    Lp = -(-L // block) * block
+    start = jnp.pad(leaf_start, (0, Lp - L))
+    count = jnp.pad(leaf_count, (0, Lp - L))
+
+    def _full(arr: Array) -> Any:
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    return pl.pallas_call(
+        functools.partial(_leaf_box_kernel, lanes=lanes),
+        grid=(Lp // block,),
+        in_specs=[
+            _full(pm),
+            pl.BlockSpec((block,), lambda i: (i,)),
+            pl.BlockSpec((block,), lambda i: (i,)),
+        ],
+        out_specs=pl.BlockSpec((block, 8), lambda i: (i, 0)),
+        out_shape=jax.ShapeDtypeStruct((Lp, 8), pm.dtype),
+        compiler_params=plgpu.CompilerParams(num_warps=4, num_stages=1),
+        interpret=bool(interpret),
+        name=f"nearfield_leaf_boxes_b{block}_k{lanes}",
+    )(pm, start, count)
+
+
+def _beyond_support(
+    box_ref: Union[KernelRef, Array], sid: Union[int, Array], t_box: tuple, p1: Array
+) -> Array:
+    """Whether every particle of leaf ``sid`` lies beyond the support of ``t_box``.
+
+    For a target in the box, ``|fl(t - s)| >= max(fl(lo_s - hi_t), fl(lo_t - hi_s),
+    0)`` on each axis (rounding is monotone), so every pair's squared separation is
+    at least the boxes' squared gap, up to the roundings of the two sums of squares
+    (:data:`_BEYOND_SUPPORT_MARGIN`).
+
+    Parameters
+    ----------
+    box_ref : Union[KernelRef, Array]
+        The per-leaf boxes (:func:`_leaf_boxes`): the kernel's ref, or the array.
+    sid : Union[int, Array]
+        Source leaf (scalar).
+    t_box : tuple
+        ``((lo, hi),) * 3`` of the target leaf (scalars).
+    p1 : Array
+        ``1 / h^2``.
+
+    Returns
+    -------
+    Array
+        Scalar bool.
+    """
+    gap_sq = None
+    for k, (t_lo, t_hi) in enumerate(t_box):
+        s_lo, s_hi = box_ref[sid, 2 * k], box_ref[sid, 2 * k + 1]
+        g = jnp.maximum(jnp.maximum(s_lo - t_hi, t_lo - s_hi), 0.0)
+        gap_sq = g * g if gap_sq is None else gap_sq + g * g
+    return gap_sq * p1 >= _BEYOND_SUPPORT_MARGIN
 
 
 def leafpair_chunk_capacity(edge_capacity: int, num_leaves: int, chunk: int) -> int:

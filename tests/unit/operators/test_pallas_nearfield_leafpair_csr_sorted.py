@@ -349,3 +349,139 @@ def test_the_default_is_the_tiled_kernel(monkeypatch):
     for g, w, s in zip(got, want, scalar):
         assert np.array_equal(np.asarray(g), np.asarray(w))
         assert not np.array_equal(np.asarray(g), np.asarray(s))  # non-vacuous
+
+
+# ------------------------------------------------------------ the ferrers3 tile skip
+
+_SKIP_EPS = 0.05  # h = 0.123 against the unit-normal positions of ``_case``
+
+
+def _ferrers3_params(eps=_SKIP_EPS):
+    from jaccpot.softening import softening_params_from_sq
+
+    return softening_params_from_sq("ferrers3", jnp.float32(eps**2), jnp.float32)
+
+
+def _first_beyond(params):
+    """The smallest float32 ``r^2`` whose rounded ``r^2 / h^2`` is 1."""
+    p0, p1 = (np.float32(v) for v in np.asarray(params))
+    v = min(p0, np.float32(1.0) / p1)
+    for _ in range(8):
+        v = np.nextafter(v, np.float32(0.0))
+    while np.float32(v * p1) < np.float32(1.0):
+        v = np.nextafter(v, np.float32(np.inf))
+    return v
+
+
+def test_the_newtonian_factors_are_the_polynomials_bits_beyond_the_support():
+    """On pairs whose rounded ``r^2 / h^2`` reaches 1 -- from the first float that
+    does, up -- the Newtonian factors are ``masked_pair_factors``' force and potential
+    factors to the bit; dead pairs (some inside the support) are zero in both."""
+    import jax
+
+    from jaccpot.pallas.nearfield_leafpair_csr import _ferrers3_newton_factors
+    from jaccpot.softening import masked_pair_factors
+
+    params = _ferrers3_params()
+    newton = jax.jit(
+        lambda r, a: _ferrers3_newton_factors(r, a, params, "ferrers3", potential=True)
+    )
+    plain = jax.jit(
+        lambda r, a: masked_pair_factors(r, a, params, "ferrers3", potential=True)
+    )
+    first = _first_beyond(params)
+    walk = [first]
+    for _ in range(31):
+        walk.append(np.nextafter(walk[-1], np.float32(np.inf)))
+    rng = np.random.default_rng(0)
+    far = (first * np.exp(rng.uniform(0.0, 12.0, 64))).astype(np.float32)
+    r = np.concatenate([np.asarray(walk, np.float32), far, np.zeros(32, np.float32)])
+    live = np.arange(r.size) < 96  # the last 32: dead, at r = 0
+    r, live = r.reshape(16, 8), live.reshape(16, 8)
+    got = newton(jnp.asarray(r), jnp.asarray(live))
+    want = plain(jnp.asarray(r), jnp.asarray(live))
+    assert got[2] is None and want[2] is None
+    for g, w in zip(got[:2], want[:2]):
+        assert np.array_equal(np.asarray(g), np.asarray(w))
+    # the walk starts at the boundary: one rounding below, c < 1
+    p1 = np.float32(np.asarray(params)[1])
+    assert np.float32(np.nextafter(first, np.float32(0.0)) * p1) < np.float32(1.0)
+
+
+def _leaf_table(leaves):
+    """``(pm, start, count)`` of consecutive leaves, the kernel's sorted layout."""
+    pos = np.concatenate(leaves).astype(np.float32)
+    counts = np.array([len(x) for x in leaves], np.int32)
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]]).astype(np.int32)
+    pm = np.concatenate([pos, np.ones((len(pos), 1), np.float32)], axis=1)
+    pm = np.pad(pm, ((0, 64), (0, 0)))
+    return jnp.asarray(pm), jnp.asarray(starts), jnp.asarray(counts)
+
+
+def test_the_leaf_boxes_are_the_particles_extremes():
+    """Each leaf's box is its particles' min and max per axis; an empty leaf's is
+    ``(inf, -inf)``; leaves past ``L`` pad the table to the kernel's block."""
+    from jaccpot.pallas.nearfield_leafpair_csr import _leaf_boxes
+
+    rng = np.random.default_rng(3)
+    leaves = [rng.standard_normal((n, 3)) for n in (1, 7, 16, 0, 33, 64, 2)]
+    pm, starts, counts = _leaf_table(leaves)
+    boxes = np.asarray(_leaf_boxes(pm, starts, counts, interpret=True))
+    assert boxes.shape == (128, 8)
+    for leaf, x in enumerate(leaves):
+        x = x.astype(np.float32)
+        lo = x.min(0) if len(x) else np.full(3, np.inf, np.float32)
+        hi = x.max(0) if len(x) else np.full(3, -np.inf, np.float32)
+        assert np.array_equal(boxes[leaf, 0:6:2], lo)
+        assert np.array_equal(boxes[leaf, 1:6:2], hi)
+        assert not np.any(boxes[leaf, 6:])
+
+
+def test_the_box_test_admits_no_pair_inside_the_support():
+    """Whenever ``_beyond_support`` clears a source leaf, every pair with the target
+    leaf has a rounded ``r^2 / h^2`` of at least 1 (the clipped ``c`` is 1, so the
+    Newtonian factors are the polynomial's); and it clears leaves within 0.1 % of
+    the support as well as refusing nearer ones."""
+    import jax
+
+    from jaccpot.pallas.nearfield_leafpair_csr import (
+        _BEYOND_SUPPORT_MARGIN,
+        _beyond_support,
+    )
+
+    params = _ferrers3_params()
+    p1 = np.float32(np.asarray(params)[1])
+    h = float(np.sqrt(np.asarray(params)[0]))
+    rng = np.random.default_rng(5)
+    test = jax.jit(
+        lambda boxes, t_box: _beyond_support(boxes, 1, t_box, params[1]),
+    )
+    cleared, refused, tight = 0, 0, 0
+    for trial in range(300):
+        nt, ns = rng.integers(1, 17, 2)
+        centre = rng.uniform(-50.0, 50.0, 3)  # off the origin: the roundings matter
+        t = (centre + 0.05 * rng.standard_normal((nt, 3))).astype(np.float32)
+        s = (centre + 0.05 * rng.standard_normal((ns, 3))).astype(np.float32)
+        # the source cloud past the target box along one axis, by a gap around
+        # the cleared edge, its nearest particle facing the target's farthest
+        k = int(rng.integers(3))
+        gap = h * np.sqrt(_BEYOND_SUPPORT_MARGIN) * (1.0 + rng.uniform(-4e-4, 4e-4))
+        s[:, k] += np.float32(t[:, k].max() - s[:, k].min() + gap)
+        ia, ib = int(np.argmax(t[:, k])), int(np.argmin(s[:, k]))
+        s[ib, [a for a in range(3) if a != k]] = t[ia, [a for a in range(3) if a != k]]
+        # the boxes as _leaf_boxes builds them (pinned above), rows 0 and 1
+        boxes = np.zeros((2, 8), np.float32)
+        boxes[:, 0:6:2] = [t.min(0), s.min(0)]
+        boxes[:, 1:6:2] = [t.max(0), s.max(0)]
+        t_box = tuple((boxes[0, 2 * a], boxes[0, 2 * a + 1]) for a in range(3))
+        ok = bool(test(jnp.asarray(boxes), t_box))
+        d = t[:, None, :] - s[None, :, :]
+        r_sq = d[..., 0] * d[..., 0] + d[..., 1] * d[..., 1] + d[..., 2] * d[..., 2]
+        c_one = np.all((r_sq * p1).astype(np.float32) >= np.float32(1.0))
+        if ok:
+            cleared += 1
+            assert c_one, trial
+            tight += bool(np.min(r_sq) * p1 < 1.001)
+        else:
+            refused += 1
+    assert cleared > 50 and refused > 50 and tight > 10, (cleared, refused, tight)
