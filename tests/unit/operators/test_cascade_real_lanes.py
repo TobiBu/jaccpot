@@ -169,3 +169,57 @@ def test_lanes_jit_and_the_vjp_forward(tree_data):
         )
 
     assert np.array_equal(cvjp(), lanes)
+
+
+def test_eager_calls_compile_once_and_trace_the_same_program(tree_data):
+    """An eager call (the caps-only prepare's upward pass is one, at every fresh
+    run) goes through one program per static configuration: a second eager call
+    compiles nothing. Before, ``lax.fori_loop`` recompiled its level loop at every
+    eager call (its body is a closure made per call): ~30 s of Pallas compile per
+    ``ProductionRunner.run`` at 1e6 on an A100 (S4). The eager result is the traced
+    call's, bitwise, for both cascades."""
+    from jax import monitoring
+
+    topo, com, num_levels, width = tree_data
+    num_internal = int(topo.left_child.shape[0])
+    total = int(topo.parent.shape[0])
+    order = 3
+    C = (order + 1) ** 2
+    x = jnp.asarray(np.random.default_rng(7).standard_normal((total, C)), jnp.float32)
+    m2m_args = (x, com, topo.left_child, topo.right_child, topo.nodes_by_level)
+    m2m_kw = dict(
+        order=order,
+        num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=width,
+        interpret=True,
+    )
+    l2l_args = (x, com, topo.parent, topo.nodes_by_level, topo.level_offsets)
+    l2l_kw = dict(
+        order=order, num_levels=num_levels, level_batch_width=width, interpret=True
+    )
+
+    def m2m(*a):
+        return m2m_real_levels_lanes_pallas(*a, topo.level_offsets, **m2m_kw)
+
+    def l2l(*a):
+        return l2l_real_levels_lanes_pallas(*a, **l2l_kw)
+
+    compiles = []
+
+    def listen(name, duration, **_):
+        if name == "/jax/core/compile/backend_compile_duration":
+            compiles.append(name)
+
+    monitoring.register_event_duration_secs_listener(listen)
+    try:
+        first = [np.asarray(m2m(*m2m_args)), np.asarray(l2l(*l2l_args))]
+        before = len(compiles)
+        again = [np.asarray(m2m(*m2m_args)), np.asarray(l2l(*l2l_args))]
+        assert len(compiles) == before  # nothing compiled for the second calls
+    finally:
+        monitoring.unregister_event_duration_listener(listen)
+    traced = [np.asarray(jax.jit(m2m)(*m2m_args)), np.asarray(jax.jit(l2l)(*l2l_args))]
+    for a, b, c in zip(first, again, traced):
+        assert np.array_equal(a, b)
+        assert np.array_equal(a, c)

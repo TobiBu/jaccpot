@@ -449,6 +449,34 @@ def _check(order: int, coeffs: Array) -> int:
     return C
 
 
+def _eager(*arrays: Any) -> bool:
+    """Whether a cascade is called outside any trace (an eager prepare).
+
+    Eagerly, ``lax.fori_loop`` traces and compiles its level loop on EVERY call:
+    its body is a closure made per call, and the loop's compile cache is keyed by
+    the body's identity. Each eager call then goes through one module-level
+    program per static configuration instead (:data:`_M2M_EAGER`,
+    :data:`_L2L_EAGER`), compiled once per process. Inside a trace nothing
+    changes: the traced programs are the ones they were.
+
+    Parameters
+    ----------
+    *arrays : Any
+        The cascade's array arguments.
+
+    Returns
+    -------
+    bool
+        ``True`` when none of them is a tracer.
+    """
+    # imported here, not at the top: a line added above the kernels moves the
+    # source locations their Triton IR embeds, and with them the text of every
+    # program that runs them (bench/provider_hlo_identity.py)
+    from jaccpot._jax_compat import Tracer
+
+    return not any(isinstance(a, Tracer) for a in arrays)
+
+
 def m2m_real_levels_lanes_pallas(
     packed: Array,
     centers: Array,
@@ -504,6 +532,19 @@ def m2m_real_levels_lanes_pallas(
     Array
         ``[nodes, C]`` packed multipoles with the internal nodes filled.
     """
+    statics = dict(
+        order=order,
+        num_internal=num_internal,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+    arrays = (packed, centers, left_child, right_child, nodes_by_level, level_offsets)
+    if _eager(*arrays):
+        return _M2M_EAGER(*arrays, **statics)
     p = int(order)
     C = _check(p, packed)
     if int(num_internal) <= 0:
@@ -614,6 +655,18 @@ def l2l_real_levels_lanes_pallas(
     ValueError
         If ``force_scale`` does not have one value per node.
     """
+    statics = dict(
+        order=order,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+    arrays = (coeffs_local, centers, parent, nodes_by_level, level_offsets)
+    if _eager(*arrays):
+        return _L2L_EAGER(*arrays, **statics)
     p = int(order)
     C = _check(p, coeffs_local)
     tables = _cascade_lane_tables(p)
@@ -691,3 +744,32 @@ def l2l_real_levels_lanes_pallas(
         1, max(int(num_levels), 1), body, coeffs_local.reshape(-1), unroll=True
     )
     return flat.reshape(nodes, C)
+
+
+#: An eager call's M2M cascade: one program per static configuration (``_eager``).
+_M2M_EAGER = jax.jit(
+    m2m_real_levels_lanes_pallas,
+    static_argnames=(
+        "order",
+        "num_internal",
+        "num_levels",
+        "level_batch_width",
+        "k_lanes",
+        "interpret",
+        "backend",
+        "num_warps",
+    ),
+)
+#: An eager call's L2L cascade: one program per static configuration (``_eager``).
+_L2L_EAGER = jax.jit(
+    l2l_real_levels_lanes_pallas,
+    static_argnames=(
+        "order",
+        "num_levels",
+        "level_batch_width",
+        "k_lanes",
+        "interpret",
+        "backend",
+        "num_warps",
+    ),
+)
