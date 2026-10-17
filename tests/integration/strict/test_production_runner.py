@@ -208,13 +208,15 @@ def _static(**kw):
 
 
 @pytest.mark.parametrize(
-    "steps, num_steps", [(2, 6), (2, 5)], ids=["3x2_vs_6", "2+2+1_vs_5"]
+    "steps, num_steps", [(2, 6), (2, 5)], ids=["3x2_vs_6", "2+3_vs_5"]
 )
 def test_segments_are_one_long_call(steps, num_steps, six_steps):
     """R1: the runner's segments compute what one ``strict_run_v2`` call of all the
     steps computes, bit for bit, and its last handle is that call's. Without
     ``donate_input`` the first segment's scan and the later ones' are two programs
-    (the second donates its input); the remainder segment is a third."""
+    (the second donates its input); a last segment of another length adds one.
+    A 1-step remainder joins the last segment (``segment_lengths``), so 5 steps of 2
+    run as 2 + 3."""
     ref_state, ref_force = six_steps if num_steps == 6 else _one_call(num_steps)
     state, masses = _system()
     runner = _runner(_static(steps=steps))
@@ -225,16 +227,18 @@ def test_segments_are_one_long_call(steps, num_steps, six_steps):
         res = runner.run(state, masses, dt=DT, num_steps=num_steps)
     assert np.array_equal(np.asarray(res.state), ref_state)
     assert np.array_equal(np.asarray(res.handle.self_acceleration), ref_force)
-    assert [e.step for e in res.edges] == [0, *range(steps, num_steps, steps)] + [
-        num_steps
-    ]
+    plan = segment_lengths(num_steps, steps)
+    assert [e.step for e in res.edges] == [0, *np.cumsum(plan).tolist()]
     assert [e.segment for e in res.edges] == list(range(len(res.edges)))
     assert res.edges[-1].time == pytest.approx(num_steps * DT, rel=1e-14)
     assert res.step == num_steps and not res.stopped
     assert all(e.retries == 0 for e in res.edges)
     # the edges kept in the result hold no arrays
     assert all(e.state is None and e.self_acceleration is None for e in res.edges)
-    assert len(_particle_runners(runner)) == 2 + bool(num_steps % steps)
+    # one scan per (length, donation): the first segment keeps the caller's state,
+    # every later one donates the runner's own
+    programs = {(plan[0], False)} | {(n, True) for n in plan[1:]}
+    assert len(_particle_runners(runner)) == len(programs)
     assert not state.is_deleted()  # the caller's input is kept
 
 
@@ -357,9 +361,17 @@ def test_a_run_without_segments_keeps_the_callers_state():
 
 def test_segment_lengths_put_the_remainder_last():
     assert segment_lengths(6, 2) == (2, 2, 2)
-    assert segment_lengths(5, 2) == (2, 2, 1)
+    assert segment_lengths(8, 3) == (3, 3, 2)
     assert segment_lengths(1, 4) == (1,)
     assert segment_lengths(0, 3) == ()
+
+
+def test_a_one_step_remainder_joins_the_last_segment():
+    """A scan of length one compiles to other code than a longer scan's loop body."""
+    assert segment_lengths(5, 2) == (2, 3)
+    assert segment_lengths(7, 3) == (3, 4)
+    assert segment_lengths(3, 2) == (3,)
+    assert segment_lengths(4, 1) == (1, 1, 1, 1)  # steps=1 is the caller's choice
 
 
 def test_segment_config_is_checked():
