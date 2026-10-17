@@ -143,10 +143,20 @@ class StrictRunMixin(_EngineBase):
             no walk flag fired (the failure was some other capacity), when a list
             that overflowed was NAMED by the caller (a deliberate bound, never
             widened), or when the lane is not the flat walk.
+
+        Raises
+        ------
+        RuntimeError
+            When a list that overflowed needs more than the index range can build
+            (:func:`jaccpot.runtime._interaction_cache.flat_walk_list_limit`):
+            here, before the re-prepare, since no re-plan fits it.
         """
         from jaccpot.runtime._interaction_cache import (
             _tight_list_capacity,
             flat_walk_cap_headroom,
+            flat_walk_list_limit,
+            flat_walk_list_limit_message,
+            strict_walk_backend,
         )
         from jaccpot.runtime.capacity_guard import WALK_NEEDS_FIELDS
 
@@ -163,14 +173,34 @@ class StrictRunMixin(_EngineBase):
         # its queue overflowed (pairs never classified): a list that overflowed
         # then at least doubles
         lower = bool(n["lower_bound"] or n["queue_overflow"])
-        for key, needed, ovf in (
-            ("compact_far_pair_capacity", n["far_needed"], n["far_overflow"]),
-            ("near_edge_capacity", n["near_needed"], n["near_overflow"]),
+        # Neither the headroom nor the doubling may carry a list past the index
+        # range (2/3 of int32 for the Pallas walk's CSRs): the re-prepare would
+        # fail deep in its list build. A list clamped there still holds what it
+        # needed; one that needs more fits no width, so the retry stops here.
+        limit = flat_walk_list_limit(INDEX_DTYPE, csr=strict_walk_backend() == "pallas")
+        for key, kind, needed, ovf in (
+            ("compact_far_pair_capacity", "far", n["far_needed"], n["far_overflow"]),
+            ("near_edge_capacity", "near", n["near_needed"], n["near_overflow"]),
         ):
             cap = int(validated.get(key) or 0)
-            grown = _tight_list_capacity(needed, headroom=headroom, floor=cap)
+            if ovf and needed > limit:
+                raise RuntimeError(
+                    flat_walk_list_limit_message(
+                        kind, f"needs {needed} directed entries", limit=limit
+                    )
+                )
+            if ovf and (needed < 0 or (lower and cap >= limit)):
+                # a count past the int32 range wraps negative in the traced needs
+                raise RuntimeError(
+                    flat_walk_list_limit_message(
+                        kind, f"overflowed {cap} directed entries", limit=limit
+                    )
+                )
+            grown = _tight_list_capacity(
+                needed, headroom=headroom, floor=cap, limit=limit
+            )
             if ovf and lower:
-                grown = max(grown, 2 * cap)
+                grown = max(grown, min(2 * cap, limit))
             validated[key] = int(grown)
         peak = max(int(validated.get("peak_wavefront") or 0), n["peak_wavefront"])
         if n["queue_overflow"]:

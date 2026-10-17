@@ -257,3 +257,29 @@ def test_queue_ladder_grows_from_a_small_queue(tree_and_geometry):
     (report,) = reports
     assert report["queue_capacity"] > 8 and report["grew"], report
     assert int(art.compact_far_pairs.far_pair_count) > 0
+
+
+def test_unnamed_caps_stop_at_the_index_range(tree_and_geometry, monkeypatch):
+    # the fixture's lists: 464 far and 3512 near directed entries, built 1024 and
+    # 8192 wide (1.5x headroom); a range of 4096 must cut the near width to it
+    # and leave the lists as they were (``test_flat_walk_list_limit.py``)
+    import jaccpot.runtime._interaction_cache as ic
+
+    tree, geometry, num_internal, total_nodes = tree_and_geometry
+    unnamed = dict(far_named=False, near_edge_named=False)
+    ref = _flat(tree, geometry, **unnamed)
+    monkeypatch.setattr(ic, "flat_walk_list_limit", lambda idx, csr: 4096)
+    reports = []
+    art = _flat(tree, geometry, far_cap=8, near_cap=8, report=reports.append, **unnamed)
+    (report,) = reports
+    assert report["total_neighbors"] == 3512
+    assert report["near_edge_capacity"] == 4096
+    assert report["compact_far_pair_capacity"] == 1024
+    assert _flat_far_set(art.compact_far_pairs) == _flat_far_set(ref.compact_far_pairs)
+    assert _flat_near_sets(art.neighbor_list, num_internal, total_nodes) == (
+        _flat_near_sets(ref.neighbor_list, num_internal, total_nodes)
+    )
+    # a list that needs more than the range: the ladder stops at it and says so
+    monkeypatch.setattr(ic, "flat_walk_list_limit", lambda idx, csr: 2048)
+    with pytest.raises(RuntimeError, match="near list overflowed 2048 directed"):
+        _flat(tree, geometry, far_cap=8, near_cap=8, **unnamed)

@@ -50,6 +50,8 @@ from .dtypes import require_index_capacity
 __all__ = [
     "POLICY_IDENTITY_UNCACHEABLE",
     "flat_walk_cap_headroom",
+    "flat_walk_list_limit",
+    "flat_walk_list_limit_message",
     "pair_policy_cache_identity",
     "strict_walk_backend",
     "TargetSortedFarPairs",
@@ -710,14 +712,10 @@ _STRICT_STREAMED_QUEUE_FLOOR = 32_768
 _STRICT_STREAMED_FAR_PAIR_FLOOR = 131_072
 _STRICT_STREAMED_RETRY_LIMIT = 1 << 25
 _STRICT_STREAMED_RETRY_ATTEMPTS = 12
-# Flat-walk lane: eager floors and ceilings for the two capacities the caller did
-# NOT name (a named cap is never widened -- #333's rule). Directed pair counts. The
-# ladder width is only transient -- an unnamed list is built at
-# `_tight_list_capacity` of the count the eager walk measured -- so the ceilings
-# only guard the int32 index range; memory is the real bound.
+# Flat-walk lane: the eager floor for the near capacity the caller did NOT name (a
+# named cap is never widened -- #333's rule). Directed pair counts. An unnamed list
+# grows only up to `flat_walk_list_limit`, the index range; memory is the real bound.
 _FLAT_WALK_NEAR_EDGE_FLOOR = 1 << 21
-_FLAT_WALK_NEAR_EDGE_LIMIT = 1 << 30
-_FLAT_WALK_FAR_PAIR_LIMIT = 1 << 30
 #: The flat walk's queue ceiling. The dual walk's 2^25 stopped one card at 3.2e7
 #: Plummer particles, whose peak wavefront is past it (2.2e7 at 2.4e7); 2^28 slots
 #: are 4 GiB of queue, allocated only if a walk needs them.
@@ -748,13 +746,17 @@ def flat_walk_cap_headroom() -> float:
     )
 
 
-def _tight_list_capacity(count: int, *, headroom: float, floor: int = 0) -> int:
+def _tight_list_capacity(
+    count: int, *, headroom: float, floor: int = 0, limit: Optional[int] = None
+) -> int:
     """Directed list capacity for ``count`` live entries.
 
     ``headroom x count`` rounded up to a multiple of ``_FLAT_WALK_CAP_GRANULE``
     (below one granule, to the next power of two), never below ``floor`` -- the
     width an earlier eager pass validated, so a re-prepare never shrinks a width
-    the compiled step was built for -- and even.
+    the compiled step was built for -- and even. With ``limit``, the headroom
+    stops there: a ``count`` that fits the index range is never sized past it
+    (the caller refuses a ``count`` that does not).
 
     Parameters
     ----------
@@ -764,6 +766,9 @@ def _tight_list_capacity(count: int, *, headroom: float, floor: int = 0) -> int:
         Factor over ``count``.
     floor : int
         Smallest capacity to return.
+    limit : Optional[int]
+        Largest capacity to return (:func:`flat_walk_list_limit`); a ``floor``
+        past it is kept.
 
     Returns
     -------
@@ -777,7 +782,67 @@ def _tight_list_capacity(count: int, *, headroom: float, floor: int = 0) -> int:
         else 1 << (want - 1).bit_length()
     )
     cap = max(-(-want // granule) * granule, int(floor))
-    return cap + (cap & 1)
+    cap = cap + (cap & 1)
+    if limit is not None:
+        cap = min(cap, max(int(limit), int(floor)))
+    return cap
+
+
+def flat_walk_list_limit(idx: Any, *, csr: bool) -> int:
+    """The largest directed flat-walk list ``idx`` indices can build.
+
+    The deterministic (Pallas-walk) lane builds both lists as directed CSRs from
+    the canonical pairs, :func:`_directed_csr_from_canonical`, whose XLA placement
+    points the dead entries of a canonical width ``W`` at the distinct slots
+    ``2W .. 3W - 1``: ``3 W`` must stay below ``iinfo(idx).max``. With int32 that
+    is 1,431,306,240 directed entries (``W`` = 715,653,120), 2/3 of the int32
+    range. The flat walk's interleaved lists only need ``2 W`` to fit. Rounded
+    down to ``_FLAT_WALK_CAP_GRANULE``, so a list clamped here keeps one width
+    (and the compiled step its shapes) across re-plans.
+
+    Parameters
+    ----------
+    idx : Any
+        Index dtype of the lists.
+    csr : bool
+        The lists are built as CSRs (the Pallas walk's ``deterministic`` build).
+
+    Returns
+    -------
+    int
+        Directed capacity, even.
+    """
+    top = int(jnp.iinfo(idx).max)
+    width = (top - 1) // 3 if csr else (top - 1) // 2
+    return (2 * width) // _FLAT_WALK_CAP_GRANULE * _FLAT_WALK_CAP_GRANULE
+
+
+def flat_walk_list_limit_message(kind: str, what: str, *, limit: int) -> str:
+    """The error message for a flat-walk list that no width in the index range fits.
+
+    Parameters
+    ----------
+    kind : str
+        ``"far"`` or ``"near"``.
+    what : str
+        What the list needs (``"needs N directed entries"``, ``"overflowed N
+        directed entries"`` when a walk stopped at its first overflow, ``"is N
+        directed entries wide"``).
+    limit : int
+        :func:`flat_walk_list_limit`.
+
+    Returns
+    -------
+    str
+        Naming the limit and the remedies.
+    """
+    return (
+        f"the flat walk's {kind} list {what}, past the largest list the index "
+        f"range can build ({int(limit)} directed entries), so no capacity fits it. "
+        "Cut the pairs per particle -- a larger opening angle (theta), or a larger "
+        "leaf_size -- or split the particles over several GPUs "
+        "(jaccpot.distributed)."
+    )
 
 
 def _strict_streamed_retry_diag(grew: list[str]) -> None:
@@ -1875,12 +1940,11 @@ def _build_flat_walk_artifacts_strict_streamed(
     far_named : bool
         Whether ``compact_far_pair_capacity`` was named by the caller
         (``JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP``); a named cap raises
-        on overflow, an unnamed one is doubled eagerly up to
-        ``_FLAT_WALK_FAR_PAIR_LIMIT``.
+        on overflow, an unnamed one is grown eagerly up to
+        :func:`flat_walk_list_limit`.
     near_edge_named : bool
         Same for ``near_edge_capacity``
-        (``JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP``; ceiling
-        ``_FLAT_WALK_NEAR_EDGE_LIMIT``).
+        (``JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP``).
     extra_overflow : Optional[Array]
         An upstream capacity flag treated like the walk's own -- today the
         cell-leaf partition's ``leaf_capacity``.
@@ -1913,8 +1977,9 @@ def _build_flat_walk_artifacts_strict_streamed(
     ValueError
         If a capacity is not even / positive, or (int32 indices) reaches 2^31.
     RuntimeError
-        Eager far or near overflow of a named cap (or of an unnamed one past its
-        ceiling), or a queue that will not fit within the retry ceiling.
+        Eager far or near overflow of a named cap, an unnamed list that needs more
+        than :func:`flat_walk_list_limit` (or a list width past it), or a queue
+        that will not fit within the retry ceiling.
     """
     from yggdrax._interactions_impl import _build_mac_extents
     from yggdrax.interactions import dual_tree_walk_mutual
@@ -1985,11 +2050,13 @@ def _build_flat_walk_artifacts_strict_streamed(
         _STRICT_STREAMED_QUEUE_FLOOR if max_pair_queue is None else int(max_pair_queue)
     )
     headroom = flat_walk_cap_headroom()
+    # the largest list the index range builds; the Pallas walk's lists are CSRs
+    limit = flat_walk_list_limit(idx, csr=walk_backend == "pallas")
     floor = _walk_separation_floor(separation_floor)
     grew: list[str] = []
     walk = None
     traced = False
-    # Cap growth (unnamed caps only) is bounded by the ceilings; queue growth by
+    # Cap growth (unnamed caps only) is bounded by the index range; queue growth by
     # the retry budget. Only queue doublings count against that budget, so a tiny
     # unnamed cap cannot exhaust it.
     queue_attempts = 0
@@ -2069,45 +2136,59 @@ def _build_flat_walk_artifacts_strict_streamed(
         # Pallas walk sizes its lists exactly once the queue fits, so it grows only
         # the queue now; the flat walk's counts are never exact, so its lists double.
         defer_lists = queue_ovf and hasattr(walk, "far_needed")
+        # an unnamed list grows to headroom x what it needed, but never past the
+        # index range; a list that needs more than the range holds (or doubles from
+        # a capacity already at it) cannot be built at all
         grown_far = (
-            _tight_list_capacity(2 * int(walk.far_needed), headroom=headroom) // 2
+            _tight_list_capacity(
+                2 * int(walk.far_needed), headroom=headroom, limit=limit
+            )
+            // 2
             if exact
-            else 2 * far_cap
+            else min(2 * far_cap, limit // 2)
         )
         grown_near = (
-            _tight_list_capacity(2 * int(walk.near_needed), headroom=headroom) // 2
+            _tight_list_capacity(
+                2 * int(walk.near_needed), headroom=headroom, limit=limit
+            )
+            // 2
             if exact
-            else 2 * near_cap
+            else min(2 * near_cap, limit // 2)
         )
-        if far_ovf and (
-            far_named or (not defer_lists and 2 * grown_far > _FLAT_WALK_FAR_PAIR_LIMIT)
-        ):
+        if far_ovf and far_named:
             raise RuntimeError(
                 "flat-walk far pairs overflowed: capacity "
                 f"{2 * far_cap} directed pairs"
                 + (f", {2 * int(walk.far_needed)} needed" if exact else "")
-                + (
-                    " (the caller named it, so it is not widened here). Raise "
-                    if far_named
-                    else f" (the eager ceiling is {_FLAT_WALK_FAR_PAIR_LIMIT}). Set "
-                )
-                + "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
+                + " (the caller named it, so it is not widened here). Raise "
+                "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP."
             )
-        if near_ovf and (
-            near_edge_named
-            or (not defer_lists and 2 * grown_near > _FLAT_WALK_NEAR_EDGE_LIMIT)
-        ):
+        if near_ovf and near_edge_named:
             raise RuntimeError(
                 "flat-walk near pairs overflowed: capacity "
                 f"{2 * near_cap} directed pairs"
                 + (f", {2 * int(walk.near_needed)} needed" if exact else "")
-                + (
-                    " (the caller named it, so it is not widened here). Raise "
-                    if near_edge_named
-                    else f" (the eager ceiling is {_FLAT_WALK_NEAR_EDGE_LIMIT}). Set "
-                )
-                + "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
+                + " (the caller named it, so it is not widened here). Raise "
+                "JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP."
             )
+        for kind, ovf, cap, needed in (
+            ("far", far_ovf, far_cap, walk.far_needed if exact else None),
+            ("near", near_ovf, near_cap, walk.near_needed if exact else None),
+        ):
+            if not ovf or defer_lists:
+                continue
+            if needed is not None and 2 * int(needed) > limit:
+                raise RuntimeError(
+                    flat_walk_list_limit_message(
+                        kind, f"needs {2 * int(needed)} directed entries", limit=limit
+                    )
+                )
+            if needed is None and 2 * cap >= limit:
+                raise RuntimeError(
+                    flat_walk_list_limit_message(
+                        kind, f"overflowed {2 * cap} directed entries", limit=limit
+                    )
+                )
         if far_ovf and not defer_lists:
             grew.append(f"compact_far_pair_capacity {2 * far_cap}->{2 * grown_far}")
             far_cap = grown_far
@@ -2149,17 +2230,34 @@ def _build_flat_walk_artifacts_strict_streamed(
         if not far_named:
             far_width = (
                 _tight_list_capacity(
-                    2 * int(walk.far_count), headroom=headroom, floor=int(far_floor)
+                    2 * int(walk.far_count),
+                    headroom=headroom,
+                    floor=int(far_floor),
+                    limit=limit,
                 )
                 // 2
             )
         if not near_edge_named:
             near_width = (
                 _tight_list_capacity(
-                    2 * int(walk.near_count), headroom=headroom, floor=int(near_floor)
+                    2 * int(walk.near_count),
+                    headroom=headroom,
+                    floor=int(near_floor),
+                    limit=limit,
                 )
                 // 2
             )
+    if walk_backend == "pallas":
+        # the CSR build's own check (`_directed_csr_from_canonical`), here and
+        # clearly: a width past the range (named, or a floor from elsewhere) fails
+        # there under the caps-only prepare's template trace, deep in a re-plan
+        for kind, width in (("far", far_width), ("near", near_width)):
+            if 3 * int(width) >= int(jnp.iinfo(idx).max):
+                raise RuntimeError(
+                    flat_walk_list_limit_message(
+                        kind, f"is {2 * int(width)} directed entries wide", limit=limit
+                    )
+                )
     compact_far_pair_capacity = 2 * far_width
     near_edge_capacity = 2 * near_width
 
