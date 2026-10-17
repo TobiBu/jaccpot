@@ -897,10 +897,26 @@ flung along z had made the box cubic again).
 - A walk that counted past 2^31 - 1 pairs wrapped its int32 counter negative, and the ladder sized its next rung
   from it and walked again, forever; it raises now. The same wrap writes out of bounds inside the kernel (`slot <
   cap` accepts a negative slot), which only a kernel guard can stop (it changes the traced program; not done).
-- **Lifting the limit** (not done). A CSR placement inside 2W would raise it to the flat walk's 2.15e9 entries; past
-  that the lists need int64 indices (`flat_walk_list_limit` takes the dtype). On a 40 GB card memory binds about
-  there anyway: with the 1e8 far list at the limit, XLA's rematerialisation brought the step's programs down to
-  32.7-37.2 GiB only.
+- **Lifting the limit** (not done; not needed now). What is int32 today:
+  - the Pallas walk hard-codes it and bitcasts node ids into float32 records, so an int64 walk would not compile;
+  - its counters and slots are int32, and `slot < cap` has no `slot >= 0` guard, so a counter that wrapped would
+    write out of bounds (a kernel fix that changes the program);
+  - `walk_needs` doubles the far count in int32 (it wraps at 2^30 canonical pairs);
+  - `csr_place` uses int32 offsets and float32 row cursors (exact to 2^24 entries per row), and the XLA placement's
+    `2W + i` is the 3W bound;
+  - `csr_by_target` casts to int32, and the M2L reverse sorts 2W entries with int32 keys.
+- **Memory per canonical pair, int32:** far 8 B in the walk, 16 B at the CSR build's peak, 8 B live through M2L;
+  near about the same. int64 would roughly double the build and live parts. At W = 1e9 that is 16 GB transient and
+  8 GB live for the far list alone, so on a 40 GB card memory binds near today's index limit anyway. With the 1e8
+  far list at the limit, XLA's rematerialisation brought the step's programs down to 32.7-37.2 GiB only.
+- **The options:**
+  1. A route-aware 3W check (2W plus lanes on the Pallas placement) reaches about 1.07e9 canonical pairs and keeps
+     the default program, but is safe only with the kernel's `slot >= 0` guard and saturating traced needs, which
+     change programs.
+  2. int64 offsets behind a static switch touch about 10 files; the walk still caps W.
+  3. A lo/hi row split keeps int32 to W < 2^31 but changes the `TargetSortedFarPairs` pytree.
+- **For this IC the levers are physical:** a larger softening or a smaller dt, or `JACCPOT_CUBIC_BOUNDS=1`. Beyond
+  1.43e9 directed pairs, use multi-GPU.
 
 ### The ferrers3 tile skip (opt-in)
 With `JACCPOT_NEARFIELD_TILE_SKIP=1`, the CSR direct kernel evaluates a source range's tiles with the exact Newtonian
