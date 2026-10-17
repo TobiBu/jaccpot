@@ -23,7 +23,7 @@ same clamp guard, ~40 small vectorised steps and no extra memory beyond the
 from __future__ import annotations
 
 from functools import partial
-from typing import Any
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +32,7 @@ from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 
 __all__ = [
+    "FarForceScaleInputs",
     "ancestor_sum_by_level",
     "far_force_scale_own",
     "far_force_scale_sorted",
@@ -39,6 +40,42 @@ __all__ = [
     "node_force_scale_min_sorted",
     "subtree_min_by_level",
 ]
+
+
+class FarForceScaleInputs(NamedTuple):
+    """What the lanes kernel needs to also sum eq (16b)'s far term per target row.
+
+    Dehnen (2014) eq (16b)'s force scale ``f_b = sum_a G m_a / (|x_a - x_b|^2 +
+    eps^2)`` has a far half that the fused lane takes from the far list as
+    monopoles: every far pair ``(A -> B)`` adds ``G M_A / ((|c_A - c_B| + rho_B)^2
+    + eps^2)`` to its target node B (:func:`far_force_scale_own`). The CSR M2L
+    lanes kernel (:func:`~jaccpot.pallas.m2l_real_csr_lanes.m2l_real_csr_lanes_pallas`
+    with ``force_scale``) visits every far pair of a target's row anyway, so with
+    these it sums that term per row as well, with no atomics and no second pass
+    over the list.
+
+    Attributes
+    ----------
+    node_mass : Array
+        ``[n]`` node masses (the upward pass's mass moments: the packed monopole
+        coefficient is NOT the same float, it is summed in another order).
+    node_radii : Array
+        ``[n]`` the walk radii ``rho``.
+    softening_sq : Array
+        ``eps^2``, the Plummer-equivalent softening squared (a scalar).
+    gravitational_constant : float
+        ``G``, baked into the kernel.
+    node_centers : Optional[Array]
+        ``[n, 3]`` the walk centres; ``None`` when they are the expansion centres
+        the kernel already reads (the COM walk geometry), which saves a gather
+        per pair.
+    """
+
+    node_mass: Array
+    node_radii: Array
+    softening_sq: Array
+    gravitational_constant: float
+    node_centers: Optional[Array] = None
 
 
 def _level_windows(
