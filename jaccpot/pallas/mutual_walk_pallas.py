@@ -181,7 +181,7 @@ def _round_kernel(
         ``[theta^2, separation floor, theta_max, 0]``.
     err_ref : KernelRef
         ``[nodes, W]`` eq (16a) table (:func:`~jaccpot.runtime._walk_criterion.dehnen_walk_table`)
-        when ``error_order > 0``; a dummy otherwise.
+        when ``error_order > 0``, ``W`` a power of two; a dummy otherwise.
     far_a_ref : KernelRef
         Far list, first node ``[far_cap]``; aliased to ``far_a_out``.
     far_b_ref : KernelRef
@@ -291,6 +291,38 @@ def _round_kernel(
     lax.fori_loop(0, trips, _one, 0)
 
 
+def _node_rows(ref: KernelRef, nodes: Array) -> list[Array]:
+    """Every column of the ``[nodes, W]`` table ``ref`` at rows ``nodes``, one load each.
+
+    ``ref[nodes, k]`` column by column is one scalar gather instruction per column,
+    each touching the same 32-byte row of every lane again. ``ref[nodes, :]`` reads
+    each node's row as one contiguous vector (Triton issues it as ``W / 4``
+    128-bit loads), and the columns are split apart in registers. The values are
+    the same loads, so every test on them is bitwise unchanged.
+
+    The walk is bound by these gathers, not by its arithmetic. The walk alone on the
+    25M disc+bulge (captured inputs, A100, contended, min of 3 in one process,
+    2026-10-17): the geometric MAC with the eq (16a) table merely loaded beside it,
+    column by column, 47.6 ms against 22.9 ms without (identical lists); eq (16a)
+    52.5 ms with the table read by column, 32.1 ms read by row, same lists.
+
+    Parameters
+    ----------
+    ref : KernelRef
+        ``[nodes, W]`` table, ``W`` a power of two (Triton's split).
+    nodes : Array
+        ``[B]`` row per lane (in range).
+
+    Returns
+    -------
+    list[Array]
+        ``W`` arrays of shape ``[B]``, column ``k`` of each lane's row.
+    """
+    width = int(ref.shape[1])
+    rows = ref[nodes, :]
+    return [col.reshape(col.shape[0]) for col in jnp.split(rows, width, axis=1)]
+
+
 def _round_block(
     qa_ref: KernelRef,
     qb_ref: KernelRef,
@@ -347,7 +379,8 @@ def _round_block(
     theta_ref : KernelRef
         ``[theta^2, separation floor, theta_max, 0]``.
     err_ref : KernelRef
-        ``[nodes, W]`` eq (16a) table when ``error_order > 0``; a dummy otherwise.
+        ``[nodes, W]`` eq (16a) table when ``error_order > 0``, ``W`` a power of
+        two; a dummy otherwise.
     far_a_out : KernelRef
         Far list, first node; written in place.
     far_b_out : KernelRef
@@ -426,15 +459,16 @@ def _round_block(
     same = a_s == b_s
     rsum = rad_a + rad_b
     if error_order > 0:
-        # eq (16a), both directions, from the two nodes' table rows; like the
-        # policy, no d > 0 guard (the convergence clause fails at d = 0)
+        # eq (16a), both directions, from the two nodes' table rows (one vector
+        # load per row, _node_rows); like the policy, no d > 0 guard (the
+        # convergence clause fails at d = 0)
         cols = WALK_TABLE_POWER0 + int(error_order)
         accept = (
             live
             & (~same)
             & dehnen_pair_accept(
-                row_a=[err_ref[a_s, k] for k in range(cols)],
-                row_b=[err_ref[b_s, k] for k in range(cols)],
+                row_a=_node_rows(err_ref, a_s)[:cols],
+                row_b=_node_rows(err_ref, b_s)[:cols],
                 radius_a=rad_a,
                 radius_b=rad_b,
                 dist_sq=d2,
@@ -856,6 +890,11 @@ def _mutual_walk_jit(
     if error_order > 0:
         assert error_table is not None  # checked by the wrapper
         err = jnp.asarray(error_table, dtype)
+        # the kernel reads each row as one vector and splits it (_node_rows):
+        # Triton splits power-of-two widths only (dehnen_walk_table's already are)
+        width = int(err.shape[1])
+        if width & (width - 1):
+            err = jnp.pad(err, ((0, 0), (0, (1 << width.bit_length()) - width)))
     else:
         err = jnp.zeros((1, 8), dtype)
     if node_layout == "record":
