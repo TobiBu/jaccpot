@@ -58,8 +58,9 @@ set, N must be in it.
 ## Quick start: velocity Verlet in your own scan
 
 `FastMultipoleMethod(preset="galaxy", softening=...)` is the production configuration
-(S3, `jaccpot/production.py`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8),
-p6, the geometric Dehnen MAC at theta 0.8, ferrers3, fp32, and
+(S3, `jaccpot/production.py`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8)
+in a cubic Morton box (`cubic_bounds=True`, S3b; see `docs/production.md`, "The Morton
+box"), p6, the geometric Dehnen MAC at theta 0.8, ferrers3, fp32, and
 `leaf_capacity="auto"` -- sized at the first eager prepare from the live cell leaves of
 the particles it is given (x1.15, in steps of 1024; on device,
 `capacity_plan.live_cell_leaves`), then fixed. It compiles the same programs as the
@@ -90,6 +91,7 @@ solver = FastMultipoleMethod(
             leaf_partition="cells",
             leaf_capacity=leaf_capacity,  # or "auto"; above the live count at every step
             cell_min_level=8,
+            cubic_bounds=True,
         ),
         nearfield=NearFieldConfig(mode="auto"),
         mac_type="dehnen",

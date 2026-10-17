@@ -154,7 +154,7 @@ On a CPU `large_n_gpu` declines the lane and runs the general path, where they w
 | `balanced` | middle ground; bucketed near field |
 | `accurate` | tightest settings; what the golden suite uses |
 | `large_n_gpu` | the large-N GPU lane: static-radix tree, streamed far field, minimum memory, fp32 |
-| `galaxy` | the fused lane's production configuration (`jaccpot.production.GalaxySettings`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8, `leaf_capacity="auto"`), p6, geometric Dehnen MAC at `theta` 0.8, ferrers3, fp32 -- the benches' L1-L3 configuration, same compiled programs |
+| `galaxy` | the fused lane's production configuration (`jaccpot.production.GalaxySettings`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8, `leaf_capacity="auto"`) in a cubic Morton box (`cubic_bounds=True`), p6, geometric Dehnen MAC at `theta` 0.8, ferrers3, fp32 -- the benches' L1-L3 configuration with `--cubic-bounds`, same compiled programs |
 
 `theta` defaults to the preset's: 0.8 for `galaxy`, 0.6 for the others.
 `leaf_capacity="auto"` (`TreeConfig`) sizes the cell-leaf tree at the first eager

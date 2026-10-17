@@ -148,7 +148,40 @@ int32`), and the run went on to step 551 without another re-plan: the step took 
 on the cubic box, 1,596 ms at the stretched one (steps 452-501) and 1,004 ms once
 particles flung along z had made the box cubic again (502-551). On the same IC at 1e7 the
 far count grows 44 % by step 451 with the per-axis box; with `JACCPOT_CUBIC_BOUNDS=1` the
-same positions need 22 % fewer pairs than at step 0.
+same positions need 22 % fewer pairs than at step 0. `preset="galaxy"` builds the cubic
+box (below); other configurations get it with `TreeConfig(cubic_bounds=True)`.
+
+**The Morton box.** `morton_encode` normalises each axis by its own extent, so the
+per-axis box the lane infers from the particles (the library default) gives every cell
+the box's aspect, and a few outliers set it. `preset="galaxy"` builds a cube on the
+longest extent instead (`GalaxySettings.cubic_bounds`, `TreeConfig(cubic_bounds=True)`,
+S3b): every cell is a cube. `JACCPOT_CUBIC_BOUNDS` overrides the configuration when it is
+set (`1`: cube, `0`: per axis; read per call, and a cube is part of the provider's compile
+key); the multi-GPU lane reads only the variable. Measured with the eager prepare on one
+A100 (lists in directed entries; rel-L2 against the fp64 direct sum on 4096 targets;
+ferrers3, theta 0.8, cells of 64, `cell_min_level` 8, p6):
+
+| particles | box aspect | far, per axis -> cube | near | rel-L2 | live leaves |
+|---|---|---|---|---|---|
+| 25M disc + bulge, step 0 (L3) | 1.004 | 94.80M -> 94.75M | 37.58M -> 37.58M | 4.18e-4 -> 4.21e-4 | 1,502,983 -> 1,504,705 |
+| the same run, step 250 | 1.009 | 95.59M -> 94.75M | 37.89M -> 37.91M | 4.26e-4 -> 4.22e-4 | 1,495,590 -> 1,496,838 |
+| the same run, step 500 | 1.012 | 96.80M -> 95.78M | 38.45M -> 38.46M | 3.85e-4 -> 4.19e-4 | 1,507,252 -> 1,508,319 |
+| its disc alone (21M, thin in z) | 3.01 | 215.92M -> 78.87M | 56.47M -> 28.14M | 1.02e-3 -> 5.28e-4 | 1,494,684 -> 1,273,521 |
+| 8e6 clipped Plummer (L1) | 1.004 | 39.09M -> 38.95M | 9.41M -> 9.42M | 4.33e-4 -> 4.30e-4 | 763,545 -> 762,927 |
+| 2e6 unclipped Plummer | 2.77 | 11.10M -> 7.20M | 4.99M -> 2.35M | 8.29e-4 -> 5.23e-4 | 102,648 -> 105,438 |
+| 4e6 unclipped Plummer | 3.20 | 58.95M -> 14.65M | 13.22M -> 4.80M | 2.83e-3 -> 4.89e-4 | 219,355 -> 217,961 |
+| 8e6 unclipped Plummer | 2.14 | 22.34M -> 29.14M | 13.14M -> 9.53M | 4.87e-4 -> 4.35e-4 | 405,630 -> 434,822 |
+
+Where the box is a cube anyway -- the production disc + bulge, whose bulge reaches r = 20
+on every axis, and the clipped Plummer -- the lists agree to about 1 % and the rel-L2
+within 9 %, either way; over the 25M production run (snapshots of the S3 gate) the
+per-axis box stays within 1.2 % of a cube. Where it is not, the cube walks up to 75 % fewer far and 64 % fewer near pairs and its
+error is up to 5.8x lower. The one row where it walks more far pairs (8e6 unclipped) it
+walks 27 % fewer near ones, the costlier list, at a lower rel-L2 (its worst target is
+1.08e-2 against 7.3e-3; on single targets either box can be worse). The step's peak
+follows the lists (the 21M disc's step, `fused_memory_budget.py --skip-eval`: 6.75 ->
+5.09 GiB, 346 -> 261 B/p; L1 and L3 unchanged); the leaf capacity, depth and level widths of the cube moved like the per-axis box's along the
+production run, so the same headroom serves both.
 
 ## Edges, callbacks, diagnostics
 
