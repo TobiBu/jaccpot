@@ -762,3 +762,228 @@ parameters, a restart file every 5 segments, snapshots at 250 and 500:
 - cheaper edges (diagnostics, the retry's host copy);
 - the 25M production gate with energy, and a 1e8 run through the runner with energy on;
 - the ferrers3 tile skip (opt-in unless bitwise).
+
+## S3 session 2 — the energy, the caps-only prepare, the production gate (2026-10-16/17)
+
+**Setup.** jaccpot main `392061d` (S3a merged) with #421, yggdrax main `ca3a93c`, jax 0.11.2. Four tracks on
+branches of their own (the potential and the energy, the caps-only prepare, the ferrers3 tile skip, the int32 list
+limit), merged into one integration for the gates. Timings on free A100s booked through autocvd (no foreign process
+on the card in any timed row; the host's load, 18-78, and the busy other cards are flagged on every row); accuracy,
+identity and pins on shared cards.
+
+**The user's decisions (2026-10-17):**
+
+| | decision |
+| --- | --- |
+| ferrers3 tile skip | opt-in (`JACCPOT_NEARFIELD_TILE_SKIP=1`), off by default: bitwise, but +1.8 % per step on the production disc |
+| XLA's fusion autotuner | off in production: `--xla_gpu_experimental_enable_fusion_autotuner=false` in the launch environment. The library cannot set it (XLA reads its flags when the backend starts), so the runner recommends it and warns |
+
+### What session 2 built
+| branch | what |
+| --- | --- |
+| `fix/runner-no-one-step-segment` (#421) | a 1-step remainder joins the last segment (5 steps of 2 run as 2 + 3) |
+| `s32p/1-fastlane-potential` | `FusedForceProvider.potential`: the fast lane's O(N) potential under a compile key of its own; the near field from the CSR direct kernel's potential lane, the far field from the XLA particle-major L2P's value |
+| `s32p/2-runner-energy` | the runner's energy `E = K + W_self + W_ext` (fp64, every 10th edge, `external_potential_fn`); the retry's start copy into pinned host memory, asynchronously; the energy program compiles once |
+| `s32p/3-caps-only-walk` | the strict flat walk's eager ladder can stop before its lists; `prepare_state_caps_only` |
+| `s32p/4-caps-only-default` | `FusedForceProvider.prepare(caps_only=True)` (the template from `jax.eval_shape`); the particle carry bootstraps, retries and restores caps-only (`JACCPOT_STRICT_CAPS_ONLY_PREPARE=0`: the full prepare); the identity A/B of a library switch |
+| `s32p/5-ferrers3-tile-skip` | the ferrers3 tile skip, opt-in |
+| `s32p/6-replan-int32-limit` | list re-plans stop at the int32 index range, and a list past it raises a clear error; a wrapped walk count raises instead of looping |
+| `s32p/7-autotuner-and-record` | the launch environment (the runner's warning, the benches' flag, `docs/production.md`); this section |
+
+### Findings that changed the plan
+- **A scan of length one is other code.** After #419, main's CI failed `2+2+1_vs_5` on one runner. XLA inlines a
+  1-step scan into straight-line code and fuses it differently (one fusion against the loop body's three, CPU toy),
+  so the remainder step rounded differently on that runner's CPU. #421 gives a 1-step remainder to the last segment;
+  `SegmentConfig(steps=1)` is one long call to round-off only.
+- **The S3 1e8 gate outgrew the int32 index range because its Morton box stretched.** Run for 451 steps, the S3a
+  sequence crashed (main too): the re-plans grew the far list from 302M to 474M and 754M canonical pairs, and
+  building the last raised `pair width 754450432 overflows int32`. In the clipped Plummer (softening 1e-7, dt
+  1e-2) close encounters fling a few particles out from step ~200; the per-axis box elongates every cell and the
+  far need went 402M -> 632M -> 1,005M directed entries by step 401. At 1e7 on the same IC the far count grows 44 %
+  by step 451 (47,747,880 -> 69,051,414); with `JACCPOT_CUBIC_BOUNDS=1` the same positions need 37,308,898, **22 %
+  fewer than at step 0**.
+- **XLA's fusion autotuner made restarts on shared cards non-bitwise.** It times the native against the block-level
+  (Triton) emitter for some fusions, so a fresh process on a busy card can compile other code from the same HLO
+  (below). Off, every resume and DET2 were bitwise, at no measurable cost: the user's decision above.
+- **The energy program compiled twice** (51.6 + 46.1 s at 25M): step 0's state reached it committed (a host copy put
+  back with the masses' sharding), the segments' states uncommitted, and jit keeps one executable per commitment.
+  Every state now goes to the masses' sharding.
+- **The edges' cost at 1e8 was the retry's host copy**, not the diagnostics: a synchronous 2.4 GB `device_get` into
+  pageable memory, 0.99-1.38 s per segment, against 13-23 ms for the moments. Pinned and asynchronous it takes
+  0.10 s (the first of a run 1.4 s, the pinned allocation); segments 2-5 of 10 steps at 1e8: 9.83-10.57 s ->
+  8.79-8.86 s.
+
+### The potential and the energy
+- `FusedForceProvider.potential(topology, params)` against an fp64 direct sum: rel-L2 3.4e-4 (CPU, N = 512, Plummer,
+  pure-JAX near field), 7.7e-5 (ferrers3, the CSR kernel in interpret mode), 1.02e-5 on an A100 at 2e5
+  (`preset="galaxy"`, 4096 targets; the force: 8.0e-4). On a contended A100: 25M 247 ms and 133 B/p of temporaries
+  (a force evaluation 220 ms, 143 B/p), 1e8 960 ms and 123 B/p (851 ms, 133 B/p). The generic path it replaces asked
+  for a 30.75 GiB buffer at 25M.
+- The energy, CPU N = 512: `W_self` within 9.5e-6 of the fp64 direct sum at step 0 (2.6e-6 at step 6); with the
+  energy at every edge the runner is one long call bitwise (R4, the same two scan programs), and a fresh process
+  continues it bitwise (R5). Its trace leaves the engine's trace-time state as it found it.
+- Energy conservation, A100, Plummer 2e5 (eps 0.05), max |dE/E0| over the run: it falls with dt down to a floor of
+  4-5e-7.
+
+| dt (steps) | 0.16 (8) | 0.08 (16) | 0.04 (32) | 0.02 (50) | 0.01 (100) | 0.005 (200) |
+| --- | --- | --- | --- | --- | --- | --- |
+| max \|dE/E0\| | 1.77e-5 | 2.22e-6 | 6.55e-7 | 4.25e-7 | 4.08e-7 | 5.18e-7 |
+
+### The caps-only prepare
+The particle carry reads four things of its eager prepare: the template's shapes, the engine's trace-time state
+(walk caps, level registry, depth bound, the near field's static caps), the initial verdict and, under
+`dehnen_error`, the f_b seed. The caps-only prepare builds the tree and the upward pass and runs the eager walk's
+ladder (which records the caps); it places no list, no M2L or L2L, no near payload and no far f_b, and takes the
+template from a rebuild under `jax.eval_shape`. The template key, the provider key, the verdict and the trace-time
+state equal the full prepare's (CPU: pure-JAX, CSR, `dehnen_error`; A100: 2e5, 8e6, the 25M disc), so it is the
+particle carry's default for the bootstrap, the segment retry and the restore. Free A100, L-pin rows, main against
+the branch:
+
+| N | prepare peak (B/p) | prepare wall | step |
+| --- | --- | --- | --- |
+| 8e6 | 325.5 -> 242.3 | 78.8 -> 60.2 s | 78.72 -> 78.18 ms |
+| 25M disc | 243.6 -> 184.9 | 76.6 -> 62.2 s | 239.54 -> 239.54 ms |
+| 1e8 | 253.0 -> 193.2 | 80.5 -> 63.2 s | 872.55 -> 872.81 ms |
+
+A 25M restore takes 60.4 s (80.0). **The runner's one-card ceiling with donation is 1.92e8 particles at 175.2 B/p**
+(31.32 GiB; before: 1.68e8 at 214 B/p, set by the full prepare). What binds now is the tree and upward pass's
+transient peak and the walk ladder's queue doublings after it (1.96e8 runs out there). The rows in full:
+`docs/fused_memory_2026-10.md`, "S3 session 2".
+
+### The 25M production run (free A100; the integration with the tile skip off)
+`preset="galaxy"`, the 25,000,000-particle disc+bulge, the NFW halo as field and potential, ferrers3 eps 1.5e-3, dt
+5e-4, 500 steps in 10 segments of 50, traced parameters, `donate_input`, the moments at every edge, the energy every
+10th, a restart every 5 segments, snapshots at 250 and 500:
+- **238.6 ms/step** in the segment calls (median; min 238.18; the S3a dry run 246.8), 238.8 ms with the edges.
+- **`run()` 423.6 s** (S3a 354.1): the stepping 305.7 s, plus the energy program's two compiles (51.6 + 46.1 s,
+  the double compile fixed since). The first segment, with the caps-only bootstrap, 198.2 s (S3a 232.0): the prepare
+  72.5 s (S3a's eager prepare 95.7 s), 285 compiles in 205.2 s. At host load 18 instead of 78: 161.7 s, a 57.9 s
+  prepare.
+- **Energy:** E0 = -322.42190 (K0 37.9065, W_self -44.3289, W_ext -315.9995); **dE/E0 = -2.08e-7 at step 500** (the
+  run's one due energy edge). With the energy at every edge (150 steps): +6.4e-8, +1.2e-7, +7.4e-9 at steps 50,
+  100, 150. A warm energy edge costs 0.268 s (1.12 steps).
+- |dL|/|L0| 4.97e-7 at step 500 (max 5.89e-7); COM drift 5.68e-5; KE +7.69 % (the IC's disequilibrium, as in the
+  S3 probe). No re-plan, no retry; live cell leaves 1,495,590-1,507,252 of 1,728,512.
+- **Peak 4.549 GiB = 195.4 B/p** (S3a 237.1). A restart file (1.30 GB) in 2.8-3.0 s, a snapshot (0.6 GB) in 1.2 s.
+- **The final state is bitwise the S3a dry run's** (0 of 1.5e8 elements): the energy, the caps-only prepare and the
+  pinned copy change no number.
+- **Kill and resume** from the step-250 restart in a fresh process: the digests matched, the final state differs in
+  0 of 1.5e8 elements and the step-500 restart file is the same (arrays and meta). Restore 68.9 s before the first
+  segment (S3a 100.9), first segment 63.9 s (71.0); `run()` 237.4 s for 250 steps, a 52.8 s energy compile included.
+
+### 1e8 through the runner (free A100; clipped Plummer, segments of 50, the S3a sequence 1 + 50 + 3 x 50 steps)
+| row | ms/step (min of 3 calls) | S3a | B/p | edge per segment |
+| --- | --- | --- | --- | --- |
+| runner, diagnostics and energy | **873.75** | 919.4 | 208.77 | 0.015 s (S3a 0.23-0.31) |
+| runner, `--runner-diagnostics-every 0` | 873.84 | 909.2 | 208.77 | 0.002 s |
+| plain `strict_run_v2` | 871.69 | 889.9 | 256.77 | - |
+
+**1e8 stays below 1 s per step through the runner, 0.24 % over the plain call.** The energy's first due edge comes
+after step 201; E0 took 51.7 s at the first edge, untimed (its compile included). Past ~250 steps this IC stretches
+its box (above): with the clamp below the 451-step sequence runs to step 551 without another re-plan, the step
+following the box's aspect (874 ms cubic, 1,596 ms stretched at steps 452-501, 1,004 ms at 502-551, once particles
+flung along z had made the box cubic again).
+
+### The int32 list limit
+- `_interaction_cache.flat_walk_list_limit`: the largest directed list the index range builds, 1,431,306,240 entries
+  on the Pallas walk, whose CSR placement addresses 3W slots for a canonical width W (2,146,435,072 for the flat
+  walk's interleaved lists). The re-plan's 1.5x headroom and the eager ladder stop there; a list that needs more
+  raises a `RuntimeError` before the re-prepare, naming the remedies (theta or `adaptive_eps`, `leaf_size`, more
+  GPUs, `JACCPOT_CUBIC_BOUNDS=1`), and the runner adds its last restart. The eager ladder's 2^30 ceilings are gone
+  (they refused needs between 2^30/1.5 and the range, which fit). Below the limit every capacity is the old one; the
+  checks run on the host, and no traced program changes.
+- At the limit the lane is correct: 2e6 forces with the far cap named at the limit are bitwise those at the sized
+  caps (0 of 6M elements; A-vs-A 0); one granule past it raises.
+- A walk that counted past 2^31 - 1 pairs wrapped its int32 counter negative, and the ladder sized its next rung
+  from it and walked again, forever; it raises now. The same wrap writes out of bounds inside the kernel (`slot <
+  cap` accepts a negative slot), which only a kernel guard can stop (it changes the traced program; not done).
+- **Lifting the limit** (not done). A CSR placement inside 2W would raise it to the flat walk's 2.15e9 entries; past
+  that the lists need int64 indices (`flat_walk_list_limit` takes the dtype). On a 40 GB card memory binds about
+  there anyway: with the 1e8 far list at the limit, XLA's rematerialisation brought the step's programs down to
+  32.7-37.2 GiB only.
+
+### The ferrers3 tile skip (opt-in)
+With `JACCPOT_NEARFIELD_TILE_SKIP=1`, the CSR direct kernel evaluates a source range's tiles with the exact Newtonian
+factors when every leaf of the range clears the target leaf's box by the support (one scalar test per neighbour
+entry, from a per-leaf box table), and with the polynomial otherwise. It is bitwise: Triton tests in five regimes
+(beyond, straddling, inside, roundings at the box edge, overlapping boxes); with it on, the eight S pins that inherit
+the environment and S6 are bitwise `s2-tree`, and the 25M L3 force is bitwise main's (0 of 75,000,000). Free A100,
+min of 3 calls x 4 steps, the near kernel from traces:
+
+| | main | tile skip | near kernel |
+| --- | --- | --- | --- |
+| 8e6 clipped Plummer, softening 1e-7 | 78.43 / 78.51 ms | 76.16 / 75.59 ms | 24.92 -> 22.02 ms |
+| 1e8 clipped Plummer, softening 1e-7 | 872.21 / 870.61 ms | 829.16 ms | 311.93 -> 271.26 ms |
+| 25M disc+bulge, softening 1.5e-3 | 239.81 / 239.76 ms | **244.01 ms (+1.8 %)** | 91.89 -> 96.88 ms |
+
+At the production softening nearly every neighbour leaf comes within the support, so the test is overhead: off by
+default (the user). Two other designs were measured and dropped: a per-tile test on the tile's smallest r^2
+(bitwise, but its reduction cost 0.76 of the polynomial's 0.88 ms; 8e6 near 24.79 -> 25.46 ms) and an optimistic
+Newtonian pass (3.92 -> 3.82 ms on the microbench).
+
+### The launch environment: XLA's fusion autotuner
+- **The effect.** The first 2e6 particles of the 25M disc with its NFW halo, 20 steps, resumed in a fresh process
+  from step 10, on busy cards: 4 of 12 resumes bitwise, the other 8 differing in 436,234 of 12M elements (max 4.4e-6).
+  The optimised programs of one bitwise and one differing process: the HLO before optimisation identical, after it 7
+  fusions switched between the native and the Triton emitter, one of them the NFW field added to the self-gravity.
+  With the autotuner off: 8 of 8 bitwise. On the free card the 25M run and its resume had picked the same emitters.
+- **DET2** (the gradient on the production flags), one shared card: with the autotuner off 5 of 5 bitwise A-vs-A;
+  with it 3 of 5, with at least two independent flips (652 position- and 1147 mass-gradient elements, max 9.5e-7 /
+  1.2e-4; and 1 element, 5.8e-11). The first is the DET2 A-vs-A mismatch of the S1 record (647 / 1147).
+- **The cost** (free card, interleaved A1 B1 A2 B2, `compare --envelope` passes L1-L3):
+
+| ms (min) | A1 | B1 (off) | A2 | B2 (off) |
+| --- | --- | --- | --- | --- |
+| L1 step 8e6 | 78.50 | 78.51 | 78.99 | 79.93 |
+| L2 step 1e8 | 872.33 | 870.44 | 873.19 | 871.27 |
+| L3 step 25M | 239.25 | 239.83 | 239.49 | 239.95 |
+| L3 force 25M | 100.32 | 100.86 | 100.67 | 100.71 |
+
+  B/p equal (L3's bimodal step peak aside), rel-L2 and far pairs equal; compile time within the host-load noise.
+  Under deterministic ops the flag moved nothing: S1 and S1x bitwise `s2-tree`, S4b bitwise `s2-main-f967805`.
+- **The alternative,** a per-fusion autotune cache (`--xla_gpu_per_fusion_autotune_cache_dir`), also made 4 of 4
+  resumes bitwise, but it is state: what the first process timed, a directory that must travel with the restart
+  files, not invalidated by XLA across versions or devices.
+- **Built** (`s32p/7`): `ProductionRunner.run` warns once per process when its state is on a GPU and `XLA_FLAGS` does
+  not turn the autotuner off; `fused_memory_budget.py`, `dce_pins.py`'s production-flag pins (L1-L3, DET1-DET3) and
+  `provider_hlo_identity.py --device gpu` add the flag unless `XLA_FLAGS` sets it; `docs/production.md`, "Launch
+  environment". The flag is experimental: re-check it at every jax upgrade.
+
+### Gates
+- **CPU.** Every CI shard on the integration: all pass but one test in `unit` and `py-floor`,
+  `test_module_exports_guard` (`record_fused_nearfield_caps` was missing from `_large_n_pipeline.__all__`; fixed in
+  `s32p/3`). `test_shards.py check`: the shards cover the 2148 tests. On the stack, each branch passes
+  the CPU tests of what it touches, `test_shards.py check`, black, isort and pydoclint. Under
+  `JACCPOT_RUNTIME_TYPECHECK=1` 7 caps-only tests fail, as on the track's own tip: the caps-only prepare's stub
+  prepared state holds `local_data=None` against its `LocalExpansionData` annotation. CI runs `integration-strict`
+  with the runtime type checks off.
+- **Program identity** (`provider_hlo_identity.py` against `s32-base-cpu`, main `392061d`): the integration's start
+  programs, scans and returns (`--programs compiled_runner`) 36/36 identical; in full, the 18 particle-carry
+  variants lose the eager `_flat_walk_lists`, M2L and L2L programs and gain `_near_leaf_counts` (the caps-only
+  prepare), and with `JACCPOT_STRICT_CAPS_ONLY_PREPARE=0` all 36 are identical in full. On the stack: the compiled
+  runners 36/36 on every branch; in full 36/36 on `s32p/1`-`s32p/3`, and from `s32p/4` on the same 18 variants
+  and programs differ as on the integration (on `s32p/7` with the switch off: 36/36 in full).
+- **GPU** (the integration, shared cards): S1, S6, DET1, G1, S1p, S1t, S1e, S1x, S1g bitwise `s2-tree`; R1p, R1x, R1r
+  bitwise (`s3integ-pins`); DET3 bitwise A-vs-A and to `s3integ-det3`; M1, M3 bitwise, M2 within main's envelope;
+  with the tile skip on, S1 and S1x bitwise. On `s32p/7`, where the benches add the autotuner flag: S1, S6, G1,
+  S1p, S1t, S1e, S1x, S1g bitwise `s2-tree`; R1p, R1x, R1r bitwise; DET1 and DET3 (now with the autotuner off)
+  bitwise A-vs-A and bitwise the integration's records made without it.
+- **L1-L3** (free card; main `392061d`, the integration, main again; `compare --envelope`): L2 +0.30 % step, -0.18 %
+  peak; L3 force +0.03 % / +0.03 %; L3 step +0.12 % / +2.18 % (limit 4.37 %: the step peak is bimodal, 255.78 or
+  261.36 B/p, and the A-vs-A control moves the same): pass. **L1 fails only because its peak DROPPED 2.93 %**
+  (325.28 -> 315.74 B/p: the caps-only bootstrap at 8e6) against the symmetric 2 % limit; its step +0.40 %. rel-L2
+  4.179e-4 and the lists unchanged. **Re-record the L and DET baselines after the merge**: L1's peak moved by
+  design, and the production-flag pins now run with the autotuner off (DET2 lands on other values; DET1 and DET3
+  did not move).
+
+### For S3b and S4
+- **S3b:** the `dehnen_error` refresh cost (its step 2.9x geometric at 25M) is untouched by this session. Also
+  measure the per-axis against the cubic Morton box on the disc over a production run, and consider
+  `JACCPOT_CUBIC_BOUNDS=1` for `preset="galaxy"` if the disc behaves like the Plummer (it changes the lists: a
+  decision, not bitwise).
+- **The Pallas walk's counter wrap** past 2^31 - 1 pairs writes out of bounds in the kernel: a guard there (a traced
+  change, gated by identity and pins).
+- **S4:** Odisseo's `integrate()` through the runner, with the launch environment's flag in Odisseo's launchers and
+  docs; the GPU identity and pin references re-recorded with the flag.
+- **Compiles** are now the first segment's cost at 25M (285 programs, 160-200 s on a loaded host) and ~50 s per
+  energy program: a persistent compilation cache is the next lever.
