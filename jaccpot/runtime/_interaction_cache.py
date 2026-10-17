@@ -2177,6 +2177,15 @@ def _build_flat_walk_artifacts_strict_streamed(
         ):
             if not ovf or defer_lists:
                 continue
+            if needed is not None and int(needed) < 0:
+                # the Pallas walk's int32 counter keeps counting past a full list;
+                # past 2^31 - 1 pairs it wraps negative (which sized the next rung
+                # at 2 and walked again, forever)
+                raise RuntimeError(
+                    flat_walk_list_limit_message(
+                        kind, "needs more than 2^31 - 1 canonical pairs", limit=limit
+                    )
+                )
             if needed is not None and 2 * int(needed) > limit:
                 raise RuntimeError(
                     flat_walk_list_limit_message(

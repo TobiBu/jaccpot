@@ -283,3 +283,43 @@ def test_unnamed_caps_stop_at_the_index_range(tree_and_geometry, monkeypatch):
     monkeypatch.setattr(ic, "flat_walk_list_limit", lambda idx, csr: 2048)
     with pytest.raises(RuntimeError, match="near list overflowed 2048 directed"):
         _flat(tree, geometry, far_cap=8, near_cap=8, **unnamed)
+
+
+def test_a_wrapped_pallas_walk_count_raises_instead_of_looping(
+    tree_and_geometry, monkeypatch
+):
+    # the Pallas walk counts past a full list in int32: past 2^31 - 1 pairs the
+    # count wraps negative, and the ladder sized its next rung from it (2 entries),
+    # walked again and never stopped
+    import jaccpot.pallas.mutual_walk_pallas as mwp
+    import jaccpot.runtime._interaction_cache as ic
+
+    tree, geometry, _, _ = tree_and_geometry
+    calls = []
+
+    def wrapped_walk(*args, far_cap, near_cap, **kw):
+        calls.append(far_cap)
+        if len(calls) > 3:
+            raise AssertionError("the ladder walked again on a wrapped count")
+        i32 = jnp.int32
+        return mwp.PallasWalkResult(
+            far_a=jnp.full((far_cap,), -1, i32),
+            far_b=jnp.full((far_cap,), -1, i32),
+            far_count=jnp.asarray(far_cap, i32),
+            near_a=jnp.zeros((near_cap,), i32),
+            near_b=jnp.zeros((near_cap,), i32),
+            near_count=jnp.asarray(0, i32),
+            far_overflow=jnp.asarray(True),
+            near_overflow=jnp.asarray(False),
+            queue_overflow=jnp.asarray(False),
+            peak_wavefront=jnp.asarray(1, i32),
+            rounds=jnp.asarray(1, i32),
+            far_needed=jnp.asarray(-(1 << 30), i32),
+            near_needed=jnp.asarray(0, i32),
+        )
+
+    monkeypatch.setattr(ic, "strict_walk_backend", lambda: "pallas")
+    monkeypatch.setattr(mwp, "mutual_walk_pallas", wrapped_walk)
+    with pytest.raises(RuntimeError, match="needs more than 2\\^31 - 1 canonical"):
+        _flat(tree, geometry, far_named=False, near_edge_named=False)
+    assert len(calls) == 1
