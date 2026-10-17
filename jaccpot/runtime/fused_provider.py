@@ -13,6 +13,10 @@ this module names them:
     the evaluation on that topology: near-field P2P, L2P and the scatter back to
     the input order (``evaluate_large_n_state``). It takes no positions or masses:
     the rebuild already ran the far field at the positions it was given.
+``potential``
+    the same topology's potential per particle, O(N) (``evaluate_large_n_potential``:
+    the near field's fourth lane, the far field's L2P value): the energy diagnostic's,
+    in a program of its own.
 
 :class:`FusedForceProvider` holds the static configuration both halves are traced
 under (the engine, leaf size, order, opening angle, runtime overrides) and the
@@ -56,7 +60,7 @@ from beartype.typing import Callable, Tuple
 from jaxtyping import Array
 
 from ..softening import support_factor
-from ._large_n_pipeline import evaluate_large_n_state
+from ._large_n_pipeline import evaluate_large_n_potential, evaluate_large_n_state
 from ._large_n_types import LargeNPreparedState
 from .fused_topology import (
     OVERFLOW_PARAMS,
@@ -802,6 +806,61 @@ class FusedForceProvider:
             return_potential=False,
             max_acc_derivative_order=0,
             **extra,
+        )
+
+    def potential(
+        self,
+        topology: FusedTopology,
+        params: Optional[Union[ForceParams, StepParams]] = None,
+        *,
+        order: str = "input",
+    ) -> Array:
+        """The self-gravity potential on ``topology``: near lane 4, far L2P, scatter.
+
+        ``phi_i = -G sum_{j != i} m_j psi(r_ij)`` with the force's softening kernel
+        (Newtonian beyond its support), the far field from the same local
+        expansions the accelerations read (``evaluate_large_n_potential``). O(N), in
+        a program of its own: no acceleration program changes. The self-gravity's
+        energy is ``W = 1/2 sum_i m_i phi_i``.
+
+        Parameters
+        ----------
+        topology : FusedTopology
+            From :meth:`rebuild` (or :meth:`FusedTopology.from_prepared`).
+        params : Optional[Union[ForceParams, StepParams]]
+            As in :meth:`accelerations`. Arrays reach the near field only on the
+            fused Pallas lane (the CSR direct kernel); the generic lane takes Python
+            floats.
+        order : str
+            ``"input"`` or ``"tree"``, as in :meth:`accelerations`.
+
+        Returns
+        -------
+        Array
+            ``[N]`` in the state's input dtype.
+
+        Raises
+        ------
+        ValueError
+            On an unknown ``order``, or parameters other than the engine's own
+            under ``mac_type='dehnen_error'``.
+        RuntimeError
+            If the topology does not hold a ``LargeNPreparedState``.
+        """
+        force = self.resolve_params(params)
+        if order not in ("input", "tree"):
+            raise ValueError(f"order must be 'input' or 'tree', got {order!r}")
+        prepared = topology.prepared
+        if not isinstance(prepared, LargeNPreparedState):
+            raise RuntimeError(
+                "the fused lane's potential needs a LargeNPreparedState, got "
+                f"{type(prepared).__name__}"
+            )
+        return evaluate_large_n_potential(
+            self.engine,
+            prepared,
+            sorted_output=order == "tree",
+            force_params=force,
         )
 
     def capacity_ok(self, topology: FusedTopology) -> Array:

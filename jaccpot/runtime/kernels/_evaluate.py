@@ -48,6 +48,7 @@ from jaccpot.nearfield.near_field import (
     compute_leaf_p2p_accelerations_large_n_accel_only,
 )
 from jaccpot.operators.real_harmonics import (
+    evaluate_local_real,
     evaluate_local_real_derivative_tower_batch,
     evaluate_local_real_with_grad,
 )
@@ -2071,6 +2072,74 @@ def _evaluate_local_expansions_particle_major(
         return lax.dynamic_update_slice(out, grads, (s, 0))
 
     return lax.fori_loop(0, num_chunks, _chunk, jnp.zeros((n, 3), dtype=dtype))
+
+
+def _evaluate_local_potential_particle_major(
+    local_data: LocalExpansionData,
+    positions: Float[Array, "n 3"],
+    *,
+    leaf_nodes: Int[Array, "leaves"],
+    node_ranges: Int[Array, "nodes 2"],
+    order: int,
+    chunk: int,
+) -> Array:
+    """Real-basis far-field potential at every particle, in particle order, in chunks.
+
+    The potential twin of :func:`_evaluate_local_expansions_particle_major`'s
+    ``"xla"`` kernel (the Pallas L2P has no potential lane): each particle reads its
+    own leaf's expansion, ``chunk`` particles at a time, and evaluates
+    :func:`evaluate_local_real` -- the value :func:`evaluate_local_real_with_grad`
+    computes beside the gradient, which the acceleration lane drops.
+
+    Parameters
+    ----------
+    local_data : LocalExpansionData
+        Local expansions, indexed by node; real (Dehnen) coefficients.
+    positions : Float[Array, 'n 3']
+        Morton-sorted particle positions ``[N, 3]``.
+    leaf_nodes : Int[Array, 'leaves']
+        Leaf node ids in particle order (static radix trees).
+    node_ranges : Int[Array, 'nodes 2']
+        Per-node ``[start, end]`` particle ranges, inclusive of ``end``.
+    order : int
+        Expansion order ``p``.
+    chunk : int
+        Particles per chunk. Static.
+
+    Returns
+    -------
+    Array
+        ``[N]`` expansion of ``+sum m / |r|`` (the caller applies ``-G``); zero for
+        rows past the leaves' particles.
+    """
+    n = int(positions.shape[0])
+    num_leaves = int(leaf_nodes.shape[0])
+    dtype = positions.dtype
+    if n == 0 or num_leaves == 0:
+        return jnp.zeros((n,), dtype=dtype)
+    leaf_ranges = node_ranges[leaf_nodes]
+    counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
+    leaf_of = jnp.repeat(
+        jnp.arange(num_leaves, dtype=INDEX_DTYPE), counts, total_repeat_length=n
+    )
+    live = jnp.arange(n, dtype=INDEX_DTYPE) < jnp.sum(counts)
+    k = max(1, min(int(chunk), n))
+    num_chunks = -(-n // k)
+    p = int(order)
+
+    def _chunk(c: Array, out: Array) -> Array:
+        # the last chunk overlaps the previous one instead of padding
+        s = jnp.minimum(c * k, n - k)
+        idx = s + jnp.arange(k, dtype=INDEX_DTYPE)
+        node = leaf_nodes[leaf_of[idx]]
+        delta = local_data.centers[node] - positions[idx]
+        values = jax.vmap(
+            lambda coeff, offset: evaluate_local_real(coeff, offset, order=p)
+        )(local_data.coefficients[node], delta)
+        values = jnp.where(live[idx], values.astype(dtype), 0.0)
+        return lax.dynamic_update_slice(out, values, (s,))
+
+    return lax.fori_loop(0, num_chunks, _chunk, jnp.zeros((n,), dtype=dtype))
 
 
 @partial(

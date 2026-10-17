@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+from numbers import Real
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import jax
@@ -580,10 +582,11 @@ def evaluate_large_n_nearfield_fast_lane(
     G : Optional[Union[float, Array]]
         The gravitational constant, overriding the engine's: a Python float is a
         compile-time literal, an array may be traced (the fused lane's traced force
-        parameters). ``None`` takes ``fmm.G``. Accelerations only.
+        parameters). ``None`` takes ``fmm.G``.
     softening_sq : Optional[Union[float, Array]]
         The softening squared, overriding the engine's, likewise. ``None`` squares
-        ``fmm.softening``. Accelerations only.
+        ``fmm.softening``. A potential off the fused Pallas lane (the generic
+        path) takes a Python float only.
 
     Returns
     -------
@@ -598,14 +601,14 @@ def evaluate_large_n_nearfield_fast_lane(
         rather than user input, as above.
     ValueError
         If both ``return_potential`` and ``return_force_scale`` are set: they
-        share the near-field kernel's fourth lane; or if ``G`` or
-        ``softening_sq`` comes with ``return_potential``.
+        share the near-field kernel's fourth lane.
+    NotImplementedError
+        If an array ``softening_sq`` comes with a potential the generic path
+        evaluates.
     """
 
     if bool(return_potential) and bool(return_force_scale):
         raise ValueError("return_potential and return_force_scale are exclusive")
-    if bool(return_potential) and (G is not None or softening_sq is not None):
-        raise ValueError("G / softening_sq overrides are wired for accelerations only")
     # the engine's own parameters unless overridden (the fused lane's force params)
     g_value = getattr(fmm, "G") if G is None else G
     soft_kw = {} if softening_sq is None else {"softening_sq": softening_sq}
@@ -636,7 +639,11 @@ def evaluate_large_n_nearfield_fast_lane(
                 pallas_nearfield_fused_supported,
             )
 
-            if pallas_nearfield_fused_supported():
+            # interpret mode reaches the kernels as the acceleration lane does
+            interpret = str(
+                os.environ.get("JACCPOT_NEARFIELD_PALLAS_INTERPRET", "0")
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if interpret or pallas_nearfield_fused_supported():
                 diag_mode_pot = normalize_large_n_nearfield_diag_mode()
                 if diag_mode_pot == "zero":
                     zeros_acc = jnp.zeros_like(live_positions)
@@ -645,20 +652,41 @@ def evaluate_large_n_nearfield_fast_lane(
                         dtype=live_positions.dtype,
                     )
                     return zeros_acc, zeros_pot
+                # the leaf ranges select the CSR lane's direct kernel (the
+                # production near field; its fourth lane is the potential, the
+                # diagonal excluded), as on the acceleration lane below
                 return compute_leaf_p2p_accelerations_radix_fast_lane(
                     positions_sorted=live_positions,
                     masses_sorted=live_masses,
                     payload=state.radix_fast_payload,
-                    G=getattr(fmm, "G"),
+                    G=g_value,
                     softening=float(getattr(fmm, "softening")),
+                    **soft_kw,
                     softening_kernel=getattr(fmm, "softening_kernel", None),
                     return_potential=True,
                     use_pallas=True,
                     neighbor_list=state.neighbor_list,
+                    leaf_ranges=(
+                        None
+                        if state.neighbor_list is None
+                        else jnp.asarray(state.tree.node_ranges)[
+                            jnp.asarray(state.neighbor_list.leaf_indices)
+                        ]
+                    ),
                 )
 
         # Keep potential compatibility by delegating to canonical generic
-        # nearfield when the fused Pallas path is unavailable.
+        # nearfield when the fused Pallas path is unavailable. It squares a
+        # concrete softening length on the host: a traced one cannot reach it.
+        generic_softening = float(getattr(fmm, "softening"))
+        if softening_sq is not None:
+            if not isinstance(softening_sq, Real):
+                raise NotImplementedError(
+                    "an array softening_sq reaches the near-field potential on the "
+                    "fused Pallas lane only; the generic lane squares a Python "
+                    "float softening length"
+                )
+            generic_softening = math.sqrt(float(softening_sq))
         has_leaf_groups = int(state.nearfield_leaf_particle_indices.size) > 0
         leaf_particle_indices_override = (
             state.nearfield_leaf_particle_indices if has_leaf_groups else None
@@ -671,8 +699,8 @@ def evaluate_large_n_nearfield_fast_lane(
             state.neighbor_list,
             live_positions,
             live_masses,
-            G=getattr(fmm, "G"),
-            softening=float(getattr(fmm, "softening")),
+            G=g_value,
+            softening=generic_softening,
             softening_kernel=getattr(fmm, "softening_kernel", None),
             max_leaf_size=int(state.max_leaf_size),
             return_potential=True,

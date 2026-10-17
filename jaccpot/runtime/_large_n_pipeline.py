@@ -50,6 +50,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, no runtime import
 
 __all__ = [
     "can_use_large_n_prepare_path",
+    "evaluate_large_n_potential",
     "evaluate_large_n_state",
     "prepare_large_n_state",
 ]
@@ -1956,9 +1957,9 @@ def evaluate_large_n_state(
     """Evaluate large-N prepared state for the full particle set.
 
     Acceleration evaluation on the production large-N path is locked to the
-    radix fast-lane payload route. Potential evaluation still falls back to the
-    compiled generic evaluator until a dedicated fast-lane potential path is
-    implemented.
+    radix fast-lane payload route. ``return_potential`` here still falls back to
+    the compiled generic evaluator (not at scale: 30.75 GiB at 25M);
+    :func:`evaluate_large_n_potential` is the fast lane's own potential.
 
     Parameters
     ----------
@@ -2462,6 +2463,143 @@ def evaluate_large_n_state(
         state_prepared.inverse_permutation
     ].astype(output_dtype)
     return accelerations, potentials
+
+
+def evaluate_large_n_potential(
+    fmm: "FMMEngine",
+    state: Union[LargeNPreparedState, LargeNCompiledState],
+    *,
+    sorted_output: bool = False,
+    force_params: Any = None,
+) -> Array:
+    """The radix fast lane's potential per particle: O(N), no acceleration.
+
+    The potential twin of :func:`evaluate_large_n_state`'s fast-lane acceleration
+    route, for the fused lane's energy diagnostic: the near field from the CSR
+    direct kernel's fourth lane (``evaluate_large_n_nearfield_fast_lane(
+    return_potential=True)``; the self pair excluded), the far field from the
+    particle-major L2P's value (:func:`_evaluate_local_potential_particle_major`,
+    XLA: the Pallas L2P has gradients only), ``-G`` times that, and the scatter to
+    input order. ``evaluate_large_n_state(return_potential=True)`` leaves the fast
+    lane for the generic evaluator instead, which at 25M asked for a 30.75 GiB
+    buffer. The program is compiled under a key of its own, so no acceleration
+    program changes.
+
+    Parameters
+    ----------
+    fmm : FMMEngine
+        The engine, typed loosely to avoid the import cycle.
+    state : Union[LargeNPreparedState, LargeNCompiledState]
+        Prepared or compiled large-N state on the radix fast lane.
+    sorted_output : bool
+        Return the potential in the tree's (Morton) order instead of the input's.
+    force_params : Any
+        A :class:`~jaccpot.runtime.fused_topology.ForceParams` overriding ``G`` and
+        the softening, as in :func:`evaluate_large_n_state` (arrays are arguments
+        of the compiled program); ``None`` takes the engine's.
+
+    Returns
+    -------
+    Array
+        ``[N]`` physical potential ``-G sum_j m_j psi(r_ij)`` (``j != i``) in the
+        state's input dtype.
+
+    Raises
+    ------
+    RuntimeError
+        If the state is not on the radix fast lane or carries no payload.
+    """
+    from .kernels._evaluate import _evaluate_local_potential_particle_major
+
+    state_prepared = large_n_as_prepared_state(state)
+    if not bool(getattr(state_prepared, "radix_fast_lane", False)) or (
+        getattr(state_prepared, "radix_fast_payload", None) is None
+    ):
+        raise RuntimeError(
+            "the fast-lane potential needs a radix fast-lane state with its payload "
+            "(the large_n_gpu radix profile)"
+        )
+    if isinstance(state, LargeNCompiledState):
+        local_order = int(state.local_order)
+    else:
+        local_order = int(
+            getattr(
+                state_prepared,
+                "local_order",
+                getattr(state_prepared.local_data, "order", 0),
+            )
+        )
+    if jnp.issubdtype(state_prepared.input_dtype, jnp.floating):
+        output_dtype = state_prepared.input_dtype
+    else:
+        output_dtype = state_prepared.working_dtype
+    l2p_chunk = env_int("JACCPOT_L2P_PARTICLE_CHUNK", 1 << 21, minimum=1)
+    keep_sorted = bool(sorted_output)
+
+    def _fastlane_potential_body(state_in: Any, params_in: Any = None) -> Any:
+        g_far = float(getattr(fmm, "G")) if params_in is None else params_in.G
+        near_kw = (
+            {}
+            if params_in is None
+            else {"G": params_in.G, "softening_sq": params_in.eps2}
+        )
+        _, near_pot = evaluate_large_n_nearfield_fast_lane(
+            fmm, state_in, return_potential=True, **near_kw
+        )
+        far_value = _evaluate_local_potential_particle_major(
+            state_in.local_data,
+            state_in.positions_sorted,
+            leaf_nodes=jnp.asarray(
+                state_in.neighbor_list.leaf_indices, dtype=INDEX_DTYPE
+            ),
+            node_ranges=jnp.asarray(state_in.tree.node_ranges, dtype=INDEX_DTYPE),
+            order=local_order,
+            chunk=l2p_chunk,
+        )
+        potential_sorted = jnp.asarray(near_pot) + (-g_far) * far_value
+        if keep_sorted:
+            return potential_sorted.astype(output_dtype)
+        perm = jnp.asarray(state_in.tree.particle_indices, dtype=INDEX_DTYPE)
+        return (
+            jnp.zeros(potential_sorted.shape, output_dtype)
+            .at[perm]
+            .set(
+                potential_sorted.astype(output_dtype),
+                unique_indices=True,
+                mode="promise_in_bounds",
+            )
+        )
+
+    params_key: tuple = (
+        (float(getattr(fmm, "G")), float(getattr(fmm, "softening")))
+        if force_params is None
+        else (
+            jax.tree_util.tree_structure(force_params),
+            tuple(
+                (jnp.shape(x), jnp.result_type(x).name)
+                for x in jax.tree_util.tree_leaves(force_params)
+            ),
+        )
+    )
+    compiled = _large_n_fastlane_eval_fn(
+        fmm,
+        state_prepared if force_params is None else (state_prepared, force_params),
+        body=_fastlane_potential_body,
+        cache_key=(
+            "fastlane_potential",
+            int(local_order),
+            jnp.dtype(output_dtype).name,
+            *params_key,
+            str(getattr(fmm, "softening_kernel", "plummer")),
+            bool(getattr(fmm, "use_pallas", False)),
+            int(l2p_chunk),
+            keep_sorted,
+        ),
+    )
+    args = (state_prepared,) if force_params is None else (state_prepared, force_params)
+    if compiled is not None:
+        return compiled(*args)
+    return _fastlane_potential_body(*args)
 
 
 def _record_large_n_decline(fmm: Any, reason: str) -> None:
