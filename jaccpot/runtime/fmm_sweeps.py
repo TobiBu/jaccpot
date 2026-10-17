@@ -6,7 +6,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -34,6 +34,7 @@ from jaccpot.upward.tree_expansions import (
 )
 from jaccpot.upward.tree_geometry import compute_tree_geometry_compiled
 
+from ._force_scale_levels import FarForceScaleInputs
 from .dtypes import require_index_capacity
 from .kernels.core import _FarPairCOO, _prepare_solidfmm_downward_sweep
 from .reference import MultipoleExpansion
@@ -419,7 +420,8 @@ class SweepsMixin(_EngineBase):
         p_gears: Optional[tuple[int, ...]] = None,
         n_targets: Optional[int] = None,
         cross_far: Optional[tuple] = None,
-    ) -> TreeDownwardData:
+        far_force_scale: Optional[FarForceScaleInputs] = None,
+    ) -> Union[TreeDownwardData, tuple[TreeDownwardData, Array]]:
         """Build interactions and locals needed for the downward sweep.
 
         The caller-facing boundary for ``mac_type``: this accepts the wider
@@ -471,11 +473,18 @@ class SweepsMixin(_EngineBase):
             multipoles and expansion centres, and the cross far pairs as indices into
             ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
             cascade serves both. ``None`` (default) is the single-domain lane.
+        far_force_scale : Optional[FarForceScaleInputs]
+            ``mac_type='dehnen_error'``: also return eq (16b)'s far force-scale
+            term per node, summed in the CSR M2L lanes kernel and pushed down by
+            the Pallas L2L cascade. Only where
+            :func:`~jaccpot.runtime.kernels._l2l._far_force_scale_in_downward_available`
+            holds.
 
         Returns
         -------
-        TreeDownwardData
-            Interactions plus the local expansions they produced.
+        Union[TreeDownwardData, tuple[TreeDownwardData, Array]]
+            Interactions plus the local expansions they produced; with
+            ``far_force_scale``, ``(downward, far term [total_nodes])``.
 
         Raises
         ------
@@ -556,6 +565,7 @@ class SweepsMixin(_EngineBase):
                 separation_floor=self._walk_separation_floor(),
                 use_pallas=self.use_pallas,
                 timing_recorder=timing_recorder,
+                force_scale=far_force_scale,
             )
 
         raise ValueError(

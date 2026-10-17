@@ -8,6 +8,8 @@
 * the Pallas L2L cascade's force-scale channel (S3b: the push-down rides the
   launches the downward sweep makes anyway) is ``ancestor_sum_by_level``, bit for
   bit -- the same sums in the same association -- and leaves the locals alone;
+* ``far_force_scale_from_node_totals`` is ``far_force_scale_sorted``'s per-particle
+  read-out;
 
 on a bucket tree and on the capacity-padded cell tree the fused lane uses (empty
 leaves included), eagerly and under ``jit``.
@@ -299,3 +301,64 @@ def test_the_l2l_custom_vjp_differentiates_the_locals_only():
     got = jax.grad(with_scale, argnums=(0, 1))(coeffs, centres)
     for g, w in zip(got, want):
         np.testing.assert_array_equal(np.asarray(g), np.asarray(w))
+
+
+def test_the_node_totals_read_out_is_the_sorted_far_term():
+    from yggdrax.interactions import CompactTaggedFarPairs
+    from yggdrax.tree_moments import compute_tree_mass_moments
+
+    from jaccpot.runtime import _force_scale_levels as fsl
+    from jaccpot.runtime._mac_geometry import com_mac_geometry
+
+    topo, ps, ms = _tree("cells", n=2000)
+    mm = compute_tree_mass_moments(topo, ps, ms)
+    geom = com_mac_geometry(topo, ps, mm.center_of_mass, leaf_cap=16)
+    total = int(topo.parent.shape[0])
+    ranges = np.asarray(topo.node_ranges)
+    rng = np.random.default_rng(9)
+    src = rng.integers(0, total, 3000)
+    tgt = rng.integers(0, total, 3000)
+    pairs = CompactTaggedFarPairs(
+        sources=jnp.asarray(src, jnp.int32),
+        targets=jnp.asarray(tgt, jnp.int32),
+        tags=jnp.zeros((src.size,), jnp.int32),
+        far_pair_count=jnp.asarray(src.size, jnp.int32),
+    )
+    ni = int(topo.left_child.shape[0])
+    live = ranges[ni:, 1] >= ranges[ni:, 0]
+    # leaves in particle order, the empty ones last (as the neighbour list's)
+    leaves = np.arange(ni, total)
+    leaves = leaves[
+        np.argsort(np.where(live, ranges[ni:, 0], ps.shape[0]), kind="stable")
+    ]
+    kw = dict(
+        node_mass=jnp.asarray(mm.mass),
+        node_centers=geom.center,
+        node_radii=geom.radius,
+        gravitational_constant=1.3,
+        softening_sq=jnp.asarray(1e-3),
+    )
+    want = fsl.far_force_scale_sorted(
+        tree=topo,
+        leaf_nodes=jnp.asarray(leaves, jnp.int32),
+        far_pairs=pairs,
+        num_levels=int(get_level_offsets(topo).shape[0] - 1),
+        num_particles=int(ps.shape[0]),
+        **kw,
+    )
+    own = far_force_scale_own(
+        sources=pairs.sources,
+        targets=pairs.targets,
+        live=jnp.ones((src.size,), bool),
+        num_nodes=total,
+        **kw,
+    )
+    totals = ancestor_sum_by_level(own, **_tables(topo))
+    got = fsl.far_force_scale_from_node_totals(
+        totals,
+        tree=topo,
+        leaf_nodes=jnp.asarray(leaves, jnp.int32),
+        num_particles=int(ps.shape[0]),
+    )
+    assert np.asarray(want).max() > 0
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-12, atol=0)

@@ -4,8 +4,25 @@ The criterion's threshold for a node is ``eps * min_{b in node} f_b`` with the
 cancellation-free ``f_b = sum_a G m_a / (|x_a - x_b|^2 + eps^2)``. On the fused
 lane ``f_b`` is a by-product of the previous step's force: its near half from the
 near-field kernel's force-scale lane, its far half from the far pairs as monopoles
-pushed down the tree. Two reductions over the tree turn those into what the walk
-needs, and both must stay cheap at 1e8 particles:
+(:func:`far_force_scale_own`) pushed down the tree.
+
+**Where the far half is computed (S3b).** Where the downward sweep runs the CSR
+M2L lanes kernel and the Pallas L2L cascade (an Ampere card; CPU in interpret
+mode), it computes the far half on the side: the lanes kernel sums each target
+node's own term over its CSR row (:class:`FarForceScaleInputs`, no atomics), the
+cascade carries it down the same parent edges as the locals, and
+:func:`far_force_scale_from_node_totals` reads it at each particle's leaf
+(``fmm_prepare``'s ``_far_force_scale_inputs``). The separate pass,
+:func:`far_force_scale_sorted` -- a chunked segment sum over the far list and
+:func:`ancestor_sum_by_level` -- cost ~390 ms of the 25M disc's 695 ms step in
+scatter-adds (S0 trace, ``docs/production_2026-10.md``); it stays for every other
+route (the pure-JAX M2L or L2L, a cross-domain list) and for the first step's
+seed, whose geometric walk runs no downward sweep. The push-down keeps the old
+association (``own[child] + sum[parent]``), so only the own term's summation
+order differs between the two.
+
+Two reductions over the tree turn those into what the walk needs, and both must
+stay cheap at 1e8 particles:
 
 * :func:`ancestor_sum_by_level` -- each node's own far contribution plus all its
   ancestors', so a leaf holds the complete far term of its particles. The serial
@@ -34,6 +51,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 __all__ = [
     "FarForceScaleInputs",
     "ancestor_sum_by_level",
+    "far_force_scale_from_node_totals",
     "far_force_scale_own",
     "far_force_scale_sorted",
     "node_force_scale_min",
@@ -496,6 +514,32 @@ def _far_force_scale_sorted_jit(
         num_levels=num_levels,
         level_batch_width=level_batch_width,
     )
+    return _particles_from_node_totals(
+        total_far, node_ranges, leaf_nodes, num_particles=num_particles
+    ).astype(node_mass.dtype)
+
+
+def _particles_from_node_totals(
+    total_far: Array, node_ranges: Array, leaf_nodes: Array, *, num_particles: int
+) -> Array:
+    """Each sorted particle's leaf value: the fast lane's ``repeat`` over leaf counts.
+
+    Parameters
+    ----------
+    total_far : Array
+        ``[total_nodes]`` per-node values (the pushed-down far term).
+    node_ranges : Array
+        ``[total_nodes, 2]`` inclusive particle ranges.
+    leaf_nodes : Array
+        ``[L]`` leaf node ids in particle order.
+    num_particles : int
+        ``N``. Static.
+
+    Returns
+    -------
+    Array
+        ``[N]`` in tree (sorted) order; zero past the leaves.
+    """
     ranges = node_ranges[leaf_nodes]
     counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
     n = int(num_particles)
@@ -505,9 +549,50 @@ def _far_force_scale_sorted_jit(
         total_repeat_length=n,
     )
     live_particle = jnp.arange(n, dtype=INDEX_DTYPE) < jnp.sum(counts)
-    return jnp.where(live_particle, total_far[leaf_nodes[leaf_of]], 0.0).astype(
-        node_mass.dtype
-    )
+    return jnp.where(live_particle, total_far[leaf_nodes[leaf_of]], 0.0)
+
+
+def far_force_scale_from_node_totals(
+    total_far: Array, *, tree: Any, leaf_nodes: Array, num_particles: int
+) -> Array:
+    """The far half of eq (16b)'s ``f_b`` per SORTED particle, from pushed-down node sums.
+
+    The tail of :func:`far_force_scale_sorted` for a caller that already holds
+    every node's own far term plus its ancestors': the downward sweep, whose CSR
+    M2L lanes kernel sums each target's own term
+    (:class:`~jaccpot.pallas.m2l_real_csr_lanes.FarForceScaleInputs`) and whose
+    Pallas L2L cascade carries it down the tree
+    (:func:`~jaccpot.pallas.cascade_real_level.l2l_real_levels_fb_pallas_cvjp`).
+
+    Parameters
+    ----------
+    total_far : Array
+        ``[total_nodes]`` each node's far term plus all its ancestors'.
+    tree : Any
+        The step's tree (``node_ranges``).
+    leaf_nodes : Array
+        ``[L]`` leaf node ids in particle order (``neighbor_list.leaf_indices``).
+    num_particles : int
+        ``N``. Static.
+
+    Returns
+    -------
+    Array
+        ``[N]`` the far force scale in tree (sorted) order, dtype of
+        ``total_far``; zero past the leaves.
+    """
+    total_far = jnp.asarray(total_far)
+    return _particles_from_node_totals_jit(
+        total_far,
+        jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE),
+        jnp.asarray(leaf_nodes, dtype=INDEX_DTYPE),
+        num_particles=int(num_particles),
+    ).astype(total_far.dtype)
+
+
+_particles_from_node_totals_jit = jax.jit(
+    _particles_from_node_totals, static_argnames=("num_particles",)
+)
 
 
 def node_force_scale_min(

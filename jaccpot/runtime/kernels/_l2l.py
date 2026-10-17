@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import time
 from functools import partial
-from typing import Optional
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -44,9 +44,11 @@ from jaccpot.operators.real_harmonics import (
 )
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
+from .._force_scale_levels import FarForceScaleInputs
 from ..dtypes import INDEX_DTYPE
 from ._downward_prep import (
     _FarPairCOO,
+    _m2l_csr_pallas_active,
     _prepare_solidfmm_downward_child_inputs,
     _prepare_solidfmm_downward_init,
     _prepare_solidfmm_downward_interaction_inputs,
@@ -142,6 +144,51 @@ def _l2l_level_compact_kwargs(
     return out
 
 
+def _far_force_scale_in_downward_available(
+    tree: Tree, *, total_nodes: int, cross_domain: bool = False
+) -> bool:
+    """Whether the downward sweep can sum ``dehnen_error``'s far force scale itself.
+
+    Eq (16b)'s far half (``f_b``) is each far pair's monopole term summed into
+    its target node, then pushed down to the leaves. The CSR M2L lanes kernel
+    sums the first per target row
+    (:class:`~jaccpot.runtime._force_scale_levels.FarForceScaleInputs`) and the
+    Pallas L2L cascade carries the second down its parent edges, in the launches
+    the sweep makes anyway. Anywhere else (the pure-JAX M2L or L2L loops, a
+    cross-domain list, a detail-diagnostic sweep that skips a stage) the caller
+    keeps :func:`~jaccpot.runtime._force_scale_levels.far_force_scale_sorted`.
+
+    Parameters
+    ----------
+    tree : Tree
+        The tree the sweep descends.
+    total_nodes : int
+        Node count (the level registry's key, as the sweep resolves it).
+    cross_domain : bool
+        Cross-domain sources ride behind the local nodes (the multi-GPU hook).
+
+    Returns
+    -------
+    bool
+        ``True`` when :func:`_prepare_solidfmm_downward_sweep` takes
+        ``force_scale``.
+    """
+    if cross_domain:
+        return False
+    mode = _normalize_strict_refresh_detail_diag_mode(
+        os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
+    )
+    if mode != "full" or not _m2l_csr_pallas_active():
+        return False
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    if num_internal <= 0:
+        return False
+    kw = _l2l_level_compact_kwargs(
+        tree, total_nodes=int(total_nodes), num_internal=num_internal
+    )
+    return "pallas_levels" in kw
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -169,7 +216,8 @@ def _propagate_solidfmm_locals_by_level(
     level_batch_width: Optional[int] = None,
     parent: Optional[Array] = None,
     pallas_levels: Optional[int] = None,
-) -> Array:
+    force_scale: Optional[Array] = None,
+) -> Union[Array, tuple[Array, Array]]:
     """Top-down, level-by-level L2L cascade over a binary tree.
 
     With ``nodes_by_level`` / ``level_offsets`` / ``level_batch_width`` the
@@ -228,14 +276,42 @@ def _propagate_solidfmm_locals_by_level(
     pallas_levels : Optional[int]
         Number of levels to run as one Pallas launch each. ``None`` keeps the
         pure-JAX loop.
+    force_scale : Optional[Array]
+        ``(total_nodes,)`` ``mac_type='dehnen_error'``'s own far force-scale term
+        per node (the CSR M2L lanes kernel's second output), carried down the
+        same parent edges by the Pallas cascade's launches
+        (:func:`~jaccpot.pallas.cascade_real_level.l2l_real_levels_fb_pallas_cvjp`).
+        Only that cascade carries it: the caller checks
+        :func:`_far_force_scale_in_downward_available` first.
 
     Returns
     -------
-    Array
-        ``(total_nodes, C)`` locals after the full root-to-leaf cascade.
+    Union[Array, tuple[Array, Array]]
+        ``(total_nodes, C)`` locals after the full root-to-leaf cascade; with
+        ``force_scale``, ``(locals, sums)``: every node's value plus all its
+        ancestors', as :func:`jaccpot.runtime._force_scale_levels.ancestor_sum_by_level`.
+
+    Raises
+    ------
+    ValueError
+        ``force_scale`` off the Pallas cascade.
     """
     num_internal = int(left_child.shape[0])
+    pallas_route = (
+        nodes_by_level is not None
+        and level_offsets is not None
+        and bool(level_batch_width)
+        and pallas_levels is not None
+        and parent is not None
+    )
+    if force_scale is not None and not pallas_route:
+        raise ValueError(
+            "the far force scale rides the Pallas L2L cascade only; check "
+            "_far_force_scale_in_downward_available() first"
+        )
     if num_internal <= 0:
+        if force_scale is not None:
+            return coeffs_local, force_scale
         return coeffs_local
 
     left_internal = left_child[:num_internal]
@@ -311,8 +387,28 @@ def _propagate_solidfmm_locals_by_level(
             # plan sub-10ms Phase 3: one Pallas launch per level, through the
             # custom_vjp seam (plan fast-gradients) so the reverse is the level
             # kernels' own adjoint rather than pallas_call's generic JVP rule
-            from jaccpot.pallas.cascade_real_level import l2l_real_levels_pallas_cvjp
+            from jaccpot.pallas.cascade_real_level import (
+                l2l_real_levels_fb_pallas_cvjp,
+                l2l_real_levels_pallas_cvjp,
+            )
 
+            if force_scale is not None:
+                return l2l_real_levels_fb_pallas_cvjp(
+                    coeffs_local,
+                    force_scale,
+                    centers,
+                    jnp.asarray(parent, dtype=left_internal.dtype),
+                    left_internal,
+                    right_internal,
+                    jnp.asarray(nodes_by_level, dtype=left_internal.dtype),
+                    jnp.asarray(level_offsets, dtype=left_internal.dtype),
+                    order,
+                    int(pallas_levels),
+                    int(level_batch_width),
+                    env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
+                    "triton",
+                    4,
+                )
             return l2l_real_levels_pallas_cvjp(
                 coeffs_local,
                 centers,
@@ -470,7 +566,8 @@ def _prepare_solidfmm_downward_sweep(
     separation_floor: float = 0.0,
     use_pallas: bool = False,
     timing_recorder: Optional[Callable[[str, float], None]] = None,
-) -> TreeDownwardData:
+    force_scale: Optional[FarForceScaleInputs] = None,
+) -> Union[TreeDownwardData, tuple[TreeDownwardData, Array]]:
     """Prepare M2L accumulation and the L2L cascade for the real locals.
 
     The returned value intentionally retains only the locals plus a minimal
@@ -535,17 +632,34 @@ def _prepare_solidfmm_downward_sweep(
         Per-stage timing sink. Passing one forces host synchronisation via
         ``block_until_ready``, so it changes timing behaviour and is for
         profiling only.
+    force_scale : Optional[FarForceScaleInputs]
+        ``mac_type='dehnen_error'``: also compute eq (16b)'s far force-scale term
+        of every node, its own far pairs' monopole terms plus its ancestors', in
+        the CSR M2L lanes kernel and the Pallas L2L cascade (no pass of its own).
+        Only where :func:`_far_force_scale_in_downward_available` holds.
 
     Returns
     -------
-    TreeDownwardData
-        Local expansions plus a minimal interaction handle.
+    Union[TreeDownwardData, tuple[TreeDownwardData, Array]]
+        Local expansions plus a minimal interaction handle; with ``force_scale``,
+        ``(downward, far term [total_nodes])``.
 
     Raises
     ------
     ValueError
-        If a chunk-size option is not positive.
+        If a chunk-size option is not positive, or ``force_scale`` is passed
+        where the sweep cannot compute it.
     """
+    if force_scale is not None and (
+        cross_multipoles is not None
+        or not _far_force_scale_in_downward_available(
+            tree, total_nodes=int(jnp.asarray(upward.multipoles.centers).shape[0])
+        )
+    ):
+        raise ValueError(
+            "the downward sweep cannot compute the far force scale here; check "
+            "_far_force_scale_in_downward_available() first"
+        )
 
     interaction_inputs = _prepare_solidfmm_downward_interaction_inputs(
         tree=tree,
@@ -592,10 +706,16 @@ def _prepare_solidfmm_downward_sweep(
             centers=centers,
             coefficients=locals_coeffs,
         )
-        return TreeDownwardData(
+        empty = TreeDownwardData(
             interactions=interactions,
             locals=empty_locals,
         )
+        if force_scale is not None:
+            # no far pair: no far term anywhere
+            return empty, jnp.zeros(
+                (total_nodes,), jnp.asarray(force_scale.node_mass).dtype
+            )
+        return empty
 
     detail_diag_mode = _normalize_strict_refresh_detail_diag_mode(
         os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
@@ -670,21 +790,41 @@ def _prepare_solidfmm_downward_sweep(
             n_targets = n_local_nodes
 
         stage_t0 = time.perf_counter()
-        locals_updated = _solidfmm_downward_accumulate_from_multipoles(
-            locals_coeffs,
-            multip_packed_kernel,
-            n_targets=n_targets,
-            centers=centers,
-            src=src,
-            tgt=tgt,
-            pair_count=pair_count,
-            active_pair_count=active_pair_count,
-            order=p,
-            total_nodes=total_nodes,
-            chunk_size=chunk_size,
-            m2l_impl=resolved_m2l_impl,
-            targets_sorted=targets_sorted,
-        )
+        if force_scale is not None:
+            locals_updated, force_scale_nodes = (
+                _solidfmm_downward_accumulate_from_multipoles(
+                    locals_coeffs,
+                    multip_packed_kernel,
+                    n_targets=n_targets,
+                    centers=centers,
+                    src=src,
+                    tgt=tgt,
+                    pair_count=pair_count,
+                    active_pair_count=active_pair_count,
+                    order=p,
+                    total_nodes=total_nodes,
+                    chunk_size=chunk_size,
+                    m2l_impl=resolved_m2l_impl,
+                    targets_sorted=targets_sorted,
+                    force_scale=force_scale,
+                )
+            )
+        else:
+            locals_updated = _solidfmm_downward_accumulate_from_multipoles(
+                locals_coeffs,
+                multip_packed_kernel,
+                n_targets=n_targets,
+                centers=centers,
+                src=src,
+                tgt=tgt,
+                pair_count=pair_count,
+                active_pair_count=active_pair_count,
+                order=p,
+                total_nodes=total_nodes,
+                chunk_size=chunk_size,
+                m2l_impl=resolved_m2l_impl,
+                targets_sorted=targets_sorted,
+            )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_m2l_compute_seconds",
             stage_t0,
@@ -720,21 +860,37 @@ def _prepare_solidfmm_downward_sweep(
                 node_levels_host[: child_inputs.num_internal_nodes].max()
             )
         stage_t0 = time.perf_counter()
-        locals_updated = _propagate_solidfmm_locals_by_level(
-            locals_updated,
-            centers,
-            left_child,
-            right_child,
-            node_levels,
-            order=p,
+        l2l_kwargs = _l2l_level_compact_kwargs(
+            tree,
             total_nodes=total_nodes,
-            num_levels=l2l_num_levels,
-            **_l2l_level_compact_kwargs(
-                tree,
-                total_nodes=total_nodes,
-                num_internal=child_inputs.num_internal_nodes,
-            ),
+            num_internal=child_inputs.num_internal_nodes,
         )
+        if force_scale is not None:
+            # the own far terms ride the same cascade down to the leaves
+            locals_updated, force_scale_nodes = _propagate_solidfmm_locals_by_level(
+                locals_updated,
+                centers,
+                left_child,
+                right_child,
+                node_levels,
+                order=p,
+                total_nodes=total_nodes,
+                num_levels=l2l_num_levels,
+                force_scale=force_scale_nodes,
+                **l2l_kwargs,
+            )
+        else:
+            locals_updated = _propagate_solidfmm_locals_by_level(
+                locals_updated,
+                centers,
+                left_child,
+                right_child,
+                node_levels,
+                order=p,
+                total_nodes=total_nodes,
+                num_levels=l2l_num_levels,
+                **l2l_kwargs,
+            )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_l2l_compute_seconds",
             stage_t0,
@@ -747,7 +903,10 @@ def _prepare_solidfmm_downward_sweep(
         coefficients=locals_updated,
     )
 
-    return TreeDownwardData(
+    downward = TreeDownwardData(
         interactions=interactions,
         locals=locals_after,
     )
+    if force_scale is not None:
+        return downward, force_scale_nodes
+    return downward
