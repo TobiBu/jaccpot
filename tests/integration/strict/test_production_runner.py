@@ -370,6 +370,9 @@ def test_the_diagnostics_leave_the_trajectory_alone(six_steps):
     assert last["energy_drift"] == (last["energy"] - e0) / abs(e0)
     # every edge after the first segment has its energy
     assert all(e.diagnostics["energy"] is not None for e in on.edges[1:])
+    # step 0's energy and the segments' run ONE executable (step 0's state arrives
+    # committed, the segments' do not: two compiles of ~50 s at 25M before)
+    assert [p._cache_size() for p in runner._energy_programs.values()] == [1]
 
 
 def test_donating_the_input_changes_no_number(six_steps):

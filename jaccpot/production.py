@@ -1450,6 +1450,10 @@ class ProductionRunner:
             program = jax.jit(energy)
             self._energy_programs[key] = program
         scale = handle.force_scale if prov.scale_carry else None
+        # one placement for every call: step 0's state comes committed (a host copy
+        # put back on the device), the segments' states do not, and jit compiles
+        # one executable per commitment -- a second ~50 s compile at 25M and 1e8
+        state = jax.device_put(state, masses.sharding)
         with _trace_state_kept(self.engine):
             out = program(state, masses, scale, external_params)
         w_self, w_ext, ok = jax.device_get(out)
