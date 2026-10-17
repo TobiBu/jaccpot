@@ -33,9 +33,11 @@ import numpy as np
 from jaxtyping import Array
 
 __all__ = [
+    "PreparedCaps",
     "PreparedShapeTemplate",
     "StrictParticleCarry",
     "external_field_key",
+    "host_copy",
     "materialize_template",
     "shape_template",
 ]
@@ -75,6 +77,57 @@ class PreparedShapeTemplate:
                 for x in self.leaves
             ),
         )
+
+
+@dataclasses.dataclass(frozen=True)
+class PreparedCaps:
+    """What the caps-only prepare leaves in place of a prepared state.
+
+    The particle carry reads four things from the eager prepare: the template's
+    SHAPES, the engine's trace-time state (validated walk caps, level registry,
+    depth bound), the initial capacity verdict and, under
+    ``mac_type='dehnen_error'``, the eq (16b) seed with the eager permutation. Its
+    start force comes from the start program. So the caps-only prepare
+    (``PrepareMixin.prepare_state_caps_only``) builds the tree and the upward pass
+    and runs the eager flat walk's ladder, and stops: no list, no M2L or L2L, no
+    near-field payload, no far f_b. The template is derived from a rebuild of
+    :attr:`stub` under ``jax.eval_shape``
+    (:meth:`~jaccpot.runtime.fused_provider.FusedForceProvider.prepare` with
+    ``caps_only=True``).
+
+    Attributes
+    ----------
+    stub : Any
+        A ``LargeNPreparedState`` holding the eager tree and the state's static
+        fields, nothing else: what a rebuild reads of a prepared state. Its tree's
+        ``particle_indices`` are the eager permutation the f_b seed is scattered
+        through.
+    walk : Any
+        The eager walk's ``_FlatWalkCaps``: the inputs of the verdict.
+    capacity_ok : Optional[bool]
+        The verdict the full prepare's state would get
+        (``capacity_guard.fused_state_capacity_ok``), set with the template;
+        ``None`` before.
+    shapes : Any
+        The rebuild's output under ``jax.eval_shape`` (a ``LargeNPreparedState``
+        of ``jax.ShapeDtypeStruct``) the template was taken from; ``None`` before.
+    """
+
+    stub: Any
+    walk: Any
+    capacity_ok: Optional[bool] = None
+    shapes: Any = None
+
+    @property
+    def tree(self) -> Any:
+        """The eager tree (the full prepare's ``prepared.tree``).
+
+        Returns
+        -------
+        Any
+            The stub's tree.
+        """
+        return self.stub.tree
 
 
 @dataclasses.dataclass(frozen=True)
@@ -219,3 +272,38 @@ def materialize_template(template: PreparedShapeTemplate) -> Any:
     return jax.tree_util.tree_unflatten(
         template.treedef, [_fill(x) for x in template.leaves]
     )
+
+
+def host_copy(state: Array) -> Any:
+    """A copy of a device state off the device, for a state about to be donated.
+
+    ``strict_run_v2(donate_state=True)`` hands its start state to the scan, and a
+    capacity retry re-runs the segment from this copy; the runner keeps step 0's
+    state this way for its energy when ``donate_input`` consumes it. On a GPU the
+    copy is an asynchronous ``device_put`` into pinned host memory: the call
+    returns at once, and a program that consumes ``state`` waits for the DMA (PjRt
+    orders a donation after the buffer's pending reads). 2.4 GB at 1e8 particles
+    on an A100: 0.10 s per copy (the run's first 1.4 s, the pinned allocation),
+    against 0.97-1.11 s for the synchronous ``device_get`` into pageable NumPy
+    memory it replaces -- the larger part of the runner's edge at 1e8. Elsewhere
+    that NumPy copy. ``jax.device_put(copy, sharding)`` restores either, bitwise.
+
+    Parameters
+    ----------
+    state : Array
+        The state, about to be donated.
+
+    Returns
+    -------
+    Any
+        A ``pinned_host`` array (GPU) or a NumPy array.
+    """
+    devices = list(state.devices())
+    pinned = all(
+        d.platform == "gpu"
+        and any(m.kind == "pinned_host" for m in d.addressable_memories())
+        for d in devices
+    )
+    if pinned:
+        return jax.device_put(state, state.sharding.with_memory_kind("pinned_host"))
+    return np.asarray(jax.device_get(state))

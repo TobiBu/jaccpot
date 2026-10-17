@@ -8,7 +8,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -53,14 +53,20 @@ from ._adaptive_policy import (
 from ._force_scale_levels import far_force_scale_sorted, node_force_scale_min_sorted
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
+    _CapsOnlyUnavailable,
     _DualTreeArtifacts,
+    _FlatWalkCaps,
     _interaction_cache_key,
     _InteractionCacheEntry,
     far_pair_targets,
     pair_policy_cache_identity,
 )
-from ._large_n_pipeline import can_use_large_n_prepare_path, prepare_large_n_state
-from ._large_n_types import LargeNPrepareRequest
+from ._large_n_pipeline import (
+    can_use_large_n_prepare_path,
+    prepare_large_n_state,
+    record_fused_nearfield_caps,
+)
+from ._large_n_types import LargeNPreparedState, LargeNPrepareRequest
 from ._level_shapes import level_width_overflow, widest_level
 from ._mac_geometry import (
     mac_geometry_mode,
@@ -1216,7 +1222,8 @@ class PrepareMixin(_EngineBase):
         suppress_host_side_effects: bool = False,
         retain_compact_far_pairs: bool = False,
         cross_far: Optional[tuple] = None,
-    ) -> _PrepareStateDualDownwardArtifacts:
+        caps_only: bool = False,
+    ) -> Union[_PrepareStateDualDownwardArtifacts, _FlatWalkCaps]:
         """Build/reuse interactions and prepare downward artifacts.
 
         Memory note:
@@ -1272,16 +1279,23 @@ class PrepareMixin(_EngineBase):
             multipoles and expansion centres, and the cross far pairs as indices into
             ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
             cascade serves both. ``None`` (default) is the single-domain lane.
+        caps_only : bool
+            The strict streamed fast path's eager walk only: its capacities are
+            recorded as always, no list, no downward pass
+            (:meth:`prepare_state_caps_only`).
 
         Returns
         -------
-        _PrepareStateDualDownwardArtifacts
-            Interactions plus downward artifacts for the prepared state.
+        Union[_PrepareStateDualDownwardArtifacts, _FlatWalkCaps]
+            Interactions plus downward artifacts for the prepared state; with
+            ``caps_only``, the walk's capacities.
 
         Raises
         ------
         ValueError
             If the resolved plan is internally inconsistent.
+        _CapsOnlyUnavailable
+            ``caps_only`` off the strict streamed flat walk.
         """
         suppress_host_side_effects = bool(suppress_host_side_effects)
         refresh_timing_active = bool(
@@ -1355,8 +1369,13 @@ class PrepareMixin(_EngineBase):
             allow_stateful_cache=allow_stateful_cache,
             suppress_host_side_effects=suppress_host_side_effects,
         )
+        if caps_only and not strict_streamed_fast_path:
+            raise _CapsOnlyUnavailable(
+                "the caps-only prepare needs the strict streamed fast path"
+            )
         if strict_streamed_fast_path:
             return self._prepare_state_dual_and_downward_strict_streamed_fast(
+                caps_only=caps_only,
                 cross_far=cross_far,
                 force_scale_nodes=force_scale_nodes,
                 walk_criterion_active=bool(use_paper_fixed_policy),
@@ -3003,7 +3022,8 @@ class PrepareMixin(_EngineBase):
         cross_far: Optional[tuple] = None,
         force_scale_nodes: Optional[Array] = None,
         walk_criterion_active: bool = False,
-    ) -> _PrepareStateDualDownwardArtifacts:
+        caps_only: bool = False,
+    ) -> Union[_PrepareStateDualDownwardArtifacts, _FlatWalkCaps]:
         """Strict static fast path with compact streamed far-pairs only.
 
         Parameters
@@ -3040,11 +3060,15 @@ class PrepareMixin(_EngineBase):
             ``mac_type='dehnen_error'``: accept far pairs by eq (16a) inside the
             flat walk (:class:`~jaccpot.runtime._walk_criterion.FlatWalkCriterion`)
             at threshold ``adaptive_eps * force_scale_nodes``.
+        caps_only : bool
+            Stop after the eager flat walk's ladder and capacity report: no list,
+            no far f_b, no M2L or L2L.
 
         Returns
         -------
-        _PrepareStateDualDownwardArtifacts
-            Dual/downward artifacts built by the strict streamed fast path.
+        Union[_PrepareStateDualDownwardArtifacts, _FlatWalkCaps]
+            Dual/downward artifacts built by the strict streamed fast path; with
+            ``caps_only``, the walk's capacities.
 
         Raises
         ------
@@ -3117,7 +3141,10 @@ class PrepareMixin(_EngineBase):
             policy_state=None,
             jit_traversal=True,
             timing_callback=None,
+            strict_caps_only=caps_only,
         )
+        if isinstance(dual_artifacts, _FlatWalkCaps):
+            return dual_artifacts
         (
             interactions,
             neighbor_list,
@@ -3695,30 +3722,320 @@ class PrepareMixin(_EngineBase):
         except Exception as exc:
             if not is_capacity_failure(exc):
                 raise
-            try:
-                num_particles = int(jnp.asarray(positions).shape[0])
-            except Exception:
-                num_particles = 0
-            traversal_config = None
-            try:
-                traversal_config = self._resolve_runtime_execution_overrides(
-                    num_particles=num_particles
-                ).traversal_config
-            except Exception:
-                pass
-            reraise_with_capacity_report(
-                exc,
-                num_particles=num_particles,
-                leaf_size=int(kwargs.get("leaf_size", 16)),
-                max_order=int(kwargs.get("max_order", 2)),
-                working_dtype=self.working_dtype,
-                preset=self.preset,
-                traversal_config=traversal_config,
-                nearfield_mode=str(self.nearfield_mode),
-                walk_caps=getattr(self, "_strict_fused_validated_caps", None),
-                num_leaves=getattr(self, "_tree_leaf_capacity", None),
-            )
+            self._reraise_prepare_capacity_failure(exc, positions, kwargs)
             raise  # pragma: no cover - reraise_with_capacity_report always raises
+
+    def _reraise_prepare_capacity_failure(
+        self, exc: BaseException, positions: Array, kwargs: dict
+    ) -> None:
+        """Re-raise a prepare's capacity failure with the configuration's report.
+
+        :meth:`prepare_state`'s (and :meth:`prepare_state_caps_only`'s) handler:
+        the statically-sized buffers largest-first, the knob that sizes each and a
+        configuration that would fit (:mod:`jaccpot.runtime.capacity_diagnostics`),
+        the original chained. ``reraise_with_capacity_report`` always raises.
+
+        Parameters
+        ----------
+        exc : BaseException
+            The capacity failure (``is_capacity_failure``).
+        positions : Array
+            The prepare's positions (their count sizes the report).
+        kwargs : dict
+            The prepare's keyword arguments.
+        """
+        try:
+            num_particles = int(jnp.asarray(positions).shape[0])
+        except Exception:
+            num_particles = 0
+        traversal_config = None
+        try:
+            traversal_config = self._resolve_runtime_execution_overrides(
+                num_particles=num_particles
+            ).traversal_config
+        except Exception:
+            pass
+        reraise_with_capacity_report(
+            exc,
+            num_particles=num_particles,
+            leaf_size=int(kwargs.get("leaf_size", 16)),
+            max_order=int(kwargs.get("max_order", 2)),
+            working_dtype=self.working_dtype,
+            preset=self.preset,
+            traversal_config=traversal_config,
+            nearfield_mode=str(self.nearfield_mode),
+            walk_caps=getattr(self, "_strict_fused_validated_caps", None),
+            num_leaves=getattr(self, "_tree_leaf_capacity", None),
+        )
+
+    def prepare_state_caps_only(
+        self,
+        positions: Array,
+        masses: Array,
+        **kwargs: Any,
+    ) -> Optional[Any]:
+        """The strict particle carry's prepare: what its scan reads, and no more.
+
+        ``strict_run_v2(carry="particles")`` needs from an eager prepare the
+        template's shapes, the engine's trace-time state (validated walk caps,
+        level registry, depth bound, the near-field stage's static caps), the
+        initial capacity verdict and, under ``mac_type='dehnen_error'``, the eq
+        (16b) seed with the eager permutation; its start force comes from its
+        start program. So this builds the tree and the upward pass, resolves the
+        seed when the criterion is on, runs the eager flat walk's ladder (which
+        records the caps) and stops before the lists are placed: no M2L or L2L,
+        no near-field payload, no far f_b. That list build was the eager
+        prepare's peak (~215 B per particle at 1.5-1.7e8,
+        ``docs/fused_memory_2026-10.md``).
+
+        A configuration whose walk is not the strict streamed flat walk (the dual
+        walk) builds its lists as it walks: it gets the full prepare, on the tree
+        already built.
+
+        Keyword arguments are :meth:`_prepare_state_caps_only_uncaught`'s;
+        capacity failures are reported as :meth:`prepare_state` reports them.
+
+        Parameters
+        ----------
+        positions : Array
+            ``[N, 3]`` positions.
+        masses : Array
+            ``[N]`` masses.
+        **kwargs : Any
+            Forwarded to :meth:`_prepare_state_caps_only_uncaught`.
+
+        Returns
+        -------
+        Optional[Any]
+            A :class:`~jaccpot.runtime.strict_carry.PreparedCaps`; the full
+            ``LargeNPreparedState`` off the flat walk; ``None`` where the fused
+            lane's prepare does not apply (traced positions, not the large-N
+            path) -- the caller prepares in full.
+
+        Raises
+        ------
+        Exception
+            Whatever the build raised, a capacity failure annotated.
+        """
+        try:
+            return self._prepare_state_caps_only_uncaught(positions, masses, **kwargs)
+        except Exception as exc:
+            if not is_capacity_failure(exc):
+                raise
+            self._reraise_prepare_capacity_failure(exc, positions, kwargs)
+            raise  # pragma: no cover - reraise_with_capacity_report always raises
+
+    def _prepare_state_caps_only_uncaught(
+        self,
+        positions: Array,
+        masses: Array,
+        *,
+        bounds: Optional[Tuple[Array, Array]] = None,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+        jit_tree: Optional[bool] = None,
+        runtime_overrides_override: Optional[_RuntimeExecutionOverrides] = None,
+    ) -> Optional[Any]:
+        """:meth:`prepare_state_caps_only` without the error annotation.
+
+        Every stage is the full fused prepare's own (``prepare_state(...,
+        fused_device_mode=True)`` on the large-N path), called with the same
+        arguments, up to the walk.
+
+        Parameters
+        ----------
+        positions : Array
+            ``[N, 3]`` positions.
+        masses : Array
+            ``[N]`` masses.
+        bounds : Optional[Tuple[Array, Array]]
+            Morton box; ``None`` infers it.
+        leaf_size : int
+            Requested particles per leaf.
+        max_order : int
+            Expansion order ``p``.
+        theta : Optional[float]
+            Opening angle; ``None`` takes the solver's.
+        jit_tree : Optional[bool]
+            Whether the tree build runs jitted.
+        runtime_overrides_override : Optional[_RuntimeExecutionOverrides]
+            Resolved runtime overrides; ``None`` resolves them for ``N``.
+
+        Returns
+        -------
+        Optional[Any]
+            As :meth:`prepare_state_caps_only`.
+
+        Raises
+        ------
+        RuntimeError
+            Under the Dehnen criterion when no force scale resolves (as the full
+            prepare).
+        """
+        from .strict_carry import PreparedCaps
+
+        self._validate_prepare_state_request(
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+        )
+        positions_arr, masses_arr, input_dtype = self._prepare_state_input_arrays(
+            positions,
+            masses,
+        )
+        if _contains_tracer((positions_arr, masses_arr)):
+            return None  # the walk's caps are measured eagerly
+        n = int(positions_arr.shape[0])
+        runtime_overrides = runtime_overrides_override
+        if runtime_overrides is None:
+            runtime_overrides = self._resolve_runtime_execution_overrides(
+                num_particles=n
+            )
+        refine_local_val = self.refine_local
+        if runtime_overrides.refine_local_override is not None:
+            refine_local_val = bool(runtime_overrides.refine_local_override)
+        theta_val = float(self.theta if theta is None else theta)
+        if not can_use_large_n_prepare_path(
+            self,
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            allow_stateful_cache=True,
+        ):
+            return None
+        collected_retries: list[DualTreeRetryEvent] = []
+
+        def record_retry(event: DualTreeRetryEvent) -> None:
+            collected_retries.append(event)
+            if self.interaction_retry_logger is not None:
+                self.interaction_retry_logger(event)
+
+        request = LargeNPrepareRequest(
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta_val=theta_val,
+            mac_type_val=self._base_mac_type(),
+            refine_local_val=refine_local_val,
+            max_refine_levels_val=self.max_refine_levels,
+            aspect_threshold_val=self.aspect_threshold,
+            jit_tree_override=jit_tree,
+            allow_stateful_cache=True,
+            runtime_traversal_config=runtime_overrides.traversal_config,
+            runtime_m2l_chunk_size=runtime_overrides.m2l_chunk_size,
+            runtime_l2l_chunk_size=runtime_overrides.l2l_chunk_size,
+            upward_center_mode=runtime_overrides.center_mode,
+            record_retry=record_retry,
+            collected_retries=collected_retries,
+        )
+        build = dict(
+            refine_local_val=request.refine_local_val,
+            max_refine_levels_val=request.max_refine_levels_val,
+            aspect_threshold_val=request.aspect_threshold_val,
+        )
+        tree_artifacts = self._prepare_state_tree_and_upward(
+            positions_arr=positions_arr,
+            masses_arr=masses_arr,
+            bounds=bounds,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            jit_tree_override=jit_tree,
+            upward_center_mode=request.upward_center_mode,
+            allow_stateful_cache=True,
+            **build,
+        )
+        chunks = dict(
+            runtime_traversal_config=request.runtime_traversal_config,
+            runtime_m2l_chunk_size=request.runtime_m2l_chunk_size,
+            runtime_l2l_chunk_size=request.runtime_l2l_chunk_size,
+            record_retry=record_retry,
+        )
+        force_scale_nodes = None
+        if self._uses_paper_style_force_scale():
+            # the fused lane's eq (16b) seed (`_fused_force_scale_seed`, which
+            # also leaves the per-particle f_b the first refresh starts from)
+            force_scale_nodes = self._resolve_force_scale_nodes_for_prepare(
+                tree_artifacts=tree_artifacts,
+                supplied_force_scale=None,
+                fused_seed=True,
+                positions_arr=positions_arr,
+                masses_arr=masses_arr,
+                bounds=bounds,
+                leaf_size=int(leaf_size),
+                max_order=int(max_order),
+                jit_tree=jit_tree,
+                upward_center_mode=request.upward_center_mode,
+                **chunks,
+                **build,
+            )
+            if force_scale_nodes is None:
+                raise RuntimeError(
+                    "the large-N lane was asked to run the Dehnen paper MAC but "
+                    "no per-node force scale could be resolved"
+                )
+        try:
+            walk = self._prepare_state_dual_and_downward(
+                tree_artifacts=tree_artifacts,
+                force_scale_nodes=force_scale_nodes,
+                upward_center_mode=request.upward_center_mode,
+                theta_val=theta_val,
+                mac_type_val=request.mac_type_val,
+                dehnen_radius_scale=self.dehnen_radius_scale,
+                allow_stateful_cache=True,
+                caps_only=True,
+                **chunks,
+                **build,
+            )
+        except _CapsOnlyUnavailable:
+            # a walk that builds its lists as it goes: the full prepare
+            return prepare_large_n_state(
+                self,
+                positions_arr=positions_arr,
+                masses_arr=masses_arr,
+                input_dtype=input_dtype,
+                request=request,
+                tree_artifacts=tree_artifacts,
+                supplied_force_scale=force_scale_nodes,
+                fused_device_mode=True,
+            )
+        assert isinstance(walk, _FlatWalkCaps)
+        self._recent_retry_events = tuple(collected_retries)
+        # what the full prepare's near-field stage would leave on the engine
+        record_fused_nearfield_caps(
+            self,
+            num_particles=n,
+            num_leaves=int(walk.num_leaves),
+            leaf_cap=int(tree_artifacts.leaf_cap),
+            max_leaf_neighbors=int(walk.max_leaf_neighbors),
+        )
+        # what a rebuild reads of a prepared state: the tree and the static fields
+        stub = LargeNPreparedState(
+            tree=tree_artifacts.tree,
+            local_data=None,
+            neighbor_list=None,
+            nearfield_leaf_particle_indices=None,
+            nearfield_leaf_particle_mask=None,
+            nearfield_target_leaf_ids=None,
+            nearfield_source_leaf_ids=None,
+            nearfield_valid_pairs=None,
+            nearfield_chunk_sort_indices=None,
+            nearfield_chunk_group_ids=None,
+            nearfield_chunk_unique_indices=None,
+            nearfield_target_block_leaf_ids=None,
+            nearfield_target_block_source_leaf_ids=None,
+            nearfield_target_block_valid_mask=None,
+            nearfield_target_block_offsets=None,
+            nearfield_target_block_source_leaf_ids_padded=None,
+            nearfield_target_block_valid_mask_padded=None,
+            nearfield_target_block_size=0,
+            max_leaf_size=int(tree_artifacts.leaf_cap),
+            local_order=int(max_order),
+            input_dtype=jnp.dtype(input_dtype),
+            working_dtype=jnp.dtype(positions_arr.dtype),
+            theta=theta_val,
+            topology_key=tree_artifacts.topology_key,
+            retry_events=tuple(collected_retries),
+        )
+        return PreparedCaps(stub=stub, walk=walk)
 
     def _prepare_state_uncaught(
         self,

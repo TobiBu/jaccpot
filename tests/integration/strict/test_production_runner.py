@@ -155,6 +155,38 @@ def nfw_halo_params(state_rows, params):
     return -params["m"] * coeff[:, None] * pos
 
 
+def nfw_potential_params(state_rows, params):
+    """The halo's potential per unit mass, ``-m log(1 + r / rs) / r`` (Odisseo's
+    ``potentials.NFW``), the field's partner for the energy diagnostic."""
+    pos = state_rows[:, 0, :]
+    r = jnp.sqrt(jnp.maximum(jnp.sum(pos * pos, axis=1), 1e-30))
+    x = r / params["rs"]
+    log1p_over_x = jnp.where(
+        x < 1e-3, 1.0 - 0.5 * x + x * x / 3.0, jnp.log1p(x) / jnp.maximum(x, 1e-30)
+    )
+    return -params["m"] / params["rs"] * log1p_over_x
+
+
+def _direct_energy(state, masses, *, halo=None):
+    """fp64 ``(K, 1/2 sum m phi, sum m Phi_halo)`` of a packed state, with the
+    test solver's pair kernel (the library default)."""
+    from jaccpot.softening import resolve_softening_kernel
+    from tests.integration.strict.test_fused_potential import direct_potential
+
+    s = np.asarray(state, np.float64)
+    m = np.asarray(masses, np.float64)
+    kinetic = 0.5 * np.sum(m * np.sum(s[:, 1] ** 2, axis=1))
+    kernel = resolve_softening_kernel(None)
+    w_self = 0.5 * np.sum(
+        m * direct_potential(s[:, 0], m, kernel=kernel, softening=SOFTENING)
+    )
+    w_ext = 0.0
+    if halo is not None:
+        r = np.linalg.norm(s[:, 0], axis=1)
+        w_ext = np.sum(m * -halo["m"] * np.log1p(r / halo["rs"]) / r)
+    return kinetic, w_self, w_ext
+
+
 def _one_call(steps, *, external=None, external_params=None, traced=False):
     """``strict_run_v2`` once for all ``steps``: the reference of every gate."""
     from jaccpot import ForceParams
@@ -260,14 +292,32 @@ def test_an_external_field_crosses_the_segment_edges(form):
         traced=form == "traced_params",
     )
     state, masses = _system()
+    traced = form == "traced_params"
+    # the traced form with the energy at every edge, the halo's potential included
+    # (S3 R4 with a field): the trajectory stays the one call's
     res = _runner(
         SegmentConfig(
-            steps=2, traced_params=form == "traced_params", diagnostics_every=0
+            steps=2,
+            traced_params=traced,
+            diagnostics_every=int(traced),
+            diagnostics_every_energy=1,
         ),
         external_acceleration_fn=field,
+        external_potential_fn=nfw_potential_params if traced else None,
     ).run(state, masses, dt=DT, num_steps=6, external_params=params)
     assert np.array_equal(np.asarray(res.state), ref_state)
     assert res.handle.acceleration is not None
+    if traced:
+        last = res.edges[-1].diagnostics
+        kinetic, w_self, w_ext = _direct_energy(res.state, masses, halo=params)
+        assert last["energy_ok"]
+        assert last["potential_external"] == pytest.approx(w_ext, rel=1e-6)
+        assert last["potential_self"] == pytest.approx(w_self, rel=1e-3)
+        e0 = res.baselines["energy"]
+        assert e0 == pytest.approx(
+            sum(_direct_energy(state, masses, halo=params)), rel=1e-3
+        )
+        assert last["energy_drift"] == (last["energy"] - e0) / abs(e0)
 
 
 def test_the_traced_runner_is_the_traced_call():
@@ -285,14 +335,15 @@ def test_the_traced_runner_is_the_traced_call():
 
 
 def test_the_diagnostics_leave_the_trajectory_alone(six_steps):
-    """R4: with diagnostics at every edge the states are those without (the long
-    call's, as R1's runner without them), and their numbers are the fp64 moments
-    of the edge's state against step 0's."""
+    """R4: with diagnostics -- the energy too -- at every edge the states are those
+    without (the long call's, as R1's runner without them), with the same two scan
+    programs, and their numbers are the fp64 moments of the edge's state against
+    step 0's and the energy ``K + 1/2 sum m phi`` against the direct sum's."""
     state, masses = _system()
-    on = _runner(_static(steps=2, diagnostics_every=1)).run(
-        state, masses, dt=DT, num_steps=6
-    )
+    runner = _runner(_static(steps=2, diagnostics_every=1, diagnostics_every_energy=1))
+    on = runner.run(state, masses, dt=DT, num_steps=6)
     assert np.array_equal(np.asarray(on.state), six_steps[0])
+    assert len(_particle_runners(runner)) == 2  # as R1's 3 x 2 without diagnostics
     first, last = on.edges[0].diagnostics, on.edges[-1].diagnostics
     x = np.asarray(state, np.float64)
     m = np.asarray(masses, np.float64)
@@ -306,8 +357,22 @@ def test_the_diagnostics_leave_the_trajectory_alone(six_steps):
     pf = (m[:, None] * xf[:, 1]).sum(0)
     np.testing.assert_allclose(last["momentum"], pf, rtol=1e-12, atol=1e-12)
     assert 0.0 < last["momentum_drift"] < 1e-3
-    # energy needs the fast-lane potential (S3 session 2)
+    # step 0's energy needs the first segment's provider: the baseline, not its row
     assert first["energy"] is None
+    k0, w0, _ = _direct_energy(state, masses)
+    assert on.baselines["kinetic"] == pytest.approx(k0, rel=1e-12)
+    assert on.baselines["potential"] == pytest.approx(w0, rel=1e-3)
+    kinetic, w_self, _ = _direct_energy(on.state, masses)
+    assert last["energy_ok"] and last["potential_external"] == 0.0
+    assert last["potential_self"] == pytest.approx(w_self, rel=1e-3)
+    assert last["energy"] == pytest.approx(kinetic + w_self, rel=1e-3)
+    e0 = on.baselines["energy"]
+    assert last["energy_drift"] == (last["energy"] - e0) / abs(e0)
+    # every edge after the first segment has its energy
+    assert all(e.diagnostics["energy"] is not None for e in on.edges[1:])
+    # step 0's energy and the segments' run ONE executable (step 0's state arrives
+    # committed, the segments' do not: two compiles of ~50 s at 25M before)
+    assert [p._cache_size() for p in runner._energy_programs.values()] == [1]
 
 
 def test_donating_the_input_changes_no_number(six_steps):
@@ -435,15 +500,22 @@ def _restart_solver(variant):
 
 
 def _restart_runner(variant, **segment):
-    """The variant's runner: 2-step segments, diagnostics every edge."""
+    """The variant's runner: 2-step segments, diagnostics every edge; the energy
+    (step 0's after the first segment, then every third edge) in the external
+    variant only, with the halo's potential (each energy program is a compile)."""
+    external = variant == "external"
     config = SegmentConfig(
-        steps=2, traced_params=variant in ("external", "traced"), **segment
+        steps=2,
+        traced_params=variant in ("external", "traced"),
+        diagnostics_every_energy=3 if external else 0,
+        **segment,
     )
     return ProductionRunner(
         _restart_solver(variant),
         settings=SETTINGS,
         segment=config,
-        external_acceleration_fn=nfw_halo_params if variant == "external" else None,
+        external_acceleration_fn=nfw_halo_params if external else None,
+        external_potential_fn=nfw_potential_params if external else None,
     )
 
 
@@ -471,6 +543,7 @@ def _resume(variant, path, out):
         state=np.asarray(res.state),
         self_acceleration=np.asarray(res.handle.self_acceleration),
         steps=np.asarray([e.step for e in res.edges]),
+        diagnostics=np.asarray(json.dumps(res.edges[-1].diagnostics)),
         restored=np.asarray(json.dumps(res.restored)),
         warned=np.asarray(json.dumps([str(w.message) for w in caught])),
     )
@@ -520,6 +593,13 @@ def test_a_restart_in_a_fresh_process_continues_bitwise(variant, tmp_path, monke
         assert np.array_equal(
             got["self_acceleration"], np.asarray(straight.handle.self_acceleration)
         )
+        if variant == "external":
+            # the energy too: E0 from the file, E from the restored provider
+            last = json.loads(str(got["diagnostics"]))
+            ref = straight.edges[-1].diagnostics
+            assert last["energy"] is not None and last["energy_ok"]
+            assert last["energy"] == ref["energy"]
+            assert last["energy_drift"] == ref["energy_drift"]
 
 
 def test_a_restore_says_when_it_cannot_be_bitwise(tmp_path):

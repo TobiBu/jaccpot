@@ -44,7 +44,7 @@ cleanup (X5).
 from __future__ import annotations
 
 import functools
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -52,7 +52,7 @@ from beartype import beartype
 from jax import lax
 from jaxtyping import Array, Bool, Float, Int, jaxtyped
 
-from jaccpot._env import env_int, env_text
+from jaccpot._env import env_flag, env_int, env_text
 from jaccpot._searchsorted import searchsorted_method
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import (
@@ -151,6 +151,200 @@ def _force_scale_term(
     d2 = r_sq + eps_sq
     ok = active & (d2 > 0.0)
     return jnp.where(ok, mass / jnp.where(ok, d2, 1.0), 0.0)
+
+
+#: A source leaf takes the Newtonian factors only when its box's squared gap to the
+#: target leaf's box is at least this many ``h^2``. The gap bounds every pair's
+#: separation from below up to the few roundings of a 3-term sum of squares (a
+#: relative 4e-7), so the margin keeps every pair's clipped ``c`` at exactly 1.
+_BEYOND_SUPPORT_MARGIN = 1.0 + 2.0**-12
+
+
+def _ferrers3_newton_factors(
+    r_sq: Array,
+    active: Array,
+    params: Any,
+    kernel: str,
+    *,
+    potential: bool = False,
+) -> tuple[Array, Optional[Array], None]:
+    """:func:`masked_pair_factors`' ``"ferrers3"`` values on pairs beyond the support.
+
+    Past the support the clipped ``c = min(r^2 / h^2, 1)`` is exactly ``1``, so
+    :func:`jaccpot.softening.pair_factors` returns ``(1 + 0 R(c)) s^3 = s^3`` and
+    ``s`` with ``s = rsqrt(max(r^2, h^2))``. This computes those, op for op, without
+    the polynomials: on pairs whose ``fl(r^2 / h^2)`` is at least ``1`` the values
+    are the polynomial's, bit for bit. The caller guarantees that
+    (:func:`_beyond_support`).
+
+    Parameters
+    ----------
+    r_sq : Array
+        Squared separations, softening NOT added.
+    active : Array
+        Live pairs, broadcastable to ``r_sq``.
+    params : Any
+        ``(h^2, 1/h^2)`` (:func:`jaccpot.softening.softening_params_from_sq`).
+    kernel : str
+        ``"ferrers3"`` (the signature is :func:`masked_pair_factors`').
+    potential : bool
+        Also return the potential factor. Static.
+
+    Returns
+    -------
+    tuple[Array, Optional[Array], None]
+        ``(g, psi or None, None)``, zero on inactive pairs.
+
+    Raises
+    ------
+    ValueError
+        For any other kernel (Wendland's ``c`` goes through a square root).
+    """
+    if kernel != "ferrers3":
+        raise ValueError(f"the tile skip is ferrers3's; got {kernel!r}")
+    safe = jnp.where(active, r_sq, 1.0)
+    s = lax.rsqrt(jnp.maximum(safe, params[0]))
+    g = jnp.where(active, s * s * s, 0.0)
+    return g, (jnp.where(active, s, 0.0) if potential else None), None
+
+
+def _leaf_box_kernel(
+    pm_ref: KernelRef,
+    start_ref: KernelRef,
+    count_ref: KernelRef,
+    box_ref: KernelRef,
+    *,
+    lanes: int,
+) -> None:
+    """Each leaf's bounding box: ``B`` leaves per program, ``lanes`` particles a step.
+
+    Parameters
+    ----------
+    pm_ref : KernelRef
+        ``(N + pad, 4)`` sorted x, y, z, mass.
+    start_ref : KernelRef
+        ``(B,)`` block of first particles.
+    count_ref : KernelRef
+        ``(B,)`` block of particle counts (``0``: an empty box).
+    box_ref : KernelRef
+        ``(B, 8)`` output block: ``lo_x, hi_x, lo_y, hi_y, lo_z, hi_z, 0, 0``.
+    lanes : int
+        Particles per leaf per step (a power of two). Static.
+
+    Returns
+    -------
+    None
+        Writes the output block.
+    """
+    start = start_ref[...]
+    count = count_ref[...]
+    lane = lax.broadcasted_iota(start.dtype, (start.shape[0], lanes), 1)
+
+    def body(t: Array, acc: tuple) -> tuple:
+        off = t * lanes + lane
+        valid = off < count[:, None]
+        idx = jnp.where(valid, start[:, None] + off, 0)
+        out = []
+        for k in range(3):
+            p = pm_ref[idx, k]
+            lo = jnp.min(jnp.where(valid, p, jnp.inf), axis=1)
+            hi = jnp.max(jnp.where(valid, p, -jnp.inf), axis=1)
+            out += [jnp.minimum(acc[2 * k], lo), jnp.maximum(acc[2 * k + 1], hi)]
+        return tuple(out)
+
+    trips = (jnp.max(count) + (lanes - 1)) // lanes
+    init = tuple(
+        jnp.full(start.shape, v, pm_ref.dtype) for v in (jnp.inf, -jnp.inf) * 3
+    )
+    acc = lax.fori_loop(0, trips, body, init)
+    for k in range(6):
+        box_ref[:, k] = acc[k]
+    for k in range(6, 8):
+        box_ref[:, k] = jnp.zeros(start.shape, pm_ref.dtype)
+
+
+def _leaf_boxes(
+    pm: Array, leaf_start: Array, leaf_count: Array, *, interpret: bool
+) -> Array:
+    """Per-leaf bounding boxes for the tile skip, ``(L', 8)`` with ``L' >= L``.
+
+    One more read of the particles; 32 B per leaf.
+
+    Parameters
+    ----------
+    pm : Array
+        ``(N + pad, 4)`` sorted x, y, z, mass.
+    leaf_start : Array
+        ``(L,)`` int32 first particle per leaf.
+    leaf_count : Array
+        ``(L,)`` int32 particles per leaf.
+    interpret : bool
+        Pallas interpret mode.
+
+    Returns
+    -------
+    Array
+        Rows ``lo_x, hi_x, lo_y, hi_y, lo_z, hi_z, 0, 0``; an empty leaf's box is
+        ``(inf, -inf)`` on every axis.
+    """
+    block, lanes = 128, 8
+    L = int(leaf_start.shape[0])
+    Lp = -(-L // block) * block
+    start = jnp.pad(leaf_start, (0, Lp - L))
+    count = jnp.pad(leaf_count, (0, Lp - L))
+
+    def _full(arr: Array) -> Any:
+        shp = tuple(arr.shape)
+        return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
+
+    return pl.pallas_call(
+        functools.partial(_leaf_box_kernel, lanes=lanes),
+        grid=(Lp // block,),
+        in_specs=[
+            _full(pm),
+            pl.BlockSpec((block,), lambda i: (i,)),
+            pl.BlockSpec((block,), lambda i: (i,)),
+        ],
+        out_specs=pl.BlockSpec((block, 8), lambda i: (i, 0)),
+        out_shape=jax.ShapeDtypeStruct((Lp, 8), pm.dtype),
+        compiler_params=plgpu.CompilerParams(num_warps=4, num_stages=1),
+        interpret=bool(interpret),
+        name=f"nearfield_leaf_boxes_b{block}_k{lanes}",
+    )(pm, start, count)
+
+
+def _beyond_support(
+    box_ref: Union[KernelRef, Array], sid: Union[int, Array], t_box: tuple, p1: Array
+) -> Array:
+    """Whether every particle of leaf ``sid`` lies beyond the support of ``t_box``.
+
+    For a target in the box, ``|fl(t - s)| >= max(fl(lo_s - hi_t), fl(lo_t - hi_s),
+    0)`` on each axis (rounding is monotone), so every pair's squared separation is
+    at least the boxes' squared gap, up to the roundings of the two sums of squares
+    (:data:`_BEYOND_SUPPORT_MARGIN`).
+
+    Parameters
+    ----------
+    box_ref : Union[KernelRef, Array]
+        The per-leaf boxes (:func:`_leaf_boxes`): the kernel's ref, or the array.
+    sid : Union[int, Array]
+        Source leaf (scalar).
+    t_box : tuple
+        ``((lo, hi),) * 3`` of the target leaf (scalars).
+    p1 : Array
+        ``1 / h^2``.
+
+    Returns
+    -------
+    Array
+        Scalar bool.
+    """
+    gap_sq = None
+    for k, (t_lo, t_hi) in enumerate(t_box):
+        s_lo, s_hi = box_ref[sid, 2 * k], box_ref[sid, 2 * k + 1]
+        g = jnp.maximum(jnp.maximum(s_lo - t_hi, t_lo - s_hi), 0.0)
+        gap_sq = g * g if gap_sq is None else gap_sq + g * g
+    return gap_sq * p1 >= _BEYOND_SUPPORT_MARGIN
 
 
 def leafpair_chunk_capacity(edge_capacity: int, num_leaves: int, chunk: int) -> int:
@@ -654,6 +848,7 @@ def _nearfield_leafpair_csr_sorted_kernel(
     source_flags: str = "",
     softening_kernel: str = "plummer",
     fourth: str = "potential",
+    tile_skip: bool = False,
 ) -> None:
     """:func:`_nearfield_leafpair_csr_kernel` reading the SORTED particle array.
 
@@ -734,12 +929,22 @@ def _nearfield_leafpair_csr_sorted_kernel(
         What the fourth output lane holds when ``num_out == 4``: ``"potential"``
         (``-G m psi``) or ``"force_scale"`` (eq (16b)'s ``G m / (r^2 + eps^2)``,
         self excluded, see :func:`_force_scale_term`). Static.
+    tile_skip : bool
+        With a source tile and ``"ferrers3"``: a source range whose leaves all lie
+        beyond the support of the target leaf (:func:`_beyond_support`, on the
+        boxes of :func:`_leaf_boxes`, the first of ``out_refs`` then) takes the
+        Newtonian factors instead of the polynomial
+        (:func:`_ferrers3_newton_factors`: the same bits). Static.
 
     Returns
     -------
     None
         The result is the write to ``out_refs``.
     """
+    skip_beyond = bool(tile_skip and source_tile and softening_kernel == "ferrers3")
+    box_ref = None
+    if skip_beyond:
+        box_ref, *out_refs = out_refs
     c = pl.program_id(0)
     sub = pl.program_id(1)
     bt = int(subtile)
@@ -817,10 +1022,18 @@ def _nearfield_leafpair_csr_sorted_kernel(
             s_lane = lax.broadcasted_iota(jnp.int32, (bs,), 0)
             acc2d = "a" in source_flags
             lean = "l" in source_flags
+            if skip_beyond:
+                # the target leaf's box, once per program
+                t_box = tuple(
+                    (box_ref[tl_safe, 2 * k], box_ref[tl_safe, 2 * k + 1])
+                    for k in range(3)
+                )
             if acc2d:
                 acc0 = tuple(jnp.zeros((bt, bs), tx.dtype) for _ in range(num_out))
 
-            def _leaf_pass(sid, acc, exclude_lane=None, rng=None):  # noqa: F811
+            def _leaf_pass(  # noqa: F811
+                sid, acc, exclude_lane=None, rng=None, beyond=None
+            ):
                 # Bs sources per iteration, read as vectors. A tile may run past
                 # the range (into the next leaf's particles or the table's zero
                 # padding, never past it: the table holds Wpad >= Bs extra rows);
@@ -850,13 +1063,33 @@ def _nearfield_leafpair_csr_sorted_kernel(
                         # are masked; its potential's diagonal is excluded below
                         j2 = j[None, :]
                         active = tvalid[:, None] & (j2 < scount)
-                        g_k, psi_k, _ = masked_pair_factors(
-                            r_sq,
-                            active,
-                            soft_params,
-                            softening_kernel,
-                            potential=num_out == 4 and fourth == "potential",
-                        )
+                        want_psi = num_out == 4 and fourth == "potential"
+
+                        def _factors(fn):
+                            def _call(r):
+                                g, psi, _ = fn(
+                                    r,
+                                    active,
+                                    soft_params,
+                                    softening_kernel,
+                                    potential=want_psi,
+                                )
+                                return g, psi
+
+                            return _call
+
+                        if beyond is None:
+                            g_k, psi_k = _factors(masked_pair_factors)(r_sq)
+                        else:
+                            # the range's leaves all beyond the support of the
+                            # target leaf (_beyond_support): the Newtonian factors,
+                            # the same bits; a uniform branch, decided per range
+                            g_k, psi_k = lax.cond(
+                                beyond,
+                                _factors(_ferrers3_newton_factors),
+                                _factors(masked_pair_factors),
+                                r_sq,
+                            )
                         gm = -g_value * sm[None, :]
                         scale = g_k * gm
                         terms = (scale * dx, scale * dy, scale * dz)
@@ -931,36 +1164,46 @@ def _nearfield_leafpair_csr_sorted_kernel(
             def _range_of(s):
                 e = jnp.clip(start + s, 0, last_entry)
                 sid = neighbors_ref[e]
-                return leaf_start_ref[sid], leaf_count_ref[sid]
+                rng = (leaf_start_ref[sid], leaf_count_ref[sid])
+                if skip_beyond:
+                    rng = rng + (_beyond_support(box_ref, sid, t_box, soft_params[1]),)
+                return rng
 
             # Runs: a row lists leaves in Morton order, and neighbouring leaves
             # are often adjacent particle ranges. Consecutive entries whose
             # ranges touch are one range, run in full tiles; a range is
-            # summed when the next entry does not continue it.
+            # summed when the next entry does not continue it. (With the tile
+            # skip, a run is beyond the support when all its leaves are.)
             def _slot_body(s, carry):
-                acc, rs, rl, cur = carry
-                ss, sc = cur
+                acc, rs, rl, rb, cur = carry
+                ss, sc = cur[:2]
                 nxt = _range_of(jnp.minimum(s + 1, cnt - 1))
                 joins = ss == rs + rl
                 acc = lax.cond(
                     joins,
                     lambda a: a,
-                    lambda a: _leaf_pass(None, a, rng=(rs, rl)),
+                    lambda a: _leaf_pass(None, a, rng=(rs, rl), beyond=rb),
                     acc,
                 )
                 rs = jnp.where(joins, rs, ss)
                 rl = jnp.where(joins, rl + sc, sc)
-                return acc, rs, rl, nxt
+                if skip_beyond:
+                    rb = jnp.where(joins, rb & cur[2], cur[2])
+                return acc, rs, rl, rb, nxt
 
             zero_i = jnp.zeros((), tcount.dtype)
-            acc, rs, rl, _ = lax.fori_loop(
-                0, cnt, _slot_body, (acc0, zero_i, zero_i, _range_of(0))
+            rb0 = jnp.asarray(True) if skip_beyond else None
+            acc, rs, rl, rb, _ = lax.fori_loop(
+                0, cnt, _slot_body, (acc0, zero_i, zero_i, rb0, _range_of(0))
             )
-            acc = _leaf_pass(None, acc, rng=(rs, rl))
+            acc = _leaf_pass(None, acc, rng=(rs, rl), beyond=rb)
         else:
 
             def _slot_body(s, acc):
                 sid = neighbors_ref[start + s]
+                if skip_beyond:
+                    beyond = _beyond_support(box_ref, sid, t_box, soft_params[1])
+                    return _leaf_pass(sid, acc, beyond=beyond)
                 return _leaf_pass(sid, acc)
 
             acc = lax.fori_loop(0, cnt, _slot_body, acc0)
@@ -1017,6 +1260,8 @@ def _sorted_pallas_call(
     outs_in: Optional[list] = None,
     softening_kernel: str = "plummer",
     fourth: str = "potential",
+    tile_skip: bool = False,
+    boxes: Optional[Array] = None,
 ) -> Any:
     """One launch of :func:`_nearfield_leafpair_csr_sorted_kernel` over ``chunk_leaf``.
 
@@ -1077,6 +1322,10 @@ def _sorted_pallas_call(
         The pair kernel, static.
     fourth : str
         The fourth lane's content (``"potential"`` / ``"force_scale"``), static.
+    tile_skip : bool
+        The kernel's tile skip (``"ferrers3"`` with a source tile), static.
+    boxes : Optional[Array]
+        With ``tile_skip``: the per-leaf boxes (:func:`_leaf_boxes`).
 
     Returns
     -------
@@ -1098,6 +1347,7 @@ def _sorted_pallas_call(
             source_flags=source_flags,
             softening_kernel=softening_kernel,
             fourth=fourth,
+            tile_skip=tile_skip,
         )
 
     def _full(arr: Array) -> pl.BlockSpec:
@@ -1120,6 +1370,10 @@ def _sorted_pallas_call(
         pl.BlockSpec((2,), lambda c, sub: (0,)),
         pl.BlockSpec((1,), lambda c, sub: (0,)),
     ]
+    if boxes is not None:
+        # the kernel's first ref after g_ref (see its tile_skip)
+        operands.append(boxes)
+        in_specs.append(_full(boxes))
     extra: dict[str, Any] = {}
     if direct:
         zeros = (
@@ -1234,6 +1488,21 @@ DIRECT_SOURCE_TILE = 8
 DIRECT_SOURCE_FLAGS = "alr"
 DIRECT_TILED_TARGET_SUBTILE = 16
 
+#: The tile skip: the direct near field takes the Newtonian factors instead of the
+#: ``"ferrers3"`` polynomial for a source leaf whose box lies beyond the support of the
+#: target leaf's (:func:`_beyond_support`). They are the polynomial's bits there
+#: (:func:`_ferrers3_newton_factors`), so the Triton kernel's forces and potentials are
+#: bitwise those without it. It pays only where the support is small against the
+#: leaves. A100, 2026-10-17, against main, near kernel (boxes included) / step: clipped
+#: Plummer at softening 1e-7, 8e6 24.92 -> 22.02 ms / 78.4 -> 75.6 ms and 1e8
+#: 311.9 -> 271.3 ms / 870.6 -> 829.2 ms; the 25M disc+bulge at the production
+#: 1.5e-3, where nearly every neighbour leaf comes within the support, 91.89 ->
+#: 96.88 ms / 239.8 -> 244.0 ms. So it is OFF by default, opt-in with
+#: ``JACCPOT_NEARFIELD_TILE_SKIP=1`` (or ``tile_skip=True``). Interpret mode keeps the
+#: polynomial unless asked explicitly. A per-tile test (the (16, 8) tile's smallest
+#: r^2) was bitwise too, but its reduction cost 0.76 of the polynomial's 0.88 ms.
+DIRECT_TILE_SKIP = False
+
 #: Entries of a near-field row that its own program runs
 #: (:func:`nearfield_leafpair_csr_sorted_direct_pallas`); the rest of a longer row is
 #: split into pieces of this many. Above every row of the standard configurations
@@ -1287,6 +1556,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     source_tile: int | None = None,
     source_flags: str | None = None,
     softening_kernel: Optional[str] = None,
+    tile_skip: bool | None = None,
 ) -> tuple[Array, Array | None]:
     """The CSR near field straight into particle order: no per-leaf partials.
 
@@ -1375,6 +1645,13 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         Static.
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    tile_skip : bool | None
+        With a source tile and ``"ferrers3"``: skip the polynomial for source leaves
+        whose box lies beyond the support of the target leaf's, with the same bits
+        on the Triton kernel (:data:`DIRECT_TILE_SKIP`, which says when it pays; one
+        more read of the particles for the boxes, 32 B per leaf). ``None``:
+        ``JACCPOT_NEARFIELD_TILE_SKIP``, default :data:`DIRECT_TILE_SKIP` (off), and
+        off in interpret mode. Static.
 
     Returns
     -------
@@ -1427,6 +1704,10 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         )
     if source_tile and target_subtile is None:
         target_subtile = DIRECT_TILED_TARGET_SUBTILE
+    if tile_skip is None:
+        tile_skip = not interpret and env_flag(
+            "JACCPOT_NEARFIELD_TILE_SKIP", DIRECT_TILE_SKIP
+        )
     pm, start_i, count_i, soft, g, bt, width_pad, num_warps = _sorted_inputs(
         positions_sorted,
         masses_sorted,
@@ -1440,6 +1721,8 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         source_tile=source_tile,
         softening_kernel=resolve_softening_kernel(softening_kernel),
     )
+    kernel_name = resolve_softening_kernel(softening_kernel)
+    tile_skip = bool(tile_skip and source_tile and kernel_name == "ferrers3")
     common = dict(
         bt=bt,
         n_sub=width_pad // bt,
@@ -1450,8 +1733,14 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         interpret=interpret,
         source_tile=source_tile,
         source_flags=source_flags,
-        softening_kernel=resolve_softening_kernel(softening_kernel),
+        softening_kernel=kernel_name,
         fourth="force_scale" if with_force_scale else "potential",
+        tile_skip=tile_skip,
+        boxes=(
+            _leaf_boxes(pm, start_i, count_i, interpret=interpret)
+            if tile_skip
+            else None
+        ),
     )
     if row_limit is None:
         row_limit = env_int(

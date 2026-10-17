@@ -328,6 +328,17 @@ if ARGS.no_command_buffers:
     _CB = "--xla_gpu_enable_command_buffer="
 if "xla_gpu_enable_command_buffer" not in os.environ.get("XLA_FLAGS", ""):
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _CB).strip()
+# the production launch environment (docs/production.md): XLA's fusion autotuner OFF.
+# It picks some fusions' emitters by timing, so a process on a busy card could compile
+# other code from the same HLO (restarts and DET2 were not bitwise); off, L1-L3 kept
+# their step, peak and compile times (S3 session 2). An explicit setting wins.
+_AUTOTUNER = "--xla_gpu_experimental_enable_fusion_autotuner=false"
+if "xla_gpu_experimental_enable_fusion_autotuner" not in os.environ.get(
+    "XLA_FLAGS", ""
+):
+    os.environ["XLA_FLAGS"] = (
+        os.environ.get("XLA_FLAGS", "") + " " + _AUTOTUNER
+    ).strip()
 if ARGS.dump_dir:
     os.makedirs(ARGS.dump_dir, exist_ok=True)
     os.environ["XLA_FLAGS"] += (
@@ -488,6 +499,13 @@ for _name, _label in (
     ("_prepare_state_nearfield_artifacts", "nearfield_artifacts"),
 ):
     _wrap(PrepareMixin, _name, _label)
+# the bootstrap's prepare as a whole, the full one or the particle carry's caps-only
+# one (S3 session 2): its wall time and the peak it leaves
+from jaccpot.runtime.fused_provider import FusedForceProvider  # noqa: E402
+
+_wrap(FusedForceProvider, "prepare", "provider_prepare")
+if hasattr(PrepareMixin, "prepare_state_caps_only"):
+    _wrap(PrepareMixin, "prepare_state_caps_only", "caps_prepare")
 
 
 def _live_arrays(top: int = 20) -> dict:
@@ -911,6 +929,9 @@ def run_budget(result: dict) -> None:
 
     t0 = time.perf_counter()
     state, prep, _ = run(state0, None, 1)
+    # the bootstrap: the prepare, the start program, one step
+    result["first_call_s"] = time.perf_counter() - t0
+    _event("after_first_call")
     state, prep, _ = run(state, prep, ARGS.steps)
     result["scan_compile_s"] = time.perf_counter() - t0
     _event("after_scan_compile")
@@ -1016,7 +1037,10 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
     res = None
     if ARGS.runner_resume:
         # the restore alone: no step is missing up to the restart's own
+        t0 = time.perf_counter()
         res = runner.run(dt=dt, num_steps=0, restart_from=ARGS.runner_resume)
+        result["runner_restore_s"] = time.perf_counter() - t0
+        _event("after_restore")
         result["runner_restored"] = res.restored
     calls, samples = [], []
     monitor = None
@@ -1032,6 +1056,8 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
         else:
             res = runner.run(dt=dt, num_steps=target, restart_from=res)
         wall = time.perf_counter() - t0
+        if not calls:
+            _event("after_first_call")
         calls.append(
             dict(
                 step=res.step,

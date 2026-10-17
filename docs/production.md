@@ -27,10 +27,15 @@ def halo(state, p):          # module level: ONE function object for the whole r
     r = jnp.sqrt(jnp.sum(x * x, axis=1, keepdims=True))
     return -p["gm"] * x / (r * (r + p["rs"]) ** 2)   # a Hernquist halo
 
+def halo_potential(state, p):   # its potential per unit mass, for the energy
+    r = jnp.sqrt(jnp.sum(state[:, 0] ** 2, axis=1))
+    return -p["gm"] / (r + p["rs"])
+
 runner = ProductionRunner(
     solver,
     segment=SegmentConfig(steps=50, restart_every=4, restart_path="run/restart.npz"),
     external_acceleration_fn=halo,
+    external_potential_fn=halo_potential,
     callbacks=(SnapshotWriter("run/snapshots", every=2), DiagnosticsLog("run/diag.jsonl")),
 )
 res = runner.run(state, masses, dt=5e-4, num_steps=500,
@@ -43,6 +48,41 @@ res = runner.run(dt=5e-4, num_steps=500, restart_from="run/restart.npz",
 `state` is the packed `[N, 2, 3]` positions and velocities, `masses` `[N]`. `num_steps` is
 the run's total from `t0`: a continued run runs the steps still missing. The one-shot
 form is `jaccpot.production.run(solver, state, masses, dt=..., num_steps=..., ...)`.
+
+## Launch environment
+
+Start every production run with XLA's fusion autotuner off, before jax starts:
+
+```bash
+export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_experimental_enable_fusion_autotuner=false"
+```
+
+For some fusions XLA times the native emitter against the block-level (Triton) one on
+the card and keeps the faster. On a card other jobs share those timings vary, so a fresh
+process can compile other code from the same program: a resumed run, or a rerun, is then
+correct but not bitwise the uninterrupted one. In S3 session 2 (A100s shared with other
+jobs; the first 2e6 particles of the 25M disc with its NFW halo, 20 steps, resumed from
+step 10), 8 of 12 fresh-process resumes differed in 436,234 of the 12M state elements (max
+4.4e-6); in the pair whose optimised programs were compared, 7 fusions had switched
+emitter, one of them the NFW field added to the self-gravity. With the flag 8 of 8 were
+bitwise, and DET2 (`bench/dce_pins.py`, the gradient on the production flags) was
+bitwise A-vs-A 5 times in 5, against 3 in 5 without it. On a free card L1-L3 kept their
+step time, peak and compile time (`compare --envelope` passed), and the
+deterministic-ops pins S1, S1x and S4b did not move.
+
+The flag has to be in `XLA_FLAGS` when the backend starts (XLA reads it once), so the
+library cannot set it: `ProductionRunner.run` warns once per process on a GPU when it is
+missing. `bench/fused_memory_budget.py`, the production-flag pins of `bench/dce_pins.py`
+(L1-L3, DET1-DET3) and `bench/provider_hlo_identity.py --device gpu` add it unless
+`XLA_FLAGS` sets it.
+
+**The flag is experimental: re-check it at every jax upgrade.** XLA refuses to start on a
+flag it no longer knows, and what an experimental flag covers can change. After a bump,
+record the DET pins twice on a shared card (`record --tag X --pins DET1,DET2,DET3`, then
+`X-b`, `compare X X-b`) and L1-L3 on a free one. A per-fusion autotune cache
+(`--xla_gpu_per_fusion_autotune_cache_dir`) also made resumes bitwise (4 of 4), but it is
+state: it holds what the first process timed, it has to travel with the restart files,
+and XLA does not invalidate it across versions or devices.
 
 ## What a segment is, and why
 
@@ -75,7 +115,9 @@ one long call (2 + 2 + 1 differed from 5 on a CI runner). For the same reason
 `SegmentConfig(steps=1)` gives the trajectory to round-off, not bitwise one long call.
 
 **Compiles.** A fresh run compiles the eager prepare's programs, the start force and one
-scan. With `donate_input=False` the second segment compiles the scan once more (with
+scan. The first segment's prepare is caps-only (`FusedForceProvider.prepare(caps_only=True)`:
+the tree, the upward pass and the walk's caps, no list and no downward pass -- the start
+program evaluates the force), and so are a segment retry's and a restore's. With `donate_input=False` the second segment compiles the scan once more (with
 the state donated) and every later segment reuses it; `donate_input=True` gives every
 segment one program. Chained `strict_run_v2` calls without `carry_total_acceleration`
 also recompiled at the second call (the handle's start force was not donated: 17.7 s
@@ -86,7 +128,27 @@ against 2.4 s at N = 512 on CPU).
 grew the tree (the second for the walk only, see `docs/fused_provider.md`). A failure
 after that raises a `RuntimeError` naming the last restart file. A donated segment keeps
 a host copy of its start state for the re-runs (24 B per particle, one device-to-host
-copy per segment).
+copy per segment). On a GPU it is an asynchronous copy into pinned host memory
+(`strict_carry.host_copy`): 0.10 s at 1e8 on an A100 (the run's first 1.4 s), where the
+synchronous copy into NumPy memory took 1.0-1.5 s per segment, the larger part of an
+edge's cost at 1e8. The moments themselves cost 15 ms at 1e8 (their first call compiles,
+0.6 s once per process).
+
+**List limit.** A re-plan sizes an outgrown list at 1.5x what the segment needed
+(`JACCPOT_FLAT_WALK_CAP_HEADROOM`), but never past the largest list the int32 index range
+builds, `_interaction_cache.flat_walk_list_limit`: 1,431,306,240 directed entries on the
+Pallas walk, whose CSR build addresses 3x the canonical width. A list that needs more
+raises the `RuntimeError` before the re-prepare, naming the remedies. A far list that
+keeps growing usually means the per-axis Morton box stretched. In the S3 gate's clipped
+Plummer (softening 1e-7, dt 1e-2) close encounters fling a few particles out from step
+~200, every cell elongates, and at 1e8 the far list needed 402M directed entries at the
+start, 632M by step 301 and 1,005M by step 401. The third re-plan clamped the far list
+at the limit instead of 1,508,900,864 (which raised `pair width 754450432 overflows
+int32`), and the run went on to step 551 without another re-plan: the step took 874 ms
+on the cubic box, 1,596 ms at the stretched one (steps 452-501) and 1,004 ms once
+particles flung along z had made the box cubic again (502-551). On the same IC at 1e7 the
+far count grows 44 % by step 451 with the per-axis box; with `JACCPOT_CUBIC_BOUNDS=1` the
+same positions need 22 % fewer pairs than at step 0.
 
 ## Edges, callbacks, diagnostics
 
@@ -109,9 +171,23 @@ fetched to the host), against step 0's baselines (`RunResult.baselines`):
 | `angular_momentum`, `angular_momentum_drift` | `L = sum m x x v`; `|L - L0| / |L0|` |
 | `com`, `com_drift` | `sum m x / M`; `|COM - COM0 - P0/M (t - t0)|` (against its free motion) |
 | `kinetic`, `kinetic_change` | `K = 1/2 sum m v^2`; `(K - K0) / K0` |
-| `potential`, `energy`, `energy_drift` | **`None` until S3 session 2**: the energy needs an O(N) potential the fused lane does not have yet (the generic potential path ran out of memory at 25M) |
+| `potential_self`, `potential_external`, `potential` | `W_self = 1/2 sum m phi` (the fused lane's O(N) potential at the edge's positions), `W_ext = sum m Phi_ext` (`external_potential_fn`; 0 without), `W = W_self + W_ext` |
+| `energy`, `energy_drift`, `energy_ok` | `E = K + W`; `(E - E0) / |E0|`; whether the potential's rebuild fitted its capacities (otherwise the energy fields are `None`) |
 
 An external field changes P and L physically; the drifts then measure that.
+
+**The energy** is due at every `diagnostics_every_energy`-th edge (10; the user's
+cadence: the moments are nearly free, the energy costs a force evaluation). Its program -- the topology rebuilt at the edge's positions from the handle's
+provider, `FusedForceProvider.potential`, the external potential, the sums in fp64 -- is
+compiled once per plan and costs about one force evaluation (1.1x at 25M and 1e8 on an
+A100). Step 0's `E0` needs a provider, so the runner keeps step 0's state (the caller's
+array, or a host copy when `donate_input` consumes it) and evaluates it at the first
+diagnostics edge after a segment: the step-0 row's energy fields are `None`, and
+`RunResult.baselines` holds `energy` and `potential`. `external_potential_fn(state[,
+external_params]) -> [N]` is the field's potential per unit mass, with the field's
+contract and parameters. The energy program's trace leaves the engine's trace-time state
+as it was (`_trace_state_kept`), so the trajectory with it is the one without (R4,
+bitwise).
 
 ## Restart files
 
@@ -128,7 +204,7 @@ Size: 40 B per particle in float32 (52 with an external field, +4 under
 `dehnen_error`) plus a few kB of `meta`: about 1.0 GB at 25M (1.3 GB with the halo).
 
 `run(..., restart_from=path)` restores: the file's leaf capacity and walk caps are
-installed, the lane is prepared at the restart's positions, the caps are installed
+installed, the lane is prepared (caps-only) at the restart's positions, the caps are installed
 again and the level registry and depth bound set exactly, then the digests are checked.
 Equal (and an equal fingerprint, `dt`, force and field parameters), the next segments
 trace the programs the uninterrupted run would have, and the continuation is bitwise
@@ -147,7 +223,7 @@ bitwise.
 | R2 | an NFW field across edges, one-argument and traced parameters (CPU, pure-JAX near field) | bitwise with the carried total; without it 1 of 3072 components differs (1.9e-6) |
 | R1x | S1x's disc + NFW through the runner, chained vs one segment of 13 (A100, 2e5) | bitwise (and bitwise the plain chained S1x: on this card the eager field matched the fused one) |
 | R3 | runner (traced) vs `strict_run_v2` (traced), CPU | bitwise |
-| R4 | diagnostics on vs off, CPU | bitwise |
+| R4 | diagnostics on vs off, CPU; with the energy at every edge (S3 session 2), and with an NFW field and its potential, traced parameters | bitwise, the same scan programs; `W_self` within 1e-3 of the fp64 direct sum, `W_ext` within 1e-6 |
 | R5 | restart in a fresh process: geometric, `dehnen_error`, external (traced parameters), traced (CPU) | bitwise, digests matched |
 | R1r | R1p with a restart at step 5, resumed in a fresh process without the eval prepare (A100, 2e5) | bitwise, digests matched (file 8,005,201 B) |
 | R9 | `donate_input` on vs off, CPU | bitwise; one scan program with it, two without |

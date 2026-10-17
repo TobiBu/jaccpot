@@ -257,3 +257,69 @@ def test_queue_ladder_grows_from_a_small_queue(tree_and_geometry):
     (report,) = reports
     assert report["queue_capacity"] > 8 and report["grew"], report
     assert int(art.compact_far_pairs.far_pair_count) > 0
+
+
+def test_unnamed_caps_stop_at_the_index_range(tree_and_geometry, monkeypatch):
+    # the fixture's lists: 464 far and 3512 near directed entries, built 1024 and
+    # 8192 wide (1.5x headroom); a range of 4096 must cut the near width to it
+    # and leave the lists as they were (``test_flat_walk_list_limit.py``)
+    import jaccpot.runtime._interaction_cache as ic
+
+    tree, geometry, num_internal, total_nodes = tree_and_geometry
+    unnamed = dict(far_named=False, near_edge_named=False)
+    ref = _flat(tree, geometry, **unnamed)
+    monkeypatch.setattr(ic, "flat_walk_list_limit", lambda idx, csr: 4096)
+    reports = []
+    art = _flat(tree, geometry, far_cap=8, near_cap=8, report=reports.append, **unnamed)
+    (report,) = reports
+    assert report["total_neighbors"] == 3512
+    assert report["near_edge_capacity"] == 4096
+    assert report["compact_far_pair_capacity"] == 1024
+    assert _flat_far_set(art.compact_far_pairs) == _flat_far_set(ref.compact_far_pairs)
+    assert _flat_near_sets(art.neighbor_list, num_internal, total_nodes) == (
+        _flat_near_sets(ref.neighbor_list, num_internal, total_nodes)
+    )
+    # a list that needs more than the range: the ladder stops at it and says so
+    monkeypatch.setattr(ic, "flat_walk_list_limit", lambda idx, csr: 2048)
+    with pytest.raises(RuntimeError, match="near list overflowed 2048 directed"):
+        _flat(tree, geometry, far_cap=8, near_cap=8, **unnamed)
+
+
+def test_a_wrapped_pallas_walk_count_raises_instead_of_looping(
+    tree_and_geometry, monkeypatch
+):
+    # the Pallas walk counts past a full list in int32: past 2^31 - 1 pairs the
+    # count wraps negative, and the ladder sized its next rung from it (2 entries),
+    # walked again and never stopped
+    import jaccpot.pallas.mutual_walk_pallas as mwp
+    import jaccpot.runtime._interaction_cache as ic
+
+    tree, geometry, _, _ = tree_and_geometry
+    calls = []
+
+    def wrapped_walk(*args, far_cap, near_cap, **kw):
+        calls.append(far_cap)
+        if len(calls) > 3:
+            raise AssertionError("the ladder walked again on a wrapped count")
+        i32 = jnp.int32
+        return mwp.PallasWalkResult(
+            far_a=jnp.full((far_cap,), -1, i32),
+            far_b=jnp.full((far_cap,), -1, i32),
+            far_count=jnp.asarray(far_cap, i32),
+            near_a=jnp.zeros((near_cap,), i32),
+            near_b=jnp.zeros((near_cap,), i32),
+            near_count=jnp.asarray(0, i32),
+            far_overflow=jnp.asarray(True),
+            near_overflow=jnp.asarray(False),
+            queue_overflow=jnp.asarray(False),
+            peak_wavefront=jnp.asarray(1, i32),
+            rounds=jnp.asarray(1, i32),
+            far_needed=jnp.asarray(-(1 << 30), i32),
+            near_needed=jnp.asarray(0, i32),
+        )
+
+    monkeypatch.setattr(ic, "strict_walk_backend", lambda: "pallas")
+    monkeypatch.setattr(mwp, "mutual_walk_pallas", wrapped_walk)
+    with pytest.raises(RuntimeError, match="needs more than 2\\^31 - 1 canonical"):
+        _flat(tree, geometry, far_named=False, near_edge_named=False)
+    assert len(calls) == 1

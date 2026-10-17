@@ -349,3 +349,375 @@ def test_the_default_is_the_tiled_kernel(monkeypatch):
     for g, w, s in zip(got, want, scalar):
         assert np.array_equal(np.asarray(g), np.asarray(w))
         assert not np.array_equal(np.asarray(g), np.asarray(s))  # non-vacuous
+
+
+# ------------------------------------------------------------ the ferrers3 tile skip
+
+_SKIP_EPS = 0.05  # h = 0.123 against the unit-normal positions of ``_case``
+
+
+def _ferrers3_params(eps=_SKIP_EPS):
+    from jaccpot.softening import softening_params_from_sq
+
+    return softening_params_from_sq("ferrers3", jnp.float32(eps**2), jnp.float32)
+
+
+def _first_beyond(params):
+    """The smallest float32 ``r^2`` whose rounded ``r^2 / h^2`` is 1."""
+    p0, p1 = (np.float32(v) for v in np.asarray(params))
+    v = min(p0, np.float32(1.0) / p1)
+    for _ in range(8):
+        v = np.nextafter(v, np.float32(0.0))
+    while np.float32(v * p1) < np.float32(1.0):
+        v = np.nextafter(v, np.float32(np.inf))
+    return v
+
+
+def test_the_newtonian_factors_are_the_polynomials_bits_beyond_the_support():
+    """On pairs whose rounded ``r^2 / h^2`` reaches 1 -- from the first float that
+    does, up -- the Newtonian factors are ``masked_pair_factors``' force and potential
+    factors to the bit; dead pairs (some inside the support) are zero in both."""
+    import jax
+
+    from jaccpot.pallas.nearfield_leafpair_csr import _ferrers3_newton_factors
+    from jaccpot.softening import masked_pair_factors
+
+    params = _ferrers3_params()
+    newton = jax.jit(
+        lambda r, a: _ferrers3_newton_factors(r, a, params, "ferrers3", potential=True)
+    )
+    plain = jax.jit(
+        lambda r, a: masked_pair_factors(r, a, params, "ferrers3", potential=True)
+    )
+    first = _first_beyond(params)
+    walk = [first]
+    for _ in range(31):
+        walk.append(np.nextafter(walk[-1], np.float32(np.inf)))
+    rng = np.random.default_rng(0)
+    far = (first * np.exp(rng.uniform(0.0, 12.0, 64))).astype(np.float32)
+    r = np.concatenate([np.asarray(walk, np.float32), far, np.zeros(32, np.float32)])
+    live = np.arange(r.size) < 96  # the last 32: dead, at r = 0
+    r, live = r.reshape(16, 8), live.reshape(16, 8)
+    got = newton(jnp.asarray(r), jnp.asarray(live))
+    want = plain(jnp.asarray(r), jnp.asarray(live))
+    assert got[2] is None and want[2] is None
+    for g, w in zip(got[:2], want[:2]):
+        assert np.array_equal(np.asarray(g), np.asarray(w))
+    # the walk starts at the boundary: one rounding below, c < 1
+    p1 = np.float32(np.asarray(params)[1])
+    assert np.float32(np.nextafter(first, np.float32(0.0)) * p1) < np.float32(1.0)
+
+
+def _leaf_table(leaves):
+    """``(pm, start, count)`` of consecutive leaves, the kernel's sorted layout."""
+    pos = np.concatenate(leaves).astype(np.float32)
+    counts = np.array([len(x) for x in leaves], np.int32)
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]]).astype(np.int32)
+    pm = np.concatenate([pos, np.ones((len(pos), 1), np.float32)], axis=1)
+    pm = np.pad(pm, ((0, 64), (0, 0)))
+    return jnp.asarray(pm), jnp.asarray(starts), jnp.asarray(counts)
+
+
+def test_the_leaf_boxes_are_the_particles_extremes():
+    """Each leaf's box is its particles' min and max per axis; an empty leaf's is
+    ``(inf, -inf)``; leaves past ``L`` pad the table to the kernel's block."""
+    from jaccpot.pallas.nearfield_leafpair_csr import _leaf_boxes
+
+    rng = np.random.default_rng(3)
+    leaves = [rng.standard_normal((n, 3)) for n in (1, 7, 16, 0, 33, 64, 2)]
+    pm, starts, counts = _leaf_table(leaves)
+    boxes = np.asarray(_leaf_boxes(pm, starts, counts, interpret=True))
+    assert boxes.shape == (128, 8)
+    for leaf, x in enumerate(leaves):
+        x = x.astype(np.float32)
+        lo = x.min(0) if len(x) else np.full(3, np.inf, np.float32)
+        hi = x.max(0) if len(x) else np.full(3, -np.inf, np.float32)
+        assert np.array_equal(boxes[leaf, 0:6:2], lo)
+        assert np.array_equal(boxes[leaf, 1:6:2], hi)
+        assert not np.any(boxes[leaf, 6:])
+
+
+def test_the_box_test_admits_no_pair_inside_the_support():
+    """Whenever ``_beyond_support`` clears a source leaf, every pair with the target
+    leaf has a rounded ``r^2 / h^2`` of at least 1 (the clipped ``c`` is 1, so the
+    Newtonian factors are the polynomial's); and it clears leaves within 0.1 % of
+    the support as well as refusing nearer ones."""
+    import jax
+
+    from jaccpot.pallas.nearfield_leafpair_csr import (
+        _BEYOND_SUPPORT_MARGIN,
+        _beyond_support,
+    )
+
+    params = _ferrers3_params()
+    p1 = np.float32(np.asarray(params)[1])
+    h = float(np.sqrt(np.asarray(params)[0]))
+    rng = np.random.default_rng(5)
+    test = jax.jit(
+        lambda boxes, t_box: _beyond_support(boxes, 1, t_box, params[1]),
+    )
+    cleared, refused, tight = 0, 0, 0
+    for trial in range(300):
+        nt, ns = rng.integers(1, 17, 2)
+        centre = rng.uniform(-50.0, 50.0, 3)  # off the origin: the roundings matter
+        t = (centre + 0.05 * rng.standard_normal((nt, 3))).astype(np.float32)
+        s = (centre + 0.05 * rng.standard_normal((ns, 3))).astype(np.float32)
+        # the source cloud past the target box along one axis, by a gap around
+        # the cleared edge, its nearest particle facing the target's farthest
+        k = int(rng.integers(3))
+        gap = h * np.sqrt(_BEYOND_SUPPORT_MARGIN) * (1.0 + rng.uniform(-4e-4, 4e-4))
+        s[:, k] += np.float32(t[:, k].max() - s[:, k].min() + gap)
+        ia, ib = int(np.argmax(t[:, k])), int(np.argmin(s[:, k]))
+        s[ib, [a for a in range(3) if a != k]] = t[ia, [a for a in range(3) if a != k]]
+        # the boxes as _leaf_boxes builds them (pinned above), rows 0 and 1
+        boxes = np.zeros((2, 8), np.float32)
+        boxes[:, 0:6:2] = [t.min(0), s.min(0)]
+        boxes[:, 1:6:2] = [t.max(0), s.max(0)]
+        t_box = tuple((boxes[0, 2 * a], boxes[0, 2 * a + 1]) for a in range(3))
+        ok = bool(test(jnp.asarray(boxes), t_box))
+        d = t[:, None, :] - s[None, :, :]
+        r_sq = d[..., 0] * d[..., 0] + d[..., 1] * d[..., 1] + d[..., 2] * d[..., 2]
+        c_one = np.all((r_sq * p1).astype(np.float32) >= np.float32(1.0))
+        if ok:
+            cleared += 1
+            assert c_one, trial
+            tight += bool(np.min(r_sq) * p1 < 1.001)
+        else:
+            refused += 1
+    assert cleared > 50 and refused > 50 and tight > 10, (cleared, refused, tight)
+
+
+def _boundary_case(params):
+    """Leaf pairs ``(2k, 2k+1)``, each the other's only neighbour, whose closest pair
+    is ``d`` apart (``dx = -d`` exactly, ``dy = dz = 0``) and whose boxes are ``d``
+    apart, with ``d`` a few roundings either side of the box test's edge; every other
+    pair is far beyond the support."""
+    from jaccpot.pallas.nearfield_leafpair_csr import _BEYOND_SUPPORT_MARGIN
+
+    p0 = float(np.asarray(params)[0])
+    h = np.sqrt(p0)
+    W, pairs = 8, 7
+    pos, d = [], np.float32(h * np.sqrt(_BEYOND_SUPPORT_MARGIN))
+    for _ in range(3):
+        d = np.nextafter(d, np.float32(0.0))
+    for k in range(pairs):
+        lane = np.arange(W, dtype=np.float32) * np.float32(20.0 * h)
+        a = np.stack(
+            [np.zeros(W, np.float32), lane, np.full(W, 3.0 * k, np.float32)], 1
+        )
+        b = a.copy()
+        b[:, 0] += d
+        b[1:, 1] += np.float32(10.0 * h)  # only lane 0 of b sits next to a
+        pos += [a, b]
+        d = np.nextafter(d, np.float32(np.inf))
+    pos = np.concatenate(pos).astype(np.float32)
+    L = 2 * pairs
+    counts = np.full(L, W, np.int32)
+    starts = (np.arange(L) * W).astype(np.int32)
+    nbr = np.arange(L, dtype=np.int32) ^ 1
+    offsets = np.arange(L + 1, dtype=np.int32)
+    mass = np.linspace(0.5, 1.5, pos.shape[0]).astype(np.float32)
+    return (
+        jnp.asarray(pos),
+        jnp.asarray(mass),
+        jnp.asarray(starts),
+        jnp.asarray(counts),
+        jnp.asarray(np.concatenate([nbr, np.zeros(5, np.int32)])),
+        jnp.asarray(offsets),
+        jnp.asarray(np.ones(L, np.int32)),
+    ), W
+
+
+def _skip_case(regime, eps):
+    """``(args, W, chunk, n_dead)``: ``_case``'s leaves as compact clusters on a unit
+    grid, unless the regime is ``"overlapping"`` (``_case``'s own leaves, each spread
+    over the whole cloud, so no two boxes are apart)."""
+    if regime == "boundary":
+        args, W = _boundary_case(_ferrers3_params(eps))
+        return args, W, 4, 0
+    c = _case(7, num_live=9, num_pad=3, W=16, n_dead=2, max_row=6, empty_rows=(2,))
+    pos = np.asarray(c["pos"]).copy()
+    if regime != "overlapping":
+        rng = np.random.default_rng(8)
+        starts, counts = np.asarray(c["starts"]), np.asarray(c["counts"])
+        for leaf in range(9):
+            centre = np.array([leaf % 3, leaf // 3, 0.0])
+            rows = slice(starts[leaf], starts[leaf] + counts[leaf])
+            pos[rows] = centre + 0.05 * rng.standard_normal((counts[leaf], 3))
+    c = dict(c, pos=jnp.asarray(pos.astype(np.float32)))
+    args = tuple(
+        c[k]
+        for k in ("pos", "mass", "starts", "counts", "nbr", "offsets", "row_counts")
+    )
+    return args, 16, 4, 2
+
+
+_REGIMES = [
+    ("beyond", 1e-3),  # every leaf but a target's own lies beyond the support
+    ("straddling", 0.35),  # h = 0.86 on the unit grid: leaves of both kinds
+    ("inside", 5.0),  # every pair inside the support
+    ("boundary", _SKIP_EPS),  # leaves a few roundings either side of the box edge
+    ("overlapping", 1e-3),  # every pair beyond the support, no two boxes apart
+]
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("flags", ["alr", "a"])  # merged runs, and leaf by leaf
+@pytest.mark.parametrize("with_potential", [False, True])
+@pytest.mark.parametrize("regime, eps", _REGIMES)
+def test_the_direct_kernel_with_the_tile_skip(
+    regime, eps, with_potential, flags, interpret
+):
+    """The direct kernel with and without the tile skip.
+
+    On the Triton kernel the contract is the same bits (forces and potentials). In
+    interpret mode the two agree to float32 round-off (XLA may fuse around the
+    conditional differently; the default keeps the polynomial there).
+    """
+    from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
+
+    if not interpret and not pallas_m2l_real_csr_supported():
+        pytest.skip("native Pallas GPU lowering not available here")
+    args, W, chunk, n_dead = _skip_case(regime, eps)
+    common = dict(
+        leaf_width=W,
+        softening_sq=jnp.float32(eps**2),
+        G=jnp.float32(1.3),
+        chunk=chunk,
+        interpret=interpret,
+        with_potential=with_potential,
+        softening_kernel="ferrers3",
+        source_tile=8,
+        source_flags=flags,
+    )
+    plain = nearfield_leafpair_csr_sorted_direct_pallas(
+        *args, tile_skip=False, **common
+    )
+    skip = nearfield_leafpair_csr_sorted_direct_pallas(*args, tile_skip=True, **common)
+    acc0 = np.asarray(plain[0])
+    assert np.any(acc0) and np.all(np.isfinite(acc0))
+    if n_dead:
+        assert not np.any(np.asarray(skip[0])[-n_dead:])
+    for got, want in zip(skip, plain):
+        if want is None:
+            assert got is None
+            continue
+        got, want = np.asarray(got), np.asarray(want)
+        if interpret:
+            np.testing.assert_allclose(
+                got, want, rtol=2e-6, atol=2e-6 * float(np.abs(want).max())
+            )
+        else:
+            assert np.array_equal(got, want)
+    # the regime is what it says: pair distances against the support
+    pos = np.asarray(args[0], np.float64)
+    h = float(np.sqrt(np.asarray(_ferrers3_params(eps))[0]))
+    r = np.linalg.norm(pos[:, None] - pos[None, :], axis=-1)
+    off = r[~np.eye(len(pos), dtype=bool)]
+    if regime in ("beyond", "overlapping"):
+        assert off.min() > h
+    elif regime == "inside":
+        assert off.max() < h
+    elif regime == "boundary":
+        # every pair beyond the support, the closest at the box test's edge
+        from jaccpot.pallas.nearfield_leafpair_csr import _BEYOND_SUPPORT_MARGIN
+
+        assert abs(off.min() / (h * np.sqrt(_BEYOND_SUPPORT_MARGIN)) - 1) < 1e-6
+    else:
+        assert off.min() < h < off.max()
+
+
+@pytest.mark.parametrize("flags", ["alr", "a"])
+def test_the_skip_takes_the_newtonian_pass_where_it_may(monkeypatch, flags):
+    """With the Newtonian factors doubled (a marker), the skip doubles exactly the
+    neighbour leaves' share when they all lie beyond the support -- a leaf's own
+    pass keeps the polynomial -- and nothing when every pair lies inside it."""
+    from jaccpot.pallas import nearfield_leafpair_csr as mod
+
+    real = mod._ferrers3_newton_factors
+
+    def doubled(*args, **kwargs):
+        g, psi, d = real(*args, **kwargs)
+        return 2.0 * g, (None if psi is None else 2.0 * psi), d
+
+    monkeypatch.setattr(mod, "_ferrers3_newton_factors", doubled)
+    for regime, eps in (("beyond", 1e-3), ("inside", 5.0)):
+        args, W, chunk, _ = _skip_case(regime, eps)
+        common = dict(
+            leaf_width=W,
+            softening_sq=jnp.float32(eps**2),
+            G=jnp.float32(1.3),
+            chunk=chunk,
+            interpret=True,
+            softening_kernel="ferrers3",
+            source_tile=8,
+            source_flags=flags,
+        )
+        plain = np.asarray(
+            nearfield_leafpair_csr_sorted_direct_pallas(
+                *args, tile_skip=False, **common
+            )[0]
+        )
+        skip = np.asarray(
+            nearfield_leafpair_csr_sorted_direct_pallas(
+                *args, tile_skip=True, **common
+            )[0]
+        )
+        no_rows = args[:6] + (jnp.zeros_like(args[6]),)
+        own = np.asarray(
+            nearfield_leafpair_csr_sorted_direct_pallas(
+                *no_rows, tile_skip=False, **common
+            )[0]
+        )
+        scale = 2e-6 * float(np.abs(plain).max())
+        if regime == "beyond":
+            np.testing.assert_allclose(skip, 2.0 * plain - own, rtol=2e-6, atol=scale)
+            assert np.abs(plain - own).max() > 1e3 * scale  # the neighbours count
+        else:
+            np.testing.assert_allclose(skip, plain, rtol=2e-6, atol=scale)
+
+
+def test_the_tile_skip_default(monkeypatch):
+    """Off by default (``DIRECT_TILE_SKIP``: it slows the production disc);
+    ``JACCPOT_NEARFIELD_TILE_SKIP=1`` turns it on for the Triton kernel, not in
+    interpret mode; an explicit argument wins; only ``"ferrers3"`` with a source tile
+    skips."""
+    from jaccpot.pallas import nearfield_leafpair_csr as mod
+
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def _spy(*args, tile_skip, boxes, **kwargs):
+        seen.append((tile_skip, boxes is not None))
+        raise _Stop
+
+    monkeypatch.setattr(mod, "_sorted_pallas_call", _spy)
+    monkeypatch.setattr(mod, "_leaf_boxes", lambda pm, *a, **k: pm)
+    monkeypatch.delenv("JACCPOT_NEARFIELD_TILE_SKIP", raising=False)
+    c = _case(7, num_live=4, num_pad=0, W=8, n_dead=0, max_row=2)
+    args = tuple(
+        c[k]
+        for k in ("pos", "mass", "starts", "counts", "nbr", "offsets", "row_counts")
+    )
+    common = dict(leaf_width=8, softening_sq=jnp.float32(0.01), G=jnp.float32(1.0))
+
+    def _resolved(**kw):
+        kw.setdefault("softening_kernel", "ferrers3")
+        with pytest.raises(_Stop):
+            nearfield_leafpair_csr_sorted_direct_pallas(*args, chunk=2, **common, **kw)
+        skip, with_boxes = seen.pop()
+        assert skip is with_boxes
+        return skip
+
+    assert mod.DIRECT_TILE_SKIP is False
+    assert _resolved(interpret=False) is False
+    assert _resolved(interpret=True, tile_skip=True) is True
+    monkeypatch.setenv("JACCPOT_NEARFIELD_TILE_SKIP", "1")
+    assert _resolved(interpret=False) is True
+    assert _resolved(interpret=True) is False
+    assert _resolved(interpret=False, tile_skip=False) is False
+    assert _resolved(interpret=False, softening_kernel="plummer") is False
+    assert _resolved(interpret=False, softening_kernel="wendland_c2") is False
+    assert _resolved(interpret=False, source_tile=0) is False
