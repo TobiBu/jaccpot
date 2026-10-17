@@ -328,6 +328,17 @@ if ARGS.no_command_buffers:
     _CB = "--xla_gpu_enable_command_buffer="
 if "xla_gpu_enable_command_buffer" not in os.environ.get("XLA_FLAGS", ""):
     os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " " + _CB).strip()
+# the production launch environment (docs/production.md): XLA's fusion autotuner OFF.
+# It picks some fusions' emitters by timing, so a process on a busy card could compile
+# other code from the same HLO (restarts and DET2 were not bitwise); off, L1-L3 kept
+# their step, peak and compile times (S3 session 2). An explicit setting wins.
+_AUTOTUNER = "--xla_gpu_experimental_enable_fusion_autotuner=false"
+if "xla_gpu_experimental_enable_fusion_autotuner" not in os.environ.get(
+    "XLA_FLAGS", ""
+):
+    os.environ["XLA_FLAGS"] = (
+        os.environ.get("XLA_FLAGS", "") + " " + _AUTOTUNER
+    ).strip()
 if ARGS.dump_dir:
     os.makedirs(ARGS.dump_dir, exist_ok=True)
     os.environ["XLA_FLAGS"] += (

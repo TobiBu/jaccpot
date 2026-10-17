@@ -43,6 +43,14 @@ compile keys. ``run(..., restart_from=path)`` restores that plan exactly and che
 the digests, so the continuation is bitwise the uninterrupted run (CPU, four
 variants); a mismatch is reported, never silent.
 
+LAUNCH ENVIRONMENT. On a GPU, a fresh process continues a run bitwise only if XLA
+compiles the same code as the process that wrote the restart, and XLA's fusion
+autotuner picks the emitter of some fusions by timing them on the card. Production
+runs therefore start with ``--xla_gpu_experimental_enable_fusion_autotuner=false`` in
+``XLA_FLAGS``; :meth:`ProductionRunner.run` warns once per process on a GPU when it is
+missing. It cannot set the flag itself: XLA reads ``XLA_FLAGS`` once, when the backend
+starts (docs/production.md, "Launch environment").
+
 The module imports nothing heavy at import time (``jaccpot.solver`` imports it).
 """
 
@@ -368,6 +376,80 @@ def segment_lengths(num_steps: int, steps: int) -> tuple:
     if rest == 1 and full >= 1 and int(steps) > 1:
         return (int(steps),) * (full - 1) + (int(steps) + 1,)
     return (int(steps),) * full + ((rest,) if rest else ())
+
+
+# --------------------------------------------------------------------------
+# The launch environment: XLA's fusion autotuner.
+# --------------------------------------------------------------------------
+
+#: XLA's fusion autotuner times the native against the block-level (Triton) emitter
+#: for some fusions, so on a busy card a fresh process can compile other code from the
+#: same HLO. S3 session 2 (A100s shared with other jobs, a 2e6 disc with an NFW field):
+#: 8 of 12 fresh-process resumes differed from the uninterrupted run in 436,234 of 12M
+#: elements (max 4.4e-6); with the autotuner off all 8 were bitwise, at no measurable
+#: step, peak or compile cost on L1-L3.
+_FUSION_AUTOTUNER_FLAG = "--xla_gpu_experimental_enable_fusion_autotuner"
+#: whether this process has warned that a GPU run leaves the autotuner on
+_FUSION_AUTOTUNER_WARNED = False
+
+
+def _fusion_autotuner_off(xla_flags: Optional[str]) -> bool:
+    """Whether ``xla_flags`` turns XLA's fusion autotuner off.
+
+    XLA parses ``XLA_FLAGS`` left to right, so the last setting of a flag wins; a
+    boolean flag is ``false`` or ``0`` (any case), ``true`` or ``1``, and bare means
+    ``true`` (any other value stops XLA at start-up).
+
+    Parameters
+    ----------
+    xla_flags : Optional[str]
+        The value of ``XLA_FLAGS``; ``None`` when it is unset.
+
+    Returns
+    -------
+    bool
+        ``True`` when the last setting is false.
+    """
+    off = False
+    for token in (xla_flags or "").split():
+        name, sep, value = token.partition("=")
+        if name == _FUSION_AUTOTUNER_FLAG:
+            off = bool(sep) and value.lower() in ("false", "0")
+    return off
+
+
+def _warn_fusion_autotuner(platform: str, xla_flags: Optional[str]) -> bool:
+    """Warn, once per process, when a GPU run leaves XLA's fusion autotuner on.
+
+    Parameters
+    ----------
+    platform : str
+        The platform the run's state lives on (``"gpu"``, ``"cpu"``, ...).
+    xla_flags : Optional[str]
+        The value of ``XLA_FLAGS``; ``None`` when it is unset.
+
+    Returns
+    -------
+    bool
+        Whether this call warned.
+    """
+    global _FUSION_AUTOTUNER_WARNED
+    if (
+        platform != "gpu"
+        or _FUSION_AUTOTUNER_WARNED
+        or _fusion_autotuner_off(xla_flags)
+    ):
+        return False
+    _FUSION_AUTOTUNER_WARNED = True
+    warnings.warn(
+        f"XLA_FLAGS does not set {_FUSION_AUTOTUNER_FLAG}=false: XLA's fusion "
+        "autotuner picks some fusions' emitters by timing, so on a shared GPU a "
+        "resumed run (or a rerun) may not be bitwise the uninterrupted one. Set the "
+        "flag in the launch environment, before jax starts (docs/production.md, "
+        '"Launch environment").',
+        stacklevel=3,
+    )
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -999,6 +1081,8 @@ class ProductionRunner:
       after every segment; a truthy return stops the run after that edge.
       ``step_callback`` is ``strict_run_v2``'s in-scan hook, passed through: its
       step index counts from 0 in EACH segment.
+    * Launch environment: on a GPU, :meth:`run` warns once per process when
+      ``XLA_FLAGS`` leaves XLA's fusion autotuner on (see the module docstring).
 
     Parameters
     ----------
@@ -1141,6 +1225,7 @@ class ProductionRunner:
         import jax
         import jax.numpy as jnp
 
+        from jaccpot._env import env_text
         from jaccpot.runtime.strict_carry import host_copy
 
         started = time.perf_counter()
@@ -1188,6 +1273,9 @@ class ProductionRunner:
                 "restart_from must be a RunResult or a restart file, got "
                 f"{type(restart_from).__name__}"
             )
+        _warn_fusion_autotuner(
+            next(iter(state_now.devices())).platform, env_text("XLA_FLAGS")
+        )
         dt_arg, force_arg, external_arg = self._call_args(
             dt, force_params, external_params, state_now.dtype
         )

@@ -49,6 +49,41 @@ res = runner.run(dt=5e-4, num_steps=500, restart_from="run/restart.npz",
 the run's total from `t0`: a continued run runs the steps still missing. The one-shot
 form is `jaccpot.production.run(solver, state, masses, dt=..., num_steps=..., ...)`.
 
+## Launch environment
+
+Start every production run with XLA's fusion autotuner off, before jax starts:
+
+```bash
+export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_experimental_enable_fusion_autotuner=false"
+```
+
+For some fusions XLA times the native emitter against the block-level (Triton) one on
+the card and keeps the faster. On a card other jobs share those timings vary, so a fresh
+process can compile other code from the same program: a resumed run, or a rerun, is then
+correct but not bitwise the uninterrupted one. In S3 session 2 (A100s shared with other
+jobs; the first 2e6 particles of the 25M disc with its NFW halo, 20 steps, resumed from
+step 10), 8 of 12 fresh-process resumes differed in 436,234 of the 12M state elements (max
+4.4e-6); in the pair whose optimised programs were compared, 7 fusions had switched
+emitter, one of them the NFW field added to the self-gravity. With the flag 8 of 8 were
+bitwise, and DET2 (`bench/dce_pins.py`, the gradient on the production flags) was
+bitwise A-vs-A 5 times in 5, against 3 in 5 without it. On a free card L1-L3 kept their
+step time, peak and compile time (`compare --envelope` passed), and the
+deterministic-ops pins S1, S1x and S4b did not move.
+
+The flag has to be in `XLA_FLAGS` when the backend starts (XLA reads it once), so the
+library cannot set it: `ProductionRunner.run` warns once per process on a GPU when it is
+missing. `bench/fused_memory_budget.py`, the production-flag pins of `bench/dce_pins.py`
+(L1-L3, DET1-DET3) and `bench/provider_hlo_identity.py --device gpu` add it unless
+`XLA_FLAGS` sets it.
+
+**The flag is experimental: re-check it at every jax upgrade.** XLA refuses to start on a
+flag it no longer knows, and what an experimental flag covers can change. After a bump,
+record the DET pins twice on a shared card (`record --tag X --pins DET1,DET2,DET3`, then
+`X-b`, `compare X X-b`) and L1-L3 on a free one. A per-fusion autotune cache
+(`--xla_gpu_per_fusion_autotune_cache_dir`) also made resumes bitwise (4 of 4), but it is
+state: it holds what the first process timed, it has to travel with the restart files,
+and XLA does not invalidate it across versions or devices.
+
 ## What a segment is, and why
 
 The runner does not scan over `FusedForceProvider.step` itself: its segments ARE

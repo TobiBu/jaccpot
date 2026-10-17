@@ -88,3 +88,22 @@ def test_timing_pin_accuracy_must_match_to_two_digits():
     worse = {**_PLUMMER, "force": {"ms_min": 100.7, "peak_gib": 4.82, "rel_l2": 4.6e-4}}
     assert _compare_timed("L3", ref, same, None)["pass"]
     assert not _compare_timed("L3", ref, worse, None)["pass"]
+
+
+# ------------------------------------------------- the production pins' environment
+# L1-L3 and DET1-DET3 run on the production launch environment (docs/production.md):
+# the caller's XLA flags plus XLA's fusion autotuner off, unless the caller set it.
+from bench.dce_pins import _production_env  # noqa: E402
+
+_OFF = "--xla_gpu_experimental_enable_fusion_autotuner=false"
+
+
+def test_production_pins_turn_the_fusion_autotuner_off():
+    assert _production_env({})["XLA_FLAGS"] == _OFF
+    env = _production_env({"XLA_FLAGS": "--xla_gpu_graph_min_graph_size=2", "A": "1"})
+    assert env == {"XLA_FLAGS": f"--xla_gpu_graph_min_graph_size=2 {_OFF}", "A": "1"}
+
+
+def test_an_explicit_autotuner_setting_wins():
+    on = {"XLA_FLAGS": "--xla_gpu_experimental_enable_fusion_autotuner=true"}
+    assert _production_env(on) == on

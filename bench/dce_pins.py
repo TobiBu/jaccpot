@@ -59,7 +59,8 @@ R1x    S1x's particle arm through the runner, chained (1, 4, 4, 4 steps) and in 
 R1r    R1p with a restart file written at step 5, then the sequence continued from
        it in a FRESH process (``--runner-resume``, no eval prepare): passes when that
        state is the straight run's, bitwise, and the restore's digests matched
-DET1   S1 recorded WITHOUT ``--xla_gpu_deterministic_ops`` (the production flags)
+DET1   S1 recorded WITHOUT ``--xla_gpu_deterministic_ops`` (the production flags:
+       the caller's, plus XLA's fusion autotuner off)
 DET2   S4b's large-N gradient, recorded the same way
 DET3   R1p recorded the same way (the runner on the production flags)
 G1     the differentiable forward against the production forward on the fused
@@ -116,7 +117,14 @@ no R1p of its own (``_REFERENCE_PIN``); R1x and R1r check their own two arms.
 The DET pins answer one question: is the production path bitwise reproducible?
 Record them twice under the same code (``record --tag X --pins DET1,DET2`` and
 ``--tag X-b``); ``compare X X-b --pins DET1,DET2`` passes only when every array
-is bitwise equal.
+is bitwise equal. The production flags (DET and L pins) are the caller's
+``XLA_FLAGS`` plus ``--xla_gpu_experimental_enable_fusion_autotuner=false``, unless
+the caller sets that flag (``_production_env``; docs/production.md, "Launch
+environment"): the autotuner picks some fusions' emitters by timing, and on a shared
+card DET2 was bitwise A-vs-A 3 times in 5 with it, 5 in 5 without it (S3 session 2).
+Every DET record made before then ran with the autotuner on, and DET2 with it off
+lands on other values (652 position- and 1147 mass-gradient elements on one card):
+re-record a DET reference before comparing.
 
 G1 checks itself: ``compare <ref> X --pins G1`` passes when X's own record has the
 differentiable forward within ``_G1_REL_L2_LIMIT`` (fp32 round-off) of the
@@ -167,6 +175,9 @@ _REFERENCE_PIN = {"R1p": "S1p"}
 #: recorded without --xla_gpu_deterministic_ops: they time the lane, or test whether
 #: the production flags alone reproduce it
 _PRODUCTION_FLAGS = frozenset(PINS_LARGE + PINS_DET)
+#: the production launch environment's XLA flag (docs/production.md): XLA's fusion
+#: autotuner off, so the emitters do not depend on what else runs on the card
+_AUTOTUNER_OFF = "--xla_gpu_experimental_enable_fusion_autotuner=false"
 #: the 25M disc+bulge production softening (docs/softening_2026-10.md)
 _DISC_SOFTENING = "1.5e-3"
 #: G1's limit on rel-L2(differentiable forward - production forward). On the same
@@ -995,6 +1006,15 @@ CASES = {
 # --------------------------------------------------------------------- driver
 
 
+def _production_env(environ: dict) -> dict:
+    """``environ`` with the production flags: the fusion autotuner off unless set."""
+    env = dict(environ)
+    flags = env.get("XLA_FLAGS", "")
+    if _AUTOTUNER_OFF.split("=", 1)[0] not in flags:
+        env["XLA_FLAGS"] = f"{flags} {_AUTOTUNER_OFF}".strip()
+    return env
+
+
 def _record(args) -> int:
     out_dir = Path(args.root) / args.tag
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1002,12 +1022,13 @@ def _record(args) -> int:
     deterministic["XLA_FLAGS"] = (
         deterministic.get("XLA_FLAGS", "") + " --xla_gpu_deterministic_ops=true"
     ).strip()
+    production = _production_env(dict(os.environ))
     failed = []
     for pin in args.pins.split(","):
         print(f"[{args.tag}] {pin} ...", flush=True)
         rc = subprocess.run(
             [sys.executable, __file__, "case", pin, "--out", str(out_dir / pin)],
-            env=dict(os.environ) if pin in _PRODUCTION_FLAGS else deterministic,
+            env=production if pin in _PRODUCTION_FLAGS else deterministic,
             check=False,
         ).returncode
         if rc != 0:

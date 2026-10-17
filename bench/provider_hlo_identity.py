@@ -116,7 +116,10 @@ prepacked payload at small N). Every process scrubs the ``JACCPOT_*`` /
 sees the library's own defaults whatever the shell holds; the variants set their
 own. CPU adds ``--xla_backend_extra_options=-vectorize-loops=false`` (the test
 conftest's flag), GPU ``--xla_gpu_deterministic_ops=true`` and the bench's
-command-buffer flags.
+command-buffer and fusion-autotuner flags (each unless ``XLA_FLAGS`` sets it). A GPU
+record made before the autotuner flag was added (S3 session 2) ran without it: record
+an old base with ``XLA_FLAGS=--xla_gpu_experimental_enable_fusion_autotuner=false``
+to compare it with a new one.
 
 Usage::
 
@@ -167,6 +170,8 @@ _GPU_FLAGS = (
     # fused_memory_budget.py's record configuration
     "--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUSTOM_CALL",
     "--xla_gpu_graph_min_graph_size=2",
+    # ... and the production launch environment's (docs/production.md)
+    "--xla_gpu_experimental_enable_fusion_autotuner=false",
 )
 #: the CSR near-field lane on CPU (tests/unit/runtime/test_force_scale_evaluation.py)
 _CSR_ON_CPU = (
