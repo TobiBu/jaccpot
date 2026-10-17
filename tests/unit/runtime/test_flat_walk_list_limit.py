@@ -132,6 +132,9 @@ def test_a_list_past_the_index_range_raises_before_any_re_prepare(engine, needs,
         engine._replan_walk_caps_from_needs(needs)
     assert what in str(err.value) and str(_CSR_INT32) in str(err.value)
     assert "far list" in str(err.value)
+    # the remedies: fewer pairs, more cards, and the box a growing list points at
+    for remedy in ("theta", "leaf_size", "jaccpot.distributed", "JACCPOT_CUBIC_BOUNDS"):
+        assert remedy in str(err.value)
     # nothing re-planned: the caller never reaches the re-prepare
     assert engine._strict_fused_validated_caps == before
 
