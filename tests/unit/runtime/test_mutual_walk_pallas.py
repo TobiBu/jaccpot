@@ -466,6 +466,17 @@ def test_pallas_walk_reads_each_eq16a_table_row_once(
     assert reads[f"float32[7,{kernel_width}]"] == 2, reads
 
 
+@pytest.mark.parametrize("order", [0, 7])
+def test_pallas_walk_reads_each_node_record_once(order):
+    """The record layout's node record, ``(cx, cy, cz, r, left, right, active, 0)``,
+    is one read per node of the pair, with or without eq (16a) -- not seven."""
+    extra = {}
+    if order:
+        extra = dict(error_table=jnp.zeros((7, 16), jnp.float32), error_order=order)
+    reads = _round_kernel_reads(node_layout="record", **extra)
+    assert reads["float32[7,8]"] == 2, reads
+
+
 def test_pallas_walk_refuses_an_order_without_a_wide_enough_table():
     with pytest.raises(ValueError, match="error_table"):
         mutual_walk_pallas(

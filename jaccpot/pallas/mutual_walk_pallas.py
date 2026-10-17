@@ -304,7 +304,9 @@ def _node_rows(ref: KernelRef, nodes: Array) -> list[Array]:
     25M disc+bulge (captured inputs, A100, contended, min of 3 in one process,
     2026-10-17): the geometric MAC with the eq (16a) table merely loaded beside it,
     column by column, 47.6 ms against 22.9 ms without (identical lists); eq (16a)
-    52.5 ms with the table read by column, 32.1 ms read by row, same lists.
+    52.5 ms with the table read by column, 32.1 ms read by row, same lists. With
+    the node record read by row as well: eq (16a) 27.1 ms, the geometric walk
+    20.3 ms (22.9 by column), each with its lists unchanged.
 
     Parameters
     ----------
@@ -433,17 +435,22 @@ def _round_block(
     a_s = jnp.where(live, a, jnp.zeros_like(a))
     b_s = jnp.where(live, b, jnp.zeros_like(b))
     if node_layout == "record":
+        # each node's record in one vector load (_node_rows), not seven gathers
+        rec_a = _node_rows(cent_ref, a_s)
+        rec_b = _node_rows(cent_ref, b_s)
 
-        def _int(n, col):
-            return lax.bitcast_convert_type(cent_ref[n, col], jnp.int32)
+        def _int(col):
+            return lax.bitcast_convert_type(col, jnp.int32)
 
-        live = live & (_int(a_s, 6) > 0) & (_int(b_s, 6) > 0)
-        la = _int(a_s, 4)
-        lb = _int(b_s, 4)
-        ra = _int(a_s, 5)
-        rb = _int(b_s, 5)
-        rad_a = cent_ref[a_s, 3]
-        rad_b = cent_ref[b_s, 3]
+        live = live & (_int(rec_a[6]) > 0) & (_int(rec_b[6]) > 0)
+        la = _int(rec_a[4])
+        lb = _int(rec_b[4])
+        ra = _int(rec_a[5])
+        rb = _int(rec_b[5])
+        rad_a = rec_a[3]
+        rad_b = rec_b[3]
+        cen_a = rec_a[:3]
+        cen_b = rec_b[:3]
     else:
         live = live & (active_ref[a_s] > 0) & (active_ref[b_s] > 0)
         la = left_ref[a_s]
@@ -452,9 +459,11 @@ def _round_block(
         rb = right_ref[b_s]
         rad_a = rad_ref[a_s]
         rad_b = rad_ref[b_s]
-    dx = cent_ref[b_s, 0] - cent_ref[a_s, 0]
-    dy = cent_ref[b_s, 1] - cent_ref[a_s, 1]
-    dz = cent_ref[b_s, 2] - cent_ref[a_s, 2]
+        cen_a = [cent_ref[a_s, k] for k in range(3)]
+        cen_b = [cent_ref[b_s, k] for k in range(3)]
+    dx = cen_b[0] - cen_a[0]
+    dy = cen_b[1] - cen_a[1]
+    dz = cen_b[2] - cen_a[2]
     d2 = dx * dx + dy * dy + dz * dz
     same = a_s == b_s
     rsum = rad_a + rad_b
@@ -671,7 +680,8 @@ def mutual_walk_pallas(
         atomic for the four child pairs of a block, the only emission since the
         2026-10 cleanup, X5): the walk alone (A100) 286 -> 96 ms at 1e8
         particles and ~31 -> 15 ms at 8e6 (each alone: record 248 ms, fused
-        emission 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8.
+        emission 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8. A round
+        reads the record as one vector per node (two 128-bit loads, S3b).
     separation_floor : float
         Accept a pair only if also ``|c_b - c_a| >= r_a + r_b + separation_floor``,
         so no far interaction acts between particles closer than the floor (the
