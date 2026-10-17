@@ -28,7 +28,9 @@ widest level over ``K``.
 
 Every lane stores only its own node's row (masked, out-of-range lanes), reading
 rows of the level above or below, so the in-place update of the aliased table
-is race-free. Forward only: the custom VJPs of
+is race-free. The L2L kernel can carry one more scalar per node down the same
+parent edges (``force_scale``: ``mac_type='dehnen_error'``'s far force-scale
+term, S3b), in a second aliased table. Forward only: the custom VJPs of
 :mod:`jaccpot.pallas.cascade_real_level` pair it with that module's
 one-program-per-node reverse kernels, which read this forward's output as a
 residual (their ``_translate_rows`` body agrees with it to round-off -- a
@@ -39,7 +41,7 @@ from __future__ import annotations
 
 import functools
 import math
-from typing import Any
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -307,16 +309,11 @@ def _m2m_lanes_kernel(
 
 def _l2l_lanes_kernel(
     coef_ref: KernelRef,
-    cent_ref: KernelRef,
-    parent_ref: KernelRef,
-    nbl_ref: KernelRef,
-    start_ref: KernelRef,
-    count_ref: KernelRef,
-    out_ref: KernelRef,
-    *,
+    *refs: KernelRef,
     p: int,
     k_lanes: int,
     tables: dict,
+    force_scale: bool = False,
 ) -> None:
     """``K`` nodes of one level per program: each lane adds its parent's L2L.
 
@@ -324,30 +321,38 @@ def _l2l_lanes_kernel(
     ----------
     coef_ref : KernelRef
         Flat packed locals ``[nodes * C]`` (aliased to ``out_ref``).
-    cent_ref : KernelRef
-        Padded centres ``[nodes, 4]``.
-    parent_ref : KernelRef
-        Parent per node ``[nodes]`` (``-1`` at the root).
-    nbl_ref : KernelRef
-        ``nodes_by_level`` padded with ``-1``.
-    start_ref : KernelRef
-        This level's start ``[1]``.
-    count_ref : KernelRef
-        This level's node count ``[1]``.
-    out_ref : KernelRef
-        The flat table, written at this level's nodes.
+    *refs : KernelRef
+        ``cent_ref`` (padded centres ``[nodes, 4]``), ``parent_ref`` (parent per
+        node ``[nodes]``, ``-1`` at the root), ``nbl_ref`` (``nodes_by_level``
+        padded with ``-1``), ``start_ref`` / ``count_ref`` (this level's start
+        and node count, ``[1]`` each), ``out_ref`` (the flat table, written at
+        this level's nodes). With ``force_scale``, ``fb_ref`` (``[nodes]``,
+        aliased to ``fb_out_ref``) comes before ``cent_ref`` and ``fb_out_ref``
+        after ``out_ref``.
     p : int
         Order. Static.
     k_lanes : int
         Lanes (nodes) per program. Static.
     tables : dict
         :func:`_cascade_lane_tables`. Static.
+    force_scale : bool
+        Carry one more scalar per node down the same parent edges: each lane
+        stores ``fb[node] + fb[parent]``, so after the cascade every node holds
+        its own value plus all its ancestors' -- eq (16b)'s far force-scale
+        term pushed down to the leaves, the same sums in the same association as
+        :func:`jaccpot.runtime._force_scale_levels.ancestor_sum_by_level`.
+        ``False`` (default) is the plain L2L, the same program. Static.
 
     Returns
     -------
     None
-        Writes the nodes' rows.
+        Writes the nodes' rows (and their force-scale values).
     """
+    if force_scale:
+        fb_ref, cent_ref, parent_ref, nbl_ref, start_ref, count_ref = refs[:6]
+        out_ref, fb_out_ref = refs[6:]
+    else:
+        cent_ref, parent_ref, nbl_ref, start_ref, count_ref, out_ref = refs
     C, packed = tables["C"], tables["packed"]
     base = pl.program_id(0) * k_lanes
     count = count_ref[0]
@@ -372,6 +377,15 @@ def _l2l_lanes_kernel(
         nrow = _flat(node_safe, C, coef_ref.shape[0])
         new = {key: coef_ref[nrow + packed[key]] + w[key] for key in _keys(p)}
         _store_rows(out_ref, node_safe, valid, new, p=p, C=C, packed=packed, lane=lane)
+        if force_scale:
+            # own + everything above: the parent's level is final
+            fb_new = fb_ref[node_safe] + fb_ref[par]
+            n_rows = fb_out_ref.shape[0]
+            plgpu.store(
+                fb_out_ref.at[jnp.where(valid, node_safe, n_rows + lane)],
+                fb_new,
+                mask=valid,
+            )
 
 
 def _full(arr: Array) -> Any:
@@ -388,13 +402,31 @@ def _lanes_level_call(
     backend: str,
     num_warps: int,
     name: str,
-) -> Array:
+    force_scale: bool = False,
+) -> Any:
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
             num_warps=int(num_warps)
         )
     flat = operands[0]
+    if force_scale:
+        # the force-scale values ride as operand 1, aliased to output 1
+        fb = operands[1]
+        return pl.pallas_call(
+            kernel,
+            grid=(int(num_programs),),
+            in_specs=[_full(a) for a in operands],
+            out_specs=[_full(flat), _full(fb)],
+            out_shape=[
+                jax.ShapeDtypeStruct(flat.shape, flat.dtype),
+                jax.ShapeDtypeStruct(fb.shape, fb.dtype),
+            ],
+            input_output_aliases={0: 0, 1: 1},
+            interpret=bool(interpret),
+            name=name,
+            **backend_kwargs,
+        )(*operands)
     return pl.pallas_call(
         kernel,
         grid=(int(num_programs),),
@@ -533,7 +565,8 @@ def l2l_real_levels_lanes_pallas(
     interpret: bool = False,
     backend: str = "triton",
     num_warps: int = 1,
-) -> Array:
+    force_scale: Optional[Array] = None,
+) -> Union[Array, tuple[Array, Array]]:
     """Downward L2L cascade, one node per lane (the forward of ``l2l_real_levels_pallas_cvjp``).
 
     Parameters
@@ -562,11 +595,24 @@ def l2l_real_levels_lanes_pallas(
         Pallas GPU lowering.
     num_warps : int
         Warps per program.
+    force_scale : Optional[Array]
+        ``[nodes]`` per-node values to push down the same parent edges in the same
+        launches (``_l2l_lanes_kernel``'s ``force_scale``): eq (16b)'s far term of
+        ``mac_type='dehnen_error'``, each node's own contribution from the M2L
+        lanes kernel (:class:`~jaccpot.pallas.m2l_real_csr_lanes.FarForceScaleInputs`).
+        ``None`` (default) is the plain cascade, the same program.
 
     Returns
     -------
-    Array
-        ``[nodes, C]`` packed locals with every ancestor's field cascaded down.
+    Union[Array, tuple[Array, Array]]
+        ``[nodes, C]`` packed locals with every ancestor's field cascaded down;
+        with ``force_scale``, ``(locals, sums [nodes])``, each node's value plus
+        all its ancestors'.
+
+    Raises
+    ------
+    ValueError
+        If ``force_scale`` does not have one value per node.
     """
     p = int(order)
     C = _check(p, coeffs_local)
@@ -582,6 +628,44 @@ def l2l_real_levels_lanes_pallas(
     offs = jnp.asarray(level_offsets, idx)
     cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
     par = jnp.asarray(parent, idx)
+    if force_scale is not None:
+        kernel = functools.partial(
+            _l2l_lanes_kernel, p=p, k_lanes=k, tables=tables, force_scale=True
+        )
+
+        def body_fb(level: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+            flat, fb = carry
+            out = _lanes_level_call(
+                kernel,
+                [
+                    flat,
+                    fb,
+                    cent,
+                    par,
+                    nbl,
+                    offs[level][None],
+                    (offs[level + 1] - offs[level])[None],
+                ],
+                num_programs=-(-width // k),
+                interpret=interpret,
+                backend=backend,
+                num_warps=num_warps,
+                name=f"l2l_real_lanes_fb_p{p}_k{k}",
+                force_scale=True,
+            )
+            return out[0], out[1]
+
+        fb0 = jnp.asarray(force_scale)
+        if fb0.shape != (nodes,):
+            raise ValueError(f"force_scale must have shape ({nodes},)")
+        flat, fb = lax.fori_loop(
+            1,
+            max(int(num_levels), 1),
+            body_fb,
+            (coeffs_local.reshape(-1), fb0),
+            unroll=True,
+        )
+        return flat.reshape(nodes, C), fb
     kernel = functools.partial(_l2l_lanes_kernel, p=p, k_lanes=k, tables=tables)
 
     def body(level: Array, flat: Array) -> Array:

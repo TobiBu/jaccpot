@@ -5,6 +5,9 @@
 * ``subtree_min_by_level`` equals a brute-force minimum over each node's leaves;
 * ``far_force_scale_own`` pushed down equals the eager estimator's far-term formula
   (``_far_field_force_scale_by_node``) evaluated in numpy on the same far pairs;
+* the Pallas L2L cascade's force-scale channel (S3b: the push-down rides the
+  launches the downward sweep makes anyway) is ``ancestor_sum_by_level``, bit for
+  bit -- the same sums in the same association -- and leaves the locals alone;
 
 on a bucket tree and on the capacity-padded cell tree the fused lane uses (empty
 leaves included), eagerly and under ``jit``.
@@ -229,3 +232,70 @@ def test_the_chunked_far_term_equals_the_whole_list_one(
     got = np.asarray(fsl.far_force_scale_sorted(**kw))
     assert whole.max() > 0
     np.testing.assert_allclose(got, whole, rtol=1e-12, atol=0.0)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64], ids=["f32", "f64"])
+@pytest.mark.parametrize("kind", ["buckets", "cells"])
+def test_the_l2l_cascade_carries_the_far_term_as_ancestor_sum_does(kind, dtype):
+    """Each lane stores ``own[node] + sum[parent]`` once the parent's level is final:
+    ``ancestor_sum_by_level``'s ``own[child] + sum[node]`` along the true parent
+    edges, so every node -- the cell tree's dead ones included -- is bitwise equal."""
+    from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_pallas
+
+    topo, _, _ = _tree(kind)
+    kw = _tables(topo)
+    total = int(topo.parent.shape[0])
+    rng = np.random.default_rng(6)
+    own = jnp.asarray(rng.uniform(0.0, 1.0, total), dtype)
+    order = 3
+    coeffs = jnp.asarray(rng.standard_normal((total, (order + 1) ** 2)), dtype)
+    centres = jnp.asarray(rng.uniform(-1.0, 1.0, (total, 3)), dtype)
+    common = dict(
+        order=order,
+        num_levels=kw["num_levels"],
+        level_batch_width=kw["level_batch_width"],
+        interpret=True,
+    )
+    args = (coeffs, centres, topo.parent, kw["nodes_by_level"], kw["level_offsets"])
+    plain = l2l_real_levels_lanes_pallas(*args, **common)
+    locals_, sums = l2l_real_levels_lanes_pallas(*args, force_scale=own, **common)
+    want = np.asarray(ancestor_sum_by_level(own, **kw))
+    np.testing.assert_array_equal(np.asarray(sums), want)
+    assert np.any(want != np.asarray(own)), "vacuous: nothing was pushed down"
+    np.testing.assert_array_equal(np.asarray(locals_), np.asarray(plain))
+
+
+def test_the_l2l_custom_vjp_differentiates_the_locals_only():
+    from jaccpot.pallas.cascade_real_level import (
+        l2l_real_levels_fb_pallas_cvjp,
+        l2l_real_levels_pallas_cvjp,
+    )
+
+    topo, _, _ = _tree("cells", n=1000)
+    kw = _tables(topo)
+    total = int(topo.parent.shape[0])
+    rng = np.random.default_rng(8)
+    own = jnp.asarray(rng.uniform(0.0, 1.0, total))
+    order = 3
+    coeffs = jnp.asarray(rng.standard_normal((total, (order + 1) ** 2)))
+    centres = jnp.asarray(rng.uniform(-1.0, 1.0, (total, 3)))
+    tables = (
+        topo.parent,
+        topo.left_child,
+        topo.right_child,
+        kw["nodes_by_level"],
+        kw["level_offsets"],
+    )
+    static = (order, kw["num_levels"], kw["level_batch_width"], True, "triton", 4)
+
+    def plain(c, x):
+        return jnp.sum(l2l_real_levels_pallas_cvjp(c, x, *tables, *static) ** 2)
+
+    def with_scale(c, x):
+        out, sums = l2l_real_levels_fb_pallas_cvjp(c, own, x, *tables, *static)
+        return jnp.sum(out**2) + jnp.sum(sums)
+
+    want = jax.grad(plain, argnums=(0, 1))(coeffs, centres)
+    got = jax.grad(with_scale, argnums=(0, 1))(coeffs, centres)
+    for g, w in zip(got, want):
+        np.testing.assert_array_equal(np.asarray(g), np.asarray(w))
