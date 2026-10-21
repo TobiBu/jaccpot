@@ -60,14 +60,19 @@ set, N must be in it.
 `FastMultipoleMethod(preset="galaxy", softening=...)` is the production configuration
 (S3, `jaccpot/production.py`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8)
 in a cubic Morton box (`cubic_bounds=True`, S3b; see `docs/production.md`, "The Morton
-box"), p6, the geometric Dehnen MAC at theta 0.8, ferrers3, fp32, and
+box"), p6, Dehnen's error MAC at `adaptive_eps` 1e-4 (`mac_type="dehnen_error"`, since
+2026-10-21: 1.12x the geometric step at 25M for 2.8x lower rel-L2; the geometric MAC at
+theta 0.8 before, see `docs/production.md`, "The MAC"), ferrers3, fp32, and
 `leaf_capacity="auto"` -- sized at the first eager prepare from the live cell leaves of
 the particles it is given (x1.15, in steps of 1024; on device,
 `capacity_plan.live_cell_leaves`), then fixed. It compiles the same programs as the
 explicit configuration below with that capacity
 (`bench/provider_hlo_identity.py compare TAG TAG --pair galaxy_explicit:galaxy_preset`).
 Leaf size and order are call arguments: `GALAXY_SETTINGS.leaf_size` / `.max_order`
-from `jaccpot.production`. Spelled out:
+from `jaccpot.production`. Spelled out with the geometric MAC (`mac_type="dehnen"`, the
+preset before 2026-10-21; the preset's `dehnen_error` adds `adaptive_eps=1e-4,
+adaptive_error_model="dehnen_paper", mac_force_scale_mode="paper_fb"`, and its first
+`step` needs an `aux` that carries f_b: "The eager / traced split" below):
 
 ```python
 import jax

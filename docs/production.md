@@ -48,6 +48,73 @@ res = runner.run(dt=5e-4, num_steps=500, restart_from="run/restart.npz",
 `state` is the packed `[N, 2, 3]` positions and velocities, `masses` `[N]`. `num_steps` is
 the run's total from `t0`: a continued run runs the steps still missing. The one-shot
 form is `jaccpot.production.run(solver, state, masses, dt=..., num_steps=..., ...)`.
+The solver runs Dehnen's error MAC at 1e-4 (next section): `G` and the softening are the
+solver's, so a run with another value needs another solver.
+
+## The MAC
+
+`preset="galaxy"` accepts a far pair by Dehnen (2014) eq (16a) at a relative
+force-accuracy target of 1e-4 (`GalaxySettings(mac_type="dehnen_error",
+adaptive_eps=1e-4)`, user decision 2026-10-21); before, by the geometric Dehnen test at
+theta 0.8. The criterion runs inside the flat walk, with eq (16b)'s force scale f_b
+carried from each step's force to the next step's walk
+([`dehnen_error_fused_2026-10.md`](dehnen_error_fused_2026-10.md)); the preset passes
+what `bench/fused_memory_budget.py --mac-type dehnen_error --adaptive-eps 1e-4` passes
+and compiles the same programs (`provider_hlo_identity.py`'s galaxy pair). Measured on
+one A100 with no other job, the S3b branches merged, the second of two runs each
+([`production_2026-10.md`](production_2026-10.md), S3b):
+
+| | geometric, theta 0.8 | `dehnen_error`, 1e-4 |
+|---|---|---|
+| 25M disc + bulge, step | 233.6 ms | 260.5 ms (1.12x) |
+| 25M disc + bulge, rel-L2 against the fp64 direct sum | 4.18e-4 | 1.49e-4 (2.8x lower) |
+| 1e8 clipped Plummer, step | 855.3 ms | 831.3 ms |
+| 1e8 clipped Plummer, peak | 257 B/particle | 279 B/particle |
+
+What it costs:
+
+- **Memory:** about 22 B/particle more at 1e8, so a lower one-card ceiling.
+- **`G` and the softening are the solver's.** The rebuild builds eq (16a)'s thresholds
+  and the far half of f_b with them, so `strict_run_v2` refuses any other value, traced
+  or not, and the runner passes none (`SegmentConfig.traced_params` traces `dt` and the
+  field's parameters only). Another `G` or softening is another solver, and compiles.
+- **The tail:** the bulk of the error distribution narrows as in Dehnen (2014); its
+  0.1-1 % tail does not narrow like it.
+- **Restart files** carry f_b (`force_scale`, +4 B/particle).
+- **Off the fused lane** -- `compute_accelerations` on this preset, the large-N lane's
+  general route -- the criterion costs far more memory: at 2e5 (clipped Plummer, an
+  A100 other jobs shared) one call peaked at 4,553 B/particle against 736 with the
+  geometric MAC (not broken down further). The production path is `strict_run_v2` /
+  the runner, on the fused lane.
+
+`theta` decides no pair under `dehnen_error`: the walk accepts by eq (16a) and its
+convergence clause `rho_A + rho_B < mac_theta_max r` (`mac_theta_max` 1.0), and the first
+step's f_b seed walks at theta 0.8 whatever the solver's (`mac_force_scale_prepass_theta`
+sets it). Theta 0.3, 0.5 and 0.8 gave the same lists and the same states, bit for bit
+(CPU, N = 2048, 2 steps); it is still part of the compile keys. A tighter target is
+`FastMultipoleMethod(preset="galaxy", adaptive_eps=1e-5)`.
+
+**The geometric MAC back** (the preset before 2026-10-21, the same engine:
+`tests/unit/test_preset_galaxy.py`):
+
+```python
+import dataclasses
+
+from jaccpot import FastMultipoleMethod, ProductionRunner
+from jaccpot.production import GalaxySettings
+
+base = FastMultipoleMethod(preset="galaxy").advanced
+solver = FastMultipoleMethod(
+    preset="galaxy", softening=1.5e-3,
+    advanced=dataclasses.replace(base, mac_type="dehnen"),
+)
+runner = ProductionRunner(solver, settings=GalaxySettings(mac_type="dehnen", adaptive_eps=None))
+```
+
+The runner reads only the run-time half of `settings` (`leaf_size`, `max_order`,
+`carry`) and records all of it in the restart fingerprint; it does not build the solver
+from it, so pass both. The legacy keyword `FastMultipoleMethod(preset="galaxy",
+mac_type="dehnen")` builds the same engine with a `DeprecationWarning`.
 
 ## Launch environment
 
@@ -98,7 +165,7 @@ N = 512: 1 of 3072 state components, 1.9e-6, after 3 x 2 steps against 6).
 | `SegmentConfig` | default | |
 |---|---|---|
 | `steps` | 50 | steps per segment. **Choose it to divide `num_steps`.** |
-| `traced_params` | `True` | `dt`, `G`, the softening squared (not under `mac_type="dehnen_error"`) and the field's float parameters as arrays: arguments of the compiled programs, so other values compile nothing. `strict_run_v2` itself keeps literals by default. |
+| `traced_params` | `True` | `dt`, `G`, the softening squared (not under `mac_type="dehnen_error"`, the preset's MAC: there they are the solver's) and the field's float parameters as arrays: arguments of the compiled programs, so other values compile nothing. `strict_run_v2` itself keeps literals by default. |
 | `donate_input` | `False` | the first segment consumes the caller's state; later segments always consume their (the runner's) input |
 | `diagnostics_every` | 1 | moments at step 0, every n-th edge and the last; 0 = off |
 | `diagnostics` | all | of `"momentum"`, `"angular_momentum"`, `"com"`, `"kinetic"`, `"energy"` |
@@ -159,7 +226,7 @@ S3b): every cell is a cube. `JACCPOT_CUBIC_BOUNDS` overrides the configuration w
 set (`1`: cube, `0`: per axis; read per call, and a cube is part of the provider's compile
 key); the multi-GPU lane reads only the variable. Measured with the eager prepare on one
 A100 (lists in directed entries; rel-L2 against the fp64 direct sum on 4096 targets;
-ferrers3, theta 0.8, cells of 64, `cell_min_level` 8, p6):
+ferrers3, the geometric MAC at theta 0.8, cells of 64, `cell_min_level` 8, p6):
 
 | particles | box aspect | far, per axis -> cube | near | rel-L2 | live leaves |
 |---|---|---|---|---|---|
