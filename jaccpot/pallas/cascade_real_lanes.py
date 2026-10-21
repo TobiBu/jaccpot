@@ -665,8 +665,10 @@ def l2l_real_levels_lanes_pallas(
         num_warps=num_warps,
     )
     arrays = (coeffs_local, centers, parent, nodes_by_level, level_offsets)
-    if _eager(*arrays):
-        return _L2L_EAGER(*arrays, **statics)
+    # the force-scale channel rides along: an eager dehnen_error prepare carries it
+    fb_arrays = () if force_scale is None else (force_scale,)
+    if _eager(*arrays, *fb_arrays):
+        return _L2L_EAGER(*arrays, force_scale=force_scale, **statics)
     p = int(order)
     C = _check(p, coeffs_local)
     tables = _cascade_lane_tables(p)

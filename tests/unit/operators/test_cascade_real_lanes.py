@@ -211,6 +211,13 @@ def test_eager_calls_compile_once_and_trace_the_same_program(tree_data):
         if name == "/jax/core/compile/backend_compile_duration":
             compiles.append(name)
 
+    # The first Pallas launch of a process can define a config that is part of jax's
+    # tracing context (interpret mode imports jax's Pallas fuser, whose
+    # `pallas_fuser_disable_nested_fuse` is one), so the call after it misses the
+    # cache once whatever the cascade does: run alone, this test saw 22 compiles
+    # against 21. Warm that up before counting.
+    m2m(*m2m_args)
+    l2l(*l2l_args)
     monitoring.register_event_duration_secs_listener(listen)
     try:
         first = [np.asarray(m2m(*m2m_args)), np.asarray(l2l(*l2l_args))]
@@ -223,3 +230,32 @@ def test_eager_calls_compile_once_and_trace_the_same_program(tree_data):
     for a, b, c in zip(first, again, traced):
         assert np.array_equal(a, b)
         assert np.array_equal(a, c)
+
+
+def test_an_eager_force_scale_cascade_carries_the_force_scale(tree_data):
+    """The eager route forwards ``force_scale`` (dehnen_error's far term, S3b): an
+    eager full prepare of a ``dehnen_error`` run calls the L2L cascade with it, and
+    the eager program must return the same ``(locals, sums)`` as the traced call --
+    not the plain cascade's locals alone."""
+    topo, com, num_levels, width = tree_data
+    total = int(topo.parent.shape[0])
+    order = 3
+    C = (order + 1) ** 2
+    rng = np.random.default_rng(11)
+    x = jnp.asarray(rng.standard_normal((total, C)), jnp.float32)
+    fb = jnp.asarray(rng.uniform(0.5, 2.0, total), jnp.float32)
+    args = (x, com, topo.parent, topo.nodes_by_level, topo.level_offsets)
+    kw = dict(
+        order=order, num_levels=num_levels, level_batch_width=width, interpret=True
+    )
+
+    def l2l(*a, force_scale):
+        return l2l_real_levels_lanes_pallas(*a, force_scale=force_scale, **kw)
+
+    eager = l2l(*args, force_scale=fb)
+    traced = jax.jit(l2l)(*args, force_scale=fb)
+    assert isinstance(eager, tuple) and len(eager) == 2
+    for a, b in zip(eager, traced):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+    plain = l2l(*args, force_scale=None)
+    assert np.array_equal(np.asarray(plain), np.asarray(eager[0]))
