@@ -1036,11 +1036,17 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
     )
     runner = ProductionRunner(
         solver,
+        # the bench's own configuration (the restart fingerprint records it): its
+        # MAC, not the preset's dehnen_error
         settings=GalaxySettings(
             leaf_size=ARGS.leaf,
             max_order=ARGS.order,
             theta=ARGS.theta,
             cubic_bounds=bool(ARGS.cubic_bounds),
+            mac_type=str(ARGS.mac_type),
+            adaptive_eps=(
+                None if ARGS.adaptive_eps is None else float(ARGS.adaptive_eps)
+            ),
         ),
         segment=segment,
         external_acceleration_fn=ext,

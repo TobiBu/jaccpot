@@ -88,8 +88,9 @@ galaxy_explicit               (S3, not in the default sets) the particle carry o
                               ``fused_memory_budget.py``'s explicit configuration at
                               its defaults (leaf 64, p6, theta 0.8, cell level 8, its
                               leaf-64 traversal overrides) with ``--cubic-bounds``
-                              (S3b), capacity counted inside the capture as the
-                              bench counts it
+                              (S3b) and ``--mac-type dehnen_error --adaptive-eps
+                              1e-4`` (2026-10-21), capacity counted inside the
+                              capture as the bench counts it
 galaxy_preset                 the same run on ``preset="galaxy"`` (``leaf_capacity=
                               "auto"``, theta from the preset): ``compare --pair
                               galaxy_explicit:galaxy_preset`` must find nothing
@@ -503,12 +504,13 @@ _BENCH_TRAVERSAL_LEAF64 = dict(
 def _galaxy_solver(setup: Setup, v: "Variant", positions):
     """The galaxy pair: ``preset="galaxy"``, or the bench's explicit configuration.
 
-    ``"explicit"`` is ``fused_memory_budget.py --cubic-bounds``'s ``_solver`` (its
-    defaults and the cubic Morton box, S3b), its leaf capacity counted as the bench
-    counts it (the library's device count, since S3, in the cube), inside the
-    capture -- where ``"preset"``'s ``leaf_capacity="auto"`` counts it, in its first
-    eager prepare. Both then run the same counting programs on the same codes, so
-    the two records must agree program for program.
+    ``"explicit"`` is ``fused_memory_budget.py --cubic-bounds --mac-type
+    dehnen_error --adaptive-eps 1e-4``'s ``_solver`` (its defaults, the cubic Morton
+    box, S3b, and the preset's MAC since 2026-10-21), its leaf capacity counted as
+    the bench counts it (the library's device count, since S3, in the cube), inside
+    the capture -- where ``"preset"``'s ``leaf_capacity="auto"`` counts it, in its
+    first eager prepare. Both then run the same counting programs on the same
+    codes, so the two records must agree program for program.
     """
     import warnings
 
@@ -560,9 +562,13 @@ def _galaxy_solver(setup: Setup, v: "Variant", positions):
                 runtime=RuntimePolicyConfig(
                     traversal_config=TraversalOverrides(**_BENCH_TRAVERSAL_LEAF64)
                 ),
-                mac_type="dehnen",
+                mac_type="dehnen_error",
             ),
             fixed_order=setup.order,
+            # the bench's dehnen_error arguments
+            adaptive_eps=1e-4,
+            adaptive_error_model="dehnen_paper",
+            mac_force_scale_mode="paper_fb",
         )
 
 

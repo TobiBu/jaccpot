@@ -64,8 +64,12 @@ from tests.integration.strict.test_strict_runners_on_provider import (  # noqa: 
 N = 512
 LEAF, ORDER, THETA = 16, 4, 0.6
 SOFTENING, DT = 1e-2, 1e-3
-#: the runner's run-time half at this operating point
-SETTINGS = GalaxySettings(leaf_size=LEAF, max_order=ORDER, theta=THETA)
+#: the runner's run-time half at this operating point, with the geometric MAC of
+#: ``_solver`` (the restart fingerprint records the settings; ``preset="galaxy"``'s
+#: MAC is ``dehnen_error`` since 2026-10-21)
+SETTINGS = GalaxySettings(
+    leaf_size=LEAF, max_order=ORDER, theta=THETA, mac_type="dehnen", adaptive_eps=None
+)
 #: the halo of the external-field gates (provider_hlo_identity.py's NFW)
 HALO_M, HALO_RS = 10.0, 1.0
 

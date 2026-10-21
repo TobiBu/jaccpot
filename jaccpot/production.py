@@ -1,9 +1,10 @@
 """Galaxy-scale production on the fused lane: what ``preset="galaxy"`` runs, and the runner.
 
-``FastMultipoleMethod(preset="galaxy")`` is the configuration the production rows
-of the fused lane are measured with (``bench/fused_memory_budget.py``'s defaults:
-the L1-L3 rows, 8e6 and 1e8 particles on one A100 and the 25M disc + bulge; since
-S3b with a cubic Morton box, ``--cubic-bounds``), named so a caller no longer copies
+``FastMultipoleMethod(preset="galaxy")`` is the configuration of the fused lane's
+production rows: ``bench/fused_memory_budget.py`` at its defaults (those of the L1-L3
+rows, 8e6 and 1e8 particles on one A100 and the 25M disc + bulge) with a cubic Morton
+box (``--cubic-bounds``, S3b) and, since 2026-10-21, Dehnen's error MAC
+(``--mac-type dehnen_error --adaptive-eps 1e-4``), named so a caller no longer copies
 it from the bench. It is built from ONE :class:`GalaxySettings` instance, so the
 constructor half (the tree, the box, the MAC, the opening angle, the softening
 kernel, the precision) and the run-time half (leaf size, expansion order, carry --
@@ -93,6 +94,19 @@ class GalaxySettings:
     Frozen. The defaults are ``preset="galaxy"``; :data:`GALAXY_SETTINGS` is that
     instance.
 
+    THE MAC (user decision, 2026-10-21). The preset accepts a far pair by Dehnen
+    (2014) eq (16a) at ``adaptive_eps`` 1e-4 (``mac_type="dehnen_error"``); before, by
+    the geometric Dehnen test at ``theta`` 0.8. On the 25M disc + bulge on one A100
+    (S3b) its step takes 1.12x the geometric one (260.5 against 233.6 ms) for a 2.8x
+    lower force error (rel-L2 1.49e-4 against 4.18e-4); the 1e8 clipped Plummer step
+    831 ms at 279 B/particle (geometric 257). What it costs: about 22 B/particle
+    more at 1e8 (a lower one-card ceiling); ``G`` and the softening cannot be traced
+    -- eq (16a)'s thresholds are built with the solver's own, so another value means
+    another solver and a compile (``dt`` and the external field's parameters stay
+    traced); its 0.1-1 % error tail does not narrow like the bulk (Dehnen 2014);
+    restart files carry f_b (+4 B/particle). The geometric MAC is ``mac_type=
+    "dehnen", adaptive_eps=None`` (``docs/production.md``, "The MAC").
+
     Attributes
     ----------
     leaf_size : int
@@ -103,7 +117,13 @@ class GalaxySettings:
         ``fixed_order``). p6 since round 5: at ``cell_min_level`` 8 it halves the
         fp64 rel-L2 of p5 for ~5 % of the step.
     theta : float
-        Opening angle of the geometric Dehnen MAC.
+        Opening angle of the geometric Dehnen MAC. Under ``"dehnen_error"`` it
+        decides no pair: the flat walk accepts by eq (16a) and its convergence
+        clause ``rho_A + rho_B < mac_theta_max r`` (``mac_theta_max`` 1.0), and the
+        first step's f_b seed walks at 0.8 whatever ``theta`` is
+        (``mac_force_scale_prepass_theta``). Theta 0.3, 0.5 and 0.8 gave the same
+        lists and the same states bit for bit (CPU, N = 2048). It stays 0.8, the
+        value the bench passes; it is still part of the compile keys.
     cell_min_level : int
         No leaf coarser than this Morton level (``TreeConfig.cell_min_level``).
     leaf_capacity : Union[int, Literal["auto"]]
@@ -125,11 +145,18 @@ class GalaxySettings:
     softening_kernel : str
         Pair softening kernel (:mod:`jaccpot.softening`).
     mac_type : str
-        Multipole acceptance criterion. ``"dehnen"`` is geometric at ``theta``; the
-        mass-dependent ``"dehnen_error"`` (with ``adaptive_eps``) is the accuracy
-        alternative.
+        Multipole acceptance criterion. ``"dehnen_error"`` (the default since
+        2026-10-21): eq (16a) inside the flat walk, with the eq (15) estimator and
+        eq (16b)'s f_b carried from step to step --
+        ``bench/fused_memory_budget.py --mac-type dehnen_error``, which also passes
+        ``adaptive_error_model="dehnen_paper"`` and ``mac_force_scale_mode=
+        "paper_fb"``, as the preset does (the fused lane carries f_b whatever they
+        are; the general path reads them).
+        ``"dehnen"``: the geometric Dehnen MAC at ``theta``, 0.90x the step at 25M
+        and 0.92x the peak at 1e8, ``G`` and the softening traceable, 2.8x the
+        rel-L2.
     adaptive_eps : Optional[float]
-        ``"dehnen_error"``'s relative force-accuracy target; ``None`` with the
+        ``"dehnen_error"``'s relative force-accuracy target, 1e-4; ``None`` with the
         geometric MAC.
     carry : Literal["particles", "state"]
         ``strict_run_v2(carry=...)``: the particle carry (input order, a handle
@@ -146,8 +173,8 @@ class GalaxySettings:
     leaf_headroom: float = 1.15
     cubic_bounds: bool = True
     softening_kernel: str = "ferrers3"
-    mac_type: str = "dehnen"
-    adaptive_eps: Optional[float] = None
+    mac_type: str = "dehnen_error"
+    adaptive_eps: Optional[float] = 1e-4
     carry: Literal["particles", "state"] = "particles"
     precision: Literal["fp32", "fp64"] = "fp32"
 
@@ -173,9 +200,11 @@ class SegmentConfig:
         (:func:`segment_lengths`).
     traced_params : bool
         Pass ``dt``, ``G`` and the softening squared (not under
-        ``mac_type='dehnen_error'``, which takes the solver's own) and the external
-        field's float parameters as ARRAYS: arguments of the compiled programs, so
-        a run with other values compiles nothing new. The runner's default;
+        ``mac_type='dehnen_error'``, ``preset="galaxy"``'s MAC, which takes the
+        solver's own: another ``G`` or softening is another solver, and compiles)
+        and the external field's float parameters as ARRAYS: arguments of the
+        compiled programs, so a run with other values compiles nothing new. The
+        runner's default;
         ``strict_run_v2`` itself keeps literals by default (under ``ferrers3`` a
         traced softening is not bitwise the literal one: one float32 rounding,
         ``tests/integration/strict/test_traced_params.py``).
@@ -1085,7 +1114,8 @@ class ProductionRunner:
       segment retry (24 B per particle on the host, one device-to-host copy per
       segment).
     * Parameters: ``SegmentConfig.traced_params`` (the default) passes ``dt``,
-      ``G``, the softening squared and the field's float parameters as arrays.
+      ``G``, the softening squared (not under ``dehnen_error``, the galaxy
+      preset's MAC) and the field's float parameters as arrays.
     * Retry: a segment whose lists or tree overflow is re-planned and re-run by
       ``strict_run_v2`` itself, once (twice when the first re-plan grew the tree:
       the second for the walk only); a failure after that raises, naming the last

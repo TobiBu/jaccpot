@@ -218,7 +218,14 @@ def test_the_restore_prepares_caps_only_and_keeps_its_digests(
     digests of the run's compile keys matched, and the continuation is the run's."""
     from jaccpot.production import GalaxySettings, ProductionRunner, SegmentConfig
 
-    settings = GalaxySettings(leaf_size=r6.LEAF, max_order=r6.ORDER, theta=r6.THETA)
+    # the geometric solver's settings (the restart fingerprint records them)
+    settings = GalaxySettings(
+        leaf_size=r6.LEAF,
+        max_order=r6.ORDER,
+        theta=r6.THETA,
+        mac_type="dehnen",
+        adaptive_eps=None,
+    )
     _, state, masses = r6._systems()
     path = str(tmp_path / "restart.npz")
 

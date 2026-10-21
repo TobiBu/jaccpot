@@ -94,10 +94,12 @@ class FMMPreset(str, Enum):
         ``"galaxy"``. The fused lane's production configuration
         (:class:`jaccpot.production.GalaxySettings`): the ``large_n_gpu`` engine
         profile on cell leaves of 64 (``cell_min_level`` 8, ``leaf_capacity``
-        ``"auto"``, a cubic Morton box), p6, the geometric Dehnen MAC at
-        ``theta`` 0.8, ferrers3 softening, fp32 -- what
-        ``bench/fused_memory_budget.py --cubic-bounds`` measures, with the same
-        compiled programs. Leaf size, order and the
+        ``"auto"``, a cubic Morton box), p6, Dehnen's error MAC
+        (``dehnen_error``, eq 16a) at ``adaptive_eps`` 1e-4 (since 2026-10-21;
+        the geometric MAC at ``theta`` 0.8 before), ferrers3 softening, fp32 --
+        what ``bench/fused_memory_budget.py --cubic-bounds --mac-type dehnen_error
+        --adaptive-eps 1e-4`` measures, with the same compiled programs. Leaf
+        size, order and the
         particle carry are ``strict_run_v2`` arguments; take them from
         :data:`jaccpot.production.GALAXY_SETTINGS`.
     """
