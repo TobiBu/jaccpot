@@ -31,6 +31,7 @@ from yggdrax.bounds import infer_bounds  # noqa: E402
 from yggdrax.tree_moments import compute_tree_mass_moments  # noqa: E402
 
 from jaccpot.distributed.cross import (  # noqa: E402
+    _CROSS_CAP_GRANULE,
     CROSS_NEEDS_FIELDS,
     CrossCapacities,
     _rows_by_peer,
@@ -153,6 +154,13 @@ def test_the_row_needs_survive_the_row_capacity():
     np.testing.assert_array_equal(np.asarray(small.present), np.asarray(big.present))
 
 
+def _needs(**values):
+    vec = np.zeros(len(CROSS_NEEDS_FIELDS), np.int64)
+    for k, v in values.items():
+        vec[CROSS_NEEDS_FIELDS.index(k)] = v
+    return vec
+
+
 CAP_FIELDS = CROSS_NEEDS_FIELDS[:10]
 
 
@@ -166,6 +174,114 @@ def test_the_needs_name_the_capacities_they_size():
         "pairs_lower_bound",
         "mismatch",
     )
+
+
+def test_the_defaults_are_unchanged():
+    """Existing tests and benches build ``CrossCapacities()``; sizing is opt-in."""
+    assert vars(CrossCapacities()) == dict(
+        max_cells=1024,
+        max_leaves_per_cell=None,
+        export_far_cap=1 << 16,
+        export_near_cap=1 << 16,
+        send_node_cap=1 << 13,
+        send_csr_cap=1 << 16,
+        recv_node_cap=1 << 13,
+        recv_csr_cap=1 << 16,
+        walk_queue=1 << 16,
+        leaf_width=64,
+        recv_far_cap=1 << 17,
+        recv_near_cap=1 << 17,
+        recv_near_csr_cap=1 << 16,
+        export_walk_queue=1 << 16,
+        send_particle_cap=(1 << 13) * 64,
+        recv_particle_cap=(1 << 13) * 64,
+        summary_cell_level=None,
+        max_summary_nodes=2048,
+    )
+
+
+def test_for_shard_bounds_the_summary_by_the_tree_and_scales_with_leaves_and_peers():
+    two = CrossCapacities.for_shard(
+        leaf_capacity=4096, ndev=2, leaf_width=64, live_leaves=3000
+    )
+    assert two.max_cells == 4096 and two.max_summary_nodes == 2 * 4096 - 1
+    assert two.leaf_width == 64 and two.summary_cell_level is None
+    # 16 far pairs per live leaf per peer, x2.5
+    assert two.export_far_cap == -(-16 * 3000 * 25 // 10 // 1024) * 1024
+    four = CrossCapacities.for_shard(
+        leaf_capacity=4096, ndev=4, leaf_width=64, live_leaves=3000
+    )
+    for name in CAP_FIELDS[2:9]:
+        assert getattr(four, name) % _CROSS_CAP_GRANULE == 0, name
+        # three peers instead of one, up to the rounding of each
+        lo = 3 * getattr(two, name) - 3 * _CROSS_CAP_GRANULE
+        assert lo <= getattr(four, name) <= 3 * getattr(two, name), name
+    # no live count: the leaf capacity bounds the live leaves
+    upper = CrossCapacities.for_shard(leaf_capacity=4096, ndev=2, leaf_width=64)
+    assert upper.export_far_cap > two.export_far_cap
+
+
+def test_from_needs_sizes_every_capacity_from_its_need():
+    like = CrossCapacities(send_csr_cap=12345, summary_cell_level=8, leaf_width=64)
+    need = dict(zip(CAP_FIELDS, (33, 65, 5000, 900, 700, 120, 130, 1500, 1600, 51)))
+    caps = CrossCapacities.from_needs(_needs(**need), like=like, headroom=1.5)
+    for name in CAP_FIELDS[:9]:
+        want = -(-int(np.ceil(1.5 * need[name])) // 1024) * 1024
+        assert getattr(caps, name) == want, name
+    # the leaf width is a bound, not a count: the widest shipped leaf or the lane's
+    assert caps.leaf_width == 64
+    # what the symmetric exchange does not read comes from `like`
+    assert caps.send_csr_cap == 12345 and caps.summary_cell_level == 8
+    assert vars(like)["max_cells"] == 1024  # `like` is not modified
+
+    clamped = CrossCapacities.from_needs(
+        _needs(**need), like=like, headroom=1.5, leaf_capacity=40
+    )
+    assert clamped.max_cells == 40 and clamped.max_summary_nodes == 79
+
+
+def test_from_needs_reads_the_local_walks_headroom(monkeypatch):
+    monkeypatch.setenv("JACCPOT_FLAT_WALK_CAP_HEADROOM", "3.0")
+    caps = CrossCapacities.from_needs(_needs(export_far_cap=1000))
+    assert caps.export_far_cap == 3072
+
+
+def test_replanned_never_narrows_and_covers_the_need():
+    caps = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [100] * 9 + [40]))), headroom=1.0
+    )
+    assert all(getattr(caps, name) == 1024 for name in CAP_FIELDS[:9])
+    # an exact need past its capacity: headroom x need
+    grown = caps.replanned(
+        _needs(recv_node_cap=3000, send_particle_cap=10, overflow=1), headroom=1.5
+    )
+    assert grown.recv_node_cap == 5120
+    assert grown.send_particle_cap == 1024  # never narrower
+    assert grown.leaf_width == 64  # the lane's width; the widest leaf was 40
+    # a leaf wider than the tiles: the width grows to it, exactly
+    assert caps.replanned(_needs(leaf_width=70, overflow=1)).leaf_width == 70
+    # nothing needed more: the same capacities
+    same = caps.replanned(_needs(export_far_cap=500), headroom=1.5)
+    assert vars(same) == vars(caps)
+
+
+def test_a_lower_bound_need_that_overflowed_at_least_doubles():
+    caps = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [10_000] * 9 + [64]))), headroom=1.0
+    )
+    far = caps.export_far_cap
+    # yggdrax's traced walk stopped at its first overflow: the count is a lower bound
+    lower = _needs(export_far_cap=far + 1, walk_lower_bound=1, overflow=1)
+    assert caps.replanned(lower, headroom=1.5).export_far_cap == 2 * far
+    # the Pallas walk's count is exact past a full list: headroom x need
+    exact = _needs(export_far_cap=far + 1, overflow=1)
+    assert caps.replanned(exact, headroom=1.5).export_far_cap < 2 * far
+    # pairs lost to the walk make the exchange's counts lower bounds; a buffer that
+    # did NOT overflow is not doubled
+    rows = _needs(send_node_cap=caps.send_node_cap + 1, pairs_lower_bound=1, overflow=1)
+    grown = caps.replanned(rows, headroom=1.0)
+    assert grown.send_node_cap == 2 * caps.send_node_cap
+    assert grown.recv_node_cap == caps.recv_node_cap
 
 
 def test_cross_needs_refuses_a_hook_that_measured_nothing():

@@ -33,10 +33,13 @@ only the cost differs, and for the near half it differs the other way.
 
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple, Optional
+import copy
+import math
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array
 from yggdrax.distributed.comm import AXIS_NAME, ragged_all_to_all_exchange
 from yggdrax.distributed.export import (
@@ -108,6 +111,20 @@ CROSS_NEEDS_FIELDS = (
     "pairs_lower_bound",
     "mismatch",
 )
+#: the capacity entries of :data:`CROSS_NEEDS_FIELDS`, and the lower-bound bit (if
+#: any) that qualifies each
+_NEEDS_LOWER_BOUND_BIT = {
+    "max_cells": None,
+    "max_summary_nodes": None,
+    "export_far_cap": "walk_lower_bound",
+    "export_near_cap": "walk_lower_bound",
+    "export_walk_queue": "walk_lower_bound",
+    "send_node_cap": "pairs_lower_bound",
+    "recv_node_cap": "pairs_lower_bound",
+    "send_particle_cap": "pairs_lower_bound",
+    "recv_particle_cap": "pairs_lower_bound",
+    "leaf_width": "pairs_lower_bound",
+}
 
 
 _CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
@@ -1428,11 +1445,107 @@ def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
     return pallas_walk
 
 
+#: Capacities sized from a count are rounded up to a multiple of this.
+_CROSS_CAP_GRANULE = 1024
+
+#: A priori demand of the symmetric exchange's buffers per live leaf of the worst
+#: shard and per peer, and the headroom over it: the factors the two-card probe sized
+#: its buffers with (``bench/multigpu_c4_cross_force_probe.py``; Plummer, leaf 64,
+#: theta 0.8, 2e5-1e6 per card). Only a first measurement runs on them
+#: (:func:`plan_cross_capacities`); every later size comes from what it measured.
+_A_PRIORI_PER_LEAF = {
+    "export_far_cap": (16.0, 2.5),
+    "export_near_cap": (10.0, 2.5),
+    "export_walk_queue": (3.0, 1.5),
+    "send_node_cap": (1.25, 2.5),
+    "recv_node_cap": (1.25, 2.5),
+    "send_particle_cap": (20.0, 2.0),
+    "recv_particle_cap": (20.0, 2.0),
+}
+
+
+def _sized(need: Union[int, float], headroom: float) -> int:
+    """``headroom x need`` (at least one entry), rounded up to the granule.
+
+    Parameters
+    ----------
+    need : Union[int, float]
+        Entries needed: a measured count, or an a priori estimate.
+    headroom : float
+        Factor over ``need``.
+
+    Returns
+    -------
+    int
+        A positive multiple of :data:`_CROSS_CAP_GRANULE`.
+    """
+    want = math.ceil(float(headroom) * max(float(need), 1.0))
+    return -(-want // _CROSS_CAP_GRANULE) * _CROSS_CAP_GRANULE
+
+
+def _needs_by_field(needs: Any) -> dict[str, int]:
+    """A host needs vector as ``{field: value}``.
+
+    Parameters
+    ----------
+    needs : Any
+        ``[len(CROSS_NEEDS_FIELDS)]`` integers (:func:`cross_needs`, reduced).
+
+    Returns
+    -------
+    dict[str, int]
+        The vector keyed by :data:`CROSS_NEEDS_FIELDS`.
+
+    Raises
+    ------
+    ValueError
+        If the vector has the wrong length.
+    """
+    values = np.asarray(needs).astype(np.int64).reshape(-1)
+    if values.shape[0] != len(CROSS_NEEDS_FIELDS):
+        raise ValueError(
+            f"a cross needs vector has {len(CROSS_NEEDS_FIELDS)} entries "
+            f"(CROSS_NEEDS_FIELDS), got {values.shape[0]}"
+        )
+    return dict(zip(CROSS_NEEDS_FIELDS, (int(v) for v in values)))
+
+
+def _default_headroom(headroom: Optional[float]) -> float:
+    """The caller's headroom, or the local walk's (``JACCPOT_FLAT_WALK_CAP_HEADROOM``).
+
+    Parameters
+    ----------
+    headroom : Optional[float]
+        An explicit factor, or ``None``.
+
+    Returns
+    -------
+    float
+        The factor, at least 1.
+    """
+    if headroom is not None:
+        return max(float(headroom), 1.0)
+    from jaccpot.runtime._interaction_cache import flat_walk_cap_headroom
+
+    return flat_walk_cap_headroom()
+
+
 class CrossCapacities:
     """Static capacities for one cross exchange. Every one is an overflow risk.
 
     Attributes are read at trace time and fix every buffer shape, so they cannot be
-    derived from what actually arrives. Over-allocate and read the flags.
+    derived from what actually arrives. Three ways to size them, all for the default
+    (symmetric) exchange:
+
+    * :meth:`for_shard` -- a priori, from what the driver knows before any force: the
+      shard's leaf capacity and live leaves, the mesh size and the leaf width;
+    * :meth:`from_needs` -- from a MEASURED needs vector (:func:`cross_needs`), each
+      capacity ``headroom x`` what it needed; :func:`plan_cross_capacities` measures
+      one force at the start positions and does this;
+    * :meth:`replanned` -- the segment retry: grown, never narrowed, to cover what a
+      run whose flag fired needed.
+
+    ``CrossCapacities()`` keeps the fixed defaults below.
     """
 
     def __init__(
@@ -1517,6 +1630,208 @@ class CrossCapacities:
         self.max_summary_nodes = (
             2 * self.max_cells if max_summary_nodes is None else int(max_summary_nodes)
         )
+
+    def __repr__(self) -> str:
+        """The capacities, by attribute.
+
+        Returns
+        -------
+        str
+            ``CrossCapacities(name=value, ...)``.
+        """
+        fields = ", ".join(f"{k}={v}" for k, v in vars(self).items())
+        return f"CrossCapacities({fields})"
+
+    def _with(self, **changes: int) -> "CrossCapacities":
+        """A copy with some capacities replaced.
+
+        Parameters
+        ----------
+        **changes : int
+            Attribute name to its new value.
+
+        Returns
+        -------
+        CrossCapacities
+            The copy; ``self`` is unchanged.
+        """
+        new = copy.copy(self)
+        for name, value in changes.items():
+            setattr(new, name, int(value))
+        return new
+
+    @classmethod
+    def for_shard(
+        cls,
+        *,
+        leaf_capacity: int,
+        ndev: int,
+        leaf_width: int,
+        live_leaves: Optional[int] = None,
+        summary_cell_level: Optional[int] = None,
+    ) -> "CrossCapacities":
+        """A priori capacities for a mesh of ``ndev`` shards of ``leaf_capacity`` leaves.
+
+        The summary is bounded EXACTLY by the tree: under the default one-leaf cells
+        there is one cut cell per live leaf, at most ``leaf_capacity``, and the summary
+        tree is part of a tree of ``2 x leaf_capacity - 1`` nodes. The exchange buffers
+        scale with the live leaves of the worst shard times the peers it can hear from,
+        by the per-leaf demand the two-card probe measured, with its headroom
+        (:data:`_A_PRIORI_PER_LEAF`). Those factors come from Plummer spheres; for
+        anything else this is a first guess for :func:`plan_cross_capacities` to
+        measure and right-size, not a setting.
+
+        Parameters
+        ----------
+        leaf_capacity : int
+            Leaf slots of every shard's tree (the template's leaf capacity).
+        ndev : int
+            Mesh size.
+        leaf_width : int
+            Most particles in one leaf (the lane's leaf size).
+        live_leaves : Optional[int]
+            Live leaves of the worst shard; ``None`` uses ``leaf_capacity``.
+        summary_cell_level : Optional[int]
+            Passed through (:class:`CrossCapacities`).
+
+        Returns
+        -------
+        CrossCapacities
+            The capacities; the one-sided and CSR exchange's keep their defaults.
+        """
+        leaves = int(leaf_capacity if live_leaves is None else live_leaves)
+        peers = max(int(ndev) - 1, 1)
+        sized = {
+            name: _sized(per_leaf * leaves * peers, headroom)
+            for name, (per_leaf, headroom) in _A_PRIORI_PER_LEAF.items()
+        }
+        return cls(
+            max_cells=int(leaf_capacity),
+            max_summary_nodes=2 * int(leaf_capacity) - 1,
+            leaf_width=int(leaf_width),
+            summary_cell_level=summary_cell_level,
+            **sized,
+        )
+
+    @classmethod
+    def from_needs(
+        cls,
+        needs: Any,
+        *,
+        like: Optional["CrossCapacities"] = None,
+        headroom: Optional[float] = None,
+        leaf_capacity: Optional[int] = None,
+    ) -> "CrossCapacities":
+        """Capacities sized from a measured needs vector, wider or narrower than before.
+
+        Every capacity :data:`CROSS_NEEDS_FIELDS` names becomes ``headroom x`` what it
+        needed, rounded up to :data:`_CROSS_CAP_GRANULE` entries; the leaf width
+        becomes the widest shipped leaf, never below ``like``'s. Read a vector from a
+        run whose ``overflow`` bit is CLEAR: a lower-bound need sizes a buffer that
+        overflows again (:func:`plan_cross_capacities` re-plans first).
+
+        Parameters
+        ----------
+        needs : Any
+            The needs vector, reduced over the mesh (host).
+        like : Optional[CrossCapacities]
+            Where every capacity the symmetric exchange does not read comes from
+            (the one-sided and CSR controls'), with ``summary_cell_level`` and
+            ``max_leaves_per_cell``; ``None``: the defaults.
+        headroom : Optional[float]
+            Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM`` (1.5),
+            the local walk's.
+        leaf_capacity : Optional[int]
+            The tree's leaf slots: the summary is clamped to what a tree of them can
+            hold (``max_cells`` to it, ``max_summary_nodes`` to ``2 x it - 1``).
+
+        Returns
+        -------
+        CrossCapacities
+            The capacities.
+        """
+        base = like if like is not None else cls()
+        need = _needs_by_field(needs)
+        h = _default_headroom(headroom)
+        changes = {
+            name: _clamp_to_tree(name, _sized(need[name], h), leaf_capacity)
+            for name in _NEEDS_LOWER_BOUND_BIT
+            if name != "leaf_width"
+        }
+        changes["leaf_width"] = max(int(base.leaf_width), need["leaf_width"])
+        return base._with(**changes)
+
+    def replanned(
+        self,
+        needs: Any,
+        *,
+        headroom: Optional[float] = None,
+        leaf_capacity: Optional[int] = None,
+    ) -> "CrossCapacities":
+        """Capacities that cover what a run needed: the segment retry's re-plan.
+
+        Monotone: every capacity stays at least what it was, as the local walk's
+        re-plan (``engine._replan_walk_caps_from_needs``). A capacity grows to
+        ``headroom x`` its need; one whose need is only a LOWER bound (the walk or the
+        summary lost pairs: ``walk_lower_bound`` / ``pairs_lower_bound``) and that
+        overflowed at least doubles, as the local walk's queue does. A lower bound can
+        still fall short, so a run that overflowed its walk may need a second re-plan:
+        its re-run's needs are then exact.
+
+        Parameters
+        ----------
+        needs : Any
+            The failed run's needs vector, reduced over the mesh (a running maximum
+            over its steps is fine: every entry is a demand or an OR-ed bit).
+        headroom : Optional[float]
+            Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
+        leaf_capacity : Optional[int]
+            As :meth:`from_needs`; pass the GROWN one when the tree was re-planned.
+
+        Returns
+        -------
+        CrossCapacities
+            The grown capacities (equal to these when nothing needed more).
+        """
+        need = _needs_by_field(needs)
+        h = _default_headroom(headroom)
+        changes = {}
+        for name, bit in _NEEDS_LOWER_BOUND_BIT.items():
+            cap = int(getattr(self, name))
+            if name == "leaf_width":
+                changes[name] = max(cap, need[name])
+                continue
+            grown = max(cap, _clamp_to_tree(name, _sized(need[name], h), leaf_capacity))
+            if bit is not None and need[bit] and need[name] > cap:
+                grown = max(grown, 2 * cap)
+            changes[name] = grown
+        return self._with(**changes)
+
+
+def _clamp_to_tree(name: str, size: int, leaf_capacity: Optional[int]) -> int:
+    """A summary capacity clamped to what a tree of ``leaf_capacity`` leaves holds.
+
+    Parameters
+    ----------
+    name : str
+        The capacity (:data:`CROSS_NEEDS_FIELDS`).
+    size : int
+        Its proposed size.
+    leaf_capacity : Optional[int]
+        The tree's leaf slots; ``None`` clamps nothing.
+
+    Returns
+    -------
+    int
+        ``size``, or the tree's bound when that is smaller.
+    """
+    if leaf_capacity is None:
+        return int(size)
+    bound = {
+        "max_cells": int(leaf_capacity),
+        "max_summary_nodes": 2 * int(leaf_capacity) - 1,
+    }
+    return min(int(size), bound.get(name, int(size)))
 
 
 def make_cross_hook(
