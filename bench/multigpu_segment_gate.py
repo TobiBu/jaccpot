@@ -16,11 +16,12 @@ high-water mark, and XLA reads its flags once):
 * ``--mode solo`` (1 card): the single-card fused lane (``FusedForceProvider``) on
   the positions the segment mode dumped, scored on the same ids.
 
-The local lists are the LIBRARY's (``preset="galaxy"`` with the geometric MAC, theta
-0.8: ``leaf_capacity="auto"``, no fast-lane environment, no Odisseo harness caps).
-The CROSS capacities are ``bench/multigpu_rollout_gate.py``'s formulas (track B will
-replace them with the library's), with ``max_cells`` the leaf capacity: the
-two-sided summary holds every live leaf.
+The lists are the LIBRARY's (``preset="galaxy"`` with the geometric MAC, theta 0.8:
+``leaf_capacity="auto"``, no fast-lane environment, no Odisseo harness caps), the
+cross capacities too (``cross_caps="auto"``: sized from the start force's measured
+needs, on both routes). ``--cross formula`` takes ``bench/multigpu_rollout_gate.py``'s
+formulas instead (x ``--cross-scale``), with ``max_cells`` the leaf capacity, as the
+S11 track-A rows were measured.
 
     eval $(autocvd -q -l -n 2 -e -t 120)
     XLA_PYTHON_CLIENT_PREALLOCATE=false python bench/multigpu_segment_gate.py \\
@@ -79,6 +80,13 @@ def _args() -> argparse.Namespace:
     p.add_argument("--dump", required=True, help="positions by id, segment -> solo")
     p.add_argument(
         "--leaf-capacity", type=int, default=None, help="stacked: from the segment run"
+    )
+    p.add_argument(
+        "--cross",
+        choices=("library", "formula"),
+        default="library",
+        help="cross capacities: the library's (cross_caps='auto', the default) or "
+        "bench/multigpu_rollout_gate.py's formulas (the S11 track-A runs)",
     )
     p.add_argument(
         "--cross-scale",
@@ -355,7 +363,10 @@ def main() -> None:
     leaf_cap, leaves_per_device = _leaf_capacity_like_the_mesh(_solver(g, soft), shard)
     result["leaf_capacity_expected"] = leaf_cap
     result["leaves_per_device"] = leaves_per_device
-    caps = _cross_caps(leaves_per_device, leaf_cap)
+    caps = (
+        "auto" if ARGS.cross == "library" else _cross_caps(leaves_per_device, leaf_cap)
+    )
+    result["cross"] = ARGS.cross
     per_device = [int(c) for c in np.asarray(shard.count)]
     result["counts0"] = per_device
     times = []
@@ -386,6 +397,20 @@ def main() -> None:
             if isinstance(v, (int, float, bool))
         }
         result["plan"] = list(runner.force.setup.plan.fingerprint())
+        result["cross_caps"] = {
+            k: v
+            for k, v in vars(runner.force.cross_caps).items()
+            if isinstance(v, (int, float)) or v is None
+        }
+        if runner.force.cross_needs_measured is not None:
+            from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
+
+            result["cross_needs_measured"] = dict(
+                zip(
+                    CROSS_NEEDS_FIELDS,
+                    np.asarray(runner.force.cross_needs_measured).tolist(),
+                )
+            )
         t0 = time.perf_counter()
         start = runner.start()
         jax.block_until_ready(runner.state.acceleration)
@@ -467,6 +492,13 @@ def main() -> None:
         result["setup_s"] = time.perf_counter() - t0
         _checkpoint(result, "after_start")
         result["plan"] = list(plan.fingerprint())
+        chosen = getattr(force, "cross_caps", None)
+        if chosen is not None:
+            result["cross_caps"] = {
+                k: v
+                for k, v in vars(chosen).items()
+                if isinstance(v, (int, float)) or v is None
+            }
         for k in range(ARGS.segments):
             t0 = time.perf_counter()
             roll.run(ARGS.steps)
