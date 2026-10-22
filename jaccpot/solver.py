@@ -134,12 +134,14 @@ def _default_advanced_for_preset(preset: FMMPreset) -> FMMAdvancedConfig:
 def _galaxy_advanced(settings: GalaxySettings) -> FMMAdvancedConfig:
     """The advanced config of ``preset="galaxy"``, from its settings.
 
-    Field for field what ``bench/fused_memory_budget.py --cubic-bounds`` passes --
-    built on :class:`FMMAdvancedConfig`'s defaults, not on ``LARGE_N_GPU``'s, and
-    with the near field ``"auto"``, not that preset's ``"bucketed"`` -- so the
-    preset compiles the programs the production rows are measured with (S3 R7b,
-    ``bench/provider_hlo_identity.py``'s ``galaxy_*`` pair). The engine's
-    ``large_n_gpu`` profile canonicalizes the rest.
+    Field for field what ``bench/fused_memory_budget.py --cubic-bounds --mac-type
+    dehnen_error`` passes -- built on :class:`FMMAdvancedConfig`'s defaults, not on
+    ``LARGE_N_GPU``'s, and with the near field ``"auto"``, not that preset's
+    ``"bucketed"`` -- so the preset compiles the programs the production rows are
+    measured with (S3 R7b, ``bench/provider_hlo_identity.py``'s ``galaxy_*`` pair).
+    The engine's ``large_n_gpu`` profile canonicalizes the rest; the MAC's target,
+    estimator and force scale are constructor arguments
+    (:func:`_default_criterion_for_preset`).
 
     Parameters
     ----------
@@ -190,6 +192,52 @@ def _default_theta_for_preset(preset: FMMPreset) -> float:
     if preset is FMMPreset.GALAXY:
         return float(GALAXY_SETTINGS.theta)
     return 0.6
+
+
+def _default_criterion_for_preset(
+    preset: FMMPreset,
+    *,
+    mac_type: str,
+    adaptive_eps: Optional[float],
+    adaptive_error_model: Optional[str],
+    mac_force_scale_mode: Optional[str],
+) -> tuple:
+    """The accuracy target, error model and force scale a solver is built with.
+
+    ``"galaxy"`` under ``mac_type="dehnen_error"`` (its default since 2026-10-21,
+    :class:`~jaccpot.production.GalaxySettings`) fills what the constructor was not
+    given as ``bench/fused_memory_budget.py --mac-type dehnen_error`` passes it: the
+    settings' ``adaptive_eps`` (1e-4), the eq (15) estimator (``"dehnen_paper"``) and
+    eq (16b)'s f_b (``"paper_fb"``). Every other preset, and ``"galaxy"`` on the
+    geometric MAC, keeps the engine's defaults (``"tail_proxy"``, ``"prev"``, no
+    target), so the geometric preset is the one it was.
+
+    Parameters
+    ----------
+    preset : FMMPreset
+        Normalized preset.
+    mac_type : str
+        The resolved MAC (the advanced config's, or the legacy keyword's).
+    adaptive_eps : Optional[float]
+        The constructor's.
+    adaptive_error_model : Optional[str]
+        The constructor's; ``None``: the preset's.
+    mac_force_scale_mode : Optional[str]
+        The constructor's; ``None``: the preset's.
+
+    Returns
+    -------
+    tuple
+        ``(adaptive_eps, adaptive_error_model, mac_force_scale_mode)``.
+    """
+    criterion = preset is FMMPreset.GALAXY and str(mac_type) == "dehnen_error"
+    if criterion and adaptive_eps is None:
+        adaptive_eps = GALAXY_SETTINGS.adaptive_eps
+    if adaptive_error_model is None:
+        adaptive_error_model = "dehnen_paper" if criterion else "tail_proxy"
+    if mac_force_scale_mode is None:
+        mac_force_scale_mode = "paper_fb" if criterion else "prev"
+    return adaptive_eps, adaptive_error_model, mac_force_scale_mode
 
 
 def _normalize_preset(preset: Union[FMMPreset, str]) -> FMMPreset:
@@ -549,7 +597,9 @@ class FastMultipoleMethod:
       can run (Ampere sm_80+), pure-JAX on sm_75 and CPU. An explicit ``True`` or
       ``False`` wins.
     * ``theta`` is the opening angle; smaller is more accurate and slower. Unset,
-      it is the preset's: 0.8 for ``"galaxy"``, 0.6 for every other.
+      it is the preset's: 0.8 for ``"galaxy"``, 0.6 for every other. Under
+      ``mac_type="dehnen_error"`` (``"galaxy"``'s MAC) ``adaptive_eps`` decides
+      the far pairs and ``theta`` none of them.
 
     Nothing is computed at construction: it only resolves configuration and builds
     the engine.
@@ -562,7 +612,11 @@ class FastMultipoleMethod:
         requested, because that lane's kernels are fp32-only. ``"galaxy"`` is the
         fused lane's production configuration
         (:class:`jaccpot.production.GalaxySettings`): it also sets the defaults of
-        ``theta``, ``softening_kernel`` and the precision from those settings.
+        ``theta``, ``softening_kernel`` and the precision from those settings, and
+        under its MAC, ``dehnen_error``, those of ``adaptive_eps`` (1e-4),
+        ``adaptive_error_model`` and ``mac_force_scale_mode``. For its geometric
+        MAC pass ``advanced=`` the preset's own config with ``mac_type="dehnen"``
+        (``docs/production.md``, "The MAC").
     basis : Union[Basis, BasisInterface, str]
         ``"real"`` (default) or its alias ``"solidfmm"``, as above; any other
         name raises a ``ValueError``. May also be a constructed
@@ -584,24 +638,29 @@ class FastMultipoleMethod:
         into.
     rebuild_every : int
         With ``reuse_topology``, rebuild after this many calls. Must be positive.
-    mac_force_scale_mode : str
+    mac_force_scale_mode : Optional[str]
         How the per-node force scale entering Dehnen's eq (16a) is obtained:
-        ``"prev"`` (default) reuses the previous full evaluation's accelerations,
+        ``"prev"`` reuses the previous full evaluation's accelerations,
         ``"paper"``/``"paper_fb"`` run a prepass, and the ``*_cached`` variants
-        require a cached scale rather than computing one.
+        require a cached scale rather than computing one. ``None`` (default) takes
+        the preset's: ``"paper_fb"`` for ``"galaxy"`` under ``dehnen_error``,
+        ``"prev"`` otherwise.
     mac_force_scale_prepass_theta : Optional[float]
         Opening angle for the force-scale prepass's own traversal. ``None`` takes
         the default. Only consulted by the prepass modes.
     mac_force_scale_fb_inflation : float
         Inflates the far-field source-to-target distance so the eq (16b) scale
         stays a strict lower bound.
-    adaptive_error_model : str
-        Error estimator for adaptive acceptance: ``"tail_proxy"`` (default),
+    adaptive_error_model : Optional[str]
+        Error estimator for adaptive acceptance: ``"tail_proxy"``,
         ``"dehnen_degree"``, or ``"dehnen_paper"`` -- the last being the eq (15)
         estimator, which also switches the node force-scale reduction from max to
-        min.
+        min. ``None`` (default) takes the preset's: ``"dehnen_paper"`` for
+        ``"galaxy"`` under ``dehnen_error``, ``"tail_proxy"`` otherwise.
     adaptive_eps : Optional[float]
-        Relative force-accuracy target of eq (16a). ``None`` takes the default.
+        Relative force-accuracy target of eq (16a). ``None`` takes the default:
+        ``GalaxySettings.adaptive_eps`` (1e-4) for ``"galaxy"`` under
+        ``dehnen_error``; none otherwise, which the paper MAC refuses.
     dehnen_geometry_mode : str
         How node centres and radii entering the Dehnen MAC are measured: ``"com"``
         (default), ``"exact"``, ``"tree"``, ``"tree_approx"`` or ``"runtime"``.
@@ -611,7 +670,8 @@ class FastMultipoleMethod:
     theta : Optional[float]
         Opening angle. Smaller is more accurate and slower. ``None`` (default)
         takes the preset's: ``GalaxySettings.theta`` (0.8) for ``"galaxy"``, 0.6
-        for every other preset.
+        for every other preset. Under ``mac_type="dehnen_error"`` it does not
+        gate acceptance (``GalaxySettings.theta``).
     G : float
         Gravitational constant.
     softening : float
@@ -680,10 +740,10 @@ class FastMultipoleMethod:
         use_pallas: Optional[bool] = None,
         reuse_topology: bool = False,
         rebuild_every: int = 1,
-        mac_force_scale_mode: str = "prev",
+        mac_force_scale_mode: Optional[str] = None,
         mac_force_scale_prepass_theta: Optional[float] = None,
         mac_force_scale_fb_inflation: float = 1.0,
-        adaptive_error_model: str = "tail_proxy",
+        adaptive_error_model: Optional[str] = None,
         adaptive_eps: Optional[float] = None,
         dehnen_geometry_mode: str = "com",
         mac_theta_max: float = 1.0,
@@ -753,6 +813,15 @@ class FastMultipoleMethod:
             legacy_used=legacy_used,
         )
         legacy_used = runtime_overrides.legacy_used
+        adaptive_eps, adaptive_error_model, mac_force_scale_mode = (
+            _default_criterion_for_preset(
+                preset_norm,
+                mac_type=runtime_overrides.mac_type,
+                adaptive_eps=adaptive_eps,
+                adaptive_error_model=adaptive_error_model,
+                mac_force_scale_mode=mac_force_scale_mode,
+            )
+        )
 
         traversal_config = advanced_cfg.runtime.traversal_config
         self._impl = _RuntimeFMM(

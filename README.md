@@ -154,9 +154,16 @@ On a CPU `large_n_gpu` declines the lane and runs the general path, where they w
 | `balanced` | middle ground; bucketed near field |
 | `accurate` | tightest settings; what the golden suite uses |
 | `large_n_gpu` | the large-N GPU lane: static-radix tree, streamed far field, minimum memory, fp32 |
-| `galaxy` | the fused lane's production configuration (`jaccpot.production.GalaxySettings`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8, `leaf_capacity="auto"`) in a cubic Morton box (`cubic_bounds=True`), p6, geometric Dehnen MAC at `theta` 0.8, ferrers3, fp32 -- the benches' L1-L3 configuration with `--cubic-bounds`, same compiled programs |
+| `galaxy` | the fused lane's production configuration (`jaccpot.production.GalaxySettings`): `large_n_gpu` on cell leaves of 64 (`cell_min_level` 8, `leaf_capacity="auto"`) in a cubic Morton box (`cubic_bounds=True`), p6, Dehnen's error MAC (`dehnen_error`) at `adaptive_eps` 1e-4, ferrers3, fp32 -- the benches' L1-L3 configuration with `--cubic-bounds --mac-type dehnen_error --adaptive-eps 1e-4`, same compiled programs |
 
-`theta` defaults to the preset's: 0.8 for `galaxy`, 0.6 for the others.
+`galaxy` runs Dehnen (2014) eq (16a) since 2026-10-21 (the geometric MAC at `theta` 0.8
+before): at 25M on an A100 1.12x the geometric step for 2.8x lower rel-L2; it costs ~22
+B/particle more at 1e8, and `G` and the softening are the solver's (a new value
+recompiles; `dt` and the external field's parameters stay traced). The geometric MAC
+back, and the numbers: [docs/production.md](docs/production.md), "The MAC".
+
+`theta` defaults to the preset's: 0.8 for `galaxy` (where, under `dehnen_error`, it
+decides no pair), 0.6 for the others.
 `leaf_capacity="auto"` (`TreeConfig`) sizes the cell-leaf tree at the first eager
 prepare: 1.15x the live cell leaves of those particles, in steps of 1024, counted on
 device; it then stays fixed, so a run that clusters past it raises the capacity error.
