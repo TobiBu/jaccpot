@@ -862,9 +862,10 @@ on CPU runners. `.github/scripts/test_shards.py` defines which tests each job ru
 the `test-partition` job checks that the shards cover the suite exactly once.
 
 - `lint`: `black`, `isort`, and the `bench/` scripts' own tests;
-- `test-full`: the suite with branch coverage, in six shards (unit, unit-runtime,
-  unit-runtime-mac, integration, mutual-static-device, characterization); runtime
-  type checks are on for the unit shards;
+- `test-full`: the suite with branch coverage, in nine shards (unit, unit-runtime,
+  unit-runtime-mac, unit-runtime-grad, integration, integration-strict,
+  integration-strict-runner, mutual-static-device, characterization); runtime type
+  checks are on for the unit shards;
 - `test-py-floor`: the `smoke`-marked tests on Python 3.12, the oldest supported;
 - `test-distributed-tier`, `test-distributed-mutual`: the multi-device tests on
   forced host devices;
