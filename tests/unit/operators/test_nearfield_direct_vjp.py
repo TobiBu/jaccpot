@@ -14,7 +14,10 @@ Ampere card):
 * its forward IS the production call: the same bits, the same lowered program for
   traced operands; the force-scale lane passes through and gets no cotangent, and the
   potential lane is refused;
-* in float32 it agrees with the table layout's reverse to single-precision round-off.
+* in float32 it and the table layout's reverse are both within single-precision
+  round-off of the float64 truth (the two float32 layouts are not compared with each
+  other: the scalars are sums with cancellation, and two float32 paths agreeing proves
+  nothing).
 
 The neighbour CSR is built SYMMETRIC, as the walk emits it: the reverse takes each
 source-side cotangent from the other end of the pair.
@@ -373,7 +376,8 @@ def test_self_terms_only_and_an_empty_neighbour_array():
 def test_float32_agrees_with_the_table_layouts_reverse(kernel):
     """The table layout's rule (:func:`nearfield_leafpair_csr_pallas_cvjp`, the
     differentiable lane until now) on the same pairs, gathered into ``(L, W)``
-    tables: the same cotangents to single-precision round-off."""
+    tables, and the direct rule: each within single-precision round-off of the
+    float64 pair sum's cotangents."""
     c = _symmetric_case(29, consecutive=True, dtype=np.float32)
     soft = jnp.asarray(SOFTENING**2, jnp.float32)
     G = jnp.asarray(1.3, jnp.float32)
@@ -425,10 +429,35 @@ def test_float32_agrees_with_the_table_layouts_reverse(kernel):
     leaf_w = np.where(mask[..., None], w[ids], 0.0).astype(np.float32)
     _, vjp_t = jax.vjp(table_layout, c["pos"], c["mass"], soft, G)
     _, vjp_d = jax.vjp(direct_layout, c["pos"], c["mass"], soft, G)
-    want = vjp_t(jnp.asarray(leaf_w))
-    got = vjp_d(jnp.asarray(w))
+    table = vjp_t(jnp.asarray(leaf_w))
+    direct = vjp_d(jnp.asarray(w))
+
+    # the float64 truth on the same (float32) inputs, and the scale each cotangent's
+    # round-off is measured against: its largest element for the per-particle ones;
+    # for the two scalars, sums over every particle with cancellation, the sum of the
+    # particles' absolute contributions (sum |w . acc| / |G| and sum |w . dacc/deps^2|)
+    ref = _pair_sum(c, kernel)
+    primals64 = [jnp.asarray(x, jnp.float64) for x in (c["pos"], c["mass"], soft, G)]
+    w64 = jnp.asarray(w, jnp.float64)
+    acc64, vjp_r = jax.vjp(ref, *primals64)
+    truth = vjp_r(w64)
+    _, dacc_ds = jax.jvp(
+        lambda s_: ref(primals64[0], primals64[1], s_, primals64[3]),
+        (primals64[2],),
+        (jnp.ones_like(primals64[2]),),
+    )
+    scales = (
+        np.max(np.abs(np.asarray(truth[0]))),
+        np.max(np.abs(np.asarray(truth[1]))),
+        float(jnp.sum(jnp.abs(jnp.sum(w64 * dacc_ds, axis=1)))),
+        float(jnp.sum(jnp.abs(jnp.sum(w64 * acc64, axis=1))) / abs(primals64[3])),
+    )
     names = ("positions", "masses", "softening_sq", "G")
-    for name, a, b in zip(names, got, want):
-        # float32 round-off of the two layouts' summation orders (measured <= 2.8e-6,
-        # G_bar's sum over every pair; the rest <= 2.5e-7)
-        assert _rel(a, b) < 2e-5, (name, _rel(a, b))
+    for name, a, b, t, scale in zip(names, direct, table, truth, scales):
+        assert scale > 0, name
+        err_d = float(np.max(np.abs(np.asarray(a, np.float64) - np.asarray(t))) / scale)
+        err_t = float(np.max(np.abs(np.asarray(b, np.float64) - np.asarray(t))) / scale)
+        # float32 round-off of sums of a few hundred pair terms on either layout
+        # (measured <= 3.9e-7 on CPU and A100)
+        assert err_d < 4e-6, (name, err_d, err_t)
+        assert err_t < 4e-6, (name, err_d, err_t)
