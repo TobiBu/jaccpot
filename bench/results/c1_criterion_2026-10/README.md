@@ -254,8 +254,8 @@ relative to the reference; max |A2(t) - A2_ref(t)| (disc, R < 3 R_d).
 
 ## 5. Recommendation
 
-- **Galaxy discs keep the acceleration criterion and the production shared step** (dt 5e-4, the acceleration
-  criterion's dt_min at eta 0.18). The orbit-time criterion does not make block steps worth 10-40x on this disc at
+- **Galaxy discs keep the acceleration criterion with shared steps, at dt 1e-3** (twice today's 5e-4; the
+  acceleration criterion's dt_min at eta about 0.33; section 6 measures it on the 25M production configuration). The orbit-time criterion does not make block steps worth 10-40x on this disc at
   equal accuracy:
   - in S, the orbit-integration test at the production spread, HOLD-dyn buys 0.28-1.05x in particle evaluations
     on plain padded subsets (the S6 plan), 0.55-2.03x with one weighted pass per boundary and 0.86-3.28x in pair
@@ -288,9 +288,52 @@ relative to the reference; max |A2(t) - A2_ref(t)| (disc, R < 3 R_d).
   - with long base steps, rungs must also refine at the particle's own boundary (A, dyn eta 0.1: 9.6e-5 to
     1.4e-5);
   - HOLD's slow-fast coupling error is about 9x shared's even with frozen rungs (B).
-- **Not decided here:** whether 25M could run at a coarser shared step. In S, shared 1e-3 holds the per-particle
-  energy tail at 5.2e-5 and the bulge tail at 5e-4 over the run; at 1e5 (A) it drifts 5.7e-6 through encounters,
-  which are 250x weaker at 25M. A 25M fused-lane energy run at 5e-4 against 1e-3 would settle it.
+- **The production step can be doubled to dt 1e-3** (section 6). The 25M production run at 1e-3 matches the
+  2.5e-4 reference to 0.25 % in every structural metric, keeps the energy error bounded at 1.9e-7 and leaves the
+  per-particle energy diffusion unchanged.
+
+## 6. The 25M production configuration at dt 1e-3 and 5e-4 (`25m/`)
+
+Follow-up to the open question of section 5.
+- **Setup:** jaccpot main f654bd6 (a detached worktree), `ProductionRunner` on the fused lane with
+  `FastMultipoleMethod(preset="galaxy", softening=1.5e-3)` as is (`dehnen_error` 1e-4, the cubic box), on the
+  25M disc+bulge+NFW IC of the L3 pin (`fused_memory_budget.py --ic disc --n 25e6`).
+- **Steps:** dt 1e-3, 5e-4 and the reference 2.5e-4, each to t_end 1.5 (1500 / 3000 / 6000 steps).
+- **Driver:** `scripts/c1_25m_run.py`, adapted from the S3.2 gate's.
+  - Segments of 0.025 and the energy every 2nd edge, so all three runs share 30 energy times.
+  - Snapshots at t = 0, 0.5, 1.0, 1.5; no restarts; preallocation off.
+  - A callback scores A2 and the Lagrangian radii every energy edge, and E_i = v^2/2 + phi_i + Phi_halo at t = 0
+    and t_end. phi_i comes from the provider's own potential on a rebuilt topology, the runner's energy program
+    per particle.
+- **Scoring:** `scripts/c1_25m_score.py`, against the 2.5e-4 run.
+- **Particle order:** the state keeps the input order (median displacement after one segment 0.075 = v t).
+- **Cost hints** (not timings): peak 5.5 GiB for all three. The reference ran at 2.34 steps/s on free card 7
+  (0.258 s per step inside a segment). dt 1e-3 ran at 1.78 steps/s on card 7 with compiles included; dt 5e-4 at
+  1.13 steps/s on card 4, shared with another job. No segment needed a capacity retry.
+
+| run | steps | max dE/E0 | max dL/L | E_i diffusion disc / bulge / inner 2 % | Sigma rms (max) | sigma_z rms (max) | sigma_R rms | v_phi rms | A2 max diff | r(0.5 %) all / bulge | r(2 %) bulge |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ref 2.5e-4 | 6000 | 7.5e-08 | 9.0e-07 | 1 / 1 / 1 | -- | -- | -- | -- | -- | -- | -- |
+| 5e-4 | 3000 | 6.2e-08 | 4.9e-07 | 1.0000 / 1.0000 / 1.0002 | 6.9e-05 (2.2e-04) | 2.6e-05 (8.8e-05) | 2.3e-05 | 4.5e-05 | 2.2e-06 | +0.02 % / -0.54 % | -0.09 % |
+| **1e-3** | 1500 | 1.9e-07 | 3.5e-07 | 0.9998 / 0.9987 / 0.9965 | 1.8e-04 (6.3e-04) | 4.9e-05 (1.4e-04) | 1.2e-04 | 3.7e-05 | 5.5e-06 | +0.17 % / -0.06 % | +0.23 % |
+
+- **Energy.** At 1e-3 the error is a bounded offset, not a drift: at most -1.8e-7 early on, -5.4e-8 at the end.
+  The reference and 5e-4 share a slow wander of about 1e-7, the energy diagnostic's floor. L is at its fp32 floor
+  in all three (3.5-9.0e-7, not ordered by dt).
+- **Structure.** Every Lagrangian radius of every component (0.5-90 %) is within 0.25 % of the reference at 1e-3.
+  Over the same run the reference itself contracts: the 0.5 % / 1 % / 5 % radii by -1.7 / -2.7 / -5.4 %. The
+  disc's profiles agree to better than 0.07 % in every bin, and A2 (about 5e-4, shot noise; no bar) to 5.5e-6.
+  The bulge's innermost radius differs more at 5e-4 (-0.54 %) than at 1e-3 (-0.06 %); that is the scatter of a
+  quantile over the 21,000 innermost bulge particles.
+- **Encounters** do not show at 25M: the per-particle energy diffusion at 1e-3 equals the reference's to 0.35 % in
+  the inner 2 %, against +7 % to +164 % for the orbit-time criterion at 1e5 (A). At 1e5, shared 1e-3 drifted 5.7e-6
+  through encounters that are 250x weaker here.
+- **Production can take the 2x larger shared step:** dt 1e-3, the acceleration criterion's dt_min at eta about
+  0.33. That halves the steps per orbit at no measurable cost in any C1 metric over one orbit at 2.5 R_d.
+  - It is measured over one orbit only. The energy error is bounded, but a run of many orbits should keep the
+    energy diagnostic on.
+  - It holds for this disc's softening and N. At lower N or a smaller softening, encounters set the step (A).
+- The snapshots and per-particle energies (7.5 GB) are in `/export/scratch/tbuck/c1_criterion_2026-10/25m/`.
 
 ## Files
 
@@ -301,7 +344,8 @@ relative to the reference; max |A2(t) - A2_ref(t)| (disc, R < 3 R_d).
 | `tables_{A,B,S}.md` | `table` output: costs (also `padded`), all scores, the equal-accuracy gains |
 | `probes/` | `probe` at t = 0: N 1e5 (seeds 1, 2), 1e6, the fixed field, eps 0.0238 |
 | `logs/` | one log per run, the probes and the sweeps (card, start/end, nvidia-smi before and after) |
-| `scripts/` | the run lists `sweep{1,2,B,S}.txt` with the drivers `sweep.sh` / `launch.sh` and `sweepB2.txt` (the frozen-rung check in B) |
+| `scripts/` | the run lists `sweep{1,2,B,S}.txt` with the drivers `sweep.sh` / `launch.sh` and `sweepB2.txt` (the frozen-rung check in B); the 25M driver, scorer and launcher `c1_25m_run.py`, `c1_25m_score.py`, `launch25.sh` |
+| `25m/` | the 25M runs: summaries with the C1 series (`*.json`), the runner's DiagnosticsLog (`*.jsonl`), logs, `scores_25m.json` |
 
 The per-particle end states (`x`, `v`, `E_i`; 83 npz files, 825 MB) are kept outside the repo in
 `/export/scratch/tbuck/c1_criterion_2026-10/`; `score` needs them.

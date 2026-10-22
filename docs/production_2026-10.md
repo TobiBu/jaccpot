@@ -1195,8 +1195,9 @@ where nornax's acceleration criterion `eta sqrt(eps / |a|)` caps it at ~2x? C1 a
     chaos, keeps the production spread, and makes E_i exact.
 - **References:** shared steps at 1/16 and 1/32 of the production step (A, S), 2.5e-4 and 1.25e-4 (B).
 
-**Answer: keep the acceleration criterion and the production shared step** (5e-4 = eta 0.18 at the centre).
-**The orbit-time criterion does not make block steps worth 10-40x at equal accuracy on this disc.**
+**Answer: keep the acceleration criterion with shared steps, and double the production step to dt 1e-3** (the
+acceleration criterion's dt_min at eta about 0.33; point 5 below). **The orbit-time criterion does not make block
+steps worth 10-40x at equal accuracy on this disc.**
 
 **1. The spread is 20x, not 40x, and plain HOLD pays twice the particle-step count.** Probe at t = 0, unchanged at
 1e6 and for a second draw; the 1e6 acceleration bound is S0's 25M value:
@@ -1265,6 +1266,25 @@ same score over HOLD's cost; ranges over total energy, the per-particle energy t
 - Momentum stays at round-off in every HOLD run: pair impulse at most 5.6e-11 of `sum m |v|`, |dL| / |L| at most
   1.2e-10.
 
+**5. The 25M production configuration takes dt 1e-3.**
+- **Setup:** jaccpot main f654bd6, `ProductionRunner` with `preset="galaxy"` as is (`dehnen_error` 1e-4, the cubic
+  box), on the L3 pin's 25M disc+bulge+NFW IC. Runs at dt 1e-3, 5e-4 and the reference 2.5e-4 to t = 1.5
+  (`bench/results/c1_criterion_2026-10/25m/`). Peak 5.5 GiB; 0.258 s per step on a free card inside a segment.
+
+| 25M, one orbit | steps | max dE/E0 | E_i diffusion inner 2 % | Lagrangian radii, worst | Sigma / sigma_z / sigma_R / v_phi, worst bin | A2 diff |
+| --- | --- | --- | --- | --- | --- | --- |
+| reference 2.5e-4 | 6000 | 7.5e-8 | 1 | -- | -- | -- |
+| 5e-4 | 3000 | 6.2e-8 | 1.0002 | 0.54 % (bulge 0.5 %) | 2.2e-4 / 8.8e-5 / 4.5e-5 / 1.7e-4 | 2.2e-6 |
+| 1e-3 | 1500 | 1.9e-7 | 0.9965 | 0.23 % (bulge 2 %) | 6.3e-4 / 1.4e-4 / 2.9e-4 / 7.5e-5 | 5.5e-6 |
+
+- **Energy:** the 1e-3 error is a bounded offset (at most -1.8e-7 early, -5.4e-8 at the end), not a drift. The
+  reference and 5e-4 sit at the diagnostic's floor of about 1e-7.
+- **Structure:** every Lagrangian radius of the disc, the bulge and all baryons (0.5-90 %) is within 0.25 % of the
+  reference, against the run's own contraction of the central radii by 1.7-5.4 %. The per-particle energy
+  diffusion is unchanged, so the encounters that set the step at 1e5 (point 3) are absent at 25M.
+- **Recommendation: production dt 1e-3 for this disc** (half the steps per orbit). Keep the energy diagnostic on
+  for runs of many orbits; at lower N or a smaller softening, encounters set the step (point 3).
+
 **Decision input for the plan.**
 - The block-step track has no payoff on this disc with either criterion: at equal accuracy at most ~2x in S5's
   weighted pass, and below 1x with the padded subsets S6 planned.
@@ -1274,6 +1294,3 @@ same score over HOLD's cost; ranges over total energy, the per-particle energy t
   - a time-symmetric rung selection;
   - refinement at the particle's own boundary;
   - an accuracy gate against shared steps at equal cost, not at equal eta.
-- **Open:** whether 25M can run at shared 1e-3. In S it holds the per-particle tail at 5.2e-5 per orbit; at 1e5 it
-  drifts through encounters that are 250x weaker at 25M. A 25M fused-lane energy run at 5e-4 against 1e-3 would
-  settle it.
