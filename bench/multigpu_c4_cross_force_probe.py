@@ -750,6 +750,211 @@ def err_against_direct(accel_by_dev, tag):
     return rel
 
 
+if os.environ.get("PROBE_CAPS_CHECK") == "1":
+    # S11 B: the library's cross capacities (`CrossCapacities.for_shard` -> one
+    # measured force -> `plan_cross_capacities`) against this probe's formula above,
+    # on the same prepared states: each capacity against its live need, both flags,
+    # the forces (with an A-vs-A control per arm), and each program's memory. Every
+    # arm is compiled ahead of time so its memory analysis is the program that runs.
+    import json
+
+    from jaccpot.distributed.cross import (
+        CROSS_NEEDS_FIELDS,
+        plan_cross_capacities,
+    )
+
+    # an autocvd timeout silently gives a CPU run
+    assert jax.devices()[0].platform == "gpu", jax.devices()
+    assert jax.device_count() >= NDEV, jax.devices()
+    _rows = np.concatenate(
+        [np.arange(d * CAP, d * CAP + dev_live[d]) for d in range(NDEV)]
+    )
+
+    def _arm(c):
+        sink = {}
+        hook = make_cross_hook(ndev=NDEV, theta=THETA, caps=c, near_sink=sink)
+        f = make_fused_force_evaluator(
+            solver,
+            stacked,
+            mesh=mesh,
+            plan=plan,
+            leaf_size=LEAF,
+            max_order=ORDER,
+            theta=EVAL_THETA,
+            cross_hook=hook,
+            cross_near_sink=sink,
+            cross_needs=True,
+        )
+        # the evaluator's jitted shard_map, to compile it ahead of time
+        jitted = next(
+            cell.cell_contents
+            for cell in f.__closure__
+            if hasattr(cell.cell_contents, "lower")
+        )
+        t0 = time.perf_counter()
+        with fused_capacity_plan_overrides(plan):
+            exe = jitted.lower(stacked, flat_pos, flat_mass, nv).compile()
+        ma = exe.memory_analysis()
+        mem = {
+            k: int(getattr(ma, k))
+            for k in (
+                "temp_size_in_bytes",
+                "argument_size_in_bytes",
+                "output_size_in_bytes",
+                "generated_code_size_in_bytes",
+            )
+            if hasattr(ma, k)
+        }
+        mem["compile_s"] = time.perf_counter() - t0
+        outs = []
+        for _ in range(2):  # the A-vs-A control
+            o = jax.block_until_ready(exe(stacked, flat_pos, flat_mass, nv))
+            outs.append(
+                (np.asarray(o[0])[_rows], bool(np.asarray(o[1])), np.asarray(o[2]))
+            )
+        return outs, mem
+
+    def _differ(a, b):
+        d = a != b
+        a64, b64 = a.astype(np.float64), b.astype(np.float64)
+        # per particle |da| / |a|: the components' max_abs alone hides the scale
+        rel = np.linalg.norm(a64 - b64, axis=1) / np.maximum(
+            np.linalg.norm(b64, axis=1), 1e-300
+        )
+        moved = rel[rel > 0]
+        return dict(
+            elements=int(d.sum()),
+            of=int(d.size),
+            particles=int(moved.size),
+            max_abs=float(np.max(np.abs(a64 - b64))),
+            max_rel=float(np.max(rel)),
+            median_rel_of_moved=float(np.median(moved)) if moved.size else 0.0,
+        )
+
+    arms = {}
+    bench_outs, arms["bench"] = _arm(caps)
+    rollout_outs = None
+    if os.environ.get("PROBE_CAPS_CHECK_ROLLOUT") == "1":
+        # the older formula of bench/multigpu_rollout_gate.py (its CAPACITIES only:
+        # the summary keeps this probe's cell level, so the pairs are the same)
+        _per = kk / NDEV
+        _p2 = lambda x, floor: 1 << max(floor, int(np.ceil(np.log2(max(x, 1)))))
+        rollout_caps = CrossCapacities(
+            max_cells=LEAF_CAP,
+            export_far_cap=_p2(2.5 * 53 * _per, 21),
+            export_near_cap=_p2(2.5 * 10 * _per, 21),
+            send_node_cap=_p2(2.5 * 1.25 * _per, 15),
+            send_csr_cap=_p2(2.5 * 53 * _per, 21),
+            recv_node_cap=_p2(2.5 * 1.25 * _per, 15),
+            recv_csr_cap=_p2(2.5 * 53 * _per, 19),
+            walk_queue=2 * _p2(2.5 * 53 * _per, 19),
+            recv_far_cap=_p2(2.5 * 106 * _per, 21),
+            recv_near_cap=_p2(2.5 * 60 * _per, 21),
+            leaf_width=LEAF,
+            summary_cell_level=caps.summary_cell_level,
+        )
+        rollout_outs, arms["rollout_gate"] = _arm(rollout_caps)
+    measured = {}
+
+    def _measure(c):
+        outs, mem = _arm(c)
+        measured.update(caps=vars(c), mem=mem, flag=outs[0][1])
+        return outs[0][2]
+
+    initial = CrossCapacities.for_shard(
+        leaf_capacity=LEAF_CAP,
+        ndev=NDEV,
+        leaf_width=LEAF,
+        live_leaves=SHARD_LEAVES,
+        summary_cell_level=caps.summary_cell_level,
+    )
+    lib_caps, lib_needs = plan_cross_capacities(
+        _measure, initial, leaf_capacity=LEAF_CAP
+    )
+    arms["for_shard"] = measured["mem"]
+    lib_outs, arms["library"] = _arm(lib_caps)
+    need = dict(zip(CROSS_NEEDS_FIELDS, lib_outs[0][2].tolist()))
+    bench_need = dict(zip(CROSS_NEEDS_FIELDS, bench_outs[0][2].tolist()))
+    table = {
+        k: dict(
+            need=need[k],
+            library=getattr(lib_caps, k),
+            bench=getattr(caps, k),
+            library_over_need=getattr(lib_caps, k) / max(need[k], 1),
+            bench_over_need=getattr(caps, k) / max(need[k], 1),
+        )
+        for k in CROSS_NEEDS_FIELDS[:10]
+    }
+    print(
+        f"{'capacity':<20}{'need':>10}{'library':>10}{'x need':>8}{'bench':>10}{'x need':>8}"
+    )
+    for k, r in table.items():
+        print(
+            f"{k:<20}{r['need']:>10}{r['library']:>10}{r['library_over_need']:>8.2f}"
+            f"{r['bench']:>10}{r['bench_over_need']:>8.2f}",
+            flush=True,
+        )
+    result = dict(
+        n=N,
+        ndev=NDEV,
+        order=ORDER,
+        theta=THETA,
+        leaf=LEAF,
+        seed=SEED,
+        leaf_capacity=LEAF_CAP,
+        worst_shard_live_leaves=SHARD_LEAVES,
+        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+        bench_caps=vars(caps),
+        for_shard_caps=measured["caps"],
+        for_shard_flag=measured["flag"],
+        library_caps=vars(lib_caps),
+        needs_library=need,
+        needs_bench=bench_need,
+        table=table,
+        flags=dict(bench=bench_outs[0][1], library=lib_outs[0][1]),
+        a_vs_a=dict(
+            bench=_differ(bench_outs[0][0], bench_outs[1][0]),
+            library=_differ(lib_outs[0][0], lib_outs[1][0]),
+        ),
+        library_vs_bench=_differ(lib_outs[0][0], bench_outs[0][0]),
+        memory=arms,
+    )
+    if rollout_outs is not None:
+        result["rollout_gate_caps"] = vars(rollout_caps)
+        result["flags"]["rollout_gate"] = rollout_outs[0][1]
+        result["a_vs_a"]["rollout_gate"] = _differ(
+            rollout_outs[0][0], rollout_outs[1][0]
+        )
+        result["rollout_gate_vs_bench"] = _differ(rollout_outs[0][0], bench_outs[0][0])
+    print(
+        json.dumps(
+            {
+                k: result[k]
+                for k in (
+                    "flags",
+                    "a_vs_a",
+                    "library_vs_bench",
+                    "rollout_gate_vs_bench",
+                    "memory",
+                )
+                if k in result
+            },
+            indent=1,
+        ),
+        flush=True,
+    )
+    # accuracy, both arms, against the fp64 direct sum (in class with the one-card lane)
+    full = np.zeros((NDEV * CAP, 3))
+    for tag, outs in (("bench", bench_outs), ("library", lib_outs)):
+        full[_rows] = outs[0][0]
+        result[f"err_{tag}"] = err_against_direct(full, "+ cross FAR and NEAR")
+    if os.environ.get("PROBE_JSON"):
+        with open(os.environ["PROBE_JSON"], "w") as fh:
+            json.dump(result, fh, indent=1, default=str)
+    if any(o[0][1] for o in (bench_outs, lib_outs, rollout_outs) if o is not None):
+        raise SystemExit("CAPS CHECK FAILED: a capacity flag fired")
+    raise SystemExit(0)
+
 if TIME_REPS > 0:
     e_local = e_cross = None
     ovf_local = ovf_both = None
