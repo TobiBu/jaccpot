@@ -61,7 +61,6 @@ decomposition and the repartition's per-device body.
 
 from __future__ import annotations
 
-import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -82,9 +81,11 @@ __all__ = [
     "SegmentReport",
 ]
 
-#: compiled programs per force owner (the engine, for the fused force): runners on
-#: one solver share them; every static input is in the key
-_PROGRAMS: "weakref.WeakKeyDictionary[Any, dict]" = weakref.WeakKeyDictionary()
+#: the attribute of a force's ``cache_owner`` (the engine, for the fused force) that
+#: holds the runner's compiled programs: runners on one solver share them, every
+#: static input is in the key, and they go with the engine (as the single card's
+#: ``_strict_fused_jit_function_cache`` does)
+_PROGRAMS_ATTR = "_mesh_segment_programs"
 #: overflow bits reduced over the mesh (``fused_topology.OVERFLOW_*`` uses 0-10)
 _BIT_COUNT = 16
 
@@ -235,6 +236,63 @@ def _mesh_verdict(
         jax.lax.pmax(jnp.asarray(needs, jnp.int32), axis_name),
         jax.lax.pmin(jnp.asarray(done, jnp.int32), axis_name),
     )
+
+
+def _programs_of(owner: Any) -> dict:
+    """The compiled-program cache held by ``owner`` (created on first use).
+
+    Parameters
+    ----------
+    owner : Any
+        A force's ``cache_owner``.
+
+    Returns
+    -------
+    dict
+        Key -> compiled program.
+    """
+    cache = getattr(owner, _PROGRAMS_ATTR, None)
+    if cache is None:
+        cache = {}
+        setattr(owner, _PROGRAMS_ATTR, cache)
+    return cache
+
+
+def _total_acceleration(
+    field_fn: Optional[Callable[..., Array]],
+    acc_self: Array,
+    state_rows: Array,
+    params: Any,
+    live_rows: Array,
+) -> Array:
+    """Self-gravity plus the external field, zero on padding (one device).
+
+    The single card's order (``strict_run_v2``'s ``_advance``): the self-gravity in
+    the state's dtype, plus the field in the state's dtype.
+
+    Parameters
+    ----------
+    field_fn : Optional[Callable[..., Array]]
+        The external field, or ``None``.
+    acc_self : Array
+        ``(cap, 3)`` self-gravity.
+    state_rows : Array
+        ``(cap, 2, 3)`` the rows the field sees.
+    params : Any
+        The field's parameters, or ``None`` for a one-argument field.
+    live_rows : Array
+        ``(cap,)`` boolean.
+
+    Returns
+    -------
+    Array
+        ``(cap, 3)`` in the state's dtype.
+    """
+    acc = jnp.asarray(acc_self, state_rows.dtype)
+    if field_fn is not None:
+        value = field_fn(state_rows) if params is None else field_fn(state_rows, params)
+        acc = acc + jnp.asarray(value, state_rows.dtype)
+    return jnp.where(live_rows[:, None], acc, jnp.zeros((), acc.dtype))
 
 
 class DirectMeshForce:
@@ -619,39 +677,6 @@ class MeshSegmentRunner:
     # The programs.
     # ------------------------------------------------------------------
 
-    def _total_acceleration(
-        self, acc_self: Array, state_rows: Array, params: Any, live_rows: Array
-    ) -> Array:
-        """Self-gravity plus the external field, zero on padding (one device).
-
-        The single card's order (``strict_run_v2``'s ``_advance``): the self-gravity
-        in the state's dtype, plus the field in the state's dtype.
-
-        Parameters
-        ----------
-        acc_self : Array
-            ``(cap, 3)`` self-gravity.
-        state_rows : Array
-            ``(cap, 2, 3)`` the rows the field sees.
-        params : Any
-            The field's parameters, or ``None`` for a one-argument field.
-        live_rows : Array
-            ``(cap,)`` boolean.
-
-        Returns
-        -------
-        Array
-            ``(cap, 3)`` in the state's dtype.
-        """
-        acc = jnp.asarray(acc_self, state_rows.dtype)
-        field_fn = self.external_acceleration_fn
-        if field_fn is not None:
-            value = (
-                field_fn(state_rows) if params is None else field_fn(state_rows, params)
-            )
-            acc = acc + jnp.asarray(value, state_rows.dtype)
-        return jnp.where(live_rows[:, None], acc, jnp.zeros((), acc.dtype))
-
     def _program(self, kind: str, steps: int, params: Any) -> tuple[Callable, bool]:
         """The compiled start (``kind="start"``) or segment program, cached.
 
@@ -690,7 +715,7 @@ class MeshSegmentRunner:
             tuple((tuple(np.shape(x)), str(jnp.result_type(x))) for x in leaves),
             self.donate,
         )
-        cache = _PROGRAMS.setdefault(self.force.cache_owner, {})
+        cache = _programs_of(self.force.cache_owner)
         program = cache.get(key)
         if program is not None:
             return program, False
@@ -716,7 +741,13 @@ class MeshSegmentRunner:
         from jaccpot.runtime.fused_topology import overflow_ok
 
         del steps
-        axis = self.axis_name
+        # locals, not ``self``: the program outlives this runner in the engine's
+        # cache, and a closure over ``self`` would keep its state's buffers alive
+        axis, force, field_fn = (
+            self.axis_name,
+            self.force,
+            self.external_acceleration_fn,
+        )
 
         def body(
             state: Array, masses: Array, count: Array, ids: Array, params: Any
@@ -724,8 +755,8 @@ class MeshSegmentRunner:
             cap = int(state.shape[0])
             live = jnp.minimum(count[0], cap)
             live_rows = jnp.arange(cap) < live
-            acc_self, bits, needs = self.force.shard(state[:, 0, :], masses, live, ids)
-            acc = self._total_acceleration(acc_self, state, params, live_rows)
+            acc_self, bits, needs = force.shard(state[:, 0, :], masses, live, ids)
+            acc = _total_acceleration(field_fn, acc_self, state, params, live_rows)
             # a count above the shard's capacity cannot be real particles
             ok = overflow_ok(bits) & (count[0] <= cap)
             ok, bits, needs, _ = _mesh_verdict(
@@ -761,8 +792,13 @@ class MeshSegmentRunner:
         from jaccpot.runtime.fmm_state import _velocity_verlet_kick_drifted
         from jaccpot.runtime.fused_topology import overflow_ok
 
-        axis = self.axis_name
-        needs_size = int(self.force.needs_size)
+        # locals, not ``self`` (see _build_start)
+        axis, force, field_fn = (
+            self.axis_name,
+            self.force,
+            self.external_acceleration_fn,
+        )
+        needs_size = int(force.needs_size)
 
         def body(
             state0: Array,
@@ -784,11 +820,11 @@ class MeshSegmentRunner:
                     state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
                 )
                 state_position = state_now.at[:, 0].set(position_new)
-                acc_self, bits_new, needs_new = self.force.shard(
+                acc_self, bits_new, needs_new = force.shard(
                     state_position[:, 0, :], masses, live, ids
                 )
-                acc_new = self._total_acceleration(
-                    acc_self, state_position, params, live_rows
+                acc_new = _total_acceleration(
+                    field_fn, acc_self, state_position, params, live_rows
                 )
                 state_new = _velocity_verlet_kick_drifted(
                     state_position, acc_now, acc_new, dt
@@ -855,7 +891,7 @@ class MeshSegmentRunner:
             self.num_samples,
             str(self.state.state.dtype),
         )
-        cache = _PROGRAMS.setdefault(self.force.cache_owner, {})
+        cache = _programs_of(self.force.cache_owner)
         program = cache.get(key)
         if program is not None:
             return program
