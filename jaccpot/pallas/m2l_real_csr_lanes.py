@@ -1081,6 +1081,40 @@ def _m2l_lanes_cvjp_fwd(
     return out, (multipoles, centers, sources, targets, active_pair_count)
 
 
+def _csr_entry_rows(row_offsets: Array, num_entries: int) -> Array:
+    """:func:`~jaccpot.pallas.m2l_real_csr.targets_from_csr_offsets` in two passes.
+
+    The same integers -- entry ``j``'s row is the number of interior offsets
+    ``<= j``, ``-1`` past the live prefix -- from one scatter of the row
+    boundaries and one prefix sum over the entries, instead of a binary search
+    per entry (one compare-select pass over the entries per bisection step: 9.8
+    of the far gradient's 95 ms at 8e6, 44M pairs).
+
+    Parameters
+    ----------
+    row_offsets : Array
+        ``[R + 1]`` non-decreasing row offsets, ``row_offsets[0] == 0``.
+    num_entries : int
+        Length of the list (live prefix plus padding). Static.
+
+    Returns
+    -------
+    Array
+        ``[num_entries]`` row ids in ``row_offsets``' dtype, ``-1`` past the live
+        prefix.
+    """
+    off = jnp.asarray(row_offsets)
+    n = int(num_entries)
+    starts = (
+        jnp.zeros((n + 1,), off.dtype)
+        .at[off[1:-1]]
+        .add(jnp.ones_like(off[1:-1]), mode="drop")
+    )
+    row = jnp.cumsum(starts[:n], dtype=off.dtype)
+    pos = jnp.arange(n, dtype=off.dtype)
+    return jnp.where(pos < off[-1], row, jnp.asarray(-1, off.dtype))
+
+
 def _m2l_lanes_cvjp_bwd(
     order,
     k_lanes,
@@ -1099,7 +1133,7 @@ def _m2l_lanes_cvjp_bwd(
         # one target per entry (-1 past the live prefix, as a COO list pads), and
         # its by-target pass reads the forward's CSR as is
         row_offsets = targets
-        targets = targets_from_csr_offsets(targets, int(sources.shape[0]))
+        targets = _csr_entry_rows(targets, int(sources.shape[0]))
     if n_targets is not None and int(n_targets) != int(multipoles.shape[0]):
         raise NotImplementedError(
             "m2l_real_csr_lanes_pallas_cvjp: the reverse does not support "

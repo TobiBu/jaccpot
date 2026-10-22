@@ -269,3 +269,18 @@ def test_a_presorted_reverse_sorts_the_pairs_once():
         return count
 
     assert sorts(jaxpr.jaxpr) == 1
+
+
+def test_the_reverse_expands_the_row_offsets_into_the_same_targets():
+    """The presorted reverse's two-pass target expansion equals the binary search
+    (``targets_from_csr_offsets``): empty rows at the start, middle and end, a
+    padded tail, and offsets that end exactly at the list's length."""
+    from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+    from jaccpot.pallas.m2l_real_csr_lanes import _csr_entry_rows
+
+    for rows, pad in (([0, 3, 0, 0, 5, 1, 0], 4), ([2, 0, 7], 0), ([0, 0], 3)):
+        offsets = jnp.asarray(np.concatenate([[0], np.cumsum(rows)]), jnp.int32)
+        n = int(offsets[-1]) + pad
+        want = np.asarray(targets_from_csr_offsets(offsets, n))
+        got = np.asarray(_csr_entry_rows(offsets, n))
+        assert got.dtype == want.dtype and np.array_equal(got, want), (rows, pad)
