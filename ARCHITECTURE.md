@@ -389,9 +389,14 @@ already passed `pallas.triton.CompilerParams` and needed no change.
     CSR row-chunk lane's rule: Pallas forward in the table layout + a Pallas reverse
     over the same chunk table. It is what the grad path takes on an Ampere+ GPU, for a
     `LargeNPreparedState` and for a radix state's leaf-major lane alike (since
-    2026-09, `docs/fast_gradients_2026-09.md`). The forward's default direct layout
-    has no reverse, so `differentiable=True` forces the table layout
-    (`nearfield/_fast_lane.py:1829`).
+    2026-09, `docs/fast_gradients_2026-09.md`). `differentiable=True` forces the
+    table layout (`nearfield/_fast_lane.py:1829`). The forward's default direct
+    layout has its own rule since 2026-10-22 (plan S8):
+    `nearfield_leafpair_csr_sorted_direct_pallas_cvjp`
+    (`pallas/nearfield_leafpair_csr_direct_vjp.py`), the production call as its
+    forward and a reverse on the same sorted layout (no `(L, W)` tables, 45 B/p of
+    temporaries at 8e6 against the table rule's 1380). Nothing calls it yet; the
+    seam moves onto it in S8-W.
   - `_radix_fast_lane_prepacked_accel_cvjp` (`nearfield/_fast_lane.py`) is the
     prepacked rectangle's rule: Pallas forward + an analytic O(N) leaf-pair reverse,
     tuned by `GradConfig`'s `reverse_*` fields. It was the production rule until the
