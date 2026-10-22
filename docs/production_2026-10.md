@@ -1007,3 +1007,166 @@ Newtonian pass (3.92 -> 3.82 ms on the microbench).
   docs; the GPU identity and pin references re-recorded with the flag.
 - **Compiles** are now the first segment's cost at 25M (285 programs, 160-200 s on a loaded host) and ~50 s per
   energy program: a persistent compilation cache is the next lever.
+
+## S3b and S4 — `dehnen_error` at 1.12x, the cubic galaxy box, nornax and Odisseo on the runner (2026-10-17/21)
+
+Published as PRs. jaccpot:
+- independent of each other: #431 (the walk and near reads), #435 (the cubic galaxy box), #436 (`FusedForceProvider.retry_mode`) and this record;
+- stacked: #432 → #433 → #434 (the far f_b), #437 on #434 (an eager cascade compiles once), #438 on #435 (the galaxy preset's MAC; merge it after #434).
+
+nornax: #18 → #19 → #20 (#20 needs jaccpot #436). Odisseo: #37 into `jaccpot-integration`.
+
+**The user's decisions (2026-10-21):**
+
+| | decision |
+| --- | --- |
+| `preset="galaxy"`'s MAC | `dehnen_error` at `adaptive_eps=1e-4` (was geometric θ 0.8), once S3b met its target: 1.12x the geometric step at 25M for 2.8x lower force error |
+| Odisseo's automatic large-N profile | goes to the runner lane with the galaxy settings (an explicit `fmm_preset="large_n_gpu"` keeps the coupler) |
+| nornax's single-rung step (lead) | written in the lane's velocity-Verlet association, so a nornax rollout equals the runner bit for bit |
+
+**Setup.** jaccpot main `5f1f85f` (S3 session 2 merged), yggdrax main `ca3a93c`, nornax main `763096e`, Odisseo
+`jaccpot-integration` `8fa0c18`, jax 0.11.2. Five tracks on their own branches. S3b's three jaccpot branches were
+merged into one integration for the gates (clean merges). Timings on A100s with no other job running: card 2 on
+2026-10-17 (the L-pin base), and card 5 on 2026-10-21. On card 5, one idle process of another user (416 MiB, 0 %
+util) sat on the card for the timing gates. The rows flag it; main's rows there reproduce the clean L-pin base within 0.3 %. Accuracy, identity and
+pins ran on shared cards.
+
+**New references on main `5f1f85f`, recorded with the autotuner flag:**
+- L pins `s3b-L-main-5f1f85f-t1` (and `-b`):
+  - L1 78.3 ms, 2.352 GiB;
+  - L2 873.2 ms, 23.913 GiB;
+  - L3 240.8 / 239.4 ms, 6.062 GiB.
+  - A-vs-A within the envelope, and within it against `s32-L-main-392061d`.
+- DET1-DET3 (`s3b-det-free` / `-b`): bitwise A-vs-A on a free card. On a shared card, DET2 had 1 of 60,000
+  position-gradient elements differ (5.8e-11) even with the autotuner off. The DET pins are therefore a free-card
+  gate.
+- GPU pins `s3b-main` (S1-S6, S1p, S1t, S1e, S1x, S1g, G1) and the CPU identity base `s3b-base-cpu` (36 variants).
+
+### What S3b built
+| branch | change |
+| --- | --- |
+| `s3b/walk-vector-loads` | the Pallas walk reads each eq (16a) table row and each node record with one vector load (it read the `[nodes, 8]` table one column at a time: 16 scalar gathers per pair); the near kernel's f_b lane multiplies by the reciprocal inside Triton's float32 division (`rcp.approx.ftz.f32`, the division's bits for a divisor in [2^-126, 2^126]) |
+| `s3b/1-m2l-fb-lane`, `s3b/2-l2l-fb-channel`, `s3b/3-fb-in-downward` | the far half of f_b: each node's own term accumulated in the CSR M2L lanes kernel's launch (one lane accumulator, no atomics), pushed down the tree as one more channel of the Pallas L2L cascade, read at the leaves. Before, a chunked scatter and a searchsorted over every far pair and two scatters per level ran beside the downward pass every step |
+| `s3b/galaxy-cubic-bounds` | `TreeConfig.cubic_bounds`; `preset="galaxy"` builds a cubic Morton box (the library default stays per-axis; `JACCPOT_CUBIC_BOUNDS=1/0` overrides) |
+
+### Why `dehnen_error` cost 2.9x
+- **The walk doubled from its memory reads, not from more pairs.** At 25M both MACs run 82 rounds, with far lists
+  of 93.2M vs 94.8M. A geometric walk that merely loads the eq (16a) table beside itself took 47.6 ms against
+  22.9 ms without it.
+- **The near f_b lane cost +24 %.** The ferrers3 force is 39 instructions per pair. The f_b lane added 16, half of
+  them for one float32 division that Triton compiles with two range tests and rescaling; it now adds 8.
+- **The far f_b took about 390 ms.** It went to the separate pass's scatters (120 ms), the CSR row expansion
+  (82 ms) and the push-down (191 ms). Moved into launches that already run, it costs about nothing.
+- **The old far f_b was not reproducible on a GPU.** Run twice on the same lists, 126,363 of 200,000 values differed
+  (max rel 5.2e-7) at 2e5: the scatter-add's order is unspecified without deterministic ops. The new one is bitwise
+  A-vs-A, and its own term is closer to an fp64 sum (2.8e-7 against 8.0e-7).
+
+### Gates
+- **Lists.**
+  - The walk and near changes: far and near lists identical as sorted pairs at 25M and 4e6, both MACs; f_b and
+    forces bitwise at 25M.
+  - The far f_b: new vs old over 4 steps is 0 list entries at 2e5 and 8e6, where forces and states are bitwise.
+    The 25M disc at `dehnen_error` 1e-4 differs by 6-14 far entries out of ~91.5M; the old route against itself
+    also differs by 14.
+- **Accuracy.** Final-step rel-L2 identical in every arm: 1.5209e-4 (2e5), 1.7198e-4 (8e6), 1.5086e-4 (25M).
+- **The integration (all three branches).**
+  - CPU identity 36/36.
+  - GPU pins 13/13 bitwise, S1e included (3,350,146 far pairs).
+  - Every CPU shard rc 0; partition check clean (2,202 tests).
+  - Two-card pins M1/M3 bitwise; M2 within main's own run-to-run spread.
+
+### Timing (card 5; main vs the S3b integration, each row twice)
+| row | main | S3b |
+| --- | --- | --- |
+| 25M disc+bulge, geometric step | 241.3 / 239.1 ms | 232.8 / 233.6 ms |
+| 25M, `dehnen_error` 1e-4 step | 695.7 / 696.0 ms | **261.2 / 260.5 ms** (1.12x the geometric step) |
+| 25M, `dehnen_error` 1e-4 force | 99.3 ms, rel-L2 1.4936e-4 | 99.3-99.5 ms, rel-L2 1.4936e-4 |
+| 1e8 clipped Plummer, `dehnen_error` 1e-4 step | 2082 ms, 26.6 GiB | **831.6 / 831.3 ms**, 26.0 GiB (279 B/p) |
+| 1e8, geometric step | 871.9 / 871.4 ms | 855.3 / 855.3 ms |
+| L1 / L2 / L3 step | 78.3 / 873.2 / 240.8 ms | 76.4 / 855.2 / 232.8 ms (lists equal, peaks equal or lower) |
+
+The S3b target (a `dehnen_error` 1e-4 step within 1.3x geometric at 25M, 1e8 below 1 s) is met.
+
+### The cubic box for `preset="galaxy"`
+| case | box aspect | far entries per-axis → cube | rel-L2 | peak |
+| --- | --- | --- | --- | --- |
+| 25M disc+bulge, step 0 | 1.004 | 94.80M → 94.75M | 4.18e-4 → 4.21e-4 | 210 B/p both |
+| the same run, step 500 | 1.012 | 96.80M → 95.78M | 3.85e-4 → 4.19e-4 | equal |
+| its disc alone, 21M | 3.01 | 215.9M → 78.9M | 1.02e-3 → 5.28e-4 | 323 → 208 B/p |
+| 8e6 clipped Plummer (L1) | 1.004 | 39.09M → 38.95M | 4.33e-4 → 4.30e-4 | equal |
+
+The production disc's box is already a cube: the bulge reaches r = 20 on every axis. The cube costs nothing there and
+wins wherever the box is not cubic: a thin disc tilted at random needs 11.8M-39.3M far pairs per-axis, 10.4-11.3M
+cubic. The L pins keep the per-axis bench configuration.
+
+### What S4 built
+- **nornax** (`s4/1-leapfrog-hooks`, `s4/2-retry-segment`, `s4/3-provider-force`):
+  - `leapfrog_kdk_rollout` gets the block rollout's hooks (topology, rebuild, records, checkpoint);
+  - an external field that reads the state's time and is kicked per particle rung;
+  - `retry_segment`, a host driver that re-plans and re-runs a segment whose capacities overflowed;
+  - `FusedProviderForce`, jaccpot's provider step under the leapfrog, carrying only `(f_b, bits, needs)`.
+  - The single-rung step is written in the lane's velocity-Verlet association, so it equals the runner bit for bit.
+  - jaccpot side: `FusedProviderForce.retry_mode`.
+- **Odisseo** (`s4/thin-client`, into `jaccpot-integration`): `integrate()` runs as a thin client of
+  `ProductionRunner`, the lane `"fmm_runner"`. It is taken by `fmm_preset="galaxy"`, and by the automatic large-N
+  profile (FMM on a GPU, N >= 200,000) whenever the runner can do the run. Snapshots are the state after k·K steps,
+  the initial one first, at times k·K·dt. Settings come from `GalaxySettings` (`fmm_galaxy_settings` to change them).
+- **jaccpot** `s4/eager-cascade-once`: an eager M2M / L2L lane cascade compiles once per static configuration (every
+  eager call recompiled its level loop: 30.7 of 38.2 s of a warm Odisseo call at 1e6). It forwards the far f_b
+  channel; it is stacked on the S3b f_b branches.
+
+### S4 gates (card 5)
+| gate | result |
+| --- | --- |
+| nornax rollout == runner | bitwise: A100 2e5, 0 of 1.2M (f32, f64, f32 + NFW halo); CPU N=512, 0 of 3072 (with the halo, 1 velocity component 1 ulp) |
+| nornax vs runner, 8e6 | 76.95 / 76.96 vs 77.86 / 77.78 ms; 223.7 vs 244 B/p |
+| nornax vs runner, 1e8 | 866.3 / 865.5 vs 874.6 / 874.1 ms; 188.8 vs 208.8 B/p |
+| Odisseo `integrate()` vs the harness (L1, 8e6) | 77.77 / 77.78 vs 78.48 / 78.27 ms (0.991 / 0.994); 243.7 vs 315.7 B/p |
+| Odisseo fixed cost per call, 8e6 | S0 ~190 s; now ~4-11 s warm, nothing recompiled for new dt, G or halo parameters |
+| Odisseo == runner | bitwise (CPU; GPU 2e5 against main and main against itself, 0 of 1.2M / 4.8M) |
+
+`block_kdk_rollout(k_max=0)` costs 2 force evaluations per step on the per-level path and 3 on the fused one; the
+single-rung rollout costs 1.
+
+### Findings
+- **nornax kept the eager prepare's tree alive** (the engine's topology cache and the caller's `prov, _ =
+  prepare(...)`): +11 % peak at 8e6 until it cleared the cache as the runner does. Since then **nornax peaks ~20 B/p
+  below the runner** at 8e6 and 1e8. The runner holds something nornax does not, a lever for the one-card ceiling.
+- **The first Pallas launch in interpret mode defines a config in jax's tracing context**
+  (`pallas_fuser_disable_nested_fuse`), so the next call misses the jit cache once. CPU only; the GPU's Triton
+  lowering does not import it.
+- **Odisseo's old FMM coupler returned snapshots one step late and mislabelled their times.** It returned the states
+  after steps 1, 1+K, ..., labelled `linspace(0, t_end)`; fixed with the runner lane's semantics.
+
+### The galaxy preset on `dehnen_error` (#438)
+- **The solver resolves the bench's eq (16a) settings:** eps 1e-4, `adaptive_error_model="dehnen_paper"` and
+  `mac_force_scale_mode="paper_fb"`. Their constructor defaults are now `None` ("the preset's"), the way `theta`
+  works. Every other preset resolves as before.
+- **θ does nothing under `dehnen_error` on the fused lane.** The walk accepts by eq (16a) and its convergence clause;
+  the first step's f_b seed walks at θ 0.8. θ 0.3, 0.5 and 0.8 gave identical lists and bitwise states.
+- **The geometric MAC back:** `FastMultipoleMethod(preset="galaxy",
+  advanced=dataclasses.replace(FastMultipoleMethod(preset="galaxy").advanced, mac_type="dehnen"))`, together with
+  `GalaxySettings(mac_type="dehnen", adaptive_eps=None)` for the runner's restart fingerprint.
+- **Costs:**
+  - 279 against 257 B/p at 1e8;
+  - G and the softening are not traced (a new value recompiles);
+  - restart files carry f_b;
+  - **`compute_accelerations` on the preset (the facade's generic large-N route, not the fused runner) peaks ~6x
+    higher**: 4553 against 736 B/p at 2e5.
+- **Restart after 2 of 4 segments, fresh process** (`preset="galaxy"` at 2e5 through the runner):
+  - With all S3b PRs merged: resume, straight run and control are all bitwise.
+  - With #438 alone: 2 of 1.2M elements differ, the same noise as one straight run against another, from the old
+    far-f_b scatter.
+
+### For S5 and later
+- **The facade's `dehnen_error` route** (`compute_accelerations` on the galaxy preset): ~6x the geometric memory at 2e5.
+  The runner and the provider are lean; the facade is not.
+- **The runner holds ~20 B/p** that nornax on the same provider does not (8e6 and 1e8): a lever for the one-card ceiling.
+- **Open since S3 session 2:**
+  - the Pallas walk's counter wrap past 2^31 - 1 pairs;
+  - a persistent compilation cache (the first segment's ~285 programs).
+- **Odisseo:**
+  - `restart_from`;
+  - the last ~5-8 s of fixed cost per call (yggdrax's eager tree build, the template's `eval_shape`).
+- **Multi-GPU (S12):** the lane reads the cubic box only from `JACCPOT_CUBIC_BOUNDS`.
+- **The runner does not check** that its `GalaxySettings`' MAC matches the solver's.
