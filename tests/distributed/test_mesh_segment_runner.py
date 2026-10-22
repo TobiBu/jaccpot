@@ -9,6 +9,9 @@ eps 1e-2 (ferrers3), two devices.
 * A1: the template route's force (caps-only prepares, ONE shape template) equals the
   stacked route's (``setup_fused_force``: full eager prepares, stacked states)
   BITWISE with the same caps.
+* A2: a one-device mesh segment equals a user-written single-card scan over the
+  provider in the same box, bitwise; two segments of 2 steps equal one of 4,
+  bitwise by id.
 
     XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_PLATFORMS=cpu \\
         pytest tests/distributed/test_mesh_segment_runner.py -q
@@ -171,3 +174,143 @@ def test_a1_the_template_force_is_the_stacked_force_bitwise(cpu_fused_lane):
     want = want[rows].astype(np.float64)
     err = float(np.linalg.norm(got - want) / np.linalg.norm(want))
     assert err < 5e-3, err
+
+
+# --------------------------------------------------------------------------
+# Gate A2: the segment program is the single card's particle carry, and segments
+# chain bitwise.
+# --------------------------------------------------------------------------
+
+DT = 1e-3
+
+
+def _mesh_state(mesh, pos, vel, mass, cap=CAP, num_samples=64):
+    from jaccpot.distributed.segment import MeshState
+
+    shard, _ = decompose(mesh, pos, vel, mass, cap=cap, num_samples=num_samples)
+    return MeshState.from_shard_state(shard, mesh)
+
+
+def _gathered_equal(a, b, names=("positions", "velocities", "acceleration")):
+    ga, gb = a.gather(), b.gather()
+    for name in names:
+        _assert_bitwise(ga[name], gb[name], name)
+    return ga
+
+
+@pytest.fixture
+def fresh_level_registry(monkeypatch):
+    """An empty level-shape registry: process-global, never lowered, so a width
+    another test registered for the same tree shape would size this one's loops."""
+    from jaccpot.runtime import _level_shapes
+
+    monkeypatch.setattr(_level_shapes, "_WIDTHS", {})
+    monkeypatch.setattr(_level_shapes, "_LEVELS", {})
+
+
+def test_a2_one_device_segment_is_the_single_card_particle_carry(
+    cpu_fused_lane, fresh_level_registry
+):
+    """GATE A2 (1): a one-device mesh segment equals a user-written single-card
+    scan over the provider, bitwise, when that scan builds its trees in the same
+    box (the live particles' min/max, padded as ``global_mesh_bounds`` pads it).
+
+    One device, no padding rows (cap = N), no cross hook: what differs is the
+    mesh plumbing alone -- the ``shard_map``, the box's all-reduce, the template
+    of the merged caps-only prepare, ``num_valid``, the installed plan."""
+    from jax.sharding import NamedSharding
+    from jax.sharding import PartitionSpec as P
+
+    from jaccpot import FusedForceProvider
+    from jaccpot.distributed.fused import cube_bounds, host_mesh_bounds
+    from jaccpot.distributed.segment import MeshSegmentRunner, MeshState
+
+    n_one, steps = N // 2, 3
+    mesh = _mesh(1)
+    rng = np.random.default_rng(1)
+    pos = rng.uniform(-1.0, 1.0, (n_one, 3)).astype(np.float32)
+    vel = (0.1 * rng.normal(size=(n_one, 3))).astype(np.float32)
+    mass = np.full(n_one, 1.0 / n_one, np.float32)
+    packed = np.stack([pos, vel], axis=1)
+    sharding = NamedSharding(mesh, P(AXIS))
+    state = MeshState(
+        state=jax.device_put(packed, sharding),
+        masses=jax.device_put(mass, sharding),
+        ids=jax.device_put(np.arange(n_one, dtype=np.int32), sharding),
+        count=jax.device_put(np.asarray([n_one], np.int32), sharding),
+    )
+    runner = MeshSegmentRunner.fused(
+        _solver(), mesh, state, leaf_size=LEAF, max_order=ORDER, theta=THETA
+    )
+    runner.run(steps, dt=DT)
+    got_state = np.asarray(runner.state.state)
+    got_acc = np.asarray(runner.state.acceleration)
+
+    # the single card: its own solver and caps-only prepare, in the same box
+    single = _solver()
+    box0 = host_mesh_bounds([pos], [n_one])
+    prov, _ = FusedForceProvider.prepare(
+        single,
+        jnp.asarray(pos),
+        jnp.asarray(mass),
+        leaf_size=LEAF,
+        max_order=ORDER,
+        theta=THETA,
+        bounds=box0,
+        caps_only=True,
+    )
+
+    def force(x, m):
+        box = cube_bounds(jnp.min(x, axis=0), jnp.max(x, axis=0), pad=1e-6)
+        topology = prov.rebuild(x, m, bounds=box)
+        return prov.accelerations(topology), prov.capacity_ok(topology)
+
+    @jax.jit
+    def start(s, m):
+        acc, ok = force(s[:, 0], m)
+        return jnp.asarray(acc, s.dtype), ok
+
+    @jax.jit
+    def segment(s, a, m, dt):
+        def step(carry, _):
+            s_now, a_now, ok = carry
+            x = s_now[:, 0] + s_now[:, 1] * dt + 0.5 * a_now * dt**2
+            s_now = s_now.at[:, 0].set(x)
+            a_new, ok_new = force(x, m)
+            a_new = jnp.asarray(a_new, s_now.dtype)
+            v = s_now[:, 1] + 0.5 * (a_now + a_new) * dt
+            return (s_now.at[:, 1].set(v), a_new, ok & ok_new), None
+
+        return jax.lax.scan(step, (s, a, jnp.asarray(True)), None, length=steps)[0]
+
+    s0, m0 = jnp.asarray(packed), jnp.asarray(mass)
+    a0, ok0 = start(s0, m0)
+    want_state, want_acc, ok = segment(s0, a0, m0, jnp.asarray(DT, s0.dtype))
+    assert bool(ok0) and bool(ok)
+    assert not np.array_equal(np.asarray(want_state), packed), "nothing moved"
+    _assert_bitwise(got_state, want_state, "state")
+    _assert_bitwise(got_acc, want_acc, "acceleration")
+
+
+def test_a2_two_segments_are_one_segment_bitwise(cpu_fused_lane):
+    """GATE A2 (2): 2 + 2 steps (the total acceleration carried across) equal one
+    segment of 4, bitwise by id, on two devices with the cross field -- and the
+    second segment starts from the carried acceleration, not a start force."""
+    from jaccpot.distributed.segment import MeshSegmentRunner
+
+    mesh = _mesh()
+    pos, vel, mass = _ic()
+    solver = _solver()
+    kwargs = dict(
+        leaf_size=LEAF, max_order=ORDER, theta=THETA, cross_caps=_cross_caps()
+    )
+    chained = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    first, second = chained.run(2, dt=DT), chained.run(2, dt=DT)
+    assert first.start_force and not second.start_force
+    whole = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    whole.run(4, dt=DT)
+    _gathered_equal(chained, whole)

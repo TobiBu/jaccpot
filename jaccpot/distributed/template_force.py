@@ -75,6 +75,7 @@ from jaccpot.distributed.fused import (
 )
 
 __all__ = [
+    "FusedMeshForce",
     "MeshForceSetup",
     "cross_needs",
     "make_mesh_cross_hook",
@@ -689,3 +690,224 @@ def make_mesh_cross_hook(
         separation_floor=getattr(solver, "_impl", solver)._walk_separation_floor(),
     )
     return hook, sink
+
+
+class FusedMeshForce:
+    """The fused lane's force for :class:`~jaccpot.distributed.segment.MeshSegmentRunner`.
+
+    Holds the template-route setup (:func:`prepare_mesh_force`) and the cross hook,
+    and hands the runner what it traces and keys its programs on: :meth:`shard`
+    inside its ``shard_map`` bodies, under :meth:`context` (the merged plan
+    installed), cached under :meth:`key`. :meth:`prepare` runs at the runner's
+    start and again at a re-planned segment's start.
+
+    Parameters
+    ----------
+    solver : Any
+        The ``FastMultipoleMethod`` (large-N production profile, cell leaves, the
+        flat walk, a geometric MAC).
+    mesh : Any
+        The 1-D mesh.
+    leaf_size : int
+        Leaf target.
+    max_order : int
+        Expansion order.
+    theta : Optional[float]
+        Opening angle; ``None`` takes the solver's.
+    cross_caps : Any
+        :class:`~jaccpot.distributed.cross.CrossCapacities`; ``None`` takes the
+        constructor defaults.
+    near_theta : Optional[float]
+        Passed to the cross hook.
+    axis_name : str
+        Mesh axis.
+
+    Raises
+    ------
+    NotImplementedError
+        If the solver asks for Dehnen's error criterion; raised before anything is
+        built.
+    """
+
+    def __init__(
+        self,
+        solver: Any,
+        mesh: Any,
+        *,
+        leaf_size: int,
+        max_order: int,
+        theta: Optional[float] = None,
+        cross_caps: Any = None,
+        near_theta: Optional[float] = None,
+        axis_name: str = AXIS_NAME,
+    ) -> None:
+        _refuse_error_criterion(solver, entry="FusedMeshForce")
+        self.solver = solver
+        self.engine = getattr(solver, "_impl", solver)
+        self.mesh = mesh
+        self.leaf_size = int(leaf_size)
+        self.max_order = int(max_order)
+        self.theta = theta
+        self.cross_caps = cross_caps
+        self.near_theta = near_theta
+        self.axis_name = axis_name
+        self.setup: Optional[MeshForceSetup] = None
+        self.hook, self.near_sink = make_mesh_cross_hook(
+            solver,
+            mesh,
+            theta=self.theta_value,
+            cross_caps=cross_caps,
+            near_theta=near_theta,
+            axis_name=axis_name,
+        )
+        _warn_if_slow_ragged_exchange(mesh)
+
+    @property
+    def theta_value(self) -> float:
+        """The opening angle the local and the cross walks use.
+
+        Returns
+        -------
+        float
+            ``theta``, else the solver's.
+        """
+        return float(self.engine.theta if self.theta is None else self.theta)
+
+    @property
+    def cache_owner(self) -> Any:
+        """What the runner's compiled programs are cached on: the engine.
+
+        Returns
+        -------
+        Any
+            The runtime engine; its programs are shared by runners on one solver.
+        """
+        return self.engine
+
+    @property
+    def needs_size(self) -> int:
+        """Length of :meth:`shard`'s needs vector.
+
+        Returns
+        -------
+        int
+            ``len(NEEDS_FIELDS)`` plus the cross hook's fields (:func:`cross_needs`).
+        """
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        cross = tuple(getattr(self.hook, "needs_fields", ()) or ())
+        return len(NEEDS_FIELDS) + len(cross)
+
+    def prepare(self, positions: Array, masses: Array, counts: Array) -> None:
+        """The template-route setup at these particles (:func:`prepare_mesh_force`).
+
+        Parameters
+        ----------
+        positions : Array
+            ``(ndev * cap, 3)`` flat, mesh-sharded positions.
+        masses : Array
+            ``(ndev * cap,)`` masses.
+        counts : Array
+            ``(ndev,)`` live rows per device.
+        """
+        self.setup = None  # the old template, plan and caps go first
+        self.setup = prepare_mesh_force(
+            self.solver,
+            self.mesh,
+            positions,
+            masses,
+            counts,
+            leaf_size=self.leaf_size,
+            max_order=self.max_order,
+            theta=self.theta,
+        )
+
+    def _setup_or_raise(self) -> MeshForceSetup:
+        """The prepared setup.
+
+        Returns
+        -------
+        MeshForceSetup
+            :attr:`setup`.
+
+        Raises
+        ------
+        RuntimeError
+            Before :meth:`prepare`.
+        """
+        if self.setup is None:
+            raise RuntimeError("FusedMeshForce.prepare must run before the force")
+        return self.setup
+
+    def key(self) -> tuple:
+        """What a program traced from this force must be cached under.
+
+        Returns
+        -------
+        tuple
+            The setup's key (template shapes, walk caps, level bound, plan), the
+            opening angles and the cross capacities: the hook is rebuilt from them,
+            and its buffers are shapes of the program.
+        """
+        caps = self.cross_caps
+        caps_key = None if caps is None else tuple(sorted(vars(caps).items()))
+        return (
+            "fused",
+            *self._setup_or_raise().key(),
+            self.theta_value,
+            self.near_theta,
+            caps_key,
+        )
+
+    def context(self) -> Any:
+        """The merged plan installed, for every trace AND call of a program.
+
+        Returns
+        -------
+        Any
+            A context manager (``fused_capacity_plan_overrides``).
+        """
+        from jaccpot.runtime.capacity_plan import fused_capacity_plan_overrides
+
+        return fused_capacity_plan_overrides(self._setup_or_raise().plan)
+
+    def before_trace(self) -> None:
+        """Forget the last trace's walk caps record before a new program traces.
+
+        The traced walk records its caps on the engine, and the verdict reads them
+        in the same trace: a record another trace left must not be read as this
+        one's (``strict_run_v2`` resets it the same way).
+        """
+        self.engine._strict_fused_traced_caps = None
+
+    def shard(
+        self, positions: Array, masses: Array, live: Array, ids: Array
+    ) -> tuple[Array, Array, Array]:
+        """One device's self-gravity (:func:`mesh_force_shard`; inside ``shard_map``).
+
+        Parameters
+        ----------
+        positions : Array
+            ``(cap, 3)``.
+        masses : Array
+            ``(cap,)``.
+        live : Array
+            Scalar live row count.
+        ids : Array
+            ``(cap,)`` global ids; unused (the rows come back in input order).
+
+        Returns
+        -------
+        tuple[Array, Array, Array]
+            ``(acceleration, bits, needs)``.
+        """
+        del ids
+        return mesh_force_shard(
+            self._setup_or_raise(),
+            positions,
+            masses,
+            live,
+            cross_hook=self.hook,
+            cross_near_sink=self.near_sink,
+            axis_name=self.axis_name,
+        )
