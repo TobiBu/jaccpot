@@ -767,9 +767,133 @@ def l2p_real_particles_reverse_pallas(
     return coef_bar, cent_bar.astype(jnp.asarray(centers).dtype), pos_bar
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9, 10))
+def l2p_real_particles_pallas_cvjp(
+    coefficients: Array,
+    centers: Array,
+    positions_sorted: Array,
+    leaf_nodes: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    order: int,
+    block: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+) -> Array:
+    """Differentiable :func:`l2p_real_particles_pallas` (the forward is that call).
+
+    The reverse is :func:`l2p_real_particles_reverse_pallas` (its own block and
+    warp defaults: the forward's ``block`` and ``num_warps`` tune the forward).
+
+    Parameters
+    ----------
+    coefficients : Array
+        ``[nodes, (p+1)^2]`` real local coefficients. Differentiable.
+    centers : Array
+        ``[nodes, 3]`` expansion centres. Differentiable.
+    positions_sorted : Array
+        ``[N, 3]`` positions in tree order. Differentiable.
+    leaf_nodes : Array
+        ``[L]`` node id of each leaf (topology).
+    leaf_start : Array
+        ``[L]`` first particle of each leaf (topology).
+    leaf_count : Array
+        ``[L]`` particles of each leaf (topology).
+    order : int
+        Expansion order. ``nondiff_argnums``.
+    block : int
+        The forward's particles per program. ``nondiff_argnums``.
+    interpret : bool
+        Pallas interpret mode. ``nondiff_argnums``.
+    backend : str
+        Pallas GPU lowering. ``nondiff_argnums``.
+    num_warps : int
+        The forward's warps per program. ``nondiff_argnums``.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` gradient with respect to ``delta`` (as the forward).
+    """
+    return l2p_real_particles_pallas(
+        coefficients,
+        centers,
+        positions_sorted,
+        leaf_nodes,
+        leaf_start,
+        leaf_count,
+        order=order,
+        block=block,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+
+
+def _l2p_cvjp_fwd(
+    coefficients,
+    centers,
+    positions_sorted,
+    leaf_nodes,
+    leaf_start,
+    leaf_count,
+    order,
+    block,
+    interpret,
+    backend,
+    num_warps,
+):
+    out = l2p_real_particles_pallas(
+        coefficients,
+        centers,
+        positions_sorted,
+        leaf_nodes,
+        leaf_start,
+        leaf_count,
+        order=order,
+        block=block,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+    return out, (
+        coefficients,
+        centers,
+        positions_sorted,
+        leaf_nodes,
+        leaf_start,
+        leaf_count,
+    )
+
+
+def _l2p_cvjp_bwd(order, block, interpret, backend, num_warps, residual, grad_bar):
+    del block, num_warps
+    coefficients, centers, positions_sorted, leaf_nodes, leaf_start, leaf_count = (
+        residual
+    )
+    coef_bar, cent_bar, pos_bar = l2p_real_particles_reverse_pallas(
+        coefficients,
+        centers,
+        positions_sorted,
+        leaf_nodes,
+        leaf_start,
+        leaf_count,
+        grad_bar,
+        order=order,
+        interpret=interpret,
+        backend=backend,
+    )
+    return (coef_bar, cent_bar, pos_bar, None, None, None)
+
+
+l2p_real_particles_pallas_cvjp.defvjp(_l2p_cvjp_fwd, _l2p_cvjp_bwd)
+
+
 __all__ = [
     "l2p_real_grad_cartesian",
     "l2p_real_grad_cartesian_transpose",
     "l2p_real_particles_pallas",
+    "l2p_real_particles_pallas_cvjp",
     "l2p_real_particles_reverse_pallas",
 ]

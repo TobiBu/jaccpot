@@ -9,6 +9,10 @@ buffer exists and no atomics are needed. These tests check it against ``jax.vjp`
 of a pure-JAX L2P (the same Cartesian recurrence, gathered per particle) in
 interpret mode, on trees with leaves of every occupancy, leaves walked over many
 chunks, empty padding leaves and dead rows past the leaves' particles.
+
+``l2p_real_particles_pallas_cvjp`` is the production call with that reverse: its
+forward is the plain launch (the same program), and ``jax.grad`` through the
+production particle-major L2P reaches the reverse kernel.
 """
 
 from __future__ import annotations
@@ -19,8 +23,11 @@ import numpy as np
 import pytest
 
 from jaccpot.downward.local_expansions import LocalExpansionData
+from jaccpot.pallas import l2p_real
 from jaccpot.pallas.l2p_real import (
     l2p_real_grad_cartesian,
+    l2p_real_particles_pallas,
+    l2p_real_particles_pallas_cvjp,
     l2p_real_particles_reverse_pallas,
 )
 from jaccpot.runtime.dtypes import INDEX_DTYPE
@@ -210,6 +217,65 @@ def test_reverse_equals_the_vjp_of_the_autodiff_l2p():
     )
     for name, g, w in zip(("coefficients", "centers", "positions"), got, want):
         assert _rel_max(g, w) < 1e-10, name
+
+
+def test_grad_through_the_production_call_reaches_the_reverse_kernel(monkeypatch):
+    """``jax.grad`` through the production particle-major L2P (``kernel='pallas'`` /
+    ``'interpret'``) runs the reverse kernel once and agrees with the ``xla``
+    kernel's autodiff; before the custom_vjp, ``pallas_call``'s generic JVP rule
+    died on ``program_id``."""
+    calls = []
+    real = l2p_real.l2p_real_particles_reverse_pallas
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(l2p_real, "l2p_real_particles_reverse_pallas", counted)
+    order = 4
+    coef, cent, pos, leaf_nodes, _, _, ranges = _tree(1, 187, 200, 2, 8, order)
+    weight = jnp.asarray(np.random.default_rng(2).normal(size=pos.shape))
+
+    def loss(kernel):
+        def f(c, x, q):
+            local = LocalExpansionData(order=order, centers=x, coefficients=c)
+            g = _evaluate_local_expansions_particle_major(
+                local,
+                q,
+                leaf_nodes=leaf_nodes,
+                node_ranges=ranges,
+                order=order,
+                chunk=64,
+                kernel=kernel,
+            )
+            return jnp.sum(weight * g)
+
+        return f
+
+    got = jax.grad(loss("interpret"), argnums=(0, 1, 2))(coef, cent, pos)
+    assert len(calls) == 1
+    want = jax.grad(loss("xla"), argnums=(0, 1, 2))(coef, cent, pos)
+    for g, w in zip(got, want):
+        assert _rel_max(g, w) < 1e-10
+
+
+def test_the_forward_is_the_plain_launch():
+    """The custom_vjp's forward lowers to the production launch's program, and
+    returns its values bitwise (the program-identity contract of the fused lane)."""
+    order = 6
+    coef, cent, pos, leaf_nodes, start, count, _ = _tree(0, 187, 200, 2, 8, order)
+    coef, cent, pos = (a.astype(jnp.float32) for a in (coef, cent, pos))
+    args = (coef, cent, pos, leaf_nodes, start, count)
+    plain = jax.jit(
+        lambda *a: l2p_real_particles_pallas(*a, order=order, interpret=True)
+    )
+    seam = jax.jit(
+        lambda *a: l2p_real_particles_pallas_cvjp(*a, order, 128, True, "triton", 4)
+    )
+    assert plain.lower(*args).as_text(debug_info=False) == seam.lower(*args).as_text(
+        debug_info=False
+    )
+    assert np.array_equal(np.asarray(plain(*args)), np.asarray(seam(*args)))
 
 
 def test_the_reverse_holds_no_per_particle_coefficient_buffer():
