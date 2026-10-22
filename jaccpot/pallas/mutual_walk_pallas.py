@@ -181,7 +181,7 @@ def _round_kernel(
         ``[theta^2, separation floor, theta_max, 0]``.
     err_ref : KernelRef
         ``[nodes, W]`` eq (16a) table (:func:`~jaccpot.runtime._walk_criterion.dehnen_walk_table`)
-        when ``error_order > 0``; a dummy otherwise.
+        when ``error_order > 0``, ``W`` a power of two; a dummy otherwise.
     far_a_ref : KernelRef
         Far list, first node ``[far_cap]``; aliased to ``far_a_out``.
     far_b_ref : KernelRef
@@ -291,6 +291,40 @@ def _round_kernel(
     lax.fori_loop(0, trips, _one, 0)
 
 
+def _node_rows(ref: KernelRef, nodes: Array) -> list[Array]:
+    """Every column of the ``[nodes, W]`` table ``ref`` at rows ``nodes``, one load each.
+
+    ``ref[nodes, k]`` column by column is one scalar gather instruction per column,
+    each touching the same 32-byte row of every lane again. ``ref[nodes, :]`` reads
+    each node's row as one contiguous vector (Triton issues it as ``W / 4``
+    128-bit loads), and the columns are split apart in registers. The values are
+    the same loads, so every test on them is bitwise unchanged.
+
+    The walk is bound by these gathers, not by its arithmetic. The walk alone on the
+    25M disc+bulge (captured inputs, A100, contended, min of 3 in one process,
+    2026-10-17): the geometric MAC with the eq (16a) table merely loaded beside it,
+    column by column, 47.6 ms against 22.9 ms without (identical lists); eq (16a)
+    52.5 ms with the table read by column, 32.1 ms read by row, same lists. With
+    the node record read by row as well: eq (16a) 27.1 ms, the geometric walk
+    20.3 ms (22.9 by column), each with its lists unchanged.
+
+    Parameters
+    ----------
+    ref : KernelRef
+        ``[nodes, W]`` table, ``W`` a power of two (Triton's split).
+    nodes : Array
+        ``[B]`` row per lane (in range).
+
+    Returns
+    -------
+    list[Array]
+        ``W`` arrays of shape ``[B]``, column ``k`` of each lane's row.
+    """
+    width = int(ref.shape[1])
+    rows = ref[nodes, :]
+    return [col.reshape(col.shape[0]) for col in jnp.split(rows, width, axis=1)]
+
+
 def _round_block(
     qa_ref: KernelRef,
     qb_ref: KernelRef,
@@ -347,7 +381,8 @@ def _round_block(
     theta_ref : KernelRef
         ``[theta^2, separation floor, theta_max, 0]``.
     err_ref : KernelRef
-        ``[nodes, W]`` eq (16a) table when ``error_order > 0``; a dummy otherwise.
+        ``[nodes, W]`` eq (16a) table when ``error_order > 0``, ``W`` a power of
+        two; a dummy otherwise.
     far_a_out : KernelRef
         Far list, first node; written in place.
     far_b_out : KernelRef
@@ -400,17 +435,22 @@ def _round_block(
     a_s = jnp.where(live, a, jnp.zeros_like(a))
     b_s = jnp.where(live, b, jnp.zeros_like(b))
     if node_layout == "record":
+        # each node's record in one vector load (_node_rows), not seven gathers
+        rec_a = _node_rows(cent_ref, a_s)
+        rec_b = _node_rows(cent_ref, b_s)
 
-        def _int(n, col):
-            return lax.bitcast_convert_type(cent_ref[n, col], jnp.int32)
+        def _int(col):
+            return lax.bitcast_convert_type(col, jnp.int32)
 
-        live = live & (_int(a_s, 6) > 0) & (_int(b_s, 6) > 0)
-        la = _int(a_s, 4)
-        lb = _int(b_s, 4)
-        ra = _int(a_s, 5)
-        rb = _int(b_s, 5)
-        rad_a = cent_ref[a_s, 3]
-        rad_b = cent_ref[b_s, 3]
+        live = live & (_int(rec_a[6]) > 0) & (_int(rec_b[6]) > 0)
+        la = _int(rec_a[4])
+        lb = _int(rec_b[4])
+        ra = _int(rec_a[5])
+        rb = _int(rec_b[5])
+        rad_a = rec_a[3]
+        rad_b = rec_b[3]
+        cen_a = rec_a[:3]
+        cen_b = rec_b[:3]
     else:
         live = live & (active_ref[a_s] > 0) & (active_ref[b_s] > 0)
         la = left_ref[a_s]
@@ -419,22 +459,25 @@ def _round_block(
         rb = right_ref[b_s]
         rad_a = rad_ref[a_s]
         rad_b = rad_ref[b_s]
-    dx = cent_ref[b_s, 0] - cent_ref[a_s, 0]
-    dy = cent_ref[b_s, 1] - cent_ref[a_s, 1]
-    dz = cent_ref[b_s, 2] - cent_ref[a_s, 2]
+        cen_a = [cent_ref[a_s, k] for k in range(3)]
+        cen_b = [cent_ref[b_s, k] for k in range(3)]
+    dx = cen_b[0] - cen_a[0]
+    dy = cen_b[1] - cen_a[1]
+    dz = cen_b[2] - cen_a[2]
     d2 = dx * dx + dy * dy + dz * dz
     same = a_s == b_s
     rsum = rad_a + rad_b
     if error_order > 0:
-        # eq (16a), both directions, from the two nodes' table rows; like the
-        # policy, no d > 0 guard (the convergence clause fails at d = 0)
+        # eq (16a), both directions, from the two nodes' table rows (one vector
+        # load per row, _node_rows); like the policy, no d > 0 guard (the
+        # convergence clause fails at d = 0)
         cols = WALK_TABLE_POWER0 + int(error_order)
         accept = (
             live
             & (~same)
             & dehnen_pair_accept(
-                row_a=[err_ref[a_s, k] for k in range(cols)],
-                row_b=[err_ref[b_s, k] for k in range(cols)],
+                row_a=_node_rows(err_ref, a_s)[:cols],
+                row_b=_node_rows(err_ref, b_s)[:cols],
                 radius_a=rad_a,
                 radius_b=rad_b,
                 dist_sq=d2,
@@ -637,7 +680,8 @@ def mutual_walk_pallas(
         atomic for the four child pairs of a block, the only emission since the
         2026-10 cleanup, X5): the walk alone (A100) 286 -> 96 ms at 1e8
         particles and ~31 -> 15 ms at 8e6 (each alone: record 248 ms, fused
-        emission 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8.
+        emission 167 ms at 1e8), the fused step 1155 -> 954 ms at 1e8. A round
+        reads the record as one vector per node (two 128-bit loads, S3b).
     separation_floor : float
         Accept a pair only if also ``|c_b - c_a| >= r_a + r_b + separation_floor``,
         so no far interaction acts between particles closer than the floor (the
@@ -856,6 +900,11 @@ def _mutual_walk_jit(
     if error_order > 0:
         assert error_table is not None  # checked by the wrapper
         err = jnp.asarray(error_table, dtype)
+        # the kernel reads each row as one vector and splits it (_node_rows):
+        # Triton splits power-of-two widths only (dehnen_walk_table's already are)
+        width = int(err.shape[1])
+        if width & (width - 1):
+            err = jnp.pad(err, ((0, 0), (0, (1 << width.bit_length()) - width)))
     else:
         err = jnp.zeros((1, 8), dtype)
     if node_layout == "record":

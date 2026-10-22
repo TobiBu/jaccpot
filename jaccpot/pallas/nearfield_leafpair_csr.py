@@ -115,8 +115,46 @@ class LeafPairChunkTable(NamedTuple):
     is_first: Array
 
 
+def _triton_f32_reciprocal(x: Array) -> Array:
+    """``rcp.approx.ftz.f32``: the reciprocal inside Triton's float32 division.
+
+    Triton lowers a float32 ``a / b`` to PTX ``div.full.f32``, and ptxas expands that
+    to two range tests on ``|b|`` (above 2^126, below 2^-126), a rescaling of both
+    operands for each, ``MUFU.RCP`` and one multiply. For ``b`` inside
+    ``[2^-126, 2^126]`` no rescaling applies and the quotient is
+    ``a * rcp.approx.ftz.f32(b)``, so ``a * _triton_f32_reciprocal(b)`` has the
+    division's bits there at 2 instructions instead of 8. Pinned on the GPU by
+    ``tests/unit/operators/test_nearfield_force_scale_lane.py``. Triton float32 only:
+    interpret mode and float64 divide.
+
+    Parameters
+    ----------
+    x : Array
+        float32 divisors.
+
+    Returns
+    -------
+    Array
+        ``1 / x`` as the division's ``MUFU.RCP`` computes it.
+    """
+    (out,) = plgpu.elementwise_inline_asm(
+        "rcp.approx.ftz.f32 $0, $1;",
+        args=[x],
+        constraints="=r,r",
+        pack=1,
+        result_shape_dtypes=[jax.ShapeDtypeStruct(x.shape, x.dtype)],
+    )
+    return out
+
+
 def _force_scale_term(
-    r_sq: Array, soft: Array, active: Array, mass: Array, softening_kernel: str
+    r_sq: Array,
+    soft: Array,
+    active: Array,
+    mass: Array,
+    softening_kernel: str,
+    *,
+    fast_reciprocal: bool = False,
 ) -> Array:
     """One pair's share of eq (16b)'s force scale, ``m / (r^2 + eps^2)`` (times G).
 
@@ -140,6 +178,13 @@ def _force_scale_term(
         Source mass.
     softening_kernel : str
         The pair kernel, static.
+    fast_reciprocal : bool
+        Multiply by :func:`_triton_f32_reciprocal` instead of dividing (Triton,
+        float32): the division's bits whenever ``r^2 + eps^2`` lies in
+        ``[2^-126, 2^126]`` -- every pair once ``eps^2 >= 2^-126`` -- at half the
+        lane's cost (the 25M disc's ``_fb`` near kernel: 16 -> 8 SASS instructions
+        per pair beside the force's 39; 117.8 -> 104.6 ms against 91.4 ms without
+        the lane, A100). Static.
 
     Returns
     -------
@@ -150,6 +195,9 @@ def _force_scale_term(
     eps_sq = soft if k == 0.0 else soft * (1.0 / (k * k))
     d2 = r_sq + eps_sq
     ok = active & (d2 > 0.0)
+    if fast_reciprocal:
+        # dead lanes' reciprocals (inf, NaN) are dropped by the select
+        return jnp.where(ok, mass * _triton_f32_reciprocal(d2), 0.0)
     return jnp.where(ok, mass / jnp.where(ok, d2, 1.0), 0.0)
 
 
@@ -849,6 +897,7 @@ def _nearfield_leafpair_csr_sorted_kernel(
     softening_kernel: str = "plummer",
     fourth: str = "potential",
     tile_skip: bool = False,
+    fast_reciprocal: bool = False,
 ) -> None:
     """:func:`_nearfield_leafpair_csr_kernel` reading the SORTED particle array.
 
@@ -935,6 +984,9 @@ def _nearfield_leafpair_csr_sorted_kernel(
         boxes of :func:`_leaf_boxes`, the first of ``out_refs`` then) takes the
         Newtonian factors instead of the polynomial
         (:func:`_ferrers3_newton_factors`: the same bits). Static.
+    fast_reciprocal : bool
+        The force-scale lane multiplies by the division's reciprocal instead of
+        dividing (``_force_scale_term``; Triton float32, the same bits). Static.
 
     Returns
     -------
@@ -1008,7 +1060,14 @@ def _nearfield_leafpair_csr_sorted_kernel(
                         new = new + (
                             acc[3]
                             + g_value
-                            * _force_scale_term(r2, soft, active, sm, softening_kernel),
+                            * _force_scale_term(
+                                r2,
+                                soft,
+                                active,
+                                sm,
+                                softening_kernel,
+                                fast_reciprocal=fast_reciprocal,
+                            ),
                         )
                     else:
                         new = new + (acc[3] - g_value * inv_r * sm,)
@@ -1098,7 +1157,12 @@ def _nearfield_leafpair_csr_sorted_kernel(
                             if exclude_lane is not None:
                                 live = live & (exclude_lane[:, None] != j2)
                             fb = g_value * _force_scale_term(
-                                r_sq, soft, live, sm[None, :], softening_kernel
+                                r_sq,
+                                soft,
+                                live,
+                                sm[None, :],
+                                softening_kernel,
+                                fast_reciprocal=fast_reciprocal,
                             )
                             terms = terms + (fb,)
                         elif num_out == 4:
@@ -1348,6 +1412,9 @@ def _sorted_pallas_call(
             softening_kernel=softening_kernel,
             fourth=fourth,
             tile_skip=tile_skip,
+            # the Triton kernel's division bits without its range tests; interpret
+            # mode (CPU semantics) and float64 keep the division
+            fast_reciprocal=(not interpret) and jnp.dtype(pm.dtype) == jnp.float32,
         )
 
     def _full(arr: Array) -> pl.BlockSpec:
@@ -1627,8 +1694,10 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     with_force_scale : bool
         Instead of the potential, accumulate and return eq (16b)'s near-field
         force scale ``sum G m / (r^2 + eps^2)`` over the same pairs (self excluded):
-        the near half of Dehnen's cancellation-free ``f_b``, at one extra
-        multiply-add per pair. Exclusive with ``with_potential``. Static.
+        the near half of Dehnen's cancellation-free ``f_b``. On a compact kernel
+        that is a reciprocal, a select and two multiply-adds per pair: 8 SASS
+        instructions beside the force's 39 at ferrers3 (``_force_scale_term``).
+        Exclusive with ``with_potential``. Static.
     row_limit : int | None
         Entries of a row its own program runs (the rest in pieces of this
         many). ``None``: ``JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT``,

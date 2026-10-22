@@ -399,6 +399,84 @@ def test_pallas_walk_with_eq16a_equals_the_flat_walk_with_it(node_layout, dtype,
     assert _sets(geo)[0] != far_r
 
 
+def _round_kernel_reads(**walk_kwargs):
+    """Reads of each ref in ONE round kernel of a traced 7-node walk, by ref type.
+
+    The walk is gather-bound: on the 25M disc a per-column table read cost more
+    than eq (16a)'s arithmetic. Counted in the kernel's jaxpr (``get`` per read),
+    so no walk runs.
+    """
+    import collections
+
+    import jax
+
+    left = jnp.asarray([1, 3, 5, -1, -1, -1, -1], jnp.int32)
+    right = jnp.asarray([2, 4, 6, -1, -1, -1, -1], jnp.int32)
+
+    def _eqns(jaxpr):
+        for eqn in jaxpr.eqns:
+            yield eqn
+            for value in eqn.params.values():
+                for sub in value if isinstance(value, (tuple, list)) else (value,):
+                    inner = getattr(sub, "jaxpr", sub)  # a ClosedJaxpr's Jaxpr
+                    if hasattr(inner, "eqns"):
+                        yield from _eqns(inner)
+
+    traced = jax.make_jaxpr(
+        lambda: mutual_walk_pallas(
+            left,
+            right,
+            jnp.zeros((7, 3), jnp.float32),
+            jnp.ones((7,), jnp.float32),
+            0.5,
+            jnp.asarray(0, jnp.int32),
+            max_pair_queue=64,
+            far_cap=64,
+            near_cap=64,
+            interpret=True,
+            rounds_per_check=1,
+            **walk_kwargs,
+        )
+    )()
+    (call,) = [e for e in _eqns(traced.jaxpr) if e.primitive.name == "pallas_call"]
+    reads = collections.Counter(
+        str(e.invars[0].aval.inner_aval)
+        for e in _eqns(call.params["jaxpr"])
+        if e.primitive.name == "get"
+    )
+    return reads
+
+
+@pytest.mark.parametrize(
+    "order, width, layout, kernel_width",
+    [(7, 16, "record", 16), (4, 6, "soa", 8)],
+)
+def test_pallas_walk_reads_each_eq16a_table_row_once(
+    order, width, layout, kernel_width
+):
+    """One read of each node's eq (16a) row per pair -- not one per column (2(p+2)).
+
+    The rows are read as vectors and split in registers (``_node_rows``); a table
+    whose width is not a power of two (Triton splits only those) is padded."""
+    reads = _round_kernel_reads(
+        error_table=jnp.zeros((7, width), jnp.float32),
+        error_order=order,
+        node_layout=layout,
+    )
+    assert reads[f"float32[7,{kernel_width}]"] == 2, reads
+
+
+@pytest.mark.parametrize("order", [0, 7])
+def test_pallas_walk_reads_each_node_record_once(order):
+    """The record layout's node record, ``(cx, cy, cz, r, left, right, active, 0)``,
+    is one read per node of the pair, with or without eq (16a) -- not seven."""
+    extra = {}
+    if order:
+        extra = dict(error_table=jnp.zeros((7, 16), jnp.float32), error_order=order)
+    reads = _round_kernel_reads(node_layout="record", **extra)
+    assert reads["float32[7,8]"] == 2, reads
+
+
 def test_pallas_walk_refuses_an_order_without_a_wide_enough_table():
     with pytest.raises(ValueError, match="error_table"):
         mutual_walk_pallas(
