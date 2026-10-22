@@ -169,3 +169,33 @@ def test_auto_resolves_at_the_first_eager_prepare_and_sticks():
     # prepare_state chains the build's error under its capacity report
     assert "overflowed the leaf capacity" in str(info.value.__cause__)
     assert solver._impl._tree_leaf_capacity == capacity
+
+
+def test_a_cubic_box_builds_cubic_cells_and_counts_its_capacity_in_them(monkeypatch):
+    """``TreeConfig(cubic_bounds=True)`` (``preset="galaxy"``, S3b) reaches the
+    tree: the prepare's Morton box is a cube on a flat, elongated cloud, and
+    ``"auto"`` counts the cell leaves in that cube -- not in the per-axis box the
+    library default builds (the control), whose cells inherit the cloud's 8:2:1."""
+    monkeypatch.delenv("JACCPOT_CUBIC_BOUNDS", raising=False)
+    leaf, n = 16, 512
+    masses = jnp.full((n,), 1.0 / n, jnp.float32)
+    pos = jnp.asarray(
+        np.random.default_rng(1).uniform(-1.0, 1.0, (n, 3)) * [8.0, 2.0, 1.0],
+        jnp.float32,
+    )
+    counted = {}
+    for cubic in (True, False):
+        solver = _solver(leaf_capacity="auto", cubic_bounds=cubic)
+        state = solver.prepare_state(pos, masses, leaf_size=leaf, max_order=2)
+        edges = np.asarray(state.tree.bounds_max) - np.asarray(state.tree.bounds_min)
+        live = live_cell_leaves(
+            pos, leaf_size=leaf, cell_min_level=4, bounds=_infer_bounds(pos, cubic)
+        )
+        assert solver._impl._tree_leaf_capacity == auto_leaf_capacity(live)
+        assert int(state.tree.leaf_codes.shape[0]) == auto_leaf_capacity(live)
+        counted[cubic] = live
+        if cubic:
+            np.testing.assert_allclose(edges, edges.max(), rtol=1e-6)
+        else:
+            assert edges.max() / edges.min() > 7.0
+    assert counted[True] != counted[False]

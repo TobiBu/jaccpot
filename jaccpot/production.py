@@ -1,12 +1,13 @@
 """Galaxy-scale production on the fused lane: what ``preset="galaxy"`` runs, and the runner.
 
-``FastMultipoleMethod(preset="galaxy")`` is the configuration every production row
-of the fused lane was measured with (``bench/fused_memory_budget.py``'s defaults:
-the L1-L3 rows, 8e6 and 1e8 particles on one A100 and the 25M disc + bulge), named
-so a caller no longer copies it from the bench. It is built from ONE
-:class:`GalaxySettings` instance, so the constructor half (the tree, the MAC, the
-opening angle, the softening kernel, the precision) and the run-time half (leaf
-size, expansion order, carry -- arguments of ``strict_run_v2``) cannot drift apart.
+``FastMultipoleMethod(preset="galaxy")`` is the configuration the production rows
+of the fused lane are measured with (``bench/fused_memory_budget.py``'s defaults:
+the L1-L3 rows, 8e6 and 1e8 particles on one A100 and the 25M disc + bulge; since
+S3b with a cubic Morton box, ``--cubic-bounds``), named so a caller no longer copies
+it from the bench. It is built from ONE :class:`GalaxySettings` instance, so the
+constructor half (the tree, the box, the MAC, the opening angle, the softening
+kernel, the precision) and the run-time half (leaf size, expansion order, carry --
+arguments of ``strict_run_v2``) cannot drift apart.
 
 THE RUNNER. :class:`ProductionRunner` runs a long simulation as a host loop of
 ``SegmentConfig.steps``-step segments, each ONE ``strict_run_v2(carry="particles")``
@@ -110,6 +111,17 @@ class GalaxySettings:
         prepare.
     leaf_headroom : float
         ``TreeConfig.leaf_headroom``: the factor over the live cell leaves.
+    cubic_bounds : bool
+        ``TreeConfig.cubic_bounds``: the Morton box is a cube on the particles'
+        longest extent, not padded per axis, so every cell is a cube whatever the
+        box's aspect (S3b). On the 25M disc + bulge, whose box is a cube to 0.4 %
+        (the bulge reaches r = 20 on every axis), the two boxes' lists agree to
+        1 % and their rel-L2 within 9 %, either way, at step 0 and along the
+        production run (steps 250 and 500: the per-axis box stays within 1.2 % of
+        a cube); on the same disc
+        without its bulge (3:1, thin in z) the cube needs 63 % fewer far and 50 %
+        fewer near pairs and halves the force error (rel-L2 1.02e-3 -> 5.3e-4).
+        ``JACCPOT_CUBIC_BOUNDS=0`` turns it off for a run.
     softening_kernel : str
         Pair softening kernel (:mod:`jaccpot.softening`).
     mac_type : str
@@ -132,6 +144,7 @@ class GalaxySettings:
     cell_min_level: int = 8
     leaf_capacity: Union[int, Literal["auto"]] = "auto"
     leaf_headroom: float = 1.15
+    cubic_bounds: bool = True
     softening_kernel: str = "ferrers3"
     mac_type: str = "dehnen"
     adaptive_eps: Optional[float] = None
@@ -1958,6 +1971,7 @@ class ProductionRunner:
                         getattr(engine, "_tree_leaf_partition", None)
                     ),
                     "cell_min_level": int(getattr(engine, "_tree_cell_min_level", 0)),
+                    "cubic_bounds": bool(getattr(engine, "_tree_cubic_bounds", False)),
                     "fixed_order": getattr(engine, "fixed_order", None),
                 }
             ),

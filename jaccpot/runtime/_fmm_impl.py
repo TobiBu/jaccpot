@@ -502,6 +502,9 @@ class FMMEngine(
                 f"TreeConfig.cell_min_level must be in [0, 21], got "
                 f"{self._tree_cell_min_level}"
             )
+        # the inferred Morton box: per axis (default) or a cube; JACCPOT_CUBIC_BOUNDS
+        # overrides it when set (`kernels._evaluate._cubic_bounds_active`)
+        self._tree_cubic_bounds: bool = bool(_tree.cubic_bounds)
         tree_build_mode = _tree.mode
         target_leaf_particles = _tree.leaf_target
         refine_local = _tree.refine_local

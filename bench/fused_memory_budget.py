@@ -109,6 +109,13 @@ def _args() -> argparse.Namespace:
         default=1.15,
         help="leaf capacity = this x the live cell leaves, in steps of 1024",
     )
+    ap.add_argument(
+        "--cubic-bounds",
+        action="store_true",
+        help="TreeConfig(cubic_bounds=True): a cubic Morton box, as preset='galaxy' "
+        "builds since S3b (the default is the library's per-axis box; the leaf "
+        "capacity is counted in the same box)",
+    )
     ap.add_argument("--caps", default="bench", choices=("bench", "named", "unnamed"))
     ap.add_argument(
         "--clean-env",
@@ -731,7 +738,7 @@ def _leaf_capacity(pos: np.ndarray) -> tuple[int, int]:
         p,
         leaf_size=ARGS.leaf,
         cell_min_level=ARGS.cell_min_level,
-        bounds=_infer_bounds(p),
+        bounds=_infer_bounds(p, cubic=ARGS.cubic_bounds),
     )
     return live, auto_leaf_capacity(live, ARGS.leaf_cap_factor)
 
@@ -757,6 +764,7 @@ def _solver(leaf_cap: int, soft: float) -> FastMultipoleMethod:
                 leaf_partition="cells",
                 leaf_capacity=leaf_cap,
                 cell_min_level=ARGS.cell_min_level or None,
+                cubic_bounds=True if ARGS.cubic_bounds else None,
             ),
             nearfield=NearFieldConfig(mode="auto"),
             runtime=(
@@ -1029,7 +1037,10 @@ def _run_through_runner(result: dict, solver, state0, masses, dt, ext, saved) ->
     runner = ProductionRunner(
         solver,
         settings=GalaxySettings(
-            leaf_size=ARGS.leaf, max_order=ARGS.order, theta=ARGS.theta
+            leaf_size=ARGS.leaf,
+            max_order=ARGS.order,
+            theta=ARGS.theta,
+            cubic_bounds=bool(ARGS.cubic_bounds),
         ),
         segment=segment,
         external_acceleration_fn=ext,
@@ -1343,6 +1354,7 @@ def main() -> int:
         theta=ARGS.theta,
         order=ARGS.order,
         cell_min_level=ARGS.cell_min_level,
+        cubic_bounds=bool(ARGS.cubic_bounds),
         caps=ARGS.caps,
         state_dtype=ARGS.state_dtype,
         force_dtype=ARGS.force_dtype,

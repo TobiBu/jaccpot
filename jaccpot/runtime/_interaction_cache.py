@@ -843,8 +843,9 @@ def flat_walk_list_limit_message(kind: str, what: str, *, limit: int) -> str:
         "adaptive_eps under mac_type='dehnen_error') or a larger leaf_size -- or "
         "split the particles over several GPUs (jaccpot.distributed). A list that "
         "grew along a run often means a few far-flung particles stretched the "
-        "per-axis Morton box, elongating every cell: JACCPOT_CUBIC_BOUNDS=1 keeps "
-        "the cells cubic."
+        "per-axis Morton box, elongating every cell: a cubic box keeps the cells "
+        "cubic (TreeConfig(cubic_bounds=True), which preset='galaxy' sets, or "
+        "JACCPOT_CUBIC_BOUNDS=1)."
     )
 
 

@@ -6,10 +6,12 @@ defaults -- the L1-L3 rows -- and nothing else. Program identity is gated by
 (compile-heavy, run before a change lands); this file pins, at construction cost:
 
 * every engine attribute the preset resolves equals the bench's explicit
-  configuration's, the leaf capacity (``"auto"``, sized at the first prepare)
-  excepted;
+  configuration's (``--cubic-bounds``), the leaf capacity (``"auto"``, sized at the
+  first prepare) excepted;
 * it runs on the ``large_n_gpu`` engine profile;
 * the settings it is built from (:class:`jaccpot.production.GalaxySettings`);
+* its Morton box is a cube (S3b), ``JACCPOT_CUBIC_BOUNDS`` overrides the box both
+  ways, and a cube is part of the provider's compile key;
 * ``theta=None`` keeps 0.6 for every other preset, and explicit arguments win.
 """
 
@@ -19,6 +21,7 @@ import dataclasses
 import warnings
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from jaccpot import FastMultipoleMethod, FMMPreset, TraversalOverrides
@@ -29,10 +32,12 @@ from jaccpot.config import (
     TreeConfig,
 )
 from jaccpot.production import GALAXY_SETTINGS, GalaxySettings
+from jaccpot.runtime.fused_provider import FusedForceProvider
 
 
 def _bench_solver(**overrides):
-    """``fused_memory_budget._solver`` at the bench's defaults (leaf 64)."""
+    """``fused_memory_budget._solver`` at the bench's defaults (leaf 64) with
+    ``--cubic-bounds``."""
     kwargs = dict(
         preset="large_n_gpu",
         basis="real",
@@ -49,6 +54,7 @@ def _bench_solver(**overrides):
                 leaf_partition="cells",
                 leaf_capacity=4096,
                 cell_min_level=8,
+                cubic_bounds=True,
             ),
             nearfield=NearFieldConfig(mode="auto"),
             runtime=RuntimePolicyConfig(
@@ -128,6 +134,7 @@ def test_the_settings_are_the_production_ones():
         cell_min_level=8,
         leaf_capacity="auto",
         leaf_headroom=1.15,
+        cubic_bounds=True,
         softening_kernel="ferrers3",
         mac_type="dehnen",
         adaptive_eps=None,
@@ -136,6 +143,79 @@ def test_the_settings_are_the_production_ones():
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         GALAXY_SETTINGS.theta = 0.6  # type: ignore[misc]
+
+
+def _elongated(n: int = 512) -> jnp.ndarray:
+    """A cloud whose per-axis box is 8:2:1 (a flat, elongated disc)."""
+    rng = np.random.default_rng(3)
+    return jnp.asarray(rng.uniform(-1.0, 1.0, (n, 3)) * [8.0, 2.0, 1.0], jnp.float32)
+
+
+def _box_edges(solver) -> np.ndarray:
+    """The box the solver's prepares (eager and traced refresh) infer."""
+    lo, hi = solver._impl._resolve_prepare_state_bounds(
+        positions=_elongated(), bounds=None
+    )
+    return np.asarray(hi) - np.asarray(lo)
+
+
+def test_the_preset_infers_a_cubic_morton_box(monkeypatch):
+    """S3b: on the 25M disc without its bulge (box 3:1) the cube needs 63 % fewer
+    far and 50 % fewer near pairs and halves the error; on the production disc +
+    bulge the two boxes agree to 1 %. The library default stays per axis."""
+    monkeypatch.delenv("JACCPOT_CUBIC_BOUNDS", raising=False)
+    galaxy = FastMultipoleMethod(preset="galaxy")
+    assert galaxy.advanced.tree.cubic_bounds is True
+    assert galaxy._impl._tree_cubic_bounds is True
+    edges = _box_edges(galaxy)
+    np.testing.assert_allclose(edges, edges.max(), rtol=1e-6)
+    lo, hi = galaxy._impl._resolve_prepare_state_bounds(
+        positions=_elongated(), bounds=None
+    )
+    pts = np.asarray(_elongated())
+    assert np.all(np.asarray(lo) <= pts.min(0)) and np.all(np.asarray(hi) >= pts.max(0))
+    # CONTROL: the library default on the same cloud is the per-axis box
+    default = FastMultipoleMethod(preset="large_n_gpu")
+    assert default._impl._tree_cubic_bounds is False
+    edges = _box_edges(default)
+    assert edges.max() / edges.min() > 7.0
+
+
+def test_the_environment_overrides_the_configured_box(monkeypatch):
+    """``JACCPOT_CUBIC_BOUNDS`` wins when set: ``0`` gives the galaxy preset the
+    per-axis box, ``1`` gives the library default the cube."""
+    galaxy = FastMultipoleMethod(preset="galaxy")
+    default = FastMultipoleMethod(preset="large_n_gpu")
+    monkeypatch.delenv("JACCPOT_CUBIC_BOUNDS", raising=False)
+    edges = _box_edges(galaxy)
+    np.testing.assert_allclose(edges, edges.max(), rtol=1e-6)
+    # the same engine: the variable is read per call
+    monkeypatch.setenv("JACCPOT_CUBIC_BOUNDS", "0")
+    edges = _box_edges(galaxy)
+    assert edges.max() / edges.min() > 7.0
+    monkeypatch.setenv("JACCPOT_CUBIC_BOUNDS", "1")
+    edges = _box_edges(default)
+    np.testing.assert_allclose(edges, edges.max(), rtol=1e-6)
+
+
+def test_a_cubic_box_is_in_the_provider_key(monkeypatch):
+    """The traced refresh reads the box at trace time, so a cached scan must not
+    serve the other box: the key carries a cube, and a per-axis key is the one it
+    was before S3b (no new element)."""
+    monkeypatch.delenv("JACCPOT_CUBIC_BOUNDS", raising=False)
+    galaxy = FusedForceProvider(
+        FastMultipoleMethod(preset="galaxy"), leaf_size=64, max_order=6
+    )
+    per_axis = FusedForceProvider(
+        FastMultipoleMethod(preset="large_n_gpu", theta=0.8), leaf_size=64, max_order=6
+    )
+    assert galaxy.key()[-1] == "cubic_bounds"
+    assert "cubic_bounds" not in per_axis.key()
+    assert galaxy.key()[:-1] == per_axis.key()
+    monkeypatch.setenv("JACCPOT_CUBIC_BOUNDS", "0")
+    assert "cubic_bounds" not in galaxy.key()
+    monkeypatch.setenv("JACCPOT_CUBIC_BOUNDS", "1")
+    assert per_axis.key()[-1] == "cubic_bounds"
 
 
 def test_theta_defaults_by_preset_and_explicit_arguments_win():
