@@ -58,13 +58,56 @@ from yggdrax.distributed.summary import (
 from jaccpot._searchsorted import searchsorted_method
 
 __all__ = [
+    "CROSS_NEEDS_FIELDS",
     "CrossCapacities",
     "cross_near_acceleration",
+    "cross_needs",
     "cross_walk_backend",
     "cross_walk_fn",
     "make_cross_hook",
     "merge_imported_blocks",
 ]
+
+#: Entries of the cross NEEDS vector (:func:`cross_needs`), in order. The first ten
+#: are what the symmetric exchange (the default path) needed of the
+#: :class:`CrossCapacities` attribute of the SAME NAME, on this device:
+#:
+#: * ``max_cells``, ``max_summary_nodes``: the summary cut's cells and the published
+#:   summary tree's nodes. EXACT, past their own overflow too: recounted from the tree
+#:   (:func:`_summary_needs`), not read off the cut, which saturates at its capacity.
+#: * ``export_far_cap``, ``export_near_cap``, ``export_walk_queue``: the symmetric
+#:   walk's far and near pairs and its peak wavefront. The Pallas walk keeps counting
+#:   past a full list, so these are exact unless its queue overflowed; yggdrax's traced
+#:   walk stops at its first overflow. Either way a lower bound when
+#:   ``walk_lower_bound`` is set.
+#: * ``send_node_cap``, ``recv_node_cap``, ``send_particle_cap``, ``recv_particle_cap``,
+#:   ``leaf_width``: the rows (far and near; the larger) and particles this device
+#:   ships and receives, and the most particles in one shipped leaf. Counted on the
+#:   (peer, node) presence map, so EXACT past their own buffers' overflow; a lower
+#:   bound when ``pairs_lower_bound`` is set (the walk or the summary lost pairs).
+#:
+#: Then four bits: ``overflow`` (the hook's own flag fired on this device),
+#: ``walk_lower_bound``, ``pairs_lower_bound``, and ``mismatch`` (the two ends of an
+#: exchange disagreed on a size while none of this device's exchange buffers
+#: overflowed: no capacity covers that, and no re-plan fixes it).
+#: Reduced over the mesh with ``pmax`` the vector is what every capacity, shared by
+#: all devices, has to hold, and the bits are OR-ed.
+CROSS_NEEDS_FIELDS = (
+    "max_cells",
+    "max_summary_nodes",
+    "export_far_cap",
+    "export_near_cap",
+    "export_walk_queue",
+    "send_node_cap",
+    "recv_node_cap",
+    "send_particle_cap",
+    "recv_particle_cap",
+    "leaf_width",
+    "overflow",
+    "walk_lower_bound",
+    "pairs_lower_bound",
+    "mismatch",
+)
 
 
 _CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
@@ -290,6 +333,56 @@ def _summary_rows(
         axis=1,
     )
     return _Published(cut, st.nodes, rows, st.overflow, st.num_nodes)
+
+
+def _summary_needs(
+    tree: Any, cap: "CrossCapacities", *, two_sided: bool
+) -> tuple[Array, Array]:
+    """What :func:`_summary_rows` needs of ``max_cells`` and ``max_summary_nodes``.
+
+    ``occupancy_cut`` and ``summary_tree`` report their sizes saturated at their
+    capacities, so a re-plan cannot read the demand off them. This recounts both from
+    the cut's own rule: a node FITS when it holds 1..``max_leaves`` live leaves and
+    (internal nodes only, with ``summary_cell_level``) lies inside one Morton cell of
+    that level; the cut is every fitting node whose parent does not fit. Fitting is
+    monotone up the tree for live nodes, so the summary tree's ANCESTORS -- live,
+    internal, not in or below the cut -- are exactly the live internal nodes that do
+    not fit, and the summary tree is the root plus both children of every ancestor:
+    ``2 A + 1`` nodes (``0`` for a shard without a live leaf). Exact whatever the
+    capacities; equal to ``num_cells`` / ``num_nodes`` when nothing overflowed (pinned
+    in ``tests/unit/distributed/test_cross_capacities.py``).
+
+    Parameters
+    ----------
+    tree : Any
+        The refreshed tree, as :func:`_summary_rows` reads it.
+    cap : CrossCapacities
+        Capacities; ``max_leaves_per_cell`` and ``summary_cell_level`` are read.
+    two_sided : bool
+        The export mode (decides the default ``max_leaves``).
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(cells, summary_nodes)``, int32 scalars. One-sided, the second is the cells
+        again (the published block is the cut itself).
+    """
+    parent = jnp.asarray(tree.parent)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    sub = subtree_leaf_counts(jnp.asarray(tree.node_ranges), num_internal)
+    internal = jnp.arange(parent.shape[0]) < num_internal
+    fits = (sub > 0) & (sub <= _max_leaves_per_cell(cap, two_sided))
+    if cap.summary_cell_level is not None:
+        edge = _node_cell_edge(tree)
+        fits = fits & (~internal | (edge <= 2.0 ** -int(cap.summary_cell_level)))
+    is_root = parent < 0
+    in_cut = fits & jnp.where(is_root, True, ~fits[jnp.where(is_root, 0, parent)])
+    cells = jnp.sum(in_cut, dtype=jnp.int32)
+    if not two_sided:
+        return cells, cells
+    ancestors = jnp.sum(internal & (sub > 0) & ~fits, dtype=jnp.int32)
+    live_root = sub[jnp.argmin(parent)] > 0
+    return cells, jnp.where(live_root, 2 * ancestors + 1, 0).astype(jnp.int32)
 
 
 def _export_from_rows(
@@ -871,12 +964,18 @@ class _PeerRows(NamedTuple):
         ``(P,)`` each pair's index into ``rows``; ``-1`` for dead pairs.
     overflow : Array
         More unique rows than ``capacity``.
+    needed : Array
+        Unique rows, laid out or not: the capacity the list needed.
+    present : Array
+        ``(ndev x S,)`` int32, 1 at every (peer, node) that has a row.
     """
 
     rows: Array
     sizes: Array
     pair_row: Array
     overflow: Array
+    needed: Array
+    present: Array
 
 
 def _rows_by_peer(
@@ -925,7 +1024,7 @@ def _rows_by_peer(
     )
     sizes = jnp.sum(present.reshape(ndev, S), axis=1, dtype=idx)
     pair_row = jnp.where(live, before[jnp.minimum(key, span - 1)], -1)
-    return _PeerRows(rows, sizes, pair_row, n_rows > capacity)
+    return _PeerRows(rows, sizes, pair_row, n_rows > capacity, n_rows, present)
 
 
 def _symmetric_pair_sides(
@@ -1044,9 +1143,10 @@ def _symmetric_exchange(
     -------
     dict
         ``cross_far`` (the M2L tuple), ``far_overflow``, the walk result ``walk``, the
-        far send/receive rows, and with ``with_near`` the near-sink fields
-        (``positions``, ``masses``, ``mask``, ``target_node``, ``source_row``,
-        ``count``, ``overflow``) and ``near_particles``.
+        far send/receive rows, ``needs`` (what each capacity it read needed, keyed by
+        the :data:`CROSS_NEEDS_FIELDS` entry), and with ``with_near`` the near-sink
+        fields (``positions``, ``masses``, ``mask``, ``target_node``, ``source_row``,
+        ``count``, ``overflow``), ``near_particles`` and ``send_particles``.
     """
     S = int(gathered.shape[1])
     idx = jnp.int32
@@ -1105,6 +1205,25 @@ def _symmetric_exchange(
         | imp_f.overflow
         | far_mismatch
     )
+    # What each capacity above NEEDED (`CROSS_NEEDS_FIELDS`), for a re-plan. The rows
+    # are counted on the presence map, which no row capacity truncates; the walk's
+    # counts survive a full list only in the Pallas walk (`far_needed`), yggdrax's
+    # stops at its first overflow. Pairs a walk overflow dropped are missing from
+    # every count after it.
+    walk_overflow = res.far_overflow | res.near_overflow | res.queue_overflow
+    out["needs"] = {
+        "export_far_cap": getattr(res, "far_needed", res.far_count),
+        "export_near_cap": getattr(res, "near_needed", res.near_count),
+        "export_walk_queue": res.peak_wavefront,
+        "send_node_cap": exp_f.needed,
+        "recv_node_cap": imp_f.needed,
+        "walk_lower_bound": (
+            res.queue_overflow if hasattr(res, "far_needed") else walk_overflow
+        ),
+        "pairs_lower_bound": walk_overflow,
+        # a truncated row buffer reads as a disagreement too; that one a re-plan fixes
+        "mismatch": far_mismatch & ~(exp_f.overflow | imp_f.overflow),
+    }
     if not with_near:
         return out
 
@@ -1172,6 +1291,34 @@ def _symmetric_exchange(
         imp_mass = jnp.where(valid, recv_p[take, 3], 0.0)
         ok_n = nl & (imp_n.pair_row >= 0)
         leaf = _leaf_under(nodes[n_mine], nr, num_internal).astype(idx)
+    with jax.named_scope("cross_near_needs"):
+        # particles per (peer, node) row, laid out or not: mine from my own tree (the
+        # `full` above, for every row), the peers' from their published counts
+        live_node = nodes >= 0
+        safe_node = jnp.where(live_node, nodes, 0)
+        mine = jnp.where(
+            live_node, jnp.maximum(nr[safe_node, 1] - nr[safe_node, 0] + 1, 0), 0
+        ).astype(idx)
+        shipped = exp_n.present.reshape(ndev, S) * mine[None, :]
+        theirs = jnp.round(gathered[..., 7]).astype(idx)
+        needs = out["needs"]
+        needs["send_node_cap"] = jnp.maximum(needs["send_node_cap"], exp_n.needed)
+        needs["recv_node_cap"] = jnp.maximum(needs["recv_node_cap"], imp_n.needed)
+        needs["send_particle_cap"] = jnp.sum(shipped, dtype=idx)
+        needs["recv_particle_cap"] = jnp.sum(
+            imp_n.present.reshape(ndev, S) * theirs, dtype=idx
+        )
+        needs["leaf_width"] = jnp.max(shipped)
+        buffers_overflowed = (
+            exp_f.overflow
+            | imp_f.overflow
+            | exp_n.overflow
+            | imp_n.overflow
+            | (total > cap.send_particle_cap)
+            | (jnp.sum(recv_psizes) > cap.recv_particle_cap)
+            | jnp.any(full > W)
+        )
+        needs["mismatch"] = needs["mismatch"] | (near_mismatch & ~buffers_overflowed)
     out.update(
         positions=imp_pos,
         masses=imp_mass,
@@ -1180,6 +1327,7 @@ def _symmetric_exchange(
         source_row=jnp.where(ok_n, imp_n.pair_row, -1),
         count=res.near_count,
         near_particles=jnp.sum(recv_psizes),
+        send_particles=total,
         exp_near=exp_n,
         imp_near=imp_n,
         overflow=(
@@ -1485,6 +1633,10 @@ def make_cross_hook(
     # far half's flags then reached nobody. Holds tracers; the evaluator reads it
     # inside the same trace (`hook.flag_sink`) and ORs it into the mesh flag.
     flag_sink: dict = {}
+    # ALWAYS-ON needs channel beside it (`cross_needs`): what every capacity of the
+    # symmetric exchange needed in this trace, so a caller whose flag fired can
+    # re-plan the capacities from exact demand (`CrossCapacities.replanned`)
+    needs_sink: dict = {}
 
     def hook(tree_artifacts: Any) -> Optional[tuple]:
         # stage labels for per-device traces (`jax.named_scope` costs nothing at
@@ -1495,6 +1647,7 @@ def make_cross_hook(
     def _hook_body(tree_artifacts: Any) -> Optional[tuple]:
         # a RE-TRACE must not see the previous trace's tracers
         flag_sink.clear()
+        needs_sink.clear()
         tree = tree_artifacts.tree
         upward = tree_artifacts.upward
         mp = upward.multipoles
@@ -1570,8 +1723,26 @@ def make_cross_hook(
                 near_sink["count"] = sym["count"]
                 near_sink["overflow"] = pub.overflow | sym["overflow"]
                 flag_sink["near"] = near_sink["overflow"]
+            cells_needed, nodes_needed = _summary_needs(tree, cap, two_sided=True)
+            needs = dict(
+                sym["needs"],
+                max_cells=cells_needed,
+                max_summary_nodes=nodes_needed,
+                overflow=far_overflow | flag_sink.get("near", False),
+            )
+            # a truncated summary hides part of a tree from every walk over it
+            for bit in ("walk_lower_bound", "pairs_lower_bound"):
+                needs[bit] = needs[bit] | pub.overflow
+            needs_sink["needs"] = jnp.stack(
+                [
+                    jnp.asarray(needs.get(k, 0)).astype(jnp.int32)
+                    for k in CROSS_NEEDS_FIELDS
+                ]
+            )
             if record is not None:
                 w = sym["walk"]
+                for k, v in zip(CROSS_NEEDS_FIELDS, needs_sink["needs"]):
+                    record[f"need_{k}"] = v
                 record["summary_cells"] = summary.num_cells
                 record["summary_nodes"] = pub.num_entries
                 record["summary_leaves"] = jnp.sum(summary.leaves_per_cell)
@@ -1588,7 +1759,9 @@ def make_cross_hook(
                     record["near_list_pairs"] = w.near_count
                     record["near_csr"] = w.near_count
                     record["near_recv_nodes"] = jnp.sum(sym["imp_near"].sizes)
+                    record["near_send_nodes"] = jnp.sum(sym["exp_near"].sizes)
                     record["near_particles"] = sym["near_particles"]
+                    record["send_particles"] = sym["send_particles"]
                     record["near_walk_peak"] = jnp.asarray(0, jnp.int32)
                     record["near_walk_far_pairs"] = jnp.asarray(0, jnp.int32)
             return sym["cross_far"]
@@ -2079,7 +2252,45 @@ def make_cross_hook(
         return imp_mp, imp_cen, src, tgt
 
     hook.flag_sink = flag_sink  # pyright: ignore[reportFunctionMemberAccess]
+    hook.needs_sink = needs_sink  # pyright: ignore[reportFunctionMemberAccess]
     return hook
+
+
+def cross_needs(cross_hook: Any) -> Array:
+    """What every cross capacity needed in the hook's most recent trace.
+
+    Read inside the SAME trace, right after the force that ran the hook, like the
+    hook's ``flag_sink``: it holds tracers. Reduce it over the mesh with ``pmax``
+    (:func:`~jaccpot.distributed.fused.make_fused_force_evaluator` does with
+    ``cross_needs=True``) before sizing anything from it; the capacities are shared
+    by every device.
+
+    Parameters
+    ----------
+    cross_hook : Any
+        A hook from :func:`make_cross_hook`.
+
+    Returns
+    -------
+    Array
+        ``int32[len(CROSS_NEEDS_FIELDS)]``.
+
+    Raises
+    ------
+    ValueError
+        If the hook recorded no needs: it has not been traced, or it ran a control
+        exchange (one-sided, CSR, tiles, a receiver walk) -- the needs are measured on
+        the symmetric exchange, the default, only.
+    """
+    sink = getattr(cross_hook, "needs_sink", None) or {}
+    if "needs" not in sink:
+        raise ValueError(
+            "cross_needs: the hook recorded no needs. They are measured by the "
+            "symmetric exchange (the default) inside a traced force; a control "
+            "exchange (JACCPOT_CROSS_SYMMETRIC=0, JACCPOT_CROSS_TWO_SIDED=0, tiles, "
+            "a receiver walk) does not measure them."
+        )
+    return sink["needs"]
 
 
 def merge_imported_blocks(

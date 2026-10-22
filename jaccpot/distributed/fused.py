@@ -722,6 +722,7 @@ def make_fused_force_evaluator(
     cross_near_sink: Optional[dict] = None,
     cross_record: Optional[dict] = None,
     cross_record_keys: tuple = (),
+    cross_needs: bool = False,
 ) -> Callable[[Array, Array, Array], tuple]:
     """A jitted ``shard_map`` force: the fused lane per device, one program.
 
@@ -747,6 +748,21 @@ def make_fused_force_evaluator(
         Opening-angle override.
     axis_name : str
         Mesh axis name.
+    cross_hook : Optional[Any]
+        The cross-domain hook (:func:`~jaccpot.distributed.cross.make_cross_hook`);
+        ``None``: each device's own shard only.
+    cross_near_sink : Optional[dict]
+        The hook's near sink; its term is added after the evaluation.
+    cross_record : Optional[dict]
+        The hook's diagnostics record.
+    cross_record_keys : tuple
+        Record entries to return, per device, as a third output.
+    cross_needs : bool
+        Also return what every cross capacity needed
+        (:func:`~jaccpot.distributed.cross.cross_needs`), reduced over the mesh with
+        ``pmax``: the input of :meth:`CrossCapacities.replanned
+        <jaccpot.distributed.cross.CrossCapacities.replanned>`. Without a hook it is
+        all zeros.
 
     Returns
     -------
@@ -756,7 +772,9 @@ def make_fused_force_evaluator(
         module docstring on why not ``(ndev, cap, ...)``; ``num_valid`` is
         ``(ndev,)``. The acceleration comes back flat too, dead rows included and
         meaningless. ``overflow`` is one replicated boolean: a capacity that
-        saturated on ANY device.
+        saturated on ANY device. With ``cross_needs`` the replicated
+        ``int32[len(CROSS_NEEDS_FIELDS)]`` follows it, and with
+        ``cross_record_keys`` the per-device diagnostics come last.
 
     Raises
     ------
@@ -800,8 +818,11 @@ def make_fused_force_evaluator(
             local | count_over_cap, cross_hook, cross_near_sink, cross_record
         )
         flag = reduce_flag_across_mesh(local, axis_name=axis_name)
+        outputs: tuple = (acceleration, flag)
+        if cross_needs:
+            outputs = outputs + (_mesh_cross_needs(cross_hook, axis_name),)
         if not cross_record_keys:
-            return acceleration, flag
+            return outputs
         # The record holds TRACERS under jit, so a count can only be read by
         # leaving the mapped region as an OUTPUT. The key ORDER is fixed by the
         # caller so `out_specs` stays static.
@@ -814,9 +835,11 @@ def make_fused_force_evaluator(
             jnp.asarray(cross_record.get(k, jnp.nan)).reshape(1).astype(jnp.float64)
             for k in cross_record_keys
         )
-        return acceleration, flag, diag
+        return outputs + (diag,)
 
     out_specs = (P(axis_name), P())
+    if cross_needs:
+        out_specs = out_specs + (P(),)
     if cross_record_keys:
         out_specs = out_specs + (tuple(P(axis_name) for _ in cross_record_keys),)
     with fused_capacity_plan_overrides(plan):
@@ -834,6 +857,29 @@ def make_fused_force_evaluator(
             return compiled(prepared_stacked, positions, masses, num_valid)
 
     return force
+
+
+def _mesh_cross_needs(cross_hook: Any, axis_name: str) -> Array:
+    """The hook's needs vector of this trace, reduced over the mesh.
+
+    Parameters
+    ----------
+    cross_hook : Any
+        The hook, or ``None`` (one device's own shard: nothing was needed).
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    Array
+        ``int32[len(CROSS_NEEDS_FIELDS)]``, identical on every device: each capacity's
+        largest need over the devices, and each bit OR-ed.
+    """
+    from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS, cross_needs
+
+    if cross_hook is None:
+        return jnp.zeros((len(CROSS_NEEDS_FIELDS),), jnp.int32)
+    return jax.lax.pmax(cross_needs(cross_hook), axis_name)
 
 
 def _fold_cross_flags(
