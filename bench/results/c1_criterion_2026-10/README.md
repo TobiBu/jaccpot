@@ -343,7 +343,7 @@ Follow-up to the open question of section 5.
 | `scores_{A,B,S}.json` | `score` output: per-run scores against `ref`, `noise_floor` = `ref2` against `ref`, the reference's profiles at t = 0 and t_end |
 | `tables_{A,B,S}.md` | `table` output: costs (also `padded`), all scores, the equal-accuracy gains |
 | `probes/` | `probe` at t = 0: N 1e5 (seeds 1, 2), 1e6, the fixed field, eps 0.0238 |
-| `logs/` | one log per run, the probes and the sweeps (card, start/end, nvidia-smi before and after) |
+| `/export/scratch/tbuck/c1_criterion_2026-10/logs/` (outside the repo, 1.2 MB) | one log per run, the probes and the sweeps (card, start/end, nvidia-smi before and after) |
 | `scripts/` | the run lists `sweep{1,2,B,S}.txt` with the drivers `sweep.sh` / `launch.sh` and `sweepB2.txt` (the frozen-rung check in B); the 25M driver, scorer and launcher `c1_25m_run.py`, `c1_25m_score.py`, `launch25.sh` |
 | `25m/` | the 25M runs: summaries with the C1 series (`*.json`), the runner's DiagnosticsLog (`*.jsonl`), logs, `scores_25m.json` |
 
