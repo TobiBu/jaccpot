@@ -1170,3 +1170,127 @@ single-rung rollout costs 1.
   - the last ~5-8 s of fixed cost per call (yggdrax's eager tree build, the template's `eval_shape`).
 - **Multi-GPU (S12):** the lane reads the cubic box only from `JACCPOT_CUBIC_BOUNDS`.
 - **The runner does not check** that its `GalaxySettings`' MAC matches the solver's.
+
+## C1 — the timestep criterion for galaxy discs (2026-10-22)
+
+**[draft]** S0 left one question before the block-step track (S5-S7) resumes: would the orbit-time criterion
+`eta sqrt(sqrt(r^2 + eps^2) / |a|)` spread the 25M disc's steps far enough (bound ~40x) to make HOLD worth 10-40x,
+where nornax's acceleration criterion `eta sqrt(eps / |a|)` caps it at ~2x? C1 answers it at equal accuracy.
+
+**Setup** (`bench/c1_criterion_calibration.py`; rows, tables and README in `bench/results/c1_criterion_2026-10/`):
+- **IC:** 1e5 particles of the shuffled 25M disc+bulge IC (an independent draw from the same distribution
+  function, masses rescaled, recentred) in its NFW halo, with the production ferrers3 kernel at eps 1.5e-3.
+- **Run length:** t_end = 1.5, one stellar orbit at 2.5 R_d (2 pi R / <v_phi> = 1.47; 1.45 circular periods there).
+- **Forces:** a Pallas direct sum on A100s, fp32 pairs with fp64 sums (2e-7), the state in fp64.
+- **Schemes:** shared KDK at dt, and HOLD (level = min rung) with nornax's base-step rung assignment, optionally
+  refined at a particle's own boundary.
+- **Costs** are counted, not timed, as equivalent shared steps:
+  - `evals`: particle evaluations of the FMM with one padded-subset evaluation per active level, as S6 plans HOLD;
+  - `weighted`: one weighted evaluation per boundary, S0's model;
+  - `pairs`: direct-sum pair work.
+- **Three configurations:**
+  - **A**, the N-body at the production softening;
+  - **B**, eps 0.0238, where one particle pulls as weakly against the mean field (0.13 against 23) as at 25M;
+  - **S**, the same particles as test particles in a fixed bulge + disc + halo field. S has no encounters and no
+    chaos, keeps the production spread, and makes E_i exact.
+- **References:** shared steps at 1/16 and 1/32 of the production step (A, S), 2.5e-4 and 1.25e-4 (B).
+
+**Answer: keep the acceleration criterion with shared steps, and double the production step to dt 1e-3** (the
+acceleration criterion's dt_min at eta about 0.33; point 5 below). **The orbit-time criterion does not make block
+steps worth 10-40x at equal accuracy on this disc.**
+
+**1. The spread is 20x, not 40x, and plain HOLD pays twice the particle-step count.** Probe at t = 0, unchanged at
+1e6 and for a second draw; the 1e6 acceleration bound is S0's 25M value:
+
+| criterion | dt / dt_min p1 / p50 / p99 | particle-step bound, k_max 6 | `evals` | `weighted` | `pairs` |
+| --- | --- | --- | --- | --- | --- |
+| acceleration | 1.5 / 2.9 / 6 | 2.01x (1e6: 1.93x) | 0.95x | 1.95x | 2.11x |
+| orbit time | 4.8 / 38 / 178 | 20.6x | 9.9x (k_max 5: 11.9x) | 15.6x | 21.8x |
+
+- The eps under the square root lifts the centre's dt_min: S0's `sqrt(r/|a|)` had a median of 78x and a bound of
+  39.7x.
+- **HOLD on plain padded subsets evaluates every active level's subset at every boundary**, about
+  `2 sum_i 2^rung_i` targets. On the acceleration criterion it is slower than shared dt_min at the same eta, and
+  only S5's weighted single pass (with per-rung source multipoles) approaches the bound.
+
+**2. At equal accuracy the spread does not translate into speed** (S, HOLD's gain = the shared cost that reaches the
+same score over HOLD's cost; ranges over total energy, the per-particle energy tail dE_i p99 and positions):
+
+| criterion | `evals` | `weighted` | `pairs` |
+| --- | --- | --- | --- |
+| acceleration, k_max 4, eta 0.05-0.4 | 0.26-0.80x | 0.52-1.59x | 0.61-1.85x |
+| orbit time, k_max 6-8, refined, eta 0.025-0.1 | 0.28-1.05x | 0.55-2.03x | 0.86-3.28x |
+
+| S, one stellar orbit | `evals` | `pairs` | max dE/E0 | dE_i p50 | dE_i p99 | bulge dE_i p99 | sigma_z rms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| shared 5e-4 (production) | 3009 | 3009 | 2.8e-7 | 1.0e-7 | 1.0e-5 | 8.8e-5 | 9.2e-5 |
+| shared 1e-3 | 1505 | 1505 | 1.1e-6 | 4.0e-7 | 5.2e-5 | 5.0e-4 | 2.1e-4 |
+| HOLD orbit time eta 0.025, refined | 2285 | 745 | 2.9e-6 | 5.5e-6 | 5.1e-5 | 7.6e-5 | 1.2e-3 |
+| HOLD orbit time eta 0.05, refined | 1146 | 382 | 1.8e-5 | 2.4e-5 | 2.1e-4 | 3.0e-4 | 2.2e-3 |
+| HOLD acceleration eta 0.2 | 3244 | 1395 | 3.8e-7 | 8.4e-7 | 4.2e-5 | 1.1e-4 | 2.6e-4 |
+
+- **A shared step's accuracy is set by the bulk of the mass, not by its fastest particle.** The shared step that
+  matches HOLD-orbit-time at eta 0.025 is about 1e-3, the orbit-time dt_min at eta 0.26, so equal accuracy needs a
+  10x smaller orbit-time eta and the 20x spread shrinks to about 2x.
+- The orbit-time criterion gives every orbit the same 2 pi / eta steps; a shared step over-resolves the outer disc,
+  which holds most of the mass, for free. Leapfrog's per-particle error scales as (dt / T)^2, so the mass-summed
+  error is minimised at dt proportional to T^(2/3). The acceleration criterion is about T^(1/2) on a flat rotation
+  curve, the orbit-time criterion T^1.
+- The orbit-time criterion wins only in the bulge tail (eta 0.025: 1.3x in `evals`, 4.0x in pairs against shared
+  5e-4).
+
+**3. In the N-body the orbit-time criterion is blind to close encounters** (A).
+- At 1e5 one particle at eps pulls with 32 against a median |a| of 23.
+- Every scheme drifts once a particle's step exceeds about 5e-4 (eps / 3, a softened encounter's crossing time).
+  Shared steps converge (9.4e-5, 5.7e-6 and 1.3e-7 at 2e-3, 1e-3 and 5e-4).
+- The orbit-time criterion saturates near dE/E0 = 1e-4 for every eta <= 0.1 (4.9e-5 at 0.0125).
+- It adds spurious per-particle energy diffusion in the disc: +7 % (eta 0.05), +23 % (0.1), +53-59 % (0.2) and
+  +164 % (0.4), against at most 2 % for shared steps up to 2e-3 and every acceleration run (shared 4e-3: +5 %).
+- The centre and bulge move beyond the 2-5 % converged-run spread only at eta >= 0.2: the 0.5 % radius by +7 % at
+  0.2 and +28 % at 0.4, the bulge's 10 % radius by +14 % at 0.4.
+- Sigma, sigma_z and A2 hardly discriminate. The hot disc (Q_min 1.6) grows no bar in one orbit, and A2 stays at
+  shot noise.
+- At 25M encounters are 250x weaker, so this degradation matters for low-N or small-softening runs.
+- At equal cost shared steps win in A in every family.
+
+**4. HOLD itself has two error terms shared steps do not** (B, smooth forces):
+- **Secular drift from the base-step rung reassignment** (nornax `block_kdk`'s rule). HOLD-acc eta 0.2 drifts to
+  5.6e-5; with the rungs frozen at t = 0 it stays bounded at 7.7e-6. Without pair coupling (S) the same
+  reassignment is harmless, which makes this the time-asymmetric step selection of Hut, Makino & McMillan (1995),
+  amplified because a rung change moves all of a particle's pairs to another level.
+- **The slow-fast coupling**, applied on the slow step: even frozen, 7.7e-6 against 8.6e-7 for shared at a
+  coarser 4e-3.
+- In A, where the rungs must follow the particles, frozen rungs are worse (dyn eta 0.1: 8.0e-4 against 9.6e-5).
+- Refining at the particle's own boundary cuts the orbit-time criterion's error 2.5-3x (S, eta <= 0.1; A, eta 0.1:
+  9.6e-5 to 1.4e-5).
+- Momentum stays at round-off in every HOLD run: pair impulse at most 5.6e-11 of `sum m |v|`, |dL| / |L| at most
+  1.2e-10.
+
+**5. The 25M production configuration takes dt 1e-3.**
+- **Setup:** jaccpot main f654bd6, `ProductionRunner` with `preset="galaxy"` as is (`dehnen_error` 1e-4, the cubic
+  box), on the L3 pin's 25M disc+bulge+NFW IC. Runs at dt 1e-3, 5e-4 and the reference 2.5e-4 to t = 1.5
+  (`bench/results/c1_criterion_2026-10/25m/`). Peak 5.5 GiB; 0.258 s per step on a free card inside a segment.
+
+| 25M, one orbit | steps | max dE/E0 | E_i diffusion inner 2 % | Lagrangian radii, worst | Sigma / sigma_z / sigma_R / v_phi, worst bin | A2 diff |
+| --- | --- | --- | --- | --- | --- | --- |
+| reference 2.5e-4 | 6000 | 7.5e-8 | 1 | -- | -- | -- |
+| 5e-4 | 3000 | 6.2e-8 | 1.0002 | 0.54 % (bulge 0.5 %) | 2.2e-4 / 8.8e-5 / 4.5e-5 / 1.7e-4 | 2.2e-6 |
+| 1e-3 | 1500 | 1.9e-7 | 0.9965 | 0.23 % (bulge 2 %) | 6.3e-4 / 1.4e-4 / 2.9e-4 / 7.5e-5 | 5.5e-6 |
+
+- **Energy:** the 1e-3 error is a bounded offset (at most -1.8e-7 early, -5.4e-8 at the end), not a drift. The
+  reference and 5e-4 sit at the diagnostic's floor of about 1e-7.
+- **Structure:** every Lagrangian radius of the disc, the bulge and all baryons (0.5-90 %) is within 0.25 % of the
+  reference, against the run's own contraction of the central radii by 1.7-5.4 %. The per-particle energy
+  diffusion is unchanged, so the encounters that set the step at 1e5 (point 3) are absent at 25M.
+- **Recommendation: production dt 1e-3 for this disc** (half the steps per orbit). Keep the energy diagnostic on
+  for runs of many orbits; at lower N or a smaller softening, encounters set the step (point 3).
+
+**Decision input for the plan.**
+- The block-step track has no payoff on this disc with either criterion: at equal accuracy at most ~2x in S5's
+  weighted pass, and below 1x with the padded subsets S6 planned.
+- If it resumes for ICs with a genuinely wider range at fixed accuracy (cusps, a central black hole, mergers,
+  smaller softening), it needs:
+  - the weighted single pass;
+  - a time-symmetric rung selection;
+  - refinement at the particle's own boundary;
+  - an accuracy gate against shared steps at equal cost, not at equal eta.

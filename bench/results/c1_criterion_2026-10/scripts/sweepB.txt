@@ -1,0 +1,17 @@
+B_ref_dt2.5e-4 --scheme shared --dt 2.5e-4 --softening 0.0238 --t-end 1.5
+B_ref_dt1.25e-4 --scheme shared --dt 1.25e-4 --softening 0.0238 --t-end 1.5
+B_shared_dt8e-3 --scheme shared --dt 8e-3 --softening 0.0238 --t-end 1.5
+B_shared_dt4e-3 --scheme shared --dt 4e-3 --softening 0.0238 --t-end 1.5
+B_shared_dt2e-3 --scheme shared --dt 2e-3 --softening 0.0238 --t-end 1.5
+B_shared_dt1e-3 --scheme shared --dt 1e-3 --softening 0.0238 --t-end 1.5
+B_shared_dt5e-4 --scheme shared --dt 5e-4 --softening 0.0238 --t-end 1.5
+B_hold_dyn_k5_eta0.4 --scheme hold --criterion dyn --kmax 5 --eta 0.4 --softening 0.0238 --t-end 1.5
+B_hold_dyn_k5_eta0.2 --scheme hold --criterion dyn --kmax 5 --eta 0.2 --softening 0.0238 --t-end 1.5
+B_hold_dyn_k5_eta0.1 --scheme hold --criterion dyn --kmax 5 --eta 0.1 --softening 0.0238 --t-end 1.5
+B_hold_dyn_k5_eta0.05 --scheme hold --criterion dyn --kmax 5 --eta 0.05 --softening 0.0238 --t-end 1.5
+B_hold_dyn_k5_eta0.4_refine --scheme hold --criterion dyn --kmax 5 --eta 0.4 --refine --softening 0.0238 --t-end 1.5
+B_hold_dyn_k5_eta0.2_refine --scheme hold --criterion dyn --kmax 5 --eta 0.2 --refine --softening 0.0238 --t-end 1.5
+B_hold_dyn_k5_eta0.1_refine --scheme hold --criterion dyn --kmax 5 --eta 0.1 --refine --softening 0.0238 --t-end 1.5
+B_hold_acc_k3_eta0.4 --scheme hold --criterion acc --kmax 3 --eta 0.4 --softening 0.0238 --t-end 1.5
+B_hold_acc_k3_eta0.2 --scheme hold --criterion acc --kmax 3 --eta 0.2 --softening 0.0238 --t-end 1.5
+B_hold_acc_k3_eta0.1 --scheme hold --criterion acc --kmax 3 --eta 0.1 --softening 0.0238 --t-end 1.5
