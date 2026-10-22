@@ -38,11 +38,17 @@ from jaccpot._jax_compat import Tracer
 from ._large_n_nearfield import evaluate_large_n_nearfield_fast_lane
 from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
-from .kernels.core import _evaluate_local_expansions_for_particles, _FarPairCOO
+from .kernels._downward_prep import _TargetSortedFarPairCOO
+from .kernels.core import (
+    _evaluate_local_expansions_for_particles,
+    _evaluate_local_expansions_particle_major,
+    _FarPairCOO,
+)
 
 __all__ = [
     "LargeNGradPlan",
     "evaluate_large_n_state_at_positions_and_masses_sorted",
+    "large_n_farfield_l2p_at",
     "large_n_farfield_locals_at",
     "prepare_large_n_grad_plan",
 ]
@@ -61,7 +67,8 @@ class LargeNGradPlan:
     far_pair_sources : Array
         Source node of each frozen far pair.
     far_pair_targets : Array
-        Target node of each frozen far pair.
+        Target node of each frozen far pair; with ``far_pairs_target_sorted``, the
+        list's CSR row offsets instead (``[total_nodes + 1]``).
     far_pair_active_count : Optional[Array]
         Live pair count when the lists are padded. Consumed as a MASK, not as a
         loop bound -- that is what keeps the M2L reverse-mode safe.
@@ -77,6 +84,10 @@ class LargeNGradPlan:
         L2L chunk size; ``None`` leaves it to the runtime.
     num_far_pairs : int
         Allocated pair capacity, as a Python int so it can size a scan.
+    far_pairs_target_sorted : bool
+        The frozen list is the walk's ``TargetSortedFarPairs`` (CSR order,
+        ``far_pair_targets`` its row offsets): the M2L reads it as the production
+        refresh hands it over, without expanding a target per pair or sorting.
     """
 
     far_pair_sources: Array
@@ -88,6 +99,7 @@ class LargeNGradPlan:
     m2l_chunk_size: Optional[int]
     l2l_chunk_size: Optional[int]
     num_far_pairs: int
+    far_pairs_target_sorted: bool = False
 
 
 def _require(condition: bool, message: str) -> None:
@@ -248,10 +260,13 @@ def prepare_large_n_grad_plan(
     overrides = engine._resolve_runtime_execution_overrides(
         num_particles=int(positions.shape[0])
     )
-    from ._interaction_cache import far_pair_targets
+    from ._interaction_cache import TargetSortedFarPairs
 
     sources = jnp.asarray(compact.sources, dtype=INDEX_DTYPE)
-    targets = jnp.asarray(far_pair_targets(compact), dtype=INDEX_DTYPE)
+    # the list as the walk built it: a target-sorted list keeps its row offsets
+    # (the production refresh's M2L operands), anything else one target per pair
+    target_sorted = isinstance(compact, TargetSortedFarPairs)
+    targets = jnp.asarray(compact.targets, dtype=INDEX_DTYPE)
     return LargeNGradPlan(
         far_pair_sources=sources,
         far_pair_targets=targets,
@@ -262,6 +277,7 @@ def prepare_large_n_grad_plan(
         m2l_chunk_size=overrides.m2l_chunk_size,
         l2l_chunk_size=overrides.l2l_chunk_size,
         num_far_pairs=int(sources.shape[0]),
+        far_pairs_target_sorted=bool(target_sorted),
     )
 
 
@@ -282,6 +298,17 @@ def large_n_farfield_locals_at(
     The M2L runs against the frozen pair list via ``far_pairs_coo``. Note
     ``active_count`` is consumed as a MASK rather than a loop bound, which is what
     keeps it reverse-mode safe.
+
+    The chain is the production refresh's (``_refresh_large_n_same_topology``):
+    the same upward sweep (P2M and M2M through their Pallas ``custom_vjp`` seams;
+    the box geometry deferred where the walk tests the COM MAC, as there), and the
+    same downward sweep on the same operands -- a target-sorted walk list goes to
+    the CSR M2L lanes as its row offsets (no target expanded per pair, no sort),
+    and the L2L cascade follows. On the plan's frozen lists the locals are the
+    production prepare's bitwise (measured on an A100 at 2e5, the G1 point, and
+    under ``mac_type='dehnen_error'``). The force-scale outputs of the
+    ``dehnen_error`` sweep (eq 16b's far ``f_b``, a topology input of the next
+    walk) are not computed here: the locals do not depend on them.
 
     Parameters
     ----------
@@ -310,7 +337,11 @@ def large_n_farfield_locals_at(
         max_order=plan.order,
         center_mode=plan.center_mode,
         max_leaf_size=plan.max_leaf_size,
+        defer_geometry=engine._defers_box_geometry(
+            str(engine.config.tree.mode), plan.center_mode
+        ),
     )
+    coo = _TargetSortedFarPairCOO if plan.far_pairs_target_sorted else _FarPairCOO
     downward = engine.prepare_downward_sweep(
         state.tree,
         upward,
@@ -321,7 +352,7 @@ def large_n_farfield_locals_at(
         m2l_chunk_size=plan.m2l_chunk_size,
         l2l_chunk_size=plan.l2l_chunk_size,
         dehnen_radius_scale=engine.dehnen_radius_scale,
-        far_pairs_coo=_FarPairCOO(
+        far_pairs_coo=coo(
             plan.far_pair_sources,
             plan.far_pair_targets,
             plan.far_pair_active_count,
@@ -330,6 +361,71 @@ def large_n_farfield_locals_at(
         p_gears=(plan.order,),
     )
     return downward.locals
+
+
+def large_n_farfield_l2p_at(
+    state: LargeNPreparedState,
+    local_data: Any,
+    positions_sorted: Array,
+) -> Array:
+    """The far-field gradient at live positions, evaluated as production evaluates it.
+
+    The L2P of :func:`~jaccpot.runtime._large_n_pipeline.evaluate_large_n_state`'s
+    fast lane, with its layout, chunk and kernel
+    (:func:`~jaccpot.runtime._large_n_pipeline.resolve_large_n_l2p`) and its
+    operands: on the default particle layout with the Pallas kernel, the
+    particle-major L2P through its ``custom_vjp``
+    (:func:`~jaccpot.pallas.l2p_real.l2p_real_particles_pallas_cvjp`), whose
+    reverse reduces the coefficient and centre cotangents per leaf in the kernel
+    -- no per-particle coefficient cotangent exists. With the locals of
+    :func:`large_n_farfield_locals_at` at the state's own positions and masses this
+    is the production eval's far half bitwise (A100, 2e5).
+
+    The caller applies ``-G`` (production: ``far_acc = -G * far_grad``), so ``G``
+    may be a traced parameter.
+
+    Parameters
+    ----------
+    state : LargeNPreparedState
+        Prepared state supplying the frozen topology (leaves, node ranges).
+    local_data : Any
+        Local expansions, e.g. :func:`large_n_farfield_locals_at`'s.
+    positions_sorted : Array
+        Live positions in the state's sorted order.
+
+    Returns
+    -------
+    Array
+        ``[N, 3]`` gradient of the far-field potential with respect to
+        ``centre - position`` (the acceleration is ``-G`` times it), SORTED order.
+    """
+    from ._large_n_pipeline import resolve_large_n_l2p
+
+    layout, chunk, kernel = resolve_large_n_l2p()
+    leaf_nodes = jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    node_ranges = jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE)
+    if layout == "particle":
+        return _evaluate_local_expansions_particle_major(
+            local_data,
+            positions_sorted,
+            leaf_nodes=leaf_nodes,
+            node_ranges=node_ranges,
+            order=int(state.local_order),
+            chunk=chunk,
+            kernel=kernel,
+        )
+    far_grad, _, _ = _evaluate_local_expansions_for_particles(
+        local_data,
+        positions_sorted,
+        leaf_nodes=leaf_nodes,
+        node_ranges=node_ranges,
+        max_leaf_size=int(state.max_leaf_size),
+        order=int(state.local_order),
+        expansion_basis="solidfmm",
+        return_potential=False,
+        max_acc_derivative_order=0,
+    )
+    return far_grad
 
 
 def evaluate_large_n_state_at_positions_and_masses_sorted(
