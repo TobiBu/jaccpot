@@ -493,14 +493,59 @@ def fused_force_step(
         return_potential=False,
         max_acc_derivative_order=0,
     )
-    acceleration = jnp.asarray(acceleration)
+    acceleration = _add_cross_near_term(
+        engine,
+        refreshed,
+        jnp.asarray(acceleration),
+        cross_near_sink,
+        cross_record=cross_record,
+    )
+    return refreshed, acceleration
 
-    # The cross NEAR field is ADDED here rather than interleaved. A far contribution
-    # arrives as a local expansion and would need a second L2L cascade, which is why
-    # that half goes between the sweeps; a near contribution is a direct sum with no
-    # cascade behind it, so one small extra kernel is cheaper than plumbing it
-    # through the prepared state. Gravity is linear in the sources, so adding is
-    # exact.
+
+def _add_cross_near_term(
+    engine: Any,
+    refreshed: Any,
+    acceleration: Array,
+    cross_near_sink: Optional[dict],
+    *,
+    cross_record: Optional[dict] = None,
+) -> Array:
+    """Add the cross-domain NEAR field the hook left in ``cross_near_sink``.
+
+    The cross NEAR field is ADDED after the evaluation rather than interleaved. A
+    far contribution arrives as a local expansion and would need a second L2L
+    cascade, which is why that half goes between the sweeps; a near contribution is
+    a direct sum with no cascade behind it, so one small extra kernel is cheaper than
+    plumbing it through the prepared state. Gravity is linear in the sources, so
+    adding is exact.
+
+    Shared by both force routes of the lane -- :func:`fused_force_step` (the
+    stacked prepared states) and the segment runner's template route
+    (:mod:`jaccpot.distributed.segment`) -- so the two add the same term with the
+    same arithmetic.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine (its softening, kernel and ``G``).
+    refreshed : Any
+        The refreshed ``LargeNPreparedState`` of this trace: its tree, near-field
+        leaf pool and sorted particles.
+    acceleration : Array
+        ``(cap, 3)`` local force in input row order.
+    cross_near_sink : Optional[dict]
+        The near sink the hook filled in this trace; empty or ``None`` adds nothing.
+    cross_record : Optional[dict]
+        Diagnostics record; given, the leaf-pool and permutation checks are written
+        into it.
+
+    Returns
+    -------
+    Array
+        ``acceleration`` plus the cross near term (``acceleration`` itself when the
+        sink is empty).
+    """
     if cross_near_sink:
         from jaccpot._env import env_flag
         from jaccpot.distributed.cross import cross_near_acceleration
@@ -562,7 +607,7 @@ def fused_force_step(
             # so off a GPU (the CPU end-to-end test) it needs interpret mode
             interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
         )
-    return refreshed, acceleration
+    return acceleration
 
 
 def stack_prepared_states(states: "list[Any]") -> Any:
