@@ -17,7 +17,7 @@ Split out of ``core.py`` (Tier 1.6, A.9 seam 1); every function body is unchange
 from __future__ import annotations
 
 import os
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Union
 
 import jax.numpy as jnp
 from beartype.typing import Callable
@@ -39,6 +39,7 @@ from jaccpot.operators.real_harmonics import (
 )
 from jaccpot.upward.tree_expansions import TreeUpwardData
 
+from .._force_scale_levels import FarForceScaleInputs
 from ..dtypes import INDEX_DTYPE
 from ._m2l import (
     _accumulate_m2l_chunked_scan,
@@ -543,7 +544,8 @@ def _solidfmm_downward_accumulate_from_multipoles(
     chunk_size: int,
     m2l_impl: str = "rot_scale",
     targets_sorted: bool = False,
-) -> Array:
+    force_scale: Optional[FarForceScaleInputs] = None,
+) -> Union[Array, tuple[Array, Array]]:
     """Run one M2L accumulation pass over the flat pair list (real basis).
 
     The complex basis, and the conjugate-symmetry enforcement its coefficients
@@ -595,14 +597,32 @@ def _solidfmm_downward_accumulate_from_multipoles(
         ``src`` / ``tgt`` are a ``TargetSortedFarPairs`` list as walked: ``tgt``
         holds the row offsets. The CSR lanes kernel reads it as is; every other
         route expands one target per entry first. Static.
+    force_scale : Optional[FarForceScaleInputs]
+        Also sum ``mac_type='dehnen_error'``'s far force-scale term per target in
+        the CSR lanes kernel
+        (:func:`~jaccpot.pallas.m2l_real_csr_lanes.m2l_real_csr_lanes_fb_pallas_cvjp`).
+        Only that lane computes it: the caller checks
+        :func:`~jaccpot.runtime.kernels._l2l._far_force_scale_in_downward_available`
+        first.
 
     Returns
     -------
-    Array
-        Updated local coefficients.
+    Union[Array, tuple[Array, Array]]
+        Updated local coefficients; with ``force_scale``, ``(locals, own far
+        term [n_targets or total_nodes])``.
+
+    Raises
+    ------
+    ValueError
+        ``force_scale`` off the CSR lanes kernel.
     """
 
     csr_lane = _m2l_csr_pallas_active()
+    if force_scale is not None and not csr_lane:
+        raise ValueError(
+            "the far force scale is summed in the CSR M2L lanes kernel only; "
+            "check _far_force_scale_in_downward_available() first"
+        )
     if targets_sorted and not csr_lane:
         # only the CSR lane kernel reads a CSR as (sources, row offsets)
         from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
@@ -620,6 +640,32 @@ def _solidfmm_downward_accumulate_from_multipoles(
         from jaccpot.pallas.m2l_real_csr_lanes import m2l_real_csr_lanes_pallas_cvjp
 
         interpret = env_flag("JACCPOT_M2L_CSR_INTERPRET", False)
+        if force_scale is not None:
+            from jaccpot.pallas.m2l_real_csr_lanes import (
+                m2l_real_csr_lanes_fb_pallas_cvjp,
+            )
+
+            # the same launch with one more output: eq (16b)'s far term per row
+            m2l_inc, own_far = m2l_real_csr_lanes_fb_pallas_cvjp(
+                multipoles_coeffs,
+                centers,
+                src,
+                tgt,
+                active_pair_count,
+                force_scale.node_mass,
+                force_scale.node_radii,
+                force_scale.softening_sq,
+                force_scale.node_centers,
+                order,
+                int(os.environ.get("JACCPOT_M2L_CSR_LANES", "32")),
+                interpret,
+                "triton",
+                int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
+                n_targets,
+                bool(targets_sorted),
+                float(force_scale.gravitational_constant),
+            )
+            return initial_locals_coeffs + m2l_inc, own_far
         # the custom_vjp seam: the forward is the same launch, and the reverse
         # runs the transposed (by-source) lane kernel
         m2l_inc = m2l_real_csr_lanes_pallas_cvjp(

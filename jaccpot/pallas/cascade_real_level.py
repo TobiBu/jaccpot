@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import functools
 import math
-from typing import Any
+from typing import Any, Union
 
 import jax
 import jax.numpy as jnp
@@ -70,6 +70,7 @@ except Exception:  # pragma: no cover - import is environment-dependent
 __all__ = [
     "cascade_level_tables",
     "l2l_real_centred_pair_jax",
+    "l2l_real_levels_fb_pallas_cvjp",
     "l2l_real_levels_pallas_cvjp",
     "l2l_real_levels_reverse_pallas",
     "m2m_real_centred_pair_jax",
@@ -1107,7 +1108,7 @@ def _l2l_forward(
     nodes_by_level: Array,
     level_offsets: Array,
     **kw: Any,
-) -> Array:
+) -> Union[Array, tuple[Array, Array]]:
     """The L2L custom VJP's forward: the one-node-per-lane kernel.
 
     Parameters
@@ -1123,12 +1124,15 @@ def _l2l_forward(
     level_offsets : Array
         As :func:`l2l_real_levels_pallas_cvjp`.
     **kw : Any
-        Its keyword arguments (``num_warps`` is the reverse kernels').
+        Its keyword arguments (``num_warps`` is the reverse kernels'; the force
+        scale's twin, :func:`l2l_real_levels_fb_pallas_cvjp`, adds
+        ``force_scale``).
 
     Returns
     -------
-    Array
-        ``[nodes, C]`` packed locals, every ancestor's field cascaded down.
+    Union[Array, tuple[Array, Array]]
+        ``[nodes, C]`` packed locals, every ancestor's field cascaded down; with
+        ``force_scale``, ``(locals, sums)``.
     """
     from jaccpot.pallas.cascade_real_lanes import l2l_real_levels_lanes_pallas
 
@@ -1429,3 +1433,171 @@ def _l2l_cvjp_bwd(
 
 
 l2l_real_levels_pallas_cvjp.defvjp(_l2l_cvjp_fwd, _l2l_cvjp_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(8, 9, 10, 11, 12, 13))
+def l2l_real_levels_fb_pallas_cvjp(
+    coeffs_local: Array,
+    force_scale: Array,
+    centers: Array,
+    parent: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+) -> tuple[Array, Array]:
+    """:func:`l2l_real_levels_pallas_cvjp` that also pushes a per-node scalar down.
+
+    The forward is the lane kernel with ``force_scale``
+    (:func:`~jaccpot.pallas.cascade_real_lanes.l2l_real_levels_lanes_pallas`): the
+    same launches carry ``mac_type='dehnen_error'``'s far force-scale term from
+    every node to its descendants. The reverse is
+    :func:`l2l_real_levels_pallas_cvjp`'s for the locals; the scalar is a topology
+    quantity (the next walk's eq (16a) thresholds) and is not differentiated.
+
+    Parameters
+    ----------
+    coeffs_local : Array
+        ``[nodes, C]`` packed locals after M2L. Differentiable.
+    force_scale : Array
+        ``[nodes]`` each node's own value. Not differentiated.
+    centers : Array
+        ``[nodes, 3]`` expansion centres. Differentiable.
+    parent : Array
+        ``[nodes]`` parent per node.
+    left_child : Array
+        ``[internal]`` left children (needed by the reverse).
+    right_child : Array
+        ``[internal]`` right children (needed by the reverse).
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts.
+    order : int
+        Expansion order. ``nondiff_argnums``.
+    num_levels : int
+        Levels present. ``nondiff_argnums``.
+    level_batch_width : int
+        Programs per level. ``nondiff_argnums``.
+    interpret : bool
+        Pallas interpret mode. ``nondiff_argnums``.
+    backend : str
+        Pallas GPU lowering. ``nondiff_argnums``.
+    num_warps : int
+        Warps per program of the reverse kernels. ``nondiff_argnums``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``([nodes, C]`` cascaded locals, ``[nodes]`` each node's value plus all
+        its ancestors' ``)``.
+    """
+    return _l2l_fb_forward(
+        coeffs_local,
+        force_scale,
+        centers,
+        parent,
+        nodes_by_level,
+        level_offsets,
+        order=order,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+
+
+def _l2l_fb_forward(
+    coeffs_local: Array,
+    force_scale: Array,
+    centers: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    **kw: Any,
+) -> tuple[Array, Array]:
+    out = _l2l_forward(
+        coeffs_local,
+        centers,
+        parent,
+        nodes_by_level,
+        level_offsets,
+        force_scale=force_scale,
+        **kw,
+    )
+    return out[0], out[1]
+
+
+def _l2l_fb_cvjp_fwd(
+    coeffs_local,
+    force_scale,
+    centers,
+    parent,
+    left_child,
+    right_child,
+    nodes_by_level,
+    level_offsets,
+    order,
+    num_levels,
+    level_batch_width,
+    interpret,
+    backend,
+    num_warps,
+):
+    out, fb = _l2l_fb_forward(
+        coeffs_local,
+        force_scale,
+        centers,
+        parent,
+        nodes_by_level,
+        level_offsets,
+        order=order,
+        num_levels=num_levels,
+        level_batch_width=level_batch_width,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+    )
+    return (out, fb), (
+        out,
+        centers,
+        parent,
+        left_child,
+        right_child,
+        nodes_by_level,
+        level_offsets,
+    )
+
+
+def _l2l_fb_cvjp_bwd(
+    order,
+    num_levels,
+    level_batch_width,
+    interpret,
+    backend,
+    num_warps,
+    residual,
+    cotangents,
+):
+    out_bar, _ = cotangents
+    locals_bar, centers_bar, *rest = _l2l_cvjp_bwd(
+        order,
+        num_levels,
+        level_batch_width,
+        interpret,
+        backend,
+        num_warps,
+        residual,
+        out_bar,
+    )
+    return (locals_bar, None, centers_bar, *rest)
+
+
+l2l_real_levels_fb_pallas_cvjp.defvjp(_l2l_fb_cvjp_fwd, _l2l_fb_cvjp_bwd)

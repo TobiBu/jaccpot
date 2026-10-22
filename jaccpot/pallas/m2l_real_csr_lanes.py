@@ -23,12 +23,23 @@ once per program at the end. Any order.
 
 Grid: one program per target node, ``K`` lanes per tile of its CSR row
 (``K = 32`` = one warp by default: rows average ~32 pairs at N=2e5 leaf 64).
+
+**Force-scale lane (S3b).** With ``force_scale``
+(:class:`~jaccpot.runtime._force_scale_levels.FarForceScaleInputs`) the same
+launch also sums ``mac_type='dehnen_error'``'s far term of eq (16b) per target
+row, ``G M_s / ((|c_s - c_t| + rho_t)^2 + eps^2)`` over the live pairs, in one
+more lane accumulator reduced with the locals; the Pallas L2L cascade then
+carries it to the leaves. This is where the fused lane's per-step far ``f_b`` is
+computed on the GPU: the separate segment sum it replaced
+(:func:`~jaccpot.runtime._force_scale_levels.far_force_scale_sorted`) was a
+scatter over the whole far list every step. Without the argument the kernel is
+the same program as before.
 """
 
 from __future__ import annotations
 
 import functools
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -44,8 +55,10 @@ from jaccpot.pallas.m2l_real_csr import (
     m2l_real_csr_tables,
     targets_from_csr_offsets,
 )
+from jaccpot.runtime._force_scale_levels import FarForceScaleInputs
 
 __all__ = [
+    "m2l_real_csr_lanes_fb_pallas_cvjp",
     "m2l_real_csr_lanes_pallas",
     "m2l_real_csr_lanes_pallas_cvjp",
     "m2l_real_csr_lanes_reverse_pallas",
@@ -289,11 +302,11 @@ def _m2l_lanes_kernel(
     src_ref: KernelRef,
     off_ref: KernelRef,
     cnt_ref: KernelRef,
-    out_ref: KernelRef,
-    *,
+    *refs: KernelRef,
     p: int,
     k_lanes: int,
     tables: dict,
+    force_scale: Optional[tuple[float, bool]] = None,
 ) -> None:
     """One program per target; ``k_lanes`` pairs per iteration, one per lane.
 
@@ -309,20 +322,37 @@ def _m2l_lanes_kernel(
         Row start per target ``[n]``.
     cnt_ref : KernelRef
         Row length per target ``[n]``.
-    out_ref : KernelRef
-        This target's packed local row ``[1, C]``.
+    *refs : KernelRef
+        ``out_ref``, this target's packed local row ``[1, C]``. With
+        ``force_scale``: ``mass_ref [n]``, ``rad_ref [n]`` (walk radii),
+        ``eps_ref [1]`` (``eps^2``), ``wcent_ref [n, 4]`` (padded walk centres,
+        only when they are not ``cent_ref``), then ``out_ref`` and ``fb_ref``,
+        this target's far force-scale term ``[1]``.
     p : int
         Order. Static.
     k_lanes : int
         Lanes per tile. Static.
     tables : dict
         :func:`_lane_tables`. Static.
+    force_scale : Optional[tuple[float, bool]]
+        ``(G, walk_centres)``: also sum ``G M_s / ((|c_s - c_t| + rho_t)^2 +
+        eps^2)`` over the row's live pairs (:class:`FarForceScaleInputs`), lanes
+        reduced once at the end as the locals are. ``None`` (default) is the plain
+        M2L, the same program as without the argument. Static.
 
     Returns
     -------
     None
-        Writes the row.
+        Writes the row (and the force-scale term).
     """
+    if force_scale is None:
+        (out_ref,) = refs
+    else:
+        g_fb, walk_centres = force_scale
+        if walk_centres:
+            mass_ref, rad_ref, eps_ref, wcent_ref, out_ref, fb_ref = refs
+        else:
+            mass_ref, rad_ref, eps_ref, out_ref, fb_ref = refs
     dtype = out_ref.dtype
     B = tables["B"]
     Zf = tables["Zf"]
@@ -338,6 +368,12 @@ def _m2l_lanes_kernel(
     n_tiles = (cnt + (k_lanes - 1)) // k_lanes
     keys = [(ell, m) for ell in range(p + 1) for m in range(-ell, ell + 1)]
     acc0 = tuple(jnp.zeros((k_lanes,), dtype) for _ in keys)
+    if force_scale is not None:
+        rho_t = rad_ref[tgt]
+        eps2 = eps_ref[0]
+        if walk_centres:
+            wtx, wty, wtz = wcent_ref[tgt, 0], wcent_ref[tgt, 1], wcent_ref[tgt, 2]
+        acc0 = acc0 + (jnp.zeros((k_lanes,), dtype),)
 
     def body(t: Array, accs: tuple[Array, ...]) -> tuple[Array, ...]:
         pos = t * k_lanes + lane
@@ -348,15 +384,34 @@ def _m2l_lanes_kernel(
         dy = cty - cent_ref[sid, 1]
         dz_ = ctz - cent_ref[sid, 2]
         zero = jnp.zeros_like(dx)
+        if force_scale is not None:
+            # eq (16b)'s far term, in far_force_scale_own's operation order
+            # (|c_s - c_t|^2 as ((x^2 + y^2) + z^2), then (G M) / (reach^2 + eps^2))
+            if walk_centres:
+                fx = wtx - wcent_ref[sid, 0]
+                fy = wty - wcent_ref[sid, 1]
+                fz = wtz - wcent_ref[sid, 2]
+            else:
+                fx, fy, fz = dx, dy, dz_
+            reach = jnp.sqrt(fx * fx + fy * fy + fz * fz) + rho_t
+            term = g_fb * mass_ref[sid] / (reach * reach + eps2)
+            fb_lanes = accs[-1] + jnp.where(valid & (reach > 0.0), term, zero)
+            accs = accs[:-1]
         dx = jnp.where(valid, dx, zero)
         dy = jnp.where(valid, dy, zero)
         dz_ = jnp.where(valid, dz_, jnp.ones_like(dz_))
         v = {key: mult_ref[sid, packed[key]] for key in keys}
         w = _m2l_lane_pair(v, dx, dy, dz_, p=p, tables=tables)
         mask = valid.astype(dtype)
-        return tuple(a + w[key] * mask for a, key in zip(accs, keys))
+        out = tuple(a + w[key] * mask for a, key in zip(accs, keys))
+        if force_scale is not None:
+            out = out + (fb_lanes,)
+        return out
 
     accs = lax.fori_loop(0, n_tiles, body, acc0)
+    if force_scale is not None:
+        fb_ref[0] = jnp.sum(accs[-1])
+        accs = accs[:-1]
     for key, a in zip(keys, accs):
         out_ref[0, packed[key]] = jnp.sum(a)
 
@@ -375,7 +430,8 @@ def m2l_real_csr_lanes_pallas(
     backend: str = "triton",
     num_warps: int = 1,
     presorted: bool = False,
-) -> Array:
+    force_scale: Optional[FarForceScaleInputs] = None,
+) -> Union[Array, tuple[Array, Array]]:
     """Local increments from a flat far-pair list, one pair per lane.
 
     The reference is :func:`jaccpot.pallas.m2l_real_csr.m2l_real_csr_jax` (same
@@ -420,17 +476,25 @@ def m2l_real_csr_lanes_pallas(
         ``targets`` holds its row offsets (``[>= n_targets + 1]``), not one target
         per entry: no CSR sort, no copy (``csr_by_target(presorted=True)``).
         Static.
+    force_scale : Optional[FarForceScaleInputs]
+        Also return eq (16b)'s far term per target row (``mac_type=
+        'dehnen_error'``'s per-step force scale; :class:`FarForceScaleInputs`):
+        the same launch, one more output. ``None`` (default) is the plain M2L,
+        the same program as without the argument. Forward only: differentiate
+        through :func:`m2l_real_csr_lanes_fb_pallas_cvjp`.
 
     Returns
     -------
-    Array
-        ``[n_targets, C]`` local increments, dtype of ``multipoles``.
+    Union[Array, tuple[Array, Array]]
+        ``[n_targets, C]`` local increments, dtype of ``multipoles``; with
+        ``force_scale``, ``(increments, far_term [n_targets])``.
 
     Raises
     ------
     ValueError
-        On a shape mismatch, a non-positive ``k_lanes``, or an ``n_targets``
-        outside ``[0, n]``.
+        On a shape mismatch, a non-positive ``k_lanes``, an ``n_targets``
+        outside ``[0, n]``, or ``force_scale`` arrays that do not match the
+        nodes or the multipoles' dtype.
     """
     p = int(order)
     if int(k_lanes) < 1:
@@ -456,11 +520,26 @@ def m2l_real_csr_lanes_pallas(
         active_pair_count=active_pair_count,
         presorted=bool(presorted),
     )
+    fb_operands = []
+    fb_static = None
+    if force_scale is not None:
+        fb_operands, fb_static = _force_scale_operands(force_scale, n=n, dtype=dtype)
     if nt == 0 or int(src_sorted.shape[0]) == 0:
+        if force_scale is not None:
+            return jnp.zeros((nt, C), dtype=dtype), jnp.zeros((nt,), dtype=dtype)
         return jnp.zeros((nt, C), dtype=dtype)
-    kernel = functools.partial(
-        _m2l_lanes_kernel, p=p, k_lanes=int(k_lanes), tables=tables
-    )
+    if force_scale is None:
+        kernel = functools.partial(
+            _m2l_lanes_kernel, p=p, k_lanes=int(k_lanes), tables=tables
+        )
+    else:
+        kernel = functools.partial(
+            _m2l_lanes_kernel,
+            p=p,
+            k_lanes=int(k_lanes),
+            tables=tables,
+            force_scale=fb_static,
+        )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
         backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
@@ -472,6 +551,24 @@ def m2l_real_csr_lanes_pallas(
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
     operands = [mult, cent_p, src_sorted, offsets, counts]
+    if force_scale is not None:
+        operands = operands + fb_operands
+        return pl.pallas_call(
+            kernel,
+            grid=(nt,),
+            in_specs=[bs_full(o) for o in operands],
+            out_specs=[
+                pl.BlockSpec((1, C), lambda t: (t, 0)),
+                pl.BlockSpec((1,), lambda t: (t,)),
+            ],
+            out_shape=[
+                jax.ShapeDtypeStruct((nt, C), dtype),
+                jax.ShapeDtypeStruct((nt,), dtype),
+            ],
+            interpret=bool(interpret),
+            name=f"m2l_real_csr_lanes_fb_p{p}_k{int(k_lanes)}",
+            **backend_kwargs,
+        )(*operands)
     return pl.pallas_call(
         kernel,
         grid=(nt,),
@@ -482,6 +579,52 @@ def m2l_real_csr_lanes_pallas(
         name=f"m2l_real_csr_lanes_p{p}_k{int(k_lanes)}",
         **backend_kwargs,
     )(*operands)
+
+
+def _force_scale_operands(
+    force_scale: FarForceScaleInputs, *, n: int, dtype: Any
+) -> tuple[list, tuple[float, bool]]:
+    """The force-scale lane's kernel operands and its static ``(G, walk_centres)``.
+
+    Parameters
+    ----------
+    force_scale : FarForceScaleInputs
+        The lane's inputs.
+    n : int
+        Node count (the multipoles' rows).
+    dtype : Any
+        The multipoles' dtype, which the lane computes in.
+
+    Returns
+    -------
+    tuple[list, tuple[float, bool]]
+        ``[mass [n], radii [n], eps^2 [1](, padded walk centres [n, 4])]`` and
+        the kernel's ``force_scale`` argument.
+
+    Raises
+    ------
+    ValueError
+        If an array does not have one entry per node or is not in ``dtype``: the
+        lane would compute in another precision than the function it replaces
+        (:func:`jaccpot.runtime._force_scale_levels.far_force_scale_own`).
+    """
+    mass = jnp.asarray(force_scale.node_mass)
+    radii = jnp.asarray(force_scale.node_radii)
+    eps2 = jnp.asarray(force_scale.softening_sq).reshape((1,))
+    arrays = [mass, radii, eps2]
+    walk_centres = force_scale.node_centers is not None
+    if walk_centres:
+        wcent = jnp.asarray(force_scale.node_centers)
+        if wcent.shape != (n, 3):
+            raise ValueError(f"force_scale.node_centers must be ({n}, 3)")
+        arrays.append(jnp.pad(wcent, ((0, 0), (0, 1))))
+    if mass.shape != (n,) or radii.shape != (n,):
+        raise ValueError(f"force_scale node_mass / node_radii must be ({n},)")
+    if any(a.dtype != dtype for a in arrays):
+        raise ValueError(
+            f"force_scale arrays must be {jnp.dtype(dtype)}, the multipoles' dtype"
+        )
+    return arrays, (float(force_scale.gravitational_constant), bool(walk_centres))
 
 
 # ------------------------------------------------------------------ reverse
@@ -966,3 +1109,209 @@ def _m2l_lanes_cvjp_bwd(
 
 
 m2l_real_csr_lanes_pallas_cvjp.defvjp(_m2l_lanes_cvjp_fwd, _m2l_lanes_cvjp_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16))
+def m2l_real_csr_lanes_fb_pallas_cvjp(
+    multipoles: Array,
+    centers: Array,
+    sources: Array,
+    targets: Array,
+    active_pair_count: Optional[Array],
+    node_mass: Array,
+    node_radii: Array,
+    softening_sq: Array,
+    node_centers: Optional[Array],
+    order: int,
+    k_lanes: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    n_targets: Optional[int],
+    presorted: bool,
+    gravitational_constant: float,
+) -> tuple[Array, Array]:
+    """:func:`m2l_real_csr_lanes_pallas_cvjp` that also returns eq (16b)'s far term.
+
+    The forward is :func:`m2l_real_csr_lanes_pallas` with ``force_scale``: one
+    launch, the local increments and the per-target far term. The reverse is
+    :func:`m2l_real_csr_lanes_pallas_cvjp`'s for the increments; the far term is
+    a topology quantity (it only sets the next walk's eq (16a) thresholds) and is
+    not differentiated: its inputs get no cotangent and its own cotangent is
+    dropped.
+
+    Parameters
+    ----------
+    multipoles : Array
+        ``[n, C]`` real multipoles. Differentiable.
+    centers : Array
+        ``[n, 3]`` expansion centres. Differentiable.
+    sources : Array
+        ``[P]`` source ids (topology).
+    targets : Array
+        ``[P]`` target ids, or the row offsets with ``presorted`` (topology).
+    active_pair_count : Optional[Array]
+        Live prefix length, or ``None``.
+    node_mass : Array
+        :attr:`FarForceScaleInputs.node_mass`. Not differentiated.
+    node_radii : Array
+        :attr:`FarForceScaleInputs.node_radii`. Not differentiated.
+    softening_sq : Array
+        :attr:`FarForceScaleInputs.softening_sq`. Not differentiated.
+    node_centers : Optional[Array]
+        :attr:`FarForceScaleInputs.node_centers`. Not differentiated.
+    order : int
+        Expansion order. ``nondiff_argnums``.
+    k_lanes : int
+        Pairs per iteration. ``nondiff_argnums``.
+    interpret : bool
+        Pallas interpret mode. ``nondiff_argnums``.
+    backend : str
+        Pallas GPU lowering. ``nondiff_argnums``.
+    num_warps : int
+        Warps per program. ``nondiff_argnums``.
+    n_targets : Optional[int]
+        As :func:`m2l_real_csr_lanes_pallas_cvjp`. ``nondiff_argnums``.
+    presorted : bool
+        As :func:`m2l_real_csr_lanes_pallas_cvjp`. ``nondiff_argnums``.
+    gravitational_constant : float
+        :attr:`FarForceScaleInputs.gravitational_constant`. ``nondiff_argnums``.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``([n_targets, C]`` local increments, ``[n_targets]`` far term ``)``.
+    """
+    return _m2l_lanes_fb_forward(
+        multipoles,
+        centers,
+        sources,
+        targets,
+        active_pair_count,
+        node_mass,
+        node_radii,
+        softening_sq,
+        node_centers,
+        order,
+        k_lanes,
+        interpret,
+        backend,
+        num_warps,
+        n_targets,
+        presorted,
+        gravitational_constant,
+    )
+
+
+def _m2l_lanes_fb_forward(
+    multipoles,
+    centers,
+    sources,
+    targets,
+    active_pair_count,
+    node_mass,
+    node_radii,
+    softening_sq,
+    node_centers,
+    order,
+    k_lanes,
+    interpret,
+    backend,
+    num_warps,
+    n_targets,
+    presorted,
+    gravitational_constant,
+):
+    out = m2l_real_csr_lanes_pallas(
+        multipoles,
+        centers,
+        sources,
+        targets,
+        order=order,
+        active_pair_count=active_pair_count,
+        n_targets=n_targets,
+        k_lanes=k_lanes,
+        interpret=interpret,
+        backend=backend,
+        num_warps=num_warps,
+        presorted=presorted,
+        force_scale=FarForceScaleInputs(
+            node_mass=node_mass,
+            node_radii=node_radii,
+            softening_sq=softening_sq,
+            gravitational_constant=gravitational_constant,
+            node_centers=node_centers,
+        ),
+    )
+    return out[0], out[1]
+
+
+def _m2l_lanes_fb_cvjp_fwd(
+    multipoles,
+    centers,
+    sources,
+    targets,
+    active_pair_count,
+    node_mass,
+    node_radii,
+    softening_sq,
+    node_centers,
+    order,
+    k_lanes,
+    interpret,
+    backend,
+    num_warps,
+    n_targets,
+    presorted,
+    gravitational_constant,
+):
+    out = _m2l_lanes_fb_forward(
+        multipoles,
+        centers,
+        sources,
+        targets,
+        active_pair_count,
+        node_mass,
+        node_radii,
+        softening_sq,
+        node_centers,
+        order,
+        k_lanes,
+        interpret,
+        backend,
+        num_warps,
+        n_targets,
+        presorted,
+        gravitational_constant,
+    )
+    return out, (multipoles, centers, sources, targets, active_pair_count)
+
+
+def _m2l_lanes_fb_cvjp_bwd(
+    order,
+    k_lanes,
+    interpret,
+    backend,
+    num_warps,
+    n_targets,
+    presorted,
+    gravitational_constant,
+    residual,
+    cotangents,
+):
+    loc_bar, _ = cotangents
+    grads = _m2l_lanes_cvjp_bwd(
+        order,
+        k_lanes,
+        interpret,
+        backend,
+        num_warps,
+        n_targets,
+        presorted,
+        residual,
+        loc_bar,
+    )
+    return grads + (None, None, None, None)
+
+
+m2l_real_csr_lanes_fb_pallas_cvjp.defvjp(_m2l_lanes_fb_cvjp_fwd, _m2l_lanes_fb_cvjp_bwd)

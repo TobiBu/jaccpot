@@ -50,7 +50,12 @@ from ._adaptive_policy import (
     bucket_far_pairs_by_tag,
     compute_node_force_scale_from_sorted_magnitudes,
 )
-from ._force_scale_levels import far_force_scale_sorted, node_force_scale_min_sorted
+from ._force_scale_levels import (
+    FarForceScaleInputs,
+    far_force_scale_from_node_totals,
+    far_force_scale_sorted,
+    node_force_scale_min_sorted,
+)
 from ._interaction_cache import (
     _build_dual_tree_artifacts,
     _CapsOnlyUnavailable,
@@ -111,6 +116,7 @@ from .fmm_state import (
     _TreeBuildArtifacts,
 )
 from .kernels._downward_prep import _far_pair_coo_from
+from .kernels._l2l import _far_force_scale_in_downward_available
 from .kernels.core import (
     NearfieldInteropData,
     _build_nearfield_interop_data,
@@ -2751,7 +2757,8 @@ class PrepareMixin(_EngineBase):
         p_gears: tuple[int, ...] = tuple(),
         n_targets: Optional[int] = None,
         cross_far: Optional[tuple] = None,
-    ) -> TreeDownwardData:
+        far_force_scale: Optional[FarForceScaleInputs] = None,
+    ) -> Union[TreeDownwardData, tuple[TreeDownwardData, Array]]:
         """Prepare downward sweep using precomputed interaction artifacts.
 
         Parameters
@@ -2788,11 +2795,15 @@ class PrepareMixin(_EngineBase):
             multipoles and expansion centres, and the cross far pairs as indices into
             ``[local ; imported]``. Concatenated behind the local nodes so ONE L2L
             cascade serves both. ``None`` (default) is the single-domain lane.
+        far_force_scale : Optional[FarForceScaleInputs]
+            ``mac_type='dehnen_error'``: also return eq (16b)'s far term per node
+            (:meth:`~jaccpot.runtime.fmm_sweeps.SweepsMixin.prepare_downward_sweep`).
 
         Returns
         -------
-        TreeDownwardData
-            The downward sweep result.
+        Union[TreeDownwardData, tuple[TreeDownwardData, Array]]
+            The downward sweep result; with ``far_force_scale``, ``(downward, far
+            term per node)``.
         """
         return self.prepare_downward_sweep(
             tree,
@@ -2808,6 +2819,7 @@ class PrepareMixin(_EngineBase):
             cross_far=cross_far,
             adaptive_order=adaptive_order,
             p_gears=p_gears,
+            far_force_scale=far_force_scale,
         )
 
     def _defers_box_geometry(self, tree_mode: str, center_mode: str) -> bool:
@@ -3178,29 +3190,38 @@ class PrepareMixin(_EngineBase):
         src_far = jnp.asarray(compact_far_pairs.sources, dtype=INDEX_DTYPE)
         tgt_far = jnp.asarray(compact_far_pairs.targets, dtype=INDEX_DTYPE)
         force_scale_far_sorted = None
+        far_force_scale_in_downward = None
         if walk_criterion is not None:
             # eq (16b)'s far half for the NEXT step's thresholds, from this walk's
             # lists: the refresh drops them before the evaluation, which adds the
             # near half from the near-field kernel's force-scale lane
             tree_now = tree_artifacts.tree
-            num_levels_fb = self._resolve_upward_num_levels(tree_now)
-            if num_levels_fb is None:
-                num_levels_fb = int(get_level_offsets(tree_now).shape[0] - 1)
-            force_scale_far_sorted = far_force_scale_sorted(
-                tree=tree_now,
-                leaf_nodes=neighbor_list.leaf_indices,
-                far_pairs=compact_far_pairs,
-                node_mass=tree_artifacts.upward.mass_moments.mass,
-                node_centers=walk_geometry.center,
-                node_radii=walk_geometry.radius,
-                gravitational_constant=float(self.G),
-                softening_sq=jnp.asarray(
-                    float(self.softening) ** 2,
-                    jnp.asarray(walk_geometry.radius).dtype,
-                ),
-                num_levels=int(num_levels_fb),
-                num_particles=int(jnp.asarray(tree_now.particle_indices).shape[0]),
+            far_force_scale_in_downward = self._far_force_scale_inputs(
+                tree_artifacts=tree_artifacts,
+                walk_geometry=walk_geometry,
+                cross_far=cross_far,
             )
+            if far_force_scale_in_downward is None:
+                # the separate pass over the far list: off the CSR M2L lane or
+                # the Pallas L2L cascade (CPU, pure JAX)
+                num_levels_fb = self._resolve_upward_num_levels(tree_now)
+                if num_levels_fb is None:
+                    num_levels_fb = int(get_level_offsets(tree_now).shape[0] - 1)
+                force_scale_far_sorted = far_force_scale_sorted(
+                    tree=tree_now,
+                    leaf_nodes=neighbor_list.leaf_indices,
+                    far_pairs=compact_far_pairs,
+                    node_mass=tree_artifacts.upward.mass_moments.mass,
+                    node_centers=walk_geometry.center,
+                    node_radii=walk_geometry.radius,
+                    gravitational_constant=float(self.G),
+                    softening_sq=jnp.asarray(
+                        float(self.softening) ** 2,
+                        jnp.asarray(walk_geometry.radius).dtype,
+                    ),
+                    num_levels=int(num_levels_fb),
+                    num_particles=int(jnp.asarray(tree_now.particle_indices).shape[0]),
+                )
         far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
         p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
         if not suppress_host_side_effects:
@@ -3223,7 +3244,24 @@ class PrepareMixin(_EngineBase):
             far_pairs_coo=far_pairs_coo,
             adaptive_order=True,
             p_gears=p_gears_for_downward,
+            **(
+                {}
+                if far_force_scale_in_downward is None
+                else {"far_force_scale": far_force_scale_in_downward}
+            ),
         )
+        if far_force_scale_in_downward is not None:
+            # the M2L lanes kernel summed each node's own far term and the L2L
+            # cascade pushed it down: read it at each particle's leaf
+            downward, far_term_nodes = downward
+            force_scale_far_sorted = far_force_scale_from_node_totals(
+                far_term_nodes,
+                tree=tree_artifacts.tree,
+                leaf_nodes=neighbor_list.leaf_indices,
+                num_particles=int(
+                    jnp.asarray(tree_artifacts.tree.particle_indices).shape[0]
+                ),
+            )
         if not bool(retain_interactions):
             downward = downward._replace(
                 interactions=_empty_interaction_storage_for_tree(tree_artifacts.tree)
@@ -3236,6 +3274,67 @@ class PrepareMixin(_EngineBase):
             downward=downward,
             cache_entry=cache_entry,
             force_scale_far_sorted=force_scale_far_sorted,
+        )
+
+    def _far_force_scale_inputs(
+        self,
+        *,
+        tree_artifacts: _PrepareStateTreeUpwardArtifacts,
+        walk_geometry: Any,
+        cross_far: Optional[tuple],
+    ) -> Optional[FarForceScaleInputs]:
+        """What the downward sweep needs to compute eq (16b)'s far half itself.
+
+        ``mac_type='dehnen_error'`` takes the next step's thresholds from ``f_b``,
+        whose far half is every far pair's monopole term summed into its target
+        node and pushed down the tree. Where the downward sweep runs the CSR M2L
+        lanes kernel and the Pallas L2L cascade
+        (:func:`~jaccpot.runtime.kernels._l2l._far_force_scale_in_downward_available`),
+        those launches compute it on the side (S3b: the separate pass,
+        :func:`~jaccpot.runtime._force_scale_levels.far_force_scale_sorted`, was
+        ~390 ms of the 25M disc's 695 ms step in scatters).
+
+        Parameters
+        ----------
+        tree_artifacts : _PrepareStateTreeUpwardArtifacts
+            The refresh's tree and upward pass.
+        walk_geometry : Any
+            The geometry the walk tested the MAC on (its centres and radii).
+        cross_far : Optional[tuple]
+            The cross-domain hook's sources, if any.
+
+        Returns
+        -------
+        Optional[FarForceScaleInputs]
+            The inputs, or ``None`` where the sweep cannot use them (the caller
+            keeps the separate pass): off those kernels, behind a cross-domain
+            list, or with node arrays in another dtype than the multipole
+            centres the kernel computes in.
+        """
+        if cross_far is not None:
+            return None
+        upward = tree_artifacts.upward
+        centers = upward.multipoles.centers
+        dtype = jnp.asarray(centers).dtype
+        if not _far_force_scale_in_downward_available(
+            tree_artifacts.tree, total_nodes=int(jnp.asarray(centers).shape[0])
+        ):
+            return None
+        mass = upward.mass_moments.mass
+        radii = walk_geometry.radius
+        walk_centers = walk_geometry.center
+        if any(jnp.asarray(a).dtype != dtype for a in (mass, radii, walk_centers)):
+            return None
+        return FarForceScaleInputs(
+            node_mass=mass,
+            node_radii=radii,
+            softening_sq=jnp.asarray(
+                float(self.softening) ** 2, jnp.asarray(radii).dtype
+            ),
+            gravitational_constant=float(self.G),
+            # the COM walk geometry tests the MAC about the expansion centres
+            # themselves (the same array), which the kernel reads anyway
+            node_centers=None if walk_centers is centers else walk_centers,
         )
 
     def _fused_force_scale_seed(
