@@ -86,6 +86,7 @@ from jaccpot import (
     FarFieldConfig,
     FastMultipoleMethod,
     FMMAdvancedConfig,
+    ForceParams,
     GradConfig,
     TreeConfig,
 )
@@ -1086,3 +1087,129 @@ class TestTheForwardIsTheFusedForce:
             f"{forces[f'far_pairs_{arm}']} far pairs against the fused lane's "
             f"{forces['far_pairs_production']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# ``mac_type="dehnen_error"`` at frozen lists (plan S8).
+#
+# The criterion's thresholds (eq 16a, from the force scale f_b) decide the lists at
+# prepare time; the differentiable seam freezes them like any other lists, so
+# gradients in the positions and masses need nothing new. What it refuses is a ``G``
+# or softening other than the solver's own (``force_params``): the thresholds were
+# built with them -- the fused lane's refusal (user decision S2), kept.
+# ---------------------------------------------------------------------------
+
+_DE_N = 512
+_DE_LEAF = 8
+_DE_ENV = dict(_INTERPRET_FLAGS, JACCPOT_L2P_KERNEL="interpret")
+
+
+@pytest.mark.xdist_group("large_n_reverse_dehnen_error")
+class TestDehnenErrorAtFrozenLists:
+    @pytest.fixture(scope="class")
+    def lane(self) -> Iterator[tuple[Any, Any, Any, Any, Any]]:
+        """A float64 ``dehnen_error`` state on the Pallas lane (interpret), its plan."""
+        from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
+
+        patcher = pytest.MonkeyPatch()
+        for key, value in _DE_ENV.items():
+            patcher.setenv(key, value)
+        try:
+            rng = np.random.default_rng(13)
+            positions = jnp.asarray(rng.normal(size=(_DE_N, 3)))
+            masses = jnp.asarray(rng.uniform(0.5, 1.5, size=_DE_N))
+            fmm = FastMultipoleMethod(
+                preset="large_n_gpu",
+                basis="real",
+                G=_G,
+                softening=_SOFTENING,
+                working_dtype=jnp.float64,
+                use_pallas=True,
+                adaptive_eps=1e-5,
+                adaptive_error_model="dehnen_paper",
+                mac_force_scale_mode="paper_fb",
+                advanced=FMMAdvancedConfig(
+                    tree=TreeConfig(
+                        mode="static_radix",
+                        leaf_target=_DE_LEAF,
+                        leaf_partition="cells",
+                        leaf_capacity="auto",
+                    ),
+                    farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
+                    mac_type="dehnen_error",
+                ),
+                fixed_order=_ORDER,
+            )
+            state = fmm.prepare_state(
+                positions, masses, leaf_size=_DE_LEAF, max_order=_ORDER
+            )
+            assert isinstance(state, LargeNPreparedState)
+            plan = prepare_large_n_grad_plan(fmm, state)
+            yield fmm, state, plan, positions, masses
+        finally:
+            patcher.undo()
+
+    def test_the_lists_are_the_criterions(self, lane):
+        """Non-vacuous: the solver runs eq (16a), and the far field is live."""
+        fmm, _, plan, *_ = lane
+        assert fmm._impl.mac_type == "dehnen_error"
+        assert int(plan.far_pair_active_count) > 0
+
+    def test_other_force_params_are_refused(self, lane):
+        fmm, state, plan, positions, masses = lane
+        with pytest.raises(ValueError, match="dehnen_error"):
+            fmm.differentiable_accelerations(
+                state,
+                positions,
+                masses,
+                grad_plan=plan,
+                force_params=ForceParams(G=jnp.asarray(_G), eps2=_SOFTENING**2),
+            )
+        # the solver's own, as Python floats, are the default program
+        own = fmm.differentiable_accelerations(
+            state,
+            positions,
+            masses,
+            grad_plan=plan,
+            force_params=ForceParams(G=_G, eps2=_SOFTENING**2),
+        )
+        default = fmm.differentiable_accelerations(
+            state, positions, masses, grad_plan=plan
+        )
+        assert np.array_equal(np.asarray(own), np.asarray(default))
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_the_gradient_at_the_criterions_lists(self, lane):
+        """The forward is production's (bitwise); d/dpos and d/dmass match central
+        differences of it along random directions (float64)."""
+        fmm, state, plan, positions, masses = lane
+        production = np.asarray(fmm.evaluate_prepared_state(state))
+        rng = np.random.default_rng(17)
+        weight = jnp.asarray(rng.normal(size=(_DE_N, 3)))
+
+        def force(st, pl, p, m):
+            return fmm.differentiable_accelerations(st, p, m, grad_plan=pl)
+
+        def loss(st, pl, p, m):
+            return jnp.sum(weight * force(st, pl, p, m))
+
+        got = np.asarray(jax.jit(force)(state, plan, positions, masses))
+        assert np.array_equal(got.view(np.uint64), production.view(np.uint64))
+        grad_p, grad_m = jax.jit(jax.grad(loss, argnums=(2, 3)))(
+            state, plan, positions, masses
+        )
+        value = jax.jit(loss)
+        h = 1e-5
+        v_p = jnp.asarray(rng.normal(size=(_DE_N, 3)))
+        v_m = jnp.asarray(rng.normal(size=(_DE_N,)))
+        fd_p = (
+            float(value(state, plan, positions + h * v_p, masses))
+            - float(value(state, plan, positions - h * v_p, masses))
+        ) / (2 * h)
+        fd_m = (
+            float(value(state, plan, positions, masses + h * v_m))
+            - float(value(state, plan, positions, masses - h * v_m))
+        ) / (2 * h)
+        got_p, got_m = float(jnp.sum(grad_p * v_p)), float(jnp.sum(grad_m * v_m))
+        assert abs(got_p - fd_p) <= 1e-6 * abs(fd_p), (got_p, fd_p)
+        assert abs(got_m - fd_m) <= 1e-6 * abs(fd_m), (got_m, fd_m)
