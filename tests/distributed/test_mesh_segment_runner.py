@@ -36,11 +36,12 @@ pytest.importorskip("yggdrax.distributed.partition", reason="needs sfc_repartiti
 
 from jaccpot import FastMultipoleMethod  # noqa: E402
 from jaccpot.config import (  # noqa: E402
+    FarFieldConfig,
     FMMAdvancedConfig,
     NearFieldConfig,
     TreeConfig,
 )
-from jaccpot.distributed.cross import CrossCapacities  # noqa: E402
+from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS, CrossCapacities  # noqa: E402
 from jaccpot.distributed.rollout import (  # noqa: E402
     decompose,
     make_reference_direct_force,
@@ -64,6 +65,12 @@ ORDER = 4
 THETA = 0.8
 SOFT = 1e-2
 CAP = int(N / NDEV * 1.3)
+#: the flat M2L (the CPU lane) runs ONE fullbatch segment sum when the merged pair
+#: list -- the local far list plus the cross far list's CAPACITY -- fits a chunk,
+#: and a chunked scan otherwise; the two round 1 ulp apart (fe3618fd). 512-pair
+#: chunks keep every capacity here in the chunked regime, so capacities that differ
+#: in width (the library's against explicit ones) compute the same sums.
+M2L_CHUNK = 512
 
 
 @pytest.fixture(scope="module")
@@ -100,6 +107,7 @@ def _solver(leaf_capacity=LEAF_CAP):
                 leaf_capacity=leaf_capacity,
             ),
             nearfield=NearFieldConfig(mode="auto"),
+            farfield=FarFieldConfig(m2l_chunk_size=M2L_CHUNK),
             mac_type="dehnen",
         ),
         fixed_order=ORDER,
@@ -263,6 +271,10 @@ def test_a1_a2_the_template_force_and_chained_segments_bitwise(cpu_fused_lane):
     states) bitwise on every live row, all finite -- no template value reaches
     the force -- and it is the force (direct sum).
 
+    Library cross capacities: a runner on the default ``cross_caps="auto"`` (sized
+    from the start force's measured needs: other widths) computes the same start
+    force bitwise.
+
     A2 (2): 2 + 2 steps, the total acceleration carried across, equal one segment
     of 4, bitwise by id, with the cross field; the second segment starts from the
     carried acceleration, not a start force."""
@@ -311,6 +323,27 @@ def test_a1_a2_the_template_force_and_chained_segments_bitwise(cpu_fused_lane):
     err = float(np.linalg.norm(got - want) / np.linalg.norm(want))
     assert err < 5e-3, err
 
+    # the library's cross capacities (the default): sized from the start force's
+    # needs, other widths than the explicit ones, the same force bitwise
+    library = MeshSegmentRunner.fused(
+        solver,
+        mesh,
+        _mesh_state(mesh, pos, vel, mass),
+        leaf_size=LEAF,
+        max_order=ORDER,
+        theta=THETA,
+    )
+    lib_caps = library.force.cross_caps
+    assert library.force.cross_needs_measured is not None
+    widths = [
+        k for k in vars(lib_caps) if getattr(lib_caps, k) != getattr(_cross_caps(), k)
+    ]
+    assert "export_far_cap" in widths and "recv_particle_cap" in widths, widths
+    library.start()
+    got_lib = np.asarray(library.state.acceleration)[rows]
+    _assert_bitwise(got_lib, np.asarray(acc_s)[rows], "library vs explicit cross caps")
+    del library
+
     first, second = chained.run(2, dt=DT), chained.run(2, dt=DT)
     assert not first.start_force and not second.start_force  # start() ran it
     whole = MeshSegmentRunner.fused(
@@ -352,16 +385,17 @@ def _collapse_into_a_plummer_sphere(steps):
 def test_a3_an_outgrown_segment_is_replanned_and_equals_a_fresh_run(
     cpu_fused_lane, fresh_level_registry, monkeypatch
 ):
-    """GATE A3: prepared at leaf capacity 44 on the uniform start (it fits), the
-    segment's trees need more leaves than that, its walks longer lists and its
-    cross summary more rows: the flags fire, the needs are reduced over the mesh,
-    and the segment is re-planned at its start -- the leaf capacity to
-    ``auto_leaf_capacity`` of what the trees needed, the walk caps to what the
-    walks needed, the cross capacities through the force's ``cross_replan`` seam
-    (here: the summary follows the leaf capacity, track B's to replace) -- every
-    device re-prepared caps-only there, and the segment re-run. The result equals
-    a fresh run started there with the final capacities (leaf capacity, walk caps,
-    level plan, cross caps), bitwise by id, and that run needs no retry."""
+    """GATE A3, on the library's capacities throughout: prepared at leaf capacity
+    44 on the uniform start (it fits; the cross capacities sized there from the
+    start force's needs), the segment's trees need more leaves than that and its
+    walks longer lists: the flags fire, the needs are reduced over the mesh, and the
+    segment is re-planned at its start -- the leaf capacity to ``auto_leaf_capacity``
+    of what the trees needed, the walk caps to what the walks needed, the cross
+    capacities by ``CrossCapacities.replanned`` with the summary following the grown
+    leaf capacity -- every device re-prepared caps-only there, and the segment
+    re-run. The result equals a fresh run started there with the final capacities
+    (leaf capacity, walk caps, level plan, cross caps), bitwise by id, and that run
+    needs no retry."""
     from jaccpot.distributed.segment import MeshSegmentRunner
     from jaccpot.runtime.capacity_plan import install_walk_caps
 
@@ -372,25 +406,13 @@ def test_a3_an_outgrown_segment_is_replanned_and_equals_a_fresh_run(
     pos, vel, mass = _collapse_into_a_plummer_sphere(steps)
     solver = _solver(leaf_capacity=44)
     engine = solver._impl
-    seen = []
-
-    def cross_replan(cross_needs, caps):
-        # the two-sided summary holds one row per live leaf: its leaf capacity
-        # bounds that exactly (bench/multigpu_rollout_gate.py's sizing)
-        seen.append(np.asarray(cross_needs).tolist())
-        return CrossCapacities(
-            max_cells=int(engine._tree_leaf_capacity), leaf_width=LEAF
-        )
-
     kwargs = dict(leaf_size=LEAF, max_order=ORDER, theta=THETA)
     retried = MeshSegmentRunner.fused(
-        solver,
-        mesh,
-        _mesh_state(mesh, pos, vel, mass),
-        cross_caps=_cross_caps(),
-        cross_replan=cross_replan,
-        **kwargs,
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
     )
+    sized = retried.force.cross_caps
+    # the summary is clamped to what a tree of 44 leaves can hold
+    assert sized.max_cells <= 44 and sized.max_summary_nodes <= 2 * 44 - 1, vars(sized)
     caps_before = dict(engine._strict_fused_validated_caps)
     report = retried.run(steps, dt=DT)
     caps_after = dict(engine._strict_fused_validated_caps)
@@ -398,8 +420,14 @@ def test_a3_an_outgrown_segment_is_replanned_and_equals_a_fresh_run(
     assert engine._tree_leaf_capacity == 1024  # auto_leaf_capacity(64 leaves)
     for key in ("compact_far_pair_capacity", "near_edge_capacity"):
         assert int(caps_after[key]) > int(caps_before[key]), key
-    assert seen == [[]], seen  # the seam was asked once; no cross needs vector yet
-    assert retried.force.cross_caps.max_cells == 1024
+    final = retried.force.cross_caps
+    # the summary followed the leaf capacity (64 live leaves x 1.5, in 1024s)
+    assert 64 <= final.max_cells <= 1024, vars(final)
+    assert final.max_summary_nodes <= 2 * 1024 - 1, vars(final)
+    assert (
+        report.needs[-len(CROSS_NEEDS_FIELDS) :][CROSS_NEEDS_FIELDS.index("overflow")]
+        == 0
+    ), report.needs
 
     fresh_solver = _solver(leaf_capacity=engine._tree_leaf_capacity)
     install_walk_caps(fresh_solver, caps_after)
@@ -407,11 +435,48 @@ def test_a3_an_outgrown_segment_is_replanned_and_equals_a_fresh_run(
         fresh_solver,
         mesh,
         _mesh_state(mesh, pos, vel, mass),
-        cross_caps=retried.force.cross_caps,
+        cross_caps=final,
         level_floor=retried.force.level_floor,
         **kwargs,
     )
     fresh_report = fresh.run(steps, dt=DT)
     assert fresh_report.retries == 0, fresh_report
     assert fresh.force.setup.plan == retried.force.setup.plan
+    _gathered_equal(retried, fresh)
+
+
+def test_an_undersized_cross_capacity_is_replanned_and_equals_a_fresh_run(
+    cpu_fused_lane,
+):
+    """A cross capacity too small for the start (two buffers: the near rows a
+    device receives and the particles it sends) fires the cross flag on the start
+    force; the runner re-plans the cross capacities from the measured needs
+    (``CrossCapacities.replanned``, exact past their overflow: one retry) and runs
+    the segment. It equals a run started with the re-planned capacities, bitwise
+    by id, which needs no retry -- on the same solver, so the two share their
+    compiled programs and what is compared is the retry: the start state it
+    restarted from and the start force it recomputed."""
+    from jaccpot.distributed.segment import MeshSegmentRunner
+
+    mesh = _mesh()
+    pos, vel, mass = _ic()
+    solver = _solver()
+    small = _cross_caps()._with(recv_node_cap=64, send_particle_cap=512)
+    kwargs = dict(leaf_size=LEAF, max_order=ORDER, theta=THETA)
+    retried = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), cross_caps=small, **kwargs
+    )
+    report = retried.run(2, dt=DT)
+    final = retried.force.cross_caps
+    assert report.retries == 1, report
+    assert final.recv_node_cap > 64 and final.send_particle_cap > 512, vars(final)
+    # nothing else moved: the re-plan grew what overflowed, monotone elsewhere
+    for name, value in vars(small).items():
+        if value is not None and name not in ("recv_node_cap", "send_particle_cap"):
+            assert getattr(final, name) >= value, name
+
+    fresh = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), cross_caps=final, **kwargs
+    )
+    assert fresh.run(2, dt=DT).retries == 0
     _gathered_equal(retried, fresh)

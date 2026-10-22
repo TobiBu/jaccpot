@@ -29,7 +29,8 @@ lane the same, as a new path next to the old one (which stays the reference):
   the self-gravity as the single card adds it.
 * **Segment retry.** A fired flag (any device, any step) re-plans what the
   segment outgrew from its needs -- the walk caps, the tree's leaf capacity,
-  depth bound and level batch, the cross capacities through the force's seam --
+  depth bound and level batch, the cross capacities (``CROSS_NEEDS_FIELDS``,
+  carried after ``NEEDS_FIELDS``; sized in the library at the start) --
   re-prepares every device caps-only at the segment's START (a host copy of the
   donated start state is kept, as the single card keeps it), recompiles and
   re-runs from the start force: at most twice, the single card's policy.
@@ -179,7 +180,7 @@ class SegmentReport:
         The kept run's overflow bits, OR-ed over its steps and the mesh.
     needs : list
         The kept run's needs, max-ed over its steps and the mesh
-        (``fused_topology.NEEDS_FIELDS``, then the cross hook's).
+        (``fused_topology.NEEDS_FIELDS``, then ``cross.CROSS_NEEDS_FIELDS``).
     """
 
     segment: int
@@ -349,11 +350,12 @@ class DirectMeshForce:
         Returns
         -------
         int
-            ``len(fused_topology.NEEDS_FIELDS)``.
+            ``len(NEEDS_FIELDS) + len(CROSS_NEEDS_FIELDS)``, as the fused force's.
         """
+        from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
-        return len(NEEDS_FIELDS)
+        return len(NEEDS_FIELDS) + len(CROSS_NEEDS_FIELDS)
 
     def prepare(self, positions: Array, masses: Array, counts: Array) -> None:
         """Nothing to prepare.
@@ -579,6 +581,10 @@ class MeshSegmentRunner:
         #: the segment whose repartition already ran (a start() before it)
         self._repartitioned_for = 0
         self.force.prepare(state.state[:, 0], state.masses, state.count)
+        if getattr(self.force, "needs_cross_sizing", False):
+            # cross_caps="auto": the start force at ``state`` measures what every
+            # cross capacity needs, and the library sizes them from it
+            self.force.plan_cross(self._measure_cross)
 
     @classmethod
     def fused(
@@ -590,7 +596,7 @@ class MeshSegmentRunner:
         leaf_size: int,
         max_order: int,
         theta: Optional[float] = None,
-        cross_caps: Any = None,
+        cross_caps: Any = "auto",
         near_theta: Optional[float] = None,
         cross_replan: Optional[Callable[[np.ndarray, Any], Any]] = None,
         level_floor: Optional[tuple[int, int]] = None,
@@ -618,11 +624,13 @@ class MeshSegmentRunner:
         theta : Optional[float]
             Opening angle; ``None`` takes the solver's.
         cross_caps : Any
-            :class:`~jaccpot.distributed.cross.CrossCapacities`.
+            ``"auto"`` (the default: sized in the library at ``state``), a
+            :class:`~jaccpot.distributed.cross.CrossCapacities`, or ``None`` (its
+            defaults); see :class:`~jaccpot.distributed.template_force.FusedMeshForce`.
         near_theta : Optional[float]
             Passed to the cross hook.
         cross_replan : Optional[Callable[[np.ndarray, Any], Any]]
-            The cross capacities' re-plan
+            The cross capacities' re-plan; ``None``: the library's
             (:class:`~jaccpot.distributed.template_force.FusedMeshForce`).
         level_floor : Optional[tuple[int, int]]
             The level plan's floor (``FusedMeshForce``).
@@ -683,9 +691,10 @@ class MeshSegmentRunner:
         Parameters
         ----------
         kind : str
-            ``"start"`` or ``"segment"``.
+            ``"start"``, ``"measure"`` (the start force without the field) or
+            ``"segment"``.
         steps : int
-            The segment's steps (``0`` for the start program).
+            The segment's steps (``0`` for the start programs).
         params : Any
             The external field's parameters (their structure is in the key).
 
@@ -719,18 +728,24 @@ class MeshSegmentRunner:
         program = cache.get(key)
         if program is not None:
             return program, False
-        build = self._build_start if kind == "start" else self._build_segment
-        program = build(int(steps))
+        if kind == "segment":
+            program = self._build_segment(int(steps))
+        else:
+            # "measure": the start force without the external field (the cross
+            # needs do not depend on it, and its parameters are not known yet)
+            program = self._build_start(int(steps), with_field=kind == "start")
         cache[key] = program
         return program, True
 
-    def _build_start(self, steps: int) -> Callable:
+    def _build_start(self, steps: int, *, with_field: bool = True) -> Callable:
         """The start force: the total acceleration at the current positions.
 
         Parameters
         ----------
         steps : int
             Unused (the key's slot).
+        with_field : bool
+            Add the external field (``False``: the cross sizing's measurement).
 
         Returns
         -------
@@ -743,11 +758,8 @@ class MeshSegmentRunner:
         del steps
         # locals, not ``self``: the program outlives this runner in the engine's
         # cache, and a closure over ``self`` would keep its state's buffers alive
-        axis, force, field_fn = (
-            self.axis_name,
-            self.force,
-            self.external_acceleration_fn,
-        )
+        axis, force = self.axis_name, self.force
+        field_fn = self.external_acceleration_fn if with_field else None
 
         def body(
             state: Array, masses: Array, count: Array, ids: Array, params: Any
@@ -965,6 +977,22 @@ class MeshSegmentRunner:
             acceleration=None if state.acceleration is None else a,
         )
         return routed, {k: np.asarray(v) for k, v in diag.items()}
+
+    def _measure_cross(self) -> np.ndarray:
+        """The cross needs of the start force at the current state (host, mesh-reduced).
+
+        Returns
+        -------
+        np.ndarray
+            ``cross.CROSS_NEEDS_FIELDS`` of the force with the force's current hook.
+        """
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        s = self.state
+        _, _, _, needs = self._call(
+            "measure", 0, None, s.state, s.masses, s.count, s.ids
+        )
+        return np.asarray(jax.device_get(needs))[len(NEEDS_FIELDS) :]
 
     def _call(self, kind: str, steps: int, params: Any, *args: Any) -> tuple:
         """Run a program under the force's context (its plan installed).

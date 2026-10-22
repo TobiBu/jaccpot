@@ -42,7 +42,15 @@ uses (:func:`jaccpot.distributed.fused._add_cross_near_term`), so both routes ad
 same term with the same arithmetic.
 
 :class:`FusedMeshForce` hands this route to the segment runner
-(:mod:`jaccpot.distributed.segment`), with the segment retry's re-plan.
+(:mod:`jaccpot.distributed.segment`), with the segment retry's re-plan. Its CROSS
+capacities are the library's by default (``cross_caps="auto"``): a first guess from
+the merged leaf capacity and the worst shard's live leaves
+(``CrossCapacities.for_shard``), measured by the runner's start force and sized from
+what every capacity needed (``cross.plan_cross_capacities``); a retry grows them
+with ``CrossCapacities.replanned`` from the needs vector
+(``cross.CROSS_NEEDS_FIELDS``) the runner carries after ``NEEDS_FIELDS``, the summary
+following a grown leaf capacity and clamped to what the tree can hold. No bench
+formula and no harness environment.
 
 GATE A1 (``tests/distributed/test_mesh_segment_runner.py``): with the same caps,
 this route's force (the runner's start force) equals the stacked route's BITWISE
@@ -80,7 +88,6 @@ from jaccpot.distributed.fused import (
 __all__ = [
     "FusedMeshForce",
     "MeshForceSetup",
-    "cross_needs",
     "make_mesh_cross_hook",
     "mesh_force_shard",
     "prepare_mesh_force",
@@ -108,6 +115,10 @@ class MeshForceSetup:
         The cell-leaf tree's leaf capacity every device compiles.
     box : tuple
         The host mesh box the prepares were built in (diagnostics).
+    live_leaves : int
+        The most leaves holding a particle in any device's eager tree: the worst
+        shard the cross capacities' first guess is sized for
+        (``CrossCapacities.for_shard``).
     """
 
     provider: Any
@@ -115,6 +126,7 @@ class MeshForceSetup:
     walk_caps: Optional[dict]
     leaf_capacity: int
     box: tuple
+    live_leaves: int = 0
 
     def key(self) -> tuple:
         """What a compile cache of a program traced from this setup must hold.
@@ -213,7 +225,11 @@ def prepare_mesh_force(
     ValueError
         If the leaves are buckets (a template rebuild needs cell leaves).
     """
-    from jaccpot.distributed.rollout import _mesh_devices, _pad_onto_live_row
+    from jaccpot.distributed.rollout import (
+        _leaf_counts,
+        _mesh_devices,
+        _pad_onto_live_row,
+    )
     from jaccpot.runtime import _level_shapes as level_shapes
     from jaccpot.runtime.capacity_plan import (
         _lift_registry_to_refresh_tree,
@@ -279,7 +295,7 @@ def prepare_mesh_force(
         )
         engine._tree_leaf_capacity = auto_leaf_capacity(live, float(headroom))
 
-    plans, walks = [], []
+    plans, walks, live_leaves = [], [], []
     stub_caps: Optional[PreparedCaps] = None
     for d in range(ndev):
         # this shard's widths only: the registry is process-global
@@ -324,6 +340,7 @@ def prepare_mesh_force(
         )
         validated = getattr(engine, "_strict_fused_validated_caps", None)
         walks.append(dict(validated) if isinstance(validated, dict) else None)
+        live_leaves.append(_leaf_counts(caps.stub)[1])
         if d == 0:
             stub_caps = caps
         del caps, tree
@@ -363,6 +380,7 @@ def prepare_mesh_force(
         walk_caps=walk_caps,
         leaf_capacity=int(engine._tree_leaf_capacity),
         box=tuple(np.asarray(b) for b in box),
+        live_leaves=int(max(live_leaves)),
     )
 
 
@@ -409,7 +427,8 @@ def mesh_force_shard(
         rows meaningless), the ``uint32`` overflow bits (with
         ``OVERFLOW_LEVEL_PLAN`` and ``OVERFLOW_CROSS``) and ``int32`` needs:
         ``fused_topology.NEEDS_FIELDS`` (whose ``tree_overflow`` also counts a
-        level-plan overflow) followed by the cross hook's (:func:`cross_needs`).
+        level-plan overflow) followed by ``cross.CROSS_NEEDS_FIELDS``
+        (:func:`_hook_cross_needs`).
     """
     from jaccpot.runtime.capacity_plan import plan_level_overflow
     from jaccpot.runtime.fused_topology import (
@@ -454,17 +473,17 @@ def mesh_force_shard(
     needs = topology.needs()
     tree_slot = NEEDS_FIELDS.index("tree_overflow")
     needs = needs.at[tree_slot].max(level.astype(jnp.int32))
-    return acceleration, bits, jnp.concatenate([needs, cross_needs(cross_hook)])
+    return acceleration, bits, jnp.concatenate([needs, _hook_cross_needs(cross_hook)])
 
 
-def cross_needs(cross_hook: Any) -> Array:
-    """The cross hook's needs vector of this trace: the seam for its re-plan.
+def _hook_cross_needs(cross_hook: Any) -> Array:
+    """The cross hook's needs vector of this trace (:func:`~jaccpot.distributed.cross.cross_needs`).
 
-    A hook that exposes ``needs_fields`` (names, a static tuple) and fills
-    ``needs_sink[name]`` (an ``int32`` scalar per field: the exact demand of that
-    cross capacity) inside the trace gets them carried by the segment runner --
-    max-ed over the steps and the mesh -- and handed to its ``cross_replan``
-    callback after a cross overflow. Today's hook exposes none: an empty vector.
+    One protocol for both routes: :data:`~jaccpot.distributed.cross.CROSS_NEEDS_FIELDS`,
+    read off the hook's ``needs_sink`` inside the trace that ran it. Zeros without a
+    hook (one device: nothing crossed) and for a control exchange that measures none
+    (``JACCPOT_CROSS_SYMMETRIC=0`` and the like): there a cross overflow finds no
+    need to grow and the retry raises, naming the flag.
 
     Parameters
     ----------
@@ -474,13 +493,15 @@ def cross_needs(cross_hook: Any) -> Array:
     Returns
     -------
     Array
-        ``int32[len(needs_fields)]``.
+        ``int32[len(CROSS_NEEDS_FIELDS)]``, this device's.
     """
-    fields = tuple(getattr(cross_hook, "needs_fields", ()) or ())
-    if not fields:
-        return jnp.zeros((0,), jnp.int32)
-    sink = getattr(cross_hook, "needs_sink")
-    return jnp.stack([jnp.asarray(sink[name], jnp.int32) for name in fields])
+    from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS, cross_needs
+
+    if cross_hook is None or "needs" not in (
+        getattr(cross_hook, "needs_sink", None) or {}
+    ):
+        return jnp.zeros((len(CROSS_NEEDS_FIELDS),), jnp.int32)
+    return jnp.asarray(cross_needs(cross_hook), jnp.int32)
 
 
 def make_mesh_cross_hook(
@@ -535,6 +556,26 @@ def make_mesh_cross_hook(
     return hook, sink
 
 
+def _cross_by_field(needs: np.ndarray) -> dict:
+    """The cross half of a runner needs vector, keyed by ``CROSS_NEEDS_FIELDS``.
+
+    Parameters
+    ----------
+    needs : np.ndarray
+        ``NEEDS_FIELDS`` then ``CROSS_NEEDS_FIELDS`` (host).
+
+    Returns
+    -------
+    dict
+        ``{field: value}`` of the cross half.
+    """
+    from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    cross = np.asarray(needs, np.int64).reshape(-1)[len(NEEDS_FIELDS) :]
+    return dict(zip(CROSS_NEEDS_FIELDS, (int(v) for v in cross)))
+
+
 class FusedMeshForce:
     """The fused lane's force for :class:`~jaccpot.distributed.segment.MeshSegmentRunner`.
 
@@ -558,17 +599,22 @@ class FusedMeshForce:
     theta : Optional[float]
         Opening angle; ``None`` takes the solver's.
     cross_caps : Any
-        :class:`~jaccpot.distributed.cross.CrossCapacities`; ``None`` takes the
-        constructor defaults.
+        ``"auto"`` (the default): sized in the library -- a first guess from the
+        merged leaf capacity and the worst shard's live leaves
+        (``CrossCapacities.for_shard``), measured by the runner's start force and
+        sized from what it needed (``cross.plan_cross_capacities``, via
+        :meth:`plan_cross`). A :class:`~jaccpot.distributed.cross.CrossCapacities`:
+        used as given; ``None``: its constructor defaults. Either way a segment
+        retry grows them from the measured needs.
     near_theta : Optional[float]
         Passed to the cross hook.
     cross_replan : Optional[Callable[[np.ndarray, Any], Any]]
-        THE CROSS RE-PLAN SEAM. After a segment whose cross capacities overflowed
-        (``OVERFLOW_CROSS``): ``cross_replan(cross_needs, cross_caps) ->
-        CrossCapacities | None``, with ``cross_needs`` the hook's needs vector
-        (:func:`cross_needs`) max-ed over the segment's steps and the mesh. New
-        capacities rebuild the hook and the segment is re-run with them; ``None``
-        (or no callback, today's default) declines, and the segment raises.
+        The cross re-plan of a segment retry: ``cross_replan(cross_needs, caps) ->
+        CrossCapacities | None``, with ``cross_needs`` the
+        :data:`~jaccpot.distributed.cross.CROSS_NEEDS_FIELDS` vector max-ed over
+        the failed run's steps and the mesh. ``None`` (the default): the library's,
+        ``caps.replanned(cross_needs, leaf_capacity=<the leaf capacity, grown when
+        the tree was>)``.
     level_floor : Optional[tuple[int, int]]
         ``(widest, levels)``: every prepare's level plan covers at least a level
         of ``widest`` nodes and ``levels`` levels (:func:`prepare_mesh_force`'s
@@ -592,20 +638,34 @@ class FusedMeshForce:
         leaf_size: int,
         max_order: int,
         theta: Optional[float] = None,
-        cross_caps: Any = None,
+        cross_caps: Any = "auto",
         near_theta: Optional[float] = None,
         cross_replan: Optional[Callable[[np.ndarray, Any], Any]] = None,
         level_floor: Optional[tuple[int, int]] = None,
         axis_name: str = AXIS_NAME,
     ) -> None:
+        from jaccpot.distributed.cross import CrossCapacities
+
         _refuse_error_criterion(solver, entry="FusedMeshForce")
+        if isinstance(cross_caps, str) and cross_caps != "auto":
+            raise ValueError(
+                f"cross_caps={cross_caps!r}: a CrossCapacities, None or 'auto'"
+            )
         self.solver = solver
         self.engine = getattr(solver, "_impl", solver)
         self.mesh = mesh
         self.leaf_size = int(leaf_size)
         self.max_order = int(max_order)
         self.theta = theta
-        self.cross_caps = cross_caps
+        #: sized in the library at the first prepare (plan_cross), else as given
+        self.cross_auto = isinstance(cross_caps, str)
+        self.cross_caps = (
+            None
+            if self.cross_auto
+            else (CrossCapacities() if cross_caps is None else cross_caps)
+        )
+        #: the cross needs the library's sizing measured (host), once sized
+        self.cross_needs_measured: Optional[np.ndarray] = None
         self.near_theta = near_theta
         self.cross_replan = cross_replan
         self.level_floor = None if level_floor is None else tuple(level_floor)
@@ -613,7 +673,12 @@ class FusedMeshForce:
         self.setup: Optional[MeshForceSetup] = None
         #: the walk's peak wavefront a re-plan keeps for the next prepare
         self._peak_floor = 0
-        self.hook, self.near_sink = self._make_hook()
+        #: the segment's first failure had lower-bound cross needs (a second retry
+        #: re-measures them)
+        self._cross_lower_first = False
+        self.hook, self.near_sink = (None, None)
+        if not self.cross_auto:
+            self.hook, self.near_sink = self._make_hook()
         _warn_if_slow_ragged_exchange(mesh)
 
     def _make_hook(self) -> tuple[Optional[Callable[[Any], Any]], Optional[dict]]:
@@ -662,12 +727,12 @@ class FusedMeshForce:
         Returns
         -------
         int
-            ``len(NEEDS_FIELDS)`` plus the cross hook's fields (:func:`cross_needs`).
+            ``len(NEEDS_FIELDS) + len(CROSS_NEEDS_FIELDS)``.
         """
+        from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
-        cross = tuple(getattr(self.hook, "needs_fields", ()) or ())
-        return len(NEEDS_FIELDS) + len(cross)
+        return len(NEEDS_FIELDS) + len(CROSS_NEEDS_FIELDS)
 
     def prepare(self, positions: Array, masses: Array, counts: Array) -> None:
         """The template-route setup at these particles (:func:`prepare_mesh_force`).
@@ -704,6 +769,80 @@ class FusedMeshForce:
             self.engine._strict_fused_validated_caps = validated
             self.setup.walk_caps = dict(validated)
             self._peak_floor = 0
+        if self.cross_auto and self.cross_caps is None and len(self.devices) > 1:
+            from jaccpot.distributed.cross import CrossCapacities
+
+            # the library's first guess; plan_cross measures and right-sizes it
+            self.cross_caps = CrossCapacities.for_shard(
+                leaf_capacity=self.setup.leaf_capacity,
+                ndev=len(self.devices),
+                leaf_width=self.leaf_size,
+                live_leaves=self.setup.live_leaves,
+            )
+            self.hook, self.near_sink = self._make_hook()
+
+    @property
+    def devices(self) -> list:
+        """The mesh's devices, in mesh order.
+
+        Returns
+        -------
+        list
+            The devices.
+        """
+        from jaccpot.distributed.rollout import _mesh_devices
+
+        return _mesh_devices(self.mesh)
+
+    @property
+    def needs_cross_sizing(self) -> bool:
+        """Whether :meth:`plan_cross` still has to size the cross capacities.
+
+        Returns
+        -------
+        bool
+            ``cross_caps="auto"`` on a mesh of two or more devices, not yet sized.
+        """
+        return (
+            self.cross_auto
+            and self.hook is not None
+            and self.cross_needs_measured is None
+        )
+
+    def plan_cross(self, measure: Callable[[], np.ndarray]) -> None:
+        """Size ``cross_caps="auto"``: measure the first guess, size from the needs.
+
+        ``cross.plan_cross_capacities`` with the runner's measurement: ``measure()``
+        runs the start force at the current positions on the current hook and
+        returns its cross needs, reduced over the mesh. While their overflow bit is
+        set the capacities are re-planned and measured again; the clean
+        measurement sizes every capacity (``from_needs``: 1.5x its need, the
+        summary clamped to the tree). Each measurement is a compile of the start
+        force. A no-op once sized, with explicit capacities, and on one device.
+
+        Parameters
+        ----------
+        measure : Callable[[], np.ndarray]
+            Runs the force with :attr:`hook` and returns the host cross needs.
+        """
+        from jaccpot.distributed.cross import plan_cross_capacities
+
+        if not self.needs_cross_sizing:
+            return
+
+        def _measure(caps: Any) -> np.ndarray:
+            self.cross_caps = caps
+            self.hook, self.near_sink = self._make_hook()
+            return np.asarray(measure())
+
+        caps, needs = plan_cross_capacities(
+            _measure,
+            self.cross_caps,
+            leaf_capacity=self._setup_or_raise().leaf_capacity,
+        )
+        self.cross_caps = caps
+        self.cross_needs_measured = np.asarray(needs)
+        self.hook, self.near_sink = self._make_hook()
 
     def _setup_or_raise(self) -> MeshForceSetup:
         """The prepared setup.
@@ -800,11 +939,16 @@ class FusedMeshForce:
     # ------------------------------------------------------------------
 
     def retry_mode(self, needs: np.ndarray, retries: int, tree_first: bool) -> Any:
-        """How a failed segment may be retried: the single card's policy.
+        """How a failed segment may be retried: the single card's policy, plus one.
 
-        ``engine._segment_retry_mode`` on the local needs (at most two retries,
-        the second for the walk only after a first that re-planned the tree;
-        ``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns them off).
+        ``engine._segment_retry_mode`` on the local needs: at most two retries, the
+        second for the walk only after a first that re-planned the tree
+        (``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns them off). And a second retry
+        after a first whose CROSS needs were lower bounds (``walk_lower_bound`` /
+        ``pairs_lower_bound``: a cross walk or the summary lost pairs, so the
+        re-plan from them can fall short; the re-run's needs are exact), when the
+        re-run overflowed the cross field again: ``"walk"`` -- the local walk and
+        the cross capacities, not the tree.
 
         Parameters
         ----------
@@ -822,8 +966,26 @@ class FusedMeshForce:
         """
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
-        local = np.asarray(needs, np.int64)[: len(NEEDS_FIELDS)]
-        return self.engine._segment_retry_mode(local, int(retries), bool(tree_first))
+        needs_arr = np.asarray(needs, np.int64)
+        local = needs_arr[: len(NEEDS_FIELDS)]
+        cross = _cross_by_field(needs_arr)
+        mode = self.engine._segment_retry_mode(local, int(retries), bool(tree_first))
+        if int(retries) == 0:
+            self._cross_lower_first = bool(
+                cross["overflow"]
+                and (cross["walk_lower_bound"] or cross["pairs_lower_bound"])
+            )
+        elif (
+            mode is None
+            and int(retries) == 1
+            and self._cross_lower_first
+            and cross["overflow"]
+            and self.engine._segment_retry_mode(local, 0, False) is not None
+        ):
+            # the retry is on (the engine's policy allows a first), and this second
+            # failure re-measured the cross needs a lower bound sized
+            mode = "walk"
+        return mode
 
     def replan(self, needs: np.ndarray, bits: int, *, walk_only: bool = False) -> bool:
         """Grow what a failed segment outgrew; the caller then re-prepares.
@@ -837,20 +999,29 @@ class FusedMeshForce:
           bound to the deepest tree + 8, and :attr:`level_floor` to the widest
           level and that bound -- the installed PLAN's bounds are what the
           programs checked, so they are what is compared;
-        * the CROSS capacities, through :attr:`cross_replan` (the seam): with no
-          callback, or one that declines, a cross overflow declines the retry --
-          the re-run would overflow again -- unless the tree overflowed in the
-          same run, whose cross verdict was measured on a truncated leaf set.
+        * the CROSS capacities, after the tree (so they follow its grown leaf
+          capacity): :attr:`cross_replan`, by default ``caps.replanned(needs,
+          leaf_capacity=...)`` -- monotone, the summary clamped to what the tree can
+          hold (``max_cells`` <= the leaf capacity, ``max_summary_nodes`` <= 2x - 1:
+          a larger summary does not trace). When the cross flag fired, and whenever
+          the leaf capacity grew: then the summary's needs are raised to the tree's
+          live leaves (``leaf_needed``, exact past the overflow), which a summary
+          counted on a truncated tree cannot tell. A cross flag that grows nothing
+          declines -- a mismatch between the
+          two ends of an exchange, or a flag no cross capacity explains -- unless
+          the tree overflowed in the same run, whose cross verdict was measured on
+          a truncated leaf set (the re-run on a tree that fits decides).
 
         Parameters
         ----------
         needs : np.ndarray
             The failed run's needs, max-ed over its steps and the mesh:
-            ``fused_topology.NEEDS_FIELDS``, then the cross hook's.
+            ``fused_topology.NEEDS_FIELDS``, then ``cross.CROSS_NEEDS_FIELDS``.
         bits : int
             Its overflow bits, OR-ed over the steps and the mesh.
         walk_only : bool
-            Re-plan the walk caps only (the second retry).
+            Re-plan the walk caps (and the cross capacities) only: the second
+            retry.
 
         Returns
         -------
@@ -862,40 +1033,66 @@ class FusedMeshForce:
         engine = self.engine
         needs_arr = np.asarray(needs, np.int64)
         local = needs_arr[: len(NEEDS_FIELDS)]
-        cross = needs_arr[len(NEEDS_FIELDS) :]
         if engine._walk_overflowed_a_named_cap(local):
             # a deliberate bound the re-run would overflow again, tree or not
             return False
-        tree_overflowed = bool(local[NEEDS_FIELDS.index("tree_overflow")])
+        local_n = dict(zip(NEEDS_FIELDS, (int(v) for v in local)))
+        tree_overflowed = bool(local_n["tree_overflow"])
+        capacity_before = int(engine._tree_leaf_capacity)
         walk = engine._replan_walk_caps_from_needs(local)
         tree = False if walk_only else self._replan_tree(local)
         crossed = False
-        if int(bits) & OVERFLOW_CROSS:
-            # after the tree's re-plan, so the cross capacities can follow the
-            # grown leaf capacity (the summary publishes one row per live leaf)
-            caps = (
-                None
-                if self.cross_replan is None
-                else self.cross_replan(cross, self.cross_caps)
+        cross_fired = bool(int(bits) & OVERFLOW_CROSS)
+        leaves_grew = int(engine._tree_leaf_capacity) > capacity_before
+        if self.cross_caps is not None and (cross_fired or leaves_grew):
+            # a grown leaf capacity re-plans the cross field too, flag or not: the
+            # summary publishes one row per live leaf, so it has to follow
+            grown = self._replanned_cross(
+                needs_arr, leaf_needed=local_n["leaf_needed"] if leaves_grew else 0
             )
-            if caps is not None:
-                self.cross_caps = caps
+            if grown is not None and vars(grown) != vars(self.cross_caps):
+                self.cross_caps = grown
                 self.hook, self.near_sink = self._make_hook()
                 crossed = True
-            elif not tree_overflowed:
-                # a cross capacity nothing re-plans: the re-run would overflow too
+            elif cross_fired and not tree_overflowed:
                 return False
-            # On an overflowed tree the cross verdict was measured on a truncated
-            # leaf set (it feeds the summary and the near export): measured, the
-            # cross near flag fired on every such step of a drift into octant
-            # clumps and on none once the tree fitted. The tree re-plan's re-run
-            # decides, as a second retry re-measures the walk's needs.
         if not (walk or tree or crossed):
             return False
         self._peak_floor = int(
             (engine._strict_fused_validated_caps or {}).get("peak_wavefront") or 0
         )
         return True
+
+    def _replanned_cross(self, needs: np.ndarray, *, leaf_needed: int) -> Any:
+        """The cross capacities a retry runs with (:meth:`replan`'s cross half).
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            The failed run's full needs vector.
+        leaf_needed : int
+            The live leaves the trees needed when the leaf capacity grew, else 0.
+
+        Returns
+        -------
+        Any
+            :attr:`cross_replan`'s answer, or ``cross_caps.replanned(...)``.
+        """
+        from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        cross = np.array(needs[len(NEEDS_FIELDS) :], np.int64)
+        if leaf_needed:
+            # one summary cell per live leaf, and the summary tree over them
+            cells = CROSS_NEEDS_FIELDS.index("max_cells")
+            nodes = CROSS_NEEDS_FIELDS.index("max_summary_nodes")
+            cross[cells] = max(int(cross[cells]), int(leaf_needed))
+            cross[nodes] = max(int(cross[nodes]), 2 * int(leaf_needed) - 1)
+        if self.cross_replan is not None:
+            return self.cross_replan(cross, self.cross_caps)
+        return self.cross_caps.replanned(
+            cross, leaf_capacity=int(self.engine._tree_leaf_capacity)
+        )
 
     def _replan_tree(self, local: np.ndarray) -> bool:
         """The TREE half of :meth:`replan`, against the installed plan's bounds.
@@ -990,13 +1187,21 @@ class FusedMeshForce:
 
         bits = int(bits)
         local = np.asarray(needs, np.int64)[: len(NEEDS_FIELDS)]
-        cross = (
-            " The cross-domain capacities (CrossCapacities) overflowed "
-            "(OVERFLOW_CROSS) and no cross re-plan took them: give the hook larger "
-            "capacities, or a cross_replan."
-            if bits & OVERFLOW_CROSS
-            else ""
-        )
+        cross = ""
+        if bits & OVERFLOW_CROSS:
+            need = _cross_by_field(np.asarray(needs, np.int64))
+            why = (
+                "the two ends of an exchange disagreed on a size (mismatch): no "
+                "capacity covers that"
+                if need["mismatch"]
+                else "no cross capacity needed more than it holds, so the flag is "
+                "not a cross capacity's"
+            )
+            cross = (
+                " The cross-domain field overflowed (OVERFLOW_CROSS) and its "
+                f"re-plan grew nothing: {why}. Cross needs {need}; capacities "
+                f"{None if self.cross_caps is None else vars(self.cross_caps)}."
+            )
         if bits & OVERFLOW_FAIL_MASK & ~OVERFLOW_CROSS:
             try:
                 self.engine._raise_scan_capacity_saturated(local, retries=retries)
@@ -1004,9 +1209,8 @@ class FusedMeshForce:
                 raise RuntimeError(f"mesh {where}: {exc}{cross}") from exc
         if cross:
             raise RuntimeError(
-                f"mesh {where}: {cross.strip()} Bits {bits:#x}, cross needs "
-                f"{np.asarray(needs)[len(NEEDS_FIELDS):].tolist()}; segment "
-                f"retries run: {int(retries)}."
+                f"mesh {where}: {cross.strip()} Bits {bits:#x}; segment retries "
+                f"run: {int(retries)}."
             )
         raise RuntimeError(
             f"mesh {where}: a device's live count exceeds the shard capacity (bits "
