@@ -28,9 +28,12 @@ Two structural differences from the radix seam:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Optional
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array
 
 from jaccpot._jax_compat import Tracer
@@ -38,7 +41,10 @@ from jaccpot._jax_compat import Tracer
 from ._large_n_nearfield import evaluate_large_n_nearfield_fast_lane
 from ._large_n_types import LargeNPreparedState
 from .dtypes import INDEX_DTYPE
-from .kernels._downward_prep import _TargetSortedFarPairCOO
+from .kernels._downward_prep import (
+    _SymmetricTargetSortedFarPairCOO,
+    _TargetSortedFarPairCOO,
+)
 from .kernels.core import (
     _evaluate_local_expansions_for_particles,
     _evaluate_local_expansions_particle_major,
@@ -54,13 +60,30 @@ __all__ = [
 ]
 
 
+@partial(
+    jax.tree_util.register_dataclass,
+    data_fields=["far_pair_sources", "far_pair_targets", "far_pair_active_count"],
+    meta_fields=[
+        "order",
+        "max_leaf_size",
+        "center_mode",
+        "m2l_chunk_size",
+        "l2l_chunk_size",
+        "num_far_pairs",
+        "far_pairs_target_sorted",
+        "far_pairs_symmetric",
+    ],
+)
 @dataclass(frozen=True)
 class LargeNGradPlan:
     """Frozen-topology discriminators for a differentiable large-N evaluation.
 
-    Built once, concretely, outside any trace; captured as a constant by the
-    differentiated function. Hoist it out of an optimisation loop to avoid
-    rebuilding it per step.
+    Built once, concretely, outside any trace. Hoist it out of an optimisation loop
+    to avoid rebuilding it per step. A pytree (the pair arrays are its leaves, the
+    rest static), so a jitted gradient can take it -- and the prepared state -- as
+    ARGUMENTS: closed over, ``jax.jit`` embeds every array of the topology in the
+    program as a constant (a second copy of the far and near lists, and XLA
+    constant-folds through them at compile time).
 
     Attributes
     ----------
@@ -88,6 +111,10 @@ class LargeNGradPlan:
         The frozen list is the walk's ``TargetSortedFarPairs`` (CSR order,
         ``far_pair_targets`` its row offsets): the M2L reads it as the production
         refresh hands it over, without expanding a target per pair or sorting.
+    far_pairs_symmetric : bool
+        The target-sorted list holds every directed pair both ways (checked at
+        plan time, :func:`_csr_pairs_symmetric`): the M2L reverse reads the
+        forward's CSR in both passes and sorts nothing.
     """
 
     far_pair_sources: Array
@@ -100,6 +127,7 @@ class LargeNGradPlan:
     l2l_chunk_size: Optional[int]
     num_far_pairs: int
     far_pairs_target_sorted: bool = False
+    far_pairs_symmetric: bool = False
 
 
 def _require(condition: bool, message: str) -> None:
@@ -150,6 +178,208 @@ def _engine(fmm: Any) -> Any:
         ``fmm`` unchanged.
     """
     return getattr(fmm, "_impl", fmm)
+
+
+def _pair_hash_sums(a: Array, b: Array, live: Array) -> Array:
+    """Order-free sums of two hashes of every live directed pair, both ways round.
+
+    Parameters
+    ----------
+    a : Array
+        ``[E]`` one end of each pair.
+    b : Array
+        ``[E]`` the other end, aligned.
+    live : Array
+        ``[E]`` which entries are pairs.
+
+    Returns
+    -------
+    Array
+        ``uint64[2, 2]``: ``[k] = (sum h_k(a, b), sum h_k(b, a))`` over the live
+        entries, ``h_k`` the splitmix64 finalizer of a seeded combination (the sums
+        wrap; integer addition is exact in any order).
+    """
+
+    def mix(x: Array) -> Array:
+        x = (x ^ (x >> 30)) * jnp.uint64(0xBF58476D1CE4E5B9)
+        x = (x ^ (x >> 27)) * jnp.uint64(0x94D049BB133111EB)
+        return x ^ (x >> 31)
+
+    a64, b64 = a.astype(jnp.uint64), b.astype(jnp.uint64)
+    zero = jnp.zeros((), jnp.uint64)
+    rows = []
+    for seed in (0x9E3779B97F4A7C15, 0xD1B54A32D192ED03):
+        k = jnp.uint64(seed)
+
+        def h(x: Array, y: Array, k: Array = k) -> Array:
+            return mix(mix(x ^ k) + y * jnp.uint64(0xC2B2AE3D27D4EB4F))
+
+        rows.append(
+            jnp.stack(
+                [
+                    jnp.sum(jnp.where(live, h(a64, b64), zero)),
+                    jnp.sum(jnp.where(live, h(b64, a64), zero)),
+                ]
+            )
+        )
+    return jnp.stack(rows)
+
+
+#: entries hashed per launch: the check reads the lists in chunks, so it needs no
+#: array of the lists' length (at 1e8 the far list's capacity is 542M entries)
+_SYMMETRY_CHUNK = 1 << 24
+
+
+@partial(jax.jit, static_argnames=("size",))
+def _csr_pair_hash_sums(
+    entries: Array,
+    row_starts: Array,
+    counts: Array,
+    base: Array,
+    shift: Array,
+    *,
+    size: int,
+) -> Array:
+    """:func:`_pair_hash_sums` of the CSR pairs ``(row, entry)`` in one chunk.
+
+    Parameters
+    ----------
+    entries : Array
+        ``[E]`` the partner of each entry.
+    row_starts : Array
+        ``[R]`` non-decreasing row starts.
+    counts : Array
+        ``[R]`` live entries per row (rows may be padded).
+    base : Array
+        First entry of the chunk.
+    shift : Array
+        Subtracted from each entry (node ids to row indices).
+    size : int
+        Entries per chunk. Static.
+
+    Returns
+    -------
+    Array
+        As :func:`_pair_hash_sums`, over entries ``[base, base + size)``.
+    """
+    num = entries.shape[0]
+    pos = base + jnp.arange(size, dtype=INDEX_DTYPE)
+    row = jnp.searchsorted(row_starts, pos, side="right").astype(INDEX_DTYPE) - 1
+    safe = jnp.maximum(row, 0)
+    live = (pos < num) & (row >= 0) & (pos - row_starts[safe] < counts[safe])
+    partner = entries[jnp.minimum(pos, num - 1)] - shift
+    return _pair_hash_sums(safe, partner, live)
+
+
+def _csr_pairs_symmetric(
+    entries: Array, row_starts: Array, counts: Array, shift: Any = 0
+) -> bool:
+    """Whether a CSR's pairs ``(row, entry)`` are, as a multiset, their reverses.
+
+    A probabilistic multiset test (two independent 64-bit hashes summed over the
+    pairs, no sort): a list that is not symmetric passes with probability about
+    ``2^-64``.
+
+    Parameters
+    ----------
+    entries : Array
+        ``[E]`` the partner of each entry (same index space as the rows).
+    row_starts : Array
+        ``[R]`` (or ``[R + 1]``) non-decreasing row starts.
+    counts : Array
+        ``[R]`` live entries per row.
+    shift : Any
+        Subtracted from each entry first (a neighbour list's leaf node offset).
+
+    Returns
+    -------
+    bool
+        ``True`` when both hash sums agree both ways round.
+    """
+    entries = jnp.asarray(entries, INDEX_DTYPE)
+    shift = jnp.asarray(shift, INDEX_DTYPE)
+    cnt = jnp.asarray(counts, INDEX_DTYPE)
+    # a CSR's offsets may carry the end as an R + 1-th entry: the rows are R
+    starts = jnp.asarray(row_starts, INDEX_DTYPE)[: int(cnt.shape[0])]
+    num = int(entries.shape[0])
+    size = min(_SYMMETRY_CHUNK, 1 << max(0, (num - 1).bit_length()))
+    total = np.zeros((2, 2), np.uint64)
+    for base in range(0, num, size):
+        part = _csr_pair_hash_sums(
+            entries,
+            starts,
+            cnt,
+            jnp.asarray(base, INDEX_DTYPE),
+            shift,
+            size=size,
+        )
+        total = total + np.asarray(part, np.uint64)  # wraps, as the device sums do
+    return bool(np.all(total[:, 0] == total[:, 1]))
+
+
+def _directed_pairs_symmetric(a: Array, b: Array, live: Array) -> bool:
+    """:func:`_csr_pairs_symmetric` for pairs given end by end (small lists).
+
+    Parameters
+    ----------
+    a : Array
+        ``[E]`` one end of each pair.
+    b : Array
+        ``[E]`` the other end.
+    live : Array
+        ``[E]`` which entries are pairs.
+
+    Returns
+    -------
+    bool
+        ``True`` when both hash sums agree both ways round.
+    """
+    sums = np.asarray(jax.jit(_pair_hash_sums)(a, b, live))
+    return bool(np.all(sums[:, 0] == sums[:, 1]))
+
+
+def _near_list_symmetric(neighbor_list: Any) -> bool:
+    """Whether the leaf neighbour CSR holds every (leaf, leaf) pair both ways.
+
+    Parameters
+    ----------
+    neighbor_list : Any
+        The state's ``neighbor_list`` (row starts, counts, neighbour node ids,
+        leaf node ids).
+
+    Returns
+    -------
+    bool
+        As :func:`_csr_pairs_symmetric`.
+    """
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, INDEX_DTYPE)
+    return _csr_pairs_symmetric(
+        neighbor_list.neighbors,
+        neighbor_list.offsets,
+        neighbor_list.counts,
+        shift=leaf_nodes[0],
+    )
+
+
+def _far_list_symmetric(sources: Array, row_offsets: Array, total_nodes: int) -> bool:
+    """Whether a target-sorted far list holds every (source, target) pair both ways.
+
+    Parameters
+    ----------
+    sources : Array
+        ``[P]`` sources in CSR order (padding past the live prefix).
+    row_offsets : Array
+        ``[>= total_nodes + 1]`` row offsets by target.
+    total_nodes : int
+        Rows. Static.
+
+    Returns
+    -------
+    bool
+        As :func:`_csr_pairs_symmetric`.
+    """
+    offsets = jnp.asarray(row_offsets, INDEX_DTYPE)[: total_nodes + 1]
+    return _csr_pairs_symmetric(sources, offsets[:-1], offsets[1:] - offsets[:-1])
 
 
 def prepare_large_n_grad_plan(
@@ -262,11 +492,25 @@ def prepare_large_n_grad_plan(
     )
     from ._interaction_cache import TargetSortedFarPairs
 
+    # The direct near layout's reverse takes each source-side cotangent from the
+    # other end of the pair (nearfield_leafpair_csr_direct_vjp): on a list that is
+    # not symmetric it would be wrong, silently, so refuse one. The walk's lists
+    # are symmetric by construction (one canonical walk emits (A, B) and (B, A)).
+    _require(
+        state.neighbor_list is None or _near_list_symmetric(state.neighbor_list),
+        "differentiable large-N evaluation needs a SYMMETRIC near list (its "
+        "reverse reads each pair from both ends); this state's leaf neighbour CSR "
+        "is not.",
+    )
     sources = jnp.asarray(compact.sources, dtype=INDEX_DTYPE)
     # the list as the walk built it: a target-sorted list keeps its row offsets
     # (the production refresh's M2L operands), anything else one target per pair
     target_sorted = isinstance(compact, TargetSortedFarPairs)
     targets = jnp.asarray(compact.targets, dtype=INDEX_DTYPE)
+    num_nodes = int(jnp.asarray(state.tree.node_ranges).shape[0])
+    far_symmetric = bool(target_sorted) and _far_list_symmetric(
+        sources, targets, num_nodes
+    )
     return LargeNGradPlan(
         far_pair_sources=sources,
         far_pair_targets=targets,
@@ -278,6 +522,7 @@ def prepare_large_n_grad_plan(
         l2l_chunk_size=overrides.l2l_chunk_size,
         num_far_pairs=int(sources.shape[0]),
         far_pairs_target_sorted=bool(target_sorted),
+        far_pairs_symmetric=far_symmetric,
     )
 
 
@@ -329,19 +574,30 @@ def large_n_farfield_locals_at(
         Freshly computed local expansions -- NOT ``state.local_data``, which is
         prebaked and would cut the source-side chain.
     """
+    from jaccpot.upward._mass_moments_vjp import gather_reverse_mass_moments
+
     engine = _engine(fmm)
-    upward = engine.prepare_upward_sweep(
-        state.tree,
-        positions_sorted,
-        masses_sorted,
-        max_order=plan.order,
-        center_mode=plan.center_mode,
-        max_leaf_size=plan.max_leaf_size,
-        defer_geometry=engine._defers_box_geometry(
-            str(engine.config.tree.mode), plan.center_mode
-        ),
-    )
-    coo = _TargetSortedFarPairCOO if plan.far_pairs_target_sorted else _FarPairCOO
+    # the COMs' reverse by the tree's ancestor sums: gathers only (no f64[N + 1]
+    # scatter, the same sums in every run), the forward yggdrax's
+    with gather_reverse_mass_moments():
+        upward = engine.prepare_upward_sweep(
+            state.tree,
+            positions_sorted,
+            masses_sorted,
+            max_order=plan.order,
+            center_mode=plan.center_mode,
+            max_leaf_size=plan.max_leaf_size,
+            defer_geometry=engine._defers_box_geometry(
+                str(engine.config.tree.mode), plan.center_mode
+            ),
+        )
+    coo = _FarPairCOO
+    if plan.far_pairs_target_sorted:
+        coo = (
+            _SymmetricTargetSortedFarPairCOO
+            if plan.far_pairs_symmetric
+            else _TargetSortedFarPairCOO
+        )
     downward = engine.prepare_downward_sweep(
         state.tree,
         upward,
@@ -440,10 +696,23 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
 ) -> Array:
     """Fixed-topology large-N re-evaluation at live inputs, in SORTED order.
 
-    Mirrors the production ``evaluate_large_n_state`` accel fast lane expression
-    for expression, with one deliberate difference: L2P is evaluated against the
-    locals recomputed by :func:`large_n_farfield_locals_at` rather than the frozen
-    ``state.local_data``.
+    The production ``evaluate_large_n_state`` fast lane, expression for
+    expression and kernel for kernel (plan S8): the near field is the CSR lane's
+    direct layout through its ``custom_vjp``
+    (:func:`~jaccpot.pallas.nearfield_leafpair_csr_direct_vjp.
+    nearfield_leafpair_csr_sorted_direct_pallas_cvjp`, whose forward is the
+    production call), the far field is :func:`large_n_farfield_l2p_at` on the locals
+    :func:`large_n_farfield_locals_at` recomputes, and the two are summed as
+    production sums them. At the state's own positions and masses this is the
+    production evaluation bitwise; the one deliberate difference is that the L2P
+    reads recomputed locals rather than the frozen ``state.local_data``, so
+    cotangents reach the source-side chain.
+
+    What production adds that this does not: the caller's external field
+    (``strict_run_v2``'s ``external_acceleration_fn``, outside the self-gravity;
+    differentiate it in the caller), and the near field's overflow / target-block
+    additions of the pure-JAX rectangle route, which the CSR lane never populates
+    and :func:`prepare_large_n_grad_plan` refuses.
 
     ``include_near`` / ``include_far`` exist for the diagnostic split that the
     correctness gate relies on: with the near field disabled, a mass gradient that
@@ -493,25 +762,10 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
         )
 
     engine = _engine(fmm)
-    total = jnp.zeros_like(positions)
-
-    if include_far:
-        locals_live = large_n_farfield_locals_at(
-            engine, state, positions, masses, plan=plan
-        )
-        far_grad, _, _ = _evaluate_local_expansions_for_particles(
-            locals_live,
-            positions,
-            leaf_nodes=jnp.asarray(state.neighbor_list.leaf_indices, dtype=INDEX_DTYPE),
-            node_ranges=jnp.asarray(state.tree.node_ranges, dtype=INDEX_DTYPE),
-            max_leaf_size=plan.max_leaf_size,
-            order=plan.order,
-            expansion_basis="solidfmm",
-            return_potential=False,
-            max_acc_derivative_order=0,
-        )
-        total = total + (-float(getattr(engine, "G")) * far_grad)
-
+    # the engine's G and softening, literals as in production
+    g_far = float(getattr(engine, "G"))
+    near_acc = jnp.zeros_like(positions)
+    far_acc = jnp.zeros_like(positions)
     if include_near:
         near_acc = evaluate_large_n_nearfield_fast_lane(
             engine,
@@ -521,6 +775,9 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
             masses_sorted=masses,
             differentiable=True,
         )
-        total = total + near_acc
-
-    return total
+    if include_far:
+        locals_live = large_n_farfield_locals_at(
+            engine, state, positions, masses, plan=plan
+        )
+        far_acc = -g_far * large_n_farfield_l2p_at(state, locals_live, positions)
+    return near_acc + far_acc
