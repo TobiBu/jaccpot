@@ -38,10 +38,10 @@ runner = ProductionRunner(
     external_potential_fn=halo_potential,
     callbacks=(SnapshotWriter("run/snapshots", every=2), DiagnosticsLog("run/diag.jsonl")),
 )
-res = runner.run(state, masses, dt=5e-4, num_steps=500,
+res = runner.run(state, masses, dt=1e-3, num_steps=500,
                  external_params={"gm": 1.0, "rs": 2.0})
 # killed? continue in a fresh process, same script:
-res = runner.run(dt=5e-4, num_steps=500, restart_from="run/restart.npz",
+res = runner.run(dt=1e-3, num_steps=500, restart_from="run/restart.npz",
                  external_params={"gm": 1.0, "rs": 2.0})
 ```
 
@@ -50,6 +50,32 @@ the run's total from `t0`: a continued run runs the steps still missing. The one
 form is `jaccpot.production.run(solver, state, masses, dt=..., num_steps=..., ...)`.
 The solver runs Dehnen's error MAC at 1e-4 (next section): `G` and the softening are the
 solver's, so a run with another value needs another solver.
+
+## The timestep
+
+The runner takes one shared `dt`. For the 25M disc + bulge in its NFW halo at softening
+1.5e-3, **dt 1e-3** is the production step: plan session C1 ran this configuration
+through `ProductionRunner` (`preset="galaxy"`) for one orbit at 2.5 R_d (t = 1.5) at dt
+1e-3, 5e-4 and 2.5e-4. Against the 2.5e-4 reference, dt 1e-3 gave:
+
+- energy: max |dE/E0| 1.9e-7, a bounded offset, not a drift;
+- per-particle energy diffusion: within 0.35 % of the reference;
+- Lagrangian radii (0.5-90 %, every component): within 0.25 %;
+- Sigma(R) and sigma_z(R): worst bin within 6.3e-4 and 1.4e-4 of the reference; A2
+  within 5.5e-6;
+- |dL|/L: 3.5-9.0e-7 in all three runs, the float32 floor.
+
+This step is the acceleration criterion `eta sqrt(eps / |a|)`'s shortest step at eta
+about 0.33. C1 also found that block timesteps do not pay on this disc at equal accuracy,
+with that criterion or an orbit-time one ([`production_2026-10.md`](production_2026-10.md),
+C1; rows in `bench/results/c1_criterion_2026-10/`).
+
+Two limits on carrying dt 1e-3 elsewhere:
+- **It covers one orbit.** The energy error stayed bounded there; keep the energy
+  diagnostic on in longer runs.
+- **It holds for this N and softening.** With fewer particles or a smaller softening,
+  close encounters at the softening scale set the step. C1's 1e5-particle N-body at this
+  softening (its configuration A) is such a case.
 
 ## The MAC
 

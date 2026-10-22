@@ -695,11 +695,13 @@ solver = FastMultipoleMethod(preset="galaxy", softening=1.5e-3)
 runner = ProductionRunner(
     solver, segment=SegmentConfig(steps=50, restart_every=4, restart_path="restart.npz")
 )
-res = runner.run(state, masses, dt=5e-4, num_steps=500)    # state: [N, 2, 3]
-res = runner.run(dt=5e-4, num_steps=500, restart_from="restart.npz")  # after a kill
+res = runner.run(state, masses, dt=1e-3, num_steps=500)    # state: [N, 2, 3]
+res = runner.run(dt=1e-3, num_steps=500, restart_from="restart.npz")  # after a kill
 ```
 
-Choose `steps` to divide `num_steps` (each segment length compiles its own scan).
+Choose `steps` to divide `num_steps` (each segment length compiles its own scan). dt 1e-3
+is the measured production step for the 25M disc + bulge ([`docs/production.md`](docs/production.md),
+"The timestep").
 Guide: **[docs/production.md](docs/production.md)**.
 
 ## Momentum-Conserving FMM
