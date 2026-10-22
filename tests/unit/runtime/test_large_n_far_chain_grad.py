@@ -49,7 +49,16 @@ from jaccpot.runtime.dtypes import INDEX_DTYPE
 
 _N = 1024
 _LEAF = 8
-_ORDER = 4
+# Order 2, not production's 4-6: on CPU every Pallas kernel runs in interpret mode and
+# the cascades unroll one copy of their kernel body per tree level (~25 here), so the
+# reverse program grows faster than linearly with the order -- the whole force's
+# gradient compiled in 150 s at +9.2 GiB RSS at order 4, 73 s / 6.8 GB peak at 3, and
+# 32 s / 3.2 GB at 2 (2026-10-22, the CI runner has 16 GB for two workers). What this
+# module checks -- bitwise forwards, analytic reverses against central differences in
+# float64 -- holds at any order; the reverse kernels' higher orders are covered one
+# kernel at a time (tests/unit/operators/test_*_vjp.py at orders 2-5,
+# test_l2p_particle_major_reverse.py at 3-8).
+_ORDER = 2
 _G = 1.0
 _SOFTENING = 1e-2
 
@@ -199,7 +208,7 @@ def test_the_far_gradient_matches_finite_differences(lane):
 
     Directional derivatives along random directions, in the positions and the
     masses separately; float64, so the differences agree to ~1e-8 (measured:
-    every component within 5e-7 of a per-entry check at N=1024).
+    every component within 5e-7 of a per-entry check at N=1024, order 4).
     """
     fmm, state, plan = lane
     rng = np.random.default_rng(5)
@@ -358,6 +367,7 @@ def test_the_plan_checks_that_the_lists_are_symmetric(sorted_lane):
     assert not _csr_pairs_symmetric(entries, offsets, jnp.asarray([2, 2, 1]))
 
 
+@pytest.mark.xdist_group("large_n_far_chain_grad")
 def test_the_plan_keeps_the_walks_list_as_walked(lane):
     """A target-sorted walk list stays row offsets in the plan (no per-pair targets)."""
     _, state, plan = lane

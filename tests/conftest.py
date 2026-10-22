@@ -515,6 +515,15 @@ _DIFF_FMM_TEST_FILES = frozenset(
         # exactly the reason above -- it is a characterization test, but the
         # footprint is a differentiable-FMM footprint.
         "test_fmm_grad_golden.py",
+        # The gradients on the production layout (plan S8): jax.grad through the
+        # large-N lane's reverse kernels in Pallas interpret mode, one reverse
+        # program of the whole lane per case (1.5-5 GB each on CPU, the L2P reverse
+        # file many small ones). They sit in tests/unit/runtime, which
+        # `_SOLVER_HEAVY_TEST_DIRS` below clears anyway; named here so the clearing
+        # follows them if they move (the split trap the next note describes).
+        "test_large_n_grad_reverse_path.py",
+        "test_large_n_far_chain_grad.py",
+        "test_l2p_particle_major_reverse.py",
     }
 )
 

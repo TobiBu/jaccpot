@@ -831,6 +831,14 @@ class TestSofteningKernelsOnTheCsrLane:
 
 _CASCADE_SOFT = 1e-2
 _CASCADE_LEAF = 8  # deep enough for a non-empty M2L list at N=1024
+# Order 2 (it was 4): in interpret mode the cascades unroll one copy of their kernel
+# body per tree level, and the reverse programs grow faster than linearly with the
+# order -- this test peaked at 7.6 GB RSS on CPU at order 4, 4.2 GB at 3 and 2.6 GB at
+# 2 (2026-10-22). The Pallas reverse equals the loops' at any order (1.3e-18 here);
+# the direct sum is then matched to order 2's truncation error, 7.2e-05 measured
+# (order 4: under 1e-05), hence its tolerance below.
+_CASCADE_ORDER = 2
+_CASCADE_DIRECT_RTOL = 3e-4
 
 
 def _plummer(n, seed=0):
@@ -920,7 +928,9 @@ class TestPallasCascades:
         """
         pos, mass = _plummer_system()
         fmm = FastMultipoleMethod(theta=0.5, softening=_CASCADE_SOFT, G=1.0)
-        state = fmm.prepare_state(pos, mass, max_order=4, leaf_size=_CASCADE_LEAF)
+        state = fmm.prepare_state(
+            pos, mass, max_order=_CASCADE_ORDER, leaf_size=_CASCADE_LEAF
+        )
         assert (
             _far_pairs(state) > 0
         ), "vacuous configuration: no far pairs, the cascades are dead code"
@@ -949,7 +959,7 @@ class TestPallasCascades:
         assert np.linalg.norm(got) > 0
         rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
         assert (
-            rel < 1e-5
+            rel < _CASCADE_DIRECT_RTOL
         ), f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"
         rel = np.linalg.norm(got - g_loops) / np.linalg.norm(g_loops)
         assert rel < 1e-9, f"Pallas reverse vs loop reverse rel-L2 {rel:.3e}"
@@ -1101,6 +1111,13 @@ class TestTheForwardIsTheFusedForce:
 
 _DE_N = 512
 _DE_LEAF = 8
+# Order 2 for the reason test_large_n_far_chain_grad.py gives (the interpret-mode
+# reverse program grows faster than linearly with the order): at order 4 this
+# gradient compiled in 157 s at +7.1 GiB, the class peaking at 13.2 GB RSS on CPU in
+# 8 min; at order 2, 2.8 GB in 2 min (2026-10-22). The claims (bitwise forward,
+# reverse against central differences at the criterion's frozen lists) do not depend
+# on the order.
+_DE_ORDER = 2
 _DE_ENV = dict(_INTERPRET_FLAGS, JACCPOT_L2P_KERNEL="interpret")
 
 
@@ -1138,10 +1155,10 @@ class TestDehnenErrorAtFrozenLists:
                     farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
                     mac_type="dehnen_error",
                 ),
-                fixed_order=_ORDER,
+                fixed_order=_DE_ORDER,
             )
             state = fmm.prepare_state(
-                positions, masses, leaf_size=_DE_LEAF, max_order=_ORDER
+                positions, masses, leaf_size=_DE_LEAF, max_order=_DE_ORDER
             )
             assert isinstance(state, LargeNPreparedState)
             plan = prepare_large_n_grad_plan(fmm, state)
