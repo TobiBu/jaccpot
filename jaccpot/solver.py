@@ -1544,6 +1544,7 @@ class FastMultipoleMethod:
         jit_traversal: bool = False,
         grad_plan: Optional[Any] = None,
         grad_config: Optional[GradConfig] = None,
+        force_params: Optional[ForceParams] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -1590,6 +1591,12 @@ class FastMultipoleMethod:
             N >= 100000 because the bucketed reverse OOMs at galaxy scale. Each
             field falls back to its ``JACCPOT_*`` environment variable when left
             ``None``, so existing env-configured scripts are unaffected.
+        force_params : Optional[ForceParams]
+            Large-N only: ``G`` and the softening squared
+            (:class:`~jaccpot.ForceParams`). Arrays are differentiable, so
+            ``jax.grad`` reaches ``G`` and ``eps2`` at the frozen topology;
+            ``None`` is the solver's own. Refused under
+            ``mac_type='dehnen_error'``.
 
         Returns
         -------
@@ -1604,6 +1611,7 @@ class FastMultipoleMethod:
             jit_traversal=jit_traversal,
             grad_plan=grad_plan,
             grad_config=grad_config,
+            force_params=force_params,
         )
 
     def differentiable_step_fn(

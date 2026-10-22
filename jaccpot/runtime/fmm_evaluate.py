@@ -52,6 +52,7 @@ from ._nearfield_fastlane import (
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import FMMPreparedState
+from .fused_topology import ForceParams
 from .grad_options import grad_option_overrides, resolve_grad_options
 from .kernels.core import (
     NearfieldInteropData,
@@ -717,6 +718,7 @@ class EvaluateMixin(_EngineBase):
         jit_traversal: bool = False,
         grad_plan: Optional["LargeNGradPlan"] = None,
         grad_config: Optional[GradConfig] = None,
+        force_params: Optional[ForceParams] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -767,10 +769,24 @@ class EvaluateMixin(_EngineBase):
             OOMs at galaxy scale (30 GB peak at 200k against 6.8 GB). See
             :class:`~jaccpot.config.GradConfig`; every field also has a
             ``JACCPOT_*`` environment fallback, and an explicit field wins.
+        force_params : Optional[ForceParams]
+            Large-N path only: ``G`` and the softening squared, as the fused lane
+            takes them (:class:`~jaccpot.runtime.fused_topology.ForceParams`). Arrays
+            are differentiable -- ``jax.grad`` in ``G`` and ``eps2`` at the frozen
+            topology; ``None`` (or the solver's own values as Python floats) is the
+            solver's, the production program. Refused (``ValueError``) under
+            ``mac_type='dehnen_error'``: its frozen thresholds were built with the
+            solver's own.
+
         Returns
         -------
         Array
             ``(N, 3)`` accelerations in the original input order.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``force_params`` is given for a radix ``FMMPreparedState``.
 
         Notes
         -----
@@ -801,6 +817,13 @@ class EvaluateMixin(_EngineBase):
                     target_indices=target_indices,
                     grad_plan=grad_plan,
                     options=options,
+                    force_params=force_params,
+                )
+            if force_params is not None:
+                raise NotImplementedError(
+                    "force_params reaches the large-N (preset='large_n_gpu') "
+                    "differentiable lane only; a radix FMMPreparedState evaluates "
+                    "with the solver's own G and softening"
                 )
             return self._differentiable_accelerations_radix(
                 state,
@@ -879,7 +902,9 @@ class EvaluateMixin(_EngineBase):
             particle order, as for :meth:`differentiable_accelerations`. On a
             ``LargeNPreparedState`` the state and its grad plan are arguments of
             the compiled program, bound with ``functools.partial`` (closed over,
-            ``jax.jit`` embeds the whole topology as constants).
+            ``jax.jit`` embeds the whole topology as constants), and ``f`` takes
+            an optional third argument, ``force_params`` (as
+            :meth:`differentiable_accelerations`).
 
         Raises
         ------
@@ -918,6 +943,7 @@ class EvaluateMixin(_EngineBase):
                 plan_in: "LargeNGradPlan",
                 positions: Array,
                 masses: Array,
+                force_params: Optional[ForceParams] = None,
             ) -> Array:
                 with grad_option_overrides(options):
                     return self._differentiable_accelerations_large_n(
@@ -927,6 +953,7 @@ class EvaluateMixin(_EngineBase):
                         target_indices=target_indices,
                         grad_plan=plan_in,
                         options=options,
+                        force_params=force_params,
                     )
 
             # the state and the plan are ARGUMENTS of the program: closed over,
@@ -1090,6 +1117,7 @@ class EvaluateMixin(_EngineBase):
         target_indices: Optional[Array],
         grad_plan: Optional["LargeNGradPlan"],
         options: Any,
+        force_params: Optional[ForceParams] = None,
     ) -> Array:
         """Differentiable evaluation on the ``large_n_gpu`` production state.
 
@@ -1119,6 +1147,10 @@ class EvaluateMixin(_EngineBase):
         options : Any
             Resolved :class:`~jaccpot.config.GradConfig`. Its ``nearfield_lane``
             is ignored on this state -- see above.
+        force_params : Optional[ForceParams]
+            ``G`` and the softening squared, or ``None`` for the solver's own
+            (:func:`~jaccpot.runtime._large_n_grad.resolve_grad_force_params`,
+            which raises ``ValueError`` for others under ``mac_type='dehnen_error'``).
 
         Returns
         -------
@@ -1133,6 +1165,7 @@ class EvaluateMixin(_EngineBase):
         from ._large_n_grad import (
             evaluate_large_n_state_at_positions_and_masses_sorted,
             prepare_large_n_grad_plan,
+            resolve_grad_force_params,
         )
 
         if target_indices is not None:
@@ -1157,6 +1190,7 @@ class EvaluateMixin(_EngineBase):
             if grad_plan is not None
             else prepare_large_n_grad_plan(self, state)
         )
+        force = resolve_grad_force_params(self, force_params)
         positions_sorted, masses_sorted = self._sorted_inputs(state, positions, masses)
         accelerations_sorted = evaluate_large_n_state_at_positions_and_masses_sorted(
             self,
@@ -1164,6 +1198,7 @@ class EvaluateMixin(_EngineBase):
             positions_sorted,
             masses_sorted,
             plan=plan,
+            force_params=force,
         )
         return jnp.asarray(accelerations_sorted)[state.inverse_permutation].astype(
             self._grad_output_dtype(state)

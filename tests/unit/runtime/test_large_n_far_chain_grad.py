@@ -17,8 +17,9 @@ the far half of the differentiable forward that plan S8 makes the production one
   reverse returned NaN there.
 * the whole force (plan S8, the wiring): ``differentiable_accelerations`` jitted
   with the state and the grad plan as ARGUMENTS is the production evaluation
-  bitwise, on the far list as the GPU's walk hands it over (target-sorted and
-  checked symmetric).
+  bitwise, and its gradient in the positions, the masses, ``G`` and ``eps2`` (traced
+  ``ForceParams``) agrees with central differences -- every reverse of the
+  production layout, the near field's direct one included.
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from jaccpot import (
     FarFieldConfig,
     FastMultipoleMethod,
     FMMAdvancedConfig,
+    ForceParams,
     TreeConfig,
 )
 from jaccpot.runtime._large_n_grad import (
@@ -250,12 +252,61 @@ def test_the_differentiable_force_is_the_production_force(sorted_lane):
 
 
 @pytest.mark.xdist_group("large_n_far_chain_grad")
+def test_the_whole_force_gradient_matches_finite_differences(sorted_lane):
+    """``jax.grad`` of the whole force in positions, masses, ``G`` and ``eps2``.
+
+    float64, every kernel's reverse (the near field's direct layout, the L2P, the
+    far chain). Directional derivatives along random directions in the positions
+    and the masses; the force is linear in ``G`` (the difference quotient is exact
+    to round-off) and smooth in ``eps2`` at frozen lists (second-order truncation).
+    The far list is the flat walk's target-sorted, symmetric one, so the M2L reverse
+    is the sort-free one.
+    """
+    fmm, state, plan = sorted_lane
+    assert plan.far_pairs_target_sorted and plan.far_pairs_symmetric
+    positions, masses = _input_order(state)
+    rng = np.random.default_rng(7)
+    weight = jnp.asarray(rng.normal(size=(_N, 3)))
+
+    def loss(st, pl, p, m, g, eps2):
+        acc = fmm.differentiable_accelerations(
+            st, p, m, grad_plan=pl, force_params=ForceParams(G=g, eps2=eps2)
+        )
+        return jnp.sum(weight * acc)
+
+    g0, e0 = jnp.asarray(1.3), jnp.asarray(_SOFTENING**2)
+    grad_p, grad_m, grad_g, grad_e = jax.jit(jax.grad(loss, argnums=(2, 3, 4, 5)))(
+        state, plan, positions, masses, g0, e0
+    )
+    for g in (grad_p, grad_m, grad_g, grad_e):
+        assert np.all(np.isfinite(np.asarray(g)))
+    value = jax.jit(loss)
+
+    def fd(dp=0.0, dm=0.0, dg=0.0, de=0.0):
+        plus = value(state, plan, positions + dp, masses + dm, g0 + dg, e0 + de)
+        minus = value(state, plan, positions - dp, masses - dm, g0 - dg, e0 - de)
+        return (float(plus) - float(minus)) / 2.0
+
+    h = 1e-5
+    v_p = jnp.asarray(rng.normal(size=(_N, 3)))
+    v_m = jnp.asarray(rng.normal(size=(_N,)))
+    fd_p, fd_m = fd(dp=h * v_p) / h, fd(dm=h * v_m) / h
+    got_p, got_m = float(jnp.sum(grad_p * v_p)), float(jnp.sum(grad_m * v_m))
+    assert abs(got_p - fd_p) <= 1e-6 * abs(fd_p), (got_p, fd_p)
+    assert abs(got_m - fd_m) <= 1e-6 * abs(fd_m), (got_m, fd_m)
+    h_g, h_e = 1e-4, 1e-3 * _SOFTENING**2
+    np.testing.assert_allclose(float(grad_g), fd(dg=h_g) / h_g, rtol=1e-10)
+    np.testing.assert_allclose(float(grad_e), fd(de=h_e) / h_e, rtol=1e-6)
+    assert float(grad_e) != 0.0
+
+
+@pytest.mark.xdist_group("large_n_far_chain_grad")
 def test_the_step_fn_takes_the_topology_as_arguments(sorted_lane):
     """``differentiable_step_fn`` binds the state and its plan as arguments.
 
     Closed over, ``jax.jit`` would embed every array of the topology in the program
     as a constant. The bound program is the production force (bitwise) and
-    differentiable.
+    differentiable; ``force_params`` is its optional third argument.
     """
     from jaccpot.runtime._large_n_grad import LargeNGradPlan
 
@@ -267,8 +318,12 @@ def test_the_step_fn_takes_the_topology_as_arguments(sorted_lane):
     production = np.asarray(fmm.evaluate_prepared_state(state))
     got = np.asarray(step(positions, masses))
     assert np.array_equal(got.view(np.uint64), production.view(np.uint64))
-    g = jax.grad(lambda p: jnp.sum(step(p, masses)[:, 0]))(positions)
-    assert np.all(np.isfinite(np.asarray(g))) and np.any(np.asarray(g) != 0.0)
+    g = jax.grad(
+        lambda gg: jnp.sum(
+            step(positions, masses, ForceParams(G=gg, eps2=_SOFTENING**2))[:, 0]
+        )
+    )(jnp.asarray(_G))
+    assert np.isfinite(float(g)) and float(g) != 0.0
 
 
 @pytest.mark.xdist_group("large_n_far_chain_grad")

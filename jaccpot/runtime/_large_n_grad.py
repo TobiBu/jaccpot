@@ -57,6 +57,7 @@ __all__ = [
     "large_n_farfield_l2p_at",
     "large_n_farfield_locals_at",
     "prepare_large_n_grad_plan",
+    "resolve_grad_force_params",
 ]
 
 
@@ -684,6 +685,61 @@ def large_n_farfield_l2p_at(
     return far_grad
 
 
+def resolve_grad_force_params(fmm: Any, force_params: Any) -> Any:
+    """The force parameters a differentiable large-N evaluation runs with.
+
+    As :meth:`~jaccpot.runtime.fused_provider.FusedForceProvider.resolve_params`
+    does for the fused lane: ``None``, or the engine's own values as Python
+    floats, is the engine's (``None``: its literals, the production program);
+    other Python floats are literals; arrays are cast to the working dtype and
+    may be traced -- ``jax.grad`` in ``G`` and ``eps2`` at the frozen topology.
+
+    Parameters
+    ----------
+    fmm : Any
+        Facade or runtime engine.
+    force_params : Any
+        A :class:`~jaccpot.runtime.fused_topology.ForceParams`, or ``None``.
+
+    Returns
+    -------
+    Any
+        ``None`` for the engine's own parameters, else a ``ForceParams``.
+
+    Raises
+    ------
+    ValueError
+        For anything but the engine's own under ``mac_type='dehnen_error'``: the
+        frozen lists' eq (16a) thresholds were built with them (the fused lane's
+        refusal, user decision S2).
+    """
+    from .fused_topology import ForceParams, _is_static
+
+    if force_params is None:
+        return None
+    engine = _engine(fmm)
+    own_g, own_eps2 = float(engine.G), float(engine.softening) ** 2
+    if (
+        force_params.is_static()
+        and float(force_params.G) == own_g
+        and float(force_params.eps2) == own_eps2
+    ):
+        return None
+    if str(getattr(engine, "mac_type", "")) == "dehnen_error":
+        raise ValueError(
+            "mac_type='dehnen_error' takes the solver's own G and softening only "
+            f"(G={own_g}, eps2={own_eps2}): the frozen lists' eq (16a) thresholds "
+            "were built with them. Gradients in the positions and masses at those "
+            "lists need no force_params; G and eps2 need another MAC."
+        )
+    dtype = engine.working_dtype
+
+    def cast(value: Any) -> Any:
+        return value if _is_static(value) else jnp.asarray(value, dtype)
+
+    return ForceParams(G=cast(force_params.G), eps2=cast(force_params.eps2))
+
+
 def evaluate_large_n_state_at_positions_and_masses_sorted(
     fmm: Any,
     state: LargeNPreparedState,
@@ -693,6 +749,7 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
     plan: LargeNGradPlan,
     include_near: bool = True,
     include_far: bool = True,
+    force_params: Any = None,
 ) -> Array:
     """Fixed-topology large-N re-evaluation at live inputs, in SORTED order.
 
@@ -734,6 +791,13 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
         Include the near-field contribution.
     include_far : bool
         Include the far-field contribution.
+    force_params : Any
+        A :class:`~jaccpot.runtime.fused_topology.ForceParams` (``G`` and the
+        softening squared) resolved by :func:`resolve_grad_force_params`; ``None``
+        takes the engine's literals. Arrays may be traced: the gradient in them
+        is the derivative of the force at the frozen lists (for a compact
+        softening kernel, valid up to the softening the walk was built for,
+        ``FusedForceProvider.walk_eps2``).
 
     Returns
     -------
@@ -762,8 +826,13 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
         )
 
     engine = _engine(fmm)
-    # the engine's G and softening, literals as in production
-    g_far = float(getattr(engine, "G"))
+    # the engine's G and softening (literals), or the caller's -- as production
+    g_far = float(getattr(engine, "G")) if force_params is None else force_params.G
+    near_kw = (
+        {}
+        if force_params is None
+        else {"G": force_params.G, "softening_sq": force_params.eps2}
+    )
     near_acc = jnp.zeros_like(positions)
     far_acc = jnp.zeros_like(positions)
     if include_near:
@@ -774,6 +843,7 @@ def evaluate_large_n_state_at_positions_and_masses_sorted(
             positions_sorted=positions,
             masses_sorted=masses,
             differentiable=True,
+            **near_kw,
         )
     if include_far:
         locals_live = large_n_farfield_locals_at(
