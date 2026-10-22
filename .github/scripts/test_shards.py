@@ -114,9 +114,11 @@ SHARDS: dict[str, list[str]] = {
     "distributed-tier": [
         "tests/distributed",
         "-m",
-        "not distributed_criterion",
+        "not distributed_criterion and not distributed_segment",
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
+    # the fused mesh lane's segment runner (S11): minutes of compile per case
+    "distributed-segment": ["tests/distributed", "-m", "distributed_segment"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -124,7 +126,11 @@ SHARDS: dict[str, list[str]] = {
 # can move them. They run on pushes to main, on the nightly schedule, on a manual
 # dispatch, and on a pull request whose diff touches one of `GATED_PATHS` (prefix
 # match) -- the `changes` job in ci.yml asks `touches`.
-GATED_SHARDS: tuple[str, ...] = ("distributed-criterion", "nornax-distributed")
+GATED_SHARDS: tuple[str, ...] = (
+    "distributed-criterion",
+    "distributed-segment",
+    "nornax-distributed",
+)
 GATED_PATHS: tuple[str, ...] = (
     "jaccpot/distributed/",
     "jaccpot/mutual/",

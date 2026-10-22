@@ -17,6 +17,9 @@ eps 1e-2 (ferrers3), two devices.
   re-planned at its start, and equals a fresh run with the final capacities,
   bitwise by id.
 
+Each case is ~1.5-4 min on a loaded 64-core host, nearly all compilation, so the
+file has a CI job of its own (marker ``distributed_segment``).
+
     XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_PLATFORMS=cpu \\
         pytest tests/distributed/test_mesh_segment_runner.py -q
 """
@@ -49,6 +52,7 @@ pytestmark = [
         jax.device_count() < 2, reason="the fused multi-GPU lane needs >= 2 devices"
     ),
     pytest.mark.slow,
+    pytest.mark.distributed_segment,
 ]
 
 AXIS = "gpus"
