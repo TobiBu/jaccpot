@@ -1389,6 +1389,8 @@ def _m2l_lanes_fb_cvjp_bwd(
     cotangents,
 ):
     loc_bar, _ = cotangents
+    # symmetric=False: the sorting reverse is right for any list, and nothing
+    # guarantees that a dehnen_error far list holds every pair both ways
     grads = _m2l_lanes_cvjp_bwd(
         order,
         k_lanes,
@@ -1397,6 +1399,7 @@ def _m2l_lanes_fb_cvjp_bwd(
         num_warps,
         n_targets,
         presorted,
+        False,
         residual,
         loc_bar,
     )
