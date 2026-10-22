@@ -43,7 +43,16 @@ by the symmetry.
 MEMORY. The reverse reads the forward's ``(N + Wpad, 4)`` particle table (rebuilt,
 not saved) and a ``(N + Wpad, 4)`` table of the cotangents, and writes five ``(N,)``
 lanes (x, y, z, the mass sum, the softening sum): no ``(L, W)`` tables, no per-chunk
-partials, nothing ``N x 16`` (the S8 gate).
+partials, nothing ``N x 16`` (the S8 gate). ``jax.grad`` of ``sum(acc . w)`` through
+this rule alone on a captured 8e6 disc step (A100, float32,
+``bench/near_direct_reverse_gate.py --memory``): 45.4 B/p of temporaries (0.34 GiB),
+the largest array the ``(N + Wpad, 4)`` table; the table layout's rule on the same step
+needs 1380 B/p (10.28 GiB).
+
+TIME. On the same step the gradient takes 57.6 ms against the production forward's
+26.8-30.0 ms (the table layout's: 274.5 ms); on the 2e5 disc 3.18 ms against 1.81.
+The reverse does about twice the forward's arithmetic per pair (the tidal contraction,
+the softening derivative) and reads seven floats per source to its four.
 
 LONG ROWS. As in the forward, a row runs at most ``row_limit`` entries per program
 (one 101,870-entry outlier row serialised a whole launch, 2026-10-05). The rest of a
@@ -107,8 +116,14 @@ __all__ = [
 ]
 
 #: The reverse kernel's default tile: ``Bt = 8`` targets against ``Bs = 8`` sources, one
-#: warp. Half the forward's target tile: the reverse carries nine ``(Bt, Bs)``
-#: accumulators to the forward's four.
+#: warp. Half the forward's target tile (16, ``DIRECT_TILED_TARGET_SUBTILE``): the
+#: reverse carries nine ``(Bt, Bs)`` accumulators to the forward's four. A100,
+#: 2026-10-22, reverse alone against the production forward on captured steps
+#: (``bench/near_direct_reverse_gate.py``, free card): clipped Plummer 8e6 (cells of
+#: 10.5 particles, ferrers3 at softening 1e-7) 54.7 ms against 62.7 at (16, 8) and
+#: 61.3 at (16, 8) with 2 warps, forward 25.5; the 8e6 disc (16.4 per cell, ferrers3
+#: at 1.5e-3) 57.6 ms against 66.0 (16, 8), 60.8 (4, 8), 68.2 (8, 16), 62.4 (8, 8)
+#: with 2 warps, forward 30.0; at 2e5 likewise the fastest or within 2 %.
 REVERSE_TARGET_SUBTILE = 8
 REVERSE_SOURCE_TILE = 8
 
