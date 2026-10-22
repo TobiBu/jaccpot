@@ -1295,7 +1295,51 @@ same score over HOLD's cost; ranges over total energy, the per-particle energy t
   - refinement at the particle's own boundary;
   - an accuracy gate against shared steps at equal cost, not at equal eta.
 
-## S8-F — the far field's reverse on the production layout (2026-10-22)
+## S8 — gradients on the production layout (2026-10-22)
+
+Plan S8 (D6, part 1): the differentiable force runs the production forward's kernels, with reverses that fit at 1e8.
+Three tracks, all on main `248f93a` (S3b and S4 merged) and then `f654bd6`: **S8-N** (`s8/near-direct-reverse`), the
+near field's reverse on the direct layout; **S8-F** (`s8/l2p-reverse`), the far field's (L2P, P2M, M2L, M2M / L2L)
+and the far half's entry points; **S8-W** (`s8/wire-production-grad`, on `s8/integ` = main + both), the wiring of
+the differentiable seam onto them, the gates, the memory at 1e8. GPU rows ran on A100s; a row is a timing only when
+the card had no other process before and after (said so where it did), otherwise a contended hint.
+
+| target / gate | result |
+| --- | --- |
+| differentiable forward == production forward | **bitwise**: pin G1 (2e5, both call orders, 0 of 600,000 elements); the gate bench at 8e6 (0 of 24M) and 2.5e7 (0 of 75M); every softening kernel on CPU (Pallas interpret, compiled) |
+| FD in float64 through the whole force (near + far) | positions, masses within 1e-6 (directional), `G` 1e-10, `eps2` 1e-6 (CPU interpret, N 1024, cells of 8, p4, ferrers3; the far list target-sorted and symmetric as the GPU walk hands it over) |
+| per-softening-kernel parity | plummer, ferrers3, wendland_c2: forward bitwise; the direct near reverse vs a float64 pair sum <= 6.8e-15 (S8-N) |
+| no buffer of 16 N floats | the largest at 8e6: the `[nodes, 36]` tables, 9.4 N floats (pow2 leaf capacity); at 1e8 the COM forward's `f64[N, 3]` prefix sums, 6.0 N floats |
+| single-force gradient at 1e8 within 36 GB | `jax.grad` (positions, masses, the production leaf capacity): device peak **28.29 GiB (30.4 GB)**, temporaries 13.92 GiB (149 B/p); `value_and_grad`: temporaries 19.15 GiB, peak ~33.4 GiB (35.9 GB) estimated (12.73 in use + 19.15 + 1.49 outputs; it ran out of memory on a card with another user's 3.9 GB) |
+| gradient <= 5x the force eval at 8e6 | `jax.grad` **4.38x** (131.5 / 30.0 ms), `value_and_grad` 5.38x (161.6 ms); one run on a card free before and after: the lead's A-vs-A free-card timing is `time_grad.sh` |
+| gradient A-vs-A | bitwise at 8e6 (G1 point and galaxy), 2.5e7 and 1e8 (it differed in 636-1036 mass elements at 8e6 before S8-W's COM reverse) |
+
+### The near field's reverse on the direct layout (S8-N)
+- `nearfield_leafpair_csr_sorted_direct_reverse_pallas` (`pallas/nearfield_leafpair_csr_direct_vjp.py`) is the
+  adjoint of the production near kernel on its own sorted layout: one program per (leaf, target subtile) walks the
+  leaf's row as the forward does. The near list is symmetric (one canonical walk emits (A, B) and (B, A)), so a sink's
+  program sees every pair it is part of from both ends and writes its source-side cotangent too: one writer per
+  particle, no atomics, no second pass. `G_bar` comes from the mass cotangent by Euler (the force is mass-linear).
+- `nearfield_leafpair_csr_sorted_direct_pallas_cvjp` is the production call under a `custom_vjp` (the same
+  keywords; its forward IS that call). It differentiates positions (sinks and sources), masses, `softening_sq` and
+  `G`; the `dehnen_error` force-scale lane is computed and treated as a constant (it only sets the next walk's
+  thresholds); the potential lane is refused.
+- Measured (A100, no other process before or after, `bench/near_direct_reverse_gate.py` on captured steps):
+
+  | capture | forward | gradient (table layout's) | temporaries |
+  | --- | --- | --- | --- |
+  | 8e6 disc (ferrers3, eps 1.5e-3) | 26.8-30.0 ms | 57.6 ms (274.5) | 45.4 B/p, largest 4.00 N floats (1380 B/p) |
+  | 8e6 clipped Plummer | 25.5 ms | 54.7 ms (reverse alone) | |
+  | 2e5 disc / plummer / wendland_c2 | 1.81 / 1.38 / 2.01 ms | 3.18 / 2.39 / 3.64 ms (15.9 disc) | |
+  | 25M disc+bulge, `dehnen_error` 1e-4 (with the force-scale lane) | 106.1 ms | 202.9 ms | 45.4 B/p, device peak 2.43 GiB |
+
+  Float32 against float64 <= 1.9e-6 (the table layout's <= 1.2e-6); A-vs-A bitwise. Gates: central differences of
+  the production forward in float64 for positions, masses, eps^2 and G (<= 1.4e-8 relative, every kernel); the
+  reverse against `jax.vjp` of a pure-JAX pair sum <= 6.8e-15 (plummer, ferrers3, wendland_c2; rows in pieces,
+  padded subtiles, self terms alone, an empty neighbour array).
+
+### The far field's reverse on the production layout (S8-F)
+
 
 Track S8-F of S8 (gradients on the production layout), branch `s8/l2p-reverse` on main `248f93a` (S3b and S4
 merged). It gives the far half of the differentiable forward the production layout and kernels, with reverses that
@@ -1305,7 +1349,7 @@ calls the leaf-major L2P). The operating point is G1's unless stated: Plummer, c
 The measured quantity is `jax.value_and_grad` of `sum(w * far_acc)` through the far chain alone (P2M, M2M, M2L,
 L2L, L2P at the state's frozen lists), jitted.
 
-### What the differentiable far path ran, against the production refresh
+#### What the differentiable far path ran, against the production refresh
 | stage | production | differentiable (before) | effect |
 | --- | --- | --- | --- |
 | P2M, M2M, M2L, L2L | Pallas through their `custom_vjp` seams | the same kernels and seams | locals bitwise the prepared state's at 2e5, both at the G1 point and at `preset="galaxy"` (`dehnen_error`, p6) |
@@ -1324,7 +1368,7 @@ Two fixes:
 With both, the far half at the state's own inputs is the production eval's far field bitwise (A100 at 2e5, and the
 CPU interpret test).
 
-### The reverses
+#### The reverses
 - **L2P** (`l2p_real_particles_pallas_cvjp`, the production call with a reverse):
   - a program owns 32 leaves as the rows of a (32, 4) lane tile;
   - per lane, the coefficient cotangents are the gradient's recurrence contracted with the cotangent
@@ -1348,7 +1392,7 @@ CPU interpret test).
   reductions across the program, and an owner per leaf. At 8e6 it took 9.9-25 ms over 7 block / warp / group
   variants, against 3.94 ms for the blocked reverse and 1.15 ms for the forward (synthetic cell-like layout, p5).
 
-### Memory and time (shared A100s)
+#### Memory and time (shared A100s)
 `temp` is the compiled gradient's temporaries (`memory_analysis`). The peak is the process's `peak_bytes_in_use`,
 which includes the prepared state (1.66 GB at 8e6, 4.13 GB at 2.5e7). Times are the minima over 3-7 calls.
 
@@ -1388,7 +1432,7 @@ Kernel time of the far gradient at 8e6 (one trace, a shared card): 95.5 ms. The 
   - the far list's `s32[44M]` arrays, 168 MiB (5.5).
   - Nothing reaches 16 floats per particle, and nothing is per particle and per coefficient.
 
-### Gates
+#### Gates
 | gate | result |
 | --- | --- |
 | L2P reverse vs `jax.vjp` of a pure-JAX L2P (interpret, p 3-8: every occupancy, leaves over many chunks, empty leaves, dead rows) | float64 < 1e-12 and float32 < 2e-5 of the largest component (the test's bounds; float64 measured 3.8e-16). A100 (Triton): float64 <= 7.9e-16, float32 <= 6.0e-7, A-vs-A bitwise |
@@ -1398,7 +1442,7 @@ Kernel time of the far gradient at 8e6 (one trace, a shared card): 95.5 ms. The 
 | CPU program identity vs `s3b-integ-cpu` | 36/36 identical (HEAD, rebased on main `248f93a`) |
 | the forward kernels' source lines (L2P, P2M, cascade lanes; their Triton IR embeds the locations) | unchanged |
 
-### For S8-W and later
+#### For S8-W and later (S8-W wired the seam, removed the by-source sort and the COM scatter; see below)
 - **Wire the seam:** `evaluate_large_n_state_at_positions_and_masses_sorted` should call
   `-G * large_n_farfield_l2p_at(state, large_n_farfield_locals_at(...), positions)`. The G1 pin should then become
   bitwise on the far half.
@@ -1412,3 +1456,111 @@ Kernel time of the far gradient at 8e6 (one trace, a shared card): 95.5 ms. The 
   (the positions' were bitwise). The new kernels write every row once (no atomics), and the L2P reverse alone was
   bitwise A-vs-A. The difference is in XLA's part of the chain, most likely the scatters of the COM's reverse; not
   bisected.
+
+### The wiring of the differentiable seam (S8-W)
+
+What the differentiable forward (`differentiable_accelerations` on a `LargeNPreparedState`,
+`runtime/_large_n_grad.py`) ran against the production evaluation (`evaluate_large_n_state`), and what it runs now:
+
+| piece | production | before S8-W | S8-W |
+| --- | --- | --- | --- |
+| near field | the CSR lane's direct layout | the table layout (`differentiable=True` forced it) | the direct layout under its `custom_vjp` (`nearfield/_fast_lane.py` `_csr_direct_near`) |
+| far field | the prepare's locals; particle-major Pallas L2P | the recomputed locals; leaf-major jnp L2P | the recomputed locals on the production operands, the production L2P (S8-F's `large_n_farfield_locals_at` / `large_n_farfield_l2p_at`) |
+| the sum | `near + far` | `(0 + far) + near` | `near + far` |
+| `G`, softening | literals, or traced `ForceParams` | literals (`-float(engine.G)`) | literals, or `force_params=ForceParams(...)` (arrays: differentiable) |
+| the topology in a jitted program | an argument | closed over: every array embedded as a constant | an argument: `LargeNGradPlan` is a pytree; the input permutation is the state's `tree.particle_indices`; `differentiable_step_fn` binds both |
+| the M2L reverse's by-source pass | -- | a sort of the far list's capacity | the forward's CSR (the list checked symmetric at plan time) |
+| the COM reverse | -- | yggdrax's prefix sums transposed: colliding f64 scatters | ancestor sums by pointer doubling, gathers only |
+
+- **Forward bitwise.** Pin G1 (A100, 2e5, deterministic ops): both arms 0 of 600,000 elements differ (rel-L2 0.0),
+  with 750,196 far pairs and 252,442 near edges in each. `bench/grad_production_gate.py` (the production eval of the
+  state against the differentiable forward jitted with the state as an argument): 0 of 24,000,000 at 8e6 and 0 of
+  75,000,000 at 2.5e7. On CPU (Pallas interpret, the compiled forward): bitwise for plummer, ferrers3, wendland_c2,
+  the fused lane's force in both call orders, and `dehnen_error` at its frozen lists.
+- **Not routed through the `custom_vjp` by default.** Always calling the direct kernel through its `custom_vjp`
+  keeps every bit but moves the literal `G` and softening constants in the lowered text: 20 of 36 CPU
+  program-identity variants changed (texts only). The default programs (Python-float parameters) call the kernel
+  directly; `differentiable=True` or array parameters take the `custom_vjp`. CPU identity of the final tip against
+  `s3b-integ-cpu` and the lead's `s8-integ-cpu`: 36/36 identical.
+- **`G` and `eps2`.** `differentiable_accelerations(..., force_params=ForceParams(G, eps2))` (engine, facade,
+  `differentiable_step_fn`'s optional third argument): central differences in float64 agree to 1e-10 (G, linear) and
+  1e-6 (eps2). The provider's `accelerations(topology, params)` with array parameters is differentiable on the
+  direct layout too (its d/dG, d/deps2 test now runs on the CSR lane; on the base it failed with pallas_call's "JVP
+  with aliasing not supported"). `mac_type="dehnen_error"` refuses any `force_params` but the solver's own
+  (`ValueError`, the fused lane's rule): its positions and masses differentiate at its frozen lists (FD in float64
+  within 1e-6).
+- **What stays outside the rule, and why.** The caller's external field (`external_acceleration_fn`) is outside the
+  self-gravity. The near field's overflow and target-block payloads are the pure-JAX rectangle route's; the CSR lane
+  never builds them, and the plan refuses a state that has them (unchanged). A near list that is not symmetric is
+  refused (the direct reverse reads each pair from both ends); a far list that is not is differentiated with the
+  sorting M2L reverse.
+
+**Findings.**
+1. A gradient jitted with the prepared state CLOSED OVER embeds every array of the topology in the program as a
+   constant (a 10M-element closure is 80 MB of program text, and XLA constant-folds through it). The plan is a pytree
+   now and the seam reads the permutation from the state, so both are arguments; `differentiable_step_fn` binds them
+   with `functools.partial` (its docstring's "compiled is slower than eager on `large_n_gpu`" was this).
+2. The M2L reverse's by-source sort ran over the far list's capacity (542M entries for 361M live pairs at 1e8). The
+   walk's lists are symmetric -- checked at 2e5 (G1 and `preset="galaxy"`), 8e6 and 1e8 -- so the by-source pass
+   reads the forward's CSR; the plan checks the symmetry with a sort-free hash test, chunked (an exact check would
+   be a sort of its own).
+3. The COM reverse (yggdrax's prefix sums under autodiff) was two colliding float64 scatters: 16 ms of the 8e6
+   gradient and its A-vs-A nondeterminism (3 position and 1036 mass elements of 8e6; 1 and 1492 at 2.5e7; at 2e5 2 of
+   200,000, S8-F's open item). With the ancestor-sum reverse the gradient is bitwise A-vs-A at 8e6 and 1e8.
+4. On CPU in Pallas interpret mode an EAGER differentiable forward differs from the compiled production one by one
+   float32 rounding for the compact kernels (ferrers3 1471, wendland_c2 1334 of 3072 elements; plummer none): eager,
+   the `custom_vjp`'s forward is a program of its own whose softening is an argument, which XLA cannot fold into the
+   kernel (S2's traced-parameter effect). Compiled, it is bitwise; on the GPU the eager G1 arms are bitwise.
+5. With the CPU's XLA L2P (no interpret flag) the far field rounds differently when its locals are computed in the
+   same program (23 of 3072 elements at N 1024); not the production lane -- the CPU tests run the L2P in interpret
+   mode.
+6. `value_and_grad` keeps the forward's arrays through the reverse: +5.2 GiB of temporaries at 1e8 over `jax.grad`
+   (+1.3 GiB at 2.5e7). When memory binds, evaluate the loss in a separate forward (one force eval).
+7. `XLA_PYTHON_CLIENT_MEM_FRACTION` (default 0.75) caps the allocator with preallocation off too: the 1e8 gradient
+   needs 0.95 (the gate bench's runs set it).
+8. The direct near reverse's bwd got a literal softening back from its residuals as a numpy scalar under jit, which
+   the unit shards' runtime type check refuses (S8-N's rule; fixed in the bwd).
+
+### S8 gates (S8-W's tests and runs)
+| gate | result |
+| --- | --- |
+| forward == production | G1 bitwise (both arms); bench 0 of 24M (8e6), 0 of 75M (2.5e7); CPU per kernel and per call order bitwise (new tests fail on the base: the table layout / leaf-major L2P, 1471+ elements) |
+| FD float64, whole force, positions / masses / G / eps2 | 1e-6 / 1e-6 / 1e-10 / 1e-6 (CPU, every kernel's reverse in interpret mode, the symmetric sort-free M2L reverse, the COM ancestor reverse) |
+| `dehnen_error` at frozen lists | forward bitwise, FD 1e-6 in positions and masses; other `force_params` refused |
+| symmetric reverse, COM reverse (unit) | the sort-free M2L reverse = the sorting one to 1e-13 and `jax.vjp` of the reference to 1e-9, no sort; the COM reverse = autodiff of the prefix sums to 1.9e-15 / 3.9e-15, no float scatter |
+| no buffer of 16 N floats | largest: 9.44 N floats at 8e6 (`[nodes, 36]` tables, pow2 capacity; 12.85 with p6's `[nodes, 49]`), 6.0 N floats at 1e8 (the COM forward's `f64[N, 3]`) |
+| CPU program identity | 36/36 identical to `s3b-integ-cpu` and `s8-integ-cpu` |
+| GPU pins on the tip (`s8w-tip` vs the lead's `s8-integ`, deterministic ops) | S1, S2, S3, S4, S5, S6, S1p, S1t, S1e, S1x, S1g bitwise; **S4b moved by design** (the large-N gradient lane: 57,392 of 60,000 position and 19,156 of 20,000 mass elements, rel-L2 3.5e-7 / 3.2e-7); G1 passes bitwise (its production arm bitwise the reference's) |
+| DET (production flags, card 7 free before and after both) | `s8w-det` vs `s8w-det-b`: DET1, DET2, DET3 bitwise A-vs-A. Against `s3b-det-free`: DET1 and DET3 bitwise, **DET2 moved by design** (57,458 position / 19,161 mass elements, rel-L2 3.5e-7 / 3.1e-7): the new DET2 reference is `s8w-det` (+`-b`) |
+
+### S8 memory and time (whole force: `jax.value_and_grad` / `jax.grad` of `sum(w . acc)` in positions and masses, input order; G1 operating point)
+| N | leaf capacity | temporaries v&g / grad | device peak | largest array | A-vs-A |
+| --- | --- | --- | --- | --- | --- |
+| 8e6 | pow2 | 1.98 GiB (265.8 B/p) / 1.71 GiB (229.1 B/p) | 3.65 GiB (v&g) | `[nodes, 36]` tables, 9.44 N floats | bitwise |
+| 8e6 `preset="galaxy"` (`dehnen_error` 1e-4, p6, eps 1e-3; 28.5M far pairs in a 179M capacity) | pow2 | 2.48 GiB (332.9 B/p) / 2.01 GiB (270.0 B/p) | 12.06 GiB (the prepare's) | `[nodes, 49]`, 12.85 N floats | bitwise |
+| 2.5e7 | pow2 | 5.18 GiB (222.6 B/p) / 4.33 GiB (186.0 B/p) | 9.42 GiB (v&g) | `[nodes, 36]`, 6.04 N floats | bitwise |
+| 1e8 | auto | 19.15 GiB (205.6 B/p) / 13.92 GiB (149.4 B/p) | **grad 28.29 GiB (30.4 GB)**; v&g 33.4 GiB estimated (it ran out of memory beside another user's 3.9 GB) | the COM forward's `f64[N, 3]`, 6.0 N floats | bitwise (grad) |
+
+S8-F's far chain alone at 8e6 `preset="galaxy"` needed 5.95 GB of temporaries (the by-source sort over the 179M
+capacity); the whole force now 2.48 GiB. Every row: the differentiable forward 0 elements off the production eval.
+
+Time (8e6, pow2; one run on a card with no other process before or after, the code before the COM reverse's
+per-particle sums moved to float32): force eval 30.02 ms, `value_and_grad` 161.6 ms (**5.38x**), `jax.grad` 131.5 ms
+(**4.38x**). Every later run shared its card (8e6: 177 ms for `jax.grad` beside a 9 GB job): hints only. The
+free-card A-vs-A timing at 8e6 and 1e8 is the lead's (`time_grad.sh`).
+
+Kernel time of the 8e6 value_and_grad (A100 trace, 162.0 ms per call): the near reverse 59.9 ms, the near forward 27.3
+(dead under `jax.grad`), the M2L reverse 23.4 by source + 16.5 by target, the M2L forward 8.2, the cascades 10.7,
+the XLA scatters 3.7 (17.6 with the prefix-sum COM reverse), the L2P and P2M reverses 2.0 each.
+
+### For S9 and later
+- **The time target at 8e6 (5x) holds for `jax.grad` (4.38x) and not quite for `value_and_grad` (5.38x)**, on one
+  free-card run; the lead's A-vs-A free-card timing: `time_grad.sh` (8e6 and 1e8, the eval vs both gradients).
+- **The near reverse** is the largest item (59.9 ms, 2.2x its forward): S8-N's levers.
+- **The M2L reverse's two passes** read the same CSR now; one launch computing both halves per row would read it
+  once (40 ms).
+- **The COM forward's float64 prefix sums** are the largest arrays at 1e8 (2.4 GB each, several live); they are the
+  production refresh's too.
+- **The input-order permutation**: its transposes are XLA scatters (3.7 ms at 8e6); a permutation `custom_vjp`
+  would gather both ways.
+- **GPU program identity** of the final tip was not recorded (CPU identity, the pins and DET are).

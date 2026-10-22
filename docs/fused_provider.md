@@ -251,10 +251,15 @@ moves 2 of 3072 velocity components on CPU (1 and 8 ulps of their own values; th
 positions are bitwise): the extra argument changes XLA's compilation, not the arithmetic.
 
 **Gradients in G and eps2.** `jax.grad` through `prov.accelerations` with traced
-parameters equals central differences (G to 1e-10, eps2 to 1e-6) on the **pure-JAX
-near field in float64** (CPU). It is not verified on the GPU's Pallas lane, whose
-production forward has two kernels without a reverse rule (the direct near-field layout
-and the particle-major L2P; `ARCHITECTURE.md` section 6).
+parameters equals central differences (G to 1e-10, eps2 to 1e-6) in float64 on CPU,
+on the pure-JAX near field and on the CSR lane's direct layout (production's, Pallas
+interpret mode): with array parameters that kernel runs under its `custom_vjp`
+(`nearfield_leafpair_csr_sorted_direct_pallas_cvjp`, the same call; with Python floats
+the default programs call it directly, their text unchanged), and the particle-major
+L2P has its own reverse (plan S8). The topology is a constant of that derivative: for
+gradients in the positions and masses at a frozen topology, see
+`differentiable_accelerations` (`docs/differentiable_fmm.md`), which takes the same
+`ForceParams`.
 
 ## Limits
 

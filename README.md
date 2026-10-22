@@ -544,10 +544,10 @@ runs as Pallas on sm_80+ (`jaccpot/pallas/`):
   `cascade_real_level.py`) and L2P (`l2p_real.py`).
 
 The kernels on a gradient path carry a `custom_vjp`, so the Pallas lane stays
-differentiable. Two forward kernels have no reverse yet, and the gradient path
-takes a slower layout instead: the near field's direct layout (the gradient runs
-the CSR lane's table layout) and the particle-major L2P (the gradient runs the
-leaf-major XLA L2P).
+differentiable: since plan S8 the gradient runs the production forward's kernels,
+the near field's direct layout and the particle-major L2P included, each with a
+reverse Pallas kernel, so the differentiable forward is the production force
+bitwise.
 [ARCHITECTURE.md](ARCHITECTURE.md) section 7 has the gates and the
 version-dependent backend selection. On CPU, [examples/pallas_m2l_speed.py](examples/pallas_m2l_speed.py)
 reports the fallback rather than Pallas execution.
@@ -602,18 +602,23 @@ Measured 2026-07, A100 40 GB, fp32, θ=0.7, order 4, clustered galaxy disc
 | 200 k | 0.86 s | 2.59 s | 2.62 GB |
 | 1 M | 2.50 s | 66.4 s | 11.07 GB |
 
-The current numbers (2026-10-13, cells of 64, θ=0.8, order 5, fp32, jitted
-gradient w.r.t. positions and masses): 31.9 ms at 2e5, 101.6 ms at 1e6, and out of
-memory at 8e6 on one 40 GB card ([docs/production_2026-10.md](docs/production_2026-10.md)).
+The current numbers (plan S8, 2026-10-22, cells of 64, θ=0.8, order 5, fp32;
+the gradient of `sum(w · acc)` w.r.t. positions and masses, jitted with the state
+and its grad plan as arguments): at 8e6 `jax.grad` 131.5 ms against the 30.0 ms
+force eval (4.4x; `value_and_grad` 161.6 ms), and at 1e8 `jax.grad` fits one
+40 GB A100 with a 28.3 GiB device peak
+([docs/production_2026-10.md](docs/production_2026-10.md), "S8"). The
+differentiable forward is the production force bitwise.
 
-**What the gradient covers.** Positions and masses only: `G` and the softening
-enter as Python floats, so there is no d/dG or d/dε. Reverse mode only: every fast
-kernel is a `custom_vjp`, which refuses `jax.jvp` (and so forward-mode adjoints).
-One force at a time: `strict_run_v2` and the multi-GPU `FusedRollout` are
-forward-only, so a rollout gradient has to differentiate its own integrator around
-`differentiable_accelerations`. (The fused forward takes `G` and the softening as
-traced `ForceParams`, see [below](#the-fused-lanes-force-in-your-own-integrator);
-`jax.grad` in them is verified on the pure-JAX near field in float64 only.)
+**What the gradient covers.** Positions, masses, and on a `large_n_gpu` state `G`
+and the softening squared (`force_params=ForceParams(G, eps2)` with arrays;
+`mac_type="dehnen_error"` takes the solver's own only). Reverse mode only: every
+fast kernel is a `custom_vjp`, which refuses `jax.jvp` (and so forward-mode
+adjoints). One force at a time: `strict_run_v2` and the multi-GPU `FusedRollout`
+are forward-only, so a rollout gradient has to differentiate its own integrator
+around `differentiable_accelerations`. (`jax.grad` in traced `ForceParams` through
+the fused provider's `accelerations` works too, see
+[below](#the-fused-lanes-force-in-your-own-integrator).)
 
 ### Tuning
 

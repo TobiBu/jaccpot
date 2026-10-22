@@ -1,8 +1,9 @@
 # Differentiable FMM — user guide
 
 Exact gradients of the Jaccpot FMM force with respect to particle **positions**
-and **masses**, at fixed tree topology, on a single GPU. Verified from N=64 to
-N=1,000,000.
+and **masses** (and, on a `large_n_gpu` state, `G` and the softening), at fixed tree
+topology, on a single GPU. Verified from N=64 to N=1,000,000; on the production
+layout, memory measured to N=10^8 (plan S8).
 
 This is the reference page. The engineering history — what was measured, what was
 tried and reverted, and why — is in
@@ -37,54 +38,77 @@ arguments.
 ### Galaxy scale (N ≳ 10⁵)
 
 ```python
+import jax, jax.numpy as jnp
+from jaccpot import FastMultipoleMethod, ForceParams
+from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
+
 # required: keeps the frozen M2L pair list. A CONSTRUCTOR option (or
 # FarFieldConfig(retain_far_pairs_for_grad=True), or
 # JACCPOT_RETAIN_FAR_PAIRS_FOR_GRAD=1); prepare_state raises TypeError on it.
 fmm = FastMultipoleMethod(
     preset="large_n_gpu", basis="real", retain_far_pairs_for_grad=True
 )
-state = fmm.prepare_state(positions0, masses0, max_order=4, leaf_size=256)
-
-# Hoist the plan out of the optimisation loop.
-from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
+state = fmm.prepare_state(positions0, masses0, max_order=4, leaf_size=64)
+# once per topology: the frozen lists, checked symmetric (the reverses need it)
 plan = prepare_large_n_grad_plan(fmm, state)
 
-grads = jax.grad(loss)(positions, masses)   # pass grad_plan=plan inside `loss`
+def loss(state, plan, positions, masses, params):
+    acc = fmm.differentiable_accelerations(
+        state, positions, masses, grad_plan=plan, force_params=params
+    )
+    return jnp.sum(acc ** 2)
+
+# the state and the plan are ARGUMENTS of the compiled gradient (both pytrees):
+# closed over, jax.jit embeds the whole topology in the program as constants
+grad = jax.jit(jax.grad(loss, argnums=(2, 3, 4)))
+params = ForceParams(G=jnp.asarray(1.0), eps2=jnp.asarray(softening ** 2))
+g_positions, g_masses, g_params = grad(state, plan, positions, masses, params)
 ```
+
+`force_params` is optional (`None` is the solver's own `G` and softening, the
+production program); with arrays, `g_params.G` and `g_params.eps2` are the
+derivatives in `G` and the softening squared at the frozen lists.
+`fmm.differentiable_step_fn(state)` builds the same binding for you (it returns
+`f(positions, masses[, force_params])`).
 
 `preset="large_n_gpu"` gives a `LargeNPreparedState` only on a GPU; on a CPU it
 prepares an ordinary radix state.
 
-Measured 2026-07 on an A100 40 GB, fp32, θ=0.7, order 4, clustered galaxy disc,
-before the Pallas reverses of 2026-09 (so this is the prepacked-rectangle reverse
-the performance notes below describe):
+**The gradient runs the production forward's kernels** (plan S8, 2026-10-22,
+[`production_2026-10.md`](production_2026-10.md) "S8"): the near field's CSR direct
+layout, the M2L over the walk's target-sorted far CSR, the M2M/L2L cascades, the
+leaf P2M and the particle-major L2P, each under a `custom_vjp` with a reverse Pallas
+kernel, so the differentiable forward is the production evaluation **bitwise**
+(pin G1). Measured on A100s with `bench/grad_production_gate.py` (clipped Plummer,
+cells of 64, θ=0.8, order 5, fp32; the gradient of `sum(w · acc)` in positions and
+masses; [`production_2026-10.md`](production_2026-10.md) "S8" has the card states):
 
-| N | prepare | forward (steady) | forward+backward (steady) | reverse peak |
+| N | force eval | value_and_grad / grad | temporaries (v&g / grad) | device peak |
 |---|---|---|---|---|
-| 200 k | 57 s | 0.86 s | 2.59 s | 2.62 GB |
-| 1 M | 79 s | 2.50 s | 66.4 s | 11.07 GB |
+| 8e6 | 30.0 ms | 161.6 / 131.5 ms (5.4x / 4.4x) | 1.98 / 1.71 GiB | 3.65 GiB |
+| 2.5e7 | | | 5.18 / 4.33 GiB | 9.42 GiB |
+| 1e8 (production leaf capacity) | | | 19.15 / 13.92 GiB | 28.29 GiB (grad) |
 
-`prepare_state` is dominated by **compilation**, not computation: at 1 M the
-first call is 82 s and the second is 1.5 s. Set `jax_compilation_cache_dir` and a
-cold process drops from 81 s to 17 s.
+Two identical gradients are bitwise equal. `value_and_grad` keeps the forward's arrays
+through the reverse (+5.2 GiB at 1e8): when memory binds, take the value from a
+separate forward.
 
-**The current numbers** (2026-10-13, [`production_2026-10.md`](production_2026-10.md);
-`bench/grad_step_profile.py`: cells of 64, θ=0.8, order 5, fp32, jitted gradient
-w.r.t. positions and masses):
-
-| N | production force eval | jitted gradient | process peak |
-|---|---|---|---|
-| 2e5 | 4.63 ms | 31.9 ms | 3.22 GiB |
-| 1e6 | 13.0 ms | 101.6 ms | 15.8 GiB |
-| 8e6 | 74.5 ms | out of memory (a 27.37 GiB request) | 19.5 GiB |
+`prepare_state` is dominated by **compilation**, not computation (2026-07: at 1 M
+the first call 82 s, the second 1.5 s). Set `jax_compilation_cache_dir` and a cold
+process drops from 81 s to 17 s.
 
 ---
 
-## What the gradient lane covers (checked against main, 2026-10-15)
+## What the gradient lane covers (plan S8, 2026-10-22)
 
-* **Positions and masses only.** `G` and the softening enter as Python floats
-  (`-float(engine.G)` in `runtime/_large_n_grad.py`, `float(softening)` in the
-  near field), so there is no d/dG and no d/dε on this lane.
+* **Positions, masses, `G` and the softening squared.** `force_params=ForceParams(G,
+  eps2)` with arrays differentiates the force in both at the frozen lists (the
+  fused lane's traced parameters, S2; FD-checked in float64). For a compact
+  softening kernel the derivative in `eps2` is the frozen lists', valid up to the
+  softening the walk was built for (`FusedForceProvider.walk_eps2`).
+  `mac_type="dehnen_error"` refuses any `force_params` but the solver's own
+  (`ValueError`: its eq (16a) thresholds were built with them); its positions and
+  masses differentiate at its frozen lists like any other.
 * **Reverse mode only.** Every fast kernel is a `custom_vjp`, and JAX refuses
   `jax.jvp` through one (`TypeError: can't apply forward-mode autodiff (jvp) to a
   custom_vjp function`, on a CPU radix state too). Forward-mode adjoints, such as
@@ -93,14 +117,19 @@ w.r.t. positions and masses):
   forward-only: the strict refresh evaluates the forward-only
   `evaluate_large_n_state`, and the cross-domain M2L and near-field reverses raise.
   A rollout gradient differentiates its own integrator around
-  `differentiable_accelerations`.
-* **Slower layouts than the forward.** On an Ampere+ GPU the gradient runs the same
-  Pallas P2M, cascades, CSR M2L and CSR near-field kernels as the fused forward, each
-  with a Pallas reverse ([`fast_gradients_2026-09.md`](fast_gradients_2026-09.md)).
-  Two forward kernels have no reverse, so the gradient takes another layout: the
-  near field runs the CSR lane's table layout instead of the production direct
-  layout (`nearfield/_fast_lane.py:1829`), and the L2P runs the leaf-major padded
-  XLA L2P with its analytic VJP instead of the particle-major Pallas L2P.
+  `differentiable_accelerations` (plan S9 builds the differentiable step).
+* **The production layout.** Since S8 the gradient's forward is the production
+  evaluation, kernel for kernel (above). Before it, two forward kernels had no
+  reverse and the gradient ran other layouts in their place -- the CSR near
+  field's table layout, the leaf-major XLA L2P -- which also ran out of memory at
+  8e6. The near field's reverse reads every pair from both ends and the M2L reverse
+  reads the forward's CSR in both of its passes: both need the lists to be
+  symmetric, which `prepare_large_n_grad_plan` checks (it refuses an asymmetric
+  near list; an asymmetric far list takes the sorting M2L reverse).
+* **Not on the lane.** The caller's external field (`strict_run_v2`'s
+  `external_acceleration_fn`) is outside the self-gravity: differentiate it in the
+  caller. The near field's overflow and target-block payloads of the pure-JAX
+  rectangle route are refused by the plan (the CSR lane never builds them).
 * **Inert options on that path.** `GradConfig.fused_m2l_pallas` and the five
   `reverse_*` fields tune lanes the default Ampere path does not run (see the
   options table below), and `nearfield_lane` is ignored on a `LargeNPreparedState`.
@@ -346,12 +375,13 @@ Measure in context, at the target scale.
 | symptom | cause | fix |
 |---|---|---|
 | OOM in the backward at N ≳ 10⁵ | bucketed reverse retains O(pairs) residuals | leave `nearfield_lane="auto"`, or set `"fast_lane"` |
-| OOM at 8e6 on a `large_n_gpu` state (2026-10-13) | the full and the far-field gradients each ask for ~27.4 GiB beyond the prepared state; the far reverse runs the leaf-major padded L2P and leaf-table layouts | no option fixes it today; production-layout reverses are planned (`production_2026-10.md`) |
+| OOM, or a compile of minutes, jitting a large-N gradient | the state (or the plan) is closed over: `jax.jit` embeds every array of the topology as a constant | pass the state and the plan as arguments (above), or use `differentiable_step_fn` |
+| `NotImplementedError: ... needs a SYMMETRIC near list` | the near reverse reads each pair from both ends | the walk's lists are symmetric; a hand-built neighbour list must hold both directions |
 | `RuntimeError: compact_far_pairs is None` | large-N state built without the pair list | construct the solver with `retain_far_pairs_for_grad=True` |
 | `TypeError: ... prepare_state() got an unexpected keyword argument 'retain_far_pairs_for_grad'` | it is a constructor option | pass it to `FastMultipoleMethod(...)` |
 | `TypeError: can't apply forward-mode autodiff (jvp) to a custom_vjp function` | forward mode (`jax.jvp`, a forward-mode adjoint) | use reverse mode |
 | all-NaN gradients in fp32 | historical; the squared-radius floors underflowed in fp32 | fixed — ensure you are on this branch |
-| `ConcretizationTypeError` under outer `jax.jit` | host-side ops in the re-run sweeps at large N | use bare `jax.grad` |
+| `ConcretizationTypeError` under outer `jax.jit` | a radix state: host-side ops in the re-run sweeps at large N | use bare `jax.grad` (a `LargeNPreparedState` compiles whole, as arguments) |
 | gradients are exactly zero | you differentiated `evaluate_prepared_state` or the Odisseo forward path | use `differentiable_accelerations` / `differentiable=True` |
 | `TracerArrayConversionError` on centres | historical: the grouped M2L reached the grad path | removed in the 2026-10 cleanup (X3); file a bug |
 | FD and AD disagree | FD perturbed a *different* function (full rebuild) | FD the same frozen `state` |
