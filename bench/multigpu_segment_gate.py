@@ -438,6 +438,11 @@ def main() -> None:
                 flush=True,
             )
         result["reports"] = reports
+        result["cross_caps_final"] = {
+            k: v
+            for k, v in vars(runner.force.cross_caps).items()
+            if isinstance(v, (int, float)) or v is None
+        }
         # the force alone (the start program: the template route's force at the
         # current positions), to tell the force from the integrator's overhead
         state = runner.state
@@ -470,6 +475,20 @@ def main() -> None:
 
         cap_leaf = ARGS.leaf_capacity or leaf_cap
         result["leaf_capacity"] = int(cap_leaf)
+        sibling = ARGS.out.replace("stacked_", "segment_")
+        if caps == "auto" and sibling != ARGS.out and os.path.exists(sibling):
+            # FusedRollout has no segment retry, and capacities sized at the start
+            # (cross_caps="auto") can be outgrown in the first steps (the Morton
+            # domains interpenetrate until the first repartition): the stacked
+            # route runs on the capacities the segment runner ended with
+            from jaccpot.distributed.cross import CrossCapacities
+
+            final = json.load(open(sibling)).get("cross_caps_final")
+            if final:
+                caps = CrossCapacities()._with(
+                    **{k: v for k, v in final.items() if v is not None}
+                )
+                result["cross"] = "segment_final"
         solver = _solver(g, soft, leaf_capacity=cap_leaf)
         t0 = time.perf_counter()
         force, plan, walk = setup_fused_force(
