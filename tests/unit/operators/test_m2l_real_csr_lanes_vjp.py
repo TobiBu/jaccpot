@@ -233,3 +233,39 @@ def test_lanes_reverse_matches_the_operator_rule_on_the_axis(order, interpret):
     assert np.all(np.isfinite(np.asarray(cb_r)))
     assert _rel(mb_g, mb_r) < 1e-9, f"multipole half rel-L2 {_rel(mb_g, mb_r):.3e}"
     assert _rel(cb_g, cb_r) < 1e-9, f"centre half rel-L2 {_rel(cb_g, cb_r):.3e}"
+
+
+def test_a_presorted_reverse_sorts_the_pairs_once():
+    """On a target-sorted list the reverse's by-target pass reads the forward's CSR:
+    one sort of the ``P`` pairs (by source), not two (each a ``P``-sized key/value
+    sort and its scratch, the far reverse's largest temporaries)."""
+    order, n, K = 2, 30, 8
+    rows = np.random.default_rng(3).integers(0, 3 * K, n)
+    mult, cent, src, tgt = _case(order, n, rows, order)
+    offsets = jnp.asarray(np.concatenate([[0], np.cumsum(rows)]), jnp.int32)
+    live = jnp.asarray(int(src.shape[0]), jnp.int32)
+    cot = jnp.ones((n, (order + 1) ** 2), jnp.float64)
+
+    def reverse(m, c, g):
+        return jax.vjp(
+            lambda m, c: m2l_real_csr_lanes_pallas_cvjp(
+                m, c, src, offsets, live, order, K, True, "triton", 1, None, True
+            ),
+            m,
+            c,
+        )[1](g)
+
+    jaxpr = jax.make_jaxpr(reverse)(mult, cent, cot)
+
+    def sorts(j) -> int:
+        count = 0
+        for eqn in j.eqns:
+            count += eqn.primitive.name == "sort"
+            for p in eqn.params.values():
+                for sub in p if isinstance(p, (list, tuple)) else (p,):
+                    inner = getattr(sub, "jaxpr", sub)
+                    if hasattr(inner, "eqns"):
+                        count += sorts(inner)
+        return count
+
+    assert sorts(jaxpr.jaxpr) == 1

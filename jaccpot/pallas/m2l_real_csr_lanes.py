@@ -871,6 +871,7 @@ def m2l_real_csr_lanes_reverse_pallas(
     interpret: bool = False,
     backend: str = "triton",
     num_warps: int = 1,
+    target_row_offsets: Optional[Array] = None,
 ) -> tuple[Array, Array]:
     """Adjoint of :func:`m2l_real_csr_lanes_pallas`: a by-source and a by-target pass.
 
@@ -898,6 +899,12 @@ def m2l_real_csr_lanes_reverse_pallas(
         Pallas GPU lowering.
     num_warps : int
         Warps per program.
+    target_row_offsets : Optional[Array]
+        The list is already in CSR order by target (a ``TargetSortedFarPairs``
+        list, the forward's ``presorted``) with these row offsets
+        (``[>= n + 1]``): the by-target pass reads it as is instead of sorting it
+        again -- one ``P``-pair sort less. ``targets`` still holds one target per
+        entry, for the by-source sort.
 
     Returns
     -------
@@ -957,9 +964,14 @@ def m2l_real_csr_lanes_reverse_pallas(
         return jnp.zeros((n, C), dtype), jnp.zeros_like(centers)
     mbar, cbar_src = one_pass(tgt_sorted, off_s, cnt_s, by_target=False)
     # by TARGET (the forward's CSR): the target half of the centre cotangents
-    src_sorted, off_t, cnt_t = csr_by_target(
-        sources, targets, total_nodes=n, active_pair_count=active_pair_count
-    )
+    if target_row_offsets is None:
+        src_sorted, off_t, cnt_t = csr_by_target(
+            sources, targets, total_nodes=n, active_pair_count=active_pair_count
+        )
+    else:
+        src_sorted, off_t, cnt_t = csr_by_target(
+            sources, target_row_offsets, total_nodes=n, presorted=True
+        )
     _, cbar_tgt = one_pass(src_sorted, off_t, cnt_t, by_target=True)
     centers_bar = (cbar_src[:, :3] + cbar_tgt[:, :3]).astype(centers.dtype)
     return mbar, centers_bar
@@ -1081,9 +1093,12 @@ def _m2l_lanes_cvjp_bwd(
     loc_bar,
 ):
     multipoles, centers, sources, targets, active_pair_count = residual
+    row_offsets = None
     if presorted:
         # the forward got the row offsets; the reverse sorts by source and needs
-        # one target per entry (-1 past the live prefix, as a COO list pads)
+        # one target per entry (-1 past the live prefix, as a COO list pads), and
+        # its by-target pass reads the forward's CSR as is
+        row_offsets = targets
         targets = targets_from_csr_offsets(targets, int(sources.shape[0]))
     if n_targets is not None and int(n_targets) != int(multipoles.shape[0]):
         raise NotImplementedError(
@@ -1104,6 +1119,7 @@ def _m2l_lanes_cvjp_bwd(
         interpret=interpret,
         backend=backend,
         num_warps=num_warps,
+        target_row_offsets=row_offsets,
     )
     return (mult_bar, centers_bar, None, None, None)
 
