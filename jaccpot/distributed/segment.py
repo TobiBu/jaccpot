@@ -181,6 +181,9 @@ class SegmentReport:
     needs : list
         The kept run's needs, max-ed over its steps and the mesh
         (``fused_topology.NEEDS_FIELDS``, then ``cross.CROSS_NEEDS_FIELDS``).
+    failures : list
+        One entry per failed attempt before the kept run: its ``bits``, ``needs``
+        and the steps that fitted (``done``) -- what the retries re-planned from.
     """
 
     segment: int
@@ -193,6 +196,7 @@ class SegmentReport:
     counts: list = field(default_factory=list)
     bits: int = 0
     needs: list = field(default_factory=list)
+    failures: list = field(default_factory=list)
 
 
 def _mesh_verdict(
@@ -1130,6 +1134,7 @@ class MeshSegmentRunner:
         state_new = state.state
         acc_new: Optional[Array] = None
         retries, tree_first = 0, False
+        failures: list = []
         while True:
             consumed = False
             if start:
@@ -1171,6 +1176,9 @@ class MeshSegmentRunner:
             # re-prepare at the segment's START and run it again from its start
             # force: at most twice, the single card's policy.
             needs_np = np.asarray(needs_h, np.int64)
+            failures.append(
+                dict(bits=int(bits_h), needs=needs_np.tolist(), done=int(done_h))
+            )
             where = f"segment {n} ({int(done_h)} of {k} steps fitted)"
             mode = (
                 self.force.retry_mode(needs_np, retries, tree_first)
@@ -1224,6 +1232,7 @@ class MeshSegmentRunner:
             counts=[int(c) for c in np.asarray(state.count)],
             bits=int(bits_h),
             needs=np.asarray(needs_h).tolist(),
+            failures=failures,
         )
         if k > 0:
             self.reports.append(report)
