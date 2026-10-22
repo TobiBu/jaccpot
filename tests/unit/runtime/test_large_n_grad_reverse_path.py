@@ -1086,4 +1086,3 @@ class TestTheForwardIsTheFusedForce:
             f"{forces[f'far_pairs_{arm}']} far pairs against the fused lane's "
             f"{forces['far_pairs_production']}"
         )
-
