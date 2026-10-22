@@ -48,6 +48,11 @@ Costs, per run (both are counted, not timed):
   evaluation of ``S_l`` per boundary (S0's model; needs per-rung source multipoles), and
   ``evals_padded`` pads each level to its largest subset of the run (a static capacity plan).
 
+``--static`` replaces the self-gravity by a fixed field (``make_static``): the IC's particles
+become test particles, so encounters and chaos are gone and every scheme pays O(N) per
+boundary, while the criteria keep the production timestep spread. ``--rungs-once`` keeps
+the rungs of t = 0 (the diagnostic for the base-step reassignment).
+
 ``score`` compares each run's end state with the reference ``--ref`` (a shared run at a much
 smaller step) and gives the noise floor from ``--ref2`` (the same at half that step): the
 energy error, angular and linear momentum (the pair impulse balance; the halo changes the
@@ -88,6 +93,7 @@ def _args(argv: Optional[list] = None) -> argparse.Namespace:
         p.add_argument("--n", type=int, default=100_000)
         p.add_argument("--offset", type=int, default=0)
         p.add_argument("--softening", type=float, default=1.5e-3)
+        p.add_argument("--static", action="store_true")
         if name == "probe":
             p.add_argument("--kmax", default="3,4,5,6,7,8")
             p.add_argument("--no-energy", action="store_true")
@@ -103,6 +109,7 @@ def _args(argv: Optional[list] = None) -> argparse.Namespace:
             p.add_argument("--t-end", type=float, required=True)
             p.add_argument("--n-out", type=int, default=16)
             p.add_argument("--refine", action="store_true")
+            p.add_argument("--rungs-once", action="store_true")
     s = sub.add_parser("score")
     s.add_argument("out")
     s.add_argument("runs", nargs="+")
@@ -141,6 +148,7 @@ def load_ic(n: int, offset: int) -> dict:
         bulge_m=float(ic["bulge_mass_code"]),
         bulge_a=float(ic["bulge_scale_code"]),
         disk_m=float(ic["disk_mass_code"]),
+        disk_h=float(ic["hdisk_code"]) if "hdisk_code" in ic.files else None,
     )
 
 
@@ -293,6 +301,45 @@ def make_halo(g_const: float, hm: float, rs: float):
     return acc, pot
 
 
+def make_static(ic: dict, eps: float):
+    """``--static``: the galaxy as a fixed field, for test particles (no self-gravity).
+
+    The NFW halo, a Hernquist bulge softened at ``eps`` (``r -> sqrt(r^2 + eps^2)``, a
+    smooth core like the N-body centre's) and a Miyamoto-Nagai disc of the disc's mass
+    and height whose rotation curve peaks where the exponential disc's does (``a + b =
+    2.15 R_d / sqrt(2)``). The IC is not exactly in equilibrium in it, which does not
+    matter: the scores compare runs with a converged run in the same field.
+    """
+    g = ic["G"]
+    halo_acc, halo_pot = make_halo(g, ic["halo_m"], ic["halo_rs"])
+    mb, ab, md, bd = ic["bulge_m"], ic["bulge_a"], ic["disk_m"], ic["disk_h"]
+    ad = 2.15 * ic["rdisk"] / math.sqrt(2.0) - bd
+
+    def parts(x):
+        s = jnp.sqrt(jnp.sum(x * x, 1) + eps * eps)
+        zeta = jnp.sqrt(x[:, 2] ** 2 + bd * bd)
+        dd = x[:, 0] ** 2 + x[:, 1] ** 2 + (ad + zeta) ** 2
+        return s, zeta, dd
+
+    def acc(x):
+        s, zeta, dd = parts(x)
+        a_b = -(g * mb) / ((s + ab) ** 2 * s)
+        c = -(g * md) / dd**1.5
+        a_d = jnp.stack([c * x[:, 0], c * x[:, 1], c * x[:, 2] * (ad + zeta) / zeta], 1)
+        return halo_acc(x) + a_b[:, None] * x + a_d
+
+    def pot(x):
+        s, _, dd = parts(x)
+        return halo_pot(x) - g * mb / (s + ab) - g * md / jnp.sqrt(dd)
+
+    return acc, pot
+
+
+def _no_pairs(x, m, p, q, n_active):
+    """``--static``: no self-gravity."""
+    return jnp.zeros_like(x), jnp.zeros_like(x)
+
+
 # -------------------------------------------------------------------- the criteria
 
 
@@ -350,6 +397,9 @@ def probe() -> None:
     x, m = jnp.asarray(ic["x"]), jnp.asarray(ic["m"])
     halo_acc, halo_pot = make_halo(ic["G"], ic["halo_m"], ic["halo_rs"])
     pair_pass = jax.jit(make_pair_pass(n, eps, ic["G"]))
+    if ARGS.static:
+        halo_acc, halo_pot = make_static(ic, eps)
+        pair_pass = _no_pairs
     zeros = jnp.zeros(n)
     t0 = time.perf_counter()
     _, u = pair_pass(x, m, zeros, zeros, n)
@@ -394,7 +444,7 @@ def probe() -> None:
         )
     out["rotation_curve"] = curve
     if not ARGS.no_energy:
-        phi = np.asarray(make_potential(n, eps, ic["G"])(x, m))
+        phi = np.asarray(make_potential(n, eps, ic["G"])(x, m)) * (not ARGS.static)
         k_e = 0.5 * float(np.sum(ic["m"][:, None] * ic["v"] ** 2))
         w_self = 0.5 * float(np.sum(ic["m"] * phi))
         w_ext = float(np.sum(ic["m"] * np.asarray(halo_pot(x))))
@@ -466,12 +516,15 @@ _LAGR_BULGE = (0.1, 0.25, 0.5, 0.75, 0.9)
 class Diagnostics:
     """Energy (fp64 potential), momenta, A2 and Lagrangian radii at synchronised times."""
 
-    def __init__(self, ic: dict, eps: float):
+    def __init__(self, ic: dict, eps: float, static: bool = False):
         self.ic = ic
         n = ic["x"].shape[0]
         self.m = jnp.asarray(ic["m"])
         self.phi = make_potential(n, eps, ic["G"])
         _, self.halo_pot = make_halo(ic["G"], ic["halo_m"], ic["halo_rs"])
+        if static:
+            self.phi = lambda x, m: jnp.zeros(n)
+            _, self.halo_pot = make_static(ic, eps)
         self.rows: list = []
         self.p0 = None
 
@@ -554,13 +607,16 @@ def run() -> None:
     m = jnp.asarray(ic["m"])
     halo_acc, _ = make_halo(ic["G"], ic["halo_m"], ic["halo_rs"])
     pair_pass = make_pair_pass(n, eps, ic["G"])
+    if ARGS.static:
+        halo_acc, _ = make_static(ic, eps)
+        pair_pass = _no_pairs
     if (ARGS.criterion == "dynfloor") != (ARGS.floor_c > 0):
         raise SystemExit(
             "--floor-c > 0 goes with --criterion dynfloor, and only with it"
         )
     t_floor = ARGS.floor_c * floor_time(ic, eps)
     tau_fn = make_tau(ARGS.criterion, eps)
-    diag = Diagnostics(ic, eps)
+    diag = Diagnostics(ic, eps, ARGS.static)
     x0, v0 = jnp.asarray(ic["x"]), jnp.asarray(ic["v"])
     zeros = jnp.zeros(n)
 
@@ -678,9 +734,17 @@ def run() -> None:
         return v + kick, u + ext, j_ext, acc
 
     @jax.jit
-    def opening(x, v, a, pid, mm, j_ext, acc):
-        """New rungs from the total force, sort fastest first, open every level, drift."""
-        rung = rungs_of(dt_of(x, norm(a)), dt_max, k)
+    def opening(x, v, a, pid, mm, j_ext, acc, rung_old):
+        """New rungs from the total force, sort fastest first, open every level, drift.
+
+        ``--rungs-once`` keeps the rungs of t = 0 (``rung_old``) for the whole run.
+        """
+        if ARGS.rungs_once:
+            rung = jnp.where(
+                rung_old < 0, rungs_of(dt_of(x, norm(a)), dt_max, k), rung_old
+            )
+        else:
+            rung = rungs_of(dt_of(x, norm(a)), dt_max, k)
         order = jnp.argsort(-rung, stable=True)
         x, v, rung, pid, mm, a = (
             x[order],
@@ -779,7 +843,10 @@ def run() -> None:
                     f"[run] t {row['t']:.4f} dE/E0 {abs(row['E'] / diag.rows[0]['E'] - 1):.3e} rungs {hists[-1]}",
                     flush=True,
                 )
-        x, v, rung, pid, mm, a, j_ext, acc = opening(x, v, a, pid, mm, j_ext, acc)
+        rung_old = jnp.full((n,), -1, jnp.int32) if rung is None else rung
+        x, v, rung, pid, mm, a, j_ext, acc = opening(
+            x, v, a, pid, mm, j_ext, acc, rung_old
+        )
         work = work + full
         h0 = np.bincount(np.asarray(rung), minlength=k + 1)
         hists.append(h0.tolist())
@@ -891,7 +958,23 @@ def _score_one(run: dict, ref: dict, rd: float) -> dict:
         k: c_run["e_diffusion_rms"][k] / c_ref["e_diffusion_rms"][k]
         for k in c_run["e_diffusion_rms"]
     }
-    return dict(
+    out = {}
+    if run["config"].get("static"):
+        # a fixed field: E_i is an exact invariant (L_z,i too, but a leapfrog in an
+        # axisymmetric field keeps it to round-off), and the orbits are regular, so
+        # particle-wise errors against the reference are meaningful
+        de = np.abs(run["e_i"] - run["e_i0"]) / np.abs(run["e_i0"])
+        dx = np.linalg.norm(run["x"] - ref["x"], axis=1) / rd
+        disc = run["comp"] == 0
+        out["static"] = {
+            name: {f"p{q}": float(np.percentile(val[sel], q)) for q in (50, 90, 99)}
+            for name, val, sel in (
+                ("dE_i_rel", de, slice(None)),
+                ("dE_i_rel_bulge", de, ~disc),
+                ("dx_vs_ref_over_Rd", dx, slice(None)),
+            )
+        }
+    return out | dict(
         max_dE_over_E0=float(max(abs(r["E"] / e0 - 1.0) for r in ser)),
         final_dE_over_E0=float(ser[-1]["E"] / e0 - 1.0),
         max_dL_over_L0=float(
@@ -980,6 +1063,19 @@ def _family(cfg: dict) -> str:
 
 def _scores_of(row: dict) -> dict:
     p = row["profiles"]
+    if "static" in row:
+        st = row["static"]
+        return {
+            "max_dE_over_E0": row["max_dE_over_E0"],
+            "dE_i_rel_p50": st["dE_i_rel"]["p50"],
+            "dE_i_rel_p99": st["dE_i_rel"]["p99"],
+            "dE_i_rel_bulge_p99": st["dE_i_rel_bulge"]["p99"],
+            "dx_vs_ref_p50": st["dx_vs_ref_over_Rd"]["p50"],
+            "dx_vs_ref_p90": st["dx_vs_ref_over_Rd"]["p90"],
+            "Sigma_rms": p["Sigma"]["rms"],
+            "sigma_z_rms": p["sigma_z"]["rms"],
+            "r_1pct_abs_rel": abs(row["lagrange_all_rel"][1]),
+        }
     return {
         "max_dE_over_E0": row["max_dE_over_E0"],
         "Sigma_rms": p["Sigma"]["rms"],
@@ -1057,7 +1153,10 @@ def table() -> None:
     for name, r in rows:
         if r["config"]["scheme"] == "shared":
             continue
-        for key in ("max_dE_over_E0", "sigma_z_rms", "Sigma_rms"):
+        keys = ("max_dE_over_E0", "sigma_z_rms", "Sigma_rms")
+        if "static" in r:
+            keys = ("max_dE_over_E0", "dE_i_rel_p99", "dx_vs_ref_p90")
+        for key in keys:
             val = _scores_of(r)[key]
             cells = []
             for proxy in _PROXIES:
