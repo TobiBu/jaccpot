@@ -1,16 +1,20 @@
 """The direct CSR near field's reverse (the production layout) vs autodiff and differences.
 
-:func:`nearfield_leafpair_csr_sorted_direct_reverse_pallas` is the production near-field
-kernel's reverse on the same sorted layout. Pinned here, for every softening kernel,
-in float64 on the Pallas interpreter (and natively on an Ampere card):
+:func:`nearfield_leafpair_csr_sorted_direct_pallas_cvjp` is the production near-field
+call under a ``custom_vjp`` whose reverse runs on the same sorted layout. Pinned here,
+for every softening kernel, in float64 on the Pallas interpreter (and natively on an
+Ampere card):
 
 * its cotangents (positions, masses, ``softening_sq``, ``G``) equal ``jax.vjp`` of a
   pure-JAX pair sum over the same pairs (rows + self, diagonal excluded) to float64
   round-off -- on leaves of every occupancy, empty padding leaves, rows past every
   leaf's particles, an empty row, rows of consecutive leaves (the merged source runs)
   and rows longer than the row limit (the reverse's in-place pieces);
-* with no neighbour entries at all (the self terms alone), an empty ``neighbors``
-  array included, the same.
+* central finite differences of the PRODUCTION forward agree with them;
+* its forward IS the production call: the same bits, the same lowered program for
+  traced operands; the force-scale lane passes through and gets no cotangent, and the
+  potential lane is refused;
+* in float32 it agrees with the table layout's reverse to single-precision round-off.
 
 The neighbour CSR is built SYMMETRIC, as the walk emits it: the reverse takes each
 source-side cotangent from the other end of the pair.
@@ -25,9 +29,13 @@ import pytest
 
 from jaccpot.pallas.m2l_real_csr import pallas_m2l_real_csr_supported
 from jaccpot.pallas.nearfield_leafpair_csr import (
+    build_leafpair_chunk_table,
+    leafpair_chunk_capacity,
+    nearfield_leafpair_csr_pallas_cvjp,
     nearfield_leafpair_csr_sorted_direct_pallas,
 )
 from jaccpot.pallas.nearfield_leafpair_csr_direct_vjp import (
+    nearfield_leafpair_csr_sorted_direct_pallas_cvjp,
     nearfield_leafpair_csr_sorted_direct_reverse_pallas,
 )
 from jaccpot.softening import pair_factors, softening_params_from_sq, support_factor
@@ -192,6 +200,144 @@ def test_reverse_matches_vjp_of_the_pure_jax_pair_sum(
     assert not np.any(np.asarray(mass_bar)[c["n_live"] :])
 
 
+@pytest.mark.parametrize("kernel", KERNELS)
+def test_reverse_matches_central_differences_of_the_production_forward(kernel):
+    """d/dx, d/dm, d/d(eps^2), d/dG of ``sum(acc . w)``, the forward being the
+    production kernel itself (float64, interpret), along random directions."""
+    c = _symmetric_case(13)
+    soft = jnp.asarray(SOFTENING**2)
+    G = jnp.asarray(0.9)
+    w = jnp.asarray(np.random.default_rng(2).standard_normal((c["n"], 3)))
+
+    def loss(fn, p, m, s, g):
+        acc, _ = fn(
+            p,
+            m,
+            *_topology(c),
+            leaf_width=c["W"],
+            softening_sq=s,
+            G=g,
+            chunk=1,
+            softening_kernel=kernel,
+            interpret=True,
+        )
+        return jnp.sum(acc * w)
+
+    grads = jax.grad(
+        lambda *a: loss(nearfield_leafpair_csr_sorted_direct_pallas_cvjp, *a),
+        argnums=(0, 1, 2, 3),
+    )(c["pos"], c["mass"], soft, G)
+    prod = jax.jit(lambda *a: loss(nearfield_leafpair_csr_sorted_direct_pallas, *a))
+    rng = np.random.default_rng(4)
+    primals = [c["pos"], c["mass"], soft, G]
+    # steps: second-order truncation ~h^2 against round-off ~1e-16 |L| / h
+    for k, h in enumerate((1e-5, 1e-5, 1e-6, 1e-4)):
+        v = jnp.asarray(rng.standard_normal(np.shape(primals[k])))
+        up = list(primals)
+        dn = list(primals)
+        up[k] = primals[k] + h * v
+        dn[k] = primals[k] - h * v
+        fd = (float(prod(*up)) - float(prod(*dn))) / (2.0 * h)
+        ad = float(jnp.sum(grads[k] * v))
+        assert abs(ad) > 1e-3
+        # measured: <= 1.4e-8 relative (positions, round-off of the differences),
+        # <= 7e-10 for the rest; an algebra slip shows at 1e-3 or more
+        assert abs(fd - ad) <= 1e-6 * abs(ad), (k, fd, ad)
+
+
+@pytest.mark.parametrize("interpret", [True, False])
+@pytest.mark.parametrize("with_force_scale", [False, True])
+def test_the_forward_is_the_production_call(with_force_scale, interpret):
+    """float32 at the production defaults (source tiles, flags, row limit from the
+    environment's defaults): the primal of ``jax.vjp`` has the production call's
+    bits, and for traced operands the jitted programs are the same text."""
+    _native_or_skip(interpret)
+    c = _symmetric_case(17, dtype=np.float32)
+    soft = jnp.asarray(0.05**2, jnp.float32)
+    G = jnp.asarray(1.3, jnp.float32)
+    kw = dict(
+        leaf_width=c["W"],
+        chunk=64,
+        softening_kernel="ferrers3",
+        interpret=interpret,
+        with_force_scale=with_force_scale,
+    )
+
+    def _program(fn):
+        def near(p, m, ls, lc, nb, off, cnt, s, g):
+            return fn(p, m, ls, lc, nb, off, cnt, softening_sq=s, G=g, **kw)
+
+        return near
+
+    prod = _program(nearfield_leafpair_csr_sorted_direct_pallas)
+    diff = _program(nearfield_leafpair_csr_sorted_direct_pallas_cvjp)
+    args = (c["pos"], c["mass"], *_topology(c), soft, G)
+    want = jax.jit(prod)(*args)
+    got, _ = jax.vjp(lambda p, m: jax.jit(diff)(p, m, *args[2:]), *args[:2])
+    assert np.array_equal(np.asarray(got[0]), np.asarray(want[0]))
+    if with_force_scale:
+        assert np.array_equal(np.asarray(got[1]), np.asarray(want[1]))
+    else:
+        assert got[1] is None and want[1] is None
+    text_prod = jax.jit(prod).lower(*args).as_text(debug_info=False)
+    text_diff = jax.jit(diff).lower(*args).as_text(debug_info=False)
+    assert text_prod == text_diff
+
+
+def test_the_force_scale_lane_gets_no_cotangent():
+    """With ``with_force_scale`` the accelerations' gradient is the one without it,
+    and a cotangent on the force-scale lane is dropped (it only sets thresholds)."""
+    c = _symmetric_case(19)
+    soft = jnp.asarray(SOFTENING**2)
+    G = jnp.asarray(1.1)
+    w = jnp.asarray(np.random.default_rng(6).standard_normal((c["n"], 3)))
+    u = jnp.asarray(np.random.default_rng(7).standard_normal(c["n"]))
+
+    def loss(p, m, s, g, *, with_force_scale, scale_weight):
+        acc, fb = nearfield_leafpair_csr_sorted_direct_pallas_cvjp(
+            p,
+            m,
+            *_topology(c),
+            leaf_width=c["W"],
+            softening_sq=s,
+            G=g,
+            chunk=1,
+            softening_kernel="ferrers3",
+            interpret=True,
+            with_force_scale=with_force_scale,
+        )
+        out = jnp.sum(acc * w)
+        if with_force_scale:
+            assert fb is not None and fb.shape == (c["n"],)
+            out = out + scale_weight * jnp.sum(fb * u)
+        return out
+
+    def grads(**kw):
+        g = jax.grad(lambda *a: loss(*a, **kw), argnums=(0, 1, 2, 3))
+        return [np.asarray(x) for x in g(c["pos"], c["mass"], soft, G)]
+
+    plain = grads(with_force_scale=False, scale_weight=0.0)
+    for weight in (0.0, 1.0):
+        for a, b in zip(grads(with_force_scale=True, scale_weight=weight), plain):
+            assert np.array_equal(a, b)
+
+
+def test_the_potential_lane_is_refused():
+    c = _symmetric_case(19)
+    with pytest.raises(ValueError, match="potential lane has no reverse"):
+        nearfield_leafpair_csr_sorted_direct_pallas_cvjp(
+            c["pos"],
+            c["mass"],
+            *_topology(c),
+            leaf_width=c["W"],
+            softening_sq=jnp.asarray(0.01),
+            G=jnp.asarray(1.0),
+            chunk=1,
+            interpret=True,
+            with_potential=True,
+        )
+
+
 def test_self_terms_only_and_an_empty_neighbour_array():
     """No neighbour entries at all (the self terms alone): the reverse is the pure-JAX
     sum's, and an empty ``neighbors`` array is accepted."""
@@ -221,3 +367,68 @@ def test_self_terms_only_and_an_empty_neighbour_array():
         )
         for a, b in zip(got, want):
             assert _rel(a, b) < 1e-12
+
+
+@pytest.mark.parametrize("kernel", KERNELS)
+def test_float32_agrees_with_the_table_layouts_reverse(kernel):
+    """The table layout's rule (:func:`nearfield_leafpair_csr_pallas_cvjp`, the
+    differentiable lane until now) on the same pairs, gathered into ``(L, W)``
+    tables: the same cotangents to single-precision round-off."""
+    c = _symmetric_case(29, consecutive=True, dtype=np.float32)
+    soft = jnp.asarray(SOFTENING**2, jnp.float32)
+    G = jnp.asarray(1.3, jnp.float32)
+    W, L = c["W"], c["L"]
+    starts, counts = np.asarray(c["starts"]), np.asarray(c["counts"])
+    slot = np.arange(W)[None, :]
+    mask = slot < counts[:, None]
+    ids = np.where(mask, starts[:, None] + slot, 0)
+    cap = leafpair_chunk_capacity(int(c["nbr"].shape[0]), L, 4)
+    table = build_leafpair_chunk_table(
+        c["offsets"], c["row_counts"], chunk=4, capacity=cap
+    )
+    w = np.random.default_rng(9).standard_normal((c["n"], 3)).astype(np.float32)
+
+    def table_layout(p, m, s, g):
+        out = nearfield_leafpair_csr_pallas_cvjp(
+            p[ids],
+            m[ids],
+            jnp.asarray(mask),
+            c["nbr"],
+            table,
+            s,
+            g,
+            4,
+            None,
+            1,
+            None,
+            True,
+            "input",
+            True,
+            None,
+            kernel,
+        )
+        return out[..., :3]
+
+    def direct_layout(p, m, s, g):
+        return nearfield_leafpair_csr_sorted_direct_pallas_cvjp(
+            p,
+            m,
+            *_topology(c),
+            leaf_width=W,
+            softening_sq=s,
+            G=g,
+            chunk=4,
+            softening_kernel=kernel,
+            interpret=True,
+        )[0]
+
+    leaf_w = np.where(mask[..., None], w[ids], 0.0).astype(np.float32)
+    _, vjp_t = jax.vjp(table_layout, c["pos"], c["mass"], soft, G)
+    _, vjp_d = jax.vjp(direct_layout, c["pos"], c["mass"], soft, G)
+    want = vjp_t(jnp.asarray(leaf_w))
+    got = vjp_d(jnp.asarray(w))
+    names = ("positions", "masses", "softening_sq", "G")
+    for name, a, b in zip(names, got, want):
+        # float32 round-off of the two layouts' summation orders (measured <= 2.8e-6,
+        # G_bar's sum over every pair; the rest <= 2.5e-7)
+        assert _rel(a, b) < 2e-5, (name, _rel(a, b))
