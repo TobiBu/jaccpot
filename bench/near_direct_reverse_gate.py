@@ -158,10 +158,13 @@ def main() -> None:
 
     w32 = jnp.asarray(np.random.default_rng(1).standard_normal((n, 3)), jnp.float32)
     common = dict(leaf_width=W, chunk=chunk, softening_kernel=kernel)
+    # the production call's fourth lane: dehnen_error's force scale (a capture of
+    # the fused lane with mac_type="dehnen_error" says so); the reverse has none
+    forward = dict(common, with_force_scale=bool(meta.get("with_force_scale")))
 
     def direct_loss(p, m, topo, s, g, w):
         acc, _ = nearfield_leafpair_csr_sorted_direct_pallas_cvjp(
-            p, m, *topo, softening_sq=s, G=g, **common
+            p, m, *topo, softening_sq=s, G=g, **forward
         )
         return jnp.sum(acc * w)
 
@@ -247,7 +250,7 @@ def main() -> None:
     if not args.no_timing:
         fwd = jax.jit(
             lambda p, m, topo, s, g: nearfield_leafpair_csr_sorted_direct_pallas(
-                p, m, *topo, softening_sq=s, G=g, **common
+                p, m, *topo, softening_sq=s, G=g, **forward
             )[0]
         )
         t_fwd = _time(fwd, p32, m32, topo32, s32, g32, reps=args.reps)

@@ -50,7 +50,9 @@ the largest array the ``(N + Wpad, 4)`` table; the table layout's rule on the sa
 needs 1380 B/p (10.28 GiB).
 
 TIME. On the same step the gradient takes 57.6 ms against the production forward's
-26.8-30.0 ms (the table layout's: 274.5 ms); on the 2e5 disc 3.18 ms against 1.81.
+26.8-30.0 ms (the table layout's: 274.5 ms); on the 2e5 disc 3.18 ms against 1.81; on
+the galaxy preset's 25M disc+bulge step (``dehnen_error``, the forward with its
+force-scale lane) 202.9 ms against 106.1, with the same 45.4 B/p of temporaries.
 The reverse does about twice the forward's arithmetic per pair (the tidal contraction,
 the softening derivative) and reads seven floats per source to its four.
 
