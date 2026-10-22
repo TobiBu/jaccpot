@@ -69,7 +69,6 @@ from jax import lax
 from jaxtyping import Array
 from yggdrax.dtypes import INDEX_DTYPE, as_index
 from yggdrax.tree import Tree, get_level_offsets, get_nodes_by_level
-from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot.operators._precision import HIGHEST
 from jaccpot.operators.real_harmonic_derivatives import real_harmonic_lowering_matrix
@@ -81,6 +80,7 @@ from jaccpot.runtime._level_shapes import (
 from jaccpot.runtime._level_shapes import (
     registered_num_levels as _registered_num_levels,
 )
+from jaccpot.upward._mass_moments_vjp import tree_mass_moments
 
 __all__ = [
     "RealNodeMultipoleData",
@@ -637,7 +637,7 @@ def prepare_real_upward_sweep(
     if p < 0:
         raise ValueError("max_order must be >= 0")
 
-    mass_moments = compute_tree_mass_moments(tree, positions_sorted, masses_sorted)
+    mass_moments = tree_mass_moments(tree, positions_sorted, masses_sorted)
     centers = jnp.asarray(mass_moments.center_of_mass, dtype=positions_sorted.dtype)
 
     total_nodes = int(jnp.asarray(tree.parent).shape[0])

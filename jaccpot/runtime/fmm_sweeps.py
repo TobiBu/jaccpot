@@ -19,7 +19,6 @@ from yggdrax.interactions import (
     NodeInteractionList,
 )
 from yggdrax.tree import Tree, get_node_levels
-from yggdrax.tree_moments import compute_tree_mass_moments
 
 from jaccpot._jax_compat import Tracer
 from jaccpot.config import MACTypeInput
@@ -27,6 +26,7 @@ from jaccpot.downward.local_expansions import (
     LocalExpansionData,
     TreeDownwardData,
 )
+from jaccpot.upward._mass_moments_vjp import tree_mass_moments
 from jaccpot.upward.real_tree_expansions import prepare_real_upward_sweep
 from jaccpot.upward.tree_expansions import (
     NodeMultipoleData,
@@ -371,9 +371,7 @@ class SweepsMixin(_EngineBase):
                     )
                 )
             )
-            mass_moments_real = compute_tree_mass_moments(
-                tree, positions_sorted, masses_sorted
-            )
+            mass_moments_real = tree_mass_moments(tree, positions_sorted, masses_sorted)
             real_upward = prepare_real_upward_sweep(
                 tree,
                 positions_sorted,
