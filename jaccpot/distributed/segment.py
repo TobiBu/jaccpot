@@ -27,6 +27,12 @@ lane the same, as a new path next to the old one (which stays the reference):
 * **An external field per row**, ``external_acceleration_fn(state, params)``
   (``(state)`` without parameters) on each device's ``(cap, 2, 3)`` rows, added to
   the self-gravity as the single card adds it.
+* **Segment retry.** A fired flag (any device, any step) re-plans what the
+  segment outgrew from its needs -- the walk caps, the tree's leaf capacity,
+  depth bound and level batch, the cross capacities through the force's seam --
+  re-prepares every device caps-only at the segment's START (a host copy of the
+  donated start state is kept, as the single card keeps it), recompiles and
+  re-runs from the start force: at most twice, the single card's policy.
 * **Repartition BETWEEN segments**, as its own program, every
   ``repartition_every`` segments (host cadence: no ``lax.cond`` around
   collectives, whose device-divergent predicate deadlocks, and none of its buffers
@@ -365,6 +371,73 @@ class DirectMeshForce:
         )
         return acc, jnp.uint32(0), jnp.zeros((self.needs_size,), jnp.int32)
 
+    def retry_mode(self, needs: np.ndarray, retries: int, tree_first: bool) -> Any:
+        """Never retried: the direct sum has no capacity.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            Unused.
+        retries : int
+            Unused.
+        tree_first : bool
+            Unused.
+
+        Returns
+        -------
+        Any
+            ``None``.
+        """
+        del needs, retries, tree_first
+        return None
+
+    def replan(self, needs: np.ndarray, bits: int, *, walk_only: bool = False) -> bool:
+        """Nothing to re-plan.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            Unused.
+        bits : int
+            Unused.
+        walk_only : bool
+            Unused.
+
+        Returns
+        -------
+        bool
+            ``False``.
+        """
+        del needs, bits, walk_only
+        return False
+
+    def raise_overflow(
+        self, needs: np.ndarray, bits: int, *, retries: int, where: str
+    ) -> None:
+        """Raise: only a count past the shard capacity can fail this force.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            Unused.
+        bits : int
+            The failed run's bits.
+        retries : int
+            Unused.
+        where : str
+            Which segment, for the message.
+
+        Raises
+        ------
+        RuntimeError
+            Always.
+        """
+        del needs, retries
+        raise RuntimeError(
+            f"mesh {where}: the direct force failed (bits {int(bits):#x}): a "
+            "device's live count exceeds the shard capacity"
+        )
+
 
 class MeshSegmentRunner:
     """Velocity Verlet on the mesh, one compiled program per segment.
@@ -383,9 +456,11 @@ class MeshSegmentRunner:
     force : Any
         The per-device force: ``shard(positions, masses, live, ids) ->
         (acceleration, bits, needs)`` inside ``shard_map``, with ``prepare``,
-        ``key``, ``context``, ``before_trace``, ``needs_size`` and ``cache_owner``
-        (:class:`~jaccpot.distributed.template_force.FusedMeshForce`).
-        ``prepare`` runs here, at ``state``.
+        ``key``, ``context``, ``before_trace``, ``needs_size``, ``cache_owner``
+        and the retry's ``retry_mode``, ``replan`` and ``raise_overflow``
+        (:class:`~jaccpot.distributed.template_force.FusedMeshForce`,
+        :class:`DirectMeshForce`). ``prepare`` runs here, at ``state``, and again
+        at a re-planned segment's start.
     external_acceleration_fn : Optional[Callable[..., Array]]
         ``field(state_rows, params)`` (or ``field(state_rows)`` when ``run`` gets no
         parameters) -> ``(cap, 3)``, on one device's ``(cap, 2, 3)`` rows. Keep ONE
@@ -443,6 +518,8 @@ class MeshSegmentRunner:
         self.reports: list[SegmentReport] = []
         #: what the carried acceleration was computed with (external_field_key)
         self._acceleration_key: Optional[tuple] = None
+        #: the segment whose repartition already ran (a start() before it)
+        self._repartitioned_for = 0
         self.force.prepare(state.state[:, 0], state.masses, state.count)
 
     @classmethod
@@ -457,6 +534,8 @@ class MeshSegmentRunner:
         theta: Optional[float] = None,
         cross_caps: Any = None,
         near_theta: Optional[float] = None,
+        cross_replan: Optional[Callable[[np.ndarray, Any], Any]] = None,
+        level_floor: Optional[tuple[int, int]] = None,
         external_acceleration_fn: Optional[Callable[..., Array]] = None,
         repartition_every: int = 0,
         num_samples: int = 256,
@@ -484,6 +563,11 @@ class MeshSegmentRunner:
             :class:`~jaccpot.distributed.cross.CrossCapacities`.
         near_theta : Optional[float]
             Passed to the cross hook.
+        cross_replan : Optional[Callable[[np.ndarray, Any], Any]]
+            The cross capacities' re-plan
+            (:class:`~jaccpot.distributed.template_force.FusedMeshForce`).
+        level_floor : Optional[tuple[int, int]]
+            The level plan's floor (``FusedMeshForce``).
         external_acceleration_fn : Optional[Callable[..., Array]]
             As in the constructor.
         repartition_every : int
@@ -516,6 +600,8 @@ class MeshSegmentRunner:
             theta=theta,
             cross_caps=cross_caps,
             near_theta=near_theta,
+            cross_replan=cross_replan,
+            level_floor=level_floor,
             axis_name=axis_name,
         )
         return cls(
@@ -873,6 +959,31 @@ class MeshSegmentRunner:
     # The host loop.
     # ------------------------------------------------------------------
 
+    def start(self, *, external_params: Any = None) -> SegmentReport:
+        """The start force alone: the total acceleration at the current positions.
+
+        :meth:`run` computes it when it needs one (the first segment, a changed
+        external field); this computes it now, without stepping -- re-planned
+        like a segment if it overflows -- and the next :meth:`run` starts from
+        it.
+
+        Parameters
+        ----------
+        external_params : Any
+            The external field's parameters, as :meth:`run` will get them.
+
+        Returns
+        -------
+        SegmentReport
+            ``steps = 0``; ``segment`` is the segment the force starts.
+
+        Raises
+        ------
+        RuntimeError
+            As :meth:`run`.
+        """
+        return self._advance(0, None, external_params)
+
     def run(self, steps: int, *, dt: Any, external_params: Any = None) -> SegmentReport:
         """Advance one segment of ``steps`` steps.
 
@@ -896,58 +1007,137 @@ class MeshSegmentRunner:
         ValueError
             If ``steps`` is below 1.
         RuntimeError
-            If a capacity flag fired.
+            If a capacity flag fired and the segment could not be re-planned (a
+            named walk cap, a cross overflow without a re-plan, a third failure,
+            or ``JACCPOT_STRICT_SEGMENT_RETRY=0``).
         """
-        from jaccpot.runtime.strict_carry import external_field_key
-
-        k = int(steps)
-        if k < 1:
+        if int(steps) < 1:
             raise ValueError(f"a segment needs at least one step, got {steps}")
+        return self._advance(int(steps), dt, external_params)
+
+    def _advance(self, k: int, dt: Any, external_params: Any) -> SegmentReport:
+        """:meth:`run` (``k >= 1``) or :meth:`start` (``k = 0``), with the retry.
+
+        Parameters
+        ----------
+        k : int
+            Steps; ``0`` computes the start force only.
+        dt : Any
+            Time step (unused when ``k = 0``).
+        external_params : Any
+            The external field's parameters.
+
+        Returns
+        -------
+        SegmentReport
+            What ran.
+        """
+        from jaccpot._env import env_flag
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+        from jaccpot.runtime.strict_carry import external_field_key, host_copy
+
         n = self.segment_index + 1
         every = self.repartition_every
-        repartitioned = every > 0 and n > 1 and (n - 1) % every == 0
+        # once per segment: a start() before the segment already ran it
+        repartitioned = (
+            every > 0
+            and n > 1
+            and (n - 1) % every == 0
+            and self._repartitioned_for != n
+        )
         diag: dict = {}
         if repartitioned:
             self.state, diag = self._repartition(self.state)
+            self._repartitioned_for = n
         state = self.state
-        dt_arr = jnp.asarray(dt, state.state.dtype)
         key = external_field_key(self.external_acceleration_fn, external_params)
         start = state.acceleration is None or key != self._acceleration_key
+        if k == 0 and not start:
+            return SegmentReport(segment=n, steps=0, start_force=False)
+        started = start
         acceleration = state.acceleration
-        if start:
-            acceleration, ok, bits, needs = self._call(
-                "start",
-                0,
-                external_params,
-                state.state,
-                state.masses,
-                state.count,
-                state.ids,
-            )
-            ok_h, bits_h, needs_h = jax.device_get((ok, bits, needs))
-            if not bool(ok_h):
-                raise RuntimeError(
-                    f"segment {n}: a capacity flag fired on the start force "
-                    f"(bits {int(bits_h):#x}, needs {np.asarray(needs_h).tolist()})"
+        retry_enabled = env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True)
+        start_host: Any = None
+        if k > 0 and self.donate and retry_enabled:
+            # the segment consumes its start state, and a retry re-runs the segment
+            # from it: one copy per segment, off the device (on a GPU asynchronous,
+            # into pinned memory), as strict_run_v2's particle carry keeps it
+            start_host = host_copy(state.state)
+        state_new = state.state
+        acc_new: Optional[Array] = None
+        retries, tree_first = 0, False
+        while True:
+            consumed = False
+            if start:
+                acceleration, ok, bits, needs = self._call(
+                    "start",
+                    0,
+                    external_params,
+                    state.state,
+                    state.masses,
+                    state.count,
+                    state.ids,
                 )
-        outputs = self._call(
-            "segment",
-            k,
-            external_params,
-            state.state,
-            acceleration,
-            state.masses,
-            state.count,
-            state.ids,
-            dt_arr,
-        )
-        state_new, acc_new = outputs[:2]
-        ok_h, bits_h, needs_h, done_h = jax.device_get(outputs[2:])
-        if not bool(ok_h):
-            raise RuntimeError(
-                f"segment {n}: a capacity flag fired after {int(done_h)} of {k} steps "
-                f"(bits {int(bits_h):#x}, needs {np.asarray(needs_h).tolist()})"
+                ok_h, bits_h, needs_h = jax.device_get((ok, bits, needs))
+                done_h = 0
+                if k == 0 and bool(ok_h):
+                    acc_new = acceleration
+                    break
+            if k > 0 and (not start or bool(ok_h)):
+                outputs = self._call(
+                    "segment",
+                    k,
+                    external_params,
+                    state.state,
+                    acceleration,
+                    state.masses,
+                    state.count,
+                    state.ids,
+                    jnp.asarray(dt, state.state.dtype),
+                )
+                state_new, acc_new = outputs[:2]
+                # the segment's one host sync
+                ok_h, bits_h, needs_h, done_h = jax.device_get(outputs[2:])
+                del outputs
+                consumed = self.donate
+                if bool(ok_h):
+                    break
+            # A fired flag. Re-plan from what the segment needed (the walk caps,
+            # the tree's bounds, the cross capacities through the force's seam),
+            # re-prepare at the segment's START and run it again from its start
+            # force: at most twice, the single card's policy.
+            needs_np = np.asarray(needs_h, np.int64)
+            where = f"segment {n} ({int(done_h)} of {k} steps fitted)"
+            mode = (
+                self.force.retry_mode(needs_np, retries, tree_first)
+                if retry_enabled
+                else None
             )
+            if mode is None:
+                self.force.raise_overflow(
+                    needs_np, int(bits_h), retries=retries, where=where
+                )
+            if retries == 0:
+                tree_first = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
+            retries += 1
+            acceleration = acc_new = None
+            state_new = state.state
+            if consumed:
+                assert start_host is not None
+                state = MeshState(
+                    state=jax.device_put(start_host, state.masses.sharding),
+                    masses=state.masses,
+                    ids=state.ids,
+                    count=state.count,
+                )
+                state_new = state.state
+            if not self.force.replan(needs_np, int(bits_h), walk_only=mode == "walk"):
+                self.force.raise_overflow(
+                    needs_np, int(bits_h), retries=retries - 1, where=where
+                )
+            self.force.prepare(state.state[:, 0], state.masses, state.count)
+            # the start force again, with the grown capacities, as a fresh run's
+            start = True
         self.state = MeshState(
             state=state_new,
             masses=state.masses,
@@ -956,12 +1146,14 @@ class MeshSegmentRunner:
             acceleration=acc_new,
         )
         self._acceleration_key = key
-        self.segment_index = n
-        self.steps_done += k
+        if k > 0:
+            self.segment_index = n
+            self.steps_done += k
         report = SegmentReport(
             segment=n,
             steps=k,
-            start_force=start,
+            start_force=started,
+            retries=retries,
             repartitioned=repartitioned,
             declined=bool(diag["declined"][0]) if diag else False,
             sent_off_device=int(diag["sent_off_device"].sum()) if diag else 0,
@@ -969,7 +1161,8 @@ class MeshSegmentRunner:
             bits=int(bits_h),
             needs=np.asarray(needs_h).tolist(),
         )
-        self.reports.append(report)
+        if k > 0:
+            self.reports.append(report)
         return report
 
     def gather(self) -> dict:

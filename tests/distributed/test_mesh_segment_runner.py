@@ -11,6 +11,10 @@ eps 1e-2 (ferrers3), two devices.
   BITWISE with the same caps.
 * A2: a one-device mesh segment equals a user-written single-card scan over the
   provider in the same box, bitwise; two segments of 2 steps equal one of 4,
+  bitwise by id (the repartition half of A2, with a partition-independent force:
+  ``test_mesh_segment_repartition.py``).
+* A3: a segment that outgrows its leaf capacity, walk caps and cross summary is
+  re-planned at its start, and equals a fresh run with the final capacities,
   bitwise by id.
 
     XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_PLATFORMS=cpu \\
@@ -39,7 +43,6 @@ from jaccpot.distributed.rollout import (  # noqa: E402
     make_reference_direct_force,
     setup_fused_force,
 )
-from jaccpot.distributed.template_force import setup_template_force  # noqa: E402
 
 pytestmark = [
     pytest.mark.skipif(
@@ -129,51 +132,6 @@ def _assert_bitwise(got, want, what):
         f"{what}: {differ} of {got.size} elements differ, max "
         f"{float(np.nanmax(np.abs(got.astype(np.float64) - want))):.3e}"
     )
-
-
-def test_a1_the_template_force_is_the_stacked_force_bitwise(cpu_fused_lane):
-    """GATE A1: same caps, same force, bit for bit; nothing reads the template."""
-    mesh = _mesh()
-    pos, vel, mass = _ic()
-    state, _ = decompose(mesh, pos, vel, mass, cap=CAP, num_samples=64)
-    solver = _solver()
-    stacked, plan_s, walk_s = setup_fused_force(
-        solver,
-        mesh,
-        state,
-        leaf_size=LEAF,
-        max_order=ORDER,
-        theta=THETA,
-        cross_caps=_cross_caps(),
-    )
-    acc_s, flag_s = stacked(state.positions, state.masses, state.count, state.ids)
-    assert not bool(np.asarray(flag_s))
-    # the template route on the same solver: its prepares start from the walk caps
-    # the stacked setup validated, so the two compile the same caps
-    template, plan_t, walk_t = setup_template_force(
-        solver,
-        mesh,
-        state,
-        leaf_size=LEAF,
-        max_order=ORDER,
-        theta=THETA,
-        cross_caps=_cross_caps(),
-    )
-    assert plan_t == plan_s
-    assert walk_t == walk_s
-    acc_t, flag_t = template(state.positions, state.masses, state.count, state.ids)
-    assert not bool(np.asarray(flag_t))
-    rows = _live_rows(state.count)
-    got = np.asarray(acc_t)[rows]
-    assert np.all(np.isfinite(got)), "the template route read a template value"
-    _assert_bitwise(got, np.asarray(acc_s)[rows], "template vs stacked force")
-    # and it is the force: the single-device fused lane's own error on these
-    # particles is 3.578e-3 (test_fused_multigpu_cpu_e2e.py)
-    ref = make_reference_direct_force(mesh, G=1.0, softening=SOFT)
-    want = np.asarray(ref(state.positions, state.masses, state.count, state.ids)[0])
-    want = want[rows].astype(np.float64)
-    err = float(np.linalg.norm(got - want) / np.linalg.norm(want))
-    assert err < 5e-3, err
 
 
 # --------------------------------------------------------------------------
@@ -292,25 +250,164 @@ def test_a2_one_device_segment_is_the_single_card_particle_carry(
     _assert_bitwise(got_acc, want_acc, "acceleration")
 
 
-def test_a2_two_segments_are_one_segment_bitwise(cpu_fused_lane):
-    """GATE A2 (2): 2 + 2 steps (the total acceleration carried across) equal one
-    segment of 4, bitwise by id, on two devices with the cross field -- and the
-    second segment starts from the carried acceleration, not a start force."""
+def test_a1_a2_the_template_force_and_chained_segments_bitwise(cpu_fused_lane):
+    """GATE A1, and A2 (2), on one solver (their compiled programs shared).
+
+    A1: with the same caps, the runner's start force (the template route:
+    caps-only prepares, ONE shape template materialised in the body) equals the
+    stacked route's force (``setup_fused_force``: full eager prepares, stacked
+    states) bitwise on every live row, all finite -- no template value reaches
+    the force -- and it is the force (direct sum).
+
+    A2 (2): 2 + 2 steps, the total acceleration carried across, equal one segment
+    of 4, bitwise by id, with the cross field; the second segment starts from the
+    carried acceleration, not a start force."""
     from jaccpot.distributed.segment import MeshSegmentRunner
 
     mesh = _mesh()
     pos, vel, mass = _ic()
+    shard, _ = decompose(mesh, pos, vel, mass, cap=CAP, num_samples=64)
     solver = _solver()
+    stacked, plan_s, walk_s = setup_fused_force(
+        solver,
+        mesh,
+        shard,
+        leaf_size=LEAF,
+        max_order=ORDER,
+        theta=THETA,
+        cross_caps=_cross_caps(),
+    )
+    acc_s, flag_s = stacked(shard.positions, shard.masses, shard.count, shard.ids)
+    assert not bool(np.asarray(flag_s))
+
+    # the template route on the same solver: its prepares start from the walk caps
+    # the stacked setup validated, so the two compile the same caps
     kwargs = dict(
         leaf_size=LEAF, max_order=ORDER, theta=THETA, cross_caps=_cross_caps()
     )
     chained = MeshSegmentRunner.fused(
         solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
     )
+    assert chained.force.setup.plan == plan_s
+    assert chained.force.setup.walk_caps == walk_s
+    start = chained.start()
+    assert start.start_force and start.retries == 0
+    rows = _live_rows(chained.state.count)
+    np.testing.assert_array_equal(
+        np.asarray(chained.state.ids)[rows], np.asarray(shard.ids)[rows]
+    )
+    got = np.asarray(chained.state.acceleration)[rows]
+    assert np.all(np.isfinite(got)), "the template route read a template value"
+    _assert_bitwise(got, np.asarray(acc_s)[rows], "template vs stacked force")
+    # and it is the force: the single-device fused lane's own error on these
+    # particles is 3.578e-3 (test_fused_multigpu_cpu_e2e.py)
+    ref = make_reference_direct_force(mesh, G=1.0, softening=SOFT)
+    want = np.asarray(ref(shard.positions, shard.masses, shard.count, shard.ids)[0])
+    want = want[rows].astype(np.float64)
+    err = float(np.linalg.norm(got - want) / np.linalg.norm(want))
+    assert err < 5e-3, err
+
     first, second = chained.run(2, dt=DT), chained.run(2, dt=DT)
-    assert first.start_force and not second.start_force
+    assert not first.start_force and not second.start_force  # start() ran it
     whole = MeshSegmentRunner.fused(
         solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
     )
-    whole.run(4, dt=DT)
+    assert whole.run(4, dt=DT).start_force
     _gathered_equal(chained, whole)
+
+
+# --------------------------------------------------------------------------
+# Gate A3: a segment that outgrows its capacities is re-planned at its start, and
+# the re-run equals a fresh run with the final capacities, bitwise.
+# --------------------------------------------------------------------------
+
+
+def _collapse_into_a_plummer_sphere(steps):
+    """``(positions, velocities, masses)``: a uniform cube whose free drift remaps
+    every particle radially -- direction kept, radius rank kept -- onto a clipped
+    Plummer sphere (scale 0.7) over ``steps`` steps of ``DT``, with masses so small
+    (1e-9) that gravity moves nothing measurably. Keeping the directions keeps each
+    device's Morton domain a half-space, so the cross volume stays a boundary's.
+    The start fits what it is prepared with; the steps need more cell leaves (per
+    device ~33 -> 64 at leaf 64) and longer walk lists (far 1230 and near 1294
+    directed pairs against the start's validated 1024 each)."""
+    rng = np.random.default_rng(0)
+    start = rng.uniform(-1.0, 1.0, (N, 3))
+    radius = np.linalg.norm(start, axis=1)
+    rank = (np.argsort(np.argsort(radius)) + 0.5) / N
+    radius_end = np.minimum(0.7 / np.sqrt(rank ** (-2.0 / 3.0) - 1.0), 1.5)
+    end = start / radius[:, None] * radius_end[:, None]
+    vel = (end - start) / (steps * DT)
+    return (
+        start.astype(np.float32),
+        vel.astype(np.float32),
+        np.full(N, 1e-9, np.float32),
+    )
+
+
+def test_a3_an_outgrown_segment_is_replanned_and_equals_a_fresh_run(
+    cpu_fused_lane, fresh_level_registry, monkeypatch
+):
+    """GATE A3: prepared at leaf capacity 44 on the uniform start (it fits), the
+    segment's trees need more leaves than that, its walks longer lists and its
+    cross summary more rows: the flags fire, the needs are reduced over the mesh,
+    and the segment is re-planned at its start -- the leaf capacity to
+    ``auto_leaf_capacity`` of what the trees needed, the walk caps to what the
+    walks needed, the cross capacities through the force's ``cross_replan`` seam
+    (here: the summary follows the leaf capacity, track B's to replace) -- every
+    device re-prepared caps-only there, and the segment re-run. The result equals
+    a fresh run started there with the final capacities (leaf capacity, walk caps,
+    level plan, cross caps), bitwise by id, and that run needs no retry."""
+    from jaccpot.distributed.segment import MeshSegmentRunner
+    from jaccpot.runtime.capacity_plan import install_walk_caps
+
+    # the library's own walk caps: a NAMED near cap is never widened
+    monkeypatch.delenv("JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP")
+    steps = 2
+    mesh = _mesh()
+    pos, vel, mass = _collapse_into_a_plummer_sphere(steps)
+    solver = _solver(leaf_capacity=44)
+    engine = solver._impl
+    seen = []
+
+    def cross_replan(cross_needs, caps):
+        # the two-sided summary holds one row per live leaf: its leaf capacity
+        # bounds that exactly (bench/multigpu_rollout_gate.py's sizing)
+        seen.append(np.asarray(cross_needs).tolist())
+        return CrossCapacities(
+            max_cells=int(engine._tree_leaf_capacity), leaf_width=LEAF
+        )
+
+    kwargs = dict(leaf_size=LEAF, max_order=ORDER, theta=THETA)
+    retried = MeshSegmentRunner.fused(
+        solver,
+        mesh,
+        _mesh_state(mesh, pos, vel, mass),
+        cross_caps=_cross_caps(),
+        cross_replan=cross_replan,
+        **kwargs,
+    )
+    caps_before = dict(engine._strict_fused_validated_caps)
+    report = retried.run(steps, dt=DT)
+    caps_after = dict(engine._strict_fused_validated_caps)
+    assert report.retries >= 1, report
+    assert engine._tree_leaf_capacity == 1024  # auto_leaf_capacity(64 leaves)
+    for key in ("compact_far_pair_capacity", "near_edge_capacity"):
+        assert int(caps_after[key]) > int(caps_before[key]), key
+    assert seen == [[]], seen  # the seam was asked once; no cross needs vector yet
+    assert retried.force.cross_caps.max_cells == 1024
+
+    fresh_solver = _solver(leaf_capacity=engine._tree_leaf_capacity)
+    install_walk_caps(fresh_solver, caps_after)
+    fresh = MeshSegmentRunner.fused(
+        fresh_solver,
+        mesh,
+        _mesh_state(mesh, pos, vel, mass),
+        cross_caps=retried.force.cross_caps,
+        level_floor=retried.force.level_floor,
+        **kwargs,
+    )
+    fresh_report = fresh.run(steps, dt=DT)
+    assert fresh_report.retries == 0, fresh_report
+    assert fresh.force.setup.plan == retried.force.setup.plan
+    _gathered_equal(retried, fresh)
