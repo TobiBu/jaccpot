@@ -127,12 +127,15 @@ lands on other values (652 position- and 1147 mass-gradient elements on one card
 re-record a DET reference before comparing.
 
 G1 checks itself: ``compare <ref> X --pins G1`` passes when X's own record has the
-differentiable forward within ``_G1_REL_L2_LIMIT`` (fp32 round-off) of the
-production forward, in both call orders; the ref is only reported (``compare X X``
+differentiable forward BITWISE equal to the production forward (no element whose
+bits differ), in both call orders; the ref is only reported (``compare X X``
 works). ``docs/fast_gradients_2026-09.md`` measured the two equal to 1.8e-11, on its
 branch before bc62978; S0 found them 1.46e-3 apart (``docs/production_2026-10.md``),
 which S4b and DET2 could not see because they compare the gradient lane only with
-itself. G1 on 63587f2: 1.21e-3 on the fresh solver, 1.66e-7 on the production one.
+itself. G1 on 63587f2: 1.21e-3 on the fresh solver, 1.66e-7 on the production one;
+the gap left was the layouts (the table near layout, the leaf-major L2P), which S8
+replaced with the production kernels under their reverses, so the check is bitwise
+since. A record without the bitwise counts is judged by ``_G1_REL_L2_LIMIT``.
 
 Usage (book the card with autocvd first; the org rule)::
 
@@ -637,6 +640,12 @@ def case_g1(out: Path) -> dict:
         a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
         return float(np.linalg.norm(a - b) / np.linalg.norm(b))
 
+    def differing(a, b):
+        # bit patterns, so a -0.0 against a +0.0 counts too
+        return int(
+            np.sum(np.asarray(a).view(np.uint32) != np.asarray(b).view(np.uint32))
+        )
+
     np.savez(
         out,
         acc_production=acc_prod,
@@ -648,6 +657,8 @@ def case_g1(out: Path) -> dict:
         "limit": _G1_REL_L2_LIMIT,
         "rel_l2_fresh": rel(acc_fresh, acc_prod),
         "rel_l2_same_engine": rel(acc_same, acc_prod),
+        "differing_fresh": differing(acc_fresh, acc_prod),
+        "differing_same_engine": differing(acc_same, acc_prod),
         "lists": {
             "production": lists_prod,
             "fresh": lists_fresh,
@@ -667,10 +678,18 @@ def _bitwise_pass(meta: dict) -> bool:
 
 
 def _g1_pass(meta: dict) -> bool:
-    """G1 passes when both differentiable arms equal production to round-off."""
+    """G1 passes when both differentiable arms are the production forward, bitwise.
+
+    A record made before the bitwise counts existed (no ``differing_*``) is judged
+    by the round-off limit it was made under.
+    """
+    if "differing_fresh" not in meta:
+        return all(
+            meta.get(key, float("inf")) <= _G1_REL_L2_LIMIT
+            for key in ("rel_l2_fresh", "rel_l2_same_engine")
+        )
     return all(
-        meta.get(key, float("inf")) <= _G1_REL_L2_LIMIT
-        for key in ("rel_l2_fresh", "rel_l2_same_engine")
+        meta.get(key) == 0 for key in ("differing_fresh", "differing_same_engine")
     )
 
 

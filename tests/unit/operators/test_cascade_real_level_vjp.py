@@ -386,3 +386,68 @@ def test_reverse_is_finite_at_zero_and_on_axis_displacements():
             # the primal is the unguarded one
             ref = _translate_rows(rows, tuple(jnp.asarray(v) for v in d), t, which)
             assert np.array_equal(np.asarray(out), np.asarray(ref))
+
+
+def test_the_reverses_keep_the_packed_layout(tree_data):
+    """Neither reverse materialises anything wider than the packed ``[nodes, C]``
+    table: the level reverse they replaced worked on centred ``[nodes + 1, Bp*Wp]``
+    rows (128 floats per node through order 6, 2.6x the packed row at p6; 33.5 floats
+    per particle on the 8e6 cell tree)."""
+    from tests.unit._jaxpr_buffers import largest_xla_array
+
+    topo, com = tree_data
+    order = 4
+    total = int(topo.parent.shape[0])
+    num_internal = int(topo.left_child.shape[0])
+    C = (order + 1) ** 2
+    table = jnp.ones((total, C), jnp.float64).at[:num_internal].set(0.0)
+    num_levels = int(jnp.max(topo.node_level)) + 1
+    offs = topo.level_offsets
+    width = int(jnp.max(offs[1:] - offs[:-1]))
+
+    def m2m(x, c, g):
+        return jax.vjp(
+            lambda x, c: m2m_real_levels_pallas_cvjp(
+                x,
+                c,
+                topo.left_child,
+                topo.right_child,
+                topo.parent,
+                topo.nodes_by_level,
+                offs,
+                order,
+                num_internal,
+                num_levels,
+                width,
+                True,
+                "triton",
+                4,
+            ),
+            x,
+            c,
+        )[1](g)
+
+    def l2l(x, c, g):
+        return jax.vjp(
+            lambda x, c: l2l_real_levels_pallas_cvjp(
+                x,
+                c,
+                topo.parent,
+                topo.left_child,
+                topo.right_child,
+                topo.nodes_by_level,
+                offs,
+                order,
+                num_levels,
+                width,
+                True,
+                "triton",
+                4,
+            ),
+            x,
+            c,
+        )[1](g)
+
+    for reverse in (m2m, l2l):
+        largest = largest_xla_array(reverse, table, com, table)
+        assert largest <= total * C, (reverse.__name__, largest, total * C)

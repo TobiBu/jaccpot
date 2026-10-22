@@ -37,8 +37,8 @@ import sys
 
 # The Dehnen-MAC / force-scale criterion family of tests/unit/runtime. Every case
 # builds a solver and runs a full FMM solve (26-95 s each on CPU), which is why
-# the directory used to have a job to itself; it is now two shards of test-full,
-# this family and the rest of the directory.
+# the directory used to have a job to itself; it is now three shards of test-full,
+# this family, the gradient family below and the rest of the directory.
 _RUNTIME_MAC_FILES = (
     "tests/unit/runtime/test_criterion_reaches_the_split_build.py",
     "tests/unit/runtime/test_dehnen_mac_gradients.py",
@@ -52,6 +52,18 @@ _RUNTIME_MAC_FILES = (
     "tests/unit/runtime/test_refuted_dehnen_theta_mode.py",
     "tests/unit/runtime/test_split_build_carries_pair_policy.py",
     "tests/unit/runtime/test_split_build_default_predicate.py",
+)
+
+# The gradients on the production layout (plan S8): jax.grad through the large-N
+# lane's reverse kernels, in Pallas interpret mode on CPU, against the direct sum or
+# central differences. Every heavy case compiles a reverse program of the whole lane
+# (minutes each on CPU); with them `unit-runtime` was cancelled at its cap or
+# OOM-killed (2026-10-22, PR #443), so they are a shard of their own.
+_RUNTIME_GRAD_FILES = (
+    "tests/unit/runtime/test_l2p_particle_major_reverse.py",
+    "tests/unit/runtime/test_large_n_far_chain_grad.py",
+    "tests/unit/runtime/test_large_n_grad_reverse_path.py",
+    "tests/unit/runtime/test_mass_moments_vjp.py",
 )
 
 # Single files that need their own job: forced host devices change the device
@@ -89,9 +101,10 @@ SHARDS: dict[str, list[str]] = {
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
     "unit": ["tests/unit", "--ignore=tests/unit/runtime"],
     "unit-runtime-mac": list(_RUNTIME_MAC_FILES),
+    "unit-runtime-grad": list(_RUNTIME_GRAD_FILES),
     "unit-runtime": [
         "tests/unit/runtime",
-        *(f"--ignore={path}" for path in _RUNTIME_MAC_FILES),
+        *(f"--ignore={path}" for path in (*_RUNTIME_MAC_FILES, *_RUNTIME_GRAD_FILES)),
     ],
     "characterization": ["tests/characterization"],
     # single-purpose jobs

@@ -30,7 +30,7 @@ from jaccpot.runtime._force_scale_levels import (
     far_force_scale_own,
     subtree_min_by_level,
 )
-from jaccpot.runtime._level_shapes import level_batch_width
+from jaccpot.runtime._level_shapes import _LEVEL_HEADROOM, level_batch_width
 
 
 def _plummer(n, seed):
@@ -288,7 +288,16 @@ def test_the_l2l_custom_vjp_differentiates_the_locals_only():
         kw["nodes_by_level"],
         kw["level_offsets"],
     )
-    static = (order, kw["num_levels"], kw["level_batch_width"], True, "triton", 4)
+    # The level count the downward sweep launches (``level_batch_width``'s rule: the
+    # tree's live levels plus a headroom of 8, 26 here), not the table's 64: the two
+    # reverses unroll one interpret-mode kernel body per level, and since the
+    # packed-layout reverses (plan S8) 64 levels took this test to 7.3 GB RSS on CPU
+    # (3.5 GB at 26). Computed here rather than read from the process-wide registry,
+    # which another test's tree of the same shape may have raised.
+    live = int(np.count_nonzero(np.diff(np.asarray(kw["level_offsets"]))))
+    levels = min(live + _LEVEL_HEADROOM, kw["num_levels"])
+    assert live < levels < kw["num_levels"]
+    static = (order, levels, kw["level_batch_width"], True, "triton", 4)
 
     def plain(c, x):
         return jnp.sum(l2l_real_levels_pallas_cvjp(c, x, *tables, *static) ** 2)

@@ -29,6 +29,7 @@ Split out of ``near_field.py`` (Tier 1.4); every function body is unchanged.
 from __future__ import annotations
 
 from functools import partial
+from numbers import Real
 from typing import Any, Literal, Optional, Union, overload
 
 import jax
@@ -1475,6 +1476,146 @@ _radix_fast_lane_prepacked_accel_cvjp.defvjp(
 )
 
 
+def _csr_near_layout(leaf_ranges: Any) -> str:
+    """The CSR lane's layout: ``"direct"`` (the sorted particles) or ``"table"``.
+
+    ``JACCPOT_NEARFIELD_LAYOUT`` (default ``direct``) chooses; the direct kernel
+    needs the leaf ranges and accumulates in the input dtype, so without ranges or
+    with ``JACCPOT_NEARFIELD_ACCUM=wide`` it is the table kernel (as the multi-GPU
+    cross term, which reads the same variables). The differentiable lane resolves
+    the layout the same way: since plan S8 the direct layout has its own reverse.
+
+    Parameters
+    ----------
+    leaf_ranges : Any
+        ``(L, 2)`` inclusive particle range per CSR leaf, or ``None``.
+
+    Returns
+    -------
+    str
+        ``"direct"`` or ``"table"``.
+    """
+    accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
+    layout = _env_choice("JACCPOT_NEARFIELD_LAYOUT", "direct", ("table", "direct"))
+    if leaf_ranges is None or accum != "input":
+        return "table"
+    return layout
+
+
+def _csr_direct_near(
+    positions: Array,
+    masses: Array,
+    neighbor_list: Any,
+    leaf_ranges: Any,
+    *,
+    leaf_width: int,
+    G: Union[float, Array],
+    softening_sq: Array,
+    softening_kernel: Optional[str],
+    want_potential: bool,
+    want_force_scale: bool,
+    differentiable: bool,
+) -> Union[Array, Tuple[Array, Array]]:
+    """The CSR lane's direct layout: the production near field.
+
+    One call of :func:`~jaccpot.pallas.nearfield_leafpair_csr.
+    nearfield_leafpair_csr_sorted_direct_pallas` on the sorted particles, the leaf
+    ranges and the neighbour CSR. ``differentiable`` makes it the same call under its
+    ``custom_vjp`` (:func:`~jaccpot.pallas.nearfield_leafpair_csr_direct_vjp.
+    nearfield_leafpair_csr_sorted_direct_pallas_cvjp`): the same operands, the same
+    bits, and a reverse on the same layout, so the differentiable lane's forward is
+    the production one (plan S8). Not by default: the bits are the same, but the
+    ``custom_vjp`` boundary moves the literal ``G`` and softening constants in the
+    lowered text of the production programs (CPU program identity, 20 of 36
+    variants, every array bitwise).
+
+    Parameters
+    ----------
+    positions : Array
+        ``(N, 3)`` positions in tree order.
+    masses : Array
+        ``(N,)`` masses, same order.
+    neighbor_list : Any
+        The prepared state's leaf neighbour CSR (symmetric: one canonical walk).
+    leaf_ranges : Any
+        ``(L, 2)`` inclusive particle range per CSR leaf.
+    leaf_width : int
+        The payload's leaf slot width ``W``.
+    G : Union[float, Array]
+        Gravitational constant.
+    softening_sq : Array
+        Softening squared, in the positions' dtype.
+    softening_kernel : Optional[str]
+        The pair kernel.
+    want_potential : bool
+        Return the potential lane (forward only: it has no reverse rule).
+    want_force_scale : bool
+        Return the force-scale lane (its cotangent is dropped by the reverse).
+    differentiable : bool
+        Route through the ``custom_vjp`` (the potential lane never is).
+
+    Returns
+    -------
+    Union[Array, Tuple[Array, Array]]
+        ``(N, 3)`` accelerations, or with the fourth lane ``(acc, lane)``.
+    """
+    from jaccpot.pallas.nearfield_leafpair_csr import (
+        nearfield_leafpair_csr_sorted_direct_pallas,
+    )
+    from jaccpot.pallas.nearfield_leafpair_csr_direct_vjp import (
+        nearfield_leafpair_csr_sorted_direct_pallas_cvjp,
+    )
+
+    dtype = positions.dtype
+    offsets = jnp.asarray(neighbor_list.offsets, dtype=INDEX_DTYPE)
+    counts = jnp.asarray(neighbor_list.counts, dtype=INDEX_DTYPE)
+    nbr_nodes = jnp.asarray(neighbor_list.neighbors, dtype=INDEX_DTYPE)
+    leaf_nodes = jnp.asarray(neighbor_list.leaf_indices, dtype=INDEX_DTYPE)
+    # static radix: leaves are the last num_leaves nodes, so leaf index =
+    # node id - first leaf node (entries past a row's count are never read)
+    nbr_leaf = jnp.maximum(nbr_nodes - leaf_nodes[0], 0)
+    chunk = max(1, _env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64))
+    pallas_num_warps = _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_WARPS", 0)
+    pallas_num_stages = max(1, _env_int("JACCPOT_NEARFIELD_PALLAS_NUM_STAGES", 1))
+    pallas_subtile = _env_int("JACCPOT_NEARFIELD_PALLAS_TARGET_SUBTILE", 0)
+    ranges = jnp.asarray(leaf_ranges, dtype=INDEX_DTYPE)
+    leaf_start = ranges[:, 0]
+    leaf_count = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
+    kernel_opts = dict(
+        leaf_width=int(leaf_width),
+        softening_sq=softening_sq,
+        softening_kernel=softening_kernel,
+        G=jnp.asarray(G, dtype=dtype),
+        chunk=chunk,
+        num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
+        num_stages=pallas_num_stages,
+        target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
+        interpret=_env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+    )
+    direct_call = (
+        nearfield_leafpair_csr_sorted_direct_pallas_cvjp
+        if differentiable and not want_potential
+        else nearfield_leafpair_csr_sorted_direct_pallas
+    )
+    pair_acc, pair_pot = direct_call(
+        positions,
+        masses,
+        leaf_start,
+        leaf_count,
+        nbr_leaf,
+        offsets,
+        counts,
+        with_potential=want_potential,
+        with_force_scale=want_force_scale,
+        **kernel_opts,
+    )
+    pair_acc = pair_acc.astype(dtype)
+    if want_potential or want_force_scale:
+        assert pair_pot is not None
+        return pair_acc, pair_pot.astype(dtype)
+    return pair_acc
+
+
 # Overloads: the return shape is keyed entirely on `return_potential`, so a caller that does
 # not set it should not be handed a union to narrow. Generated from this
 # function's own signature rather than retyped -- including whether `return_potential`
@@ -1568,8 +1709,10 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     ``differentiable`` routes the fused Pallas lanes through their ``custom_vjp``
     wrappers so ``jax.grad`` works. ``pallas_call`` has no autodiff rule, so the
     raw lanes hard-fail in reverse mode; the wrapper keeps the Pallas forward
-    (byte-identical) and takes the reverse from this lane's tiled pure-JAX
-    fallback. Defaults False so the production forward path is untouched.
+    (byte-identical). On the CSR lane's direct layout (the production near field)
+    it is the production call itself, with a reverse on the same layout; the
+    other lanes take their reverse from their tiled pure-JAX twins. Defaults False
+    so the production forward path is untouched.
 
     ``reverse_options`` carries the resolved reverse-pass tuning (tiering, tile
     sizes, the empty-tile skip). ``None`` means "resolve from the environment",
@@ -1613,8 +1756,8 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         The prepared state's leaf neighbour CSR. Present, it enables the CSR
         row-chunk lane, whose rows are the real ones rather than a padded
         rectangle; ``None`` keeps the rectangle kernel. The differentiable path
-        takes it too, through the kernel's ``custom_vjp`` and the ``table``
-        layout (acceleration only).
+        takes it too, through the kernels' ``custom_vjp`` rules, on the layout
+        the forward resolves (acceleration only).
     leaf_ranges : Any
         ``(L, 2)`` inclusive particle range per CSR leaf, in leaf order. Given,
         the forward CSR lane can read the sorted particles directly instead of
@@ -1648,6 +1791,13 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     ValueError
         If both ``return_potential`` and ``return_force_scale`` are set.
     """
+    # the caller's force parameters as arrays rather than Python floats (the fused
+    # lane's traced ForceParams): the direct layout then runs under its custom_vjp,
+    # so jax.grad in G and the softening at a fixed topology reaches its reverse.
+    # Python floats are the literals of the default programs, which stay as they are.
+    array_params = not isinstance(G, Real) or (
+        softening_sq is not None and not isinstance(softening_sq, Real)
+    )
     if reverse_options is None:
         from jaccpot.runtime.grad_options import resolve_grad_options
 
@@ -1735,6 +1885,31 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     if int(target_particle_ids.size) == 0:
         return _zeros_result()
 
+    if (
+        differentiable
+        and csr_lane
+        and _csr_near_layout(leaf_ranges) == "direct"
+        and _large_n_nearfield_diag_mode() not in ("zero", "self_only")
+    ):
+        # the production near field under its custom_vjp: the direct layout reads
+        # the sorted particles, so none of the (L, W) leaf tables below is built
+        return _csr_direct_near(
+            positions,
+            masses,
+            neighbor_list,
+            leaf_ranges,
+            leaf_width=int(target_particle_ids.shape[1]),
+            G=G,
+            softening_sq=jnp.asarray(
+                float(softening) ** 2 if softening_sq is None else softening_sq,
+                dtype=positions.dtype,
+            ),
+            softening_kernel=softening_kernel,
+            want_potential=want_potential,
+            want_force_scale=want_force_scale,
+            differentiable=True,
+        )
+
     safe_target_particle_ids = jnp.where(target_particle_mask, target_particle_ids, 0)
     leaf_positions = positions[safe_target_particle_ids]
     leaf_masses = masses[safe_target_particle_ids]
@@ -1821,6 +1996,27 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
     if csr_lane:
         # CSR row-chunk lane (plan sub-10ms 4.1): one program per chunk of a
         # leaf's neighbour row; the self term rides on each leaf's first chunk.
+        layout = _csr_near_layout(leaf_ranges)
+        if want_force_scale and layout != "direct":
+            raise NotImplementedError(
+                "return_force_scale is accumulated by the direct CSR kernel only; "
+                f"this call resolved layout={layout!r} (no leaf ranges, "
+                "JACCPOT_NEARFIELD_LAYOUT or accum='wide')"
+            )
+        if layout == "direct":
+            return _csr_direct_near(
+                positions,
+                masses,
+                neighbor_list,
+                leaf_ranges,
+                leaf_width=int(target_particle_ids.shape[1]),
+                G=G,
+                softening_sq=softening_sq,
+                softening_kernel=softening_kernel,
+                want_potential=want_potential,
+                want_force_scale=want_force_scale,
+                differentiable=differentiable or array_params,
+            )
         from jaccpot.pallas.nearfield_leafpair_csr import (
             build_leafpair_chunk_table,
             leafpair_chunk_capacity,
@@ -1837,57 +2033,6 @@ def compute_leaf_p2p_accelerations_radix_fast_lane(
         nbr_leaf = jnp.maximum(nbr_nodes - leaf_nodes[0], 0)
         chunk = max(1, _env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64))
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
-        layout = _env_choice("JACCPOT_NEARFIELD_LAYOUT", "direct", ("table", "direct"))
-        if differentiable or leaf_ranges is None:
-            layout = "table"
-        if layout == "direct" and accum != "input":
-            # the direct kernel accumulates in the input dtype; the table kernel
-            # carries the wide accumulator (as the multi-GPU cross term, which
-            # reads the same variable)
-            layout = "table"
-        if want_force_scale and layout != "direct":
-            raise NotImplementedError(
-                "return_force_scale is accumulated by the direct CSR kernel only; "
-                f"this call resolved layout={layout!r} (differentiable, no leaf "
-                "ranges, JACCPOT_NEARFIELD_LAYOUT or accum='wide')"
-            )
-        if layout == "direct":
-            from jaccpot.pallas.nearfield_leafpair_csr import (
-                nearfield_leafpair_csr_sorted_direct_pallas,
-            )
-
-            ranges = jnp.asarray(leaf_ranges, dtype=INDEX_DTYPE)
-            leaf_start = ranges[:, 0]
-            leaf_count = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
-            width = int(target_particle_ids.shape[1])
-            kernel_opts = dict(
-                leaf_width=width,
-                softening_sq=softening_sq,
-                softening_kernel=softening_kernel,
-                G=jnp.asarray(G, dtype=dtype),
-                chunk=chunk,
-                num_warps=(pallas_num_warps if pallas_num_warps > 0 else None),
-                num_stages=pallas_num_stages,
-                target_subtile=(pallas_subtile if pallas_subtile > 0 else None),
-                interpret=pallas_interpret,
-            )
-            pair_acc, pair_pot = nearfield_leafpair_csr_sorted_direct_pallas(
-                positions,
-                masses,
-                leaf_start,
-                leaf_count,
-                nbr_leaf,
-                offsets,
-                counts,
-                with_potential=want_potential,
-                with_force_scale=want_force_scale,
-                **kernel_opts,
-            )
-            pair_acc = pair_acc.astype(dtype)
-            if want_potential or want_force_scale:
-                assert pair_pot is not None
-                return pair_acc, pair_pot.astype(dtype)
-            return pair_acc
         num_leaves_csr = int(counts.shape[0])
         capacity = leafpair_chunk_capacity(
             int(nbr_nodes.shape[0]), num_leaves_csr, chunk

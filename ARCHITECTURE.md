@@ -268,31 +268,40 @@ cleanup (`docs/cleanup_2026-10.md`: X3, K, C, Z-b).
     `runtime/_large_n_grad.py`. It needs `retain_far_pairs_for_grad=True` (a
     constructor option, not a `prepare_state` one), and it has one near field.
 
-  On an Ampere+ GPU (since 2026-09, `docs/fast_gradients_2026-09.md`) the gradient
-  runs the same Pallas kernels as the fused forward, each with a reverse Pallas
-  kernel: the leaf P2M, the M2M/L2L cascades, the M2L over the far-pair CSR, and the
-  near field's CSR row-chunk lane. Two forward kernels have no reverse, so the
-  gradient path bypasses them for slower layouts: the near field runs the CSR lane's
-  table layout, not the production direct layout (`nearfield/_fast_lane.py:1829`),
-  and the L2P runs the leaf-major padded XLA L2P with its analytic VJP, not the
-  particle-major Pallas L2P. The 2026-10-13 numbers (`docs/production_2026-10.md`):
-  jitted gradient 31.9 ms at 2e5 and 101.6 ms at 1e6, out of memory at 8e6 on one
-  40 GB card. (The 2026-07 figure this bullet used to quote, 1M forward+backward
-  69 s at 11 GB, predates the Pallas reverses.)
+  On an Ampere+ GPU the gradient runs the production forward's kernels, kernel for
+  kernel, each under a `custom_vjp` with a reverse Pallas kernel (plan S8, 2026-10-22;
+  `docs/production_2026-10.md`, "S8"): the leaf P2M, the M2M/L2L cascades, the M2L
+  over the walk's target-sorted far-pair CSR, the particle-major L2P (its reverse
+  reduces the coefficient and centre cotangents per leaf in the kernel), and the near
+  field's CSR direct layout (`nearfield_leafpair_csr_sorted_direct_pallas_cvjp`, the
+  production call as its forward; its reverse uses the near list's symmetry, so every
+  particle's cotangent has one writer). The differentiable forward is therefore the
+  production evaluation bitwise (pin G1, A100 2e5; every softening kernel in CPU
+  interpret mode). Before S8 the lane ran other layouts where those had no reverse --
+  the near field's table layout, the leaf-major XLA L2P -- and ran out of memory at
+  8e6. A jitted gradient takes the state and the grad plan (a pytree) as ARGUMENTS:
+  closed over, `jax.jit` embeds the whole topology in the program as constants
+  (`differentiable_step_fn` does this itself). The M2L reverse reads the forward's
+  CSR in both passes (the far list is checked symmetric at plan time) and the COMs'
+  reverse is a gather over the tree's ancestor sums, so the reverse sorts and
+  scatters no float and two identical gradients are bitwise equal. Measured at the
+  G1 operating point (A100): at 8e6 `jax.grad` 131.5 ms against the 30.0 ms force eval
+  (4.4x; `value_and_grad` 5.4x; a card free before and after), 1.71 GiB of
+  temporaries, the largest array 9.4 N floats; at 1e8 `jax.grad`'s device peak
+  28.29 GiB (13.92 GiB of temporaries).
 
-  **What it does not cover.** Positions and masses only: `G` and the softening are
-  Python floats (`_large_n_grad.py`'s `-float(engine.G)`, the near field's
-  `float(softening)`), so there is no d/dG or d/dε. (The fused forward takes them as
-  traced `ForceParams` since S2, and `jax.grad` through `FusedForceProvider.accelerations`
-  in them equals central differences on the pure-JAX near field in float64 (CPU). Not
-  verified on the Pallas lane, whose direct near-field kernel and particle-major L2P
-  have no reverse rule (below). See [`docs/fused_provider.md`](docs/fused_provider.md).) Reverse mode only: a
-  `custom_vjp` refuses `jax.jvp`, so forward-mode adjoints fail. One force only:
-  `strict_run_v2` evaluates the forward-only `evaluate_large_n_state`, and the
-  fused multi-GPU lane's cross-domain M2L and near-field reverses raise
-  (`pallas/m2l_real_csr_lanes.py:835-840`, `pallas/nearfield_leafpair_csr.py:2174-2183`),
-  so neither `strict_run_v2` nor
-  `FusedRollout` can be differentiated.
+  **What it does not cover.** Reverse mode only: a `custom_vjp` refuses `jax.jvp`, so
+  forward-mode adjoints fail. One force only: `strict_run_v2` evaluates the
+  forward-only `evaluate_large_n_state`, and the fused multi-GPU lane's cross-domain
+  M2L and near-field reverses raise (`pallas/m2l_real_csr_lanes.py:835-840`,
+  `pallas/nearfield_leafpair_csr.py:2174-2183`), so neither `strict_run_v2` nor
+  `FusedRollout` can be differentiated (plan S9). `G` and the softening squared are
+  differentiable as traced `ForceParams` (`differentiable_accelerations(...,
+  force_params=)`, and `FusedForceProvider.accelerations(topology, params)`, whose
+  direct near layout then runs under its `custom_vjp`), except under
+  `mac_type="dehnen_error"`, which refuses any but the solver's own (its thresholds
+  were built with them; positions and masses differentiate at its frozen lists).
+  See [`docs/fused_provider.md`](docs/fused_provider.md).
 - **Configuring the grad path.** `GradConfig` (`jaccpot/config.py`) is the
   supported interface; `runtime/grad_options.py` resolves it under
   `explicit field > JACCPOT_* env var > measured default`, so the environment
@@ -383,15 +392,24 @@ already passed `pallas.triton.CompilerParams` and needed no change.
   `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0`. The multi-GPU mesh lane
   (`distributed/fmm.py`) calls `_apply_real_m2l` directly.
 - Nearfield Pallas is resolved from `pallas_nearfield_fused_supported()` into the
-  engine's `use_pallas`. Three differentiable near-field lanes exist and they are
+  engine's `use_pallas`. Four differentiable near-field lanes exist and they are
   **not** interchangeable:
+  - `nearfield_leafpair_csr_sorted_direct_pallas_cvjp`
+    (`pallas/nearfield_leafpair_csr_direct_vjp.py`, plan S8) is the CSR lane's DIRECT
+    layout under a `custom_vjp`: the production call as its forward and a reverse on
+    the same sorted layout (no `(L, W)` tables: 45 B/p of temporaries at 8e6 against
+    the table rule's 1380). It is what the grad path takes for a `LargeNPreparedState`
+    on an Ampere+ GPU (`nearfield/_fast_lane.py` `_csr_direct_near`, with
+    `differentiable=True` or array force parameters; the default programs call the
+    kernel directly: the `custom_vjp` boundary moves their literal constants, not
+    their bits).
   - `nearfield_leafpair_csr_pallas_cvjp` (`pallas/nearfield_leafpair_csr.py`) is the
-    CSR row-chunk lane's rule: Pallas forward in the table layout + a Pallas reverse
-    over the same chunk table. It is what the grad path takes on an Ampere+ GPU, for a
-    `LargeNPreparedState` and for a radix state's leaf-major lane alike (since
-    2026-09, `docs/fast_gradients_2026-09.md`). The forward's default direct layout
-    has no reverse, so `differentiable=True` forces the table layout
-    (`nearfield/_fast_lane.py:1829`).
+    CSR row-chunk lane's TABLE layout rule: Pallas forward in the table layout + a
+    Pallas reverse over the same chunk table. The grad path takes it where the direct
+    layout does not run: a radix state's leaf-major lane (no leaf ranges),
+    `JACCPOT_NEARFIELD_LAYOUT=table` and `JACCPOT_NEARFIELD_ACCUM=wide` (since
+    2026-09, `docs/fast_gradients_2026-09.md`; the `LargeNPreparedState`'s rule until
+    S8).
   - `_radix_fast_lane_prepacked_accel_cvjp` (`nearfield/_fast_lane.py`) is the
     prepacked rectangle's rule: Pallas forward + an analytic O(N) leaf-pair reverse,
     tuned by `GradConfig`'s `reverse_*` fields. It was the production rule until the

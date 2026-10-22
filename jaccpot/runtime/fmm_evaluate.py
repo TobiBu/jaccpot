@@ -23,6 +23,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import warnings
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import jax
@@ -51,6 +52,7 @@ from ._nearfield_fastlane import (
 from .dtypes import INDEX_DTYPE
 from .fmm_caches import _contains_tracer
 from .fmm_state import FMMPreparedState
+from .fused_topology import ForceParams
 from .grad_options import grad_option_overrides, resolve_grad_options
 from .kernels.core import (
     NearfieldInteropData,
@@ -716,6 +718,7 @@ class EvaluateMixin(_EngineBase):
         jit_traversal: bool = False,
         grad_plan: Optional["LargeNGradPlan"] = None,
         grad_config: Optional[GradConfig] = None,
+        force_params: Optional[ForceParams] = None,
     ) -> Array:
         """Exact fixed-topology gradients of the FMM force w.r.t. positions/masses.
 
@@ -766,19 +769,35 @@ class EvaluateMixin(_EngineBase):
             OOMs at galaxy scale (30 GB peak at 200k against 6.8 GB). See
             :class:`~jaccpot.config.GradConfig`; every field also has a
             ``JACCPOT_*`` environment fallback, and an explicit field wins.
+        force_params : Optional[ForceParams]
+            Large-N path only: ``G`` and the softening squared, as the fused lane
+            takes them (:class:`~jaccpot.runtime.fused_topology.ForceParams`). Arrays
+            are differentiable -- ``jax.grad`` in ``G`` and ``eps2`` at the frozen
+            topology; ``None`` (or the solver's own values as Python floats) is the
+            solver's, the production program. Refused (``ValueError``) under
+            ``mac_type='dehnen_error'``: its frozen thresholds were built with the
+            solver's own.
 
         Returns
         -------
         Array
             ``(N, 3)`` accelerations in the original input order.
 
+        Raises
+        ------
+        NotImplementedError
+            If ``force_params`` is given for a radix ``FMMPreparedState``.
+
         Notes
         -----
         Bare ``jax.grad``/``jax.vjp`` over this method give exact gradients, and are
-        the recommended usage -- the inner numeric kernels are already jit-compiled.
-        Wrapping the *entire* call in an outer ``jax.jit`` is supported at moderate N
-        but can fail at large N (the re-run of the prepared sweeps retains host-side
-        ops). See ``docs/differentiable_fmm.md`` ("jit limitation").
+        the recommended usage on a radix state -- the inner numeric kernels are
+        already jit-compiled. Wrapping the *entire* call in an outer ``jax.jit`` is
+        supported at moderate N but can fail at large N there (the re-run of the
+        prepared sweeps retains host-side ops). A ``LargeNPreparedState`` compiles
+        whole: jit the gradient with the state and its ``grad_plan`` (both pytrees)
+        as ARGUMENTS -- closed over, ``jax.jit`` embeds every array of the topology
+        in the program as a constant. See ``docs/differentiable_fmm.md``.
         """
         _warn_if_traced_under_an_outer_jit(positions, masses)
         options = resolve_grad_options(
@@ -798,6 +817,13 @@ class EvaluateMixin(_EngineBase):
                     target_indices=target_indices,
                     grad_plan=grad_plan,
                     options=options,
+                    force_params=force_params,
+                )
+            if force_params is not None:
+                raise NotImplementedError(
+                    "force_params reaches the large-N (preset='large_n_gpu') "
+                    "differentiable lane only; a radix FMMPreparedState evaluates "
+                    "with the solver's own G and softening"
                 )
             return self._differentiable_accelerations_radix(
                 state,
@@ -850,8 +876,9 @@ class EvaluateMixin(_EngineBase):
         Parameters
         ----------
         state : Union[FMMPreparedState, LargeNPreparedState]
-            A prepared state from :meth:`prepare_state`. Closed over as a
-            constant, exactly as :meth:`differentiable_accelerations` treats it.
+            A prepared state from :meth:`prepare_state`: frozen topology, as
+            :meth:`differentiable_accelerations` treats it (a constant of the
+            radix program; an argument of the large-N one, see Returns).
         target_indices : Optional[Array]
             Optional targets to return; all particles remain sources. Passed
             through to :meth:`differentiable_accelerations` unchanged.
@@ -872,7 +899,12 @@ class EvaluateMixin(_EngineBase):
             A compiled ``f(positions, masses) -> accelerations`` closing over
             ``state``. Differentiable, so ``jax.grad`` over it works and is
             itself compiled. Positions and masses are in the original (unsorted)
-            particle order, as for :meth:`differentiable_accelerations`.
+            particle order, as for :meth:`differentiable_accelerations`. On a
+            ``LargeNPreparedState`` the state and its grad plan are arguments of
+            the compiled program, bound with ``functools.partial`` (closed over,
+            ``jax.jit`` embeds the whole topology as constants), and ``f`` takes
+            an optional third argument, ``force_params`` (as
+            :meth:`differentiable_accelerations`).
 
         Raises
         ------
@@ -901,17 +933,38 @@ class EvaluateMixin(_EngineBase):
             supports_fast_lane=not isinstance(state, LargeNPreparedState),
         )
 
-        def _step(positions: Array, masses: Array) -> Array:
-            with grad_option_overrides(options):
-                if isinstance(state, LargeNPreparedState):
+        if isinstance(state, LargeNPreparedState):
+            from ._large_n_grad import prepare_large_n_grad_plan
+
+            plan = prepare_large_n_grad_plan(self, state)
+
+            def _large_n_step(
+                state_in: LargeNPreparedState,
+                plan_in: "LargeNGradPlan",
+                positions: Array,
+                masses: Array,
+                force_params: Optional[ForceParams] = None,
+            ) -> Array:
+                with grad_option_overrides(options):
                     return self._differentiable_accelerations_large_n(
-                        state,
+                        state_in,
                         positions,
                         masses,
                         target_indices=target_indices,
-                        grad_plan=None,
+                        grad_plan=plan_in,
                         options=options,
+                        force_params=force_params,
                     )
+
+            # the state and the plan are ARGUMENTS of the program: closed over,
+            # jax.jit embeds every array of the topology as a constant
+            large_n = partial(jax.jit(_large_n_step), state, plan)
+            if compile_now is not None:
+                jax.block_until_ready(large_n(*compile_now))
+            return large_n
+
+        def _step(positions: Array, masses: Array) -> Array:
+            with grad_option_overrides(options):
                 return self._differentiable_accelerations_radix(
                     state,
                     positions,
@@ -969,6 +1022,12 @@ class EvaluateMixin(_EngineBase):
             Integer gather index ``fwd`` with ``positions_sorted ==
             positions[fwd]``.
         """
+        if isinstance(state, LargeNPreparedState):
+            # the tree's own order (positions_sorted = positions[particle_indices],
+            # the index production scatters the force back through): an array of
+            # the state, so a jitted gradient may take the state as an ARGUMENT
+            # instead of embedding its topology as constants
+            return jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
         permutation = state.inverse_permutation
         cached = getattr(self, "_forward_permutation_memo", None)
         if cached is not None and cached[0] is permutation:
@@ -1058,6 +1117,7 @@ class EvaluateMixin(_EngineBase):
         target_indices: Optional[Array],
         grad_plan: Optional["LargeNGradPlan"],
         options: Any,
+        force_params: Optional[ForceParams] = None,
     ) -> Array:
         """Differentiable evaluation on the ``large_n_gpu`` production state.
 
@@ -1066,7 +1126,9 @@ class EvaluateMixin(_EngineBase):
         the frozen M2L list comes from ``compact_far_pairs`` and the near field is
         the fused Pallas fast lane driven through its ``custom_vjp``. The
         near-field lane is therefore not selectable here -- this state has exactly
-        one differentiable near field. See ``runtime/_large_n_grad.py``.
+        one differentiable near field, the production one (plan S8: the forward
+        is the production evaluation's, kernel for kernel). See
+        ``runtime/_large_n_grad.py``.
 
         Parameters
         ----------
@@ -1085,6 +1147,10 @@ class EvaluateMixin(_EngineBase):
         options : Any
             Resolved :class:`~jaccpot.config.GradConfig`. Its ``nearfield_lane``
             is ignored on this state -- see above.
+        force_params : Optional[ForceParams]
+            ``G`` and the softening squared, or ``None`` for the solver's own
+            (:func:`~jaccpot.runtime._large_n_grad.resolve_grad_force_params`,
+            which raises ``ValueError`` for others under ``mac_type='dehnen_error'``).
 
         Returns
         -------
@@ -1099,6 +1165,7 @@ class EvaluateMixin(_EngineBase):
         from ._large_n_grad import (
             evaluate_large_n_state_at_positions_and_masses_sorted,
             prepare_large_n_grad_plan,
+            resolve_grad_force_params,
         )
 
         if target_indices is not None:
@@ -1123,6 +1190,7 @@ class EvaluateMixin(_EngineBase):
             if grad_plan is not None
             else prepare_large_n_grad_plan(self, state)
         )
+        force = resolve_grad_force_params(self, force_params)
         positions_sorted, masses_sorted = self._sorted_inputs(state, positions, masses)
         accelerations_sorted = evaluate_large_n_state_at_positions_and_masses_sorted(
             self,
@@ -1130,6 +1198,7 @@ class EvaluateMixin(_EngineBase):
             positions_sorted,
             masses_sorted,
             plan=plan,
+            force_params=force,
         )
         return jnp.asarray(accelerations_sorted)[state.inverse_permutation].astype(
             self._grad_output_dtype(state)

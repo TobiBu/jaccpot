@@ -136,6 +136,19 @@ class _TargetSortedFarPairCOO(_FarPairCOO):
     __slots__ = ()
 
 
+class _SymmetricTargetSortedFarPairCOO(_TargetSortedFarPairCOO):
+    """A :class:`_TargetSortedFarPairCOO` list that holds every directed pair both ways.
+
+    The frozen list of a mutual walk, CHECKED symmetric by its maker (the
+    differentiable seam's grad plan, ``runtime/_large_n_grad.py``): the CSR M2L
+    lanes' reverse then reads the forward's CSR in both of its passes and sorts
+    nothing (``m2l_real_csr_lanes_pallas_cvjp(symmetric=True)``). The forward is
+    the target-sorted list's. Field-less, like its parent.
+    """
+
+    __slots__ = ()
+
+
 def _far_pair_coo_from(
     compact_far_pairs: Any, sources: Array, targets: Array
 ) -> _FarPairCOO:
@@ -545,6 +558,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
     m2l_impl: str = "rot_scale",
     targets_sorted: bool = False,
     force_scale: Optional[FarForceScaleInputs] = None,
+    symmetric_pairs: bool = False,
 ) -> Union[Array, tuple[Array, Array]]:
     """Run one M2L accumulation pass over the flat pair list (real basis).
 
@@ -604,6 +618,10 @@ def _solidfmm_downward_accumulate_from_multipoles(
         Only that lane computes it: the caller checks
         :func:`~jaccpot.runtime.kernels._l2l._far_force_scale_in_downward_available`
         first.
+    symmetric_pairs : bool
+        With ``targets_sorted``: the list holds every directed pair both ways
+        (:class:`_SymmetricTargetSortedFarPairCOO`), so the CSR lanes kernel's
+        reverse sorts nothing. The forward is unchanged. Static.
 
     Returns
     -------
@@ -681,6 +699,7 @@ def _solidfmm_downward_accumulate_from_multipoles(
             int(os.environ.get("JACCPOT_M2L_CSR_WARPS", "1")),
             n_targets,
             bool(targets_sorted),
+            bool(targets_sorted) and bool(symmetric_pairs),
         )
         locals_updated = initial_locals_coeffs + m2l_inc
     elif pair_count <= chunk_size:

@@ -163,12 +163,26 @@ jobs:
           - shard: unit
             typecheck: "1"
             timeout: 45
-          # tests/unit/runtime in two halves: the Dehnen-MAC / force-scale
-          # criterion family (every case a full FMM solve, 26-95 s on CPU) and the
-          # rest of the directory.
+          # tests/unit/runtime in three parts: the Dehnen-MAC / force-scale
+          # criterion family (every case a full FMM solve, 26-95 s on CPU), the
+          # gradients on the production layout (plan S8: jax.grad through the
+          # large-N lane's reverse kernels in interpret mode) and the rest of the
+          # directory.
           - shard: unit-runtime-mac
             typecheck: "1"
             timeout: 40
+          # Split out on #443 (2026-10-22): with these files `unit-runtime` was
+          # OOM-killed ~5 min in (single cases peaked at 13.8 GB RSS on CPU at
+          # order 4; at the orders they run now, at most 4.9 GB). Measured as
+          # this job runs it (`-n 2`, coverage, typecheck, cold JAX cache) on a
+          # loaded 64-core host: 8.5 min, 8.3 GB peak for both workers, 5.8 GB
+          # the larger one. The cap is about twice that plus the install. The
+          # rest of the directory, measured the same way: 13.5 min, 7.8 GB, 4.3 GB
+          # (12.5 GB and 9.0 GB before test_force_scale_levels.py's L2L reverse
+          # ran the levels the sweep launches instead of the table's 64).
+          - shard: unit-runtime-grad
+            typecheck: "1"
+            timeout: 25
           - shard: unit-runtime
             typecheck: "1"
             timeout: 40

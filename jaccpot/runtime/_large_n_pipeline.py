@@ -54,6 +54,7 @@ __all__ = [
     "evaluate_large_n_state",
     "prepare_large_n_state",
     "record_fused_nearfield_caps",
+    "resolve_large_n_l2p",
 ]
 
 
@@ -1980,6 +1981,43 @@ def prepare_large_n_state(
     return out_state
 
 
+def resolve_large_n_l2p() -> tuple[str, int, str]:
+    """The fused lane's far-field evaluation (L2P): layout, chunk and kernel.
+
+    Read at trace time from the environment, by :func:`evaluate_large_n_state` and
+    by the differentiable lane's far half
+    (:func:`~jaccpot.runtime._large_n_grad.large_n_farfield_l2p_at`), so the two
+    evaluate the far field the same way.
+
+    * layout (``JACCPOT_L2P_LAYOUT``): ``"particle"`` (default) evaluates every
+      particle in its own leaf's expansion, chunk by chunk; ``"leaf"`` sweeps
+      padded ``[leaves, max_leaf_size]`` blocks, whose residuals were the step's
+      temporary peak (3.7-6 slots per particle on cell leaves). Same arithmetic:
+      bitwise equal forces at 8e6 on an A100 (docs/fused_memory_2026-10.md,
+      round 2).
+    * chunk (``JACCPOT_L2P_PARTICLE_CHUNK``): particles per chunk of the
+      particle layout's ``"xla"`` kernel.
+    * kernel (``JACCPOT_L2P_KERNEL``): the particle layout's kernel, ``"pallas"``
+      (the sm_80+ default, :mod:`jaccpot.pallas.l2p_real`), ``"interpret"`` or
+      the XLA vmap of the autodiff form (``"xla"``, elsewhere).
+
+    Returns
+    -------
+    tuple[str, int, str]
+        ``(layout, chunk, kernel)``.
+    """
+    layout = env_choice("JACCPOT_L2P_LAYOUT", "particle", ("leaf", "particle"))
+    chunk = env_int("JACCPOT_L2P_PARTICLE_CHUNK", 1 << 21, minimum=1)
+    kernel = env_choice(
+        "JACCPOT_L2P_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
+    )
+    if kernel == "auto":
+        from jaccpot.pallas.cascade_real_level import pallas_cascade_level_supported
+
+        kernel = "pallas" if pallas_cascade_level_supported() else "xla"
+    return layout, chunk, kernel
+
+
 def _large_n_fastlane_eval_fn(
     fmm: Any,
     state: Any,
@@ -2229,24 +2267,7 @@ def evaluate_large_n_state(
             return jnp.zeros_like(state_prepared.positions_sorted).astype(output_dtype)
         keep_sorted = bool(sorted_output)
 
-        # far-field evaluation layout: "particle" (default) evaluates every particle
-        # in its own leaf's expansion, chunk by chunk; "leaf" sweeps padded
-        # [leaves, max_leaf_size] blocks, whose residuals were the step's temporary
-        # peak (3.7-6 slots per particle on cell leaves). Same arithmetic: bitwise
-        # equal forces at 8e6 on an A100 (docs/fused_memory_2026-10.md, round 2)
-        l2p_layout = env_choice("JACCPOT_L2P_LAYOUT", "particle", ("leaf", "particle"))
-        l2p_chunk = env_int("JACCPOT_L2P_PARTICLE_CHUNK", 1 << 21, minimum=1)
-        # the particle-major L2P's kernel: "pallas" (sm_80+ default,
-        # jaccpot.pallas.l2p_real) or the XLA vmap of the autodiff form
-        l2p_kernel = env_choice(
-            "JACCPOT_L2P_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
-        )
-        if l2p_kernel == "auto":
-            from jaccpot.pallas.cascade_real_level import (
-                pallas_cascade_level_supported,
-            )
-
-            l2p_kernel = "pallas" if pallas_cascade_level_supported() else "xla"
+        l2p_layout, l2p_chunk, l2p_kernel = resolve_large_n_l2p()
 
         want_scale = bool(return_force_scale)
 

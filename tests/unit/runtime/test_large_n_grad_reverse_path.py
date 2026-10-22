@@ -86,14 +86,17 @@ from jaccpot import (
     FarFieldConfig,
     FastMultipoleMethod,
     FMMAdvancedConfig,
+    ForceParams,
     GradConfig,
     TreeConfig,
 )
 from jaccpot.autodiff import direct_sum_gravitational_acceleration
 from jaccpot.pallas import (
     cascade_real_level,
+    l2p_real,
     m2l_real_csr_lanes,
     nearfield_leafpair_csr,
+    nearfield_leafpair_csr_direct_vjp,
     p2m_real_leaf,
 )
 from jaccpot.runtime._large_n_types import LargeNPreparedState
@@ -425,13 +428,15 @@ def test_discarded_far_pairs_are_rejected_rather_than_differentiated_as_constant
 # Every fast Pallas kernel, on CPU (was test_grad_path_fast_kernels_large_n.py).
 #
 # Plan ``fast-gradients-for-the-sub10ms-fmm``. The sub-10 ms forward at N = 2x10^5
-# runs five Pallas kernels: the leaf P2M, the per-level M2M and L2L cascades, the
-# pair-per-lane M2L over the far-pair CSR and the CSR row-chunk near field. Each
-# carries a ``custom_vjp`` whose reverse is a Pallas kernel of its own. This opens
-# every one of them on CPU through its interpret flag, differentiates the
+# runs six Pallas kernels: the leaf P2M, the per-level M2M and L2L cascades, the
+# pair-per-lane M2L over the far-pair CSR, the particle-major L2P and the CSR near
+# field's direct layout. Each carries a ``custom_vjp`` whose reverse is a Pallas
+# kernel of its own (the L2P's and the direct layout's since plan S8: before it, the
+# gradient lane ran the leaf-major jnp L2P and the near field's table layout). This
+# opens every one of them on CPU through its interpret flag, differentiates the
 # production ``large_n_gpu`` path (the gates above: backend patched, prepacked
 # near-field layout forced, far pairs retained) and checks the gradient against
-# the direct-sum oracle -- and COUNTS the five reverse kernels, because a path that
+# the direct-sum oracle -- and COUNTS the six reverse kernels, because a path that
 # quietly fell back to a pure-JAX lane would pass the accuracy check while
 # measuring nothing.
 #
@@ -447,6 +452,7 @@ _INTERPRET_FLAGS = {
     "JACCPOT_M2L_CSR_INTERPRET": "1",
     "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
     "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    "JACCPOT_L2P_KERNEL": "interpret",
     _PAYLOAD_CAP_ENV: "0",  # the prepacked layout, as at N=200k
 }
 
@@ -506,23 +512,33 @@ class TestEveryFastPallasKernel:
 
     @pytest.fixture
     def reverse_counters(self, monkeypatch):
-        counts = {k: 0 for k in ("p2m", "m2m", "l2l", "m2l", "near")}
+        counts = {k: 0 for k in ("p2m", "m2m", "l2l", "m2l", "l2p", "near")}
         for module, name, key in (
             (p2m_real_leaf, "p2m_real_leaves_reverse_pallas", "p2m"),
             (cascade_real_level, "m2m_real_levels_reverse_pallas", "m2m"),
             (cascade_real_level, "l2l_real_levels_reverse_pallas", "l2l"),
             (m2l_real_csr_lanes, "m2l_real_csr_lanes_reverse_pallas", "m2l"),
-            (nearfield_leafpair_csr, "nearfield_leafpair_csr_reverse_pallas", "near"),
+            (l2p_real, "l2p_real_particles_reverse_pallas", "l2p"),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_reverse_pallas",
+                "near",
+            ),
         ):
             _count_calls(monkeypatch, counts, module, name, key)
         return counts
 
     @pytest.fixture
     def forward_counters(self, monkeypatch):
-        counts = {k: 0 for k in ("m2l_lanes", "near_csr")}
+        counts = {k: 0 for k in ("m2l_lanes", "near_direct", "near_table")}
         for module, name, key in (
             (m2l_real_csr_lanes, "m2l_real_csr_lanes_pallas", "m2l_lanes"),
-            (nearfield_leafpair_csr, "nearfield_leafpair_csr_pallas", "near_csr"),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_pallas_cvjp",
+                "near_direct",
+            ),
+            (nearfield_leafpair_csr, "nearfield_leafpair_csr_pallas", "near_table"),
         ):
             _count_calls(monkeypatch, counts, module, name, key)
         return counts
@@ -532,7 +548,7 @@ class TestEveryFastPallasKernel:
         assert int(np.asarray(state.compact_far_pairs.far_pair_count)) > 0
 
     @pytest.mark.filterwarnings("ignore::UserWarning")
-    def test_grad_through_all_five_reverse_kernels_matches_the_direct_sum(
+    def test_grad_through_all_six_reverse_kernels_matches_the_direct_sum(
         self, prepared, reverse_counters, forward_counters
     ):
         fmm, state, positions, masses, weight = prepared
@@ -549,8 +565,11 @@ class TestEveryFastPallasKernel:
             )
 
         forward = np.asarray(fmm.differentiable_accelerations(state, positions, masses))
+        # the production layout: the direct near field, never the table one
         assert (
-            forward_counters["m2l_lanes"] >= 1 and forward_counters["near_csr"] >= 1
+            forward_counters["m2l_lanes"] >= 1
+            and forward_counters["near_direct"] >= 1
+            and forward_counters["near_table"] == 0
         ), forward_counters
         assert reverse_counters == {k: 0 for k in reverse_counters}
         got_p, got_m = jax.grad(loss, argnums=(0, 1))(positions, masses)
@@ -586,7 +605,52 @@ class TestEveryFastPallasKernel:
 # Measured on CPU (N=1024, leaf 8, order 4, eps 0.05, 2444 far pairs) before the
 # fix: forward vs production 5.96e-02 (plummer), 1.02e-02 (wendland_c2), 3.4e-07
 # (ferrers3, the default); d/dpos vs the plummer direct-sum gradient 0.380.
+#
+# Since plan S8 the two entries run the same kernels -- the near field's direct
+# layout (the gradient lane through its custom_vjp) and the particle-major L2P (its
+# Pallas kernel in interpret mode here, as on a GPU) -- so the forwards are BITWISE
+# equal, for every kernel. On the base they differed by the layouts (the gradient
+# lane's table near field and leaf-major L2P): 3.4e-07 with ferrers3.
+#
+# Both are compiled programs here, as the production one is: run eagerly, the
+# custom_vjp's forward is a program of its own in which the softening is an
+# argument, and in interpret mode XLA then cannot fold it into the kernel body --
+# one float32 rounding on 1471 of 3072 elements with ferrers3, 1334 with
+# wendland_c2, none with plummer (the rewrite ``docs/fused_provider.md`` describes
+# for traced parameters). On a GPU the kernel reads the softening as an operand
+# either way.
 # ---------------------------------------------------------------------------
+
+
+def _jitted_force(fmm: Any, state: Any, positions: Any, masses: Any) -> Any:
+    """The differentiable force compiled with the state and its plan as arguments.
+
+    Parameters
+    ----------
+    fmm : Any
+        The solver.
+    state : Any
+        Its prepared large-N state.
+    positions : Any
+        Positions in the caller's order.
+    masses : Any
+        Masses, same order.
+
+    Returns
+    -------
+    Any
+        ``(N, 3)`` accelerations in the caller's order.
+    """
+    from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
+
+    plan = prepare_large_n_grad_plan(fmm, state)
+
+    @jax.jit
+    def force(st, pl, p, m):
+        return fmm.differentiable_accelerations(st, p, m, grad_plan=pl)
+
+    return force(state, plan, positions, masses)
+
 
 _KERNEL_N = 1024
 _KERNEL_LEAF = 8  # 2444 far pairs: both forwards carry a far field
@@ -594,12 +658,11 @@ _KERNEL_SOFTENING = 0.05  # direct sums vs ferrers3: wendland_c2 1.0e-2, plummer
 _KERNEL_ENV = {
     "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
     "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    # the GPU's L2P: the XLA one's program rounds differently with its locals
+    # computed in the same program (23 of 3072 elements at 1.5e-5 here)
+    "JACCPOT_L2P_KERNEL": "interpret",
     _PAYLOAD_CAP_ENV: "0",  # the prepacked layout the grad plan needs
 }
-# The two forwards differ by the near-field layout (the gradient lane's ``table``
-# kernel, production's ``direct``) and the far field's L2P: fp32 rounding, 3.4e-07
-# measured. A dropped kernel is 1e-2 or more.
-_KERNEL_FORWARD_RTOL = 1e-5
 # The plummer gradient against its direct-sum oracle: d/dpos 7.6e-04, d/dmass
 # 3.8e-03 measured, the FMM's own error at leaf 8 (ferrers3 gives 6.9e-04 /
 # 3.4e-03 here). With the default kernel's reverse: 0.38 / 0.19.
@@ -664,22 +727,35 @@ class TestSofteningKernelsOnTheCsrLane:
 
     @pytest.fixture
     def csr_counters(self, monkeypatch) -> dict[str, int]:
-        counts = {"table": 0, "direct": 0, "reverse": 0}
-        for name, key in (
-            ("nearfield_leafpair_csr_pallas", "table"),
-            ("nearfield_leafpair_csr_sorted_direct_pallas", "direct"),
-            ("nearfield_leafpair_csr_reverse_pallas", "reverse"),
+        counts = {"table": 0, "direct": 0, "direct_cvjp": 0, "reverse": 0}
+        for module, name, key in (
+            (nearfield_leafpair_csr, "nearfield_leafpair_csr_pallas", "table"),
+            (
+                nearfield_leafpair_csr,
+                "nearfield_leafpair_csr_sorted_direct_pallas",
+                "direct",
+            ),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_pallas_cvjp",
+                "direct_cvjp",
+            ),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_reverse_pallas",
+                "reverse",
+            ),
         ):
-            _count_calls(monkeypatch, counts, nearfield_leafpair_csr, name, key)
+            _count_calls(monkeypatch, counts, module, name, key)
         return counts
 
     def test_the_kernels_differ_at_this_softening(self, problem):
-        """Non-vacuous: a dropped kernel must move the force far past the gate."""
+        """Non-vacuous: a dropped kernel must move the force far past round-off."""
         refs = {k: np.asarray(self._direct(problem, k)) for k in SOFTENING_KERNELS}
         for kernel in SOFTENING_KERNELS:
             if kernel != DEFAULT_SOFTENING_KERNEL:
                 gap = _relative_l2(refs[kernel], refs[DEFAULT_SOFTENING_KERNEL])
-                assert gap > 100 * _KERNEL_FORWARD_RTOL, (kernel, gap)
+                assert gap > 1e-3, (kernel, gap)
 
     @pytest.mark.parametrize("kernel", SOFTENING_KERNELS)
     def test_the_differentiable_forward_is_the_production_forward(
@@ -689,13 +765,17 @@ class TestSofteningKernelsOnTheCsrLane:
         fmm, state = solvers(kernel)
         production = np.asarray(fmm.evaluate_prepared_state(state))
         assert csr_counters["direct"] >= 1, csr_counters
-        differentiable = np.asarray(
-            fmm.differentiable_accelerations(state, positions, masses)
+        differentiable = np.asarray(_jitted_force(fmm, state, positions, masses))
+        # the gradient lane ran production's direct layout under its custom_vjp
+        assert csr_counters["direct_cvjp"] >= 1, csr_counters
+        assert csr_counters["table"] == 0, csr_counters
+        differ = int(
+            np.sum(differentiable.view(np.uint32) != production.view(np.uint32))
         )
-        # the gradient lane reached the CSR near field, through its table kernel
-        assert csr_counters["table"] >= 1, csr_counters
-        error = _relative_l2(differentiable, production)
-        assert error < _KERNEL_FORWARD_RTOL, f"{kernel}: rel-L2 {error:.3e}"
+        assert differ == 0, (
+            f"{kernel}: {differ} of {production.size} elements differ, max "
+            f"{float(np.max(np.abs(differentiable - production))):.3e}"
+        )
         reference = np.asarray(self._direct(problem, kernel))
         assert _relative_l2(differentiable, reference) < _RTOL
 
@@ -751,6 +831,14 @@ class TestSofteningKernelsOnTheCsrLane:
 
 _CASCADE_SOFT = 1e-2
 _CASCADE_LEAF = 8  # deep enough for a non-empty M2L list at N=1024
+# Order 2 (it was 4): in interpret mode the cascades unroll one copy of their kernel
+# body per tree level, and the reverse programs grow faster than linearly with the
+# order -- this test peaked at 7.6 GB RSS on CPU at order 4, 4.2 GB at 3 and 2.6 GB at
+# 2 (2026-10-22). The Pallas reverse equals the loops' at any order (1.3e-18 here);
+# the direct sum is then matched to order 2's truncation error, 7.2e-05 measured
+# (order 4: under 1e-05), hence its tolerance below.
+_CASCADE_ORDER = 2
+_CASCADE_DIRECT_RTOL = 3e-4
 
 
 def _plummer(n, seed=0):
@@ -840,7 +928,9 @@ class TestPallasCascades:
         """
         pos, mass = _plummer_system()
         fmm = FastMultipoleMethod(theta=0.5, softening=_CASCADE_SOFT, G=1.0)
-        state = fmm.prepare_state(pos, mass, max_order=4, leaf_size=_CASCADE_LEAF)
+        state = fmm.prepare_state(
+            pos, mass, max_order=_CASCADE_ORDER, leaf_size=_CASCADE_LEAF
+        )
         assert (
             _far_pairs(state) > 0
         ), "vacuous configuration: no far pairs, the cascades are dead code"
@@ -869,7 +959,7 @@ class TestPallasCascades:
         assert np.linalg.norm(got) > 0
         rel = np.linalg.norm(got - ref) / np.linalg.norm(ref)
         assert (
-            rel < 1e-5
+            rel < _CASCADE_DIRECT_RTOL
         ), f"gradient disagrees with the direct-sum oracle: rel-L2 {rel:.3e}"
         rel = np.linalg.norm(got - g_loops) / np.linalg.norm(g_loops)
         assert rel < 1e-9, f"Pallas reverse vs loop reverse rel-L2 {rel:.3e}"
@@ -893,6 +983,14 @@ class TestPallasCascades:
 #
 # Both call orders: a fresh solver (what the bench does) and the production solver
 # after its strict call.
+#
+# With the same lists the two lanes differed by fp32 summation order only (5.5e-8
+# here, 1.7e-7 at 2e5 on an A100): the gradient lane's near field was the table
+# layout and its L2P the leaf-major jnp one. Since plan S8 it runs production's
+# kernels (the direct near layout and the particle-major L2P under their reverses),
+# so on the Pallas lane -- the GPU's, interpret mode here -- the forwards are
+# BITWISE equal. (On the pure-JAX route the XLA L2P rounds differently with its
+# locals computed in the same program: 23 of 3072 elements at N=1024.)
 # ---------------------------------------------------------------------------
 
 _FUSED_ENV = {
@@ -901,10 +999,11 @@ _FUSED_ENV = {
     "JACCPOT_STATIC_STRICT_FUSED_FLAT_COMPACT_FAR_PAIRS": "1",
     "JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP": "262144",
     _PAYLOAD_CAP_ENV: "0",  # the prepacked layout the gradient lane requires
+    # the GPU lane's near field and L2P, in interpret mode
+    "JACCPOT_NEARFIELD_PALLAS_INTERPRET": "1",
+    "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
+    "JACCPOT_L2P_KERNEL": "interpret",
 }
-#: Two lanes that walk the same lists differ by fp32 summation order only (5.5e-8
-#: here, 1.7e-7 at 2e5 on an A100); the geometry split is 5.3e-3 here, 1.2e-3 there.
-_SAME_FORCE_RTOL = 1e-5
 _FUSED_THETA = 0.8
 
 
@@ -923,6 +1022,7 @@ def _fused_solver() -> FastMultipoleMethod:
         G=_G,
         softening=_SOFTENING,
         working_dtype=jnp.float32,
+        use_pallas=True,
         advanced=FMMAdvancedConfig(
             tree=TreeConfig(mode="static_radix", leaf_target=_LEAF),
             farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
@@ -974,9 +1074,8 @@ class TestTheForwardIsTheFusedForce:
                     theta=_FUSED_THETA,
                 )
                 assert isinstance(state, LargeNPreparedState)
-                out[arm] = np.asarray(
-                    fmm.differentiable_accelerations(state, positions, masses)
-                )
+                # compiled, as the fused eval is (see _jitted_force)
+                out[arm] = np.asarray(_jitted_force(fmm, state, positions, masses))
                 out[f"far_pairs_{arm}"] = int(
                     np.asarray(state.compact_far_pairs.far_pair_count)
                 )
@@ -989,10 +1088,145 @@ class TestTheForwardIsTheFusedForce:
 
     @pytest.mark.parametrize("arm", ["fresh", "same_engine"])
     def test_the_differentiable_forward_is_the_fused_force(self, forces, arm):
-        """Round-off apart, in either call order (a geometry split is 5.3e-3 here)."""
-        rel = _relative_l2(forces[arm], forces["production"])
-        assert rel < _SAME_FORCE_RTOL, (
-            f"{arm}: the differentiable forward is {rel:.3e} from the fused eval, "
-            f"with {forces[f'far_pairs_{arm}']} far pairs against the fused lane's "
+        """Bitwise, in either call order (a geometry split is 5.3e-3 here)."""
+        got, want = forces[arm], forces["production"]
+        differ = int(np.sum(got.view(np.uint32) != want.view(np.uint32)))
+        assert differ == 0, (
+            f"{arm}: {differ} of {want.size} elements of the differentiable forward "
+            f"differ from the fused eval (rel-L2 {_relative_l2(got, want):.3e}), with "
+            f"{forces[f'far_pairs_{arm}']} far pairs against the fused lane's "
             f"{forces['far_pairs_production']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# ``mac_type="dehnen_error"`` at frozen lists (plan S8).
+#
+# The criterion's thresholds (eq 16a, from the force scale f_b) decide the lists at
+# prepare time; the differentiable seam freezes them like any other lists, so
+# gradients in the positions and masses need nothing new. What it refuses is a ``G``
+# or softening other than the solver's own (``force_params``): the thresholds were
+# built with them -- the fused lane's refusal (user decision S2), kept.
+# ---------------------------------------------------------------------------
+
+_DE_N = 512
+_DE_LEAF = 8
+# Order 2 for the reason test_large_n_far_chain_grad.py gives (the interpret-mode
+# reverse program grows faster than linearly with the order): at order 4 this
+# gradient compiled in 157 s at +7.1 GiB, the class peaking at 13.2 GB RSS on CPU in
+# 8 min; at order 2, 2.8 GB in 2 min (2026-10-22). The claims (bitwise forward,
+# reverse against central differences at the criterion's frozen lists) do not depend
+# on the order.
+_DE_ORDER = 2
+_DE_ENV = dict(_INTERPRET_FLAGS, JACCPOT_L2P_KERNEL="interpret")
+
+
+@pytest.mark.xdist_group("large_n_reverse_dehnen_error")
+class TestDehnenErrorAtFrozenLists:
+    @pytest.fixture(scope="class")
+    def lane(self) -> Iterator[tuple[Any, Any, Any, Any, Any]]:
+        """A float64 ``dehnen_error`` state on the Pallas lane (interpret), its plan."""
+        from jaccpot.runtime._large_n_grad import prepare_large_n_grad_plan
+
+        patcher = pytest.MonkeyPatch()
+        for key, value in _DE_ENV.items():
+            patcher.setenv(key, value)
+        try:
+            rng = np.random.default_rng(13)
+            positions = jnp.asarray(rng.normal(size=(_DE_N, 3)))
+            masses = jnp.asarray(rng.uniform(0.5, 1.5, size=_DE_N))
+            fmm = FastMultipoleMethod(
+                preset="large_n_gpu",
+                basis="real",
+                G=_G,
+                softening=_SOFTENING,
+                working_dtype=jnp.float64,
+                use_pallas=True,
+                adaptive_eps=1e-5,
+                adaptive_error_model="dehnen_paper",
+                mac_force_scale_mode="paper_fb",
+                advanced=FMMAdvancedConfig(
+                    tree=TreeConfig(
+                        mode="static_radix",
+                        leaf_target=_DE_LEAF,
+                        leaf_partition="cells",
+                        leaf_capacity="auto",
+                    ),
+                    farfield=FarFieldConfig(retain_far_pairs_for_grad=True),
+                    mac_type="dehnen_error",
+                ),
+                fixed_order=_DE_ORDER,
+            )
+            state = fmm.prepare_state(
+                positions, masses, leaf_size=_DE_LEAF, max_order=_DE_ORDER
+            )
+            assert isinstance(state, LargeNPreparedState)
+            plan = prepare_large_n_grad_plan(fmm, state)
+            yield fmm, state, plan, positions, masses
+        finally:
+            patcher.undo()
+
+    def test_the_lists_are_the_criterions(self, lane):
+        """Non-vacuous: the solver runs eq (16a), and the far field is live."""
+        fmm, _, plan, *_ = lane
+        assert fmm._impl.mac_type == "dehnen_error"
+        assert int(plan.far_pair_active_count) > 0
+
+    def test_other_force_params_are_refused(self, lane):
+        fmm, state, plan, positions, masses = lane
+        with pytest.raises(ValueError, match="dehnen_error"):
+            fmm.differentiable_accelerations(
+                state,
+                positions,
+                masses,
+                grad_plan=plan,
+                force_params=ForceParams(G=jnp.asarray(_G), eps2=_SOFTENING**2),
+            )
+        # the solver's own, as Python floats, are the default program
+        own = fmm.differentiable_accelerations(
+            state,
+            positions,
+            masses,
+            grad_plan=plan,
+            force_params=ForceParams(G=_G, eps2=_SOFTENING**2),
+        )
+        default = fmm.differentiable_accelerations(
+            state, positions, masses, grad_plan=plan
+        )
+        assert np.array_equal(np.asarray(own), np.asarray(default))
+
+    @pytest.mark.filterwarnings("ignore::UserWarning")
+    def test_the_gradient_at_the_criterions_lists(self, lane):
+        """The forward is production's (bitwise); d/dpos and d/dmass match central
+        differences of it along random directions (float64)."""
+        fmm, state, plan, positions, masses = lane
+        production = np.asarray(fmm.evaluate_prepared_state(state))
+        rng = np.random.default_rng(17)
+        weight = jnp.asarray(rng.normal(size=(_DE_N, 3)))
+
+        def force(st, pl, p, m):
+            return fmm.differentiable_accelerations(st, p, m, grad_plan=pl)
+
+        def loss(st, pl, p, m):
+            return jnp.sum(weight * force(st, pl, p, m))
+
+        got = np.asarray(jax.jit(force)(state, plan, positions, masses))
+        assert np.array_equal(got.view(np.uint64), production.view(np.uint64))
+        grad_p, grad_m = jax.jit(jax.grad(loss, argnums=(2, 3)))(
+            state, plan, positions, masses
+        )
+        value = jax.jit(loss)
+        h = 1e-5
+        v_p = jnp.asarray(rng.normal(size=(_DE_N, 3)))
+        v_m = jnp.asarray(rng.normal(size=(_DE_N,)))
+        fd_p = (
+            float(value(state, plan, positions + h * v_p, masses))
+            - float(value(state, plan, positions - h * v_p, masses))
+        ) / (2 * h)
+        fd_m = (
+            float(value(state, plan, positions, masses + h * v_m))
+            - float(value(state, plan, positions, masses - h * v_m))
+        ) / (2 * h)
+        got_p, got_m = float(jnp.sum(grad_p * v_p)), float(jnp.sum(grad_m * v_m))
+        assert abs(got_p - fd_p) <= 1e-6 * abs(fd_p), (got_p, fd_p)
+        assert abs(got_m - fd_m) <= 1e-6 * abs(fd_m), (got_m, fd_m)

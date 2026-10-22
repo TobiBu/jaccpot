@@ -20,7 +20,7 @@ The forward is BLOCKED (:func:`_p2m_block_kernel`, 2026-10-05): cell leaves hold
 and walks each leaf's particles a few lanes at a time -- 3-6x faster than the
 one-program-per-leaf forward it replaced, the same coefficients up to float32
 summation order. That per-leaf forward (``JACCPOT_P2M_BLOCK=0``) was removed in
-the 2026-10 cleanup (X5). The reverse kernel is per leaf.
+the 2026-10 cleanup (X5). The reverse is blocked the same way (plan S8).
 """
 
 from __future__ import annotations
@@ -65,10 +65,10 @@ def pallas_p2m_real_leaf_supported() -> bool:
     return pallas_m2l_real_csr_supported()
 
 
-#: Warps per program of the per-leaf REVERSE kernel. Measured on an idle A100 for
-#: the per-leaf forward it shared its shape with (leaf 64 lanes, 16k cell leaves):
-#: the register allocation is sensitive to the warp count and the wrong one spills.
-_DEFAULT_WARPS = {4: 2, 5: 4, 6: 2}
+#: Leaves per program, lanes per leaf and warps of the REVERSE kernel (the
+#: forward's blocked shape; the per-leaf reverse it replaced tuned its warps per
+#: order, ``{4: 2, 5: 4, 6: 2}``, for 64-lane leaf programs).
+_REV_BLOCK, _REV_CHUNK, _REV_WARPS = 16, 8, 4
 
 #: Leaves per program and lanes per iteration of the blocked forward kernel
 #: (:func:`_p2m_block_kernel`), its warps. Timed alone on the 8e6 and 1e8 cell trees
@@ -409,71 +409,107 @@ def p2m_real_leaves_pallas(
 #     pos_bar_i  = m_i  grad_x [ sum_nm gbar_nm U_nm ]   (its gradient, per lane)
 #     c_bar      = - sum_i pos_bar_i
 #
-# One program per leaf over ``W`` lanes (the forward is blocked: see
-# ``_p2m_block_kernel``); the position gradient is ``jax.vjp`` of the
-# lane-wise contraction with the mass lanes as cotangent (lanes are independent,
-# so the lane-wise vjp IS the per-particle gradient), traced inside the kernel.
-# The block output ``(L, W, 4)`` is scattered onto the particles in XLA (every
-# particle belongs to exactly one leaf slot, so the scatter has unique indices).
+# BLOCKED (plan S8), the forward's shape (:func:`_p2m_block_kernel`): a program owns
+# ``block`` leaves as the rows of a ``(block, chunk)`` lane tile and walks their
+# particles a few lanes at a time; each lane writes its particle's rows, the leaf
+# centre's cotangent is summed along the row and written by the leaf's program (no
+# atomics). The position gradient is ``jax.vjp`` of the lane-wise contraction with
+# the mass lanes as cotangent (lanes are independent, so the lane-wise vjp IS the
+# per-particle gradient), traced inside the kernel. The per-leaf reverse it
+# replaced gave every leaf ``W`` (the leaf capacity) lanes and wrote an
+# ``(L, W, 4)`` block that XLA gathered onto the particles: on cell leaves (~10-20
+# particles against 64 slots, plus the empty capacity leaves) 21 floats per
+# particle at 2e5 and 33.5 at 8e6, the far reverse's largest per-particle buffer.
 
 
-def _p2m_rev_leaf_kernel(
+def _p2m_rev_block_kernel(
     pos_ref: KernelRef,
     mass_ref: KernelRef,
     start_ref: KernelRef,
     count_ref: KernelRef,
     cent_ref: KernelRef,
     gbar_ref: KernelRef,
-    out_ref: KernelRef,
+    pos_bar_in: KernelRef,
+    mass_bar_in: KernelRef,
+    cent_bar_in: KernelRef,
+    pos_bar_ref: KernelRef,
+    mass_bar_ref: KernelRef,
+    cent_bar_ref: KernelRef,
     *,
     order: int,
-    width: int,
+    block: int,
+    chunk: int,
     floor: float,
+    rows: int,
+    num_leaves: int,
 ) -> None:
-    """One leaf: per-particle position and mass cotangents from the leaf's multipole cotangent.
+    """``block`` leaves, their particles ``chunk`` lanes at a time (the forward's shape).
+
+    Each lane writes its particle's position and mass cotangents to its own rows;
+    the leaf's centre cotangent (minus the sum of its positions') is summed along
+    the row and written once, by this program.
 
     Parameters
     ----------
     pos_ref : KernelRef
-        Sorted positions padded by ``width`` rows ``[n + W, 3]``.
+        Whole sorted positions ``[n, 3]``.
     mass_ref : KernelRef
-        Sorted masses, padded likewise ``[n + W]``.
+        Whole sorted masses ``[n]``.
     start_ref : KernelRef
-        First particle per leaf ``[L]``.
+        First particle of each leaf ``[L]``.
     count_ref : KernelRef
-        Particle count per leaf ``[L]``.
+        Particle count of each leaf ``[L]``.
     cent_ref : KernelRef
         Leaf expansion centres ``[L, 3]``.
     gbar_ref : KernelRef
         Leaf multipole cotangents ``[L, C]``.
-    out_ref : KernelRef
-        **Output** ``[1, W, 4]``: lanes 0:3 the position cotangent, lane 3 the
-        mass cotangent, zero on slots past the count.
+    pos_bar_in : KernelRef
+        The zeroed ``[n, 3]`` position cotangent, aliased to ``pos_bar_ref``.
+    mass_bar_in : KernelRef
+        The zeroed ``[n]`` mass cotangent, aliased to ``mass_bar_ref``.
+    cent_bar_in : KernelRef
+        The zeroed ``[L, 3]`` centre cotangent, aliased to ``cent_bar_ref``.
+    pos_bar_ref : KernelRef
+        **Output** position cotangent rows.
+    mass_bar_ref : KernelRef
+        **Output** mass cotangent rows.
+    cent_bar_ref : KernelRef
+        **Output** the leaves' centre cotangent rows.
     order : int
         Expansion order. Static.
-    width : int
-        Leaf capacity ``W``. Static.
+    block : int
+        Leaves per program (a power of two). Static.
+    chunk : int
+        Lanes per leaf per iteration (a power of two). Static.
     floor : float
         Squared-radius floor. Static.
+    rows : int
+        ``n``. Static.
+    num_leaves : int
+        ``L``. Static.
 
     Returns
     -------
     None
-        Writes the leaf's block.
+        Writes the leaves' particle rows and the leaves' rows.
     """
+    del pos_bar_in, mass_bar_in, cent_bar_in
     p = int(order)
-    leaf = pl.program_id(0)
-    start = start_ref[leaf]
-    count = count_ref[leaf]
-    lanes = pl.ds(start, width)
-    dtype = out_ref.dtype
-    x = pos_ref[lanes, 0] - cent_ref[leaf, 0]
-    y = pos_ref[lanes, 1] - cent_ref[leaf, 1]
-    z = pos_ref[lanes, 2] - cent_ref[leaf, 2]
-    lane = lax.broadcasted_iota(jnp.int32, (width,), 0)
-    valid = lane < count
-    mass = jnp.where(valid, mass_ref[lanes], jnp.asarray(0.0, dtype))
-    g = [gbar_ref[leaf, sh_index(n, m)] for n in range(p + 1) for m in range(-n, n + 1)]
+    dtype = pos_bar_ref.dtype
+    leaf = pl.program_id(0) * block + lax.broadcasted_iota(jnp.int32, (block,), 0)
+    live = leaf < num_leaves
+    lf = jnp.where(live, leaf, 0)
+    start = start_ref[lf]
+    count = jnp.where(live, count_ref[lf], 0)
+    cx = cent_ref[lf, 0][:, None]
+    cy = cent_ref[lf, 1][:, None]
+    cz = cent_ref[lf, 2][:, None]
+    g = [
+        gbar_ref[lf, sh_index(n, m)][:, None]
+        for n in range(p + 1)
+        for m in range(-n, n + 1)
+    ]
+    lane = lax.broadcasted_iota(jnp.int32, (block, chunk), 1)
 
     def contraction(xx: Array, yy: Array, zz: Array) -> Array:
         acc = None
@@ -484,13 +520,40 @@ def _p2m_rev_leaf_kernel(
             acc = term if acc is None else acc + term
         return acc
 
-    u_val, vjp = jax.vjp(contraction, x, y, z)
-    xb, yb, zb = vjp(mass)
-    zero = jnp.zeros_like(x)
-    out_ref[0, :, 0] = jnp.where(valid, xb, zero)
-    out_ref[0, :, 1] = jnp.where(valid, yb, zero)
-    out_ref[0, :, 2] = jnp.where(valid, zb, zero)
-    out_ref[0, :, 3] = jnp.where(valid, u_val, zero)
+    def body(t: Array, acc: tuple) -> tuple:
+        off = t * chunk + lane
+        valid = off < count[:, None]
+        idx = jnp.where(valid, start[:, None] + off, 0)
+        x = pos_ref[idx, 0] - cx
+        y = pos_ref[idx, 1] - cy
+        z = pos_ref[idx, 2] - cz
+        mass = jnp.where(valid, mass_ref[idx], jnp.asarray(0.0, dtype))
+        u_val, vjp = jax.vjp(contraction, x, y, z)
+        xb, yb, zb = vjp(mass)
+        dest = jnp.where(valid, idx, rows)
+        plgpu.store(pos_bar_ref.at[dest, 0], xb.astype(dtype), mask=valid)
+        plgpu.store(pos_bar_ref.at[dest, 1], yb.astype(dtype), mask=valid)
+        plgpu.store(pos_bar_ref.at[dest, 2], zb.astype(dtype), mask=valid)
+        plgpu.store(mass_bar_ref.at[dest], u_val.astype(mass_bar_ref.dtype), mask=valid)
+        # x = position - centre: the centre gets minus the positions' cotangents
+        return tuple(
+            a - jnp.sum(jnp.where(valid, c, 0), axis=1)
+            for a, c in zip(acc, (xb, yb, zb))
+        )
+
+    trips = (jnp.max(count) + (chunk - 1)) // chunk
+    zero = jnp.zeros((block,), dtype)
+    acc = lax.fori_loop(0, trips, body, (zero, zero, zero))
+    cidx = lax.broadcasted_iota(jnp.int32, (block, 4), 1)
+    tile = jnp.zeros((block, 4), dtype)
+    for a in range(3):
+        tile = jnp.where(cidx == a, acc[a][:, None], tile)
+    row = jnp.where(live, leaf, num_leaves)[:, None]
+    plgpu.store(
+        cent_bar_ref.at[row, cidx],
+        tile.astype(cent_bar_ref.dtype),
+        mask=live[:, None] & (cidx < 3),
+    )
 
 
 def p2m_real_leaves_reverse_pallas(
@@ -508,7 +571,7 @@ def p2m_real_leaves_reverse_pallas(
     backend: str = "triton",
     num_warps: int | None = None,
 ) -> tuple[Array, Array, Array]:
-    """Adjoint of :func:`p2m_real_leaves_pallas`: one Pallas program per leaf.
+    """Adjoint of :func:`p2m_real_leaves_pallas`: one program per ``block`` leaves.
 
     Parameters
     ----------
@@ -519,7 +582,8 @@ def p2m_real_leaves_reverse_pallas(
     leaf_centers : Array
         ``[L, 3]`` leaf expansion centres.
     leaf_ranges : Array
-        ``[L, 2]`` inclusive particle ranges.
+        ``[L, 2]`` inclusive particle ranges, in particle order (empty leaves,
+        ``end < start``, only after the live ones).
     packed_bar : Array
         ``[total_nodes, C]`` cotangent of the forward's output table; only the
         leaf rows matter (the internal rows of the output are constant zeros).
@@ -530,40 +594,54 @@ def p2m_real_leaves_reverse_pallas(
     total_nodes : int
         Node count. Static.
     leaf_width : int
-        Leaf capacity. Static.
+        Leaf capacity. Not read: the blocked reverse walks each leaf's own count
+        (the custom VJP passes the forward's arguments). Static.
     interpret : bool
         Pallas interpret mode.
     backend : str
         Pallas GPU lowering.
     num_warps : int | None
-        Warps per program (``None`` = the forward's per-order default).
+        Warps per program (``None`` = :data:`_REV_WARPS`).
 
     Returns
     -------
     tuple[Array, Array, Array]
         ``(positions_bar [n, 3], masses_bar [n], leaf_centers_bar [L, 3])``.
     """
+    del leaf_width, total_nodes
     p = int(order)
     C = sh_size(p)
     if num_warps is None:
-        num_warps = _DEFAULT_WARPS.get(p, 2)
+        num_warps = _REV_WARPS
     dtype = jnp.result_type(positions_sorted.dtype, masses_sorted.dtype)
     n = int(positions_sorted.shape[0])
     L = int(leaf_ranges.shape[0])
-    w = int(leaf_width)
-    pos = jnp.pad(jnp.asarray(positions_sorted, dtype), ((0, w), (0, 0)))
-    mass = jnp.pad(jnp.asarray(masses_sorted, dtype), (0, w))
+    if n == 0 or L == 0:
+        return (
+            jnp.zeros(positions_sorted.shape, positions_sorted.dtype),
+            jnp.zeros(masses_sorted.shape, masses_sorted.dtype),
+            jnp.zeros(leaf_centers.shape, leaf_centers.dtype),
+        )
+    pos = jnp.asarray(positions_sorted, dtype)
+    mass = jnp.asarray(masses_sorted, dtype)
     ranges = jnp.asarray(leaf_ranges)
     counts = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0).astype(jnp.int32)
-    starts = jnp.where(counts > 0, ranges[:, 0], n).astype(jnp.int32)
+    starts = jnp.where(counts > 0, ranges[:, 0], 0).astype(jnp.int32)
     cent = jnp.asarray(leaf_centers, dtype)
     gbar = jnp.asarray(packed_bar, dtype)[int(num_internal) : int(num_internal) + L, :C]
     if (
         int(gbar.shape[0]) < L
     ):  # total_nodes < num_internal + L: rows past the table are zero
         gbar = jnp.pad(gbar, ((0, L - int(gbar.shape[0])), (0, 0)))
+    B = _next_pow2(_REV_BLOCK)
     kernel = functools.partial(
-        _p2m_rev_leaf_kernel, order=p, width=w, floor=float(squared_radius_floor(dtype))
+        _p2m_rev_block_kernel,
+        order=p,
+        block=B,
+        chunk=_next_pow2(_REV_CHUNK),
+        floor=float(squared_radius_floor(dtype)),
+        rows=n,
+        num_leaves=L,
     )
     backend_kwargs = pallas_backend_kwargs(backend, interpret)
     if "compiler_params" in backend_kwargs:
@@ -575,37 +653,28 @@ def p2m_real_leaves_reverse_pallas(
         shp = tuple(arr.shape)
         return pl.BlockSpec(shp, (lambda *_: (0,) * len(shp)))
 
-    out = pl.pallas_call(
+    operands = [pos, mass, starts, counts, cent, gbar]
+    outs = [
+        jnp.zeros((n, 3), dtype),
+        jnp.zeros((n,), dtype),
+        jnp.zeros((L, 3), dtype),
+    ]
+    pos_bar, mass_bar, cent_bar = pl.pallas_call(
         kernel,
-        grid=(L,),
-        in_specs=[
-            _full(pos),
-            _full(mass),
-            _full(starts),
-            _full(counts),
-            _full(cent),
-            _full(gbar),
-        ],
-        out_specs=pl.BlockSpec((1, w, 4), lambda i: (i, 0, 0)),
-        out_shape=jax.ShapeDtypeStruct((L, w, 4), dtype),
+        grid=(-(-L // B),),
+        in_specs=[_full(o) for o in operands + outs],
+        out_specs=[_full(o) for o in outs],
+        out_shape=[jax.ShapeDtypeStruct(o.shape, o.dtype) for o in outs],
+        input_output_aliases={len(operands) + k: k for k in range(len(outs))},
         interpret=bool(interpret),
-        name=f"p2m_rev_real_leaf_p{p}_w{w}",
+        name=f"p2m_rev_real_block_p{p}_b{B}",
         **backend_kwargs,
-    )(pos, mass, starts, counts, cent, gbar)
-    # Every particle sits in exactly one leaf slot, so the block-to-particle
-    # transpose is a GATHER, not a scatter-add: the XLA scatter it replaced was
-    # 3.8 ms at N = 2x10^5 (the largest single kernel of the reverse pass,
-    # docs/fast_gradients_2026-09.md). Leaves are laid out in particle order
-    # (Morton leaves cover increasing contiguous ranges; padding leaves have
-    # count 0 and drop out of the repeat), so particle i belongs to the leaf
-    # whose cumulative count first exceeds i.
-    leaf_of = jnp.repeat(jnp.arange(L, dtype=jnp.int32), counts, total_repeat_length=n)
-    slot_of = jnp.arange(n, dtype=jnp.int32) - starts[leaf_of]
-    per_particle = out[leaf_of, slot_of]  # (n, 4)
-    positions_bar = per_particle[:, :3].astype(positions_sorted.dtype)
-    masses_bar = per_particle[:, 3].astype(masses_sorted.dtype)
-    centers_bar = (-jnp.sum(out[:, :, :3], axis=1)).astype(leaf_centers.dtype)
-    return positions_bar, masses_bar, centers_bar
+    )(*operands, *outs)
+    return (
+        pos_bar.astype(positions_sorted.dtype),
+        mass_bar.astype(masses_sorted.dtype),
+        cent_bar.astype(leaf_centers.dtype),
+    )
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10))

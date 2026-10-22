@@ -233,3 +233,136 @@ def test_lanes_reverse_matches_the_operator_rule_on_the_axis(order, interpret):
     assert np.all(np.isfinite(np.asarray(cb_r)))
     assert _rel(mb_g, mb_r) < 1e-9, f"multipole half rel-L2 {_rel(mb_g, mb_r):.3e}"
     assert _rel(cb_g, cb_r) < 1e-9, f"centre half rel-L2 {_rel(cb_g, cb_r):.3e}"
+
+
+def test_a_presorted_reverse_sorts_the_pairs_once():
+    """On a target-sorted list the reverse's by-target pass reads the forward's CSR:
+    one sort of the ``P`` pairs (by source), not two (each a ``P``-sized key/value
+    sort and its scratch, the far reverse's largest temporaries)."""
+    order, n, K = 2, 30, 8
+    rows = np.random.default_rng(3).integers(0, 3 * K, n)
+    mult, cent, src, tgt = _case(order, n, rows, order)
+    offsets = jnp.asarray(np.concatenate([[0], np.cumsum(rows)]), jnp.int32)
+    live = jnp.asarray(int(src.shape[0]), jnp.int32)
+    cot = jnp.ones((n, (order + 1) ** 2), jnp.float64)
+
+    def reverse(m, c, g):
+        return jax.vjp(
+            lambda m, c: m2l_real_csr_lanes_pallas_cvjp(
+                m, c, src, offsets, live, order, K, True, "triton", 1, None, True
+            ),
+            m,
+            c,
+        )[1](g)
+
+    jaxpr = jax.make_jaxpr(reverse)(mult, cent, cot)
+
+    def sorts(j) -> int:
+        count = 0
+        for eqn in j.eqns:
+            count += eqn.primitive.name == "sort"
+            for p in eqn.params.values():
+                for sub in p if isinstance(p, (list, tuple)) else (p,):
+                    inner = getattr(sub, "jaxpr", sub)
+                    if hasattr(inner, "eqns"):
+                        count += sorts(inner)
+        return count
+
+    assert sorts(jaxpr.jaxpr) == 1
+
+
+def test_the_reverse_expands_the_row_offsets_into_the_same_targets():
+    """The presorted reverse's two-pass target expansion equals the binary search
+    (``targets_from_csr_offsets``): empty rows at the start, middle and end, a
+    padded tail, and offsets that end exactly at the list's length."""
+    from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
+    from jaccpot.pallas.m2l_real_csr_lanes import _csr_entry_rows
+
+    for rows, pad in (([0, 3, 0, 0, 5, 1, 0], 4), ([2, 0, 7], 0), ([0, 0], 3)):
+        offsets = jnp.asarray(np.concatenate([[0], np.cumsum(rows)]), jnp.int32)
+        n = int(offsets[-1]) + pad
+        want = np.asarray(targets_from_csr_offsets(offsets, n))
+        got = np.asarray(_csr_entry_rows(offsets, n))
+        assert got.dtype == want.dtype and np.array_equal(got, want), (rows, pad)
+
+
+def _symmetric_case(seed: int, n: int, order: int):
+    """A symmetric directed list (every pair both ways), target-sorted, padded."""
+    rng = np.random.default_rng(seed)
+    C = (order + 1) ** 2
+    mult = jnp.asarray(rng.standard_normal((n, C)), jnp.float64)
+    cent = jnp.asarray(rng.uniform(-1.0, 1.0, (n, 3)) * 4.0, jnp.float64)
+    upper = [(a, b) for a in range(n) for b in range(a + 1, n) if rng.random() < 0.3]
+    pairs = sorted(upper + [(b, a) for a, b in upper], key=lambda st: (st[1], st[0]))
+    src = np.asarray([s for s, _ in pairs], np.int32)
+    tgt = np.asarray([t for _, t in pairs], np.int32)
+    rows = np.bincount(tgt, minlength=n)
+    offsets = np.concatenate([[0], np.cumsum(rows)]).astype(np.int32)
+    pad = 5
+    src_p = jnp.asarray(np.concatenate([src, np.full(pad, -1, np.int32)]))
+    tgt_p = jnp.asarray(np.concatenate([tgt, np.full(pad, -1, np.int32)]))
+    live = jnp.asarray(int(src.size), jnp.int32)
+    return mult, cent, src_p, tgt_p, jnp.asarray(offsets), live
+
+
+@pytest.mark.parametrize("order", [2, 4])
+def test_a_symmetric_list_reverses_without_a_sort(order):
+    """``symmetric``: on a list holding every directed pair both ways the reverse
+    reads the forward's CSR in both passes. Its cotangents equal the sorting
+    reverse's to round-off (another summation order) and ``jax.vjp`` of the
+    reference's, and its program has no sort (interpret mode, float64)."""
+    n, K = 24, 8
+    mult, cent, src_p, tgt_p, offsets, live = _symmetric_case(40 + order, n, order)
+    cot = jnp.asarray(
+        np.random.default_rng(order).standard_normal((n, (order + 1) ** 2)),
+        jnp.float64,
+    )
+
+    def csr(symmetric):
+        def f(m, c):
+            return m2l_real_csr_lanes_pallas_cvjp(
+                m,
+                c,
+                src_p,
+                offsets,
+                live,
+                order,
+                K,
+                True,
+                "triton",
+                1,
+                None,
+                True,
+                symmetric,
+            )
+
+        return f
+
+    def ref(m, c):
+        return m2l_real_csr_jax(m, c, src_p[:live], tgt_p[:live], order=order)
+
+    out_y, vjp_y = jax.vjp(csr(True), mult, cent)
+    out_n, vjp_n = jax.vjp(csr(False), mult, cent)
+    out_r, vjp_r = jax.vjp(ref, mult, cent)
+    assert np.array_equal(np.asarray(out_y), np.asarray(out_n))
+    for y, nn, r in zip(vjp_y(cot), vjp_n(cot), vjp_r(cot)):
+        assert np.linalg.norm(np.asarray(r)) > 0
+        assert _rel(y, nn) < 1e-13
+        assert _rel(y, r) < 1e-9
+
+    jaxpr = jax.make_jaxpr(lambda m, c, g: jax.vjp(csr(True), m, c)[1](g))(
+        mult, cent, cot
+    )
+    names = set()
+
+    def collect(j) -> None:
+        for eqn in j.eqns:
+            names.add(eqn.primitive.name)
+            for p in eqn.params.values():
+                for sub in p if isinstance(p, (list, tuple)) else (p,):
+                    inner = getattr(sub, "jaxpr", sub)
+                    if hasattr(inner, "eqns"):
+                        collect(inner)
+
+    collect(jaxpr.jaxpr)
+    assert "sort" not in names
