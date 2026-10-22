@@ -1294,3 +1294,121 @@ same score over HOLD's cost; ranges over total energy, the per-particle energy t
   - a time-symmetric rung selection;
   - refinement at the particle's own boundary;
   - an accuracy gate against shared steps at equal cost, not at equal eta.
+
+## S8-F — the far field's reverse on the production layout (2026-10-22)
+
+Track S8-F of S8 (gradients on the production layout), branch `s8/l2p-reverse` on main `248f93a` (S3b and S4
+merged). It gives the far half of the differentiable forward the production layout and kernels, with reverses that
+fit at 8e6 and 2.5e7. S8-W wires the seam onto it (`evaluate_large_n_state_at_positions_and_masses_sorted` still
+calls the leaf-major L2P). The operating point is G1's unless stated: Plummer, cells of 64, θ 0.8, p5, fp32,
+`mac_type="dehnen"`. GPU rows ran on shared A100s (other users' jobs on the card): **contended hints, not timings**.
+The measured quantity is `jax.value_and_grad` of `sum(w * far_acc)` through the far chain alone (P2M, M2M, M2L,
+L2L, L2P at the state's frozen lists), jitted.
+
+### What the differentiable far path ran, against the production refresh
+| stage | production | differentiable (before) | effect |
+| --- | --- | --- | --- |
+| P2M, M2M, M2L, L2L | Pallas through their `custom_vjp` seams | the same kernels and seams | locals bitwise the prepared state's at 2e5, both at the G1 point and at `preset="galaxy"` (`dehnen_error`, p6) |
+| far-pair operands | the walk's `TargetSortedFarPairs` as row offsets (a presorted CSR) | one target per pair, expanded in the plan, then a stable sort by target in the M2L | the same values; an extra P-int32 array in the plan and a P-pair sort in every forward |
+| box geometry | deferred on the COM walk | computed | dead code in the far chain |
+| the `dehnen_error` force-scale twins of M2L / L2L | yes (f_b feeds the next walk) | no | locals bitwise either way |
+| L2P | particle-major Pallas (`l2p_real_particles_pallas`) | leaf-major padded jnp (`_evaluate_local_expansions_for_particles`) | 506,531 of 600,000 components differ (max 6.6e-7 relative). Its reverse is NaN at the 13 single-particle leaves (delta = 0 exactly), which made the far chain's whole gradient NaN at 2e5 |
+| expansion centres | the COMs of the live positions and masses | the same | |
+
+Two fixes:
+- `large_n_farfield_locals_at` now builds the production operands (the far pairs and the geometry;
+  `LargeNGradPlan.far_pairs_target_sorted`).
+- `large_n_farfield_l2p_at` evaluates as `evaluate_large_n_state` does: one helper both read,
+  `_large_n_pipeline.resolve_large_n_l2p`.
+
+With both, the far half at the state's own inputs is the production eval's far field bitwise (A100 at 2e5, and the
+CPU interpret test).
+
+### The reverses
+- **L2P** (`l2p_real_particles_pallas_cvjp`, the production call with a reverse):
+  - a program owns 32 leaves as the rows of a (32, 4) lane tile;
+  - per lane, the coefficient cotangents are the gradient's recurrence contracted with the cotangent
+    (`l2p_real_grad_cartesian_transpose`);
+  - the delta cotangent is ONE forward-mode jvp of the recurrence (the Hessian is symmetric);
+  - the leaf's sums run along the row and are written once by the leaf's program: no N x (p+1)^2 buffer, no
+    atomics.
+- **P2M**: the same blocked shape, 16 leaves x 8 lanes (the forward's). The (L, W, 4) slot block it replaced was 21
+  floats per particle at 2e5 and 33.5 at 8e6.
+- **M2L**: the reverse of a presorted list reads the forward's CSR for its by-target pass, one P-pair sort less (343 MiB
+  of CUB scratch at 8e6). It expands the per-pair targets for its by-source sort in two passes, one scatter and one
+  prefix sum, instead of a binary search per pair (9.8 ms at 8e6).
+- **M2M / L2L**: one node per lane in the packed `[nodes, C]` table, the forwards' shape.
+  - The coefficient half is `jax.vjp` of `_translate_lane` in its coefficients only.
+  - The geometry half comes from the generator of translations. Translating and differentiating commute, so
+    `d/d delta <g, T v> = <g, A w>` for M2M (`w = T v`) and `<A^T v, T^T g>` for L2L, with `A` the solid harmonics'
+    derivative ladder (the L2P gradient's).
+  - This is exact on the axis and at a zero edge: central differences of the pair twins agree to 1e-10 at p 2-6.
+  - The level reverse it replaced ran the widest level's grid on every level, on centred `[nodes, 128]` rows.
+- **What did not work:** a particle-major L2P reverse, with one particle per lane, each leaf's sums as masked lane
+  reductions across the program, and an owner per leaf. At 8e6 it took 9.9-25 ms over 7 block / warp / group
+  variants, against 3.94 ms for the blocked reverse and 1.15 ms for the forward (synthetic cell-like layout, p5).
+
+### Memory and time (shared A100s)
+`temp` is the compiled gradient's temporaries (`memory_analysis`). The peak is the process's `peak_bytes_in_use`,
+which includes the prepared state (1.66 GB at 8e6, 4.13 GB at 2.5e7). Times are the minima over 3-7 calls.
+
+| | base (`s5/base`) | S8-F |
+| --- | --- | --- |
+| 2e5: temp / peak | 666 MB / 722 MB, **NaN gradient** | 55.5 MB / 111 MB |
+| 2e5: far forward / far gradient | 2.16 / 25.4 ms | 1.54 / 5.55 ms (3.6x) |
+| 8e6: temp / peak | **out of memory** (a 41.38 GiB allocation; 44.4 GB requested) | 2.00 GB / 3.79 GB |
+| 8e6: far forward / far gradient | -- | 21.3 / 87.3 ms (4.1x; another call on another card: 15.9 / 95.0 ms) |
+| 8e6 `preset="galaxy"` (`dehnen_error` 1e-4, p6; 28.5M far pairs in a 179M capacity): temp / peak, forward / gradient | -- | 5.95 GB / 12.9 GB; 21.4 / 146 ms (6.8x) |
+| 2.5e7: temp / peak | -- | 4.92 GB / 9.46 GB |
+| 2.5e7: far forward / far gradient | -- | 36.9 / 209 ms (5.7x) |
+
+At intermediate states of this work, at 8e6:
+- the particle-major L2P / P2M reverses with the level cascade reverse: temp 3.74 GB, far gradient 547 ms (34.5x);
+- at 2.5e7 the same: 7.25 GB, 1.13 s.
+
+Kernel time of the far gradient at 8e6 (one trace, a shared card): 95.5 ms. The largest items:
+- the M2L reverse, 23.5 ms by source and 16.6 ms by target (40.1 ms);
+- an XLA scatter of the COM's reverse (`input_scatter_fusion`, 13.9 ms: yggdrax's mass moments);
+- the per-pair target expansion, 9.8 ms (since replaced);
+- the M2L forward, 8.2 ms;
+- the cascade reverses, 3.1 + 2.6 ms (163 + 2 x 162 ms with the level kernels);
+- the L2P reverse 2.0 ms and the P2M reverse 2.0 ms.
+
+**Largest buffers of the compiled far gradient** (XLA buffer assignment):
+- base, 2e5:
+  - CUB sort scratch, 21.4 floats per particle;
+  - the cascade reverse's centred rows `f32[32768, 128]`, 21.0;
+  - the P2M block `f32[16384, 64, 4]`, 21.0;
+  - the leaf-major L2P's `f32[16384, 64, 3]`, 15.7;
+  - ~150 `f32[16384, 64]` residuals.
+- S8-F, 8e6 (2.66 GiB in 214 allocations, 1.91 GiB of them preallocated temp):
+  - the CUB scratch of the M2L reverse's by-source sort, 343 MiB (11.2 floats per particle);
+  - the `[nodes, 36]` coefficient tables, 288 MiB (9.4);
+  - the mass moments' float64 prefix sums `f64[N + 1, 3]`, 183 MiB (6.0);
+  - the far list's `s32[44M]` arrays, 168 MiB (5.5).
+  - Nothing reaches 16 floats per particle, and nothing is per particle and per coefficient.
+
+### Gates
+| gate | result |
+| --- | --- |
+| L2P reverse vs `jax.vjp` of a pure-JAX L2P (interpret, p 3-8: every occupancy, leaves over many chunks, empty leaves, dead rows) | float64 < 1e-12 and float32 < 2e-5 of the largest component (the test's bounds; float64 measured 3.8e-16). A100 (Triton): float64 <= 7.9e-16, float32 <= 6.0e-7, A-vs-A bitwise |
+| L2P at 2e5 in fp32, against float64 truth (`jax.vjp` of the Cartesian L2P) | coefficients / centres / positions rel-L2 1.56e-7 / 1.48e-7 / 1.35e-7 (max 3.4e-7). The leaf-major reverse: 8.5e-7 / 1.2e-5 / 1.2e-5 (max 3.5e-4), and NaN on 13 leaves. A-vs-A bitwise |
+| FD in float64 through the whole far chain (P2M, M2M, M2L, L2L and L2P reverses, interpret; N 1024, cells of 8, p4) | directional derivatives in positions and masses within 1e-6; per entry within 4.7e-7 (the finite-difference noise) |
+| P2M / M2L / M2M / L2L reverse tests (both halves vs `jax.vjp` of the pure-JAX references; on-axis edges; zero displacements) | pass, interpret and native (27 cascade tests on an A100) |
+| CPU program identity vs `s3b-integ-cpu` | 36/36 identical (HEAD, rebased on main `248f93a`) |
+| the forward kernels' source lines (L2P, P2M, cascade lanes; their Triton IR embeds the locations) | unchanged |
+
+### For S8-W and later
+- **Wire the seam:** `evaluate_large_n_state_at_positions_and_masses_sorted` should call
+  `-G * large_n_farfield_l2p_at(state, large_n_farfield_locals_at(...), positions)`. The G1 pin should then become
+  bitwise on the far half.
+- **The far reverse's next levers** at 8e6:
+  - the M2L reverse's two passes (40 ms; the by-target pass re-runs the pair vjp only for the geometry half);
+  - the COM reverse's scatter in yggdrax (14 ms);
+  - the by-source sort of the frozen list (one CUB sort per reverse). It runs over the list's capacity, not its live
+    count (179M against 28.5M pairs under `dehnen_error` at 8e6). The list is frozen, so its by-source CSR could be
+    built once per plan.
+- **The far gradient is not bitwise A-vs-A on a shared card:** 2 of 200,000 mass-gradient elements differed at 2e5
+  (the positions' were bitwise). The new kernels write every row once (no atomics), and the L2P reverse alone was
+  bitwise A-vs-A. The difference is in XLA's part of the chain, most likely the scatters of the COM's reverse; not
+  bisected.
