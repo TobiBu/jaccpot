@@ -1,0 +1,39 @@
+[sweep] start hold_acc_k4_eta0.2 2026-10-22T10:21:39+02:00
+[sweep] done hold_acc_k4_eta0.2 6, 0 %, 0 MiB
+[sweep] start hold_dyn_k6_eta0.1 2026-10-22T10:23:10+02:00
+[sweep] done hold_dyn_k6_eta0.1 6, 0 %, 0 MiB
+[sweep] start hold_dyn_k6_eta0.1_refine 2026-10-22T10:23:43+02:00
+[sweep] done hold_dyn_k6_eta0.1_refine 6, 0 %, 0 MiB
+[sweep] start hold_dyn_k6_eta0.4 2026-10-22T10:24:18+02:00
+[sweep] done hold_dyn_k6_eta0.4 6, 0 %, 21 MiB
+[sweep] start hold_dyn_k6_eta0.2 2026-10-22T10:24:45+02:00
+[sweep] done hold_dyn_k6_eta0.2 6, 1 %, 2485 MiB
+[sweep] start hold_dyn_k6_eta0.05 2026-10-22T10:25:14+02:00
+[sweep] done hold_dyn_k6_eta0.05 6, 0 %, 2485 MiB
+[sweep] start hold_dyn_k6_eta0.025 2026-10-22T10:25:58+02:00
+[sweep] done hold_dyn_k6_eta0.025 6, 0 %, 2577 MiB
+[sweep] start hold_dyn_k6_eta0.2_refine 2026-10-22T10:27:01+02:00
+[sweep] done hold_dyn_k6_eta0.2_refine 6, 0 %, 1457 MiB
+[sweep] start hold_dyn_k6_eta0.05_refine 2026-10-22T10:27:31+02:00
+[sweep] done hold_dyn_k6_eta0.05_refine 6, 0 %, 0 MiB
+[sweep] start hold_dyn_k6_eta0.025_refine 2026-10-22T10:28:17+02:00
+[sweep] done hold_dyn_k6_eta0.025_refine 6, 0 %, 4 MiB
+[sweep] start hold_acc_k4_eta0.4 2026-10-22T10:29:25+02:00
+[sweep] done hold_acc_k4_eta0.4 6, 0 %, 559 MiB
+[sweep] start hold_acc_k4_eta0.1 2026-10-22T10:30:23+02:00
+[sweep] done hold_acc_k4_eta0.1 6, 100 %, 26473 MiB
+[sweep] start hold_acc_k4_eta0.05 2026-10-22T10:33:02+02:00
+[sweep] done hold_acc_k4_eta0.05 6, 100 %, 26473 MiB
+[sweep] start shared_dt4e-3 2026-10-22T10:38:00+02:00
+[sweep] done shared_dt4e-3 6, 100 %, 26473 MiB
+[sweep] start shared_dt2e-3 2026-10-22T10:39:04+02:00
+[sweep] done shared_dt2e-3 6, 100 %, 26473 MiB
+[sweep] start shared_dt1e-3 2026-10-22T10:40:48+02:00
+[sweep] done shared_dt1e-3 6, 100 %, 26473 MiB
+[sweep] start shared_dt5e-4 2026-10-22T10:42:16+02:00
+[sweep] done shared_dt5e-4 6, 89 %, 26473 MiB
+[sweep] start shared_dt2.5e-4 2026-10-22T10:44:58+02:00
+[sweep] done shared_dt2.5e-4 6, 100 %, 26473 MiB
+[sweep] start shared_dt1.25e-4 2026-10-22T10:49:52+02:00
+[sweep] done shared_dt1.25e-4 6, 100 %, 26473 MiB
+[sweep] ALL DONE 2026-10-22T10:59:21+02:00

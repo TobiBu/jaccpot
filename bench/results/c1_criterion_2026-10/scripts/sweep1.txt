@@ -1,0 +1,19 @@
+hold_acc_k4_eta0.2 --scheme hold --criterion acc --kmax 4 --eta 0.2 --t-end 1.5
+hold_dyn_k6_eta0.1 --scheme hold --criterion dyn --kmax 6 --eta 0.1 --t-end 1.5
+hold_dyn_k6_eta0.1_refine --scheme hold --criterion dyn --kmax 6 --eta 0.1 --t-end 1.5 --refine
+hold_dyn_k6_eta0.4 --scheme hold --criterion dyn --kmax 6 --eta 0.4 --t-end 1.5
+hold_dyn_k6_eta0.2 --scheme hold --criterion dyn --kmax 6 --eta 0.2 --t-end 1.5
+hold_dyn_k6_eta0.05 --scheme hold --criterion dyn --kmax 6 --eta 0.05 --t-end 1.5
+hold_dyn_k6_eta0.025 --scheme hold --criterion dyn --kmax 6 --eta 0.025 --t-end 1.5
+hold_dyn_k6_eta0.2_refine --scheme hold --criterion dyn --kmax 6 --eta 0.2 --t-end 1.5 --refine
+hold_dyn_k6_eta0.05_refine --scheme hold --criterion dyn --kmax 6 --eta 0.05 --t-end 1.5 --refine
+hold_dyn_k6_eta0.025_refine --scheme hold --criterion dyn --kmax 6 --eta 0.025 --t-end 1.5 --refine
+hold_acc_k4_eta0.4 --scheme hold --criterion acc --kmax 4 --eta 0.4 --t-end 1.5
+hold_acc_k4_eta0.1 --scheme hold --criterion acc --kmax 4 --eta 0.1 --t-end 1.5
+hold_acc_k4_eta0.05 --scheme hold --criterion acc --kmax 4 --eta 0.05 --t-end 1.5
+shared_dt4e-3 --scheme shared --dt 4e-3 --t-end 1.5
+shared_dt2e-3 --scheme shared --dt 2e-3 --t-end 1.5
+shared_dt1e-3 --scheme shared --dt 1e-3 --t-end 1.5
+shared_dt5e-4 --scheme shared --dt 5e-4 --t-end 1.5
+shared_dt2.5e-4 --scheme shared --dt 2.5e-4 --t-end 1.5
+shared_dt1.25e-4 --scheme shared --dt 1.25e-4 --t-end 1.5

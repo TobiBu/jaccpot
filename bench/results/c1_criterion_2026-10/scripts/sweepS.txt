@@ -1,0 +1,27 @@
+S_ref_dt3.125e-5 --scheme shared --dt 3.125e-5 --static --t-end 1.5
+S_ref_dt1.5625e-5 --scheme shared --dt 1.5625e-5 --static --t-end 1.5
+S_shared_dt4e-3 --scheme shared --dt 4e-3 --static --t-end 1.5
+S_shared_dt2e-3 --scheme shared --dt 2e-3 --static --t-end 1.5
+S_shared_dt1e-3 --scheme shared --dt 1e-3 --static --t-end 1.5
+S_shared_dt5e-4 --scheme shared --dt 5e-4 --static --t-end 1.5
+S_shared_dt2.5e-4 --scheme shared --dt 2.5e-4 --static --t-end 1.5
+S_shared_dt1.25e-4 --scheme shared --dt 1.25e-4 --static --t-end 1.5
+S_hold_acc_k4_eta0.4 --scheme hold --criterion acc --kmax 4 --eta 0.4 --static --t-end 1.5
+S_hold_acc_k4_eta0.2 --scheme hold --criterion acc --kmax 4 --eta 0.2 --static --t-end 1.5
+S_hold_acc_k4_eta0.1 --scheme hold --criterion acc --kmax 4 --eta 0.1 --static --t-end 1.5
+S_hold_acc_k4_eta0.05 --scheme hold --criterion acc --kmax 4 --eta 0.05 --static --t-end 1.5
+S_hold_dyn_k6_eta0.4 --scheme hold --criterion dyn --kmax 6 --eta 0.4 --static --t-end 1.5
+S_hold_dyn_k6_eta0.2 --scheme hold --criterion dyn --kmax 6 --eta 0.2 --static --t-end 1.5
+S_hold_dyn_k6_eta0.1 --scheme hold --criterion dyn --kmax 6 --eta 0.1 --static --t-end 1.5
+S_hold_dyn_k6_eta0.05 --scheme hold --criterion dyn --kmax 6 --eta 0.05 --static --t-end 1.5
+S_hold_dyn_k6_eta0.025 --scheme hold --criterion dyn --kmax 6 --eta 0.025 --static --t-end 1.5
+S_hold_dyn_k6_eta0.4_refine --scheme hold --criterion dyn --kmax 6 --eta 0.4 --refine --static --t-end 1.5
+S_hold_dyn_k6_eta0.2_refine --scheme hold --criterion dyn --kmax 6 --eta 0.2 --refine --static --t-end 1.5
+S_hold_dyn_k6_eta0.1_refine --scheme hold --criterion dyn --kmax 6 --eta 0.1 --refine --static --t-end 1.5
+S_hold_dyn_k6_eta0.05_refine --scheme hold --criterion dyn --kmax 6 --eta 0.05 --refine --static --t-end 1.5
+S_hold_dyn_k6_eta0.025_refine --scheme hold --criterion dyn --kmax 6 --eta 0.025 --refine --static --t-end 1.5
+S_hold_dyn_k8_eta0.05_refine --scheme hold --criterion dyn --kmax 8 --eta 0.05 --refine --static --t-end 1.5
+S_hold_dyn_k4_eta0.05_refine --scheme hold --criterion dyn --kmax 4 --eta 0.05 --refine --static --t-end 1.5
+S_hold_dynfloor0.2_k6_eta0.05_refine --scheme hold --criterion dynfloor --floor-c 0.2 --kmax 6 --eta 0.05 --refine --static --t-end 1.5
+S_hold_dynfloor0.2_k6_eta0.025_refine --scheme hold --criterion dynfloor --floor-c 0.2 --kmax 6 --eta 0.025 --refine --static --t-end 1.5
+S_hold_acc_k4_eta0.2_refine --scheme hold --criterion acc --kmax 4 --eta 0.2 --refine --static --t-end 1.5

@@ -1,0 +1,3 @@
+B_hold_acc_k3_eta0.2_once --scheme hold --criterion acc --kmax 3 --eta 0.2 --rungs-once --softening 0.0238 --t-end 1.5
+B_hold_acc_k1_eta0.2 --scheme hold --criterion acc --kmax 1 --eta 0.2 --softening 0.0238 --t-end 1.5
+B_hold_acc_k1_eta0.2_once --scheme hold --criterion acc --kmax 1 --eta 0.2 --rungs-once --softening 0.0238 --t-end 1.5

@@ -1,0 +1,7 @@
+[sweep] start B_hold_acc_k3_eta0.2_once 2026-10-22T11:47:29+02:00
+[sweep] done B_hold_acc_k3_eta0.2_once 6, 100 %, 26507 MiB
+[sweep] start B_hold_acc_k1_eta0.2 2026-10-22T11:48:08+02:00
+[sweep] done B_hold_acc_k1_eta0.2 6, 100 %, 26507 MiB
+[sweep] start B_hold_acc_k1_eta0.2_once 2026-10-22T11:48:56+02:00
+[sweep] done B_hold_acc_k1_eta0.2_once 6, 100 %, 26507 MiB
+[sweep] ALL DONE 2026-10-22T11:49:47+02:00

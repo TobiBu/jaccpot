@@ -1,0 +1,19 @@
+hold_acc_k4_eta0.2_once --scheme hold --criterion acc --kmax 4 --eta 0.2 --t-end 1.5 --rungs-once
+hold_acc_k4_eta0.4_once --scheme hold --criterion acc --kmax 4 --eta 0.4 --t-end 1.5 --rungs-once
+hold_dyn_k6_eta0.1_once --scheme hold --criterion dyn --kmax 6 --eta 0.1 --t-end 1.5 --rungs-once
+hold_dyn_k6_eta0.05_once --scheme hold --criterion dyn --kmax 6 --eta 0.05 --t-end 1.5 --rungs-once
+hold_dynfloor0.2_k6_eta0.05 --scheme hold --criterion dynfloor --floor-c 0.2 --kmax 6 --eta 0.05 --t-end 1.5
+hold_dynfloor0.2_k6_eta0.025 --scheme hold --criterion dynfloor --floor-c 0.2 --kmax 6 --eta 0.025 --t-end 1.5
+hold_dynfloor0.2_k6_eta0.0125 --scheme hold --criterion dynfloor --floor-c 0.2 --kmax 6 --eta 0.0125 --t-end 1.5
+hold_dynfloor0.2_k6_eta0.05_refine --scheme hold --criterion dynfloor --floor-c 0.2 --kmax 6 --eta 0.05 --t-end 1.5 --refine
+hold_dynfloor0.2_k6_eta0.025_refine --scheme hold --criterion dynfloor --floor-c 0.2 --kmax 6 --eta 0.025 --t-end 1.5 --refine
+hold_dyn_k4_eta0.05 --scheme hold --criterion dyn --kmax 4 --eta 0.05 --t-end 1.5
+hold_dyn_k8_eta0.05 --scheme hold --criterion dyn --kmax 8 --eta 0.05 --t-end 1.5
+hold_dyn_k8_eta0.05_refine --scheme hold --criterion dyn --kmax 8 --eta 0.05 --t-end 1.5 --refine
+hold_acc_k4_eta0.2_refine --scheme hold --criterion acc --kmax 4 --eta 0.2 --t-end 1.5 --refine
+hold_acc_k4_eta0.1_refine --scheme hold --criterion acc --kmax 4 --eta 0.1 --t-end 1.5 --refine
+hold_dyn_k6_eta0.4_refine --scheme hold --criterion dyn --kmax 6 --eta 0.4 --t-end 1.5 --refine
+hold_dyn_k6_eta0.0125_refine --scheme hold --criterion dyn --kmax 6 --eta 0.0125 --t-end 1.5 --refine
+hold_acc_k4_eta0.4_refine --scheme hold --criterion acc --kmax 4 --eta 0.4 --t-end 1.5 --refine
+hold_acc_k4_eta0.05_refine --scheme hold --criterion acc --kmax 4 --eta 0.05 --t-end 1.5 --refine
+hold_dyn_k4_eta0.05_refine --scheme hold --criterion dyn --kmax 4 --eta 0.05 --t-end 1.5 --refine

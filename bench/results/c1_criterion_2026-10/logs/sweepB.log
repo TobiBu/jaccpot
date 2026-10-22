@@ -1,0 +1,35 @@
+[sweep] start B_ref_dt2.5e-4 2026-10-22T11:02:01+02:00
+[sweep] done B_ref_dt2.5e-4 6, 100 %, 26473 MiB
+[sweep] start B_ref_dt1.25e-4 2026-10-22T11:10:06+02:00
+[sweep] done B_ref_dt1.25e-4 6, 100 %, 26473 MiB
+[sweep] start B_shared_dt8e-3 2026-10-22T11:28:04+02:00
+[sweep] done B_shared_dt8e-3 6, 100 %, 26473 MiB
+[sweep] start B_shared_dt4e-3 2026-10-22T11:28:34+02:00
+[sweep] done B_shared_dt4e-3 6, 100 %, 26473 MiB
+[sweep] start B_shared_dt2e-3 2026-10-22T11:29:32+02:00
+[sweep] done B_shared_dt2e-3 6, 100 %, 26473 MiB
+[sweep] start B_shared_dt1e-3 2026-10-22T11:30:48+02:00
+[sweep] done B_shared_dt1e-3 6, 100 %, 26473 MiB
+[sweep] start B_shared_dt5e-4 2026-10-22T11:33:54+02:00
+[sweep] done B_shared_dt5e-4 6, 100 %, 26473 MiB
+[sweep] start B_hold_dyn_k5_eta0.4 2026-10-22T11:39:47+02:00
+[sweep] done B_hold_dyn_k5_eta0.4 6, 100 %, 26473 MiB
+[sweep] start B_hold_dyn_k5_eta0.2 2026-10-22T11:40:13+02:00
+[sweep] done B_hold_dyn_k5_eta0.2 6, 100 %, 26473 MiB
+[sweep] start B_hold_dyn_k5_eta0.1 2026-10-22T11:40:48+02:00
+[sweep] done B_hold_dyn_k5_eta0.1 6, 100 %, 26473 MiB
+[sweep] start B_hold_dyn_k5_eta0.05 2026-10-22T11:41:31+02:00
+[sweep] done B_hold_dyn_k5_eta0.05 6, 0 %, 26473 MiB
+[sweep] start B_hold_dyn_k5_eta0.4_refine 2026-10-22T11:42:07+02:00
+[sweep] done B_hold_dyn_k5_eta0.4_refine 6, 0 %, 26481 MiB
+[sweep] start B_hold_dyn_k5_eta0.2_refine 2026-10-22T11:42:33+02:00
+[sweep] done B_hold_dyn_k5_eta0.2_refine 6, 0 %, 26491 MiB
+[sweep] start B_hold_dyn_k5_eta0.1_refine 2026-10-22T11:43:01+02:00
+[sweep] done B_hold_dyn_k5_eta0.1_refine 6, 100 %, 26495 MiB
+[sweep] start B_hold_acc_k3_eta0.4 2026-10-22T11:43:32+02:00
+[sweep] done B_hold_acc_k3_eta0.4 6, 100 %, 26507 MiB
+[sweep] start B_hold_acc_k3_eta0.2 2026-10-22T11:44:02+02:00
+[sweep] done B_hold_acc_k3_eta0.2 6, 100 %, 26507 MiB
+[sweep] start B_hold_acc_k3_eta0.1 2026-10-22T11:44:43+02:00
+[sweep] done B_hold_acc_k3_eta0.1 6, 100 %, 26507 MiB
+[sweep] ALL DONE 2026-10-22T11:45:41+02:00
