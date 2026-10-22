@@ -19,16 +19,13 @@ from yggdrax.interactions import NodeInteractionList
 import jaccpot.runtime._fmm_impl as fmm_impl_private
 from jaccpot import (
     FarFieldConfig,
-    FastMultipoleMethod,
-    FMMAdvancedConfig,
-    FMMPreset,
-    NearFieldConfig,
-    RealSHBasis,
-    RuntimePolicyConfig,
-    TreeConfig,
 )
+from jaccpot import FastMultipoleMethod
 from jaccpot import FastMultipoleMethod as ExpanseFMM
+from jaccpot import FMMAdvancedConfig
+from jaccpot import FMMPreset
 from jaccpot import FMMPreset as ExpansePreset
+from jaccpot import NearFieldConfig, RealSHBasis, RuntimePolicyConfig, TreeConfig
 
 
 def _sample_problem(n: int = 64):

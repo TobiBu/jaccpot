@@ -56,8 +56,9 @@ from jax import shard_map
 from jax.sharding import PartitionSpec as P
 from jax.typing import ArrayLike
 from yggdrax import build_interactions_and_neighbors
-from yggdrax.distributed import device_count, make_mesh
+from yggdrax.distributed import device_count
 from yggdrax.distributed import let as _yggdrax_let
+from yggdrax.distributed import make_mesh
 from yggdrax.distributed.cross_walk import dual_tree_walk_cross_impl
 from yggdrax.distributed.let import (
     build_coarse_frontier,

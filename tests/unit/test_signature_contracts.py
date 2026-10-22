@@ -67,11 +67,13 @@ from jaccpot.nearfield._large_n_blocks import (
     _accumulate_target_block_tile_sequence,
     _compute_leaf_p2p_prepared_large_n_pairs_only_impl,
     _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_impl,
-    _compute_leaf_p2p_prepared_large_n_self_only_impl,
-    _compute_target_block_pairs_from_source_tiles,
 )
 from jaccpot.nearfield._large_n_blocks import (
     _compute_leaf_p2p_prepared_large_n_pairs_target_blocks_prepacked_impl as _prepacked_impl,
+)
+from jaccpot.nearfield._large_n_blocks import (
+    _compute_leaf_p2p_prepared_large_n_self_only_impl,
+    _compute_target_block_pairs_from_source_tiles,
 )
 from jaccpot.nearfield.near_field import (
     _compute_leaf_p2p_from_prepared_leaf_data_impl,
