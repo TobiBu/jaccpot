@@ -54,6 +54,7 @@ from ._downward_prep import (
     _prepare_solidfmm_downward_interaction_inputs,
     _prepare_solidfmm_downward_multipole_inputs,
     _solidfmm_downward_accumulate_from_multipoles,
+    _SymmetricTargetSortedFarPairCOO,
     _TargetSortedFarPairCOO,
 )
 from ._shared import _normalize_strict_refresh_detail_diag_mode
@@ -679,6 +680,8 @@ def _prepare_solidfmm_downward_sweep(
     # the walk's list as walked (CSR order, ``tgt`` its row offsets); expanded and
     # cleared below if the cross-domain pairs are appended behind it
     targets_sorted = isinstance(far_pairs_coo, _TargetSortedFarPairCOO)
+    # checked symmetric by its maker (the grad plan): a sort-free M2L reverse
+    symmetric_pairs = isinstance(far_pairs_coo, _SymmetricTargetSortedFarPairCOO)
     pair_count = interaction_inputs.pair_count
     active_pair_count = interaction_inputs.active_pair_count
 
@@ -781,6 +784,7 @@ def _prepare_solidfmm_downward_sweep(
                 src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
                 tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
                 targets_sorted = False
+                symmetric_pairs = False
                 pair_count = int(src.shape[0])
                 # A merged list has no live PREFIX: the local half is -1-padded and
                 # the cross half follows it, so `arange(P) < active_pair_count` --
@@ -824,6 +828,7 @@ def _prepare_solidfmm_downward_sweep(
                 chunk_size=chunk_size,
                 m2l_impl=resolved_m2l_impl,
                 targets_sorted=targets_sorted,
+                symmetric_pairs=symmetric_pairs,
             )
         locals_updated = _record_timed_array(
             "_refresh_timing_dual_m2l_compute_seconds",
