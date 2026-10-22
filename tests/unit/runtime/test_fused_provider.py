@@ -429,3 +429,31 @@ def test_a_template_rebuild_refuses_bucket_leaves():
     )
     with pytest.raises(ValueError, match="needs cell leaves"):
         prov.rebuild(jnp.zeros((N, 3)), jnp.ones((N,)))
+
+
+@pytest.mark.usefixtures("lane")
+def test_the_retry_policy_is_the_runners(monkeypatch):
+    """``retry_mode`` is the policy ``strict_run_v2``'s runners retry a segment by.
+
+    A caller that drives its own segments over ``step`` (nornax) asks the provider
+    instead of copying the rule: the first retry re-plans in full, a second only the
+    walk and only after a first that re-planned the tree, never a third; and the
+    switch that turns the runners' retry off turns this one off too.
+    """
+    from jaccpot import FusedForceProvider
+
+    prov = FusedForceProvider(_solver(), leaf_size=LEAF, max_order=ORDER)
+    walk = np.zeros(len(NEEDS_FIELDS), np.int64)
+    walk[NEEDS_FIELDS.index("far_overflow")] = 1
+    tree = walk.copy()
+    tree[NEEDS_FIELDS.index("tree_overflow")] = 1
+
+    assert prov.retry_mode(walk, 0, False) == "full"
+    assert prov.retry_mode(tree, 0, False) == "full"
+    # after a tree re-plan, once more for the walk only, on a tree that fits
+    assert prov.retry_mode(walk, 1, True) == "walk"
+    assert prov.retry_mode(tree, 1, True) is None
+    assert prov.retry_mode(walk, 1, False) is None
+    assert prov.retry_mode(walk, 2, True) is None
+    monkeypatch.setenv("JACCPOT_STRICT_SEGMENT_RETRY", "0")
+    assert prov.retry_mode(walk, 0, False) is None

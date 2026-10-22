@@ -532,6 +532,37 @@ class FusedForceProvider:
         )
         return provider, FusedTopology.from_prepared(prepared)
 
+    def retry_mode(self, needs: Any, retries: int, tree_first: bool) -> Optional[str]:
+        """How a failed segment may be retried: ``strict_run_v2``'s policy.
+
+        For a caller that drives its own segments over :meth:`step` (nornax) and
+        retries them with :meth:`replanned`: the answer the lane's runners act on
+        (``engine._segment_retry_mode``), so the policy has one source. At most
+        two retries per segment: the first re-plans whatever overflowed, a second
+        only the walk, and only after a first that re-planned the tree (the walk's
+        needs on an overflowed tree can fall short).
+        ``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns it off.
+
+        Parameters
+        ----------
+        needs : Any
+            The failed run's running maximum of :meth:`FusedTopology.needs`
+            (host).
+        retries : int
+            Retries this segment has run so far.
+        tree_first : bool
+            The segment's first failure was a tree overflow.
+
+        Returns
+        -------
+        Optional[str]
+            ``"full"`` (:meth:`replanned` with ``walk_only=False``), ``"walk"``
+            (``walk_only=True``), or ``None``: the caller raises.
+        """
+        return self.engine._segment_retry_mode(
+            np.asarray(needs).astype(np.int64), int(retries), bool(tree_first)
+        )
+
     def _with_caps_template(
         self, caps: PreparedCaps, positions: Array, masses: Array
     ) -> tuple["FusedForceProvider", PreparedCaps]:

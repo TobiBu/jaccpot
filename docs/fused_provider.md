@@ -141,6 +141,7 @@ needs max-ed over them. Check `bits` once per segment, after the scan, as
 | `FusedForceProvider.prepare(solver, pos, m, *, leaf_size, max_order, theta=None, bounds=None, runtime_overrides=None, caps_only=False)` | the eager prepare `strict_run_v2` bootstraps with (fused device-resident layout; validated walk caps recorded on the engine, which size the traced walk; the eq (16b) prepass under `dehnen_error`). Returns `(provider, FusedTopology)`. `caps_only=True`: only what a particle-carry scan reads of it -- the tree, the upward pass, the eager walk's caps, the seed, no list, no downward pass, no near-field payload; the template is the shapes of a rebuild under `jax.eval_shape`, equal to the full prepare's, and the topology holds a `PreparedCaps` (the eager tree and the verdict) that nothing can be evaluated on. The particle carry's bootstrap, segment retry and the runner's restore use it (`JACCPOT_STRICT_CAPS_ONLY_PREPARE=0`: the full prepare). |
 | `FusedForceProvider.freeze_template(solver, prepared, *, leaf_size, max_order, theta=None, runtime_overrides=None)` | a provider for an existing prepared state: its shapes, not its buffers |
 | `prov.replanned(needs, pos_start, m_start, *, walk_only=False, caps_only=False)` | the segment retry: grows the unnamed flat-walk caps to cover `needs`, prepares again at the segment's start (caps-only on request) and returns `(provider, topology)`, or `None` when nothing can be re-planned (a named cap, no walk flag, or a cell-leaf tree overflow alone) |
+| `prov.retry_mode(needs, retries, tree_first)` | the runners' retry policy, for a caller that drives its own segments (nornax): `"full"` for the first retry, `"walk"` (`replanned(..., walk_only=True)`) for a second after a first that re-planned the tree, else `None` (raise); `None` also under `JACCPOT_STRICT_SEGMENT_RETRY=0` |
 | `prov.key(like=None)` | what a compile cache keyed on the provider must hold: leaf, order, theta, whether f_b is carried, the diagnostic modes, the level-loop bound, the validated walk caps, the template's shapes. `G`, the softening, the MAC and the kernels are fixed per engine and not in it. |
 
 **Traced** (call inside your own `jax.jit`; each returns arrays or tracers):
@@ -268,7 +269,12 @@ and the particle-major L2P; `ARCHITECTURE.md` section 6).
 - **A tree overflow is re-planned at the segment's start** (S3; S2 raised): see the needs
   above. A walk that overflowed a NAMED cap declines the retry altogether, tree or not.
 - **Not yet on the provider:** the fused multi-GPU lane (`jaccpot/distributed/fused.py`)
-  has its own force step; nornax's block-step integrators do not call it yet.
+  has its own force step; nornax's block-step (multi-rung) integrators do not call it
+  yet. nornax's single-rung KDK leapfrog does (S4): `nornax.adapters.FusedProviderForce`
+  carries `step`'s aux through `leapfrog_kdk_rollout`, and `nornax.retry_segment`
+  re-plans a segment with `retry_mode` and `replanned`. Its forces are this lane's; nornax's
+  `tests/integration/test_jaccpot_provider_rollout.py` compares its rollout with
+  `strict_run_v2(carry="particles")` and the production runner.
 
 ## The fp64 validation lane
 
