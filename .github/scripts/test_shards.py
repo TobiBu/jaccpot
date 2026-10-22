@@ -83,6 +83,12 @@ _STRICT_RUNNER_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_production_runner.py",
 )
 
+# Unit tests that need two or more devices and skip below them: in the unit shard
+# (one device) they collected and skipped, so the repartition gate they pin (the
+# rollout's bitwise ownership invariance) ran nowhere. They run with the
+# forced-device tier instead; their four-device cases still skip there (two).
+_UNIT_MULTI_DEVICE: tuple[str, ...] = ("tests/unit/distributed/test_fused_rollout.py",)
+
 SHARDS: dict[str, list[str]] = {
     # test-full matrix
     "integration": [
@@ -99,7 +105,11 @@ SHARDS: dict[str, list[str]] = {
     ],
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
-    "unit": ["tests/unit", "--ignore=tests/unit/runtime"],
+    "unit": [
+        "tests/unit",
+        "--ignore=tests/unit/runtime",
+        *(f"--ignore={path}" for path in _UNIT_MULTI_DEVICE),
+    ],
     "unit-runtime-mac": list(_RUNTIME_MAC_FILES),
     "unit-runtime-grad": list(_RUNTIME_GRAD_FILES),
     "unit-runtime": [
@@ -113,6 +123,7 @@ SHARDS: dict[str, list[str]] = {
     "nornax-distributed": [_NORNAX_DISTRIBUTED],
     "distributed-tier": [
         "tests/distributed",
+        *_UNIT_MULTI_DEVICE,
         "-m",
         "not distributed_criterion and not distributed_segment",
     ],
@@ -133,6 +144,14 @@ GATED_SHARDS: tuple[str, ...] = (
 )
 GATED_PATHS: tuple[str, ...] = (
     "jaccpot/distributed/",
+    # what the fused mesh lane (test-distributed-segment) takes its shapes, template,
+    # verdict and plan from on the runtime side
+    "jaccpot/runtime/fused_provider.py",
+    "jaccpot/runtime/fused_topology.py",
+    "jaccpot/runtime/capacity_plan.py",
+    "jaccpot/runtime/strict_carry.py",
+    "jaccpot/runtime/_level_shapes.py",
+    "jaccpot/runtime/capacity_guard.py",
     "jaccpot/mutual/",
     "jaccpot/nornax_adapter.py",
     "jaccpot/pallas/nearfield_",
