@@ -221,6 +221,7 @@ def global_mesh_bounds(
     num_valid: Optional[Array] = None,
     axis_name: str = AXIS_NAME,
     pad: float = 1e-6,
+    cubic: Optional[bool] = None,
 ) -> tuple[Array, Array]:
     """Morton box covering every device's particles.
 
@@ -244,6 +245,8 @@ def global_mesh_bounds(
     pad : float
         Fractional slack added to each side, so a particle never sits exactly on
         the box edge.
+    cubic : Optional[bool]
+        The configured box shape (:func:`cube_bounds`).
 
     Returns
     -------
@@ -259,11 +262,15 @@ def global_mesh_bounds(
         pos = jnp.where(live[:, None], pos, pos[0][None, :])
     lo = jax.lax.pmin(jnp.min(pos, axis=0), axis_name)
     hi = jax.lax.pmax(jnp.max(pos, axis=0), axis_name)
-    return cube_bounds(lo, hi, pad=pad)
+    return cube_bounds(lo, hi, pad=pad, cubic=cubic)
 
 
 def host_mesh_bounds(
-    positions: list, num_valid: list, *, pad: float = 1e-6
+    positions: list,
+    num_valid: list,
+    *,
+    pad: float = 1e-6,
+    cubic: Optional[bool] = None,
 ) -> tuple[Array, Array]:
     """:func:`global_mesh_bounds` on the host, from per-device pieces.
 
@@ -278,6 +285,8 @@ def host_mesh_bounds(
     num_valid : list
         Per-device live row counts.
     pad : float
+        As :func:`global_mesh_bounds`.
+    cubic : Optional[bool]
         As :func:`global_mesh_bounds`.
 
     Returns
@@ -294,10 +303,12 @@ def host_mesh_bounds(
         his.append(jnp.max(live, axis=0))
     lo = jnp.min(jnp.stack(los), axis=0)
     hi = jnp.max(jnp.stack(his), axis=0)
-    return cube_bounds(lo, hi, pad=pad)
+    return cube_bounds(lo, hi, pad=pad, cubic=cubic)
 
 
-def cube_bounds(lo: Array, hi: Array, *, pad: float) -> tuple[Array, Array]:
+def cube_bounds(
+    lo: Array, hi: Array, *, pad: float, cubic: Optional[bool] = None
+) -> tuple[Array, Array]:
     """Padded Morton box around ``[lo, hi]``; a cube if ``JACCPOT_CUBIC_BOUNDS=1``.
 
     ``morton_encode`` normalises each axis by its OWN extent, so a box that is longer
@@ -328,6 +339,11 @@ def cube_bounds(lo: Array, hi: Array, *, pad: float) -> tuple[Array, Array]:
         Per-axis minimum and maximum of the live positions, shape ``(3,)``.
     pad : float
         Fractional slack added to each side.
+    cubic : Optional[bool]
+        The solver's ``TreeConfig.cubic_bounds`` (``preset="galaxy"``: ``True``),
+        which the single card's box honours: ``JACCPOT_CUBIC_BOUNDS`` wins when it
+        is set, as there (``kernels._evaluate._cubic_bounds_active``). ``None``
+        (the stacked route's default): the environment alone.
 
     Returns
     -------
@@ -335,11 +351,17 @@ def cube_bounds(lo: Array, hi: Array, *, pad: float) -> tuple[Array, Array]:
         ``(min_corner, max_corner)``.
     """
     from jaccpot._env import env_flag
+    from jaccpot.runtime.kernels._evaluate import _cubic_bounds_active
 
     lo = jnp.asarray(lo)
     hi = jnp.asarray(hi)
     padv = jnp.asarray(pad, lo.dtype)
-    if not env_flag("JACCPOT_CUBIC_BOUNDS", False):
+    use_cube = (
+        env_flag("JACCPOT_CUBIC_BOUNDS", False)
+        if cubic is None
+        else _cubic_bounds_active(bool(cubic))
+    )
+    if not use_cube:
         span = jnp.maximum(hi - lo, padv)
         slack = span * padv
         return lo - slack, hi + slack

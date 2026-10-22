@@ -256,7 +256,10 @@ def prepare_mesh_force(
         _pad_onto_live_row(jnp.asarray(p), jnp.arange(cap) < counts_host[d])
         for d, p in enumerate(pos_d)
     ]
-    box = host_mesh_bounds([np.asarray(p) for p in pos_d], counts_host)
+    # the solver's configured box shape (preset="galaxy": a cube), as the single
+    # card's box and every traced force below (mesh_force_shard) build it
+    cubic = bool(getattr(engine, "_tree_cubic_bounds", False))
+    box = host_mesh_bounds([np.asarray(p) for p in pos_d], counts_host, cubic=cubic)
     runtime_overrides = engine._resolve_runtime_execution_overrides(num_particles=cap)
 
     headroom = getattr(engine, "_tree_leaf_capacity_auto", None)
@@ -419,7 +422,12 @@ def mesh_force_shard(
     # a RE-TRACE must not read the previous trace's tracers (fused_force_step)
     if cross_near_sink is not None:
         cross_near_sink.clear()
-    bounds = global_mesh_bounds(positions, num_valid=live, axis_name=axis_name)
+    bounds = global_mesh_bounds(
+        positions,
+        num_valid=live,
+        axis_name=axis_name,
+        cubic=bool(getattr(provider.engine, "_tree_cubic_bounds", False)),
+    )
     topology = provider.rebuild(
         positions,
         masses,
