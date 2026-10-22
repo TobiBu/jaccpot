@@ -608,9 +608,11 @@ def _solidfmm_downward_accumulate_from_multipoles(
     m2l_impl : str
         M2L implementation selector for the flat lanes.
     targets_sorted : bool
-        ``src`` / ``tgt`` are a ``TargetSortedFarPairs`` list as walked: ``tgt``
-        holds the row offsets. The CSR lanes kernel reads it as is; every other
-        route expands one target per entry first. Static.
+        ``src`` / ``tgt`` are a CSR list -- a ``TargetSortedFarPairs`` list as
+        walked, or that list with the cross-domain pairs merged into its rows
+        (:func:`~jaccpot.pallas.m2l_real_csr.merge_into_csr`): ``tgt`` holds the
+        row offsets. The CSR lanes kernel reads it as is; every other route
+        expands one target per entry first. Static.
     force_scale : Optional[FarForceScaleInputs]
         Also sum ``mac_type='dehnen_error'``'s far force-scale term per target in
         the CSR lanes kernel

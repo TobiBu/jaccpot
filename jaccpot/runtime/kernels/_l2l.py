@@ -677,8 +677,9 @@ def _prepare_solidfmm_downward_sweep(
     interactions = interaction_inputs.interactions
     src = interaction_inputs.src
     tgt = interaction_inputs.tgt
-    # the walk's list as walked (CSR order, ``tgt`` its row offsets); expanded and
-    # cleared below if the cross-domain pairs are appended behind it
+    # the walk's list as walked (CSR order, ``tgt`` its row offsets); the
+    # cross-domain pairs are merged into its rows below on the CSR lane, else it is
+    # expanded and cleared and they are appended behind it
     targets_sorted = isinstance(far_pairs_coo, _TargetSortedFarPairCOO)
     # checked symmetric by its maker (the grad plan): a sort-free M2L reverse
     symmetric_pairs = isinstance(far_pairs_coo, _SymmetricTargetSortedFarPairCOO)
@@ -756,7 +757,7 @@ def _prepare_solidfmm_downward_sweep(
         if chunk_size <= 0:
             raise ValueError("m2l_chunk_size must be positive")
 
-        # ---- cross-domain sources, concatenated (plan phase C) -------------
+        # ---- cross-domain sources, behind the local ones (plan phase C) ----
         # The imported multipoles ride at indices >= the local node count, which is
         # what makes the walk's (min, max) canonicalisation an exact
         # (local target, imported source) ordering. `n_targets` then keeps the M2L
@@ -775,22 +776,45 @@ def _prepare_solidfmm_downward_sweep(
                 [centers, jnp.asarray(cross_centers, centers.dtype)]
             )
             if cross_src is not None and int(jnp.asarray(cross_src).shape[0]) > 0:
-                if targets_sorted:
-                    # a target-sorted list carries row offsets: one target per
-                    # entry before the cross pairs go behind it
-                    from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
-
-                    tgt = targets_from_csr_offsets(tgt, int(src.shape[0]))
-                src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
-                tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
-                targets_sorted = False
                 symmetric_pairs = False
+                if targets_sorted and _m2l_csr_pallas_active():
+                    # The CSR lanes kernel reads the walk's list as the CSR it is:
+                    # each cross pair goes into its target's row, behind the row's
+                    # own entries -- the order the stable sort of the concatenated
+                    # list gives a row, so the locals are bitwise that route's,
+                    # without its sort over the whole far capacity (only the cross
+                    # pairs are sorted). The flat lanes below keep the
+                    # concatenation: they accumulate by chunk of the list, so a
+                    # row-ordered list would reassociate their sums, and they never
+                    # sorted the whole list.
+                    from jaccpot.pallas.m2l_real_csr import merge_into_csr
+
+                    src, tgt, active_pair_count = merge_into_csr(
+                        src,
+                        tgt,
+                        cross_src,
+                        cross_tgt,
+                        total_nodes=n_local_nodes,
+                    )
+                else:
+                    if targets_sorted:
+                        # a target-sorted list carries row offsets: one target per
+                        # entry before the cross pairs go behind it
+                        from jaccpot.pallas.m2l_real_csr import (
+                            targets_from_csr_offsets,
+                        )
+
+                        tgt = targets_from_csr_offsets(tgt, int(src.shape[0]))
+                    src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
+                    tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
+                    targets_sorted = False
+                    # The concatenation has no live PREFIX: the local half is -1-padded
+                    # and the cross half follows it, so `arange(P) <
+                    # active_pair_count` -- which is what this argument means --
+                    # would cut the cross pairs off entirely. The -1 entries are
+                    # dropped by the CSR build on their own.
+                    active_pair_count = None
                 pair_count = int(src.shape[0])
-                # A merged list has no live PREFIX: the local half is -1-padded and
-                # the cross half follows it, so `arange(P) < active_pair_count` --
-                # which is what this argument means -- would cut the cross pairs off
-                # entirely. The -1 entries are dropped by the CSR build on their own.
-                active_pair_count = None
             n_targets = n_local_nodes
 
         stage_t0 = time.perf_counter()
