@@ -131,3 +131,40 @@ def test_geometric_criteria_pass():
     for mac_type in ("dehnen", "bh"):
         assert _refuse_error_criterion(_solver(mac_type), entry="x") is None
     make_cross_hook(ndev=2, theta=0.8, mac_type="dehnen")
+
+
+def test_the_segment_runner_refuses_before_preparing_a_shard(
+    criterion_solver, monkeypatch
+):
+    """The template route's entry points (S11): the segment runner's fused force and
+    its setup refuse before any shard is prepared."""
+    from jaccpot.distributed import template_force
+    from jaccpot.distributed.segment import MeshSegmentRunner, MeshState
+
+    engine = criterion_solver._impl
+
+    def prepared_anyway(*args, **kwargs):
+        raise AssertionError("a shard was prepared before the refusal")
+
+    monkeypatch.setattr(engine, "prepare_state_caps_only", prepared_anyway)
+    shard = _state()
+    state = MeshState(
+        state=jnp.stack([shard.positions, shard.velocities], axis=1),
+        masses=shard.masses,
+        ids=shard.ids,
+        count=shard.count,
+    )
+    with pytest.raises(NotImplementedError, match="FusedMeshForce"):
+        MeshSegmentRunner.fused(
+            criterion_solver, _mesh(), state, leaf_size=64, max_order=4, theta=0.8
+        )
+    with pytest.raises(NotImplementedError, match="prepare_mesh_force"):
+        template_force.prepare_mesh_force(
+            criterion_solver,
+            _mesh(),
+            shard.positions,
+            shard.masses,
+            shard.count,
+            leaf_size=64,
+            max_order=4,
+        )
