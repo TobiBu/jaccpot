@@ -1310,8 +1310,8 @@ the card had no other process before and after (said so where it did), otherwise
 | FD in float64 through the whole force (near + far) | positions, masses within 1e-6 (directional), `G` 1e-10, `eps2` 1e-6 (CPU interpret, N 1024, cells of 8, p4, ferrers3; the far list target-sorted and symmetric as the GPU walk hands it over) |
 | per-softening-kernel parity | plummer, ferrers3, wendland_c2: forward bitwise; the direct near reverse vs a float64 pair sum <= 6.8e-15 (S8-N) |
 | no buffer of 16 N floats | the largest at 8e6: the `[nodes, 36]` tables, 9.4 N floats (pow2 leaf capacity); at 1e8 the COM forward's `f64[N, 3]` prefix sums, 6.0 N floats |
-| single-force gradient at 1e8 within 36 GB | `jax.grad` (positions, masses, the production leaf capacity): device peak **28.29 GiB (30.4 GB)**, temporaries 13.92 GiB (149 B/p); `value_and_grad`: temporaries 19.15 GiB, peak ~33.4 GiB (35.9 GB) estimated (12.73 in use + 19.15 + 1.49 outputs; it ran out of memory on a card with another user's 3.9 GB) |
-| gradient <= 5x the force eval at 8e6 | `jax.grad` **4.38x** (131.5 / 30.0 ms), `value_and_grad` 5.38x (161.6 ms); one run on a card free before and after: the lead's A-vs-A free-card timing is `time_grad.sh` |
+| single-force gradient at 1e8 within 36 GB | `jax.grad` (positions, masses, the production leaf capacity): device peak **28.29 GiB (30.4 GB)**, temporaries 13.92 GiB (149 B/p); `value_and_grad`: temporaries 19.15 GiB, ~33.4 GiB (35.9 GB) estimated; out of memory on a free card (the block does not fit beside the prepared state) |
+| gradient <= 5x the force eval at 8e6 | `jax.grad` **4.37x** (131.5 / 30.1 ms; 1e8: 4.14x), `value_and_grad` 5.37x (161.5 ms); free card, A-vs-A |
 | gradient A-vs-A | bitwise at 8e6 (G1 point and galaxy), 2.5e7 and 1e8 (it differed in 636-1036 mass elements at 8e6 before S8-W's COM reverse) |
 
 ### The near field's reverse on the direct layout (S8-N)
@@ -1544,18 +1544,27 @@ What the differentiable forward (`differentiable_accelerations` on a `LargeNPrep
 S8-F's far chain alone at 8e6 `preset="galaxy"` needed 5.95 GB of temporaries (the by-source sort over the 179M
 capacity); the whole force now 2.48 GiB. Every row: the differentiable forward 0 elements off the production eval.
 
-Time (8e6, pow2; one run on a card with no other process before or after, the code before the COM reverse's
-per-particle sums moved to float32): force eval 30.02 ms, `value_and_grad` 161.6 ms (**5.38x**), `jax.grad` 131.5 ms
-(**4.38x**). Every later run shared its card (8e6: 177 ms for `jax.grad` beside a 9 GB job): hints only. The
-free-card A-vs-A timing at 8e6 and 1e8 is the lead's (`time_grad.sh`).
+Time, final tip (`454f1476`), one A100 with no other process before or after any run (card 4, 2026-10-22), each
+row twice in fresh processes (min of 7 calls; the force eval is `evaluate_prepared_state`):
+
+| N | force eval | `jax.grad` | `value_and_grad` | peak |
+| --- | --- | --- | --- | --- |
+| 8e6 (pow2) | 30.10 / 30.25 ms | 131.47 / 131.42 ms (**4.37x / 4.35x**) | 161.53 / 161.54 ms (5.37x / 5.34x) | 3.64 / 3.60 GiB |
+| 1e8 (auto capacity) | 347.6 / 346.4 ms | 1437.4 / 1436.5 ms (**4.14x / 4.15x**) | out of memory (below) | 28.29 / 28.21 GiB (grad) |
+
+At 1e8, `value_and_grad` failed on the free card in both runs and again with `TF_GPU_ALLOCATOR=cuda_malloc_async`.
+The allocator could not place its 19.15 GiB temporaries as one block beside the prepared state (15.2 GiB in use after
+the prepare, `XLA_PYTHON_CLIENT_MEM_FRACTION=0.95`). `jax.grad` alone (13.92 GiB of temporaries) fits.
 
 Kernel time of the 8e6 value_and_grad (A100 trace, 162.0 ms per call): the near reverse 59.9 ms, the near forward 27.3
 (dead under `jax.grad`), the M2L reverse 23.4 by source + 16.5 by target, the M2L forward 8.2, the cascades 10.7,
 the XLA scatters 3.7 (17.6 with the prefix-sum COM reverse), the L2P and P2M reverses 2.0 each.
 
 ### For S9 and later
-- **The time target at 8e6 (5x) holds for `jax.grad` (4.38x) and not quite for `value_and_grad` (5.38x)**, on one
-  free-card run; the lead's A-vs-A free-card timing: `time_grad.sh` (8e6 and 1e8, the eval vs both gradients).
+- **The time target at 8e6 (5x) holds for `jax.grad` (4.37x, and 4.14x at 1e8), not quite for `value_and_grad`
+  (5.37x).** At 1e8, `value_and_grad` does not fit on a 40 GB card: its 19.15 GiB of temporaries do not fit as one
+  block beside the prepared state. That needs the forward's arrays released before the reverse, or `jax.grad` plus
+  one force eval.
 - **The near reverse** is the largest item (59.9 ms, 2.2x its forward): S8-N's levers.
 - **The M2L reverse's two passes** read the same CSR now; one launch computing both halves per row would read it
   once (40 ms).
