@@ -27,6 +27,12 @@ lane the same, as a new path next to the old one (which stays the reference):
 * **An external field per row**, ``external_acceleration_fn(state, params)``
   (``(state)`` without parameters) on each device's ``(cap, 2, 3)`` rows, added to
   the self-gravity as the single card adds it.
+* **Repartition BETWEEN segments**, as its own program, every
+  ``repartition_every`` segments (host cadence: no ``lax.cond`` around
+  collectives, whose device-divergent predicate deadlocks, and none of its buffers
+  in a segment's peak). With the velocity-Verlet form the carried acceleration
+  must travel with its particle, so ``sfc_repartition`` routes the velocity, the
+  total acceleration and the id (``rollout._repartition_shard``).
 
 **Padding rows** keep their place: their velocity and acceleration are zero, so the
 drift leaves them where the last repartition put them (on a live row), and the
@@ -38,8 +44,13 @@ cap, ...)``, and a device sees ``(cap, ...)``.
 
 The force is injectable (:meth:`MeshSegmentRunner.__init__`'s ``force``): the
 fused lane's (:class:`~jaccpot.distributed.template_force.FusedMeshForce`;
-:meth:`MeshSegmentRunner.fused` builds it), or a partition-independent direct sum
-for tests.
+:meth:`MeshSegmentRunner.fused` builds it), or :class:`DirectMeshForce`, a
+partition-independent direct sum for tests.
+
+WHY A MODULE OF ITS OWN, not :mod:`jaccpot.distributed.rollout`: the rollout's
+per-step path (``setup_fused_force``, ``FusedRollout``) stays the protected
+reference until this one passes its gates on cards, and the two share only the
+decomposition and the repartition's per-device body.
 """
 
 from __future__ import annotations
@@ -59,6 +70,7 @@ from jaccpot.distributed.fused import AXIS_NAME, reduce_flag_across_mesh
 from jaccpot.runtime.dtypes import require_x64
 
 __all__ = [
+    "DirectMeshForce",
     "MeshSegmentRunner",
     "MeshState",
     "SegmentReport",
@@ -149,6 +161,9 @@ class SegmentReport:
         Re-plans (and re-runs from the segment's start) it needed.
     repartitioned : bool
         Whether a repartition ran before it.
+    declined : bool
+        That repartition was declined (a device would have overflowed): nothing
+        moved, the old ownership stands.
     sent_off_device : int
         Live rows that repartition moved to another device.
     counts : list
@@ -165,6 +180,7 @@ class SegmentReport:
     start_force: bool
     retries: int = 0
     repartitioned: bool = False
+    declined: bool = False
     sent_off_device: int = 0
     counts: list = field(default_factory=list)
     bits: int = 0
@@ -215,6 +231,141 @@ def _mesh_verdict(
     )
 
 
+class DirectMeshForce:
+    """An all-pairs force for the runner whose answer does not depend on the partition.
+
+    :func:`~jaccpot.distributed.rollout.make_reference_direct_force`'s per-device sum
+    (sources all-gathered and summed in global-id order, so a particle's force is
+    bitwise the same whichever device and row hold it), with the runner's force
+    interface: what lets a test require a repartitioned run and a never
+    repartitioned one to agree bitwise. Never overflows. Small N only.
+
+    Parameters
+    ----------
+    G : float
+        Gravitational constant.
+    softening : float
+        Plummer-equivalent softening length.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    axis_name : str
+        Mesh axis.
+    """
+
+    def __init__(
+        self,
+        *,
+        G: float = 1.0,
+        softening: float = 0.0,
+        softening_kernel: Optional[str] = None,
+        axis_name: str = AXIS_NAME,
+    ) -> None:
+        from jaccpot.softening import resolve_softening_kernel
+
+        self.G = float(G)
+        self.softening = float(softening)
+        self.kernel = resolve_softening_kernel(softening_kernel)
+        self.axis_name = axis_name
+
+    @property
+    def cache_owner(self) -> "DirectMeshForce":
+        """Programs are cached on the force itself.
+
+        Returns
+        -------
+        DirectMeshForce
+            ``self``.
+        """
+        return self
+
+    @property
+    def needs_size(self) -> int:
+        """Length of the needs vector: the fused lane's, all zero.
+
+        Returns
+        -------
+        int
+            ``len(fused_topology.NEEDS_FIELDS)``.
+        """
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        return len(NEEDS_FIELDS)
+
+    def prepare(self, positions: Array, masses: Array, counts: Array) -> None:
+        """Nothing to prepare.
+
+        Parameters
+        ----------
+        positions : Array
+            Unused.
+        masses : Array
+            Unused.
+        counts : Array
+            Unused.
+        """
+        del positions, masses, counts
+
+    def key(self) -> tuple:
+        """The compile key's force part.
+
+        Returns
+        -------
+        tuple
+            ``("direct", G, softening, kernel)``.
+        """
+        return ("direct", self.G, self.softening, self.kernel)
+
+    def context(self) -> Any:
+        """No plan to install.
+
+        Returns
+        -------
+        Any
+            A null context manager.
+        """
+        import contextlib
+
+        return contextlib.nullcontext()
+
+    def before_trace(self) -> None:
+        """Nothing recorded between traces."""
+
+    def shard(
+        self, positions: Array, masses: Array, live: Array, ids: Array
+    ) -> tuple[Array, Array, Array]:
+        """One device's direct sum (inside ``shard_map``).
+
+        Parameters
+        ----------
+        positions : Array
+            ``(cap, 3)``.
+        masses : Array
+            ``(cap,)``.
+        live : Array
+            Scalar live row count.
+        ids : Array
+            ``(cap,)`` global ids: the sources' summation order.
+
+        Returns
+        -------
+        tuple[Array, Array, Array]
+            ``(acceleration, bits = 0, needs = 0)``.
+        """
+        from jaccpot.distributed.rollout import _reference_direct_shard
+
+        acc = _reference_direct_shard(
+            positions,
+            masses,
+            live,
+            ids,
+            G=self.G,
+            softening=self.softening,
+            kernel=self.kernel,
+            axis_name=self.axis_name,
+        )
+        return acc, jnp.uint32(0), jnp.zeros((self.needs_size,), jnp.int32)
+
+
 class MeshSegmentRunner:
     """Velocity Verlet on the mesh, one compiled program per segment.
 
@@ -239,6 +390,14 @@ class MeshSegmentRunner:
         ``field(state_rows, params)`` (or ``field(state_rows)`` when ``run`` gets no
         parameters) -> ``(cap, 3)``, on one device's ``(cap, 2, 3)`` rows. Keep ONE
         function object: its identity is part of the compile keys.
+    repartition_every : int
+        Repartition before the segment after every ``repartition_every`` completed
+        segments (``0``: never after the initial decomposition). Its own program,
+        between segments: the cadence is the host's, so no ``lax.cond`` around
+        collectives (a device-divergent predicate deadlocks), and its buffers never
+        add to a segment's peak.
+    num_samples : int
+        Pivot samples per device for the repartition.
     donate : bool
         Donate the state and the acceleration to each segment's program.
     axis_name : str
@@ -257,6 +416,8 @@ class MeshSegmentRunner:
         force: Any,
         *,
         external_acceleration_fn: Optional[Callable[..., Array]] = None,
+        repartition_every: int = 0,
+        num_samples: int = 256,
         donate: bool = True,
         axis_name: str = AXIS_NAME,
     ) -> None:
@@ -272,6 +433,8 @@ class MeshSegmentRunner:
         self.cap = rows // self.ndev
         self.force = force
         self.external_acceleration_fn = external_acceleration_fn
+        self.repartition_every = int(repartition_every)
+        self.num_samples = int(num_samples)
         self.donate = bool(donate)
         self.axis_name = axis_name
         self.state = state
@@ -295,6 +458,8 @@ class MeshSegmentRunner:
         cross_caps: Any = None,
         near_theta: Optional[float] = None,
         external_acceleration_fn: Optional[Callable[..., Array]] = None,
+        repartition_every: int = 0,
+        num_samples: int = 256,
         donate: bool = True,
         axis_name: str = AXIS_NAME,
     ) -> "MeshSegmentRunner":
@@ -320,6 +485,10 @@ class MeshSegmentRunner:
         near_theta : Optional[float]
             Passed to the cross hook.
         external_acceleration_fn : Optional[Callable[..., Array]]
+            As in the constructor.
+        repartition_every : int
+            As in the constructor.
+        num_samples : int
             As in the constructor.
         donate : bool
             As in the constructor.
@@ -354,6 +523,8 @@ class MeshSegmentRunner:
             state,
             force,
             external_acceleration_fn=external_acceleration_fn,
+            repartition_every=repartition_every,
+            num_samples=num_samples,
             donate=donate,
             axis_name=axis_name,
         )
@@ -573,6 +744,106 @@ class MeshSegmentRunner:
             donate_argnums=(0, 1) if self.donate else (),
         )
 
+    def _repartition_program(self) -> Callable:
+        """The mesh repartition of the packed state, cached.
+
+        ``rollout._repartition_shard`` (``sfc_repartition`` in the global box) with
+        the velocity, the TOTAL acceleration and the id routed with each particle:
+        the next segment's first drift and kick read the acceleration the last one
+        ended with, row by row. Not donated: the ragged exchange's outputs must not
+        alias its inputs.
+
+        Returns
+        -------
+        Callable
+            ``(state, acceleration, masses, ids, count) -> (state, acceleration,
+            masses, ids, count, diag)``.
+        """
+        from jaccpot.distributed.rollout import _repartition_shard
+
+        key = (
+            "mesh_repartition",
+            tuple(int(d.id) for d in self.devices),
+            self.axis_name,
+            self.cap,
+            self.num_samples,
+            str(self.state.state.dtype),
+        )
+        cache = _PROGRAMS.setdefault(self.force.cache_owner, {})
+        program = cache.get(key)
+        if program is not None:
+            return program
+        ndev, cap, samples, axis = self.ndev, self.cap, self.num_samples, self.axis_name
+
+        def body(
+            state: Array, acc: Array, masses: Array, ids: Array, count: Array
+        ) -> tuple:
+            x, v, m, i, c, a, diag = _repartition_shard(
+                state[:, 0],
+                state[:, 1],
+                masses,
+                ids,
+                count,
+                ndev=ndev,
+                cap=cap,
+                num_samples=samples,
+                axis_name=axis,
+                acceleration=acc,
+            )
+            return jnp.stack([x, v], axis=1), a, m, i, c, diag
+
+        spec = P(axis)
+        diag_spec = {
+            "declined": spec,
+            "recv_counts": spec,
+            "sent_off_device": spec,
+            "max_util": spec,
+        }
+        program = jax.jit(
+            jax.shard_map(
+                body,
+                mesh=self.mesh,
+                in_specs=(spec,) * 5,
+                out_specs=(spec,) * 5 + (diag_spec,),
+                check_vma=False,
+            )
+        )
+        cache[key] = program
+        return program
+
+    def _repartition(self, state: MeshState) -> tuple[MeshState, dict]:
+        """Repartition ``state`` on the mesh (the acceleration routed along).
+
+        A declined repartition (a device would overflow its capacity) moves
+        nothing and leaves a valid partition: the run goes on in the old
+        ownership, and the report says so.
+
+        Parameters
+        ----------
+        state : MeshState
+            The state at a segment edge (its acceleration computed).
+
+        Returns
+        -------
+        tuple[MeshState, dict]
+            The repartitioned state and the diagnostics on the host.
+        """
+        acc = state.acceleration
+        if acc is None:
+            acc = jnp.zeros(state.state.shape[:1] + (3,), state.state.dtype)
+            acc = jax.device_put(acc, state.state.sharding)
+        x, a, m, i, c, diag = self._repartition_program()(
+            state.state, acc, state.masses, state.ids, state.count
+        )
+        routed = MeshState(
+            state=x,
+            masses=m,
+            ids=i,
+            count=c,
+            acceleration=None if state.acceleration is None else a,
+        )
+        return routed, {k: np.asarray(v) for k, v in diag.items()}
+
     def _call(self, kind: str, steps: int, params: Any, *args: Any) -> tuple:
         """Run a program under the force's context (its plan installed).
 
@@ -633,6 +904,11 @@ class MeshSegmentRunner:
         if k < 1:
             raise ValueError(f"a segment needs at least one step, got {steps}")
         n = self.segment_index + 1
+        every = self.repartition_every
+        repartitioned = every > 0 and n > 1 and (n - 1) % every == 0
+        diag: dict = {}
+        if repartitioned:
+            self.state, diag = self._repartition(self.state)
         state = self.state
         dt_arr = jnp.asarray(dt, state.state.dtype)
         key = external_field_key(self.external_acceleration_fn, external_params)
@@ -686,6 +962,9 @@ class MeshSegmentRunner:
             segment=n,
             steps=k,
             start_force=start,
+            repartitioned=repartitioned,
+            declined=bool(diag["declined"][0]) if diag else False,
+            sent_off_device=int(diag["sent_off_device"].sum()) if diag else 0,
             counts=[int(c) for c in np.asarray(state.count)],
             bits=int(bits_h),
             needs=np.asarray(needs_h).tolist(),
