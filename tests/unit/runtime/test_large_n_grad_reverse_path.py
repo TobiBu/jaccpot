@@ -94,6 +94,7 @@ from jaccpot.pallas import (
     cascade_real_level,
     m2l_real_csr_lanes,
     nearfield_leafpair_csr,
+    nearfield_leafpair_csr_direct_vjp,
     p2m_real_leaf,
 )
 from jaccpot.runtime._large_n_types import LargeNPreparedState
@@ -512,17 +513,26 @@ class TestEveryFastPallasKernel:
             (cascade_real_level, "m2m_real_levels_reverse_pallas", "m2m"),
             (cascade_real_level, "l2l_real_levels_reverse_pallas", "l2l"),
             (m2l_real_csr_lanes, "m2l_real_csr_lanes_reverse_pallas", "m2l"),
-            (nearfield_leafpair_csr, "nearfield_leafpair_csr_reverse_pallas", "near"),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_reverse_pallas",
+                "near",
+            ),
         ):
             _count_calls(monkeypatch, counts, module, name, key)
         return counts
 
     @pytest.fixture
     def forward_counters(self, monkeypatch):
-        counts = {k: 0 for k in ("m2l_lanes", "near_csr")}
+        counts = {k: 0 for k in ("m2l_lanes", "near_direct", "near_table")}
         for module, name, key in (
             (m2l_real_csr_lanes, "m2l_real_csr_lanes_pallas", "m2l_lanes"),
-            (nearfield_leafpair_csr, "nearfield_leafpair_csr_pallas", "near_csr"),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_pallas_cvjp",
+                "near_direct",
+            ),
+            (nearfield_leafpair_csr, "nearfield_leafpair_csr_pallas", "near_table"),
         ):
             _count_calls(monkeypatch, counts, module, name, key)
         return counts
@@ -549,8 +559,11 @@ class TestEveryFastPallasKernel:
             )
 
         forward = np.asarray(fmm.differentiable_accelerations(state, positions, masses))
+        # the production layout: the direct near field, never the table one
         assert (
-            forward_counters["m2l_lanes"] >= 1 and forward_counters["near_csr"] >= 1
+            forward_counters["m2l_lanes"] >= 1
+            and forward_counters["near_direct"] >= 1
+            and forward_counters["near_table"] == 0
         ), forward_counters
         assert reverse_counters == {k: 0 for k in reverse_counters}
         got_p, got_m = jax.grad(loss, argnums=(0, 1))(positions, masses)
@@ -596,9 +609,9 @@ _KERNEL_ENV = {
     "JACCPOT_NEARFIELD_LEAFPAIR_CSR": "1",
     _PAYLOAD_CAP_ENV: "0",  # the prepacked layout the grad plan needs
 }
-# The two forwards differ by the near-field layout (the gradient lane's ``table``
-# kernel, production's ``direct``) and the far field's L2P: fp32 rounding, 3.4e-07
-# measured. A dropped kernel is 1e-2 or more.
+# The two forwards differ by the far field's L2P (the gradient lane's leaf-major one,
+# production's particle-major): fp32 rounding. Both run the direct near layout. A
+# dropped kernel is 1e-2 or more.
 _KERNEL_FORWARD_RTOL = 1e-5
 # The plummer gradient against its direct-sum oracle: d/dpos 7.6e-04, d/dmass
 # 3.8e-03 measured, the FMM's own error at leaf 8 (ferrers3 gives 6.9e-04 /
@@ -664,13 +677,26 @@ class TestSofteningKernelsOnTheCsrLane:
 
     @pytest.fixture
     def csr_counters(self, monkeypatch) -> dict[str, int]:
-        counts = {"table": 0, "direct": 0, "reverse": 0}
-        for name, key in (
-            ("nearfield_leafpair_csr_pallas", "table"),
-            ("nearfield_leafpair_csr_sorted_direct_pallas", "direct"),
-            ("nearfield_leafpair_csr_reverse_pallas", "reverse"),
+        counts = {"table": 0, "direct": 0, "direct_cvjp": 0, "reverse": 0}
+        for module, name, key in (
+            (nearfield_leafpair_csr, "nearfield_leafpair_csr_pallas", "table"),
+            (
+                nearfield_leafpair_csr,
+                "nearfield_leafpair_csr_sorted_direct_pallas",
+                "direct",
+            ),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_pallas_cvjp",
+                "direct_cvjp",
+            ),
+            (
+                nearfield_leafpair_csr_direct_vjp,
+                "nearfield_leafpair_csr_sorted_direct_reverse_pallas",
+                "reverse",
+            ),
         ):
-            _count_calls(monkeypatch, counts, nearfield_leafpair_csr, name, key)
+            _count_calls(monkeypatch, counts, module, name, key)
         return counts
 
     def test_the_kernels_differ_at_this_softening(self, problem):
@@ -692,8 +718,9 @@ class TestSofteningKernelsOnTheCsrLane:
         differentiable = np.asarray(
             fmm.differentiable_accelerations(state, positions, masses)
         )
-        # the gradient lane reached the CSR near field, through its table kernel
-        assert csr_counters["table"] >= 1, csr_counters
+        # the gradient lane ran production's direct layout under its custom_vjp
+        assert csr_counters["direct_cvjp"] >= 1, csr_counters
+        assert csr_counters["table"] == 0, csr_counters
         error = _relative_l2(differentiable, production)
         assert error < _KERNEL_FORWARD_RTOL, f"{kernel}: rel-L2 {error:.3e}"
         reference = np.asarray(self._direct(problem, kernel))

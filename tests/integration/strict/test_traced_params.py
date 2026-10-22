@@ -9,7 +9,7 @@ boundary, so one compile serves every value.
 * a traced value computes what the literal computes (bitwise here; the GPU A/B is
   ``bench/fused_memory_budget.py --traced-params``);
 * the force is linear in G to the last bit, and its derivatives in G and eps2 are
-  the finite differences' (float64 force, pure-JAX near field);
+  the finite differences' (float64 force, the pure-JAX and the CSR near field);
 * a traced dt and traced external parameters are the closure form's numbers;
 * three calls with three different (dt, G, eps2, external) values trace once;
 * a softening beyond the one the walk is built for sets ``OVERFLOW_PARAMS``
@@ -202,14 +202,23 @@ def test_the_force_is_linear_in_G_to_the_last_bit():
     not jax.config.jax_enable_x64, reason="the float64 force lane needs x64"
 )
 @pytest.mark.parametrize("kernel", ["plummer", "ferrers3"])
-def test_the_derivatives_in_G_and_eps2_are_the_finite_differences(kernel):
-    """``jax.grad`` through the provider's evaluation (float64, pure-JAX near field)
-    in ``G`` and ``eps2`` against central differences of the same evaluation."""
+@pytest.mark.parametrize("csr", [False, True], ids=["purejax", "csr"])
+def test_the_derivatives_in_G_and_eps2_are_the_finite_differences(
+    csr, kernel, monkeypatch
+):
+    """``jax.grad`` through the provider's evaluation (float64) in ``G`` and ``eps2``
+    against central differences of the same evaluation: the pure-JAX near field, and
+    the CSR lane's direct layout (production's, interpret mode), whose forward runs
+    under its ``custom_vjp`` when the parameters are arrays (plan S8; before it,
+    ``pallas_call`` had no differentiation rule there)."""
     from jaccpot import FusedForceProvider
     from jaccpot.runtime.fused_topology import ForceParams
 
+    if csr:
+        for key, val in _CSR_ON_CPU.items():
+            monkeypatch.setenv(key, val)
     state, masses = _system(jnp.float64)
-    solver = _solver(dtype=jnp.float64, softening_kernel=kernel)
+    solver = _solver(use_pallas=csr, dtype=jnp.float64, softening_kernel=kernel)
     prov, topo = FusedForceProvider.prepare(
         solver, state[:, 0], masses, leaf_size=LEAF, max_order=ORDER, theta=THETA
     )
