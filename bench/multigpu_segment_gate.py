@@ -89,6 +89,12 @@ def _args() -> argparse.Namespace:
         "bench/multigpu_rollout_gate.py's formulas (the S11 track-A runs)",
     )
     p.add_argument(
+        "--cross-json",
+        default=None,
+        help="explicit cross capacities: a segment run's JSON (its cross_caps_final), "
+        "so the process's peak holds no sizing measurement",
+    )
+    p.add_argument(
         "--cross-scale",
         type=float,
         default=1.0,
@@ -367,6 +373,14 @@ def main() -> None:
         "auto" if ARGS.cross == "library" else _cross_caps(leaves_per_device, leaf_cap)
     )
     result["cross"] = ARGS.cross
+    if ARGS.cross_json:
+        from jaccpot.distributed.cross import CrossCapacities
+
+        final = json.load(open(ARGS.cross_json))["cross_caps_final"]
+        caps = CrossCapacities()._with(
+            **{k: v for k, v in final.items() if v is not None}
+        )
+        result["cross"] = f"json:{ARGS.cross_json}"
     per_device = [int(c) for c in np.asarray(shard.count)]
     result["counts0"] = per_device
     times = []
