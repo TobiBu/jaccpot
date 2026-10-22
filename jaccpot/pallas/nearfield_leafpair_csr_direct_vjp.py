@@ -802,6 +802,9 @@ def _direct_cvjp_bwd(static, residual, cotangent):
     # the force-scale lane is bookkeeping (it only sets the next walk's thresholds):
     # its cotangent is dropped
     acc_bar = cotangent[0] if static.with_force_scale else cotangent
+    # a literal softening or G (the solver's own, folded at trace time) comes back
+    # from the residuals as a numpy scalar under jit
+    softening_sq, G = jnp.asarray(softening_sq), jnp.asarray(G)
     pos_bar, mass_bar, soft_bar, g_bar = (
         nearfield_leafpair_csr_sorted_direct_reverse_pallas(
             positions_sorted,
