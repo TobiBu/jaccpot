@@ -6,7 +6,8 @@ the cascade kernels and the tests share:
 
 * the hardware gate :func:`pallas_m2l_real_csr_supported` (the real Pallas
   kernels' common sm_80 predicate);
-* the CSR helpers :func:`csr_by_target` and :func:`targets_from_csr_offsets`;
+* the CSR helpers :func:`csr_by_target`, :func:`targets_from_csr_offsets` and
+  :func:`merge_into_csr`;
 * the CENTRED padded layout (:func:`pack_centred` / :func:`unpack_centred`) and
   the per-order constant tables (:func:`m2l_real_csr_tables`);
 * the per-pair rotate -> z-translate -> rotate-back M2L in that layout
@@ -75,6 +76,7 @@ __all__ = [
     "m2l_real_csr_jax",
     "csr_by_target",
     "targets_from_csr_offsets",
+    "merge_into_csr",
     "pack_centred",
     "unpack_centred",
 ]
@@ -520,6 +522,92 @@ def targets_from_csr_offsets(row_offsets: Array, num_entries: int) -> Array:
         off.dtype
     ) - jnp.asarray(1, off.dtype)
     return jnp.where(pos < off[-1], row, jnp.asarray(-1, off.dtype))
+
+
+def merge_into_csr(
+    sources: Array,
+    row_offsets: Array,
+    extra_sources: Array,
+    extra_targets: Array,
+    *,
+    total_nodes: int,
+) -> tuple[Array, Array, Array]:
+    """Slot a COO pair list into a CSR list, each pair behind its row's own entries.
+
+    Row ``t`` of the result holds the CSR list's row ``t`` in its order, then the
+    COO pairs whose target is ``t`` in THEIR order: entry for entry the CSR that the
+    stable :func:`csr_by_target` makes of the concatenation (the CSR list with one
+    target per entry, then the COO pairs), so a kernel that sums a row in list
+    order sums the same terms in the same order -- without a sort over the CSR
+    list's capacity. Only the COO pairs are sorted (stably, by target); one prefix
+    sum over the merged length then places every entry.
+
+    Parameters
+    ----------
+    sources : Array
+        ``[P]`` sources of a CSR list (``TargetSortedFarPairs``): its live entries
+        a prefix without holes, padding behind it.
+    row_offsets : Array
+        Its row offsets, ``[>= total_nodes + 1]``; the first ``total_nodes + 1``
+        are read.
+    extra_sources : Array
+        ``[E]`` sources of the COO pairs; negative marks padding.
+    extra_targets : Array
+        ``[E]`` their targets, aligned; negative marks padding, and a target
+        ``>= total_nodes`` is dropped (as the sort route drops it).
+    total_nodes : int
+        Number of target rows. Static.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(sources [P + E], row_offsets [total_nodes + 1], live_count)``, int32: a
+        CSR list for ``csr_by_target(presorted=True)``, its live entries a prefix
+        and ``-1`` behind it.
+    """
+    nt = int(total_nodes)
+    src = jnp.asarray(sources, dtype=jnp.int32)
+    off = jnp.asarray(row_offsets, dtype=jnp.int32)[: nt + 1]
+    xs = jnp.asarray(extra_sources, dtype=jnp.int32)
+    xt = jnp.asarray(extra_targets, dtype=jnp.int32)
+    width = int(src.shape[0]) + int(xs.shape[0])
+    valid = (xs >= 0) & (xt >= 0) & (xt < nt)
+    # csr_by_target's sort on the COO pairs alone: stable, padding keyed past the
+    # last row
+    key, xs_sorted = jax.lax.sort(
+        (jnp.where(valid, xt, nt), jnp.where(valid, xs, 0)), num_keys=1, is_stable=True
+    )
+    extra_before_row = jnp.searchsorted(
+        key,
+        jnp.arange(nt + 1, dtype=jnp.int32),
+        side="left",
+        method=searchsorted_method(),
+    ).astype(jnp.int32)
+    merged_offsets = off + extra_before_row
+    # the k-th sorted pair lands behind its row's own entries and the k sorted pairs
+    # before it: slot off[t + 1] + k, strictly increasing over the live pairs
+    slot = jnp.where(
+        key < nt,
+        off[jnp.minimum(key + 1, nt)] + jnp.arange(key.shape[0], dtype=jnp.int32),
+        width,
+    )
+    is_extra = jnp.zeros((width,), jnp.int32).at[slot].set(1, mode="drop")
+    # COO pairs at or before each slot; every other slot takes the CSR entry that
+    # many places back
+    extra_upto = jnp.cumsum(is_extra, dtype=jnp.int32)
+    pos = jnp.arange(width, dtype=jnp.int32)
+    live_count = merged_offsets[nt]
+
+    def take(arr: Array, idx: Array) -> Array:
+        # a gather from an empty list cannot be built: nothing to take
+        if int(arr.shape[0]) == 0:
+            return jnp.full((width,), -1, jnp.int32)
+        return arr.at[jnp.maximum(idx, 0)].get(mode="fill", fill_value=-1)
+
+    merged = jnp.where(
+        is_extra > 0, take(xs_sorted, extra_upto - 1), take(src, pos - extra_upto)
+    )
+    return jnp.where(pos < live_count, merged, -1), merged_offsets, live_count
 
 
 def m2l_real_csr_jax(
