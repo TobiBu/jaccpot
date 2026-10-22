@@ -38,6 +38,7 @@ from jaccpot.distributed.cross import (  # noqa: E402
     _summary_needs,
     _summary_rows,
     cross_needs,
+    plan_cross_capacities,
 )
 from jaccpot.runtime._mac_geometry import com_mac_geometry  # noqa: E402
 
@@ -282,6 +283,44 @@ def test_a_lower_bound_need_that_overflowed_at_least_doubles():
     grown = caps.replanned(rows, headroom=1.0)
     assert grown.send_node_cap == 2 * caps.send_node_cap
     assert grown.recv_node_cap == caps.recv_node_cap
+
+
+def test_plan_measures_until_clean_then_sizes_from_the_clean_measurement():
+    clean = _needs(
+        **dict(zip(CAP_FIELDS, (30, 59, 4000, 800, 300, 90, 90, 900, 900, 50)))
+    )
+    seen = []
+
+    def measure(caps):
+        seen.append(caps)
+        if caps.export_far_cap < 4000:  # the first guess is too narrow
+            return _needs(export_far_cap=4000, overflow=1)
+        return clean
+
+    initial = CrossCapacities.from_needs(_needs(), headroom=1.0)
+    caps, needs = plan_cross_capacities(measure, initial, headroom=1.5)
+    assert len(seen) == 2 and seen[1].export_far_cap >= 4000
+    np.testing.assert_array_equal(needs, clean)
+    assert vars(caps) == vars(
+        CrossCapacities.from_needs(clean, like=seen[1], headroom=1.5)
+    )
+
+
+def test_plan_refuses_a_flag_no_capacity_explains():
+    initial = CrossCapacities()
+    with pytest.raises(RuntimeError, match="mismatch"):
+        plan_cross_capacities(
+            lambda caps: _needs(mismatch=1, overflow=1), initial, headroom=1.5
+        )
+    grow = iter(range(1, 100))
+    with pytest.raises(RuntimeError, match="still overflowing"):
+        plan_cross_capacities(
+            lambda caps: _needs(
+                export_far_cap=caps.export_far_cap + next(grow), overflow=1
+            ),
+            initial,
+            max_rounds=2,
+        )
 
 
 def test_cross_needs_refuses_a_hook_that_measured_nothing():

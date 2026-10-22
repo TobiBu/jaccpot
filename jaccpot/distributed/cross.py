@@ -69,6 +69,7 @@ __all__ = [
     "cross_walk_fn",
     "make_cross_hook",
     "merge_imported_blocks",
+    "plan_cross_capacities",
 ]
 
 #: Entries of the cross NEEDS vector (:func:`cross_needs`), in order. The first ten
@@ -1832,6 +1833,72 @@ def _clamp_to_tree(name: str, size: int, leaf_capacity: Optional[int]) -> int:
         "max_summary_nodes": 2 * int(leaf_capacity) - 1,
     }
     return min(int(size), bound.get(name, int(size)))
+
+
+def plan_cross_capacities(
+    measure: Callable[[CrossCapacities], Any],
+    initial: CrossCapacities,
+    *,
+    headroom: Optional[float] = None,
+    leaf_capacity: Optional[int] = None,
+    max_rounds: int = 3,
+) -> tuple[CrossCapacities, np.ndarray]:
+    """Size the cross capacities from a force measured at the start positions.
+
+    ``measure(caps)`` runs one force with ``caps`` and returns its needs vector
+    reduced over the mesh (``make_fused_force_evaluator(cross_needs=True)``). While
+    its ``overflow`` bit is set the capacities are re-planned from it
+    (:meth:`CrossCapacities.replanned`) and measured again; once a measurement is
+    clean every capacity is sized from it (:meth:`CrossCapacities.from_needs`), which
+    is usually NARROWER than the first guess. Each measurement with new capacities is
+    a compile.
+
+    Parameters
+    ----------
+    measure : Callable[[CrossCapacities], Any]
+        Runs a force and returns the host needs vector.
+    initial : CrossCapacities
+        The first guess (:meth:`CrossCapacities.for_shard`).
+    headroom : Optional[float]
+        Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
+    leaf_capacity : Optional[int]
+        The tree's leaf slots, which bound the summary exactly.
+    max_rounds : int
+        Measurements at most.
+
+    Returns
+    -------
+    tuple[CrossCapacities, np.ndarray]
+        ``(capacities, the clean measurement's needs)``.
+
+    Raises
+    ------
+    RuntimeError
+        When a measurement overflowed and no capacity needed more (the two ends of
+        an exchange disagreed: ``mismatch``), or still overflowed after
+        ``max_rounds``.
+    """
+    caps = initial
+    for _ in range(max(int(max_rounds), 1)):
+        needs = np.asarray(measure(caps)).astype(np.int64)
+        need = _needs_by_field(needs)
+        if not need["overflow"]:
+            caps = CrossCapacities.from_needs(
+                needs, like=caps, headroom=headroom, leaf_capacity=leaf_capacity
+            )
+            return caps, needs
+        grown = caps.replanned(needs, headroom=headroom, leaf_capacity=leaf_capacity)
+        if vars(grown) == vars(caps):
+            raise RuntimeError(
+                "plan_cross_capacities: the cross flag fired and no capacity needed "
+                f"more ({need}); a mismatch between the two ends of an exchange is "
+                "not a capacity."
+            )
+        caps = grown
+    raise RuntimeError(
+        f"plan_cross_capacities: still overflowing after {max_rounds} measurements "
+        f"({need}, capacities {caps})"
+    )
 
 
 def make_cross_hook(

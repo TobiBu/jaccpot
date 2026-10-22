@@ -455,6 +455,13 @@ def setup_fused_force(
         Opening angle.
     cross_caps : Any
         :class:`~jaccpot.distributed.cross.CrossCapacities`; ``None`` takes defaults.
+        ``"auto"`` sizes them in the library: a first guess from the shards' leaf
+        counts (:meth:`~jaccpot.distributed.cross.CrossCapacities.for_shard`), one
+        force at ``state``'s positions that measures what every capacity needed, and
+        the capacities sized from that (:func:`~jaccpot.distributed.cross.
+        plan_cross_capacities`) -- one compile more than explicit capacities. The
+        chosen capacities and the measured needs ride on the returned force as
+        ``force.cross_caps`` / ``force.cross_needs``.
     near_theta : Optional[float]
         Passed to the cross hook.
     axis_name : str
@@ -471,8 +478,14 @@ def setup_fused_force(
         If ``solver`` asks for Dehnen's error criterion, which this lane does not
         carry yet (:func:`~jaccpot.distributed.fused._refuse_error_criterion`);
         raised before any shard is prepared.
+    ValueError
+        If ``cross_caps`` is a string other than ``"auto"``.
     """
-    from jaccpot.distributed.cross import make_cross_hook
+    from jaccpot.distributed.cross import (
+        CrossCapacities,
+        make_cross_hook,
+        plan_cross_capacities,
+    )
     from jaccpot.distributed.fused import (
         _refuse_error_criterion,
         assemble_prepared_states,
@@ -488,6 +501,10 @@ def setup_fused_force(
     )
 
     _refuse_error_criterion(solver, entry="setup_fused_force")
+    if isinstance(cross_caps, str) and cross_caps != "auto":
+        raise ValueError(
+            f"cross_caps={cross_caps!r}: a CrossCapacities, None or 'auto'"
+        )
     devices = _mesh_devices(mesh)
     ndev = len(devices)
 
@@ -531,35 +548,63 @@ def setup_fused_force(
     plan = merge_plans(plans)
     walk_caps = merge_walk_caps(walks)
     install_walk_caps(solver, walk_caps)
+    leaf_slots, live_leaves = (max(t) for t in zip(*map(_leaf_counts, preps)))
     stacked = assemble_prepared_states(preps, mesh, axis_name=axis_name)
     del preps
 
-    hook, sink = None, None
-    if ndev > 1:
-        sink = {}
-        hook = make_cross_hook(
-            ndev=ndev,
+    def _evaluator(caps: Any, *, needs: bool) -> Callable:
+        hook, sink = None, None
+        if ndev > 1:
+            sink = {}
+            hook = make_cross_hook(
+                ndev=ndev,
+                theta=theta,
+                caps=caps,
+                near_sink=sink,
+                near_theta=near_theta,
+                axis_name=axis_name,
+                # the local walks' floor (a compact kernel's support): the cross
+                # walks must keep their far pairs as far apart
+                separation_floor=getattr(
+                    solver, "_impl", solver
+                )._walk_separation_floor(),
+            )
+        return make_fused_force_evaluator(
+            solver,
+            stacked,
+            mesh=mesh,
+            plan=plan,
+            leaf_size=leaf_size,
+            max_order=max_order,
             theta=theta,
-            caps=cross_caps,
-            near_sink=sink,
-            near_theta=near_theta,
             axis_name=axis_name,
-            # the local walks' floor (a compact kernel's support): the cross
-            # walks must keep their far pairs as far apart
-            separation_floor=getattr(solver, "_impl", solver)._walk_separation_floor(),
+            cross_hook=hook,
+            cross_near_sink=sink,
+            cross_needs=needs,
         )
-    evaluator = make_fused_force_evaluator(
-        solver,
-        stacked,
-        mesh=mesh,
-        plan=plan,
-        leaf_size=leaf_size,
-        max_order=max_order,
-        theta=theta,
-        axis_name=axis_name,
-        cross_hook=hook,
-        cross_near_sink=sink,
-    )
+
+    measured = None
+    if isinstance(cross_caps, str):
+        cross_caps = None
+        if ndev > 1:
+
+            def _measure(caps: Any) -> np.ndarray:
+                out = _evaluator(caps, needs=True)(
+                    state.positions, state.masses, state.count
+                )
+                return np.asarray(out[2])
+
+            cross_caps, measured = plan_cross_capacities(
+                _measure,
+                CrossCapacities.for_shard(
+                    leaf_capacity=leaf_slots,
+                    ndev=ndev,
+                    leaf_width=leaf_size,
+                    live_leaves=live_leaves,
+                ),
+                leaf_capacity=leaf_slots,
+            )
+    evaluator = _evaluator(cross_caps, needs=False)
 
     def force(
         positions: Array, masses: Array, count: Array, ids: Optional[Array]
@@ -568,7 +613,28 @@ def setup_fused_force(
         acc, flag = evaluator(positions, masses, count)
         return acc, flag
 
+    force.cross_caps = cross_caps  # pyright: ignore[reportFunctionMemberAccess]
+    force.cross_needs = measured  # pyright: ignore[reportFunctionMemberAccess]
     return force, plan, walk_caps
+
+
+def _leaf_counts(prepared: Any) -> tuple[int, int]:
+    """A prepared shard's leaf slots and live leaves.
+
+    Parameters
+    ----------
+    prepared : Any
+        An eagerly prepared state (its ``tree``).
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(leaf slots, leaves holding a particle)``.
+    """
+    tree = prepared.tree
+    ranges = np.asarray(tree.node_ranges)
+    leaves = ranges[int(np.asarray(tree.left_child).shape[0]) :]
+    return int(leaves.shape[0]), int(np.sum(leaves[:, 1] >= leaves[:, 0]))
 
 
 class FusedRollout:
