@@ -2046,7 +2046,9 @@ def _evaluate_local_expansions_particle_major(
         ``"xla"`` (the chunked ``vmap`` of :func:`evaluate_local_real_with_grad`),
         ``"pallas"`` or ``"interpret"`` (:mod:`jaccpot.pallas.l2p_real`: one
         particle per lane, the gradient by the Cartesian recurrence of the solid
-        harmonics -- the same to float rounding). Forward only. Static.
+        harmonics -- the same to float rounding; differentiable through
+        :func:`~jaccpot.pallas.l2p_real.l2p_real_particles_pallas_cvjp`, whose
+        reverse never forms a per-particle coefficient cotangent). Static.
 
     Returns
     -------
@@ -2062,17 +2064,23 @@ def _evaluate_local_expansions_particle_major(
     leaf_ranges = node_ranges[leaf_nodes]
     counts = jnp.maximum(leaf_ranges[:, 1] - leaf_ranges[:, 0] + 1, 0)
     if kernel in ("pallas", "interpret"):
-        from jaccpot.pallas.l2p_real import l2p_real_particles_pallas
+        from jaccpot.pallas.l2p_real import l2p_real_particles_pallas_cvjp
 
-        grads = l2p_real_particles_pallas(
+        # the custom_vjp seam: the forward is the plain launch (the same program),
+        # and jax.grad reaches the particle-major reverse kernel, which reduces the
+        # coefficient and centre cotangents per leaf in the kernel
+        grads = l2p_real_particles_pallas_cvjp(
             local_data.coefficients,
             local_data.centers,
             positions,
             jnp.asarray(leaf_nodes, INDEX_DTYPE),
             jnp.asarray(leaf_ranges[:, 0], INDEX_DTYPE),
             jnp.asarray(counts, INDEX_DTYPE),
-            order=int(order),
-            interpret=kernel == "interpret",
+            int(order),
+            128,
+            kernel == "interpret",
+            "triton",
+            4,
         )
         return grads.astype(dtype)
     leaf_of = jnp.repeat(

@@ -64,10 +64,10 @@ except Exception:  # pragma: no cover - import is environment-dependent
     pl = None
     plgpu = None
 
-__all__ = [
-    "l2l_real_levels_lanes_pallas",
-    "m2m_real_levels_lanes_pallas",
-]
+# __all__ is at the end of the module: the lines above the kernels are their
+# Triton IR's source locations, which bench/provider_hlo_identity.py compares,
+# so the reverse kernels (and their names in __all__) live below the forwards
+# and this block keeps the four lines the list had here.
 
 
 @functools.lru_cache(maxsize=None)
@@ -775,3 +775,562 @@ _L2L_EAGER = jax.jit(
         "num_warps",
     ),
 )
+
+
+# ------------------------------------------------------------------ reverse
+# The adjoints of both cascades, ONE NODE PER LANE in the packed [nodes, C] table
+# as the forwards (plan S8). Below the forwards on purpose: their source lines are
+# their Triton IR's locations, which the program-identity tool reads.
+#
+# A level is linear in the coefficients at fixed geometry, so a lane's
+# coefficient cotangent is the transposed translation, ``jax.vjp`` of
+# :func:`_translate_lane` in its coefficients only (traced in the kernel; the
+# geometry is a constant of that vjp, so its square roots and guards are never
+# differentiated). The geometry cotangent comes from the generator of translations
+# instead of from differentiating the rotations: translating and differentiating
+# commute, so for an edge ``w = T(delta) v``
+#
+#     M2M:  d/d delta_a  <g, T(delta) v>  =  <g, A_a w>            (A_a: d/dx_a on
+#     L2L:  d/d delta_a  <g, T(delta) v>  =  <A_a^T v, T(delta)^T g>   the U_n^m)
+#
+# where ``A_a`` is the ladder that maps the real solid harmonics ``U_n^m`` of
+# degree n to their derivatives, harmonics of degree n - 1 -- the ladder the
+# L2P's gradient runs (:func:`_ladder_lanes`). Exact wherever the translation is
+# defined, the axis (``rho = 0``) and a zero edge (a single child on its
+# parent's centre) included, so no on-axis special case is needed.
+#
+# * M2M reverse: top-down, one lane per node below the root:
+#   ``g[c] += T^T g[parent]`` and the edge cotangent ``dbar[c]`` -- one writer
+#   per row (the L2L forward's shape);
+# * L2L reverse: bottom-up, one lane per internal node: ``g[p] += sum_c T_c^T
+#   g[c]`` over both children and ``dbar[c]`` for each (the M2M forward's shape).
+#
+# The edge cotangents sit in the child's row of a ``[nodes, 4]`` table and are
+# folded onto the two centres in XLA
+# (:func:`~jaccpot.pallas.cascade_real_level._fold_edge_cotangents`). Measured
+# on an A100 at 8e6 against the one-program-per-node, ``(Bp, Wp)``-tile level
+# reverse this replaced (grid = the widest level for every level): see
+# docs/production_2026-10.md, S8-F.
+
+
+def _ladder_lanes(coeff: dict, harm: dict, *, p: int) -> tuple:
+    """``sum_k coeff_k grad U_k`` with every ``U_k'`` (degree < p) replaced by ``harm``.
+
+    The contraction of :func:`jaccpot.pallas.l2p_real.l2p_real_grad_cartesian`
+    with the harmonics given: ``harm[(n, m)]`` stands for ``U_n^m``
+    (``Re Y_n^|m|`` for ``m >= 0``, ``Im`` for ``m < 0``), and the derivatives
+    ``d_z Y_n^m = Y_{n-1}^m``, ``(d_x - i d_y) Y_n^m = Y_{n-1}^{m-1}``,
+    ``(d_x + i d_y) Y_n^m = -Y_{n-1}^{m+1}`` combine them.
+
+    Parameters
+    ----------
+    coeff : dict
+        Coefficients per ``(degree, m)``, lane vectors.
+    harm : dict
+        Values per ``(degree, m)`` standing for the harmonics, lane vectors.
+    p : int
+        Order. Static.
+
+    Returns
+    -------
+    tuple
+        ``(gx, gy, gz)`` lane vectors.
+    """
+    zero = coeff[(0, 0)] * 0
+    gx, gy, gz = zero, zero, zero
+    for n in range(1, p + 1):
+        d = n - 1
+        Y = {m: (harm[(d, m)], harm[(d, -m)] if m > 0 else zero) for m in range(d + 1)}
+        for m in range(n + 1):
+            fr = coeff[(n, m)]
+            fi = coeff[(n, -m)] if m > 0 else None
+            if m <= d:
+                zr, zi = Y[m]
+                gz = gz + fr * zr
+                if fi is not None:
+                    gz = gz + fi * zi
+            ar, ai = Y[m + 1] if m + 1 <= d else (zero, zero)
+            if m >= 1:
+                br, bi = Y[m - 1]
+            elif d >= 1:
+                br, bi = -Y[1][0], Y[1][1]
+            else:
+                br, bi = zero, zero
+            # d_x = (B - A) / 2,  d_y = i (A + B) / 2
+            gx = gx + fr * (0.5 * (br - ar))
+            gy = gy - fr * (0.5 * (ai + bi))
+            if fi is not None:
+                gx = gx + fi * (0.5 * (bi - ai))
+                gy = gy + fi * (0.5 * (ar + br))
+    return gx, gy, gz
+
+
+def _store_edge(
+    dbar_ref: KernelRef, node: Array, valid: Array, d3: tuple, *, lane: Array
+) -> None:
+    """Write the lanes' edge cotangents ``(x, y, z)`` to their rows of ``[nodes, 4]``.
+
+    Parameters
+    ----------
+    dbar_ref : KernelRef
+        The edge-cotangent table.
+    node : Array
+        Each lane's row.
+    valid : Array
+        Lanes that write.
+    d3 : tuple
+        ``(dx, dy, dz)`` lane vectors.
+    lane : Array
+        Lane index (masked lanes point past the table).
+    """
+    rows = dbar_ref.shape[0]
+    dest = jnp.where(valid, node, rows + lane)
+    for a, val in enumerate(d3):
+        plgpu.store(dbar_ref.at[dest, a], val.astype(dbar_ref.dtype), mask=valid)
+
+
+def _m2m_rev_lanes_kernel(
+    g_in_ref: KernelRef,
+    dbar_in_ref: KernelRef,
+    out_ref: KernelRef,
+    cent_ref: KernelRef,
+    parent_ref: KernelRef,
+    nbl_ref: KernelRef,
+    start_ref: KernelRef,
+    count_ref: KernelRef,
+    g_ref: KernelRef,
+    dbar_ref: KernelRef,
+    *,
+    p: int,
+    k_lanes: int,
+    tables: dict,
+) -> None:
+    """``K`` nodes of one level per program: each lane pulls its parent's cotangent.
+
+    Parameters
+    ----------
+    g_in_ref : KernelRef
+        Flat coefficient cotangents ``[nodes * C]`` (aliased to ``g_ref``).
+    dbar_in_ref : KernelRef
+        Edge cotangents ``[nodes, 4]`` (aliased to ``dbar_ref``).
+    out_ref : KernelRef
+        The forward's output, flat ``[nodes * C]``: every node's multipole.
+    cent_ref : KernelRef
+        Padded centres ``[nodes, 4]``.
+    parent_ref : KernelRef
+        Parent per node ``[nodes]`` (``-1`` at the root).
+    nbl_ref : KernelRef
+        ``nodes_by_level`` padded with ``-1``.
+    start_ref : KernelRef
+        This level's start in ``nodes_by_level`` ``[1]``.
+    count_ref : KernelRef
+        This level's node count ``[1]``.
+    g_ref : KernelRef
+        **Output** the level's nodes' cotangent rows.
+    dbar_ref : KernelRef
+        **Output** the level's nodes' edge cotangents.
+    p : int
+        Order. Static.
+    k_lanes : int
+        Lanes (nodes) per program. Static.
+    tables : dict
+        :func:`_cascade_lane_tables`. Static.
+
+    Returns
+    -------
+    None
+        Writes the level's rows.
+    """
+    del g_in_ref, dbar_in_ref
+    C, packed = tables["C"], tables["packed"]
+    base = pl.program_id(0) * k_lanes
+    count = count_ref[0]
+
+    @pl.when(base < count)
+    def _live():
+        lane = lax.broadcasted_iota(jnp.int32, (k_lanes,), 0)
+        slot = base + lane
+        valid = slot < count
+        node = nbl_ref[start_ref[0] + jnp.where(valid, slot, 0)]
+        valid = valid & (node >= 0)
+        node_safe = jnp.where(valid, node, 0)
+        par = parent_ref[node_safe]
+        valid = valid & (par >= 0)
+        par = jnp.where(valid, par, 0)
+        # the forward's edge: child centre minus parent centre
+        dx = jnp.where(valid, cent_ref[node_safe, 0] - cent_ref[par, 0], 0.0)
+        dy = jnp.where(valid, cent_ref[node_safe, 1] - cent_ref[par, 1], 0.0)
+        dz_ = jnp.where(valid, cent_ref[node_safe, 2] - cent_ref[par, 2], 1.0)
+        n_tab = g_ref.shape[0]
+        nrow = _flat(node_safe, C, n_tab)
+        prow = _flat(par, C, n_tab)
+        v = {key: out_ref[nrow + packed[key]] for key in _keys(p)}
+        mask = valid.astype(dx.dtype)
+        gp = {key: g_ref[prow + packed[key]] * mask for key in _keys(p)}
+        w, vjp = jax.vjp(
+            lambda vv: _translate_lane(
+                vv, dx, dy, dz_, which="m2m", p=p, tables=tables
+            ),
+            v,
+        )
+        (vt,) = vjp(gp)
+        new = {key: g_ref[nrow + packed[key]] + vt[key] for key in _keys(p)}
+        _store_rows(g_ref, node_safe, valid, new, p=p, C=C, packed=packed, lane=lane)
+        _store_edge(dbar_ref, node_safe, valid, _ladder_lanes(gp, w, p=p), lane=lane)
+
+
+def _l2l_rev_lanes_kernel(
+    g_in_ref: KernelRef,
+    dbar_in_ref: KernelRef,
+    out_ref: KernelRef,
+    cent_ref: KernelRef,
+    left_ref: KernelRef,
+    right_ref: KernelRef,
+    nbl_ref: KernelRef,
+    start_ref: KernelRef,
+    count_ref: KernelRef,
+    g_ref: KernelRef,
+    dbar_ref: KernelRef,
+    *,
+    p: int,
+    k_lanes: int,
+    tables: dict,
+    num_internal: int,
+) -> None:
+    """``K`` parents of one level per program: each lane pulls its children's cotangents.
+
+    Parameters
+    ----------
+    g_in_ref : KernelRef
+        Flat coefficient cotangents ``[nodes * C]`` (aliased to ``g_ref``).
+    dbar_in_ref : KernelRef
+        Edge cotangents ``[nodes, 4]`` (aliased to ``dbar_ref``).
+    out_ref : KernelRef
+        The forward's output, flat ``[nodes * C]``: every node's final local.
+    cent_ref : KernelRef
+        Padded centres ``[nodes, 4]``.
+    left_ref : KernelRef
+        Left child per internal node ``[internal]``.
+    right_ref : KernelRef
+        Right child per internal node ``[internal]``.
+    nbl_ref : KernelRef
+        ``nodes_by_level`` padded with ``-1``.
+    start_ref : KernelRef
+        This level's start in ``nodes_by_level`` ``[1]``.
+    count_ref : KernelRef
+        This level's node count ``[1]``.
+    g_ref : KernelRef
+        **Output** the level's parents' cotangent rows.
+    dbar_ref : KernelRef
+        **Output** their children's edge cotangents.
+    p : int
+        Order. Static.
+    k_lanes : int
+        Lanes (nodes) per program. Static.
+    tables : dict
+        :func:`_cascade_lane_tables`. Static.
+    num_internal : int
+        Internal node count. Static.
+
+    Returns
+    -------
+    None
+        Writes the parents' rows and their children's edge rows.
+    """
+    del g_in_ref, dbar_in_ref
+    C, packed = tables["C"], tables["packed"]
+    base = pl.program_id(0) * k_lanes
+    count = count_ref[0]
+
+    @pl.when(base < count)
+    def _live():
+        lane = lax.broadcasted_iota(jnp.int32, (k_lanes,), 0)
+        slot = base + lane
+        valid = slot < count
+        node = nbl_ref[start_ref[0] + jnp.where(valid, slot, 0)]
+        valid = valid & (node >= 0) & (node < num_internal)
+        node_safe = jnp.where(valid, node, 0)
+        n_tab = g_ref.shape[0]
+        prow = _flat(node_safe, C, n_tab)
+        f_par = {key: out_ref[prow + packed[key]] for key in _keys(p)}
+        acc = {key: g_ref[prow + packed[key]] for key in _keys(p)}
+        for child_ref in (left_ref, right_ref):
+            ch = child_ref[node_safe]
+            ok = valid & (ch >= 0)
+            ch = jnp.where(ok, ch, 0)
+            # the forward's edge: parent centre minus child centre
+            dx = jnp.where(ok, cent_ref[node_safe, 0] - cent_ref[ch, 0], 0.0)
+            dy = jnp.where(ok, cent_ref[node_safe, 1] - cent_ref[ch, 1], 0.0)
+            dz_ = jnp.where(ok, cent_ref[node_safe, 2] - cent_ref[ch, 2], 1.0)
+            crow = _flat(ch, C, n_tab)
+            mask = ok.astype(dx.dtype)
+            gc = {key: g_ref[crow + packed[key]] * mask for key in _keys(p)}
+            _, vjp = jax.vjp(
+                lambda vv: _translate_lane(
+                    vv, dx, dy, dz_, which="l2l", p=p, tables=tables
+                ),
+                f_par,
+            )
+            (vt,) = vjp(gc)
+            acc = {key: acc[key] + vt[key] for key in _keys(p)}
+            _store_edge(dbar_ref, ch, ok, _ladder_lanes(f_par, vt, p=p), lane=lane)
+        _store_rows(g_ref, node_safe, valid, acc, p=p, C=C, packed=packed, lane=lane)
+
+
+def _rev_level_call(
+    kernel: Any,
+    operands: list,
+    *,
+    num_programs: int,
+    interpret: bool,
+    backend: str,
+    num_warps: int,
+    name: str,
+) -> tuple[Array, Array]:
+    backend_kwargs = pallas_backend_kwargs(backend, interpret)
+    if "compiler_params" in backend_kwargs:
+        backend_kwargs["compiler_params"] = type(backend_kwargs["compiler_params"])(
+            num_warps=int(num_warps)
+        )
+    g, dbar = operands[0], operands[1]
+    return pl.pallas_call(
+        kernel,
+        grid=(int(num_programs),),
+        in_specs=[_full(a) for a in operands],
+        out_specs=[_full(g), _full(dbar)],
+        out_shape=[
+            jax.ShapeDtypeStruct(g.shape, g.dtype),
+            jax.ShapeDtypeStruct(dbar.shape, dbar.dtype),
+        ],
+        input_output_aliases={0: 0, 1: 1},
+        interpret=bool(interpret),
+        name=name,
+        **backend_kwargs,
+    )(*operands)
+
+
+def m2m_real_levels_lanes_reverse_pallas(
+    out_packed: Array,
+    centers: Array,
+    parent: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    out_bar: Array,
+    *,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+    k_lanes: int = 32,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 1,
+) -> tuple[Array, Array]:
+    """Adjoint of :func:`m2m_real_levels_lanes_pallas`: top down, one node per lane.
+
+    Parameters
+    ----------
+    out_packed : Array
+        ``[nodes, C]`` the forward's OUTPUT (every node's final multipole).
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    parent : Array
+        ``[nodes]`` parent per node (``-1`` at the root).
+    nodes_by_level : Array
+        Level-major node ids (all nodes, leaves included).
+    level_offsets : Array
+        ``[levels + 1]`` starts into ``nodes_by_level``.
+    out_bar : Array
+        ``[nodes, C]`` cotangent of the output table.
+    order : int
+        Expansion order. Static.
+    num_levels : int
+        Levels the forward covered. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    k_lanes : int
+        Nodes per program. Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(g [nodes, C], dbar [nodes, 3])``: the total cotangent of every node's
+        multipole (the caller zeroes the internal rows, which the forward
+        overwrites) and each node's edge-vector cotangent (``child - parent``).
+    """
+    p = int(order)
+    C = _check(p, out_packed)
+    tables = _cascade_lane_tables(p)
+    dtype = out_packed.dtype
+    nodes = int(out_packed.shape[0])
+    k = max(1, int(k_lanes))
+    width = int(max(level_batch_width, 1))
+    idx = level_offsets.dtype
+    nbl = jnp.concatenate(
+        [jnp.asarray(nodes_by_level, idx), jnp.full((width + k,), -1, idx)]
+    )
+    offs = jnp.asarray(level_offsets, idx)
+    cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
+    par = jnp.asarray(parent, idx)
+    kernel = functools.partial(_m2m_rev_lanes_kernel, p=p, k_lanes=k, tables=tables)
+    rows = out_packed.reshape(-1)
+
+    def body(level: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        g, dbar = carry
+        return _rev_level_call(
+            kernel,
+            [
+                g,
+                dbar,
+                rows,
+                cent,
+                par,
+                nbl,
+                offs[level][None],
+                (offs[level + 1] - offs[level])[None],
+            ],
+            num_programs=-(-width // k),
+            interpret=interpret,
+            backend=backend,
+            num_warps=num_warps,
+            name=f"m2m_rev_real_lanes_p{p}_k{k}",
+        )
+
+    # the forward filled parents from children, deepest first; the cotangent
+    # flows parent -> child, shallowest first (child levels 1 .. num_levels-1)
+    g, dbar = lax.fori_loop(
+        1,
+        max(int(num_levels), 1),
+        body,
+        (jnp.asarray(out_bar, dtype).reshape(-1), jnp.zeros((nodes, 4), dtype)),
+        unroll=True,
+    )
+    return g.reshape(nodes, C), dbar[:, :3]
+
+
+def l2l_real_levels_lanes_reverse_pallas(
+    out_locals: Array,
+    centers: Array,
+    left_child: Array,
+    right_child: Array,
+    nodes_by_level: Array,
+    level_offsets: Array,
+    out_bar: Array,
+    *,
+    order: int,
+    num_levels: int,
+    level_batch_width: int,
+    k_lanes: int = 32,
+    interpret: bool = False,
+    backend: str = "triton",
+    num_warps: int = 1,
+) -> tuple[Array, Array]:
+    """Adjoint of :func:`l2l_real_levels_lanes_pallas`: bottom up, one parent per lane.
+
+    Parameters
+    ----------
+    out_locals : Array
+        ``[nodes, C]`` the forward's OUTPUT (fully cascaded locals).
+    centers : Array
+        ``[nodes, 3]`` expansion centres.
+    left_child : Array
+        ``[internal]`` left children.
+    right_child : Array
+        ``[internal]`` right children.
+    nodes_by_level : Array
+        Level-major node ids.
+    level_offsets : Array
+        ``[levels + 1]`` starts into ``nodes_by_level``.
+    out_bar : Array
+        ``[nodes, C]`` cotangent of the output table.
+    order : int
+        Expansion order. Static.
+    num_levels : int
+        Levels present. Static.
+    level_batch_width : int
+        Nodes per level at most. Static.
+    k_lanes : int
+        Nodes per program. Static.
+    interpret : bool
+        Pallas interpret mode.
+    backend : str
+        Pallas GPU lowering.
+    num_warps : int
+        Warps per program.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(g [nodes, C], dbar [nodes, 3])``: the cotangent of the INPUT table
+        (every row, since ``out[n] = in[n] + L2L(out[parent])``) and each node's
+        edge-vector cotangent (``parent - child``).
+    """
+    p = int(order)
+    C = _check(p, out_locals)
+    tables = _cascade_lane_tables(p)
+    dtype = out_locals.dtype
+    nodes = int(out_locals.shape[0])
+    num_internal = int(jnp.asarray(left_child).shape[0])
+    g0 = jnp.asarray(out_bar, dtype).reshape(-1)
+    dbar0 = jnp.zeros((nodes, 4), dtype)
+    if num_internal <= 0 or int(num_levels) <= 1:
+        return g0.reshape(nodes, C), dbar0[:, :3]
+    k = max(1, int(k_lanes))
+    width = int(max(level_batch_width, 1))
+    idx = level_offsets.dtype
+    nbl = jnp.concatenate(
+        [jnp.asarray(nodes_by_level, idx), jnp.full((width + k,), -1, idx)]
+    )
+    offs = jnp.asarray(level_offsets, idx)
+    cent = jnp.pad(jnp.asarray(centers, dtype), ((0, 0), (0, 1)))
+    kernel = functools.partial(
+        _l2l_rev_lanes_kernel,
+        p=p,
+        k_lanes=k,
+        tables=tables,
+        num_internal=num_internal,
+    )
+    rows = out_locals.reshape(-1)
+    lc = jnp.asarray(left_child, idx)
+    rc = jnp.asarray(right_child, idx)
+
+    def body(rev: Array, carry: tuple[Array, Array]) -> tuple[Array, Array]:
+        level = (int(num_levels) - 2) - rev  # parent level, deepest first
+        g, dbar = carry
+        return _rev_level_call(
+            kernel,
+            [
+                g,
+                dbar,
+                rows,
+                cent,
+                lc,
+                rc,
+                nbl,
+                offs[level][None],
+                (offs[level + 1] - offs[level])[None],
+            ],
+            num_programs=-(-width // k),
+            interpret=interpret,
+            backend=backend,
+            num_warps=num_warps,
+            name=f"l2l_rev_real_lanes_p{p}_k{k}",
+        )
+
+    g, dbar = lax.fori_loop(
+        0, max(int(num_levels) - 1, 0), body, (g0, dbar0), unroll=True
+    )
+    return g.reshape(nodes, C), dbar[:, :3]
+
+
+__all__ = [
+    "l2l_real_levels_lanes_pallas",
+    "l2l_real_levels_lanes_reverse_pallas",
+    "m2m_real_levels_lanes_pallas",
+    "m2m_real_levels_lanes_reverse_pallas",
+]

@@ -23,6 +23,7 @@ engine class inherits this mixin. Sibling of _fmm_impl at runtime level.
 from __future__ import annotations
 
 import warnings
+from functools import partial
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 import jax
@@ -766,7 +767,6 @@ class EvaluateMixin(_EngineBase):
             OOMs at galaxy scale (30 GB peak at 200k against 6.8 GB). See
             :class:`~jaccpot.config.GradConfig`; every field also has a
             ``JACCPOT_*`` environment fallback, and an explicit field wins.
-
         Returns
         -------
         Array
@@ -775,10 +775,13 @@ class EvaluateMixin(_EngineBase):
         Notes
         -----
         Bare ``jax.grad``/``jax.vjp`` over this method give exact gradients, and are
-        the recommended usage -- the inner numeric kernels are already jit-compiled.
-        Wrapping the *entire* call in an outer ``jax.jit`` is supported at moderate N
-        but can fail at large N (the re-run of the prepared sweeps retains host-side
-        ops). See ``docs/differentiable_fmm.md`` ("jit limitation").
+        the recommended usage on a radix state -- the inner numeric kernels are
+        already jit-compiled. Wrapping the *entire* call in an outer ``jax.jit`` is
+        supported at moderate N but can fail at large N there (the re-run of the
+        prepared sweeps retains host-side ops). A ``LargeNPreparedState`` compiles
+        whole: jit the gradient with the state and its ``grad_plan`` (both pytrees)
+        as ARGUMENTS -- closed over, ``jax.jit`` embeds every array of the topology
+        in the program as a constant. See ``docs/differentiable_fmm.md``.
         """
         _warn_if_traced_under_an_outer_jit(positions, masses)
         options = resolve_grad_options(
@@ -850,8 +853,9 @@ class EvaluateMixin(_EngineBase):
         Parameters
         ----------
         state : Union[FMMPreparedState, LargeNPreparedState]
-            A prepared state from :meth:`prepare_state`. Closed over as a
-            constant, exactly as :meth:`differentiable_accelerations` treats it.
+            A prepared state from :meth:`prepare_state`: frozen topology, as
+            :meth:`differentiable_accelerations` treats it (a constant of the
+            radix program; an argument of the large-N one, see Returns).
         target_indices : Optional[Array]
             Optional targets to return; all particles remain sources. Passed
             through to :meth:`differentiable_accelerations` unchanged.
@@ -872,7 +876,10 @@ class EvaluateMixin(_EngineBase):
             A compiled ``f(positions, masses) -> accelerations`` closing over
             ``state``. Differentiable, so ``jax.grad`` over it works and is
             itself compiled. Positions and masses are in the original (unsorted)
-            particle order, as for :meth:`differentiable_accelerations`.
+            particle order, as for :meth:`differentiable_accelerations`. On a
+            ``LargeNPreparedState`` the state and its grad plan are arguments of
+            the compiled program, bound with ``functools.partial`` (closed over,
+            ``jax.jit`` embeds the whole topology as constants).
 
         Raises
         ------
@@ -901,17 +908,36 @@ class EvaluateMixin(_EngineBase):
             supports_fast_lane=not isinstance(state, LargeNPreparedState),
         )
 
-        def _step(positions: Array, masses: Array) -> Array:
-            with grad_option_overrides(options):
-                if isinstance(state, LargeNPreparedState):
+        if isinstance(state, LargeNPreparedState):
+            from ._large_n_grad import prepare_large_n_grad_plan
+
+            plan = prepare_large_n_grad_plan(self, state)
+
+            def _large_n_step(
+                state_in: LargeNPreparedState,
+                plan_in: "LargeNGradPlan",
+                positions: Array,
+                masses: Array,
+            ) -> Array:
+                with grad_option_overrides(options):
                     return self._differentiable_accelerations_large_n(
-                        state,
+                        state_in,
                         positions,
                         masses,
                         target_indices=target_indices,
-                        grad_plan=None,
+                        grad_plan=plan_in,
                         options=options,
                     )
+
+            # the state and the plan are ARGUMENTS of the program: closed over,
+            # jax.jit embeds every array of the topology as a constant
+            large_n = partial(jax.jit(_large_n_step), state, plan)
+            if compile_now is not None:
+                jax.block_until_ready(large_n(*compile_now))
+            return large_n
+
+        def _step(positions: Array, masses: Array) -> Array:
+            with grad_option_overrides(options):
                 return self._differentiable_accelerations_radix(
                     state,
                     positions,
@@ -969,6 +995,12 @@ class EvaluateMixin(_EngineBase):
             Integer gather index ``fwd`` with ``positions_sorted ==
             positions[fwd]``.
         """
+        if isinstance(state, LargeNPreparedState):
+            # the tree's own order (positions_sorted = positions[particle_indices],
+            # the index production scatters the force back through): an array of
+            # the state, so a jitted gradient may take the state as an ARGUMENT
+            # instead of embedding its topology as constants
+            return jnp.asarray(state.tree.particle_indices, dtype=INDEX_DTYPE)
         permutation = state.inverse_permutation
         cached = getattr(self, "_forward_permutation_memo", None)
         if cached is not None and cached[0] is permutation:
@@ -1066,7 +1098,9 @@ class EvaluateMixin(_EngineBase):
         the frozen M2L list comes from ``compact_far_pairs`` and the near field is
         the fused Pallas fast lane driven through its ``custom_vjp``. The
         near-field lane is therefore not selectable here -- this state has exactly
-        one differentiable near field. See ``runtime/_large_n_grad.py``.
+        one differentiable near field, the production one (plan S8: the forward
+        is the production evaluation's, kernel for kernel). See
+        ``runtime/_large_n_grad.py``.
 
         Parameters
         ----------

@@ -10,8 +10,10 @@ a different forward from production (per-chunk partials, another summation order
 gathered ``(L, W)`` leaf tables that pad cell leaves of ~10-20 particles into 64
 slots, and ``(chunks, W, 8)`` reverse partials (plan S8, D6 part 1).
 
-:func:`nearfield_leafpair_csr_sorted_direct_reverse_pallas` is the direct kernel's own
-reverse, on the same layout: the adjoint of its ``(N, 3)`` accelerations.
+:func:`nearfield_leafpair_csr_sorted_direct_pallas_cvjp` is the production call under
+a ``custom_vjp``: its forward IS that call with the same operands (the same lowered
+program; the force-scale lane of ``dehnen_error`` included), and its reverse,
+:func:`nearfield_leafpair_csr_sorted_direct_reverse_pallas`, runs on the same layout.
 
 THE REVERSE. The per-pair algebra is the table reverse's (``nearfield/grad.py``'s
 tidal-tensor contraction with every softening kernel's ``g``, ``(1/r) dg/dr`` and
@@ -41,7 +43,18 @@ by the symmetry.
 MEMORY. The reverse reads the forward's ``(N + Wpad, 4)`` particle table (rebuilt,
 not saved) and a ``(N + Wpad, 4)`` table of the cotangents, and writes five ``(N,)``
 lanes (x, y, z, the mass sum, the softening sum): no ``(L, W)`` tables, no per-chunk
-partials, nothing ``N x 16`` (the S8 gate).
+partials, nothing ``N x 16`` (the S8 gate). ``jax.grad`` of ``sum(acc . w)`` through
+this rule alone on a captured 8e6 disc step (A100, float32,
+``bench/near_direct_reverse_gate.py --memory``): 45.4 B/p of temporaries (0.34 GiB),
+the largest array the ``(N + Wpad, 4)`` table; the table layout's rule on the same step
+needs 1380 B/p (10.28 GiB).
+
+TIME. On the same step the gradient takes 57.6 ms against the production forward's
+26.8-30.0 ms (the table layout's: 274.5 ms); on the 2e5 disc 3.18 ms against 1.81; on
+the galaxy preset's 25M disc+bulge step (``dehnen_error``, the forward with its
+force-scale lane) 202.9 ms against 106.1, with the same 45.4 B/p of temporaries.
+The reverse does about twice the forward's arithmetic per pair (the tidal contraction,
+the softening derivative) and reads seven floats per source to its four.
 
 LONG ROWS. As in the forward, a row runs at most ``row_limit`` entries per program
 (one 101,870-entry outlier row serialised a whole launch, 2026-10-05). The rest of a
@@ -50,8 +63,16 @@ adding its piece into the particle-order lanes it reads (every particle is one l
 one program per launch, so the read-add-store is race free). A ``fori_loop`` with a
 traced trip count runs them; it runs zero times unless some row is that long.
 
-The potential and force-scale lanes have no reverse here, nor ``accum="wide"`` (which
-does not exist on the direct layout: the caller routes it to the table kernel).
+WHAT IS NOT DIFFERENTIATED. The force-scale lane (``with_force_scale``) is returned by
+the forward and treated as a constant: it only sets the next refresh's eq (16a)
+thresholds, i.e. discrete MAC decisions, so its cotangent is dropped (the far lanes'
+``_fb`` twins drop theirs the same way). The potential lane has no rule: the fast-lane
+potential serves the energy diagnostic, which nothing differentiates, so
+``with_potential`` is refused rather than given a silently zero gradient. ``accum="wide"``
+does not exist on the direct layout (the caller routes it to the table kernel), so
+it has no reverse here either. The tile skip (``tile_skip``, opt-in, off by default) is
+forwarded to the forward only: the reverse evaluates the ``"ferrers3"`` polynomial on
+every pair, which beyond the support gives the Newtonian factors anyway.
 
 The module sits beside, not inside, ``nearfield_leafpair_csr.py`` so that file stays
 byte for byte unchanged: the GPU program texts embed the kernels' source lines, and the
@@ -61,7 +82,7 @@ production forward must not move by one character.
 from __future__ import annotations
 
 import functools
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -71,7 +92,10 @@ from jaxtyping import Array
 from jaccpot._env import env_int
 from jaccpot.pallas._compat import KernelRef
 from jaccpot.pallas.nearfield_fused_leaf import _resolve_subtile
-from jaccpot.pallas.nearfield_leafpair_csr import DIRECT_ROW_LIMIT
+from jaccpot.pallas.nearfield_leafpair_csr import (
+    DIRECT_ROW_LIMIT,
+    nearfield_leafpair_csr_sorted_direct_pallas,
+)
 from jaccpot.softening import (
     masked_pair_factors,
     pair_softening_sq_derivative,
@@ -89,12 +113,19 @@ except Exception:  # pragma: no cover - import is environment-dependent
 __all__ = [
     "REVERSE_SOURCE_TILE",
     "REVERSE_TARGET_SUBTILE",
+    "nearfield_leafpair_csr_sorted_direct_pallas_cvjp",
     "nearfield_leafpair_csr_sorted_direct_reverse_pallas",
 ]
 
 #: The reverse kernel's default tile: ``Bt = 8`` targets against ``Bs = 8`` sources, one
-#: warp. Half the forward's target tile: the reverse carries nine ``(Bt, Bs)``
-#: accumulators to the forward's four.
+#: warp. Half the forward's target tile (16, ``DIRECT_TILED_TARGET_SUBTILE``): the
+#: reverse carries nine ``(Bt, Bs)`` accumulators to the forward's four. A100,
+#: 2026-10-22, reverse alone against the production forward on captured steps
+#: (``bench/near_direct_reverse_gate.py``, free card): clipped Plummer 8e6 (cells of
+#: 10.5 particles, ferrers3 at softening 1e-7) 54.7 ms against 62.7 at (16, 8) and
+#: 61.3 at (16, 8) with 2 warps, forward 25.5; the 8e6 disc (16.4 per cell, ferrers3
+#: at 1.5e-3) 57.6 ms against 66.0 (16, 8), 60.8 (4, 8), 68.2 (8, 16), 62.4 (8, 8)
+#: with 2 warps, forward 30.0; at 2e5 likewise the fastest or within 2 %.
 REVERSE_TARGET_SUBTILE = 8
 REVERSE_SOURCE_TILE = 8
 
@@ -617,3 +648,351 @@ def nearfield_leafpair_csr_sorted_direct_reverse_pallas(
     g_bar = jnp.sum(masses_sorted * lanes[3])
     soft_bar = -g_scalar * jnp.sum(lanes[4])
     return pos_bar, mass_bar, soft_bar, g_bar
+
+
+class _DirectStatic(NamedTuple):
+    """The forward's static options, one hashable ``nondiff_argnums`` operand.
+
+    Each field is the keyword of the same name of
+    :func:`~jaccpot.pallas.nearfield_leafpair_csr.nearfield_leafpair_csr_sorted_direct_pallas`,
+    passed through unchanged (``None`` keeps the forward's own resolution, from the
+    environment or its defaults, so the forward resolves exactly as production does).
+
+    Attributes
+    ----------
+    leaf_width : int
+        ``W``.
+    chunk : int
+        Entries per chunk.
+    num_warps : Optional[int]
+        Triton warps per program.
+    num_stages : int
+        Triton pipeline stages.
+    target_subtile : Optional[int]
+        Targets per program.
+    interpret : bool
+        Pallas interpret mode (the reverse's too).
+    with_force_scale : bool
+        Return the force-scale lane.
+    row_limit : Optional[int]
+        Entries of a row its own program runs (the reverse's too).
+    source_tile : Optional[int]
+        Sources per vector tile.
+    source_flags : Optional[str]
+        The source tiles' options.
+    softening_kernel : Optional[str]
+        The pair kernel (the reverse's too).
+    tile_skip : Optional[bool]
+        The ferrers3 tile skip.
+    """
+
+    leaf_width: int
+    chunk: int
+    num_warps: Optional[int]
+    num_stages: int
+    target_subtile: Optional[int]
+    interpret: bool
+    with_force_scale: bool
+    row_limit: Optional[int]
+    source_tile: Optional[int]
+    source_flags: Optional[str]
+    softening_kernel: Optional[str]
+    tile_skip: Optional[bool]
+
+
+def _direct_forward(
+    positions_sorted,
+    masses_sorted,
+    leaf_start,
+    leaf_count,
+    neighbors,
+    offsets,
+    counts,
+    softening_sq,
+    G,
+    static,
+):
+    acc, fourth = nearfield_leafpair_csr_sorted_direct_pallas(
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        leaf_width=static.leaf_width,
+        softening_sq=softening_sq,
+        G=G,
+        chunk=static.chunk,
+        num_warps=static.num_warps,
+        num_stages=static.num_stages,
+        target_subtile=static.target_subtile,
+        interpret=static.interpret,
+        with_force_scale=static.with_force_scale,
+        row_limit=static.row_limit,
+        source_tile=static.source_tile,
+        source_flags=static.source_flags,
+        softening_kernel=static.softening_kernel,
+        tile_skip=static.tile_skip,
+    )
+    return (acc, fourth) if static.with_force_scale else acc
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(9,))
+def _direct_cvjp(
+    positions_sorted,
+    masses_sorted,
+    leaf_start,
+    leaf_count,
+    neighbors,
+    offsets,
+    counts,
+    softening_sq,
+    G,
+    static,
+):
+    return _direct_forward(
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        softening_sq,
+        G,
+        static,
+    )
+
+
+def _direct_cvjp_fwd(
+    positions_sorted,
+    masses_sorted,
+    leaf_start,
+    leaf_count,
+    neighbors,
+    offsets,
+    counts,
+    softening_sq,
+    G,
+    static,
+):
+    out = _direct_forward(
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        softening_sq,
+        G,
+        static,
+    )
+    # the operands only: the particle table is rebuilt in the reverse rather than
+    # kept alive from the forward
+    return out, (
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        jnp.asarray(softening_sq),
+        jnp.asarray(G),
+    )
+
+
+def _direct_cvjp_bwd(static, residual, cotangent):
+    (
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        softening_sq,
+        G,
+    ) = residual
+    # the force-scale lane is bookkeeping (it only sets the next walk's thresholds):
+    # its cotangent is dropped
+    acc_bar = cotangent[0] if static.with_force_scale else cotangent
+    # a literal softening or G (the solver's own, folded at trace time) comes back
+    # from the residuals as a numpy scalar under jit
+    softening_sq, G = jnp.asarray(softening_sq), jnp.asarray(G)
+    pos_bar, mass_bar, soft_bar, g_bar = (
+        nearfield_leafpair_csr_sorted_direct_reverse_pallas(
+            positions_sorted,
+            masses_sorted,
+            leaf_start,
+            leaf_count,
+            neighbors,
+            offsets,
+            counts,
+            acc_bar,
+            leaf_width=static.leaf_width,
+            softening_sq=softening_sq,
+            G=G,
+            chunk=static.chunk,
+            row_limit=static.row_limit,
+            softening_kernel=static.softening_kernel,
+            interpret=static.interpret,
+        )
+    )
+    return (
+        pos_bar.astype(positions_sorted.dtype),
+        mass_bar.astype(masses_sorted.dtype),
+        None,
+        None,
+        None,
+        None,
+        None,
+        jnp.reshape(soft_bar.astype(softening_sq.dtype), jnp.shape(softening_sq)),
+        jnp.reshape(g_bar.astype(G.dtype), jnp.shape(G)),
+    )
+
+
+_direct_cvjp.defvjp(_direct_cvjp_fwd, _direct_cvjp_bwd)
+
+
+def nearfield_leafpair_csr_sorted_direct_pallas_cvjp(
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_start: Array,
+    leaf_count: Array,
+    neighbors: Array,
+    offsets: Array,
+    counts: Array,
+    *,
+    leaf_width: int,
+    softening_sq: Array,
+    G: Array,
+    chunk: int,
+    num_warps: int | None = None,
+    num_stages: int = 1,
+    target_subtile: int | None = None,
+    interpret: bool = False,
+    with_potential: bool = False,
+    with_force_scale: bool = False,
+    row_limit: int | None = None,
+    source_tile: int | None = None,
+    source_flags: str | None = None,
+    softening_kernel: Optional[str] = None,
+    tile_skip: bool | None = None,
+) -> tuple[Array, Array | None]:
+    """Differentiable direct CSR near field: the production forward, its own reverse.
+
+    The forward is :func:`~jaccpot.pallas.nearfield_leafpair_csr.
+    nearfield_leafpair_csr_sorted_direct_pallas` called with exactly these arguments,
+    so it computes the production bits and, for the same (traced) operands, lowers to
+    the same program. Under ``jax.grad`` / ``jax.vjp`` the reverse is
+    :func:`nearfield_leafpair_csr_sorted_direct_reverse_pallas` on the same layout.
+
+    WHAT IS DIFFERENTIATED: the ``(N, 3)`` accelerations, with respect to
+    ``positions_sorted`` (each particle as a sink and as a source), ``masses_sorted``
+    (as sources), ``softening_sq`` and ``G``. The leaf ranges and the CSR are topology
+    (integer, no cotangent). The force-scale lane (``with_force_scale``, the near half
+    of ``dehnen_error``'s ``f_b``) is computed by the forward as in production but is a
+    constant to the reverse: its cotangent is dropped, since it only sets the next
+    refresh's thresholds (see the module docstring).
+
+    Parameters
+    ----------
+    positions_sorted : Array
+        ``(N, 3)`` particle positions in tree (Morton) order. Differentiable.
+    masses_sorted : Array
+        ``(N,)`` masses in the same order. Differentiable.
+    leaf_start : Array
+        ``(L,)`` first particle of each leaf (topology).
+    leaf_count : Array
+        ``(L,)`` particles per leaf (topology).
+    neighbors : Array
+        Flat SYMMETRIC neighbour array of leaf indices (topology): the reverse takes
+        each source-side cotangent from the other end of the pair.
+    offsets : Array
+        CSR row starts (topology).
+    counts : Array
+        ``(L,)`` row lengths (topology).
+    leaf_width : int
+        As the forward. Static.
+    softening_sq : Array
+        Scalar squared softening. Differentiable; pass an array (a Python float is
+        accepted, but then the program is not the production call's text: there the
+        literal folds at trace time).
+    G : Array
+        Scalar gravitational constant. Differentiable; the same remark.
+    chunk : int
+        As the forward. Static.
+    num_warps : int | None
+        The forward's. Static.
+    num_stages : int
+        The forward's. Static.
+    target_subtile : int | None
+        The forward's. Static.
+    interpret : bool
+        Pallas interpret mode, forward and reverse. Static.
+    with_potential : bool
+        Refused: the potential lane has no reverse rule (the fast-lane potential is
+        an energy diagnostic, which nothing differentiates). Static.
+    with_force_scale : bool
+        Also return the force-scale lane, as the forward (not differentiated).
+        Static.
+    row_limit : int | None
+        As the forward, for the forward and the reverse. Static.
+    source_tile : int | None
+        The forward's. Static.
+    source_flags : str | None
+        The forward's. Static.
+    softening_kernel : Optional[str]
+        The pair kernel, forward and reverse. Static.
+    tile_skip : bool | None
+        The forward's (the reverse evaluates every pair's polynomial). Static.
+
+    Returns
+    -------
+    tuple[Array, Array | None]
+        ``(N, 3)`` accelerations and the ``(N,)`` force scale with
+        ``with_force_scale``, else ``None`` -- the forward's return value.
+
+    Raises
+    ------
+    ValueError
+        If ``with_potential`` is set.
+    """
+    if with_potential:
+        raise ValueError(
+            "nearfield_leafpair_csr_sorted_direct_pallas_cvjp differentiates the "
+            "accelerations only; the potential lane has no reverse rule (call "
+            "nearfield_leafpair_csr_sorted_direct_pallas for the potential)"
+        )
+    static = _DirectStatic(
+        leaf_width=int(leaf_width),
+        chunk=int(chunk),
+        num_warps=num_warps,
+        num_stages=int(num_stages),
+        target_subtile=target_subtile,
+        interpret=bool(interpret),
+        with_force_scale=bool(with_force_scale),
+        row_limit=row_limit,
+        source_tile=source_tile,
+        source_flags=source_flags,
+        softening_kernel=softening_kernel,
+        tile_skip=tile_skip,
+    )
+    out = _direct_cvjp(
+        positions_sorted,
+        masses_sorted,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        softening_sq,
+        G,
+        static,
+    )
+    if static.with_force_scale:
+        return out
+    return out, None

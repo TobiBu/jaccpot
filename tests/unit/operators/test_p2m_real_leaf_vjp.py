@@ -23,6 +23,7 @@ from jaccpot.pallas.p2m_real_leaf import (
     pallas_p2m_real_leaf_supported,
 )
 from jaccpot.upward.real_tree_expansions import _p2m_leaves_real
+from tests.unit._jaxpr_buffers import largest_xla_array
 
 jax.config.update("jax_enable_x64", True)
 
@@ -131,3 +132,43 @@ def test_p2m_reverse_matches_vjp_of_the_batched_reference(order, interpret):
         interpret=interpret,
     )
     assert np.array_equal(np.asarray(plain), np.asarray(out_g))
+
+
+def test_p2m_reverse_holds_no_per_slot_buffer():
+    """The particle-major reverse keeps the cotangents at their primals' shapes.
+
+    The per-leaf reverse it replaced wrote an ``(L, W, 4)`` block (every leaf slot of
+    the capacity, ~40 floats per particle on cell leaves at 2e5) and gathered it onto
+    the particles; nothing here is larger than ``[n, 3]`` or the ``[L, C]`` leaf rows
+    of the cotangent it reads.
+    """
+    order, n, leaf = 4, 600, 16
+    dtype = jnp.float64
+    P = jnp.asarray(_plummer(n, 1), dtype)
+    M = jnp.asarray(np.random.default_rng(2).uniform(0.5, 1.5, n), dtype)
+    topo, ps, ms, _ = build_static_cells_tree(
+        P, M, infer_bounds(P), leaf_size=leaf, leaf_capacity=1024, return_reordered=True
+    )
+    ni = int(topo.left_child.shape[0])
+    tot = int(topo.parent.shape[0])
+    num_leaves = tot - ni
+    com = jnp.asarray(compute_tree_mass_moments(topo, ps, ms).center_of_mass, dtype)
+    cot = jnp.ones((tot, (order + 1) ** 2), dtype)
+    from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_reverse_pallas
+
+    def reverse(p, m, c, bar):
+        return p2m_real_leaves_reverse_pallas(
+            p,
+            m,
+            c,
+            topo.node_ranges[ni:],
+            bar,
+            order=order,
+            num_internal=ni,
+            total_nodes=tot,
+            leaf_width=leaf,
+            interpret=True,
+        )
+
+    largest = largest_xla_array(reverse, ps, ms, com[ni:], cot)
+    assert largest <= max(3 * n, num_leaves * (order + 1) ** 2), largest

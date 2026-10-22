@@ -871,6 +871,8 @@ def m2l_real_csr_lanes_reverse_pallas(
     interpret: bool = False,
     backend: str = "triton",
     num_warps: int = 1,
+    target_row_offsets: Optional[Array] = None,
+    symmetric: bool = False,
 ) -> tuple[Array, Array]:
     """Adjoint of :func:`m2l_real_csr_lanes_pallas`: a by-source and a by-target pass.
 
@@ -898,11 +900,30 @@ def m2l_real_csr_lanes_reverse_pallas(
         Pallas GPU lowering.
     num_warps : int
         Warps per program.
+    target_row_offsets : Optional[Array]
+        The list is already in CSR order by target (a ``TargetSortedFarPairs``
+        list, the forward's ``presorted``) with these row offsets
+        (``[>= n + 1]``): the by-target pass reads it as is instead of sorting it
+        again -- one ``P``-pair sort less. ``targets`` still holds one target per
+        entry, for the by-source sort.
+    symmetric : bool
+        The list holds every directed pair in both directions (the frozen list of a
+        mutual walk; the caller checks it): row ``s`` of the forward's CSR -- the
+        sources of target ``s`` -- are then exactly the targets of source ``s``, so
+        the by-source pass reads the forward's CSR too, and the reverse sorts
+        nothing (at 1e8 the by-source sort ran over a 542M-entry capacity for 361M
+        live pairs). Needs ``target_row_offsets``; ``targets`` is then unused.
+        Static.
 
     Returns
     -------
     tuple[Array, Array]
         ``(multipoles_bar [n, C], centers_bar [n, 3])``.
+
+    Raises
+    ------
+    ValueError
+        If ``symmetric`` is set without ``target_row_offsets``.
     """
     p = int(order)
     tables = _lane_tables(p)
@@ -948,6 +969,20 @@ def m2l_real_csr_lanes_reverse_pallas(
             **backend_kwargs,
         )(*operands)
 
+    if symmetric:
+        if target_row_offsets is None:
+            raise ValueError("symmetric needs the forward's CSR (target_row_offsets)")
+        src_sorted, off_t, cnt_t = csr_by_target(
+            sources, target_row_offsets, total_nodes=n, presorted=True
+        )
+        if n == 0 or int(src_sorted.shape[0]) == 0:
+            return jnp.zeros((n, C), dtype), jnp.zeros_like(centers)
+        # row s lists the partners of s at both ends of a pair: by source the
+        # multipole cotangents and the source half, by target the target half
+        mbar, cbar_src = one_pass(src_sorted, off_t, cnt_t, by_target=False)
+        _, cbar_tgt = one_pass(src_sorted, off_t, cnt_t, by_target=True)
+        centers_bar = (cbar_src[:, :3] + cbar_tgt[:, :3]).astype(centers.dtype)
+        return mbar, centers_bar
     # by SOURCE (the same sort with the roles swapped): multipole cotangents + the
     # source half of the centre cotangents
     tgt_sorted, off_s, cnt_s = csr_by_target(
@@ -957,15 +992,20 @@ def m2l_real_csr_lanes_reverse_pallas(
         return jnp.zeros((n, C), dtype), jnp.zeros_like(centers)
     mbar, cbar_src = one_pass(tgt_sorted, off_s, cnt_s, by_target=False)
     # by TARGET (the forward's CSR): the target half of the centre cotangents
-    src_sorted, off_t, cnt_t = csr_by_target(
-        sources, targets, total_nodes=n, active_pair_count=active_pair_count
-    )
+    if target_row_offsets is None:
+        src_sorted, off_t, cnt_t = csr_by_target(
+            sources, targets, total_nodes=n, active_pair_count=active_pair_count
+        )
+    else:
+        src_sorted, off_t, cnt_t = csr_by_target(
+            sources, target_row_offsets, total_nodes=n, presorted=True
+        )
     _, cbar_tgt = one_pass(src_sorted, off_t, cnt_t, by_target=True)
     centers_bar = (cbar_src[:, :3] + cbar_tgt[:, :3]).astype(centers.dtype)
     return mbar, centers_bar
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9, 10, 11, 12))
 def m2l_real_csr_lanes_pallas_cvjp(
     multipoles: Array,
     centers: Array,
@@ -979,6 +1019,7 @@ def m2l_real_csr_lanes_pallas_cvjp(
     num_warps: int,
     n_targets: Optional[int] = None,
     presorted: bool = False,
+    symmetric: bool = False,
 ) -> Array:
     """Differentiable :func:`m2l_real_csr_lanes_pallas` (forward byte-identical).
 
@@ -1016,6 +1057,11 @@ def m2l_real_csr_lanes_pallas_cvjp(
         ``targets`` are the row offsets of a CSR-ordered list: the forward reads
         it as is, the reverse expands one target per entry before its by-source
         sort. ``nondiff_argnums``.
+    symmetric : bool
+        With ``presorted``: the list holds every directed pair both ways, so the
+        reverse reads the forward's CSR in both passes and sorts nothing
+        (:func:`m2l_real_csr_lanes_reverse_pallas`). The forward ignores it.
+        ``nondiff_argnums``.
 
     Returns
     -------
@@ -1051,6 +1097,7 @@ def _m2l_lanes_cvjp_fwd(
     num_warps,
     n_targets,
     presorted,
+    symmetric,
 ):
     out = m2l_real_csr_lanes_pallas(
         multipoles,
@@ -1069,6 +1116,40 @@ def _m2l_lanes_cvjp_fwd(
     return out, (multipoles, centers, sources, targets, active_pair_count)
 
 
+def _csr_entry_rows(row_offsets: Array, num_entries: int) -> Array:
+    """:func:`~jaccpot.pallas.m2l_real_csr.targets_from_csr_offsets` in two passes.
+
+    The same integers -- entry ``j``'s row is the number of interior offsets
+    ``<= j``, ``-1`` past the live prefix -- from one scatter of the row
+    boundaries and one prefix sum over the entries, instead of a binary search
+    per entry (one compare-select pass over the entries per bisection step: 9.8
+    of the far gradient's 95 ms at 8e6, 44M pairs).
+
+    Parameters
+    ----------
+    row_offsets : Array
+        ``[R + 1]`` non-decreasing row offsets, ``row_offsets[0] == 0``.
+    num_entries : int
+        Length of the list (live prefix plus padding). Static.
+
+    Returns
+    -------
+    Array
+        ``[num_entries]`` row ids in ``row_offsets``' dtype, ``-1`` past the live
+        prefix.
+    """
+    off = jnp.asarray(row_offsets)
+    n = int(num_entries)
+    starts = (
+        jnp.zeros((n + 1,), off.dtype)
+        .at[off[1:-1]]
+        .add(jnp.ones_like(off[1:-1]), mode="drop")
+    )
+    row = jnp.cumsum(starts[:n], dtype=off.dtype)
+    pos = jnp.arange(n, dtype=off.dtype)
+    return jnp.where(pos < off[-1], row, jnp.asarray(-1, off.dtype))
+
+
 def _m2l_lanes_cvjp_bwd(
     order,
     k_lanes,
@@ -1077,14 +1158,20 @@ def _m2l_lanes_cvjp_bwd(
     num_warps,
     n_targets,
     presorted,
+    symmetric,
     residual,
     loc_bar,
 ):
     multipoles, centers, sources, targets, active_pair_count = residual
+    row_offsets = None
     if presorted:
-        # the forward got the row offsets; the reverse sorts by source and needs
-        # one target per entry (-1 past the live prefix, as a COO list pads)
-        targets = targets_from_csr_offsets(targets, int(sources.shape[0]))
+        # the forward got the row offsets; the reverse's by-target pass reads the
+        # forward's CSR as is, and so does its by-source pass on a symmetric list;
+        # otherwise it sorts by source and needs one target per entry (-1 past the
+        # live prefix, as a COO list pads)
+        row_offsets = targets
+        if not symmetric:
+            targets = _csr_entry_rows(targets, int(sources.shape[0]))
     if n_targets is not None and int(n_targets) != int(multipoles.shape[0]):
         raise NotImplementedError(
             "m2l_real_csr_lanes_pallas_cvjp: the reverse does not support "
@@ -1104,6 +1191,8 @@ def _m2l_lanes_cvjp_bwd(
         interpret=interpret,
         backend=backend,
         num_warps=num_warps,
+        target_row_offsets=row_offsets,
+        symmetric=bool(symmetric) and bool(presorted),
     )
     return (mult_bar, centers_bar, None, None, None)
 
