@@ -839,6 +839,9 @@ class FusedMeshForce:
             _measure,
             self.cross_caps,
             leaf_capacity=self._setup_or_raise().leaf_capacity,
+            # a lower-bound need doubles per round: a first guess sized for a
+            # Plummer sphere can be several doublings short (the disc + bulge)
+            max_rounds=6,
         )
         self.cross_caps = caps
         self.cross_needs_measured = np.asarray(needs)

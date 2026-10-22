@@ -285,6 +285,22 @@ def test_a_lower_bound_need_that_overflowed_at_least_doubles():
     assert grown.recv_node_cap == caps.recv_node_cap
 
 
+def test_an_overflowed_walk_queue_doubles_whatever_its_peak_reads():
+    """The Pallas walk stops at a queue overflow and reports the widest wavefront it
+    admitted, which can sit BELOW the queue it overflowed: the queue must still
+    double, or the re-plan grows nothing that stopped the walk and the next
+    measurement overflows the same way (the disc + bulge at 2e5 on two cards)."""
+    caps = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [10_000] * 9 + [64]))), headroom=1.0
+    )
+    queue = caps.export_walk_queue
+    stopped = _needs(export_walk_queue=queue // 2, walk_lower_bound=1, overflow=1)
+    assert caps.replanned(stopped, headroom=1.5).export_walk_queue == 2 * queue
+    # without the lower-bound bit the peak is exact and nothing needed more
+    exact = _needs(export_walk_queue=queue // 2, overflow=1)
+    assert caps.replanned(exact, headroom=1.5).export_walk_queue == queue
+
+
 def test_plan_measures_until_clean_then_sizes_from_the_clean_measurement():
     clean = _needs(
         **dict(zip(CAP_FIELDS, (30, 59, 4000, 800, 300, 90, 90, 900, 900, 50)))

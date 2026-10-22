@@ -1840,6 +1840,15 @@ class CrossCapacities:
             grown = max(cap, _clamp_to_tree(name, _sized(need[name], h), leaf_capacity))
             if bit is not None and need[bit] and need[name] > cap:
                 grown = max(grown, 2 * cap)
+            if name == "export_walk_queue" and need["walk_lower_bound"]:
+                # The walk stopped with pairs still queued, and the peak it reports
+                # is the widest wavefront it ADMITTED, which can read below the
+                # queue it overflowed (measured: the disc + bulge at 2e5 on two
+                # A100s, a peak of 252,788 read off a queue of 389,120 that
+                # overflowed; at 4x every capacity the walk ran clean, peak
+                # 375,310): the queue doubles whatever the peak says, as the local
+                # walk's queue does on a queue overflow.
+                grown = max(grown, 2 * cap)
             changes[name] = grown
         return self._with(**changes)
 
