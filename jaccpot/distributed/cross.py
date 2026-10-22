@@ -262,6 +262,36 @@ class _Published(NamedTuple):
     num_entries: Array
 
 
+def _live_node_ends(tree: Any) -> Array:
+    """Each node's last LIVE particle (inclusive): its range end, clamped.
+
+    A capacity-padded cells tree (a mesh shard, dead rows sorted to the end) gives
+    its padding leaves the empty range ``(n, n - 1)`` and an internal node the
+    (min start, max end) of its children, so the parent of the last live leaf and
+    the padding subtree spans ``[that leaf's start, n - 1]``: the leaf's particles
+    AND every dead row. Under one-leaf summary cells without ``summary_cell_level``
+    that parent is a cut cell (it holds one live leaf), and laying its near
+    particles out over its range shipped the dead rows -- zero mass, so the force
+    was right, but the near half's ``full > W`` check fired whatever the width
+    (two A100s, the rollout gate's capacities, 2e5 per card). Live particles are
+    exactly the leaves' ranges, so the last of them bounds every node.
+
+    Parameters
+    ----------
+    tree : Any
+        The refreshed tree (``node_ranges``, ``left_child``).
+
+    Returns
+    -------
+    Array
+        ``(total_nodes,)`` inclusive ends; an empty node keeps ``end < start``.
+    """
+    nr = jnp.asarray(tree.node_ranges)
+    leaves = nr[int(jnp.asarray(tree.left_child).shape[0]) :]
+    last_live = jnp.max(jnp.where(leaves[:, 1] >= leaves[:, 0], leaves[:, 1], -1))
+    return jnp.minimum(nr[:, 1], last_live)
+
+
 def _summary_rows(
     tree: Any, geom: Any, cap: "CrossCapacities", *, two_sided: bool
 ) -> _Published:
@@ -337,8 +367,10 @@ def _summary_rows(
     safe = jnp.where(ok, st.nodes, 0)
     nr = jnp.asarray(tree.node_ranges)
     # live particles under each entry: what a peer receiving this node's particles
-    # needs to lay them out (`_symmetric_exchange`), so no row counts travel
-    count = jnp.where(st.active, jnp.maximum(nr[safe, 1] - nr[safe, 0] + 1, 0), 0)
+    # needs to lay them out (`_symmetric_exchange`), so no row counts travel. Not the
+    # range length: a padded shard's ranges can run into its dead rows
+    ends = _live_node_ends(tree)
+    count = jnp.where(st.active, jnp.maximum(ends[safe] - nr[safe, 0] + 1, 0), 0)
     rows = jnp.concatenate(
         [
             jnp.where(ok[:, None], center[safe], 0.0),
@@ -1262,7 +1294,10 @@ def _symmetric_exchange(
         s_ok = exp_n.rows >= 0
         s_node = nodes[jnp.maximum(exp_n.rows, 0)]
         starts = nr[s_node, 0].astype(idx)
-        full = jnp.where(s_ok, nr[s_node, 1].astype(idx) - starts + 1, 0)
+        # the LIVE particles only, as the receiver's count column says
+        # (`_live_node_ends`: a padded shard's ranges can run into its dead rows)
+        ends = _live_node_ends(tree)
+        full = jnp.where(s_ok, ends[s_node].astype(idx) - starts + 1, 0)
         counts = jnp.clip(full, 0, W)
         row, within, live_q, total = _row_of_slot(counts, cap.send_particle_cap)
         src = jnp.clip(starts[row] + within, 0, pos_sorted.shape[0] - 1)
@@ -1315,7 +1350,7 @@ def _symmetric_exchange(
         live_node = nodes >= 0
         safe_node = jnp.where(live_node, nodes, 0)
         mine = jnp.where(
-            live_node, jnp.maximum(nr[safe_node, 1] - nr[safe_node, 0] + 1, 0), 0
+            live_node, jnp.maximum(ends[safe_node] - nr[safe_node, 0] + 1, 0), 0
         ).astype(idx)
         shipped = exp_n.present.reshape(ndev, S) * mine[None, :]
         theirs = jnp.round(gathered[..., 7]).astype(idx)
