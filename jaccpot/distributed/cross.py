@@ -71,6 +71,7 @@ __all__ = [
     "make_cross_hook",
     "merge_imported_blocks",
     "plan_cross_capacities",
+    "size_cross_capacities",
 ]
 
 #: Entries of the cross NEEDS vector (:func:`cross_needs`), in order. The first ten
@@ -1391,7 +1392,16 @@ def _symmetric_exchange(
     )(payload, exp_f.sizes, output_capacity=cap.recv_node_cap, axis_name=axis_name)
     far_mismatch = jnp.any(recv_sizes.astype(idx) != imp_f.sizes)
     tgt_f = nodes[f_mine]
-    ok_f = fl & (imp_f.pair_row >= 0) & (tgt_f >= 0) & (tgt_f < n_local)
+    # a pair whose row lies past the receive buffer (an overflowed buffer: the
+    # force is flagged, the sizing measurement overflows on purpose) is dropped:
+    # its source index would read past the imported multipoles
+    ok_f = (
+        fl
+        & (imp_f.pair_row >= 0)
+        & (imp_f.pair_row < cap.recv_node_cap)
+        & (tgt_f >= 0)
+        & (tgt_f < n_local)
+    )
     # one order per pair set: the walk's is the atomics' (`_in_pair_order`)
     tgt_f, row_f = _in_pair_order(
         ok_f, tgt_f, imp_f.pair_row, num_targets=n_local, num_sources=ndev * S
@@ -1500,7 +1510,8 @@ def _symmetric_exchange(
         # each row's particles: a range of the flat receive buffer, read as such by
         # the cross near term (`cross_near_acceleration_direct`); no W-wide tiles
         r_start = jnp.cumsum(r_count, dtype=idx) - r_count
-        ok_n = nl & (imp_n.pair_row >= 0)
+        # as the far pairs: a row past the receive buffer was never laid out
+        ok_n = nl & (imp_n.pair_row >= 0) & (imp_n.pair_row < cap.recv_node_cap)
         leaf = _leaf_under(nodes[n_mine], nr, num_internal).astype(idx)
         # one order per pair set, as the far list's; a leaf past the pool (n_local)
         # stays for the near term to drop
@@ -1770,6 +1781,18 @@ _A_PRIORI_PER_LEAF = {
 }
 
 
+#: The exchange's row and particle buffers: their needs are counted on the (peer,
+#: node) presence map, so they are EXACT past the buffers' own overflow whenever the
+#: walk lost no pair (``pairs_lower_bound`` clear). The sizing measurement compiles
+#: them at one granule (:meth:`CrossCapacities.for_measurement`).
+_ROW_CAPACITIES = (
+    "send_node_cap",
+    "recv_node_cap",
+    "send_particle_cap",
+    "recv_particle_cap",
+)
+
+
 def _sized(need: Union[int, float], headroom: float) -> int:
     """``headroom x need`` (at least one entry), rounded up to the granule.
 
@@ -2017,6 +2040,83 @@ class CrossCapacities:
             leaf_width=int(leaf_width),
             summary_cell_level=summary_cell_level,
             **sized,
+        )
+
+    @classmethod
+    def for_measurement(
+        cls,
+        *,
+        leaf_capacity: int,
+        ndev: int,
+        leaf_width: int,
+        live_leaves: Optional[int] = None,
+        summary_cell_level: Optional[int] = None,
+        exact_walk_needs: bool = False,
+        queue_floor: int = 0,
+    ) -> "CrossCapacities":
+        """The capacities the library's sizing MEASURES with (:func:`size_cross_capacities`).
+
+        A measurement only has to report what every capacity needs, and nearly
+        every need is exact past its own buffer's overflow
+        (:data:`CROSS_NEEDS_FIELDS`), so a buffer whose need it only has to COUNT
+        is compiled at one granule and the program holds none of it: the rows and
+        particles the exchange ships and receives (:data:`_ROW_CAPACITIES`, counted
+        on the presence maps of the walk's pairs) and, when the walk keeps
+        counting past a full list (``exact_walk_needs``: the Pallas walk, the
+        GPU's), the walk's far and near lists. A walk that stops at its first
+        overflow (yggdrax's traced walk) keeps :meth:`for_shard`'s lists, so its
+        counts come out exact on most shards in one measurement. The summary keeps
+        the tree's bound (it cannot overflow) and the leaf width the leaf size.
+        The walk's queue is the one need that is a lower bound past its own
+        overflow (the walk reports the widest wavefront it admitted), so it starts
+        at the larger of :meth:`for_shard`'s and ``queue_floor``.
+
+        Measured on two A100s (2^19 particles per card, a compact Plummer, cell
+        leaves of ~3 of 64 slots), the cross near term on the direct layout:
+        :meth:`for_shard`'s per-leaf guess ran its buffers at 12-113x what they
+        needed, and its measurement compiled 792 MB of temporaries; its rows and
+        particles at a granule 710 MB, and with the walk's lists at their need too
+        540 MB, against the sized force's 569 MB (its far list alone, 6.6M pairs
+        against 0.56M needed, cost 141 MB).
+
+        Parameters
+        ----------
+        leaf_capacity : int
+            Leaf slots of every shard's tree.
+        ndev : int
+            Mesh size.
+        leaf_width : int
+            Most particles in one leaf (the lane's leaf size).
+        live_leaves : Optional[int]
+            Live leaves of the worst shard; ``None`` uses ``leaf_capacity``.
+        summary_cell_level : Optional[int]
+            Passed through (:class:`CrossCapacities`).
+        exact_walk_needs : bool
+            The cross walk counts its far and near pairs past a full list
+            (:func:`cross_walk_backend` ``"pallas"``): its lists start at one
+            granule too.
+        queue_floor : int
+            The least export-walk queue to start from (the force's: the local
+            walk's widest wavefront times the peers).
+
+        Returns
+        -------
+        CrossCapacities
+            The measurement's capacities.
+        """
+        base = cls.for_shard(
+            leaf_capacity=leaf_capacity,
+            ndev=ndev,
+            leaf_width=leaf_width,
+            live_leaves=live_leaves,
+            summary_cell_level=summary_cell_level,
+        )
+        counted = _ROW_CAPACITIES
+        if exact_walk_needs:
+            counted = counted + ("export_far_cap", "export_near_cap")
+        return base._with(
+            export_walk_queue=max(base.export_walk_queue, _sized(queue_floor, 1.0)),
+            **{name: _CROSS_CAP_GRANULE for name in counted},
         )
 
     @classmethod
@@ -2273,6 +2373,113 @@ def plan_cross_capacities(
     raise RuntimeError(
         f"plan_cross_capacities: still overflowing after {max_rounds} measurements "
         f"({need}, capacities {caps})"
+    )
+
+
+def size_cross_capacities(
+    measure: Callable[[CrossCapacities], Any],
+    initial: CrossCapacities,
+    *,
+    headroom: Optional[float] = None,
+    walk_headroom: Optional[float] = None,
+    near_floor: int = 0,
+    leaf_capacity: Optional[int] = None,
+    leaf_size: Optional[int] = None,
+    max_rounds: int = 6,
+) -> tuple[CrossCapacities, CrossCapacities, np.ndarray]:
+    """Size the cross capacities from EXACT needs, read off a force that may overflow.
+
+    :func:`plan_cross_capacities` sizes from a CLEAN measurement only, so its first
+    measurement has to hold every buffer the force will need. But a need is exact
+    past its own buffer's overflow unless a lower-bound bit says otherwise
+    (:data:`CROSS_NEEDS_FIELDS`): the row and particle counts are read off the
+    presence maps of the walk's pairs. So here ``measure(caps)`` may run on
+    capacities far below the demand (:meth:`CrossCapacities.for_measurement`), and
+    a measurement whose ``walk_lower_bound`` and ``pairs_lower_bound`` are clear
+    sizes every capacity (:meth:`CrossCapacities.from_needs`: ``headroom x`` its
+    need), overflowed or not. With a lower-bound bit set (the walk's lists or
+    queue, or the summary, lost pairs) only what makes the needs exact grows --
+    the walk's lists and queue and the summary, as
+    :meth:`CrossCapacities.replanned` grows them; the rows and particles keep
+    their size, their next count is exact -- and the force is measured again.
+
+    Parameters
+    ----------
+    measure : Callable[[CrossCapacities], Any]
+        Runs a force with the given capacities and returns its host needs vector,
+        reduced over the mesh.
+    initial : CrossCapacities
+        The first measurement's capacities.
+    headroom : Optional[float]
+        Factor over each need of the sized capacities; ``None``:
+        ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
+    walk_headroom : Optional[float]
+        Factor over the walk's and the summary's needs when a lower bound grows
+        them for the next MEASUREMENT; ``None``: ``headroom``. A caller that will
+        measure other positions on the same program (the drift probes) gives it
+        room to spare.
+    near_floor : int
+        The least near list the walk grows to for the next measurement (``0``:
+        none): a drift's new near pairs come from boundary particles in the
+        neighbour's cells, a few per leaf whatever the start needed, and a near
+        pair costs the measurement little (~7 B).
+    leaf_capacity : Optional[int]
+        The tree's leaf slots, which bound the summary exactly.
+    leaf_size : Optional[int]
+        The template's leaf size, which bounds the leaf width.
+    max_rounds : int
+        Measurements at most.
+
+    Returns
+    -------
+    tuple[CrossCapacities, CrossCapacities, np.ndarray]
+        ``(sized, measured, needs)``: the capacities sized from the exact needs,
+        the capacities of the measurement that read them (its program is
+        compiled), and those needs.
+
+    Raises
+    ------
+    RuntimeError
+        When the two ends of an exchange disagreed on a size (``mismatch``: not a
+        capacity) in a measurement whose needs were exact -- walks that stopped can
+        disagree, and are re-planned --, a lower bound grew nothing, or the needs
+        were still lower bounds after ``max_rounds`` measurements.
+    """
+    caps = initial
+    for _ in range(max(int(max_rounds), 1)):
+        needs = np.asarray(measure(caps)).astype(np.int64)
+        need = _needs_by_field(needs)
+        if not (need["walk_lower_bound"] or need["pairs_lower_bound"]):
+            if need["mismatch"]:
+                raise RuntimeError(
+                    "size_cross_capacities: the two ends of an exchange disagreed "
+                    f"on a size ({need}); a mismatch is not a capacity."
+                )
+            sized = CrossCapacities.from_needs(
+                needs,
+                like=caps,
+                headroom=headroom,
+                leaf_capacity=leaf_capacity,
+                leaf_size=leaf_size,
+            )
+            return sized, caps, needs
+        grown = caps.replanned(
+            needs,
+            headroom=headroom if walk_headroom is None else walk_headroom,
+            leaf_capacity=leaf_capacity,
+            leaf_size=leaf_size,
+        )._with(**{name: getattr(caps, name) for name in _ROW_CAPACITIES})
+        if grown.export_near_cap < int(near_floor):
+            grown = grown._with(export_near_cap=_sized(near_floor, 1.0))
+        if vars(grown) == vars(caps):
+            raise RuntimeError(
+                "size_cross_capacities: the needs are lower bounds and no capacity "
+                f"of the walk or the summary needed more ({need})."
+            )
+        caps = grown
+    raise RuntimeError(
+        f"size_cross_capacities: the needs were still lower bounds after {max_rounds} "
+        f"measurements ({need}, capacities {caps})"
     )
 
 
