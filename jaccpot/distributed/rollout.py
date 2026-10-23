@@ -731,6 +731,7 @@ def setup_fused_force(
                     live_leaves=live_leaves,
                 ),
                 leaf_capacity=leaf_slots,
+                leaf_size=leaf_size,
             )
     evaluator = _evaluator(cross_caps, needs=False)
 

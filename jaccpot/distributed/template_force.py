@@ -839,6 +839,7 @@ class FusedMeshForce:
             _measure,
             self.cross_caps,
             leaf_capacity=self._setup_or_raise().leaf_capacity,
+            leaf_size=self.leaf_size,
             # a lower-bound need doubles per round: a first guess sized for a
             # Plummer sphere can be several doublings short (the disc + bulge)
             max_rounds=6,
@@ -1094,7 +1095,9 @@ class FusedMeshForce:
         if self.cross_replan is not None:
             return self.cross_replan(cross, self.cross_caps)
         return self.cross_caps.replanned(
-            cross, leaf_capacity=int(self.engine._tree_leaf_capacity)
+            cross,
+            leaf_capacity=int(self.engine._tree_leaf_capacity),
+            leaf_size=self.leaf_size,
         )
 
     def _replan_tree(self, local: np.ndarray) -> bool:

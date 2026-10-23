@@ -132,8 +132,9 @@ def test_a_summary_cell_publishes_its_live_particle_count(shards):
         np.testing.assert_array_equal(np.round(rows[cell, 7]).astype(int), live)
 
 
-def _exchange(shards, cap):
-    """The hook's publish, all_gather and symmetric exchange on two mapped devices."""
+def _exchange(shards, cap, walk_fn=None):
+    """The hook's publish, all_gather and symmetric exchange on two mapped devices
+    (``walk_fn``: the cross walk, ``None`` for yggdrax's traced one)."""
 
     def stack(get):
         return jax.tree_util.tree_map(
@@ -164,7 +165,7 @@ def _exchange(shards, cap):
             cap=cap,
             ndev=2,
             mac_type="dehnen",
-            walk_fn=None,
+            walk_fn=walk_fn,
             axis_name=AXIS,
             with_near=True,
         )
@@ -188,3 +189,42 @@ def test_the_symmetric_exchange_ships_live_particles_only(shards):
     # the widest shipped leaf is a live leaf (at most LEAF particles), not the
     # padding cell's range of live and dead rows
     assert np.all(need["leaf_width"] <= LEAF), need["leaf_width"]
+
+
+@pytest.mark.parametrize("walk", ["traced", "pallas"])
+def test_a_stopped_walk_reads_lower_bounds_not_internal_nodes(
+    shards, walk, monkeypatch
+):
+    """A cross walk that stops on a queue overflow keeps only near pairs between
+    summary LEAVES (both walks emit a near pair only when neither node can be
+    split), so every near-side need it reports is a lower bound of the full walk's
+    -- never a whole-shard row -- and the bits say so. (On two A100s at 8e6 the
+    whole-shard rows came from steps run AFTER a failed one, on a NaN state: the
+    segment fold, ``segment._build_segment``.) The Pallas walk runs interpreted."""
+    from jaccpot.distributed import cross
+
+    if walk == "pallas":
+        monkeypatch.setenv("JACCPOT_WALK_PALLAS_INTERPRET", "1")
+        monkeypatch.setenv("JACCPOT_CROSS_WALK", "pallas")
+    walk_fn = cross.cross_walk_fn("dehnen")
+    assert (walk_fn is None) == (walk == "traced")
+    stopped = _caps()
+    stopped.export_walk_queue = 256
+    _, _, needs_full, _ = jax.jit(lambda: _exchange(shards, _caps(), walk_fn))()
+    _, _, needs_stop, _ = jax.jit(lambda: _exchange(shards, stopped, walk_fn))()
+    f = {k: np.asarray(needs_full)[:, i] for i, k in enumerate(CROSS_NEEDS_FIELDS)}
+    s = {k: np.asarray(needs_stop)[:, i] for i, k in enumerate(CROSS_NEEDS_FIELDS)}
+    assert np.all(f["walk_lower_bound"] == 0) and np.all(s["walk_lower_bound"] == 1)
+    assert np.all(s["pairs_lower_bound"] == 1)
+    assert np.all(s["export_walk_queue"] > 256)  # it says what stopped it
+    for name in (
+        "export_near_cap",
+        "send_node_cap",
+        "recv_node_cap",
+        "send_particle_cap",
+        "recv_particle_cap",
+        "leaf_width",
+    ):
+        assert np.all(s[name] <= f[name]), (name, s[name], f[name])
+    assert np.all(s["leaf_width"] <= LEAF)
+    assert np.all(f["send_particle_cap"] > 0), "vacuous: no near particles"

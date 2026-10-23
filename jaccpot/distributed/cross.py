@@ -1757,6 +1757,7 @@ class CrossCapacities:
         like: Optional["CrossCapacities"] = None,
         headroom: Optional[float] = None,
         leaf_capacity: Optional[int] = None,
+        leaf_size: Optional[int] = None,
     ) -> "CrossCapacities":
         """Capacities sized from a measured needs vector, wider or narrower than before.
 
@@ -1764,7 +1765,10 @@ class CrossCapacities:
         needed, rounded up to :data:`_CROSS_CAP_GRANULE` entries; the leaf width
         becomes the widest shipped leaf, never below ``like``'s. Read a vector from a
         run whose ``overflow`` bit is CLEAR: a lower-bound need sizes a buffer that
-        overflows again (:func:`plan_cross_capacities` re-plans first).
+        overflows again (:func:`plan_cross_capacities` re-plans first). Whatever a
+        need says, the structural bounds hold (:func:`_structural_bounds`): the leaf
+        width at most ``leaf_size``, the particle buffers at most their rows x the
+        leaf width.
 
         Parameters
         ----------
@@ -1780,6 +1784,9 @@ class CrossCapacities:
         leaf_capacity : Optional[int]
             The tree's leaf slots: the summary is clamped to what a tree of them can
             hold (``max_cells`` to it, ``max_summary_nodes`` to ``2 x it - 1``).
+        leaf_size : Optional[int]
+            The most particles a leaf of the template holds (its leaf size); the
+            leaf width never exceeds it. ``None``: no bound on the width.
 
         Returns
         -------
@@ -1795,7 +1802,7 @@ class CrossCapacities:
             if name != "leaf_width"
         }
         changes["leaf_width"] = max(int(base.leaf_width), need["leaf_width"])
-        return base._with(**changes)
+        return base._with(**_structural_bounds(changes, leaf_size))
 
     def replanned(
         self,
@@ -1803,6 +1810,7 @@ class CrossCapacities:
         *,
         headroom: Optional[float] = None,
         leaf_capacity: Optional[int] = None,
+        leaf_size: Optional[int] = None,
     ) -> "CrossCapacities":
         """Capacities that cover what a run needed: the segment retry's re-plan.
 
@@ -1812,17 +1820,21 @@ class CrossCapacities:
         summary lost pairs: ``walk_lower_bound`` / ``pairs_lower_bound``) and that
         overflowed at least doubles, as the local walk's queue does. A lower bound can
         still fall short, so a run that overflowed its walk may need a second re-plan:
-        its re-run's needs are then exact.
+        its re-run's needs are then exact. No need grows a capacity past its
+        structural bound (:func:`_structural_bounds`), and none narrows one.
 
         Parameters
         ----------
         needs : Any
-            The failed run's needs vector, reduced over the mesh (a running maximum
-            over its steps is fine: every entry is a demand or an OR-ed bit).
+            The failed run's needs vector, reduced over the mesh: a running maximum
+            over the steps that STARTED on the trajectory (a step after the first
+            failure runs on wrong forces, and what it reads is no demand).
         headroom : Optional[float]
             Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
         leaf_capacity : Optional[int]
             As :meth:`from_needs`; pass the GROWN one when the tree was re-planned.
+        leaf_size : Optional[int]
+            As :meth:`from_needs`: the leaf width never grows past it.
 
         Returns
         -------
@@ -1850,7 +1862,47 @@ class CrossCapacities:
                 # walk's queue does on a queue overflow.
                 grown = max(grown, 2 * cap)
             changes[name] = grown
-        return self._with(**changes)
+        bounded = _structural_bounds(changes, leaf_size)
+        # monotone: a bound below the present width keeps the width
+        return self._with(
+            **{name: max(int(getattr(self, name)), v) for name, v in bounded.items()}
+        )
+
+
+def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
+    """Clamp proposed capacities to what the exchange can structurally need.
+
+    * ``leaf_width`` <= ``leaf_size``: a near row is one summary cell holding one live
+      cell leaf, and a cell leaf holds at most the leaf size the template was built
+      with -- the local lane's own leaf tiles are that wide. A wider "need" is not a
+      leaf (a degenerate tree: measured, the root of a NaN state as one summary cell
+      of 4,002,489 particles) and no width serves it.
+    * ``send_particle_cap`` <= ``send_node_cap x leaf_width``, ``recv_particle_cap``
+      <= ``recv_node_cap x leaf_width``: every near row ships at most ``leaf_width``
+      particles (the sender clips to it and flags the rest).
+
+    Parameters
+    ----------
+    caps : dict
+        Proposed values of the :data:`CROSS_NEEDS_FIELDS` capacities.
+    leaf_size : Optional[int]
+        The template's leaf size; ``None`` leaves the width alone.
+
+    Returns
+    -------
+    dict
+        The clamped values.
+    """
+    out = dict(caps)
+    if leaf_size is not None:
+        out["leaf_width"] = min(int(out["leaf_width"]), int(leaf_size))
+    width = int(out["leaf_width"])
+    for particles, rows in (
+        ("send_particle_cap", "send_node_cap"),
+        ("recv_particle_cap", "recv_node_cap"),
+    ):
+        out[particles] = min(int(out[particles]), int(out[rows]) * width)
+    return out
 
 
 def _clamp_to_tree(name: str, size: int, leaf_capacity: Optional[int]) -> int:
@@ -1885,6 +1937,7 @@ def plan_cross_capacities(
     *,
     headroom: Optional[float] = None,
     leaf_capacity: Optional[int] = None,
+    leaf_size: Optional[int] = None,
     max_rounds: int = 3,
 ) -> tuple[CrossCapacities, np.ndarray]:
     """Size the cross capacities from a force measured at the start positions.
@@ -1907,6 +1960,8 @@ def plan_cross_capacities(
         Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
     leaf_capacity : Optional[int]
         The tree's leaf slots, which bound the summary exactly.
+    leaf_size : Optional[int]
+        The template's leaf size, which bounds the leaf width.
     max_rounds : int
         Measurements at most.
 
@@ -1928,10 +1983,16 @@ def plan_cross_capacities(
         need = _needs_by_field(needs)
         if not need["overflow"]:
             caps = CrossCapacities.from_needs(
-                needs, like=caps, headroom=headroom, leaf_capacity=leaf_capacity
+                needs,
+                like=caps,
+                headroom=headroom,
+                leaf_capacity=leaf_capacity,
+                leaf_size=leaf_size,
             )
             return caps, needs
-        grown = caps.replanned(needs, headroom=headroom, leaf_capacity=leaf_capacity)
+        grown = caps.replanned(
+            needs, headroom=headroom, leaf_capacity=leaf_capacity, leaf_size=leaf_size
+        )
         if vars(grown) == vars(caps):
             raise RuntimeError(
                 "plan_cross_capacities: the cross flag fired and no capacity needed "

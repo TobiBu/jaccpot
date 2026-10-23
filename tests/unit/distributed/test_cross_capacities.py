@@ -348,3 +348,41 @@ def test_cross_needs_refuses_a_hook_that_measured_nothing():
         cross_needs(hook)
     with pytest.raises(ValueError, match="symmetric exchange"):
         cross_needs(None)
+
+
+def test_no_need_grows_a_capacity_past_its_structural_bound():
+    """What a NaN state's degenerate tree read on two A100s at 8e6 -- the root of
+    each shard one summary cell, near the other's: 4,002,489 particles in one near
+    row -- sized a leaf width of a whole shard (an OOM of 282.72 GiB). A cell leaf
+    holds at most the template's leaf size, and a near row ships at most a leaf
+    width of particles, so neither re-plan nor sizing goes past those bounds."""
+    caps = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [64]))), headroom=1.0, leaf_size=64
+    )
+    garbage = _needs(
+        leaf_width=4_002_489,
+        send_particle_cap=4_002_489,
+        recv_particle_cap=4_002_489,
+        send_node_cap=60,
+        recv_node_cap=60,
+        overflow=1,
+        pairs_lower_bound=1,
+    )
+    grown = caps.replanned(garbage, headroom=1.5, leaf_size=64)
+    assert grown.leaf_width == 64, vars(grown)
+    assert grown.send_particle_cap <= grown.send_node_cap * 64, vars(grown)
+    assert grown.recv_particle_cap <= grown.recv_node_cap * 64, vars(grown)
+    sized = CrossCapacities.from_needs(garbage, headroom=1.5, leaf_size=64)
+    assert sized.leaf_width == 64
+    assert sized.send_particle_cap <= sized.send_node_cap * 64, vars(sized)
+    # the bounds never narrow what a run already has
+    wide = caps._with(leaf_width=128, send_particle_cap=10**7)
+    kept = wide.replanned(garbage, leaf_size=64)
+    assert kept.leaf_width == 128 and kept.send_particle_cap == 10**7
+    # a leaf width the leaf size allows still grows
+    assert (
+        caps._with(leaf_width=32)
+        .replanned(_needs(leaf_width=50, overflow=1), leaf_size=64)
+        .leaf_width
+        == 50
+    )
