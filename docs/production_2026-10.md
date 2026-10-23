@@ -1786,3 +1786,67 @@ The geometric MAC on the same code (S11 fix 8's rows): 8e6 4.36e-4 / 4.30e-4, 2e
 - The per-device seed's far half is the single card's `far_force_scale_sorted` (a scatter-add): like the single
   card's seed, not bitwise reproducible on a GPU; every later f_b is (the lanes kernel and the cascade).
 - The runner's multi-GPU mode (S11 session 2) takes the criterion with no further change to the lane.
+
+## S11, session 2 — the fused multi-GPU lane in the runner (2026-10-23)
+
+**[open]** One subsection per track; the lead merges them.
+
+### The mesh potential (E)
+The runner's multi-GPU mode reports the energy (`E = K + W_self + W_ext`), and the mesh had no potential: the cross
+near kernel's fourth lane carried f_b (S12) or nothing. Branch `s11s2/mesh-potential`.
+
+| piece | change |
+| --- | --- |
+| the cross near pairs' potential | `cross_near_acceleration(with_potential=True)`: the leaf-pair kernel's fourth lane in its default meaning (`-G m psi`, accumulated beside the force, as the sorted kernel's `with_potential`), which the force drops; exclusive with `with_force_scale`. The kernel is unchanged. `fused._add_cross_near_potential` adds it in input row order from the pool and pairs the force's term reads (`_cross_near_pool`, factored out of `_add_cross_near_term`) |
+| `template_force.mesh_potential_shard` | the single card's energy program (`ProductionRunner.potential_energy`) on the template route: the force's rebuild (the global box, the cross hook between the sweeps, under `dehnen_error` eq (16a)'s thresholds from the given f_b, so the lists are the force's), `FusedForceProvider.potential` (local near lane 4, the far L2P value of the local expansions, which hold the cross far pairs' M2L: the force's L2P reads the same locals), plus the cross near pairs' potential; zero on padding rows; the bits and needs of the rebuild (`_shard_verdict`, factored out of `mesh_force_shard` with `_shard_rebuild`) |
+| `FusedMeshForce.potential_shard(positions, masses, live, ids, force_scale=None) -> (phi, bits)` | the force protocol method `MeshSegmentRunner.potential_energy` calls inside its `shard_map`, like `shard`. No capacity of its own |
+
+The runner's energy program (`MeshSegmentRunner.potential_energy`) calls it per device inside its `shard_map`, as
+its start program calls `shard`: `phi, bits = force.potential_shard(state[:, 0], masses, min(count[0], cap), ids)`,
+with `force_scale=<the carried f_b>` under the criterion (required: the rebuild refuses without it), under
+`force.context()`, `force.before_trace()` before a fresh trace, the engine's trace-time state kept around the trace
+(`production._trace_state_kept`, as the single card's energy program). `phi` is in the positions' dtype and zero on
+padding rows, so `W_self = 1/2 psum(sum(float64(m) * float64(phi)))` needs no mask; the energy is valid when
+`overflow_ok` holds for the bits OR-ed over the mesh (`segment._mesh_verdict`) and every count fits its shard.
+
+No force program changes: the template route's start and segment programs (geometric and `dehnen_error`) and the
+stacked route's force program, lowered on two forced CPU devices (`as_text(debug_info=False)`), are text-identical to
+main `e82389b5` (an A-vs-A control on main is identical too). No single-card file is touched.
+
+Gates (`tests/distributed/test_mesh_potential.py`: two forced CPU devices, N = 2048 uniform cube, leaf 64 with leaf
+capacity 128, p4, eps 1e-2 ferrers3; 386 s of calls for the four cases on this host, in `test-distributed-segment`):
+
+| gate | geometric (theta 0.8) | `dehnen_error` 1e-4 |
+| --- | --- | --- |
+| one device == the single card's potential, same box (N = 1024) | bitwise | bitwise, from the same seed f_b (the mesh's seed is the single card's, bitwise) |
+| phi vs the fp64 direct sum (all pairs, the same kernel), rel-L2 / max: mesh | 1.862e-4 / 1.118e-3 | 1.010e-6 / 1.125e-5 |
+| one card on the same particles | 1.878e-4 / 1.113e-3 | 1.275e-6 / 1.249e-5 |
+| `W = 1/2 sum m phi` vs direct: mesh / one card (bound) | 1.76e-5 / 1.94e-5 (1e-4) | 1.13e-8 / 1.84e-8 (1e-6) |
+| mutation: W without the cross near term / without the cross far pairs | 7.1e-2 / 3.3e-1 | 3.5e-1 / 4.5e-2 |
+| the potential's lists | -- | its needs equal the force's at the same f_b, and move with it (4x f_b) |
+
+Two A100s (`bench/multigpu_potential_gate.py`, `preset="galaxy"`, leaf 64, p6, library cross caps; cards 0 + 7, both
+shared with other users' jobs at 45-100 % utilisation: the times are contended and are not results). phi against an
+fp64 direct sum on 512 fixed ids; one card on the same positions (its own start force's f_b); temporaries from
+`memory_analysis()` per device; the peak is the process's, set by the setup's cross sizing (the start force's
+program), and the potential did not raise it:
+
+| row | phi rel-L2 / max, mesh | one card | W mesh vs one card | temporaries potential / force | peak per device | potential / force, median (min) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Plummer 2e6, `dehnen_error` | 1.408e-6 / 8.88e-6 | 1.536e-6 / 8.72e-6 | 2.6e-8 | 390.3 / 371.3 MB | 671-676 MB | 125.8 (107.3) / 165.3 (126.3) ms |
+| disc + bulge 2e6, `dehnen_error` | 1.359e-6 / 8.48e-6 | 1.477e-6 / 8.04e-6 | 9.4e-8 | 675.2 / 682.6 MB | 842-847 MB | 635 (597) / 745 (629) ms |
+| Plummer 2e6, geometric 0.8 | 6.739e-6 / 4.146e-5 | 7.083e-6 / 1.454e-4 | 2.2e-7 | 294.0 / 308.9 MB | 662 MB | 219 (206) / 200 (164) ms |
+
+Every potential's bits were clean and its padding rows zero; no start force retried.
+
+**Found on the way (GPU only): the mesh force is not bitwise reproducible run to run.** A-vs-A on two A100s (cards 0 +
+6, then 0 + 7; Plummer 2e6, `dehnen_error`, the same program on the same inputs twice): 2,664,694 of 6,900,000
+acceleration components differ (max 4.8e-7 at |a| <= 21.4, ulps) and 455,887 of 2,300,000 potentials (max 3.0e-7);
+with `--xla_gpu_deterministic_ops=true` 2,706,687 and 482,140. Without the cross hook (each device's own particles)
+both are bitwise (0 differ); without the cross near term the potential still differs (472,909). The symmetric cross
+walk (Pallas) returns the same pair SET in a different ORDER each run (507,778 far and 73,840 near pairs per device;
+1,012,559 of the 1,015,556 live far slots and 146,730 of the 147,680 near ones hold another pair), and the stable sort
+that slots the cross pairs into the CSR rows keeps that order, so the M2L (and the cross near kernel) sum each row in
+a run-dependent order. Not the potential's: it inherits it from the rebuild. A canonical order (sorted by target, then
+source) should make both reproducible (not tried: it changes the force program). On CPU the lane's bitwise gates hold
+(S11 A2/A3, S12 (a)-(c)).
