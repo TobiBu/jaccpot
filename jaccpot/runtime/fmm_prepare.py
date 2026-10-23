@@ -52,6 +52,7 @@ from ._adaptive_policy import (
 )
 from ._force_scale_levels import (
     FarForceScaleInputs,
+    cross_far_force_scale_own,
     far_force_scale_from_node_totals,
     far_force_scale_sorted,
     node_force_scale_min_sorted,
@@ -1234,6 +1235,7 @@ class PrepareMixin(_EngineBase):
         retain_compact_far_pairs: bool = False,
         cross_far: Optional[tuple] = None,
         caps_only: bool = False,
+        cross_far_masses: Optional[Array] = None,
     ) -> Union[_PrepareStateDualDownwardArtifacts, _FlatWalkCaps]:
         """Build/reuse interactions and prepare downward artifacts.
 
@@ -1294,6 +1296,9 @@ class PrepareMixin(_EngineBase):
             The strict streamed fast path's eager walk only: its capacities are
             recorded as always, no list, no downward pass
             (:meth:`prepare_state_caps_only`).
+        cross_far_masses : Optional[Array]
+            ``mac_type='dehnen_error'`` with ``cross_far``: the imported nodes'
+            masses, for eq (16b)'s far half (the strict streamed fast path only).
 
         Returns
         -------
@@ -1388,6 +1393,7 @@ class PrepareMixin(_EngineBase):
             return self._prepare_state_dual_and_downward_strict_streamed_fast(
                 caps_only=caps_only,
                 cross_far=cross_far,
+                cross_far_masses=cross_far_masses,
                 force_scale_nodes=force_scale_nodes,
                 walk_criterion_active=bool(use_paper_fixed_policy),
                 tree_artifacts=tree_artifacts,
@@ -3040,6 +3046,7 @@ class PrepareMixin(_EngineBase):
         force_scale_nodes: Optional[Array] = None,
         walk_criterion_active: bool = False,
         caps_only: bool = False,
+        cross_far_masses: Optional[Array] = None,
     ) -> Union[_PrepareStateDualDownwardArtifacts, _FlatWalkCaps]:
         """Strict static fast path with compact streamed far-pairs only.
 
@@ -3080,6 +3087,10 @@ class PrepareMixin(_EngineBase):
         caps_only : bool
             Stop after the eager flat walk's ladder and capacity report: no list,
             no far f_b, no M2L or L2L.
+        cross_far_masses : Optional[Array]
+            ``[K]`` masses of ``cross_far``'s imported nodes: with
+            ``walk_criterion_active`` the cross far pairs add their monopole terms
+            to eq (16b)'s far half, as the local ones do. Required then.
 
         Returns
         -------
@@ -3090,7 +3101,8 @@ class PrepareMixin(_EngineBase):
         Raises
         ------
         RuntimeError
-            If the strict streamed preconditions do not hold at build time.
+            If the strict streamed preconditions do not hold at build time, or the
+            criterion runs behind a cross-domain list without its masses.
         """
 
         (
@@ -3105,28 +3117,8 @@ class PrepareMixin(_EngineBase):
         walk_geometry, geometry_factory = self._walk_geometry(tree_artifacts)
         walk_criterion = None
         if walk_criterion_active:
-            if force_scale_nodes is None:
-                # eps * 1 is a different criterion that accepts far more: refuse
-                # rather than run it (the policy's trap 14)
-                raise RuntimeError(
-                    "mac_type='dehnen_error' on the strict fused lane needs the "
-                    "per-node force scale of eq (16a); none was resolved"
-                )
-            upward = tree_artifacts.upward
-            mult_dtype = jnp.asarray(upward.multipoles.packed).dtype
-            walk_criterion = FlatWalkCriterion(
-                multipole_packed=upward.multipoles.packed,
-                mass=upward.mass_moments.mass,
-                # the policy's threshold, `max(eps * f, 1e-24)` (exact Dehnen mode:
-                # no normalisation of the scale)
-                threshold=jnp.maximum(
-                    jnp.asarray(float(self.adaptive_eps), mult_dtype)
-                    * jnp.asarray(force_scale_nodes, mult_dtype),
-                    jnp.asarray(1e-24, mult_dtype),
-                ),
-                order=int(upward.multipoles.order),
-                theta_max=float(self.mac_theta_max),
-                gravitational_constant=float(self.G),
+            walk_criterion = self._flat_walk_criterion(
+                tree_artifacts.upward, force_scale_nodes
             )
         dual_artifacts, cache_entry = _build_dual_tree_artifacts(
             tree_artifacts.tree,
@@ -3196,10 +3188,19 @@ class PrepareMixin(_EngineBase):
             # lists: the refresh drops them before the evaluation, which adds the
             # near half from the near-field kernel's force-scale lane
             tree_now = tree_artifacts.tree
+            if cross_far is not None and cross_far_masses is None:
+                # the cross far pairs' terms need their sources' masses: without
+                # them f_b would silently lose the other domains' far field
+                raise RuntimeError(
+                    "mac_type='dehnen_error' with a cross-domain far list needs the "
+                    "imported sources' masses (cross_far_masses) for eq (16b)'s far "
+                    "half"
+                )
             far_force_scale_in_downward = self._far_force_scale_inputs(
                 tree_artifacts=tree_artifacts,
                 walk_geometry=walk_geometry,
                 cross_far=cross_far,
+                cross_far_masses=cross_far_masses,
             )
             if far_force_scale_in_downward is None:
                 # the separate pass over the far list: off the CSR M2L lane or
@@ -3207,6 +3208,23 @@ class PrepareMixin(_EngineBase):
                 num_levels_fb = self._resolve_upward_num_levels(tree_now)
                 if num_levels_fb is None:
                     num_levels_fb = int(get_level_offsets(tree_now).shape[0] - 1)
+                eps_sq_fb = jnp.asarray(
+                    float(self.softening) ** 2,
+                    jnp.asarray(walk_geometry.radius).dtype,
+                )
+                cross_own = None
+                if cross_far is not None:
+                    # the cross far pairs' own terms, on the local targets, added to
+                    # the walk's before the push-down
+                    cross_own = cross_far_force_scale_own(
+                        cross_far,
+                        cross_far_masses,
+                        node_mass=tree_artifacts.upward.mass_moments.mass,
+                        node_centers=walk_geometry.center,
+                        node_radii=walk_geometry.radius,
+                        gravitational_constant=float(self.G),
+                        softening_sq=eps_sq_fb,
+                    )
                 force_scale_far_sorted = far_force_scale_sorted(
                     tree=tree_now,
                     leaf_nodes=neighbor_list.leaf_indices,
@@ -3215,12 +3233,10 @@ class PrepareMixin(_EngineBase):
                     node_centers=walk_geometry.center,
                     node_radii=walk_geometry.radius,
                     gravitational_constant=float(self.G),
-                    softening_sq=jnp.asarray(
-                        float(self.softening) ** 2,
-                        jnp.asarray(walk_geometry.radius).dtype,
-                    ),
+                    softening_sq=eps_sq_fb,
                     num_levels=int(num_levels_fb),
                     num_particles=int(jnp.asarray(tree_now.particle_indices).shape[0]),
+                    **({} if cross_own is None else {"cross_own": cross_own}),
                 )
         far_pairs_coo = _far_pair_coo_from(compact_far_pairs, src_far, tgt_far)
         p_gears_for_downward = (int(tree_artifacts.upward.multipoles.order),)
@@ -3276,12 +3292,66 @@ class PrepareMixin(_EngineBase):
             force_scale_far_sorted=force_scale_far_sorted,
         )
 
+    def _flat_walk_criterion(
+        self, upward: Any, force_scale_nodes: Optional[Array]
+    ) -> FlatWalkCriterion:
+        """Eq (16a)'s per-node inputs for the flat walk, at this step's thresholds.
+
+        The one place the threshold ``max(eps * min_b f_b, 1e-24)`` is formed:
+        the local walk reads it, and on the multi-GPU lane the cross-domain walks
+        read the same rows of the nodes each device publishes
+        (:func:`jaccpot.distributed.cross.make_cross_hook`), so both decide every
+        pair by one rule.
+
+        Parameters
+        ----------
+        upward : Any
+            The upward pass (packed multipoles about the walk centres, mass
+            moments).
+        force_scale_nodes : Optional[Array]
+            ``[nodes]`` ``min_b f_b`` over each node's particles (eq 16b).
+
+        Returns
+        -------
+        FlatWalkCriterion
+            The criterion carrier (its table is built on the walk's radii).
+
+        Raises
+        ------
+        RuntimeError
+            If ``force_scale_nodes`` is ``None``: ``eps * 1`` is another criterion,
+            one that accepts far more pairs (the policy's trap 14).
+        """
+        if force_scale_nodes is None:
+            # eps * 1 is a different criterion that accepts far more: refuse
+            # rather than run it (the policy's trap 14)
+            raise RuntimeError(
+                "mac_type='dehnen_error' on the strict fused lane needs the "
+                "per-node force scale of eq (16a); none was resolved"
+            )
+        mult_dtype = jnp.asarray(upward.multipoles.packed).dtype
+        return FlatWalkCriterion(
+            multipole_packed=upward.multipoles.packed,
+            mass=upward.mass_moments.mass,
+            # the policy's threshold, `max(eps * f, 1e-24)` (exact Dehnen mode:
+            # no normalisation of the scale)
+            threshold=jnp.maximum(
+                jnp.asarray(float(self.adaptive_eps), mult_dtype)
+                * jnp.asarray(force_scale_nodes, mult_dtype),
+                jnp.asarray(1e-24, mult_dtype),
+            ),
+            order=int(upward.multipoles.order),
+            theta_max=float(self.mac_theta_max),
+            gravitational_constant=float(self.G),
+        )
+
     def _far_force_scale_inputs(
         self,
         *,
         tree_artifacts: _PrepareStateTreeUpwardArtifacts,
         walk_geometry: Any,
         cross_far: Optional[tuple],
+        cross_far_masses: Optional[Array] = None,
     ) -> Optional[FarForceScaleInputs]:
         """What the downward sweep needs to compute eq (16b)'s far half itself.
 
@@ -3301,17 +3371,25 @@ class PrepareMixin(_EngineBase):
         walk_geometry : Any
             The geometry the walk tested the MAC on (its centres and radii).
         cross_far : Optional[tuple]
-            The cross-domain hook's sources, if any.
+            The cross-domain hook's sources, if any: ``(multipoles, centers, src,
+            tgt)``, the imported nodes at ``[n_local, n_local + K)``.
+        cross_far_masses : Optional[Array]
+            ``[K]`` the imported nodes' masses (their owners' mass moments);
+            required with ``cross_far``.
 
         Returns
         -------
         Optional[FarForceScaleInputs]
             The inputs, or ``None`` where the sweep cannot use them (the caller
-            keeps the separate pass): off those kernels, behind a cross-domain
-            list, or with node arrays in another dtype than the multipole
-            centres the kernel computes in.
+            keeps the separate pass): off those kernels, with a cross-domain list
+            whose masses are missing, or with node arrays in another dtype than
+            the multipole centres the kernel computes in. With ``cross_far`` they
+            cover ``[local ; imported]``: the sweep concatenates the imported
+            nodes behind the local ones and the lanes kernel reads every source's
+            mass and centre by its index there (the radii are the targets', all
+            local: the imported rows' are zeros).
         """
-        if cross_far is not None:
+        if cross_far is not None and cross_far_masses is None:
             return None
         upward = tree_artifacts.upward
         centers = upward.multipoles.centers
@@ -3325,6 +3403,22 @@ class PrepareMixin(_EngineBase):
         walk_centers = walk_geometry.center
         if any(jnp.asarray(a).dtype != dtype for a in (mass, radii, walk_centers)):
             return None
+        # the COM walk geometry tests the MAC about the expansion centres
+        # themselves (the same array), which the kernel reads anyway
+        node_centers = None if walk_centers is centers else walk_centers
+        if cross_far is not None:
+            # the imported sources behind the local nodes, as the sweep lays out
+            # their multipoles; their expansion centres are their owners' COM walk
+            # centres (the cross hook requires the COM geometry)
+            imported = int(jnp.asarray(cross_far[1]).shape[0])
+            mass = jnp.concatenate(
+                [jnp.asarray(mass), jnp.asarray(cross_far_masses, dtype)]
+            )
+            radii = jnp.concatenate([jnp.asarray(radii), jnp.zeros((imported,), dtype)])
+            if node_centers is not None:
+                node_centers = jnp.concatenate(
+                    [jnp.asarray(node_centers), jnp.asarray(cross_far[1], dtype)]
+                )
         return FarForceScaleInputs(
             node_mass=mass,
             node_radii=radii,
@@ -3332,9 +3426,7 @@ class PrepareMixin(_EngineBase):
                 float(self.softening) ** 2, jnp.asarray(radii).dtype
             ),
             gravitational_constant=float(self.G),
-            # the COM walk geometry tests the MAC about the expansion centres
-            # themselves (the same array), which the kernel reads anyway
-            node_centers=None if walk_centers is centers else walk_centers,
+            node_centers=node_centers,
         )
 
     def _fused_force_scale_seed(

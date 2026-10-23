@@ -145,9 +145,7 @@ def _l2l_level_compact_kwargs(
     return out
 
 
-def _far_force_scale_in_downward_available(
-    tree: Tree, *, total_nodes: int, cross_domain: bool = False
-) -> bool:
+def _far_force_scale_in_downward_available(tree: Tree, *, total_nodes: int) -> bool:
     """Whether the downward sweep can sum ``dehnen_error``'s far force scale itself.
 
     Eq (16b)'s far half (``f_b``) is each far pair's monopole term summed into
@@ -156,8 +154,10 @@ def _far_force_scale_in_downward_available(
     (:class:`~jaccpot.runtime._force_scale_levels.FarForceScaleInputs`) and the
     Pallas L2L cascade carries the second down its parent edges, in the launches
     the sweep makes anyway. Anywhere else (the pure-JAX M2L or L2L loops, a
-    cross-domain list, a detail-diagnostic sweep that skips a stage) the caller
-    keeps :func:`~jaccpot.runtime._force_scale_levels.far_force_scale_sorted`.
+    detail-diagnostic sweep that skips a stage) the caller keeps
+    :func:`~jaccpot.runtime._force_scale_levels.far_force_scale_sorted`. A
+    cross-domain list (the multi-GPU hook's imported sources behind the local
+    nodes, S12) rides the same rows when the inputs cover the imported nodes too.
 
     Parameters
     ----------
@@ -165,8 +165,6 @@ def _far_force_scale_in_downward_available(
         The tree the sweep descends.
     total_nodes : int
         Node count (the level registry's key, as the sweep resolves it).
-    cross_domain : bool
-        Cross-domain sources ride behind the local nodes (the multi-GPU hook).
 
     Returns
     -------
@@ -174,8 +172,6 @@ def _far_force_scale_in_downward_available(
         ``True`` when :func:`_prepare_solidfmm_downward_sweep` takes
         ``force_scale``.
     """
-    if cross_domain:
-        return False
     mode = _normalize_strict_refresh_detail_diag_mode(
         os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
     )
@@ -637,7 +633,9 @@ def _prepare_solidfmm_downward_sweep(
         ``mac_type='dehnen_error'``: also compute eq (16b)'s far force-scale term
         of every node, its own far pairs' monopole terms plus its ancestors', in
         the CSR M2L lanes kernel and the Pallas L2L cascade (no pass of its own).
-        Only where :func:`_far_force_scale_in_downward_available` holds.
+        Only where :func:`_far_force_scale_in_downward_available` holds. With
+        ``cross_multipoles`` its arrays cover ``[local ; imported]`` (the cross
+        far pairs' sources are read there), the radii the local targets'.
 
     Returns
     -------
@@ -649,18 +647,27 @@ def _prepare_solidfmm_downward_sweep(
     ------
     ValueError
         If a chunk-size option is not positive, or ``force_scale`` is passed
-        where the sweep cannot compute it.
+        where the sweep cannot compute it: off those kernels, or not covering the
+        imported nodes of a cross-domain list.
     """
-    if force_scale is not None and (
-        cross_multipoles is not None
-        or not _far_force_scale_in_downward_available(
-            tree, total_nodes=int(jnp.asarray(upward.multipoles.centers).shape[0])
+    if force_scale is not None:
+        local_nodes = int(jnp.asarray(upward.multipoles.centers).shape[0])
+        if not _far_force_scale_in_downward_available(tree, total_nodes=local_nodes):
+            raise ValueError(
+                "the downward sweep cannot compute the far force scale here; check "
+                "_far_force_scale_in_downward_available() first"
+            )
+        imported = (
+            0
+            if cross_multipoles is None
+            else int(jnp.asarray(cross_multipoles).shape[0])
         )
-    ):
-        raise ValueError(
-            "the downward sweep cannot compute the far force scale here; check "
-            "_far_force_scale_in_downward_available() first"
-        )
+        covered = int(jnp.asarray(force_scale.node_mass).shape[0])
+        if covered != local_nodes + imported:
+            raise ValueError(
+                f"force_scale covers {covered} nodes, the sweep's sources are "
+                f"{local_nodes} local + {imported} imported"
+            )
 
     interaction_inputs = _prepare_solidfmm_downward_interaction_inputs(
         tree=tree,
