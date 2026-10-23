@@ -157,3 +157,63 @@ def test_an_external_field_rides_in_the_carried_total_acceleration():
         # 1e-2 scale and the self-gravity's 1e-3
         atol=1e-12,
     )
+
+
+class _CountingScale(DirectMeshForce):
+    """The direct force with a stand-in f_b carry (``scale_carry``, S12): each force
+    returns the f_b it was given plus one. Seeded with each particle's id, a
+    particle's f_b after ``k`` forces is ``id + k`` -- wherever it lives -- only if
+    every repartition routes f_b with its particle."""
+
+    scale_carry = True
+
+    def __init__(self, ids, **kwargs):
+        super().__init__(**kwargs)
+        self.force_scale_seed = jnp.where(ids >= 0, ids.astype(jnp.float64), 0.0)
+
+    def shard(self, positions, masses, live, ids, force_scale=None):
+        acc, bits, needs = super().shard(positions, masses, live, ids)
+        rows = jnp.arange(positions.shape[0]) < live
+        return acc, bits, needs, jnp.where(rows, force_scale + 1.0, 0.0)
+
+
+def _run_scaled(every, segments, steps=2):
+    mesh = _mesh()
+    state = _state(mesh)
+    runner = MeshSegmentRunner(
+        mesh,
+        state,
+        _CountingScale(state.ids, G=1e-3, softening=0.05, axis_name=AXIS),
+        repartition_every=every,
+        num_samples=64,
+    )
+    reports = [runner.run(steps, dt=DT) for _ in range(segments)]
+    return runner, reports
+
+
+def test_the_force_scale_rides_the_repartition_with_its_particle():
+    """S12: under the criterion the carried f_b is the next force's thresholds, so
+    the repartition routes it like the acceleration: after a start force and 10 x 2
+    steps every particle's stand-in f_b is ``id + 21`` on a run that repartitions
+    before every segment, and the run equals one that never does, bitwise by id."""
+    a, rep_a = _run_scaled(every=1, segments=10)
+    b, _ = _run_scaled(every=0, segments=10)
+    ga, gb = _assert_equal_by_id(
+        a, b, names=("positions", "velocities", "acceleration", "force_scale")
+    )
+    assert sum(r.sent_off_device for r in rep_a) > 0, "nothing moved: nothing tested"
+    np.testing.assert_array_equal(ga["force_scale"], np.arange(N) + 21.0)
+
+
+def test_a_force_scale_left_in_the_old_rows_breaks_it(monkeypatch):
+    """MUTATION CONTROL: f_b not routed by the repartition."""
+    real = rollout._repartition_shard
+
+    def unrouted(*args, force_scale=None, **kwargs):
+        out = real(*args, force_scale=force_scale, **kwargs)
+        return out if force_scale is None else out[:7] + (force_scale,)
+
+    monkeypatch.setattr(rollout, "_repartition_shard", unrouted)
+    a, rep_a = _run_scaled(every=1, segments=10)
+    assert sum(r.sent_off_device for r in rep_a) > 0
+    assert not np.array_equal(a.gather()["force_scale"], np.arange(N) + 21.0)

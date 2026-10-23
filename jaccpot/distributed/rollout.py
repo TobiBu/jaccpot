@@ -325,6 +325,7 @@ def _repartition_shard(
     axis_name: str,
     route_velocities: bool = True,
     acceleration: Optional[Array] = None,
+    force_scale: Optional[Array] = None,
 ) -> tuple:
     """One device's part of the mesh repartition (inside ``shard_map``).
 
@@ -332,7 +333,8 @@ def _repartition_shard(
     repartition (:mod:`jaccpot.distributed.segment`), which also routes the carried
     total ACCELERATION: its velocity Verlet starts a segment from the acceleration
     the previous one ended with, so that has to travel with its particle like the
-    velocity and the id.
+    velocity and the id. Under ``mac_type='dehnen_error'`` the carried eq (16b)
+    ``f_b`` travels too: the next force's thresholds are its particles'.
 
     Parameters
     ----------
@@ -358,12 +360,15 @@ def _repartition_shard(
         ``False`` is the test-only mutation of :func:`_make_repartition`.
     acceleration : Optional[Array]
         ``(cap, 3)``; given, it is routed too (zero on padding rows).
+    force_scale : Optional[Array]
+        ``(cap,)``; given, it is routed too (zero on padding rows).
 
     Returns
     -------
     tuple
         ``(x, v, m, ids, count, acceleration, diag)`` in the new ownership;
-        ``acceleration`` is ``None`` when none was given.
+        ``acceleration`` is ``None`` when none was given. With ``force_scale`` the
+        routed ``f_b`` follows as an eighth entry.
     """
     from yggdrax.distributed.partition import sfc_repartition
 
@@ -374,6 +379,9 @@ def _repartition_shard(
     if acceleration is not None:
         payload["acc"] = acceleration
         fill["acc"] = 0.0
+    if force_scale is not None:
+        payload["fb"] = force_scale
+        fill["fb"] = 0.0
     res = sfc_repartition(
         x,
         m,
@@ -399,7 +407,7 @@ def _repartition_shard(
         "sent_off_device": res.sent_off_device.reshape(1),
         "max_util": res.max_util.reshape(1),
     }
-    return (
+    routed = (
         x_new,
         v_new,
         res.masses,
@@ -408,6 +416,9 @@ def _repartition_shard(
         acc_new,
         diag,
     )
+    if force_scale is None:
+        return routed
+    return routed + (jnp.where(live, res.payload["fb"], 0.0),)
 
 
 def make_reference_direct_force(

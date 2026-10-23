@@ -1,11 +1,19 @@
-"""The fused multi-GPU lane refuses Dehnen's error criterion until it carries it.
+"""The fused multi-GPU lane's STACKED route refuses Dehnen's error criterion.
 
 Review G7 (2026-10-13): ``mac_type='dehnen_error'`` was neither supported nor
 refused on this lane. Its force step refreshes without eq (16b)'s per-particle
 force scale ``f_b`` (the single-card scan carries one from step to step), and its
 cross-domain walks test the geometric MAC at ``theta`` -- so a user asking for the
-criterion silently got another one. Every entry point now says so before it builds
-anything; the dev plan's session S12 brings the criterion to the lane.
+criterion silently got another one. Every entry point of the stacked route
+(``setup_fused_force``, ``make_fused_force_evaluator``, ``fused_force_step``) says
+so before it builds anything, and still does.
+
+S12 brought the criterion to the TEMPLATE route (``MeshSegmentRunner.fused``,
+``FusedMeshForce``, ``prepare_mesh_force``): f_b rides its segment carry and its
+cross walks evaluate eq (16a) (``tests/distributed/test_mesh_segment_dehnen_error.py``).
+There only the variants the single card's flat walk does not run either are
+refused (the refuted ``dehnen_theta``), and the cross hook takes the criterion as
+``error_criterion=True`` on the symmetric exchange only.
 
 The mesh lane (``jaccpot.distributed.fmm``) carries the criterion and is untouched:
 its own tests (``tests/distributed/test_distributed_dehnen_error_mac.py``, pin M1)
@@ -133,20 +141,20 @@ def test_geometric_criteria_pass():
     make_cross_hook(ndev=2, theta=0.8, mac_type="dehnen")
 
 
-def test_the_segment_runner_refuses_before_preparing_a_shard(
-    criterion_solver, monkeypatch
-):
-    """The template route's entry points (S11): the segment runner's fused force and
-    its setup refuse before any shard is prepared."""
+class _Prepared(Exception):
+    """Raised by a stubbed prepare: the entry point got past its refusal."""
+
+
+def _template_route_entries(solver, monkeypatch):
+    """Call the template route's entry points with a prepare that raises
+    :class:`_Prepared`; yield what each raised."""
     from jaccpot.distributed import template_force
     from jaccpot.distributed.segment import MeshSegmentRunner, MeshState
 
-    engine = criterion_solver._impl
+    def prepared(*args, **kwargs):
+        raise _Prepared
 
-    def prepared_anyway(*args, **kwargs):
-        raise AssertionError("a shard was prepared before the refusal")
-
-    monkeypatch.setattr(engine, "prepare_state_caps_only", prepared_anyway)
+    monkeypatch.setattr(solver._impl, "prepare_state_caps_only", prepared)
     shard = _state()
     state = MeshState(
         state=jnp.stack([shard.positions, shard.velocities], axis=1),
@@ -154,20 +162,44 @@ def test_the_segment_runner_refuses_before_preparing_a_shard(
         ids=shard.ids,
         count=shard.count,
     )
-    with pytest.raises(NotImplementedError, match="FusedMeshForce"):
-        MeshSegmentRunner.fused(
-            criterion_solver, _mesh(), state, leaf_size=64, max_order=4, theta=0.8
-        )
-    with pytest.raises(NotImplementedError, match="prepare_mesh_force"):
-        template_force.prepare_mesh_force(
-            criterion_solver,
+    calls = {
+        "FusedMeshForce": lambda: MeshSegmentRunner.fused(
+            solver, _mesh(), state, leaf_size=64, max_order=4, theta=0.8
+        ),
+        "prepare_mesh_force": lambda: template_force.prepare_mesh_force(
+            solver,
             _mesh(),
             shard.positions,
             shard.masses,
             shard.count,
             leaf_size=64,
             max_order=4,
-        )
+        ),
+    }
+    for entry, call in calls.items():
+        try:
+            call()
+        except Exception as exc:  # noqa: BLE001 - what it raised is the result
+            yield entry, exc
+        else:  # pragma: no cover - the stub always raises
+            yield entry, None
+
+
+def test_the_segment_runner_takes_dehnen_error_since_s12(criterion_solver, monkeypatch):
+    """The template route's entry points (S11) refused the criterion until S12
+    carried f_b on it: they now reach the prepare."""
+    for entry, exc in _template_route_entries(criterion_solver, monkeypatch):
+        assert isinstance(exc, _Prepared), (entry, exc)
+
+
+def test_the_segment_runner_refuses_dehnen_theta_before_preparing(monkeypatch):
+    """The refuted ``dehnen_theta`` folds a per-node opening angle the cross walks
+    would not apply (the single card's flat walk does not run it either): refused
+    before any shard is prepared."""
+    solver = _solver("dehnen_theta", adaptive_eps=1e-3)
+    for entry, exc in _template_route_entries(solver, monkeypatch):
+        assert isinstance(exc, NotImplementedError), (entry, exc)
+        assert entry in str(exc) and "mac_type='dehnen_error'" in str(exc)
 
 
 def test_the_cross_hook_takes_the_criterion_on_the_symmetric_exchange_only(

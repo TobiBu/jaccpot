@@ -79,7 +79,6 @@ from jaccpot.distributed.fused import (
     AXIS_NAME,
     _add_cross_near_term,
     _fold_cross_flags,
-    _refuse_error_criterion,
     _warn_if_slow_ragged_exchange,
     global_mesh_bounds,
     host_mesh_bounds,
@@ -119,6 +118,12 @@ class MeshForceSetup:
         The most leaves holding a particle in any device's eager tree: the worst
         shard the cross capacities' first guess is sized for
         (``CrossCapacities.for_shard``).
+    force_scale_seed : Optional[Array]
+        ``mac_type='dehnen_error'``: eq (16b)'s ``f_b`` per row from each device's
+        caps-only prepare (``_fused_force_scale_seed``: a geometric walk over the
+        device's own particles, near pairs exact, far pairs as monopoles), flat
+        ``(ndev * cap,)`` and mesh-sharded, zero on padding rows: the first
+        force's thresholds. ``None`` without the criterion.
     """
 
     provider: Any
@@ -127,6 +132,7 @@ class MeshForceSetup:
     leaf_capacity: int
     box: tuple
     live_leaves: int = 0
+    force_scale_seed: Optional[Array] = None
 
     def key(self) -> tuple:
         """What a compile cache of a program traced from this setup must hold.
@@ -139,6 +145,46 @@ class MeshForceSetup:
             retrace by itself.
         """
         return (*self.provider.key(), *self.plan.fingerprint())
+
+
+def _refuse_unsupported_criterion(solver: Any, *, entry: str) -> None:
+    """Refuse the error-criterion variants the template route does not carry.
+
+    ``mac_type='dehnen_error'`` (eq 16a at a fixed order on the flat walk, the
+    galaxy preset's MAC) runs on this route since S12: the force scale rides the
+    segment carry and the cross walks evaluate the same eq (16a) from the
+    published nodes' tables. What the single card's fused lane does not run on its
+    flat walk either is refused here, before anything is prepared: the refuted
+    ``dehnen_theta`` (a per-node opening angle folded into the radii, which the
+    cross walks would not apply) and the paper criterion with an adaptive order.
+    The stacked route (``setup_fused_force``) keeps refusing every criterion
+    (:func:`~jaccpot.distributed.fused._refuse_error_criterion`).
+
+    Parameters
+    ----------
+    solver : Any
+        The ``FastMultipoleMethod`` (or its runtime impl).
+    entry : str
+        The entry point's name, for the message.
+
+    Raises
+    ------
+    NotImplementedError
+        For a paper-style criterion that is not the flat walk's eq (16a).
+    """
+    engine = getattr(solver, "_impl", solver)
+    uses_criterion = getattr(engine, "_uses_paper_style_traversal_policy", None)
+    if uses_criterion is None or not uses_criterion():
+        return
+    if engine._flat_walk_criterion_active():
+        return
+    raise NotImplementedError(
+        f"{entry}: mac_type={str(getattr(engine, 'mac_type', ''))!r} with "
+        f"adaptive_order={bool(getattr(engine, 'adaptive_order', False))} is not "
+        "the flat walk's eq (16a) (mac_type='dehnen_error' at a fixed order), the "
+        "only error criterion the fused multi-GPU lane carries. Use "
+        "mac_type='dehnen_error' (the galaxy preset's) or a geometric MAC."
+    )
 
 
 def _by_device(arr: Array, devices: list) -> list:
@@ -215,9 +261,9 @@ def prepare_mesh_force(
     Raises
     ------
     NotImplementedError
-        If the solver asks for Dehnen's error criterion
-        (:func:`~jaccpot.distributed.fused._refuse_error_criterion`); raised before
-        anything is prepared.
+        If the solver asks for an error criterion other than the flat walk's eq
+        (16a) (:func:`_refuse_unsupported_criterion`); raised before anything is
+        prepared.
     RuntimeError
         If the profile is not the large-N production profile, the shard capacity is
         not in ``JACCPOT_STATIC_STRICT_FUSED_PROFILE_SET``, or the walk is not the
@@ -244,7 +290,7 @@ def prepare_mesh_force(
     from jaccpot.runtime.fused_provider import FusedForceProvider, require_cell_leaves
     from jaccpot.runtime.strict_carry import PreparedCaps
 
-    _refuse_error_criterion(solver, entry="prepare_mesh_force")
+    _refuse_unsupported_criterion(solver, entry="prepare_mesh_force")
     engine = getattr(solver, "_impl", solver)
     require_cell_leaves(engine)
     devices = _mesh_devices(mesh)
@@ -295,8 +341,9 @@ def prepare_mesh_force(
         )
         engine._tree_leaf_capacity = auto_leaf_capacity(live, float(headroom))
 
-    plans, walks, live_leaves = [], [], []
+    plans, walks, live_leaves, seeds = [], [], [], []
     stub_caps: Optional[PreparedCaps] = None
+    scale_carry = bool(engine._flat_walk_criterion_active())
     for d in range(ndev):
         # this shard's widths only: the registry is process-global
         level_shapes._WIDTHS.clear()
@@ -341,6 +388,12 @@ def prepare_mesh_force(
         validated = getattr(engine, "_strict_fused_validated_caps", None)
         walks.append(dict(validated) if isinstance(validated, dict) else None)
         live_leaves.append(_leaf_counts(caps.stub)[1])
+        if scale_carry:
+            with jax.default_device(devices[d]):
+                seed_d = _force_scale_seed(
+                    engine, tree, pos_d[d].dtype, counts_host[d], cap
+                )
+            seeds.append(jax.device_put(seed_d, devices[d]))
         if d == 0:
             stub_caps = caps
         del caps, tree
@@ -374,6 +427,17 @@ def prepare_mesh_force(
     # caches that would keep an eager prepare's buffers alive through the run
     engine._topology_reuse_entry = None
     engine.clear_prepared_state_cache()
+    seed = None
+    if scale_carry:
+        from jax.sharding import NamedSharding
+        from jax.sharding import PartitionSpec as P
+
+        seed = jax.make_array_from_single_device_arrays(
+            (ndev * cap,), NamedSharding(mesh, P(*mesh.axis_names)), seeds
+        )
+        # the last prepare's seed, which the single card's runner would start from
+        engine._last_force_scale_particles = None
+        engine._last_force_scale_nodes = None
     return MeshForceSetup(
         provider=provider,
         plan=plan,
@@ -381,7 +445,58 @@ def prepare_mesh_force(
         leaf_capacity=int(engine._tree_leaf_capacity),
         box=tuple(np.asarray(b) for b in box),
         live_leaves=int(max(live_leaves)),
+        force_scale_seed=seed,
     )
+
+
+def _force_scale_seed(
+    engine: Any, tree: Any, dtype: Any, count: int, cap: int
+) -> Array:
+    """One device's eq (16b) seed in its input row order, zero on padding.
+
+    The caps-only prepare leaves its ``_fused_force_scale_seed`` (the device's own
+    particles: a geometric flat walk, near pairs exact, far pairs as monopoles) on
+    the engine in its eager tree's order, as the single card's particle carry
+    reads it (``strict_run_v2``'s ``_force_scale_seed``).
+
+    On the mesh it is a lower bound of the single card's seed: eq (16b)'s ``f_b``
+    is a sum of positive terms, and this one leaves out every other domain's, so
+    the first force's thresholds are lower and its acceptance stricter, never
+    looser -- the contract the single card's seed already has (it errs low).
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine, right after this device's prepare.
+    tree : Any
+        That prepare's eager tree (its ``particle_indices``: sorted row -> input
+        row, over every row of the shard).
+    dtype : Any
+        The positions' dtype (the carry's).
+    count : int
+        Live rows of the shard.
+    cap : int
+        Rows of the shard.
+
+    Returns
+    -------
+    Array
+        ``(cap,)`` on the prepare's device.
+
+    Raises
+    ------
+    RuntimeError
+        If the prepare left no seed of this shard's size.
+    """
+    fb_sorted = getattr(engine, "_last_force_scale_particles", None)
+    perm = jnp.asarray(tree.particle_indices)
+    if fb_sorted is None or int(fb_sorted.shape[0]) != cap or int(perm.shape[0]) != cap:
+        raise RuntimeError(
+            "mac_type='dehnen_error': the caps-only prepare left no eq (16b) seed "
+            f"for a shard of {cap} rows"
+        )
+    seed = jnp.zeros((cap,), dtype).at[perm].set(jnp.asarray(fb_sorted, dtype))
+    return jnp.where(jnp.arange(cap) < count, seed, jnp.zeros((), dtype))
 
 
 def mesh_force_shard(
@@ -390,10 +505,11 @@ def mesh_force_shard(
     masses: Array,
     live: Array,
     *,
-    cross_hook: Optional[Callable[[Any], Any]] = None,
+    cross_hook: Optional[Callable[..., Any]] = None,
     cross_near_sink: Optional[dict] = None,
     axis_name: str = AXIS_NAME,
-) -> tuple[Array, Array, Array]:
+    force_scale: Optional[Array] = None,
+) -> tuple[Array, ...]:
     """One device's self-gravity on the template route (inside ``shard_map``).
 
     The global box (:func:`~jaccpot.distributed.fused.global_mesh_bounds`, one
@@ -402,6 +518,12 @@ def mesh_force_shard(
     NEAR term. The same refresh and evaluation as
     :func:`~jaccpot.distributed.fused.fused_force_step`, from a template instead of
     a prepared state.
+
+    Under ``mac_type='dehnen_error'`` the rebuild takes the previous force's eq
+    (16b) ``f_b`` (``force_scale``) for eq (16a)'s thresholds -- the local walk's
+    and, through the hook, the cross walks' -- and the force returns the next
+    one: the local near and far halves (the far half with the cross far pairs'
+    monopole terms, in the downward sweep) plus the cross near term's share.
 
     Parameters
     ----------
@@ -413,22 +535,26 @@ def mesh_force_shard(
         ``(cap,)`` masses, zero on padding.
     live : Array
         Scalar live row count (at most ``cap``).
-    cross_hook : Optional[Callable[[Any], Any]]
+    cross_hook : Optional[Callable[..., Any]]
         The cross-domain hook (``None`` on one device).
     cross_near_sink : Optional[dict]
         The hook's near sink.
     axis_name : str
         Mesh axis.
+    force_scale : Optional[Array]
+        ``(cap,)`` the previous force's ``f_b`` in input row order (or the
+        prepare's seed); required under the criterion, ``None`` without it.
 
     Returns
     -------
-    tuple[Array, Array, Array]
+    tuple[Array, ...]
         ``(acceleration, bits, needs)``: ``(cap, 3)`` in input row order (padding
         rows meaningless), the ``uint32`` overflow bits (with
         ``OVERFLOW_LEVEL_PLAN`` and ``OVERFLOW_CROSS``) and ``int32`` needs:
         ``fused_topology.NEEDS_FIELDS`` (whose ``tree_overflow`` also counts a
         level-plan overflow) followed by ``cross.CROSS_NEEDS_FIELDS``
-        (:func:`_hook_cross_needs`).
+        (:func:`_hook_cross_needs`); with ``force_scale``, then the new ``(cap,)``
+        ``f_b`` (zero on padding rows).
     """
     from jaccpot.runtime.capacity_plan import plan_level_overflow
     from jaccpot.runtime.fused_topology import (
@@ -453,13 +579,27 @@ def mesh_force_shard(
         bounds=bounds,
         num_valid=live,
         cross_hook=cross_hook,
+        **({} if force_scale is None else {"force_scale": force_scale}),
     )
-    acceleration = _add_cross_near_term(
-        provider.engine,
-        topology.prepared,
-        jnp.asarray(provider.accelerations(topology)),
-        cross_near_sink,
-    )
+    f_b = None
+    if force_scale is None:
+        acceleration = _add_cross_near_term(
+            provider.engine,
+            topology.prepared,
+            jnp.asarray(provider.accelerations(topology)),
+            cross_near_sink,
+        )
+    else:
+        acc_local, fb_local = provider.accelerations(topology, force_scale=True)
+        acceleration, f_b = _add_cross_near_term(
+            provider.engine,
+            topology.prepared,
+            jnp.asarray(acc_local),
+            cross_near_sink,
+            force_scale=jnp.asarray(fb_local, force_scale.dtype),
+        )
+        live_rows = jnp.arange(int(positions.shape[0])) < live
+        f_b = jnp.where(live_rows, f_b, jnp.zeros((), f_b.dtype))
     # a tree wider or deeper than the installed plan's level loops loses nodes from
     # both cascades (capacity_plan.plan_level_overflow); the refresh's own tree flag
     # checks the same plan, this one also the level-table bound
@@ -473,7 +613,10 @@ def mesh_force_shard(
     needs = topology.needs()
     tree_slot = NEEDS_FIELDS.index("tree_overflow")
     needs = needs.at[tree_slot].max(level.astype(jnp.int32))
-    return acceleration, bits, jnp.concatenate([needs, _hook_cross_needs(cross_hook)])
+    needs = jnp.concatenate([needs, _hook_cross_needs(cross_hook)])
+    if f_b is not None:
+        return acceleration, bits, needs, f_b
+    return acceleration, bits, needs
 
 
 def _hook_cross_needs(cross_hook: Any) -> Array:
@@ -512,8 +655,13 @@ def make_mesh_cross_hook(
     cross_caps: Any = None,
     near_theta: Optional[float] = None,
     axis_name: str = AXIS_NAME,
-) -> tuple[Optional[Callable[[Any], Any]], Optional[dict]]:
+    record: Optional[dict] = None,
+) -> tuple[Optional[Callable[..., Any]], Optional[dict]]:
     """The cross hook and its near sink for this mesh, as ``setup_fused_force`` builds them.
+
+    Under ``mac_type='dehnen_error'`` (``_flat_walk_criterion_active``) the hook
+    runs the criterion too (``make_cross_hook(error_criterion=True)``): the cross
+    walks accept by the same eq (16a) as the local walk.
 
     Parameters
     ----------
@@ -529,10 +677,12 @@ def make_mesh_cross_hook(
         Passed to the hook.
     axis_name : str
         Mesh axis.
+    record : Optional[dict]
+        The hook's diagnostics record (tracers of the trace that ran it).
 
     Returns
     -------
-    tuple[Optional[Callable[[Any], Any]], Optional[dict]]
+    tuple[Optional[Callable[..., Any]], Optional[dict]]
         ``(hook, near_sink)``; ``(None, None)`` on one device.
     """
     from jaccpot.distributed.cross import make_cross_hook
@@ -541,6 +691,7 @@ def make_mesh_cross_hook(
     ndev = len(_mesh_devices(mesh))
     if ndev < 2:
         return None, None
+    engine = getattr(solver, "_impl", solver)
     sink: dict = {}
     hook = make_cross_hook(
         ndev=ndev,
@@ -549,9 +700,11 @@ def make_mesh_cross_hook(
         near_sink=sink,
         near_theta=near_theta,
         axis_name=axis_name,
+        record=record,
         # the local walks' floor (a compact kernel's support): the cross walks must
         # keep their far pairs as far apart
-        separation_floor=getattr(solver, "_impl", solver)._walk_separation_floor(),
+        separation_floor=engine._walk_separation_floor(),
+        error_criterion=bool(engine._flat_walk_criterion_active()),
     )
     return hook, sink
 
@@ -585,11 +738,15 @@ class FusedMeshForce:
     installed), cached under :meth:`key`. :meth:`prepare` runs at the runner's
     start and again at a re-planned segment's start.
 
+    Under ``mac_type='dehnen_error'`` (:attr:`scale_carry`) the force takes and
+    returns eq (16b)'s per-particle ``f_b`` (:meth:`shard`), the runner carries it,
+    and :attr:`force_scale_seed` is the prepare's seed for the first force.
+
     Parameters
     ----------
     solver : Any
         The ``FastMultipoleMethod`` (large-N production profile, cell leaves, the
-        flat walk, a geometric MAC).
+        flat walk; a geometric MAC or ``mac_type='dehnen_error'``).
     mesh : Any
         The 1-D mesh.
     leaf_size : int
@@ -622,11 +779,16 @@ class FusedMeshForce:
         :attr:`level_floor` to a fresh force to compile the same plan.
     axis_name : str
         Mesh axis.
+    cross_record : Optional[dict]
+        The cross hook's diagnostics record (``make_cross_hook(record=...)``):
+        tracers of the trace that ran the hook, for a probe that reads them inside
+        it. ``None`` (default): none.
 
     Raises
     ------
     NotImplementedError
-        If the solver asks for Dehnen's error criterion; raised before anything is
+        If the solver asks for an error criterion other than the flat walk's eq
+        (16a) (:func:`_refuse_unsupported_criterion`); raised before anything is
         built.
     """
 
@@ -643,10 +805,11 @@ class FusedMeshForce:
         cross_replan: Optional[Callable[[np.ndarray, Any], Any]] = None,
         level_floor: Optional[tuple[int, int]] = None,
         axis_name: str = AXIS_NAME,
+        cross_record: Optional[dict] = None,
     ) -> None:
         from jaccpot.distributed.cross import CrossCapacities
 
-        _refuse_error_criterion(solver, entry="FusedMeshForce")
+        _refuse_unsupported_criterion(solver, entry="FusedMeshForce")
         if isinstance(cross_caps, str) and cross_caps != "auto":
             raise ValueError(
                 f"cross_caps={cross_caps!r}: a CrossCapacities, None or 'auto'"
@@ -670,6 +833,7 @@ class FusedMeshForce:
         self.cross_replan = cross_replan
         self.level_floor = None if level_floor is None else tuple(level_floor)
         self.axis_name = axis_name
+        self.cross_record = cross_record
         self.setup: Optional[MeshForceSetup] = None
         #: the walk's peak wavefront a re-plan keeps for the next prepare
         self._peak_floor = 0
@@ -696,7 +860,30 @@ class FusedMeshForce:
             cross_caps=self.cross_caps,
             near_theta=self.near_theta,
             axis_name=self.axis_name,
+            record=self.cross_record,
         )
+
+    @property
+    def scale_carry(self) -> bool:
+        """``mac_type='dehnen_error'``: the force takes and returns ``f_b``.
+
+        Returns
+        -------
+        bool
+            The engine's ``_flat_walk_criterion_active()``.
+        """
+        return bool(self.engine._flat_walk_criterion_active())
+
+    @property
+    def force_scale_seed(self) -> Optional[Array]:
+        """The last prepare's eq (16b) seed (flat, mesh-sharded), under the criterion.
+
+        Returns
+        -------
+        Optional[Array]
+            ``(ndev * cap,)``, or ``None`` without the criterion.
+        """
+        return self._setup_or_raise().force_scale_seed
 
     @property
     def theta_value(self) -> float:
@@ -907,8 +1094,13 @@ class FusedMeshForce:
         self.engine._strict_fused_traced_caps = None
 
     def shard(
-        self, positions: Array, masses: Array, live: Array, ids: Array
-    ) -> tuple[Array, Array, Array]:
+        self,
+        positions: Array,
+        masses: Array,
+        live: Array,
+        ids: Array,
+        force_scale: Optional[Array] = None,
+    ) -> tuple[Array, ...]:
         """One device's self-gravity (:func:`mesh_force_shard`; inside ``shard_map``).
 
         Parameters
@@ -921,11 +1113,13 @@ class FusedMeshForce:
             Scalar live row count.
         ids : Array
             ``(cap,)`` global ids; unused (the rows come back in input order).
+        force_scale : Optional[Array]
+            ``(cap,)`` the previous force's ``f_b`` (:attr:`scale_carry` only).
 
         Returns
         -------
-        tuple[Array, Array, Array]
-            ``(acceleration, bits, needs)``.
+        tuple[Array, ...]
+            ``(acceleration, bits, needs)``, then ``f_b`` with ``force_scale``.
         """
         del ids
         return mesh_force_shard(
@@ -936,6 +1130,7 @@ class FusedMeshForce:
             cross_hook=self.hook,
             cross_near_sink=self.near_sink,
             axis_name=self.axis_name,
+            force_scale=force_scale,
         )
 
     # ------------------------------------------------------------------

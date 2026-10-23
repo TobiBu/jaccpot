@@ -43,6 +43,13 @@ lane the same, as a new path next to the old one (which stays the reference):
   in a segment's peak). With the velocity-Verlet form the carried acceleration
   must travel with its particle, so ``sfc_repartition`` routes the velocity, the
   total acceleration and the id (``rollout._repartition_shard``).
+* **Dehnen's error criterion** (``mac_type='dehnen_error'``, S12; the force's
+  ``scale_carry``): eq (16b)'s per-particle ``f_b`` rides with the acceleration --
+  in the start program (in: the carried one or, before any force, the prepare's
+  seed; out: the force's own), in the scan carry (each force's thresholds are the
+  previous force's ``f_b``, as the single card's particle carry), in
+  :class:`MeshState` between segments and through the repartition. A retried
+  segment restarts from the re-prepare's seed, as a fresh run there would.
 
 **Padding rows** keep their place: their velocity and acceleration are zero, so the
 drift leaves them where the last repartition put them (on a live row), and the
@@ -116,6 +123,11 @@ class MeshState:
         ``(ndev * cap, 3)`` TOTAL acceleration (self-gravity plus the external
         field) at ``state``'s positions, zero on padding; ``None`` until a start
         force computed it.
+    force_scale : Optional[Array]
+        ``mac_type='dehnen_error'``: ``(ndev * cap,)`` eq (16b)'s ``f_b`` of the
+        force that gave ``acceleration`` (the next force's thresholds), zero on
+        padding; ``None`` without the criterion or before a start force (the force's
+        prepare seeds the first one).
     """
 
     state: Array
@@ -123,6 +135,7 @@ class MeshState:
     ids: Array
     count: Array
     acceleration: Optional[Array] = None
+    force_scale: Optional[Array] = None
 
     @classmethod
     def from_shard_state(
@@ -594,6 +607,8 @@ class MeshSegmentRunner:
             raise ValueError(f"{rows} rows do not split over {self.ndev} devices")
         self.cap = rows // self.ndev
         self.force = force
+        #: mac_type='dehnen_error': f_b rides the carry (the force says so)
+        self.scale_carry = bool(getattr(force, "scale_carry", False))
         self.external_acceleration_fn = external_acceleration_fn
         self.repartition_every = int(repartition_every)
         self.num_samples = int(num_samples)
@@ -639,7 +654,7 @@ class MeshSegmentRunner:
         ----------
         solver : Any
             The ``FastMultipoleMethod`` (large-N production profile, cell leaves,
-            the flat walk, a geometric MAC).
+            the flat walk; a geometric MAC or ``mac_type='dehnen_error'``).
         mesh : Any
             The 1-D mesh.
         state : MeshState
@@ -680,8 +695,9 @@ class MeshSegmentRunner:
         Raises
         ------
         NotImplementedError
-            If the solver asks for Dehnen's error criterion (refused on this lane
-            until it carries the force scale); raised before anything is prepared.
+            If the solver asks for an error criterion other than the flat walk's
+            eq (16a) (``mac_type='dehnen_error'`` runs); raised before anything is
+            prepared.
         """
         from jaccpot.distributed.template_force import FusedMeshForce
 
@@ -778,7 +794,10 @@ class MeshSegmentRunner:
         -------
         Callable
             ``(state, masses, count, ids, params) -> (acceleration, ok, bits,
-            needs)``; the acceleration flat, the rest replicated.
+            needs)``; the acceleration flat, the rest replicated. Under the
+            criterion (:attr:`scale_carry`) ``(state, masses, count, ids, f_b,
+            params) -> (acceleration, f_b, ok, bits, needs)``: the force's
+            thresholds from the given ``f_b``, and the force's own.
         """
         from jaccpot.runtime.fused_topology import overflow_ok
 
@@ -788,28 +807,65 @@ class MeshSegmentRunner:
         axis, force = self.axis_name, self.force
         field_fn = self.external_acceleration_fn if with_field else None
 
-        def body(
-            state: Array, masses: Array, count: Array, ids: Array, params: Any
+        def start_force(
+            state: Array,
+            masses: Array,
+            count: Array,
+            ids: Array,
+            params: Any,
+            f_b: Optional[Array],
         ) -> tuple:
             cap = int(state.shape[0])
             live = jnp.minimum(count[0], cap)
             live_rows = jnp.arange(cap) < live
-            acc_self, bits, needs = force.shard(state[:, 0, :], masses, live, ids)
+            out = force.shard(
+                state[:, 0, :],
+                masses,
+                live,
+                ids,
+                **({} if f_b is None else {"force_scale": f_b}),
+            )
+            acc_self, bits, needs = out[:3]
             acc = _total_acceleration(field_fn, acc_self, state, params, live_rows)
             # a count above the shard's capacity cannot be real particles
             ok = overflow_ok(bits) & (count[0] <= cap)
             ok, bits, needs, _ = _mesh_verdict(
                 ok, bits, needs, jnp.int32(0), axis_name=axis
             )
-            return acc, ok, bits, needs
+            if f_b is None:
+                return acc, ok, bits, needs
+            return acc, out[3], ok, bits, needs
 
         spec = P(axis)
+        if not self.scale_carry:
+
+            def body(
+                state: Array, masses: Array, count: Array, ids: Array, params: Any
+            ) -> tuple:
+                return start_force(state, masses, count, ids, params, None)
+
+            in_specs: tuple = (spec, spec, spec, spec, P())
+            out_specs: tuple = (spec, P(), P(), P())
+        else:
+
+            def body(  # type: ignore[misc]
+                state: Array,
+                masses: Array,
+                count: Array,
+                ids: Array,
+                f_b: Array,
+                params: Any,
+            ) -> tuple:
+                return start_force(state, masses, count, ids, params, f_b)
+
+            in_specs = (spec, spec, spec, spec, spec, P())
+            out_specs = (spec, spec, P(), P(), P())
         return jax.jit(
             jax.shard_map(
                 body,
                 mesh=self.mesh,
-                in_specs=(spec, spec, spec, spec, P()),
-                out_specs=(spec, P(), P(), P()),
+                in_specs=in_specs,
+                out_specs=out_specs,
                 check_vma=False,
             )
         )
@@ -826,7 +882,11 @@ class MeshSegmentRunner:
         -------
         Callable
             ``(state, acceleration, masses, count, ids, dt, params) -> (state,
-            acceleration, ok, bits, needs, done)``.
+            acceleration, ok, bits, needs, done)``. Under the criterion
+            (:attr:`scale_carry`) ``f_b`` rides the carry from each force to the
+            next one's thresholds: ``(state, acceleration, f_b, masses, count, ids,
+            dt, params) -> (state, acceleration, f_b, ok, bits, needs, done)``,
+            ``f_b`` donated with the state.
         """
         from jaccpot.runtime.fmm_state import _velocity_verlet_kick_drifted
         from jaccpot.runtime.fused_topology import overflow_ok
@@ -838,10 +898,12 @@ class MeshSegmentRunner:
             self.external_acceleration_fn,
         )
         needs_size = int(force.needs_size)
+        scale_carry = self.scale_carry
 
-        def body(
+        def segment(
             state0: Array,
             acc0: Array,
+            fb0: Optional[Array],
             masses: Array,
             count: Array,
             ids: Array,
@@ -853,15 +915,20 @@ class MeshSegmentRunner:
             live_rows = jnp.arange(cap) < live
 
             def step(carry: tuple, _: Any) -> tuple:
-                state_now, acc_now, ok, bits, needs, done = carry
+                state_now, acc_now, ok, bits, needs, done = carry[:6]
                 # strict_run_v2's `_advance`: drift, force, kick of the drifted state
                 position_new = (
                     state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
                 )
                 state_position = state_now.at[:, 0].set(position_new)
-                acc_self, bits_new, needs_new = force.shard(
-                    state_position[:, 0, :], masses, live, ids
+                out = force.shard(
+                    state_position[:, 0, :],
+                    masses,
+                    live,
+                    ids,
+                    **({"force_scale": carry[6]} if scale_carry else {}),
                 )
+                acc_self, bits_new, needs_new = out[:3]
                 acc_new = _total_acceleration(
                     field_fn, acc_self, state_position, params, live_rows
                 )
@@ -884,6 +951,7 @@ class MeshSegmentRunner:
                     bits | jnp.where(ok, bits_new, jnp.uint32(0)),
                     jnp.where(ok, jnp.maximum(needs, needs_new), needs),
                     done + ok_new.astype(jnp.int32),
+                    *out[3:],
                 ), None
 
             init = (
@@ -893,24 +961,57 @@ class MeshSegmentRunner:
                 jnp.uint32(0),
                 jnp.zeros((needs_size,), jnp.int32),
                 jnp.int32(0),
+                *(() if fb0 is None else (fb0,)),
             )
-            (state_f, acc_f, ok, bits, needs, done), _ = jax.lax.scan(
-                step, init, None, length=int(steps)
-            )
-            return (state_f, acc_f) + _mesh_verdict(
+            carry_f, _ = jax.lax.scan(step, init, None, length=int(steps))
+            state_f, acc_f, ok, bits, needs, done = carry_f[:6]
+            return (state_f, acc_f, *carry_f[6:]) + _mesh_verdict(
                 ok, bits, needs, done, axis_name=axis
             )
 
         spec = P(axis)
+        if not scale_carry:
+
+            def body(
+                state0: Array,
+                acc0: Array,
+                masses: Array,
+                count: Array,
+                ids: Array,
+                dt: Array,
+                params: Any,
+            ) -> tuple:
+                return segment(state0, acc0, None, masses, count, ids, dt, params)
+
+            in_specs: tuple = (spec, spec, spec, spec, spec, P(), P())
+            out_specs: tuple = (spec, spec, P(), P(), P(), P())
+            donate: tuple = (0, 1)
+        else:
+
+            def body(  # type: ignore[misc]
+                state0: Array,
+                acc0: Array,
+                fb0: Array,
+                masses: Array,
+                count: Array,
+                ids: Array,
+                dt: Array,
+                params: Any,
+            ) -> tuple:
+                return segment(state0, acc0, fb0, masses, count, ids, dt, params)
+
+            in_specs = (spec, spec, spec, spec, spec, spec, P(), P())
+            out_specs = (spec, spec, spec, P(), P(), P(), P())
+            donate = (0, 1, 2)
         return jax.jit(
             jax.shard_map(
                 body,
                 mesh=self.mesh,
-                in_specs=(spec, spec, spec, spec, spec, P(), P()),
-                out_specs=(spec, spec, P(), P(), P(), P()),
+                in_specs=in_specs,
+                out_specs=out_specs,
                 check_vma=False,
             ),
-            donate_argnums=(0, 1) if self.donate else (),
+            donate_argnums=donate if self.donate else (),
         )
 
     def _repartition_program(self) -> Callable:
@@ -926,10 +1027,14 @@ class MeshSegmentRunner:
         -------
         Callable
             ``(state, acceleration, masses, ids, count) -> (state, acceleration,
-            masses, ids, count, diag)``.
+            masses, ids, count, diag)``; under the criterion (:attr:`scale_carry`)
+            ``f_b`` is routed too: ``(state, acceleration, f_b, masses, ids, count)
+            -> (state, acceleration, f_b, masses, ids, count, diag)`` (the next
+            force's thresholds are its particles', wherever they now live).
         """
         from jaccpot.distributed.rollout import _repartition_shard
 
+        scale_carry = self.scale_carry
         key = (
             "mesh_repartition",
             tuple(int(d.id) for d in self.devices),
@@ -937,6 +1042,7 @@ class MeshSegmentRunner:
             self.cap,
             self.num_samples,
             str(self.state.state.dtype),
+            *(("force_scale",) if scale_carry else ()),
         )
         cache = _programs_of(self.force.cache_owner)
         program = cache.get(key)
@@ -944,10 +1050,15 @@ class MeshSegmentRunner:
             return program
         ndev, cap, samples, axis = self.ndev, self.cap, self.num_samples, self.axis_name
 
-        def body(
-            state: Array, acc: Array, masses: Array, ids: Array, count: Array
+        def repartition(
+            state: Array,
+            acc: Array,
+            f_b: Optional[Array],
+            masses: Array,
+            ids: Array,
+            count: Array,
         ) -> tuple:
-            x, v, m, i, c, a, diag = _repartition_shard(
+            x, v, m, i, c, a, diag, *routed = _repartition_shard(
                 state[:, 0],
                 state[:, 1],
                 masses,
@@ -958,8 +1069,9 @@ class MeshSegmentRunner:
                 num_samples=samples,
                 axis_name=axis,
                 acceleration=acc,
+                **({} if f_b is None else {"force_scale": f_b}),
             )
-            return jnp.stack([x, v], axis=1), a, m, i, c, diag
+            return (jnp.stack([x, v], axis=1), a, *routed, m, i, c, diag)
 
         spec = P(axis)
         diag_spec = {
@@ -968,12 +1080,33 @@ class MeshSegmentRunner:
             "sent_off_device": spec,
             "max_util": spec,
         }
+        if not scale_carry:
+
+            def body(
+                state: Array, acc: Array, masses: Array, ids: Array, count: Array
+            ) -> tuple:
+                return repartition(state, acc, None, masses, ids, count)
+
+            arrays = 5
+        else:
+
+            def body(  # type: ignore[misc]
+                state: Array,
+                acc: Array,
+                f_b: Array,
+                masses: Array,
+                ids: Array,
+                count: Array,
+            ) -> tuple:
+                return repartition(state, acc, f_b, masses, ids, count)
+
+            arrays = 6
         program = jax.jit(
             jax.shard_map(
                 body,
                 mesh=self.mesh,
-                in_specs=(spec,) * 5,
-                out_specs=(spec,) * 5 + (diag_spec,),
+                in_specs=(spec,) * arrays,
+                out_specs=(spec,) * arrays + (diag_spec,),
                 check_vma=False,
             )
         )
@@ -1001,15 +1134,28 @@ class MeshSegmentRunner:
         if acc is None:
             acc = jnp.zeros(state.state.shape[:1] + (3,), state.state.dtype)
             acc = jax.device_put(acc, state.state.sharding)
-        x, a, m, i, c, diag = self._repartition_program()(
-            state.state, acc, state.masses, state.ids, state.count
+        scale: tuple = ()
+        if self.scale_carry:
+            f_b = state.force_scale
+            if f_b is None:
+                f_b = jax.device_put(
+                    jnp.zeros(state.state.shape[:1], state.state.dtype),
+                    state.masses.sharding,
+                )
+            scale = (f_b,)
+        out = self._repartition_program()(
+            state.state, acc, *scale, state.masses, state.ids, state.count
         )
+        x, a = out[:2]
+        f_b_new = out[2] if self.scale_carry else None
+        m, i, c, diag = out[-4:]
         routed = MeshState(
             state=x,
             masses=m,
             ids=i,
             count=c,
             acceleration=None if state.acceleration is None else a,
+            force_scale=None if state.force_scale is None else f_b_new,
         )
         return routed, {k: np.asarray(v) for k, v in diag.items()}
 
@@ -1024,10 +1170,31 @@ class MeshSegmentRunner:
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
         s = self.state
-        _, _, _, needs = self._call(
-            "measure", 0, None, s.state, s.masses, s.count, s.ids
-        )
+        needs = self._call(
+            "measure", 0, None, s.state, s.masses, s.count, s.ids, *self._scale_args(s)
+        )[-1]
         return np.asarray(jax.device_get(needs))[len(NEEDS_FIELDS) :]
+
+    def _scale_args(self, state: MeshState) -> tuple:
+        """The start program's ``f_b`` argument: the carried one, else the seed.
+
+        Parameters
+        ----------
+        state : MeshState
+            The state the start force runs at.
+
+        Returns
+        -------
+        tuple
+            ``()`` without the criterion; else ``(f_b,)``: ``state.force_scale``
+            (the last force's), or before any force the prepare's seed
+            (``force.force_scale_seed``).
+        """
+        if not self.scale_carry:
+            return ()
+        if state.force_scale is not None:
+            return (state.force_scale,)
+        return (self.force.force_scale_seed,)
 
     def _call(self, kind: str, steps: int, params: Any, *args: Any) -> tuple:
         """Run a program under the force's context (its plan installed).
@@ -1155,6 +1322,9 @@ class MeshSegmentRunner:
             return SegmentReport(segment=n, steps=0, start_force=False)
         started = start
         acceleration = state.acceleration
+        # the criterion's f_b: the start force's thresholds (carried, else the
+        # prepare's seed) and, after it, the segment's first
+        scale_now: tuple = self._scale_args(state)
         retry_enabled = env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True)
         start_host: Any = None
         if k > 0 and self.donate and retry_enabled:
@@ -1164,6 +1334,7 @@ class MeshSegmentRunner:
             start_host = host_copy(state.state)
         state_new = state.state
         acc_new: Optional[Array] = None
+        scale_new: tuple = ()
         retries, tree_first = 0, False
         failures: list = []
         # the most steps an earlier failed attempt fitted (-1: none failed yet)
@@ -1171,7 +1342,7 @@ class MeshSegmentRunner:
         while True:
             consumed = False
             if start:
-                acceleration, ok, bits, needs = self._call(
+                outputs = self._call(
                     "start",
                     0,
                     external_params,
@@ -1179,11 +1350,16 @@ class MeshSegmentRunner:
                     state.masses,
                     state.count,
                     state.ids,
+                    *scale_now,
                 )
-                ok_h, bits_h, needs_h = jax.device_get((ok, bits, needs))
+                acceleration = outputs[0]
+                # the start force's own f_b: the segment's first thresholds
+                scale_now = tuple(outputs[1:-3])
+                ok_h, bits_h, needs_h = jax.device_get(outputs[-3:])
+                del outputs
                 done_h = 0
                 if k == 0 and bool(ok_h):
-                    acc_new = acceleration
+                    acc_new, scale_new = acceleration, scale_now
                     break
             if k > 0 and (not start or bool(ok_h)):
                 outputs = self._call(
@@ -1192,14 +1368,16 @@ class MeshSegmentRunner:
                     external_params,
                     state.state,
                     acceleration,
+                    *scale_now,
                     state.masses,
                     state.count,
                     state.ids,
                     jnp.asarray(dt, state.state.dtype),
                 )
                 state_new, acc_new = outputs[:2]
+                scale_new = tuple(outputs[2:-4])
                 # the segment's one host sync
-                ok_h, bits_h, needs_h, done_h = jax.device_get(outputs[2:])
+                ok_h, bits_h, needs_h, done_h = jax.device_get(outputs[-4:])
                 del outputs
                 consumed = self.donate
                 if bool(ok_h):
@@ -1238,6 +1416,7 @@ class MeshSegmentRunner:
                 tree_first = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
             retries += 1
             acceleration = acc_new = None
+            scale_new = ()
             state_new = state.state
             if consumed:
                 assert start_host is not None
@@ -1253,7 +1432,18 @@ class MeshSegmentRunner:
                     needs_np, int(bits_h), retries=retries - 1, where=where
                 )
             self.force.prepare(state.state[:, 0], state.masses, state.count)
-            # the start force again, with the grown capacities, as a fresh run's
+            # the start force again, with the grown capacities, as a fresh run's:
+            # under the criterion from the re-prepare's own seed at the segment's
+            # start (a fresh run there has no carried f_b), as the single card's
+            # retry reseeds
+            scale_now = self._scale_args(
+                MeshState(
+                    state=state.state,
+                    masses=state.masses,
+                    ids=state.ids,
+                    count=state.count,
+                )
+            )
             start = True
         self.state = MeshState(
             state=state_new,
@@ -1261,6 +1451,7 @@ class MeshSegmentRunner:
             ids=state.ids,
             count=state.count,
             acceleration=acc_new,
+            force_scale=scale_new[0] if scale_new else None,
         )
         self._acceleration_key = key
         if k > 0:
@@ -1290,8 +1481,8 @@ class MeshSegmentRunner:
         -------
         dict
             ``positions``, ``velocities``, ``masses`` and (once computed)
-            ``acceleration`` as ``(N, ...)`` arrays indexed by global id, plus
-            ``owner`` (device per id).
+            ``acceleration`` and, under the criterion, ``force_scale`` as ``(N,
+            ...)`` arrays indexed by global id, plus ``owner`` (device per id).
 
         Raises
         ------
@@ -1318,6 +1509,8 @@ class MeshSegmentRunner:
         }
         if s.acceleration is not None:
             arrays["acceleration"] = np.asarray(s.acceleration)[rows]
+        if s.force_scale is not None:
+            arrays["force_scale"] = np.asarray(s.force_scale)[rows]
         out = {}
         for name, arr in arrays.items():
             full = np.empty((n,) + arr.shape[1:], arr.dtype)

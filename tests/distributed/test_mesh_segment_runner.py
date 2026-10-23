@@ -523,6 +523,8 @@ def test_a_failed_steps_successors_size_nothing():
         external_acceleration_fn=None,
         mesh=mesh,
         donate=False,
+        # what MeshSegmentRunner.__init__ reads off the force: no f_b in the carry
+        scale_carry=False,
     )
     program = MeshSegmentRunner._build_segment(runner, steps)
     state = np.zeros((NDEV * cap, 2, 3), np.float32)
