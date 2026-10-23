@@ -1177,6 +1177,52 @@ def _symmetric_pair_sides(
     return live, mine % S, theirs // S, theirs % S
 
 
+def _in_pair_order(
+    live: Array, target: Array, source: Array, *, num_targets: int, num_sources: int
+) -> tuple[Array, Array]:
+    """A cross pair list in (target, source) order, dead pairs ``-1`` behind it.
+
+    The Pallas walk hands its pairs out through atomic cursors, so on a GPU every
+    run lists the same pair SET in another order (``mutual_walk_pallas``), and a
+    consumer that sums a target's pairs in list order -- the CSR M2L's rows
+    (``merge_into_csr`` keeps the cross pairs' order within a row), the cross near
+    kernel's rows (:func:`cross_near_acceleration` sorts by target only) -- summed
+    them in another order each run: the mesh force was not reproducible run to
+    run. Sorted by (target, source), the order of the local lane's own directed
+    lists (``_directed_csr_from_canonical``), the lists and every sum over them
+    are a function of the pair set. One keys-only sort of a composite key
+    (``_lex_sorted``).
+
+    Parameters
+    ----------
+    live : Array
+        ``(P,)`` live pairs.
+    target, source : Array
+        ``(P,)`` each pair's target and source, in ``[0, num_targets)`` and
+        ``[0, num_sources)`` where ``live``.
+    num_targets, num_sources : int
+        Exclusive bounds of the live targets and sources. Static.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(target, source)``, int32: the live pairs sorted, ``-1`` behind them.
+    """
+    from jaccpot.runtime._interaction_cache import _lex_sorted
+
+    idx = jnp.int32
+    t = jnp.where(live, jnp.asarray(target).astype(idx), int(num_targets))
+    s = jnp.where(live, jnp.asarray(source).astype(idx), 0)
+    t, s = _lex_sorted(
+        t,
+        s,
+        primary_bound=int(num_targets) + 1,
+        secondary_bound=max(int(num_sources), 1),
+    )
+    dead = t >= int(num_targets)
+    return jnp.where(dead, -1, t), jnp.where(dead, -1, s)
+
+
 def _leaf_under(cells: Array, node_ranges: Array, num_internal: int) -> Array:
     """The leaf under each one-leaf cell (itself when it is a leaf).
 
@@ -1231,7 +1277,9 @@ def _symmetric_exchange(
     What a sender ships to ``d`` and what ``d`` expects from it are both laid out in
     the sender's ascending summary index (:func:`_rows_by_peer`); the receive sizes
     the size gather reports are checked against the ones predicted locally, so a
-    divergence raises the overflow flag instead of misaligning rows.
+    divergence raises the overflow flag instead of misaligning rows. Both returned
+    pair lists are in (target, source) order (:func:`_in_pair_order`), whatever
+    order the walk emitted them in.
 
     Parameters
     ----------
@@ -1332,9 +1380,13 @@ def _symmetric_exchange(
         ragged_all_to_all_exchange, name="cross_exchange_far"
     )(payload, exp_f.sizes, output_capacity=cap.recv_node_cap, axis_name=axis_name)
     far_mismatch = jnp.any(recv_sizes.astype(idx) != imp_f.sizes)
-    ok_f = fl & (imp_f.pair_row >= 0)
-    src_f = jnp.where(ok_f, n_local + imp_f.pair_row, -1)
-    tgt_f = jnp.where(ok_f, nodes[f_mine], -1)
+    tgt_f = nodes[f_mine]
+    ok_f = fl & (imp_f.pair_row >= 0) & (tgt_f >= 0) & (tgt_f < n_local)
+    # one order per pair set: the walk's is the atomics' (`_in_pair_order`)
+    tgt_f, row_f = _in_pair_order(
+        ok_f, tgt_f, imp_f.pair_row, num_targets=n_local, num_sources=ndev * S
+    )
+    src_f = jnp.where(row_f >= 0, n_local + row_f, -1)
     out["cross_far"] = (
         recv[:, :n_coeff],
         recv[:, n_coeff : n_coeff + 3],
@@ -1443,6 +1495,11 @@ def _symmetric_exchange(
         imp_mass = jnp.where(valid, recv_p[take, 3], 0.0)
         ok_n = nl & (imp_n.pair_row >= 0)
         leaf = _leaf_under(nodes[n_mine], nr, num_internal).astype(idx)
+        # one order per pair set, as the far list's; a leaf past the pool (n_local)
+        # stays for the near term to drop
+        leaf, row_n = _in_pair_order(
+            ok_n, leaf, imp_n.pair_row, num_targets=n_local + 1, num_sources=ndev * S
+        )
     with jax.named_scope("cross_near_needs"):
         # particles per (peer, node) row, laid out or not: mine from my own tree (the
         # `full` above, for every row), the peers' from their published counts
@@ -1475,8 +1532,8 @@ def _symmetric_exchange(
         positions=imp_pos,
         masses=imp_mass,
         mask=imp_mass != 0.0,
-        target_node=jnp.where(ok_n, leaf, -1),
-        source_row=jnp.where(ok_n, imp_n.pair_row, -1),
+        target_node=leaf,
+        source_row=row_n,
         count=res.near_count,
         near_particles=jnp.sum(recv_psizes),
         send_particles=total,
