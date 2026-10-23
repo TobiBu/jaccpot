@@ -146,6 +146,23 @@ def test_migrating_changes_nothing_but_ownership():
     _exact_domains(c)
 
 
+def test_the_rebalance_evens_the_counts_and_moves_only_ownership():
+    """Fixed cuts let the counts drift; the repartition between segments under
+    migration reads even cuts off the ranks (the sample sort would keep the
+    current cut of exact ranges) and migrates to them: N / 2 rows each, the
+    domains exact, and the run still the never-migrating one's, bitwise by id."""
+    a, rep_a = _run(True, 0, 4)
+    assert len({tuple(r.counts) for r in rep_a}) > 1, "the counts never moved"
+    assert max(rep_a[-1].counts) > N // NDEV
+    a.state, diag = a._repartition(a.state)
+    assert not bool(diag["declined"][0]) and int(diag["sent_off_device"].sum()) > 0
+    np.testing.assert_array_equal(np.asarray(a.state.count), [N // NDEV] * NDEV)
+    _exact_domains(a)
+    for _ in range(2):
+        rep_a.append(a.run(2, dt=DT))
+    _assert_equal_by_id(a, _run(False, 0, 6)[0])
+
+
 def test_an_acceleration_left_in_the_old_rows_breaks_it(monkeypatch):
     """MUTATION CONTROL: the carried acceleration not moved by the migration."""
     real = migration.migrate_shard

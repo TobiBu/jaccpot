@@ -62,6 +62,7 @@ from jaccpot.distributed.fused import AXIS_NAME, global_mesh_bounds
 __all__ = [
     "OVERFLOW_MIGRATION",
     "OVERFLOW_SHARD",
+    "balanced_splitters_shard",
     "migrate_shard",
     "migration_cap_for_need",
     "migration_need_shard",
@@ -150,6 +151,58 @@ def splitters_shard(
     # a reverse running minimum: an empty device (sentinel) takes the next cut
     suffix = jax.lax.cummin(per_device, reverse=True)
     return suffix[1:]
+
+
+def balanced_splitters_shard(
+    positions: Array, count: Array, *, cubic: bool, axis_name: str = AXIS_NAME
+) -> Array:
+    """Cuts that split the particles evenly, for an ownership of exact ranges.
+
+    The rebalance between segments under migration. ``sfc_repartition``'s sample
+    sort draws the same number of samples from every device whatever its count,
+    so on domains that are already exact Morton ranges its median sample is the
+    current cut and it moves nothing however unequal the counts are (2e6 disc +
+    bulge on two A100s: 999,037 / 1,000,963 drifted to 1,012,142 / 987,858 over
+    12 steps of fixed cuts, through two repartitions that sent 0 rows). Here the
+    devices' live codes, in device order, ARE the sorted global sequence, so the
+    cut ``j`` is the code at global rank ``j * N // ndev`` exactly: the device
+    holding that rank reads it from its sorted codes, the others offer the
+    sentinel, and a ``pmin`` replicates it. A migration to these cuts
+    (:func:`migrate_shard`) then moves only the rows that change owner.
+
+    Parameters
+    ----------
+    positions : Array
+        ``(cap, 3)`` this device's positions.
+    count : Array
+        ``(1,)`` its live rows.
+    cubic : bool
+        The force's box shape.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    Array
+        ``(ndev - 1,)`` ``uint64`` cuts, identical on every device; valid when
+        every device's live rows are an exact Morton range in the force's box at
+        these positions, the ranges ascending with the device index (what
+        :func:`splitters_shard` and every migration leave).
+    """
+    cap = positions.shape[0]
+    n_live = jnp.minimum(count[0], cap).astype(jnp.int32)
+    live = jnp.arange(cap) < n_live
+    codes = _codes(positions, n_live, cubic=cubic, axis_name=axis_name)
+    ordered = jnp.sort(jnp.where(live, codes, _CODE_SENTINEL))
+    counts = jax.lax.all_gather(n_live, axis_name, tiled=False)
+    ndev = counts.shape[0]
+    me = jax.lax.axis_index(axis_name)
+    offset = (jnp.cumsum(counts) - counts)[me]
+    targets = (jnp.arange(1, ndev, dtype=jnp.int64) * jnp.sum(counts)) // ndev
+    local = targets - offset
+    mine = (local >= 0) & (local < n_live)
+    offered = jnp.where(mine, ordered[jnp.clip(local, 0, cap - 1)], _CODE_SENTINEL)
+    return jax.lax.pmin(offered, axis_name)
 
 
 def _destinations(
