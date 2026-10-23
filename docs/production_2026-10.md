@@ -1573,3 +1573,97 @@ the XLA scatters 3.7 (17.6 with the prefix-sum COM reverse), the L2P and P2M rev
 - **The input-order permutation**: its transposes are XLA scatters (3.7 ms at 8e6); a permutation `custom_vjp`
   would gather both ways.
 - **GPU program identity** of the final tip was not recorded (CPU identity, the pins and DET are).
+
+## S11, session 1 — the fused multi-GPU lane on the runner's machinery (2026-10-22/23)
+
+Plan S11: the fused multi-GPU lane gets what the single-card runner has (S2-S3): a shape template instead of
+prepared states, one program per segment with the state donated, a segment retry, capacities sized in the library.
+Four tracks on main `90ca9f38` (S8 merged): **A** (`s11/mesh-segment-runner`) the template force and the segment
+runner; **B** (`s11/cross-capacities`) the cross capacities in the library; **C** (`s11/cross-csr-merge`) the cross
+far pairs into the walk's CSR; and in yggdrax `fix/ragged-exchange-clamp`. Then the wiring on top
+(`s11/mesh-library-caps`). The old route (`setup_fused_force`, the stacked evaluator, `FusedRollout`) is unchanged
+and stays the reference. The single-card lane is untouched: CPU program identity 36/36 against main.
+
+**No card was free this session.** Every two-card row below ran on cards 2 + 4 with other users' processes on them
+(card 2 at 98-100 % utilisation during the library-caps rows): correctness and memory are results, times are not.
+
+| target / gate | result |
+| --- | --- |
+| the template force == the stacked force (A1) | bitwise on two forced CPU devices, every value finite (no template value is read), same plan and walk caps |
+| a one-device mesh segment == the single-card particle carry (A2) | bitwise (a user-written scan over `prov.step`, the same explicit box) |
+| segments chain, repartitions move only ownership (A2) | 2 + 2 steps == 4, bitwise by id (two devices, cross field on); a repartition before every segment == none, bitwise by id (partition-independent direct force); a carried acceleration left in the old rows is caught |
+| a segment retry == a fresh run with the final caps (A3) | bitwise: a leaf capacity of 44 grown to 1024, the walk caps and the cross caps re-planned; and an undersized `recv_node_cap` / `send_particle_cap` |
+| a mesh run needs no bench formula and no Odisseo harness env | yes: Plummer and the disc + bulge at 2e5 and 2e6 on two A100s, six segments with repartitions, every flag clean |
+| accuracy in class with one card | rel-L2 vs fp64 direct (512 ids), mesh start / end vs one card on the same particles: Plummer 2e6 5.19e-4 / 4.99e-4 vs 5.10e-4 / 5.04e-4; disc 2e6 3.19e-4 / 3.14e-4 vs 3.26e-4 / 2.93e-4 |
+| peak per device | Plummer 2e6 (1e6 per card): **412 B/p** on library caps (rerun on a run's final caps), 962 B/p with the bench formulas, 1214-1257 B/p on the old route; between segments 51-76 MB against 297-347 MB |
+
+### The template force and the segment runner (A)
+- `jaccpot/distributed/template_force.py`: per device (mesh order, on that device) a caps-only prepare in the GLOBAL
+  box, the level registry lifted to the refresh tree over the live rows, plans and walk caps merged and installed,
+  `leaf_capacity="auto"` sized once from the largest device; ONE shape template and provider for every device; the
+  eager prepares dropped. Inside the `shard_map` each device rebuilds from `provider.like()` in the global box over
+  its live rows, with the cross hook between the sweeps; the cross near term is the old route's
+  (`fused._add_cross_near_term`, factored out, ops unchanged). Its verdict is the provider's bits plus two for this
+  lane (`OVERFLOW_LEVEL_PLAN`, `OVERFLOW_CROSS`) and its needs the walk's and tree's plus the cross needs (B).
+- `jaccpot/distributed/segment.py`: `MeshSegmentRunner`. A segment is ONE program, jit(shard_map(lax.scan)), with
+  the packed state and the total acceleration donated and the single card's velocity-Verlet association; the start
+  force is its own program; the verdict is reduced over the mesh once per segment and read once. Between segments a
+  repartition (its own program) routes the velocities, the total acceleration and the ids with the particles. The
+  old route ran 3-4 programs and host syncs per step: at 2e6 on two contended cards 68.1 against 25.9 ms per step,
+  with the force alone 26.7 against 28.0 ms.
+- The retry: needs reduced over the mesh, the engine's walk and tree re-plan, the cross re-plan, caps-only
+  re-prepares at the segment's start (a host copy of the donated start state), at most twice.
+- The template route honours `TreeConfig(cubic_bounds)` (the galaxy preset's cube); the old route reads only
+  `JACCPOT_CUBIC_BOUNDS`. Built with `mac_type="dehnen"`: `dehnen_error` stays refused at every entry point (S12).
+- CI: job `test-distributed-segment` (marker `distributed_segment`, two forced devices, path-gated on
+  `jaccpot/distributed/` and the runtime files the template and verdict come from).
+
+### The cross capacities in the library (B)
+- `CROSS_NEEDS_FIELDS`: the demand of every capacity the default (symmetric) exchange reads, traced next to its
+  flags (`hook.needs_sink`, `cross.cross_needs`), exact past its own overflow except where a stopped walk makes it a
+  lower bound (two bits say which). `CrossCapacities.for_shard` (a first guess from the leaf capacity), `from_needs`
+  (1.5x, the summary clamped to the tree), `replanned` (monotone), `plan_cross_capacities`.
+- At 1e6 per card (Plummer, N = 2e6) the library caps sit at 1.50-1.51x need (the summary at 1.15x); the probe's
+  formula at 3.5-14x and the rollout gate's at up to 235x (the walk queue). The force program's temporaries per
+  device: 523.8 MB (library), 731.0 MB (probe formula), 1207.4 MB (rollout formula).
+- **Bug fixed: a padded shard's summary cell spanned all its dead rows.** Padding leaves carry the empty range
+  `(n, n - 1)`, so the parent of the last live leaf spans `[that leaf's start, n - 1]`. Under one-leaf summary cells
+  without `summary_cell_level` that parent is a cut cell, and the near export laid out every dead row: the force was
+  right (zero mass) but `full > W` fired at any width (two A100s, the rollout gate's caps, 2e5 per card, on main).
+  Ranges are now clamped to the last live particle.
+- An overflowed cross-walk queue doubles on a re-plan: the Pallas walk reports the widest wavefront it admitted,
+  which read 252,788 off a 389,120 queue that overflowed (disc 2e5; clean at 4x with a peak of 375,310).
+- **The flat M2L's chunk switch reassociates.** On the flat lanes (CPU, pre-Ampere,
+  `JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0`) `pair_count <= m2l_chunk_size` selects the full-batch or the chunked
+  accumulation, and `pair_count` includes the cross list's capacity: crossing it moved 2347 of 6144 components by
+  1 ulp. The `FarFieldConfig.m2l_chunk_size` docstring said it did not change the result; corrected.
+
+### The cross far pairs into the CSR (C)
+- The walk's far list reaches the downward sweep target-sorted; the cross pairs were appended as COO and the whole
+  list sorted again by target (an `s32[P + E]` sort over the far capacity, 20,971,520 entries at 1e6 per card).
+  `merge_into_csr` sorts the E cross pairs only and slots each behind its row's own entries. The old sort was stable
+  and the CSR M2L kernel sums a row in list order, so the locals are bitwise the old route's: 0 of 6,553,575 M2L
+  outputs differ on captured GPU inputs at 1e6 per card. The flat lanes keep the concatenation (their chunked sums
+  would reassociate). The list build alone at 1e6 per card, one contended card: 5.4-7.2 -> 1.6-1.9 ms (minimum).
+- S12 needs `FarForceScaleInputs` over the imported nodes; the force-scale kernel reads the same presorted list.
+
+### The ragged exchange stays in its buffers (yggdrax)
+- `ragged_all_to_all_exchange`'s native (NCCL) path handed XLA the requested sizes unclamped. On a capacity overflow,
+  which the cross exchange detects only after it from the returned sizes, it wrote and read out of bounds: on two
+  A100s 512 rows written past the output, 1024 rows read from beyond the send buffer (padded-buffer canaries).
+  `_clamped_transfer` derives one clamped transfer matrix from the gathered sizes on every device; the requested
+  sizes are still returned, and a fitting exchange is unchanged. Merge it before the jaccpot PRs.
+
+### Not done yet (S11 session 2) and found on the way
+- **The runner's multi-GPU mode** (edges, diagnostics, restart, energy: the cross near term has no potential yet)
+  and **Odisseo's multi-GPU lane** off the mesh lane (`fmm_mesh` -> the segment runner).
+- **Measurements on free cards**: 2/4/8 cards, B/p at production particles per card, weak and strong scaling, the
+  8-card ceiling. The small-N rows above are dominated by fixed buffers (disc 2e5: 1437 B/p).
+- **The first segment retries once**: one drift step after a decomposition puts leaf cells inside the neighbour's
+  domain and roughly doubles the cross near demand (export_near 11,603 -> 22,795, particles 36,231 -> 87,867 at
+  Plummer 2e5), which the start sizing (1.5x) cannot see. The grown caps hold for the rest of the run; measuring
+  the sizing also at drifted positions would save that recompile.
+- yggdrax `let.py` (`import_near_halo`, round A, the old mesh lane) has no flag for more requests than
+  `max_recv_leaves`.
+- pydoclint's exclude pattern `dist` also matches `jaccpot/distributed/`, so that package is never linted (50
+  violations on main).

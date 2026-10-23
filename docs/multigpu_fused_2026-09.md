@@ -1672,6 +1672,13 @@ whose cost is mostly waiting at them.
 
 ## Next
 
+**2026-10-23 (plan S11, session 1):** the lane runs on the single-card runner's machinery, as a new path next to
+the one above: one shape template instead of stacked prepared states (`distributed/template_force.py`), one program
+per segment with the state donated and a mesh-wide segment retry (`distributed/segment.py`), the cross capacities
+sized and re-planned in the library (`CrossCapacities.for_shard` / `replanned`, the traced cross needs), the cross
+far pairs merged into the walk's CSR, and the ragged exchange clamped to its buffers (yggdrax). A mesh run needs no
+bench formula and no harness environment. Measured and still open: `docs/production_2026-10.md`, section "S11".
+
 **2026-10-03, later:** four cards run (section "Beyond two cards"): the symmetric exchange, the near pass-through,
 smaller probe floors and an unrolled searchsorted; two cards pass the 1.5x gate on every row of three draws, four
 cards at 1e6 per card. What follows: the four-card rows at 2e5-5e5 per card (domain shape -- RCB is -1 to -2 ms --
