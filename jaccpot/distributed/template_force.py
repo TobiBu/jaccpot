@@ -438,8 +438,11 @@ def prepare_mesh_force(
             runtime_overrides=runtime_overrides,
         )._with_caps_template(stub_caps, pos_d[0], mass_d[0])
     del stub_caps, pos_d, mass_d
-    # caches that would keep an eager prepare's buffers alive through the run
+    # caches that would keep an eager prepare's buffers alive through the run (the
+    # geometry entry holds the last device's box geometry: 12 MB on the second of
+    # two A100s at 2^19 particles per card, through every segment)
     engine._topology_reuse_entry = None
+    engine._geometry_reuse_entry = None
     engine.clear_prepared_state_cache()
     seed = None
     if scale_carry:
