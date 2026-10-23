@@ -154,6 +154,9 @@ GATED_SHARDS: tuple[str, ...] = (
 )
 GATED_PATHS: tuple[str, ...] = (
     "jaccpot/distributed/",
+    # the production runner's multi-GPU mode dispatches from here
+    # (tests/distributed/test_production_runner_mesh_fused.py)
+    "jaccpot/production.py",
     # what the fused mesh lane (test-distributed-segment) takes its shapes, template,
     # verdict and plan from on the runtime side
     "jaccpot/runtime/fused_provider.py",

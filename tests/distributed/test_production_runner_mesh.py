@@ -1,29 +1,39 @@
 """``ProductionRunner``'s multi-GPU mode (S11 session 2) with a partition-independent force.
 
 ``ProductionRunner(solver, mesh=MeshRunConfig(...))`` runs the single card's loop --
-segments, edges, callbacks, diagnostics with the energy, continuations -- on
+segments, edges, callbacks, diagnostics with the energy, restart files -- on
 :class:`~jaccpot.distributed.segment.MeshSegmentRunner`. These gates drive it with
 :class:`~jaccpot.distributed.segment.DirectMeshForce` (a direct sum over the
 sources in global-id order, so a particle's force and potential do not depend on
 the device or row that holds it): what the mode adds is the machinery around the
 segment runner, and it is tested here at N = 256 in float64 on two forced CPU
-devices, in seconds.
+devices, in seconds. The fused force through the same mode is
+``test_production_runner_mesh_fused.py``.
 
 * the mode == the segment runner driven by hand with the same segments and
   repartition cadence, bitwise by id, and every edge's lazy ``state_host()`` is the
   hand-driven state at that step;
-* chained runs (``restart_from=RunResult``) == one run, bitwise;
+* chained runs (``restart_from=RunResult``) == one run, bitwise; a restart file
+  continued in a FRESH process on the same mesh == the straight run, bitwise (its
+  digests matching); on another mesh the restore decomposes the by-id state and
+  says it is not bitwise;
 * the moments are the host fp64 moments of the gathered state; the energy is the
   host fp64 direct-sum energy of the gathered state; the energy diagnostics leave
   the trajectory alone;
-* a callback stops the run; a retried segment is reported at its edge; what the
-  mode cannot take is refused.
+* a callback stops the run; a retried segment is reported at its edge; a failure
+  names the last restart; what the mode cannot take is refused.
 
     XLA_FLAGS=--xla_force_host_platform_device_count=2 JAX_PLATFORMS=cpu \\
         JAX_ENABLE_X64=1 pytest tests/distributed/test_production_runner_mesh.py -q
 """
 
 from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -43,6 +53,7 @@ from jaccpot.production import (  # noqa: E402
     ProductionRunner,
     RunResult,
     SegmentConfig,
+    load_restart,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -224,6 +235,105 @@ def test_chained_runs_are_one_run():
 
 
 # --------------------------------------------------------------------------
+# Restart files.
+# --------------------------------------------------------------------------
+
+
+def _resume(path, out):
+    """The fresh process: continue ``path`` to step 8 on the same mesh."""
+    jax.config.update("jax_enable_x64", True)
+    runner = _runner()
+    # what the restore and the run warn
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        res = runner.run(dt=DT, num_steps=8, restart_from=path, external_params=PARAMS)
+    np.savez(
+        out,
+        state=res.state,
+        acceleration=res.handle.gather()["acceleration"],
+        steps=np.asarray([e.step for e in res.edges]),
+        diagnostics=np.asarray(json.dumps(res.edges[-1].diagnostics)),
+        restored=np.asarray(json.dumps(res.restored)),
+        warned=np.asarray(json.dumps([str(w.message) for w in caught])),
+    )
+
+
+def test_a_restart_in_a_fresh_process_continues_bitwise(tmp_path):
+    """4 segments straight (a restart after each) against 2 of them, the restart
+    file, and 2 more segments in a FRESH process on the same two devices: the same
+    state and carried acceleration by id, bit for bit, the same last diagnostics,
+    the restore's digest matching and no warning. The file holds the by-id arrays
+    and the layout."""
+    straight = _run(
+        restart_every=1, restart_path=str(tmp_path / "restart_{segment}.npz")
+    )
+    assert len(straight.restarts) == 4
+    path = tmp_path / "restart_2.npz"
+    arrays, meta = load_restart(path)
+    assert set(arrays) == {
+        "state",
+        "masses",
+        "acceleration",
+        "mesh_ids",
+        "mesh_padding",
+    }
+    assert arrays["state"].shape == (N, 2, 3) and arrays["mesh_ids"].shape == (
+        NDEV * CAP,
+    )
+    assert arrays["mesh_padding"].shape == (NDEV * CAP - N, 3)
+    assert meta["counters"]["step"] == 4 and meta["counters"]["segment"] == 2
+    assert meta["mesh"]["ndev"] == NDEV and meta["mesh"]["cap"] == CAP
+    assert meta["baselines"] == straight.baselines
+    out = tmp_path / "resumed.npz"
+    child = f"import {__name__} as m; m._resume(*{[str(path), str(out)]!r})"
+    proc = subprocess.run(
+        [sys.executable, "-c", child],
+        env=dict(os.environ, PYTHONPATH=os.pathsep.join(sys.path)),
+        capture_output=True,
+        text=True,
+        timeout=1800,
+    )
+    assert proc.returncode == 0, proc.stderr[-4000:]
+    with np.load(out) as got:
+        restored = json.loads(str(got["restored"]))
+        assert restored["bitwise"], (restored, str(got["warned"]))
+        assert restored["layout"] == "file"
+        assert json.loads(str(got["warned"])) == []
+        assert got["steps"].tolist() == [6, 8]
+        _bitwise(got["state"], straight.state, "resumed state")
+        _bitwise(
+            got["acceleration"],
+            straight.handle.gather()["acceleration"],
+            "resumed acceleration",
+        )
+        assert json.loads(str(got["diagnostics"])) == straight.edges[-1].diagnostics
+
+
+def test_a_restart_on_another_mesh_continues_and_says_it_is_not_bitwise(tmp_path):
+    """The two-device file continued on ONE device: the by-id state decomposed
+    there, its carried acceleration placed by id (no start force), the run
+    finished -- the same trajectory to round-off (the direct sum's source axis
+    has another length there), and ``restored["bitwise"]`` False with the layout
+    named."""
+    straight = _run(
+        restart_every=1, restart_path=str(tmp_path / "restart_{segment}.npz")
+    )
+    with pytest.warns(UserWarning, match="not bitwise"):
+        other = _runner(ndev=1).run(
+            dt=DT,
+            num_steps=8,
+            restart_from=tmp_path / "restart_2.npz",
+            external_params=PARAMS,
+        )
+    assert not other.restored["bitwise"]
+    assert other.restored["layout"] == "decomposed"
+    assert "mesh_layout" in other.restored["mismatches"]
+    assert other.handle.ndev == 1 and other.step == 8
+    assert not other.handle.reports[0].start_force
+    np.testing.assert_allclose(other.state, straight.state, rtol=0, atol=1e-12)
+
+
+# --------------------------------------------------------------------------
 # Diagnostics.
 # --------------------------------------------------------------------------
 
@@ -399,10 +509,28 @@ def test_a_retried_segment_is_reported_at_its_edge():
     np.testing.assert_allclose(res.state, _run().state, rtol=0, atol=1e-12)
 
 
-def test_the_mesh_mode_refuses_what_it_cannot_take():
+def test_a_failed_segment_names_the_last_restart(tmp_path):
+    """Armed after step 4 with no re-plan: the third segment raises a RuntimeError
+    that names it, its steps and the last restart file."""
+    force = _Armed(retryable=False, G=G, softening=SOFT, axis_name=AXIS)
+
+    def arm(edge):
+        if edge.step == 4:
+            force.armed = True
+
+    path = str(tmp_path / "restart_{segment}.npz")
+    with pytest.raises(RuntimeError) as info:
+        _run(force=force, callbacks=(arm,), restart_every=1, restart_path=path)
+    message = str(info.value)
+    assert "segment 3 (steps 4 to 6)" in message, message
+    assert f"Last restart: {tmp_path / 'restart_2.npz'}" in message, message
+    assert "armed" in message
+
+
+def test_the_mesh_mode_refuses_what_it_cannot_take(tmp_path):
     """Force parameters other than the force's own (it is static in them), an
-    in-scan step callback, a 2-D mesh; a multi-GPU result continued on one card.
-    The force's own parameters pass."""
+    in-scan step callback, a 2-D mesh; a multi-GPU restart file on one card. The
+    force's own parameters pass."""
     from jaccpot import ForceParams
 
     state, masses = _ic()
@@ -431,6 +559,11 @@ def test_the_mesh_mode_refuses_what_it_cannot_take():
     mesh_2d = jax.sharding.Mesh(np.asarray(jax.devices()[:2]).reshape(2, 1), ("a", "b"))
     with pytest.raises(ValueError, match="1-D"):
         MeshRunConfig(mesh_2d)
+    _run(num_steps=2, restart_every=1, restart_path=str(tmp_path / "r.npz"))
+    with pytest.raises(ValueError, match="multi-GPU mode"):
+        ProductionRunner(_solver()).run(
+            dt=DT, num_steps=4, restart_from=tmp_path / "r.npz"
+        )
     with pytest.raises(ValueError, match="'mesh' RunResult"):
         ProductionRunner(_solver()).run(
             dt=DT, num_steps=4, restart_from=RunResult(*[None] * 14, mode="mesh")

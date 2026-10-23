@@ -55,8 +55,8 @@ starts (docs/production.md, "Launch environment").
 
 THE MULTI-GPU MODE. ``ProductionRunner(solver, ..., mesh=<a 1-D jax Mesh or a
 :class:`MeshRunConfig`>)`` runs the same loop -- segments, edges, callbacks, the
-diagnostics with the energy, a continuation from the result, the segment retry --
-on the fused multi-GPU lane's segment runner
+diagnostics with the energy, restart files and their continuation, the segment
+retry -- on the fused multi-GPU lane's segment runner
 (:class:`~jaccpot.distributed.segment.MeshSegmentRunner`;
 :mod:`jaccpot.distributed.mesh_runner` is that mode's backend). The API stays in
 input (id) order: ``run(state [N, 2, 3], masses [N], ...)`` decomposes the particles
@@ -1135,7 +1135,9 @@ def load_restart(path: Union[str, "os.PathLike"]) -> tuple:
     tuple
         ``(arrays, meta)``: a dict of host arrays (``state``, ``masses``,
         ``self_acceleration``, and ``acceleration`` / ``force_scale`` where the
-        run had them) and the decoded JSON.
+        run had them; a multi-GPU file, whose ``meta["mesh"]`` is set, holds the
+        total ``acceleration`` and no ``self_acceleration``, plus the layout's
+        ``mesh_ids`` and ``mesh_padding``) and the decoded JSON.
 
     Raises
     ------
@@ -1550,6 +1552,12 @@ class ProductionRunner:
             res.state = res.handle = None  # consumed
         elif isinstance(restart_from, (str, os.PathLike)):
             arrays, meta = load_restart(restart_from)
+            if meta.get("mesh") is not None:
+                raise ValueError(
+                    f"{restart_from} was written by the multi-GPU mode (on "
+                    f"{meta['mesh'].get('ndev')} devices): continue it with "
+                    "ProductionRunner(..., mesh=...)"
+                )
             state_now = jnp.asarray(arrays["state"])
             masses_now = jnp.asarray(arrays["masses"])
             counters = meta["counters"]
