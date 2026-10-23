@@ -180,7 +180,9 @@ def decompose(
 
     The host only splits the arrays evenly in their given order (no sort); one jitted
     :func:`~yggdrax.distributed.partition.sfc_repartition` then makes each device own
-    a contiguous Morton range. Accelerations are zero until the first force.
+    a contiguous Morton range. Accelerations are zero until the first force. The
+    program is built once per mesh, capacity and options and reused by every later
+    call (a fresh run of the same runner compiles nothing here).
 
     Parameters
     ----------
@@ -262,6 +264,11 @@ def decompose(
     return state, {k: np.asarray(vv) for k, vv in diag.items()}
 
 
+#: :func:`_make_repartition`'s programs, by (mesh, capacity, options): a jit built
+#: per call is a new function to jax, and every fresh run compiled it again
+_REPARTITION_PROGRAMS: dict = {}
+
+
 def _make_repartition(
     mesh: Any,
     *,
@@ -270,12 +277,27 @@ def _make_repartition(
     axis_name: str,
     route_velocities: bool = True,
 ) -> Callable:
-    """A jitted mesh repartition of ``(x, v, m, ids, count)``.
+    """A jitted mesh repartition of ``(x, v, m, ids, count)``, built once per key.
 
     ``route_velocities=False`` is a deliberate MUTATION for tests: velocities stay in
     the old row order while everything else moves, which must break the rollout's
     equivalence -- proof that the equivalence test can see a mis-route.
     """
+    from jaccpot._env import env_text
+
+    # the box shape reads JACCPOT_CUBIC_BOUNDS when the program traces
+    # (`fused.cube_bounds`): a program traced under another value is another one
+    key = (
+        mesh,
+        int(cap),
+        int(num_samples),
+        axis_name,
+        bool(route_velocities),
+        env_text("JACCPOT_CUBIC_BOUNDS"),
+    )
+    program = _REPARTITION_PROGRAMS.get(key)
+    if program is not None:
+        return program
     ndev = len(_mesh_devices(mesh))
 
     def body(x: Array, v: Array, m: Array, ids: Array, count: Array) -> tuple:
@@ -309,7 +331,9 @@ def _make_repartition(
         ),
         check_vma=False,
     )
-    return jax.jit(mapped)
+    program = jax.jit(mapped)
+    _REPARTITION_PROGRAMS[key] = program
+    return program
 
 
 def _repartition_shard(

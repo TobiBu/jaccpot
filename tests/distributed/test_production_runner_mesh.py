@@ -234,6 +234,38 @@ def test_chained_runs_are_one_run():
         runner.run(dt=DT, num_steps=8, restart_from=first, external_params=PARAMS)
 
 
+_LOWERINGS: list = []
+
+
+def _count_lowerings(event, duration, **kwargs):
+    """A ``jax.monitoring`` listener: every program jax lowers (traced anew), on or
+    off a persistent compilation cache (which only skips the backend compile)."""
+    del duration, kwargs
+    if event == "/jax/core/compile/jaxpr_to_mlir_module_duration":
+        _LOWERINGS.append(event)
+
+
+def test_a_fresh_run_of_the_same_runner_lowers_no_program():
+    """``runner.run(...)`` a second and a third time on the same runner: a fresh
+    decomposition, packing, force and segment programs, edges, the energy -- and
+    not one program lowered again. Before, the decomposition's ``jit(shard_map)``
+    (built per call in ``rollout.decompose``) and ``MeshState.from_shard_state``'s
+    ``jax.jit(lambda ...)`` were new functions to jax on every run."""
+    from jax import monitoring
+
+    monitoring.register_event_duration_secs_listener(_count_lowerings)
+    runner = _runner()
+    state, masses = _ic()
+    kwargs = dict(dt=DT, num_steps=4, external_params=PARAMS)
+    first = runner.run(state, masses, **kwargs)
+    _LOWERINGS.clear()
+    second = runner.run(state, masses, **kwargs)
+    third = runner.run(state, masses, **kwargs)
+    assert _LOWERINGS == [], f"{len(_LOWERINGS)} programs lowered again"
+    _bitwise(second.state, first.state, "a fresh run")
+    _bitwise(third.state, first.state, "another fresh run")
+
+
 # --------------------------------------------------------------------------
 # Restart files.
 # --------------------------------------------------------------------------

@@ -182,14 +182,58 @@ class MeshState:
         MeshState
             Positions and velocities stacked into ``(ndev * cap, 2, 3)``.
         """
-        sharding = NamedSharding(mesh, P(axis_name))
-        pack = jax.jit(lambda x, v: jnp.stack([x, v], axis=1), out_shardings=sharding)
         return cls(
-            state=pack(shard.positions, shard.velocities),
+            state=_state_packer(NamedSharding(mesh, P(axis_name)))(
+                shard.positions, shard.velocities
+            ),
             masses=shard.masses,
             ids=shard.ids,
             count=shard.count,
         )
+
+
+#: :func:`_state_packer`'s programs, by output sharding
+_PACKERS: dict = {}
+
+
+def _stack_state(x: Array, v: Array) -> Array:
+    """Positions and velocities as one ``(rows, 2, 3)`` state.
+
+    Parameters
+    ----------
+    x : Array
+        ``(rows, 3)`` positions.
+    v : Array
+        ``(rows, 3)`` velocities.
+
+    Returns
+    -------
+    Array
+        ``(rows, 2, 3)``.
+    """
+    return jnp.stack([x, v], axis=1)
+
+
+def _state_packer(sharding: Any) -> Callable:
+    """:func:`_stack_state` jitted onto ``sharding``, built once per sharding.
+
+    A ``jax.jit`` of a lambda built per call is a new function to jax: every fresh
+    run of a runner compiled it again.
+
+    Parameters
+    ----------
+    sharding : Any
+        The output's ``NamedSharding``.
+
+    Returns
+    -------
+    Callable
+        ``(x, v) -> state``.
+    """
+    packer = _PACKERS.get(sharding)
+    if packer is None:
+        packer = _PACKERS[sharding] = jax.jit(_stack_state, out_shardings=sharding)
+    return packer
 
 
 @dataclass
