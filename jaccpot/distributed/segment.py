@@ -1922,7 +1922,11 @@ class MeshSegmentRunner:
                 out_specs=(spec,) * rows + (P(),) * 3,
                 check_vma=False,
             )
-        program = jax.jit(mapped)
+        # the rebalance consumes the edge's rows (a declined migration returns
+        # them unchanged), so its outputs can take their buffers: one copy of the
+        # rows less at the run's peak
+        donate = tuple(range(rows)) if kind == "rebalance" and self.donate else ()
+        program = jax.jit(mapped, donate_argnums=donate)
         cache[key] = program
         return program
 
@@ -1956,7 +1960,12 @@ class MeshSegmentRunner:
 
         cuts = self._migration_program("cuts")(state.state, state.count)
         need, _ = self._migration_program("need")(state.state, state.count, cuts)
-        size = migration_cap_for_need(int(jax.device_get(need)), self.cap)
+        # at least the segments' buffer: one program for every rebalance that
+        # fits it (most of them, once the first has evened the counts)
+        size = max(
+            int(self.migration_cap or 0),
+            migration_cap_for_need(int(jax.device_get(need)), self.cap),
+        )
         acc = state.acceleration
         if acc is None:
             acc = jax.device_put(
@@ -1977,15 +1986,10 @@ class MeshSegmentRunner:
         )
         moved, bits = (int(v) for v in jax.device_get(out[-2:]))
         declined = bool(bits & OVERFLOW_SHARD)
-        if declined:
-            # even cuts cannot overfill a shard; declined, the old cuts stand
-            return state, {
-                "declined": np.ones(self.ndev, bool),
-                "recv_counts": np.asarray(state.count)[None].repeat(self.ndev, 0),
-                "sent_off_device": np.zeros(self.ndev, np.int64),
-                "max_util": np.zeros(self.ndev, np.float32),
-            }
-        self.splitters = cuts
+        if not declined:
+            # (even cuts cannot overfill a shard; declined, the rows came back
+            # unchanged and the old cuts stand)
+            self.splitters = cuts
         counts = np.asarray(out[4])
         sent = np.zeros(self.ndev, np.int64)
         sent[0] = moved
@@ -2000,7 +2004,7 @@ class MeshSegmentRunner:
             ),
         )
         return routed, {
-            "declined": np.zeros(self.ndev, bool),
+            "declined": np.full(self.ndev, declined),
             "recv_counts": counts[None].repeat(self.ndev, 0),
             "sent_off_device": sent,
             "max_util": np.full(self.ndev, counts.max() / self.cap, np.float32),
