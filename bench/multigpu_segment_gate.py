@@ -112,6 +112,7 @@ def _args() -> argparse.Namespace:
         help="the galaxy preset's eq (16a) (default) or the geometric theta 0.8",
     )
     p.add_argument("--force-repeats", type=int, default=5)
+    p.add_argument("--ndev", type=int, default=2, help="segment mode: mesh devices")
     p.add_argument(
         "--migrate",
         action="store_true",
@@ -128,7 +129,7 @@ def _args() -> argparse.Namespace:
 
 
 ARGS = _args()
-NDEV = 1 if ARGS.mode == "solo" else 2
+NDEV = 1 if ARGS.mode == "solo" else int(ARGS.ndev)
 CAP = int(ARGS.n / NDEV * 1.15) if NDEV > 1 else ARGS.n
 
 
