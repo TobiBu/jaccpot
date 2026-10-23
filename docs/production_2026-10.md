@@ -1688,3 +1688,95 @@ and stays the reference. The single-card lane is untouched: CPU program identity
   `max_recv_leaves`.
 - pydoclint's exclude pattern `dist` also matches `jaccpot/distributed/`, so that package is never linted (50
   violations on main).
+
+## S12 — `dehnen_error` on the fused multi-GPU lane (2026-10-23)
+
+Plan S12, the user's decision D2: the multi-GPU lane runs the production MAC (since 2026-10-21 `preset="galaxy"` is
+`dehnen_error` at `adaptive_eps=1e-4`), its cost measured. Built on the S11 stack (`s11/7-runner-library-caps`,
+PRs #458-#464), branch `s12/mesh-dehnen-error`; yggdrax #103 (the clamped ragged exchange). Only the NEW path, the
+template route (`prepare_mesh_force`, `FusedMeshForce`, `MeshSegmentRunner`), runs the criterion; the stacked route
+(`setup_fused_force`, `make_fused_force_evaluator`, `fused_force_step`, `FusedRollout`) keeps refusing it.
+
+### What S12 built
+| piece | change |
+| --- | --- |
+| f_b's far half behind a cross list | `_far_force_scale_inputs` returned `None` behind a cross list, and the separate pass then summed the LOCAL far pairs only: the other domains' far field was missing from the next thresholds. The imported sources' masses now ride next to `cross_far`: on the GPU route `FarForceScaleInputs` covers `[local ; imported]` (the CSR M2L lanes kernel reads mass and centre by source index; the merged CSR of S11-C puts the cross pairs in the rows), on the separate pass (CPU) `cross_far_force_scale_own` adds the cross pairs' own terms before the push-down |
+| the cross near term's f_b | the leaf-pool CSR kernel gets the sorted kernel's force-scale lane (`with_force_scale`: `G m / (r^2 + eps^2)` in lane 3 instead of the potential, the same launch); `_add_cross_near_term` adds the share to f_b |
+| the criterion in the cross walks | the thresholds are computed before the hook (`_call_cross_hook` hands it this step's `FlatWalkCriterion`); each device publishes, behind its summary rows, every published node's eq (16a) table row (G M, `eps * min_b f_b` of its subtree, `s_1..s_p` on the published radius): p + 2 more columns of the one all_gather. `_symmetric_walk` gives the gathered table to `cross_walk_fn`'s criterion walk (the Pallas walk's `error_table`, or yggdrax's `pair_accept=DehnenWalkAccept`), so both devices evaluate every cross pair from the same floats. The far payload carries each node's mass moment (one column). Under the criterion `make_cross_hook(error_criterion=True)` refuses every control exchange and the `aabb` geometry |
+| f_b through the runner | the seed: each device's caps-only prepare's `_fused_force_scale_seed`, in input row order. It is local-only, a lower bound of the single card's seed (f_b sums positive terms; this one leaves out the other domains'), so the first force is stricter, never looser: the single card's own contract holds. Then f_b goes in and out of the start program, rides the scan carry, `MeshState` and the repartition payload; a retry restarts from the re-prepare's seed |
+
+The criterion-aware exchange gates stay correct: under the criterion only the symmetric exchange runs (a separate
+near or export theta, `JACCPOT_CROSS_SYMMETRIC=0`, tiles, a receiver walk or `max_leaves_per_cell != 1` select a
+control whose walks re-test imported rows without a table: refused at construction). No new capacity: the table
+columns are a static width of the summary, the mass a column of the far payload, the cross near f_b the same launch
+as its force, so `CROSS_NEEDS_FIELDS` still covers everything the criterion path reads.
+
+**Found on the way (GPU only):** the first version shipped the mass as `where(alive[:, None], mass[rows], 0)`, a
+`(rows, rows)` broadcast: on two A100s at 2e6 the start program asked for 215 GiB (323 GiB of temporaries at compile
+time), and the receiver read every row's mass as the sender's first row's. At the CPU gates' size the payload was
+1024 wide, nothing overflowed and every number but the cross far f_b looked right. Fixed before the PR; gate (b) now
+checks each imported far row's mass against its owner's published G M (the broadcast fails it: 24 of 27 rows).
+
+### Gates (CPU, two forced devices; N = 2048 uniform cube, leaf 64, p4, eps 1e-4)
+| gate | result |
+| --- | --- |
+| (a) one device == the single card's particle carry with f_b | bitwise: state 0/6144, acceleration 0/3072, f_b 0/1024 differ (N = 1024, 3 steps, same box, the single card's own seed; the mesh's seed is that seed bitwise). A wrongly ordered seed moves 1005/6144 state elements |
+| (b) both devices decide every cross pair alike | identical gathered summary (14 columns: 8 + p + 2) and identical pair sets on both devices (186 far, 870 near) |
+| (b) eq (16a) on every cross far pair | evaluated independently in float64 on the gathered table: max ratio 0.9995 (< 1), convergence <= 0.43, gap past the floor >= 0.56; all 870 leaf-leaf near pairs fail it. Mutation (geometric cross walks under the criterion): 329/329 far pairs fail it (max ratio 241) |
+| (b) f_b | mesh vs one card on the same particles: median 3.7e-3, max 3.9e-2 (both estimators against the exact sum: 4.3e-3 / 3.1e-2 mesh, 6.6e-3 / 4.2e-2 one card); the cross f_b terms dropped: 0.21 / 0.61 against the exact sum, the local-only sum's spread. The lanes-kernel route (interpret) and the separate pass: f_b identical. Every imported far row's mass is its owner's published G M, bitwise |
+| (b) force | rel-L2 against the direct sum: mesh 2.63e-5, one card 3.30e-5 (theta 0.8 on the mesh: 3.64e-3); 2 + 2 steps == 4 bitwise with f_b carried |
+| (c) a retry under the criterion == a fresh run with the final caps | bitwise, f_b included (leaf capacity 44 outgrown) |
+| f_b rides the repartition | a stand-in f_b (id + forces) after 10 x 2 steps with a repartition before every segment: `id + 21` everywhere, == never repartitioned; unrouted, it breaks |
+| single-card lane | CPU program identity 36/36 against `s11-stack-cpu` |
+
+The segment job (`test-distributed-segment`) grows from 4 to 8 cases: 1363 s of calls on this host (700 s wall at
+`-n 2`), under the job's 40-minute cap at CI's `-n 1` if its runners are no slower than this shared host.
+
+### On two A100s (cards 2 + 4)
+`bench/multigpu_segment_gate.py` (`preset="galaxy"`, leaf 64, p6, library cross capacities sized at the start,
+segments of 8 steps with a repartition before each, rel-L2 against an fp64 direct sum on 512 fixed ids). Card 4 held
+another user's training job (60-100 % utilisation) until ~05:05; the rows after that ran with no other process on
+either card ("free"; card 2 shows 427 MiB held but lists no process).
+
+| row | MAC | rel-L2 start / end | one card, same positions | peak B/p | flags |
+| --- | --- | --- | --- | --- | --- |
+| Plummer 2e6 | `dehnen_error` 1e-4 | 1.324e-4 / 1.636e-4 | 1.767e-4 / 1.672e-4 | 671-676 (475-487 on explicit caps) | 10 segments, 9 repartitions, clean |
+| Plummer 2e6 | geometric 0.8 | 5.191e-4 / 4.770e-4 | 5.098e-4 / 4.507e-4 | 662 (412 on explicit caps) | the same |
+| disc+bulge 2e6 | `dehnen_error` 1e-4 | 6.212e-5 / 8.200e-5 | 1.026e-4 / 8.859e-5 | 842-846 | 6 segments, 5 repartitions, clean |
+| disc+bulge 2e6 | geometric 0.8 | 3.188e-4 / 3.141e-4 | 3.260e-4 / 2.926e-4 | 961-962 | the same |
+
+The Plummer rows' first segment retries once (the S11 drift effect), the disc rows' fifth, on both MACs.
+"Explicit caps" reruns on the first run's final cross capacities (`--cross-json`), without the sizing measurement in
+the process: the S11 record's 412 B/p, now +15-18 % under the criterion.
+
+**Time, Plummer 2e6 (1e6 per card), free cards, the arms interleaved from one frozen tree:**
+
+| | `dehnen_error` | geometric | ratio |
+| --- | --- | --- | --- |
+| mesh step (segment wall / 8, steady state) | 32.67 / 32.49 ms | 21.74 / 21.82 ms | 1.50x / 1.49x |
+| mesh force alone (start program, min of 9) | 33.21 / 32.91 ms | 22.49 / 22.30 ms | 1.48x |
+
+The lists explain it: at 1e6 per card the criterion's lists are longer than theta 0.8's (local far +26 %, near
++26 %, cross far pairs +55 %, cross near +14 %, the particles shipped equal), as on one card at this N
+(`docs/dehnen_error_fused_2026-10.md`: the criterion's lists per particle shrink with N; at 25M they match theta
+0.8's, hence 1.12x there).
+One card on the same 2e6 particles (free card 2, both arms in one process, 40 interleaved rounds of the jitted
+`prov.step`): `dehnen_error` 29.90 / 30.25 ms (min / median), geometric 18.90 / 19.01 ms, **1.58x**. The mesh's 1.49x
+is the single card's ratio at this N, not a cost of its own; at 25M on one card it was 1.12x.
+
+**8e6 (4e6 per card) did not run, on either MAC, and not because of S12.** The first segment overflows its trees
+after one drift step (a level of 245,758 nodes against the plan's 84,495), and the re-plan grows the cross
+capacities from that run's needs, which read a leaf width of 4,002,489 and as many particles to ship (a whole
+shard). The re-run's program then asks for 282.7 GiB (geometric) or exceeds Triton's launch grid in the cross near
+kernel (`dehnen_error`). Dropping the cross needs of a run whose trees overflowed is not enough: the re-run, on trees
+that fit, reads the same whole-shard leaf width while its cross-walk queue overflows (`walk_lower_bound` set). The
+S11 cross needs at 4e6 per card are the open question (captured with a spy on `FusedMeshForce.replan`; the
+start force and the post-sizing segment program, 1.07 GiB of temporaries, are fine).
+
+### Open after S12
+- The S11 cross needs at 4e6 per card (above): the 8e6 rows, and with them the large-N ratio on the mesh.
+- Four cards (none free this session) and timed disc rows (card 4 was shared during them: the disc's 307 against
+  361 ms per step is contended and is not a result).
+- The per-device seed's far half is the single card's `far_force_scale_sorted` (a scatter-add): like the single
+  card's seed, not bitwise reproducible on a GPU; every later f_b is (the lanes kernel and the cascade).
+- The runner's multi-GPU mode (S11 session 2) takes the criterion with no further change to the lane.

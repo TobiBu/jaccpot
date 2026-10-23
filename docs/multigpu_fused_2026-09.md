@@ -1672,6 +1672,11 @@ whose cost is mostly waiting at them.
 
 ## Next
 
+**2026-10-23 (plan S12):** the new path runs `mac_type="dehnen_error"` (the galaxy preset's MAC): eq (16b)'s f_b
+rides the segment carry, each device publishes its summary nodes' eq (16a) table rows in the one all_gather, and the
+symmetric exchange's cross walks accept by the same criterion on both devices (the old path keeps refusing it).
+Measured: `docs/production_2026-10.md`, section "S12".
+
 **2026-10-23 (plan S11, session 1):** the lane runs on the single-card runner's machinery, as a new path next to
 the one above: one shape template instead of stacked prepared states (`distributed/template_force.py`), one program
 per segment with the state donated and a mesh-wide segment retry (`distributed/segment.py`), the cross capacities
