@@ -524,9 +524,10 @@ class MeshBackend:
             The force; prepared here (and the cross capacities sized, under
             ``cross_caps="auto"``).
         migration : Optional[dict]
-            ``migrate=True`` on a same-mesh restore: the file's ``splitters`` (the
-            cuts of ``layout``'s ownership) and ``migration_cap``; ``None``: the
-            configuration's buffer, the cuts chosen by the runner's repartition.
+            ``migrate=True``: the ``splitters`` (the cuts of ``layout``'s ownership:
+            a same-mesh restore's file, or :meth:`_decomposed`'s) and, on a
+            restore, ``migration_cap``; ``None``: the configuration's buffer, the
+            cuts chosen by the runner's repartition.
 
         Returns
         -------
@@ -572,8 +573,16 @@ class MeshBackend:
             num_particles, self.ndev, float(self.config.cap_headroom)
         )
 
-    def _decomposed(self, state: np.ndarray, masses: np.ndarray) -> Any:
+    def _decomposed(
+        self, state: np.ndarray, masses: np.ndarray, force: Any
+    ) -> tuple[Any, Optional[dict]]:
         """The host by-id particles decomposed over the mesh.
+
+        Under ``migrate=True`` the Morton ranges are cut in the FORCE's box (the
+        box the migration's cuts live in, ``TreeConfig.cubic_bounds``) and the cuts
+        are read off them (``migration.ownership_splitters``), so the segment
+        runner starts on them instead of repartitioning into that box again: one
+        cap-sized exchange and its buffers less in the setup.
 
         Parameters
         ----------
@@ -581,16 +590,22 @@ class MeshBackend:
             ``[N, 2, 3]`` in id order.
         masses : np.ndarray
             ``[N]``.
+        force : Any
+            The run's force (its box shape).
 
         Returns
         -------
-        Any
+        tuple[Any, Optional[dict]]
             The :class:`~jaccpot.distributed.segment.MeshState` (ids ``0..N-1``,
-            no acceleration yet).
+            no acceleration yet) and, under ``migrate=True``, ``{"splitters":
+            <its cuts>}`` for :meth:`_segment_runner` (``None`` otherwise).
         """
+        from jaccpot.distributed.migration import ownership_splitters
         from jaccpot.distributed.rollout import decompose
-        from jaccpot.distributed.segment import MeshState
+        from jaccpot.distributed.segment import MeshState, _force_box_cubic
 
+        migrate = bool(self.config.migrate)
+        cubic = _force_box_cubic(force) if migrate else None
         shard, _ = decompose(
             self.mesh,
             state[:, 0],
@@ -599,8 +614,21 @@ class MeshBackend:
             cap=self._cap(int(state.shape[0])),
             num_samples=int(self.config.num_samples),
             axis_name=self.axis_name,
+            cubic=cubic,
         )
-        return MeshState.from_shard_state(shard, self.mesh, axis_name=self.axis_name)
+        migration = None
+        if migrate:
+            migration = {
+                "splitters": ownership_splitters(
+                    self.mesh,
+                    shard.positions,
+                    shard.count,
+                    cubic=bool(cubic),
+                    axis_name=self.axis_name,
+                )
+            }
+        layout = MeshState.from_shard_state(shard, self.mesh, axis_name=self.axis_name)
+        return layout, migration
 
     def _fresh(self, state: np.ndarray, masses: np.ndarray) -> Any:
         """A fresh run's segment runner: decomposed, its force prepared.
@@ -617,7 +645,9 @@ class MeshBackend:
         Any
             The segment runner.
         """
-        return self._segment_runner(self._decomposed(state, masses), self._force())
+        force = self._force()
+        layout, migration = self._decomposed(state, masses, force)
+        return self._segment_runner(layout, force, migration)
 
     def _sharded(self, arr: Optional[np.ndarray]) -> Any:
         """A flat host array placed ``P(axis)`` on the mesh.
@@ -1035,7 +1065,10 @@ class MeshBackend:
             self._install_plan(msr.force, meta)
         else:
             mismatches.append("mesh_layout")
-            layout = self._decomposed(arrays["state"], arrays["masses"])
+            force = self._force()
+            layout, migration = self._decomposed(
+                arrays["state"], arrays["masses"], force
+            )
             ids = _host(layout.ids)
             live = ids >= 0
             for name, by_id in (
@@ -1047,7 +1080,7 @@ class MeshBackend:
                 flat = np.zeros((ids.shape[0],) + by_id.shape[1:], by_id.dtype)
                 flat[live] = by_id[ids[live]]
                 setattr(layout, name, self._sharded(flat))
-            msr = self._segment_runner(layout, self._force())
+            msr = self._segment_runner(layout, force, migration)
         digests = {"force_key": _key_digest(msr.force.key())}
         if same_layout and digests["force_key"] != meta["digests"].get("force_key"):
             mismatches.append("force_key")

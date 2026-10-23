@@ -175,6 +175,7 @@ def decompose(
     ids: Optional[Any] = None,
     num_samples: int = 256,
     axis_name: str = AXIS_NAME,
+    cubic: Optional[bool] = None,
 ) -> tuple[ShardState, dict]:
     """Place a host particle set on the mesh as Morton domains, on device.
 
@@ -203,6 +204,11 @@ def decompose(
         Pivot samples per device.
     axis_name : str
         Mesh axis.
+    cubic : Optional[bool]
+        The box the Morton ranges are cut in (:func:`~jaccpot.distributed.fused.cube_bounds`);
+        ``None`` (the default) the environment's, as before. The segment runner's
+        migration decomposes in the force's box (``TreeConfig.cubic_bounds``), where
+        its cuts live.
 
     Returns
     -------
@@ -245,7 +251,7 @@ def decompose(
         jax.device_put(a, sh) for a in (flat_pos, flat_vel, flat_mass, flat_id, counts)
     )
     repart = _make_repartition(
-        mesh, cap=cap, num_samples=num_samples, axis_name=axis_name
+        mesh, cap=cap, num_samples=num_samples, axis_name=axis_name, cubic=cubic
     )
     x, v, m, i, c, diag = repart(x, v, m, i, c)
     if bool(np.asarray(diag["declined"])[0]):
@@ -276,12 +282,14 @@ def _make_repartition(
     num_samples: int,
     axis_name: str,
     route_velocities: bool = True,
+    cubic: Optional[bool] = None,
 ) -> Callable:
     """A jitted mesh repartition of ``(x, v, m, ids, count)``, built once per key.
 
     ``route_velocities=False`` is a deliberate MUTATION for tests: velocities stay in
     the old row order while everything else moves, which must break the rollout's
-    equivalence -- proof that the equivalence test can see a mis-route.
+    equivalence -- proof that the equivalence test can see a mis-route. ``cubic``:
+    the decomposition box (:func:`_repartition_shard`).
     """
     from jaccpot._env import env_text
 
@@ -293,6 +301,7 @@ def _make_repartition(
         int(num_samples),
         axis_name,
         bool(route_velocities),
+        cubic,
         env_text("JACCPOT_CUBIC_BOUNDS"),
     )
     program = _REPARTITION_PROGRAMS.get(key)
@@ -312,6 +321,7 @@ def _make_repartition(
             num_samples=num_samples,
             axis_name=axis_name,
             route_velocities=route_velocities,
+            cubic=cubic,
         )
         return routed[:5] + routed[6:]
 

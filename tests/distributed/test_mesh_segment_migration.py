@@ -442,6 +442,36 @@ def _production(migrate, every=0, **config):
     )
 
 
+def test_the_production_mode_decomposes_into_the_forces_box(monkeypatch):
+    """``MeshRunConfig(migrate=True)``: a fresh run decomposes straight into the
+    force's box and starts on the cuts read off that decomposition -- the runner's
+    constructor does not repartition the state again (one cap-sized exchange less
+    in the setup) -- and every live row is then where those cuts put it."""
+    from jaccpot.distributed.segment import MeshSegmentRunner
+    from tests.distributed import test_production_runner_mesh as prm
+
+    calls = []
+    original = MeshSegmentRunner._repartition
+
+    def counted(self, state):
+        calls.append(self.segment_index)
+        return original(self, state)
+
+    monkeypatch.setattr(MeshSegmentRunner, "_repartition", counted)
+    state, masses = prm._ic()
+    runner = _production(True)
+    msr = runner._mesh_backend._fresh(state, masses)  # decomposed, force prepared
+    assert calls == [], calls
+    cuts = migration.ownership_splitters(
+        _mesh(), msr.state.state[:, 0], msr.state.count, cubic=False, axis_name=AXIS
+    )
+    np.testing.assert_array_equal(np.asarray(msr.splitters), cuts)
+    res = runner.run(state, masses, dt=prm.DT, num_steps=4, external_params=prm.PARAMS)
+    assert calls == [], calls  # repartition_every=0: none after the start either
+    plans = [e.plan["migration"] for e in res.edges if e.step > 0]
+    assert all(p["migrated"] > 0 for p in plans), plans
+
+
 def test_the_production_mode_migrates_and_restores_its_cuts(tmp_path):
     """``MeshRunConfig(migrate=True)``: the run equals the non-migrating mode's,
     bitwise by id, and its plan records say what moved. Its restart file holds
