@@ -1764,17 +1764,23 @@ One card on the same 2e6 particles (free card 2, both arms in one process, 40 in
 `prov.step`): `dehnen_error` 29.90 / 30.25 ms (min / median), geometric 18.90 / 19.01 ms, **1.58x**. The mesh's 1.49x
 is the single card's ratio at this N, not a cost of its own; at 25M on one card it was 1.12x.
 
-**8e6 (4e6 per card) did not run, on either MAC, and not because of S12.** The first segment overflows its trees
-after one drift step (a level of 245,758 nodes against the plan's 84,495), and the re-plan grows the cross
-capacities from that run's needs, which read a leaf width of 4,002,489 and as many particles to ship (a whole
-shard). The re-run's program then asks for 282.7 GiB (geometric) or exceeds Triton's launch grid in the cross near
-kernel (`dehnen_error`). Dropping the cross needs of a run whose trees overflowed is not enough: the re-run, on trees
-that fit, reads the same whole-shard leaf width while its cross-walk queue overflows (`walk_lower_bound` set). The
-S11 cross needs at 4e6 per card are the open question (captured with a spy on `FusedMeshForce.replan`; the
-start force and the post-sizing segment program, 1.07 GiB of temporaries, are fine).
+**8e6 and 2e7 (4e6 and 1e7 per card).** At first 8e6 did not run on either MAC: the re-plan folded the needs of
+the steps AFTER a failed one, whose force had gone to NaN, and asked for a whole shard (4,002,489 particles) as a
+leaf width. Fixed in S11 (fix 8: the re-plan reads only the steps that started on the trajectory; a segment retries
+while each re-run fits more steps). On it, Plummer, `dehnen_error` 1e-4, library caps, 6 segments x 8 steps with a
+repartition before every segment after the first, cards 0 + 1 (both shared with other jobs at 50-100 %, so no time
+here is a result):
+
+| N | retries (segment) | bits | rel-L2 mesh start / end | one card, same particles | peak |
+| --- | --- | --- | --- | --- | --- |
+| 8e6 | 1 (1), 1 (6) | 0 every segment | 1.3188e-4 / 1.5194e-4 | 1.6033e-4 / 1.5855e-4 | 672-676 B/p (2.70 GB) |
+| 2e7 | 1 (3) | 0 every segment | 1.2802e-4 / 1.9313e-4 | 1.8742e-4 / 1.8110e-4 | 633-642 B/p (6.42 GB) |
+
+The geometric MAC on the same code (S11 fix 8's rows): 8e6 4.36e-4 / 4.30e-4, 2e7 4.33e-4 / 3.91e-4, peaks 662 and
+644 B/p. The large-N time ratio needs free cards.
 
 ### Open after S12
-- The S11 cross needs at 4e6 per card (above): the 8e6 rows, and with them the large-N ratio on the mesh.
+- The large-N time ratio of the criterion on the mesh (8e6 and 2e7 ran on shared cards).
 - Four cards (none free this session) and timed disc rows (card 4 was shared during them: the disc's 307 against
   361 ms per step is contended and is not a result).
 - The per-device seed's far half is the single card's `far_force_scale_sorted` (a scatter-add): like the single
