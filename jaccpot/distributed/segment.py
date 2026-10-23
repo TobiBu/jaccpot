@@ -34,9 +34,11 @@ lane the same, as a new path next to the old one (which stays the reference):
   re-prepares every device caps-only at the segment's START (a host copy of the
   donated start state is kept, as the single card keeps it), recompiles and
   re-runs from the start force: at most twice, the single card's policy, and
-  again as long as each re-run fits more steps than every earlier attempt (the
-  re-plan reads only the steps up to the first failure, so needs that grow step
-  by step are learned a step at a time).
+  again as long as each re-run makes progress -- fits more steps than every
+  earlier attempt (the re-plan reads only the steps up to the first failure, so
+  needs that grow step by step are learned a step at a time), or fails at the
+  same step after a re-plan from lower bounds and needs more than they said
+  (:func:`_retry_made_progress`, the single card's ``_segment_retry_next``).
 * **Repartition BETWEEN segments**, as its own program, every
   ``repartition_every`` segments (host cadence: no ``lax.cond`` around
   collectives, whose device-divergent predicate deadlocks, and none of its buffers
@@ -281,6 +283,81 @@ def _mesh_verdict(
         bits_all,
         jax.lax.pmax(jnp.asarray(needs, jnp.int32), axis_name),
         jax.lax.pmin(jnp.asarray(done, jnp.int32), axis_name),
+    )
+
+
+def _retry_made_progress(needs: np.ndarray, done: int, earlier: list) -> bool:
+    """Whether a failed re-run made progress: the retry past the force's policy.
+
+    The mesh's ``StrictRunMixin._segment_retry_next`` (the single card's rule, the
+    same limits). A re-run made progress when
+
+    * it fitted more steps than every earlier attempt (``done`` grows with each such
+      retry, so there are at most the segment's steps of them), or
+    * it failed at the SAME step as the attempt before, whose needs were LOWER
+      BOUNDS, and it needed more than they said of what they bounded: their re-plan
+      was a doubling, not a measurement (each such retry at least doubles a
+      capacity). The local walk's lists and queue (``lower_bound``: the flat walk
+      stops at its first overflow; ``queue_overflow``: a walk whose queue overflowed
+      counted part of its pairs), the cross walk's lists and queue
+      (``walk_lower_bound``: yggdrax's traced walk stops at its first overflow, the
+      Pallas walk undercounts past a full queue) and the exchange's rows and
+      particles (``pairs_lower_bound``: the walk or the summary lost pairs).
+
+    A re-plan that grows nothing still raises (the force's ``replan``), and
+    ``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns every retry off (the caller).
+
+    Parameters
+    ----------
+    needs : np.ndarray
+        This attempt's needs, mesh-reduced: ``fused_topology.NEEDS_FIELDS``, then
+        ``cross.CROSS_NEEDS_FIELDS``.
+    done : int
+        Steps this attempt fitted before its first failure.
+    earlier : list
+        The segment's earlier failed attempts, in order
+        (:attr:`SegmentReport.failures` entries: ``done``, ``needs``).
+
+    Returns
+    -------
+    bool
+        Whether the segment is retried anyway.
+    """
+    from jaccpot.distributed.cross import _NEEDS_LOWER_BOUND_BIT, CROSS_NEEDS_FIELDS
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    if not earlier:
+        return False
+    best = max(int(f["done"]) for f in earlier)
+    if int(done) > best:
+        return True
+    last = earlier[-1]
+    if not int(done) == best == int(last["done"]):
+        return False
+    now = np.asarray(needs, np.int64)
+    before = np.asarray(last["needs"], np.int64)
+    local = NEEDS_FIELDS.index
+    # (the earlier attempt's lower-bound bit, the needs it qualifies)
+    bounded = [
+        (
+            bool(before[local("lower_bound")] or before[local("queue_overflow")]),
+            list(range(local("far_overflow"))),  # far, near, peak wavefront
+        )
+    ]
+    if now.shape[0] >= len(NEEDS_FIELDS) + len(CROSS_NEEDS_FIELDS):
+        cross = len(NEEDS_FIELDS)
+        for bit in ("walk_lower_bound", "pairs_lower_bound"):
+            fields = [
+                cross + CROSS_NEEDS_FIELDS.index(name)
+                for name, qualifier in _NEEDS_LOWER_BOUND_BIT.items()
+                if qualifier == bit
+            ]
+            bounded.append(
+                (bool(before[cross + CROSS_NEEDS_FIELDS.index(bit)]), fields)
+            )
+    return any(
+        lower and bool(np.any(now[fields] > before[fields]))
+        for lower, fields in bounded
     )
 
 
@@ -1456,8 +1533,6 @@ class MeshSegmentRunner:
         scale_new: tuple = ()
         retries, tree_first = 0, False
         failures: list = []
-        # the most steps an earlier failed attempt fitted (-1: none failed yet)
-        best_done = -1
         while True:
             consumed = False
             if start:
@@ -1516,21 +1591,28 @@ class MeshSegmentRunner:
                 if retry_enabled
                 else None
             )
-            if mode is None and retry_enabled and 0 <= best_done < int(done_h):
-                # PROGRESS: this re-run fitted more steps than every earlier attempt.
-                # The re-plan reads only the steps up to the first failure (the rest
-                # left the trajectory), so a segment whose needs grow step by step is
-                # learned one failing step at a time: the outgrowing-segment gate
-                # under mac_type='dehnen_error' ran out of the force's two retries at
-                # 1 of 2 steps fitted. `done` grows with every such retry, so they
-                # are at most the segment's steps.
+            if (
+                mode is None
+                and retry_enabled
+                and _retry_made_progress(needs_np, int(done_h), failures[:-1])
+            ):
+                # PROGRESS (the single card's `_segment_retry_next`): this re-run
+                # fitted more steps than every earlier attempt, or it failed at the
+                # same step as the attempt before, whose needs were lower bounds,
+                # and needed more than they said. The re-plan reads only the steps
+                # up to the first failure (the rest left the trajectory), so a
+                # segment whose needs grow step by step is learned one failing step
+                # at a time: the outgrowing-segment gate under
+                # mac_type='dehnen_error' ran out of the force's two retries at 1 of
+                # 2 steps fitted. `done` grows with every retry of the first kind,
+                # so there are at most the segment's steps of them; each of the
+                # second kind at least doubles a capacity a stopped walk filled.
                 tree_now = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
                 mode = "full" if tree_now else "walk"
             if mode is None:
                 self.force.raise_overflow(
                     needs_np, int(bits_h), retries=retries, where=where
                 )
-            best_done = max(best_done, int(done_h))
             if retries == 0:
                 tree_first = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
             retries += 1
