@@ -482,6 +482,58 @@ def test_an_undersized_cross_capacity_is_replanned_and_equals_a_fresh_run(
     _gathered_equal(retried, fresh)
 
 
+def test_the_cross_capacities_are_sized_at_the_first_segments_drift(cpu_fused_lane):
+    """A decomposition leaves the two domains apart, and the first steps' drift
+    carries each one's boundary particles into cells the other fills: the cross
+    demand grows past what the start positions needed. Here (the cube at 30x the
+    module's speeds) the particles a device ships go 563 at the start -> 896 /
+    1009 / 1039 after 1 / 2 / 3 steps of drift, and the library's start sizing
+    (1024) overflowed at step 3: the first segment retried. The first ``run()``
+    now measures the drifted positions too (``x + s v dt``, s = 1, 2, 4) and sizes
+    from the larger need: no retry, and the same run as one started with those
+    capacities, bitwise -- also when ``start()`` ran first on the start sizing
+    (its force is computed again, as that fresh run computes it)."""
+    from jaccpot.distributed.segment import MeshSegmentRunner
+
+    steps = 4
+    mesh = _mesh()
+    pos, vel, mass = _ic()
+    vel = vel * np.float32(300.0)
+    solver = _solver()
+    kwargs = dict(leaf_size=LEAF, max_order=ORDER, theta=THETA)
+    sized = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    at_start = sized.force.cross_caps
+    shipped = CROSS_NEEDS_FIELDS.index("send_particle_cap")
+    assert sized.force.cross_needs_measured[shipped] < at_start.send_particle_cap
+    report = sized.run(steps, dt=DT)
+    assert report.retries == 0 and report.bits == 0, report
+    final = sized.force.cross_caps
+    drifted = sized.force.cross_needs_drifted
+    assert drifted is not None
+    # the run needed more than the start sizing holds; the drifted probes saw it
+    run_need = report.needs[-len(CROSS_NEEDS_FIELDS) :][shipped]
+    assert run_need > at_start.send_particle_cap, (run_need, vars(at_start))
+    assert drifted[shipped] > at_start.send_particle_cap, drifted
+    assert final.send_particle_cap >= max(run_need, drifted[shipped]), vars(final)
+
+    fresh = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), cross_caps=final, **kwargs
+    )
+    assert fresh.run(steps, dt=DT).retries == 0
+    _gathered_equal(sized, fresh)
+
+    started = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    assert started.start().retries == 0
+    again = started.run(steps, dt=DT)
+    assert again.start_force and again.retries == 0, again
+    assert vars(started.force.cross_caps) == vars(final)
+    _gathered_equal(started, fresh)
+
+
 class _FailsAtStepTwo:
     """A force with no physics that reads its step off a marker particle: row 0 of
     every device starts at x = 0 with v = 1/dt and no acceleration, so after step k

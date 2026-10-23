@@ -55,7 +55,9 @@ no force program changes.
 capacities are the library's by default (``cross_caps="auto"``): a first guess from
 the merged leaf capacity and the worst shard's live leaves
 (``CrossCapacities.for_shard``), measured by the runner's start force and sized from
-what every capacity needed (``cross.plan_cross_capacities``); a retry grows them
+what every capacity needed (``cross.plan_cross_capacities``), then measured again at
+the first segment's drifted positions (:meth:`FusedMeshForce.plan_cross_drift`: the
+drift after a decomposition grows the cross demand past the start's); a retry grows them
 with ``CrossCapacities.replanned`` from the needs vector
 (``cross.CROSS_NEEDS_FIELDS``) the runner carries after ``NEEDS_FIELDS``, the summary
 following a grown leaf capacity and clamped to what the tree can hold. No bench
@@ -909,6 +911,10 @@ def _cross_by_field(needs: np.ndarray) -> dict:
     return dict(zip(CROSS_NEEDS_FIELDS, (int(v) for v in cross)))
 
 
+class _NoDriftedProbe(Exception):
+    """:meth:`FusedMeshForce.plan_cross_drift`: no drifted state could be read."""
+
+
 class FusedMeshForce:
     """The fused lane's force for :class:`~jaccpot.distributed.segment.MeshSegmentRunner`.
 
@@ -1009,6 +1015,14 @@ class FusedMeshForce:
         )
         #: the cross needs the library's sizing measured (host), once sized
         self.cross_needs_measured: Optional[np.ndarray] = None
+        #: and at the first segment's drifted positions (plan_cross_drift), once
+        #: measured; None until then, or when no probe could be read
+        self.cross_needs_drifted: Optional[np.ndarray] = None
+        #: plan_cross_drift ran (it runs once, at the first segment)
+        self.cross_drift_sized = False
+        #: the capacities of the sizing's clean measurement: their start-force
+        #: program is compiled, so the drifted probes run on them first
+        self._cross_caps_probe: Any = None
         self.near_theta = near_theta
         self.cross_replan = cross_replan
         self.level_floor = None if level_floor is None else tuple(level_floor)
@@ -1200,6 +1214,7 @@ class FusedMeshForce:
         def _measure(caps: Any) -> np.ndarray:
             self.cross_caps = caps
             self.hook, self.near_sink = self._make_hook()
+            self._cross_caps_probe = caps
             return np.asarray(measure())
 
         caps, needs = plan_cross_capacities(
@@ -1214,6 +1229,105 @@ class FusedMeshForce:
         self.cross_caps = caps
         self.cross_needs_measured = np.asarray(needs)
         self.hook, self.near_sink = self._make_hook()
+
+    @property
+    def needs_drift_sizing(self) -> bool:
+        """Whether :meth:`plan_cross_drift` still has to run.
+
+        Returns
+        -------
+        bool
+            ``cross_caps="auto"``, sized at the start positions
+            (:meth:`plan_cross`), not yet at drifted ones.
+        """
+        return (
+            self.cross_auto
+            and self.hook is not None
+            and self.cross_needs_measured is not None
+            and not self.cross_drift_sized
+        )
+
+    def plan_cross_drift(self, measure: Callable[[], Optional[np.ndarray]]) -> bool:
+        """Size ``cross_caps="auto"`` also from the needs at drifted positions.
+
+        A decomposition leaves the domains apart, and the first steps' drift
+        carries each domain's boundary particles into cells its neighbour fills:
+        the cross demand grows for a few steps past what the start positions
+        needed (``MeshSegmentRunner._measure_cross_drifted``), and a first segment
+        sized at the start alone retried. ``measure()`` runs the start force at
+        the first segment's drifted positions on the current hook and returns the
+        cross needs max-ed over them. As in :meth:`plan_cross`: re-planned and
+        measured again while their overflow bit is set, starting from the
+        capacities of the start's clean measurement (their program is compiled);
+        then every capacity is sized from the larger of the two measurements
+        (``from_needs``: 1.5x), never narrower than it is. Runs once.
+
+        When no drifted state could be read (``measure()`` returns ``None``: its
+        own trees or walks overflowed), the start sizing stands, and the
+        segment's own flags and retry decide. Probes that cannot be sized raise
+        ``plan_cross_capacities``' ``RuntimeError`` (they overflowed and no
+        capacity needed more -- a mismatch -- or still overflowed after six
+        measurements), with the start sizing restored.
+
+        Parameters
+        ----------
+        measure : Callable[[], Optional[np.ndarray]]
+            Runs the force with :attr:`hook` at the drifted positions and returns
+            the host cross needs, or ``None``.
+
+        Returns
+        -------
+        bool
+            Whether the capacities changed.
+        """
+        from jaccpot.distributed.cross import (
+            _NEEDS_LOWER_BOUND_BIT,
+            CrossCapacities,
+            plan_cross_capacities,
+        )
+
+        if not self.needs_drift_sizing:
+            return False
+        self.cross_drift_sized = True
+        before = self.cross_caps
+        leaf_capacity = self._setup_or_raise().leaf_capacity
+
+        def _measure(caps: Any) -> np.ndarray:
+            self.cross_caps = caps
+            self.hook, self.near_sink = self._make_hook()
+            needs = measure()
+            if needs is None:
+                raise _NoDriftedProbe
+            return np.asarray(needs)
+
+        try:
+            caps, needs = plan_cross_capacities(
+                _measure,
+                self._cross_caps_probe or before,
+                leaf_capacity=leaf_capacity,
+                leaf_size=self.leaf_size,
+                max_rounds=6,
+            )
+        except (_NoDriftedProbe, RuntimeError) as exc:
+            self.cross_caps = before
+            self.hook, self.near_sink = self._make_hook()
+            if not isinstance(exc, _NoDriftedProbe):
+                raise
+            return False
+        self.cross_needs_drifted = np.asarray(needs)
+        both = np.maximum(np.asarray(needs, np.int64), self.cross_needs_measured)
+        sized = CrossCapacities.from_needs(
+            both, like=caps, leaf_capacity=leaf_capacity, leaf_size=self.leaf_size
+        )
+        # monotone: a start() that retried may have grown them past both
+        self.cross_caps = sized._with(
+            **{
+                name: max(int(getattr(sized, name)), int(getattr(before, name)))
+                for name in _NEEDS_LOWER_BOUND_BIT
+            }
+        )
+        self.hook, self.near_sink = self._make_hook()
+        return vars(self.cross_caps) != vars(before)
 
     def _setup_or_raise(self) -> MeshForceSetup:
         """The prepared setup.
