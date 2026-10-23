@@ -168,3 +168,24 @@ def test_the_segment_runner_refuses_before_preparing_a_shard(
             leaf_size=64,
             max_order=4,
         )
+
+
+def test_the_cross_hook_takes_the_criterion_on_the_symmetric_exchange_only(
+    monkeypatch,
+):
+    """``error_criterion=True`` builds on the default (symmetric) exchange and says
+    so to the refresh (``hook.error_criterion``); a control exchange, whose walks
+    re-test imported rows that carry no eq (16a) table, and the box MAC geometry
+    are refused."""
+    hook = make_cross_hook(ndev=2, theta=0.8, error_criterion=True)
+    assert hook.error_criterion is True
+    assert make_cross_hook(ndev=2, theta=0.8).error_criterion is False
+    with pytest.raises(NotImplementedError, match="symmetric exchange only"):
+        make_cross_hook(ndev=2, theta=0.8, near_theta=0.5, error_criterion=True)
+    monkeypatch.setenv("JACCPOT_CROSS_SYMMETRIC", "0")
+    with pytest.raises(NotImplementedError, match="symmetric exchange only"):
+        make_cross_hook(ndev=2, theta=0.8, error_criterion=True)
+    monkeypatch.delenv("JACCPOT_CROSS_SYMMETRIC")
+    monkeypatch.setenv("JACCPOT_CROSS_MAC_GEOMETRY", "aabb")
+    with pytest.raises(NotImplementedError, match="COM MAC geometry"):
+        make_cross_hook(ndev=2, theta=0.8, error_criterion=True)

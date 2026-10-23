@@ -262,6 +262,32 @@ class _Published(NamedTuple):
     num_entries: Array
 
 
+#: column of the first eq (16a) table entry in a two-sided summary row
+#: (:func:`_summary_rows`): centre 3, radius, left, right, active, count, then the
+#: table's ``G M``, threshold, ``s_1..s_p``
+_SUMMARY_TABLE_COL = 8
+
+
+def _summary_table_width(order: int) -> int:
+    """Table columns a summary row carries under the criterion: ``G M``, the
+    threshold and ``s_1..s_p`` (:func:`~jaccpot.runtime._walk_criterion.dehnen_walk_table`
+    without its power-of-two padding).
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    int
+        ``p + 2``.
+    """
+    from jaccpot.runtime._walk_criterion import WALK_TABLE_POWER0
+
+    return WALK_TABLE_POWER0 + int(order)
+
+
 def _live_node_ends(tree: Any) -> Array:
     """Each node's last LIVE particle (inclusive): its range end, clamped.
 
@@ -293,7 +319,12 @@ def _live_node_ends(tree: Any) -> Array:
 
 
 def _summary_rows(
-    tree: Any, geom: Any, cap: "CrossCapacities", *, two_sided: bool
+    tree: Any,
+    geom: Any,
+    cap: "CrossCapacities",
+    *,
+    two_sided: bool,
+    criterion: Any = None,
 ) -> _Published:
     """This device's summary, packed for ONE all_gather.
 
@@ -309,6 +340,14 @@ def _summary_rows(
         is the block width.
     two_sided : bool
         Publish the summary tree (with child links) instead of the bare cells.
+    criterion : Any
+        ``mac_type='dehnen_error'`` (two-sided only): this step's
+        :class:`~jaccpot.runtime._walk_criterion.FlatWalkCriterion` over the local
+        nodes. Each published node's eq (16a) table row -- ``G M``, the threshold
+        ``eps * min_b f_b`` of its subtree, ``s_1..s_p`` on the PUBLISHED radius,
+        the one the cross walks read -- rides behind the geometry
+        (:data:`_SUMMARY_TABLE_COL`), so every device evaluates every cross pair
+        from the same floats. ``None``: the geometric rows.
 
     Returns
     -------
@@ -371,17 +410,25 @@ def _summary_rows(
     # range length: a padded shard's ranges can run into its dead rows
     ends = _live_node_ends(tree)
     count = jnp.where(st.active, jnp.maximum(ends[safe] - nr[safe, 0] + 1, 0), 0)
-    rows = jnp.concatenate(
-        [
-            jnp.where(ok[:, None], center[safe], 0.0),
-            jnp.where(ok, radius[safe], 0.0)[:, None],
-            st.left.astype(dtype)[:, None],
-            st.right.astype(dtype)[:, None],
-            st.active.astype(dtype)[:, None],
-            count.astype(dtype)[:, None],
-        ],
-        axis=1,
-    )
+    columns = [
+        jnp.where(ok[:, None], center[safe], 0.0),
+        jnp.where(ok, radius[safe], 0.0)[:, None],
+        st.left.astype(dtype)[:, None],
+        st.right.astype(dtype)[:, None],
+        st.active.astype(dtype)[:, None],
+        count.astype(dtype)[:, None],
+    ]
+    if criterion is not None:
+        # the published nodes' table rows, built on the radius published above
+        published = criterion._replace(
+            multipole_packed=jnp.asarray(criterion.multipole_packed)[safe],
+            mass=jnp.asarray(criterion.mass)[safe],
+            threshold=jnp.asarray(criterion.threshold)[safe],
+        )
+        width = _summary_table_width(int(criterion.order))
+        table = jnp.asarray(published.table(radius[safe])[:, :width], dtype)
+        columns.append(jnp.where(ok[:, None], table, 0.0))
+    rows = jnp.concatenate(columns, axis=1)
     return _Published(cut, st.nodes, rows, st.overflow, st.num_nodes)
 
 
@@ -938,6 +985,7 @@ def _symmetric_walk(
     *,
     mac_type: str,
     walk_fn: Optional[Callable[..., Any]],
+    error_order: int = 0,
 ) -> Any:
     """One walk between this device's tree and every peer's, over the gathered trees.
 
@@ -964,15 +1012,35 @@ def _symmetric_walk(
         MAC variant. Static.
     walk_fn : Optional[Callable[..., Any]]
         The walk implementation (``None``: yggdrax's traced walk).
+    error_order : int
+        ``mac_type='dehnen_error'``: accept by eq (16a) at this order from the
+        gathered table columns (:func:`_summary_rows`' ``criterion``); ``walk_fn``
+        is then :func:`cross_walk_fn`'s criterion walk, which takes the table as
+        ``error_table``. ``0``: the opening angle. Static.
 
     Returns
     -------
     Any
         The walk result: pairs ``(a, b)`` with ``a`` in the lower device's block.
+
+    Raises
+    ------
+    ValueError
+        If ``error_order > 0`` comes without a criterion walk.
     """
     from yggdrax.interactions import dual_tree_walk_mutual
 
     ndev, S = int(gathered.shape[0]), int(gathered.shape[1])
+    criterion: dict = {}
+    if int(error_order) > 0:
+        if walk_fn is None:
+            raise ValueError("the criterion's cross walk needs cross_walk_fn's walk")
+        width = _summary_table_width(int(error_order))
+        # every device's published rows, in the walk's [ndev x S] index space: the
+        # same floats on every device, so both ends of a pair decide it alike
+        criterion["error_table"] = gathered[
+            ..., _SUMMARY_TABLE_COL : _SUMMARY_TABLE_COL + width
+        ].reshape(ndev * S, width)
     idx = jnp.int32
     base = (jnp.arange(ndev, dtype=idx) * S)[:, None]
 
@@ -997,6 +1065,7 @@ def _symmetric_walk(
         node_active=(gathered[..., 6] > 0.5).reshape(ndev * S),
         seed_a=jnp.where(dead, jnp.asarray(-1, idx), jnp.minimum(dev, me_i) * S),
         seed_b=jnp.where(dead, jnp.asarray(-1, idx), jnp.maximum(dev, me_i) * S),
+        **criterion,
     )
 
 
@@ -1148,6 +1217,8 @@ def _symmetric_exchange(
     walk_fn: Optional[Callable[..., Any]],
     axis_name: str,
     with_near: bool,
+    error_order: int = 0,
+    node_mass: Optional[Array] = None,
 ) -> dict:
     """The cross field with only multipoles and particles on the wire.
 
@@ -1188,16 +1259,31 @@ def _symmetric_exchange(
         Mesh axis.
     with_near : bool
         Also exchange particles and return the near list.
+    error_order : int
+        ``mac_type='dehnen_error'``: the walk accepts by eq (16a) at this order
+        from the gathered table columns (:func:`_symmetric_walk`). Static.
+    node_mass : Optional[Array]
+        ``[nodes]`` this device's node masses (its upward pass's mass moments);
+        with ``error_order`` they travel with the multipoles, one more column of
+        the far payload, for eq (16b)'s far half on the receiver.
 
     Returns
     -------
     dict
         ``cross_far`` (the M2L tuple), ``far_overflow``, the walk result ``walk``, the
         far send/receive rows, ``needs`` (what each capacity it read needed, keyed by
-        the :data:`CROSS_NEEDS_FIELDS` entry), and with ``with_near`` the near-sink
-        fields (``positions``, ``masses``, ``mask``, ``target_node``, ``source_row``,
+        the :data:`CROSS_NEEDS_FIELDS` entry), with ``error_order`` the imported
+        rows' masses ``cross_masses``, and with ``with_near`` the near-sink fields
+        (``positions``, ``masses``, ``mask``, ``target_node``, ``source_row``,
         ``count``, ``overflow``), ``near_particles`` and ``send_particles``.
+
+    Raises
+    ------
+    ValueError
+        If ``error_order > 0`` comes without ``node_mass``.
     """
+    if int(error_order) > 0 and node_mass is None:
+        raise ValueError("the criterion's far payload needs the node masses")
     S = int(gathered.shape[1])
     idx = jnp.int32
     nodes = jnp.asarray(nodes).astype(idx)
@@ -1208,7 +1294,13 @@ def _symmetric_exchange(
     nr = jnp.asarray(tree.node_ranges)
 
     res = jax.named_call(_symmetric_walk, name="cross_export_walk")(
-        gathered, me, theta, cap, mac_type=mac_type, walk_fn=walk_fn
+        gathered,
+        me,
+        theta,
+        cap,
+        mac_type=mac_type,
+        walk_fn=walk_fn,
+        error_order=int(error_order),
     )
     out: dict = {"walk": res}
 
@@ -1225,13 +1317,17 @@ def _symmetric_exchange(
         )
         alive = (exp_f.rows >= 0)[:, None]
         send_node = nodes[jnp.maximum(exp_f.rows, 0)]
-        payload = jnp.concatenate(
-            [
-                jnp.where(alive, packed[send_node], 0.0),
-                jnp.where(alive, jnp.asarray(mp.centers)[send_node], 0.0),
-            ],
-            axis=1,
-        )
+        columns = [
+            jnp.where(alive, packed[send_node], 0.0),
+            jnp.where(alive, jnp.asarray(mp.centers)[send_node], 0.0),
+        ]
+        if int(error_order) > 0:
+            # the mass moment itself, not the packed monopole (another summation
+            # order): the receiver's f_b far terms read the float its owner has
+            assert node_mass is not None
+            mass = jnp.asarray(node_mass, packed.dtype)[send_node][:, None]
+            columns.append(jnp.where(alive, mass, 0.0))
+        payload = jnp.concatenate(columns, axis=1)
     recv, recv_sizes, _ = jax.named_call(
         ragged_all_to_all_exchange, name="cross_exchange_far"
     )(payload, exp_f.sizes, output_capacity=cap.recv_node_cap, axis_name=axis_name)
@@ -1245,6 +1341,9 @@ def _symmetric_exchange(
         src_f,
         tgt_f,
     )
+    if int(error_order) > 0:
+        # only the rows a live cross pair names are read, as the multipoles
+        out["cross_masses"] = recv[:, n_coeff + 3]
     out["exp_far"] = exp_f
     out["imp_far"] = imp_f
     out["far_overflow"] = (
@@ -1415,7 +1514,9 @@ def cross_walk_backend() -> str:
     return env_choice("JACCPOT_CROSS_WALK", strict_walk_backend(), ("flat", "pallas"))
 
 
-def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
+def cross_walk_fn(
+    mac_type: str, *, error_order: int = 0, theta_max: float = 1.0
+) -> Optional[Callable[..., Any]]:
     """The ``walk_fn`` the export and receiver walks run, or ``None`` for yggdrax's.
 
     The traced walk runs one ``while_loop`` per wavefront width with ~40 ops per
@@ -1424,17 +1525,33 @@ def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
     per force across the three cross walks. The Pallas walk classifies a round in
     one launch and checks the loop predicate every 16 rounds.
 
+    Under ``mac_type='dehnen_error'`` (``error_order > 0``) the walk takes one more
+    keyword, ``error_table`` (the ``[nodes, p + 2]`` eq (16a) rows, traced), and
+    accepts by eq (16a) instead of the opening angle -- on either backend, with
+    the single card's two implementations of one elementwise test: the Pallas
+    walk's ``error_table`` / ``error_order`` / ``theta_max``, or yggdrax's walk
+    with ``pair_accept=DehnenWalkAccept(p)``. The separation floor still applies.
+
     Parameters
     ----------
     mac_type : str
         The hook's MAC; the Pallas kernel implements ``dehnen`` / ``bh`` only, so
         any other keeps the traced walk.
+    error_order : int
+        ``0``: the opening angle. ``p > 0``: eq (16a) at expansion order ``p``.
+        Static.
+    theta_max : float
+        Eq (16a)'s convergence clause (``rho_A + rho_B < theta_max r``). Static.
 
     Returns
     -------
     Optional[Callable[..., Any]]
-        A function with ``dual_tree_walk_mutual``'s signature and result fields.
+        A function with ``dual_tree_walk_mutual``'s signature and result fields
+        (plus ``error_table`` with ``error_order``); ``None`` for yggdrax's walk
+        as it is.
     """
+    if int(error_order) > 0:
+        return _criterion_walk_fn(int(error_order), float(theta_max))
     if cross_walk_backend() != "pallas" or str(mac_type) not in ("dehnen", "bh"):
         return None
 
@@ -1479,6 +1596,94 @@ def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
         )
 
     return pallas_walk
+
+
+def _criterion_walk_fn(order: int, theta_max: float) -> Callable[..., Any]:
+    """:func:`cross_walk_fn` under eq (16a): the walk with an ``error_table`` keyword.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``.
+    theta_max : float
+        The convergence clause's bound.
+
+    Returns
+    -------
+    Callable[..., Any]
+        ``dual_tree_walk_mutual``'s signature plus ``error_table``, on the backend
+        :func:`cross_walk_backend` names.
+    """
+    pallas = cross_walk_backend() == "pallas"
+
+    def criterion_walk(
+        left_child_full: Array,
+        right_child_full: Array,
+        centers: Array,
+        radii: Array,
+        theta: float,
+        root: Array,
+        *,
+        error_table: Array,
+        max_pair_queue: int,
+        far_cap: int,
+        near_cap: int,
+        mac_type: Optional[str] = None,
+        node_active: Optional[Array] = None,
+        seed_a: Optional[Array] = None,
+        seed_b: Optional[Array] = None,
+        seed_count: Optional[Array] = None,
+        separation_floor: float = 0.0,
+    ) -> Any:
+        # theta and mac_type are the geometric test's: eq (16a) replaces it
+        del mac_type
+        common = dict(
+            max_pair_queue=int(max_pair_queue),
+            far_cap=int(far_cap),
+            near_cap=int(near_cap),
+            node_active=node_active,
+            seed_a=seed_a,
+            seed_b=seed_b,
+            seed_count=seed_count,
+            separation_floor=float(separation_floor),
+        )
+        if pallas:
+            from jaccpot._env import env_flag
+            from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+
+            return mutual_walk_pallas(
+                left_child_full,
+                right_child_full,
+                centers,
+                radii,
+                float(theta),
+                root,
+                interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
+                error_table=error_table,
+                error_order=int(order),
+                theta_max=float(theta_max),
+                **common,
+            )
+        from yggdrax.interactions import dual_tree_walk_mutual
+
+        from jaccpot.runtime._walk_criterion import DehnenWalkAccept
+
+        return dual_tree_walk_mutual(
+            left_child_full,
+            right_child_full,
+            centers,
+            radii,
+            float(theta),
+            root,
+            pair_accept=DehnenWalkAccept(int(order)),
+            pair_accept_data={
+                "table": error_table,
+                "theta_max": jnp.asarray(float(theta_max), jnp.asarray(radii).dtype),
+            },
+            **common,
+        )
+
+    return criterion_walk
 
 
 #: Capacities sized from a count are rounded up to a multiple of this.
@@ -2006,6 +2211,39 @@ def plan_cross_capacities(
     )
 
 
+def _with_separation_floor(
+    walk_fn: Optional[Callable[..., Any]], floor: float
+) -> Optional[Callable[..., Any]]:
+    """``walk_fn`` with the separation floor applied to every call.
+
+    Every cross walk -- export, receiver, near import -- runs through ``walk_fn``
+    (or yggdrax's mutual walk when it is ``None``), so the floor is applied once,
+    here, to all of them.
+
+    Parameters
+    ----------
+    walk_fn : Optional[Callable[..., Any]]
+        The walk (``None``: yggdrax's).
+    floor : float
+        Minimum gap of an accepted far pair; ``0`` leaves ``walk_fn`` as it is.
+
+    Returns
+    -------
+    Optional[Callable[..., Any]]
+        The wrapped walk.
+    """
+    if floor <= 0.0:
+        return walk_fn
+    from yggdrax.interactions import dual_tree_walk_mutual
+
+    inner_walk = walk_fn if walk_fn is not None else dual_tree_walk_mutual
+
+    def floored_walk(*args: Any, **kwargs: Any) -> Any:
+        return inner_walk(*args, separation_floor=floor, **kwargs)
+
+    return floored_walk
+
+
 def make_cross_hook(
     *,
     ndev: int,
@@ -2019,7 +2257,8 @@ def make_cross_hook(
     export_theta: Optional[float] = None,
     two_sided: Optional[bool] = None,
     separation_floor: float = 0.0,
-) -> Callable[[Any], Optional[tuple]]:
+    error_criterion: bool = False,
+) -> Callable[..., Optional[tuple]]:
     """Build the ``cross_hook`` for a mesh of ``ndev`` devices.
 
     Parameters
@@ -2071,41 +2310,50 @@ def make_cross_hook(
         Minimum gap of an accepted far pair in every export and receiver walk
         (length units); a compact softening kernel's support, so the unsoftened
         cross far field is exact. ``0`` (default): none. Static.
+    error_criterion:
+        Dehnen's eq (16a) (``mac_type='dehnen_error'`` on the solver, S12): the
+        cross walks accept by the criterion the local walk runs, from each
+        published node's table row (``G M``, ``eps * min_b f_b`` of its subtree,
+        ``s_1..s_p``; extra columns of the summary all_gather), so both devices of
+        a pair evaluate the identical test on the identical floats; the far
+        payload carries each node's mass for eq (16b)'s far half. The hook is then
+        called ``hook(tree_artifacts, criterion=FlatWalkCriterion)`` and returns
+        ``(multipoles, centers, src, tgt, masses)``
+        (``FastMultipoleMethod``'s refresh does both, ``_call_cross_hook``).
+        Symmetric exchange only (the default path). ``mac_type`` stays the
+        geometric name (``theta`` is then unused by the walks). Static.
 
     Returns
     -------
     Callable
         ``hook(tree_artifacts) -> (multipoles, centers, src, tgt) | None``, with the
-        imported sources indexed from ``n_local``.
+        imported sources indexed from ``n_local`` (with ``error_criterion``, see
+        there).
 
     Raises
     ------
     NotImplementedError
-        For ``mac_type`` ``"dehnen_error"`` / ``"dehnen_theta"``: the cross walks
-        have no per-node force scale to evaluate Dehnen's eq (16a) with (see
-        :func:`jaccpot.distributed.fused._refuse_error_criterion`).
+        For ``mac_type`` ``"dehnen_error"`` / ``"dehnen_theta"``: the hook's MAC
+        name is the walks' geometric one; the criterion is ``error_criterion``.
+        And for ``error_criterion`` on any exchange but the symmetric one (a
+        control: one-sided, CSR, tiles, a receiver walk, a separate near or export
+        theta) or the ``aabb`` MAC geometry control: their walks re-test imported
+        rows that carry no eq (16a) table, and the far half's f_b needs the
+        expansion centres to be the walk centres.
     """
     if str(mac_type) in ("dehnen_error", "dehnen_theta"):
         raise NotImplementedError(
-            f"make_cross_hook: mac_type={mac_type!r} (Dehnen's error criterion, eq "
-            "16a) is not supported on the fused multi-GPU lane yet: the cross walks "
-            "test a geometric MAC and carry no per-node force scale. Use "
-            "mac_type='dehnen' here, or run the criterion on the single-card fused "
-            "lane or the mesh lane (jaccpot.distributed.fmm)."
+            f"make_cross_hook: mac_type={mac_type!r} is not a cross-walk MAC: the "
+            "cross walks take the geometric name (mac_type='dehnen'), and Dehnen's "
+            "error criterion (eq 16a, dehnen_error) through error_criterion=True, "
+            "with each step's per-node force scale (FusedMeshForce and "
+            "MeshSegmentRunner.fused build it so). dehnen_theta is not supported "
+            "on the fused multi-GPU lane; the mesh lane (jaccpot.distributed.fmm) "
+            "runs the criteria too."
         )
     cap = caps if caps is not None else CrossCapacities()
-    walk_fn = cross_walk_fn(mac_type)
     floor = float(separation_floor)
-    if floor > 0.0:
-        # Every cross walk -- export, receiver, near import -- runs through
-        # `walk_fn` (or yggdrax's mutual walk when it is None), so the floor is
-        # applied once, here, to all of them.
-        from yggdrax.interactions import dual_tree_walk_mutual
-
-        inner_walk = walk_fn if walk_fn is not None else dual_tree_walk_mutual
-
-        def walk_fn(*args: Any, **kwargs: Any) -> Any:
-            return inner_walk(*args, separation_floor=floor, **kwargs)
+    walk_fn = _with_separation_floor(cross_walk_fn(mac_type), floor)
 
     two_sided = _cross_two_sided() if two_sided is None else bool(two_sided)
     symmetric = two_sided and _symmetric_exchange_enabled(
@@ -2115,6 +2363,22 @@ def make_cross_hook(
         near_theta=near_theta,
         export_theta=export_theta,
     )
+    if error_criterion and not symmetric:
+        raise NotImplementedError(
+            "make_cross_hook(error_criterion=True): Dehnen's eq (16a) runs on the "
+            "symmetric exchange only (two-sided over leaves, no receiver walk, one "
+            "theta; the default). This configuration selects a control exchange "
+            "(JACCPOT_CROSS_SYMMETRIC=0, JACCPOT_CROSS_TWO_SIDED=0, "
+            "JACCPOT_CROSS_NEAR_TILES=1, a receiver walk forced on, "
+            "max_leaves_per_cell != 1, or a near/export theta of its own), whose "
+            "walks re-test imported rows that carry no eq (16a) table."
+        )
+    if error_criterion and _cross_mac_geometry_mode() != "com":
+        raise NotImplementedError(
+            "make_cross_hook(error_criterion=True) needs the COM MAC geometry "
+            "(JACCPOT_CROSS_MAC_GEOMETRY=com, the default): eq (16a)'s table and "
+            "eq (16b)'s far terms are about the expansion centres."
+        )
     # ALWAYS-ON overflow channel, independent of the diagnostics `record`: the
     # production and timing paths pass no record, and before this sink existed the
     # far half's flags then reached nobody. Holds tracers; the evaluator reads it
@@ -2125,16 +2389,22 @@ def make_cross_hook(
     # re-plan the capacities from exact demand (`CrossCapacities.replanned`)
     needs_sink: dict = {}
 
-    def hook(tree_artifacts: Any) -> Optional[tuple]:
+    def hook(tree_artifacts: Any, criterion: Any = None) -> Optional[tuple]:
         # stage labels for per-device traces (`jax.named_scope` costs nothing at
         # run time; it only names the ops). Every stage call below adds its own.
         with jax.named_scope("cross_hook"):
-            return _hook_body(tree_artifacts)
+            return _hook_body(tree_artifacts, criterion)
 
-    def _hook_body(tree_artifacts: Any) -> Optional[tuple]:
+    def _hook_body(tree_artifacts: Any, criterion: Any) -> Optional[tuple]:
         # a RE-TRACE must not see the previous trace's tracers
         flag_sink.clear()
         needs_sink.clear()
+        if bool(error_criterion) != (criterion is not None):
+            raise RuntimeError(
+                "the cross hook was built with error_criterion="
+                f"{bool(error_criterion)} and called "
+                f"{'with' if criterion is not None else 'without'} a criterion"
+            )
         tree = tree_artifacts.tree
         upward = tree_artifacts.upward
         mp = upward.multipoles
@@ -2177,8 +2447,9 @@ def make_cross_hook(
         num_internal = int(jnp.asarray(tree.left_child).shape[0])
 
         # what every device publishes -- the cut cells, or (two-sided) the summary
-        # tree over them -- packed so that ONE all_gather carries it
-        pub = _summary_rows(tree, geom, cap, two_sided=two_sided)
+        # tree over them, with eq (16a)'s table rows under the criterion -- packed
+        # so that ONE all_gather carries it
+        pub = _summary_rows(tree, geom, cap, two_sided=two_sided, criterion=criterion)
         summary = pub.cut
         block_nodes = pub.block_nodes
         block = int(block_nodes.shape[0])
@@ -2188,6 +2459,7 @@ def make_cross_hook(
         me = jax.lax.axis_index(axis_name)
 
         if symmetric:
+            order = 0 if criterion is None else int(criterion.order)
             sym = _symmetric_exchange(
                 gathered,
                 me,
@@ -2198,9 +2470,22 @@ def make_cross_hook(
                 cap=cap,
                 ndev=ndev,
                 mac_type=mac_type,
-                walk_fn=walk_fn,
+                walk_fn=(
+                    walk_fn
+                    if criterion is None
+                    else _with_separation_floor(
+                        cross_walk_fn(
+                            mac_type,
+                            error_order=order,
+                            theta_max=float(criterion.theta_max),
+                        ),
+                        floor,
+                    )
+                ),
                 axis_name=axis_name,
                 with_near=near_sink is not None,
+                error_order=order,
+                node_mass=None if criterion is None else upward.mass_moments.mass,
             )
             far_overflow = pub.overflow | sym["far_overflow"]
             flag_sink["far"] = far_overflow
@@ -2251,6 +2536,21 @@ def make_cross_hook(
                     record["send_particles"] = sym["send_particles"]
                     record["near_walk_peak"] = jnp.asarray(0, jnp.int32)
                     record["near_walk_far_pairs"] = jnp.asarray(0, jnp.int32)
+                # the walk's pairs and what it read, for a check of each device's
+                # view of every cross pair (tests/distributed/
+                # test_mesh_segment_dehnen_error.py)
+                record["gathered"] = gathered
+                for side in ("far_a", "far_b", "far_count", "near_a", "near_b"):
+                    record[f"walk_{side}"] = getattr(w, side)
+                record["walk_near_count"] = w.near_count
+                # each imported far row's sender node (in the sender's summary
+                # index, rows grouped by peer) and, under the criterion, its mass
+                record["imp_far_rows"] = sym["imp_far"].rows
+                record["imp_far_sizes"] = sym["imp_far"].sizes
+                if criterion is not None:
+                    record["cross_masses"] = sym["cross_masses"]
+            if criterion is not None:
+                return sym["cross_far"] + (sym["cross_masses"],)
             return sym["cross_far"]
 
         idx = parent.dtype
@@ -2740,6 +3040,10 @@ def make_cross_hook(
 
     hook.flag_sink = flag_sink  # pyright: ignore[reportFunctionMemberAccess]
     hook.needs_sink = needs_sink  # pyright: ignore[reportFunctionMemberAccess]
+    # what the refresh calls it with (`_call_cross_hook`)
+    hook.error_criterion = bool(  # pyright: ignore[reportFunctionMemberAccess]
+        error_criterion
+    )
     return hook
 
 
