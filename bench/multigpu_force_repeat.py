@@ -22,7 +22,8 @@ cannot show it: the interpreted walk emits in one order (the CPU check is
     XLA_PYTHON_CLIENT_PREALLOCATE=false python bench/multigpu_force_repeat.py \\
         --mac dehnen --n 400000 --out OUT.json
 
-Exits 1 if any run differs from the first. Plummer sphere from the Odisseo harness
+Exits 1 if any run differs from the first. ``--save`` / ``--compare`` set the first
+run against another process's (a fresh compile of the same program). Plummer sphere from the Odisseo harness
 (``BENCH_DIR``), ``preset="galaxy"`` (leaf 64, p6), the library's cross capacities.
 """
 
@@ -65,6 +66,16 @@ def _args() -> argparse.Namespace:
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--time-repeats", type=int, default=10)
     p.add_argument("--out", required=True)
+    p.add_argument(
+        "--save",
+        default=None,
+        help="save the first run's outputs (.npz), for --compare in another process",
+    )
+    p.add_argument(
+        "--compare",
+        default=None,
+        help="compare the first run with a --save of another process (same flags)",
+    )
     return p.parse_args()
 
 
@@ -160,6 +171,14 @@ def main() -> int:
         call()
         times.append(1e3 * (time.perf_counter() - t0))
     bitwise = all(c[name]["differ"] == 0 for c in compared for name in names)
+    if args.save:
+        np.savez(args.save, **dict(zip(names, runs[0])))
+    other_process = None
+    if args.compare:
+        saved = np.load(args.compare)
+        other_process = {
+            name: _differ(got, saved[name]) for name, got in zip(names, runs[0])
+        }
     record = {
         "jaccpot": os.path.dirname(jaccpot.__file__),
         "ndev": args.ndev,
@@ -174,6 +193,7 @@ def main() -> int:
         "control_same_buffers": control,
         "runs_vs_first": compared,
         "bitwise": bitwise,
+        "first_vs_other_process": other_process,
         "start_force_ms": {
             "median": float(np.median(times)),
             "min": float(np.min(times)),
@@ -184,7 +204,14 @@ def main() -> int:
     }
     with open(args.out, "w") as fh:
         json.dump(record, fh, indent=1)
-    print(json.dumps({k: record[k] for k in ("runs_vs_first", "bitwise")}))
+    print(
+        json.dumps(
+            {
+                k: record[k]
+                for k in ("runs_vs_first", "bitwise", "first_vs_other_process")
+            }
+        )
+    )
     print(json.dumps(record["start_force_ms"]))
     return 0 if bitwise else 1
 
