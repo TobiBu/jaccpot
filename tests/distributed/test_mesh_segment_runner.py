@@ -541,3 +541,91 @@ def test_a_failed_steps_successors_size_nothing():
     assert int(bits) == OVERFLOW_CROSS
     assert np.asarray(needs).tolist() == [200, 201, 2], np.asarray(needs)
     assert int(done) == 1
+
+
+class _NeedsGrowEveryStep:
+    """A capacity a segment outgrows by one more step each time: step k needs k.
+
+    No physics (zero force); every particle drifts at ``1/dt`` along x from
+    ``[0, 0.5)``, so after step ``k`` the smallest live x is in ``[k, k + 0.5)``.
+    The flag fires when ``k`` exceeds the capacity ``fit``; the re-plan raises
+    ``fit`` to the need; the force's own policy allows ONE retry (the single card's
+    for a walk that is not a tree's).
+    """
+
+    def __init__(self, fit):
+        from jaccpot.distributed.segment import DirectMeshForce
+
+        self._direct = DirectMeshForce(axis_name=AXIS)
+        self.fit = int(fit)
+        self.replans = []
+
+    def __getattr__(self, name):
+        return getattr(self._direct, name)
+
+    @property
+    def cache_owner(self):
+        return self
+
+    def key(self):
+        return ("needs-grow", self.fit)
+
+    def shard(self, positions, masses, live, ids):
+        from jaccpot.runtime.fused_topology import OVERFLOW_SATURATED
+
+        del masses, ids
+        rows = jnp.arange(positions.shape[0]) < live
+        lowest = jnp.min(jnp.where(rows, positions[:, 0], jnp.inf))
+        step = jnp.floor(jax.lax.pmin(lowest, AXIS)).astype(jnp.int32)
+        bits = jnp.where(step > self.fit, jnp.uint32(OVERFLOW_SATURATED), jnp.uint32(0))
+        needs = jnp.zeros((self._direct.needs_size,), jnp.int32).at[0].set(step)
+        return jnp.zeros_like(positions), bits, needs
+
+    def retry_mode(self, needs, retries, tree_first):
+        del needs, tree_first
+        return "full" if retries == 0 else None
+
+    def replan(self, needs, bits, *, walk_only=False):
+        del bits, walk_only
+        need = int(np.asarray(needs)[0])
+        self.replans.append(need)
+        grew, self.fit = need > self.fit, max(self.fit, need)
+        return grew
+
+
+def test_a_segment_whose_needs_grow_every_step_retries_while_it_progresses():
+    """The re-plan reads only the steps up to the first failure (the later ones left
+    the trajectory), so needs that grow over a segment are learned one failing
+    step at a time; the force's own two-retry policy ran out at 1 of 2 steps fitted
+    on the outgrowing-segment gate under mac_type='dehnen_error'. The runner retries
+    as long as each re-run fits more steps than every earlier attempt -- here three
+    progress retries after the policy's one -- and ends where a fresh run with the
+    final capacity starts, bitwise."""
+    from jaccpot.distributed.segment import MeshSegmentRunner, MeshState
+
+    steps, dt, n, cap = 4, 0.25, 64, 48
+    mesh = _mesh()
+
+    def state():
+        rng = np.random.default_rng(1)
+        pos = rng.uniform(0.0, 0.5, (n, 3))
+        vel = np.zeros((n, 3))
+        vel[:, 0] = 1.0 / dt
+        shard, _ = decompose(
+            mesh, pos, vel, np.full(n, 1.0 / n), cap=cap, num_samples=16
+        )
+        return MeshState.from_shard_state(shard, mesh)
+
+    force = _NeedsGrowEveryStep(fit=0)
+    retried = MeshSegmentRunner(mesh, state(), force, num_samples=16)
+    report = retried.run(steps, dt=dt)
+    assert report.retries == 4, report
+    assert [f["done"] for f in report.failures] == [0, 1, 2, 3], report.failures
+    assert force.replans == [1, 2, 3, 4] and force.fit == steps
+    assert report.bits == 0
+
+    fresh = MeshSegmentRunner(
+        mesh, state(), _NeedsGrowEveryStep(fit=steps), num_samples=16
+    )
+    assert fresh.run(steps, dt=dt).retries == 0
+    _gathered_equal(retried, fresh)
