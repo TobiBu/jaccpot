@@ -520,11 +520,14 @@ def main() -> None:
             ),
             force,
         )
-        roll.start()
-        jax.block_until_ready(roll.state.accel)
-        result["setup_s"] = time.perf_counter() - t0
-        _checkpoint(result, "after_start")
         result["plan"] = list(plan.fingerprint())
+        measured = getattr(force, "cross_needs", None)
+        if measured is not None:
+            from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
+
+            result["cross_needs_measured"] = dict(
+                zip(CROSS_NEEDS_FIELDS, np.asarray(measured).tolist())
+            )
         chosen = getattr(force, "cross_caps", None)
         if chosen is not None:
             result["cross_caps"] = {
@@ -532,6 +535,12 @@ def main() -> None:
                 for k, v in vars(chosen).items()
                 if isinstance(v, (int, float)) or v is None
             }
+        # what the route sized, even when its rollout then stops on a flag
+        json.dump(result, open(ARGS.out, "w"), indent=1)
+        roll.start()
+        jax.block_until_ready(roll.state.accel)
+        result["setup_s"] = time.perf_counter() - t0
+        _checkpoint(result, "after_start")
         for k in range(ARGS.segments):
             t0 = time.perf_counter()
             roll.run(ARGS.steps)
