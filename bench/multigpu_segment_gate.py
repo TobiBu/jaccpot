@@ -112,6 +112,18 @@ def _args() -> argparse.Namespace:
         help="the galaxy preset's eq (16a) (default) or the geometric theta 0.8",
     )
     p.add_argument("--force-repeats", type=int, default=5)
+    p.add_argument(
+        "--migrate",
+        action="store_true",
+        help="segment mode: migrate to fixed cuts after every drift "
+        "(MeshSegmentRunner(migrate=True), jaccpot.distributed.migration)",
+    )
+    p.add_argument(
+        "--migration-cap",
+        default="auto",
+        help="--migrate: the buffer's rows ('auto', an int, or 'json' to take "
+        "--cross-json's migration_cap_final)",
+    )
     return p.parse_args()
 
 
@@ -431,6 +443,12 @@ def main() -> None:
 
         solver = _solver(g, soft)
         kernel = solver._impl.softening_kernel
+        migration_cap = ARGS.migration_cap
+        if migration_cap == "json":
+            migration_cap = json.load(open(ARGS.cross_json))["migration_cap_final"]
+        elif migration_cap != "auto":
+            migration_cap = int(migration_cap)
+        result["migrate"] = bool(ARGS.migrate)
         t0 = time.perf_counter()
         runner = MeshSegmentRunner.fused(
             solver,
@@ -441,6 +459,8 @@ def main() -> None:
             theta=0.8,
             cross_caps=caps,
             repartition_every=ARGS.repartition_every,
+            migrate=bool(ARGS.migrate),
+            migration_cap=migration_cap,
         )
         del shard
         result["setup_s"] = time.perf_counter() - t0
@@ -490,9 +510,11 @@ def main() -> None:
                 rep.retries,
                 rep.bits,
                 rep.counts,
+                f"migrated {rep.migrated} need {rep.migration_need}",
                 flush=True,
             )
         result["reports"] = reports
+        result["migration_cap_final"] = runner.migration_cap
         result["cross_caps_final"] = {
             k: v
             for k, v in vars(runner.force.cross_caps).items()
