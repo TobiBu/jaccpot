@@ -172,7 +172,9 @@ def _exchange(shards, cap, walk_fn=None):
         needs = jnp.stack(
             [jnp.asarray(sym["needs"].get(k, 0), jnp.int32) for k in CROSS_NEEDS_FIELDS]
         )
-        return sym["overflow"], sym["far_overflow"], needs, jnp.sum(sym["masses"] != 0)
+        # the particles received (the flat import's masses, zero past them)
+        received = jnp.sum(sym["particles"][:, 3] != 0)
+        return sym["overflow"], sym["far_overflow"], needs, received
 
     return jax.vmap(one, axis_name=AXIS)(topo, geom, sorted_pm)
 
