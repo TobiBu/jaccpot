@@ -16,12 +16,17 @@ high-water mark, and XLA reads its flags once):
 * ``--mode solo`` (1 card): the single-card fused lane (``FusedForceProvider``) on
   the positions the segment mode dumped, scored on the same ids.
 
-The lists are the LIBRARY's (``preset="galaxy"`` with the geometric MAC, theta 0.8:
-``leaf_capacity="auto"``, no fast-lane environment, no Odisseo harness caps), the
-cross capacities too (``cross_caps="auto"``: sized from the start force's measured
-needs, on both routes). ``--cross formula`` takes ``bench/multigpu_rollout_gate.py``'s
-formulas instead (x ``--cross-scale``), with ``max_cells`` the leaf capacity, as the
-S11 track-A rows were measured.
+The lists are the LIBRARY's (``preset="galaxy"``: ``leaf_capacity="auto"``, no
+fast-lane environment, no Odisseo harness caps), the cross capacities too
+(``cross_caps="auto"``: sized from the start force's measured needs, on both
+routes). ``--mac`` picks the MAC: ``dehnen_error`` (the default since S12: the
+preset's own, eq (16a) at ``adaptive_eps = 1e-4``, f_b carried on the mesh and
+seeded per device; segment and solo modes) or ``dehnen`` (the geometric theta 0.8
+the S11 rows ran; the only one the stacked route takes). ``--cross formula`` takes
+``bench/multigpu_rollout_gate.py``'s formulas instead (x ``--cross-scale``), with
+``max_cells`` the leaf capacity, as the S11 track-A rows were measured. The solo mode
+also times the single card's force (``prov.step``, jitted; the median of
+``--force-repeats``), next to the segment mode's ``force_only_ms``.
 
     eval $(autocvd -q -l -n 2 -e -t 120)
     XLA_PYTHON_CLIENT_PREALLOCATE=false python bench/multigpu_segment_gate.py \\
@@ -100,6 +105,13 @@ def _args() -> argparse.Namespace:
         default=1.0,
         help="multiplies the gate formulas' leaves per device (the disc needs more)",
     )
+    p.add_argument(
+        "--mac",
+        choices=("dehnen_error", "dehnen"),
+        default="dehnen_error",
+        help="the galaxy preset's eq (16a) (default) or the geometric theta 0.8",
+    )
+    p.add_argument("--force-repeats", type=int, default=5)
     return p.parse_args()
 
 
@@ -174,8 +186,11 @@ def _ic() -> tuple:
 def _solver(g: float, soft: float, leaf_capacity=None):
     from jaccpot import FastMultipoleMethod
 
-    base = FastMultipoleMethod(preset="galaxy").advanced
-    advanced = dataclasses.replace(base, mac_type="dehnen")
+    advanced = FastMultipoleMethod(preset="galaxy").advanced
+    if ARGS.mac == "dehnen":
+        # docs/production_2026-10.md, "The galaxy preset on dehnen_error": the
+        # geometric MAC back
+        advanced = dataclasses.replace(advanced, mac_type="dehnen")
     if leaf_capacity is not None:
         advanced = dataclasses.replace(
             advanced,
@@ -183,7 +198,16 @@ def _solver(g: float, soft: float, leaf_capacity=None):
                 advanced.tree, leaf_capacity=int(leaf_capacity), leaf_headroom=None
             ),
         )
-    return FastMultipoleMethod(preset="galaxy", G=g, softening=soft, advanced=advanced)
+    solver = FastMultipoleMethod(
+        preset="galaxy", G=g, softening=soft, advanced=advanced
+    )
+    engine = solver._impl
+    want = ARGS.mac == "dehnen_error"
+    assert bool(engine._flat_walk_criterion_active()) == want, (
+        ARGS.mac,
+        engine.mac_type,
+    )
+    return solver
 
 
 def _cross_caps(leaves_per_device: float, max_cells: int):
@@ -309,6 +333,7 @@ def main() -> None:
     os.makedirs(ARGS.dump, exist_ok=True)
     result: dict = dict(
         mode=ARGS.mode,
+        mac=ARGS.mac,
         ic=ARGS.ic,
         n=ARGS.n,
         ndev=NDEV,
@@ -334,7 +359,7 @@ def main() -> None:
             f = os.path.join(ARGS.dump, f"positions_{tag}.npy")
             pos = jnp.asarray(np.load(f).astype(np.float32))
             m = jnp.asarray(mass0)
-            prov, _ = FusedForceProvider.prepare(
+            prov, topology = FusedForceProvider.prepare(
                 solver,
                 pos,
                 m,
@@ -343,8 +368,23 @@ def main() -> None:
                 theta=0.8,
                 caps_only=True,
             )
+            aux = None
+            if prov.scale_carry:
+                # the caps-only prepare's eq (16b) seed, in input order (as the
+                # particle carry's start force reads it)
+                perm = jnp.asarray(topology.prepared.stub.tree.particle_indices)
+                fb_sorted = jnp.asarray(solver._impl._last_force_scale_particles)
+                seed = jnp.zeros_like(fb_sorted).at[perm].set(fb_sorted)
+                aux = (seed, None, None)
+            del topology
             step = jax.jit(prov.step)
-            acc, (_, bits, _) = step(pos, m)
+            acc, (_, bits, _) = step(pos, m, None, aux)
+            jax.block_until_ready(acc)
+            force_s = []
+            for _ in range(int(ARGS.force_repeats)):
+                t0 = time.perf_counter()
+                jax.block_until_ready(step(pos, m, None, aux)[0])
+                force_s.append(time.perf_counter() - t0)
             from jaccpot.runtime.fused_topology import overflow_ok
 
             result[f"solo_{tag}"] = dict(
@@ -353,9 +393,10 @@ def main() -> None:
                     np.asarray(acc), np.asarray(pos), mass0, g, soft, kernel, ids
                 ),
                 leaf_capacity=int(solver._impl._tree_leaf_capacity),
+                force_ms=[1e3 * x for x in force_s],
             )
             print(tag, result[f"solo_{tag}"], flush=True)
-            del prov, step, acc
+            del prov, step, acc, aux
         result["peak_bytes"] = _peaks()
         result["smi_after"] = _smi()
         json.dump(result, open(ARGS.out, "w"), indent=1)
@@ -461,10 +502,18 @@ def main() -> None:
         # current positions), to tell the force from the integrator's overhead
         state = runner.state
         force_s = []
-        for _ in range(5):
+        for _ in range(int(ARGS.force_repeats)):
             t0 = time.perf_counter()
             out = runner._call(
-                "start", 0, None, state.state, state.masses, state.count, state.ids
+                "start",
+                0,
+                None,
+                state.state,
+                state.masses,
+                state.count,
+                state.ids,
+                # under the criterion: the carried f_b (the start program's input)
+                *runner._scale_args(state),
             )
             jax.block_until_ready(out[0])
             force_s.append(time.perf_counter() - t0)
@@ -486,6 +535,9 @@ def main() -> None:
             RolloutConfig,
             setup_fused_force,
         )
+
+        # the stacked route refuses the criterion (fused._refuse_error_criterion)
+        assert ARGS.mac == "dehnen", "--mode stacked runs the geometric MAC only"
 
         cap_leaf = ARGS.leaf_capacity or leaf_cap
         result["leaf_capacity"] = int(cap_leaf)
