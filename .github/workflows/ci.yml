@@ -21,9 +21,10 @@ concurrency:
 
 jobs:
   changes:
-    # Whether this run needs the two path-gated jobs, `test-distributed-criterion`
-    # and `test-cross-repo-nornax-distributed`. They cost ~10 and ~4 runner-minutes
-    # of forced-device compilation and only changes to the distributed, mutual and
+    # Whether this run needs the path-gated jobs, `test-distributed-criterion`,
+    # `test-distributed-segment` and `test-cross-repo-nornax-distributed`. They cost
+    # ~10, ~20 (estimated) and ~4 runner-minutes of forced-device compilation and
+    # only changes to the distributed, mutual and
     # nornax-adapter code (or their own tests and the CI files) can move them, so a
     # pull request runs them only if its diff touches one of those paths. Pushes to
     # main, the nightly schedule and a manual dispatch always run them.
@@ -641,6 +642,117 @@ jobs:
           if grep -qE "no tests ran|collected 0 items" pytest-criterion-tier.txt \
              || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-criterion-tier.txt; then
             echo "::error::the criterion tier did not run on forced devices"
+            exit 1
+          fi
+
+  # The fused multi-GPU lane's segment runner (S11 gates A1-A3,
+  # tests/distributed/test_mesh_segment_runner.py), in its own job for the reason
+  # `test-distributed-criterion` has one: each case compiles two to eight whole-lane
+  # programs on the forced-CPU mesh (1.5-4 min each on a loaded 64-core host, ~9 min
+  # for the file at `-n 0`), more than `test-distributed-tier`'s budget has room for.
+  #
+  # PATH-GATED: see the `changes` job. Its cap is about twice the local file time
+  # on the hosted runner's assumed 2x slowdown; adjust it from the first measured
+  # runs.
+  test-distributed-segment:
+    name: test-distributed-segment
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=2
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_cache
+          key: jax-cache-segment-${{ runner.os }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
+          restore-keys: |
+            jax-cache-segment-${{ runner.os }}--
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Segment-runner tier on forced devices
+        # `-n 1`: the cases share nothing but compiled programs, and the file's
+        # peak is one case's (~3 GB RSS, as the CPU end-to-end test).
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-segment)
+          pytest "${selection[@]}" -n 1 -rs --durations=10 \
+            | tee pytest-segment-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-segment-tier.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-segment-tier.txt; then
+            echo "::error::the segment-runner tier did not run on forced devices"
+            exit 1
+          fi
+
+  # The segment runner under Dehnen's error criterion (S12 gates (a)-(c),
+  # tests/distributed/test_mesh_segment_dehnen_error.py): split from
+  # `test-distributed-segment`, which with it took 27 of its 40 minutes on CI
+  # (10 cases, 26m40s). Same setup, same path gate.
+  test-distributed-segment-criterion:
+    name: test-distributed-segment-criterion
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=2
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_cache
+          key: jax-cache-segment-criterion-${{ runner.os }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
+          restore-keys: |
+            jax-cache-segment-criterion-${{ runner.os }}--
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Segment-runner criterion tier on forced devices
+        # `-n 1`: the cases share nothing but compiled programs, and the file's
+        # peak is one case's (~3 GB RSS, as the CPU end-to-end test).
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-segment-criterion)
+          pytest "${selection[@]}" -n 1 -rs --durations=10 \
+            | tee pytest-segment-criterion-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-segment-criterion-tier.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-segment-criterion-tier.txt; then
+            echo "::error::the segment-runner criterion tier did not run on forced devices"
             exit 1
           fi
 

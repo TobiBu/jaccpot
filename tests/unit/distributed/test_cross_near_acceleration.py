@@ -270,3 +270,52 @@ def test_default_accum_follows_the_local_lane_env(monkeypatch):
     monkeypatch.setenv("JACCPOT_NEARFIELD_ACCUM", "nonsense")
     with pytest.warns(RuntimeWarning, match="JACCPOT_NEARFIELD_ACCUM"):
         _run_fp32(near, local, n_lp, None)
+
+
+def _reference_force_scale(pairs, local, imported, n_local_particles):
+    """Eq (16b)'s near share, ``G sum m / (r^2 + eps^2)``, over exactly the pairs."""
+    lp, lm, lk, lidx = local
+    ip, im, ik, _ = imported
+    ref = np.zeros(n_local_particles)
+    for t, s in pairs:
+        tp = lp[t][lk[t]]
+        ti = lidx[t][lk[t]]
+        sp = ip[s][ik[s]]
+        sm = im[s][ik[s]]
+        d2 = np.sum((sp[None, :, :] - tp[:, None, :]) ** 2, axis=-1)
+        ref[ti] += G * np.sum(sm[None, :] / (d2 + SOFT**2), axis=1)
+    return ref
+
+
+@pytest.mark.parametrize("kernel", ["plummer", "ferrers3"])
+def test_the_force_scale_lane_is_the_near_pair_sum(kernel):
+    """``with_force_scale=True`` (S12, ``mac_type='dehnen_error'`` on the mesh):
+    the same launch also returns the imported leaves' share of eq (16b)'s ``f_b``
+    -- ``eps`` the Plummer-equivalent softening whatever the pair kernel, as the
+    local near lane's -- and the acceleration is the plain call's, bitwise."""
+    rng = np.random.default_rng(41)
+    pairs = [(0, 0), (0, 1), (0, 2), (2, 1), (3, 2)]
+    near, local, imported, n_lp, _ = _build(rng, pairs)
+    lp, lm, lk, lidx = local
+    kw = dict(
+        softening_sq=jnp.asarray(SOFT**2),
+        G=jnp.asarray(G),
+        chunk=8,
+        interpret=True,
+        softening_kernel=kernel,
+    )
+    args = (
+        near,
+        jnp.asarray(lp),
+        jnp.asarray(lm),
+        jnp.asarray(lk),
+        jnp.asarray(lidx),
+        n_lp,
+        NUM_INTERNAL,
+    )
+    plain = np.asarray(cross_near_acceleration(*args, **kw))
+    acc, fb = cross_near_acceleration(*args, with_force_scale=True, **kw)
+    assert np.array_equal(np.asarray(acc), plain)
+    ref = _reference_force_scale(pairs, local, imported, n_lp)
+    assert np.any(ref > 0) and np.any(ref == 0)  # untouched leaves stay zero
+    np.testing.assert_allclose(np.asarray(fb), ref, rtol=1e-12, atol=0.0)

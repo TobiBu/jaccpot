@@ -40,7 +40,7 @@ silently when it is cold.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -221,6 +221,7 @@ def global_mesh_bounds(
     num_valid: Optional[Array] = None,
     axis_name: str = AXIS_NAME,
     pad: float = 1e-6,
+    cubic: Optional[bool] = None,
 ) -> tuple[Array, Array]:
     """Morton box covering every device's particles.
 
@@ -244,6 +245,8 @@ def global_mesh_bounds(
     pad : float
         Fractional slack added to each side, so a particle never sits exactly on
         the box edge.
+    cubic : Optional[bool]
+        The configured box shape (:func:`cube_bounds`).
 
     Returns
     -------
@@ -259,11 +262,15 @@ def global_mesh_bounds(
         pos = jnp.where(live[:, None], pos, pos[0][None, :])
     lo = jax.lax.pmin(jnp.min(pos, axis=0), axis_name)
     hi = jax.lax.pmax(jnp.max(pos, axis=0), axis_name)
-    return cube_bounds(lo, hi, pad=pad)
+    return cube_bounds(lo, hi, pad=pad, cubic=cubic)
 
 
 def host_mesh_bounds(
-    positions: list, num_valid: list, *, pad: float = 1e-6
+    positions: list,
+    num_valid: list,
+    *,
+    pad: float = 1e-6,
+    cubic: Optional[bool] = None,
 ) -> tuple[Array, Array]:
     """:func:`global_mesh_bounds` on the host, from per-device pieces.
 
@@ -278,6 +285,8 @@ def host_mesh_bounds(
     num_valid : list
         Per-device live row counts.
     pad : float
+        As :func:`global_mesh_bounds`.
+    cubic : Optional[bool]
         As :func:`global_mesh_bounds`.
 
     Returns
@@ -294,10 +303,12 @@ def host_mesh_bounds(
         his.append(jnp.max(live, axis=0))
     lo = jnp.min(jnp.stack(los), axis=0)
     hi = jnp.max(jnp.stack(his), axis=0)
-    return cube_bounds(lo, hi, pad=pad)
+    return cube_bounds(lo, hi, pad=pad, cubic=cubic)
 
 
-def cube_bounds(lo: Array, hi: Array, *, pad: float) -> tuple[Array, Array]:
+def cube_bounds(
+    lo: Array, hi: Array, *, pad: float, cubic: Optional[bool] = None
+) -> tuple[Array, Array]:
     """Padded Morton box around ``[lo, hi]``; a cube if ``JACCPOT_CUBIC_BOUNDS=1``.
 
     ``morton_encode`` normalises each axis by its OWN extent, so a box that is longer
@@ -328,6 +339,11 @@ def cube_bounds(lo: Array, hi: Array, *, pad: float) -> tuple[Array, Array]:
         Per-axis minimum and maximum of the live positions, shape ``(3,)``.
     pad : float
         Fractional slack added to each side.
+    cubic : Optional[bool]
+        The solver's ``TreeConfig.cubic_bounds`` (``preset="galaxy"``: ``True``),
+        which the single card's box honours: ``JACCPOT_CUBIC_BOUNDS`` wins when it
+        is set, as there (``kernels._evaluate._cubic_bounds_active``). ``None``
+        (the stacked route's default): the environment alone.
 
     Returns
     -------
@@ -335,11 +351,17 @@ def cube_bounds(lo: Array, hi: Array, *, pad: float) -> tuple[Array, Array]:
         ``(min_corner, max_corner)``.
     """
     from jaccpot._env import env_flag
+    from jaccpot.runtime.kernels._evaluate import _cubic_bounds_active
 
     lo = jnp.asarray(lo)
     hi = jnp.asarray(hi)
     padv = jnp.asarray(pad, lo.dtype)
-    if not env_flag("JACCPOT_CUBIC_BOUNDS", False):
+    use_cube = (
+        env_flag("JACCPOT_CUBIC_BOUNDS", False)
+        if cubic is None
+        else _cubic_bounds_active(bool(cubic))
+    )
+    if not use_cube:
         span = jnp.maximum(hi - lo, padv)
         slack = span * padv
         return lo - slack, hi + slack
@@ -493,14 +515,66 @@ def fused_force_step(
         return_potential=False,
         max_acc_derivative_order=0,
     )
-    acceleration = jnp.asarray(acceleration)
+    acceleration = _add_cross_near_term(
+        engine,
+        refreshed,
+        jnp.asarray(acceleration),
+        cross_near_sink,
+        cross_record=cross_record,
+    )
+    return refreshed, acceleration
 
-    # The cross NEAR field is ADDED here rather than interleaved. A far contribution
-    # arrives as a local expansion and would need a second L2L cascade, which is why
-    # that half goes between the sweeps; a near contribution is a direct sum with no
-    # cascade behind it, so one small extra kernel is cheaper than plumbing it
-    # through the prepared state. Gravity is linear in the sources, so adding is
-    # exact.
+
+def _add_cross_near_term(
+    engine: Any,
+    refreshed: Any,
+    acceleration: Array,
+    cross_near_sink: Optional[dict],
+    *,
+    cross_record: Optional[dict] = None,
+    force_scale: Optional[Array] = None,
+) -> Union[Array, tuple[Array, Array]]:
+    """Add the cross-domain NEAR field the hook left in ``cross_near_sink``.
+
+    The cross NEAR field is ADDED after the evaluation rather than interleaved. A
+    far contribution arrives as a local expansion and would need a second L2L
+    cascade, which is why that half goes between the sweeps; a near contribution is
+    a direct sum with no cascade behind it, so one small extra kernel is cheaper than
+    plumbing it through the prepared state. Gravity is linear in the sources, so
+    adding is exact.
+
+    Shared by both force routes of the lane -- :func:`fused_force_step` (the
+    stacked prepared states) and the segment runner's template route
+    (:mod:`jaccpot.distributed.segment`) -- so the two add the same term with the
+    same arithmetic.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine (its softening, kernel and ``G``).
+    refreshed : Any
+        The refreshed ``LargeNPreparedState`` of this trace: its tree, near-field
+        leaf pool and sorted particles.
+    acceleration : Array
+        ``(cap, 3)`` local force in input row order.
+    cross_near_sink : Optional[dict]
+        The near sink the hook filled in this trace; empty or ``None`` adds nothing.
+    cross_record : Optional[dict]
+        Diagnostics record; given, the leaf-pool and permutation checks are written
+        into it.
+    force_scale : Optional[Array]
+        ``(cap,)`` the local evaluation's eq (16b) force scale (input row order),
+        under ``mac_type='dehnen_error'``: the imported leaves' share is added to
+        it from the same kernel launch (its fourth lane), so the next step's
+        thresholds see the other domains' near field too.
+
+    Returns
+    -------
+    Union[Array, tuple[Array, Array]]
+        ``acceleration`` plus the cross near term (``acceleration`` itself when the
+        sink is empty); with ``force_scale``, ``(acceleration, force_scale)``, both
+        with the cross term added.
+    """
     if cross_near_sink:
         from jaccpot._env import env_flag
         from jaccpot.distributed.cross import cross_near_acceleration
@@ -545,9 +619,7 @@ def fused_force_step(
             cross_record["perm_nonidentity"] = jnp.sum(
                 orig != jnp.arange(orig.shape[0], dtype=orig.dtype)
             )
-        acceleration = acceleration + jax.named_call(
-            cross_near_acceleration, name="cross_near_term"
-        )(
+        term = jax.named_call(cross_near_acceleration, name="cross_near_term")(
             cross_near_sink,
             leaf_pos,
             leaf_mass,
@@ -561,8 +633,15 @@ def fused_force_step(
             # the local near field's interpret switch: this term is Pallas only,
             # so off a GPU (the CPU end-to-end test) it needs interpret mode
             interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+            **({} if force_scale is None else {"with_force_scale": True}),
         )
-    return refreshed, acceleration
+        if force_scale is not None:
+            term, scale_term = term
+            force_scale = force_scale + jnp.asarray(scale_term, force_scale.dtype)
+        acceleration = acceleration + term
+    if force_scale is not None:
+        return acceleration, force_scale
+    return acceleration
 
 
 def stack_prepared_states(states: "list[Any]") -> Any:
@@ -722,6 +801,7 @@ def make_fused_force_evaluator(
     cross_near_sink: Optional[dict] = None,
     cross_record: Optional[dict] = None,
     cross_record_keys: tuple = (),
+    cross_needs: bool = False,
 ) -> Callable[[Array, Array, Array], tuple]:
     """A jitted ``shard_map`` force: the fused lane per device, one program.
 
@@ -747,6 +827,21 @@ def make_fused_force_evaluator(
         Opening-angle override.
     axis_name : str
         Mesh axis name.
+    cross_hook : Optional[Any]
+        The cross-domain hook (:func:`~jaccpot.distributed.cross.make_cross_hook`);
+        ``None``: each device's own shard only.
+    cross_near_sink : Optional[dict]
+        The hook's near sink; its term is added after the evaluation.
+    cross_record : Optional[dict]
+        The hook's diagnostics record.
+    cross_record_keys : tuple
+        Record entries to return, per device, as a third output.
+    cross_needs : bool
+        Also return what every cross capacity needed
+        (:func:`~jaccpot.distributed.cross.cross_needs`), reduced over the mesh with
+        ``pmax``: the input of :meth:`CrossCapacities.replanned
+        <jaccpot.distributed.cross.CrossCapacities.replanned>`. Without a hook it is
+        all zeros.
 
     Returns
     -------
@@ -756,7 +851,9 @@ def make_fused_force_evaluator(
         module docstring on why not ``(ndev, cap, ...)``; ``num_valid`` is
         ``(ndev,)``. The acceleration comes back flat too, dead rows included and
         meaningless. ``overflow`` is one replicated boolean: a capacity that
-        saturated on ANY device.
+        saturated on ANY device. With ``cross_needs`` the replicated
+        ``int32[len(CROSS_NEEDS_FIELDS)]`` follows it, and with
+        ``cross_record_keys`` the per-device diagnostics come last.
 
     Raises
     ------
@@ -800,8 +897,11 @@ def make_fused_force_evaluator(
             local | count_over_cap, cross_hook, cross_near_sink, cross_record
         )
         flag = reduce_flag_across_mesh(local, axis_name=axis_name)
+        outputs: tuple = (acceleration, flag)
+        if cross_needs:
+            outputs = outputs + (_mesh_cross_needs(cross_hook, axis_name),)
         if not cross_record_keys:
-            return acceleration, flag
+            return outputs
         # The record holds TRACERS under jit, so a count can only be read by
         # leaving the mapped region as an OUTPUT. The key ORDER is fixed by the
         # caller so `out_specs` stays static.
@@ -814,9 +914,11 @@ def make_fused_force_evaluator(
             jnp.asarray(cross_record.get(k, jnp.nan)).reshape(1).astype(jnp.float64)
             for k in cross_record_keys
         )
-        return acceleration, flag, diag
+        return outputs + (diag,)
 
     out_specs = (P(axis_name), P())
+    if cross_needs:
+        out_specs = out_specs + (P(),)
     if cross_record_keys:
         out_specs = out_specs + (tuple(P(axis_name) for _ in cross_record_keys),)
     with fused_capacity_plan_overrides(plan):
@@ -834,6 +936,29 @@ def make_fused_force_evaluator(
             return compiled(prepared_stacked, positions, masses, num_valid)
 
     return force
+
+
+def _mesh_cross_needs(cross_hook: Any, axis_name: str) -> Array:
+    """The hook's needs vector of this trace, reduced over the mesh.
+
+    Parameters
+    ----------
+    cross_hook : Any
+        The hook, or ``None`` (one device's own shard: nothing was needed).
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    Array
+        ``int32[len(CROSS_NEEDS_FIELDS)]``, identical on every device: each capacity's
+        largest need over the devices, and each bit OR-ed.
+    """
+    from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS, cross_needs
+
+    if cross_hook is None:
+        return jnp.zeros((len(CROSS_NEEDS_FIELDS),), jnp.int32)
+    return jax.lax.pmax(cross_needs(cross_hook), axis_name)
 
 
 def _fold_cross_flags(

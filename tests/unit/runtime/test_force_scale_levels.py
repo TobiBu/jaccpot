@@ -371,3 +371,95 @@ def test_the_node_totals_read_out_is_the_sorted_far_term():
     )
     assert np.asarray(want).max() > 0
     np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-12, atol=0)
+
+
+def test_a_cross_domain_far_list_adds_its_own_terms_before_the_push_down():
+    """S12, the multi-GPU lane under ``mac_type='dehnen_error'``: the cross hook's
+    far pairs name IMPORTED sources (indices past the local nodes, their owners'
+    masses and COM centres). ``cross_far_force_scale_own`` gives each local target
+    the same ``G M_A / ((|c_A - c_B| + rho_B)^2 + eps^2)`` a local pair does (numpy
+    here, dead pairs dropped), and ``far_force_scale_sorted(cross_own=...)`` adds it
+    to the walk's own terms before the push-down: the cross pairs' far f_b reaches
+    every particle below their targets."""
+    from yggdrax.interactions import CompactTaggedFarPairs
+    from yggdrax.tree_moments import compute_tree_mass_moments
+
+    from jaccpot.runtime import _force_scale_levels as fsl
+    from jaccpot.runtime._mac_geometry import com_mac_geometry
+
+    topo, ps, ms = _tree("cells", n=2000)
+    mm = compute_tree_mass_moments(topo, ps, ms)
+    geom = com_mac_geometry(topo, ps, mm.center_of_mass, leaf_cap=16)
+    total = int(topo.parent.shape[0])
+    ni = int(topo.left_child.shape[0])
+    ranges = np.asarray(topo.node_ranges)
+    rng = np.random.default_rng(13)
+    # the local list, and K imported nodes behind the local ones
+    src = rng.integers(0, total, 2000)
+    tgt = rng.integers(0, total, 2000)
+    pairs = CompactTaggedFarPairs(
+        sources=jnp.asarray(src, jnp.int32),
+        targets=jnp.asarray(tgt, jnp.int32),
+        tags=jnp.zeros((src.size,), jnp.int32),
+        far_pair_count=jnp.asarray(src.size, jnp.int32),
+    )
+    K, P = 30, 400
+    imp_mass = rng.uniform(0.01, 0.1, K)
+    imp_cen = rng.uniform(4.0, 9.0, (K, 3))
+    c_src = total + rng.integers(0, K, P)
+    c_tgt = rng.integers(0, total, P)
+    dead = rng.uniform(size=P) < 0.2
+    c_src = np.where(dead, -1, c_src)
+    c_tgt = np.where(dead, -1, c_tgt)
+    cross_far = (
+        jnp.zeros((K, 25)),
+        jnp.asarray(imp_cen),
+        jnp.asarray(c_src, jnp.int32),
+        jnp.asarray(c_tgt, jnp.int32),
+    )
+    kw = dict(
+        node_mass=jnp.asarray(mm.mass),
+        node_centers=geom.center,
+        node_radii=geom.radius,
+        gravitational_constant=1.3,
+        softening_sq=jnp.asarray(1e-3),
+    )
+    got_own = np.asarray(
+        fsl.cross_far_force_scale_own(cross_far, jnp.asarray(imp_mass), **kw)
+    )
+    want_own = np.zeros(total)
+    cen = np.asarray(geom.center)
+    rad = np.asarray(geom.radius)
+    for s, t in zip(c_src[~dead], c_tgt[~dead]):
+        reach = np.linalg.norm(imp_cen[s - total] - cen[t]) + rad[t]
+        want_own[t] += 1.3 * imp_mass[s - total] / (reach**2 + 1e-3)
+    assert got_own.shape == (total,) and np.sum(want_own > 0) > 100
+    np.testing.assert_allclose(got_own, want_own, rtol=1e-12, atol=0.0)
+
+    live = ranges[ni:, 1] >= ranges[ni:, 0]
+    leaves = np.arange(ni, total)
+    leaves = leaves[
+        np.argsort(np.where(live, ranges[ni:, 0], ps.shape[0]), kind="stable")
+    ]
+    sorted_kw = dict(
+        tree=topo,
+        leaf_nodes=jnp.asarray(leaves, jnp.int32),
+        far_pairs=pairs,
+        num_levels=int(get_level_offsets(topo).shape[0] - 1),
+        num_particles=int(ps.shape[0]),
+        **kw,
+    )
+    local_only = np.asarray(fsl.far_force_scale_sorted(**sorted_kw))
+    with_cross = np.asarray(
+        fsl.far_force_scale_sorted(cross_own=jnp.asarray(got_own), **sorted_kw)
+    )
+    cross_pushed = fsl.far_force_scale_from_node_totals(
+        ancestor_sum_by_level(jnp.asarray(got_own), **_tables(topo)),
+        tree=topo,
+        leaf_nodes=jnp.asarray(leaves, jnp.int32),
+        num_particles=int(ps.shape[0]),
+    )
+    assert np.sum(with_cross != local_only) > 1000
+    np.testing.assert_allclose(
+        with_cross, local_only + np.asarray(cross_pushed), rtol=1e-12, atol=0.0
+    )

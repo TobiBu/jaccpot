@@ -276,45 +276,22 @@ def _make_repartition(
     the old row order while everything else moves, which must break the rollout's
     equivalence -- proof that the equivalence test can see a mis-route.
     """
-    from yggdrax.distributed.partition import sfc_repartition
-
     ndev = len(_mesh_devices(mesh))
 
     def body(x: Array, v: Array, m: Array, ids: Array, count: Array) -> tuple:
-        n_live = count[0]
-        bounds = global_mesh_bounds(x, num_valid=n_live, axis_name=axis_name)
-        payload = {"v": v, "id": ids} if route_velocities else {"id": ids}
-        fill = {"v": 0.0, "id": -1} if route_velocities else {"id": -1}
-        res = sfc_repartition(
+        routed = _repartition_shard(
             x,
+            v,
             m,
-            n_live,
-            ndev,
-            output_capacity=int(cap),
-            bounds=bounds,
-            num_samples=int(num_samples),
+            ids,
+            count,
+            ndev=ndev,
+            cap=cap,
+            num_samples=num_samples,
             axis_name=axis_name,
-            payload=payload,
-            payload_fill=fill,
+            route_velocities=route_velocities,
         )
-        live = jnp.arange(int(cap)) < res.live_count
-        x_new = _pad_onto_live_row(res.positions, live)
-        v_new = res.payload["v"] if route_velocities else v
-        v_new = jnp.where(live[:, None], v_new, 0.0)
-        diag = {
-            "declined": res.declined.reshape(1),
-            "recv_counts": res.recv_counts[None],
-            "sent_off_device": res.sent_off_device.reshape(1),
-            "max_util": res.max_util.reshape(1),
-        }
-        return (
-            x_new,
-            v_new,
-            res.masses,
-            res.payload["id"],
-            res.live_count.reshape(1).astype(jnp.int32),
-            diag,
-        )
+        return routed[:5] + routed[6:]
 
     spec = P(axis_name)
     mapped = jax.shard_map(
@@ -333,6 +310,115 @@ def _make_repartition(
         check_vma=False,
     )
     return jax.jit(mapped)
+
+
+def _repartition_shard(
+    x: Array,
+    v: Array,
+    m: Array,
+    ids: Array,
+    count: Array,
+    *,
+    ndev: int,
+    cap: int,
+    num_samples: int,
+    axis_name: str,
+    route_velocities: bool = True,
+    acceleration: Optional[Array] = None,
+    force_scale: Optional[Array] = None,
+) -> tuple:
+    """One device's part of the mesh repartition (inside ``shard_map``).
+
+    The body of :func:`_make_repartition`, shared with the segment runner's
+    repartition (:mod:`jaccpot.distributed.segment`), which also routes the carried
+    total ACCELERATION: its velocity Verlet starts a segment from the acceleration
+    the previous one ended with, so that has to travel with its particle like the
+    velocity and the id. Under ``mac_type='dehnen_error'`` the carried eq (16b)
+    ``f_b`` travels too: the next force's thresholds are its particles'.
+
+    Parameters
+    ----------
+    x : Array
+        ``(cap, 3)`` positions.
+    v : Array
+        ``(cap, 3)`` velocities.
+    m : Array
+        ``(cap,)`` masses.
+    ids : Array
+        ``(cap,)`` global ids.
+    count : Array
+        ``(1,)`` live rows.
+    ndev : int
+        Mesh size.
+    cap : int
+        Rows per device.
+    num_samples : int
+        Pivot samples per device.
+    axis_name : str
+        Mesh axis.
+    route_velocities : bool
+        ``False`` is the test-only mutation of :func:`_make_repartition`.
+    acceleration : Optional[Array]
+        ``(cap, 3)``; given, it is routed too (zero on padding rows).
+    force_scale : Optional[Array]
+        ``(cap,)``; given, it is routed too (zero on padding rows).
+
+    Returns
+    -------
+    tuple
+        ``(x, v, m, ids, count, acceleration, diag)`` in the new ownership;
+        ``acceleration`` is ``None`` when none was given. With ``force_scale`` the
+        routed ``f_b`` follows as an eighth entry.
+    """
+    from yggdrax.distributed.partition import sfc_repartition
+
+    n_live = count[0]
+    bounds = global_mesh_bounds(x, num_valid=n_live, axis_name=axis_name)
+    payload = {"v": v, "id": ids} if route_velocities else {"id": ids}
+    fill = {"v": 0.0, "id": -1} if route_velocities else {"id": -1}
+    if acceleration is not None:
+        payload["acc"] = acceleration
+        fill["acc"] = 0.0
+    if force_scale is not None:
+        payload["fb"] = force_scale
+        fill["fb"] = 0.0
+    res = sfc_repartition(
+        x,
+        m,
+        n_live,
+        ndev,
+        output_capacity=int(cap),
+        bounds=bounds,
+        num_samples=int(num_samples),
+        axis_name=axis_name,
+        payload=payload,
+        payload_fill=fill,
+    )
+    live = jnp.arange(int(cap)) < res.live_count
+    x_new = _pad_onto_live_row(res.positions, live)
+    v_new = res.payload["v"] if route_velocities else v
+    v_new = jnp.where(live[:, None], v_new, 0.0)
+    acc_new = None
+    if acceleration is not None:
+        acc_new = jnp.where(live[:, None], res.payload["acc"], 0.0)
+    diag = {
+        "declined": res.declined.reshape(1),
+        "recv_counts": res.recv_counts[None],
+        "sent_off_device": res.sent_off_device.reshape(1),
+        "max_util": res.max_util.reshape(1),
+    }
+    routed = (
+        x_new,
+        v_new,
+        res.masses,
+        res.payload["id"],
+        res.live_count.reshape(1).astype(jnp.int32),
+        acc_new,
+        diag,
+    )
+    if force_scale is None:
+        return routed
+    return routed + (jnp.where(live, res.payload["fb"], 0.0),)
 
 
 def make_reference_direct_force(
@@ -371,30 +457,17 @@ def make_reference_direct_force(
     kernel = resolve_softening_kernel(softening_kernel)
 
     def body(x: Array, m: Array, count: Array, ids: Array) -> tuple:
-        live = jnp.arange(x.shape[0]) < count[0]
-        xs = jax.lax.all_gather(x, axis_name, tiled=True)
-        ms = jax.lax.all_gather(jnp.where(live, m, 0.0), axis_name, tiled=True)
-        gs = jax.lax.all_gather(jnp.where(live, ids, -1), axis_name, tiled=True)
-        big = jnp.iinfo(jnp.int32).max
-        order = jnp.argsort(jnp.where(gs >= 0, gs, big), stable=True)
-        xs, ms = xs[order], ms[order]
-        d = xs[None, :, :] - x[:, None, :]
-        if kernel == "plummer":
-            r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, x.dtype) ** 2
-            inv = jnp.where(r2 > 0, r2 ** jnp.asarray(-1.5, x.dtype), 0.0)
-        else:
-            r2 = jnp.sum(d * d, axis=-1)
-            params = softening_params(kernel, softening, x.dtype)
-            inv = masked_pair_factors(r2, r2 > 0, params, kernel)[0]
-        # HIGHEST: on Ampere an fp32 einsum defaults to TF32 (~10-bit mantissa), which
-        # would make the reference less accurate than the lane it checks
-        acc = jnp.asarray(G, x.dtype) * jnp.einsum(
-            "ij,ijk->ik",
-            ms[None, :] * inv,
-            d,
-            precision=jax.lax.Precision.HIGHEST,
+        acc = _reference_direct_shard(
+            x,
+            m,
+            count[0],
+            ids,
+            G=G,
+            softening=softening,
+            kernel=kernel,
+            axis_name=axis_name,
         )
-        return jnp.where(live[:, None], acc, 0.0), jnp.zeros((1,), jnp.bool_)
+        return acc, jnp.zeros((1,), jnp.bool_)
 
     spec = P(axis_name)
     mapped = jax.jit(
@@ -412,6 +485,72 @@ def make_reference_direct_force(
         return acc, jnp.any(flag)
 
     return force
+
+
+def _reference_direct_shard(
+    x: Array,
+    m: Array,
+    n_live: Array,
+    ids: Array,
+    *,
+    G: float,
+    softening: float,
+    kernel: str,
+    axis_name: str,
+) -> Array:
+    """One device's part of :func:`make_reference_direct_force` (inside ``shard_map``).
+
+    Shared with the segment runner's reference force
+    (:class:`jaccpot.distributed.segment.DirectMeshForce`).
+
+    Parameters
+    ----------
+    x : Array
+        ``(cap, 3)`` positions.
+    m : Array
+        ``(cap,)`` masses.
+    n_live : Array
+        Scalar live row count.
+    ids : Array
+        ``(cap,)`` global ids.
+    G : float
+        Gravitational constant.
+    softening : float
+        Plummer-equivalent softening length.
+    kernel : str
+        The resolved pair kernel.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    Array
+        ``(cap, 3)`` accelerations, zero on padding rows.
+    """
+    live = jnp.arange(x.shape[0]) < n_live
+    xs = jax.lax.all_gather(x, axis_name, tiled=True)
+    ms = jax.lax.all_gather(jnp.where(live, m, 0.0), axis_name, tiled=True)
+    gs = jax.lax.all_gather(jnp.where(live, ids, -1), axis_name, tiled=True)
+    big = jnp.iinfo(jnp.int32).max
+    order = jnp.argsort(jnp.where(gs >= 0, gs, big), stable=True)
+    xs, ms = xs[order], ms[order]
+    d = xs[None, :, :] - x[:, None, :]
+    if kernel == "plummer":
+        r2 = jnp.sum(d * d, axis=-1) + jnp.asarray(softening, x.dtype) ** 2
+        inv = jnp.where(r2 > 0, r2 ** jnp.asarray(-1.5, x.dtype), 0.0)
+    else:
+        r2 = jnp.sum(d * d, axis=-1)
+        params = softening_params(kernel, softening, x.dtype)
+        inv = masked_pair_factors(r2, r2 > 0, params, kernel)[0]
+    # HIGHEST: on Ampere an fp32 einsum defaults to TF32 (~10-bit mantissa), which
+    # would make the reference less accurate than the lane it checks
+    acc = jnp.asarray(G, x.dtype) * jnp.einsum(
+        "ij,ijk->ik",
+        ms[None, :] * inv,
+        d,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    return jnp.where(live[:, None], acc, 0.0)
 
 
 def setup_fused_force(
@@ -455,6 +594,13 @@ def setup_fused_force(
         Opening angle.
     cross_caps : Any
         :class:`~jaccpot.distributed.cross.CrossCapacities`; ``None`` takes defaults.
+        ``"auto"`` sizes them in the library: a first guess from the shards' leaf
+        counts (:meth:`~jaccpot.distributed.cross.CrossCapacities.for_shard`), one
+        force at ``state``'s positions that measures what every capacity needed, and
+        the capacities sized from that (:func:`~jaccpot.distributed.cross.
+        plan_cross_capacities`) -- one compile more than explicit capacities. The
+        chosen capacities and the measured needs ride on the returned force as
+        ``force.cross_caps`` / ``force.cross_needs``.
     near_theta : Optional[float]
         Passed to the cross hook.
     axis_name : str
@@ -471,8 +617,14 @@ def setup_fused_force(
         If ``solver`` asks for Dehnen's error criterion, which this lane does not
         carry yet (:func:`~jaccpot.distributed.fused._refuse_error_criterion`);
         raised before any shard is prepared.
+    ValueError
+        If ``cross_caps`` is a string other than ``"auto"``.
     """
-    from jaccpot.distributed.cross import make_cross_hook
+    from jaccpot.distributed.cross import (
+        CrossCapacities,
+        make_cross_hook,
+        plan_cross_capacities,
+    )
     from jaccpot.distributed.fused import (
         _refuse_error_criterion,
         assemble_prepared_states,
@@ -488,6 +640,10 @@ def setup_fused_force(
     )
 
     _refuse_error_criterion(solver, entry="setup_fused_force")
+    if isinstance(cross_caps, str) and cross_caps != "auto":
+        raise ValueError(
+            f"cross_caps={cross_caps!r}: a CrossCapacities, None or 'auto'"
+        )
     devices = _mesh_devices(mesh)
     ndev = len(devices)
 
@@ -531,35 +687,64 @@ def setup_fused_force(
     plan = merge_plans(plans)
     walk_caps = merge_walk_caps(walks)
     install_walk_caps(solver, walk_caps)
+    leaf_slots, live_leaves = (max(t) for t in zip(*map(_leaf_counts, preps)))
     stacked = assemble_prepared_states(preps, mesh, axis_name=axis_name)
     del preps
 
-    hook, sink = None, None
-    if ndev > 1:
-        sink = {}
-        hook = make_cross_hook(
-            ndev=ndev,
+    def _evaluator(caps: Any, *, needs: bool) -> Callable:
+        hook, sink = None, None
+        if ndev > 1:
+            sink = {}
+            hook = make_cross_hook(
+                ndev=ndev,
+                theta=theta,
+                caps=caps,
+                near_sink=sink,
+                near_theta=near_theta,
+                axis_name=axis_name,
+                # the local walks' floor (a compact kernel's support): the cross
+                # walks must keep their far pairs as far apart
+                separation_floor=getattr(
+                    solver, "_impl", solver
+                )._walk_separation_floor(),
+            )
+        return make_fused_force_evaluator(
+            solver,
+            stacked,
+            mesh=mesh,
+            plan=plan,
+            leaf_size=leaf_size,
+            max_order=max_order,
             theta=theta,
-            caps=cross_caps,
-            near_sink=sink,
-            near_theta=near_theta,
             axis_name=axis_name,
-            # the local walks' floor (a compact kernel's support): the cross
-            # walks must keep their far pairs as far apart
-            separation_floor=getattr(solver, "_impl", solver)._walk_separation_floor(),
+            cross_hook=hook,
+            cross_near_sink=sink,
+            cross_needs=needs,
         )
-    evaluator = make_fused_force_evaluator(
-        solver,
-        stacked,
-        mesh=mesh,
-        plan=plan,
-        leaf_size=leaf_size,
-        max_order=max_order,
-        theta=theta,
-        axis_name=axis_name,
-        cross_hook=hook,
-        cross_near_sink=sink,
-    )
+
+    measured = None
+    if isinstance(cross_caps, str):
+        cross_caps = None
+        if ndev > 1:
+
+            def _measure(caps: Any) -> np.ndarray:
+                out = _evaluator(caps, needs=True)(
+                    state.positions, state.masses, state.count
+                )
+                return np.asarray(out[2])
+
+            cross_caps, measured = plan_cross_capacities(
+                _measure,
+                CrossCapacities.for_shard(
+                    leaf_capacity=leaf_slots,
+                    ndev=ndev,
+                    leaf_width=leaf_size,
+                    live_leaves=live_leaves,
+                ),
+                leaf_capacity=leaf_slots,
+                leaf_size=leaf_size,
+            )
+    evaluator = _evaluator(cross_caps, needs=False)
 
     def force(
         positions: Array, masses: Array, count: Array, ids: Optional[Array]
@@ -568,7 +753,28 @@ def setup_fused_force(
         acc, flag = evaluator(positions, masses, count)
         return acc, flag
 
+    force.cross_caps = cross_caps  # pyright: ignore[reportFunctionMemberAccess]
+    force.cross_needs = measured  # pyright: ignore[reportFunctionMemberAccess]
     return force, plan, walk_caps
+
+
+def _leaf_counts(prepared: Any) -> tuple[int, int]:
+    """A prepared shard's leaf slots and live leaves.
+
+    Parameters
+    ----------
+    prepared : Any
+        An eagerly prepared state (its ``tree``).
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(leaf slots, leaves holding a particle)``.
+    """
+    tree = prepared.tree
+    ranges = np.asarray(tree.node_ranges)
+    leaves = ranges[int(np.asarray(tree.left_child).shape[0]) :]
+    return int(leaves.shape[0]), int(np.sum(leaves[:, 1] >= leaves[:, 0]))
 
 
 class FusedRollout:

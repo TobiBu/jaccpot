@@ -16,10 +16,13 @@ cascade carries it down the same parent edges as the locals, and
 :func:`far_force_scale_sorted` -- a chunked segment sum over the far list and
 :func:`ancestor_sum_by_level` -- cost ~390 ms of the 25M disc's 695 ms step in
 scatter-adds (S0 trace, ``docs/production_2026-10.md``); it stays for every other
-route (the pure-JAX M2L or L2L, a cross-domain list) and for the first step's
-seed, whose geometric walk runs no downward sweep. The push-down keeps the old
-association (``own[child] + sum[parent]``), so only the own term's summation
-order differs between the two.
+route (the pure-JAX M2L or L2L) and for the first step's seed, whose geometric
+walk runs no downward sweep. The push-down keeps the old association
+(``own[child] + sum[parent]``), so only the own term's summation order differs
+between the two. A multi-GPU cross-domain far list (S12) rides both: its imported
+sources sit behind the local nodes in the lanes kernel's inputs, and on the
+separate pass their own terms (:func:`cross_far_force_scale_own`) join the walk's
+before the push-down.
 
 Two reductions over the tree turn those into what the walk needs, and both must
 stay cheap at 1e8 particles:
@@ -51,6 +54,7 @@ from yggdrax.dtypes import INDEX_DTYPE, as_index
 __all__ = [
     "FarForceScaleInputs",
     "ancestor_sum_by_level",
+    "cross_far_force_scale_own",
     "far_force_scale_from_node_totals",
     "far_force_scale_own",
     "far_force_scale_sorted",
@@ -327,6 +331,73 @@ def far_force_scale_own(
     return jax.ops.segment_sum(contrib, tgt, num_segments=int(num_nodes))
 
 
+def cross_far_force_scale_own(
+    cross_far: tuple,
+    cross_masses: Array,
+    *,
+    node_mass: Array,
+    node_centers: Array,
+    node_radii: Array,
+    gravitational_constant: float,
+    softening_sq: Array,
+) -> Array:
+    """The own far terms of eq (16b) a cross-domain far list adds to the local nodes.
+
+    The multi-GPU lane's cross hook hands the downward sweep imported source nodes
+    behind the local ones (``cross_far = (multipoles, centers, src, tgt)``, sources
+    at ``[n_local, n_local + K)``, ``-1`` on dead pairs) and the far pairs that
+    name them. Each such pair ``(A -> B)``, ``A`` imported, ``B`` local, adds the
+    same lower bound :func:`far_force_scale_own` takes from a local far pair,
+    ``G M_A / ((|c_A - c_B| + rho_B)^2 + eps^2)``, with ``M_A`` the owner's mass
+    moment and ``c_A`` its expansion centre (the owner's COM walk centre).
+
+    Parameters
+    ----------
+    cross_far : tuple
+        ``(multipoles, centers, src, tgt)`` from the cross hook.
+    cross_masses : Array
+        ``[K]`` the imported nodes' masses.
+    node_mass : Array
+        ``[n_local]`` local node masses.
+    node_centers : Array
+        ``[n_local, 3]`` local walk centres.
+    node_radii : Array
+        ``[n_local]`` local walk radii (the targets' ``rho_B``).
+    gravitational_constant : float
+        ``G``.
+    softening_sq : Array
+        ``eps^2`` (Plummer-equivalent).
+
+    Returns
+    -------
+    Array
+        ``[n_local]`` own far terms, before the push-down.
+    """
+    _, cross_centers, src, tgt = cross_far
+    dtype = jnp.asarray(node_mass).dtype
+    n_local = int(jnp.asarray(node_mass).shape[0])
+    imported = int(jnp.asarray(cross_centers).shape[0])
+    src = jnp.asarray(src, INDEX_DTYPE)
+    tgt = jnp.asarray(tgt, INDEX_DTYPE)
+    return far_force_scale_own(
+        sources=src,
+        targets=tgt,
+        live=(src >= 0) & (tgt >= 0),
+        node_mass=jnp.concatenate(
+            [jnp.asarray(node_mass), jnp.asarray(cross_masses, dtype)]
+        ),
+        node_centers=jnp.concatenate(
+            [jnp.asarray(node_centers, dtype), jnp.asarray(cross_centers, dtype)]
+        ),
+        node_radii=jnp.concatenate(
+            [jnp.asarray(node_radii, dtype), jnp.zeros((imported,), dtype)]
+        ),
+        gravitational_constant=gravitational_constant,
+        softening_sq=softening_sq,
+        num_nodes=n_local,
+    )
+
+
 #: far pairs per chunk of the per-step far force scale (bounds its temporaries)
 _FAR_PAIR_CHUNK = 1 << 22
 
@@ -343,6 +414,7 @@ def far_force_scale_sorted(
     softening_sq: Array,
     num_levels: int,
     num_particles: int,
+    cross_own: Optional[Array] = None,
 ) -> Array:
     """The far half of eq (16b)'s ``f_b`` per SORTED particle, from one walk's lists.
 
@@ -376,6 +448,10 @@ def far_force_scale_sorted(
         Level-loop bound, the one the upward pass uses. Static.
     num_particles : int
         ``N``. Static.
+    cross_own : Optional[Array]
+        ``[nodes]`` own far terms of a cross-domain far list
+        (:func:`cross_far_force_scale_own`), added to the walk's before the
+        push-down: the multi-GPU lane's other domains. ``None`` (default): none.
 
     Returns
     -------
@@ -415,6 +491,7 @@ def far_force_scale_sorted(
         ),
         num_particles=int(num_particles),
         target_sorted=_is_target_sorted(far_pairs),
+        cross_own=None if cross_own is None else jnp.asarray(cross_own),
     )
 
 
@@ -459,6 +536,7 @@ def _far_force_scale_sorted_jit(
     num_levels: int,
     level_batch_width: int,
     num_particles: int,
+    cross_own: Optional[Array] = None,
 ) -> Array:
     # The pairs in fixed chunks, so no per-pair temporary is ever list-sized: at
     # eps 1e-5 on the 2e6 disc the whole-list form still added 0.30 GiB to the
@@ -503,6 +581,8 @@ def _far_force_scale_sorted_jit(
         return own + jax.ops.segment_sum(contrib, tgt_s, num_segments=int(total_nodes))
 
     own = lax.fori_loop(0, num_chunks, _chunk, jnp.zeros((int(total_nodes),), dtype))
+    if cross_own is not None:
+        own = own + jnp.asarray(cross_own, dtype)
     total_far = ancestor_sum_by_level(
         own,
         left_child,

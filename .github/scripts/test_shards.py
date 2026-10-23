@@ -72,6 +72,7 @@ _RUNTIME_GRAD_FILES = (
 _MUTUAL_DISTRIBUTED = "tests/integration/test_mutual_distributed.py"
 _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
+_SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _MUTUAL_STATIC_DEVICE = "tests/integration/test_mutual_fmm_static_device.py"
 # The fused strict lane's CPU tests (every case a full fused-lane solve, 60-245 s on
 # CPU) left the integration shard in 2026-10 (S3): with them it ran 42 of its 50
@@ -82,6 +83,12 @@ _STRICT_RUNNER_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_strict_runners_on_provider.py",
     "tests/integration/strict/test_production_runner.py",
 )
+
+# Unit tests that need two or more devices and skip below them: in the unit shard
+# (one device) they collected and skipped, so the repartition gate they pin (the
+# rollout's bitwise ownership invariance) ran nowhere. They run with the
+# forced-device tier instead; their four-device cases still skip there (two).
+_UNIT_MULTI_DEVICE: tuple[str, ...] = ("tests/unit/distributed/test_fused_rollout.py",)
 
 SHARDS: dict[str, list[str]] = {
     # test-full matrix
@@ -99,7 +106,11 @@ SHARDS: dict[str, list[str]] = {
     ],
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
-    "unit": ["tests/unit", "--ignore=tests/unit/runtime"],
+    "unit": [
+        "tests/unit",
+        "--ignore=tests/unit/runtime",
+        *(f"--ignore={path}" for path in _UNIT_MULTI_DEVICE),
+    ],
     "unit-runtime-mac": list(_RUNTIME_MAC_FILES),
     "unit-runtime-grad": list(_RUNTIME_GRAD_FILES),
     "unit-runtime": [
@@ -113,10 +124,21 @@ SHARDS: dict[str, list[str]] = {
     "nornax-distributed": [_NORNAX_DISTRIBUTED],
     "distributed-tier": [
         "tests/distributed",
+        *_UNIT_MULTI_DEVICE,
         "-m",
-        "not distributed_criterion",
+        "not distributed_criterion and not distributed_segment",
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
+    # the fused mesh lane's segment runner (S11): minutes of compile per case
+    "distributed-segment": [
+        "tests/distributed",
+        "-m",
+        "distributed_segment",
+        f"--ignore={_SEGMENT_CRITERION}",
+    ],
+    # the same runner under Dehnen's error criterion (S12), a job of its own: with it
+    # the segment job took 27 of its 40 minutes on CI
+    "distributed-segment-criterion": [_SEGMENT_CRITERION, "-m", "distributed_segment"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -124,9 +146,27 @@ SHARDS: dict[str, list[str]] = {
 # can move them. They run on pushes to main, on the nightly schedule, on a manual
 # dispatch, and on a pull request whose diff touches one of `GATED_PATHS` (prefix
 # match) -- the `changes` job in ci.yml asks `touches`.
-GATED_SHARDS: tuple[str, ...] = ("distributed-criterion", "nornax-distributed")
+GATED_SHARDS: tuple[str, ...] = (
+    "distributed-criterion",
+    "distributed-segment",
+    "distributed-segment-criterion",
+    "nornax-distributed",
+)
 GATED_PATHS: tuple[str, ...] = (
     "jaccpot/distributed/",
+    # what the fused mesh lane (test-distributed-segment) takes its shapes, template,
+    # verdict and plan from on the runtime side
+    "jaccpot/runtime/fused_provider.py",
+    "jaccpot/runtime/fused_topology.py",
+    "jaccpot/runtime/capacity_plan.py",
+    "jaccpot/runtime/strict_carry.py",
+    "jaccpot/runtime/_level_shapes.py",
+    "jaccpot/runtime/capacity_guard.py",
+    # where the cross far pairs and their force scale enter the downward sweep
+    # (S11's CSR merge, S12's f_b over imported nodes)
+    "jaccpot/runtime/_force_scale_levels.py",
+    "jaccpot/runtime/kernels/_l2l.py",
+    "jaccpot/pallas/m2l_real_csr.py",
     "jaccpot/mutual/",
     "jaccpot/nornax_adapter.py",
     "jaccpot/pallas/nearfield_",

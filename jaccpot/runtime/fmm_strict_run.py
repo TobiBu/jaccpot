@@ -2666,6 +2666,70 @@ class StrictRunMixin(_EngineBase):
 
         return prepared, _eval
 
+    def _call_cross_hook(
+        self,
+        cross_hook: Callable[..., Any],
+        tree_artifacts: Any,
+        force_scale_nodes: Optional[Array],
+        *,
+        criterion_active: bool,
+    ) -> tuple[Optional[tuple], Optional[Array]]:
+        """Run the multi-GPU cross hook between the sweeps, on this step's criterion.
+
+        A geometric hook is called as ``hook(tree_artifacts)`` and returns the
+        imported far sources ``(multipoles, centers, src, tgt)`` (or ``None``).
+        Under ``mac_type='dehnen_error'`` (this refresh carries a force scale) the
+        cross walks must accept by the same eq (16a) as the local walk, so the hook
+        has to say it does (``hook.error_criterion``, set by
+        :func:`jaccpot.distributed.cross.make_cross_hook`): it is called with this
+        step's :class:`~jaccpot.runtime._walk_criterion.FlatWalkCriterion` and
+        returns the imported sources' masses as a fifth entry, which eq (16b)'s far
+        half needs. A mismatch either way raises: one criterion for the local pairs
+        and another for the cross pairs is a silent wrong answer.
+
+        Parameters
+        ----------
+        cross_hook : Callable[..., Any]
+            The hook.
+        tree_artifacts : Any
+            The refresh's tree and upward pass.
+        force_scale_nodes : Optional[Array]
+            ``[nodes]`` ``min_b f_b`` of this step's tree (eq 16a's thresholds).
+        criterion_active : bool
+            This refresh runs the criterion.
+
+        Returns
+        -------
+        tuple[Optional[tuple], Optional[Array]]
+            ``(cross_far, cross_far_masses)``; the masses are ``None`` for a
+            geometric hook.
+
+        Raises
+        ------
+        RuntimeError
+            If the hook's criterion and this refresh's disagree.
+        """
+        hook_criterion = bool(getattr(cross_hook, "error_criterion", False))
+        if hook_criterion != bool(criterion_active):
+            raise RuntimeError(
+                "the cross hook and the local walk disagree on the criterion: the "
+                f"refresh {'runs' if criterion_active else 'does not run'} "
+                "mac_type='dehnen_error' and the hook was built "
+                f"{'with' if hook_criterion else 'without'} it "
+                "(make_cross_hook(error_criterion=...))"
+            )
+        if not hook_criterion:
+            return cross_hook(tree_artifacts), None
+        out = cross_hook(
+            tree_artifacts,
+            criterion=self._flat_walk_criterion(
+                tree_artifacts.upward, force_scale_nodes
+            ),
+        )
+        if out is None:
+            return None, None
+        return tuple(out[:4]), out[4]
+
     def _refresh_large_n_same_topology(
         self,
         prepared_state: LargeNPreparedState,
@@ -2725,7 +2789,9 @@ class StrictRunMixin(_EngineBase):
             tree artifacts (`jaccpot.distributed.cross.make_cross_hook`). It returns
             ``(multipoles, centers, src, tgt)`` for the cross-domain far field, which the
             downward sweep concatenates behind the local nodes, or ``None``. ``None``
-            (default) is the single-domain lane, bit-identical.
+            (default) is the single-domain lane, bit-identical. Under
+            ``mac_type='dehnen_error'`` it also takes this step's eq (16a) criterion
+            and returns the imported masses (:meth:`_call_cross_hook`).
         force_scale_particles : Optional[Array]
             ``mac_type='dehnen_error'``: eq (16b)'s ``f_b`` per particle in input
             order, carried from the previous step's evaluation. Reduced to the
@@ -3022,7 +3088,22 @@ class StrictRunMixin(_EngineBase):
         # X6), and a hook in only one of them silently never fired on the other.
         #
         # Phase C1: called, result discarded, force bit-identical either way.
+        # eq (16a)'s per-node thresholds come first: the cross hook's walks read
+        # them too (the rows each device publishes), as the local walk below does
+        force_scale_nodes_now = prepared_state.force_scale_nodes
+        if force_scale_particles is not None:
+            from jaccpot.runtime._force_scale_levels import node_force_scale_min
+
+            levels_fb = self._resolve_upward_num_levels(tree_artifacts.tree)
+            if levels_fb is None:
+                levels_fb = int(get_level_offsets(tree_artifacts.tree).shape[0] - 1)
+            force_scale_nodes_now = node_force_scale_min(
+                tree=tree_artifacts.tree,
+                force_scale_particles=force_scale_particles,
+                num_levels=int(levels_fb),
+            )
         cross_far = None
+        cross_far_masses = None
         if cross_hook is not None:
             # ONE exact-radius COM geometry for the hook and the local walk below:
             # each used to resolve its own, 9.7 ms per force at 1e6 particles per
@@ -3038,21 +3119,15 @@ class StrictRunMixin(_EngineBase):
                 tree_artifacts = tree_artifacts._replace(
                     walk_geometry=self._walk_geometry(tree_artifacts)
                 )
-            cross_far = cross_hook(tree_artifacts)
-        force_scale_nodes_now = prepared_state.force_scale_nodes
-        if force_scale_particles is not None:
-            from jaccpot.runtime._force_scale_levels import node_force_scale_min
-
-            levels_fb = self._resolve_upward_num_levels(tree_artifacts.tree)
-            if levels_fb is None:
-                levels_fb = int(get_level_offsets(tree_artifacts.tree).shape[0] - 1)
-            force_scale_nodes_now = node_force_scale_min(
-                tree=tree_artifacts.tree,
-                force_scale_particles=force_scale_particles,
-                num_levels=int(levels_fb),
+            cross_far, cross_far_masses = self._call_cross_hook(
+                cross_hook,
+                tree_artifacts,
+                force_scale_nodes_now,
+                criterion_active=bool(self._flat_walk_criterion_active()),
             )
         dual_downward_artifacts = self._prepare_state_dual_and_downward(
             cross_far=cross_far,
+            cross_far_masses=cross_far_masses,
             tree_artifacts=tree_artifacts,
             force_scale_nodes=force_scale_nodes_now,
             upward_center_mode=upward_center_mode,

@@ -145,9 +145,7 @@ def _l2l_level_compact_kwargs(
     return out
 
 
-def _far_force_scale_in_downward_available(
-    tree: Tree, *, total_nodes: int, cross_domain: bool = False
-) -> bool:
+def _far_force_scale_in_downward_available(tree: Tree, *, total_nodes: int) -> bool:
     """Whether the downward sweep can sum ``dehnen_error``'s far force scale itself.
 
     Eq (16b)'s far half (``f_b``) is each far pair's monopole term summed into
@@ -156,8 +154,10 @@ def _far_force_scale_in_downward_available(
     (:class:`~jaccpot.runtime._force_scale_levels.FarForceScaleInputs`) and the
     Pallas L2L cascade carries the second down its parent edges, in the launches
     the sweep makes anyway. Anywhere else (the pure-JAX M2L or L2L loops, a
-    cross-domain list, a detail-diagnostic sweep that skips a stage) the caller
-    keeps :func:`~jaccpot.runtime._force_scale_levels.far_force_scale_sorted`.
+    detail-diagnostic sweep that skips a stage) the caller keeps
+    :func:`~jaccpot.runtime._force_scale_levels.far_force_scale_sorted`. A
+    cross-domain list (the multi-GPU hook's imported sources behind the local
+    nodes, S12) rides the same rows when the inputs cover the imported nodes too.
 
     Parameters
     ----------
@@ -165,8 +165,6 @@ def _far_force_scale_in_downward_available(
         The tree the sweep descends.
     total_nodes : int
         Node count (the level registry's key, as the sweep resolves it).
-    cross_domain : bool
-        Cross-domain sources ride behind the local nodes (the multi-GPU hook).
 
     Returns
     -------
@@ -174,8 +172,6 @@ def _far_force_scale_in_downward_available(
         ``True`` when :func:`_prepare_solidfmm_downward_sweep` takes
         ``force_scale``.
     """
-    if cross_domain:
-        return False
     mode = _normalize_strict_refresh_detail_diag_mode(
         os.environ.get("JACCPOT_STRICT_REFRESH_DETAIL_DIAG_MODE", "full")
     )
@@ -637,7 +633,9 @@ def _prepare_solidfmm_downward_sweep(
         ``mac_type='dehnen_error'``: also compute eq (16b)'s far force-scale term
         of every node, its own far pairs' monopole terms plus its ancestors', in
         the CSR M2L lanes kernel and the Pallas L2L cascade (no pass of its own).
-        Only where :func:`_far_force_scale_in_downward_available` holds.
+        Only where :func:`_far_force_scale_in_downward_available` holds. With
+        ``cross_multipoles`` its arrays cover ``[local ; imported]`` (the cross
+        far pairs' sources are read there), the radii the local targets'.
 
     Returns
     -------
@@ -649,18 +647,27 @@ def _prepare_solidfmm_downward_sweep(
     ------
     ValueError
         If a chunk-size option is not positive, or ``force_scale`` is passed
-        where the sweep cannot compute it.
+        where the sweep cannot compute it: off those kernels, or not covering the
+        imported nodes of a cross-domain list.
     """
-    if force_scale is not None and (
-        cross_multipoles is not None
-        or not _far_force_scale_in_downward_available(
-            tree, total_nodes=int(jnp.asarray(upward.multipoles.centers).shape[0])
+    if force_scale is not None:
+        local_nodes = int(jnp.asarray(upward.multipoles.centers).shape[0])
+        if not _far_force_scale_in_downward_available(tree, total_nodes=local_nodes):
+            raise ValueError(
+                "the downward sweep cannot compute the far force scale here; check "
+                "_far_force_scale_in_downward_available() first"
+            )
+        imported = (
+            0
+            if cross_multipoles is None
+            else int(jnp.asarray(cross_multipoles).shape[0])
         )
-    ):
-        raise ValueError(
-            "the downward sweep cannot compute the far force scale here; check "
-            "_far_force_scale_in_downward_available() first"
-        )
+        covered = int(jnp.asarray(force_scale.node_mass).shape[0])
+        if covered != local_nodes + imported:
+            raise ValueError(
+                f"force_scale covers {covered} nodes, the sweep's sources are "
+                f"{local_nodes} local + {imported} imported"
+            )
 
     interaction_inputs = _prepare_solidfmm_downward_interaction_inputs(
         tree=tree,
@@ -677,8 +684,9 @@ def _prepare_solidfmm_downward_sweep(
     interactions = interaction_inputs.interactions
     src = interaction_inputs.src
     tgt = interaction_inputs.tgt
-    # the walk's list as walked (CSR order, ``tgt`` its row offsets); expanded and
-    # cleared below if the cross-domain pairs are appended behind it
+    # the walk's list as walked (CSR order, ``tgt`` its row offsets); the
+    # cross-domain pairs are merged into its rows below on the CSR lane, else it is
+    # expanded and cleared and they are appended behind it
     targets_sorted = isinstance(far_pairs_coo, _TargetSortedFarPairCOO)
     # checked symmetric by its maker (the grad plan): a sort-free M2L reverse
     symmetric_pairs = isinstance(far_pairs_coo, _SymmetricTargetSortedFarPairCOO)
@@ -756,7 +764,7 @@ def _prepare_solidfmm_downward_sweep(
         if chunk_size <= 0:
             raise ValueError("m2l_chunk_size must be positive")
 
-        # ---- cross-domain sources, concatenated (plan phase C) -------------
+        # ---- cross-domain sources, behind the local ones (plan phase C) ----
         # The imported multipoles ride at indices >= the local node count, which is
         # what makes the walk's (min, max) canonicalisation an exact
         # (local target, imported source) ordering. `n_targets` then keeps the M2L
@@ -775,22 +783,45 @@ def _prepare_solidfmm_downward_sweep(
                 [centers, jnp.asarray(cross_centers, centers.dtype)]
             )
             if cross_src is not None and int(jnp.asarray(cross_src).shape[0]) > 0:
-                if targets_sorted:
-                    # a target-sorted list carries row offsets: one target per
-                    # entry before the cross pairs go behind it
-                    from jaccpot.pallas.m2l_real_csr import targets_from_csr_offsets
-
-                    tgt = targets_from_csr_offsets(tgt, int(src.shape[0]))
-                src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
-                tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
-                targets_sorted = False
                 symmetric_pairs = False
+                if targets_sorted and _m2l_csr_pallas_active():
+                    # The CSR lanes kernel reads the walk's list as the CSR it is:
+                    # each cross pair goes into its target's row, behind the row's
+                    # own entries -- the order the stable sort of the concatenated
+                    # list gives a row, so the locals are bitwise that route's,
+                    # without its sort over the whole far capacity (only the cross
+                    # pairs are sorted). The flat lanes below keep the
+                    # concatenation: they accumulate by chunk of the list, so a
+                    # row-ordered list would reassociate their sums, and they never
+                    # sorted the whole list.
+                    from jaccpot.pallas.m2l_real_csr import merge_into_csr
+
+                    src, tgt, active_pair_count = merge_into_csr(
+                        src,
+                        tgt,
+                        cross_src,
+                        cross_tgt,
+                        total_nodes=n_local_nodes,
+                    )
+                else:
+                    if targets_sorted:
+                        # a target-sorted list carries row offsets: one target per
+                        # entry before the cross pairs go behind it
+                        from jaccpot.pallas.m2l_real_csr import (
+                            targets_from_csr_offsets,
+                        )
+
+                        tgt = targets_from_csr_offsets(tgt, int(src.shape[0]))
+                    src = jnp.concatenate([src, jnp.asarray(cross_src, src.dtype)])
+                    tgt = jnp.concatenate([tgt, jnp.asarray(cross_tgt, tgt.dtype)])
+                    targets_sorted = False
+                    # The concatenation has no live PREFIX: the local half is -1-padded
+                    # and the cross half follows it, so `arange(P) <
+                    # active_pair_count` -- which is what this argument means --
+                    # would cut the cross pairs off entirely. The -1 entries are
+                    # dropped by the CSR build on their own.
+                    active_pair_count = None
                 pair_count = int(src.shape[0])
-                # A merged list has no live PREFIX: the local half is -1-padded and
-                # the cross half follows it, so `arange(P) < active_pair_count` --
-                # which is what this argument means -- would cut the cross pairs off
-                # entirely. The -1 entries are dropped by the CSR build on their own.
-                active_pair_count = None
             n_targets = n_local_nodes
 
         stage_t0 = time.perf_counter()

@@ -208,8 +208,18 @@ class FarFieldConfig:
     Attributes
     ----------
     m2l_chunk_size : Optional[int]
-        Pairs per chunk in the chunked M2L ``lax.scan``. A memory/throughput knob;
-        it bounds peak memory rather than changing the result.
+        Pairs per chunk in the chunked M2L ``lax.scan`` of the flat M2L -- the lane
+        on a CPU, on a pre-Ampere card, or with
+        ``JACCPOT_STATIC_STRICT_FUSED_M2L_CSR=0``; the CSR M2L kernel does not read
+        it. A memory/throughput knob, but not a numerically neutral one: a pair list
+        that fits one chunk (``pair_count <= chunk_size``; ``pair_count`` is the
+        list's static width, capacity padding included) is accumulated in ONE
+        fullbatch segment sum, a longer one by the chunked scan, and the two
+        associate the sum differently. Measured on the two-device CPU end-to-end
+        lane: a cross far list whose capacity alone crossed the default 4096 moved
+        2347 of 6144 force components by 1 ulp
+        (``tests/distributed/test_cross_capacities_cpu_e2e.py``). Within the chunked
+        scan the chunk size also sets how the partial sums are grouped.
     l2l_chunk_size : Optional[int]
         The same for the L2L cascade.
     streamed_far_pairs : Optional[bool]

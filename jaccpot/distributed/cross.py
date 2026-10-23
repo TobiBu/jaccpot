@@ -33,10 +33,13 @@ only the cost differs, and for the near half it differs the other way.
 
 from __future__ import annotations
 
-from typing import Any, Callable, NamedTuple, Optional
+import copy
+import math
+from typing import Any, Callable, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array
 from yggdrax.distributed.comm import AXIS_NAME, ragged_all_to_all_exchange
 from yggdrax.distributed.export import (
@@ -58,13 +61,71 @@ from yggdrax.distributed.summary import (
 from jaccpot._searchsorted import searchsorted_method
 
 __all__ = [
+    "CROSS_NEEDS_FIELDS",
     "CrossCapacities",
     "cross_near_acceleration",
+    "cross_needs",
     "cross_walk_backend",
     "cross_walk_fn",
     "make_cross_hook",
     "merge_imported_blocks",
+    "plan_cross_capacities",
 ]
+
+#: Entries of the cross NEEDS vector (:func:`cross_needs`), in order. The first ten
+#: are what the symmetric exchange (the default path) needed of the
+#: :class:`CrossCapacities` attribute of the SAME NAME, on this device:
+#:
+#: * ``max_cells``, ``max_summary_nodes``: the summary cut's cells and the published
+#:   summary tree's nodes. EXACT, past their own overflow too: recounted from the tree
+#:   (:func:`_summary_needs`), not read off the cut, which saturates at its capacity.
+#: * ``export_far_cap``, ``export_near_cap``, ``export_walk_queue``: the symmetric
+#:   walk's far and near pairs and its peak wavefront. The Pallas walk keeps counting
+#:   past a full list, so these are exact unless its queue overflowed; yggdrax's traced
+#:   walk stops at its first overflow. Either way a lower bound when
+#:   ``walk_lower_bound`` is set.
+#: * ``send_node_cap``, ``recv_node_cap``, ``send_particle_cap``, ``recv_particle_cap``,
+#:   ``leaf_width``: the rows (far and near; the larger) and particles this device
+#:   ships and receives, and the most particles in one shipped leaf. Counted on the
+#:   (peer, node) presence map, so EXACT past their own buffers' overflow; a lower
+#:   bound when ``pairs_lower_bound`` is set (the walk or the summary lost pairs).
+#:
+#: Then four bits: ``overflow`` (the hook's own flag fired on this device),
+#: ``walk_lower_bound``, ``pairs_lower_bound``, and ``mismatch`` (the two ends of an
+#: exchange disagreed on a size while none of this device's exchange buffers
+#: overflowed: no capacity covers that, and no re-plan fixes it).
+#: Reduced over the mesh with ``pmax`` the vector is what every capacity, shared by
+#: all devices, has to hold, and the bits are OR-ed.
+CROSS_NEEDS_FIELDS = (
+    "max_cells",
+    "max_summary_nodes",
+    "export_far_cap",
+    "export_near_cap",
+    "export_walk_queue",
+    "send_node_cap",
+    "recv_node_cap",
+    "send_particle_cap",
+    "recv_particle_cap",
+    "leaf_width",
+    "overflow",
+    "walk_lower_bound",
+    "pairs_lower_bound",
+    "mismatch",
+)
+#: the capacity entries of :data:`CROSS_NEEDS_FIELDS`, and the lower-bound bit (if
+#: any) that qualifies each
+_NEEDS_LOWER_BOUND_BIT = {
+    "max_cells": None,
+    "max_summary_nodes": None,
+    "export_far_cap": "walk_lower_bound",
+    "export_near_cap": "walk_lower_bound",
+    "export_walk_queue": "walk_lower_bound",
+    "send_node_cap": "pairs_lower_bound",
+    "recv_node_cap": "pairs_lower_bound",
+    "send_particle_cap": "pairs_lower_bound",
+    "recv_particle_cap": "pairs_lower_bound",
+    "leaf_width": "pairs_lower_bound",
+}
 
 
 _CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
@@ -201,8 +262,69 @@ class _Published(NamedTuple):
     num_entries: Array
 
 
+#: column of the first eq (16a) table entry in a two-sided summary row
+#: (:func:`_summary_rows`): centre 3, radius, left, right, active, count, then the
+#: table's ``G M``, threshold, ``s_1..s_p``
+_SUMMARY_TABLE_COL = 8
+
+
+def _summary_table_width(order: int) -> int:
+    """Table columns a summary row carries under the criterion: ``G M``, the
+    threshold and ``s_1..s_p`` (:func:`~jaccpot.runtime._walk_criterion.dehnen_walk_table`
+    without its power-of-two padding).
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``.
+
+    Returns
+    -------
+    int
+        ``p + 2``.
+    """
+    from jaccpot.runtime._walk_criterion import WALK_TABLE_POWER0
+
+    return WALK_TABLE_POWER0 + int(order)
+
+
+def _live_node_ends(tree: Any) -> Array:
+    """Each node's last LIVE particle (inclusive): its range end, clamped.
+
+    A capacity-padded cells tree (a mesh shard, dead rows sorted to the end) gives
+    its padding leaves the empty range ``(n, n - 1)`` and an internal node the
+    (min start, max end) of its children, so the parent of the last live leaf and
+    the padding subtree spans ``[that leaf's start, n - 1]``: the leaf's particles
+    AND every dead row. Under one-leaf summary cells without ``summary_cell_level``
+    that parent is a cut cell (it holds one live leaf), and laying its near
+    particles out over its range shipped the dead rows -- zero mass, so the force
+    was right, but the near half's ``full > W`` check fired whatever the width
+    (two A100s, the rollout gate's capacities, 2e5 per card). Live particles are
+    exactly the leaves' ranges, so the last of them bounds every node.
+
+    Parameters
+    ----------
+    tree : Any
+        The refreshed tree (``node_ranges``, ``left_child``).
+
+    Returns
+    -------
+    Array
+        ``(total_nodes,)`` inclusive ends; an empty node keeps ``end < start``.
+    """
+    nr = jnp.asarray(tree.node_ranges)
+    leaves = nr[int(jnp.asarray(tree.left_child).shape[0]) :]
+    last_live = jnp.max(jnp.where(leaves[:, 1] >= leaves[:, 0], leaves[:, 1], -1))
+    return jnp.minimum(nr[:, 1], last_live)
+
+
 def _summary_rows(
-    tree: Any, geom: Any, cap: "CrossCapacities", *, two_sided: bool
+    tree: Any,
+    geom: Any,
+    cap: "CrossCapacities",
+    *,
+    two_sided: bool,
+    criterion: Any = None,
 ) -> _Published:
     """This device's summary, packed for ONE all_gather.
 
@@ -218,6 +340,14 @@ def _summary_rows(
         is the block width.
     two_sided : bool
         Publish the summary tree (with child links) instead of the bare cells.
+    criterion : Any
+        ``mac_type='dehnen_error'`` (two-sided only): this step's
+        :class:`~jaccpot.runtime._walk_criterion.FlatWalkCriterion` over the local
+        nodes. Each published node's eq (16a) table row -- ``G M``, the threshold
+        ``eps * min_b f_b`` of its subtree, ``s_1..s_p`` on the PUBLISHED radius,
+        the one the cross walks read -- rides behind the geometry
+        (:data:`_SUMMARY_TABLE_COL`), so every device evaluates every cross pair
+        from the same floats. ``None``: the geometric rows.
 
     Returns
     -------
@@ -276,20 +406,80 @@ def _summary_rows(
     safe = jnp.where(ok, st.nodes, 0)
     nr = jnp.asarray(tree.node_ranges)
     # live particles under each entry: what a peer receiving this node's particles
-    # needs to lay them out (`_symmetric_exchange`), so no row counts travel
-    count = jnp.where(st.active, jnp.maximum(nr[safe, 1] - nr[safe, 0] + 1, 0), 0)
-    rows = jnp.concatenate(
-        [
-            jnp.where(ok[:, None], center[safe], 0.0),
-            jnp.where(ok, radius[safe], 0.0)[:, None],
-            st.left.astype(dtype)[:, None],
-            st.right.astype(dtype)[:, None],
-            st.active.astype(dtype)[:, None],
-            count.astype(dtype)[:, None],
-        ],
-        axis=1,
-    )
+    # needs to lay them out (`_symmetric_exchange`), so no row counts travel. Not the
+    # range length: a padded shard's ranges can run into its dead rows
+    ends = _live_node_ends(tree)
+    count = jnp.where(st.active, jnp.maximum(ends[safe] - nr[safe, 0] + 1, 0), 0)
+    columns = [
+        jnp.where(ok[:, None], center[safe], 0.0),
+        jnp.where(ok, radius[safe], 0.0)[:, None],
+        st.left.astype(dtype)[:, None],
+        st.right.astype(dtype)[:, None],
+        st.active.astype(dtype)[:, None],
+        count.astype(dtype)[:, None],
+    ]
+    if criterion is not None:
+        # the published nodes' table rows, built on the radius published above
+        published = criterion._replace(
+            multipole_packed=jnp.asarray(criterion.multipole_packed)[safe],
+            mass=jnp.asarray(criterion.mass)[safe],
+            threshold=jnp.asarray(criterion.threshold)[safe],
+        )
+        width = _summary_table_width(int(criterion.order))
+        table = jnp.asarray(published.table(radius[safe])[:, :width], dtype)
+        columns.append(jnp.where(ok[:, None], table, 0.0))
+    rows = jnp.concatenate(columns, axis=1)
     return _Published(cut, st.nodes, rows, st.overflow, st.num_nodes)
+
+
+def _summary_needs(
+    tree: Any, cap: "CrossCapacities", *, two_sided: bool
+) -> tuple[Array, Array]:
+    """What :func:`_summary_rows` needs of ``max_cells`` and ``max_summary_nodes``.
+
+    ``occupancy_cut`` and ``summary_tree`` report their sizes saturated at their
+    capacities, so a re-plan cannot read the demand off them. This recounts both from
+    the cut's own rule: a node FITS when it holds 1..``max_leaves`` live leaves and
+    (internal nodes only, with ``summary_cell_level``) lies inside one Morton cell of
+    that level; the cut is every fitting node whose parent does not fit. Fitting is
+    monotone up the tree for live nodes, so the summary tree's ANCESTORS -- live,
+    internal, not in or below the cut -- are exactly the live internal nodes that do
+    not fit, and the summary tree is the root plus both children of every ancestor:
+    ``2 A + 1`` nodes (``0`` for a shard without a live leaf). Exact whatever the
+    capacities; equal to ``num_cells`` / ``num_nodes`` when nothing overflowed (pinned
+    in ``tests/unit/distributed/test_cross_capacities.py``).
+
+    Parameters
+    ----------
+    tree : Any
+        The refreshed tree, as :func:`_summary_rows` reads it.
+    cap : CrossCapacities
+        Capacities; ``max_leaves_per_cell`` and ``summary_cell_level`` are read.
+    two_sided : bool
+        The export mode (decides the default ``max_leaves``).
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(cells, summary_nodes)``, int32 scalars. One-sided, the second is the cells
+        again (the published block is the cut itself).
+    """
+    parent = jnp.asarray(tree.parent)
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    sub = subtree_leaf_counts(jnp.asarray(tree.node_ranges), num_internal)
+    internal = jnp.arange(parent.shape[0]) < num_internal
+    fits = (sub > 0) & (sub <= _max_leaves_per_cell(cap, two_sided))
+    if cap.summary_cell_level is not None:
+        edge = _node_cell_edge(tree)
+        fits = fits & (~internal | (edge <= 2.0 ** -int(cap.summary_cell_level)))
+    is_root = parent < 0
+    in_cut = fits & jnp.where(is_root, True, ~fits[jnp.where(is_root, 0, parent)])
+    cells = jnp.sum(in_cut, dtype=jnp.int32)
+    if not two_sided:
+        return cells, cells
+    ancestors = jnp.sum(internal & (sub > 0) & ~fits, dtype=jnp.int32)
+    live_root = sub[jnp.argmin(parent)] > 0
+    return cells, jnp.where(live_root, 2 * ancestors + 1, 0).astype(jnp.int32)
 
 
 def _export_from_rows(
@@ -795,6 +985,7 @@ def _symmetric_walk(
     *,
     mac_type: str,
     walk_fn: Optional[Callable[..., Any]],
+    error_order: int = 0,
 ) -> Any:
     """One walk between this device's tree and every peer's, over the gathered trees.
 
@@ -821,15 +1012,35 @@ def _symmetric_walk(
         MAC variant. Static.
     walk_fn : Optional[Callable[..., Any]]
         The walk implementation (``None``: yggdrax's traced walk).
+    error_order : int
+        ``mac_type='dehnen_error'``: accept by eq (16a) at this order from the
+        gathered table columns (:func:`_summary_rows`' ``criterion``); ``walk_fn``
+        is then :func:`cross_walk_fn`'s criterion walk, which takes the table as
+        ``error_table``. ``0``: the opening angle. Static.
 
     Returns
     -------
     Any
         The walk result: pairs ``(a, b)`` with ``a`` in the lower device's block.
+
+    Raises
+    ------
+    ValueError
+        If ``error_order > 0`` comes without a criterion walk.
     """
     from yggdrax.interactions import dual_tree_walk_mutual
 
     ndev, S = int(gathered.shape[0]), int(gathered.shape[1])
+    criterion: dict = {}
+    if int(error_order) > 0:
+        if walk_fn is None:
+            raise ValueError("the criterion's cross walk needs cross_walk_fn's walk")
+        width = _summary_table_width(int(error_order))
+        # every device's published rows, in the walk's [ndev x S] index space: the
+        # same floats on every device, so both ends of a pair decide it alike
+        criterion["error_table"] = gathered[
+            ..., _SUMMARY_TABLE_COL : _SUMMARY_TABLE_COL + width
+        ].reshape(ndev * S, width)
     idx = jnp.int32
     base = (jnp.arange(ndev, dtype=idx) * S)[:, None]
 
@@ -854,6 +1065,7 @@ def _symmetric_walk(
         node_active=(gathered[..., 6] > 0.5).reshape(ndev * S),
         seed_a=jnp.where(dead, jnp.asarray(-1, idx), jnp.minimum(dev, me_i) * S),
         seed_b=jnp.where(dead, jnp.asarray(-1, idx), jnp.maximum(dev, me_i) * S),
+        **criterion,
     )
 
 
@@ -871,12 +1083,18 @@ class _PeerRows(NamedTuple):
         ``(P,)`` each pair's index into ``rows``; ``-1`` for dead pairs.
     overflow : Array
         More unique rows than ``capacity``.
+    needed : Array
+        Unique rows, laid out or not: the capacity the list needed.
+    present : Array
+        ``(ndev x S,)`` int32, 1 at every (peer, node) that has a row.
     """
 
     rows: Array
     sizes: Array
     pair_row: Array
     overflow: Array
+    needed: Array
+    present: Array
 
 
 def _rows_by_peer(
@@ -925,7 +1143,7 @@ def _rows_by_peer(
     )
     sizes = jnp.sum(present.reshape(ndev, S), axis=1, dtype=idx)
     pair_row = jnp.where(live, before[jnp.minimum(key, span - 1)], -1)
-    return _PeerRows(rows, sizes, pair_row, n_rows > capacity)
+    return _PeerRows(rows, sizes, pair_row, n_rows > capacity, n_rows, present)
 
 
 def _symmetric_pair_sides(
@@ -999,6 +1217,8 @@ def _symmetric_exchange(
     walk_fn: Optional[Callable[..., Any]],
     axis_name: str,
     with_near: bool,
+    error_order: int = 0,
+    node_mass: Optional[Array] = None,
 ) -> dict:
     """The cross field with only multipoles and particles on the wire.
 
@@ -1039,15 +1259,31 @@ def _symmetric_exchange(
         Mesh axis.
     with_near : bool
         Also exchange particles and return the near list.
+    error_order : int
+        ``mac_type='dehnen_error'``: the walk accepts by eq (16a) at this order
+        from the gathered table columns (:func:`_symmetric_walk`). Static.
+    node_mass : Optional[Array]
+        ``[nodes]`` this device's node masses (its upward pass's mass moments);
+        with ``error_order`` they travel with the multipoles, one more column of
+        the far payload, for eq (16b)'s far half on the receiver.
 
     Returns
     -------
     dict
         ``cross_far`` (the M2L tuple), ``far_overflow``, the walk result ``walk``, the
-        far send/receive rows, and with ``with_near`` the near-sink fields
+        far send/receive rows, ``needs`` (what each capacity it read needed, keyed by
+        the :data:`CROSS_NEEDS_FIELDS` entry), with ``error_order`` the imported
+        rows' masses ``cross_masses``, and with ``with_near`` the near-sink fields
         (``positions``, ``masses``, ``mask``, ``target_node``, ``source_row``,
-        ``count``, ``overflow``) and ``near_particles``.
+        ``count``, ``overflow``), ``near_particles`` and ``send_particles``.
+
+    Raises
+    ------
+    ValueError
+        If ``error_order > 0`` comes without ``node_mass``.
     """
+    if int(error_order) > 0 and node_mass is None:
+        raise ValueError("the criterion's far payload needs the node masses")
     S = int(gathered.shape[1])
     idx = jnp.int32
     nodes = jnp.asarray(nodes).astype(idx)
@@ -1058,7 +1294,13 @@ def _symmetric_exchange(
     nr = jnp.asarray(tree.node_ranges)
 
     res = jax.named_call(_symmetric_walk, name="cross_export_walk")(
-        gathered, me, theta, cap, mac_type=mac_type, walk_fn=walk_fn
+        gathered,
+        me,
+        theta,
+        cap,
+        mac_type=mac_type,
+        walk_fn=walk_fn,
+        error_order=int(error_order),
     )
     out: dict = {"walk": res}
 
@@ -1075,13 +1317,17 @@ def _symmetric_exchange(
         )
         alive = (exp_f.rows >= 0)[:, None]
         send_node = nodes[jnp.maximum(exp_f.rows, 0)]
-        payload = jnp.concatenate(
-            [
-                jnp.where(alive, packed[send_node], 0.0),
-                jnp.where(alive, jnp.asarray(mp.centers)[send_node], 0.0),
-            ],
-            axis=1,
-        )
+        columns = [
+            jnp.where(alive, packed[send_node], 0.0),
+            jnp.where(alive, jnp.asarray(mp.centers)[send_node], 0.0),
+        ]
+        if int(error_order) > 0:
+            # the mass moment itself, not the packed monopole (another summation
+            # order): the receiver's f_b far terms read the float its owner has
+            assert node_mass is not None
+            mass = jnp.asarray(node_mass, packed.dtype)[send_node][:, None]
+            columns.append(jnp.where(alive, mass, 0.0))
+        payload = jnp.concatenate(columns, axis=1)
     recv, recv_sizes, _ = jax.named_call(
         ragged_all_to_all_exchange, name="cross_exchange_far"
     )(payload, exp_f.sizes, output_capacity=cap.recv_node_cap, axis_name=axis_name)
@@ -1095,6 +1341,9 @@ def _symmetric_exchange(
         src_f,
         tgt_f,
     )
+    if int(error_order) > 0:
+        # only the rows a live cross pair names are read, as the multipoles
+        out["cross_masses"] = recv[:, n_coeff + 3]
     out["exp_far"] = exp_f
     out["imp_far"] = imp_f
     out["far_overflow"] = (
@@ -1105,6 +1354,25 @@ def _symmetric_exchange(
         | imp_f.overflow
         | far_mismatch
     )
+    # What each capacity above NEEDED (`CROSS_NEEDS_FIELDS`), for a re-plan. The rows
+    # are counted on the presence map, which no row capacity truncates; the walk's
+    # counts survive a full list only in the Pallas walk (`far_needed`), yggdrax's
+    # stops at its first overflow. Pairs a walk overflow dropped are missing from
+    # every count after it.
+    walk_overflow = res.far_overflow | res.near_overflow | res.queue_overflow
+    out["needs"] = {
+        "export_far_cap": getattr(res, "far_needed", res.far_count),
+        "export_near_cap": getattr(res, "near_needed", res.near_count),
+        "export_walk_queue": res.peak_wavefront,
+        "send_node_cap": exp_f.needed,
+        "recv_node_cap": imp_f.needed,
+        "walk_lower_bound": (
+            res.queue_overflow if hasattr(res, "far_needed") else walk_overflow
+        ),
+        "pairs_lower_bound": walk_overflow,
+        # a truncated row buffer reads as a disagreement too; that one a re-plan fixes
+        "mismatch": far_mismatch & ~(exp_f.overflow | imp_f.overflow),
+    }
     if not with_near:
         return out
 
@@ -1125,7 +1393,10 @@ def _symmetric_exchange(
         s_ok = exp_n.rows >= 0
         s_node = nodes[jnp.maximum(exp_n.rows, 0)]
         starts = nr[s_node, 0].astype(idx)
-        full = jnp.where(s_ok, nr[s_node, 1].astype(idx) - starts + 1, 0)
+        # the LIVE particles only, as the receiver's count column says
+        # (`_live_node_ends`: a padded shard's ranges can run into its dead rows)
+        ends = _live_node_ends(tree)
+        full = jnp.where(s_ok, ends[s_node].astype(idx) - starts + 1, 0)
         counts = jnp.clip(full, 0, W)
         row, within, live_q, total = _row_of_slot(counts, cap.send_particle_cap)
         src = jnp.clip(starts[row] + within, 0, pos_sorted.shape[0] - 1)
@@ -1172,6 +1443,34 @@ def _symmetric_exchange(
         imp_mass = jnp.where(valid, recv_p[take, 3], 0.0)
         ok_n = nl & (imp_n.pair_row >= 0)
         leaf = _leaf_under(nodes[n_mine], nr, num_internal).astype(idx)
+    with jax.named_scope("cross_near_needs"):
+        # particles per (peer, node) row, laid out or not: mine from my own tree (the
+        # `full` above, for every row), the peers' from their published counts
+        live_node = nodes >= 0
+        safe_node = jnp.where(live_node, nodes, 0)
+        mine = jnp.where(
+            live_node, jnp.maximum(ends[safe_node] - nr[safe_node, 0] + 1, 0), 0
+        ).astype(idx)
+        shipped = exp_n.present.reshape(ndev, S) * mine[None, :]
+        theirs = jnp.round(gathered[..., 7]).astype(idx)
+        needs = out["needs"]
+        needs["send_node_cap"] = jnp.maximum(needs["send_node_cap"], exp_n.needed)
+        needs["recv_node_cap"] = jnp.maximum(needs["recv_node_cap"], imp_n.needed)
+        needs["send_particle_cap"] = jnp.sum(shipped, dtype=idx)
+        needs["recv_particle_cap"] = jnp.sum(
+            imp_n.present.reshape(ndev, S) * theirs, dtype=idx
+        )
+        needs["leaf_width"] = jnp.max(shipped)
+        buffers_overflowed = (
+            exp_f.overflow
+            | imp_f.overflow
+            | exp_n.overflow
+            | imp_n.overflow
+            | (total > cap.send_particle_cap)
+            | (jnp.sum(recv_psizes) > cap.recv_particle_cap)
+            | jnp.any(full > W)
+        )
+        needs["mismatch"] = needs["mismatch"] | (near_mismatch & ~buffers_overflowed)
     out.update(
         positions=imp_pos,
         masses=imp_mass,
@@ -1180,6 +1479,7 @@ def _symmetric_exchange(
         source_row=jnp.where(ok_n, imp_n.pair_row, -1),
         count=res.near_count,
         near_particles=jnp.sum(recv_psizes),
+        send_particles=total,
         exp_near=exp_n,
         imp_near=imp_n,
         overflow=(
@@ -1214,7 +1514,9 @@ def cross_walk_backend() -> str:
     return env_choice("JACCPOT_CROSS_WALK", strict_walk_backend(), ("flat", "pallas"))
 
 
-def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
+def cross_walk_fn(
+    mac_type: str, *, error_order: int = 0, theta_max: float = 1.0
+) -> Optional[Callable[..., Any]]:
     """The ``walk_fn`` the export and receiver walks run, or ``None`` for yggdrax's.
 
     The traced walk runs one ``while_loop`` per wavefront width with ~40 ops per
@@ -1223,17 +1525,33 @@ def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
     per force across the three cross walks. The Pallas walk classifies a round in
     one launch and checks the loop predicate every 16 rounds.
 
+    Under ``mac_type='dehnen_error'`` (``error_order > 0``) the walk takes one more
+    keyword, ``error_table`` (the ``[nodes, p + 2]`` eq (16a) rows, traced), and
+    accepts by eq (16a) instead of the opening angle -- on either backend, with
+    the single card's two implementations of one elementwise test: the Pallas
+    walk's ``error_table`` / ``error_order`` / ``theta_max``, or yggdrax's walk
+    with ``pair_accept=DehnenWalkAccept(p)``. The separation floor still applies.
+
     Parameters
     ----------
     mac_type : str
         The hook's MAC; the Pallas kernel implements ``dehnen`` / ``bh`` only, so
         any other keeps the traced walk.
+    error_order : int
+        ``0``: the opening angle. ``p > 0``: eq (16a) at expansion order ``p``.
+        Static.
+    theta_max : float
+        Eq (16a)'s convergence clause (``rho_A + rho_B < theta_max r``). Static.
 
     Returns
     -------
     Optional[Callable[..., Any]]
-        A function with ``dual_tree_walk_mutual``'s signature and result fields.
+        A function with ``dual_tree_walk_mutual``'s signature and result fields
+        (plus ``error_table`` with ``error_order``); ``None`` for yggdrax's walk
+        as it is.
     """
+    if int(error_order) > 0:
+        return _criterion_walk_fn(int(error_order), float(theta_max))
     if cross_walk_backend() != "pallas" or str(mac_type) not in ("dehnen", "bh"):
         return None
 
@@ -1280,11 +1598,195 @@ def cross_walk_fn(mac_type: str) -> Optional[Callable[..., Any]]:
     return pallas_walk
 
 
+def _criterion_walk_fn(order: int, theta_max: float) -> Callable[..., Any]:
+    """:func:`cross_walk_fn` under eq (16a): the walk with an ``error_table`` keyword.
+
+    Parameters
+    ----------
+    order : int
+        Expansion order ``p``.
+    theta_max : float
+        The convergence clause's bound.
+
+    Returns
+    -------
+    Callable[..., Any]
+        ``dual_tree_walk_mutual``'s signature plus ``error_table``, on the backend
+        :func:`cross_walk_backend` names.
+    """
+    pallas = cross_walk_backend() == "pallas"
+
+    def criterion_walk(
+        left_child_full: Array,
+        right_child_full: Array,
+        centers: Array,
+        radii: Array,
+        theta: float,
+        root: Array,
+        *,
+        error_table: Array,
+        max_pair_queue: int,
+        far_cap: int,
+        near_cap: int,
+        mac_type: Optional[str] = None,
+        node_active: Optional[Array] = None,
+        seed_a: Optional[Array] = None,
+        seed_b: Optional[Array] = None,
+        seed_count: Optional[Array] = None,
+        separation_floor: float = 0.0,
+    ) -> Any:
+        # theta and mac_type are the geometric test's: eq (16a) replaces it
+        del mac_type
+        common = dict(
+            max_pair_queue=int(max_pair_queue),
+            far_cap=int(far_cap),
+            near_cap=int(near_cap),
+            node_active=node_active,
+            seed_a=seed_a,
+            seed_b=seed_b,
+            seed_count=seed_count,
+            separation_floor=float(separation_floor),
+        )
+        if pallas:
+            from jaccpot._env import env_flag
+            from jaccpot.pallas.mutual_walk_pallas import mutual_walk_pallas
+
+            return mutual_walk_pallas(
+                left_child_full,
+                right_child_full,
+                centers,
+                radii,
+                float(theta),
+                root,
+                interpret=env_flag("JACCPOT_WALK_PALLAS_INTERPRET", False),
+                error_table=error_table,
+                error_order=int(order),
+                theta_max=float(theta_max),
+                **common,
+            )
+        from yggdrax.interactions import dual_tree_walk_mutual
+
+        from jaccpot.runtime._walk_criterion import DehnenWalkAccept
+
+        return dual_tree_walk_mutual(
+            left_child_full,
+            right_child_full,
+            centers,
+            radii,
+            float(theta),
+            root,
+            pair_accept=DehnenWalkAccept(int(order)),
+            pair_accept_data={
+                "table": error_table,
+                "theta_max": jnp.asarray(float(theta_max), jnp.asarray(radii).dtype),
+            },
+            **common,
+        )
+
+    return criterion_walk
+
+
+#: Capacities sized from a count are rounded up to a multiple of this.
+_CROSS_CAP_GRANULE = 1024
+
+#: A priori demand of the symmetric exchange's buffers per live leaf of the worst
+#: shard and per peer, and the headroom over it: the factors the two-card probe sized
+#: its buffers with (``bench/multigpu_c4_cross_force_probe.py``; Plummer, leaf 64,
+#: theta 0.8, 2e5-1e6 per card). Only a first measurement runs on them
+#: (:func:`plan_cross_capacities`); every later size comes from what it measured.
+_A_PRIORI_PER_LEAF = {
+    "export_far_cap": (16.0, 2.5),
+    "export_near_cap": (10.0, 2.5),
+    "export_walk_queue": (3.0, 1.5),
+    "send_node_cap": (1.25, 2.5),
+    "recv_node_cap": (1.25, 2.5),
+    "send_particle_cap": (20.0, 2.0),
+    "recv_particle_cap": (20.0, 2.0),
+}
+
+
+def _sized(need: Union[int, float], headroom: float) -> int:
+    """``headroom x need`` (at least one entry), rounded up to the granule.
+
+    Parameters
+    ----------
+    need : Union[int, float]
+        Entries needed: a measured count, or an a priori estimate.
+    headroom : float
+        Factor over ``need``.
+
+    Returns
+    -------
+    int
+        A positive multiple of :data:`_CROSS_CAP_GRANULE`.
+    """
+    want = math.ceil(float(headroom) * max(float(need), 1.0))
+    return -(-want // _CROSS_CAP_GRANULE) * _CROSS_CAP_GRANULE
+
+
+def _needs_by_field(needs: Any) -> dict[str, int]:
+    """A host needs vector as ``{field: value}``.
+
+    Parameters
+    ----------
+    needs : Any
+        ``[len(CROSS_NEEDS_FIELDS)]`` integers (:func:`cross_needs`, reduced).
+
+    Returns
+    -------
+    dict[str, int]
+        The vector keyed by :data:`CROSS_NEEDS_FIELDS`.
+
+    Raises
+    ------
+    ValueError
+        If the vector has the wrong length.
+    """
+    values = np.asarray(needs).astype(np.int64).reshape(-1)
+    if values.shape[0] != len(CROSS_NEEDS_FIELDS):
+        raise ValueError(
+            f"a cross needs vector has {len(CROSS_NEEDS_FIELDS)} entries "
+            f"(CROSS_NEEDS_FIELDS), got {values.shape[0]}"
+        )
+    return dict(zip(CROSS_NEEDS_FIELDS, (int(v) for v in values)))
+
+
+def _default_headroom(headroom: Optional[float]) -> float:
+    """The caller's headroom, or the local walk's (``JACCPOT_FLAT_WALK_CAP_HEADROOM``).
+
+    Parameters
+    ----------
+    headroom : Optional[float]
+        An explicit factor, or ``None``.
+
+    Returns
+    -------
+    float
+        The factor, at least 1.
+    """
+    if headroom is not None:
+        return max(float(headroom), 1.0)
+    from jaccpot.runtime._interaction_cache import flat_walk_cap_headroom
+
+    return flat_walk_cap_headroom()
+
+
 class CrossCapacities:
     """Static capacities for one cross exchange. Every one is an overflow risk.
 
     Attributes are read at trace time and fix every buffer shape, so they cannot be
-    derived from what actually arrives. Over-allocate and read the flags.
+    derived from what actually arrives. Three ways to size them, all for the default
+    (symmetric) exchange:
+
+    * :meth:`for_shard` -- a priori, from what the driver knows before any force: the
+      shard's leaf capacity and live leaves, the mesh size and the leaf width;
+    * :meth:`from_needs` -- from a MEASURED needs vector (:func:`cross_needs`), each
+      capacity ``headroom x`` what it needed; :func:`plan_cross_capacities` measures
+      one force at the start positions and does this;
+    * :meth:`replanned` -- the segment retry: grown, never narrowed, to cover what a
+      run whose flag fired needed.
+
+    ``CrossCapacities()`` keeps the fixed defaults below.
     """
 
     def __init__(
@@ -1370,6 +1872,377 @@ class CrossCapacities:
             2 * self.max_cells if max_summary_nodes is None else int(max_summary_nodes)
         )
 
+    def __repr__(self) -> str:
+        """The capacities, by attribute.
+
+        Returns
+        -------
+        str
+            ``CrossCapacities(name=value, ...)``.
+        """
+        fields = ", ".join(f"{k}={v}" for k, v in vars(self).items())
+        return f"CrossCapacities({fields})"
+
+    def _with(self, **changes: int) -> "CrossCapacities":
+        """A copy with some capacities replaced.
+
+        Parameters
+        ----------
+        **changes : int
+            Attribute name to its new value.
+
+        Returns
+        -------
+        CrossCapacities
+            The copy; ``self`` is unchanged.
+        """
+        new = copy.copy(self)
+        for name, value in changes.items():
+            setattr(new, name, int(value))
+        return new
+
+    @classmethod
+    def for_shard(
+        cls,
+        *,
+        leaf_capacity: int,
+        ndev: int,
+        leaf_width: int,
+        live_leaves: Optional[int] = None,
+        summary_cell_level: Optional[int] = None,
+    ) -> "CrossCapacities":
+        """A priori capacities for a mesh of ``ndev`` shards of ``leaf_capacity`` leaves.
+
+        The summary is bounded EXACTLY by the tree: under the default one-leaf cells
+        there is one cut cell per live leaf, at most ``leaf_capacity``, and the summary
+        tree is part of a tree of ``2 x leaf_capacity - 1`` nodes. The exchange buffers
+        scale with the live leaves of the worst shard times the peers it can hear from,
+        by the per-leaf demand the two-card probe measured, with its headroom
+        (:data:`_A_PRIORI_PER_LEAF`). Those factors come from Plummer spheres; for
+        anything else this is a first guess for :func:`plan_cross_capacities` to
+        measure and right-size, not a setting.
+
+        Parameters
+        ----------
+        leaf_capacity : int
+            Leaf slots of every shard's tree (the template's leaf capacity).
+        ndev : int
+            Mesh size.
+        leaf_width : int
+            Most particles in one leaf (the lane's leaf size).
+        live_leaves : Optional[int]
+            Live leaves of the worst shard; ``None`` uses ``leaf_capacity``.
+        summary_cell_level : Optional[int]
+            Passed through (:class:`CrossCapacities`).
+
+        Returns
+        -------
+        CrossCapacities
+            The capacities; the one-sided and CSR exchange's keep their defaults.
+        """
+        leaves = int(leaf_capacity if live_leaves is None else live_leaves)
+        peers = max(int(ndev) - 1, 1)
+        sized = {
+            name: _sized(per_leaf * leaves * peers, headroom)
+            for name, (per_leaf, headroom) in _A_PRIORI_PER_LEAF.items()
+        }
+        return cls(
+            max_cells=int(leaf_capacity),
+            max_summary_nodes=2 * int(leaf_capacity) - 1,
+            leaf_width=int(leaf_width),
+            summary_cell_level=summary_cell_level,
+            **sized,
+        )
+
+    @classmethod
+    def from_needs(
+        cls,
+        needs: Any,
+        *,
+        like: Optional["CrossCapacities"] = None,
+        headroom: Optional[float] = None,
+        leaf_capacity: Optional[int] = None,
+        leaf_size: Optional[int] = None,
+    ) -> "CrossCapacities":
+        """Capacities sized from a measured needs vector, wider or narrower than before.
+
+        Every capacity :data:`CROSS_NEEDS_FIELDS` names becomes ``headroom x`` what it
+        needed, rounded up to :data:`_CROSS_CAP_GRANULE` entries; the leaf width
+        becomes the widest shipped leaf, never below ``like``'s. Read a vector from a
+        run whose ``overflow`` bit is CLEAR: a lower-bound need sizes a buffer that
+        overflows again (:func:`plan_cross_capacities` re-plans first). Whatever a
+        need says, the structural bounds hold (:func:`_structural_bounds`): the leaf
+        width at most ``leaf_size``, the particle buffers at most their rows x the
+        leaf width.
+
+        Parameters
+        ----------
+        needs : Any
+            The needs vector, reduced over the mesh (host).
+        like : Optional[CrossCapacities]
+            Where every capacity the symmetric exchange does not read comes from
+            (the one-sided and CSR controls'), with ``summary_cell_level`` and
+            ``max_leaves_per_cell``; ``None``: the defaults.
+        headroom : Optional[float]
+            Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM`` (1.5),
+            the local walk's.
+        leaf_capacity : Optional[int]
+            The tree's leaf slots: the summary is clamped to what a tree of them can
+            hold (``max_cells`` to it, ``max_summary_nodes`` to ``2 x it - 1``).
+        leaf_size : Optional[int]
+            The most particles a leaf of the template holds (its leaf size); the
+            leaf width never exceeds it. ``None``: no bound on the width.
+
+        Returns
+        -------
+        CrossCapacities
+            The capacities.
+        """
+        base = like if like is not None else cls()
+        need = _needs_by_field(needs)
+        h = _default_headroom(headroom)
+        changes = {
+            name: _clamp_to_tree(name, _sized(need[name], h), leaf_capacity)
+            for name in _NEEDS_LOWER_BOUND_BIT
+            if name != "leaf_width"
+        }
+        changes["leaf_width"] = max(int(base.leaf_width), need["leaf_width"])
+        return base._with(**_structural_bounds(changes, leaf_size))
+
+    def replanned(
+        self,
+        needs: Any,
+        *,
+        headroom: Optional[float] = None,
+        leaf_capacity: Optional[int] = None,
+        leaf_size: Optional[int] = None,
+    ) -> "CrossCapacities":
+        """Capacities that cover what a run needed: the segment retry's re-plan.
+
+        Monotone: every capacity stays at least what it was, as the local walk's
+        re-plan (``engine._replan_walk_caps_from_needs``). A capacity grows to
+        ``headroom x`` its need; one whose need is only a LOWER bound (the walk or the
+        summary lost pairs: ``walk_lower_bound`` / ``pairs_lower_bound``) and that
+        overflowed at least doubles, as the local walk's queue does. A lower bound can
+        still fall short, so a run that overflowed its walk may need a second re-plan:
+        its re-run's needs are then exact. No need grows a capacity past its
+        structural bound (:func:`_structural_bounds`), and none narrows one.
+
+        Parameters
+        ----------
+        needs : Any
+            The failed run's needs vector, reduced over the mesh: a running maximum
+            over the steps that STARTED on the trajectory (a step after the first
+            failure runs on wrong forces, and what it reads is no demand).
+        headroom : Optional[float]
+            Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
+        leaf_capacity : Optional[int]
+            As :meth:`from_needs`; pass the GROWN one when the tree was re-planned.
+        leaf_size : Optional[int]
+            As :meth:`from_needs`: the leaf width never grows past it.
+
+        Returns
+        -------
+        CrossCapacities
+            The grown capacities (equal to these when nothing needed more).
+        """
+        need = _needs_by_field(needs)
+        h = _default_headroom(headroom)
+        changes = {}
+        for name, bit in _NEEDS_LOWER_BOUND_BIT.items():
+            cap = int(getattr(self, name))
+            if name == "leaf_width":
+                changes[name] = max(cap, need[name])
+                continue
+            grown = max(cap, _clamp_to_tree(name, _sized(need[name], h), leaf_capacity))
+            if bit is not None and need[bit] and need[name] > cap:
+                grown = max(grown, 2 * cap)
+            if name == "export_walk_queue" and need["walk_lower_bound"]:
+                # The walk stopped with pairs still queued, and the peak it reports
+                # is the widest wavefront it ADMITTED, which can read below the
+                # queue it overflowed (measured: the disc + bulge at 2e5 on two
+                # A100s, a peak of 252,788 read off a queue of 389,120 that
+                # overflowed; at 4x every capacity the walk ran clean, peak
+                # 375,310): the queue doubles whatever the peak says, as the local
+                # walk's queue does on a queue overflow.
+                grown = max(grown, 2 * cap)
+            changes[name] = grown
+        bounded = _structural_bounds(changes, leaf_size)
+        # monotone: a bound below the present width keeps the width
+        return self._with(
+            **{name: max(int(getattr(self, name)), v) for name, v in bounded.items()}
+        )
+
+
+def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
+    """Clamp proposed capacities to what the exchange can structurally need.
+
+    * ``leaf_width`` <= ``leaf_size``: a near row is one summary cell holding one live
+      cell leaf, and a cell leaf holds at most the leaf size the template was built
+      with -- the local lane's own leaf tiles are that wide. A wider "need" is not a
+      leaf (a degenerate tree: measured, the root of a NaN state as one summary cell
+      of 4,002,489 particles) and no width serves it.
+    * ``send_particle_cap`` <= ``send_node_cap x leaf_width``, ``recv_particle_cap``
+      <= ``recv_node_cap x leaf_width``: every near row ships at most ``leaf_width``
+      particles (the sender clips to it and flags the rest).
+
+    Parameters
+    ----------
+    caps : dict
+        Proposed values of the :data:`CROSS_NEEDS_FIELDS` capacities.
+    leaf_size : Optional[int]
+        The template's leaf size; ``None`` leaves the width alone.
+
+    Returns
+    -------
+    dict
+        The clamped values.
+    """
+    out = dict(caps)
+    if leaf_size is not None:
+        out["leaf_width"] = min(int(out["leaf_width"]), int(leaf_size))
+    width = int(out["leaf_width"])
+    for particles, rows in (
+        ("send_particle_cap", "send_node_cap"),
+        ("recv_particle_cap", "recv_node_cap"),
+    ):
+        out[particles] = min(int(out[particles]), int(out[rows]) * width)
+    return out
+
+
+def _clamp_to_tree(name: str, size: int, leaf_capacity: Optional[int]) -> int:
+    """A summary capacity clamped to what a tree of ``leaf_capacity`` leaves holds.
+
+    Parameters
+    ----------
+    name : str
+        The capacity (:data:`CROSS_NEEDS_FIELDS`).
+    size : int
+        Its proposed size.
+    leaf_capacity : Optional[int]
+        The tree's leaf slots; ``None`` clamps nothing.
+
+    Returns
+    -------
+    int
+        ``size``, or the tree's bound when that is smaller.
+    """
+    if leaf_capacity is None:
+        return int(size)
+    bound = {
+        "max_cells": int(leaf_capacity),
+        "max_summary_nodes": 2 * int(leaf_capacity) - 1,
+    }
+    return min(int(size), bound.get(name, int(size)))
+
+
+def plan_cross_capacities(
+    measure: Callable[[CrossCapacities], Any],
+    initial: CrossCapacities,
+    *,
+    headroom: Optional[float] = None,
+    leaf_capacity: Optional[int] = None,
+    leaf_size: Optional[int] = None,
+    max_rounds: int = 3,
+) -> tuple[CrossCapacities, np.ndarray]:
+    """Size the cross capacities from a force measured at the start positions.
+
+    ``measure(caps)`` runs one force with ``caps`` and returns its needs vector
+    reduced over the mesh (``make_fused_force_evaluator(cross_needs=True)``). While
+    its ``overflow`` bit is set the capacities are re-planned from it
+    (:meth:`CrossCapacities.replanned`) and measured again; once a measurement is
+    clean every capacity is sized from it (:meth:`CrossCapacities.from_needs`), which
+    is usually NARROWER than the first guess. Each measurement with new capacities is
+    a compile.
+
+    Parameters
+    ----------
+    measure : Callable[[CrossCapacities], Any]
+        Runs a force and returns the host needs vector.
+    initial : CrossCapacities
+        The first guess (:meth:`CrossCapacities.for_shard`).
+    headroom : Optional[float]
+        Factor over each need; ``None``: ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
+    leaf_capacity : Optional[int]
+        The tree's leaf slots, which bound the summary exactly.
+    leaf_size : Optional[int]
+        The template's leaf size, which bounds the leaf width.
+    max_rounds : int
+        Measurements at most.
+
+    Returns
+    -------
+    tuple[CrossCapacities, np.ndarray]
+        ``(capacities, the clean measurement's needs)``.
+
+    Raises
+    ------
+    RuntimeError
+        When a measurement overflowed and no capacity needed more (the two ends of
+        an exchange disagreed: ``mismatch``), or still overflowed after
+        ``max_rounds``.
+    """
+    caps = initial
+    for _ in range(max(int(max_rounds), 1)):
+        needs = np.asarray(measure(caps)).astype(np.int64)
+        need = _needs_by_field(needs)
+        if not need["overflow"]:
+            caps = CrossCapacities.from_needs(
+                needs,
+                like=caps,
+                headroom=headroom,
+                leaf_capacity=leaf_capacity,
+                leaf_size=leaf_size,
+            )
+            return caps, needs
+        grown = caps.replanned(
+            needs, headroom=headroom, leaf_capacity=leaf_capacity, leaf_size=leaf_size
+        )
+        if vars(grown) == vars(caps):
+            raise RuntimeError(
+                "plan_cross_capacities: the cross flag fired and no capacity needed "
+                f"more ({need}); a mismatch between the two ends of an exchange is "
+                "not a capacity."
+            )
+        caps = grown
+    raise RuntimeError(
+        f"plan_cross_capacities: still overflowing after {max_rounds} measurements "
+        f"({need}, capacities {caps})"
+    )
+
+
+def _with_separation_floor(
+    walk_fn: Optional[Callable[..., Any]], floor: float
+) -> Optional[Callable[..., Any]]:
+    """``walk_fn`` with the separation floor applied to every call.
+
+    Every cross walk -- export, receiver, near import -- runs through ``walk_fn``
+    (or yggdrax's mutual walk when it is ``None``), so the floor is applied once,
+    here, to all of them.
+
+    Parameters
+    ----------
+    walk_fn : Optional[Callable[..., Any]]
+        The walk (``None``: yggdrax's).
+    floor : float
+        Minimum gap of an accepted far pair; ``0`` leaves ``walk_fn`` as it is.
+
+    Returns
+    -------
+    Optional[Callable[..., Any]]
+        The wrapped walk.
+    """
+    if floor <= 0.0:
+        return walk_fn
+    from yggdrax.interactions import dual_tree_walk_mutual
+
+    inner_walk = walk_fn if walk_fn is not None else dual_tree_walk_mutual
+
+    def floored_walk(*args: Any, **kwargs: Any) -> Any:
+        return inner_walk(*args, separation_floor=floor, **kwargs)
+
+    return floored_walk
+
 
 def make_cross_hook(
     *,
@@ -1384,7 +2257,8 @@ def make_cross_hook(
     export_theta: Optional[float] = None,
     two_sided: Optional[bool] = None,
     separation_floor: float = 0.0,
-) -> Callable[[Any], Optional[tuple]]:
+    error_criterion: bool = False,
+) -> Callable[..., Optional[tuple]]:
     """Build the ``cross_hook`` for a mesh of ``ndev`` devices.
 
     Parameters
@@ -1436,41 +2310,50 @@ def make_cross_hook(
         Minimum gap of an accepted far pair in every export and receiver walk
         (length units); a compact softening kernel's support, so the unsoftened
         cross far field is exact. ``0`` (default): none. Static.
+    error_criterion:
+        Dehnen's eq (16a) (``mac_type='dehnen_error'`` on the solver, S12): the
+        cross walks accept by the criterion the local walk runs, from each
+        published node's table row (``G M``, ``eps * min_b f_b`` of its subtree,
+        ``s_1..s_p``; extra columns of the summary all_gather), so both devices of
+        a pair evaluate the identical test on the identical floats; the far
+        payload carries each node's mass for eq (16b)'s far half. The hook is then
+        called ``hook(tree_artifacts, criterion=FlatWalkCriterion)`` and returns
+        ``(multipoles, centers, src, tgt, masses)``
+        (``FastMultipoleMethod``'s refresh does both, ``_call_cross_hook``).
+        Symmetric exchange only (the default path). ``mac_type`` stays the
+        geometric name (``theta`` is then unused by the walks). Static.
 
     Returns
     -------
     Callable
         ``hook(tree_artifacts) -> (multipoles, centers, src, tgt) | None``, with the
-        imported sources indexed from ``n_local``.
+        imported sources indexed from ``n_local`` (with ``error_criterion``, see
+        there).
 
     Raises
     ------
     NotImplementedError
-        For ``mac_type`` ``"dehnen_error"`` / ``"dehnen_theta"``: the cross walks
-        have no per-node force scale to evaluate Dehnen's eq (16a) with (see
-        :func:`jaccpot.distributed.fused._refuse_error_criterion`).
+        For ``mac_type`` ``"dehnen_error"`` / ``"dehnen_theta"``: the hook's MAC
+        name is the walks' geometric one; the criterion is ``error_criterion``.
+        And for ``error_criterion`` on any exchange but the symmetric one (a
+        control: one-sided, CSR, tiles, a receiver walk, a separate near or export
+        theta) or the ``aabb`` MAC geometry control: their walks re-test imported
+        rows that carry no eq (16a) table, and the far half's f_b needs the
+        expansion centres to be the walk centres.
     """
     if str(mac_type) in ("dehnen_error", "dehnen_theta"):
         raise NotImplementedError(
-            f"make_cross_hook: mac_type={mac_type!r} (Dehnen's error criterion, eq "
-            "16a) is not supported on the fused multi-GPU lane yet: the cross walks "
-            "test a geometric MAC and carry no per-node force scale. Use "
-            "mac_type='dehnen' here, or run the criterion on the single-card fused "
-            "lane or the mesh lane (jaccpot.distributed.fmm)."
+            f"make_cross_hook: mac_type={mac_type!r} is not a cross-walk MAC: the "
+            "cross walks take the geometric name (mac_type='dehnen'), and Dehnen's "
+            "error criterion (eq 16a, dehnen_error) through error_criterion=True, "
+            "with each step's per-node force scale (FusedMeshForce and "
+            "MeshSegmentRunner.fused build it so). dehnen_theta is not supported "
+            "on the fused multi-GPU lane; the mesh lane (jaccpot.distributed.fmm) "
+            "runs the criteria too."
         )
     cap = caps if caps is not None else CrossCapacities()
-    walk_fn = cross_walk_fn(mac_type)
     floor = float(separation_floor)
-    if floor > 0.0:
-        # Every cross walk -- export, receiver, near import -- runs through
-        # `walk_fn` (or yggdrax's mutual walk when it is None), so the floor is
-        # applied once, here, to all of them.
-        from yggdrax.interactions import dual_tree_walk_mutual
-
-        inner_walk = walk_fn if walk_fn is not None else dual_tree_walk_mutual
-
-        def walk_fn(*args: Any, **kwargs: Any) -> Any:
-            return inner_walk(*args, separation_floor=floor, **kwargs)
+    walk_fn = _with_separation_floor(cross_walk_fn(mac_type), floor)
 
     two_sided = _cross_two_sided() if two_sided is None else bool(two_sided)
     symmetric = two_sided and _symmetric_exchange_enabled(
@@ -1480,21 +2363,48 @@ def make_cross_hook(
         near_theta=near_theta,
         export_theta=export_theta,
     )
+    if error_criterion and not symmetric:
+        raise NotImplementedError(
+            "make_cross_hook(error_criterion=True): Dehnen's eq (16a) runs on the "
+            "symmetric exchange only (two-sided over leaves, no receiver walk, one "
+            "theta; the default). This configuration selects a control exchange "
+            "(JACCPOT_CROSS_SYMMETRIC=0, JACCPOT_CROSS_TWO_SIDED=0, "
+            "JACCPOT_CROSS_NEAR_TILES=1, a receiver walk forced on, "
+            "max_leaves_per_cell != 1, or a near/export theta of its own), whose "
+            "walks re-test imported rows that carry no eq (16a) table."
+        )
+    if error_criterion and _cross_mac_geometry_mode() != "com":
+        raise NotImplementedError(
+            "make_cross_hook(error_criterion=True) needs the COM MAC geometry "
+            "(JACCPOT_CROSS_MAC_GEOMETRY=com, the default): eq (16a)'s table and "
+            "eq (16b)'s far terms are about the expansion centres."
+        )
     # ALWAYS-ON overflow channel, independent of the diagnostics `record`: the
     # production and timing paths pass no record, and before this sink existed the
     # far half's flags then reached nobody. Holds tracers; the evaluator reads it
     # inside the same trace (`hook.flag_sink`) and ORs it into the mesh flag.
     flag_sink: dict = {}
+    # ALWAYS-ON needs channel beside it (`cross_needs`): what every capacity of the
+    # symmetric exchange needed in this trace, so a caller whose flag fired can
+    # re-plan the capacities from exact demand (`CrossCapacities.replanned`)
+    needs_sink: dict = {}
 
-    def hook(tree_artifacts: Any) -> Optional[tuple]:
+    def hook(tree_artifacts: Any, criterion: Any = None) -> Optional[tuple]:
         # stage labels for per-device traces (`jax.named_scope` costs nothing at
         # run time; it only names the ops). Every stage call below adds its own.
         with jax.named_scope("cross_hook"):
-            return _hook_body(tree_artifacts)
+            return _hook_body(tree_artifacts, criterion)
 
-    def _hook_body(tree_artifacts: Any) -> Optional[tuple]:
+    def _hook_body(tree_artifacts: Any, criterion: Any) -> Optional[tuple]:
         # a RE-TRACE must not see the previous trace's tracers
         flag_sink.clear()
+        needs_sink.clear()
+        if bool(error_criterion) != (criterion is not None):
+            raise RuntimeError(
+                "the cross hook was built with error_criterion="
+                f"{bool(error_criterion)} and called "
+                f"{'with' if criterion is not None else 'without'} a criterion"
+            )
         tree = tree_artifacts.tree
         upward = tree_artifacts.upward
         mp = upward.multipoles
@@ -1537,8 +2447,9 @@ def make_cross_hook(
         num_internal = int(jnp.asarray(tree.left_child).shape[0])
 
         # what every device publishes -- the cut cells, or (two-sided) the summary
-        # tree over them -- packed so that ONE all_gather carries it
-        pub = _summary_rows(tree, geom, cap, two_sided=two_sided)
+        # tree over them, with eq (16a)'s table rows under the criterion -- packed
+        # so that ONE all_gather carries it
+        pub = _summary_rows(tree, geom, cap, two_sided=two_sided, criterion=criterion)
         summary = pub.cut
         block_nodes = pub.block_nodes
         block = int(block_nodes.shape[0])
@@ -1548,6 +2459,7 @@ def make_cross_hook(
         me = jax.lax.axis_index(axis_name)
 
         if symmetric:
+            order = 0 if criterion is None else int(criterion.order)
             sym = _symmetric_exchange(
                 gathered,
                 me,
@@ -1558,9 +2470,22 @@ def make_cross_hook(
                 cap=cap,
                 ndev=ndev,
                 mac_type=mac_type,
-                walk_fn=walk_fn,
+                walk_fn=(
+                    walk_fn
+                    if criterion is None
+                    else _with_separation_floor(
+                        cross_walk_fn(
+                            mac_type,
+                            error_order=order,
+                            theta_max=float(criterion.theta_max),
+                        ),
+                        floor,
+                    )
+                ),
                 axis_name=axis_name,
                 with_near=near_sink is not None,
+                error_order=order,
+                node_mass=None if criterion is None else upward.mass_moments.mass,
             )
             far_overflow = pub.overflow | sym["far_overflow"]
             flag_sink["far"] = far_overflow
@@ -1570,8 +2495,26 @@ def make_cross_hook(
                 near_sink["count"] = sym["count"]
                 near_sink["overflow"] = pub.overflow | sym["overflow"]
                 flag_sink["near"] = near_sink["overflow"]
+            cells_needed, nodes_needed = _summary_needs(tree, cap, two_sided=True)
+            needs = dict(
+                sym["needs"],
+                max_cells=cells_needed,
+                max_summary_nodes=nodes_needed,
+                overflow=far_overflow | flag_sink.get("near", False),
+            )
+            # a truncated summary hides part of a tree from every walk over it
+            for bit in ("walk_lower_bound", "pairs_lower_bound"):
+                needs[bit] = needs[bit] | pub.overflow
+            needs_sink["needs"] = jnp.stack(
+                [
+                    jnp.asarray(needs.get(k, 0)).astype(jnp.int32)
+                    for k in CROSS_NEEDS_FIELDS
+                ]
+            )
             if record is not None:
                 w = sym["walk"]
+                for k, v in zip(CROSS_NEEDS_FIELDS, needs_sink["needs"]):
+                    record[f"need_{k}"] = v
                 record["summary_cells"] = summary.num_cells
                 record["summary_nodes"] = pub.num_entries
                 record["summary_leaves"] = jnp.sum(summary.leaves_per_cell)
@@ -1588,9 +2531,26 @@ def make_cross_hook(
                     record["near_list_pairs"] = w.near_count
                     record["near_csr"] = w.near_count
                     record["near_recv_nodes"] = jnp.sum(sym["imp_near"].sizes)
+                    record["near_send_nodes"] = jnp.sum(sym["exp_near"].sizes)
                     record["near_particles"] = sym["near_particles"]
+                    record["send_particles"] = sym["send_particles"]
                     record["near_walk_peak"] = jnp.asarray(0, jnp.int32)
                     record["near_walk_far_pairs"] = jnp.asarray(0, jnp.int32)
+                # the walk's pairs and what it read, for a check of each device's
+                # view of every cross pair (tests/distributed/
+                # test_mesh_segment_dehnen_error.py)
+                record["gathered"] = gathered
+                for side in ("far_a", "far_b", "far_count", "near_a", "near_b"):
+                    record[f"walk_{side}"] = getattr(w, side)
+                record["walk_near_count"] = w.near_count
+                # each imported far row's sender node (in the sender's summary
+                # index, rows grouped by peer) and, under the criterion, its mass
+                record["imp_far_rows"] = sym["imp_far"].rows
+                record["imp_far_sizes"] = sym["imp_far"].sizes
+                if criterion is not None:
+                    record["cross_masses"] = sym["cross_masses"]
+            if criterion is not None:
+                return sym["cross_far"] + (sym["cross_masses"],)
             return sym["cross_far"]
 
         idx = parent.dtype
@@ -2079,7 +3039,49 @@ def make_cross_hook(
         return imp_mp, imp_cen, src, tgt
 
     hook.flag_sink = flag_sink  # pyright: ignore[reportFunctionMemberAccess]
+    hook.needs_sink = needs_sink  # pyright: ignore[reportFunctionMemberAccess]
+    # what the refresh calls it with (`_call_cross_hook`)
+    hook.error_criterion = bool(  # pyright: ignore[reportFunctionMemberAccess]
+        error_criterion
+    )
     return hook
+
+
+def cross_needs(cross_hook: Any) -> Array:
+    """What every cross capacity needed in the hook's most recent trace.
+
+    Read inside the SAME trace, right after the force that ran the hook, like the
+    hook's ``flag_sink``: it holds tracers. Reduce it over the mesh with ``pmax``
+    (:func:`~jaccpot.distributed.fused.make_fused_force_evaluator` does with
+    ``cross_needs=True``) before sizing anything from it; the capacities are shared
+    by every device.
+
+    Parameters
+    ----------
+    cross_hook : Any
+        A hook from :func:`make_cross_hook`.
+
+    Returns
+    -------
+    Array
+        ``int32[len(CROSS_NEEDS_FIELDS)]``.
+
+    Raises
+    ------
+    ValueError
+        If the hook recorded no needs: it has not been traced, or it ran a control
+        exchange (one-sided, CSR, tiles, a receiver walk) -- the needs are measured on
+        the symmetric exchange, the default, only.
+    """
+    sink = getattr(cross_hook, "needs_sink", None) or {}
+    if "needs" not in sink:
+        raise ValueError(
+            "cross_needs: the hook recorded no needs. They are measured by the "
+            "symmetric exchange (the default) inside a traced force; a control "
+            "exchange (JACCPOT_CROSS_SYMMETRIC=0, JACCPOT_CROSS_TWO_SIDED=0, tiles, "
+            "a receiver walk) does not measure them."
+        )
+    return sink["needs"]
 
 
 def merge_imported_blocks(
@@ -2159,7 +3161,8 @@ def cross_near_acceleration(
     interpret: bool = False,
     accum: Optional[str] = None,
     softening_kernel: Optional[str] = None,
-) -> Array:
+    with_force_scale: bool = False,
+) -> Union[Array, tuple[Array, Array]]:
     """Acceleration on local particles from the IMPORTED leaves, as its own term.
 
     Added to the force rather than interleaved, because a near contribution is a
@@ -2204,11 +3207,16 @@ def cross_near_acceleration(
 
     softening_kernel:
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    with_force_scale:
+        Also return the imported leaves' share of eq (16b)'s force scale, ``sum G
+        m / (r^2 + eps^2)`` over the same pairs (the kernel's fourth lane, in place
+        of the potential), for ``mac_type='dehnen_error'``. Static.
 
     Returns
     -------
-    Array
-        ``(n_particles, 3)`` acceleration to ADD to the local force.
+    Union[Array, tuple[Array, Array]]
+        ``(n_particles, 3)`` acceleration to ADD to the local force; with
+        ``with_force_scale``, ``(acceleration, force_scale [n_particles])``.
     """
     from jaccpot.nearfield.near_field import _env_choice
     from jaccpot.pallas.nearfield_leafpair_csr import (
@@ -2296,6 +3304,7 @@ def cross_near_acceleration(
         num_target_leaves=L,
         accum=str(accum),
         softening_kernel=softening_kernel,
+        **({"with_force_scale": True} if with_force_scale else {}),
     )
     acc = out[..., :3]
     # The scatter below is a PERMUTATION, not a reduction: every live particle sits
@@ -2305,8 +3314,16 @@ def cross_near_acceleration(
     # DROPPED -- routing them onto one discard row made every dead slot (~70 % of
     # L x W at ~18 particles per 64-slot leaf) an atomic add on the same address.
     flat_idx = jnp.where(loc_mask, idx, n_particles).reshape(-1)
-    return (
+    acc_out = (
         jnp.zeros((n_particles, 3), acc.dtype)
         .at[flat_idx]
         .add(acc.reshape(-1, 3), mode="drop")
+    )
+    if not with_force_scale:
+        return acc_out
+    fb = out[..., 3]
+    return acc_out, (
+        jnp.zeros((n_particles,), fb.dtype)
+        .at[flat_idx]
+        .add(fb.reshape(-1), mode="drop")
     )

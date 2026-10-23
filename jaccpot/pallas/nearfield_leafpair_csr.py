@@ -502,6 +502,8 @@ def _nearfield_leafpair_csr_kernel(
     out_dtype: Any,
     include_self: bool,
     softening_kernel: str = "plummer",
+    fourth: str = "potential",
+    fast_reciprocal: bool = False,
 ) -> None:
     """One CSR row chunk against one target subtile of its leaf.
 
@@ -551,6 +553,13 @@ def _nearfield_leafpair_csr_kernel(
         Add the leaf's own particles, diagonal removed, on its first chunk.
     softening_kernel : str
         The pair kernel, static (:mod:`jaccpot.softening`).
+    fourth : str
+        What lane 3 accumulates: ``"potential"`` (``-G m psi``, the default) or
+        ``"force_scale"`` (eq (16b)'s ``G m / (r^2 + eps^2)``,
+        :func:`_force_scale_term`, the sorted kernel's lane). Static.
+    fast_reciprocal : bool
+        ``"force_scale"`` only: :func:`_force_scale_term`'s Triton reciprocal.
+        Static.
 
     Returns
     -------
@@ -619,7 +628,17 @@ def _nearfield_leafpair_csr_kernel(
                 acc_x = acc_x + scale * dx
                 acc_y = acc_y + scale * dy
                 acc_z = acc_z + scale * dz
-                acc_p = acc_p - g_value * inv_r * sm
+                if fourth == "force_scale":
+                    acc_p = acc_p + g_value * _force_scale_term(
+                        r2,
+                        soft,
+                        active,
+                        sm,
+                        softening_kernel,
+                        fast_reciprocal=fast_reciprocal,
+                    )
+                else:
+                    acc_p = acc_p - g_value * inv_r * sm
                 return (acc_x, acc_y, acc_z, acc_p)
 
             scount = leaf_count_ref[sid]
@@ -679,6 +698,7 @@ def nearfield_leafpair_csr_pallas(
     include_self: bool = True,
     num_target_leaves: int | None = None,
     softening_kernel: Optional[str] = None,
+    with_force_scale: bool = False,
 ) -> Array:
     """Leaf-pair near field from a neighbour CSR, one Pallas program per row chunk.
 
@@ -733,12 +753,18 @@ def nearfield_leafpair_csr_pallas(
         today; nothing can check that here because the table is traced.
     softening_kernel : Optional[str]
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    with_force_scale : bool
+        Lane 3 holds eq (16b)'s near-field force scale ``sum G m / (r^2 +
+        eps^2)`` (:func:`_force_scale_term`, as the sorted kernel's
+        ``with_force_scale`` lane) instead of the potential: the multi-GPU lane's
+        cross-domain near term under ``mac_type='dehnen_error'``. ``False``
+        (default): the potential, the kernel unchanged. Static.
 
     Returns
     -------
     Array
         ``(num_target_leaves, W, _OUT_WIDTH)``: acceleration lanes 0:3, potential
-        lane 3, in the input dtype.
+        (or, ``with_force_scale``, the force scale) lane 3, in the input dtype.
 
     Raises
     ------
@@ -787,6 +813,16 @@ def nearfield_leafpair_csr_pallas(
     partial_dtype = accum_dtype if accum_dtype is not None else dtype
     include_self = bool(include_self)
 
+    fourth_lane = (
+        {}
+        if not with_force_scale
+        else dict(
+            fourth="force_scale",
+            # the division's bits at half its cost, as the sorted kernel's lane
+            fast_reciprocal=(not interpret) and jnp.dtype(dtype) == jnp.float32,
+        )
+    )
+
     def _kernel(*refs):
         return _nearfield_leafpair_csr_kernel(
             *refs,
@@ -796,6 +832,7 @@ def nearfield_leafpair_csr_pallas(
             out_dtype=partial_dtype,
             include_self=include_self,
             softening_kernel=softening_kernel,
+            **fourth_lane,
         )
 
     def _full(arr: Array) -> pl.BlockSpec:
@@ -835,6 +872,7 @@ def nearfield_leafpair_csr_pallas(
             f"nearfield_leafpair_csr_t{bt}_c{int(chunk)}_w{leaf_width}_a{accum}"
             f"{'_self' if include_self else ''}"
             f"{'' if softening_kernel == 'plummer' else '_' + softening_kernel}"
+            f"{'_fb' if with_force_scale else ''}"
         ),
     )
     partials = kernel(

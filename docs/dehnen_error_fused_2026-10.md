@@ -143,5 +143,8 @@ GPU rollout tests:
     is the pkdgrav3 design, and it is not built yet.
   - On the disc the worst particle is ~5 eps.
 - The tree-order carry (`JACCPOT_STRICT_CARRY_ORDER=tree`) is off with the criterion: input order only.
-- The multi-GPU fused lane does not run the criterion.
+- The multi-GPU fused lane runs the criterion on its template route only (S12: `MeshSegmentRunner.fused`;
+  `docs/production_2026-10.md`, section "S12"): f_b rides the segment carry, each device publishes its nodes' table
+  rows with its summary, and the cross walks evaluate the same eq (16a). The stacked route (`setup_fused_force`,
+  `FusedRollout`) refuses it.
 - The general (non-fused) path is unchanged. Its policy still ignores the softening floor on one GPU.
