@@ -457,3 +457,63 @@ def test_the_retry_policy_is_the_runners(monkeypatch):
     assert prov.retry_mode(walk, 2, True) is None
     monkeypatch.setenv("JACCPOT_STRICT_SEGMENT_RETRY", "0")
     assert prov.retry_mode(walk, 0, False) is None
+
+
+def _retried_segment(engine, steps):
+    """A segment of ``steps`` steps whose step ``k`` needs ``k`` far pairs, run from
+    capacity 0 through the runners' retry decision: each attempt fits the steps its
+    capacity holds and fails at the next, the fold reports that step's need, and
+    the re-plan grows the capacity to it. Returns the modes and the steps fitted."""
+    fit, retries, tree_first, failures, modes = 0, 0, False, [], []
+    index = NEEDS_FIELDS.index
+    while fit < steps:
+        done = fit
+        needs = np.zeros(len(NEEDS_FIELDS), np.int64)
+        needs[index("far_needed")] = fit + 1
+        needs[index("far_overflow")] = 1
+        mode = engine._segment_retry_next(needs, done, retries, tree_first, failures)
+        modes.append(mode)
+        if mode is None:
+            break
+        failures.append((done, needs))
+        retries += 1
+        fit = max(fit, int(needs[index("far_needed")]))
+    return modes, [d for d, _ in failures]
+
+
+def test_a_segment_retries_while_each_re_run_gets_further(monkeypatch):
+    """The scans fold the needs of the steps up to the first failure only (the later
+    ones left the trajectory), so a segment whose needs grow step by step is learned
+    one failing step at a time, and the policy's two retries run out (the multi-GPU
+    lane raised at 1 of 2 steps fitted). The runners retry while each re-run fits
+    more steps than every earlier attempt -- at most the segment's steps -- or,
+    after a re-plan from lower bounds (the flat walk stops at its first overflow),
+    fails at the same step needing more; a re-run that learned nothing raises."""
+    engine = _solver()._impl
+    modes, done = _retried_segment(engine, 4)
+    assert modes == ["full", "walk", "walk", "walk"] and done == [0, 1, 2, 3]
+
+    index = NEEDS_FIELDS.index
+    walk = np.zeros(len(NEEDS_FIELDS), np.int64)
+    walk[index("far_overflow")], walk[index("far_needed")] = 1, 300
+    tree = walk.copy()
+    tree[index("tree_overflow")] = 1
+    earlier = [(2, walk), (2, walk)]
+    # further: full when this failure's tree overflowed
+    assert engine._segment_retry_next(walk, 3, 2, False, earlier) == "walk"
+    assert engine._segment_retry_next(tree, 3, 2, False, earlier) == "full"
+    # the same step and exact counts: the re-plan covered them, nothing new
+    more = walk.copy()
+    more[index("far_needed")] = 600
+    assert engine._segment_retry_next(more, 2, 2, False, earlier) is None
+    assert engine._segment_retry_next(walk, 1, 2, False, earlier) is None
+    # the same step after a re-plan from LOWER BOUNDS: a doubling search
+    bound = walk.copy()
+    bound[index("lower_bound")] = 1
+    stopped = [(2, walk), (2, bound)]
+    assert engine._segment_retry_next(more, 2, 2, False, stopped) == "walk"
+    assert engine._segment_retry_next(bound, 2, 2, False, stopped) is None
+    # the policy's own retries come first; the switch turns every retry off
+    assert engine._segment_retry_next(walk, 0, 0, False, []) == "full"
+    monkeypatch.setenv("JACCPOT_STRICT_SEGMENT_RETRY", "0")
+    assert engine._segment_retry_next(walk, 3, 2, False, earlier) is None
