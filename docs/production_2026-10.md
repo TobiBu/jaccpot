@@ -1850,3 +1850,125 @@ that slots the cross pairs into the CSR rows keeps that order, so the M2L (and t
 a run-dependent order. Not the potential's: it inherits it from the rebuild. A canonical order (sorted by target, then
 source) should make both reproducible (not tried: it changes the force program). On CPU the lane's bitwise gates hold
 (S11 A2/A3, S12 (a)-(c)).
+
+### Migration to fixed cuts (I)
+Track F found what sets the cross near volume: INTRUDER leaves. A decomposition leaves exact Morton domains; one
+drift later a domain's boundary particles sit in cells its neighbour fills, the owner's tree does not subdivide
+there (a few of its particles), and one coarse sparse leaf fails the MAC against much of the neighbour's core (8e6
+Plummer, two cards: one 19-particle leaf of radius 3.07 made 194,255 of 361,797 cross near pairs). It recurs after
+every drift that follows a cut. Branch `s11s2/mesh-migration`.
+
+**Phase 1, the host model** (`bench/multigpu_migration_model.py`: per-device cell leaves of the galaxy preset --
+leaf 64, level >= 8, codes in the force's cube -- after `s` drift steps `x0 + s dt v0`, leaf pairs failing the
+geometric MAC at theta 0.8 with COM centres and exact radii; it reproduces the cards' 131,199 / 359,944 at 8e6 against
+129,544 / 360,247). Cross near pairs per device at drift 0 / 1 / 2 / 4 / 8, two devices; "shipped" the most
+particles a device sends over steps 1-8; "migrants" the rows that change device per step:
+
+| rule | Plummer 2e5 | Plummer 8e6 | disc + bulge 2e6 |
+| --- | --- | --- | --- |
+| today: the cut kept, per-axis box | 11.8k / 16.3k / 17.1k / 22.5k / 21.0k; 87k shipped | 131k / 360k / 420k / 400k / 623k; 3.90M shipped | 49.2k / 80.1k / 90.4k / 102k / 119k; 382k shipped |
+| the cut kept, the decomposition in the cube | 8.8k / 30.1k / 33.1k / 39.7k / 37.1k | 95.0k / 1.37M / 1.12M / 1.44M / 1.57M | 39.0k / 100k / 112k / 115k / 130k |
+| migration, keys in the per-axis box of the drifted positions (a) | 11.8k at every drift; 37k; 170-211 migrants | 131k / 131k / 138k / 206k / 138k; 1.75M | 49.0-49.4k; 167k; 3.3-3.4k |
+| migration, keys in the per-axis box frozen at the cut | 11.9k-15.0k | 131k-143k; 530k | 70.0k-71.8k |
+| **migration, keys in the force's cube of the drifted positions (b)** | **8.76k-8.82k at every drift; 28.4k; 189-233 migrants** | **95.1k-95.3k; 310k; 7.35k-7.52k migrants** | **38.6k-39.0k; 139k; 3.28k-3.41k migrants** |
+| migration, the cube frozen at the cut | 10.8k-17.5k | 95k-746k (erratic); 3.92M | 70.8k-78.3k |
+| no migration, intruders as one-particle leaves (c) | 12.1k-15.9k; 51k | 141k-251k; 549k | 70.7k-133k |
+| no migration, intruders grouped by the owner's leaf cell (c) | 12.2k-28.1k | 147k-508k | 254k-633k |
+
+Four and eight devices (most pairs on one device; drift 0 / 1-8), today against (b): Plummer 2e5 on four 12.1k /
+20.3k-27.9k against 10.3k / 10.2k-10.3k, on eight 10.1k / 15.2k-25.3k against 7.18k / 7.17k-7.19k; disc 2e6 on four
+46.7k / 78.1k-118k against 34.0k / 34.0k-34.2k.
+
+**Decision: (b).** Migration to the fixed cuts after every drift, the keys in the FORCE's own box at that force
+(the cube of the drifted live positions, `global_mesh_bounds` with the force's box shape), the cuts chosen in that
+box. It holds the zero-drift level of a cube decomposition at every drift -- below today's start (95k against
+131k at 8e6) -- for 0.09-0.17 % of the particles moved per step, and the margin grows with the device count. A
+box frozen at the cut is not enough: a box that moves by a fraction of a finest cell moves the cut by that much and
+the particles in the sliver are intruders again (the frozen cube reached 746k at 8e6). (c) refines the symptom and
+still ships the neighbour's leaves around every intruder; it loses to (b) everywhere and would change the
+single-card tree build.
+
+**What was built** (opt-in; the default programs unchanged):
+
+| piece | what |
+| --- | --- |
+| `jaccpot/distributed/migration.py` | `migrate_shard`: after the drift each live row whose code (force's box) lies outside its device's splitter range goes to the owner, through an unconditional ragged exchange of the leavers (buffer `migration_cap` rows each way); the need (the most rows a device sends or receives) is read off the all-gathered send matrix BEFORE anything moves, so it is exact and replicated, and a migration that does not fit the buffer (`OVERFLOW_MIGRATION`) or a shard (`OVERFLOW_SHARD`) is declined on every device -- nothing moves. Every per-row array moves bitwise, grouped by dtype: state, the carried TOTAL acceleration, mass, id, f_b. `splitters_shard` (the cuts of an exact-range ownership), `balanced_splitters_shard` (even cuts read off the ranks), `migration_need_shard` |
+| `MeshSegmentRunner(migrate=True, migration_cap="auto")` | the step is drift -> migrate -> force -> kick, in the scan; counts, masses and ids ride the carry. The constructor repartitions once into the force's box (`_repartition_shard(cubic=...)`) unless a restart passes the cuts; later repartitions are a rebalance by rank plus a migration (`sfc_repartition`'s sample sort cannot rebalance exact ranges -- the disc's counts drifted 999,037 / 1,000,963 -> 1,012,142 / 987,858 over 12 steps through two repartitions that moved 0 rows -- and its cap-sized exchange was the run's peak). `"auto"` sizes the buffer from one step's drift (2x, pow2, >= 256 rows); the cross sizing's drifted probes are migrated before they are measured. A declined migration ends the trajectory before its force; `OVERFLOW_MIGRATION` re-sizes the buffer from the exact need and re-runs the segment (outside the force's retry policy); `OVERFLOW_SHARD` raises. `SegmentReport.migrated` / `migration_need` |
+| `MeshRunConfig(migrate=..., migration_cap=...)` | the runner's mode; the restart file keeps the cuts (uint64) and the buffer, a same-mesh restore hands them back (bitwise layout and cuts); the edges' plan record carries the buffer and the segment's migrated rows |
+| `bench/multigpu_segment_gate.py --migrate` | the two-card gate on the migrating runner |
+
+**Gates.**
+
+| gate | result |
+| --- | --- |
+| a migrating run == one that never migrates nor repartitions (`DirectMeshForce`, N = 256, 10 segments, a repartition before each) | bitwise by id (positions, velocities, acceleration, masses); rows moved every segment; exact Morton domains at every edge; the acceleration left in the old rows breaks it (mutation) |
+| f_b rides the migration | `id + 21` after 21 forces, and bitwise against the never-migrating run |
+| an undersized buffer (1 row) | declined, re-sized from the exact need, == a run started with the final buffer, bitwise (direct force, and the fused force on two forced CPU devices) |
+| the rebalance | counts N / 2 each on exact domains, the run unchanged bitwise |
+| the exchange on crafted rows | order, arrays and padding as specified; the buffer and shard declines move nothing and report the exact need |
+| the production mode | == the non-migrating mode bitwise; its restart keeps the cuts (a restore that chose its own ends on another layout: caught) |
+| the fused force on two forced CPU devices (N = 2048 cube at 30x its speeds) | flag-clean, exact domains, acceleration within 5e-3 of the direct sum, cross near pairs and shipped particles at most the non-migrating run's |
+| the default (migrate=False) programs | the template route's start, segment and repartition programs (geometric and `dehnen_error`) and the direct force's, lowered on two forced CPU devices: text-identical to `s11s2/integ` 700bcbe6 (8/8); single-card CPU program identity 36/36 against `s11s2-main-cpu` |
+
+The fast cases (10, ~30 s) are in the distributed tier; the two fused ones (~4.5 min of compilation) in a new job,
+`test-distributed-segment-migration` (shard `distributed-segment-migration`), not in `test-distributed-segment`.
+
+**On two A100s** (`bench/multigpu_segment_gate.py`, `preset="galaxy"`, leaf 64, p6, library cross caps sized at the
+start and the first segment's drift; rel-L2 against an fp64 direct sum on 512 fixed ids). No pair of cards was free:
+every row shared its cards with other users' or tracks' processes (0-100 % utilisation), so the times below are
+CONTENDED and the arms were interleaved; correctness, needs and memory are results. "Today" is `migrate=False` on
+this branch (its programs are integ's). The per-step probes and the first gate rows ran before the rank rebalance
+(their migrating repartitions moved 0 rows, see above); the gate rows below ran on `33e512aa`, the last caps rows
+on `29177658` (the rebalance's rows donated).
+
+Per step (geometric theta 0.8, one-step segments, a repartition every 4 steps; cross near pairs / particles a
+device ships, the most over the mesh):
+
+| row | start force | steps 1-12, near pairs | shipped | migrants per step (rows per device) |
+| --- | --- | --- | --- | --- |
+| Plummer 8e6, today | 129,544 / 430,677 | 337,626-621,796 | 1,849,830-3,927,219 | -- |
+| Plummer 8e6, migrate | 94,409 / 303,828 | 94,370-94,732 | 304,308-306,178 | 7,285-7,475 (3,647-3,787) |
+| disc + bulge 2e6, today | 2,884,947 / 406,885 | 2,939,483-3,340,622 | 475,149-556,832 | -- |
+| disc + bulge 2e6, migrate | 2,842,523 / 379,397 | 2,481,213-2,839,335 | 377,618-379,904 | 3,196-3,417 (2,110-2,312) |
+
+The host model has the Plummer rows (95.1-95.3k pairs, 306-310k shipped, 7.35-7.52k migrants) but not the disc's
+absolute numbers: it has no separation floor (the cross walks send every pair closer than the compact kernel's
+support to the near field, `make_cross_hook(separation_floor=...)`; eps = 2.7e-2 here, 1e-7 for Plummer), which makes
+most of the disc's cross near pairs. Its migrants (3.28-3.41k) match. The library's sizing follows: Plummer 8e6's
+final `send_particle_cap` 5,891,072 rows today (more than a shard's 4.6M) against 456,704 migrating,
+`export_near_cap` 932,864 against 142,336.
+
+The S12 gate configuration (`dehnen_error` 1e-4, 6 segments of 8 steps, a repartition before every segment after
+the first); every segment of every row flag-clean with no retry:
+
+| row | rel-L2 start / end | cross near pairs per segment | shipped | peak B/p, library caps / explicit final caps |
+| --- | --- | --- | --- | --- |
+| Plummer 8e6, today | 1.3188e-4 / 1.5193e-4 (S12: 1.3188e-4 / 1.5194e-4) | 344,210-537,214 | 3,377,081-3,996,574 | 671.5-673.6 / 470.5-475.0 |
+| Plummer 8e6, migrate | 1.3459e-4 / 1.5075e-4 | 97,317-97,905 | 316,748-319,056 | 705.4-711.5 / **415.1-428.8** |
+| disc + bulge 2e6, today | 6.2111e-5 / 8.1998e-5 (S12: 6.212e-5 / 8.200e-5) | 3,263,939-3,711,530 | 557,699-636,739 | 842.4-846.4 / 791.3-798.3 |
+| disc + bulge 2e6, migrate | 5.8287e-5 / 7.9486e-5 | 2,839,325-3,306,801 | 379,960-413,203 | 867.7-875.7 / 783.3-799.6 |
+
+The library-caps peak is the setup's (the sizing measurement in the process; and the constructor's repartition into
+the cube: 1.38-1.43 GB per device after the setup against 1.23-1.29 GB today, on explicit caps); on explicit caps the migrating Plummer peak is its segment program
+(1.66-1.69 GB per device; on `33e512aa`, before the rebalance donated its rows, the rebalance set it at 1.76 GB,
+439.0-439.8 B/p), today's the start force (1.75-1.80 GB). The disc's peak does not move: its cross field is mostly the
+real boundary through the disc plane, not intruders.
+
+Counts: today's repartitions do not keep the balance -- 3,997,511 / 4,002,489 drifted to 3,970,414 / 4,029,586 over
+five (Plummer 8e6), 999,058 / 1,000,942 to 984,856 / 1,015,144 (disc), 0.1-0.4 % of a shard per repartition: the
+sample sort's bias (above) on nearly exact ranges. The migrating rebalance holds Plummer within 160 rows of N / 2 at every edge after the first; the disc's
+fixed cuts drift ~0.8 % per 8 steps (it rotates through them) and every edge evens them again (6.6-8.0k rows sent).
+
+Time (contended, explicit caps, interleaved off / on / off / on, Plummer 8e6 `dehnen_error`): the force alone (start
+program at the final state, min of 5) 262.2 / 249.2 / 223.7 / 219.3 ms today against 51.2 / 53.8 / 54.1 / 53.6 ms
+migrating; steady segments 108-266 ms per step today (growing with the cross volume) against 56-63 ms. The disc 2e6: force alone
+199.4 / 217.2 ms against 219.0 / 177.2 ms -- no difference outside the contention. A free-card A/B (and four to eight
+cards, which the model says gain more) is still to do.
+
+**Recommendation.** Make `migrate=True` the multi-GPU mode's default (`MeshRunConfig`) once a free-card A/B confirms
+the time: on the Plummer rows it removes the intruder field outright (near pairs 3.5-5.5x and particles shipped
+10.6-12.6x fewer per segment, the force 4.1-5.1x faster on contended cards, the peak 9-12 % lower) for ~0.1 % of the
+rows moved per step, at the same accuracy; on the disc it ships 30-35 % fewer particles and makes 2-17 % fewer near
+pairs per segment, with no measurable time or peak change on contended cards. Found on the way, for the default path:
+the repartition's sample sort (yggdrax `_choose_pivots`: the same number of samples from every device whatever its
+count) cannot rebalance nearly exact ranges and lets the imbalance grow 0.1-0.4 % of a shard per repartition.
