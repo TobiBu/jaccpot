@@ -1654,6 +1654,27 @@ and stays the reference. The single-card lane is untouched: CPU program identity
   `_clamped_transfer` derives one clamped transfer matrix from the gathered sizes on every device; the requested
   sizes are still returned, and a fitting exchange is unchanged. Merge it before the jaccpot PRs.
 
+### Re-plans from the steps on the trajectory only (fix 8)
+- At 8e6 (4e6 per card) the first segment's cross flag fired at step 1. The scan kept stepping on that step's wrong
+  force (one device's acceleration 1.5e8 against 49 at the start, NaN by step 4), and the re-plan folded every
+  step's needs by max: on steps 5-8 each shard's root had become one summary cell of 4,002,489 particles, so the
+  re-plan asked for a leaf width and particle caps of a whole shard (out of memory at 282.7 GiB, or past Triton's
+  launch grid). A stopped cross walk was NOT the cause: it only under-reads (pinned, traced and Pallas walks).
+- The segment program now folds bits and needs only from steps that started on the trajectory (the failing step
+  included); the verdict is mesh-wide, one scalar all-reduce per step. `leaf_width` never exceeds the template's
+  leaf size, the particle caps never exceed rows x `leaf_width`, and a run whose tree overflowed re-plans only the
+  cross summary (the rest re-measures on a tree that fits).
+- Two A100s (card 0 shared, so times are contended), Plummer, library caps, 6 segments x 8 steps, geometric MAC:
+
+  | N | retries | rel-L2 mesh start / end | one card, same particles | peak | step (contended) |
+  | --- | --- | --- | --- | --- | --- |
+  | 8e6 (4e6 per card) | segment 1: 2 | 4.3568e-4 / 4.3011e-4 | 4.3159e-4 / 4.5346e-4 | 662 B/p (2.65 GB) | 222 ms |
+  | 2e7 (1e7 per card) | segments 1 and 6: 1 each | 4.3331e-4 / 3.9118e-4 | 4.4181e-4 / 4.3008e-4 | 644 B/p (6.44 GB) | 1328 ms |
+
+- The cross near pairs jump from 129,544 at the start positions to 360,247 at the first step and fall back to ~150k
+  (8e6): not diagnosed (the start sizing's undersizing that the first segment's retries absorb).
+- The single-card scans fold their needs the same way (every step); that is fixed on its own branch.
+
 ### Not done yet (S11 session 2) and found on the way
 - **The runner's multi-GPU mode** (edges, diagnostics, restart, energy: the cross near term has no potential yet)
   and **Odisseo's multi-GPU lane** off the mesh lane (`fmm_mesh` -> the segment runner).
