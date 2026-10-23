@@ -109,6 +109,16 @@ def _plummer():
     return jnp.asarray(pos, jnp.float32)
 
 
+def _cusp():
+    """Radii log-uniform over e^-20..1: a radix tree 58 levels deep, past the
+    level-loop bound the blobs' prepare sets (their tree has 15)."""
+    rng = np.random.default_rng(3)
+    radius = np.exp(-20.0 * rng.uniform(0.0, 1.0, N))
+    direction = rng.normal(size=(N, 3))
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+    return jnp.asarray(radius[:, None] * direction, jnp.float32)
+
+
 def _probe(prov):
     """One jitted step: rebuild, evaluate, both verdicts and the walk's needs."""
 
@@ -280,6 +290,40 @@ def test_the_overflow_bits_name_what_the_verdict_refuses(base):
     # the fitting rebuild: no bit, and the verdict agrees
     _, ok_fit, _, bits_fit = base["probe"](base["pos"], base["masses"])
     assert bool(ok_fit) and bool(ft.overflow_ok(bits_fit))
+
+
+def test_a_step_after_a_failed_one_leaves_the_aux_alone(base):
+    """``step`` folds a step's bits and needs into its aux only while every step the
+    aux has seen fitted. A caller's scan steps on after a failure, on a truncated
+    force, and a retry (nornax's ``retry_segment``) re-plans from these needs: the
+    failing step counts -- it started from right forces --, the ones after it do
+    not. The step after the failure here is a cusp whose tree overflows the depth
+    bound: folded, it would have the retry grow a tree that never overflowed on
+    the trajectory."""
+    from jaccpot.runtime import fused_topology as ft
+
+    masses = base["masses"]
+    step = jax.jit(base["prov"].step)  # one program: every call passes an aux
+    start = (None, jnp.uint32(0), jnp.zeros((len(NEEDS_FIELDS),), jnp.int32))
+
+    def aux_after(pos, aux=start):
+        return step(pos, masses, aux=aux)[1]
+
+    fit = aux_after(base["pos"])
+    failed = aux_after(_plummer(), fit)
+    after = aux_after(_cusp(), failed)
+    plummer, cusp = aux_after(_plummer()), aux_after(_cusp())
+    assert bool(ft.overflow_ok(fit[1])) and not bool(ft.overflow_ok(failed[1]))
+    # the failing step counts
+    assert int(failed[1]) == int(fit[1]) | int(plummer[1])
+    assert np.array_equal(failed[2], np.maximum(fit[2], plummer[2]))
+    # the cusp alone overflows the tree, deeper than anything the aux holds ...
+    depth = NEEDS_FIELDS.index("depth_needed")
+    assert int(cusp[1]) & ft.OVERFLOW_TREE
+    assert int(cusp[2][depth]) > int(failed[2][depth])
+    # ... and after the failure it changes nothing
+    assert int(after[1]) == int(failed[1])
+    assert np.array_equal(after[2], failed[2])
 
 
 @pytest.fixture(scope="module")

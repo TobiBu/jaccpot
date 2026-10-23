@@ -134,8 +134,9 @@ round-off, not a different force, but it is not the lane's bits.
 
 `aux = (f_b, bits, needs)` rides in the carry: the next rebuild's force scale (only
 under `mac_type="dehnen_error"`), the overflow bits OR-ed over the steps, and the walk's
-needs max-ed over them. Check `bits` once per segment, after the scan, as
-`strict_run_v2` does.
+needs max-ed over them -- up to and including the first step whose verdict failed (the
+steps after it ran on a truncated force). Check `bits` once per segment, after the
+scan, as `strict_run_v2` does.
 
 ## The eager / traced split
 
@@ -220,6 +221,10 @@ time; at most the segment's steps of these), or one that failed at the same step
 re-plan from lower bounds (the flat walk stops at its first overflow, so its lists
 double until they fit). A re-run that learned nothing raises, names what overflowed
 against which bound, and says how many retries ran.
+
+`prov.step`'s aux folds the same way: bits and needs of the steps up to and including the
+first whose verdict failed, so a caller's retry (nornax's `retry_segment`) re-plans from
+the trajectory too.
 
 ## Force and step parameters
 
