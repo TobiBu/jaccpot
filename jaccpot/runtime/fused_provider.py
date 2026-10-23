@@ -70,6 +70,7 @@ from .fused_topology import (
     FusedTopology,
     StepParams,
     _is_static,
+    overflow_ok,
 )
 from .kernels._evaluate import _cubic_bounds_active
 from .strict_carry import (
@@ -1148,7 +1149,8 @@ class FusedForceProvider:
         tuple[Any, tuple]
             ``(acc, (f_b, bits, needs))``: f_b for the next step (``None`` without
             the criterion), the overflow bits (``OVERFLOW_PARAMS`` included) OR-ed
-            and the walk needs max-ed over the steps ``aux`` has seen.
+            and the walk needs max-ed over the steps ``aux`` has seen, up to and
+            including the first whose verdict failed.
         """
         f_b_in, bits_in, needs_in = (None, None, None) if aux is None else aux
         topology = self.rebuild(positions, masses, force_scale=f_b_in)
@@ -1160,10 +1162,20 @@ class FusedForceProvider:
             extra=0 if params is None else self.params_overflow(params)
         )
         needs = topology.needs()
+        # A step counts only when it started on the trajectory: every step `aux`
+        # has seen fitted. After a failure the caller's scan steps on a truncated
+        # force, and a retry re-plans from these needs (nornax's
+        # `retry_segment`), as `strict_run_v2`'s scans fold them.
+        on_trajectory = None
         if bits_in is not None:
-            bits = bits | jnp.asarray(bits_in, jnp.uint32)
+            bits_in = jnp.asarray(bits_in, jnp.uint32)
+            on_trajectory = overflow_ok(bits_in)
+            bits = jnp.where(on_trajectory, bits, jnp.uint32(0)) | bits_in
         if needs_in is not None:
-            needs = jnp.maximum(jnp.asarray(needs_in, jnp.int32), needs)
+            needs_in = jnp.asarray(needs_in, jnp.int32)
+            needs = jnp.maximum(needs_in, needs)
+            if on_trajectory is not None:
+                needs = jnp.where(on_trajectory, needs, needs_in)
         return acc, (f_b, bits, needs)
 
     # ----------------------------------------------------------------------

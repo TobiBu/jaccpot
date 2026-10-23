@@ -217,9 +217,14 @@ also recompiled at the second call (the handle's start force was not donated: 17
 against 2.4 s at N = 512 on CPU).
 
 **Retry.** A segment whose lists or tree overflow is re-planned and re-run by
-`strict_run_v2` (`FusedForceProvider.replanned`): once, or twice when the first re-plan
-grew the tree (the second for the walk only, see `docs/fused_provider.md`). A failure
-after that raises a `RuntimeError` naming the last restart file. A donated segment keeps
+`strict_run_v2` (`FusedForceProvider.replanned`) from what its steps up to the first
+failure needed (the later ones ran on a truncated force, off the trajectory): once, or
+twice when the first re-plan grew the tree (the second for the walk only), then again
+while each re-run gets further (see `docs/fused_provider.md`). Each retry recompiles the
+segment's scan (52.8 s at 25M on an A100, as a ragged segment's compile); a segment whose
+needs stay within the re-plan's headroom (x1.5 for a list) after its first failure takes
+one. A failure that learned nothing raises a `RuntimeError` naming the last restart
+file. A donated segment keeps
 a host copy of its start state for the re-runs (24 B per particle, one device-to-host
 copy per segment). On a GPU it is an asynchronous copy into pinned host memory
 (`strict_carry.host_copy`): 0.10 s at 1e8 on an A100 (the run's first 1.4 s), where the

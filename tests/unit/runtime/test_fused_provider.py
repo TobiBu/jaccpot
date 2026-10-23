@@ -109,6 +109,16 @@ def _plummer():
     return jnp.asarray(pos, jnp.float32)
 
 
+def _cusp():
+    """Radii log-uniform over e^-20..1: a radix tree 58 levels deep, past the
+    level-loop bound the blobs' prepare sets (their tree has 15)."""
+    rng = np.random.default_rng(3)
+    radius = np.exp(-20.0 * rng.uniform(0.0, 1.0, N))
+    direction = rng.normal(size=(N, 3))
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+    return jnp.asarray(radius[:, None] * direction, jnp.float32)
+
+
 def _probe(prov):
     """One jitted step: rebuild, evaluate, both verdicts and the walk's needs."""
 
@@ -280,6 +290,40 @@ def test_the_overflow_bits_name_what_the_verdict_refuses(base):
     # the fitting rebuild: no bit, and the verdict agrees
     _, ok_fit, _, bits_fit = base["probe"](base["pos"], base["masses"])
     assert bool(ok_fit) and bool(ft.overflow_ok(bits_fit))
+
+
+def test_a_step_after_a_failed_one_leaves_the_aux_alone(base):
+    """``step`` folds a step's bits and needs into its aux only while every step the
+    aux has seen fitted. A caller's scan steps on after a failure, on a truncated
+    force, and a retry (nornax's ``retry_segment``) re-plans from these needs: the
+    failing step counts -- it started from right forces --, the ones after it do
+    not. The step after the failure here is a cusp whose tree overflows the depth
+    bound: folded, it would have the retry grow a tree that never overflowed on
+    the trajectory."""
+    from jaccpot.runtime import fused_topology as ft
+
+    masses = base["masses"]
+    step = jax.jit(base["prov"].step)  # one program: every call passes an aux
+    start = (None, jnp.uint32(0), jnp.zeros((len(NEEDS_FIELDS),), jnp.int32))
+
+    def aux_after(pos, aux=start):
+        return step(pos, masses, aux=aux)[1]
+
+    fit = aux_after(base["pos"])
+    failed = aux_after(_plummer(), fit)
+    after = aux_after(_cusp(), failed)
+    plummer, cusp = aux_after(_plummer()), aux_after(_cusp())
+    assert bool(ft.overflow_ok(fit[1])) and not bool(ft.overflow_ok(failed[1]))
+    # the failing step counts
+    assert int(failed[1]) == int(fit[1]) | int(plummer[1])
+    assert np.array_equal(failed[2], np.maximum(fit[2], plummer[2]))
+    # the cusp alone overflows the tree, deeper than anything the aux holds ...
+    depth = NEEDS_FIELDS.index("depth_needed")
+    assert int(cusp[1]) & ft.OVERFLOW_TREE
+    assert int(cusp[2][depth]) > int(failed[2][depth])
+    # ... and after the failure it changes nothing
+    assert int(after[1]) == int(failed[1])
+    assert np.array_equal(after[2], failed[2])
 
 
 @pytest.fixture(scope="module")
@@ -457,3 +501,63 @@ def test_the_retry_policy_is_the_runners(monkeypatch):
     assert prov.retry_mode(walk, 2, True) is None
     monkeypatch.setenv("JACCPOT_STRICT_SEGMENT_RETRY", "0")
     assert prov.retry_mode(walk, 0, False) is None
+
+
+def _retried_segment(engine, steps):
+    """A segment of ``steps`` steps whose step ``k`` needs ``k`` far pairs, run from
+    capacity 0 through the runners' retry decision: each attempt fits the steps its
+    capacity holds and fails at the next, the fold reports that step's need, and
+    the re-plan grows the capacity to it. Returns the modes and the steps fitted."""
+    fit, retries, tree_first, failures, modes = 0, 0, False, [], []
+    index = NEEDS_FIELDS.index
+    while fit < steps:
+        done = fit
+        needs = np.zeros(len(NEEDS_FIELDS), np.int64)
+        needs[index("far_needed")] = fit + 1
+        needs[index("far_overflow")] = 1
+        mode = engine._segment_retry_next(needs, done, retries, tree_first, failures)
+        modes.append(mode)
+        if mode is None:
+            break
+        failures.append((done, needs))
+        retries += 1
+        fit = max(fit, int(needs[index("far_needed")]))
+    return modes, [d for d, _ in failures]
+
+
+def test_a_segment_retries_while_each_re_run_gets_further(monkeypatch):
+    """The scans fold the needs of the steps up to the first failure only (the later
+    ones left the trajectory), so a segment whose needs grow step by step is learned
+    one failing step at a time, and the policy's two retries run out (the multi-GPU
+    lane raised at 1 of 2 steps fitted). The runners retry while each re-run fits
+    more steps than every earlier attempt -- at most the segment's steps -- or,
+    after a re-plan from lower bounds (the flat walk stops at its first overflow),
+    fails at the same step needing more; a re-run that learned nothing raises."""
+    engine = _solver()._impl
+    modes, done = _retried_segment(engine, 4)
+    assert modes == ["full", "walk", "walk", "walk"] and done == [0, 1, 2, 3]
+
+    index = NEEDS_FIELDS.index
+    walk = np.zeros(len(NEEDS_FIELDS), np.int64)
+    walk[index("far_overflow")], walk[index("far_needed")] = 1, 300
+    tree = walk.copy()
+    tree[index("tree_overflow")] = 1
+    earlier = [(2, walk), (2, walk)]
+    # further: full when this failure's tree overflowed
+    assert engine._segment_retry_next(walk, 3, 2, False, earlier) == "walk"
+    assert engine._segment_retry_next(tree, 3, 2, False, earlier) == "full"
+    # the same step and exact counts: the re-plan covered them, nothing new
+    more = walk.copy()
+    more[index("far_needed")] = 600
+    assert engine._segment_retry_next(more, 2, 2, False, earlier) is None
+    assert engine._segment_retry_next(walk, 1, 2, False, earlier) is None
+    # the same step after a re-plan from LOWER BOUNDS: a doubling search
+    bound = walk.copy()
+    bound[index("lower_bound")] = 1
+    stopped = [(2, walk), (2, bound)]
+    assert engine._segment_retry_next(more, 2, 2, False, stopped) == "walk"
+    assert engine._segment_retry_next(bound, 2, 2, False, stopped) is None
+    # the policy's own retries come first; the switch turns every retry off
+    assert engine._segment_retry_next(walk, 0, 0, False, []) == "full"
+    monkeypatch.setenv("JACCPOT_STRICT_SEGMENT_RETRY", "0")
+    assert engine._segment_retry_next(walk, 3, 2, False, earlier) is None

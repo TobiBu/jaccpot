@@ -606,9 +606,17 @@ def test_a_level_wider_than_the_level_loops_batch_mid_segment_is_replanned(
     loops' batch is ceil(1.25 x 18) = 23), drifting into four blobs (113 and 105
     live leaves, widest levels 44 and 46). The re-prepare at the segment's start
     sees the cusp again and would register 23 once more: the batch must come from
-    what the segment's trees needed, ceil(1.25 x 46) = 58, or the re-run overflows
-    the same way. The leaf capacity stays 128; the result equals a run started
-    there with the widened batch and the final walk caps.
+    what the segment's trees needed up to the first failure, step 1's
+    ceil(1.25 x 44) = 55 (step 2 ran after it, off the trajectory; 55 holds its 46
+    on the re-run), or the re-run overflows the same way. The leaf capacity stays
+    128; the result equals a run started there with the widened batch and the
+    final walk caps.
+
+    With the library's walk caps the walk is re-planned after the tree, from the
+    flat walk's lower bounds (it stops at its first overflow), so the far list
+    doubles at step 1 until it fits: 256, 512, 1024, 2048 -- the last a progress
+    retry (``_segment_retry_next``). Before the fold stopped at the first failure,
+    the walk's re-plan read a larger lower bound off step 2 and needed one fewer.
     """
     for key, val in (_CSR_ON_CPU | _WALK_CAPS[walk_caps]).items():
         monkeypatch.setenv(key, val)
@@ -620,9 +628,9 @@ def test_a_level_wider_than_the_level_loops_batch_mid_segment_is_replanned(
     shape = (2 * 128 - 1, 128 - 1)
     before = _fallbacks(solver)
     got, _, _ = _run(solver, state, masses, carry=carry)
-    assert _fallbacks(solver) == before + _RETRIES[walk_caps]
+    assert _fallbacks(solver) == before + {"named": 1, "unnamed": 3}[walk_caps]
     assert impl._tree_leaf_capacity == 128  # the leaves never overflowed
-    assert _fresh_level_registry._WIDTHS[shape] == 58
+    assert _fresh_level_registry._WIDTHS[shape] == 55
 
     # the registry is process-global: a fresh solver started at the same state
     # compiles with the widened batch
@@ -660,3 +668,79 @@ def test_a_walk_retry_after_a_tree_replan_is_the_last(carry, monkeypatch):
     assert "Segment retries run: 2" in str(err.value)
     assert len(calls) == 2  # no third re-plan
     assert impl._tree_leaf_capacity == 1024
+
+
+# --------------------------------------------------------------------------
+# What a failed segment re-plans from: its steps up to the first failure.
+# --------------------------------------------------------------------------
+
+
+class _RetryPolicyReached(Exception):
+    """Raised in place of the segment retry's policy, after recording its needs."""
+
+
+def _contracting_cube():
+    """``(state, masses)``: a uniform cube whose interior contracts, 0.1 of the way
+    per step, each coordinate ``u`` towards ``u**3`` (the corners stay put, so the
+    box does not change), with masses so small (1e-9 each) that gravity moves
+    nothing measurably. Every step's walk finds more far pairs (2064 directed at
+    the start, then 2220, 2472, 3374) and its tree more live leaves (71, then 77,
+    83, 95, 107)."""
+    rng = np.random.default_rng(0)
+    cube = rng.uniform(-1.0, 1.0, (N, 3))
+    cube[:8] = [[a, b, c] for a in (-1, 1) for b in (-1, 1) for c in (-1, 1)]
+    vel = 0.1 * (cube**3 - cube) / DT
+    state = jnp.asarray(np.stack([cube, vel], axis=1), jnp.float32)
+    return state, jnp.full((N,), 1e-9, jnp.float32)
+
+
+def _needs_at_the_retry(state, masses, *, carry, steps, monkeypatch):
+    """``(needs, engine)``: what a fresh solver's failed segment of ``steps`` steps
+    hands the retry policy (``_segment_retry_mode``), which then stops the call."""
+    solver = _solver()
+    seen: list = []
+
+    def policy(needs, retries, tree_first):
+        seen.append(np.array(needs, copy=True))
+        raise _RetryPolicyReached
+
+    monkeypatch.setattr(solver._impl, "_segment_retry_mode", policy)
+    with pytest.raises(_RetryPolicyReached):
+        _run(solver, state, masses, carry=carry, steps=steps)
+    assert len(seen) == 1
+    return seen[0], solver._impl
+
+
+@pytest.mark.parametrize("carry", ["state", "particles"])
+def test_a_failed_segment_replans_from_its_steps_up_to_the_first_failure(
+    carry, monkeypatch
+):
+    """The scan cannot break out at a failed step: it steps on, on a truncated
+    force, and the retry re-runs the segment from its start. What the steps after
+    the first failure "need" is measured off the trajectory (on the multi-GPU lane
+    it went NaN and asked for a whole shard as one leaf), so the re-plan must not
+    size from it: the needs are folded up to and including the first failed step,
+    whose own positions came from right forces.
+
+    The far list is capped (named) between what steps 1 and 2 need, so step 2 is
+    the first to fail; steps 3 and 4 need more far pairs and leaves. A segment
+    that ran two steps past the failure hands the retry the needs of one that
+    stopped at it (its last step). Both are scans of two or more steps, whose
+    common steps are bitwise the same (the runner's chained segments rest on it).
+    Before the fix the longer segment's needs were steps 3 and 4's.
+    """
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "2344")
+    state, masses = _contracting_cube()
+    past, impl = _needs_at_the_retry(
+        state, masses, carry=carry, steps=4, monkeypatch=monkeypatch
+    )
+    if carry == "particles":
+        assert impl._strict_particle_failed_step == 1  # step 1 fitted
+    at, _ = _needs_at_the_retry(
+        state, masses, carry=carry, steps=2, monkeypatch=monkeypatch
+    )
+    assert at[NEEDS_FIELDS.index("far_overflow")] == 1
+    assert at[NEEDS_FIELDS.index("tree_overflow")] == 0
+    assert np.array_equal(past, at), dict(
+        zip(NEEDS_FIELDS, zip(past.tolist(), at.tolist()))
+    )

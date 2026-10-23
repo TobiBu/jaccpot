@@ -134,8 +134,9 @@ round-off, not a different force, but it is not the lane's bits.
 
 `aux = (f_b, bits, needs)` rides in the carry: the next rebuild's force scale (only
 under `mac_type="dehnen_error"`), the overflow bits OR-ed over the steps, and the walk's
-needs max-ed over them. Check `bits` once per segment, after the scan, as
-`strict_run_v2` does.
+needs max-ed over them -- up to and including the first step whose verdict failed (the
+steps after it ran on a truncated force). Check `bits` once per segment, after the
+scan, as `strict_run_v2` does.
 
 ## The eager / traced split
 
@@ -199,7 +200,10 @@ wrong**, not merely slow. Before S2 a tree overflow inside the scan left the ver
 (`TREE_NEEDS_FIELDS`): `leaf_needed` (the live cell leaves, counted before the cut to
 `leaf_capacity`, so exact past an overflow), `depth_needed` (levels) and
 `widest_needed` (the widest level's node count). A failed segment re-plans from their
-running maximum with `prov.replanned`, once per segment, at the segment's start: the
+running maximum over the steps up to and including its FIRST failed step -- the scan
+cannot stop there, and the steps after it run on a truncated force, off the trajectory,
+so what they "need" sizes nothing real (the multi-GPU lane's went NaN and asked for a
+whole shard as one leaf) -- with `prov.replanned`, at the segment's start: the
 walk's caps from the first seven, the tree's bounds from the last three (S3) -- the leaf
 capacity grows to `auto_leaf_capacity(leaf_needed, headroom)` (`TreeConfig.leaf_headroom`
 under `leaf_capacity="auto"`, x1.15 for an explicit capacity; rounded up to 1024; sticky
@@ -210,8 +214,17 @@ live leaves +0.26 %). A grown capacity is a new template shape, so the re-run co
 A segment whose first retry re-planned the tree may retry once more, for the walk only
 (`prov.replanned(..., walk_only=True)`): the walk's needs in a segment whose tree
 overflowed were measured on that broken tree and can fall short, the re-run's are real.
-At most two retries per segment; a further failure raises, names what overflowed against
-which bound, and says how many retries ran.
+After those two, a segment retries while it makes progress (`_segment_retry_next`, as the
+multi-GPU lane's segment runner): a re-run that fitted more steps than every earlier
+attempt (needs that outgrow the headroom step by step are learned one failing step at a
+time; at most the segment's steps of these), or one that failed at the same step after a
+re-plan from lower bounds (the flat walk stops at its first overflow, so its lists
+double until they fit). A re-run that learned nothing raises, names what overflowed
+against which bound, and says how many retries ran.
+
+`prov.step`'s aux folds the same way: bits and needs of the steps up to and including the
+first whose verdict failed, so a caller's retry (nornax's `retry_segment`) re-plans from
+the trajectory too.
 
 ## Force and step parameters
 

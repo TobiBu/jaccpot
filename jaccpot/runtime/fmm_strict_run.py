@@ -352,6 +352,76 @@ class StrictRunMixin(_EngineBase):
             return "walk"
         return None
 
+    def _segment_retry_next(
+        self,
+        needs: np.ndarray,
+        done: int,
+        retries: int,
+        tree_first: bool,
+        earlier: list,
+    ) -> Optional[str]:
+        """The retry a failed segment attempt gets: the policy, then its progress.
+
+        :meth:`_segment_retry_mode` first. When it says stop, the segment is
+        retried anyway while it makes PROGRESS, as the multi-GPU lane's segment
+        runner does: the scans fold the needs of the steps up to the first failure
+        only (the later ones left the trajectory), so a segment whose needs grow
+        step by step past the re-plan's headroom is learned one failing step at a
+        time. A re-run made progress when
+
+        * it fitted more steps than every earlier attempt (``done`` grows with each
+          such retry, so there are at most the segment's steps of them), or
+        * it failed at the same step as the attempt before, whose needs were
+          LOWER BOUNDS -- the flat walk stops at its first overflow, a walk whose
+          queue overflowed counted only part of its pairs -- and it needed more
+          than they said: their re-plan was a doubling, not a measurement (each
+          such retry at least doubles a list, and a list past the index range
+          raises in the re-plan).
+
+        The retry is ``"full"`` when this failure's tree overflowed, ``"walk"``
+        otherwise; a re-plan that grows nothing still raises, and
+        ``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns every retry off.
+
+        Parameters
+        ----------
+        needs : np.ndarray
+            This attempt's folded
+            :meth:`jaccpot.runtime.fused_topology.FusedTopology.needs`.
+        done : int
+            Steps this attempt fitted before its first failure.
+        retries : int
+            Retries this segment has run so far.
+        tree_first : bool
+            The first failure was a tree overflow.
+        earlier : list
+            ``(done, needs)`` of the segment's earlier failed attempts, in order.
+
+        Returns
+        -------
+        Optional[str]
+            ``"full"``, ``"walk"``, or ``None`` (the caller raises).
+        """
+        from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+        mode = self._segment_retry_mode(needs, retries, tree_first)
+        if mode is not None or not earlier:
+            return mode
+        if not env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True):
+            return None
+        index = NEEDS_FIELDS.index
+        best = max(int(d) for d, _ in earlier)
+        last_done, last = earlier[-1]
+        walk = slice(0, index("far_overflow"))  # far, near, peak wavefront
+        further = int(done) > best
+        deeper = (
+            int(done) == best == int(last_done)
+            and bool(last[index("lower_bound")] or last[index("queue_overflow")])
+            and bool(np.any(np.asarray(needs)[walk] > np.asarray(last)[walk]))
+        )
+        if not (further or deeper):
+            return None
+        return "full" if int(needs[index("tree_overflow")]) else "walk"
+
     def _raise_scan_capacity_saturated(
         self, needs: Optional[np.ndarray], *, retries: int = 0
     ) -> None:
@@ -394,9 +464,9 @@ class StrictRunMixin(_EngineBase):
             else {}
         )
         ran = (
-            f" Segment retries run: {int(retries)} (at most two per segment, "
-            "the second only for the walk after a tree re-plan; "
-            "JACCPOT_STRICT_SEGMENT_RETRY=0 turns them off)."
+            f" Segment retries run: {int(retries)} (two per segment, the second "
+            "only for the walk after a tree re-plan, then more while each re-run "
+            "gets further; JACCPOT_STRICT_SEGMENT_RETRY=0 turns them off)."
         )
         saturated = (
             "a fixed capacity saturated inside the compiled velocity-Verlet "
@@ -414,8 +484,8 @@ class StrictRunMixin(_EngineBase):
                 "the far-pair count saturates on ANY overflow -- far, near "
                 "(JACCPOT_LARGE_N_NEIGHBOR_EDGE_PROFILE_FIXED_CAP) or queue "
                 "(TraversalOverrides(max_pair_queue=...)) -- so check all three; "
-                "unnamed caps are re-planned once per segment (twice after a tree "
-                "re-plan; JACCPOT_STRICT_SEGMENT_RETRY=0 turns that off), named "
+                "unnamed caps are re-planned at the segment's start (the retries "
+                "below; JACCPOT_STRICT_SEGMENT_RETRY=0 turns that off), named "
                 "ones never."
                 if traced_caps.get("flat_walk")
                 else ""
@@ -1747,7 +1817,13 @@ class StrictRunMixin(_EngineBase):
                     params_in: Optional[StepParams] = None,
                 ) -> tuple[
                     tuple[
-                        LargeNPreparedState, Array, Array, Array, Array, Optional[Array]
+                        LargeNPreparedState,
+                        Array,
+                        Array,
+                        Array,
+                        Array,
+                        Array,
+                        Optional[Array],
                     ],
                     Optional[Array],
                 ]:
@@ -1758,6 +1834,7 @@ class StrictRunMixin(_EngineBase):
                             acceleration_now,
                             capacity_ok_now,
                             walk_needs_now,
+                            done_now,
                             scale_now,
                         ) = carry
                         topology_new, state_new, acceleration_new, _, scale_new = (
@@ -1775,9 +1852,13 @@ class StrictRunMixin(_EngineBase):
                             prov.capacity_ok(topology_new)
                         )
                         # what the walks of this segment needed, at most: a failed
-                        # segment is re-planned from it
-                        walk_needs_new = jnp.maximum(
-                            walk_needs_now, topology_new.needs()
+                        # segment is re-planned from it. Only the steps that
+                        # started on the trajectory count, as on the particle
+                        # carry (`_strict_particle_carry_run`)
+                        walk_needs_new = jnp.where(
+                            capacity_ok_now,
+                            jnp.maximum(walk_needs_now, topology_new.needs()),
+                            walk_needs_now,
                         )
                         return (
                             topology_new.prepared,
@@ -1785,6 +1866,8 @@ class StrictRunMixin(_EngineBase):
                             acceleration_new,
                             capacity_ok_new,
                             walk_needs_new,
+                            # the steps that fitted: a retry's progress
+                            done_now + capacity_ok_new.astype(jnp.int32),
                             scale_new,
                         ), (state_new if return_history else None)
 
@@ -1805,6 +1888,7 @@ class StrictRunMixin(_EngineBase):
                                 FusedTopology.from_prepared(prepared_initial)
                             ),
                             jnp.zeros((len(NEEDS_FIELDS),), jnp.int32),
+                            jnp.zeros((), jnp.int32),
                             scale_initial,
                         ),
                         xs=scan_xs,
@@ -1816,6 +1900,7 @@ class StrictRunMixin(_EngineBase):
                 return _compiled_runner
 
             retries, tree_first = 0, False
+            failures: list = []  # (steps fitted, needs) of the failed attempts
             # A state an earlier call's scan returned holds that scan's own f_b
             # (set below): the next refresh's thresholds continue from it, as the
             # particle carry's handle does. The eager prepare's prepass is at the
@@ -1864,6 +1949,7 @@ class StrictRunMixin(_EngineBase):
                     _,
                     capacity_ok_all,
                     walk_needs,
+                    done,
                     _scale_out,
                 ), history_out = compiled_runner(
                     prepared_in,
@@ -1896,10 +1982,15 @@ class StrictRunMixin(_EngineBase):
                 # re-prepare from the segment's START
                 # (`FusedForceProvider.replanned`), recompile and run the segment
                 # once more -- after a tree re-plan, a second time for the walk
-                # (`_segment_retry_mode`). Anything else raises below.
-                mode = self._segment_retry_mode(needs, retries, tree_first)
+                # (`_segment_retry_mode`), then while each re-run gets further
+                # (`_segment_retry_next`). Anything else raises below.
+                done_i = int(np.asarray(jax.device_get(done)))
+                mode = self._segment_retry_next(
+                    needs, done_i, retries, tree_first, failures
+                )
                 if mode is None:
                     self._raise_scan_capacity_saturated(needs, retries=retries)
+                failures.append((done_i, needs))
                 if retries == 0:
                     tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
                 retries += 1
@@ -2188,7 +2279,18 @@ class StrictRunMixin(_EngineBase):
                         )
                         tree_rows = ()
                     ok_new = ok_now & prov_i.capacity_ok(topology_new)
-                    needs_new = jnp.maximum(needs_now, topology_new.needs())
+                    # The re-plan's needs: only from a step that STARTED on the
+                    # trajectory (every earlier step fitted). The failing step
+                    # counts -- its positions came from right forces -- but after
+                    # it the scan steps on a truncated force and leaves the
+                    # trajectory, and what its later trees and walks "need"
+                    # sizes nothing real (the mesh lane's went NaN by its fourth
+                    # step and asked for a whole shard as one leaf).
+                    needs_new = jnp.where(
+                        ok_now,
+                        jnp.maximum(needs_now, topology_new.needs()),
+                        needs_now,
+                    )
                     # a segment that overflowed is re-run from its start, so the
                     # carry is NOT frozen (keeping the step's old state for a
                     # where() held 36 B per particle through every step); only
@@ -2390,6 +2492,7 @@ class StrictRunMixin(_EngineBase):
                 "from a run without the criterion cannot continue one with it)"
             )
         retries, tree_first = 0, False
+        failures: list = []  # (steps fitted, needs) of the failed attempts
         state_now = state_arr
         scale_now: Optional[Array] = scale_seed
         acc_self_now: Optional[Array] = acceleration_self_current
@@ -2460,14 +2563,22 @@ class StrictRunMixin(_EngineBase):
             self._strict_particle_failed_step = int(np.asarray(jax.device_get(done)))
             # segment retry: re-plan the walk caps and the tree from what the
             # segment needed, re-prepare at the segment's START, run it once more
-            # (after a tree re-plan, a second time for the walk)
+            # (after a tree re-plan, a second time for the walk; then while each
+            # re-run gets further)
             mode = (
-                self._segment_retry_mode(needs, retries, tree_first)
+                self._segment_retry_next(
+                    needs,
+                    self._strict_particle_failed_step,
+                    retries,
+                    tree_first,
+                    failures,
+                )
                 if retry_enabled
                 else None
             )
             if mode is None:
                 self._raise_scan_capacity_saturated(needs, retries=retries)
+            failures.append((self._strict_particle_failed_step, needs))
             if retries == 0:
                 tree_first = bool(needs[NEEDS_FIELDS.index("tree_overflow")])
             retries += 1
