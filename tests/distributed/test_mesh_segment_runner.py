@@ -480,3 +480,64 @@ def test_an_undersized_cross_capacity_is_replanned_and_equals_a_fresh_run(
     )
     assert fresh.run(2, dt=DT).retries == 0
     _gathered_equal(retried, fresh)
+
+
+class _FailsAtStepTwo:
+    """A force with no physics that reads its step off a marker particle: row 0 of
+    every device starts at x = 0 with v = 1/dt and no acceleration, so after step k
+    it sits at x = k exactly. Device 1's flag fires at step 2; every device's needs
+    grow with the step (``100 k``, the device, ``k``)."""
+
+    needs_size = 3
+
+    def shard(self, positions, masses, live, ids):
+        from jaccpot.runtime.fused_topology import OVERFLOW_CROSS
+
+        del masses, live, ids
+        step = jnp.round(positions[0, 0]).astype(jnp.int32)
+        me = jax.lax.axis_index(AXIS)
+        failed = (step == 2) & (me == 1)
+        bits = jnp.where(failed, jnp.uint32(OVERFLOW_CROSS), jnp.uint32(0))
+        needs = jnp.stack([100 * step, 100 * step + me, step]).astype(jnp.int32)
+        return jnp.zeros_like(positions), bits, needs
+
+
+def test_a_failed_steps_successors_size_nothing():
+    """A segment keeps stepping after a flag fires, on forces from truncated or
+    misaligned lists, so its later states leave the trajectory. On two A100s at 8e6
+    a failed segment went NaN by its fourth step, and what its degenerate trees
+    "needed" (the root of each shard one summary cell, near the other's: a row of
+    4,002,489 particles) became the re-plan's leaf width; it OOMed at 282.72 GiB.
+    The fold keeps what the steps up to and including the first failure needed --
+    on EVERY device: device 0's own flags hold here, but it ran on device 1's
+    exchange -- and reports how many steps fitted."""
+    from types import SimpleNamespace
+
+    from jaccpot.distributed.segment import MeshSegmentRunner
+    from jaccpot.runtime.fused_topology import OVERFLOW_CROSS
+
+    mesh, cap, dt, steps = _mesh(), 8, 0.25, 4
+    runner = SimpleNamespace(
+        axis_name=AXIS,
+        force=_FailsAtStepTwo(),
+        external_acceleration_fn=None,
+        mesh=mesh,
+        donate=False,
+    )
+    program = MeshSegmentRunner._build_segment(runner, steps)
+    state = np.zeros((NDEV * cap, 2, 3), np.float32)
+    state[::cap, 1, 0] = 1.0 / dt  # the marker rows
+    state[:, 0, 1] = np.arange(NDEV * cap)  # any distinct positions elsewhere
+    _, _, ok, bits, needs, done = program(
+        jnp.asarray(state),
+        jnp.zeros((NDEV * cap, 3), jnp.float32),
+        jnp.ones((NDEV * cap,), jnp.float32),
+        jnp.full((NDEV,), cap, jnp.int32),
+        jnp.arange(NDEV * cap, dtype=jnp.int32),
+        jnp.asarray(dt, jnp.float32),
+        None,
+    )
+    assert not bool(ok)
+    assert int(bits) == OVERFLOW_CROSS
+    assert np.asarray(needs).tolist() == [200, 201, 2], np.asarray(needs)
+    assert int(done) == 1

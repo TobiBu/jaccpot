@@ -199,6 +199,26 @@ class SegmentReport:
     failures: list = field(default_factory=list)
 
 
+def _mesh_all(flag: Array, axis_name: str) -> Array:
+    """A boolean that holds on every device (inside ``shard_map``).
+
+    Parameters
+    ----------
+    flag : Array
+        This device's boolean scalar.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    Array
+        Boolean scalar, identical on every device.
+    """
+    return jnp.logical_not(
+        reduce_flag_across_mesh(jnp.logical_not(flag), axis_name=axis_name)
+    )
+
+
 def _mesh_verdict(
     ok: Array, bits: Array, needs: Array, done: Array, *, axis_name: str
 ) -> tuple[Array, Array, Array, Array]:
@@ -845,20 +865,28 @@ class MeshSegmentRunner:
                 state_new = _velocity_verlet_kick_drifted(
                     state_position, acc_now, acc_new, dt
                 )
-                ok_new = ok & overflow_ok(bits_new)
+                # Fold only what a step entered ON the trajectory needed. After the
+                # first failure the forces come from truncated or misaligned lists,
+                # the states leave the trajectory, and what their trees and walks
+                # "need" sizes nothing real: a failed 8e6 segment on two A100s went
+                # NaN by its fourth step, and the degenerate trees after it read a
+                # whole shard per cross row (leaf width 4,002,489; the re-plan then
+                # OOMed). `ok` is the MESH's: a device whose own flags held still
+                # ran on a failed peer's exchange.
+                ok_new = _mesh_all(ok & overflow_ok(bits_new), axis)
                 return (
                     state_new,
                     acc_new,
                     ok_new,
-                    bits | bits_new,
-                    jnp.maximum(needs, needs_new),
+                    bits | jnp.where(ok, bits_new, jnp.uint32(0)),
+                    jnp.where(ok, jnp.maximum(needs, needs_new), needs),
                     done + ok_new.astype(jnp.int32),
                 ), None
 
             init = (
                 state0,
                 acc0,
-                count[0] <= cap,
+                _mesh_all(count[0] <= cap, axis),
                 jnp.uint32(0),
                 jnp.zeros((needs_size,), jnp.int32),
                 jnp.int32(0),
