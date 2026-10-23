@@ -188,6 +188,80 @@ def test_whole_rows_past_the_limit_go_in_pieces(row_limit):
     assert int(row_counts.max()) > row_limit  # some row really goes in pieces
 
 
+@pytest.mark.parametrize("source_tile", [0, 8])
+@pytest.mark.parametrize("row_limit", [1 << 20, 2])
+def test_leading_target_leaves_without_the_self_term(source_tile, row_limit):
+    """``include_self=False`` and ``num_target_leaves=T`` (the multi-GPU cross term:
+    local leaves first, imported leaves behind them as sources only): the first
+    ``T`` leaves' rows and nothing else -- no self term, the source-only leaves'
+    particles zero -- against a NumPy pair sum, through the row pieces too
+    (``row_limit=2``)."""
+    c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6, empty_rows=(2,))
+    T = 6
+    offsets, row_counts = c["offsets"][: T + 1], c["row_counts"][:T]
+    soft2, g = 0.05**2, 1.3
+    acc, pot = nearfield_leafpair_csr_sorted_direct_pallas(
+        c["pos"],
+        c["mass"],
+        c["starts"],
+        c["counts"],
+        c["nbr"],
+        offsets,
+        row_counts,
+        leaf_width=8,
+        softening_sq=jnp.float32(soft2),
+        G=jnp.float32(g),
+        chunk=1,
+        interpret=True,
+        with_potential=True,
+        source_tile=source_tile,
+        row_limit=row_limit,
+        softening_kernel="plummer",  # the reference's
+        include_self=False,
+        num_target_leaves=T,
+    )
+    pos = np.asarray(c["pos"], np.float64)
+    mass = np.asarray(c["mass"], np.float64)
+    starts, counts = np.asarray(c["starts"]), np.asarray(c["counts"])
+    nbr, off = np.asarray(c["nbr"]), np.asarray(offsets)
+    want = np.zeros((pos.shape[0], 4))
+    for leaf in range(T):
+        tgt = np.arange(starts[leaf], starts[leaf] + counts[leaf])
+        for s in nbr[off[leaf] : off[leaf + 1]]:
+            src = np.arange(starts[s], starts[s] + counts[s])
+            d = pos[src][None, :, :] - pos[tgt][:, None, :]
+            r2 = np.sum(d * d, axis=-1) + soft2
+            want[tgt, :3] += g * np.einsum("ij,ijk->ik", mass[src] * r2**-1.5, d)
+            want[tgt, 3] -= g * np.sum(mass[src] * r2**-0.5, axis=1)
+    got = np.concatenate([np.asarray(acc), np.asarray(pot)[:, None]], axis=1)
+    assert np.any(want[: starts[T]] != 0.0)
+    assert not np.any(got[starts[T] :])  # the source-only leaves and the dead rows
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+    if row_limit == 2:
+        assert int(np.asarray(row_counts).max()) > row_limit  # some row in pieces
+
+
+def test_num_target_leaves_is_validated():
+    """More target leaves than leaves is refused, not read past the leaf table."""
+    c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6)
+    with pytest.raises(ValueError, match="num_target_leaves"):
+        nearfield_leafpair_csr_sorted_direct_pallas(
+            c["pos"],
+            c["mass"],
+            c["starts"],
+            c["counts"],
+            c["nbr"],
+            c["offsets"],
+            c["row_counts"],
+            leaf_width=8,
+            softening_sq=jnp.float32(0.05**2),
+            G=jnp.float32(1.3),
+            chunk=1,
+            interpret=True,
+            num_target_leaves=c["L"] + 1,
+        )
+
+
 def _consecutive_case(seed, *, W):
     """``_case`` with rows of CONSECUTIVE leaves, so source runs really merge."""
     c = _case(seed, num_live=9, num_pad=3, W=W, n_dead=2, max_row=6, empty_rows=(2,))
