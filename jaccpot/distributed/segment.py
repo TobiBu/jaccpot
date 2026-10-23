@@ -43,6 +43,10 @@ lane the same, as a new path next to the old one (which stays the reference):
   in a segment's peak). With the velocity-Verlet form the carried acceleration
   must travel with its particle, so ``sfc_repartition`` routes the velocity, the
   total acceleration and the id (``rollout._repartition_shard``).
+* **The potential energy at the current state** (:meth:`MeshSegmentRunner.potential_energy`,
+  S11 session 2): the force's ``potential_shard`` per device and the external
+  potential per row, summed in fp64 over the mesh, in a program of its own that
+  changes no number of the run.
 * **Dehnen's error criterion** (``mac_type='dehnen_error'``, S12; the force's
   ``scale_carry``): eq (16b)'s per-particle ``f_b`` rides with the acceleration --
   in the start program (in: the carried one or, before any force, the prepare's
@@ -72,6 +76,7 @@ decomposition and the repartition's per-device body.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -336,6 +341,71 @@ def _total_acceleration(
     return jnp.where(live_rows[:, None], acc, jnp.zeros((), acc.dtype))
 
 
+def _direct_potential_shard(
+    x: Array,
+    m: Array,
+    n_live: Array,
+    ids: Array,
+    *,
+    G: float,
+    softening: float,
+    kernel: str,
+    axis_name: str,
+) -> Array:
+    """One device's all-pairs potential (inside ``shard_map``), partition-independent.
+
+    The potential half of ``rollout._reference_direct_shard``: the mesh's particles
+    all-gathered and summed in GLOBAL-ID order, ``phi_i = -G sum_{j != i} m_j
+    psi(r_ij)`` with the pair kernel's potential factor (:mod:`jaccpot.softening`;
+    Newtonian beyond a compact kernel's support). The self pair is left out by id,
+    not by ``r = 0``: two particles at one position still see each other's
+    ``psi(0)``.
+
+    Parameters
+    ----------
+    x : Array
+        ``(cap, 3)`` positions.
+    m : Array
+        ``(cap,)`` masses.
+    n_live : Array
+        Scalar live row count.
+    ids : Array
+        ``(cap,)`` global ids.
+    G : float
+        Gravitational constant.
+    softening : float
+        Plummer-equivalent softening length.
+    kernel : str
+        The resolved pair kernel.
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    Array
+        ``(cap,)`` potentials in the positions' dtype, zero on padding rows.
+    """
+    from jaccpot.softening import masked_pair_factors, softening_params
+
+    live = jnp.arange(x.shape[0]) < n_live
+    xs = jax.lax.all_gather(x, axis_name, tiled=True)
+    ms = jax.lax.all_gather(jnp.where(live, m, 0.0), axis_name, tiled=True)
+    gs = jax.lax.all_gather(jnp.where(live, ids, -1), axis_name, tiled=True)
+    big = jnp.iinfo(jnp.int32).max
+    order = jnp.argsort(jnp.where(gs >= 0, gs, big), stable=True)
+    xs, ms, gs = xs[order], ms[order], gs[order]
+    d = xs[None, :, :] - x[:, None, :]
+    r2 = jnp.sum(d * d, axis=-1)
+    active = (gs[None, :] >= 0) & (gs[None, :] != ids[:, None])
+    params = softening_params(kernel, softening, x.dtype)
+    psi = masked_pair_factors(r2, active, params, kernel, potential=True)[1]
+    # HIGHEST, as the reference force: no TF32 on Ampere
+    phi = -jnp.asarray(G, x.dtype) * jnp.einsum(
+        "ij,j->i", psi, ms, precision=jax.lax.Precision.HIGHEST
+    )
+    return jnp.where(live, phi, jnp.zeros((), phi.dtype))
+
+
 class DirectMeshForce:
     """An all-pairs force for the runner whose answer does not depend on the partition.
 
@@ -471,6 +541,53 @@ class DirectMeshForce:
         )
         return acc, jnp.uint32(0), jnp.zeros((self.needs_size,), jnp.int32)
 
+    def potential_shard(
+        self,
+        positions: Array,
+        masses: Array,
+        live: Array,
+        ids: Array,
+        force_scale: Optional[Array] = None,
+    ) -> tuple[Array, Array]:
+        """One device's direct-sum potential (inside ``shard_map``).
+
+        ``phi_i = -G sum_{j != i} m_j psi(r_ij)`` over every device's particles,
+        with the force's pair kernel (:func:`_direct_potential_shard`): the
+        sources in global-id order, so a particle's potential does not depend on
+        which device and row hold it.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(cap, 3)``.
+        masses : Array
+            ``(cap,)``.
+        live : Array
+            Scalar live row count.
+        ids : Array
+            ``(cap,)`` global ids: the sources' summation order and the self pair.
+        force_scale : Optional[Array]
+            Unused (no criterion in a direct sum).
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(phi, bits = 0)``; ``phi`` ``(cap,)`` in the positions' dtype, zero on
+            padding rows.
+        """
+        del force_scale
+        phi = _direct_potential_shard(
+            positions,
+            masses,
+            live,
+            ids,
+            G=self.G,
+            softening=self.softening,
+            kernel=self.kernel,
+            axis_name=self.axis_name,
+        )
+        return phi, jnp.uint32(0)
+
     def retry_mode(self, needs: np.ndarray, retries: int, tree_first: bool) -> Any:
         """Never retried: the direct sum has no capacity.
 
@@ -559,8 +676,10 @@ class MeshSegmentRunner:
         ``key``, ``context``, ``before_trace``, ``needs_size``, ``cache_owner``
         and the retry's ``retry_mode``, ``replan`` and ``raise_overflow``
         (:class:`~jaccpot.distributed.template_force.FusedMeshForce`,
-        :class:`DirectMeshForce`). ``prepare`` runs here, at ``state``, and again
-        at a re-planned segment's start.
+        :class:`DirectMeshForce`); for :meth:`potential_energy` also
+        ``potential_shard(positions, masses, live, ids, force_scale=None) -> (phi,
+        bits)``. ``prepare`` runs here, at ``state``, and again at a re-planned
+        segment's start.
     external_acceleration_fn : Optional[Callable[..., Array]]
         ``field(state_rows, params)`` (or ``field(state_rows)`` when ``run`` gets no
         parameters) -> ``(cap, 3)``, on one device's ``(cap, 2, 3)`` rows. Keep ONE
@@ -1520,3 +1639,232 @@ class MeshSegmentRunner:
         owner[live_ids] = rows // cap
         out["owner"] = owner
         return out
+
+    def resume(
+        self, *, segment_index: int, steps_done: int, external_params: Any = None
+    ) -> None:
+        """Continue a run restored from a restart file: its counters, its carried total.
+
+        A restore builds the runner from the file's :class:`MeshState` and then
+        sets what the run that wrote it had reached: the segments done (the
+        repartition cadence counts them), the steps, and -- when the state carries
+        its total acceleration -- the external field it was computed with, so the
+        next segment starts from it as the uninterrupted run did (no start force).
+
+        Parameters
+        ----------
+        segment_index : int
+            Segments the run had completed.
+        steps_done : int
+            Steps the run had completed.
+        external_params : Any
+            The external field's parameters the carried acceleration was computed
+            with (the next segments' own), or ``None``.
+        """
+        from jaccpot.runtime.strict_carry import external_field_key
+
+        self.segment_index = int(segment_index)
+        self.steps_done = int(steps_done)
+        self._repartitioned_for = 0
+        self._acceleration_key = (
+            None
+            if self.state.acceleration is None
+            else external_field_key(self.external_acceleration_fn, external_params)
+        )
+
+    # ------------------------------------------------------------------
+    # The energy.
+    # ------------------------------------------------------------------
+
+    def potential_energy(
+        self,
+        *,
+        external_potential_fn: Optional[Callable[..., Array]] = None,
+        external_params: Any = None,
+    ) -> dict:
+        """The potential energies at the current state: ``1/2 sum m phi``, ``sum m Phi_ext``.
+
+        One compiled program per plan (cached with the segment programs, under the
+        force's key, the external potential's identity and the parameters'
+        structure): the force's ``potential_shard`` on every device, ``phi_i = -G
+        sum_{j != i} m_j psi(r_ij)`` over all devices' particles, and the external
+        potential per row, both summed in fp64 per device and over the mesh. Under
+        ``mac_type='dehnen_error'`` the rebuild's thresholds are the carried f_b
+        (before any force, the prepare's seed), the next force's own.
+
+        It changes nothing: the state is read, never donated, and the trace leaves
+        the force's and its cache owner's trace-time state as it found them
+        (``production._trace_state_kept``), so a run with the energy is the run
+        without, bitwise.
+
+        Parameters
+        ----------
+        external_potential_fn : Optional[Callable[..., Array]]
+            The external field's potential per unit mass, ``potential(state_rows,
+            params)`` (``potential(state_rows)`` without parameters) -> ``(cap,)``
+            on one device's ``(cap, 2, 3)`` rows: the field's own contract. ``None``:
+            ``W_ext = 0``. Keep ONE function object (its identity is in the key).
+        external_params : Any
+            Its parameters (replicated), or ``None``.
+
+        Returns
+        -------
+        dict
+            Host values: ``self`` (``W_self``, fp64), ``external`` (``W_ext``) and
+            ``ok`` (every device's potential fitted its capacities; the energies are
+            meaningless otherwise).
+
+        Raises
+        ------
+        NotImplementedError
+            If the force has no ``potential_shard``.
+        """
+        from jaccpot.production import _trace_state_kept
+
+        if getattr(self.force, "potential_shard", None) is None:
+            raise NotImplementedError(
+                f"{type(self.force).__name__} has no potential_shard: the mesh "
+                "potential of this force is not implemented"
+            )
+        program, fresh = self._potential_program(external_potential_fn, external_params)
+        s = self.state
+        owners = [self.force.cache_owner]
+        if self.force is not owners[0]:
+            owners.append(self.force)
+        with contextlib.ExitStack() as kept:
+            # the program is in the cache already, so the cache's restore keeps it
+            for owner in owners:
+                kept.enter_context(_trace_state_kept(owner))
+            with self.force.context():
+                if fresh:
+                    self.force.before_trace()
+                out = program(
+                    s.state,
+                    s.masses,
+                    s.count,
+                    s.ids,
+                    *self._scale_args(s),
+                    external_params,
+                )
+        w_self, w_ext, ok, _ = jax.device_get(out)
+        return {"self": float(w_self), "external": float(w_ext), "ok": bool(ok)}
+
+    def _potential_program(
+        self, field_fn: Optional[Callable[..., Array]], params: Any
+    ) -> tuple[Callable, bool]:
+        """The compiled potential-energy program, cached.
+
+        Parameters
+        ----------
+        field_fn : Optional[Callable[..., Array]]
+            The external potential, or ``None``.
+        params : Any
+            Its parameters (their structure is in the key).
+
+        Returns
+        -------
+        tuple[Callable, bool]
+            ``(state, masses, count, ids, [f_b,] params) -> (w_self, w_ext, ok,
+            bits)``, replicated; and whether it was just built.
+        """
+        from jaccpot.runtime.fused_topology import overflow_ok
+
+        leaves, treedef = jax.tree_util.tree_flatten(params)
+        key = (
+            "mesh_potential",
+            tuple(int(d.id) for d in self.devices),
+            self.axis_name,
+            self.cap,
+            str(self.state.state.dtype),
+            str(self.state.masses.dtype),
+            *self.force.key(),
+            None if field_fn is None else id(field_fn),
+            str(treedef),
+            tuple((tuple(np.shape(x)), str(jnp.result_type(x))) for x in leaves),
+        )
+        cache = _programs_of(self.force.cache_owner)
+        program = cache.get(key)
+        if program is not None:
+            return program, False
+        # locals, not ``self`` (see _build_start)
+        axis, force = self.axis_name, self.force
+
+        def energy(
+            state: Array,
+            masses: Array,
+            count: Array,
+            ids: Array,
+            f_b: Optional[Array],
+            params_in: Any,
+        ) -> tuple:
+            cap = int(state.shape[0])
+            live = jnp.minimum(count[0], cap)
+            live_rows = jnp.arange(cap) < live
+            phi, bits = force.potential_shard(
+                state[:, 0, :],
+                masses,
+                live,
+                ids,
+                **({} if f_b is None else {"force_scale": f_b}),
+            )
+            # padding rows masked out of both sums (a field may be singular where
+            # one sits), each sum in fp64, as the single card's
+            zero = jnp.zeros((), jnp.float64)
+            m = jnp.where(live_rows, jnp.asarray(masses).astype(jnp.float64), zero)
+            phi64 = jnp.where(live_rows, jnp.asarray(phi).astype(jnp.float64), zero)
+            w_self = 0.5 * jnp.sum(m * phi64)
+            w_ext = zero
+            if field_fn is not None:
+                ext = (
+                    field_fn(state) if params_in is None else field_fn(state, params_in)
+                )
+                ext64 = jnp.where(live_rows, jnp.asarray(ext).astype(jnp.float64), zero)
+                w_ext = jnp.sum(m * ext64)
+            ok = overflow_ok(bits) & (count[0] <= cap)
+            ok, bits, _, _ = _mesh_verdict(
+                ok,
+                bits,
+                jnp.zeros((1,), jnp.int32),
+                jnp.int32(0),
+                axis_name=axis,
+            )
+            return (
+                jax.lax.psum(w_self, axis),
+                jax.lax.psum(w_ext, axis),
+                ok,
+                bits,
+            )
+
+        spec = P(axis)
+        if not self.scale_carry:
+
+            def body(
+                state: Array, masses: Array, count: Array, ids: Array, params_in: Any
+            ) -> tuple:
+                return energy(state, masses, count, ids, None, params_in)
+
+            in_specs: tuple = (spec, spec, spec, spec, P())
+        else:
+
+            def body(  # type: ignore[misc]
+                state: Array,
+                masses: Array,
+                count: Array,
+                ids: Array,
+                f_b: Array,
+                params_in: Any,
+            ) -> tuple:
+                return energy(state, masses, count, ids, f_b, params_in)
+
+            in_specs = (spec, spec, spec, spec, spec, P())
+        program = jax.jit(
+            jax.shard_map(
+                body,
+                mesh=self.mesh,
+                in_specs=in_specs,
+                out_specs=(P(), P(), P(), P()),
+                check_vma=False,
+            )
+        )
+        cache[key] = program
+        return program, True
