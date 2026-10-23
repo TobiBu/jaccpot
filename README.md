@@ -706,7 +706,9 @@ res = runner.run(dt=1e-3, num_steps=500, restart_from="restart.npz")  # after a 
 
 Choose `steps` to divide `num_steps` (each segment length compiles its own scan). dt 1e-3
 is the measured production step for the 25M disc + bulge ([`docs/production.md`](docs/production.md),
-"The timestep").
+"The timestep"). `ProductionRunner(solver, ..., mesh=MeshRunConfig(make_mesh(4)))` runs the
+same loop on several cards (the fused multi-GPU lane's segment runner; input and output in
+id order, restart files bitwise on the same mesh: "Multi-GPU mode").
 Guide: **[docs/production.md](docs/production.md)**.
 
 ## Momentum-Conserving FMM
