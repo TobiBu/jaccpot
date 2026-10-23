@@ -2857,7 +2857,8 @@ def cross_near_acceleration(
     interpret: bool = False,
     accum: Optional[str] = None,
     softening_kernel: Optional[str] = None,
-) -> Array:
+    with_force_scale: bool = False,
+) -> Union[Array, tuple[Array, Array]]:
     """Acceleration on local particles from the IMPORTED leaves, as its own term.
 
     Added to the force rather than interleaved, because a near contribution is a
@@ -2902,11 +2903,16 @@ def cross_near_acceleration(
 
     softening_kernel:
         The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    with_force_scale:
+        Also return the imported leaves' share of eq (16b)'s force scale, ``sum G
+        m / (r^2 + eps^2)`` over the same pairs (the kernel's fourth lane, in place
+        of the potential), for ``mac_type='dehnen_error'``. Static.
 
     Returns
     -------
-    Array
-        ``(n_particles, 3)`` acceleration to ADD to the local force.
+    Union[Array, tuple[Array, Array]]
+        ``(n_particles, 3)`` acceleration to ADD to the local force; with
+        ``with_force_scale``, ``(acceleration, force_scale [n_particles])``.
     """
     from jaccpot.nearfield.near_field import _env_choice
     from jaccpot.pallas.nearfield_leafpair_csr import (
@@ -2994,6 +3000,7 @@ def cross_near_acceleration(
         num_target_leaves=L,
         accum=str(accum),
         softening_kernel=softening_kernel,
+        **({"with_force_scale": True} if with_force_scale else {}),
     )
     acc = out[..., :3]
     # The scatter below is a PERMUTATION, not a reduction: every live particle sits
@@ -3003,8 +3010,16 @@ def cross_near_acceleration(
     # DROPPED -- routing them onto one discard row made every dead slot (~70 % of
     # L x W at ~18 particles per 64-slot leaf) an atomic add on the same address.
     flat_idx = jnp.where(loc_mask, idx, n_particles).reshape(-1)
-    return (
+    acc_out = (
         jnp.zeros((n_particles, 3), acc.dtype)
         .at[flat_idx]
         .add(acc.reshape(-1, 3), mode="drop")
+    )
+    if not with_force_scale:
+        return acc_out
+    fb = out[..., 3]
+    return acc_out, (
+        jnp.zeros((n_particles,), fb.dtype)
+        .at[flat_idx]
+        .add(fb.reshape(-1), mode="drop")
     )

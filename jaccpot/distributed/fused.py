@@ -40,7 +40,7 @@ silently when it is cold.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -532,7 +532,8 @@ def _add_cross_near_term(
     cross_near_sink: Optional[dict],
     *,
     cross_record: Optional[dict] = None,
-) -> Array:
+    force_scale: Optional[Array] = None,
+) -> Union[Array, tuple[Array, Array]]:
     """Add the cross-domain NEAR field the hook left in ``cross_near_sink``.
 
     The cross NEAR field is ADDED after the evaluation rather than interleaved. A
@@ -561,12 +562,18 @@ def _add_cross_near_term(
     cross_record : Optional[dict]
         Diagnostics record; given, the leaf-pool and permutation checks are written
         into it.
+    force_scale : Optional[Array]
+        ``(cap,)`` the local evaluation's eq (16b) force scale (input row order),
+        under ``mac_type='dehnen_error'``: the imported leaves' share is added to
+        it from the same kernel launch (its fourth lane), so the next step's
+        thresholds see the other domains' near field too.
 
     Returns
     -------
-    Array
+    Union[Array, tuple[Array, Array]]
         ``acceleration`` plus the cross near term (``acceleration`` itself when the
-        sink is empty).
+        sink is empty); with ``force_scale``, ``(acceleration, force_scale)``, both
+        with the cross term added.
     """
     if cross_near_sink:
         from jaccpot._env import env_flag
@@ -612,9 +619,7 @@ def _add_cross_near_term(
             cross_record["perm_nonidentity"] = jnp.sum(
                 orig != jnp.arange(orig.shape[0], dtype=orig.dtype)
             )
-        acceleration = acceleration + jax.named_call(
-            cross_near_acceleration, name="cross_near_term"
-        )(
+        term = jax.named_call(cross_near_acceleration, name="cross_near_term")(
             cross_near_sink,
             leaf_pos,
             leaf_mass,
@@ -628,7 +633,14 @@ def _add_cross_near_term(
             # the local near field's interpret switch: this term is Pallas only,
             # so off a GPU (the CPU end-to-end test) it needs interpret mode
             interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+            **({} if force_scale is None else {"with_force_scale": True}),
         )
+        if force_scale is not None:
+            term, scale_term = term
+            force_scale = force_scale + jnp.asarray(scale_term, force_scale.dtype)
+        acceleration = acceleration + term
+    if force_scale is not None:
+        return acceleration, force_scale
     return acceleration
 
 
