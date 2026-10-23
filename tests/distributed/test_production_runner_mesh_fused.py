@@ -11,8 +11,8 @@ the one gate that needs it:
 * the mode == :class:`~jaccpot.distributed.segment.MeshSegmentRunner` driven by
   hand, bitwise by id, with a cross capacity too small for the first segment (its
   flag fires, the segment is re-planned and re-run, its edge says so) and an
-  energy diagnostic at every edge whose program traces the whole fused rebuild
-  (the trajectory with it is the one without);
+  energy diagnostic at every edge (``FusedMeshForce.potential_shard``: its program
+  traces the whole fused rebuild; the trajectory with it is the one without);
 * the restart written after the retried segment, continued in a FRESH process:
   the restore rebuilds the layout and the re-planned plan (leaf capacity, walk
   caps, level plan, depth bound, the grown cross capacities, the template's
@@ -78,17 +78,6 @@ def _small_caps():
     return a._cross_caps()._with(**SMALL)
 
 
-class _WithAPotential(FusedMeshForce):
-    """The fused force with a stand-in potential that traces the whole fused
-    rebuild (``phi`` = the x acceleration): its energy program's trace does to the
-    engine's trace-time state what a real mesh potential's does, so a trajectory
-    with it must be the one without."""
-
-    def potential_shard(self, positions, masses, live, ids, force_scale=None):
-        out = self.shard(positions, masses, live, ids, force_scale=force_scale)
-        return out[0][:, 0], out[1]
-
-
 def _mesh_runner(solver, force=None, **segment):
     return ProductionRunner(
         solver,
@@ -139,7 +128,7 @@ def test_the_fused_force_through_the_mesh_mode_and_its_restart(
     """3 segments of 2 steps, a repartition before every segment after the first,
     the cross capacities too small for the first: (1) the segment runner by hand,
     on its own solver; (2) the runner's mesh mode on another, with the energy at
-    every edge (a stand-in potential through the whole fused rebuild) and a
+    every edge (the fused mesh potential: the whole fused rebuild) and a
     restart after every segment -- the first segment retried once, its edge
     saying so, the grown capacities in the plan record, step 0's energy program
     flagging the same undersized capacities -- equal to (1) bitwise by id; (3) the
@@ -164,7 +153,7 @@ def test_the_fused_force_through_the_mesh_mode_and_its_restart(
     del hand
 
     solver = a._solver()
-    force = _WithAPotential(
+    force = FusedMeshForce(
         solver,
         mesh,
         leaf_size=a.LEAF,

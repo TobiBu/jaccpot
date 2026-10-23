@@ -452,11 +452,11 @@ timeout leaves `CUDA_VISIBLE_DEVICES` empty and the run lands on the CPU.
   energy, drift 0), not at the first segment as on one card. A potential that overflows its
   capacities reports `energy_ok = False` and no energy (at step 0 that leaves `E0` and every
   drift `None`: the energy program shares the force's capacities, which a first segment's
-  retry may still have to grow). A force without
-  `potential_shard` reports every energy field as `None`, `energy_unavailable` says why,
-  and the run warns once: **the fused mesh force has no potential yet** (the cross near
-  kernel's fourth lane carries f_b, not the potential; S11 session 2, track E), so on the
-  fused lane the energy is `None` until it lands.
+  retry may still have to grow). The fused mesh force's `potential_shard` is the
+  template route's rebuild, `FusedForceProvider.potential` (local near, local far and the
+  cross far pairs through the locals) and the cross near pairs' potential lane. A force
+  without `potential_shard` reports every energy field as `None`, `energy_unavailable`
+  says why, and the run warns once.
 - **Retry.** The segment runner's: a fired flag on any device re-plans what the segment
   outgrew (the walk caps, the tree's leaf capacity, depth and level plan, the cross
   capacities), re-prepares every device at the segment's start from a host copy of the
@@ -513,7 +513,7 @@ at every edge, a restart file after each segment:
 | flags | segment 1 retried once (S11's first-segment retry: `OVERFLOW_CROSS` at its 8th step, 7 of 8 fitted), the kept runs clean; segments 2 and 3 no retry |
 | rel-L2 of the carried acceleration against the fp64 direct sum (512 ids) | 1.793e-4 at step 8, 1.638e-4 at step 24 (S12's segment gate: 1.324e-4 / 1.636e-4; one card 1.767e-4 / 1.672e-4) |
 | peak per device | 616-619 B/particle (616,157,696 and 619,280,128 B); 850-854 with `--xla_gpu_deterministic_ops=true` |
-| energy | `None`, `energy_unavailable`: the fused mesh force has no potential yet |
+| energy | `None`, `energy_unavailable` (this run predates the fused mesh force's `potential_shard`) |
 | restart after segment 2, continued in a fresh process | digest matched, `layout="file"`; the final state differs from the straight run's in 165,799 of 12,000,000 elements (max 4.8e-7) |
 | control: a second straight run (A-vs-A) | 412,084 of 12,000,000 differ (max 4.2e-5) |
 | control: a second continuation from the same file | 166,835 of 12,000,000 differ from the first (max 2.4e-7) |
