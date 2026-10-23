@@ -53,6 +53,18 @@ runs therefore start with ``--xla_gpu_experimental_enable_fusion_autotuner=false
 missing. It cannot set the flag itself: XLA reads ``XLA_FLAGS`` once, when the backend
 starts (docs/production.md, "Launch environment").
 
+THE MULTI-GPU MODE. ``ProductionRunner(solver, ..., mesh=<a 1-D jax Mesh or a
+:class:`MeshRunConfig`>)`` runs the same loop -- segments, edges, callbacks, the
+diagnostics with the energy, a continuation from the result, the segment retry --
+on the fused multi-GPU lane's segment runner
+(:class:`~jaccpot.distributed.segment.MeshSegmentRunner`;
+:mod:`jaccpot.distributed.mesh_runner` is that mode's backend). The API stays in
+input (id) order: ``run(state [N, 2, 3], masses [N], ...)`` decomposes the particles
+over the mesh, :attr:`RunResult.state` is the final state gathered by id, and
+:meth:`MeshSegmentEdge.state_host` gathers an edge's state on demand. ``mesh=None``
+(the default) is the single-card runner, unchanged (docs/production.md, "Multi-GPU
+mode").
+
 The module imports nothing heavy at import time (``jaccpot.solver`` imports it).
 """
 
@@ -62,6 +74,7 @@ import contextlib
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import time
 import warnings
@@ -76,12 +89,16 @@ __all__ = [
     "RESTART_FORMAT",
     "DiagnosticsLog",
     "GalaxySettings",
+    "MESH_CAP_HEADROOM",
+    "MeshRunConfig",
+    "MeshSegmentEdge",
     "ProductionRunner",
     "RunResult",
     "SegmentConfig",
     "SegmentEdge",
     "SnapshotWriter",
     "load_restart",
+    "mesh_shard_capacity",
     "run",
     "segment_lengths",
 ]
@@ -324,6 +341,80 @@ class SegmentEdge:
         return np.asarray(jax.device_get(self.state))
 
 
+#: why an edge kept in ``RunResult.edges`` has no arrays
+_CONSUMED_EDGE = (
+    "this edge holds no state: the next segment consumed it. Copy the state inside "
+    "the callback (SnapshotWriter does)."
+)
+
+
+@dataclass(frozen=True)
+class MeshSegmentEdge(SegmentEdge):
+    """What a callback sees between two segments in the multi-GPU mode.
+
+    The fields of :class:`SegmentEdge`, with the mesh layout's arrays: ``state``
+    and ``masses`` are the flat ``(ndev * cap, 2, 3)`` and ``(ndev * cap,)`` arrays
+    of :attr:`layout` (rows by device, padding rows included, sharded over the
+    mesh), and ``self_acceleration`` is ``None`` -- the segments carry the TOTAL
+    acceleration (``layout.acceleration``). Nothing is gathered at an edge unless
+    something asks: :meth:`state_host` (what :class:`SnapshotWriter` calls) and
+    :meth:`gather` copy to the host by global id, on demand. Valid DURING the
+    callback only, as on one card: the next segment consumes the arrays.
+
+    Attributes
+    ----------
+    layout : Any
+        The :class:`~jaccpot.distributed.segment.MeshState` at the edge (``None``
+        once kept in :attr:`RunResult.edges`).
+    """
+
+    layout: Any = None
+
+    def state_host(self) -> np.ndarray:
+        """The state by global id, as a host array (one gather of the state and ids).
+
+        Returns
+        -------
+        np.ndarray
+            ``[N, 2, 3]`` in input (id) order.
+
+        Raises
+        ------
+        RuntimeError
+            Outside the callback, where the edge holds no state any more.
+        """
+        if self.layout is None:
+            raise RuntimeError(_CONSUMED_EDGE)
+        return self.gather(("state",))["state"]
+
+    def gather(self, names: Sequence = ("state", "masses", "acceleration")) -> dict:
+        """The edge's arrays by global id on the host.
+
+        Parameters
+        ----------
+        names : Sequence
+            Of ``"state"``, ``"masses"``, ``"acceleration"`` (the total) and
+            ``"force_scale"`` (``mac_type='dehnen_error'``); one not computed yet
+            is left out.
+
+        Returns
+        -------
+        dict
+            ``name -> (N, ...)`` host arrays in id order, and ``owner``: the device
+            that holds each id.
+
+        Raises
+        ------
+        RuntimeError
+            Outside the callback, where the edge holds no state any more.
+        """
+        from jaccpot.distributed.mesh_runner import gather_by_id
+
+        if self.layout is None:
+            raise RuntimeError(_CONSUMED_EDGE)
+        return gather_by_id(self.layout, names)
+
+
 @dataclass
 class RunResult:
     """What :meth:`ProductionRunner.run` returns.
@@ -367,6 +458,11 @@ class RunResult:
     state_owned : bool
         Whether ``state`` is the runner's own -- a continuation consumes it --,
         and not the caller's input (a fresh run that did no segment).
+    mode : str
+        ``"single"`` (one card) or ``"mesh"`` (the multi-GPU mode: ``state`` and
+        ``masses`` are host arrays gathered by id, ``handle`` the
+        :class:`~jaccpot.distributed.segment.MeshSegmentRunner`); a run continues
+        only a result of its own mode.
     """
 
     state: Any
@@ -385,6 +481,7 @@ class RunResult:
     wall_s: float
     time_anchor: tuple = (0.0, 0)
     state_owned: bool = True
+    mode: str = "single"
 
 
 def segment_lengths(num_steps: int, steps: int) -> tuple:
@@ -418,6 +515,116 @@ def segment_lengths(num_steps: int, steps: int) -> tuple:
     if rest == 1 and full >= 1 and int(steps) > 1:
         return (int(steps),) * (full - 1) + (int(steps) + 1,)
     return (int(steps),) * full + ((rest,) if rest else ())
+
+
+# --------------------------------------------------------------------------
+# The multi-GPU mode's configuration.
+# --------------------------------------------------------------------------
+
+#: rows per device over an even split, by default (:func:`mesh_shard_capacity`)
+MESH_CAP_HEADROOM = 1.15
+
+
+def mesh_shard_capacity(
+    num_particles: int, ndev: int, headroom: float = MESH_CAP_HEADROOM
+) -> int:
+    """The multi-GPU mode's default rows per device: an even split with headroom.
+
+    ``ceil(ceil(N / ndev) * headroom)``. A device's live count is set by the
+    decomposition and every repartition (``sfc_repartition``'s sample sort, whose
+    balance overshoot is about ``2 ndev / num_samples`` of a shard: 6 % on 8 devices
+    at 256 samples) and stays fixed within a segment, so the headroom only has to
+    cover that; 1.15 is the S11 and S12 gates' (``bench/multigpu_segment_gate.py``).
+    A repartition that would overflow a device is declined (the old ownership
+    stands, the edge says so); a decomposition that would is an error.
+
+    Parameters
+    ----------
+    num_particles : int
+        N.
+    ndev : int
+        Devices of the mesh.
+    headroom : float
+        The factor over the even split, at least 1.
+
+    Returns
+    -------
+    int
+        Rows per device.
+
+    Raises
+    ------
+    ValueError
+        For a headroom below 1, or no particles or devices.
+    """
+    if float(headroom) < 1.0:
+        raise ValueError(f"the shard headroom must be >= 1, got {headroom}")
+    if int(num_particles) < 1 or int(ndev) < 1:
+        raise ValueError(f"no particles ({num_particles}) or devices ({ndev})")
+    return int(math.ceil(math.ceil(int(num_particles) / int(ndev)) * float(headroom)))
+
+
+@dataclass(frozen=True)
+class MeshRunConfig:
+    """How :class:`ProductionRunner`'s multi-GPU mode lays a run out (``mesh=``).
+
+    Frozen. ``ProductionRunner(solver, mesh=<a jax Mesh>)`` is ``mesh=
+    MeshRunConfig(mesh=<that mesh>)``.
+
+    Attributes
+    ----------
+    mesh : Any
+        A 1-D ``jax.sharding.Mesh`` (``yggdrax.distributed.sharding.make_mesh``).
+    cap : Optional[int]
+        Rows per device (every device's shard has this many rows, the live ones
+        first); ``None``: :func:`mesh_shard_capacity` of the run's N at
+        ``cap_headroom``. A restart on the same mesh keeps the file's.
+    cap_headroom : float
+        The default ``cap``'s factor over an even split.
+    repartition_every : int
+        Repartition before the segment after every ``repartition_every``
+        completed segments: ``1`` (the default, the S12 gate's cadence) before
+        every segment after the first; ``0`` never after the initial
+        decomposition. Between segments, in a program of its own.
+    num_samples : int
+        Pivot samples per device of the decomposition and the repartitions.
+    cross_caps : Any
+        The fused force's cross-domain capacities: ``"auto"`` (the default, sized
+        in the library at the start state), a
+        :class:`~jaccpot.distributed.cross.CrossCapacities`, or ``None`` (its
+        defaults). A segment retry grows them either way.
+    force : Any
+        ``None`` (the default): the fused lane's
+        :class:`~jaccpot.distributed.template_force.FusedMeshForce` on the
+        runner's solver, built per run (``settings.leaf_size`` /
+        ``settings.max_order``, the solver's opening angle). A force object of the
+        :class:`~jaccpot.distributed.segment.MeshSegmentRunner` protocol
+        (:class:`~jaccpot.distributed.segment.DirectMeshForce` in tests) is used
+        as given.
+    """
+
+    mesh: Any
+    cap: Optional[int] = None
+    cap_headroom: float = MESH_CAP_HEADROOM
+    repartition_every: int = 1
+    num_samples: int = 256
+    cross_caps: Any = "auto"
+    force: Any = None
+
+    def __post_init__(self) -> None:
+        if len(tuple(getattr(self.mesh, "axis_names", ()))) != 1:
+            raise ValueError(
+                "MeshRunConfig.mesh must be a 1-D jax.sharding.Mesh, got axes "
+                f"{getattr(self.mesh, 'axis_names', None)!r}"
+            )
+        if self.cap is not None and int(self.cap) < 1:
+            raise ValueError(f"MeshRunConfig.cap must be >= 1, got {self.cap}")
+        if float(self.cap_headroom) < 1.0:
+            raise ValueError("MeshRunConfig.cap_headroom must be >= 1")
+        if int(self.repartition_every) < 0:
+            raise ValueError("MeshRunConfig.repartition_every must be >= 0")
+        if int(self.num_samples) < 1:
+            raise ValueError("MeshRunConfig.num_samples must be >= 1")
 
 
 # --------------------------------------------------------------------------
@@ -1126,6 +1333,9 @@ class ProductionRunner:
       step index counts from 0 in EACH segment.
     * Launch environment: on a GPU, :meth:`run` warns once per process when
       ``XLA_FLAGS`` leaves XLA's fusion autotuner on (see the module docstring).
+    * Multi-GPU: with ``mesh`` the same loop runs on the fused multi-GPU lane's
+      segment runner (:mod:`jaccpot.distributed.mesh_runner`; docs/production.md,
+      "Multi-GPU mode").
 
     Parameters
     ----------
@@ -1154,11 +1364,19 @@ class ProductionRunner:
         ``strict_run_v2``'s in-scan streaming hook.
     step_callback_stride : int
         Its stride.
+    mesh : Any
+        ``None`` (the default): one card. A 1-D ``jax.sharding.Mesh`` or a
+        :class:`MeshRunConfig`: the multi-GPU mode. There the external field
+        and potential see one device's ``(cap, 2, 3)`` rows (the same contract
+        restricted to rows: a per-particle field works unchanged), ``dt`` and
+        the field's parameters are program arguments, ``G`` and the softening
+        the force's own, and there is no ``step_callback``.
 
     Raises
     ------
     ValueError
-        If ``settings.carry`` is not ``"particles"``.
+        If ``settings.carry`` is not ``"particles"``, or with ``mesh`` and a
+        ``step_callback``.
 
     Notes
     -----
@@ -1185,6 +1403,7 @@ class ProductionRunner:
         callbacks: Sequence[Callable[[SegmentEdge], Optional[bool]]] = (),
         step_callback: Optional[Callable[[Any, Any], None]] = None,
         step_callback_stride: int = 1,
+        mesh: Any = None,
     ) -> None:
         if settings.carry != "particles":
             raise ValueError(
@@ -1207,6 +1426,20 @@ class ProductionRunner:
         self._last_restart: Optional[str] = None
         #: the energy programs, by plan (potential_energy)
         self._energy_programs: dict = {}
+        #: the multi-GPU mode's configuration and backend (``None``: one card)
+        self.mesh: Optional[MeshRunConfig] = None
+        self._mesh_backend: Any = None
+        if mesh is not None:
+            from jaccpot.distributed.mesh_runner import MeshBackend
+
+            if step_callback is not None:
+                raise ValueError(
+                    "the multi-GPU mode has no in-scan step_callback (the mesh "
+                    "segment runner's scan streams nothing); use a callback at the "
+                    "segment edges"
+                )
+            self.mesh = mesh if isinstance(mesh, MeshRunConfig) else MeshRunConfig(mesh)
+            self._mesh_backend = MeshBackend(self)
 
     # ------------------------------------------------------------------
     # The loop.
@@ -1252,7 +1485,10 @@ class ProductionRunner:
         Returns
         -------
         RunResult
-            The final state, handle, counters and the edges of this call.
+            The final state, handle, counters and the edges of this call. In the
+            multi-GPU mode (``mesh=``; :mod:`jaccpot.distributed.mesh_runner`)
+            ``state`` and ``masses`` are gathered by id on the host, ``handle`` is
+            the ``MeshSegmentRunner`` and ``mode`` is ``"mesh"``.
 
         Raises
         ------
@@ -1265,6 +1501,17 @@ class ProductionRunner:
             When a segment fails after ``strict_run_v2``'s own re-plan; the message
             names the last restart file.
         """
+        if self._mesh_backend is not None:
+            return self._mesh_backend.run(
+                state,
+                masses,
+                dt=dt,
+                num_steps=num_steps,
+                t0=t0,
+                force_params=force_params,
+                external_params=external_params,
+                restart_from=restart_from,
+            )
         import jax
         import jax.numpy as jnp
 
@@ -1288,6 +1535,11 @@ class ProductionRunner:
             owned = bool(self.segment.donate_input)
         elif isinstance(restart_from, RunResult):
             res = restart_from
+            if res.mode != "single":
+                raise ValueError(
+                    f"a {res.mode!r} RunResult continues in its own mode: pass the "
+                    "runner its mesh (ProductionRunner(..., mesh=...))"
+                )
             state_now, masses_now, handle = res.state, res.masses, res.handle
             step, segment_done, t0_run = res.step, res.segment, res.t0
             # edge times count from the same anchor while dt is unchanged
@@ -1514,6 +1766,9 @@ class ProductionRunner:
     ) -> dict:
         """The potential energies at ``state``: ``1/2 sum m phi`` and ``sum m Phi_ext``.
 
+        One card. (On the mesh: ``RunResult.handle.potential_energy(...)``,
+        :meth:`~jaccpot.distributed.segment.MeshSegmentRunner.potential_energy`.)
+
         One jitted program per plan (the handle's provider key, its force
         parameters, the external potential): the topology rebuilt at ``state``'s
         positions from the provider's template, ``FusedForceProvider.potential``
@@ -1728,6 +1983,8 @@ class ProductionRunner:
         RuntimeError
             Before the first segment (step 0 is the run's own input).
         """
+        if self._mesh_backend is not None:
+            return self._mesh_backend.save_restart(path)
         import jax
 
         current = self._current
@@ -2034,6 +2291,7 @@ def run(
     t0: float = 0.0,
     force_params: Any = None,
     external_params: Any = None,
+    mesh: Any = None,
 ) -> RunResult:
     """One-shot :class:`ProductionRunner` run.
 
@@ -2069,6 +2327,9 @@ def run(
         As :meth:`ProductionRunner.run`.
     external_params : Any
         As :meth:`ProductionRunner.run`.
+    mesh : Any
+        As :class:`ProductionRunner`: ``None`` (one card), a 1-D mesh or a
+        :class:`MeshRunConfig` (the multi-GPU mode).
 
     Returns
     -------
@@ -2084,6 +2345,7 @@ def run(
         callbacks=callbacks,
         step_callback=step_callback,
         step_callback_stride=step_callback_stride,
+        mesh=mesh,
     ).run(
         state,
         masses,
