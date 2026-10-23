@@ -72,6 +72,7 @@ _RUNTIME_GRAD_FILES = (
 _MUTUAL_DISTRIBUTED = "tests/integration/test_mutual_distributed.py"
 _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
+_SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
 _MUTUAL_STATIC_DEVICE = "tests/integration/test_mutual_fmm_static_device.py"
 # The fused strict lane's CPU tests (every case a full fused-lane solve, 60-245 s on
 # CPU) left the integration shard in 2026-10 (S3): with them it ran 42 of its 50
@@ -129,7 +130,15 @@ SHARDS: dict[str, list[str]] = {
     ],
     "distributed-criterion": ["tests/distributed", "-m", "distributed_criterion"],
     # the fused mesh lane's segment runner (S11): minutes of compile per case
-    "distributed-segment": ["tests/distributed", "-m", "distributed_segment"],
+    "distributed-segment": [
+        "tests/distributed",
+        "-m",
+        "distributed_segment",
+        f"--ignore={_SEGMENT_CRITERION}",
+    ],
+    # the same runner under Dehnen's error criterion (S12), a job of its own: with it
+    # the segment job took 27 of its 40 minutes on CI
+    "distributed-segment-criterion": [_SEGMENT_CRITERION, "-m", "distributed_segment"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -140,6 +149,7 @@ SHARDS: dict[str, list[str]] = {
 GATED_SHARDS: tuple[str, ...] = (
     "distributed-criterion",
     "distributed-segment",
+    "distributed-segment-criterion",
     "nornax-distributed",
 )
 GATED_PATHS: tuple[str, ...] = (
@@ -152,6 +162,11 @@ GATED_PATHS: tuple[str, ...] = (
     "jaccpot/runtime/strict_carry.py",
     "jaccpot/runtime/_level_shapes.py",
     "jaccpot/runtime/capacity_guard.py",
+    # where the cross far pairs and their force scale enter the downward sweep
+    # (S11's CSR merge, S12's f_b over imported nodes)
+    "jaccpot/runtime/_force_scale_levels.py",
+    "jaccpot/runtime/kernels/_l2l.py",
+    "jaccpot/pallas/m2l_real_csr.py",
     "jaccpot/mutual/",
     "jaccpot/nornax_adapter.py",
     "jaccpot/pallas/nearfield_",
