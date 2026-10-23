@@ -1052,7 +1052,9 @@ class FusedMeshForce:
             # a grown leaf capacity re-plans the cross field too, flag or not: the
             # summary publishes one row per live leaf, so it has to follow
             grown = self._replanned_cross(
-                needs_arr, leaf_needed=local_n["leaf_needed"] if leaves_grew else 0
+                needs_arr,
+                leaf_needed=local_n["leaf_needed"] if leaves_grew else 0,
+                tree_overflowed=tree_overflowed,
             )
             if grown is not None and vars(grown) != vars(self.cross_caps):
                 self.cross_caps = grown
@@ -1067,7 +1069,9 @@ class FusedMeshForce:
         )
         return True
 
-    def _replanned_cross(self, needs: np.ndarray, *, leaf_needed: int) -> Any:
+    def _replanned_cross(
+        self, needs: np.ndarray, *, leaf_needed: int, tree_overflowed: bool = False
+    ) -> Any:
         """The cross capacities a retry runs with (:meth:`replan`'s cross half).
 
         Parameters
@@ -1076,6 +1080,12 @@ class FusedMeshForce:
             The failed run's full needs vector.
         leaf_needed : int
             The live leaves the trees needed when the leaf capacity grew, else 0.
+        tree_overflowed : bool
+            The failed run's tree overflowed: its walks ran on a truncated tree
+            (the nodes the level loops dropped carry no multipole or geometry), so
+            of its cross needs only the summary's are kept -- the walk's and the
+            exchange's read that tree, not a demand, and a re-plan never narrows
+            what it grew. The re-run on a tree that fits measures them.
 
         Returns
         -------
@@ -1086,6 +1096,13 @@ class FusedMeshForce:
         from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 
         cross = np.array(needs[len(NEEDS_FIELDS) :], np.int64)
+        if tree_overflowed:
+            keep = [
+                CROSS_NEEDS_FIELDS.index(k) for k in ("max_cells", "max_summary_nodes")
+            ]
+            summary = cross[keep]
+            cross[:] = 0
+            cross[keep] = summary
         if leaf_needed:
             # one summary cell per live leaf, and the summary tree over them
             cells = CROSS_NEEDS_FIELDS.index("max_cells")

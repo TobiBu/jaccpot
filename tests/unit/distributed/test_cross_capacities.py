@@ -386,3 +386,48 @@ def test_no_need_grows_a_capacity_past_its_structural_bound():
         .leaf_width
         == 50
     )
+
+
+def test_a_run_whose_tree_overflowed_replans_only_the_cross_summary():
+    """The segment runner's cross re-plan after a run whose TREE overflowed: that
+    run's walks read a truncated tree (the nodes the level loops dropped carry no
+    multipole or geometry), so its walk and exchange needs are no demand, and the
+    monotone re-plan would keep whatever they grew. Only the summary grows (it
+    follows the live leaves); the re-run on a tree that fits measures the rest."""
+    from types import SimpleNamespace
+
+    from jaccpot.distributed.template_force import FusedMeshForce
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    caps = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [64]))),
+        headroom=1.0,
+        leaf_size=64,
+        leaf_capacity=4096,
+    )
+    force = SimpleNamespace(
+        cross_caps=caps,
+        cross_replan=None,
+        engine=SimpleNamespace(_tree_leaf_capacity=4096),
+        leaf_size=64,
+    )
+    broken = _needs(
+        max_cells=2000,
+        max_summary_nodes=3999,
+        export_near_cap=550_592,
+        send_node_cap=179_966,
+        send_particle_cap=3_507_599,
+        overflow=1,
+        walk_lower_bound=1,
+        pairs_lower_bound=1,
+        mismatch=1,
+    )
+    needs = np.concatenate([np.zeros(len(NEEDS_FIELDS), np.int64), broken])
+    grown = FusedMeshForce._replanned_cross(
+        force, needs, leaf_needed=0, tree_overflowed=True
+    )
+    changed = {k for k in vars(caps) if getattr(grown, k) != getattr(caps, k)}
+    assert changed == {"max_cells", "max_summary_nodes"}, changed
+    # on a tree that fit, the same needs are a demand
+    trusted = FusedMeshForce._replanned_cross(force, needs, leaf_needed=0)
+    assert trusted.send_node_cap > caps.send_node_cap
