@@ -3378,6 +3378,10 @@ def cross_near_acceleration(
         num_target_leaves=L,
         accum=str(accum),
         softening_kernel=softening_kernel,
+        # a row's chunks summed in one fixed order: the segment_sum's GPU atomics
+        # summed a row of three or more (>128 imported leaves) in another order
+        # each run
+        ordered_rows=True,
         **({"with_force_scale": True} if with_force_scale else {}),
     )
     acc = out[..., :3]
