@@ -58,11 +58,22 @@ import numpy as np  # noqa: E402
 jax.config.update("jax_enable_x64", True)
 
 
+_DISC_IC = "/export/scratch/tbuck/odisseo_ic/disk_bulge_25m.npz"
+
+
 def _args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--ndev", type=int, default=2)
     p.add_argument("--mac", choices=("dehnen_error", "dehnen"), default="dehnen")
     p.add_argument("--n", type=int, default=400_000)
+    p.add_argument(
+        "--ic",
+        choices=("plummer", "disc"),
+        default="plummer",
+        help="the Plummer sphere (softening 1e-7) or the disc + bulge prefix of "
+        "bench/multigpu_segment_gate.py (its softening rule): the disc's cross near "
+        "rows reach the direct kernel's row pieces (up to 4,225 entries at 2e6)",
+    )
     p.add_argument("--repeats", type=int, default=3)
     p.add_argument("--time-repeats", type=int, default=10)
     p.add_argument("--out", required=True)
@@ -127,7 +138,17 @@ def main() -> int:
     assert jax.device_count() >= args.ndev, jax.device_count()
     smi_before = _smi()
 
-    pos, mass = IC_GENERATORS["plummer"](args.n, seed=0)
+    if args.ic == "plummer":
+        pos, mass = IC_GENERATORS["plummer"](args.n, seed=0)
+        g, soft = 1.0, 1e-7
+    else:
+        ic = np.load(_DISC_IC)
+        n_all = int(ic["state0"].shape[0])
+        pos = ic["state0"][: args.n, 0]
+        # the IC is shuffled: a prefix is a random subsample, rescaled to the galaxy
+        mass = np.asarray(ic["mass"][: args.n], np.float64) * (n_all / args.n)
+        g = float(ic["G_code"]) if "G_code" in ic.files else 1.0
+        soft = float(0.5 * float(ic["rdisk_code"]) / np.sqrt(args.n / 1e5))
     pos = np.asarray(pos, np.float32)
     mass = np.asarray(mass, np.float32)
     base = FastMultipoleMethod(preset="galaxy").advanced
@@ -136,7 +157,7 @@ def main() -> int:
         if args.mac == "dehnen_error"
         else dataclasses.replace(base, mac_type="dehnen")
     )
-    solver = FastMultipoleMethod(preset="galaxy", G=1.0, softening=1e-7, advanced=adv)
+    solver = FastMultipoleMethod(preset="galaxy", G=g, softening=soft, advanced=adv)
     mesh = make_mesh(args.ndev)
     cap = int(np.ceil(args.n / args.ndev * 1.15))
     shard, _ = decompose(mesh, pos, np.zeros_like(pos), mass, cap=cap, num_samples=256)
@@ -183,6 +204,7 @@ def main() -> int:
         "jaccpot": os.path.dirname(jaccpot.__file__),
         "ndev": args.ndev,
         "mac": args.mac,
+        "ic": args.ic,
         "n": args.n,
         "devices": [str(d) for d in devices[: args.ndev]],
         "cuda_visible": os.environ.get("CUDA_VISIBLE_DEVICES"),

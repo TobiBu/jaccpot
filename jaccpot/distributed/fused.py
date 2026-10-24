@@ -546,22 +546,22 @@ def _add_cross_near_term(
     Shared by both force routes of the lane -- :func:`fused_force_step` (the
     stacked prepared states) and the segment runner's template route
     (:mod:`jaccpot.distributed.segment`) -- so the two add the same term with the
-    same arithmetic.
+    same arithmetic (:func:`_cross_near_lanes`: the local near field's direct
+    layout by default).
 
     Parameters
     ----------
     engine : Any
         The runtime engine (its softening, kernel and ``G``).
     refreshed : Any
-        The refreshed ``LargeNPreparedState`` of this trace: its tree, near-field
-        leaf pool and sorted particles.
+        The refreshed ``LargeNPreparedState`` of this trace: its tree and sorted
+        particles.
     acceleration : Array
         ``(cap, 3)`` local force in input row order.
     cross_near_sink : Optional[dict]
         The near sink the hook filled in this trace; empty or ``None`` adds nothing.
     cross_record : Optional[dict]
-        Diagnostics record; given, the leaf-pool and permutation checks are written
-        into it.
+        Diagnostics record; given, the layout's invariants are checked into it.
     force_scale : Optional[Array]
         ``(cap,)`` the local evaluation's eq (16b) force scale (input row order),
         under ``mac_type='dehnen_error'``: the imported leaves' share is added to
@@ -576,53 +576,14 @@ def _add_cross_near_term(
         with the cross term added.
     """
     if cross_near_sink:
-        from jaccpot._env import env_flag
-        from jaccpot.distributed.cross import cross_near_acceleration
-
-        tree = refreshed.tree
-        # The near term assumes pool row r IS leaf node (num_internal + r). That
-        # held in the unit test because the test BUILT the pool that way; here the
-        # pool comes from the lane and the assumption is unverified. If it is
-        # wrong the contribution lands on the wrong particles, which adds noise
-        # rather than signal -- exactly what a rising error looks like.
-        if cross_record is not None:
-            idx = jnp.asarray(refreshed.nearfield_leaf_particle_indices)
-            msk = jnp.asarray(refreshed.nearfield_leaf_particle_mask)
-            _ni = int(jnp.asarray(tree.left_child).shape[0])
-            _nr = jnp.asarray(tree.node_ranges)
-            _L = int(idx.shape[0])
-            _rows = jnp.arange(_L)
-            _first = jnp.where(msk[:, 0], idx[:, 0], -1)
-            _want = jnp.where(
-                _ni + _rows < _nr.shape[0],
-                _nr[jnp.clip(_ni + _rows, 0, _nr.shape[0] - 1), 0],
-                -1,
-            )
-            _has = msk.any(axis=1)
-            cross_record["leaf_pool_mismatch"] = jnp.sum(_has & (_first != _want))
-            cross_record["leaf_pool_rows"] = jnp.sum(_has)
-        leaf_pos, leaf_mass, msk, idx_orig = _cross_near_pool(refreshed)
-        if cross_record is not None:
-            # if this permutation were the identity the remap would be a no-op
-            orig = jnp.asarray(tree.particle_indices)
-            cross_record["perm_nonidentity"] = jnp.sum(
-                orig != jnp.arange(orig.shape[0], dtype=orig.dtype)
-            )
-        term = jax.named_call(cross_near_acceleration, name="cross_near_term")(
+        term = _cross_near_lanes(
+            engine,
+            refreshed,
             cross_near_sink,
-            leaf_pos,
-            leaf_mass,
-            msk,
-            idx_orig,
-            int(refreshed.positions_sorted.shape[0]),
-            int(jnp.asarray(tree.left_child).shape[0]),
-            softening_sq=jnp.asarray(engine.softening, acceleration.dtype) ** 2,
-            softening_kernel=getattr(engine, "softening_kernel", None),
-            G=jnp.asarray(engine.G, acceleration.dtype),
-            # the local near field's interpret switch: this term is Pallas only,
-            # so off a GPU (the CPU end-to-end test) it needs interpret mode
-            interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
-            **({} if force_scale is None else {"with_force_scale": True}),
+            acceleration.dtype,
+            fourth=None if force_scale is None else "force_scale",
+            cross_record=cross_record,
+            name="cross_near_term",
         )
         if force_scale is not None:
             term, scale_term = term
@@ -633,8 +594,149 @@ def _add_cross_near_term(
     return acceleration
 
 
+def _cross_near_layout(cross_near_sink: dict) -> str:
+    """The cross near term's layout: ``"direct"`` or ``"table"``.
+
+    The local near field's choice (``nearfield._fast_lane._csr_near_layout``:
+    ``JACCPOT_NEARFIELD_LAYOUT``, default ``direct``; the table under
+    ``JACCPOT_NEARFIELD_ACCUM=wide``, which the direct kernel does not accumulate),
+    so the two near terms change together. The control exchanges' tiles
+    (``JACCPOT_CROSS_SYMMETRIC=0`` and the like) have no flat import: the table.
+
+    Parameters
+    ----------
+    cross_near_sink : dict
+        The near sink of this trace.
+
+    Returns
+    -------
+    str
+        ``"direct"`` or ``"table"``.
+    """
+    from jaccpot.nearfield._fast_lane import _csr_near_layout
+
+    if "particles" not in cross_near_sink:
+        return "table"
+    # any non-None leaf ranges: the local leaves' ranges always exist here
+    return _csr_near_layout(leaf_ranges=())
+
+
+def _cross_near_lanes(
+    engine: Any,
+    refreshed: Any,
+    cross_near_sink: dict,
+    dtype: Any,
+    *,
+    fourth: Optional[str],
+    cross_record: Optional[dict] = None,
+    name: str,
+) -> Union[Array, tuple[Array, Array]]:
+    """The cross near term's lanes in input row order, on its layout.
+
+    ``"direct"`` (:func:`_cross_near_layout`'s default):
+    :func:`~jaccpot.distributed.cross.cross_near_acceleration_direct` on the
+    local sorted particles and the leaves' ranges of the refreshed tree.
+    ``"table"``: :func:`~jaccpot.distributed.cross.cross_near_acceleration` on
+    the leaf-major pool (:func:`_cross_near_pool`).
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine (its softening, kernel and ``G``).
+    refreshed : Any
+        The refreshed ``LargeNPreparedState`` of this trace.
+    cross_near_sink : dict
+        The near sink the hook filled in this trace (not empty).
+    dtype : Any
+        Dtype of the softening and ``G`` scalars (the local term's).
+    fourth : Optional[str]
+        ``None`` (the acceleration only), ``"force_scale"`` or ``"potential"``: the
+        kernel's fourth lane, returned after the acceleration. Static.
+    cross_record : Optional[dict]
+        Diagnostics record; given, the layout's invariants are checked into it.
+    name : str
+        The named call (profiles).
+
+    Returns
+    -------
+    Union[Array, tuple[Array, Array]]
+        ``(cap, 3)`` acceleration, or with ``fourth`` ``(acceleration, lane)``.
+    """
+    from jaccpot._env import env_flag
+    from jaccpot.distributed.cross import (
+        cross_near_acceleration,
+        cross_near_acceleration_direct,
+    )
+
+    tree = refreshed.tree
+    num_internal = int(jnp.asarray(tree.left_child).shape[0])
+    lane = {} if fourth is None else {f"with_{fourth}": True}
+    common = dict(
+        softening_sq=jnp.asarray(engine.softening, dtype) ** 2,
+        softening_kernel=getattr(engine, "softening_kernel", None),
+        G=jnp.asarray(engine.G, dtype),
+        # the local near field's interpret switch: this term is Pallas only,
+        # so off a GPU (the CPU end-to-end test) it needs interpret mode
+        interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+        **lane,
+    )
+    if cross_record is not None:
+        # if this permutation were the identity the remap would be a no-op
+        orig = jnp.asarray(tree.particle_indices)
+        cross_record["perm_nonidentity"] = jnp.sum(
+            orig != jnp.arange(orig.shape[0], dtype=orig.dtype)
+        )
+    if _cross_near_layout(cross_near_sink) == "direct":
+        # leaf row r IS leaf node (num_internal + r): its range is the tree's
+        node_ranges = jnp.asarray(tree.node_ranges)
+        return jax.named_call(cross_near_acceleration_direct, name=name)(
+            cross_near_sink,
+            jnp.asarray(refreshed.positions_sorted),
+            jnp.asarray(refreshed.masses_sorted),
+            node_ranges[num_internal:],
+            jnp.asarray(tree.particle_indices),
+            num_internal,
+            # the local leaves' slot width: a static shape, not a read of the pool
+            leaf_width=int(
+                jnp.asarray(refreshed.nearfield_leaf_particle_indices).shape[1]
+            ),
+            **common,
+        )
+    # The table layout assumes pool row r IS leaf node (num_internal + r). That held
+    # in the unit test because the test BUILT the pool that way; here the pool comes
+    # from the lane and the assumption is unverified. If it is wrong the
+    # contribution lands on the wrong particles, which adds noise rather than
+    # signal -- exactly what a rising error looks like.
+    if cross_record is not None:
+        idx = jnp.asarray(refreshed.nearfield_leaf_particle_indices)
+        msk = jnp.asarray(refreshed.nearfield_leaf_particle_mask)
+        _nr = jnp.asarray(tree.node_ranges)
+        _L = int(idx.shape[0])
+        _rows = jnp.arange(_L)
+        _first = jnp.where(msk[:, 0], idx[:, 0], -1)
+        _want = jnp.where(
+            num_internal + _rows < _nr.shape[0],
+            _nr[jnp.clip(num_internal + _rows, 0, _nr.shape[0] - 1), 0],
+            -1,
+        )
+        _has = msk.any(axis=1)
+        cross_record["leaf_pool_mismatch"] = jnp.sum(_has & (_first != _want))
+        cross_record["leaf_pool_rows"] = jnp.sum(_has)
+    leaf_pos, leaf_mass, msk, idx_orig = _cross_near_pool(refreshed)
+    return jax.named_call(cross_near_acceleration, name=name)(
+        cross_near_sink,
+        leaf_pos,
+        leaf_mass,
+        msk,
+        idx_orig,
+        int(refreshed.positions_sorted.shape[0]),
+        num_internal,
+        **common,
+    )
+
+
 def _cross_near_pool(refreshed: Any) -> tuple[Array, Array, Array, Array]:
-    """This device's leaf-major near-field pool, as the cross near term reads it.
+    """This device's leaf-major near-field pool, as the table layout reads it.
 
     The local leaves' particles (the targets of the cross near pairs and the first
     ``L`` rows of the kernel's pool) and, per slot, the particle's INPUT row for
@@ -660,7 +762,7 @@ def _cross_near_pool(refreshed: Any) -> tuple[Array, Array, Array, Array]:
     leaf_pos = jnp.where(msk[..., None], psort[safe], 0.0)
     leaf_mass = jnp.where(msk, msort[safe], 0.0)
     # `leaf_particle_indices` indexes the MORTON-SORTED array -- that is what
-    # `_add_cross_near_term`'s leaf_pool_mismatch check establishes, since
+    # `_cross_near_lanes`'s leaf_pool_mismatch check establishes, since
     # `node_ranges` is defined in sorted order. The lane's acceleration is in the
     # caller's original order. Scattering the near term by the sorted index would
     # add it to the wrong particles: right magnitudes, wrong rows, which shows up
@@ -680,11 +782,10 @@ def _add_cross_near_potential(
 
     The potential twin of :func:`_add_cross_near_term`, for the mesh potential's
     program (:func:`~jaccpot.distributed.template_force.mesh_potential_shard`): the
-    same pool, pairs and kernel launch, with the leaf-pair kernel's fourth lane in
-    its default meaning, ``-G m psi`` over the imported leaves
-    (:func:`~jaccpot.distributed.cross.cross_near_acceleration`'s
-    ``with_potential``); its acceleration lanes are not read. No force program
-    calls it.
+    same layout, pairs and kernel launch (:func:`_cross_near_lanes`), with the
+    leaf-pair kernel's fourth lane in its default meaning, ``-G m psi`` over the
+    imported leaves (``with_potential``); its acceleration lanes are not read. No
+    force program calls it.
 
     Parameters
     ----------
@@ -704,24 +805,13 @@ def _add_cross_near_potential(
     """
     if not cross_near_sink:
         return potential
-    from jaccpot._env import env_flag
-    from jaccpot.distributed.cross import cross_near_acceleration
-
-    tree = refreshed.tree
-    leaf_pos, leaf_mass, msk, idx_orig = _cross_near_pool(refreshed)
-    _, term = jax.named_call(cross_near_acceleration, name="cross_near_potential")(
+    _, term = _cross_near_lanes(
+        engine,
+        refreshed,
         cross_near_sink,
-        leaf_pos,
-        leaf_mass,
-        msk,
-        idx_orig,
-        int(refreshed.positions_sorted.shape[0]),
-        int(jnp.asarray(tree.left_child).shape[0]),
-        softening_sq=jnp.asarray(engine.softening, potential.dtype) ** 2,
-        softening_kernel=getattr(engine, "softening_kernel", None),
-        G=jnp.asarray(engine.G, potential.dtype),
-        interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
-        with_potential=True,
+        potential.dtype,
+        fourth="potential",
+        name="cross_near_potential",
     )
     return potential + jnp.asarray(term, potential.dtype)
 

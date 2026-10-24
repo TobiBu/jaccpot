@@ -66,6 +66,7 @@ __all__ = [
     "migrate_shard",
     "migration_cap_for_need",
     "migration_need_shard",
+    "ownership_splitters",
     "splitters_shard",
 ]
 
@@ -151,6 +152,64 @@ def splitters_shard(
     # a reverse running minimum: an empty device (sentinel) takes the next cut
     suffix = jax.lax.cummin(per_device, reverse=True)
     return suffix[1:]
+
+
+#: :func:`ownership_splitters`' programs, by (mesh, box shape, axis, box env)
+_SPLITTER_PROGRAMS: dict = {}
+
+
+def ownership_splitters(
+    mesh: Any,
+    positions: Array,
+    count: Array,
+    *,
+    cubic: bool,
+    axis_name: str = AXIS_NAME,
+) -> np.ndarray:
+    """The cuts of an ownership of exact Morton ranges, on the host.
+
+    :func:`splitters_shard` over the mesh, for a state that a decomposition in the
+    force's box left (``rollout.decompose(cubic=...)``): the segment runner then
+    starts its migration on these cuts (``MeshSegmentRunner(splitters=...)``)
+    instead of repartitioning into that box again. One small program per mesh.
+
+    Parameters
+    ----------
+    mesh : Any
+        The 1-D mesh.
+    positions : Array
+        ``(ndev * cap, 3)`` flat, mesh-sharded positions.
+    count : Array
+        ``(ndev,)`` live rows per device, mesh-sharded.
+    cubic : bool
+        The force's box shape (``TreeConfig.cubic_bounds``).
+    axis_name : str
+        Mesh axis.
+
+    Returns
+    -------
+    np.ndarray
+        ``(ndev - 1,)`` ``uint64`` splitters.
+    """
+    from jax.sharding import PartitionSpec as P
+
+    from jaccpot._env import env_text
+
+    # the box shape reads JACCPOT_CUBIC_BOUNDS when the program traces
+    key = (mesh, bool(cubic), axis_name, env_text("JACCPOT_CUBIC_BOUNDS"))
+    program = _SPLITTER_PROGRAMS.get(key)
+    if program is None:
+
+        def body(x: Array, c: Array) -> Array:
+            return splitters_shard(x, c, cubic=bool(cubic), axis_name=axis_name)
+
+        spec = P(axis_name)
+        program = _SPLITTER_PROGRAMS[key] = jax.jit(
+            jax.shard_map(
+                body, mesh=mesh, in_specs=(spec, spec), out_specs=P(), check_vma=False
+            )
+        )
+    return np.asarray(jax.device_get(program(positions, count)), np.uint64)
 
 
 def balanced_splitters_shard(

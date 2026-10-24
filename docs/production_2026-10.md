@@ -1972,3 +1972,119 @@ rows moved per step, at the same accuracy; on the disc it ships 30-35 % fewer pa
 pairs per segment, with no measurable time or peak change on contended cards. Found on the way, for the default path:
 the repartition's sample sort (yggdrax `_choose_pivots`: the same number of samples from every device whatever its
 count) cannot rebalance nearly exact ranges and lets the imbalance grow 0.1-0.4 % of a shard per repartition.
+
+### Mesh memory (N)
+Track M measured what set the two-device mesh's per-device peak (stage probes: the allocator's peak after every
+setup stage, `memory_analysis()` of every compiled program) on H's IC -- 2^20 particles of a Plummer sphere truncated
+at r < 10, `preset="galaxy"`, eps 1e-3, so 2^19 per card in 164,418 live cell leaves (~3 particles per 64-slot
+leaf) -- and the disc + bulge at 2e6: (1) the cross sizing's measurement program, compiled at
+`CrossCapacities.for_shard`'s per-leaf first guess (12-113x the needs on H's IC), which F's drift probes reran, and
+(2) in every program the cross near term's leaf-major tile pool (`_cross_near_pool` plus the imported (R, W)
+tiles, the table kernel's mask and chunk partials over ALL local leaf slots and every received row: >95 %
+padding). Branch `s11s2/mesh-memory`.
+
+| piece | change |
+| --- | --- |
+| the cross near term on the direct layout | `cross.cross_near_acceleration_direct`: the cross pairs on `nearfield_leafpair_csr_sorted_direct_pallas` (the local near field's kernel) over ONE table, the device's sorted particles then the flat receive buffer, each leaf a range of it (local leaves from the tree's node ranges, imported rows from the exchange's row starts and counts); the local leaves the only targets (`num_target_leaves`), no self term (`include_self=False`; the kernel's two new keywords, defaults unchanged), stored into particle order. The exchange leaves the flat import in the near sink, no W-wide tiles. Both force routes and E's potential take it (`fused._cross_near_lanes`); the table stays for `JACCPOT_NEARFIELD_ACCUM=wide` / `JACCPOT_NEARFIELD_LAYOUT=table` (as the local near field) and the control exchanges |
+| the sizing measured on small buffers | `CrossCapacities.for_measurement`: what a measurement only COUNTS at one granule -- the rows and particles (presence maps; exact past their own overflow), and on the Pallas walk (counts past a full list) its far and near lists; the summary at the tree's bound; the queue (its need is a lower bound past an overflow) at least the local walk's widest wavefront x peers. `cross.size_cross_capacities`: a measurement whose `walk_lower_bound` and `pairs_lower_bound` are clear sizes every capacity (1.5x), overflowed or not; a lower bound grows only the walk (2x, the near list to at least 4 pairs per live leaf: room for the drift probes) and the summary and measures again. `FusedMeshForce` sizes with it at the start and at the drift, the drift probes on the last measurement's program. A far or near pair naming a row past the receive buffer is dropped (its source index read past the imported multipoles). The stacked route keeps `for_shard` + `plan_cross_capacities` |
+| the eager geometry cache | `prepare_mesh_force` clears `engine._geometry_reuse_entry` (the last device's box geometry stayed through every segment: 12 MB on H's IC) |
+| a fresh run's programs | `rollout.decompose`'s jit(shard_map) and `MeshState.from_shard_state`'s packer are built once per (mesh, capacity, options) / sharding: a second run of one runner lowered and compiled them again |
+| `migrate=True` decomposes into the force's box | `rollout.decompose(cubic=...)`; the mode reads the cuts off that ownership (`migration.ownership_splitters`) and hands them to the runner, which no longer repartitions in its constructor |
+
+**Before / after** (two A100s, cards shared with other users' jobs at 80-100 % utilisation: memory is a result,
+times are not; one segment of 8 steps after the library's sizing; base = `s11s2/integ` 6b9cda95, N = this branch's
+last commit). MB per device;
+"peak" the process's high-water mark after the stage:
+
+| stage | H's IC, base | H's IC, N | disc + bulge 2e6, base | disc 2e6, N |
+| --- | --- | --- | --- | --- |
+| decompose + pack | 112.7 / 112.7 | 112.7 / 112.7 | 224.3 / 224.3 | 224.3 / 224.3 |
+| per-device caps-only prepares | 485.2 / 486.3 | 484.9 / 381.2 | 704.1 / 646.8 | 700.4 / 644.6 |
+| start sizing (`plan_cross`) | 1443.0 / 1457.3 | 589.9 / 589.9 | 762.5 / 765.9 | 732.2 / 730.7 |
+| drift sizing (`plan_cross_drift`) | 1459.8 / 1474.0 | 606.6 / 606.6 | 796.1 / 793.5 | 765.8 / 764.2 |
+| start force + segment (final peak) | **1459.8 / 1474.0** | **618.6 / 618.6** | **796.1 / 793.5** | **765.8 / 764.2** |
+| final B/p | 2784 / 2811 | **1180 / 1180** | 796 / 794 | **766 / 764** |
+| measurement programs, temporaries | 1404.6 (one) | 517.8, 551.5 | 658.7, 658.7, 658.7, 683.2 | 594.8, 652.9 |
+| start / segment program | 722.0 / 724.8 | 580.2 / 528.7 | 662.7 / 661.9 | 660.7 / 644.8 |
+| compiles of the mesh programs | 3 | 4 | 6 | 4 |
+| in use between segments, device 1 | 52.6 | 38.4 | 82.7 | 77.8 |
+
+The sized capacities are the same, value for value, as the base's (H: far 840,704, near 55,296, rows 64,512,
+particles 96,256 at the start; 1,186,816 / 94,208 / 70,656 / 106,496 after the drift): the measurements on small
+buffers read the same needs. One card holds H's 2^20 particles at a 660 MB peak and the disc's 2e6 at 1389 MB (track
+M); the mesh's per-device peak at half the particles is now 94 % and 55 % of those.
+
+What each capacity costs the measurement (H's IC, the direct layout, temporaries of the measure program):
+`for_shard`'s guess 792.4 MB; its rows and particles at a granule 710.1; the walk's lists at their sized widths too
+540.1; the sized force 568.9. On top of the sized force: the far list at 8x +141.2 MB (23-24 B a pair: it feeds the
+CSR M2L's merge), the near list at 8x +2.8, the queue at 8x +0, the rows at 8x +12.6. The disc: the far list at 8x
++407.7 over its sized 651.2. Every variant read the same needs bit for bit; the base's disc measurement took four
+rounds (its queue 4.5 a priori slots per leaf against 15 needed), now two (the queue from the local walk's widest
+wavefront).
+
+**Gates.** `bench/multigpu_segment_gate.py` (6 segments of 8 steps, a repartition before every segment after the
+first, library cross capacities, rel-L2 against an fp64 direct sum on 512 fixed ids; the base and N runs on the
+same contended cards, interleaved); every segment of every row flag-clean, and no row's first segment retried (F's
+guarantee):
+
+| row | rel-L2 start / end, base | N | peak per device, base | N |
+| --- | --- | --- | --- | --- |
+| Plummer 2e5, `dehnen_error` | 1.1475e-4 / 1.5896e-4 | 1.1475e-4 / 1.5896e-4 | 79.0-79.1 MB | 78.9-79.4 MB |
+| Plummer 2e5, geometric 0.8 | 7.6106e-4 / 8.1967e-4 | 7.6106e-4 / 8.1967e-4 | 78.5 MB | 44.9 MB |
+| disc + bulge 2e5, `dehnen_error` | 3.5781e-5 / 3.5205e-5 | 3.5781e-5 / 3.5211e-5 | 146.5-147.2 MB | 146.5 MB |
+| disc + bulge 2e5, geometric | 2.1453e-4 / 1.6699e-4 | 2.1453e-4 / 1.6699e-4 | 145.6 MB | 145.6 MB |
+| disc + bulge 2e6, `dehnen_error` | 6.2112e-5 / 8.1999e-5 | 6.2110e-5 / 8.1999e-5 | 817.4-824.6 MB (818-824 B/p) | 787.2 MB (787 B/p) |
+| disc + bulge 2e6, geometric | 3.1878e-4 / 3.1406e-4 and 3.1407e-4 (two runs) | 3.1878e-4 / 3.1407e-4 | 1005.0 MB (1005 B/p) | 717.3 MB (718 B/p) |
+| Plummer 8e6, geometric | 4.3568e-4 / 4.3011e-4 (track F's run) | 4.3568e-4 / 4.3011e-4 | 2647.6 MB (662 B/p, F's) | 1365.6 MB (**342 B/p**) |
+
+The base's Plummer 8e6 row ran out of memory three times on the shared cards (2-4.7 GB free); its numbers are track
+F's run of the same configuration on F's branch (integ without G and I; the same final cross capacities, value for
+value). N's 8e6 measured twice at the start (the base once) and not again at the drift (2x the walk, the near list
+at 4 per leaf): five force programs compiled against the base's four. The 2e5 rows' peaks are the setup's eager
+prepares, not the force programs. CPU (two forced devices): gate A1 (the
+template route == the stacked route, bitwise), the segment, segment-criterion, segment-migration and criterion
+jobs, the distributed tier, the single-card runner file and the guards pass; CPU program identity 36/36 against
+`s11s2-main-cpu` (the kernel's three new keywords default to the traced program it always was).
+
+**The longest cross row** (entries of one local target leaf's cross CSR row, every cross near term of a segment of 8
+steps, both devices): H's IC 102 (no row reaches the direct kernel's 1024-entry `DIRECT_ROW_LIMIT`); the disc + bulge
+2e6 **4,225**, up to 926 rows per force past 1024 entries and 355 past 2048. So the disc's cross term runs the
+kernel's `_rest` pieces, and a row past 2048 entries has two or more pieces scatter-added onto the same outputs --
+in the atomics' order: the cross term passes `ordered_rest=True` (the kernel's new keyword, default off: a row's
+pieces summed by one segmented scan onto its last piece and added once). Run to run (`bench/multigpu_force_repeat.py`,
+the start force three times in one process and once in another, two A100s): Plummer 4e5, geometric and
+`dehnen_error`, bitwise (0 of 1,380,000 components, across processes too: G's gate holds). The disc + bulge 2e6
+(`--ic disc`, new, `dehnen_error`) is NOT bitwise, and was not on the base either: base 8,561 / 8,169 of 6,900,000
+acceleration and 2,493 / 2,412 of 2,300,000 f_b components differ from the first run (max 7.6e-6 / 3.1e-5), N without
+the ordered pieces 9,786 / 9,304 and 2,595 / 2,483, N 8,620 / 8,414 and 2,237 / 2,411; the control (one run's buffers
+read twice) 0 every time. So the ordered pieces remove the direct layout's own share, and what is left predates N and
+lies outside the cross near term (G's gate ran Plummer only): not diagnosed here.
+
+**Programs a fresh run compiles again** (one runner, `run()` three times; GPU, a Plummer sphere of 131,072, the galaxy
+preset): base run 2: 27 compiles -- the decomposition's jit(shard_map), the state packer's `jax.jit(lambda)`, 16
+jit(while), 4 jit(wrapped), 2 jit(cond), and the measure, start and segment programs (run 1's start force retried
+on the LOCAL walk -- its near-edge capacity 131,072 -> 1,048,576, which stays on the engine -- so run 2's programs
+have other walk caps and cross capacities; run 3 adds no program key); run 3: 24. The single card's second and
+third runs compile 11 each (8 jit(while), 2 jit(wrapped), 1 jit(cond)): the caps-only prepare's eager calls --
+yggdrax's `_propagate_extents` `lax.while_loop` (from `_interaction_cache._build_flat_walk_artifacts_strict_streamed`),
+the P2M and the f_b seed's near kernel as eager `pallas_call`s, that kernel's rest-piece `lax.cond` -- which the
+mesh runs once per device. N removes the two mesh-only ones (N's run 3: 22 compiles, the prepares' 16 + 4 + 2 alone,
+60.6 s; run 2 again recompiled the four force programs after run 1's local retry); the prepare's eleven are the single
+card's own (and yggdrax's) and are left as they are. CPU: a second and third run of the mode on the direct force
+lower no program (`tests/distributed/test_production_runner_mesh.py`).
+
+**`migrate=True`'s setup** (H's IC): the mode decomposes in the force's cube and reads the cuts off it (a program of
+4.8 MB temporaries); the base decomposed (48.4 MB) and then repartitioned again in the runner's constructor (44.0 MB
+temporaries, 28.9 MB outputs per device), which is gone. At H's size the setup's peak is the caps-only prepares'
+(484-489 MB), so it does not move there (final peaks 620.4 / 608.1 MB migrating, base 1471.6 at the start sizing);
+track I's +0.13 GB per device was at 4e6 per card.
+
+**Open.** At 2^19 per card the start program's 580 MB is still close to one card's for twice the particles (450 MB
+temporaries, 660 MB peak on H's IC). Its largest temporaries now (XLA's buffer assignment): the local tree's
+per-node arrays -- 378,879 nodes for 2^19 particles on this compact IC, its multipoles and locals f32[378879, 49] at
+74 MB a copy, several live, the local walk's far list s32[14,680,064] at 59 MB a copy -- then the cross far half: the
+[local; imported] multipoles f32[449535, 49] (88 MB) and the all-gathered summary f32[2, 378879, 16] (48.5 MB, ndev x
+one device's block: it grows with the mesh). The cross near term's whole table is f32[709492, 4] (11.4 MB). The
+single card's `_rest` scatter-add (its default) is not changed. The eleven eager-prepare programs per device per
+run (above). A drift whose walk lists outgrow the measurement's (2x the far pairs, 4 near pairs per leaf) costs a
+third measurement. The disc's remaining run-to-run differences (above).
