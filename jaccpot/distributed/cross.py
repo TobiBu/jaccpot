@@ -3162,6 +3162,7 @@ def cross_near_acceleration(
     accum: Optional[str] = None,
     softening_kernel: Optional[str] = None,
     with_force_scale: bool = False,
+    with_potential: bool = False,
 ) -> Union[Array, tuple[Array, Array]]:
     """Acceleration on local particles from the IMPORTED leaves, as its own term.
 
@@ -3211,12 +3212,26 @@ def cross_near_acceleration(
         Also return the imported leaves' share of eq (16b)'s force scale, ``sum G
         m / (r^2 + eps^2)`` over the same pairs (the kernel's fourth lane, in place
         of the potential), for ``mac_type='dehnen_error'``. Static.
+    with_potential:
+        Also return the imported leaves' share of the potential, ``-G sum m
+        psi(r)`` with the pair kernel's ``psi`` over the same pairs: the kernel's
+        fourth lane in its default meaning (the sorted kernel's
+        ``with_potential``), which the force drops. For the mesh potential's
+        program (``template_force.mesh_potential_shard``); exclusive with
+        ``with_force_scale``. Static.
 
     Returns
     -------
     Union[Array, tuple[Array, Array]]
         ``(n_particles, 3)`` acceleration to ADD to the local force; with
-        ``with_force_scale``, ``(acceleration, force_scale [n_particles])``.
+        ``with_force_scale``, ``(acceleration, force_scale [n_particles])``; with
+        ``with_potential``, ``(acceleration, potential [n_particles])``.
+
+    Raises
+    ------
+    ValueError
+        If both ``with_force_scale`` and ``with_potential`` are set: they share the
+        kernel's fourth lane.
     """
     from jaccpot.nearfield.near_field import _env_choice
     from jaccpot.pallas.nearfield_leafpair_csr import (
@@ -3225,6 +3240,8 @@ def cross_near_acceleration(
         nearfield_leafpair_csr_pallas,
     )
 
+    if with_force_scale and with_potential:
+        raise ValueError("with_force_scale and with_potential share the fourth lane")
     if accum is None:
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
 
@@ -3319,11 +3336,12 @@ def cross_near_acceleration(
         .at[flat_idx]
         .add(acc.reshape(-1, 3), mode="drop")
     )
-    if not with_force_scale:
+    if not (with_force_scale or with_potential):
         return acc_out
-    fb = out[..., 3]
+    # lane 3: the force scale with `with_force_scale`, else the potential
+    fourth = out[..., 3]
     return acc_out, (
-        jnp.zeros((n_particles,), fb.dtype)
+        jnp.zeros((n_particles,), fourth.dtype)
         .at[flat_idx]
-        .add(fb.reshape(-1), mode="drop")
+        .add(fourth.reshape(-1), mode="drop")
     )

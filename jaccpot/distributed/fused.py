@@ -580,16 +580,14 @@ def _add_cross_near_term(
         from jaccpot.distributed.cross import cross_near_acceleration
 
         tree = refreshed.tree
-        idx = jnp.asarray(refreshed.nearfield_leaf_particle_indices)
-        msk = jnp.asarray(refreshed.nearfield_leaf_particle_mask)
-        psort = jnp.asarray(refreshed.positions_sorted)
-        msort = jnp.asarray(refreshed.masses_sorted)
         # The near term assumes pool row r IS leaf node (num_internal + r). That
         # held in the unit test because the test BUILT the pool that way; here the
         # pool comes from the lane and the assumption is unverified. If it is
         # wrong the contribution lands on the wrong particles, which adds noise
         # rather than signal -- exactly what a rising error looks like.
         if cross_record is not None:
+            idx = jnp.asarray(refreshed.nearfield_leaf_particle_indices)
+            msk = jnp.asarray(refreshed.nearfield_leaf_particle_mask)
             _ni = int(jnp.asarray(tree.left_child).shape[0])
             _nr = jnp.asarray(tree.node_ranges)
             _L = int(idx.shape[0])
@@ -603,19 +601,10 @@ def _add_cross_near_term(
             _has = msk.any(axis=1)
             cross_record["leaf_pool_mismatch"] = jnp.sum(_has & (_first != _want))
             cross_record["leaf_pool_rows"] = jnp.sum(_has)
-        safe = jnp.clip(idx, 0, psort.shape[0] - 1)
-        leaf_pos = jnp.where(msk[..., None], psort[safe], 0.0)
-        leaf_mass = jnp.where(msk, msort[safe], 0.0)
-        # `leaf_particle_indices` indexes the MORTON-SORTED array -- that is what
-        # the leaf_pool_mismatch check above establishes, since `node_ranges` is
-        # defined in sorted order. The lane's acceleration is in the caller's
-        # original order. Scattering the near term by the sorted index would add
-        # it to the wrong particles: right magnitudes, wrong rows, which shows up
-        # as a RISE in the error rather than as anything obviously broken.
-        orig = jnp.asarray(tree.particle_indices)
-        idx_orig = jnp.where(msk, orig[jnp.clip(idx, 0, orig.shape[0] - 1)], 0)
+        leaf_pos, leaf_mass, msk, idx_orig = _cross_near_pool(refreshed)
         if cross_record is not None:
             # if this permutation were the identity the remap would be a no-op
+            orig = jnp.asarray(tree.particle_indices)
             cross_record["perm_nonidentity"] = jnp.sum(
                 orig != jnp.arange(orig.shape[0], dtype=orig.dtype)
             )
@@ -625,7 +614,7 @@ def _add_cross_near_term(
             leaf_mass,
             msk,
             idx_orig,
-            int(psort.shape[0]),
+            int(refreshed.positions_sorted.shape[0]),
             int(jnp.asarray(tree.left_child).shape[0]),
             softening_sq=jnp.asarray(engine.softening, acceleration.dtype) ** 2,
             softening_kernel=getattr(engine, "softening_kernel", None),
@@ -642,6 +631,99 @@ def _add_cross_near_term(
     if force_scale is not None:
         return acceleration, force_scale
     return acceleration
+
+
+def _cross_near_pool(refreshed: Any) -> tuple[Array, Array, Array, Array]:
+    """This device's leaf-major near-field pool, as the cross near term reads it.
+
+    The local leaves' particles (the targets of the cross near pairs and the first
+    ``L`` rows of the kernel's pool) and, per slot, the particle's INPUT row for
+    the scatter back.
+
+    Parameters
+    ----------
+    refreshed : Any
+        The refreshed ``LargeNPreparedState`` of this trace.
+
+    Returns
+    -------
+    tuple[Array, Array, Array, Array]
+        ``(positions (L, W, 3), masses (L, W), mask (L, W), input_rows (L, W))``,
+        zero on dead slots.
+    """
+    tree = refreshed.tree
+    idx = jnp.asarray(refreshed.nearfield_leaf_particle_indices)
+    msk = jnp.asarray(refreshed.nearfield_leaf_particle_mask)
+    psort = jnp.asarray(refreshed.positions_sorted)
+    msort = jnp.asarray(refreshed.masses_sorted)
+    safe = jnp.clip(idx, 0, psort.shape[0] - 1)
+    leaf_pos = jnp.where(msk[..., None], psort[safe], 0.0)
+    leaf_mass = jnp.where(msk, msort[safe], 0.0)
+    # `leaf_particle_indices` indexes the MORTON-SORTED array -- that is what
+    # `_add_cross_near_term`'s leaf_pool_mismatch check establishes, since
+    # `node_ranges` is defined in sorted order. The lane's acceleration is in the
+    # caller's original order. Scattering the near term by the sorted index would
+    # add it to the wrong particles: right magnitudes, wrong rows, which shows up
+    # as a RISE in the error rather than as anything obviously broken.
+    orig = jnp.asarray(tree.particle_indices)
+    idx_orig = jnp.where(msk, orig[jnp.clip(idx, 0, orig.shape[0] - 1)], 0)
+    return leaf_pos, leaf_mass, msk, idx_orig
+
+
+def _add_cross_near_potential(
+    engine: Any,
+    refreshed: Any,
+    potential: Array,
+    cross_near_sink: Optional[dict],
+) -> Array:
+    """Add the cross-domain NEAR field's potential the hook left in ``cross_near_sink``.
+
+    The potential twin of :func:`_add_cross_near_term`, for the mesh potential's
+    program (:func:`~jaccpot.distributed.template_force.mesh_potential_shard`): the
+    same pool, pairs and kernel launch, with the leaf-pair kernel's fourth lane in
+    its default meaning, ``-G m psi`` over the imported leaves
+    (:func:`~jaccpot.distributed.cross.cross_near_acceleration`'s
+    ``with_potential``); its acceleration lanes are not read. No force program
+    calls it.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine (its softening, kernel and ``G``).
+    refreshed : Any
+        The refreshed ``LargeNPreparedState`` of this trace.
+    potential : Array
+        ``(cap,)`` local potential in input row order.
+    cross_near_sink : Optional[dict]
+        The near sink the hook filled in this trace; empty or ``None`` adds nothing.
+
+    Returns
+    -------
+    Array
+        ``potential`` plus the cross near term, in ``potential``'s dtype.
+    """
+    if not cross_near_sink:
+        return potential
+    from jaccpot._env import env_flag
+    from jaccpot.distributed.cross import cross_near_acceleration
+
+    tree = refreshed.tree
+    leaf_pos, leaf_mass, msk, idx_orig = _cross_near_pool(refreshed)
+    _, term = jax.named_call(cross_near_acceleration, name="cross_near_potential")(
+        cross_near_sink,
+        leaf_pos,
+        leaf_mass,
+        msk,
+        idx_orig,
+        int(refreshed.positions_sorted.shape[0]),
+        int(jnp.asarray(tree.left_child).shape[0]),
+        softening_sq=jnp.asarray(engine.softening, potential.dtype) ** 2,
+        softening_kernel=getattr(engine, "softening_kernel", None),
+        G=jnp.asarray(engine.G, potential.dtype),
+        interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+        with_potential=True,
+    )
+    return potential + jnp.asarray(term, potential.dtype)
 
 
 def stack_prepared_states(states: "list[Any]") -> Any:

@@ -41,6 +41,15 @@ The cross NEAR term is added after the evaluation by the helper the stacked rout
 uses (:func:`jaccpot.distributed.fused._add_cross_near_term`), so both routes add the
 same term with the same arithmetic.
 
+The self-gravity POTENTIAL, the energy diagnostic's (:func:`mesh_potential_shard`,
+:meth:`FusedMeshForce.potential_shard`), is the single card's energy program on this
+route: the force's rebuild, ``FusedForceProvider.potential`` on it (the local near and
+far fields, and the cross far pairs through the local expansions their M2L wrote),
+and the cross near pairs' potential from the cross near term's kernel launch, its
+fourth lane in its default meaning
+(:func:`jaccpot.distributed.fused._add_cross_near_potential`). A program of its own:
+no force program changes.
+
 :class:`FusedMeshForce` hands this route to the segment runner
 (:mod:`jaccpot.distributed.segment`), with the segment retry's re-plan. Its CROSS
 capacities are the library's by default (``cross_caps="auto"``): a first guess from
@@ -77,6 +86,7 @@ from jaxtyping import Array
 
 from jaccpot.distributed.fused import (
     AXIS_NAME,
+    _add_cross_near_potential,
     _add_cross_near_term,
     _fold_cross_flags,
     _warn_if_slow_ragged_exchange,
@@ -89,6 +99,7 @@ __all__ = [
     "MeshForceSetup",
     "make_mesh_cross_hook",
     "mesh_force_shard",
+    "mesh_potential_shard",
     "prepare_mesh_force",
 ]
 
@@ -556,30 +567,16 @@ def mesh_force_shard(
         (:func:`_hook_cross_needs`); with ``force_scale``, then the new ``(cap,)``
         ``f_b`` (zero on padding rows).
     """
-    from jaccpot.runtime.capacity_plan import plan_level_overflow
-    from jaccpot.runtime.fused_topology import (
-        NEEDS_FIELDS,
-        OVERFLOW_CROSS,
-        OVERFLOW_LEVEL_PLAN,
-    )
-
     provider = setup.provider
-    # a RE-TRACE must not read the previous trace's tracers (fused_force_step)
-    if cross_near_sink is not None:
-        cross_near_sink.clear()
-    bounds = global_mesh_bounds(
-        positions,
-        num_valid=live,
-        axis_name=axis_name,
-        cubic=bool(getattr(provider.engine, "_tree_cubic_bounds", False)),
-    )
-    topology = provider.rebuild(
+    topology = _shard_rebuild(
+        provider,
         positions,
         masses,
-        bounds=bounds,
-        num_valid=live,
+        live,
         cross_hook=cross_hook,
-        **({} if force_scale is None else {"force_scale": force_scale}),
+        cross_near_sink=cross_near_sink,
+        axis_name=axis_name,
+        force_scale=force_scale,
     )
     f_b = None
     if force_scale is None:
@@ -600,6 +597,103 @@ def mesh_force_shard(
         )
         live_rows = jnp.arange(int(positions.shape[0])) < live
         f_b = jnp.where(live_rows, f_b, jnp.zeros((), f_b.dtype))
+    bits, needs = _shard_verdict(topology, cross_hook, cross_near_sink)
+    if f_b is not None:
+        return acceleration, bits, needs, f_b
+    return acceleration, bits, needs
+
+
+def _shard_rebuild(
+    provider: Any,
+    positions: Array,
+    masses: Array,
+    live: Array,
+    *,
+    cross_hook: Optional[Callable[..., Any]],
+    cross_near_sink: Optional[dict],
+    axis_name: str,
+    force_scale: Optional[Array],
+) -> Any:
+    """One device's topology in the global box, the cross hook between the sweeps.
+
+    The rebuild :func:`mesh_force_shard` and :func:`mesh_potential_shard` share:
+    the near sink emptied (a RE-TRACE must not read the previous trace's tracers,
+    as in ``fused_force_step``), the global box (one all-reduce), and the
+    provider's rebuild over the live rows, with ``force_scale`` for eq (16a)'s
+    thresholds under the criterion.
+
+    Parameters
+    ----------
+    provider : Any
+        The setup's :class:`~jaccpot.runtime.fused_provider.FusedForceProvider`.
+    positions : Array
+        ``(cap, 3)`` this device's positions.
+    masses : Array
+        ``(cap,)`` masses, zero on padding.
+    live : Array
+        Scalar live row count.
+    cross_hook : Optional[Callable[..., Any]]
+        The cross-domain hook (``None`` on one device).
+    cross_near_sink : Optional[dict]
+        The hook's near sink.
+    axis_name : str
+        Mesh axis.
+    force_scale : Optional[Array]
+        ``(cap,)`` eq (16b)'s ``f_b`` in input row order under the criterion, else
+        ``None``.
+
+    Returns
+    -------
+    Any
+        The rebuilt :class:`~jaccpot.runtime.fused_topology.FusedTopology`.
+    """
+    if cross_near_sink is not None:
+        cross_near_sink.clear()
+    bounds = global_mesh_bounds(
+        positions,
+        num_valid=live,
+        axis_name=axis_name,
+        cubic=bool(getattr(provider.engine, "_tree_cubic_bounds", False)),
+    )
+    return provider.rebuild(
+        positions,
+        masses,
+        bounds=bounds,
+        num_valid=live,
+        cross_hook=cross_hook,
+        **({} if force_scale is None else {"force_scale": force_scale}),
+    )
+
+
+def _shard_verdict(
+    topology: Any, cross_hook: Any, cross_near_sink: Optional[dict]
+) -> tuple[Array, Array]:
+    """One device's capacity bits and needs of a rebuilt topology (this trace's).
+
+    The provider's bits with this lane's two (``OVERFLOW_LEVEL_PLAN``,
+    ``OVERFLOW_CROSS``), and the walk's, tree's and cross needs.
+
+    Parameters
+    ----------
+    topology : Any
+        From :func:`_shard_rebuild`, in this trace.
+    cross_hook : Any
+        The hook that ran in the rebuild, or ``None``.
+    cross_near_sink : Optional[dict]
+        Its near sink.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(bits, needs)`` as :func:`mesh_force_shard` returns them.
+    """
+    from jaccpot.runtime.capacity_plan import plan_level_overflow
+    from jaccpot.runtime.fused_topology import (
+        NEEDS_FIELDS,
+        OVERFLOW_CROSS,
+        OVERFLOW_LEVEL_PLAN,
+    )
+
     # a tree wider or deeper than the installed plan's level loops loses nodes from
     # both cascades (capacity_plan.plan_level_overflow); the refresh's own tree flag
     # checks the same plan, this one also the level-table bound
@@ -614,9 +708,95 @@ def mesh_force_shard(
     tree_slot = NEEDS_FIELDS.index("tree_overflow")
     needs = needs.at[tree_slot].max(level.astype(jnp.int32))
     needs = jnp.concatenate([needs, _hook_cross_needs(cross_hook)])
-    if f_b is not None:
-        return acceleration, bits, needs, f_b
-    return acceleration, bits, needs
+    return bits, needs
+
+
+def mesh_potential_shard(
+    setup: MeshForceSetup,
+    positions: Array,
+    masses: Array,
+    live: Array,
+    *,
+    cross_hook: Optional[Callable[..., Any]] = None,
+    cross_near_sink: Optional[dict] = None,
+    axis_name: str = AXIS_NAME,
+    force_scale: Optional[Array] = None,
+) -> tuple[Array, Array, Array]:
+    """One device's self-gravity POTENTIAL on the template route (inside ``shard_map``).
+
+    The single card's energy program (``ProductionRunner.potential_energy``: a
+    rebuild at the positions, then ``FusedForceProvider.potential`` on it) on the
+    mesh: :func:`mesh_force_shard`'s rebuild -- the global box, the cross hook
+    between the sweeps and, under ``mac_type='dehnen_error'``, eq (16a)'s
+    thresholds from ``force_scale`` (the carried ``f_b``), so the lists are the
+    force's at these positions -- and ``phi_i = -G sum_{j != i} m_j psi(r_ij)``
+    with the force's pair kernel over every device's particles:
+
+    * the local near and far fields: ``FusedForceProvider.potential`` (the near
+      kernel's fourth lane, the self pair excluded; the far field's L2P value
+      from the local expansions, ``evaluate_large_n_potential``);
+    * the cross FAR pairs: their M2L writes the same local expansions (through the
+      walk's CSR since S11-C; the flat lanes' concatenated list), which that L2P
+      reads, as the force's L2P reads them;
+    * the cross NEAR pairs: the cross near term's kernel launch with its fourth
+      lane as the potential (:func:`~jaccpot.distributed.fused._add_cross_near_potential`),
+      added in input row order after the local potential, as the force adds its
+      acceleration.
+
+    Its own program (no force program changes): nothing of the acceleration is
+    evaluated but the cross near kernel's three force lanes, which share the launch.
+    No capacity of its own: the rebuild's are the force's, and the cross near term
+    reads the near sink the force reads.
+
+    Parameters
+    ----------
+    setup : MeshForceSetup
+        From :func:`prepare_mesh_force`.
+    positions : Array
+        ``(cap, 3)`` this device's positions.
+    masses : Array
+        ``(cap,)`` masses, zero on padding.
+    live : Array
+        Scalar live row count (at most ``cap``).
+    cross_hook : Optional[Callable[..., Any]]
+        The cross-domain hook (``None`` on one device).
+    cross_near_sink : Optional[dict]
+        The hook's near sink.
+    axis_name : str
+        Mesh axis.
+    force_scale : Optional[Array]
+        ``(cap,)`` eq (16b)'s ``f_b`` in input row order (the force's carried one);
+        required under the criterion, ``None`` without it.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(phi, bits, needs)``: ``(cap,)`` in input row order and the positions'
+        dtype, zero on padding rows; the ``uint32`` overflow bits and the ``int32``
+        needs of the rebuild, as :func:`mesh_force_shard` returns them (the
+        potential is meaningless unless ``overflow_ok(bits)``).
+    """
+    provider = setup.provider
+    topology = _shard_rebuild(
+        provider,
+        positions,
+        masses,
+        live,
+        cross_hook=cross_hook,
+        cross_near_sink=cross_near_sink,
+        axis_name=axis_name,
+        force_scale=force_scale,
+    )
+    phi = _add_cross_near_potential(
+        provider.engine,
+        topology.prepared,
+        jnp.asarray(provider.potential(topology)),
+        cross_near_sink,
+    )
+    live_rows = jnp.arange(int(positions.shape[0])) < live
+    phi = jnp.where(live_rows, phi, jnp.zeros((), phi.dtype))
+    bits, needs = _shard_verdict(topology, cross_hook, cross_near_sink)
+    return phi, bits, needs
 
 
 def _hook_cross_needs(cross_hook: Any) -> Array:
@@ -1132,6 +1312,55 @@ class FusedMeshForce:
             axis_name=self.axis_name,
             force_scale=force_scale,
         )
+
+    def potential_shard(
+        self,
+        positions: Array,
+        masses: Array,
+        live: Array,
+        ids: Array,
+        force_scale: Optional[Array] = None,
+    ) -> tuple[Array, Array]:
+        """One device's self-gravity potential (:func:`mesh_potential_shard`; inside ``shard_map``).
+
+        Called like :meth:`shard`: inside the caller's ``shard_map``, under
+        :meth:`context`, with :meth:`before_trace` before a fresh trace. The
+        energy's ``W = 1/2 sum_i m_i phi_i`` (summed over the mesh) counts every
+        pair once.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(cap, 3)``.
+        masses : Array
+            ``(cap,)``.
+        live : Array
+            Scalar live row count.
+        ids : Array
+            ``(cap,)`` global ids; unused (the rows come back in input order).
+        force_scale : Optional[Array]
+            ``(cap,)`` the force's carried ``f_b`` (:attr:`scale_carry` only): the
+            rebuild's thresholds, so the lists are the force's.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(phi, bits)``: ``(cap,)`` in the positions' dtype, zero on padding
+            rows, and the ``uint32`` overflow bits of its rebuild (the potential is
+            meaningless unless ``overflow_ok`` of their mesh-wide OR holds).
+        """
+        del ids
+        phi, bits, _ = mesh_potential_shard(
+            self._setup_or_raise(),
+            positions,
+            masses,
+            live,
+            cross_hook=self.hook,
+            cross_near_sink=self.near_sink,
+            axis_name=self.axis_name,
+            force_scale=force_scale,
+        )
+        return phi, bits
 
     # ------------------------------------------------------------------
     # The segment retry.
