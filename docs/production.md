@@ -412,7 +412,9 @@ timeout leaves `CUDA_VISIBLE_DEVICES` empty and the run lands on the CPU.
 | `cap` | `None` | rows per device; `None`: `mesh_shard_capacity(N, ndev, cap_headroom)` = `ceil(ceil(N / ndev) x 1.15)` (the S11/S12 gates' headroom; the repartition's balance overshoot is about `2 ndev / num_samples` of a shard) |
 | `repartition_every` | 1 | a repartition before every segment after the first (the S12 gate's cadence); 0: only the initial decomposition. Its own program, between segments; a declined one (a device would overflow `cap`) moves nothing and the edge says so |
 | `num_samples` | 256 | pivot samples per device of the decomposition and the repartitions |
-| `cross_caps` | `"auto"` | the cross-domain capacities: sized in the library at the start state (`CrossCapacities.from_needs`, 1.5x), or a `CrossCapacities` |
+| `cross_caps` | `"auto"` | the cross-domain capacities: sized in the library from the needs measured at the start state and at the first segment's drift (on small buffers, `CrossCapacities.for_measurement`; 1.5x the needs), or a `CrossCapacities` |
+| `migrate` | `False` | after every drift, hand each particle that left its device's Morton range to the owner before the force, keys and cuts in the force's own (cubic) box (`MeshSegmentRunner(migrate=True)`, `jaccpot/distributed/migration.py`): the domains stay exact, so no device holds a sparse leaf inside another's core. At 8e6 on two A100s 4-5x fewer cross near pairs and ~11x fewer particles shipped per step, the force 219-262 -> 51-54 ms on contended cards; the repartitions then only rebalance (even cuts plus a migration). Opt-in until the free-card A/B (`production_2026-10.md`, S11 session 2) |
+| `migration_cap` | `"auto"` | `migrate=True`: the migration buffer's rows per device, sized from one step's drift, re-planned exactly when it overflows |
 | `force` | `None` | the fused lane's `FusedMeshForce` on `solver` (`settings.leaf_size`, `settings.max_order`, the solver's theta); a force object of the segment runner's protocol (`DirectMeshForce` in tests) is used as given |
 
 **What is the same and what is not, against one card:**
@@ -481,9 +483,11 @@ compile key. Size: 40 B/particle in float32 (+4 under `dehnen_error`) plus 4 B p
   force key's digest. Equal, the next segments trace the run's programs and the
   continuation is the uninterrupted run, BITWISE (`restored["bitwise"]`; CPU gates for the
   direct and the fused force, the latter from a file written after a retried segment, in a
-  fresh process). **On GPUs the lane itself is not deterministic run to run** (below), so
-  there a continuation matches the uninterrupted run as closely as a rerun does, not bit for
-  bit.
+  fresh process). On GPUs the cross-domain path is bitwise run to run since S11 session 2
+  (its pair lists in (target, source) order, its long rows summed in a fixed order), and a
+  continuation's STATE is the uninterrupted run's, bitwise (two A100s, 24 steps); the
+  carried acceleration can still differ in a few components where the single card's own
+  near kernel scatter-adds the pieces of very long rows (below).
 - **On another mesh** (another device count or `cap`): the by-id state is decomposed there,
   its carried acceleration and f_b placed by id (no start force), and the force prepared
   and sized afresh: the same run to round-off, `restored["bitwise"] = False`,
@@ -495,13 +499,13 @@ compile key. Size: 40 B/particle in float32 (+4 under `dehnen_error`) plus 4 B p
 |---|---|
 | the mode == `MeshSegmentRunner` driven by hand (same segments, cadence, force) | bitwise by id (CPU: direct force, and the fused force with a retried segment) |
 | chained runs (`restart_from=RunResult`) == one run | bitwise |
-| a restart file continued in a fresh process on the same mesh | bitwise, digests matching (CPU: direct and fused force); on two A100s the digests match but the lane is not run-to-run deterministic (below) |
+| a restart file continued in a fresh process on the same mesh | bitwise, digests matching (CPU: direct and fused force); on two A100s the state bitwise, the carried acceleration in 1-9 of 6M components not (below) |
 | the energy diagnostic on or off | bitwise |
 | a restart on another device count or `cap` | the same run to round-off; `bitwise = False` |
 | a retried segment against one that never failed | to round-off: the retry recomputes the start force the other carried |
 | the mesh against one card on the same particles | not bitwise (other trees and lists); the accuracy is in class (`production_2026-10.md`, S11 and S12) |
 
-**On two A100s** (`bench/multigpu_runner_gate.py`, 2026-10-23, cards 0 + 7, both shared with
+**On two A100s, before the cross path's order fix** (`bench/multigpu_runner_gate.py`, 2026-10-23, cards 0 + 7, both shared with
 other users' jobs at 90-100 % utilisation: memory and accuracy are results, times are not).
 Plummer, N = 2e6 (1e6 per card), `preset="galaxy"` (`dehnen_error` 1e-4, leaf 64, p6), the
 library's cross capacities and shard capacity (1,150,000 rows), 3 segments of 8 steps at dt
@@ -526,9 +530,19 @@ start force evaluated three times on the same state with the same compiled progr
 bitwise on a one-device mesh but differs in 612,657 of 1,380,000 components (max 9.5e-7) on
 two devices (Plummer 4e5, production flags; geometric MAC, `dehnen_error` 513,742, max 3.4e-7):
 the cross-domain path is
-not deterministic at run time on GPUs, and deterministic ops do not fix it. Until it is, the
-GPU restart contract is "the same run to the lane's round-off", and a bitwise GPU gate of
-the mode needs that fixed first (the CPU gates are bitwise).
+not deterministic at run time on GPUs, and deterministic ops do not fix it.
+
+**Fixed for the cross path** (S11 session 2, track G; `bench/multigpu_force_repeat.py`): the
+symmetric Pallas cross walk emits the same pairs in another order each run (atomic cursors)
+and the merge kept that order inside each CSR row; the pairs are now sorted by (target,
+source) and the cross near kernel's chunks and long-row pieces summed in a fixed order. The
+start force is bitwise run to run and across processes (Plummer 4e5 and 2e6, both MACs), and
+the restart above continues with the state bitwise (0 of 12,000,000) and the carried
+acceleration in 1-9 of 6,000,000 components (max 3.0e-8). What is left -- and on the disc +
+bulge 2e6 some 8.5k of 6.9M start-force components -- comes from outside the cross terms,
+most likely the single card's direct near kernel, which scatter-adds the pieces of rows past
+2 x 1024 entries in atomic order (`JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT=1e8` made the repeats
+bitwise): a change of the single-card default path, not made.
 
 ## Gates (S3)
 
