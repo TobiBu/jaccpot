@@ -809,6 +809,55 @@ jobs:
             exit 1
           fi
 
+  test-distributed-segment-runner:
+    name: test-distributed-segment-runner
+    needs: changes
+    if: needs.changes.outputs.gated == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      JAX_ENABLE_X64: "1"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=2
+      JACCPOT_TEST_JAX_CACHE_DIR: ${{ github.workspace }}/.jax_cache
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Restore JAX compilation cache
+        uses: actions/cache@v4
+        with:
+          path: .jax_cache
+          key: jax-cache-segment-runner-${{ runner.os }}--${{ hashFiles('jaccpot/**/*.py', 'tests/**/*.py') }}
+          restore-keys: |
+            jax-cache-segment-runner-${{ runner.os }}--
+      - name: Install package + dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install git+https://github.com/TobiBu/yggdrax.git
+          pip install -e ".[dev]"
+      - name: Segment-runner potential + production-mode tier on forced devices
+        # `-n 1`: the cases share nothing but compiled programs, and the file's
+        # peak is one case's (~3 GB RSS, as the CPU end-to-end test).
+        run: |
+          set -o pipefail
+          rc=0
+          mapfile -t selection < <(python .github/scripts/test_shards.py args distributed-segment-runner)
+          pytest "${selection[@]}" -n 1 -rs --durations=10 \
+            | tee pytest-segment-runner-tier.txt || rc=$?
+          if [ "$rc" != 0 ] && [ "$rc" != 5 ]; then exit "$rc"; fi
+      - name: Fail if the tier was skipped rather than run
+        run: |
+          if grep -qE "no tests ran|collected 0 items" pytest-segment-runner-tier.txt \
+             || grep -qE "^SKIPPED.*needs >= 2 devices" pytest-segment-runner-tier.txt; then
+            echo "::error::the segment-runner potential/production-mode tier did not run on forced devices"
+            exit 1
+          fi
+
   test-distributed-tier:
     # `tests/distributed/` on forced CPU devices -- the tier itself, which until
     # now ran nowhere.
