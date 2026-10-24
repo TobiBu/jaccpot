@@ -326,6 +326,7 @@ def _repartition_shard(
     route_velocities: bool = True,
     acceleration: Optional[Array] = None,
     force_scale: Optional[Array] = None,
+    cubic: Optional[bool] = None,
 ) -> tuple:
     """One device's part of the mesh repartition (inside ``shard_map``).
 
@@ -362,6 +363,11 @@ def _repartition_shard(
         ``(cap, 3)``; given, it is routed too (zero on padding rows).
     force_scale : Optional[Array]
         ``(cap,)``; given, it is routed too (zero on padding rows).
+    cubic : Optional[bool]
+        The decomposition box's shape (:func:`~jaccpot.distributed.fused.cube_bounds`);
+        ``None`` (the default) the environment's, as before. The segment runner's
+        migration passes the force's (``TreeConfig.cubic_bounds``): its cuts live in
+        the box the force builds its trees in.
 
     Returns
     -------
@@ -373,7 +379,7 @@ def _repartition_shard(
     from yggdrax.distributed.partition import sfc_repartition
 
     n_live = count[0]
-    bounds = global_mesh_bounds(x, num_valid=n_live, axis_name=axis_name)
+    bounds = global_mesh_bounds(x, num_valid=n_live, axis_name=axis_name, cubic=cubic)
     payload = {"v": v, "id": ids} if route_velocities else {"id": ids}
     fill = {"v": 0.0, "id": -1} if route_velocities else {"id": -1}
     if acceleration is not None:

@@ -51,6 +51,17 @@ lane the same, as a new path next to the old one (which stays the reference):
   in a segment's peak). With the velocity-Verlet form the carried acceleration
   must travel with its particle, so ``sfc_repartition`` routes the velocity, the
   total acceleration and the id (``rollout._repartition_shard``).
+* **Migration to fixed cuts** (opt-in, ``migrate=True``): after every drift, before
+  the force, each particle outside its device's splitter range moves to the owner
+  (:mod:`jaccpot.distributed.migration`), in the scan, so every force sees exact
+  Morton domains in its own box -- the start's zero-drift cross volume -- instead of
+  the stragglers a drift leaves in its neighbour's cells, whose coarse leaves make
+  most of the cross near pairs. The repartition between segments then only
+  rebalances the counts: even cuts read off the ranks and a migration to them
+  (``sfc_repartition`` once, at the start, puts the domains in the force's box).
+  Counts, masses and ids change inside the segment and ride the carry; the
+  exchange's buffer (``migration_cap``) is a capacity with an exact need and a
+  re-plan.
 * **The potential energy at the current state** (:meth:`MeshSegmentRunner.potential_energy`,
   S11 session 2): the force's ``potential_shard`` per device and the external
   potential per row, summed in fp64 over the mesh, in a program of its own that
@@ -213,6 +224,12 @@ class SegmentReport:
     failures : list
         One entry per failed attempt before the kept run: its ``bits``, ``needs``
         and the steps that fitted (``done``) -- what the retries re-planned from.
+    migrated : int
+        ``migrate=True``: rows the kept run's migrations moved, over its steps and
+        the mesh (``0`` without migration).
+    migration_need : int
+        ``migrate=True``: the most rows a device sent or received in one of its
+        migrations (what ``migration_cap`` has to hold).
     """
 
     segment: int
@@ -226,6 +243,8 @@ class SegmentReport:
     bits: int = 0
     needs: list = field(default_factory=list)
     failures: list = field(default_factory=list)
+    migrated: int = 0
+    migration_need: int = 0
 
 
 def _mesh_all(flag: Array, axis_name: str) -> Array:
@@ -536,6 +555,24 @@ def _direct_potential_shard(
     return jnp.where(live, phi, jnp.zeros((), phi.dtype))
 
 
+def _force_box_cubic(force: Any) -> bool:
+    """The box shape a force builds its trees in (``TreeConfig.cubic_bounds``).
+
+    Parameters
+    ----------
+    force : Any
+        The runner's force: the fused force's engine says; a force without one
+        (:class:`DirectMeshForce`) builds no tree, and the per-axis box is taken.
+
+    Returns
+    -------
+    bool
+        ``True`` for a cube.
+    """
+    engine = getattr(force, "engine", None)
+    return bool(getattr(engine, "_tree_cubic_bounds", False))
+
+
 class DirectMeshForce:
     """An all-pairs force for the runner whose answer does not depend on the partition.
 
@@ -826,11 +863,28 @@ class MeshSegmentRunner:
         Donate the state and the acceleration to each segment's program.
     axis_name : str
         Mesh axis.
+    migrate : bool
+        Migrate to fixed cuts after every drift (:mod:`jaccpot.distributed.migration`;
+        off by default). The decomposition is redone here in the force's box (the
+        cuts' frame; one repartition, before the force is prepared) unless
+        ``splitters`` are given; every repartition after it is a rebalance
+        (:meth:`_rebalance`: even cuts read off the ranks, a migration to them).
+        No-op on one device.
+    migration_cap : Any
+        ``migrate=True``: the migration buffer's rows per device, each way: an int,
+        or ``"auto"`` (the default: sized at the first segment from the rows one
+        step's drift moves, :func:`~jaccpot.distributed.migration.migration_cap_for_need`).
+        A migration that outgrows it fails its step (``OVERFLOW_MIGRATION``) and
+        the segment is re-run with the buffer re-sized from the exact need.
+    splitters : Any
+        ``migrate=True``: the cuts of ``state``'s ownership, ``(ndev - 1,)``
+        ``uint64`` (a restart's); ``None`` repartitions here to choose them.
 
     Raises
     ------
     ValueError
-        If the state's rows do not split evenly over the mesh.
+        If the state's rows do not split evenly over the mesh, or the migration's
+        initial repartition was declined.
     """
 
     def __init__(
@@ -844,6 +898,9 @@ class MeshSegmentRunner:
         num_samples: int = 256,
         donate: bool = True,
         axis_name: str = AXIS_NAME,
+        migrate: bool = False,
+        migration_cap: Any = "auto",
+        splitters: Any = None,
     ) -> None:
         from jaccpot.distributed.rollout import _mesh_devices
 
@@ -871,6 +928,34 @@ class MeshSegmentRunner:
         self._acceleration_key: Optional[tuple] = None
         #: the segment whose repartition already ran (a start() before it)
         self._repartitioned_for = 0
+        #: migration to fixed cuts (one device: nothing to migrate)
+        self.migrate = bool(migrate) and self.ndev > 1
+        self.migration_cap: Optional[int] = None
+        if migration_cap != "auto":
+            self.migration_cap = int(migration_cap)
+            if self.migration_cap < 1:
+                raise ValueError(f"migration_cap must be >= 1, got {migration_cap}")
+        #: the box shape the force builds its trees in, which the cuts live in
+        self._migration_cubic = _force_box_cubic(force)
+        self.splitters: Any = None
+        if self.migrate:
+            if splitters is None:
+                # the cuts are chosen in the force's box: a decomposition in any
+                # other frame is not a Morton range there
+                self.state, diag = self._repartition(self.state)
+                if bool(diag["declined"][0]):
+                    raise ValueError(
+                        "migrate=True: the repartition into the force's box was "
+                        "declined: some device would receive "
+                        f"{int(np.asarray(diag['recv_counts']).max())} rows > "
+                        f"cap={self.cap}"
+                    )
+                state = self.state
+            else:
+                self.splitters = jax.device_put(
+                    jnp.asarray(np.asarray(splitters, np.uint64)),
+                    NamedSharding(mesh, P()),
+                )
         self.force.prepare(state.state[:, 0], state.masses, state.count)
         if getattr(self.force, "needs_cross_sizing", False):
             # cross_caps="auto": the start force at ``state`` measures what every
@@ -896,6 +981,8 @@ class MeshSegmentRunner:
         num_samples: int = 256,
         donate: bool = True,
         axis_name: str = AXIS_NAME,
+        migrate: bool = False,
+        migration_cap: Any = "auto",
     ) -> "MeshSegmentRunner":
         """A runner on the fused lane's force (the template route).
 
@@ -935,6 +1022,10 @@ class MeshSegmentRunner:
             As in the constructor.
         axis_name : str
             Mesh axis.
+        migrate : bool
+            As in the constructor.
+        migration_cap : Any
+            As in the constructor.
 
         Returns
         -------
@@ -971,6 +1062,8 @@ class MeshSegmentRunner:
             num_samples=num_samples,
             donate=donate,
             axis_name=axis_name,
+            migrate=migrate,
+            migration_cap=migration_cap,
         )
 
     # ------------------------------------------------------------------
@@ -1015,12 +1108,15 @@ class MeshSegmentRunner:
             str(treedef),
             tuple((tuple(np.shape(x)), str(jnp.result_type(x))) for x in leaves),
             self.donate,
+            *self._migration_key(kind),
         )
         cache = _programs_of(self.force.cache_owner)
         program = cache.get(key)
         if program is not None:
             return program, False
-        if kind == "segment":
+        if kind == "segment" and self.migrate:
+            program = self._build_migrating_segment(int(steps))
+        elif kind == "segment":
             program = self._build_segment(int(steps))
         else:
             # "measure": the start force without the external field (the cross
@@ -1263,6 +1359,207 @@ class MeshSegmentRunner:
             donate_argnums=donate if self.donate else (),
         )
 
+    def _migration_key(self, kind: str) -> tuple:
+        """The compile key's migration part: empty unless a segment migrates.
+
+        Parameters
+        ----------
+        kind : str
+            The program's kind.
+
+        Returns
+        -------
+        tuple
+            ``()``, or ``("migrate", migration_cap, cubic)`` for a migrating
+            segment.
+        """
+        if kind != "segment" or not self.migrate:
+            return ()
+        return ("migrate", int(self.migration_cap or 0), self._migration_cubic)
+
+    def _build_migrating_segment(self, steps: int) -> Callable:
+        """:meth:`_build_segment` with the migration between each drift and force.
+
+        The step: the drift, the migration to the fixed cuts
+        (:func:`~jaccpot.distributed.migration.migrate_shard`, in the force's box;
+        the rows -- state, total acceleration, mass, id, ``f_b`` -- move with their
+        particles), the force on the migrated rows, the kick. The counts, masses
+        and ids are part of the carry. A declined migration fails its step (its
+        bits on the trajectory); the force's bits and needs of that step are not
+        folded (its ownership is not the trajectory's), so a failed attempt is
+        either the migration's or the force's.
+
+        Parameters
+        ----------
+        steps : int
+            Steps of the scan (static).
+
+        Returns
+        -------
+        Callable
+            ``(state, acceleration, [f_b,] masses, ids, count, splitters, dt,
+            params) -> (state, acceleration, [f_b,] masses, ids, count, ok, bits,
+            needs, done, migration_need, migrated)``; everything up to ``count``
+            flat and donated, the rest replicated.
+        """
+        from jaccpot.distributed.migration import migrate_shard
+        from jaccpot.runtime.fmm_state import _velocity_verlet_kick_drifted
+        from jaccpot.runtime.fused_topology import overflow_ok
+
+        # locals, not ``self`` (see _build_start)
+        axis, force, field_fn = (
+            self.axis_name,
+            self.force,
+            self.external_acceleration_fn,
+        )
+        needs_size = int(force.needs_size)
+        scale_carry = self.scale_carry
+        mcap, cubic = int(self.migration_cap or 0), self._migration_cubic
+        zero_bits = jnp.uint32(0)
+
+        def segment(
+            state0: Array,
+            acc0: Array,
+            fb0: Optional[Array],
+            masses0: Array,
+            ids0: Array,
+            count0: Array,
+            splitters: Array,
+            dt: Array,
+            params: Any,
+        ) -> tuple:
+            cap = int(state0.shape[0])
+
+            def step(carry: tuple, _: Any) -> tuple:
+                state_now, acc_now, masses, ids, count = carry[:5]
+                ok, bits, needs, done, need_m, moved_m = carry[5:11]
+                fb_now = carry[11] if scale_carry else None
+                position_new = (
+                    state_now[:, 0] + state_now[:, 1] * dt + 0.5 * acc_now * dt**2
+                )
+                state_position = state_now.at[:, 0].set(position_new)
+                state_position, acc_now, masses, ids, count, fb_now, info = (
+                    migrate_shard(
+                        state_position,
+                        acc_now,
+                        masses,
+                        ids,
+                        count,
+                        splitters,
+                        migration_cap=mcap,
+                        cubic=cubic,
+                        force_scale=fb_now,
+                        axis_name=axis,
+                    )
+                )
+                # the migration's verdict is replicated (the all-gathered sizes)
+                ok_mig = ok & (info["bits"] == zero_bits)
+                live = jnp.minimum(count[0], cap)
+                live_rows = jnp.arange(cap) < live
+                out = force.shard(
+                    state_position[:, 0, :],
+                    masses,
+                    live,
+                    ids,
+                    **({"force_scale": fb_now} if scale_carry else {}),
+                )
+                acc_self, bits_new, needs_new = out[:3]
+                acc_new = _total_acceleration(
+                    field_fn, acc_self, state_position, params, live_rows
+                )
+                state_new = _velocity_verlet_kick_drifted(
+                    state_position, acc_now, acc_new, dt
+                )
+                # fold only what a step entered ON the trajectory needed (see
+                # _build_segment); a declined migration ends the trajectory before
+                # its force
+                ok_new = _mesh_all(ok_mig & overflow_ok(bits_new), axis)
+                return (
+                    state_new,
+                    acc_new,
+                    masses,
+                    ids,
+                    count,
+                    ok_new,
+                    bits
+                    | jnp.where(ok, info["bits"], zero_bits)
+                    | jnp.where(ok_mig, bits_new, zero_bits),
+                    jnp.where(ok_mig, jnp.maximum(needs, needs_new), needs),
+                    done + ok_new.astype(jnp.int32),
+                    jnp.where(ok, jnp.maximum(need_m, info["need"]), need_m),
+                    moved_m + jnp.where(ok_mig, info["moved"], 0),
+                    *out[3:],
+                ), None
+
+            init = (
+                state0,
+                acc0,
+                masses0,
+                ids0,
+                count0,
+                _mesh_all(count0[0] <= cap, axis),
+                zero_bits,
+                jnp.zeros((needs_size,), jnp.int32),
+                jnp.int32(0),
+                jnp.int32(0),
+                jnp.int32(0),
+                *(() if fb0 is None else (fb0,)),
+            )
+            carry_f, _ = jax.lax.scan(step, init, None, length=int(steps))
+            state_f, acc_f, masses_f, ids_f, count_f = carry_f[:5]
+            ok, bits, needs, done, need_m, moved_m = carry_f[5:11]
+            return (
+                (state_f, acc_f, *carry_f[11:], masses_f, ids_f, count_f)
+                + _mesh_verdict(ok, bits, needs, done, axis_name=axis)
+                + (need_m, moved_m)
+            )
+
+        spec = P(axis)
+        rows = 5 if not scale_carry else 6
+        if not scale_carry:
+
+            def body(
+                state0: Array,
+                acc0: Array,
+                masses0: Array,
+                ids0: Array,
+                count0: Array,
+                splitters: Array,
+                dt: Array,
+                params: Any,
+            ) -> tuple:
+                return segment(
+                    state0, acc0, None, masses0, ids0, count0, splitters, dt, params
+                )
+
+        else:
+
+            def body(  # type: ignore[misc]
+                state0: Array,
+                acc0: Array,
+                fb0: Array,
+                masses0: Array,
+                ids0: Array,
+                count0: Array,
+                splitters: Array,
+                dt: Array,
+                params: Any,
+            ) -> tuple:
+                return segment(
+                    state0, acc0, fb0, masses0, ids0, count0, splitters, dt, params
+                )
+
+        return jax.jit(
+            jax.shard_map(
+                body,
+                mesh=self.mesh,
+                in_specs=(spec,) * rows + (P(), P(), P()),
+                out_specs=(spec,) * rows + (P(),) * 6,
+                check_vma=False,
+            ),
+            donate_argnums=tuple(range(rows)) if self.donate else (),
+        )
+
     def _repartition_program(self) -> Callable:
         """The mesh repartition of the packed state, cached.
 
@@ -1271,6 +1568,11 @@ class MeshSegmentRunner:
         the next segment's first drift and kick read the acceleration the last one
         ended with, row by row. Not donated: the ragged exchange's outputs must not
         alias its inputs.
+
+        Under ``migrate=True`` the decomposition box is the FORCE's
+        (:func:`_force_box_cubic`; the migration's cuts live there) and the program
+        also returns the cuts of the new ownership
+        (:func:`~jaccpot.distributed.migration.splitters_shard`) after ``diag``.
 
         Returns
         -------
@@ -1281,9 +1583,11 @@ class MeshSegmentRunner:
             -> (state, acceleration, f_b, masses, ids, count, diag)`` (the next
             force's thresholds are its particles', wherever they now live).
         """
+        from jaccpot.distributed.migration import splitters_shard
         from jaccpot.distributed.rollout import _repartition_shard
 
         scale_carry = self.scale_carry
+        migrate, cubic = self.migrate, self._migration_cubic
         key = (
             "mesh_repartition",
             tuple(int(d.id) for d in self.devices),
@@ -1292,6 +1596,7 @@ class MeshSegmentRunner:
             self.num_samples,
             str(self.state.state.dtype),
             *(("force_scale",) if scale_carry else ()),
+            *(("migrate", cubic) if migrate else ()),
         )
         cache = _programs_of(self.force.cache_owner)
         program = cache.get(key)
@@ -1319,8 +1624,12 @@ class MeshSegmentRunner:
                 axis_name=axis,
                 acceleration=acc,
                 **({} if f_b is None else {"force_scale": f_b}),
+                **({"cubic": cubic} if migrate else {}),
             )
-            return (jnp.stack([x, v], axis=1), a, *routed, m, i, c, diag)
+            out = (jnp.stack([x, v], axis=1), a, *routed, m, i, c, diag)
+            if not migrate:
+                return out
+            return out + (splitters_shard(x, c, cubic=cubic, axis_name=axis),)
 
         spec = P(axis)
         diag_spec = {
@@ -1355,7 +1664,7 @@ class MeshSegmentRunner:
                 body,
                 mesh=self.mesh,
                 in_specs=(spec,) * arrays,
-                out_specs=(spec,) * arrays + (diag_spec,),
+                out_specs=(spec,) * arrays + (diag_spec,) + ((P(),) if migrate else ()),
                 check_vma=False,
             )
         )
@@ -1379,6 +1688,9 @@ class MeshSegmentRunner:
         tuple[MeshState, dict]
             The repartitioned state and the diagnostics on the host.
         """
+        if self.migrate and self.splitters is not None:
+            # exact ranges already: even cuts and a migration to them
+            return self._rebalance(state)
         acc = state.acceleration
         if acc is None:
             acc = jnp.zeros(state.state.shape[:1] + (3,), state.state.dtype)
@@ -1395,6 +1707,11 @@ class MeshSegmentRunner:
         out = self._repartition_program()(
             state.state, acc, *scale, state.masses, state.ids, state.count
         )
+        if self.migrate:
+            # the new ownership's cuts, which every migration until the next
+            # repartition keeps
+            self.splitters = out[-1]
+            out = out[:-1]
         x, a = out[:2]
         f_b_new = out[2] if self.scale_carry else None
         m, i, c, diag = out[-4:]
@@ -1441,7 +1758,9 @@ class MeshSegmentRunner:
         ``s`` in :func:`_drift_probe_steps` -- the drift alone, which is what moves
         the particles across the cuts (``a dt^2 / 2`` adds ~1e-3 of it at a
         stable step) -- with the ``"measure"`` program, compiled for the force's
-        current hook, and max-es them over the probes.
+        current hook, and max-es them over the probes. Under ``migrate=True`` each
+        probe is migrated to the cuts first (:meth:`_migrated`), as every force of
+        the segment is.
 
         Parameters
         ----------
@@ -1468,16 +1787,24 @@ class MeshSegmentRunner:
         step = jnp.asarray(dt, s.state.dtype)
         worst: Optional[np.ndarray] = None
         for probe in _drift_probe_steps(int(steps)):
-            moved = _drifted(s.state, step * probe)
+            moved = MeshState(
+                state=_drifted(s.state, step * probe),
+                masses=s.masses,
+                ids=s.ids,
+                count=s.count,
+                force_scale=s.force_scale,
+            )
+            if self.migrate:
+                moved = self._migrated(moved)
             out = self._call(
                 "measure",
                 0,
                 None,
-                moved,
-                s.masses,
-                s.count,
-                s.ids,
-                *self._scale_args(s),
+                moved.state,
+                moved.masses,
+                moved.count,
+                moved.ids,
+                *self._scale_args(moved),
             )
             bits, needs = jax.device_get(out[-2:])
             del out, moved
@@ -1486,6 +1813,291 @@ class MeshSegmentRunner:
             cross = np.asarray(needs, np.int64)[len(NEEDS_FIELDS) :]
             worst = cross if worst is None else np.maximum(worst, cross)
         return worst
+
+    def _migration_program(self, kind: str, migration_cap: int = 0) -> Callable:
+        """The standalone migration programs (sizing, probes, rebalance), cached.
+
+        Parameters
+        ----------
+        kind : str
+            ``"need"``: ``(state, count, splitters) -> (need, moved)``, what a
+            migration at the state's positions would move
+            (:func:`~jaccpot.distributed.migration.migration_need_shard`);
+            ``"cuts"``: ``(state, count) -> splitters``, the even cuts of an
+            exact-range ownership
+            (:func:`~jaccpot.distributed.migration.balanced_splitters_shard`);
+            ``"move"``: ``(state, masses, ids, count, [f_b,] splitters) ->
+            (state, masses, ids, count, [f_b,] need, moved, bits)``, the migration
+            itself with a buffer of ``migration_cap`` rows and no acceleration
+            (the cross sizing's probes measure a force); ``"rebalance"``: the same
+            with the carried acceleration after the state, ``(state, acc, ...)
+            -> (state, acc, ...)``.
+        migration_cap : int
+            ``"move"``'s and ``"rebalance"``'s buffer.
+
+        Returns
+        -------
+        Callable
+            The jitted ``shard_map`` program.
+        """
+        from jaccpot.distributed.migration import (
+            balanced_splitters_shard,
+            migrate_shard,
+            migration_need_shard,
+        )
+
+        scale = self.scale_carry and kind in ("move", "rebalance")
+        with_acc = kind == "rebalance"
+        key = (
+            "mesh_migration",
+            kind,
+            int(migration_cap),
+            tuple(int(d.id) for d in self.devices),
+            self.axis_name,
+            self.cap,
+            str(self.state.state.dtype),
+            self._migration_cubic,
+            scale,
+        )
+        cache = _programs_of(self.force.cache_owner)
+        program = cache.get(key)
+        if program is not None:
+            return program
+        axis, cubic, spec = self.axis_name, self._migration_cubic, P(self.axis_name)
+        if kind == "need":
+
+            def need(state: Array, count: Array, splitters: Array) -> tuple:
+                return migration_need_shard(
+                    state[:, 0], count, splitters, cubic=cubic, axis_name=axis
+                )
+
+            mapped = jax.shard_map(
+                need,
+                mesh=self.mesh,
+                in_specs=(spec, spec, P()),
+                out_specs=(P(), P()),
+                check_vma=False,
+            )
+        elif kind == "cuts":
+
+            def cuts(state: Array, count: Array) -> Array:
+                return balanced_splitters_shard(
+                    state[:, 0], count, cubic=cubic, axis_name=axis
+                )
+
+            mapped = jax.shard_map(
+                cuts,
+                mesh=self.mesh,
+                in_specs=(spec, spec),
+                out_specs=P(),
+                check_vma=False,
+            )
+        else:
+
+            def move(state: Array, *rest: Array) -> tuple:
+                acc = rest[0] if with_acc else None
+                masses, ids, count = rest[int(with_acc) : int(with_acc) + 3]
+                f_b = rest[int(with_acc) + 3] if scale else None
+                x, a, m, i, c, fb, info = migrate_shard(
+                    state,
+                    acc,
+                    masses,
+                    ids,
+                    count,
+                    rest[-1],
+                    migration_cap=int(migration_cap),
+                    cubic=cubic,
+                    force_scale=f_b,
+                    axis_name=axis,
+                )
+                head = (x,) + ((a,) if with_acc else ()) + (m, i, c)
+                head = head + ((fb,) if scale else ())
+                return head + (info["need"], info["moved"], info["bits"])
+
+            rows = 4 + int(scale) + int(with_acc)
+            mapped = jax.shard_map(
+                move,
+                mesh=self.mesh,
+                in_specs=(spec,) * rows + (P(),),
+                out_specs=(spec,) * rows + (P(),) * 3,
+                check_vma=False,
+            )
+        # the rebalance consumes the edge's rows (a declined migration returns
+        # them unchanged), so its outputs can take their buffers: one copy of the
+        # rows less at the run's peak
+        donate = tuple(range(rows)) if kind == "rebalance" and self.donate else ()
+        program = jax.jit(mapped, donate_argnums=donate)
+        cache[key] = program
+        return program
+
+    def _rebalance(self, state: MeshState) -> tuple[MeshState, dict]:
+        """The repartition between segments under migration: even cuts, then a move.
+
+        At a segment edge every device's rows are an exact Morton range in the
+        force's box of the current positions (the last force's: a kick moves no
+        position), so the even cuts are read off the ranks
+        (:func:`~jaccpot.distributed.migration.balanced_splitters_shard`) and a
+        migration to them moves only the rows that change owner, through a buffer
+        sized to its exact need -- not ``sfc_repartition``, whose sample sort
+        cannot rebalance exact ranges and whose exchange holds every row
+        (cap-sized buffers: the run's peak once the migration shrank the cross
+        field's; 8e6 Plummer on two A100s, 1.75 GB per device against 1.66-1.69
+        GB in the segments).
+
+        Parameters
+        ----------
+        state : MeshState
+            The state at a segment edge, its acceleration computed.
+
+        Returns
+        -------
+        tuple[MeshState, dict]
+            The rebalanced state and ``_repartition``'s diagnostics
+            (``declined``, ``recv_counts`` = the new counts, ``sent_off_device``
+            on device 0, ``max_util``).
+        """
+        from jaccpot.distributed.migration import OVERFLOW_SHARD, migration_cap_for_need
+
+        cuts = self._migration_program("cuts")(state.state, state.count)
+        need, _ = self._migration_program("need")(state.state, state.count, cuts)
+        # at least the segments' buffer: one program for every rebalance that
+        # fits it (most of them, once the first has evened the counts)
+        size = max(
+            int(self.migration_cap or 0),
+            migration_cap_for_need(int(jax.device_get(need)), self.cap),
+        )
+        acc = state.acceleration
+        if acc is None:
+            acc = jax.device_put(
+                jnp.zeros(state.state.shape[:1] + (3,), state.state.dtype),
+                state.state.sharding,
+            )
+        scale: tuple = ()
+        if self.scale_carry:
+            f_b = state.force_scale
+            if f_b is None:
+                f_b = jax.device_put(
+                    jnp.zeros(state.state.shape[:1], state.state.dtype),
+                    state.masses.sharding,
+                )
+            scale = (f_b,)
+        out = self._migration_program("rebalance", size)(
+            state.state, acc, state.masses, state.ids, state.count, *scale, cuts
+        )
+        moved, bits = (int(v) for v in jax.device_get(out[-2:]))
+        declined = bool(bits & OVERFLOW_SHARD)
+        if not declined:
+            # (even cuts cannot overfill a shard; declined, the rows came back
+            # unchanged and the old cuts stand)
+            self.splitters = cuts
+        counts = np.asarray(out[4])
+        sent = np.zeros(self.ndev, np.int64)
+        sent[0] = moved
+        routed = MeshState(
+            state=out[0],
+            masses=out[2],
+            ids=out[3],
+            count=out[4],
+            acceleration=None if state.acceleration is None else out[1],
+            force_scale=(
+                out[5] if self.scale_carry and state.force_scale is not None else None
+            ),
+        )
+        return routed, {
+            "declined": np.full(self.ndev, declined),
+            "recv_counts": counts[None].repeat(self.ndev, 0),
+            "sent_off_device": sent,
+            "max_util": np.full(self.ndev, counts.max() / self.cap, np.float32),
+        }
+
+    def _migration_need(self, state: MeshState) -> int:
+        """The most rows a device would send or receive migrating ``state``.
+
+        Parameters
+        ----------
+        state : MeshState
+            Positions (drifted) in the current ownership.
+
+        Returns
+        -------
+        int
+            The need (host).
+        """
+        need, _ = self._migration_program("need")(
+            state.state, state.count, self.splitters
+        )
+        return int(jax.device_get(need))
+
+    def _migrated(self, state: MeshState) -> MeshState:
+        """``state`` migrated to the cuts, through a buffer its own need sizes.
+
+        For the cross sizing's drifted probes (:meth:`_measure_cross_drifted`):
+        the need first (:meth:`_migration_need`), then the migration with
+        :func:`~jaccpot.distributed.migration.migration_cap_for_need`'s buffer for
+        it (one compile per size), so it is never declined.
+
+        Parameters
+        ----------
+        state : MeshState
+            The drifted state (no acceleration moves; ``force_scale`` does).
+
+        Returns
+        -------
+        MeshState
+            The migrated rows, without acceleration.
+
+        Raises
+        ------
+        RuntimeError
+            If the migration would overfill a device's shard (``cap``).
+        """
+        from jaccpot.distributed.migration import OVERFLOW_SHARD, migration_cap_for_need
+
+        size = migration_cap_for_need(self._migration_need(state), self.cap)
+        scale = (state.force_scale,) if self.scale_carry else ()
+        if self.scale_carry and state.force_scale is None:
+            scale = (self.force.force_scale_seed,)
+        out = self._migration_program("move", size)(
+            state.state, state.masses, state.ids, state.count, *scale, self.splitters
+        )
+        if int(jax.device_get(out[-1])) & OVERFLOW_SHARD:
+            raise RuntimeError(
+                f"migrate=True: a drifted probe's migration would overfill a "
+                f"device's shard (cap={self.cap}); raise the shard capacity"
+            )
+        return MeshState(
+            state=out[0],
+            masses=out[1],
+            ids=out[2],
+            count=out[3],
+            force_scale=out[4] if self.scale_carry else None,
+        )
+
+    def _size_migration(self, dt: Any) -> None:
+        """Size ``migration_cap="auto"`` from one step's drift at the current state.
+
+        ``migration_cap_for_need`` of the rows the migration after one step's
+        drift (``x + v dt``) would move: the boundary flux per step, which is
+        steady; the factor 2 above it and the retry's exact re-plan cover the
+        rest. Runs once, at the first segment.
+
+        Parameters
+        ----------
+        dt : Any
+            The time step.
+        """
+        from jaccpot.distributed.migration import migration_cap_for_need
+
+        s = self.state
+        moved = MeshState(
+            state=_drifted(s.state, jnp.asarray(dt, s.state.dtype)),
+            masses=s.masses,
+            ids=s.ids,
+            count=s.count,
+        )
+        self.migration_cap = migration_cap_for_need(
+            self._migration_need(moved), self.cap
+        )
 
     def _scale_args(self, state: MeshState) -> tuple:
         """The start program's ``f_b`` argument: the carried one, else the seed.
@@ -1632,6 +2244,9 @@ class MeshSegmentRunner:
         start = state.acceleration is None or key != self._acceleration_key
         if k == 0 and not start:
             return SegmentReport(segment=n, steps=0, start_force=False)
+        if k > 0 and self.migrate and self.migration_cap is None:
+            # migration_cap="auto": one step's drift says how many rows move
+            self._size_migration(dt)
         if k > 0 and getattr(self.force, "needs_drift_sizing", False):
             # cross_caps="auto" was sized at the start positions; the first
             # segment's dt sizes it at the drifted ones too
@@ -1656,15 +2271,25 @@ class MeshSegmentRunner:
         scale_now: tuple = self._scale_args(state)
         retry_enabled = env_flag("JACCPOT_STRICT_SEGMENT_RETRY", True)
         start_host: Any = None
+        rows_host: tuple = ()
         if k > 0 and self.donate and retry_enabled:
             # the segment consumes its start state, and a retry re-runs the segment
             # from it: one copy per segment, off the device (on a GPU asynchronous,
             # into pinned memory), as strict_run_v2's particle carry keeps it
             start_host = host_copy(state.state)
+            if self.migrate:
+                # a migrating segment also consumes the rows' masses, ids, counts
+                rows_host = tuple(
+                    host_copy(a) for a in (state.masses, state.ids, state.count)
+                )
         state_new = state.state
+        rows_new = (state.masses, state.ids, state.count)
         acc_new: Optional[Array] = None
         scale_new: tuple = ()
         retries, tree_first = 0, False
+        # the force's own policy counts its retries; a migration re-plan is exact
+        force_retries = 0
+        migrated_h, migration_need_h = 0, 0
         failures: list = []
         while True:
             consumed = False
@@ -1688,7 +2313,32 @@ class MeshSegmentRunner:
                 if k == 0 and bool(ok_h):
                     acc_new, scale_new = acceleration, scale_now
                     break
-            if k > 0 and (not start or bool(ok_h)):
+            if k > 0 and (not start or bool(ok_h)) and self.migrate:
+                outputs = self._call(
+                    "segment",
+                    k,
+                    external_params,
+                    state.state,
+                    acceleration,
+                    *scale_now,
+                    state.masses,
+                    state.ids,
+                    state.count,
+                    self.splitters,
+                    jnp.asarray(dt, state.state.dtype),
+                )
+                state_new, acc_new = outputs[:2]
+                scale_new = tuple(outputs[2:-9])
+                rows_new = tuple(outputs[-9:-6])
+                # the segment's one host sync
+                ok_h, bits_h, needs_h, done_h, migration_need_h, migrated_h = (
+                    jax.device_get(outputs[-6:])
+                )
+                del outputs
+                consumed = self.donate
+                if bool(ok_h):
+                    break
+            elif k > 0 and (not start or bool(ok_h)):
                 outputs = self._call(
                     "segment",
                     k,
@@ -1719,15 +2369,23 @@ class MeshSegmentRunner:
                 dict(bits=int(bits_h), needs=needs_np.tolist(), done=int(done_h))
             )
             where = f"segment {n} ({int(done_h)} of {k} steps fitted)"
-            mode = (
-                self.force.retry_mode(needs_np, retries, tree_first)
-                if retry_enabled
-                else None
+            migration_failed = self.migrate and self._migration_failed(
+                int(bits_h), int(migration_need_h), where, retry_enabled
             )
+            if migration_failed:
+                failures[-1]["migration_need"] = int(migration_need_h)
+                mode = "migration"
+            else:
+                mode = (
+                    self.force.retry_mode(needs_np, force_retries, tree_first)
+                    if retry_enabled
+                    else None
+                )
+            force_failures = [f for f in failures[:-1] if "migration_need" not in f]
             if (
                 mode is None
                 and retry_enabled
-                and _retry_made_progress(needs_np, int(done_h), failures[:-1])
+                and _retry_made_progress(needs_np, int(done_h), force_failures)
             ):
                 # PROGRESS (the single card's `_segment_retry_next`): this re-run
                 # fitted more steps than every earlier attempt, or it failed at the
@@ -1744,27 +2402,41 @@ class MeshSegmentRunner:
                 mode = "full" if tree_now else "walk"
             if mode is None:
                 self.force.raise_overflow(
-                    needs_np, int(bits_h), retries=retries, where=where
+                    needs_np, int(bits_h), retries=force_retries, where=where
                 )
-            if retries == 0:
-                tree_first = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
+            if mode != "migration":
+                if force_retries == 0:
+                    tree_first = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
+                force_retries += 1
             retries += 1
             acceleration = acc_new = None
             scale_new = ()
             state_new = state.state
             if consumed:
                 assert start_host is not None
+                sharding = state.masses.sharding
+                if rows_host:
+                    masses_r, ids_r, count_r = (
+                        jax.device_put(a, sharding) for a in rows_host
+                    )
+                else:
+                    masses_r, ids_r, count_r = state.masses, state.ids, state.count
                 state = MeshState(
-                    state=jax.device_put(start_host, state.masses.sharding),
-                    masses=state.masses,
-                    ids=state.ids,
-                    count=state.count,
+                    state=jax.device_put(start_host, sharding),
+                    masses=masses_r,
+                    ids=ids_r,
+                    count=count_r,
                 )
                 state_new = state.state
-            if not self.force.replan(needs_np, int(bits_h), walk_only=mode == "walk"):
+            rows_new = (state.masses, state.ids, state.count)
+            if mode != "migration" and not self.force.replan(
+                needs_np, int(bits_h), walk_only=mode == "walk"
+            ):
                 self.force.raise_overflow(
-                    needs_np, int(bits_h), retries=retries - 1, where=where
+                    needs_np, int(bits_h), retries=force_retries - 1, where=where
                 )
+            # a migration re-plan re-prepares too: under the criterion the start
+            # force's seed is the prepare's, in the segment start's row order
             self.force.prepare(state.state[:, 0], state.masses, state.count)
             # the start force again, with the grown capacities, as a fresh run's:
             # under the criterion from the re-prepare's own seed at the segment's
@@ -1781,9 +2453,9 @@ class MeshSegmentRunner:
             start = True
         self.state = MeshState(
             state=state_new,
-            masses=state.masses,
-            ids=state.ids,
-            count=state.count,
+            masses=rows_new[0],
+            ids=rows_new[1],
+            count=rows_new[2],
             acceleration=acc_new,
             force_scale=scale_new[0] if scale_new else None,
         )
@@ -1799,14 +2471,78 @@ class MeshSegmentRunner:
             repartitioned=repartitioned,
             declined=bool(diag["declined"][0]) if diag else False,
             sent_off_device=int(diag["sent_off_device"].sum()) if diag else 0,
-            counts=[int(c) for c in np.asarray(state.count)],
+            counts=[int(c) for c in np.asarray(self.state.count)],
             bits=int(bits_h),
             needs=np.asarray(needs_h).tolist(),
             failures=failures,
+            migrated=int(migrated_h),
+            migration_need=int(migration_need_h),
         )
         if k > 0:
             self.reports.append(report)
         return report
+
+    def _migration_failed(
+        self, bits: int, need: int, where: str, retry_enabled: bool
+    ) -> bool:
+        """Whether a failed attempt was its migration's, re-planned here.
+
+        The first failing step of an attempt is either a declined migration or
+        the force's (the migrating segment folds no force verdict after a decline).
+        :data:`~jaccpot.distributed.migration.OVERFLOW_MIGRATION` re-sizes the
+        buffer from the exact need
+        (:func:`~jaccpot.distributed.migration.migration_cap_for_need`; it always
+        grows, at most to the shard's ``cap``) and the caller re-runs the segment;
+        :data:`~jaccpot.distributed.migration.OVERFLOW_SHARD` (a device's rows past
+        its shard) has no re-plan and raises.
+
+        Parameters
+        ----------
+        bits : int
+            The attempt's bits (mesh-reduced).
+        need : int
+            Its migration need (rows).
+        where : str
+            Which segment, for the message.
+        retry_enabled : bool
+            ``JACCPOT_STRICT_SEGMENT_RETRY``.
+
+        Returns
+        -------
+        bool
+            ``True`` when the buffer was re-sized for a re-run; ``False`` when the
+            failure was the force's.
+
+        Raises
+        ------
+        RuntimeError
+            On a shard overflow, or a buffer overflow with the retry turned off.
+        """
+        from jaccpot.distributed.migration import (
+            OVERFLOW_MIGRATION,
+            OVERFLOW_SHARD,
+            migration_cap_for_need,
+        )
+
+        if bits & OVERFLOW_SHARD:
+            raise RuntimeError(
+                f"mesh {where}: a migration would leave a device with more rows "
+                f"than its shard holds (cap={self.cap}; bits {bits:#x}): the "
+                "domains' counts drifted past the headroom within the segment. "
+                "Give the shards more headroom (cap) or repartition more often."
+            )
+        if not bits & OVERFLOW_MIGRATION:
+            return False
+        if not retry_enabled:
+            raise RuntimeError(
+                f"mesh {where}: the migration needed {need} rows per device, its "
+                f"buffer holds {self.migration_cap} (OVERFLOW_MIGRATION), and "
+                "JACCPOT_STRICT_SEGMENT_RETRY=0 turns the re-plan off"
+            )
+        self.migration_cap = max(
+            int(self.migration_cap or 0), migration_cap_for_need(need, self.cap)
+        )
+        return True
 
     def gather(self) -> dict:
         """The state on the host, by global id, with identity checked.

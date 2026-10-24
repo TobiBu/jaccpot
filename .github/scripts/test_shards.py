@@ -73,6 +73,7 @@ _MUTUAL_DISTRIBUTED = "tests/integration/test_mutual_distributed.py"
 _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
+_SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
 _MUTUAL_STATIC_DEVICE = "tests/integration/test_mutual_fmm_static_device.py"
 # The fused strict lane's CPU tests (every case a full fused-lane solve, 60-245 s on
 # CPU) left the integration shard in 2026-10 (S3): with them it ran 42 of its 50
@@ -135,10 +136,15 @@ SHARDS: dict[str, list[str]] = {
         "-m",
         "distributed_segment",
         f"--ignore={_SEGMENT_CRITERION}",
+        f"--ignore={_SEGMENT_MIGRATION}",
     ],
     # the same runner under Dehnen's error criterion (S12), a job of its own: with it
     # the segment job took 27 of its 40 minutes on CI
     "distributed-segment-criterion": [_SEGMENT_CRITERION, "-m", "distributed_segment"],
+    # the runner's migration to fixed cuts on the fused force (S11 session 2, track
+    # I): ~5 min of compilation on a loaded host, kept out of the segment job, which
+    # its other S11 session 2 cases bring to ~24 of its 40 minutes
+    "distributed-segment-migration": [_SEGMENT_MIGRATION, "-m", "distributed_segment"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -150,6 +156,7 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-criterion",
     "distributed-segment",
     "distributed-segment-criterion",
+    "distributed-segment-migration",
     "nornax-distributed",
 )
 GATED_PATHS: tuple[str, ...] = (

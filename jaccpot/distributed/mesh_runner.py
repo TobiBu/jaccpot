@@ -511,7 +511,9 @@ class MeshBackend:
             axis_name=self.axis_name,
         )
 
-    def _segment_runner(self, layout: Any, force: Any) -> Any:
+    def _segment_runner(
+        self, layout: Any, force: Any, migration: Optional[dict] = None
+    ) -> Any:
         """A :class:`~jaccpot.distributed.segment.MeshSegmentRunner` at ``layout``.
 
         Parameters
@@ -521,6 +523,10 @@ class MeshBackend:
         force : Any
             The force; prepared here (and the cross capacities sized, under
             ``cross_caps="auto"``).
+        migration : Optional[dict]
+            ``migrate=True`` on a same-mesh restore: the file's ``splitters`` (the
+            cuts of ``layout``'s ownership) and ``migration_cap``; ``None``: the
+            configuration's buffer, the cuts chosen by the runner's repartition.
 
         Returns
         -------
@@ -529,6 +535,8 @@ class MeshBackend:
         """
         from jaccpot.distributed.segment import MeshSegmentRunner
 
+        migration = migration or {}
+        cap = migration.get("migration_cap")
         return MeshSegmentRunner(
             self.mesh,
             layout,
@@ -538,6 +546,9 @@ class MeshBackend:
             num_samples=int(self.config.num_samples),
             donate=True,
             axis_name=self.axis_name,
+            migrate=bool(self.config.migrate),
+            migration_cap=self.config.migration_cap if cap is None else int(cap),
+            splitters=migration.get("splitters"),
         )
 
     def _cap(self, num_particles: int) -> int:
@@ -760,7 +771,9 @@ class MeshBackend:
             ``cross_caps``, ``cross_needs_measured`` (the fused force's; ``None``
             for a force without them), ``mesh`` (``ndev``, ``cap``, ``counts``),
             ``repartition`` (``repartitioned``, ``declined``, ``sent_off_device``
-            of the repartition before the segment; ``None`` at step 0) and
+            of the repartition before the segment; ``None`` at step 0),
+            ``migration`` (``migrate=True``: the buffer's ``cap``, the segment's
+            ``migrated`` rows and per-step ``need``; ``None`` otherwise) and
             ``bits``.
         """
         from jaccpot.production import _jsonable
@@ -799,6 +812,15 @@ class MeshBackend:
                     "repartitioned": bool(report.repartitioned),
                     "declined": bool(report.declined),
                     "sent_off_device": int(report.sent_off_device),
+                }
+            ),
+            "migration": (
+                None
+                if not getattr(msr, "migrate", False)
+                else {
+                    "cap": msr.migration_cap,
+                    "migrated": None if report is None else int(report.migrated),
+                    "need": None if report is None else int(report.migration_need),
                 }
             ),
             "bits": None if report is None else int(report.bits),
@@ -891,6 +913,16 @@ class MeshBackend:
                 "num_samples": int(msr.num_samples),
                 "repartition_every": int(msr.repartition_every),
                 "force": _qualname(type(force)),
+                # migrate=True: the cuts of this layout's ownership and the buffer,
+                # which a same-mesh restore keeps (the cuts are uint64 codes)
+                "migration": (
+                    None
+                    if not getattr(msr, "migrate", False)
+                    else {
+                        "splitters": [int(v) for v in _host(msr.splitters)],
+                        "migration_cap": msr.migration_cap,
+                    }
+                ),
             },
             "plan": current["plan"],
             "template_shapes": None if template is None else _template_shapes(template),
@@ -991,7 +1023,15 @@ class MeshBackend:
         )
         if same_layout:
             layout = self._layout_from_file(arrays, int(saved["cap"]), acceleration)
-            msr = self._segment_runner(layout, self._restored_force(meta["plan"]))
+            migration = saved.get("migration")
+            if bool(migration) != bool(self.config.migrate):
+                # the cuts (or their absence) are part of the trajectory
+                mismatches.append("migration")
+            msr = self._segment_runner(
+                layout,
+                self._restored_force(meta["plan"]),
+                migration if self.config.migrate else None,
+            )
             self._install_plan(msr.force, meta)
         else:
             mismatches.append("mesh_layout")

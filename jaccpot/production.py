@@ -601,6 +601,15 @@ class MeshRunConfig:
         :class:`~jaccpot.distributed.segment.MeshSegmentRunner` protocol
         (:class:`~jaccpot.distributed.segment.DirectMeshForce` in tests) is used
         as given.
+    migrate : bool
+        Migrate to fixed cuts after every drift (``MeshSegmentRunner(migrate=True)``,
+        :mod:`jaccpot.distributed.migration`): every force on exact Morton domains in
+        the force's box, the repartitions in that box choosing the cuts. Off by
+        default (opt-in, S11 session 2). A restart on the same mesh keeps the
+        file's cuts and buffer.
+    migration_cap : Any
+        ``migrate=True``: the migration buffer's rows per device, ``"auto"`` (the
+        default: sized from one step's drift at the first segment) or an int.
     """
 
     mesh: Any
@@ -610,6 +619,8 @@ class MeshRunConfig:
     num_samples: int = 256
     cross_caps: Any = "auto"
     force: Any = None
+    migrate: bool = False
+    migration_cap: Any = "auto"
 
     def __post_init__(self) -> None:
         if len(tuple(getattr(self.mesh, "axis_names", ()))) != 1:
@@ -625,6 +636,11 @@ class MeshRunConfig:
             raise ValueError("MeshRunConfig.repartition_every must be >= 0")
         if int(self.num_samples) < 1:
             raise ValueError("MeshRunConfig.num_samples must be >= 1")
+        if self.migration_cap != "auto" and int(self.migration_cap) < 1:
+            raise ValueError(
+                f"MeshRunConfig.migration_cap must be 'auto' or >= 1, got "
+                f"{self.migration_cap!r}"
+            )
 
 
 # --------------------------------------------------------------------------
