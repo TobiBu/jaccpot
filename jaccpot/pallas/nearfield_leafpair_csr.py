@@ -699,6 +699,7 @@ def nearfield_leafpair_csr_pallas(
     num_target_leaves: int | None = None,
     softening_kernel: Optional[str] = None,
     with_force_scale: bool = False,
+    ordered_rows: bool = False,
 ) -> Array:
     """Leaf-pair near field from a neighbour CSR, one Pallas program per row chunk.
 
@@ -759,6 +760,14 @@ def nearfield_leafpair_csr_pallas(
         ``with_force_scale`` lane) instead of the potential: the multi-GPU lane's
         cross-domain near term under ``mac_type='dehnen_error'``. ``False``
         (default): the potential, the kernel unchanged. Static.
+    ordered_rows : bool
+        Sum each row's chunk partials in one fixed order
+        (:func:`_sum_chunks_in_fixed_order`) instead of the ``segment_sum``, whose
+        order within a row of three or more chunks is the atomics' on a GPU: the
+        same bits on every run. The table must be built over exactly the
+        ``num_target_leaves`` target rows (each owns a first chunk). ``False``
+        (default): the ``segment_sum``. For the multi-GPU lane's cross near term
+        (:func:`jaccpot.distributed.cross.cross_near_acceleration`). Static.
 
     Returns
     -------
@@ -900,17 +909,100 @@ def nearfield_leafpair_csr_pallas(
             f"num_target_leaves must lie in [0, {num_leaves}], got {n_tgt}"
         )
     seg = jnp.where(chunks.leaf < 0, jnp.asarray(n_tgt, idx), chunks.leaf)
-    out = jax.ops.segment_sum(
-        partials,
-        seg,
-        num_segments=n_tgt,
-        indices_are_sorted=True,
-        mode=jax.lax.GatherScatterMode.FILL_OR_DROP,
-    )
+    if ordered_rows:
+        out = _sum_chunks_in_fixed_order(partials, seg, chunks.is_first, n_tgt)
+    else:
+        out = jax.ops.segment_sum(
+            partials,
+            seg,
+            num_segments=n_tgt,
+            indices_are_sorted=True,
+            mode=jax.lax.GatherScatterMode.FILL_OR_DROP,
+        )
     out = out.astype(dtype)
     if pad_t:
         out = out[:, :leaf_width, :]
     return out
+
+
+def _sum_chunks_in_fixed_order(
+    partials: Array, rows: Array, is_first: Array, num_rows: int
+) -> Array:
+    """Each row's chunk partials summed in one fixed order, without a colliding scatter.
+
+    ``jax.ops.segment_sum`` over the chunk table is ONE scatter-add, and on a GPU
+    the order in which a row's chunks land is the atomics': a row of three or more
+    chunks (more than ``2 * chunk`` neighbours) rounds differently run to run (two
+    addends commute exactly). The chunks of a row are consecutive in the table
+    (:func:`build_leafpair_chunk_table`): each row's first chunk is gathered, its
+    later chunks -- compacted in table order into the table's slack, at most
+    ``capacity - num_rows`` of them when every row owns a first chunk -- are summed
+    by one segmented ``associative_scan`` (a fixed tree of additions, the same on
+    every backend and run), and that sum is added to the first. A row of one or two
+    chunks keeps the ``segment_sum``'s bits; a longer one is ``p_0 + (p_1 + ...
+    + p_k)`` in the scan's tree order. No loop and no host round trip: a traced
+    loop over the ranks cost one device-to-host sync per rank (6.5-7x the
+    ``segment_sum``'s median time on a shared A100).
+
+    Parameters
+    ----------
+    partials : Array
+        ``(capacity, W, k)`` one partial per chunk.
+    rows : Array
+        ``(capacity,)`` each chunk's row; ``num_rows`` for a chunk to drop.
+    is_first : Array
+        ``(capacity,)`` nonzero on each row's first chunk.
+    num_rows : int
+        Output rows; the table is built over exactly these. Static.
+
+    Returns
+    -------
+    Array
+        ``(num_rows, W, k)``, in ``partials``' dtype.
+    """
+    idx = rows.dtype
+    capacity = int(rows.shape[0])
+    c = jnp.arange(capacity, dtype=idx)
+    live = rows < num_rows
+    rank = c - lax.cummax(jnp.where(is_first > 0, c, jnp.asarray(0, idx)))
+    zero = jnp.zeros((), partials.dtype)
+    first = (
+        jnp.full((num_rows,), capacity, idx)
+        .at[jnp.where(live & (rank == 0), rows, num_rows)]
+        .set(c, mode="drop")
+    )
+    out = jnp.where(
+        (first < capacity)[:, None, None],
+        partials[jnp.minimum(first, capacity - 1)],
+        zero,
+    )
+    slack = capacity - int(num_rows)
+    if slack <= 0:
+        return out
+    later = live & (rank > 0)
+    slot = jnp.where(later, jnp.cumsum(later, dtype=idx) - 1, slack)
+    chunk_of = jnp.full((slack,), capacity, idx).at[slot].set(c, mode="drop")
+    held = chunk_of < capacity
+    take = jnp.minimum(chunk_of, capacity - 1)
+    later_rows = jnp.where(held, rows[take], num_rows)
+    values = jnp.where(held[:, None, None], partials[take], zero)
+    change = later_rows[1:] != later_rows[:-1]
+    starts = jnp.concatenate([jnp.ones((1,), bool), change])
+    ends = jnp.concatenate([change, jnp.ones((1,), bool)])
+
+    def segmented_add(
+        a: tuple[Array, Array], b: tuple[Array, Array]
+    ) -> tuple[Array, Array]:
+        # a segment starting in `b` drops everything before it (where, not a
+        # multiply: nothing from another row reaches this one's bits)
+        return a[0] | b[0], jnp.where(b[0][:, None, None], b[1], a[1] + b[1])
+
+    _, summed = lax.associative_scan(segmented_add, (starts, values))
+    # each row's last later chunk holds the row's later sum; rows are distinct
+    tgt = jnp.where(held & ends, later_rows, num_rows)
+    extra = jnp.zeros_like(out).at[tgt].set(summed, mode="drop")
+    has_extra = jnp.zeros((num_rows,), bool).at[tgt].set(True, mode="drop")
+    return jnp.where(has_extra[:, None, None], out + extra, out)
 
 
 def _nearfield_leafpair_csr_sorted_kernel(

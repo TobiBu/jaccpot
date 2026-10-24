@@ -354,6 +354,91 @@ def test_a1_a2_the_template_force_and_chained_segments_bitwise(cpu_fused_lane):
 
 
 # --------------------------------------------------------------------------
+# The cross force is a function of the cross walk's pair SET: on a GPU the Pallas
+# walk emits its pairs in a different order every run.
+# --------------------------------------------------------------------------
+
+
+def _reversed_walk(real, moved):
+    """``cross._symmetric_walk`` with its far and near lists' live prefixes reversed.
+
+    The same pairs in another emission order, as the Pallas walk's atomic cursors
+    hand them out run to run on a GPU; ``moved`` collects, per device and call,
+    how many live far and near slots now hold another pair (a callback: the lists
+    are tracers at trace time).
+    """
+
+    def walk(*args, **kwargs):
+        res = real(*args, **kwargs)
+        lists = {}
+        changed = []
+        for side in ("far", "near"):
+            a, b = getattr(res, f"{side}_a"), getattr(res, f"{side}_b")
+            i = jnp.arange(a.shape[0])
+            count = jnp.minimum(getattr(res, f"{side}_count"), a.shape[0])
+            perm = jnp.where(i < count, count - 1 - i, i)
+            lists[f"{side}_a"], lists[f"{side}_b"] = a[perm], b[perm]
+            changed.append(jnp.sum((i < count) & ((a[perm] != a) | (b[perm] != b))))
+        jax.debug.callback(lambda f, n: moved.append((int(f), int(n))), *changed)
+        return res._replace(**lists)
+
+    return walk
+
+
+def test_the_cross_force_does_not_depend_on_the_walks_emission_order(
+    cpu_fused_lane, monkeypatch
+):
+    """The start force with the cross walk's lists in reverse equals it as emitted.
+
+    On a GPU the Pallas walk returns the same pair set in another order each run;
+    before the cross pairs were put in (target, source) order
+    (``cross._in_pair_order``) every consumer summed a target's cross pairs in
+    that order -- the CSR M2L's rows, the flat M2L's chunks, the cross near
+    kernel's rows -- and the mesh force differed run to run in ~45 % of its
+    components (S11 session 2, track G). Here the order changes on purpose
+    (the CPU walk's own order is fixed) and the force must not move, bitwise,
+    on every live row; the control is that the reversal moved pairs on both
+    devices, far and near."""
+    import jaccpot.distributed.cross as cross
+    from jaccpot.distributed.segment import MeshSegmentRunner
+
+    mesh = _mesh()
+    pos, vel, mass = _ic()
+    kwargs = dict(
+        leaf_size=LEAF, max_order=ORDER, theta=THETA, cross_caps=_cross_caps()
+    )
+    emitted = MeshSegmentRunner.fused(
+        _solver(), mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    emitted.start()
+
+    moved: list = []
+    monkeypatch.setattr(
+        cross, "_symmetric_walk", _reversed_walk(cross._symmetric_walk, moved)
+    )
+    # a solver of its own: the runner's programs are cached on the engine, and
+    # this one must trace the patched walk
+    reversed_ = MeshSegmentRunner.fused(
+        _solver(), mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    reversed_.start()
+    assert len(moved) == NDEV, moved
+    assert all(far > 0 and near > 0 for far, near in moved), moved
+
+    rows = _live_rows(emitted.state.count)
+    np.testing.assert_array_equal(
+        np.asarray(reversed_.state.ids)[rows], np.asarray(emitted.state.ids)[rows]
+    )
+    got = np.asarray(reversed_.state.acceleration)[rows]
+    assert np.all(np.isfinite(got))
+    _assert_bitwise(
+        got,
+        np.asarray(emitted.state.acceleration)[rows],
+        "reversed vs emitted cross walk order",
+    )
+
+
+# --------------------------------------------------------------------------
 # Gate A3: a segment that outgrows its capacities is re-planned at its start, and
 # the re-run equals a fresh run with the final capacities, bitwise.
 # --------------------------------------------------------------------------
