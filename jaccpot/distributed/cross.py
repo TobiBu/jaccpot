@@ -3703,11 +3703,11 @@ def cross_near_acceleration_direct(
     The local leaves are the only targets (``num_target_leaves``), the cross CSR
     their rows in the pair list's (target, source) order, and the self term is
     left out (``include_self=False``): it is in the local force already. A row is
-    one program summed in list order, so the term is a function of the pair set --
-    up to the kernel's ``DIRECT_ROW_LIMIT`` entries; the rest of a longer row is
-    scatter-added in pieces, in an unspecified order once a row has two of them.
-    Single precision accumulation (``accum="input"``), as the direct kernel;
-    ``"wide"`` is the table layout's.
+    one program summed in list order up to the kernel's ``DIRECT_ROW_LIMIT``
+    entries, and the rest of a longer row in pieces summed in one fixed order
+    (``ordered_rest``), so the term is a function of the pair set. Single precision
+    accumulation (``accum="input"``), as the direct kernel; ``"wide"`` is the table
+    layout's.
 
     Parameters
     ----------
@@ -3830,6 +3830,10 @@ def cross_near_acceleration_direct(
         softening_kernel=softening_kernel,
         include_self=False,  # the local self term is already in the force
         num_target_leaves=L,
+        # a row's pieces past the row limit in one fixed order: the disc + bulge
+        # at 2e6 on two A100s has rows of up to 4,225 entries, and the pieces'
+        # scatter-add left ~1e4 of 6.9e6 acceleration components run-dependent
+        ordered_rest=True,
     )
     # sorted -> input rows: a permutation, one addend per row (no sum)
     perm = jnp.asarray(particle_indices)

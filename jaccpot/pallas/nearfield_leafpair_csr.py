@@ -1732,6 +1732,50 @@ def leafpair_extra_chunk_capacity(edge_capacity: int, chunk: int) -> int:
     return (int(edge_capacity) + chunk - 1) // chunk
 
 
+def _rest_pieces_in_fixed_order(
+    partials: Array, rows: Array, leaf: Array, dropped: int
+) -> tuple[Array, Array]:
+    """A row's remaining pieces summed in one fixed order, each row's sum once.
+
+    The direct kernel's remaining pieces (``row_limit``) come in the table in leaf
+    order, a leaf's pieces consecutive. A segmented ``associative_scan`` over them
+    (a fixed tree of additions, the same every run) leaves each leaf's sum of
+    pieces on its last piece; the other pieces' rows are dropped, so the scatter
+    that follows adds ONE value to each output row. A leaf of one piece keeps its
+    piece's bits.
+
+    Parameters
+    ----------
+    partials : Array
+        ``(capacity, Wpad, num_out)`` one partial per piece.
+    rows : Array
+        ``(capacity, Wpad)`` each piece's output rows, ``dropped`` past its count.
+    leaf : Array
+        ``(capacity,)`` each piece's target leaf, ``-1`` for padding pieces.
+    dropped : int
+        The out-of-range row the scatter drops.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(sums, rows)``: on each leaf's last piece the sum of its pieces, and the
+        rows with every other piece's dropped.
+    """
+    change = leaf[1:] != leaf[:-1]
+    starts = jnp.concatenate([jnp.ones((1,), bool), change])
+    ends = jnp.concatenate([change, jnp.ones((1,), bool)])
+
+    def segmented_add(
+        a: tuple[Array, Array], b: tuple[Array, Array]
+    ) -> tuple[Array, Array]:
+        # a segment starting in `b` drops everything before it
+        return a[0] | b[0], jnp.where(b[0][:, None, None], b[1], a[1] + b[1])
+
+    _, summed = lax.associative_scan(segmented_add, (starts, partials))
+    keep = ends & (leaf >= 0)
+    return summed, jnp.where(keep[:, None], rows, dropped)
+
+
 def nearfield_leafpair_csr_sorted_direct_pallas(
     positions_sorted: Array,
     masses_sorted: Array,
@@ -1758,6 +1802,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     tile_skip: bool | None = None,
     include_self: bool = True,
     num_target_leaves: int | None = None,
+    ordered_rest: bool = False,
 ) -> tuple[Array, Array | None]:
     """The CSR near field straight into particle order: no per-leaf partials.
 
@@ -1865,6 +1910,13 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         CSR's (``offsets`` and ``counts`` hold ``T`` rows); the leaves past them
         are sources only, and their particles' outputs stay zero. ``None``: every
         leaf (the default). Static.
+    ordered_rest : bool
+        Sum a row's remaining pieces (past ``row_limit``) in one fixed order
+        (:func:`_rest_pieces_in_fixed_order`) and add that sum once, instead of
+        scatter-adding every piece: on a GPU the scatter's atomics add the two or
+        more pieces of a row past twice the limit in another order each run. A row
+        of one remaining piece keeps its bits. ``False`` (the default): the
+        scatter. Static.
 
     Returns
     -------
@@ -2031,6 +2083,10 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         tcount = jnp.where(valid, count_i[leaf_safe], 0)
         rows = start_i[leaf_safe][:, None] + lane[None, :]
         rows = jnp.where(lane[None, :] < tcount[:, None], rows, n)  # n = dropped
+        if ordered_rest:
+            partials, rows = _rest_pieces_in_fixed_order(
+                partials, rows, jnp.where(valid, leaf_safe, -1), n
+            )
         return [
             o.at[rows].add(partials[..., comp], mode="drop")
             for comp, o in enumerate(outs_in)
