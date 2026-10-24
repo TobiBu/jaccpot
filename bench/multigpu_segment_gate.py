@@ -498,6 +498,14 @@ def main() -> None:
             for k, v in vars(runner.force.cross_caps).items()
             if isinstance(v, (int, float)) or v is None
         }
+        drifted = getattr(runner.force, "cross_needs_drifted", None)
+        if drifted is not None:
+            # the library's sizing at the first segment's drifted positions
+            from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
+
+            result["cross_needs_drifted"] = dict(
+                zip(CROSS_NEEDS_FIELDS, np.asarray(drifted).tolist())
+            )
         # the force alone (the start program: the template route's force at the
         # current positions), to tell the force from the integrator's overhead
         state = runner.state

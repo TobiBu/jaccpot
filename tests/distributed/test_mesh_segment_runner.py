@@ -482,6 +482,58 @@ def test_an_undersized_cross_capacity_is_replanned_and_equals_a_fresh_run(
     _gathered_equal(retried, fresh)
 
 
+def test_the_cross_capacities_are_sized_at_the_first_segments_drift(cpu_fused_lane):
+    """A decomposition leaves the two domains apart, and the first steps' drift
+    carries each one's boundary particles into cells the other fills: the cross
+    demand grows past what the start positions needed. Here (the cube at 30x the
+    module's speeds) the particles a device ships go 563 at the start -> 896 /
+    1009 / 1039 after 1 / 2 / 3 steps of drift, and the library's start sizing
+    (1024) overflowed at step 3: the first segment retried. The first ``run()``
+    now measures the drifted positions too (``x + s v dt``, s = 1, 2, 4) and sizes
+    from the larger need: no retry, and the same run as one started with those
+    capacities, bitwise -- also when ``start()`` ran first on the start sizing
+    (its force is computed again, as that fresh run computes it)."""
+    from jaccpot.distributed.segment import MeshSegmentRunner
+
+    steps = 4
+    mesh = _mesh()
+    pos, vel, mass = _ic()
+    vel = vel * np.float32(300.0)
+    solver = _solver()
+    kwargs = dict(leaf_size=LEAF, max_order=ORDER, theta=THETA)
+    sized = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    at_start = sized.force.cross_caps
+    shipped = CROSS_NEEDS_FIELDS.index("send_particle_cap")
+    assert sized.force.cross_needs_measured[shipped] < at_start.send_particle_cap
+    report = sized.run(steps, dt=DT)
+    assert report.retries == 0 and report.bits == 0, report
+    final = sized.force.cross_caps
+    drifted = sized.force.cross_needs_drifted
+    assert drifted is not None
+    # the run needed more than the start sizing holds; the drifted probes saw it
+    run_need = report.needs[-len(CROSS_NEEDS_FIELDS) :][shipped]
+    assert run_need > at_start.send_particle_cap, (run_need, vars(at_start))
+    assert drifted[shipped] > at_start.send_particle_cap, drifted
+    assert final.send_particle_cap >= max(run_need, drifted[shipped]), vars(final)
+
+    fresh = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), cross_caps=final, **kwargs
+    )
+    assert fresh.run(steps, dt=DT).retries == 0
+    _gathered_equal(sized, fresh)
+
+    started = MeshSegmentRunner.fused(
+        solver, mesh, _mesh_state(mesh, pos, vel, mass), **kwargs
+    )
+    assert started.start().retries == 0
+    again = started.run(steps, dt=DT)
+    assert again.start_force and again.retries == 0, again
+    assert vars(started.force.cross_caps) == vars(final)
+    _gathered_equal(started, fresh)
+
+
 class _FailsAtStepTwo:
     """A force with no physics that reads its step off a marker particle: row 0 of
     every device starts at x = 0 with v = 1/dt and no acceleration, so after step k
@@ -631,3 +683,149 @@ def test_a_segment_whose_needs_grow_every_step_retries_while_it_progresses():
     )
     assert fresh.run(steps, dt=dt).retries == 0
     _gathered_equal(retried, fresh)
+
+
+def _cross_slot(name):
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    return len(NEEDS_FIELDS) + CROSS_NEEDS_FIELDS.index(name)
+
+
+class _StoppedCrossWalk(_NeedsGrowEveryStep):
+    """A cross walk that STOPS at its first overflow, from the second step on.
+
+    The same drifting particles as :class:`_NeedsGrowEveryStep` (after step ``k``
+    the smallest live x is in ``[k, k + 0.5)``). From step 2 on the cross near list
+    needs ``need`` pairs; a walk with room for ``fit`` stops when it is full, as
+    yggdrax's traced cross walk does, so it reports what it counted -- ``fit`` --
+    with ``walk_lower_bound`` set: a lower bound, not the demand. The re-plan of a
+    lower bound doubles the list (``CrossCapacities.replanned``); the force's own
+    policy allows ONE retry. Every attempt fails at the same step.
+    """
+
+    def __init__(self, fit, need):
+        super().__init__(fit)
+        self.need = int(need)
+
+    def key(self):
+        return ("stopped-cross-walk", self.fit, self.need)
+
+    def shard(self, positions, masses, live, ids):
+        from jaccpot.runtime.fused_topology import OVERFLOW_CROSS
+
+        del masses, ids
+        rows = jnp.arange(positions.shape[0]) < live
+        lowest = jnp.min(jnp.where(rows, positions[:, 0], jnp.inf))
+        step = jnp.floor(jax.lax.pmin(lowest, AXIS)).astype(jnp.int32)
+        over = (step >= 2) & (self.need > self.fit)
+        bits = jnp.where(over, jnp.uint32(OVERFLOW_CROSS), jnp.uint32(0))
+        counted = jnp.where(step >= 2, min(self.need, self.fit), 0)
+        needs = (
+            jnp.zeros((self._direct.needs_size,), jnp.int32)
+            .at[_cross_slot("export_near_cap")]
+            .set(counted)
+            .at[_cross_slot("overflow")]
+            .set(over.astype(jnp.int32))
+            .at[_cross_slot("walk_lower_bound")]
+            .set(over.astype(jnp.int32))
+        )
+        return jnp.zeros_like(positions), bits, needs
+
+    def replan(self, needs, bits, *, walk_only=False):
+        del bits, walk_only
+        needs = np.asarray(needs)
+        counted = int(needs[_cross_slot("export_near_cap")])
+        lower = bool(needs[_cross_slot("walk_lower_bound")])
+        self.replans.append((counted, lower))
+        grown = max(self.fit, -(-3 * counted // 2), 2 * self.fit if lower else 0)
+        grew, self.fit = grown > self.fit, grown
+        return grew
+
+
+def test_a_stopped_cross_walk_retries_at_the_same_step_while_it_needs_more():
+    """PR #469's same-step rule on the mesh. A stopped cross walk's needs are lower
+    bounds, so its re-plan is a doubling, not a measurement, and the re-run fails
+    at the SAME step: no step more fitted, so fix 8's progress rule alone raised
+    after the force's one retry (10 -> 20 pairs of the 100 needed). The runner
+    retries while such a re-run needed more than the lower bounds said -- here
+    20 -> 40 -> 80 -> 160 -- and ends where a fresh run with the final capacity
+    starts, bitwise."""
+    from jaccpot.distributed.segment import MeshSegmentRunner, MeshState
+
+    steps, dt, n, cap = 4, 0.25, 64, 48
+    mesh = _mesh()
+
+    def state():
+        rng = np.random.default_rng(1)
+        pos = rng.uniform(0.0, 0.5, (n, 3))
+        vel = np.zeros((n, 3))
+        vel[:, 0] = 1.0 / dt
+        shard, _ = decompose(
+            mesh, pos, vel, np.full(n, 1.0 / n), cap=cap, num_samples=16
+        )
+        return MeshState.from_shard_state(shard, mesh)
+
+    force = _StoppedCrossWalk(fit=10, need=100)
+    retried = MeshSegmentRunner(mesh, state(), force, num_samples=16)
+    report = retried.run(steps, dt=dt)
+    assert report.retries == 4, report
+    assert [f["done"] for f in report.failures] == [1, 1, 1, 1], report.failures
+    assert force.replans == [(10, True), (20, True), (40, True), (80, True)]
+    assert force.fit == 160 and report.bits == 0
+
+    fresh = MeshSegmentRunner(
+        mesh, state(), _StoppedCrossWalk(fit=160, need=100), num_samples=16
+    )
+    assert fresh.run(steps, dt=dt).retries == 0
+    _gathered_equal(retried, fresh)
+
+
+def test_the_same_step_rule_reads_each_lower_bound_with_what_it_bounds():
+    """The edges of the same-step rule (``segment._retry_made_progress``): a re-run
+    that failed at the attempt before's step makes progress only when that
+    attempt's needs were lower bounds AND this one needed more of what they bound
+    -- the local walk's lists (``lower_bound`` / ``queue_overflow``), the cross
+    walk's (``walk_lower_bound``), the exchange's rows and particles
+    (``pairs_lower_bound``). Fitting more steps is progress whatever the needs."""
+    from jaccpot.distributed.segment import _retry_made_progress
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    size = len(NEEDS_FIELDS) + len(CROSS_NEEDS_FIELDS)
+
+    def needs(**values):
+        out = np.zeros(size, np.int64)
+        for name, value in values.items():
+            slot = (
+                NEEDS_FIELDS.index(name) if name in NEEDS_FIELDS else _cross_slot(name)
+            )
+            out[slot] = value
+        return out
+
+    def attempt(done, **values):
+        return dict(done=done, bits=0, needs=needs(**values).tolist())
+
+    # nothing to compare with, and a re-run that fitted more steps
+    assert not _retry_made_progress(needs(far_needed=9), 1, [])
+    assert _retry_made_progress(needs(), 2, [attempt(1)])
+    # the local walk stopped (lower_bound, or a queue that overflowed)
+    for bit in ("lower_bound", "queue_overflow"):
+        earlier = [attempt(1, far_needed=10, **{bit: 1})]
+        assert _retry_made_progress(needs(far_needed=20), 1, earlier)
+        assert not _retry_made_progress(needs(far_needed=10), 1, earlier)
+    # the same needs again, or more without a lower bound: no progress
+    assert not _retry_made_progress(
+        needs(far_needed=20), 1, [attempt(1, far_needed=10)]
+    )
+    # the cross walk stopped: its lists and queue
+    earlier = [attempt(1, export_near_cap=10, walk_lower_bound=1)]
+    assert _retry_made_progress(needs(export_near_cap=20), 1, earlier)
+    assert _retry_made_progress(needs(export_walk_queue=5), 1, earlier)
+    # ... but not what pairs_lower_bound qualifies
+    assert not _retry_made_progress(needs(send_particle_cap=50), 1, earlier)
+    # the exchange lost pairs: its rows, particles and leaf width
+    earlier = [attempt(1, send_particle_cap=10, pairs_lower_bound=1)]
+    assert _retry_made_progress(needs(send_particle_cap=20), 1, earlier)
+    assert not _retry_made_progress(needs(export_near_cap=20), 1, earlier)
+    # the same step as the LAST attempt, which was also the furthest one
+    earlier = [attempt(2), attempt(1, far_needed=10, lower_bound=1)]
+    assert not _retry_made_progress(needs(far_needed=20), 1, earlier)

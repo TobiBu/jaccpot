@@ -34,9 +34,17 @@ lane the same, as a new path next to the old one (which stays the reference):
   re-prepares every device caps-only at the segment's START (a host copy of the
   donated start state is kept, as the single card keeps it), recompiles and
   re-runs from the start force: at most twice, the single card's policy, and
-  again as long as each re-run fits more steps than every earlier attempt (the
-  re-plan reads only the steps up to the first failure, so needs that grow step
-  by step are learned a step at a time).
+  again as long as each re-run makes progress -- fits more steps than every
+  earlier attempt (the re-plan reads only the steps up to the first failure, so
+  needs that grow step by step are learned a step at a time), or fails at the
+  same step after a re-plan from lower bounds and needs more than they said
+  (:func:`_retry_made_progress`, the single card's ``_segment_retry_next``).
+* **Cross capacities sized at drifted positions too.** ``cross_caps="auto"`` is
+  measured at the start positions when the runner is built and, at the first
+  :meth:`MeshSegmentRunner.run` (its ``dt`` known), at that segment's drifted
+  positions (:meth:`MeshSegmentRunner._measure_cross_drifted`): the drift after a
+  decomposition grows the cross demand for a few steps, which a first segment
+  sized at the start alone retried.
 * **Repartition BETWEEN segments**, as its own program, every
   ``repartition_every`` segments (host cadence: no ``lax.cond`` around
   collectives, whose device-divergent predicate deadlocks, and none of its buffers
@@ -282,6 +290,128 @@ def _mesh_verdict(
         jax.lax.pmax(jnp.asarray(needs, jnp.int32), axis_name),
         jax.lax.pmin(jnp.asarray(done, jnp.int32), axis_name),
     )
+
+
+def _retry_made_progress(needs: np.ndarray, done: int, earlier: list) -> bool:
+    """Whether a failed re-run made progress: the retry past the force's policy.
+
+    The mesh's ``StrictRunMixin._segment_retry_next`` (the single card's rule, the
+    same limits). A re-run made progress when
+
+    * it fitted more steps than every earlier attempt (``done`` grows with each such
+      retry, so there are at most the segment's steps of them), or
+    * it failed at the SAME step as the attempt before, whose needs were LOWER
+      BOUNDS, and it needed more than they said of what they bounded: their re-plan
+      was a doubling, not a measurement (each such retry at least doubles a
+      capacity). The local walk's lists and queue (``lower_bound``: the flat walk
+      stops at its first overflow; ``queue_overflow``: a walk whose queue overflowed
+      counted part of its pairs), the cross walk's lists and queue
+      (``walk_lower_bound``: yggdrax's traced walk stops at its first overflow, the
+      Pallas walk undercounts past a full queue) and the exchange's rows and
+      particles (``pairs_lower_bound``: the walk or the summary lost pairs).
+
+    A re-plan that grows nothing still raises (the force's ``replan``), and
+    ``JACCPOT_STRICT_SEGMENT_RETRY=0`` turns every retry off (the caller).
+
+    Parameters
+    ----------
+    needs : np.ndarray
+        This attempt's needs, mesh-reduced: ``fused_topology.NEEDS_FIELDS``, then
+        ``cross.CROSS_NEEDS_FIELDS``.
+    done : int
+        Steps this attempt fitted before its first failure.
+    earlier : list
+        The segment's earlier failed attempts, in order
+        (:attr:`SegmentReport.failures` entries: ``done``, ``needs``).
+
+    Returns
+    -------
+    bool
+        Whether the segment is retried anyway.
+    """
+    from jaccpot.distributed.cross import _NEEDS_LOWER_BOUND_BIT, CROSS_NEEDS_FIELDS
+    from jaccpot.runtime.fused_topology import NEEDS_FIELDS
+
+    if not earlier:
+        return False
+    best = max(int(f["done"]) for f in earlier)
+    if int(done) > best:
+        return True
+    last = earlier[-1]
+    if not int(done) == best == int(last["done"]):
+        return False
+    now = np.asarray(needs, np.int64)
+    before = np.asarray(last["needs"], np.int64)
+    local = NEEDS_FIELDS.index
+    # (the earlier attempt's lower-bound bit, the needs it qualifies)
+    bounded = [
+        (
+            bool(before[local("lower_bound")] or before[local("queue_overflow")]),
+            list(range(local("far_overflow"))),  # far, near, peak wavefront
+        )
+    ]
+    if now.shape[0] >= len(NEEDS_FIELDS) + len(CROSS_NEEDS_FIELDS):
+        cross = len(NEEDS_FIELDS)
+        for bit in ("walk_lower_bound", "pairs_lower_bound"):
+            fields = [
+                cross + CROSS_NEEDS_FIELDS.index(name)
+                for name, qualifier in _NEEDS_LOWER_BOUND_BIT.items()
+                if qualifier == bit
+            ]
+            bounded.append(
+                (bool(before[cross + CROSS_NEEDS_FIELDS.index(bit)]), fields)
+            )
+    return any(
+        lower and bool(np.any(now[fields] > before[fields]))
+        for lower, fields in bounded
+    )
+
+
+def _drift_probe_steps(steps: int) -> tuple[int, ...]:
+    """The drifts, in steps, the cross sizing measures a first segment at.
+
+    Every power of two below ``steps``, then ``steps``: how fast the demand after
+    a decomposition grows depends on the leaf size at the domain cuts against the
+    distance a step moves a particle (Plummer on two A100s: still growing at step
+    5 at 1e5 particles per card, 2.8x the start's near pairs after ONE step at
+    4e6), so the probes cover the segment on a log scale -- ``1 +
+    ceil(log2(steps))`` forces.
+
+    Parameters
+    ----------
+    steps : int
+        The segment's steps (at least 1).
+
+    Returns
+    -------
+    tuple[int, ...]
+        Increasing drifts ``1, 2, 4, ..., steps``.
+    """
+    probes, s = [], 1
+    while s < int(steps):
+        probes.append(s)
+        s *= 2
+    return (*probes, int(steps))
+
+
+@jax.jit
+def _drifted(state: Array, t: Array) -> Array:
+    """``state`` with its positions drifted by its velocities over ``t``.
+
+    Parameters
+    ----------
+    state : Array
+        ``(rows, 2, 3)`` positions and velocities (padding rows: zero velocity,
+        so they stay).
+    t : Array
+        Scalar time in the state's dtype.
+
+    Returns
+    -------
+    Array
+        ``(rows, 2, 3)``, the velocities unchanged; sharded as ``state``.
+    """
+    return state.at[:, 0].add(t * state[:, 1])
 
 
 def _programs_of(owner: Any) -> dict:
@@ -1294,6 +1424,69 @@ class MeshSegmentRunner:
         )[-1]
         return np.asarray(jax.device_get(needs))[len(NEEDS_FIELDS) :]
 
+    def _measure_cross_drifted(self, steps: int, dt: Any) -> Optional[np.ndarray]:
+        """The start force's cross needs at the first segment's drifted positions.
+
+        A decomposition (or a repartition) leaves the domains apart; a drift then
+        carries each domain's boundary particles into Morton cells its neighbour
+        fills, where they cut sparse leaves -- a few particles in a cell up to the
+        tree's coarsest leaf level, their radius spanning it -- that fail the MAC
+        against many of the neighbour's leaves. Every force of a segment comes at
+        least one drift after the last cut; only the start force comes at none, so
+        the start positions undersize the cross near field (Plummer on two A100s,
+        near pairs / particles shipped: 2e5 11,603 / 36,231 at the start, 16,569 /
+        70,250 after one step, up to 22,795 / 87,867 by step 5; 8e6 129,544 /
+        430,677 at the start, 360,247 / 3,743,931 after one step, 337,626-621,796
+        near pairs over steps 2-12). This measures the needs at ``x + s v dt`` for
+        ``s`` in :func:`_drift_probe_steps` -- the drift alone, which is what moves
+        the particles across the cuts (``a dt^2 / 2`` adds ~1e-3 of it at a
+        stable step) -- with the ``"measure"`` program, compiled for the force's
+        current hook, and max-es them over the probes.
+
+        Parameters
+        ----------
+        steps : int
+            The first segment's steps.
+        dt : Any
+            Its time step.
+
+        Returns
+        -------
+        Optional[np.ndarray]
+            ``cross.CROSS_NEEDS_FIELDS`` max-ed over the probes (the bits OR-ed),
+            mesh-reduced. The probes stop at the first whose own trees or walks
+            overflowed (its cross needs would read a truncated tree): ``None`` if
+            that was the first.
+        """
+        from jaccpot.runtime.fused_topology import (
+            NEEDS_FIELDS,
+            OVERFLOW_CROSS,
+            OVERFLOW_FAIL_MASK,
+        )
+
+        s = self.state
+        step = jnp.asarray(dt, s.state.dtype)
+        worst: Optional[np.ndarray] = None
+        for probe in _drift_probe_steps(int(steps)):
+            moved = _drifted(s.state, step * probe)
+            out = self._call(
+                "measure",
+                0,
+                None,
+                moved,
+                s.masses,
+                s.count,
+                s.ids,
+                *self._scale_args(s),
+            )
+            bits, needs = jax.device_get(out[-2:])
+            del out, moved
+            if int(bits) & OVERFLOW_FAIL_MASK & ~OVERFLOW_CROSS:
+                break
+            cross = np.asarray(needs, np.int64)[len(NEEDS_FIELDS) :]
+            worst = cross if worst is None else np.maximum(worst, cross)
+        return worst
+
     def _scale_args(self, state: MeshState) -> tuple:
         """The start program's ``f_b`` argument: the carried one, else the seed.
 
@@ -1439,6 +1632,23 @@ class MeshSegmentRunner:
         start = state.acceleration is None or key != self._acceleration_key
         if k == 0 and not start:
             return SegmentReport(segment=n, steps=0, start_force=False)
+        if k > 0 and getattr(self.force, "needs_drift_sizing", False):
+            # cross_caps="auto" was sized at the start positions; the first
+            # segment's dt sizes it at the drifted ones too
+            # (`_measure_cross_drifted`). Capacities grown after a start() are a
+            # different program: its force again, as a fresh run with them
+            # computes it (from the seed, under the criterion)
+            grown = self.force.plan_cross_drift(
+                lambda: self._measure_cross_drifted(k, dt)
+            )
+            if grown and not start:
+                state = MeshState(
+                    state=state.state,
+                    masses=state.masses,
+                    ids=state.ids,
+                    count=state.count,
+                )
+                start = True
         started = start
         acceleration = state.acceleration
         # the criterion's f_b: the start force's thresholds (carried, else the
@@ -1456,8 +1666,6 @@ class MeshSegmentRunner:
         scale_new: tuple = ()
         retries, tree_first = 0, False
         failures: list = []
-        # the most steps an earlier failed attempt fitted (-1: none failed yet)
-        best_done = -1
         while True:
             consumed = False
             if start:
@@ -1516,21 +1724,28 @@ class MeshSegmentRunner:
                 if retry_enabled
                 else None
             )
-            if mode is None and retry_enabled and 0 <= best_done < int(done_h):
-                # PROGRESS: this re-run fitted more steps than every earlier attempt.
-                # The re-plan reads only the steps up to the first failure (the rest
-                # left the trajectory), so a segment whose needs grow step by step is
-                # learned one failing step at a time: the outgrowing-segment gate
-                # under mac_type='dehnen_error' ran out of the force's two retries at
-                # 1 of 2 steps fitted. `done` grows with every such retry, so they
-                # are at most the segment's steps.
+            if (
+                mode is None
+                and retry_enabled
+                and _retry_made_progress(needs_np, int(done_h), failures[:-1])
+            ):
+                # PROGRESS (the single card's `_segment_retry_next`): this re-run
+                # fitted more steps than every earlier attempt, or it failed at the
+                # same step as the attempt before, whose needs were lower bounds,
+                # and needed more than they said. The re-plan reads only the steps
+                # up to the first failure (the rest left the trajectory), so a
+                # segment whose needs grow step by step is learned one failing step
+                # at a time: the outgrowing-segment gate under
+                # mac_type='dehnen_error' ran out of the force's two retries at 1 of
+                # 2 steps fitted. `done` grows with every retry of the first kind,
+                # so there are at most the segment's steps of them; each of the
+                # second kind at least doubles a capacity a stopped walk filled.
                 tree_now = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
                 mode = "full" if tree_now else "walk"
             if mode is None:
                 self.force.raise_overflow(
                     needs_np, int(bits_h), retries=retries, where=where
                 )
-            best_done = max(best_done, int(done_h))
             if retries == 0:
                 tree_first = bool(needs_np[NEEDS_FIELDS.index("tree_overflow")])
             retries += 1
