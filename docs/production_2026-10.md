@@ -1787,9 +1787,29 @@ The geometric MAC on the same code (S11 fix 8's rows): 8e6 4.36e-4 / 4.30e-4, 2e
   card's seed, not bitwise reproducible on a GPU; every later f_b is (the lanes kernel and the cascade).
 - The runner's multi-GPU mode (S11 session 2) takes the criterion with no further change to the lane.
 
-## S11, session 2 — the fused multi-GPU lane in the runner (2026-10-23)
+## S11, session 2 — the fused multi-GPU lane in the runner (2026-10-23/24)
 
-**[open]** One subsection per track; the lead merges them.
+Plan S11, session 2: the production runner's multi-GPU mode, Odisseo off the old mesh lane, and what session 1 left
+open (the first segment's retry, the cross near volume, the free-card measurements). On main `e82389b5` (S11 session
+1, S12 and #469 merged), in PR order: **E** the mesh potential, **D** the runner's multi-GPU mode, **F** sizing at the
+drift and the same-step retry rule, **G** the 2-GPU force bitwise run to run, **I** migration to fixed cuts, **N** the
+mesh's memory (from track **M**'s stage-by-stage diagnosis); in Odisseo **H** its multi-GPU lane on the runner; **P**
+the close-out baselines on main; **T** the free-card measurements. The single-card lane is untouched throughout: CPU
+program identity 36/36 against `s11s2-main-cpu` after every track.
+
+| target | result |
+| --- | --- |
+| the runner on several cards | `ProductionRunner(mesh=MeshRunConfig(...))`: segments, edges, diagnostics with the energy, restart files, the retry, by-id input and output; CPU gates bitwise (the mode == the segment runner by hand, chained == one run, a fresh-process restart == the straight run) |
+| the energy on the mesh | `FusedMeshForce.potential_shard`: phi rel-L2 1.4e-6 against fp64 direct (`dehnen_error`, 2e6 on two A100s), W against one card 2.6e-8 (Plummer) and 9.4e-8 (disc + bulge) |
+| no first-segment retry | the cross capacities sized also at the first segment's drift: 0 retries on every gate row (Plummer 2e5 / 8e6, disc 2e5 / 2e6, both MACs) |
+| bitwise run to run on GPUs | the cross pairs in (target, source) order, their rows summed in a fixed order: the 2-device start force bitwise in one process and across processes (Plummer 4e5 / 2e6, both MACs), a restart's state bitwise; open: ~8.5k of 6.9M components on the disc 2e6, from the single card's near kernel (not changed) |
+| the cross near volume | migration to fixed cuts (`migrate=True`, opt-in): Plummer 8e6 on two cards 344-537k -> ~97k cross near pairs, 3.4-4.0M -> 318k particles shipped per step, 7.4k migrants; the force 219-262 -> 51-54 ms (contended cards) |
+| the mesh's memory | the cross near term on the local near field's direct layout, the sizing measured on small buffers: per device a compact Plummer at 2^19 per card 1,474 -> 619 MB, Plummer 8e6 662 -> 342 B/p, the disc + bulge 2e6 796 -> 766 MB |
+| Odisseo | `fmm_preset="galaxy"` + `fmm_mesh=True` + `MeshRunnerOptions` runs the runner's multi-GPU mode; `MeshOptions` keeps the old lane |
+| free-card scaling | track T (below) |
+
+No timing in the subsections below is a free-card result unless it says so: the cards were shared with other users'
+jobs for most of the session.
 
 ### The mesh potential (E)
 The runner's multi-GPU mode reports the energy (`E = K + W_self + W_ext`), and the mesh had no potential: the cross
@@ -1850,6 +1870,96 @@ that slots the cross pairs into the CSR rows keeps that order, so the M2L (and t
 a run-dependent order. Not the potential's: it inherits it from the rebuild. A canonical order (sorted by target, then
 source) should make both reproducible (not tried: it changes the force program). On CPU the lane's bitwise gates hold
 (S11 A2/A3, S12 (a)-(c)).
+
+### The runner's multi-GPU mode (D)
+`ProductionRunner(solver, ..., mesh=MeshRunConfig(make_mesh(n)))` (and `production.run(..., mesh=...)`) runs the
+single card's loop on `MeshSegmentRunner`: segments, edges and callbacks (`SnapshotWriter`, `DiagnosticsLog`, a
+truthy return stops), the diagnostics with the energy (`MeshSegmentRunner.potential_energy`: the force's
+`potential_shard` per device, fp64 sums, a program of its own whose trace leaves the engine as it found it), restart
+files and their continuation, the segment runner's retry, the plan record (caps, cross caps, repartition stats).
+Input and output by id (`rollout.decompose` with `mesh_shard_capacity(N, ndev)` = ceil(ceil(N / ndev) x 1.15) rows
+per device; `RunResult.state` gathered by id on the host; `RunResult.handle` the segment runner, so a continuation in
+memory is bitwise); `dt` and the external field's parameters traced, G and the softening the force's own
+(`force_params` must equal them); edges gather by id only when asked (`MeshSegmentEdge.state_host()` / `.gather()`).
+A restart on the mesh that wrote it rebuilds the identical layout and plan (leaf capacity, walk caps, depth bound,
+cross caps, level floor and plan, template shapes; the force key's digest checked); on another mesh it decomposes the
+by-id state (`restored["bitwise"] = False`). Backend: `jaccpot/distributed/mesh_runner.py`; the single-card path is
+unchanged (CPU program identity 36/36). Branch `s11s2/runner-mesh-mode`; docs: `production.md` "Multi-GPU mode".
+
+| gate (CPU, two forced devices) | result |
+| --- | --- |
+| the mode == `MeshSegmentRunner` driven by hand (direct force; the fused force with a retried segment) | bitwise by id at every edge |
+| chained runs (`restart_from=RunResult`) == one run | bitwise |
+| a restart file continued in a FRESH process, same mesh (direct force; fused force from a file written after a retried segment) | bitwise, digests matching |
+| restored on one device | allclose 1e-12, `bitwise = False` |
+| moments and energy against the host fp64 sums of the gathered state | 1e-12 (the summation order only) |
+| energy diagnostic on / off | bitwise |
+| a stop callback; a retry shown on its edge; a failure names the last restart file | yes |
+
+On two shared A100s (Plummer 2e6, the galaxy preset, 3 segments of 8 steps with repartitions, every diagnostic):
+flag-clean but the first segment's single retry (fixed by F), rel-L2 1.793e-4 / 1.638e-4 at steps 8 / 24 against the
+fp64 direct sum, 616-619 B/p per device. Its restart continued in a fresh process differed from the straight run in
+165,799 of 12,000,000 state elements -- as much as a second continuation from the same file did: the lane was not
+run-to-run deterministic on GPUs (found here; G fixed it). Odisseo's multi-GPU lane runs on this mode (H, below).
+
+### Sizing at the drift and the same-step retry rule (F)
+**The cross near "jump" was physics, and one number was mis-recorded.** Per-step needs (1-step segments, two
+contended A100s, Plummer, theta 0.8) -- cross near pairs / particles shipped:
+
+| state | 2e5 | 8e6 |
+| --- | --- | --- |
+| start (zero drift) | 11,603 / 36,231 | 129,544 / 430,677 |
+| step 1 | 16,569 / 70,250 | 360,247 / 3,743,931 |
+| step 2 | 17,257 / 72,153 | 424,282 / 3,838,602 |
+| step 3 | 20,438 / 87,867 | 621,796 / 3,927,219 |
+| step 4 | 22,234 / 87,232 | 399,351 / 3,828,308 |
+| later | 20,077 (step 6) | 337,626-504,898 near, 1.85-3.86M shipped (steps 6-12) |
+
+The start program at each step's positions gives exactly the scan's needs (no start-vs-scan difference), and a host
+model (yggdrax's numpy cell leaves, COM and exact radius, the geometric MAC) reproduces the force's near pairs within
+2 %. Mechanism: a decomposition leaves exact domains; one drift carries boundary particles into Morton cells the
+OTHER domain fills densely, where the owner's tree, seeing only its stragglers, keeps one coarse leaf (8e6: a leaf of
+19 particles, radius 3.07, 2.25 from the centre -- the box is thousands wide -- forms 194,255 of the 361,797 near
+pairs after one drift, and device 0 ships 3.74M of its 4.0M particles). Only the start force runs at zero drift, so
+sizing at 1.5x the start undersizes every later force. Corrections: S11's "after one drift step" 2e5 values (22,795 /
+87,867) are the first segment's maxima at steps 5 and 3; at 8e6 the needs do not fall back to ~150k, they stay at
+2.6-4.8x the start. The coarse leaves themselves are what I removes.
+- **Drift sizing:** `cross_caps="auto"` also measures at x + s v dt for s = 1, 2, 4, ... up to the first segment's
+  length (1 + ceil(log2 k) forces, once per runner) and sizes from the larger needs. First segments retry 0 times
+  on Plummer 2e5 (main: segments 1 and 3 once each), the disc 2e5 (main: none) and 2e6 (main: segment 5 once) and
+  Plummer 8e6 (main, fix 8's record: segment 1 twice), both MACs; final caps 1.12-1.50x the run's maximum need (main 1.01-1.62x); peaks +0.8 % at most on the
+  run, -7 % to +0.3 % on the final caps; rel-L2 equal to ~1e-5 relative.
+- **The same-step lower-bound rule** (#469's, now on the mesh): a re-run that failed at the same step as the attempt
+  before is retried again while its needs grow past what that attempt's LOWER BOUNDS said (the local walk's
+  `lower_bound` / `queue_overflow`, the cross walk's `walk_lower_bound`, the exchange's `pairs_lower_bound`). Test: a
+  cross walk that stops at its first overflow is retried 10 -> 20 -> 40 -> 80 -> 160 pairs at one step and then equals
+  a fresh run, bitwise (main: RuntimeError at "1 of 4 steps fitted").
+
+### Bitwise run to run on two GPUs (G)
+D's finding: the same compiled start force on the same state, three times in one process, differed in 612,657 of
+1,380,000 components on two A100s (one device: bitwise; deterministic ops did not help). Stage by stage (every
+intermediate of the start force, 3 runs): the tree, the multipoles, the gathered summary, both exchanged payloads,
+the walk COUNTS and the CSR row offsets were bitwise; the symmetric Pallas cross walk returned the same pair SETS in
+another ORDER each run (227,075 of 344,064 far and 39,311 of 61,440 near slots moved; atomic cursors), and
+`merge_into_csr` and the cross near sort, both by target only and stable, kept that order inside each row, so the
+CSR M2L and the cross near kernel summed rows in a run-dependent order. A second mechanism (`dehnen_error`, after the
+first fix): 43-69 components in rows of three or more 64-leaf chunks, whose partials the table kernel reduced with a
+`segment_sum` (a GPU scatter-add).
+- **Fixes:** the cross far list and the near sink in (target, source) order (`cross._in_pair_order`, one composite-key
+  sort); the cross near kernel's chunk partials summed in one fixed order (`ordered_rows=True`: first chunks gathered,
+  the rest by one segmented `associative_scan`; rows of one or two chunks keep their bits). N's direct layout keeps
+  both (its long rows' pieces in fixed order, `ordered_rest=True`).
+- **Gates** (`bench/multigpu_force_repeat.py`, production flags): the start force 0 differing at Plummer 4e5 geometric
+  and 2e6 `dehnen_error` (0 of 6.9M accelerations, 0 of 2.3M f_b), in one process and across three (main on the same
+  cards: 605,714-622,174 of 1.38M and 2,591,046-2,694,456 of 6.9M). D's restart gate (2e6, 3 x 8 steps): the continued
+  state bitwise (0 of 12M, both MACs; main 166,939), the carried acceleration 1-9 of 6M (max 3.0e-8). A test reverses
+  the walk's lists and requires the same force (main: 3,191 of 6,144 differ); the CPU walk emits in one fixed order,
+  so the GPU check is the bench.
+- **Cost** (paired in one process, base / both fixes): +0.046 ms at 4e5 geometric (ratio 1.015), +0.228 ms at 2e6
+  `dehnen_error` (1.005) on near-idle cards; +2.8 % / +1.9 % on contended ones; mostly the pair sort.
+- **Left:** the 1-9 accelerations and the disc's 8.5k of 6.9M (N, below) come from outside the cross terms: the
+  single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries in atomic order (bitwise with
+  `JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT=1e8`: suggestive, not proven). A single-card default-path change, not made.
 
 ### Migration to fixed cuts (I)
 Track F found what sets the cross near volume: INTRUDER leaves. A decomposition leaves exact Morton domains; one
@@ -2088,3 +2198,50 @@ one device's block: it grows with the mesh). The cross near term's whole table i
 single card's `_rest` scatter-add (its default) is not changed. The eleven eager-prepare programs per device per
 run (above). A drift whose walk lists outgrow the measurement's (2x the far pairs, 4 near pairs per leaf) costs a
 third measurement. The disc's remaining run-to-run differences (above).
+
+### Odisseo's multi-GPU lane on the runner (H)
+Odisseo's `fmm_mesh` lane ran the OLD `distributed/fmm.py` force (three dispatches per step, no potential). Odisseo
+branch `s11s2/fmm-mesh-runner` (against `jaccpot-integration`) adds lane `"fmm_mesh_runner"`: `fmm_preset="galaxy"`
+with `fmm_mesh=True` and an `odisseo.mesh_runner_coupling.MeshRunnerOptions(ndev=..., repartition_every=1,
+cap_headroom=None, force=None)` in `config.mesh_options` runs `ProductionRunner(mesh=MeshRunConfig(...))` as the
+single-card `fmm_runner` lane runs the single-card runner (the solver and runner kept between calls, the external
+field as one pair of traced functions, snapshots from the edges, the final state a host array in input order). A
+`MeshOptions` keeps the old lane, unchanged. Gradients, block steps, active schedules, `step_callback`, adaptive
+steps and a G or softening other than the solver's are refused with the reason. 28 tests (two forced CPU devices,
+`DirectMeshForce`, 12.6 s): `integrate()` == the runner called directly, bitwise; a second call reuses the runner;
+snapshots, energy and angular momentum against host fp64 sums; the old lane still reached. One `integrate()` on two
+A100s (Plummer r < 10, 2^20 particles, NFW halo, 16 steps): positions rel-L2 6.6e-8 against the single-card lane after
+16 steps (a second mesh run differs from the first by 2.4e-7 at most), self-gravity rel-L2 1.800e-4 (one card
+1.749e-4), angular momentum drift 1.4e-6. Its measurement on that compact IC found the setup peak N removed.
+
+### Close-out on merged main (P)
+Baselines re-recorded on main e82389b5 (everything through S12 and #469), card 1 (only another user's idle 416 MiB
+server on it, which flags every row `contaminated`; the numbers are clean):
+
+| pin | result |
+| --- | --- |
+| L1 8e6 / L2 1e8 / L3 25M disc step (tag `s11s2-L-main-e82389b`, control `-b`) | 76.66 / 864.03 / 235.21 ms; L2 256.77 B/p; L3 force 100.21 ms, rel-L2 4.1791e-4: within the envelope of `s3b-L-integ-g5`, 1-2 % faster than `s3b-L-main-5f1f85f-t1` (the S3b walk speed-ups) |
+| DET1-DET3 (`s11s2-det-free`, `-b`) | bitwise A-vs-A; DET2 bitwise `s8w-det` |
+| single-card GPU pins S1, S6, S1p, S1t, S1e, S1x, S1g, G1, R1p, R1x, R1r (`s11s2-pins-main`) | bitwise against `s12pins-main` / `nf-tip2` / `s8w-tip` |
+| two-card M1, M3 / M2 (`s11s2-m-main`, `-b`) | bitwise / within M2's own run-to-run spread |
+| CPU program identity (`s11s2-main-cpu`, 36 variants) | 36/36 against #469's tip; against `s11-stack-cpu` only #469's documented scan-program text |
+
+### Free-card measurements (T)
+Running at the time of this commit on cards 0, 1, 5, 6 (no other user's job on them) from a frozen tree at the
+integration of E, D, F, I and G (before N): migration on / off on two and four cards, strong scaling (Plummer 8e6, the
+25M disc + bulge against one card's 235.21 ms per step), weak scaling (4e6 per card), B/p at a production particle
+count per card. The rows follow in this section.
+
+### Open after S11 session 2
+- `MeshRunConfig.migrate` stays `False` until T's free-card A/B on two and four cards decides its default.
+- Run to run on GPUs: the single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries in
+  atomic order (the 2-GPU residual above, and the disc's 8.5k of 6.9M); `ordered_rest=True` exists, off by default:
+  turning it on for the single card is a change of its default path.
+- The repartition without migration does not rebalance nearly exact ranges (yggdrax's `_choose_pivots` takes equal
+  samples per device): the imbalance grows 0.1-0.4 % of a shard per repartition (Plummer 8e6). The migrating mode
+  rebalances by rank instead.
+- The all-gathered summary grows with the device count (f32[ndev, nodes, 16]: 48.5 MB at two devices on the compact
+  IC); the eager caps-only prepare's eleven small programs per device per fresh run are the single card's own.
+- Eight cards (four were free at most); multi-node (D5).
+- nornax `retry_segment` has no progress rule (deferred to S9: the provider's aux would need the steps an attempt
+  fitted). Odisseo's old `MeshOptions` lane: kept until its users move (user decision).
