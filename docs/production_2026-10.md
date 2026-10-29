@@ -2227,13 +2227,68 @@ server on it, which flags every row `contaminated`; the numbers are clean):
 | CPU program identity (`s11s2-main-cpu`, 36 variants) | 36/36 against #469's tip; against `s11-stack-cpu` only #469's documented scan-program text |
 
 ### Free-card measurements (T)
-Running at the time of this commit on cards 0, 1, 5, 6 (no other user's job on them) from a frozen tree at the
-integration of E, D, F, I and G (before N): migration on / off on two and four cards, strong scaling (Plummer 8e6, the
-25M disc + bulge against one card's 235.21 ms per step), weak scaling (4e6 per card), B/p at a production particle
-count per card. The rows follow in this section.
+Cards 0, 1, 5, 6 with no other user's job on them (another user's idle 416 MiB server sits on every card), 2026-10-23
+/24, from a frozen tree at the integration of E, D, F, I and G -- BEFORE N, so every peak below that includes the
+library's sizing is N's "base" (the measurement program at the per-leaf first guess); the explicit-capacity reruns are
+the force's own footprint. `bench/multigpu_segment_gate.py`, 8 segments of 8 steps, a repartition before every segment
+after the first, rel-L2 against an fp64 direct sum on 512 ids; the step is the median segment wall / 8 over segments
+4-8, two interleaved repetitions (a / b) per arm. A100-PCIE-40GB, no NVLink.
+
+**Migration on / off** (step ms, mean of the two repetitions; the ratio on / off):
+
+| config | 2 cards | 4 cards |
+| --- | --- | --- |
+| Plummer 8e6, `dehnen_error` | 164.2 / 63.7 (0.39) | 170.1 / 98.5 (0.58) |
+| Plummer 8e6, geometric | 204.1 / 53.1 (0.26) | 144.4 / 63.3 (0.44) |
+| Plummer 1.6e7, `dehnen_error` / geometric | | 486.2 / 188.0 (0.39); 408.6 / 312.6 (0.77) |
+| disc + bulge 2e6, `dehnen_error` / geometric | 187.3 / 189.8 (1.01); 180.2 / 179.0 (0.99) | 192.9 / 188.4 (0.98); 176.2 / 172.5 (0.98) |
+| disc + bulge 8e6, `dehnen_error` / geometric | | 431.8 / 372.0 (0.86); 366.5 / 309.5 (0.84) |
+| disc + bulge 25M, `dehnen_error` | 249.8 / 197.0 (0.79) | 583.1 / 301.5 (0.52) |
+
+Migration is never slower beyond the repetitions' spread, and on every Plummer row and the large discs it is 1.2-3.8x
+faster: the cross near pairs and particles shipped per step fall to the start's level (Plummer 1.6e7 on four cards:
+828-924k -> 172-173k near pairs, 5.7-6.9M -> 596-599k shipped, 28.4-28.5k migrants), and the non-migrating arms'
+retries on four cards (up to 5 per run) are gone. The disc 2e6's cross volume is set by its separation floor, not by
+intruders, so it gains nothing there. Accuracy is unchanged (rel-L2 at the end within the repetitions: e.g. Plummer
+1.6e7 `dehnen_error` 1.7550e-4 off, 1.6222e-4 on). The peak rises 1-6 % with migration (the buffer and the routed
+rows).
+
+**Strong scaling** (step ms; one card = the single-card runner on the same particles with the L3 flags,
+`fused_memory_budget.py`, and the gate's one-device mesh; the mesh rows migrate):
+
+| N, MAC | 1 card | 2 cards | 4 cards |
+| --- | --- | --- | --- |
+| disc + bulge 25M, `dehnen_error` | 258.8 (runner) / 249.8 (1-device mesh) | 197.0 (1.27-1.31x) | 293.4-309.6 (0.81-0.88x) |
+| disc + bulge 25M, geometric | 231.3 (runner) / 226.5 | 173.0 (1.31-1.34x) | 189.4 (1.20-1.22x) |
+| Plummer 8e6, `dehnen_error` | 76.9 (1-device mesh) | 63.2-64.2 (1.20-1.22x) | 96.8-100.2 (0.77-0.79x) |
+| Plummer 8e6, geometric | 66.0 | 52.8-53.4 (1.24-1.25x) | 62.5-64.0 (1.03-1.06x) |
+
+**Weak scaling** (4e6 per card, Plummer, `dehnen_error`, migrating): 46.8 ms on one device, 63.2-64.2 on two (73 %),
+187.7-188.3 on four (25 %).
+
+On this node the mesh buys CAPACITY, not speed beyond two cards: every card-to-card byte crosses PCIe (the
+cross near term ships ~1M particles per step at 25M on four cards, plus the summary all-gather and two ragged
+exchanges per step). The scaling question belongs on a node with NVLink (HoreKa's four-A100 nodes), on dedicated
+cards.
+
+**Memory per device** (B per particle of the device's share):
+
+| row | library sizing (pre-N) | explicit capacities (the force's own) |
+| --- | --- | --- |
+| Plummer 8e6, two cards | 705-713 | 448-470 |
+| disc + bulge 25M, two / four cards | 755-765 / 1377-1380 | 436-437 / 498-499 |
+| Plummer 1.6e7, four cards, off / on | 1229-1230 / 1267-1269 | 717-737 / 640-644 |
+| Plummer 4e7, four cards (1e7 per card) | 1793-1805 | 580-603 |
+| Plummer 8e7, four cards (2e7 per card) | 1626-1643 (32.9 GB per card) | 516-526 (10.5 GB per card) |
+| disc + bulge 8e7, four cards | 1406-1412 | -- |
+
+The library-sizing column is what N's measurement on small buffers removes (N's own rows: Plummer 8e6 on two cards
+662 -> 342 B/p). At 8e7 on four cards the step is 906.6 ms (one segment) and the force alone 832.8-852.8 ms (`dehnen_error`). On
+the explicit-capacity footprint a card holds ~6.9e7 particles (0.9 x 40 GB / 520 B): four cards ~2.8e8, eight ~5.5e8 -- an extrapolation, past one
+card's 1.68e8 (round 4); the post-N library-sizing peak at those counts is still to be measured.
 
 ### Open after S11 session 2
-- `MeshRunConfig.migrate` stays `False` until T's free-card A/B on two and four cards decides its default.
+- `MeshRunConfig.migrate` stays `False` in this stack; T's A/B supports `True` (a follow-up PR flips it).
 - Run to run on GPUs: the single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries in
   atomic order (the 2-GPU residual above, and the disc's 8.5k of 6.9M); `ordered_rest=True` exists, off by default:
   turning it on for the single card is a change of its default path.
