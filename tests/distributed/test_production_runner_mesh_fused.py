@@ -88,6 +88,7 @@ def _mesh_runner(solver, force=None, **segment):
             cap=a.CAP,
             num_samples=SAMPLES,
             cross_caps=_small_caps(),
+            migrate=False,  # the by-hand reference does not migrate
             force=force,
         ),
     )

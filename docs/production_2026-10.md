@@ -2288,7 +2288,8 @@ the explicit-capacity footprint a card holds ~6.9e7 particles (0.9 x 40 GB / 520
 card's 1.68e8 (round 4); the post-N library-sizing peak at those counts is still to be measured.
 
 ### Open after S11 session 2
-- `MeshRunConfig.migrate` stays `False` in this stack; T's A/B supports `True` (a follow-up PR flips it).
+- `MeshRunConfig.migrate` is `True` by default after T's A/B (the stack's last PR); `MeshSegmentRunner`'s own
+  `migrate` stays `False` (the low-level runner, its gates' reference).
 - Run to run on GPUs: the single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries in
   atomic order (the 2-GPU residual above, and the disc's 8.5k of 6.9M); `ordered_rest=True` exists, off by default:
   turning it on for the single card is a change of its default path.

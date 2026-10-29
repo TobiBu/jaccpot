@@ -119,6 +119,9 @@ def _runner(force=None, ndev=NDEV, repartition_every=1, callbacks=(), **segment)
             cap=CAP if ndev == NDEV else None,
             repartition_every=repartition_every,
             num_samples=SAMPLES,
+            # the machinery against non-migrating references (MeshSegmentRunner by
+            # hand); the default's migration: test_mesh_segment_migration.py
+            migrate=False,
             force=(
                 DirectMeshForce(G=G, softening=SOFT, axis_name=AXIS)
                 if force is None

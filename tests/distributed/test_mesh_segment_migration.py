@@ -442,6 +442,38 @@ def _production(migrate, every=0, **config):
     )
 
 
+def test_the_production_mode_migrates_by_default():
+    """``MeshRunConfig``'s default migrates (S11 session 2's free-card A/B): a run on
+    the default configuration records a migration at every edge after the start and
+    equals the explicitly migrating run, bitwise by id; ``migrate=False`` is the
+    other arm."""
+    from jaccpot.production import MeshRunConfig, ProductionRunner, SegmentConfig
+    from tests.distributed import test_production_runner_mesh as prm
+
+    assert MeshRunConfig(_mesh()).migrate is True
+    state, masses = prm._ic()
+    kwargs = dict(dt=prm.DT, num_steps=4, external_params=prm.PARAMS)
+    default = ProductionRunner(
+        prm._solver(),
+        segment=SegmentConfig(steps=2),
+        external_acceleration_fn=prm.harmonic,
+        mesh=MeshRunConfig(
+            _mesh(),
+            cap=prm.CAP,
+            num_samples=prm.SAMPLES,
+            force=DirectMeshForce(G=prm.G, softening=prm.SOFT, axis_name=AXIS),
+        ),
+    ).run(state, masses, **kwargs)
+    explicit = _production(True, every=1).run(state, masses, **kwargs)
+    np.testing.assert_array_equal(default.state, explicit.state)
+    plans = [e.plan["migration"] for e in default.edges if e.step > 0]
+    assert plans and all(p is not None and p["migrated"] > 0 for p in plans), plans
+    assert all(
+        e.plan["migration"] is None
+        for e in _production(False, every=1).run(state, masses, **kwargs).edges
+    )
+
+
 def test_the_production_mode_decomposes_into_the_forces_box(monkeypatch):
     """``MeshRunConfig(migrate=True)``: a fresh run decomposes straight into the
     force's box and starts on the cuts read off that decomposition -- the runner's

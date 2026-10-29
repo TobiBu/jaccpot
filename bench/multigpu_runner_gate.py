@@ -82,6 +82,11 @@ def _args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--from-segment", type=int, default=2, help="resume: the restart")
     p.add_argument("--mac", choices=("dehnen_error", "dehnen"), default="dehnen_error")
+    p.add_argument(
+        "--no-migrate",
+        action="store_true",
+        help="the mode without migration (MeshRunConfig(migrate=False))",
+    )
     return p.parse_args()
 
 
@@ -177,7 +182,7 @@ def _runner(callbacks=()):
             restart_path=restarts,
         ),
         callbacks=callbacks,
-        mesh=MeshRunConfig(make_mesh(NDEV)),
+        mesh=MeshRunConfig(make_mesh(NDEV), migrate=not ARGS.no_migrate),
     )
 
 
