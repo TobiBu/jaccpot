@@ -2287,6 +2287,18 @@ The library-sizing column is what N's measurement on small buffers removes (N's 
 the explicit-capacity footprint a card holds ~6.9e7 particles (0.9 x 40 GB / 520 B): four cards ~2.8e8, eight ~5.5e8 -- an extrapolation, past one
 card's 1.68e8 (round 4); the post-N library-sizing peak at those counts is still to be measured.
 
+### A cell leaf wider than the leaf size (found 2026-10-29)
+Plummer at 4e7, 8e7 and 1.2e8 on four cards (1e7-3e7 per card; the stack tip, cards shared, memory only) stopped
+with `OVERFLOW_CROSS` and "re-plan grew nothing": a near row shipped 65, 144 and 133 particles against a leaf width
+of 64, and fix 8's structural bound (`_structural_bounds`: the leaf width at most the leaf size) kept the re-plan at
+64. The bound was wrong: yggdrax keeps a cell at the finest Morton level as a leaf whatever it holds, and the
+Plummer draw's outliers make the box 35,148 wide at 8e7, so a finest cell is 0.017 across and holds up to 121
+particles in the core (51,245 such cells hold more than 64; 54 at most at 4e7 before any drift). The width is now
+bounded by 64 x the leaf size (`_FINEST_CELL_WIDTH_FACTOR`), which still keeps a degenerate tree's whole-shard
+"leaf" (the NaN root of 4,002,489) out. Fix 8's sentence above ("`leaf_width` never exceeds the template's leaf
+size") holds below ~1e7 particles per card only. Below that the same four-card runs: Plummer 8e6 531-533 B/p, the
+25M disc + bulge 503 B/p per device, flag-clean (post-N sizing).
+
 ### Open after S11 session 2
 - `MeshRunConfig.migrate` is `True` by default after T's A/B (the stack's last PR); `MeshSegmentRunner`'s own
   `migrate` stays `False` (the low-level runner, its gates' reference).

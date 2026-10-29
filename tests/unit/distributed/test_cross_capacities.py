@@ -509,8 +509,12 @@ def test_no_need_grows_a_capacity_past_its_structural_bound():
     """What a NaN state's degenerate tree read on two A100s at 8e6 -- the root of
     each shard one summary cell, near the other's: 4,002,489 particles in one near
     row -- sized a leaf width of a whole shard (an OOM of 282.72 GiB). A cell leaf
-    holds at most the template's leaf size, and a near row ships at most a leaf
+    holds at most the template's leaf size or, at the finest Morton level, a few
+    times it (``_FINEST_CELL_WIDTH_FACTOR``), and a near row ships at most a leaf
     width of particles, so neither re-plan nor sizing goes past those bounds."""
+    from jaccpot.distributed.cross import _FINEST_CELL_WIDTH_FACTOR
+
+    bound = _FINEST_CELL_WIDTH_FACTOR * 64
     caps = CrossCapacities.from_needs(
         _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [64]))), headroom=1.0, leaf_size=64
     )
@@ -524,16 +528,16 @@ def test_no_need_grows_a_capacity_past_its_structural_bound():
         pairs_lower_bound=1,
     )
     grown = caps.replanned(garbage, headroom=1.5, leaf_size=64)
-    assert grown.leaf_width == 64, vars(grown)
-    assert grown.send_particle_cap <= grown.send_node_cap * 64, vars(grown)
-    assert grown.recv_particle_cap <= grown.recv_node_cap * 64, vars(grown)
+    assert grown.leaf_width == bound, vars(grown)
+    assert grown.send_particle_cap <= grown.send_node_cap * bound, vars(grown)
+    assert grown.recv_particle_cap <= grown.recv_node_cap * bound, vars(grown)
     sized = CrossCapacities.from_needs(garbage, headroom=1.5, leaf_size=64)
-    assert sized.leaf_width == 64
-    assert sized.send_particle_cap <= sized.send_node_cap * 64, vars(sized)
+    assert sized.leaf_width == bound
+    assert sized.send_particle_cap <= sized.send_node_cap * bound, vars(sized)
     # the bounds never narrow what a run already has
-    wide = caps._with(leaf_width=128, send_particle_cap=10**7)
+    wide = caps._with(leaf_width=2 * bound, send_particle_cap=10**7)
     kept = wide.replanned(garbage, leaf_size=64)
-    assert kept.leaf_width == 128 and kept.send_particle_cap == 10**7
+    assert kept.leaf_width == 2 * bound and kept.send_particle_cap == 10**7
     # a leaf width the leaf size allows still grows
     assert (
         caps._with(leaf_width=32)
@@ -541,6 +545,25 @@ def test_no_need_grows_a_capacity_past_its_structural_bound():
         .leaf_width
         == 50
     )
+
+
+def test_a_finest_level_cell_wider_than_the_leaf_size_grows_the_leaf_width():
+    """Plummer 8e7 on four A100s (2e7 per card): the box is 35,148 wide (the
+    sphere's outliers), so a finest-level Morton cell is 0.017 across and holds up
+    to 121 particles in the core -- a leaf whatever it holds. One near row shipped
+    144 particles against a leaf width of 64; the re-plan, clamped to the leaf
+    size, grew nothing and the run stopped ("re-plan grew nothing"). The width
+    grows to the need, by both doors, and the particle caps with it."""
+    caps = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [64]))), headroom=1.0, leaf_size=64
+    )
+    wide_leaf = _needs(leaf_width=144, overflow=1)
+    assert caps.replanned(wide_leaf, headroom=1.5, leaf_size=64).leaf_width == 144
+    sized = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [144]))), headroom=1.0, leaf_size=64
+    )
+    assert sized.leaf_width == 144
+    assert sized.send_particle_cap >= 1000, vars(sized)
 
 
 def test_a_run_whose_tree_overflowed_replans_only_the_cross_summary():
