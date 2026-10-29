@@ -81,6 +81,18 @@ def _args() -> argparse.Namespace:
     p.add_argument("--repartition-every", type=int, default=1)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--disc-ic",
+        default=_DISC_IC,
+        help="the 25M disc + bulge IC (.npz: state0, mass, rdisk_code, G_code)",
+    )
+    p.add_argument(
+        "--softening",
+        type=float,
+        default=None,
+        help="override the IC's softening (the disc's formula gives 7.6e-3 at 25M; "
+        "the L3 pin's 25M disc runs 1.5e-3)",
+    )
     p.add_argument("--out", required=True)
     p.add_argument("--dump", required=True, help="positions by id, segment -> solo")
     p.add_argument(
@@ -182,16 +194,18 @@ def _ic() -> tuple:
             vel.astype(np.float32),
             np.asarray(mass, np.float32),
             1.0,
-            1e-7,
+            1e-7 if ARGS.softening is None else ARGS.softening,
             dt,
         )
-    ic = np.load(_DISC_IC)
+    ic = np.load(ARGS.disc_ic)
     n_all = int(ic["state0"].shape[0])
     state = np.asarray(ic["state0"][: ARGS.n], np.float32)
     # the IC is shuffled: a prefix is a random subsample; rescaled to the same galaxy
     mass = np.asarray(ic["mass"][: ARGS.n], np.float64) * (n_all / ARGS.n)
     g = float(ic["G_code"]) if "G_code" in ic.files else 1.0
     soft = float(0.5 * float(ic["rdisk_code"]) / np.sqrt(ARGS.n / 1e5))
+    if ARGS.softening is not None:
+        soft = ARGS.softening
     dt = 5e-4 if ARGS.dt is None else ARGS.dt
     return state[:, 0], state[:, 1], mass.astype(np.float32), g, soft, dt
 

@@ -544,6 +544,18 @@ most likely the single card's direct near kernel, which scatter-adds the pieces 
 2 x 1024 entries in atomic order (`JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT=1e8` made the repeats
 bitwise): a change of the single-card default path, not made.
 
+**Measuring the lane on a dedicated node.** The A/B and scaling rows in
+`production_2026-10.md` (S11 session 2, track T) ran on four free cards of a shared
+machine whose cards talk over PCIe only; there the mesh scales to two cards in time and
+beyond that buys capacity. `bench/multigpu_scaling_matrix.py` repeats the matrix --
+migration on / off on two and four cards, strong scaling on 1 / 2 / 4 cards (one card:
+the single-card lane on the same particles), weak scaling at 4e6 per card, the memory
+ramp to 4e7 per card -- one fresh process per row on subsets of the job's cards, with
+the XLA flags set, `nvidia-smi` before and after every row and a `SUMMARY.md`;
+`bench/slurm/multigpu_scaling.sbatch` runs it on a HoreKa accelerated node (four
+A100-40GB on NVLink). It needs Odisseo's `benchmark_multigpu/` (`BENCH_DIR`) and the
+25M disc + bulge IC (`--disc-ic`); a resubmitted job skips the rows it has.
+
 ## Gates (S3)
 
 | gate | what | result |
