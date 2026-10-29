@@ -2297,7 +2297,20 @@ particles in the core (51,245 such cells hold more than 64; 54 at most at 4e7 be
 bounded by 64 x the leaf size (`_FINEST_CELL_WIDTH_FACTOR`), which still keeps a degenerate tree's whole-shard
 "leaf" (the NaN root of 4,002,489) out. Fix 8's sentence above ("`leaf_width` never exceeds the template's leaf
 size") holds below ~1e7 particles per card only. Below that the same four-card runs: Plummer 8e6 531-533 B/p, the
-25M disc + bulge 503 B/p per device, flag-clean (post-N sizing).
+25M disc + bulge 503 B/p per device, flag-clean (post-N sizing). With the fix (four shared cards, `dehnen_error`,
+3 segments of 4 steps, migrating, library sizing):
+
+| Plummer | per card | peak per device | retries (the width grown) | widest row | rel-L2 start / end |
+| --- | --- | --- | --- | --- | --- |
+| 4e7 | 1e7 | 481-492 B/p (4.8-4.9 GB) | 1 | 65 | 9.97e-5 / 1.85e-4 |
+| 8e7 | 2e7 | 423-427 B/p (8.5 GB) | 1 | 156 | 2.48e-3 / 4.32e-3 |
+| 1.2e8 | 3e7 | 432-437 B/p (13.0 GB) | 2 | 149 | 2.09e-3 / 2.57e-3 |
+
+Every segment flag-clean. A card holds ~8e7 particles at that footprint (0.9 x 40 GB / 430 B): four cards ~3.3e8,
+eight ~6.7e8 (an extrapolation). The rel-L2 at 8e7 and 1.2e8 is NOT the mesh's: ONE card on the same 8e7 particles
+(the gate's single-card lane on the mesh run's positions) gives 4.60e-3 / 3.90e-3 (214 B/p, 650 ms per force). The
+fused lane's accuracy on this draw -- a box of 35,148 for a sphere of scale radius 1, softening 1e-7 -- falls 25x
+between 4e7 and 8e7 on one card too; the production IC (the 25M disc + bulge) is at 1.3e-4. Open, not diagnosed.
 
 ### Open after S11 session 2
 - `MeshRunConfig.migrate` is `True` by default after T's A/B (the stack's last PR); `MeshSegmentRunner`'s own
