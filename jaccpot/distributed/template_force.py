@@ -1807,13 +1807,23 @@ class FusedMeshForce:
         cross = ""
         if bits & OVERFLOW_CROSS:
             need = _cross_by_field(np.asarray(needs, np.int64))
-            why = (
-                "the two ends of an exchange disagreed on a size (mismatch): no "
-                "capacity covers that"
-                if need["mismatch"]
-                else "no cross capacity needed more than it holds, so the flag is "
-                "not a cross capacity's"
-            )
+            if need["mismatch"]:
+                why = (
+                    "the two ends of an exchange disagreed on a size (mismatch): no "
+                    "capacity covers that"
+                )
+            elif need["leaf_width"] > self.leaf_size:
+                why = (
+                    f"a near row holds {need['leaf_width']} particles, more than "
+                    f"the leaf size {self.leaf_size}, and no cell leaf does (a "
+                    "degenerate tree, or a yggdrax older than #104, which kept a "
+                    "finest-level Morton cell as one leaf whatever it held)"
+                )
+            else:
+                why = (
+                    "no cross capacity needed more than it holds, so the flag is "
+                    "not a cross capacity's"
+                )
             cross = (
                 " The cross-domain field overflowed (OVERFLOW_CROSS) and its "
                 f"re-plan grew nothing: {why}. Cross needs {need}; capacities "
