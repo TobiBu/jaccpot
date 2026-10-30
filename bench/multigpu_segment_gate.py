@@ -81,6 +81,18 @@ def _args() -> argparse.Namespace:
     p.add_argument("--repartition-every", type=int, default=1)
     p.add_argument("--dt", type=float, default=None)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--disc-ic",
+        default=_DISC_IC,
+        help="the 25M disc + bulge IC (.npz: state0, mass, rdisk_code, G_code)",
+    )
+    p.add_argument(
+        "--softening",
+        type=float,
+        default=None,
+        help="override the IC's softening (the disc's formula gives 7.6e-3 at 25M; "
+        "the L3 pin's 25M disc runs 1.5e-3)",
+    )
     p.add_argument("--out", required=True)
     p.add_argument("--dump", required=True, help="positions by id, segment -> solo")
     p.add_argument(
@@ -112,11 +124,24 @@ def _args() -> argparse.Namespace:
         help="the galaxy preset's eq (16a) (default) or the geometric theta 0.8",
     )
     p.add_argument("--force-repeats", type=int, default=5)
+    p.add_argument("--ndev", type=int, default=2, help="segment mode: mesh devices")
+    p.add_argument(
+        "--migrate",
+        action="store_true",
+        help="segment mode: migrate to fixed cuts after every drift "
+        "(MeshSegmentRunner(migrate=True), jaccpot.distributed.migration)",
+    )
+    p.add_argument(
+        "--migration-cap",
+        default="auto",
+        help="--migrate: the buffer's rows ('auto', an int, or 'json' to take "
+        "--cross-json's migration_cap_final)",
+    )
     return p.parse_args()
 
 
 ARGS = _args()
-NDEV = 1 if ARGS.mode == "solo" else 2
+NDEV = 1 if ARGS.mode == "solo" else int(ARGS.ndev)
 CAP = int(ARGS.n / NDEV * 1.15) if NDEV > 1 else ARGS.n
 
 
@@ -169,16 +194,18 @@ def _ic() -> tuple:
             vel.astype(np.float32),
             np.asarray(mass, np.float32),
             1.0,
-            1e-7,
+            1e-7 if ARGS.softening is None else ARGS.softening,
             dt,
         )
-    ic = np.load(_DISC_IC)
+    ic = np.load(ARGS.disc_ic)
     n_all = int(ic["state0"].shape[0])
     state = np.asarray(ic["state0"][: ARGS.n], np.float32)
     # the IC is shuffled: a prefix is a random subsample; rescaled to the same galaxy
     mass = np.asarray(ic["mass"][: ARGS.n], np.float64) * (n_all / ARGS.n)
     g = float(ic["G_code"]) if "G_code" in ic.files else 1.0
     soft = float(0.5 * float(ic["rdisk_code"]) / np.sqrt(ARGS.n / 1e5))
+    if ARGS.softening is not None:
+        soft = ARGS.softening
     dt = 5e-4 if ARGS.dt is None else ARGS.dt
     return state[:, 0], state[:, 1], mass.astype(np.float32), g, soft, dt
 
@@ -431,6 +458,12 @@ def main() -> None:
 
         solver = _solver(g, soft)
         kernel = solver._impl.softening_kernel
+        migration_cap = ARGS.migration_cap
+        if migration_cap == "json":
+            migration_cap = json.load(open(ARGS.cross_json))["migration_cap_final"]
+        elif migration_cap != "auto":
+            migration_cap = int(migration_cap)
+        result["migrate"] = bool(ARGS.migrate)
         t0 = time.perf_counter()
         runner = MeshSegmentRunner.fused(
             solver,
@@ -441,6 +474,8 @@ def main() -> None:
             theta=0.8,
             cross_caps=caps,
             repartition_every=ARGS.repartition_every,
+            migrate=bool(ARGS.migrate),
+            migration_cap=migration_cap,
         )
         del shard
         result["setup_s"] = time.perf_counter() - t0
@@ -490,14 +525,24 @@ def main() -> None:
                 rep.retries,
                 rep.bits,
                 rep.counts,
+                f"migrated {rep.migrated} need {rep.migration_need}",
                 flush=True,
             )
         result["reports"] = reports
+        result["migration_cap_final"] = runner.migration_cap
         result["cross_caps_final"] = {
             k: v
             for k, v in vars(runner.force.cross_caps).items()
             if isinstance(v, (int, float)) or v is None
         }
+        drifted = getattr(runner.force, "cross_needs_drifted", None)
+        if drifted is not None:
+            # the library's sizing at the first segment's drifted positions
+            from jaccpot.distributed.cross import CROSS_NEEDS_FIELDS
+
+            result["cross_needs_drifted"] = dict(
+                zip(CROSS_NEEDS_FIELDS, np.asarray(drifted).tolist())
+            )
         # the force alone (the start program: the template route's force at the
         # current positions), to tell the force from the integrator's overhead
         state = runner.state

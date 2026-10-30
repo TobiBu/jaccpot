@@ -1,8 +1,9 @@
 # Production runs on the fused lane — `ProductionRunner`
 
-`jaccpot.ProductionRunner` runs a long simulation on the fused single-GPU lane: a host
-loop of K-step segments, each ONE `strict_run_v2(carry="particles")` call continuing
-from the previous call's `StrictParticleCarry` handle. Between segments it computes the
+`jaccpot.ProductionRunner` runs a long simulation on the fused single-GPU lane (with
+`mesh=`, on several cards: [Multi-GPU mode](#multi-gpu-mode)): a host loop of K-step
+segments, each ONE `strict_run_v2(carry="particles")` call continuing from the previous
+call's `StrictParticleCarry` handle. Between segments it computes the
 diagnostics, writes restart files and calls your callbacks. Code:
 `jaccpot/production.py`; the configuration it runs is `preset="galaxy"`
 (`GalaxySettings`, same module; see [`fused_provider.md`](fused_provider.md)). What was
@@ -344,6 +345,216 @@ that run (`tests/integration/strict/test_production_runner.py`: 2 segments, a re
 external field with traced parameters, traced force parameters). Not equal, the runner
 warns, records the mismatches in `RunResult.restored`, and continues: correct, not
 bitwise.
+
+## Multi-GPU mode
+
+`ProductionRunner(solver, ..., mesh=...)` runs the same loop -- segments, edges,
+callbacks, the diagnostics with the energy, restart files and their continuation, the
+segment retry -- on the fused multi-GPU lane: one process drives every card of a 1-D
+`jax.sharding.Mesh`, and each segment is ONE `jit(shard_map(scan))` program of
+`MeshSegmentRunner` (`jaccpot/distributed/segment.py`; the mode's backend is
+`jaccpot/distributed/mesh_runner.py`). `mesh=None`, the default, is the single-card runner
+above, unchanged (its programs are byte-identical to main's: `bench/provider_hlo_identity.py`,
+36/36 on CPU).
+
+```python
+import jax
+from yggdrax.distributed.sharding import make_mesh
+
+jax.config.update("jax_enable_x64", True)
+
+from jaccpot import FastMultipoleMethod, ProductionRunner, SegmentConfig
+from jaccpot.production import DiagnosticsLog, MeshRunConfig, SnapshotWriter
+
+solver = FastMultipoleMethod(preset="galaxy", softening=1.5e-3)
+runner = ProductionRunner(
+    solver,
+    segment=SegmentConfig(steps=50, restart_every=4, restart_path="run/restart.npz"),
+    external_acceleration_fn=halo,          # the Quick start's, unchanged
+    external_potential_fn=halo_potential,
+    callbacks=(SnapshotWriter("run/snapshots", every=2), DiagnosticsLog("run/diag.jsonl")),
+    mesh=MeshRunConfig(make_mesh(4)),       # or mesh=make_mesh(4)
+)
+res = runner.run(state, masses, dt=1e-3, num_steps=500,
+                 external_params={"gm": 1.0, "rs": 2.0})
+res.state      # [N, 2, 3] on the host, in input (id) order
+res = runner.run(dt=1e-3, num_steps=500, restart_from="run/restart.npz",
+                 external_params={"gm": 1.0, "rs": 2.0})
+```
+
+**Launching.** One process, every card of the mesh visible to it. On this machine pick the
+cards with autocvd (the org rule), then set the flags BEFORE jax starts -- XLA reads
+`XLA_FLAGS` once:
+
+```bash
+eval $(/export/home/tbuck/micromamba/envs/odisseo/bin/autocvd -q -l -n 4 -e -t 120)
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export XLA_FLAGS="--xla_gpu_experimental_enable_fusion_autotuner=false \
+--xla_gpu_unsupported_use_ragged_all_to_all_one_shot_kernel=false \
+--xla_gpu_allow_ragged_all_to_all_nccl_send_recv_fallback=true \
+--xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl=false"
+```
+
+The first flag is the single card's (Launch environment: a resumed run is bitwise only
+with it). The other three are `jaccpot.distributed.fused.RAGGED_EXCHANGE_XLA_FLAGS`, XLA's
+NCCL send/recv path for the cross-domain exchange: XLA's default one-shot kernel takes
+4-6x its time across PCIe, jax 0.11 refuses the path without the fallback flag, and with
+jax 0.11's NCCL barrier on, the exchange delivers no cross-device rows and the next call
+deadlocks (how the fused two-card lane hung on 0.11.2). The force warns once when they are
+missing. Check after an `autocvd` timeout that `jax.devices()` are GPUs: the
+timeout leaves `CUDA_VISIBLE_DEVICES` empty and the run lands on the CPU.
+
+**`MeshRunConfig`** (`jaccpot.production`, frozen):
+
+| field | default | |
+|---|---|---|
+| `mesh` | -- | the 1-D mesh |
+| `cap` | `None` | rows per device; `None`: `mesh_shard_capacity(N, ndev, cap_headroom)` = `ceil(ceil(N / ndev) x 1.15)` (the S11/S12 gates' headroom; the repartition's balance overshoot is about `2 ndev / num_samples` of a shard) |
+| `repartition_every` | 1 | a repartition before every segment after the first (the S12 gate's cadence); 0: only the initial decomposition. Its own program, between segments; a declined one (a device would overflow `cap`) moves nothing and the edge says so |
+| `num_samples` | 256 | pivot samples per device of the decomposition and the repartitions |
+| `cross_caps` | `"auto"` | the cross-domain capacities: sized in the library from the needs measured at the start state and at the first segment's drift (on small buffers, `CrossCapacities.for_measurement`; 1.5x the needs), or a `CrossCapacities` |
+| `migrate` | `True` | after every drift, hand each particle that left its device's Morton range to the owner before the force, keys and cuts in the force's own (cubic) box (`MeshSegmentRunner(migrate=True)`, `jaccpot/distributed/migration.py`): the domains stay exact, so no device holds a sparse leaf inside another's core. At 8e6 on two A100s 4-5x fewer cross near pairs and ~11x fewer particles shipped per step, the force 219-262 -> 51-54 ms on contended cards; the repartitions then only rebalance (even cuts plus a migration). The default since S11 session 2's free-card A/B (`production_2026-10.md`: never slower beyond the repetitions' spread on two and four cards, both MACs, 1.2-3.8x faster on Plummer and large discs, +1-6 % peak); `False` lets the domains drift between repartitions |
+| `migration_cap` | `"auto"` | `migrate=True`: the migration buffer's rows per device, sized from one step's drift, re-planned exactly when it overflows |
+| `force` | `None` | the fused lane's `FusedMeshForce` on `solver` (`settings.leaf_size`, `settings.max_order`, the solver's theta); a force object of the segment runner's protocol (`DirectMeshForce` in tests) is used as given |
+
+**What is the same and what is not, against one card:**
+
+- **Input and output by id.** `run` decomposes the `[N, 2, 3]` state over the mesh
+  (`rollout.decompose`: Morton domains, ids `0..N-1` in input order); the caller's arrays
+  are copied, never consumed (`donate_input` has no effect here). `RunResult.state` and
+  `.masses` are the final arrays gathered by id ON THE HOST (one device-to-host copy at
+  the end; 24 B/particle in float32); `RunResult.handle` is the `MeshSegmentRunner`, so
+  `restart_from=res` continues in memory; `RunResult.mode` is `"mesh"`, and each mode
+  continues only its own results and files.
+- **Edges** are `MeshSegmentEdge`s: `state` and `masses` are the layout's flat
+  `(ndev * cap, ...)` arrays (rows by device, padding included), `self_acceleration` is
+  `None` (the segments carry the TOTAL acceleration, `layout.acceleration`), and nothing is
+  gathered unless asked: `edge.state_host()` (what `SnapshotWriter` calls) and
+  `edge.gather(names)` copy to the host by id, during the callback. `edge.retries` is the
+  segment runner's own retry count; `edge.plan` holds the leaf capacity, walk caps, the
+  merged level plan and its floor, the depth bound, the cross capacities (and what their
+  sizing measured), `mesh` (`ndev`, `cap`, live `counts`), `repartition` (whether one ran
+  before the segment, declined, rows sent off device) and the kept run's overflow `bits`.
+- **Parameters.** `dt` and the external field's parameters are program arguments (one
+  compile for every value). `G` and the softening are the force's own: the fused mesh
+  force is static in them, as the single card under `dehnen_error`, so `force_params` must
+  be `None` or equal them (otherwise a `ValueError` says so). The external field and its
+  potential see ONE device's `(cap, 2, 3)` rows: the single card's `field(state, params)`
+  contract restricted to rows, so a per-particle field works unchanged. There is no
+  `step_callback`.
+- **Diagnostics.** The moments are the single card's fp64 reductions, over the flat sharded
+  arrays: a padding row has zero mass and zero velocity, so each moment is exact without a
+  mask (gated against the host fp64 moments of the gathered state). The energy is `K +
+  W_self + W_ext` from `MeshSegmentRunner.potential_energy()`: the force's `potential_shard`
+  per device (`phi_i = -G sum_{j != i} m_j psi(r_ij)` over every device's particles) and
+  the external potential per row, summed in fp64 per device and over the mesh, in a program
+  of its own compiled once per plan whose trace leaves the engine's trace-time state as it
+  found it -- the trajectory with the energy is the one without, bitwise. The mesh force is
+  prepared before the first segment, so `E0` is evaluated AT step 0 (the step-0 row has its
+  energy, drift 0), not at the first segment as on one card. A potential that overflows its
+  capacities reports `energy_ok = False` and no energy (at step 0 that leaves `E0` and every
+  drift `None`: the energy program shares the force's capacities, which a first segment's
+  retry may still have to grow). The fused mesh force's `potential_shard` is the
+  template route's rebuild, `FusedForceProvider.potential` (local near, local far and the
+  cross far pairs through the locals) and the cross near pairs' potential lane. A force
+  without `potential_shard` reports every energy field as `None`, `energy_unavailable`
+  says why, and the run warns once.
+- **Retry.** The segment runner's: a fired flag on any device re-plans what the segment
+  outgrew (the walk caps, the tree's leaf capacity, depth and level plan, the cross
+  capacities), re-prepares every device at the segment's start from a host copy of the
+  donated start state and re-runs it from a start force -- at most twice, then while each
+  re-run fits more steps. A segment that cannot be re-planned raises a `RuntimeError`
+  naming the segment, its steps and the last restart file.
+
+**Restart files** (`SegmentConfig.restart_every`, `save_restart`): one `.npz` as on one
+card, with the arrays BY ID -- `state`, `masses`, `acceleration` (the total) and under
+`dehnen_error` `force_scale` -- plus the layout, `mesh_ids` (each row's id, `-1` on padding)
+and `mesh_padding` (the padding rows' positions: they stay where the last repartition put
+them; every other padding value is zero), and in `meta` the single card's counters,
+baselines, field record and fingerprint, `mesh` (`ndev`, `cap`, counts, the force's class)
+and the edge's plan record with the template's leaf shapes and the digest of the force's
+compile key. Size: 40 B/particle in float32 (+4 under `dehnen_error`) plus 4 B per row and
+12 B per padding row.
+
+- **On the mesh that wrote it** (the same device count and `cap`): the restore rebuilds the
+  identical layout, installs the run's leaf capacity, walk caps and depth bound, builds the
+  force with the run's cross capacities and level floor, prepares it at the restart's
+  positions, puts back the run's level plan, walk caps and template shapes, and checks the
+  force key's digest. Equal, the next segments trace the run's programs and the
+  continuation is the uninterrupted run, BITWISE (`restored["bitwise"]`; CPU gates for the
+  direct and the fused force, the latter from a file written after a retried segment, in a
+  fresh process). On GPUs the cross-domain path is bitwise run to run since S11 session 2
+  (its pair lists in (target, source) order, its long rows summed in a fixed order), and a
+  continuation's STATE is the uninterrupted run's, bitwise (two A100s, 24 steps); the
+  carried acceleration can still differ in a few components where the single card's own
+  near kernel scatter-adds the pieces of very long rows (below).
+- **On another mesh** (another device count or `cap`): the by-id state is decomposed there,
+  its carried acceleration and f_b placed by id (no start force), and the force prepared
+  and sized afresh: the same run to round-off, `restored["bitwise"] = False`,
+  `"mesh_layout"` among the mismatches.
+
+**What is bitwise, and what is not:**
+
+| | |
+|---|---|
+| the mode == `MeshSegmentRunner` driven by hand (same segments, cadence, force) | bitwise by id (CPU: direct force, and the fused force with a retried segment) |
+| chained runs (`restart_from=RunResult`) == one run | bitwise |
+| a restart file continued in a fresh process on the same mesh | bitwise, digests matching (CPU: direct and fused force); on two A100s the state bitwise, the carried acceleration in 1-9 of 6M components not (below) |
+| the energy diagnostic on or off | bitwise |
+| a restart on another device count or `cap` | the same run to round-off; `bitwise = False` |
+| a retried segment against one that never failed | to round-off: the retry recomputes the start force the other carried |
+| the mesh against one card on the same particles | not bitwise (other trees and lists); the accuracy is in class (`production_2026-10.md`, S11 and S12) |
+
+**On two A100s, before the cross path's order fix** (`bench/multigpu_runner_gate.py`, 2026-10-23, cards 0 + 7, both shared with
+other users' jobs at 90-100 % utilisation: memory and accuracy are results, times are not).
+Plummer, N = 2e6 (1e6 per card), `preset="galaxy"` (`dehnen_error` 1e-4, leaf 64, p6), the
+library's cross capacities and shard capacity (1,150,000 rows), 3 segments of 8 steps at dt
+5e-3, a repartition before segments 2 and 3 (17,476 and 17,447 rows moved), every diagnostic
+at every edge, a restart file after each segment:
+
+| | |
+|---|---|
+| flags | segment 1 retried once (S11's first-segment retry: `OVERFLOW_CROSS` at its 8th step, 7 of 8 fitted), the kept runs clean; segments 2 and 3 no retry |
+| rel-L2 of the carried acceleration against the fp64 direct sum (512 ids) | 1.793e-4 at step 8, 1.638e-4 at step 24 (S12's segment gate: 1.324e-4 / 1.636e-4; one card 1.767e-4 / 1.672e-4) |
+| peak per device | 616-619 B/particle (616,157,696 and 619,280,128 B); 850-854 with `--xla_gpu_deterministic_ops=true` |
+| energy | `None`, `energy_unavailable` (this run predates the fused mesh force's `potential_shard`) |
+| restart after segment 2, continued in a fresh process | digest matched, `layout="file"`; the final state differs from the straight run's in 165,799 of 12,000,000 elements (max 4.8e-7) |
+| control: a second straight run (A-vs-A) | 412,084 of 12,000,000 differ (max 4.2e-5) |
+| control: a second continuation from the same file | 166,835 of 12,000,000 differ from the first (max 2.4e-7) |
+| the same with `--xla_gpu_deterministic_ops=true` | continuation vs straight 169,580, continuation vs continuation 168,667, straight vs straight 412,218 (`restored["bitwise"]` True, digests equal) |
+
+The continuation is as close to the uninterrupted run as a second continuation is to the
+first: the restore reproduces the run's state and programs (the digests), and the
+difference is the lane's own run-to-run spread. Where it comes from: in ONE process, the
+start force evaluated three times on the same state with the same compiled program is
+bitwise on a one-device mesh but differs in 612,657 of 1,380,000 components (max 9.5e-7) on
+two devices (Plummer 4e5, production flags; geometric MAC, `dehnen_error` 513,742, max 3.4e-7):
+the cross-domain path is
+not deterministic at run time on GPUs, and deterministic ops do not fix it.
+
+**Fixed for the cross path** (S11 session 2, track G; `bench/multigpu_force_repeat.py`): the
+symmetric Pallas cross walk emits the same pairs in another order each run (atomic cursors)
+and the merge kept that order inside each CSR row; the pairs are now sorted by (target,
+source) and the cross near kernel's chunks and long-row pieces summed in a fixed order. The
+start force is bitwise run to run and across processes (Plummer 4e5 and 2e6, both MACs), and
+the restart above continues with the state bitwise (0 of 12,000,000) and the carried
+acceleration in 1-9 of 6,000,000 components (max 3.0e-8). What is left -- and on the disc +
+bulge 2e6 some 8.5k of 6.9M start-force components -- comes from outside the cross terms,
+most likely the single card's direct near kernel, which scatter-adds the pieces of rows past
+2 x 1024 entries in atomic order (`JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT=1e8` made the repeats
+bitwise): a change of the single-card default path, not made.
+
+**Measuring the lane on a dedicated node.** The A/B and scaling rows in
+`production_2026-10.md` (S11 session 2, track T) ran on four free cards of a shared
+machine whose cards talk over PCIe only; there the mesh scales to two cards in time and
+beyond that buys capacity. `bench/multigpu_scaling_matrix.py` repeats the matrix --
+migration on / off on two and four cards, strong scaling on 1 / 2 / 4 cards (one card:
+the single-card lane on the same particles), weak scaling at 4e6 per card, the memory
+ramp to 4e7 per card -- one fresh process per row on subsets of the job's cards, with
+the XLA flags set, `nvidia-smi` before and after every row and a `SUMMARY.md`;
+`bench/slurm/multigpu_scaling.sbatch` runs it on a HoreKa accelerated node (four
+A100-40GB on NVLink). It needs Odisseo's `benchmark_multigpu/` (`BENCH_DIR`) and the
+25M disc + bulge IC (`--disc-ic`); a resubmitted job skips the rows it has.
 
 ## Gates (S3)
 

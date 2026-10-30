@@ -41,12 +41,24 @@ The cross NEAR term is added after the evaluation by the helper the stacked rout
 uses (:func:`jaccpot.distributed.fused._add_cross_near_term`), so both routes add the
 same term with the same arithmetic.
 
+The self-gravity POTENTIAL, the energy diagnostic's (:func:`mesh_potential_shard`,
+:meth:`FusedMeshForce.potential_shard`), is the single card's energy program on this
+route: the force's rebuild, ``FusedForceProvider.potential`` on it (the local near and
+far fields, and the cross far pairs through the local expansions their M2L wrote),
+and the cross near pairs' potential from the cross near term's kernel launch, its
+fourth lane in its default meaning
+(:func:`jaccpot.distributed.fused._add_cross_near_potential`). A program of its own:
+no force program changes.
+
 :class:`FusedMeshForce` hands this route to the segment runner
 (:mod:`jaccpot.distributed.segment`), with the segment retry's re-plan. Its CROSS
-capacities are the library's by default (``cross_caps="auto"``): a first guess from
-the merged leaf capacity and the worst shard's live leaves
-(``CrossCapacities.for_shard``), measured by the runner's start force and sized from
-what every capacity needed (``cross.plan_cross_capacities``); a retry grows them
+capacities are the library's by default (``cross_caps="auto"``): the runner's start
+force MEASURES what every capacity needs on capacities that hold no row or particle
+buffer (``CrossCapacities.for_measurement``: those needs are exact past the
+buffers' overflow), sized from the exact needs (``cross.size_cross_capacities``),
+then measured again at the first segment's drifted positions on the same program
+(:meth:`FusedMeshForce.plan_cross_drift`: the drift after a decomposition grows the
+cross demand past the start's); a retry grows them
 with ``CrossCapacities.replanned`` from the needs vector
 (``cross.CROSS_NEEDS_FIELDS``) the runner carries after ``NEEDS_FIELDS``, the summary
 following a grown leaf capacity and clamped to what the tree can hold. No bench
@@ -77,6 +89,7 @@ from jaxtyping import Array
 
 from jaccpot.distributed.fused import (
     AXIS_NAME,
+    _add_cross_near_potential,
     _add_cross_near_term,
     _fold_cross_flags,
     _warn_if_slow_ragged_exchange,
@@ -89,6 +102,7 @@ __all__ = [
     "MeshForceSetup",
     "make_mesh_cross_hook",
     "mesh_force_shard",
+    "mesh_potential_shard",
     "prepare_mesh_force",
 ]
 
@@ -116,8 +130,8 @@ class MeshForceSetup:
         The host mesh box the prepares were built in (diagnostics).
     live_leaves : int
         The most leaves holding a particle in any device's eager tree: the worst
-        shard the cross capacities' first guess is sized for
-        (``CrossCapacities.for_shard``).
+        shard the cross sizing's measurement capacities are scaled to
+        (``CrossCapacities.for_measurement``).
     force_scale_seed : Optional[Array]
         ``mac_type='dehnen_error'``: eq (16b)'s ``f_b`` per row from each device's
         caps-only prepare (``_fused_force_scale_seed``: a geometric walk over the
@@ -424,8 +438,11 @@ def prepare_mesh_force(
             runtime_overrides=runtime_overrides,
         )._with_caps_template(stub_caps, pos_d[0], mass_d[0])
     del stub_caps, pos_d, mass_d
-    # caches that would keep an eager prepare's buffers alive through the run
+    # caches that would keep an eager prepare's buffers alive through the run (the
+    # geometry entry holds the last device's box geometry: 12 MB on the second of
+    # two A100s at 2^19 particles per card, through every segment)
     engine._topology_reuse_entry = None
+    engine._geometry_reuse_entry = None
     engine.clear_prepared_state_cache()
     seed = None
     if scale_carry:
@@ -556,30 +573,16 @@ def mesh_force_shard(
         (:func:`_hook_cross_needs`); with ``force_scale``, then the new ``(cap,)``
         ``f_b`` (zero on padding rows).
     """
-    from jaccpot.runtime.capacity_plan import plan_level_overflow
-    from jaccpot.runtime.fused_topology import (
-        NEEDS_FIELDS,
-        OVERFLOW_CROSS,
-        OVERFLOW_LEVEL_PLAN,
-    )
-
     provider = setup.provider
-    # a RE-TRACE must not read the previous trace's tracers (fused_force_step)
-    if cross_near_sink is not None:
-        cross_near_sink.clear()
-    bounds = global_mesh_bounds(
-        positions,
-        num_valid=live,
-        axis_name=axis_name,
-        cubic=bool(getattr(provider.engine, "_tree_cubic_bounds", False)),
-    )
-    topology = provider.rebuild(
+    topology = _shard_rebuild(
+        provider,
         positions,
         masses,
-        bounds=bounds,
-        num_valid=live,
+        live,
         cross_hook=cross_hook,
-        **({} if force_scale is None else {"force_scale": force_scale}),
+        cross_near_sink=cross_near_sink,
+        axis_name=axis_name,
+        force_scale=force_scale,
     )
     f_b = None
     if force_scale is None:
@@ -600,6 +603,103 @@ def mesh_force_shard(
         )
         live_rows = jnp.arange(int(positions.shape[0])) < live
         f_b = jnp.where(live_rows, f_b, jnp.zeros((), f_b.dtype))
+    bits, needs = _shard_verdict(topology, cross_hook, cross_near_sink)
+    if f_b is not None:
+        return acceleration, bits, needs, f_b
+    return acceleration, bits, needs
+
+
+def _shard_rebuild(
+    provider: Any,
+    positions: Array,
+    masses: Array,
+    live: Array,
+    *,
+    cross_hook: Optional[Callable[..., Any]],
+    cross_near_sink: Optional[dict],
+    axis_name: str,
+    force_scale: Optional[Array],
+) -> Any:
+    """One device's topology in the global box, the cross hook between the sweeps.
+
+    The rebuild :func:`mesh_force_shard` and :func:`mesh_potential_shard` share:
+    the near sink emptied (a RE-TRACE must not read the previous trace's tracers,
+    as in ``fused_force_step``), the global box (one all-reduce), and the
+    provider's rebuild over the live rows, with ``force_scale`` for eq (16a)'s
+    thresholds under the criterion.
+
+    Parameters
+    ----------
+    provider : Any
+        The setup's :class:`~jaccpot.runtime.fused_provider.FusedForceProvider`.
+    positions : Array
+        ``(cap, 3)`` this device's positions.
+    masses : Array
+        ``(cap,)`` masses, zero on padding.
+    live : Array
+        Scalar live row count.
+    cross_hook : Optional[Callable[..., Any]]
+        The cross-domain hook (``None`` on one device).
+    cross_near_sink : Optional[dict]
+        The hook's near sink.
+    axis_name : str
+        Mesh axis.
+    force_scale : Optional[Array]
+        ``(cap,)`` eq (16b)'s ``f_b`` in input row order under the criterion, else
+        ``None``.
+
+    Returns
+    -------
+    Any
+        The rebuilt :class:`~jaccpot.runtime.fused_topology.FusedTopology`.
+    """
+    if cross_near_sink is not None:
+        cross_near_sink.clear()
+    bounds = global_mesh_bounds(
+        positions,
+        num_valid=live,
+        axis_name=axis_name,
+        cubic=bool(getattr(provider.engine, "_tree_cubic_bounds", False)),
+    )
+    return provider.rebuild(
+        positions,
+        masses,
+        bounds=bounds,
+        num_valid=live,
+        cross_hook=cross_hook,
+        **({} if force_scale is None else {"force_scale": force_scale}),
+    )
+
+
+def _shard_verdict(
+    topology: Any, cross_hook: Any, cross_near_sink: Optional[dict]
+) -> tuple[Array, Array]:
+    """One device's capacity bits and needs of a rebuilt topology (this trace's).
+
+    The provider's bits with this lane's two (``OVERFLOW_LEVEL_PLAN``,
+    ``OVERFLOW_CROSS``), and the walk's, tree's and cross needs.
+
+    Parameters
+    ----------
+    topology : Any
+        From :func:`_shard_rebuild`, in this trace.
+    cross_hook : Any
+        The hook that ran in the rebuild, or ``None``.
+    cross_near_sink : Optional[dict]
+        Its near sink.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(bits, needs)`` as :func:`mesh_force_shard` returns them.
+    """
+    from jaccpot.runtime.capacity_plan import plan_level_overflow
+    from jaccpot.runtime.fused_topology import (
+        NEEDS_FIELDS,
+        OVERFLOW_CROSS,
+        OVERFLOW_LEVEL_PLAN,
+    )
+
     # a tree wider or deeper than the installed plan's level loops loses nodes from
     # both cascades (capacity_plan.plan_level_overflow); the refresh's own tree flag
     # checks the same plan, this one also the level-table bound
@@ -614,9 +714,95 @@ def mesh_force_shard(
     tree_slot = NEEDS_FIELDS.index("tree_overflow")
     needs = needs.at[tree_slot].max(level.astype(jnp.int32))
     needs = jnp.concatenate([needs, _hook_cross_needs(cross_hook)])
-    if f_b is not None:
-        return acceleration, bits, needs, f_b
-    return acceleration, bits, needs
+    return bits, needs
+
+
+def mesh_potential_shard(
+    setup: MeshForceSetup,
+    positions: Array,
+    masses: Array,
+    live: Array,
+    *,
+    cross_hook: Optional[Callable[..., Any]] = None,
+    cross_near_sink: Optional[dict] = None,
+    axis_name: str = AXIS_NAME,
+    force_scale: Optional[Array] = None,
+) -> tuple[Array, Array, Array]:
+    """One device's self-gravity POTENTIAL on the template route (inside ``shard_map``).
+
+    The single card's energy program (``ProductionRunner.potential_energy``: a
+    rebuild at the positions, then ``FusedForceProvider.potential`` on it) on the
+    mesh: :func:`mesh_force_shard`'s rebuild -- the global box, the cross hook
+    between the sweeps and, under ``mac_type='dehnen_error'``, eq (16a)'s
+    thresholds from ``force_scale`` (the carried ``f_b``), so the lists are the
+    force's at these positions -- and ``phi_i = -G sum_{j != i} m_j psi(r_ij)``
+    with the force's pair kernel over every device's particles:
+
+    * the local near and far fields: ``FusedForceProvider.potential`` (the near
+      kernel's fourth lane, the self pair excluded; the far field's L2P value
+      from the local expansions, ``evaluate_large_n_potential``);
+    * the cross FAR pairs: their M2L writes the same local expansions (through the
+      walk's CSR since S11-C; the flat lanes' concatenated list), which that L2P
+      reads, as the force's L2P reads them;
+    * the cross NEAR pairs: the cross near term's kernel launch with its fourth
+      lane as the potential (:func:`~jaccpot.distributed.fused._add_cross_near_potential`),
+      added in input row order after the local potential, as the force adds its
+      acceleration.
+
+    Its own program (no force program changes): nothing of the acceleration is
+    evaluated but the cross near kernel's three force lanes, which share the launch.
+    No capacity of its own: the rebuild's are the force's, and the cross near term
+    reads the near sink the force reads.
+
+    Parameters
+    ----------
+    setup : MeshForceSetup
+        From :func:`prepare_mesh_force`.
+    positions : Array
+        ``(cap, 3)`` this device's positions.
+    masses : Array
+        ``(cap,)`` masses, zero on padding.
+    live : Array
+        Scalar live row count (at most ``cap``).
+    cross_hook : Optional[Callable[..., Any]]
+        The cross-domain hook (``None`` on one device).
+    cross_near_sink : Optional[dict]
+        The hook's near sink.
+    axis_name : str
+        Mesh axis.
+    force_scale : Optional[Array]
+        ``(cap,)`` eq (16b)'s ``f_b`` in input row order (the force's carried one);
+        required under the criterion, ``None`` without it.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(phi, bits, needs)``: ``(cap,)`` in input row order and the positions'
+        dtype, zero on padding rows; the ``uint32`` overflow bits and the ``int32``
+        needs of the rebuild, as :func:`mesh_force_shard` returns them (the
+        potential is meaningless unless ``overflow_ok(bits)``).
+    """
+    provider = setup.provider
+    topology = _shard_rebuild(
+        provider,
+        positions,
+        masses,
+        live,
+        cross_hook=cross_hook,
+        cross_near_sink=cross_near_sink,
+        axis_name=axis_name,
+        force_scale=force_scale,
+    )
+    phi = _add_cross_near_potential(
+        provider.engine,
+        topology.prepared,
+        jnp.asarray(provider.potential(topology)),
+        cross_near_sink,
+    )
+    live_rows = jnp.arange(int(positions.shape[0])) < live
+    phi = jnp.where(live_rows, phi, jnp.zeros((), phi.dtype))
+    bits, needs = _shard_verdict(topology, cross_hook, cross_near_sink)
+    return phi, bits, needs
 
 
 def _hook_cross_needs(cross_hook: Any) -> Array:
@@ -709,6 +895,21 @@ def make_mesh_cross_hook(
     return hook, sink
 
 
+#: The headroom of the walk's lists when the cross sizing grows them for its next
+#: measurement (``cross.size_cross_capacities(walk_headroom=...)``): the drift probes
+#: measure on that program, and the drift after a decomposition grows the walk's
+#: pairs past the start's (two A100s: the far pairs 1.06-1.41x on H's compact
+#: Plummer, the disc + bulge and Plummer 8e6). A far pair costs ~23 B of the
+#: measurement's temporaries.
+_MEASUREMENT_WALK_HEADROOM = 2.0
+
+#: And the least near list it grows to, per live leaf and peer: the drift's intruder
+#: leaves make new near pairs whatever the start needed (Plummer 8e6: 129,544 at the
+#: start, 620,686 after the drift, 2.3 more per live leaf; H's IC 1.72x, 0.16 per
+#: leaf), at ~7 B a pair.
+_MEASUREMENT_NEAR_PER_LEAF = 4
+
+
 def _cross_by_field(needs: np.ndarray) -> dict:
     """The cross half of a runner needs vector, keyed by ``CROSS_NEEDS_FIELDS``.
 
@@ -727,6 +928,10 @@ def _cross_by_field(needs: np.ndarray) -> dict:
 
     cross = np.asarray(needs, np.int64).reshape(-1)[len(NEEDS_FIELDS) :]
     return dict(zip(CROSS_NEEDS_FIELDS, (int(v) for v in cross)))
+
+
+class _NoDriftedProbe(Exception):
+    """:meth:`FusedMeshForce.plan_cross_drift`: no drifted state could be read."""
 
 
 class FusedMeshForce:
@@ -756,11 +961,12 @@ class FusedMeshForce:
     theta : Optional[float]
         Opening angle; ``None`` takes the solver's.
     cross_caps : Any
-        ``"auto"`` (the default): sized in the library -- a first guess from the
-        merged leaf capacity and the worst shard's live leaves
-        (``CrossCapacities.for_shard``), measured by the runner's start force and
-        sized from what it needed (``cross.plan_cross_capacities``, via
-        :meth:`plan_cross`). A :class:`~jaccpot.distributed.cross.CrossCapacities`:
+        ``"auto"`` (the default): sized in the library -- the runner's start
+        force measured on ``CrossCapacities.for_measurement`` (scaled to the merged
+        leaf capacity and the worst shard's live leaves) and sized from the exact
+        needs (``cross.size_cross_capacities``, via :meth:`plan_cross`), then at the
+        first segment's drift (:meth:`plan_cross_drift`). A
+        :class:`~jaccpot.distributed.cross.CrossCapacities`:
         used as given; ``None``: its constructor defaults. Either way a segment
         retry grows them from the measured needs.
     near_theta : Optional[float]
@@ -829,6 +1035,15 @@ class FusedMeshForce:
         )
         #: the cross needs the library's sizing measured (host), once sized
         self.cross_needs_measured: Optional[np.ndarray] = None
+        #: and at the first segment's drifted positions (plan_cross_drift), once
+        #: measured; None until then, or when no probe could be read
+        self.cross_needs_drifted: Optional[np.ndarray] = None
+        #: plan_cross_drift ran (it runs once, at the first segment)
+        self.cross_drift_sized = False
+        #: the capacities of the sizing's last measurement: their start-force
+        #: program is compiled (and holds no row or particle buffer), so the
+        #: drifted probes run on it
+        self._cross_caps_probe: Any = None
         self.near_theta = near_theta
         self.cross_replan = cross_replan
         self.level_floor = None if level_floor is None else tuple(level_floor)
@@ -957,14 +1172,20 @@ class FusedMeshForce:
             self.setup.walk_caps = dict(validated)
             self._peak_floor = 0
         if self.cross_auto and self.cross_caps is None and len(self.devices) > 1:
-            from jaccpot.distributed.cross import CrossCapacities
+            from jaccpot.distributed.cross import CrossCapacities, cross_walk_backend
 
-            # the library's first guess; plan_cross measures and right-sizes it
-            self.cross_caps = CrossCapacities.for_shard(
+            # what the library's sizing measures with (what it only has to count
+            # at one granule: those needs are exact past the overflow); the queue
+            # from the local walk's widest wavefront; plan_cross sizes from it
+            peers = len(self.devices) - 1
+            local_peak = int((self.setup.walk_caps or {}).get("peak_wavefront") or 0)
+            self.cross_caps = CrossCapacities.for_measurement(
                 leaf_capacity=self.setup.leaf_capacity,
                 ndev=len(self.devices),
                 leaf_width=self.leaf_size,
                 live_leaves=self.setup.live_leaves,
+                exact_walk_needs=cross_walk_backend() == "pallas",
+                queue_floor=local_peak * peers,
             )
             self.hook, self.near_sink = self._make_hook()
 
@@ -997,22 +1218,28 @@ class FusedMeshForce:
         )
 
     def plan_cross(self, measure: Callable[[], np.ndarray]) -> None:
-        """Size ``cross_caps="auto"``: measure the first guess, size from the needs.
+        """Size ``cross_caps="auto"``: measure, then size from the exact needs.
 
-        ``cross.plan_cross_capacities`` with the runner's measurement: ``measure()``
+        ``cross.size_cross_capacities`` with the runner's measurement: ``measure()``
         runs the start force at the current positions on the current hook and
-        returns its cross needs, reduced over the mesh. While their overflow bit is
-        set the capacities are re-planned and measured again; the clean
-        measurement sizes every capacity (``from_needs``: 1.5x its need, the
-        summary clamped to the tree). Each measurement is a compile of the start
-        force. A no-op once sized, with explicit capacities, and on one device.
+        returns its cross needs, reduced over the mesh. The first measurement runs
+        on ``CrossCapacities.for_measurement`` (the rows and particles, and on the
+        Pallas walk its far and near lists, one granule: it overflows them, and
+        reads what they need exactly); its needs size every
+        capacity (``from_needs``: 1.5x its need, the summary clamped to the tree),
+        unless they were lower bounds (the walk or the summary lost pairs), which
+        grows the walk and the summary and measures again. Each measurement is a
+        compile of the start force; the last one's capacities stay
+        (:attr:`_cross_caps_probe`) for :meth:`plan_cross_drift`, whose probes run
+        its program. A no-op once sized, with explicit capacities, and on one
+        device.
 
         Parameters
         ----------
         measure : Callable[[], np.ndarray]
             Runs the force with :attr:`hook` and returns the host cross needs.
         """
-        from jaccpot.distributed.cross import plan_cross_capacities
+        from jaccpot.distributed.cross import size_cross_capacities
 
         if not self.needs_cross_sizing:
             return
@@ -1022,18 +1249,138 @@ class FusedMeshForce:
             self.hook, self.near_sink = self._make_hook()
             return np.asarray(measure())
 
-        caps, needs = plan_cross_capacities(
+        caps, probe, needs = size_cross_capacities(
             _measure,
             self.cross_caps,
+            # the drift probes run on the last measurement's program, and the first
+            # steps' drift grows the walk's pairs (H's compact Plummer at 2^19 per
+            # card: 1.72x the near pairs): its lists grown with room for that
+            walk_headroom=_MEASUREMENT_WALK_HEADROOM,
+            near_floor=self._measurement_near_floor(),
             leaf_capacity=self._setup_or_raise().leaf_capacity,
             leaf_size=self.leaf_size,
-            # a lower-bound need doubles per round: a first guess sized for a
-            # Plummer sphere can be several doublings short (the disc + bulge)
+            # a lower-bound need grows per round: a walk queue sized for a Plummer
+            # sphere can be several doublings short (the disc + bulge)
             max_rounds=6,
         )
+        self._cross_caps_probe = probe
         self.cross_caps = caps
         self.cross_needs_measured = np.asarray(needs)
         self.hook, self.near_sink = self._make_hook()
+
+    @property
+    def needs_drift_sizing(self) -> bool:
+        """Whether :meth:`plan_cross_drift` still has to run.
+
+        Returns
+        -------
+        bool
+            ``cross_caps="auto"``, sized at the start positions
+            (:meth:`plan_cross`), not yet at drifted ones.
+        """
+        return (
+            self.cross_auto
+            and self.hook is not None
+            and self.cross_needs_measured is not None
+            and not self.cross_drift_sized
+        )
+
+    def plan_cross_drift(self, measure: Callable[[], Optional[np.ndarray]]) -> bool:
+        """Size ``cross_caps="auto"`` also from the needs at drifted positions.
+
+        A decomposition leaves the domains apart, and the first steps' drift
+        carries each domain's boundary particles into cells its neighbour fills:
+        the cross demand grows for a few steps past what the start positions
+        needed (``MeshSegmentRunner._measure_cross_drifted``), and a first segment
+        sized at the start alone retried. ``measure()`` runs the start force at
+        the first segment's drifted positions on the current hook and returns the
+        cross needs max-ed over them. As in :meth:`plan_cross`
+        (``cross.size_cross_capacities``), on the capacities of the start's last
+        measurement, whose program is compiled and holds no row or particle
+        buffer: the probes overflow those and read what they need exactly; only
+        needs that are lower bounds (the walk or the summary lost pairs) grow the
+        walk and the summary and measure again. Then every capacity is sized from
+        the larger of the two measurements (``from_needs``: 1.5x), never narrower
+        than it is. Runs once.
+
+        When no drifted state could be read (``measure()`` returns ``None``: its
+        own trees or walks overflowed), the start sizing stands, and the
+        segment's own flags and retry decide. Probes that cannot be sized raise
+        ``size_cross_capacities``' ``RuntimeError`` (a mismatch, or needs still
+        lower bounds after six measurements), with the start sizing restored.
+
+        Parameters
+        ----------
+        measure : Callable[[], Optional[np.ndarray]]
+            Runs the force with :attr:`hook` at the drifted positions and returns
+            the host cross needs, or ``None``.
+
+        Returns
+        -------
+        bool
+            Whether the capacities changed.
+        """
+        from jaccpot.distributed.cross import (
+            _NEEDS_LOWER_BOUND_BIT,
+            CrossCapacities,
+            size_cross_capacities,
+        )
+
+        if not self.needs_drift_sizing:
+            return False
+        self.cross_drift_sized = True
+        before = self.cross_caps
+        leaf_capacity = self._setup_or_raise().leaf_capacity
+
+        def _measure(caps: Any) -> np.ndarray:
+            self.cross_caps = caps
+            self.hook, self.near_sink = self._make_hook()
+            needs = measure()
+            if needs is None:
+                raise _NoDriftedProbe
+            return np.asarray(needs)
+
+        try:
+            caps, _, needs = size_cross_capacities(
+                _measure,
+                self._cross_caps_probe or before,
+                walk_headroom=_MEASUREMENT_WALK_HEADROOM,
+                near_floor=self._measurement_near_floor(),
+                leaf_capacity=leaf_capacity,
+                leaf_size=self.leaf_size,
+                max_rounds=6,
+            )
+        except (_NoDriftedProbe, RuntimeError) as exc:
+            self.cross_caps = before
+            self.hook, self.near_sink = self._make_hook()
+            if not isinstance(exc, _NoDriftedProbe):
+                raise
+            return False
+        self.cross_needs_drifted = np.asarray(needs)
+        both = np.maximum(np.asarray(needs, np.int64), self.cross_needs_measured)
+        sized = CrossCapacities.from_needs(
+            both, like=caps, leaf_capacity=leaf_capacity, leaf_size=self.leaf_size
+        )
+        # monotone: a start() that retried may have grown them past both
+        self.cross_caps = sized._with(
+            **{
+                name: max(int(getattr(sized, name)), int(getattr(before, name)))
+                for name in _NEEDS_LOWER_BOUND_BIT
+            }
+        )
+        self.hook, self.near_sink = self._make_hook()
+        return vars(self.cross_caps) != vars(before)
+
+    def _measurement_near_floor(self) -> int:
+        """The least near list a sizing measurement grows to (:data:`_MEASUREMENT_NEAR_PER_LEAF`).
+
+        Returns
+        -------
+        int
+            Near pairs: per live leaf of the worst shard, per peer.
+        """
+        peers = max(len(self.devices) - 1, 1)
+        return _MEASUREMENT_NEAR_PER_LEAF * self._setup_or_raise().live_leaves * peers
 
     def _setup_or_raise(self) -> MeshForceSetup:
         """The prepared setup.
@@ -1132,6 +1479,55 @@ class FusedMeshForce:
             axis_name=self.axis_name,
             force_scale=force_scale,
         )
+
+    def potential_shard(
+        self,
+        positions: Array,
+        masses: Array,
+        live: Array,
+        ids: Array,
+        force_scale: Optional[Array] = None,
+    ) -> tuple[Array, Array]:
+        """One device's self-gravity potential (:func:`mesh_potential_shard`; inside ``shard_map``).
+
+        Called like :meth:`shard`: inside the caller's ``shard_map``, under
+        :meth:`context`, with :meth:`before_trace` before a fresh trace. The
+        energy's ``W = 1/2 sum_i m_i phi_i`` (summed over the mesh) counts every
+        pair once.
+
+        Parameters
+        ----------
+        positions : Array
+            ``(cap, 3)``.
+        masses : Array
+            ``(cap,)``.
+        live : Array
+            Scalar live row count.
+        ids : Array
+            ``(cap,)`` global ids; unused (the rows come back in input order).
+        force_scale : Optional[Array]
+            ``(cap,)`` the force's carried ``f_b`` (:attr:`scale_carry` only): the
+            rebuild's thresholds, so the lists are the force's.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            ``(phi, bits)``: ``(cap,)`` in the positions' dtype, zero on padding
+            rows, and the ``uint32`` overflow bits of its rebuild (the potential is
+            meaningless unless ``overflow_ok`` of their mesh-wide OR holds).
+        """
+        del ids
+        phi, bits, _ = mesh_potential_shard(
+            self._setup_or_raise(),
+            positions,
+            masses,
+            live,
+            cross_hook=self.hook,
+            cross_near_sink=self.near_sink,
+            axis_name=self.axis_name,
+            force_scale=force_scale,
+        )
+        return phi, bits
 
     # ------------------------------------------------------------------
     # The segment retry.

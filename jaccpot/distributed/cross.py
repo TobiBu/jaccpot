@@ -64,12 +64,14 @@ __all__ = [
     "CROSS_NEEDS_FIELDS",
     "CrossCapacities",
     "cross_near_acceleration",
+    "cross_near_acceleration_direct",
     "cross_needs",
     "cross_walk_backend",
     "cross_walk_fn",
     "make_cross_hook",
     "merge_imported_blocks",
     "plan_cross_capacities",
+    "size_cross_capacities",
 ]
 
 #: Entries of the cross NEEDS vector (:func:`cross_needs`), in order. The first ten
@@ -127,6 +129,13 @@ _NEEDS_LOWER_BOUND_BIT = {
     "leaf_width": "pairs_lower_bound",
 }
 
+
+#: The near sink's fields for the flat import of the default (symmetric) exchange:
+#: the ``(recv_particle_cap, 4)`` receive buffer (x, y, z, mass, rows grouped by
+#: sender), each received row's ``row_start`` / ``row_count`` in it, and its static
+#: ``leaf_width``. The control exchanges write W-wide tiles instead
+#: (``positions``, ``masses``, ``mask``); :func:`_near_import_tiles` reads either.
+_FLAT_NEAR_FIELDS = ("particles", "row_start", "row_count", "leaf_width")
 
 _CROSS_MAC_GEOMETRY_ENV = "JACCPOT_CROSS_MAC_GEOMETRY"
 
@@ -1177,6 +1186,52 @@ def _symmetric_pair_sides(
     return live, mine % S, theirs // S, theirs % S
 
 
+def _in_pair_order(
+    live: Array, target: Array, source: Array, *, num_targets: int, num_sources: int
+) -> tuple[Array, Array]:
+    """A cross pair list in (target, source) order, dead pairs ``-1`` behind it.
+
+    The Pallas walk hands its pairs out through atomic cursors, so on a GPU every
+    run lists the same pair SET in another order (``mutual_walk_pallas``), and a
+    consumer that sums a target's pairs in list order -- the CSR M2L's rows
+    (``merge_into_csr`` keeps the cross pairs' order within a row), the cross near
+    kernel's rows (:func:`cross_near_acceleration` sorts by target only) -- summed
+    them in another order each run: the mesh force was not reproducible run to
+    run. Sorted by (target, source), the order of the local lane's own directed
+    lists (``_directed_csr_from_canonical``), the lists and every sum over them
+    are a function of the pair set. One keys-only sort of a composite key
+    (``_lex_sorted``).
+
+    Parameters
+    ----------
+    live : Array
+        ``(P,)`` live pairs.
+    target, source : Array
+        ``(P,)`` each pair's target and source, in ``[0, num_targets)`` and
+        ``[0, num_sources)`` where ``live``.
+    num_targets, num_sources : int
+        Exclusive bounds of the live targets and sources. Static.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(target, source)``, int32: the live pairs sorted, ``-1`` behind them.
+    """
+    from jaccpot.runtime._interaction_cache import _lex_sorted
+
+    idx = jnp.int32
+    t = jnp.where(live, jnp.asarray(target).astype(idx), int(num_targets))
+    s = jnp.where(live, jnp.asarray(source).astype(idx), 0)
+    t, s = _lex_sorted(
+        t,
+        s,
+        primary_bound=int(num_targets) + 1,
+        secondary_bound=max(int(num_sources), 1),
+    )
+    dead = t >= int(num_targets)
+    return jnp.where(dead, -1, t), jnp.where(dead, -1, s)
+
+
 def _leaf_under(cells: Array, node_ranges: Array, num_internal: int) -> Array:
     """The leaf under each one-leaf cell (itself when it is a leaf).
 
@@ -1231,7 +1286,9 @@ def _symmetric_exchange(
     What a sender ships to ``d`` and what ``d`` expects from it are both laid out in
     the sender's ascending summary index (:func:`_rows_by_peer`); the receive sizes
     the size gather reports are checked against the ones predicted locally, so a
-    divergence raises the overflow flag instead of misaligning rows.
+    divergence raises the overflow flag instead of misaligning rows. Both returned
+    pair lists are in (target, source) order (:func:`_in_pair_order`), whatever
+    order the walk emitted them in.
 
     Parameters
     ----------
@@ -1274,8 +1331,10 @@ def _symmetric_exchange(
         far send/receive rows, ``needs`` (what each capacity it read needed, keyed by
         the :data:`CROSS_NEEDS_FIELDS` entry), with ``error_order`` the imported
         rows' masses ``cross_masses``, and with ``with_near`` the near-sink fields
-        (``positions``, ``masses``, ``mask``, ``target_node``, ``source_row``,
-        ``count``, ``overflow``), ``near_particles`` and ``send_particles``.
+        (the flat import: ``particles`` ``(recv_particle_cap, 4)``, ``row_start``
+        and ``row_count`` per received row, the static ``leaf_width``; and
+        ``target_node``, ``source_row``, ``count``, ``overflow``),
+        ``near_particles`` and ``send_particles``.
 
     Raises
     ------
@@ -1332,9 +1391,22 @@ def _symmetric_exchange(
         ragged_all_to_all_exchange, name="cross_exchange_far"
     )(payload, exp_f.sizes, output_capacity=cap.recv_node_cap, axis_name=axis_name)
     far_mismatch = jnp.any(recv_sizes.astype(idx) != imp_f.sizes)
-    ok_f = fl & (imp_f.pair_row >= 0)
-    src_f = jnp.where(ok_f, n_local + imp_f.pair_row, -1)
-    tgt_f = jnp.where(ok_f, nodes[f_mine], -1)
+    tgt_f = nodes[f_mine]
+    # a pair whose row lies past the receive buffer (an overflowed buffer: the
+    # force is flagged, the sizing measurement overflows on purpose) is dropped:
+    # its source index would read past the imported multipoles
+    ok_f = (
+        fl
+        & (imp_f.pair_row >= 0)
+        & (imp_f.pair_row < cap.recv_node_cap)
+        & (tgt_f >= 0)
+        & (tgt_f < n_local)
+    )
+    # one order per pair set: the walk's is the atomics' (`_in_pair_order`)
+    tgt_f, row_f = _in_pair_order(
+        ok_f, tgt_f, imp_f.pair_row, num_targets=n_local, num_sources=ndev * S
+    )
+    src_f = jnp.where(row_f >= 0, n_local + row_f, -1)
     out["cross_far"] = (
         recv[:, :n_coeff],
         recv[:, n_coeff : n_coeff + 3],
@@ -1435,14 +1507,17 @@ def _symmetric_exchange(
             r_count, jnp.where(r_ok, r_peer, ndev), num_segments=ndev + 1
         )[:ndev]
         near_mismatch = jnp.any(expect != recv_psizes.astype(idx))
+        # each row's particles: a range of the flat receive buffer, read as such by
+        # the cross near term (`cross_near_acceleration_direct`); no W-wide tiles
         r_start = jnp.cumsum(r_count, dtype=idx) - r_count
-        slot = jnp.arange(W, dtype=idx)[None, :]
-        take = jnp.clip(r_start[:, None] + slot, 0, cap.recv_particle_cap - 1)
-        valid = slot < r_count[:, None]
-        imp_pos = jnp.where(valid[..., None], recv_p[take, :3], 0.0)
-        imp_mass = jnp.where(valid, recv_p[take, 3], 0.0)
-        ok_n = nl & (imp_n.pair_row >= 0)
+        # as the far pairs: a row past the receive buffer was never laid out
+        ok_n = nl & (imp_n.pair_row >= 0) & (imp_n.pair_row < cap.recv_node_cap)
         leaf = _leaf_under(nodes[n_mine], nr, num_internal).astype(idx)
+        # one order per pair set, as the far list's; a leaf past the pool (n_local)
+        # stays for the near term to drop
+        leaf, row_n = _in_pair_order(
+            ok_n, leaf, imp_n.pair_row, num_targets=n_local + 1, num_sources=ndev * S
+        )
     with jax.named_scope("cross_near_needs"):
         # particles per (peer, node) row, laid out or not: mine from my own tree (the
         # `full` above, for every row), the peers' from their published counts
@@ -1472,11 +1547,12 @@ def _symmetric_exchange(
         )
         needs["mismatch"] = needs["mismatch"] | (near_mismatch & ~buffers_overflowed)
     out.update(
-        positions=imp_pos,
-        masses=imp_mass,
-        mask=imp_mass != 0.0,
-        target_node=jnp.where(ok_n, leaf, -1),
-        source_row=jnp.where(ok_n, imp_n.pair_row, -1),
+        particles=recv_p,
+        row_start=r_start,
+        row_count=r_count,
+        leaf_width=W,
+        target_node=leaf,
+        source_row=row_n,
         count=res.near_count,
         near_particles=jnp.sum(recv_psizes),
         send_particles=total,
@@ -1703,6 +1779,18 @@ _A_PRIORI_PER_LEAF = {
     "send_particle_cap": (20.0, 2.0),
     "recv_particle_cap": (20.0, 2.0),
 }
+
+
+#: The exchange's row and particle buffers: their needs are counted on the (peer,
+#: node) presence map, so they are EXACT past the buffers' own overflow whenever the
+#: walk lost no pair (``pairs_lower_bound`` clear). The sizing measurement compiles
+#: them at one granule (:meth:`CrossCapacities.for_measurement`).
+_ROW_CAPACITIES = (
+    "send_node_cap",
+    "recv_node_cap",
+    "send_particle_cap",
+    "recv_particle_cap",
+)
 
 
 def _sized(need: Union[int, float], headroom: float) -> int:
@@ -1955,6 +2043,83 @@ class CrossCapacities:
         )
 
     @classmethod
+    def for_measurement(
+        cls,
+        *,
+        leaf_capacity: int,
+        ndev: int,
+        leaf_width: int,
+        live_leaves: Optional[int] = None,
+        summary_cell_level: Optional[int] = None,
+        exact_walk_needs: bool = False,
+        queue_floor: int = 0,
+    ) -> "CrossCapacities":
+        """The capacities the library's sizing MEASURES with (:func:`size_cross_capacities`).
+
+        A measurement only has to report what every capacity needs, and nearly
+        every need is exact past its own buffer's overflow
+        (:data:`CROSS_NEEDS_FIELDS`), so a buffer whose need it only has to COUNT
+        is compiled at one granule and the program holds none of it: the rows and
+        particles the exchange ships and receives (:data:`_ROW_CAPACITIES`, counted
+        on the presence maps of the walk's pairs) and, when the walk keeps
+        counting past a full list (``exact_walk_needs``: the Pallas walk, the
+        GPU's), the walk's far and near lists. A walk that stops at its first
+        overflow (yggdrax's traced walk) keeps :meth:`for_shard`'s lists, so its
+        counts come out exact on most shards in one measurement. The summary keeps
+        the tree's bound (it cannot overflow) and the leaf width the leaf size.
+        The walk's queue is the one need that is a lower bound past its own
+        overflow (the walk reports the widest wavefront it admitted), so it starts
+        at the larger of :meth:`for_shard`'s and ``queue_floor``.
+
+        Measured on two A100s (2^19 particles per card, a compact Plummer, cell
+        leaves of ~3 of 64 slots), the cross near term on the direct layout:
+        :meth:`for_shard`'s per-leaf guess ran its buffers at 12-113x what they
+        needed, and its measurement compiled 792 MB of temporaries; its rows and
+        particles at a granule 710 MB, and with the walk's lists at their need too
+        540 MB, against the sized force's 569 MB (its far list alone, 6.6M pairs
+        against 0.56M needed, cost 141 MB).
+
+        Parameters
+        ----------
+        leaf_capacity : int
+            Leaf slots of every shard's tree.
+        ndev : int
+            Mesh size.
+        leaf_width : int
+            Most particles in one leaf (the lane's leaf size).
+        live_leaves : Optional[int]
+            Live leaves of the worst shard; ``None`` uses ``leaf_capacity``.
+        summary_cell_level : Optional[int]
+            Passed through (:class:`CrossCapacities`).
+        exact_walk_needs : bool
+            The cross walk counts its far and near pairs past a full list
+            (:func:`cross_walk_backend` ``"pallas"``): its lists start at one
+            granule too.
+        queue_floor : int
+            The least export-walk queue to start from (the force's: the local
+            walk's widest wavefront times the peers).
+
+        Returns
+        -------
+        CrossCapacities
+            The measurement's capacities.
+        """
+        base = cls.for_shard(
+            leaf_capacity=leaf_capacity,
+            ndev=ndev,
+            leaf_width=leaf_width,
+            live_leaves=live_leaves,
+            summary_cell_level=summary_cell_level,
+        )
+        counted = _ROW_CAPACITIES
+        if exact_walk_needs:
+            counted = counted + ("export_far_cap", "export_near_cap")
+        return base._with(
+            export_walk_queue=max(base.export_walk_queue, _sized(queue_floor, 1.0)),
+            **{name: _CROSS_CAP_GRANULE for name in counted},
+        )
+
+    @classmethod
     def from_needs(
         cls,
         needs: Any,
@@ -1972,8 +2137,8 @@ class CrossCapacities:
         run whose ``overflow`` bit is CLEAR: a lower-bound need sizes a buffer that
         overflows again (:func:`plan_cross_capacities` re-plans first). Whatever a
         need says, the structural bounds hold (:func:`_structural_bounds`): the leaf
-        width at most ``leaf_size``, the particle buffers at most their rows x the
-        leaf width.
+        width at most a finest-level cell's (``_FINEST_CELL_WIDTH_FACTOR x
+        leaf_size``), the particle buffers at most their rows x the leaf width.
 
         Parameters
         ----------
@@ -1990,8 +2155,9 @@ class CrossCapacities:
             The tree's leaf slots: the summary is clamped to what a tree of them can
             hold (``max_cells`` to it, ``max_summary_nodes`` to ``2 x it - 1``).
         leaf_size : Optional[int]
-            The most particles a leaf of the template holds (its leaf size); the
-            leaf width never exceeds it. ``None``: no bound on the width.
+            The template's leaf size; the leaf width stays within the structural
+            bound it sets (:func:`_structural_bounds`). ``None``: no bound on the
+            width.
 
         Returns
         -------
@@ -2039,7 +2205,7 @@ class CrossCapacities:
         leaf_capacity : Optional[int]
             As :meth:`from_needs`; pass the GROWN one when the tree was re-planned.
         leaf_size : Optional[int]
-            As :meth:`from_needs`: the leaf width never grows past it.
+            As :meth:`from_needs`: the leaf width stays within its structural bound.
 
         Returns
         -------
@@ -2074,14 +2240,24 @@ class CrossCapacities:
         )
 
 
+#: How much wider than the leaf size a cell leaf may be (``_structural_bounds``): a
+#: leaf past ``leaf_size`` is a cell at the finest Morton level, which yggdrax keeps
+#: as a leaf whatever it holds -- 121 particles in one such cell measured on the
+#: Plummer sphere of 8e7 (its outliers make the box 35,148 wide), 144 in one shipped
+#: near row on four cards -- while a degenerate tree's "leaf" is a whole shard.
+_FINEST_CELL_WIDTH_FACTOR = 64
+
+
 def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
     """Clamp proposed capacities to what the exchange can structurally need.
 
-    * ``leaf_width`` <= ``leaf_size``: a near row is one summary cell holding one live
-      cell leaf, and a cell leaf holds at most the leaf size the template was built
-      with -- the local lane's own leaf tiles are that wide. A wider "need" is not a
-      leaf (a degenerate tree: measured, the root of a NaN state as one summary cell
-      of 4,002,489 particles) and no width serves it.
+    * ``leaf_width`` <= ``_FINEST_CELL_WIDTH_FACTOR x leaf_size``: a near row is one
+      summary cell holding one live cell leaf. A cell leaf holds at most the leaf
+      size the template was built with, except a cell at the finest Morton level,
+      a leaf whatever it holds: in the dense core of a large, wide-boxed system
+      such cells hold a few leaf sizes (Plummer 8e7: 121 particles in one). A need
+      past the bound is not a leaf (a degenerate tree: measured, the root of a NaN
+      state as one summary cell of 4,002,489 particles) and no width serves it.
     * ``send_particle_cap`` <= ``send_node_cap x leaf_width``, ``recv_particle_cap``
       <= ``recv_node_cap x leaf_width``: every near row ships at most ``leaf_width``
       particles (the sender clips to it and flags the rest).
@@ -2091,7 +2267,8 @@ def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
     caps : dict
         Proposed values of the :data:`CROSS_NEEDS_FIELDS` capacities.
     leaf_size : Optional[int]
-        The template's leaf size; ``None`` leaves the width alone.
+        The template's leaf size (the width's bound is
+        ``_FINEST_CELL_WIDTH_FACTOR`` times it); ``None`` leaves the width alone.
 
     Returns
     -------
@@ -2100,7 +2277,8 @@ def _structural_bounds(caps: dict, leaf_size: Optional[int]) -> dict:
     """
     out = dict(caps)
     if leaf_size is not None:
-        out["leaf_width"] = min(int(out["leaf_width"]), int(leaf_size))
+        bound = _FINEST_CELL_WIDTH_FACTOR * int(leaf_size)
+        out["leaf_width"] = min(int(out["leaf_width"]), bound)
     width = int(out["leaf_width"])
     for particles, rows in (
         ("send_particle_cap", "send_node_cap"),
@@ -2211,6 +2389,113 @@ def plan_cross_capacities(
     )
 
 
+def size_cross_capacities(
+    measure: Callable[[CrossCapacities], Any],
+    initial: CrossCapacities,
+    *,
+    headroom: Optional[float] = None,
+    walk_headroom: Optional[float] = None,
+    near_floor: int = 0,
+    leaf_capacity: Optional[int] = None,
+    leaf_size: Optional[int] = None,
+    max_rounds: int = 6,
+) -> tuple[CrossCapacities, CrossCapacities, np.ndarray]:
+    """Size the cross capacities from EXACT needs, read off a force that may overflow.
+
+    :func:`plan_cross_capacities` sizes from a CLEAN measurement only, so its first
+    measurement has to hold every buffer the force will need. But a need is exact
+    past its own buffer's overflow unless a lower-bound bit says otherwise
+    (:data:`CROSS_NEEDS_FIELDS`): the row and particle counts are read off the
+    presence maps of the walk's pairs. So here ``measure(caps)`` may run on
+    capacities far below the demand (:meth:`CrossCapacities.for_measurement`), and
+    a measurement whose ``walk_lower_bound`` and ``pairs_lower_bound`` are clear
+    sizes every capacity (:meth:`CrossCapacities.from_needs`: ``headroom x`` its
+    need), overflowed or not. With a lower-bound bit set (the walk's lists or
+    queue, or the summary, lost pairs) only what makes the needs exact grows --
+    the walk's lists and queue and the summary, as
+    :meth:`CrossCapacities.replanned` grows them; the rows and particles keep
+    their size, their next count is exact -- and the force is measured again.
+
+    Parameters
+    ----------
+    measure : Callable[[CrossCapacities], Any]
+        Runs a force with the given capacities and returns its host needs vector,
+        reduced over the mesh.
+    initial : CrossCapacities
+        The first measurement's capacities.
+    headroom : Optional[float]
+        Factor over each need of the sized capacities; ``None``:
+        ``JACCPOT_FLAT_WALK_CAP_HEADROOM``.
+    walk_headroom : Optional[float]
+        Factor over the walk's and the summary's needs when a lower bound grows
+        them for the next MEASUREMENT; ``None``: ``headroom``. A caller that will
+        measure other positions on the same program (the drift probes) gives it
+        room to spare.
+    near_floor : int
+        The least near list the walk grows to for the next measurement (``0``:
+        none): a drift's new near pairs come from boundary particles in the
+        neighbour's cells, a few per leaf whatever the start needed, and a near
+        pair costs the measurement little (~7 B).
+    leaf_capacity : Optional[int]
+        The tree's leaf slots, which bound the summary exactly.
+    leaf_size : Optional[int]
+        The template's leaf size, which bounds the leaf width.
+    max_rounds : int
+        Measurements at most.
+
+    Returns
+    -------
+    tuple[CrossCapacities, CrossCapacities, np.ndarray]
+        ``(sized, measured, needs)``: the capacities sized from the exact needs,
+        the capacities of the measurement that read them (its program is
+        compiled), and those needs.
+
+    Raises
+    ------
+    RuntimeError
+        When the two ends of an exchange disagreed on a size (``mismatch``: not a
+        capacity) in a measurement whose needs were exact -- walks that stopped can
+        disagree, and are re-planned --, a lower bound grew nothing, or the needs
+        were still lower bounds after ``max_rounds`` measurements.
+    """
+    caps = initial
+    for _ in range(max(int(max_rounds), 1)):
+        needs = np.asarray(measure(caps)).astype(np.int64)
+        need = _needs_by_field(needs)
+        if not (need["walk_lower_bound"] or need["pairs_lower_bound"]):
+            if need["mismatch"]:
+                raise RuntimeError(
+                    "size_cross_capacities: the two ends of an exchange disagreed "
+                    f"on a size ({need}); a mismatch is not a capacity."
+                )
+            sized = CrossCapacities.from_needs(
+                needs,
+                like=caps,
+                headroom=headroom,
+                leaf_capacity=leaf_capacity,
+                leaf_size=leaf_size,
+            )
+            return sized, caps, needs
+        grown = caps.replanned(
+            needs,
+            headroom=headroom if walk_headroom is None else walk_headroom,
+            leaf_capacity=leaf_capacity,
+            leaf_size=leaf_size,
+        )._with(**{name: getattr(caps, name) for name in _ROW_CAPACITIES})
+        if grown.export_near_cap < int(near_floor):
+            grown = grown._with(export_near_cap=_sized(near_floor, 1.0))
+        if vars(grown) == vars(caps):
+            raise RuntimeError(
+                "size_cross_capacities: the needs are lower bounds and no capacity "
+                f"of the walk or the summary needed more ({need})."
+            )
+        caps = grown
+    raise RuntimeError(
+        f"size_cross_capacities: the needs were still lower bounds after {max_rounds} "
+        f"measurements ({need}, capacities {caps})"
+    )
+
+
 def _with_separation_floor(
     walk_fn: Optional[Callable[..., Any]], floor: float
 ) -> Optional[Callable[..., Any]]:
@@ -2280,11 +2565,14 @@ def make_cross_hook(
         overflow flags). For probes -- it is host state, so it holds tracers under
         jit and concrete values only when the hook runs eagerly.
     near_sink:
-        Optional dict the hook writes the imported NEAR payload into -- the leaf
-        pool and the (local target leaf, imported leaf) pairs. The caller evaluates
-        that term after the force and adds it; see the module docstring for why the
-        near half is added rather than interleaved. Holds tracers under jit, so it
-        must be consumed inside the same trace.
+        Optional dict the hook writes the imported NEAR payload into -- the
+        imported leaves' particles and the (local target leaf, imported leaf)
+        pairs. The default (symmetric) exchange writes the flat import
+        (:data:`_FLAT_NEAR_FIELDS`: the receive buffer and each row's range in it),
+        the controls W-wide tiles (``positions``, ``masses``, ``mask``). The caller
+        evaluates that term after the force and adds it; see the module docstring
+        for why the near half is added rather than interleaved. Holds tracers under
+        jit, so it must be consumed inside the same trace.
     near_theta:
         MAC parameter of the receiver's walk over the NEAR import; ``None`` uses
         ``theta``. The near-imported leaves travel WITH their multipoles, so the
@@ -2490,7 +2778,7 @@ def make_cross_hook(
             far_overflow = pub.overflow | sym["far_overflow"]
             flag_sink["far"] = far_overflow
             if near_sink is not None:
-                for k in ("positions", "masses", "mask", "target_node", "source_row"):
+                for k in _FLAT_NEAR_FIELDS + ("target_node", "source_row"):
                     near_sink[k] = sym[k]
                 near_sink["count"] = sym["count"]
                 near_sink["overflow"] = pub.overflow | sym["overflow"]
@@ -3162,6 +3450,7 @@ def cross_near_acceleration(
     accum: Optional[str] = None,
     softening_kernel: Optional[str] = None,
     with_force_scale: bool = False,
+    with_potential: bool = False,
 ) -> Union[Array, tuple[Array, Array]]:
     """Acceleration on local particles from the IMPORTED leaves, as its own term.
 
@@ -3174,10 +3463,17 @@ def cross_near_acceleration(
     cross pairs alone: the local near field is already in the force this is added to,
     and including it here would double it.
 
+    The TABLE layout: the leaf-pair kernel over a leaf-major pool of every local
+    leaf slot and every imported row, ``W`` slots each (at ~20 particles per 64-slot
+    leaf mostly padding). The mesh force takes :func:`cross_near_acceleration_direct`
+    unless ``JACCPOT_NEARFIELD_ACCUM=wide`` (or ``JACCPOT_NEARFIELD_LAYOUT=table``),
+    as the local near field does.
+
     Parameters
     ----------
     near:
-        The ``near_sink`` a :func:`make_cross_hook` filled.
+        The ``near_sink`` a :func:`make_cross_hook` filled (the flat import or the
+        controls' tiles; :func:`_near_import_tiles`).
     local_leaf_positions, local_leaf_masses, local_leaf_mask:
         This device's leaf-major pool, ``(L, W, 3)`` and ``(L, W)``.
     leaf_particle_indices:
@@ -3211,12 +3507,26 @@ def cross_near_acceleration(
         Also return the imported leaves' share of eq (16b)'s force scale, ``sum G
         m / (r^2 + eps^2)`` over the same pairs (the kernel's fourth lane, in place
         of the potential), for ``mac_type='dehnen_error'``. Static.
+    with_potential:
+        Also return the imported leaves' share of the potential, ``-G sum m
+        psi(r)`` with the pair kernel's ``psi`` over the same pairs: the kernel's
+        fourth lane in its default meaning (the sorted kernel's
+        ``with_potential``), which the force drops. For the mesh potential's
+        program (``template_force.mesh_potential_shard``); exclusive with
+        ``with_force_scale``. Static.
 
     Returns
     -------
     Union[Array, tuple[Array, Array]]
         ``(n_particles, 3)`` acceleration to ADD to the local force; with
-        ``with_force_scale``, ``(acceleration, force_scale [n_particles])``.
+        ``with_force_scale``, ``(acceleration, force_scale [n_particles])``; with
+        ``with_potential``, ``(acceleration, potential [n_particles])``.
+
+    Raises
+    ------
+    ValueError
+        If both ``with_force_scale`` and ``with_potential`` are set: they share the
+        kernel's fourth lane.
     """
     from jaccpot.nearfield.near_field import _env_choice
     from jaccpot.pallas.nearfield_leafpair_csr import (
@@ -3225,6 +3535,8 @@ def cross_near_acceleration(
         nearfield_leafpair_csr_pallas,
     )
 
+    if with_force_scale and with_potential:
+        raise ValueError("with_force_scale and with_potential share the fourth lane")
     if accum is None:
         accum = _env_choice("JACCPOT_NEARFIELD_ACCUM", "input", ("input", "wide"))
 
@@ -3232,9 +3544,7 @@ def cross_near_acceleration(
     loc_mass = jnp.asarray(local_leaf_masses)
     loc_mask = jnp.asarray(local_leaf_mask)
     idx = jnp.asarray(leaf_particle_indices)
-    imp_pos = jnp.asarray(near["positions"])
-    imp_mass = jnp.asarray(near["masses"])
-    imp_mask = jnp.asarray(near["mask"])
+    imp_pos, imp_mass, imp_mask = _near_import_tiles(near)
 
     L = int(loc_pos.shape[0])
 
@@ -3274,7 +3584,10 @@ def cross_near_acceleration(
     # whereas dropping it is a missing one. Neither is acceptable, but only the
     # second is detectable downstream, and the test asserts nothing is dropped.
     lrow = tgt_node - int(num_internal)
-    live = (jnp.arange(P) < n_pair) & (lrow >= 0) & (lrow < L)
+    # a source row past the import (a row buffer that overflowed: the force is
+    # flagged) would read past the pool: dropped, never read
+    in_import = (src_row >= 0) & (src_row < int(imp_pos.shape[0]))
+    live = (jnp.arange(P) < n_pair) & (lrow >= 0) & (lrow < L) & in_import
     row = jnp.where(live, lrow, L)
     order = jnp.argsort(jnp.where(live, row, L), stable=True)
     row_s = row[order]
@@ -3304,6 +3617,10 @@ def cross_near_acceleration(
         num_target_leaves=L,
         accum=str(accum),
         softening_kernel=softening_kernel,
+        # a row's chunks summed in one fixed order: the segment_sum's GPU atomics
+        # summed a row of three or more (>128 imported leaves) in another order
+        # each run
+        ordered_rows=True,
         **({"with_force_scale": True} if with_force_scale else {}),
     )
     acc = out[..., :3]
@@ -3319,11 +3636,222 @@ def cross_near_acceleration(
         .at[flat_idx]
         .add(acc.reshape(-1, 3), mode="drop")
     )
-    if not with_force_scale:
+    if not (with_force_scale or with_potential):
         return acc_out
-    fb = out[..., 3]
+    # lane 3: the force scale with `with_force_scale`, else the potential
+    fourth = out[..., 3]
     return acc_out, (
-        jnp.zeros((n_particles,), fb.dtype)
+        jnp.zeros((n_particles,), fourth.dtype)
         .at[flat_idx]
-        .add(fb.reshape(-1), mode="drop")
+        .add(fourth.reshape(-1), mode="drop")
     )
+
+
+def _near_import_tiles(near: dict) -> tuple[Array, Array, Array]:
+    """The near import as ``(R, W)`` tiles, for the table layout.
+
+    The control exchanges write tiles; the default exchange writes the flat import
+    (:data:`_FLAT_NEAR_FIELDS`), laid out here as the hook laid it out before the
+    direct layout: row ``r``'s particles in slots ``0 .. row_count[r] - 1``.
+
+    Parameters
+    ----------
+    near : dict
+        The near sink.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        ``(positions (R, W, 3), masses (R, W), mask (R, W))``, zero on dead slots.
+    """
+    if "particles" not in near:
+        return (
+            jnp.asarray(near["positions"]),
+            jnp.asarray(near["masses"]),
+            jnp.asarray(near["mask"]),
+        )
+    parts = jnp.asarray(near["particles"])
+    r_start = jnp.asarray(near["row_start"])
+    r_count = jnp.asarray(near["row_count"])
+    slot = jnp.arange(int(near["leaf_width"]), dtype=r_start.dtype)[None, :]
+    take = jnp.clip(r_start[:, None] + slot, 0, parts.shape[0] - 1)
+    valid = slot < r_count[:, None]
+    imp_pos = jnp.where(valid[..., None], parts[take, :3], 0.0)
+    imp_mass = jnp.where(valid, parts[take, 3], 0.0)
+    return imp_pos, imp_mass, imp_mass != 0.0
+
+
+def cross_near_acceleration_direct(
+    near: dict,
+    positions_sorted: Array,
+    masses_sorted: Array,
+    leaf_ranges: Array,
+    particle_indices: Array,
+    num_internal: int,
+    *,
+    leaf_width: int,
+    softening_sq: Array,
+    G: Array,
+    chunk: int = 64,
+    interpret: bool = False,
+    softening_kernel: Optional[str] = None,
+    with_force_scale: bool = False,
+    with_potential: bool = False,
+) -> Union[Array, tuple[Array, Array]]:
+    """The cross NEAR term on the direct layout: the local near field's kernel.
+
+    :func:`cross_near_acceleration`'s sum over the same pairs, on
+    :func:`~jaccpot.pallas.nearfield_leafpair_csr.nearfield_leafpair_csr_sorted_direct_pallas`
+    instead of the table kernel -- the layout the local near field moved to for
+    the same reason: the table kernel's leaf-major pool is every local leaf slot
+    and every imported row ``W`` slots wide, mostly padding, and it was the mesh
+    force's largest temporary (one A100 pair, 2^19 particles per card, cell leaves
+    of ~3 of 64 slots: the pool, its mask and the per-chunk partials 0.66 GB of a
+    0.72 GB program). Here the particles are ONE sorted table, this device's
+    sorted particles then the flat receive buffer, each leaf a range of it (the
+    local leaves from the tree, the imported rows from the near sink's
+    ``row_start`` / ``row_count``), and the kernel stores into particle order:
+    nothing is padded to ``W`` but the target tiles.
+
+    The local leaves are the only targets (``num_target_leaves``), the cross CSR
+    their rows in the pair list's (target, source) order, and the self term is
+    left out (``include_self=False``): it is in the local force already. A row is
+    one program summed in list order up to the kernel's ``DIRECT_ROW_LIMIT``
+    entries, and the rest of a longer row in pieces summed in one fixed order
+    (``ordered_rest``), so the term is a function of the pair set. Single precision
+    accumulation (``accum="input"``), as the direct kernel; ``"wide"`` is the table
+    layout's.
+
+    Parameters
+    ----------
+    near : dict
+        The near sink of the default exchange (the flat import,
+        :data:`_FLAT_NEAR_FIELDS`, and the pairs).
+    positions_sorted : Array
+        ``(n, 3)`` this device's particles in tree order.
+    masses_sorted : Array
+        ``(n,)`` their masses.
+    leaf_ranges : Array
+        ``(L, 2)`` inclusive particle range of every local leaf row (leaf node
+        ``num_internal + r``); an empty leaf has ``end < start``.
+    particle_indices : Array
+        ``(n,)`` the input row of each sorted particle (the tree's permutation).
+    num_internal : int
+        Internal-node count of the local tree: a target arrives as a NODE id.
+    leaf_width : int
+        The most particles a local leaf holds (the target tiles' width). Static.
+    softening_sq : Array
+        Scalar, matching the local lane's.
+    G : Array
+        Scalar gravitational constant.
+    chunk : int
+        Entries per chunk (the direct kernel's piece floor). Static.
+    interpret : bool
+        Pallas interpret mode.
+    softening_kernel : Optional[str]
+        The pair kernel (:mod:`jaccpot.softening`); ``None`` gives the default.
+    with_force_scale : bool
+        Also return the imported leaves' share of eq (16b)'s force scale (the
+        kernel's fourth lane), as :func:`cross_near_acceleration`. Static.
+    with_potential : bool
+        Also return their share of the potential, ``-G sum m psi(r)`` (the fourth
+        lane in its default meaning). Exclusive with ``with_force_scale``. Static.
+
+    Returns
+    -------
+    Union[Array, tuple[Array, Array]]
+        ``(n, 3)`` acceleration in INPUT row order to ADD to the local force (zero
+        on rows no local leaf holds); with ``with_force_scale`` or
+        ``with_potential``, ``(acceleration, lane (n,))``.
+
+    Raises
+    ------
+    ValueError
+        If both ``with_force_scale`` and ``with_potential`` are set: they share the
+        kernel's fourth lane.
+    """
+    from jaccpot.pallas.nearfield_leafpair_csr import (
+        nearfield_leafpair_csr_sorted_direct_pallas,
+    )
+
+    if with_force_scale and with_potential:
+        raise ValueError("with_force_scale and with_potential share the fourth lane")
+    idx = jnp.int32
+    pos = jnp.asarray(positions_sorted)
+    dtype = pos.dtype
+    n = int(pos.shape[0])
+    ranges = jnp.asarray(leaf_ranges).astype(idx)
+    L = int(ranges.shape[0])
+    parts = jnp.asarray(near["particles"])
+    capacity = int(parts.shape[0])
+    r_start = jnp.asarray(near["row_start"]).astype(idx)
+    r_count = jnp.asarray(near["row_count"]).astype(idx)
+    R = int(r_start.shape[0])
+
+    # ONE table: the local sorted particles, then the receive buffer (zero past
+    # what arrived), each leaf a range of it
+    table_pos = jnp.concatenate([pos, parts[:, :3].astype(dtype)])
+    table_mass = jnp.concatenate(
+        [jnp.asarray(masses_sorted, dtype), parts[:, 3].astype(dtype)]
+    )
+    loc_start = ranges[:, 0]
+    loc_count = jnp.maximum(ranges[:, 1] - ranges[:, 0] + 1, 0)
+    # an overflowed receive buffer holds fewer particles than the rows claim (the
+    # force is flagged): a row is cut to what lies inside it, never read past it
+    imp_start = jnp.clip(r_start, 0, capacity)
+    imp_count = jnp.clip(jnp.minimum(r_count, capacity - imp_start), 0)
+    leaf_start = jnp.concatenate([loc_start, n + imp_start])
+    leaf_count = jnp.concatenate([loc_count, imp_count])
+
+    # the cross pairs as a CSR over the LOCAL target leaf rows, the pair list's
+    # order kept within a row (a stable sort by row: the default exchange's list
+    # is in (target, source) order already). A target outside the local leaves or
+    # a source past the import is dropped, never clipped onto another row.
+    tgt_node = jnp.asarray(near["target_node"]).astype(idx)
+    src_row = jnp.asarray(near["source_row"]).astype(idx)
+    P = int(tgt_node.shape[0])
+    lrow = tgt_node - int(num_internal)
+    live = (
+        (jnp.arange(P) < jnp.asarray(near["count"]))
+        & (lrow >= 0)
+        & (lrow < L)
+        & (src_row >= 0)
+        & (src_row < R)
+    )
+    row = jnp.where(live, lrow, L)
+    order = jnp.argsort(row, stable=True)
+    # entries past a row's count are never read; the dead ones point at leaf 0
+    neighbors = jnp.where(live[order], L + src_row[order], 0)
+    counts = jnp.bincount(row, length=L + 1)[:L].astype(idx)
+    offsets = jnp.concatenate([jnp.zeros((1,), idx), jnp.cumsum(counts, dtype=idx)])
+
+    acc, fourth = nearfield_leafpair_csr_sorted_direct_pallas(
+        table_pos,
+        table_mass,
+        leaf_start,
+        leaf_count,
+        neighbors,
+        offsets,
+        counts,
+        leaf_width=max(int(leaf_width), int(near.get("leaf_width", 0))),
+        softening_sq=softening_sq,
+        G=G,
+        chunk=int(chunk),
+        interpret=bool(interpret),
+        with_potential=bool(with_potential),
+        with_force_scale=bool(with_force_scale),
+        softening_kernel=softening_kernel,
+        include_self=False,  # the local self term is already in the force
+        num_target_leaves=L,
+        # a row's pieces past the row limit in one fixed order: the disc + bulge
+        # at 2e6 on two A100s has rows of up to 4,225 entries, and the pieces'
+        # scatter-add left ~1e4 of 6.9e6 acceleration components run-dependent
+        ordered_rest=True,
+    )
+    # sorted -> input rows: a permutation, one addend per row (no sum)
+    perm = jnp.asarray(particle_indices)
+    acc_out = jnp.zeros((n, 3), acc.dtype).at[perm].set(acc[:n])
+    if not (with_force_scale or with_potential):
+        return acc_out
+    assert fourth is not None
+    return acc_out, jnp.zeros((n,), fourth.dtype).at[perm].set(fourth[:n])

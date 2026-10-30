@@ -1786,3 +1786,543 @@ The geometric MAC on the same code (S11 fix 8's rows): 8e6 4.36e-4 / 4.30e-4, 2e
 - The per-device seed's far half is the single card's `far_force_scale_sorted` (a scatter-add): like the single
   card's seed, not bitwise reproducible on a GPU; every later f_b is (the lanes kernel and the cascade).
 - The runner's multi-GPU mode (S11 session 2) takes the criterion with no further change to the lane.
+
+## S11, session 2 — the fused multi-GPU lane in the runner (2026-10-23/24)
+
+Plan S11, session 2: the production runner's multi-GPU mode, Odisseo off the old mesh lane, and what session 1 left
+open (the first segment's retry, the cross near volume, the free-card measurements). On main `e82389b5` (S11 session
+1, S12 and #469 merged), in PR order: **E** the mesh potential, **D** the runner's multi-GPU mode, **F** sizing at the
+drift and the same-step retry rule, **G** the 2-GPU force bitwise run to run, **I** migration to fixed cuts, **N** the
+mesh's memory (from track **M**'s stage-by-stage diagnosis); in Odisseo **H** its multi-GPU lane on the runner; **P**
+the close-out baselines on main; **T** the free-card measurements. The single-card lane is untouched throughout: CPU
+program identity 36/36 against `s11s2-main-cpu` after every track.
+
+| target | result |
+| --- | --- |
+| the runner on several cards | `ProductionRunner(mesh=MeshRunConfig(...))`: segments, edges, diagnostics with the energy, restart files, the retry, by-id input and output; CPU gates bitwise (the mode == the segment runner by hand, chained == one run, a fresh-process restart == the straight run) |
+| the energy on the mesh | `FusedMeshForce.potential_shard`: phi rel-L2 1.4e-6 against fp64 direct (`dehnen_error`, 2e6 on two A100s), W against one card 2.6e-8 (Plummer) and 9.4e-8 (disc + bulge) |
+| no first-segment retry | the cross capacities sized also at the first segment's drift: 0 retries on every gate row (Plummer 2e5 / 8e6, disc 2e5 / 2e6, both MACs) |
+| bitwise run to run on GPUs | the cross pairs in (target, source) order, their rows summed in a fixed order: the 2-device start force bitwise in one process and across processes (Plummer 4e5 / 2e6, both MACs), a restart's state bitwise; open: ~8.5k of 6.9M components on the disc 2e6, from the single card's near kernel (not changed) |
+| the cross near volume | migration to fixed cuts (`migrate=True`, opt-in): Plummer 8e6 on two cards 344-537k -> ~97k cross near pairs, 3.4-4.0M -> 318k particles shipped per step, 7.4k migrants; the force 219-262 -> 51-54 ms (contended cards) |
+| the mesh's memory | the cross near term on the local near field's direct layout, the sizing measured on small buffers: per device a compact Plummer at 2^19 per card 1,474 -> 619 MB, Plummer 8e6 662 -> 342 B/p, the disc + bulge 2e6 796 -> 766 MB |
+| Odisseo | `fmm_preset="galaxy"` + `fmm_mesh=True` + `MeshRunnerOptions` runs the runner's multi-GPU mode; `MeshOptions` keeps the old lane |
+| free-card scaling | track T (below) |
+
+No timing in the subsections below is a free-card result unless it says so: the cards were shared with other users'
+jobs for most of the session.
+
+### The mesh potential (E)
+The runner's multi-GPU mode reports the energy (`E = K + W_self + W_ext`), and the mesh had no potential: the cross
+near kernel's fourth lane carried f_b (S12) or nothing. Branch `s11s2/mesh-potential`.
+
+| piece | change |
+| --- | --- |
+| the cross near pairs' potential | `cross_near_acceleration(with_potential=True)`: the leaf-pair kernel's fourth lane in its default meaning (`-G m psi`, accumulated beside the force, as the sorted kernel's `with_potential`), which the force drops; exclusive with `with_force_scale`. The kernel is unchanged. `fused._add_cross_near_potential` adds it in input row order from the pool and pairs the force's term reads (`_cross_near_pool`, factored out of `_add_cross_near_term`) |
+| `template_force.mesh_potential_shard` | the single card's energy program (`ProductionRunner.potential_energy`) on the template route: the force's rebuild (the global box, the cross hook between the sweeps, under `dehnen_error` eq (16a)'s thresholds from the given f_b, so the lists are the force's), `FusedForceProvider.potential` (local near lane 4, the far L2P value of the local expansions, which hold the cross far pairs' M2L: the force's L2P reads the same locals), plus the cross near pairs' potential; zero on padding rows; the bits and needs of the rebuild (`_shard_verdict`, factored out of `mesh_force_shard` with `_shard_rebuild`) |
+| `FusedMeshForce.potential_shard(positions, masses, live, ids, force_scale=None) -> (phi, bits)` | the force protocol method `MeshSegmentRunner.potential_energy` calls inside its `shard_map`, like `shard`. No capacity of its own |
+
+The runner's energy program (`MeshSegmentRunner.potential_energy`) calls it per device inside its `shard_map`, as
+its start program calls `shard`: `phi, bits = force.potential_shard(state[:, 0], masses, min(count[0], cap), ids)`,
+with `force_scale=<the carried f_b>` under the criterion (required: the rebuild refuses without it), under
+`force.context()`, `force.before_trace()` before a fresh trace, the engine's trace-time state kept around the trace
+(`production._trace_state_kept`, as the single card's energy program). `phi` is in the positions' dtype and zero on
+padding rows, so `W_self = 1/2 psum(sum(float64(m) * float64(phi)))` needs no mask; the energy is valid when
+`overflow_ok` holds for the bits OR-ed over the mesh (`segment._mesh_verdict`) and every count fits its shard.
+
+No force program changes: the template route's start and segment programs (geometric and `dehnen_error`) and the
+stacked route's force program, lowered on two forced CPU devices (`as_text(debug_info=False)`), are text-identical to
+main `e82389b5` (an A-vs-A control on main is identical too). No single-card file is touched.
+
+Gates (`tests/distributed/test_mesh_potential.py`: two forced CPU devices, N = 2048 uniform cube, leaf 64 with leaf
+capacity 128, p4, eps 1e-2 ferrers3; 386 s of calls for the four cases on this host, in `test-distributed-segment`):
+
+| gate | geometric (theta 0.8) | `dehnen_error` 1e-4 |
+| --- | --- | --- |
+| one device == the single card's potential, same box (N = 1024) | bitwise | bitwise, from the same seed f_b (the mesh's seed is the single card's, bitwise) |
+| phi vs the fp64 direct sum (all pairs, the same kernel), rel-L2 / max: mesh | 1.862e-4 / 1.118e-3 | 1.010e-6 / 1.125e-5 |
+| one card on the same particles | 1.878e-4 / 1.113e-3 | 1.275e-6 / 1.249e-5 |
+| `W = 1/2 sum m phi` vs direct: mesh / one card (bound) | 1.76e-5 / 1.94e-5 (1e-4) | 1.13e-8 / 1.84e-8 (1e-6) |
+| mutation: W without the cross near term / without the cross far pairs | 7.1e-2 / 3.3e-1 | 3.5e-1 / 4.5e-2 |
+| the potential's lists | -- | its needs equal the force's at the same f_b, and move with it (4x f_b) |
+
+Two A100s (`bench/multigpu_potential_gate.py`, `preset="galaxy"`, leaf 64, p6, library cross caps; cards 0 + 7, both
+shared with other users' jobs at 45-100 % utilisation: the times are contended and are not results). phi against an
+fp64 direct sum on 512 fixed ids; one card on the same positions (its own start force's f_b); temporaries from
+`memory_analysis()` per device; the peak is the process's, set by the setup's cross sizing (the start force's
+program), and the potential did not raise it:
+
+| row | phi rel-L2 / max, mesh | one card | W mesh vs one card | temporaries potential / force | peak per device | potential / force, median (min) |
+| --- | --- | --- | --- | --- | --- | --- |
+| Plummer 2e6, `dehnen_error` | 1.408e-6 / 8.88e-6 | 1.536e-6 / 8.72e-6 | 2.6e-8 | 390.3 / 371.3 MB | 671-676 MB | 125.8 (107.3) / 165.3 (126.3) ms |
+| disc + bulge 2e6, `dehnen_error` | 1.359e-6 / 8.48e-6 | 1.477e-6 / 8.04e-6 | 9.4e-8 | 675.2 / 682.6 MB | 842-847 MB | 635 (597) / 745 (629) ms |
+| Plummer 2e6, geometric 0.8 | 6.739e-6 / 4.146e-5 | 7.083e-6 / 1.454e-4 | 2.2e-7 | 294.0 / 308.9 MB | 662 MB | 219 (206) / 200 (164) ms |
+
+Every potential's bits were clean and its padding rows zero; no start force retried.
+
+**Found on the way (GPU only): the mesh force is not bitwise reproducible run to run.** A-vs-A on two A100s (cards 0 +
+6, then 0 + 7; Plummer 2e6, `dehnen_error`, the same program on the same inputs twice): 2,664,694 of 6,900,000
+acceleration components differ (max 4.8e-7 at |a| <= 21.4, ulps) and 455,887 of 2,300,000 potentials (max 3.0e-7);
+with `--xla_gpu_deterministic_ops=true` 2,706,687 and 482,140. Without the cross hook (each device's own particles)
+both are bitwise (0 differ); without the cross near term the potential still differs (472,909). The symmetric cross
+walk (Pallas) returns the same pair SET in a different ORDER each run (507,778 far and 73,840 near pairs per device;
+1,012,559 of the 1,015,556 live far slots and 146,730 of the 147,680 near ones hold another pair), and the stable sort
+that slots the cross pairs into the CSR rows keeps that order, so the M2L (and the cross near kernel) sum each row in
+a run-dependent order. Not the potential's: it inherits it from the rebuild. A canonical order (sorted by target, then
+source) should make both reproducible (not tried: it changes the force program). On CPU the lane's bitwise gates hold
+(S11 A2/A3, S12 (a)-(c)).
+
+### The runner's multi-GPU mode (D)
+`ProductionRunner(solver, ..., mesh=MeshRunConfig(make_mesh(n)))` (and `production.run(..., mesh=...)`) runs the
+single card's loop on `MeshSegmentRunner`: segments, edges and callbacks (`SnapshotWriter`, `DiagnosticsLog`, a
+truthy return stops), the diagnostics with the energy (`MeshSegmentRunner.potential_energy`: the force's
+`potential_shard` per device, fp64 sums, a program of its own whose trace leaves the engine as it found it), restart
+files and their continuation, the segment runner's retry, the plan record (caps, cross caps, repartition stats).
+Input and output by id (`rollout.decompose` with `mesh_shard_capacity(N, ndev)` = ceil(ceil(N / ndev) x 1.15) rows
+per device; `RunResult.state` gathered by id on the host; `RunResult.handle` the segment runner, so a continuation in
+memory is bitwise); `dt` and the external field's parameters traced, G and the softening the force's own
+(`force_params` must equal them); edges gather by id only when asked (`MeshSegmentEdge.state_host()` / `.gather()`).
+A restart on the mesh that wrote it rebuilds the identical layout and plan (leaf capacity, walk caps, depth bound,
+cross caps, level floor and plan, template shapes; the force key's digest checked); on another mesh it decomposes the
+by-id state (`restored["bitwise"] = False`). Backend: `jaccpot/distributed/mesh_runner.py`; the single-card path is
+unchanged (CPU program identity 36/36). Branch `s11s2/runner-mesh-mode`; docs: `production.md` "Multi-GPU mode".
+
+| gate (CPU, two forced devices) | result |
+| --- | --- |
+| the mode == `MeshSegmentRunner` driven by hand (direct force; the fused force with a retried segment) | bitwise by id at every edge |
+| chained runs (`restart_from=RunResult`) == one run | bitwise |
+| a restart file continued in a FRESH process, same mesh (direct force; fused force from a file written after a retried segment) | bitwise, digests matching |
+| restored on one device | allclose 1e-12, `bitwise = False` |
+| moments and energy against the host fp64 sums of the gathered state | 1e-12 (the summation order only) |
+| energy diagnostic on / off | bitwise |
+| a stop callback; a retry shown on its edge; a failure names the last restart file | yes |
+
+On two shared A100s (Plummer 2e6, the galaxy preset, 3 segments of 8 steps with repartitions, every diagnostic):
+flag-clean but the first segment's single retry (fixed by F), rel-L2 1.793e-4 / 1.638e-4 at steps 8 / 24 against the
+fp64 direct sum, 616-619 B/p per device. Its restart continued in a fresh process differed from the straight run in
+165,799 of 12,000,000 state elements -- as much as a second continuation from the same file did: the lane was not
+run-to-run deterministic on GPUs (found here; G fixed it). Odisseo's multi-GPU lane runs on this mode (H, below).
+
+### Sizing at the drift and the same-step retry rule (F)
+**The cross near "jump" was physics, and one number was mis-recorded.** Per-step needs (1-step segments, two
+contended A100s, Plummer, theta 0.8) -- cross near pairs / particles shipped:
+
+| state | 2e5 | 8e6 |
+| --- | --- | --- |
+| start (zero drift) | 11,603 / 36,231 | 129,544 / 430,677 |
+| step 1 | 16,569 / 70,250 | 360,247 / 3,743,931 |
+| step 2 | 17,257 / 72,153 | 424,282 / 3,838,602 |
+| step 3 | 20,438 / 87,867 | 621,796 / 3,927,219 |
+| step 4 | 22,234 / 87,232 | 399,351 / 3,828,308 |
+| later | 20,077 (step 6) | 337,626-504,898 near, 1.85-3.86M shipped (steps 6-12) |
+
+The start program at each step's positions gives exactly the scan's needs (no start-vs-scan difference), and a host
+model (yggdrax's numpy cell leaves, COM and exact radius, the geometric MAC) reproduces the force's near pairs within
+2 %. Mechanism: a decomposition leaves exact domains; one drift carries boundary particles into Morton cells the
+OTHER domain fills densely, where the owner's tree, seeing only its stragglers, keeps one coarse leaf (8e6: a leaf of
+19 particles, radius 3.07, 2.25 from the centre -- the box is thousands wide -- forms 194,255 of the 361,797 near
+pairs after one drift, and device 0 ships 3.74M of its 4.0M particles). Only the start force runs at zero drift, so
+sizing at 1.5x the start undersizes every later force. Corrections: S11's "after one drift step" 2e5 values (22,795 /
+87,867) are the first segment's maxima at steps 5 and 3; at 8e6 the needs do not fall back to ~150k, they stay at
+2.6-4.8x the start. The coarse leaves themselves are what I removes.
+- **Drift sizing:** `cross_caps="auto"` also measures at x + s v dt for s = 1, 2, 4, ... up to the first segment's
+  length (1 + ceil(log2 k) forces, once per runner) and sizes from the larger needs. First segments retry 0 times
+  on Plummer 2e5 (main: segments 1 and 3 once each), the disc 2e5 (main: none) and 2e6 (main: segment 5 once) and
+  Plummer 8e6 (main, fix 8's record: segment 1 twice), both MACs; final caps 1.12-1.50x the run's maximum need (main 1.01-1.62x); peaks +0.8 % at most on the
+  run, -7 % to +0.3 % on the final caps; rel-L2 equal to ~1e-5 relative.
+- **The same-step lower-bound rule** (#469's, now on the mesh): a re-run that failed at the same step as the attempt
+  before is retried again while its needs grow past what that attempt's LOWER BOUNDS said (the local walk's
+  `lower_bound` / `queue_overflow`, the cross walk's `walk_lower_bound`, the exchange's `pairs_lower_bound`). Test: a
+  cross walk that stops at its first overflow is retried 10 -> 20 -> 40 -> 80 -> 160 pairs at one step and then equals
+  a fresh run, bitwise (main: RuntimeError at "1 of 4 steps fitted").
+
+### Bitwise run to run on two GPUs (G)
+D's finding: the same compiled start force on the same state, three times in one process, differed in 612,657 of
+1,380,000 components on two A100s (one device: bitwise; deterministic ops did not help). Stage by stage (every
+intermediate of the start force, 3 runs): the tree, the multipoles, the gathered summary, both exchanged payloads,
+the walk COUNTS and the CSR row offsets were bitwise; the symmetric Pallas cross walk returned the same pair SETS in
+another ORDER each run (227,075 of 344,064 far and 39,311 of 61,440 near slots moved; atomic cursors), and
+`merge_into_csr` and the cross near sort, both by target only and stable, kept that order inside each row, so the
+CSR M2L and the cross near kernel summed rows in a run-dependent order. A second mechanism (`dehnen_error`, after the
+first fix): 43-69 components in rows of three or more 64-leaf chunks, whose partials the table kernel reduced with a
+`segment_sum` (a GPU scatter-add).
+- **Fixes:** the cross far list and the near sink in (target, source) order (`cross._in_pair_order`, one composite-key
+  sort); the cross near kernel's chunk partials summed in one fixed order (`ordered_rows=True`: first chunks gathered,
+  the rest by one segmented `associative_scan`; rows of one or two chunks keep their bits). N's direct layout keeps
+  both (its long rows' pieces in fixed order, `ordered_rest=True`).
+- **Gates** (`bench/multigpu_force_repeat.py`, production flags): the start force 0 differing at Plummer 4e5 geometric
+  and 2e6 `dehnen_error` (0 of 6.9M accelerations, 0 of 2.3M f_b), in one process and across three (main on the same
+  cards: 605,714-622,174 of 1.38M and 2,591,046-2,694,456 of 6.9M). D's restart gate (2e6, 3 x 8 steps): the continued
+  state bitwise (0 of 12M, both MACs; main 166,939), the carried acceleration 1-9 of 6M (max 3.0e-8). A test reverses
+  the walk's lists and requires the same force (main: 3,191 of 6,144 differ); the CPU walk emits in one fixed order,
+  so the GPU check is the bench.
+- **Cost** (paired in one process, base / both fixes): +0.046 ms at 4e5 geometric (ratio 1.015), +0.228 ms at 2e6
+  `dehnen_error` (1.005) on near-idle cards; +2.8 % / +1.9 % on contended ones; mostly the pair sort.
+- **Left:** the 1-9 accelerations and the disc's 8.5k of 6.9M (N, below) come from outside the cross terms: the
+  single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries in atomic order (bitwise with
+  `JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT=1e8`: suggestive, not proven). A single-card default-path change, not made.
+
+### Migration to fixed cuts (I)
+Track F found what sets the cross near volume: INTRUDER leaves. A decomposition leaves exact Morton domains; one
+drift later a domain's boundary particles sit in cells its neighbour fills, the owner's tree does not subdivide
+there (a few of its particles), and one coarse sparse leaf fails the MAC against much of the neighbour's core (8e6
+Plummer, two cards: one 19-particle leaf of radius 3.07 made 194,255 of 361,797 cross near pairs). It recurs after
+every drift that follows a cut. Branch `s11s2/mesh-migration`.
+
+**Phase 1, the host model** (`bench/multigpu_migration_model.py`: per-device cell leaves of the galaxy preset --
+leaf 64, level >= 8, codes in the force's cube -- after `s` drift steps `x0 + s dt v0`, leaf pairs failing the
+geometric MAC at theta 0.8 with COM centres and exact radii; it reproduces the cards' 131,199 / 359,944 at 8e6 against
+129,544 / 360,247). Cross near pairs per device at drift 0 / 1 / 2 / 4 / 8, two devices; "shipped" the most
+particles a device sends over steps 1-8; "migrants" the rows that change device per step:
+
+| rule | Plummer 2e5 | Plummer 8e6 | disc + bulge 2e6 |
+| --- | --- | --- | --- |
+| today: the cut kept, per-axis box | 11.8k / 16.3k / 17.1k / 22.5k / 21.0k; 87k shipped | 131k / 360k / 420k / 400k / 623k; 3.90M shipped | 49.2k / 80.1k / 90.4k / 102k / 119k; 382k shipped |
+| the cut kept, the decomposition in the cube | 8.8k / 30.1k / 33.1k / 39.7k / 37.1k | 95.0k / 1.37M / 1.12M / 1.44M / 1.57M | 39.0k / 100k / 112k / 115k / 130k |
+| migration, keys in the per-axis box of the drifted positions (a) | 11.8k at every drift; 37k; 170-211 migrants | 131k / 131k / 138k / 206k / 138k; 1.75M | 49.0-49.4k; 167k; 3.3-3.4k |
+| migration, keys in the per-axis box frozen at the cut | 11.9k-15.0k | 131k-143k; 530k | 70.0k-71.8k |
+| **migration, keys in the force's cube of the drifted positions (b)** | **8.76k-8.82k at every drift; 28.4k; 189-233 migrants** | **95.1k-95.3k; 310k; 7.35k-7.52k migrants** | **38.6k-39.0k; 139k; 3.28k-3.41k migrants** |
+| migration, the cube frozen at the cut | 10.8k-17.5k | 95k-746k (erratic); 3.92M | 70.8k-78.3k |
+| no migration, intruders as one-particle leaves (c) | 12.1k-15.9k; 51k | 141k-251k; 549k | 70.7k-133k |
+| no migration, intruders grouped by the owner's leaf cell (c) | 12.2k-28.1k | 147k-508k | 254k-633k |
+
+Four and eight devices (most pairs on one device; drift 0 / 1-8), today against (b): Plummer 2e5 on four 12.1k /
+20.3k-27.9k against 10.3k / 10.2k-10.3k, on eight 10.1k / 15.2k-25.3k against 7.18k / 7.17k-7.19k; disc 2e6 on four
+46.7k / 78.1k-118k against 34.0k / 34.0k-34.2k.
+
+**Decision: (b).** Migration to the fixed cuts after every drift, the keys in the FORCE's own box at that force
+(the cube of the drifted live positions, `global_mesh_bounds` with the force's box shape), the cuts chosen in that
+box. It holds the zero-drift level of a cube decomposition at every drift -- below today's start (95k against
+131k at 8e6) -- for 0.09-0.17 % of the particles moved per step, and the margin grows with the device count. A
+box frozen at the cut is not enough: a box that moves by a fraction of a finest cell moves the cut by that much and
+the particles in the sliver are intruders again (the frozen cube reached 746k at 8e6). (c) refines the symptom and
+still ships the neighbour's leaves around every intruder; it loses to (b) everywhere and would change the
+single-card tree build.
+
+**What was built** (opt-in; the default programs unchanged):
+
+| piece | what |
+| --- | --- |
+| `jaccpot/distributed/migration.py` | `migrate_shard`: after the drift each live row whose code (force's box) lies outside its device's splitter range goes to the owner, through an unconditional ragged exchange of the leavers (buffer `migration_cap` rows each way); the need (the most rows a device sends or receives) is read off the all-gathered send matrix BEFORE anything moves, so it is exact and replicated, and a migration that does not fit the buffer (`OVERFLOW_MIGRATION`) or a shard (`OVERFLOW_SHARD`) is declined on every device -- nothing moves. Every per-row array moves bitwise, grouped by dtype: state, the carried TOTAL acceleration, mass, id, f_b. `splitters_shard` (the cuts of an exact-range ownership), `balanced_splitters_shard` (even cuts read off the ranks), `migration_need_shard` |
+| `MeshSegmentRunner(migrate=True, migration_cap="auto")` | the step is drift -> migrate -> force -> kick, in the scan; counts, masses and ids ride the carry. The constructor repartitions once into the force's box (`_repartition_shard(cubic=...)`) unless a restart passes the cuts; later repartitions are a rebalance by rank plus a migration (`sfc_repartition`'s sample sort cannot rebalance exact ranges -- the disc's counts drifted 999,037 / 1,000,963 -> 1,012,142 / 987,858 over 12 steps through two repartitions that moved 0 rows -- and its cap-sized exchange was the run's peak). `"auto"` sizes the buffer from one step's drift (2x, pow2, >= 256 rows); the cross sizing's drifted probes are migrated before they are measured. A declined migration ends the trajectory before its force; `OVERFLOW_MIGRATION` re-sizes the buffer from the exact need and re-runs the segment (outside the force's retry policy); `OVERFLOW_SHARD` raises. `SegmentReport.migrated` / `migration_need` |
+| `MeshRunConfig(migrate=..., migration_cap=...)` | the runner's mode; the restart file keeps the cuts (uint64) and the buffer, a same-mesh restore hands them back (bitwise layout and cuts); the edges' plan record carries the buffer and the segment's migrated rows |
+| `bench/multigpu_segment_gate.py --migrate` | the two-card gate on the migrating runner |
+
+**Gates.**
+
+| gate | result |
+| --- | --- |
+| a migrating run == one that never migrates nor repartitions (`DirectMeshForce`, N = 256, 10 segments, a repartition before each) | bitwise by id (positions, velocities, acceleration, masses); rows moved every segment; exact Morton domains at every edge; the acceleration left in the old rows breaks it (mutation) |
+| f_b rides the migration | `id + 21` after 21 forces, and bitwise against the never-migrating run |
+| an undersized buffer (1 row) | declined, re-sized from the exact need, == a run started with the final buffer, bitwise (direct force, and the fused force on two forced CPU devices) |
+| the rebalance | counts N / 2 each on exact domains, the run unchanged bitwise |
+| the exchange on crafted rows | order, arrays and padding as specified; the buffer and shard declines move nothing and report the exact need |
+| the production mode | == the non-migrating mode bitwise; its restart keeps the cuts (a restore that chose its own ends on another layout: caught) |
+| the fused force on two forced CPU devices (N = 2048 cube at 30x its speeds) | flag-clean, exact domains, acceleration within 5e-3 of the direct sum, cross near pairs and shipped particles at most the non-migrating run's |
+| the default (migrate=False) programs | the template route's start, segment and repartition programs (geometric and `dehnen_error`) and the direct force's, lowered on two forced CPU devices: text-identical to `s11s2/integ` 700bcbe6 (8/8); single-card CPU program identity 36/36 against `s11s2-main-cpu` |
+
+The fast cases (10, ~30 s) are in the distributed tier; the two fused ones (~4.5 min of compilation) in a new job,
+`test-distributed-segment-migration` (shard `distributed-segment-migration`), not in `test-distributed-segment`.
+
+**On two A100s** (`bench/multigpu_segment_gate.py`, `preset="galaxy"`, leaf 64, p6, library cross caps sized at the
+start and the first segment's drift; rel-L2 against an fp64 direct sum on 512 fixed ids). No pair of cards was free:
+every row shared its cards with other users' or tracks' processes (0-100 % utilisation), so the times below are
+CONTENDED and the arms were interleaved; correctness, needs and memory are results. "Today" is `migrate=False` on
+this branch (its programs are integ's). The per-step probes and the first gate rows ran before the rank rebalance
+(their migrating repartitions moved 0 rows, see above); the gate rows below ran on `33e512aa`, the last caps rows
+on `29177658` (the rebalance's rows donated).
+
+Per step (geometric theta 0.8, one-step segments, a repartition every 4 steps; cross near pairs / particles a
+device ships, the most over the mesh):
+
+| row | start force | steps 1-12, near pairs | shipped | migrants per step (rows per device) |
+| --- | --- | --- | --- | --- |
+| Plummer 8e6, today | 129,544 / 430,677 | 337,626-621,796 | 1,849,830-3,927,219 | -- |
+| Plummer 8e6, migrate | 94,409 / 303,828 | 94,370-94,732 | 304,308-306,178 | 7,285-7,475 (3,647-3,787) |
+| disc + bulge 2e6, today | 2,884,947 / 406,885 | 2,939,483-3,340,622 | 475,149-556,832 | -- |
+| disc + bulge 2e6, migrate | 2,842,523 / 379,397 | 2,481,213-2,839,335 | 377,618-379,904 | 3,196-3,417 (2,110-2,312) |
+
+The host model has the Plummer rows (95.1-95.3k pairs, 306-310k shipped, 7.35-7.52k migrants) but not the disc's
+absolute numbers: it has no separation floor (the cross walks send every pair closer than the compact kernel's
+support to the near field, `make_cross_hook(separation_floor=...)`; eps = 2.7e-2 here, 1e-7 for Plummer), which makes
+most of the disc's cross near pairs. Its migrants (3.28-3.41k) match. The library's sizing follows: Plummer 8e6's
+final `send_particle_cap` 5,891,072 rows today (more than a shard's 4.6M) against 456,704 migrating,
+`export_near_cap` 932,864 against 142,336.
+
+The S12 gate configuration (`dehnen_error` 1e-4, 6 segments of 8 steps, a repartition before every segment after
+the first); every segment of every row flag-clean with no retry:
+
+| row | rel-L2 start / end | cross near pairs per segment | shipped | peak B/p, library caps / explicit final caps |
+| --- | --- | --- | --- | --- |
+| Plummer 8e6, today | 1.3188e-4 / 1.5193e-4 (S12: 1.3188e-4 / 1.5194e-4) | 344,210-537,214 | 3,377,081-3,996,574 | 671.5-673.6 / 470.5-475.0 |
+| Plummer 8e6, migrate | 1.3459e-4 / 1.5075e-4 | 97,317-97,905 | 316,748-319,056 | 705.4-711.5 / **415.1-428.8** |
+| disc + bulge 2e6, today | 6.2111e-5 / 8.1998e-5 (S12: 6.212e-5 / 8.200e-5) | 3,263,939-3,711,530 | 557,699-636,739 | 842.4-846.4 / 791.3-798.3 |
+| disc + bulge 2e6, migrate | 5.8287e-5 / 7.9486e-5 | 2,839,325-3,306,801 | 379,960-413,203 | 867.7-875.7 / 783.3-799.6 |
+
+The library-caps peak is the setup's (the sizing measurement in the process; and the constructor's repartition into
+the cube: 1.38-1.43 GB per device after the setup against 1.23-1.29 GB today, on explicit caps); on explicit caps the migrating Plummer peak is its segment program
+(1.66-1.69 GB per device; on `33e512aa`, before the rebalance donated its rows, the rebalance set it at 1.76 GB,
+439.0-439.8 B/p), today's the start force (1.75-1.80 GB). The disc's peak does not move: its cross field is mostly the
+real boundary through the disc plane, not intruders.
+
+Counts: today's repartitions do not keep the balance -- 3,997,511 / 4,002,489 drifted to 3,970,414 / 4,029,586 over
+five (Plummer 8e6), 999,058 / 1,000,942 to 984,856 / 1,015,144 (disc), 0.1-0.4 % of a shard per repartition: the
+sample sort's bias (above) on nearly exact ranges. The migrating rebalance holds Plummer within 160 rows of N / 2 at every edge after the first; the disc's
+fixed cuts drift ~0.8 % per 8 steps (it rotates through them) and every edge evens them again (6.6-8.0k rows sent).
+
+Time (contended, explicit caps, interleaved off / on / off / on, Plummer 8e6 `dehnen_error`): the force alone (start
+program at the final state, min of 5) 262.2 / 249.2 / 223.7 / 219.3 ms today against 51.2 / 53.8 / 54.1 / 53.6 ms
+migrating; steady segments 108-266 ms per step today (growing with the cross volume) against 56-63 ms. The disc 2e6: force alone
+199.4 / 217.2 ms against 219.0 / 177.2 ms -- no difference outside the contention. A free-card A/B (and four to eight
+cards, which the model says gain more) is still to do.
+
+**Recommendation.** Make `migrate=True` the multi-GPU mode's default (`MeshRunConfig`) once a free-card A/B confirms
+the time: on the Plummer rows it removes the intruder field outright (near pairs 3.5-5.5x and particles shipped
+10.6-12.6x fewer per segment, the force 4.1-5.1x faster on contended cards, the peak 9-12 % lower) for ~0.1 % of the
+rows moved per step, at the same accuracy; on the disc it ships 30-35 % fewer particles and makes 2-17 % fewer near
+pairs per segment, with no measurable time or peak change on contended cards. Found on the way, for the default path:
+the repartition's sample sort (yggdrax `_choose_pivots`: the same number of samples from every device whatever its
+count) cannot rebalance nearly exact ranges and lets the imbalance grow 0.1-0.4 % of a shard per repartition.
+
+### Mesh memory (N)
+Track M measured what set the two-device mesh's per-device peak (stage probes: the allocator's peak after every
+setup stage, `memory_analysis()` of every compiled program) on H's IC -- 2^20 particles of a Plummer sphere truncated
+at r < 10, `preset="galaxy"`, eps 1e-3, so 2^19 per card in 164,418 live cell leaves (~3 particles per 64-slot
+leaf) -- and the disc + bulge at 2e6: (1) the cross sizing's measurement program, compiled at
+`CrossCapacities.for_shard`'s per-leaf first guess (12-113x the needs on H's IC), which F's drift probes reran, and
+(2) in every program the cross near term's leaf-major tile pool (`_cross_near_pool` plus the imported (R, W)
+tiles, the table kernel's mask and chunk partials over ALL local leaf slots and every received row: >95 %
+padding). Branch `s11s2/mesh-memory`.
+
+| piece | change |
+| --- | --- |
+| the cross near term on the direct layout | `cross.cross_near_acceleration_direct`: the cross pairs on `nearfield_leafpair_csr_sorted_direct_pallas` (the local near field's kernel) over ONE table, the device's sorted particles then the flat receive buffer, each leaf a range of it (local leaves from the tree's node ranges, imported rows from the exchange's row starts and counts); the local leaves the only targets (`num_target_leaves`), no self term (`include_self=False`; the kernel's two new keywords, defaults unchanged), stored into particle order. The exchange leaves the flat import in the near sink, no W-wide tiles. Both force routes and E's potential take it (`fused._cross_near_lanes`); the table stays for `JACCPOT_NEARFIELD_ACCUM=wide` / `JACCPOT_NEARFIELD_LAYOUT=table` (as the local near field) and the control exchanges |
+| the sizing measured on small buffers | `CrossCapacities.for_measurement`: what a measurement only COUNTS at one granule -- the rows and particles (presence maps; exact past their own overflow), and on the Pallas walk (counts past a full list) its far and near lists; the summary at the tree's bound; the queue (its need is a lower bound past an overflow) at least the local walk's widest wavefront x peers. `cross.size_cross_capacities`: a measurement whose `walk_lower_bound` and `pairs_lower_bound` are clear sizes every capacity (1.5x), overflowed or not; a lower bound grows only the walk (2x, the near list to at least 4 pairs per live leaf: room for the drift probes) and the summary and measures again. `FusedMeshForce` sizes with it at the start and at the drift, the drift probes on the last measurement's program. A far or near pair naming a row past the receive buffer is dropped (its source index read past the imported multipoles). The stacked route keeps `for_shard` + `plan_cross_capacities` |
+| the eager geometry cache | `prepare_mesh_force` clears `engine._geometry_reuse_entry` (the last device's box geometry stayed through every segment: 12 MB on H's IC) |
+| a fresh run's programs | `rollout.decompose`'s jit(shard_map) and `MeshState.from_shard_state`'s packer are built once per (mesh, capacity, options) / sharding: a second run of one runner lowered and compiled them again |
+| `migrate=True` decomposes into the force's box | `rollout.decompose(cubic=...)`; the mode reads the cuts off that ownership (`migration.ownership_splitters`) and hands them to the runner, which no longer repartitions in its constructor |
+
+**Before / after** (two A100s, cards shared with other users' jobs at 80-100 % utilisation: memory is a result,
+times are not; one segment of 8 steps after the library's sizing; base = `s11s2/integ` 6b9cda95, N = this branch's
+last commit). MB per device;
+"peak" the process's high-water mark after the stage:
+
+| stage | H's IC, base | H's IC, N | disc + bulge 2e6, base | disc 2e6, N |
+| --- | --- | --- | --- | --- |
+| decompose + pack | 112.7 / 112.7 | 112.7 / 112.7 | 224.3 / 224.3 | 224.3 / 224.3 |
+| per-device caps-only prepares | 485.2 / 486.3 | 484.9 / 381.2 | 704.1 / 646.8 | 700.4 / 644.6 |
+| start sizing (`plan_cross`) | 1443.0 / 1457.3 | 589.9 / 589.9 | 762.5 / 765.9 | 732.2 / 730.7 |
+| drift sizing (`plan_cross_drift`) | 1459.8 / 1474.0 | 606.6 / 606.6 | 796.1 / 793.5 | 765.8 / 764.2 |
+| start force + segment (final peak) | **1459.8 / 1474.0** | **618.6 / 618.6** | **796.1 / 793.5** | **765.8 / 764.2** |
+| final B/p | 2784 / 2811 | **1180 / 1180** | 796 / 794 | **766 / 764** |
+| measurement programs, temporaries | 1404.6 (one) | 517.8, 551.5 | 658.7, 658.7, 658.7, 683.2 | 594.8, 652.9 |
+| start / segment program | 722.0 / 724.8 | 580.2 / 528.7 | 662.7 / 661.9 | 660.7 / 644.8 |
+| compiles of the mesh programs | 3 | 4 | 6 | 4 |
+| in use between segments, device 1 | 52.6 | 38.4 | 82.7 | 77.8 |
+
+The sized capacities are the same, value for value, as the base's (H: far 840,704, near 55,296, rows 64,512,
+particles 96,256 at the start; 1,186,816 / 94,208 / 70,656 / 106,496 after the drift): the measurements on small
+buffers read the same needs. One card holds H's 2^20 particles at a 660 MB peak and the disc's 2e6 at 1389 MB (track
+M); the mesh's per-device peak at half the particles is now 94 % and 55 % of those.
+
+What each capacity costs the measurement (H's IC, the direct layout, temporaries of the measure program):
+`for_shard`'s guess 792.4 MB; its rows and particles at a granule 710.1; the walk's lists at their sized widths too
+540.1; the sized force 568.9. On top of the sized force: the far list at 8x +141.2 MB (23-24 B a pair: it feeds the
+CSR M2L's merge), the near list at 8x +2.8, the queue at 8x +0, the rows at 8x +12.6. The disc: the far list at 8x
++407.7 over its sized 651.2. Every variant read the same needs bit for bit; the base's disc measurement took four
+rounds (its queue 4.5 a priori slots per leaf against 15 needed), now two (the queue from the local walk's widest
+wavefront).
+
+**Gates.** `bench/multigpu_segment_gate.py` (6 segments of 8 steps, a repartition before every segment after the
+first, library cross capacities, rel-L2 against an fp64 direct sum on 512 fixed ids; the base and N runs on the
+same contended cards, interleaved); every segment of every row flag-clean, and no row's first segment retried (F's
+guarantee):
+
+| row | rel-L2 start / end, base | N | peak per device, base | N |
+| --- | --- | --- | --- | --- |
+| Plummer 2e5, `dehnen_error` | 1.1475e-4 / 1.5896e-4 | 1.1475e-4 / 1.5896e-4 | 79.0-79.1 MB | 78.9-79.4 MB |
+| Plummer 2e5, geometric 0.8 | 7.6106e-4 / 8.1967e-4 | 7.6106e-4 / 8.1967e-4 | 78.5 MB | 44.9 MB |
+| disc + bulge 2e5, `dehnen_error` | 3.5781e-5 / 3.5205e-5 | 3.5781e-5 / 3.5211e-5 | 146.5-147.2 MB | 146.5 MB |
+| disc + bulge 2e5, geometric | 2.1453e-4 / 1.6699e-4 | 2.1453e-4 / 1.6699e-4 | 145.6 MB | 145.6 MB |
+| disc + bulge 2e6, `dehnen_error` | 6.2112e-5 / 8.1999e-5 | 6.2110e-5 / 8.1999e-5 | 817.4-824.6 MB (818-824 B/p) | 787.2 MB (787 B/p) |
+| disc + bulge 2e6, geometric | 3.1878e-4 / 3.1406e-4 and 3.1407e-4 (two runs) | 3.1878e-4 / 3.1407e-4 | 1005.0 MB (1005 B/p) | 717.3 MB (718 B/p) |
+| Plummer 8e6, geometric | 4.3568e-4 / 4.3011e-4 (track F's run) | 4.3568e-4 / 4.3011e-4 | 2647.6 MB (662 B/p, F's) | 1365.6 MB (**342 B/p**) |
+
+The base's Plummer 8e6 row ran out of memory three times on the shared cards (2-4.7 GB free); its numbers are track
+F's run of the same configuration on F's branch (integ without G and I; the same final cross capacities, value for
+value). N's 8e6 measured twice at the start (the base once) and not again at the drift (2x the walk, the near list
+at 4 per leaf): five force programs compiled against the base's four. The 2e5 rows' peaks are the setup's eager
+prepares, not the force programs. CPU (two forced devices): gate A1 (the
+template route == the stacked route, bitwise), the segment, segment-criterion, segment-migration and criterion
+jobs, the distributed tier, the single-card runner file and the guards pass; CPU program identity 36/36 against
+`s11s2-main-cpu` (the kernel's three new keywords default to the traced program it always was).
+
+**The longest cross row** (entries of one local target leaf's cross CSR row, every cross near term of a segment of 8
+steps, both devices): H's IC 102 (no row reaches the direct kernel's 1024-entry `DIRECT_ROW_LIMIT`); the disc + bulge
+2e6 **4,225**, up to 926 rows per force past 1024 entries and 355 past 2048. So the disc's cross term runs the
+kernel's `_rest` pieces, and a row past 2048 entries has two or more pieces scatter-added onto the same outputs --
+in the atomics' order: the cross term passes `ordered_rest=True` (the kernel's new keyword, default off: a row's
+pieces summed by one segmented scan onto its last piece and added once). Run to run (`bench/multigpu_force_repeat.py`,
+the start force three times in one process and once in another, two A100s): Plummer 4e5, geometric and
+`dehnen_error`, bitwise (0 of 1,380,000 components, across processes too: G's gate holds). The disc + bulge 2e6
+(`--ic disc`, new, `dehnen_error`) is NOT bitwise, and was not on the base either: base 8,561 / 8,169 of 6,900,000
+acceleration and 2,493 / 2,412 of 2,300,000 f_b components differ from the first run (max 7.6e-6 / 3.1e-5), N without
+the ordered pieces 9,786 / 9,304 and 2,595 / 2,483, N 8,620 / 8,414 and 2,237 / 2,411; the control (one run's buffers
+read twice) 0 every time. So the ordered pieces remove the direct layout's own share, and what is left predates N and
+lies outside the cross near term (G's gate ran Plummer only): not diagnosed here.
+
+**Programs a fresh run compiles again** (one runner, `run()` three times; GPU, a Plummer sphere of 131,072, the galaxy
+preset): base run 2: 27 compiles -- the decomposition's jit(shard_map), the state packer's `jax.jit(lambda)`, 16
+jit(while), 4 jit(wrapped), 2 jit(cond), and the measure, start and segment programs (run 1's start force retried
+on the LOCAL walk -- its near-edge capacity 131,072 -> 1,048,576, which stays on the engine -- so run 2's programs
+have other walk caps and cross capacities; run 3 adds no program key); run 3: 24. The single card's second and
+third runs compile 11 each (8 jit(while), 2 jit(wrapped), 1 jit(cond)): the caps-only prepare's eager calls --
+yggdrax's `_propagate_extents` `lax.while_loop` (from `_interaction_cache._build_flat_walk_artifacts_strict_streamed`),
+the P2M and the f_b seed's near kernel as eager `pallas_call`s, that kernel's rest-piece `lax.cond` -- which the
+mesh runs once per device. N removes the two mesh-only ones (N's run 3: 22 compiles, the prepares' 16 + 4 + 2 alone,
+60.6 s; run 2 again recompiled the four force programs after run 1's local retry); the prepare's eleven are the single
+card's own (and yggdrax's) and are left as they are. CPU: a second and third run of the mode on the direct force
+lower no program (`tests/distributed/test_production_runner_mesh.py`).
+
+**`migrate=True`'s setup** (H's IC): the mode decomposes in the force's cube and reads the cuts off it (a program of
+4.8 MB temporaries); the base decomposed (48.4 MB) and then repartitioned again in the runner's constructor (44.0 MB
+temporaries, 28.9 MB outputs per device), which is gone. At H's size the setup's peak is the caps-only prepares'
+(484-489 MB), so it does not move there (final peaks 620.4 / 608.1 MB migrating, base 1471.6 at the start sizing);
+track I's +0.13 GB per device was at 4e6 per card.
+
+**Open.** At 2^19 per card the start program's 580 MB is still close to one card's for twice the particles (450 MB
+temporaries, 660 MB peak on H's IC). Its largest temporaries now (XLA's buffer assignment): the local tree's
+per-node arrays -- 378,879 nodes for 2^19 particles on this compact IC, its multipoles and locals f32[378879, 49] at
+74 MB a copy, several live, the local walk's far list s32[14,680,064] at 59 MB a copy -- then the cross far half: the
+[local; imported] multipoles f32[449535, 49] (88 MB) and the all-gathered summary f32[2, 378879, 16] (48.5 MB, ndev x
+one device's block: it grows with the mesh). The cross near term's whole table is f32[709492, 4] (11.4 MB). The
+single card's `_rest` scatter-add (its default) is not changed. The eleven eager-prepare programs per device per
+run (above). A drift whose walk lists outgrow the measurement's (2x the far pairs, 4 near pairs per leaf) costs a
+third measurement. The disc's remaining run-to-run differences (above).
+
+### Odisseo's multi-GPU lane on the runner (H)
+Odisseo's `fmm_mesh` lane ran the OLD `distributed/fmm.py` force (three dispatches per step, no potential). Odisseo
+branch `s11s2/fmm-mesh-runner` (against `jaccpot-integration`) adds lane `"fmm_mesh_runner"`: `fmm_preset="galaxy"`
+with `fmm_mesh=True` and an `odisseo.mesh_runner_coupling.MeshRunnerOptions(ndev=..., repartition_every=1,
+cap_headroom=None, force=None)` in `config.mesh_options` runs `ProductionRunner(mesh=MeshRunConfig(...))` as the
+single-card `fmm_runner` lane runs the single-card runner (the solver and runner kept between calls, the external
+field as one pair of traced functions, snapshots from the edges, the final state a host array in input order). A
+`MeshOptions` keeps the old lane, unchanged. Gradients, block steps, active schedules, `step_callback`, adaptive
+steps and a G or softening other than the solver's are refused with the reason. 28 tests (two forced CPU devices,
+`DirectMeshForce`, 12.6 s): `integrate()` == the runner called directly, bitwise; a second call reuses the runner;
+snapshots, energy and angular momentum against host fp64 sums; the old lane still reached. One `integrate()` on two
+A100s (Plummer r < 10, 2^20 particles, NFW halo, 16 steps): positions rel-L2 6.6e-8 against the single-card lane after
+16 steps (a second mesh run differs from the first by 2.4e-7 at most), self-gravity rel-L2 1.800e-4 (one card
+1.749e-4), angular momentum drift 1.4e-6. Its measurement on that compact IC found the setup peak N removed.
+
+### Close-out on merged main (P)
+Baselines re-recorded on main e82389b5 (everything through S12 and #469), card 1 (only another user's idle 416 MiB
+server on it, which flags every row `contaminated`; the numbers are clean):
+
+| pin | result |
+| --- | --- |
+| L1 8e6 / L2 1e8 / L3 25M disc step (tag `s11s2-L-main-e82389b`, control `-b`) | 76.66 / 864.03 / 235.21 ms; L2 256.77 B/p; L3 force 100.21 ms, rel-L2 4.1791e-4: within the envelope of `s3b-L-integ-g5`, 1-2 % faster than `s3b-L-main-5f1f85f-t1` (the S3b walk speed-ups) |
+| DET1-DET3 (`s11s2-det-free`, `-b`) | bitwise A-vs-A; DET2 bitwise `s8w-det` |
+| single-card GPU pins S1, S6, S1p, S1t, S1e, S1x, S1g, G1, R1p, R1x, R1r (`s11s2-pins-main`) | bitwise against `s12pins-main` / `nf-tip2` / `s8w-tip` |
+| two-card M1, M3 / M2 (`s11s2-m-main`, `-b`) | bitwise / within M2's own run-to-run spread |
+| CPU program identity (`s11s2-main-cpu`, 36 variants) | 36/36 against #469's tip; against `s11-stack-cpu` only #469's documented scan-program text |
+
+### Free-card measurements (T)
+Cards 0, 1, 5, 6 with no other user's job on them (another user's idle 416 MiB server sits on every card), 2026-10-23
+/24, from a frozen tree at the integration of E, D, F, I and G -- BEFORE N, so every peak below that includes the
+library's sizing is N's "base" (the measurement program at the per-leaf first guess); the explicit-capacity reruns are
+the force's own footprint. `bench/multigpu_segment_gate.py`, 8 segments of 8 steps, a repartition before every segment
+after the first, rel-L2 against an fp64 direct sum on 512 ids; the step is the median segment wall / 8 over segments
+4-8, two interleaved repetitions (a / b) per arm. A100-PCIE-40GB, no NVLink.
+
+**Migration on / off** (step ms, mean of the two repetitions; the ratio on / off):
+
+| config | 2 cards | 4 cards |
+| --- | --- | --- |
+| Plummer 8e6, `dehnen_error` | 164.2 / 63.7 (0.39) | 170.1 / 98.5 (0.58) |
+| Plummer 8e6, geometric | 204.1 / 53.1 (0.26) | 144.4 / 63.3 (0.44) |
+| Plummer 1.6e7, `dehnen_error` / geometric | | 486.2 / 188.0 (0.39); 408.6 / 312.6 (0.77) |
+| disc + bulge 2e6, `dehnen_error` / geometric | 187.3 / 189.8 (1.01); 180.2 / 179.0 (0.99) | 192.9 / 188.4 (0.98); 176.2 / 172.5 (0.98) |
+| disc + bulge 8e6, `dehnen_error` / geometric | | 431.8 / 372.0 (0.86); 366.5 / 309.5 (0.84) |
+| disc + bulge 25M, `dehnen_error` | 249.8 / 197.0 (0.79) | 583.1 / 301.5 (0.52) |
+
+Migration is never slower beyond the repetitions' spread, and on every Plummer row and the large discs it is 1.2-3.8x
+faster: the cross near pairs and particles shipped per step fall to the start's level (Plummer 1.6e7 on four cards:
+828-924k -> 172-173k near pairs, 5.7-6.9M -> 596-599k shipped, 28.4-28.5k migrants), and the non-migrating arms'
+retries on four cards (up to 5 per run) are gone. The disc 2e6's cross volume is set by its separation floor, not by
+intruders, so it gains nothing there. Accuracy is unchanged (rel-L2 at the end within the repetitions: e.g. Plummer
+1.6e7 `dehnen_error` 1.7550e-4 off, 1.6222e-4 on). The peak rises 1-6 % with migration (the buffer and the routed
+rows).
+
+**Strong scaling** (step ms; one card = the single-card runner on the same particles with the L3 flags,
+`fused_memory_budget.py`, and the gate's one-device mesh; the mesh rows migrate):
+
+| N, MAC | 1 card | 2 cards | 4 cards |
+| --- | --- | --- | --- |
+| disc + bulge 25M, `dehnen_error` | 258.8 (runner) / 249.8 (1-device mesh) | 197.0 (1.27-1.31x) | 293.4-309.6 (0.81-0.88x) |
+| disc + bulge 25M, geometric | 231.3 (runner) / 226.5 | 173.0 (1.31-1.34x) | 189.4 (1.20-1.22x) |
+| Plummer 8e6, `dehnen_error` | 76.9 (1-device mesh) | 63.2-64.2 (1.20-1.22x) | 96.8-100.2 (0.77-0.79x) |
+| Plummer 8e6, geometric | 66.0 | 52.8-53.4 (1.24-1.25x) | 62.5-64.0 (1.03-1.06x) |
+
+**Weak scaling** (4e6 per card, Plummer, `dehnen_error`, migrating): 46.8 ms on one device, 63.2-64.2 on two (73 %),
+187.7-188.3 on four (25 %).
+
+On this node the mesh buys CAPACITY, not speed beyond two cards: every card-to-card byte crosses PCIe (the
+cross near term ships ~1M particles per step at 25M on four cards, plus the summary all-gather and two ragged
+exchanges per step). The scaling question belongs on a node with NVLink (HoreKa's four-A100 nodes), on dedicated
+cards.
+
+**Memory per device** (B per particle of the device's share):
+
+| row | library sizing (pre-N) | explicit capacities (the force's own) |
+| --- | --- | --- |
+| Plummer 8e6, two cards | 705-713 | 448-470 |
+| disc + bulge 25M, two / four cards | 755-765 / 1377-1380 | 436-437 / 498-499 |
+| Plummer 1.6e7, four cards, off / on | 1229-1230 / 1267-1269 | 717-737 / 640-644 |
+| Plummer 4e7, four cards (1e7 per card) | 1793-1805 | 580-603 |
+| Plummer 8e7, four cards (2e7 per card) | 1626-1643 (32.9 GB per card) | 516-526 (10.5 GB per card) |
+| disc + bulge 8e7, four cards | 1406-1412 | -- |
+
+The library-sizing column is what N's measurement on small buffers removes (N's own rows: Plummer 8e6 on two cards
+662 -> 342 B/p). At 8e7 on four cards the step is 906.6 ms (one segment) and the force alone 832.8-852.8 ms (`dehnen_error`). On
+the explicit-capacity footprint a card holds ~6.9e7 particles (0.9 x 40 GB / 520 B): four cards ~2.8e8, eight ~5.5e8 -- an extrapolation, past one
+card's 1.68e8 (round 4); the post-N library-sizing peak at those counts is still to be measured.
+
+### A cell leaf wider than the leaf size (found 2026-10-29)
+Plummer at 4e7, 8e7 and 1.2e8 on four cards (1e7-3e7 per card; the stack tip, cards shared, memory only) stopped
+with `OVERFLOW_CROSS` and "re-plan grew nothing": a near row shipped 65, 144 and 133 particles against a leaf width
+of 64, and fix 8's structural bound (`_structural_bounds`: the leaf width at most the leaf size) kept the re-plan at
+64. The bound was wrong: yggdrax keeps a cell at the finest Morton level as a leaf whatever it holds, and the
+Plummer draw's outliers make the box 35,148 wide at 8e7, so a finest cell is 0.017 across and holds up to 121
+particles in the core (51,245 such cells hold more than 64; 54 at most at 4e7 before any drift). The width is now
+bounded by 64 x the leaf size (`_FINEST_CELL_WIDTH_FACTOR`), which still keeps a degenerate tree's whole-shard
+"leaf" (the NaN root of 4,002,489) out. Fix 8's sentence above ("`leaf_width` never exceeds the template's leaf
+size") holds below ~1e7 particles per card only. Below that the same four-card runs: Plummer 8e6 531-533 B/p, the
+25M disc + bulge 503 B/p per device, flag-clean (post-N sizing). With the fix (four shared cards, `dehnen_error`,
+3 segments of 4 steps, migrating, library sizing):
+
+| Plummer | per card | peak per device | retries (the width grown) | widest row | rel-L2 start / end |
+| --- | --- | --- | --- | --- | --- |
+| 4e7 | 1e7 | 481-492 B/p (4.8-4.9 GB) | 1 | 65 | 9.97e-5 / 1.85e-4 |
+| 8e7 | 2e7 | 423-427 B/p (8.5 GB) | 1 | 156 | 2.48e-3 / 4.32e-3 |
+| 1.2e8 | 3e7 | 432-437 B/p (13.0 GB) | 2 | 149 | 2.09e-3 / 2.57e-3 |
+
+Every segment flag-clean. A card holds ~8e7 particles at that footprint (0.9 x 40 GB / 430 B): four cards ~3.3e8,
+eight ~6.7e8 (an extrapolation). The rel-L2 at 8e7 and 1.2e8 is NOT the mesh's: ONE card on the same 8e7 particles
+(the gate's single-card lane on the mesh run's positions) gives 4.60e-3 / 3.90e-3 (214 B/p, 650 ms per force). The
+fused lane's accuracy on this draw -- a box of 35,148 for a sphere of scale radius 1, softening 1e-7 -- falls 25x
+between 4e7 and 8e7 on one card too; the production IC (the 25M disc + bulge) is at 1.3e-4. Open, not diagnosed.
+
+### Open after S11 session 2
+- `MeshRunConfig.migrate` is `True` by default after T's A/B (the stack's last PR); `MeshSegmentRunner`'s own
+  `migrate` stays `False` (the low-level runner, its gates' reference).
+- Run to run on GPUs: the single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries in
+  atomic order (the 2-GPU residual above, and the disc's 8.5k of 6.9M); `ordered_rest=True` exists, off by default:
+  turning it on for the single card is a change of its default path.
+- The repartition without migration does not rebalance nearly exact ranges (yggdrax's `_choose_pivots` takes equal
+  samples per device): the imbalance grows 0.1-0.4 % of a shard per repartition (Plummer 8e6). The migrating mode
+  rebalances by rank instead.
+- The all-gathered summary grows with the device count (f32[ndev, nodes, 16]: 48.5 MB at two devices on the compact
+  IC); the eager caps-only prepare's eleven small programs per device per fresh run are the single card's own.
+- Eight cards (four were free at most); multi-node (D5).
+- nornax `retry_segment` has no progress rule (deferred to S9: the provider's aux would need the steps an attempt
+  fitted). Odisseo's old `MeshOptions` lane: kept until its users move (user decision).

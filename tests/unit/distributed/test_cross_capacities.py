@@ -10,7 +10,9 @@ without a device mesh:
   on the presence map, which no row capacity truncates;
 * the sizing: a priori from the shard (``for_shard``), from a measurement
   (``from_needs``), and the segment retry's re-plan (``replanned``), which never narrows
-  a capacity and doubles one whose need is only a lower bound.
+  a capacity and doubles one whose need is only a lower bound;
+* the template route's sizing (``for_measurement``, ``size_cross_capacities``): a
+  measurement on buffers far below the demand, sized from its exact needs.
 
 The traced half -- the needs against the probes' record counts, and an undersized
 capacity re-planned to the same force -- is ``tests/distributed/
@@ -39,6 +41,7 @@ from jaccpot.distributed.cross import (  # noqa: E402
     _summary_rows,
     cross_needs,
     plan_cross_capacities,
+    size_cross_capacities,
 )
 from jaccpot.runtime._mac_geometry import com_mac_geometry  # noqa: E402
 
@@ -339,6 +342,158 @@ def test_plan_refuses_a_flag_no_capacity_explains():
         )
 
 
+ROWS = ("send_node_cap", "recv_node_cap", "send_particle_cap", "recv_particle_cap")
+
+
+@pytest.mark.parametrize("exact_walk_needs", [False, True])
+def test_the_measurement_holds_no_buffer_it_only_counts(exact_walk_needs):
+    """``for_measurement``: the rows and particles (counted on the presence maps)
+    one granule, and the walk's lists too when the walk counts past a full list
+    (the Pallas walk); the summary at the tree's bound, the queue at least the
+    floor; everything else ``for_shard``'s."""
+    kw = dict(leaf_capacity=4096, ndev=2, leaf_width=64, live_leaves=3000)
+    guess = CrossCapacities.for_shard(**kw)
+    caps = CrossCapacities.for_measurement(
+        **kw, exact_walk_needs=exact_walk_needs, queue_floor=500_000
+    )
+    for name in ROWS:
+        assert getattr(caps, name) == _CROSS_CAP_GRANULE, name
+    lists = ("export_far_cap", "export_near_cap")
+    for name in lists:
+        want = _CROSS_CAP_GRANULE if exact_walk_needs else getattr(guess, name)
+        assert getattr(caps, name) == want, name
+    assert caps.export_walk_queue == -(-500_000 // 1024) * 1024
+    assert caps.export_walk_queue > guess.export_walk_queue
+    small_floor = CrossCapacities.for_measurement(**kw, queue_floor=10)
+    assert small_floor.export_walk_queue == guess.export_walk_queue
+    changed = (
+        set(ROWS) | {"export_walk_queue"} | (set(lists) if exact_walk_needs else set())
+    )
+    for name, value in vars(guess).items():
+        if name not in changed:
+            assert getattr(caps, name) == value, name
+
+
+def _clean_needs():
+    return _needs(
+        **dict(zip(CAP_FIELDS, (30, 59, 4000, 800, 300, 90, 90, 900, 900, 50)))
+    )
+
+
+def test_an_overflowed_measurement_with_exact_needs_sizes_in_one():
+    """The rows and particles overflowed, nothing is a lower bound: ONE measurement
+    sizes every capacity from its needs -- the clean measurement's sizing -- where
+    ``plan_cross_capacities`` would measure again. The measured capacities come
+    back with it (their program is compiled)."""
+    exact = _clean_needs()
+    exact[CROSS_NEEDS_FIELDS.index("overflow")] = 1
+    seen = []
+
+    def measure(caps):
+        seen.append(caps)
+        return exact
+
+    initial = CrossCapacities.for_measurement(
+        leaf_capacity=4096, ndev=2, leaf_width=64, live_leaves=3000
+    )
+    sized, measured, needs = size_cross_capacities(measure, initial, headroom=1.5)
+    assert len(seen) == 1 and measured is initial
+    np.testing.assert_array_equal(needs, exact)
+    assert vars(sized) == vars(
+        CrossCapacities.from_needs(_clean_needs(), like=initial, headroom=1.5)
+    )
+    assert sized.send_particle_cap == 2048 and sized.export_far_cap == 6144
+
+
+def test_lower_bound_needs_grow_the_walk_and_measure_again():
+    """A walk that lost pairs (its far list full) leaves the row counts lower
+    bounds: the walk's lists grow (to headroom x the exact walk need) and the force
+    is measured again; the rows and particles keep their granule (their next count
+    is exact), and the exact second measurement sizes them."""
+    clean = _clean_needs()
+    seen = []
+
+    def measure(caps):
+        seen.append(caps)
+        if caps.export_far_cap < 4000:  # the list lost pairs: rows lower bounds
+            return _needs(
+                export_far_cap=4000, send_node_cap=40, pairs_lower_bound=1, overflow=1
+            )
+        out = clean.copy()
+        out[CROSS_NEEDS_FIELDS.index("overflow")] = 1  # rows still overflow
+        return out
+
+    initial = CrossCapacities.for_measurement(
+        leaf_capacity=4096,
+        ndev=2,
+        leaf_width=64,
+        live_leaves=3000,
+        exact_walk_needs=True,
+    )
+    sized, measured, _ = size_cross_capacities(measure, initial, headroom=1.5)
+    assert len(seen) == 2 and measured is seen[1]
+    assert seen[1].export_far_cap == 6144  # 1.5 x the exact walk need
+    for name in ROWS:
+        assert getattr(seen[1], name) == _CROSS_CAP_GRANULE, name
+    assert vars(sized) == vars(
+        CrossCapacities.from_needs(clean, like=seen[1], headroom=1.5)
+    )
+    # room for the next measurements (the drift probes): the measured walk grows by
+    # its own factor, the sized capacities keep theirs
+    seen.clear()
+    roomy, _, _ = size_cross_capacities(
+        measure, initial, headroom=1.5, walk_headroom=2.0
+    )
+    assert len(seen) == 2 and seen[1].export_far_cap == 8192  # 2 x 4000
+    assert vars(roomy) == vars(
+        CrossCapacities.from_needs(clean, like=seen[1], headroom=1.5)
+    )
+    # and a floor under the near list (the drift's intruder pairs), for the next
+    # measurement only
+    seen.clear()
+    floored, _, _ = size_cross_capacities(
+        measure, initial, headroom=1.5, near_floor=50_000
+    )
+    assert len(seen) == 2 and seen[1].export_near_cap == 49 * 1024  # >= 50,000
+    assert floored.export_near_cap == 2048  # 1.5 x the near need of 800
+
+
+def test_size_refuses_a_mismatch_and_bounds_that_never_settle():
+    initial = CrossCapacities.for_measurement(leaf_capacity=4096, ndev=2, leaf_width=64)
+    with pytest.raises(RuntimeError, match="mismatch"):
+        size_cross_capacities(lambda caps: _needs(mismatch=1, overflow=1), initial)
+    # walks that stopped (a queue overflow) can leave the two ends disagreeing:
+    # that is a lower bound to re-plan, not a mismatch to refuse
+    rounds = []
+
+    def stopped_then_exact(caps):
+        rounds.append(caps)
+        if len(rounds) == 1:
+            return _needs(
+                export_walk_queue=caps.export_walk_queue,
+                walk_lower_bound=1,
+                pairs_lower_bound=1,
+                mismatch=1,
+                overflow=1,
+            )
+        return _clean_needs()
+
+    size_cross_capacities(stopped_then_exact, initial, headroom=1.5)
+    assert len(rounds) == 2
+    assert rounds[1].export_walk_queue == 2 * initial.export_walk_queue
+    grow = iter(range(1, 100))
+    with pytest.raises(RuntimeError, match="still lower bounds"):
+        size_cross_capacities(
+            lambda caps: _needs(
+                export_far_cap=caps.export_far_cap + next(grow),
+                walk_lower_bound=1,
+                overflow=1,
+            ),
+            initial,
+            max_rounds=2,
+        )
+
+
 def test_cross_needs_refuses_a_hook_that_measured_nothing():
     def hook(tree_artifacts):
         return None
@@ -354,8 +509,12 @@ def test_no_need_grows_a_capacity_past_its_structural_bound():
     """What a NaN state's degenerate tree read on two A100s at 8e6 -- the root of
     each shard one summary cell, near the other's: 4,002,489 particles in one near
     row -- sized a leaf width of a whole shard (an OOM of 282.72 GiB). A cell leaf
-    holds at most the template's leaf size, and a near row ships at most a leaf
+    holds at most the template's leaf size or, at the finest Morton level, a few
+    times it (``_FINEST_CELL_WIDTH_FACTOR``), and a near row ships at most a leaf
     width of particles, so neither re-plan nor sizing goes past those bounds."""
+    from jaccpot.distributed.cross import _FINEST_CELL_WIDTH_FACTOR
+
+    bound = _FINEST_CELL_WIDTH_FACTOR * 64
     caps = CrossCapacities.from_needs(
         _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [64]))), headroom=1.0, leaf_size=64
     )
@@ -369,16 +528,16 @@ def test_no_need_grows_a_capacity_past_its_structural_bound():
         pairs_lower_bound=1,
     )
     grown = caps.replanned(garbage, headroom=1.5, leaf_size=64)
-    assert grown.leaf_width == 64, vars(grown)
-    assert grown.send_particle_cap <= grown.send_node_cap * 64, vars(grown)
-    assert grown.recv_particle_cap <= grown.recv_node_cap * 64, vars(grown)
+    assert grown.leaf_width == bound, vars(grown)
+    assert grown.send_particle_cap <= grown.send_node_cap * bound, vars(grown)
+    assert grown.recv_particle_cap <= grown.recv_node_cap * bound, vars(grown)
     sized = CrossCapacities.from_needs(garbage, headroom=1.5, leaf_size=64)
-    assert sized.leaf_width == 64
-    assert sized.send_particle_cap <= sized.send_node_cap * 64, vars(sized)
+    assert sized.leaf_width == bound
+    assert sized.send_particle_cap <= sized.send_node_cap * bound, vars(sized)
     # the bounds never narrow what a run already has
-    wide = caps._with(leaf_width=128, send_particle_cap=10**7)
+    wide = caps._with(leaf_width=2 * bound, send_particle_cap=10**7)
     kept = wide.replanned(garbage, leaf_size=64)
-    assert kept.leaf_width == 128 and kept.send_particle_cap == 10**7
+    assert kept.leaf_width == 2 * bound and kept.send_particle_cap == 10**7
     # a leaf width the leaf size allows still grows
     assert (
         caps._with(leaf_width=32)
@@ -386,6 +545,25 @@ def test_no_need_grows_a_capacity_past_its_structural_bound():
         .leaf_width
         == 50
     )
+
+
+def test_a_finest_level_cell_wider_than_the_leaf_size_grows_the_leaf_width():
+    """Plummer 8e7 on four A100s (2e7 per card): the box is 35,148 wide (the
+    sphere's outliers), so a finest-level Morton cell is 0.017 across and holds up
+    to 121 particles in the core -- a leaf whatever it holds. One near row shipped
+    144 particles against a leaf width of 64; the re-plan, clamped to the leaf
+    size, grew nothing and the run stopped ("re-plan grew nothing"). The width
+    grows to the need, by both doors, and the particle caps with it."""
+    caps = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [64]))), headroom=1.0, leaf_size=64
+    )
+    wide_leaf = _needs(leaf_width=144, overflow=1)
+    assert caps.replanned(wide_leaf, headroom=1.5, leaf_size=64).leaf_width == 144
+    sized = CrossCapacities.from_needs(
+        _needs(**dict(zip(CAP_FIELDS, [1000] * 9 + [144]))), headroom=1.0, leaf_size=64
+    )
+    assert sized.leaf_width == 144
+    assert sized.send_particle_cap >= 1000, vars(sized)
 
 
 def test_a_run_whose_tree_overflowed_replans_only_the_cross_summary():

@@ -229,3 +229,90 @@ def test_csr_is_jittable_with_traced_table():
         G=jnp.float32(1.0),
     )
     assert np.allclose(np.asarray(out), np.asarray(ref), rtol=1e-5, atol=1e-6)
+
+
+# ---- ordered_rows: a row's chunk partials summed in one fixed order (S11 s2, G) ----
+
+
+@pytest.mark.parametrize("chunk", trim([2, 1, 3]))
+def test_ordered_rows_sum_each_rows_chunks_alone_in_a_fixed_order(chunk):
+    """``_sum_chunks_in_fixed_order``: each row's sum, from that row's chunks alone.
+
+    The ``segment_sum`` it replaces under ``ordered_rows`` is one scatter-add, whose
+    order within a row is the atomics' on a GPU (the multi-GPU cross near term
+    differed run to run in rows of three or more chunks). Here: rows of one or two
+    chunks are ``p_0`` and ``p_0 + p_1`` bitwise (written out in float32 numpy),
+    longer ones (up to five chunks; empty rows too) the float64 sum to float32
+    accuracy, and no row's bits move when every OTHER row's partials change (to
+    other values, and to inf and NaN): the sum's order depends on the table alone."""
+    from jaccpot.pallas.nearfield_leafpair_csr import _sum_chunks_in_fixed_order
+
+    L, W = 7, 4
+    _, _, _, nbr, offsets, counts = _random_csr(
+        17, L=L, W=W, max_row=9, empty_rows=(1, 4)
+    )
+    cap = leafpair_chunk_capacity(int(nbr.shape[0]), L, chunk)
+    tab = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=cap)
+    leaf = np.asarray(tab.leaf)
+    per_row = np.bincount(leaf[leaf >= 0], minlength=L)
+    # non-vacuity: rows the scatter could add in another order, and short ones
+    assert per_row.max() >= 3 and per_row.min() <= 2, per_row
+    rng = np.random.default_rng(5)
+    partials = rng.standard_normal((cap, W, 4)).astype(np.float32)
+    rows = jnp.where(tab.leaf < 0, L, tab.leaf)
+    reduce = jax.jit(_sum_chunks_in_fixed_order, static_argnums=3)
+
+    got = np.asarray(reduce(jnp.asarray(partials), rows, tab.is_first, L))
+    assert got.dtype == np.float32
+    for row in range(L):
+        mine = np.flatnonzero(leaf == row)
+        if mine.size <= 2:
+            want = (
+                partials[mine[0]]
+                if mine.size == 1
+                else partials[mine[0]] + partials[mine[1]]
+            )
+            assert np.array_equal(got[row], want), row
+        else:
+            want = partials[mine].astype(np.float64).sum(axis=0)
+            assert np.allclose(got[row], want, rtol=1e-5, atol=1e-6), row
+        for poison in (None, np.inf, np.nan):
+            other = rng.standard_normal(partials.shape).astype(np.float32)
+            if poison is not None:
+                other[:] = poison
+            moved = np.where((leaf == row)[:, None, None], partials, other)
+            again = np.asarray(reduce(jnp.asarray(moved), rows, tab.is_first, L))
+            assert np.array_equal(again[row], got[row]), (row, poison)
+
+
+@pytest.mark.parametrize("num_target_leaves", [None, 5])
+def test_ordered_rows_keep_the_kernels_answer(num_target_leaves):
+    """The kernel with ``ordered_rows`` gives the ``segment_sum`` route's answer.
+
+    With fewer target rows than pool leaves too (the cross near term's
+    ``[local ; imported]`` pool, its table over the local rows alone)."""
+    L, W, chunk = 7, 8, 2
+    pos, mass, mask, nbr, offsets, counts = _random_csr(
+        23, L=L, W=W, max_row=9, edge_capacity=96
+    )
+    rows = L if num_target_leaves is None else num_target_leaves
+    offsets, counts = offsets[: rows + 1], counts[:rows]
+    cap = leafpair_chunk_capacity(int(nbr.shape[0]), rows, chunk)
+    tab = build_leafpair_chunk_table(offsets, counts, chunk=chunk, capacity=cap)
+    assert int(jnp.max(counts)) > 2 * chunk  # rows of three or more chunks
+    common = dict(
+        softening_sq=jnp.float32(0.05**2),
+        G=jnp.float32(1.1),
+        chunk=chunk,
+        interpret=True,
+        include_self=False,
+        num_target_leaves=num_target_leaves,
+    )
+    ordered = nearfield_leafpair_csr_pallas(
+        pos, mass, mask, nbr, tab, ordered_rows=True, **common
+    )
+    summed = nearfield_leafpair_csr_pallas(pos, mass, mask, nbr, tab, **common)
+    assert ordered.shape == summed.shape == (rows, W, 4)
+    assert np.all(np.isfinite(np.asarray(ordered)))
+    assert np.abs(np.asarray(summed)).max() > 0.0
+    assert np.allclose(np.asarray(ordered), np.asarray(summed), rtol=1e-6, atol=1e-7)

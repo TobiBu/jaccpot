@@ -73,6 +73,13 @@ _MUTUAL_DISTRIBUTED = "tests/integration/test_mutual_distributed.py"
 _NORNAX_ADAPTER = "tests/integration/test_mutual_fmm_nornax.py"
 _NORNAX_DISTRIBUTED = "tests/integration/test_mutual_distributed_nornax.py"
 _SEGMENT_CRITERION = "tests/distributed/test_mesh_segment_dehnen_error.py"
+_SEGMENT_MIGRATION = "tests/distributed/test_mesh_segment_migration_fused.py"
+# the mesh potential and the production runner's multi-GPU mode on the fused force
+# (S11 session 2, tracks E and D): ~11 min of compilation between them on CI
+_SEGMENT_RUNNER_FILES = (
+    "tests/distributed/test_mesh_potential.py",
+    "tests/distributed/test_production_runner_mesh_fused.py",
+)
 _MUTUAL_STATIC_DEVICE = "tests/integration/test_mutual_fmm_static_device.py"
 # The fused strict lane's CPU tests (every case a full fused-lane solve, 60-245 s on
 # CPU) left the integration shard in 2026-10 (S3): with them it ran 42 of its 50
@@ -135,10 +142,19 @@ SHARDS: dict[str, list[str]] = {
         "-m",
         "distributed_segment",
         f"--ignore={_SEGMENT_CRITERION}",
+        f"--ignore={_SEGMENT_MIGRATION}",
+        *(f"--ignore={path}" for path in _SEGMENT_RUNNER_FILES),
     ],
     # the same runner under Dehnen's error criterion (S12), a job of its own: with it
     # the segment job took 27 of its 40 minutes on CI
     "distributed-segment-criterion": [_SEGMENT_CRITERION, "-m", "distributed_segment"],
+    # the runner's migration to fixed cuts on the fused force (S11 session 2, track
+    # I): ~5 min of compilation on a loaded host, kept out of the segment job
+    "distributed-segment-migration": [_SEGMENT_MIGRATION, "-m", "distributed_segment"],
+    # the mesh potential and the runner's multi-GPU mode on the fused force (S11
+    # session 2, tracks E and D): with them the segment job took ~24 of its 40
+    # minutes (1,390 s of calls on this host at -n 1, ~1.2x that on CI)
+    "distributed-segment-runner": [*_SEGMENT_RUNNER_FILES, "-m", "distributed_segment"],
 }
 
 # The two jobs that do not run on every pull request. Each costs minutes of
@@ -150,10 +166,15 @@ GATED_SHARDS: tuple[str, ...] = (
     "distributed-criterion",
     "distributed-segment",
     "distributed-segment-criterion",
+    "distributed-segment-migration",
+    "distributed-segment-runner",
     "nornax-distributed",
 )
 GATED_PATHS: tuple[str, ...] = (
     "jaccpot/distributed/",
+    # the production runner's multi-GPU mode dispatches from here
+    # (tests/distributed/test_production_runner_mesh_fused.py)
+    "jaccpot/production.py",
     # what the fused mesh lane (test-distributed-segment) takes its shapes, template,
     # verdict and plan from on the runtime side
     "jaccpot/runtime/fused_provider.py",

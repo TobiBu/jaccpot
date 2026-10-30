@@ -35,8 +35,10 @@ what removes the per-slot ``lax.cond`` of the rectangle kernel.
 :func:`nearfield_leafpair_csr_sorted_direct_pallas` is the fused lane's default
 layout: it reads the Morton-sorted particles as leaf ranges and stores straight
 into particle order. The table kernel above stays for the gradient lane (its
-custom VJP), for callers without leaf ranges (the multi-GPU cross term) and for
-``accum="wide"``. The ``sorted`` layout between the two (the direct kernel's
+custom VJP), for callers without leaf ranges and for ``accum="wide"``. The
+multi-GPU cross term reads the direct kernel too (since S11 session 2): the local
+sorted particles then the imported ones as one table, the local leaves as the
+only targets (``num_target_leaves``), no self term (``include_self=False``). The ``sorted`` layout between the two (the direct kernel's
 ranges with the table kernel's per-chunk partials) was removed in the 2026-10
 cleanup (X5).
 """
@@ -699,6 +701,7 @@ def nearfield_leafpair_csr_pallas(
     num_target_leaves: int | None = None,
     softening_kernel: Optional[str] = None,
     with_force_scale: bool = False,
+    ordered_rows: bool = False,
 ) -> Array:
     """Leaf-pair near field from a neighbour CSR, one Pallas program per row chunk.
 
@@ -759,6 +762,14 @@ def nearfield_leafpair_csr_pallas(
         ``with_force_scale`` lane) instead of the potential: the multi-GPU lane's
         cross-domain near term under ``mac_type='dehnen_error'``. ``False``
         (default): the potential, the kernel unchanged. Static.
+    ordered_rows : bool
+        Sum each row's chunk partials in one fixed order
+        (:func:`_sum_chunks_in_fixed_order`) instead of the ``segment_sum``, whose
+        order within a row of three or more chunks is the atomics' on a GPU: the
+        same bits on every run. The table must be built over exactly the
+        ``num_target_leaves`` target rows (each owns a first chunk). ``False``
+        (default): the ``segment_sum``. For the multi-GPU lane's cross near term
+        (:func:`jaccpot.distributed.cross.cross_near_acceleration`). Static.
 
     Returns
     -------
@@ -900,17 +911,100 @@ def nearfield_leafpair_csr_pallas(
             f"num_target_leaves must lie in [0, {num_leaves}], got {n_tgt}"
         )
     seg = jnp.where(chunks.leaf < 0, jnp.asarray(n_tgt, idx), chunks.leaf)
-    out = jax.ops.segment_sum(
-        partials,
-        seg,
-        num_segments=n_tgt,
-        indices_are_sorted=True,
-        mode=jax.lax.GatherScatterMode.FILL_OR_DROP,
-    )
+    if ordered_rows:
+        out = _sum_chunks_in_fixed_order(partials, seg, chunks.is_first, n_tgt)
+    else:
+        out = jax.ops.segment_sum(
+            partials,
+            seg,
+            num_segments=n_tgt,
+            indices_are_sorted=True,
+            mode=jax.lax.GatherScatterMode.FILL_OR_DROP,
+        )
     out = out.astype(dtype)
     if pad_t:
         out = out[:, :leaf_width, :]
     return out
+
+
+def _sum_chunks_in_fixed_order(
+    partials: Array, rows: Array, is_first: Array, num_rows: int
+) -> Array:
+    """Each row's chunk partials summed in one fixed order, without a colliding scatter.
+
+    ``jax.ops.segment_sum`` over the chunk table is ONE scatter-add, and on a GPU
+    the order in which a row's chunks land is the atomics': a row of three or more
+    chunks (more than ``2 * chunk`` neighbours) rounds differently run to run (two
+    addends commute exactly). The chunks of a row are consecutive in the table
+    (:func:`build_leafpair_chunk_table`): each row's first chunk is gathered, its
+    later chunks -- compacted in table order into the table's slack, at most
+    ``capacity - num_rows`` of them when every row owns a first chunk -- are summed
+    by one segmented ``associative_scan`` (a fixed tree of additions, the same on
+    every backend and run), and that sum is added to the first. A row of one or two
+    chunks keeps the ``segment_sum``'s bits; a longer one is ``p_0 + (p_1 + ...
+    + p_k)`` in the scan's tree order. No loop and no host round trip: a traced
+    loop over the ranks cost one device-to-host sync per rank (6.5-7x the
+    ``segment_sum``'s median time on a shared A100).
+
+    Parameters
+    ----------
+    partials : Array
+        ``(capacity, W, k)`` one partial per chunk.
+    rows : Array
+        ``(capacity,)`` each chunk's row; ``num_rows`` for a chunk to drop.
+    is_first : Array
+        ``(capacity,)`` nonzero on each row's first chunk.
+    num_rows : int
+        Output rows; the table is built over exactly these. Static.
+
+    Returns
+    -------
+    Array
+        ``(num_rows, W, k)``, in ``partials``' dtype.
+    """
+    idx = rows.dtype
+    capacity = int(rows.shape[0])
+    c = jnp.arange(capacity, dtype=idx)
+    live = rows < num_rows
+    rank = c - lax.cummax(jnp.where(is_first > 0, c, jnp.asarray(0, idx)))
+    zero = jnp.zeros((), partials.dtype)
+    first = (
+        jnp.full((num_rows,), capacity, idx)
+        .at[jnp.where(live & (rank == 0), rows, num_rows)]
+        .set(c, mode="drop")
+    )
+    out = jnp.where(
+        (first < capacity)[:, None, None],
+        partials[jnp.minimum(first, capacity - 1)],
+        zero,
+    )
+    slack = capacity - int(num_rows)
+    if slack <= 0:
+        return out
+    later = live & (rank > 0)
+    slot = jnp.where(later, jnp.cumsum(later, dtype=idx) - 1, slack)
+    chunk_of = jnp.full((slack,), capacity, idx).at[slot].set(c, mode="drop")
+    held = chunk_of < capacity
+    take = jnp.minimum(chunk_of, capacity - 1)
+    later_rows = jnp.where(held, rows[take], num_rows)
+    values = jnp.where(held[:, None, None], partials[take], zero)
+    change = later_rows[1:] != later_rows[:-1]
+    starts = jnp.concatenate([jnp.ones((1,), bool), change])
+    ends = jnp.concatenate([change, jnp.ones((1,), bool)])
+
+    def segmented_add(
+        a: tuple[Array, Array], b: tuple[Array, Array]
+    ) -> tuple[Array, Array]:
+        # a segment starting in `b` drops everything before it (where, not a
+        # multiply: nothing from another row reaches this one's bits)
+        return a[0] | b[0], jnp.where(b[0][:, None, None], b[1], a[1] + b[1])
+
+    _, summed = lax.associative_scan(segmented_add, (starts, values))
+    # each row's last later chunk holds the row's later sum; rows are distinct
+    tgt = jnp.where(held & ends, later_rows, num_rows)
+    extra = jnp.zeros_like(out).at[tgt].set(summed, mode="drop")
+    has_extra = jnp.zeros((num_rows,), bool).at[tgt].set(True, mode="drop")
+    return jnp.where(has_extra[:, None, None], out + extra, out)
 
 
 def _nearfield_leafpair_csr_sorted_kernel(
@@ -1638,6 +1732,50 @@ def leafpair_extra_chunk_capacity(edge_capacity: int, chunk: int) -> int:
     return (int(edge_capacity) + chunk - 1) // chunk
 
 
+def _rest_pieces_in_fixed_order(
+    partials: Array, rows: Array, leaf: Array, dropped: int
+) -> tuple[Array, Array]:
+    """A row's remaining pieces summed in one fixed order, each row's sum once.
+
+    The direct kernel's remaining pieces (``row_limit``) come in the table in leaf
+    order, a leaf's pieces consecutive. A segmented ``associative_scan`` over them
+    (a fixed tree of additions, the same every run) leaves each leaf's sum of
+    pieces on its last piece; the other pieces' rows are dropped, so the scatter
+    that follows adds ONE value to each output row. A leaf of one piece keeps its
+    piece's bits.
+
+    Parameters
+    ----------
+    partials : Array
+        ``(capacity, Wpad, num_out)`` one partial per piece.
+    rows : Array
+        ``(capacity, Wpad)`` each piece's output rows, ``dropped`` past its count.
+    leaf : Array
+        ``(capacity,)`` each piece's target leaf, ``-1`` for padding pieces.
+    dropped : int
+        The out-of-range row the scatter drops.
+
+    Returns
+    -------
+    tuple[Array, Array]
+        ``(sums, rows)``: on each leaf's last piece the sum of its pieces, and the
+        rows with every other piece's dropped.
+    """
+    change = leaf[1:] != leaf[:-1]
+    starts = jnp.concatenate([jnp.ones((1,), bool), change])
+    ends = jnp.concatenate([change, jnp.ones((1,), bool)])
+
+    def segmented_add(
+        a: tuple[Array, Array], b: tuple[Array, Array]
+    ) -> tuple[Array, Array]:
+        # a segment starting in `b` drops everything before it
+        return a[0] | b[0], jnp.where(b[0][:, None, None], b[1], a[1] + b[1])
+
+    _, summed = lax.associative_scan(segmented_add, (starts, partials))
+    keep = ends & (leaf >= 0)
+    return summed, jnp.where(keep[:, None], rows, dropped)
+
+
 def nearfield_leafpair_csr_sorted_direct_pallas(
     positions_sorted: Array,
     masses_sorted: Array,
@@ -1662,6 +1800,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     source_flags: str | None = None,
     softening_kernel: Optional[str] = None,
     tile_skip: bool | None = None,
+    include_self: bool = True,
+    num_target_leaves: int | None = None,
+    ordered_rest: bool = False,
 ) -> tuple[Array, Array | None]:
     """The CSR near field straight into particle order: no per-leaf partials.
 
@@ -1707,9 +1848,10 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     neighbors : Array
         Flat neighbour array of LEAF indices (``0 <= id < L``).
     offsets : Array
-        CSR row starts into ``neighbors`` (``L`` or ``L + 1`` entries).
+        CSR row starts into ``neighbors`` (``T`` or ``T + 1`` entries, ``T`` the
+        target leaves: ``L`` unless ``num_target_leaves``).
     counts : Array
-        ``(L,)`` row lengths.
+        ``(T,)`` row lengths.
     leaf_width : int
         ``W``, the most particles a leaf can hold. Static.
     softening_sq : Array
@@ -1759,13 +1901,29 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         more read of the particles for the boxes, 32 B per leaf). ``None``:
         ``JACCPOT_NEARFIELD_TILE_SKIP``, default :data:`DIRECT_TILE_SKIP` (off), and
         off in interpret mode. Static.
+    include_self : bool
+        Add each target leaf's own particles, the diagonal removed (the default).
+        ``False``: the rows' entries only -- the multi-GPU cross term, whose
+        targets' self term is already in the local force. Static.
+    num_target_leaves : int | None
+        Leaves ``0 .. T - 1`` are the targets: one program each, their rows the
+        CSR's (``offsets`` and ``counts`` hold ``T`` rows); the leaves past them
+        are sources only, and their particles' outputs stay zero. ``None``: every
+        leaf (the default). Static.
+    ordered_rest : bool
+        Sum a row's remaining pieces (past ``row_limit``) in one fixed order
+        (:func:`_rest_pieces_in_fixed_order`) and add that sum once, instead of
+        scatter-adding every piece: on a GPU the scatter's atomics add the two or
+        more pieces of a row past twice the limit in another order each run. A row
+        of one remaining piece keeps its bits. ``False`` (the default): the
+        scatter. Static.
 
     Returns
     -------
     tuple[Array, Array | None]
         ``(N, 3)`` accelerations and the ``(N,)`` fourth lane -- the potential with
         ``with_potential``, the near-field force scale with ``with_force_scale``,
-        ``None`` with neither; zero on rows no leaf holds.
+        ``None`` with neither; zero on rows no target leaf holds.
 
     Raises
     ------
@@ -1773,8 +1931,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         If Pallas or its Triton backend could not be imported.
     ValueError
         If ``source_tile`` is not ``0`` or a power of two, ``source_flags``
-        holds a letter other than ``a``, ``l``, ``p``, ``r``, or both
-        ``with_potential`` and ``with_force_scale`` are set.
+        holds a letter other than ``a``, ``l``, ``p``, ``r``, both
+        ``with_potential`` and ``with_force_scale`` are set, or
+        ``num_target_leaves`` is not in ``[0, L]``.
     """
     if pl is None or plgpu is None:
         raise RuntimeError("jax.experimental.pallas is not available")
@@ -1782,18 +1941,24 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     dtype = positions_sorted.dtype
     n = int(positions_sorted.shape[0])
     num_leaves = int(leaf_start.shape[0])
+    # the programs' leaves: every leaf, or the leading targets (the rest only source)
+    num_targets = num_leaves if num_target_leaves is None else int(num_target_leaves)
+    if not 0 <= num_targets <= num_leaves:
+        raise ValueError(
+            f"num_target_leaves={num_target_leaves} is not in [0, {num_leaves}]"
+        )
     leaf_width = int(leaf_width)
     if with_potential and with_force_scale:
         raise ValueError("with_potential and with_force_scale share the fourth lane")
     fourth_lane = bool(with_potential or with_force_scale)
     num_out = 4 if fourth_lane else 3
-    if num_leaves == 0 or leaf_width == 0 or n == 0:
+    if num_targets == 0 or leaf_width == 0 or n == 0:
         acc = jnp.zeros((n, 3), dtype)
         return acc, (jnp.zeros((n,), dtype) if fourth_lane else None)
     idx = jnp.asarray(counts).dtype
     chunk = max(1, int(chunk))
     counts = jnp.asarray(counts, idx)
-    row_start = jnp.asarray(offsets, idx)[:num_leaves]
+    row_start = jnp.asarray(offsets, idx)[:num_targets]
     neighbors = jnp.asarray(neighbors, dtype=idx)
     if source_tile is None:
         source_tile = env_int(
@@ -1861,6 +2026,7 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         f"{source_flags}"
         f"{'_pot' if with_potential else ''}"
         f"{'_fb' if with_force_scale else ''}"
+        f"{'' if include_self else '_noself'}"
     )
     # 1. each row up to ``piece`` entries (all of it, when shorter) + self, stored
     # in particle order
@@ -1869,13 +2035,13 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         start_i,
         count_i,
         neighbors,
-        jnp.arange(num_leaves, dtype=idx),
+        jnp.arange(num_targets, dtype=idx),
         row_start,
         jnp.minimum(counts, piece_i),
-        jnp.ones((num_leaves,), idx),
+        jnp.ones((num_targets,), idx),
         soft,
         g,
-        include_self=True,
+        include_self=bool(include_self),
         direct=True,
         num_rows=n,
         name=f"nearfield_leafpair_csr_direct_first_{tag}",
@@ -1893,8 +2059,8 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         leaf = jnp.searchsorted(
             ends, c, side="right", method=searchsorted_method()
         ).astype(idx)
-        valid = leaf < jnp.asarray(num_leaves, idx)
-        leaf_safe = jnp.minimum(leaf, jnp.asarray(num_leaves - 1, idx))
+        valid = leaf < jnp.asarray(num_targets, idx)
+        leaf_safe = jnp.minimum(leaf, jnp.asarray(num_targets - 1, idx))
         k = c - first[leaf_safe] + 1  # piece k >= 1 of its row
         partials = _sorted_pallas_call(
             pm,
@@ -1917,6 +2083,10 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         tcount = jnp.where(valid, count_i[leaf_safe], 0)
         rows = start_i[leaf_safe][:, None] + lane[None, :]
         rows = jnp.where(lane[None, :] < tcount[:, None], rows, n)  # n = dropped
+        if ordered_rest:
+            partials, rows = _rest_pieces_in_fixed_order(
+                partials, rows, jnp.where(valid, leaf_safe, -1), n
+            )
         return [
             o.at[rows].add(partials[..., comp], mode="drop")
             for comp, o in enumerate(outs_in)

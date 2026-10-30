@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from jaccpot.pallas.nearfield_leafpair_csr import (
+    _rest_pieces_in_fixed_order,
     build_leafpair_chunk_table,
     leafpair_chunk_capacity,
     nearfield_leafpair_csr_pallas,
@@ -186,6 +187,151 @@ def test_whole_rows_past_the_limit_go_in_pieces(row_limit):
             fits[starts[leaf] : starts[leaf] + counts[leaf]] = True
     assert np.array_equal(lim[fits], full[fits])
     assert int(row_counts.max()) > row_limit  # some row really goes in pieces
+
+
+@pytest.mark.parametrize("source_tile", [0, 8])
+@pytest.mark.parametrize("row_limit", [1 << 20, 2])
+def test_leading_target_leaves_without_the_self_term(source_tile, row_limit):
+    """``include_self=False`` and ``num_target_leaves=T`` (the multi-GPU cross term:
+    local leaves first, imported leaves behind them as sources only): the first
+    ``T`` leaves' rows and nothing else -- no self term, the source-only leaves'
+    particles zero -- against a NumPy pair sum, through the row pieces too
+    (``row_limit=2``)."""
+    c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6, empty_rows=(2,))
+    T = 6
+    offsets, row_counts = c["offsets"][: T + 1], c["row_counts"][:T]
+    soft2, g = 0.05**2, 1.3
+    acc, pot = nearfield_leafpair_csr_sorted_direct_pallas(
+        c["pos"],
+        c["mass"],
+        c["starts"],
+        c["counts"],
+        c["nbr"],
+        offsets,
+        row_counts,
+        leaf_width=8,
+        softening_sq=jnp.float32(soft2),
+        G=jnp.float32(g),
+        chunk=1,
+        interpret=True,
+        with_potential=True,
+        source_tile=source_tile,
+        row_limit=row_limit,
+        softening_kernel="plummer",  # the reference's
+        include_self=False,
+        num_target_leaves=T,
+    )
+    pos = np.asarray(c["pos"], np.float64)
+    mass = np.asarray(c["mass"], np.float64)
+    starts, counts = np.asarray(c["starts"]), np.asarray(c["counts"])
+    nbr, off = np.asarray(c["nbr"]), np.asarray(offsets)
+    want = np.zeros((pos.shape[0], 4))
+    for leaf in range(T):
+        tgt = np.arange(starts[leaf], starts[leaf] + counts[leaf])
+        for s in nbr[off[leaf] : off[leaf + 1]]:
+            src = np.arange(starts[s], starts[s] + counts[s])
+            d = pos[src][None, :, :] - pos[tgt][:, None, :]
+            r2 = np.sum(d * d, axis=-1) + soft2
+            want[tgt, :3] += g * np.einsum("ij,ijk->ik", mass[src] * r2**-1.5, d)
+            want[tgt, 3] -= g * np.sum(mass[src] * r2**-0.5, axis=1)
+    got = np.concatenate([np.asarray(acc), np.asarray(pot)[:, None]], axis=1)
+    assert np.any(want[: starts[T]] != 0.0)
+    assert not np.any(got[starts[T] :])  # the source-only leaves and the dead rows
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+    if row_limit == 2:
+        assert int(np.asarray(row_counts).max()) > row_limit  # some row in pieces
+
+
+def test_num_target_leaves_is_validated():
+    """More target leaves than leaves is refused, not read past the leaf table."""
+    c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6)
+    with pytest.raises(ValueError, match="num_target_leaves"):
+        nearfield_leafpair_csr_sorted_direct_pallas(
+            c["pos"],
+            c["mass"],
+            c["starts"],
+            c["counts"],
+            c["nbr"],
+            c["offsets"],
+            c["row_counts"],
+            leaf_width=8,
+            softening_sq=jnp.float32(0.05**2),
+            G=jnp.float32(1.3),
+            chunk=1,
+            interpret=True,
+            num_target_leaves=c["L"] + 1,
+        )
+
+
+@pytest.mark.parametrize("row_limit", [1, 2])
+def test_the_ordered_rest_sums_each_rows_pieces_once(row_limit):
+    """``ordered_rest=True`` (the multi-GPU cross term): a row's pieces past the
+    limit are summed in one fixed order and added once -- the scatter's values to
+    single-precision round-off, the bits of every row with at most one remaining
+    piece (two addends commute), and the unlimited run's values."""
+    c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6, empty_rows=(2,))
+    common = dict(
+        softening_sq=jnp.float32(0.05**2),
+        G=jnp.float32(1.3),
+        chunk=1,
+        interpret=True,
+        leaf_width=8,
+        source_tile=0,
+        with_potential=True,
+    )
+    args = (
+        c["pos"],
+        c["mass"],
+        c["starts"],
+        c["counts"],
+        c["nbr"],
+        c["offsets"],
+        c["row_counts"],
+    )
+    full = np.asarray(
+        nearfield_leafpair_csr_sorted_direct_pallas(*args, row_limit=1 << 20, **common)[
+            0
+        ]
+    )
+    plain = nearfield_leafpair_csr_sorted_direct_pallas(
+        *args, row_limit=row_limit, **common
+    )
+    ordered = nearfield_leafpair_csr_sorted_direct_pallas(
+        *args, row_limit=row_limit, ordered_rest=True, **common
+    )
+    row_counts = np.asarray(c["row_counts"])
+    counts, starts = np.asarray(c["counts"]), np.asarray(c["starts"])
+    one_piece = np.zeros(full.shape[0], bool)
+    for leaf in range(c["L"]):
+        if row_counts[leaf] <= 2 * row_limit:
+            one_piece[starts[leaf] : starts[leaf] + counts[leaf]] = True
+    for got, want in zip(ordered, plain):
+        got, want = np.asarray(got), np.asarray(want)
+        np.testing.assert_allclose(got, want, rtol=2e-6, atol=1e-6)
+        assert np.array_equal(got[one_piece], want[one_piece])
+    np.testing.assert_allclose(np.asarray(ordered[0]), full, rtol=2e-6, atol=1e-6)
+    assert int(row_counts.max()) > 2 * row_limit  # some row has two or more pieces
+
+
+def test_the_rest_pieces_are_summed_per_leaf_onto_its_last_piece():
+    """The segmented sum: each leaf's pieces (consecutive) summed onto its last
+    piece, every other piece's rows dropped, padding pieces dropped."""
+    rng = np.random.default_rng(3)
+    leaf = np.array([0, 0, 0, 2, 5, 5, -1, -1], np.int32)
+    partials = rng.normal(size=(8, 4, 2)).astype(np.float64)
+    rows = np.arange(8 * 4, dtype=np.int32).reshape(8, 4)
+    sums, kept = _rest_pieces_in_fixed_order(
+        jnp.asarray(partials), jnp.asarray(rows), jnp.asarray(leaf), 99
+    )
+    sums, kept = np.asarray(sums), np.asarray(kept)
+    last = {0: 2, 2: 3, 5: 5}
+    for piece in range(8):
+        if leaf[piece] in last and last[leaf[piece]] == piece:
+            members = leaf == leaf[piece]
+            np.testing.assert_allclose(sums[piece], partials[members].sum(axis=0))
+            np.testing.assert_array_equal(kept[piece], rows[piece])
+        else:
+            assert np.all(kept[piece] == 99), piece
 
 
 def _consecutive_case(seed, *, W):

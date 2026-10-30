@@ -319,3 +319,60 @@ def test_the_force_scale_lane_is_the_near_pair_sum(kernel):
     ref = _reference_force_scale(pairs, local, imported, n_lp)
     assert np.any(ref > 0) and np.any(ref == 0)  # untouched leaves stay zero
     np.testing.assert_allclose(np.asarray(fb), ref, rtol=1e-12, atol=0.0)
+
+
+def _reference_potential(pairs, local, imported, n_local_particles, kernel):
+    """``-G sum m psi(r)`` over exactly the pairs, the pair kernel's ``psi``."""
+    from jaccpot.softening import pair_factors, softening_params_np
+
+    lp, lm, lk, lidx = local
+    ip, im, ik, _ = imported
+    ref = np.zeros(n_local_particles)
+    for t, s in pairs:
+        tp = lp[t][lk[t]]
+        ti = lidx[t][lk[t]]
+        sp = ip[s][ik[s]]
+        sm = im[s][ik[s]]
+        d2 = np.sum((sp[None, :, :] - tp[:, None, :]) ** 2, axis=-1)
+        _, psi, _ = pair_factors(
+            d2, softening_params_np(kernel, SOFT), kernel, potential=True, xp=np
+        )
+        ref[ti] -= G * np.sum(sm[None, :] * psi, axis=1)
+    return ref
+
+
+@pytest.mark.parametrize("kernel", ["plummer", "ferrers3"])
+def test_the_potential_lane_is_the_near_pair_sum(kernel):
+    """``with_potential=True`` (the mesh potential, S11 session 2): the same launch
+    returns the imported leaves' share of the potential, ``-G sum m psi(r)`` -- the
+    kernel's fourth lane in its default meaning, which the force drops -- and the
+    acceleration is the plain call's, bitwise. It shares the lane with the force
+    scale, so asking for both is refused."""
+    rng = np.random.default_rng(43)
+    pairs = [(0, 0), (0, 1), (0, 2), (2, 1), (3, 2)]
+    near, local, imported, n_lp, _ = _build(rng, pairs)
+    lp, lm, lk, lidx = local
+    kw = dict(
+        softening_sq=jnp.asarray(SOFT**2),
+        G=jnp.asarray(G),
+        chunk=8,
+        interpret=True,
+        softening_kernel=kernel,
+    )
+    args = (
+        near,
+        jnp.asarray(lp),
+        jnp.asarray(lm),
+        jnp.asarray(lk),
+        jnp.asarray(lidx),
+        n_lp,
+        NUM_INTERNAL,
+    )
+    plain = np.asarray(cross_near_acceleration(*args, **kw))
+    acc, phi = cross_near_acceleration(*args, with_potential=True, **kw)
+    assert np.array_equal(np.asarray(acc), plain)
+    ref = _reference_potential(pairs, local, imported, n_lp, kernel)
+    assert np.any(ref < 0) and np.any(ref == 0)  # untouched leaves stay zero
+    np.testing.assert_allclose(np.asarray(phi), ref, rtol=1e-12, atol=0.0)
+    with pytest.raises(ValueError, match="fourth lane"):
+        cross_near_acceleration(*args, with_potential=True, with_force_scale=True, **kw)
