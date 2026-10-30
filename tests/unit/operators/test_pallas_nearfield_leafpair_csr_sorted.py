@@ -264,11 +264,11 @@ def test_num_target_leaves_is_validated():
 
 
 @pytest.mark.parametrize("row_limit", [1, 2])
-def test_the_ordered_rest_sums_each_rows_pieces_once(row_limit):
-    """``ordered_rest=True`` (the multi-GPU cross term): a row's pieces past the
-    limit are summed in one fixed order and added once -- the scatter's values to
-    single-precision round-off, the bits of every row with at most one remaining
-    piece (two addends commute), and the unlimited run's values."""
+def test_the_rest_sums_each_rows_pieces_once(row_limit):
+    """A row's pieces past the limit are summed in one fixed order and added once
+    (a scatter of every piece added them in the atomics' order on a GPU): the
+    unlimited run's values to single-precision round-off, and its bits on every
+    row the limit does not cut."""
     c = _case(7, num_live=9, num_pad=3, W=8, n_dead=2, max_row=6, empty_rows=(2,))
     common = dict(
         softening_sq=jnp.float32(0.05**2),
@@ -288,28 +288,22 @@ def test_the_ordered_rest_sums_each_rows_pieces_once(row_limit):
         c["offsets"],
         c["row_counts"],
     )
-    full = np.asarray(
-        nearfield_leafpair_csr_sorted_direct_pallas(*args, row_limit=1 << 20, **common)[
-            0
-        ]
+    full = nearfield_leafpair_csr_sorted_direct_pallas(
+        *args, row_limit=1 << 20, **common
     )
-    plain = nearfield_leafpair_csr_sorted_direct_pallas(
+    limited = nearfield_leafpair_csr_sorted_direct_pallas(
         *args, row_limit=row_limit, **common
-    )
-    ordered = nearfield_leafpair_csr_sorted_direct_pallas(
-        *args, row_limit=row_limit, ordered_rest=True, **common
     )
     row_counts = np.asarray(c["row_counts"])
     counts, starts = np.asarray(c["counts"]), np.asarray(c["starts"])
-    one_piece = np.zeros(full.shape[0], bool)
+    uncut = np.zeros(np.asarray(full[0]).shape[0], bool)
     for leaf in range(c["L"]):
-        if row_counts[leaf] <= 2 * row_limit:
-            one_piece[starts[leaf] : starts[leaf] + counts[leaf]] = True
-    for got, want in zip(ordered, plain):
+        if row_counts[leaf] <= row_limit:
+            uncut[starts[leaf] : starts[leaf] + counts[leaf]] = True
+    for got, want in zip(limited, full):
         got, want = np.asarray(got), np.asarray(want)
         np.testing.assert_allclose(got, want, rtol=2e-6, atol=1e-6)
-        assert np.array_equal(got[one_piece], want[one_piece])
-    np.testing.assert_allclose(np.asarray(ordered[0]), full, rtol=2e-6, atol=1e-6)
+        assert np.array_equal(got[uncut], want[uncut])
     assert int(row_counts.max()) > 2 * row_limit  # some row has two or more pieces
 
 
