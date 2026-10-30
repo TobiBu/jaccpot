@@ -1802,7 +1802,6 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     tile_skip: bool | None = None,
     include_self: bool = True,
     num_target_leaves: int | None = None,
-    ordered_rest: bool = False,
 ) -> tuple[Array, Array | None]:
     """The CSR near field straight into particle order: no per-leaf partials.
 
@@ -1826,9 +1825,12 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
     outskirt cell of an unclipped Plummer draw at ``cell_min_level`` 6 neighbours
     101,870 leaves, and the step took 16.6 s instead of 44 ms (2026-10-05). So
     each row runs up to ``row_limit`` entries in its program, and only the rest of
-    a longer row goes in pieces of ``row_limit`` entries: partials scatter-added
-    onto the outputs, under a ``lax.cond`` that skips them when no row is that
-    long. Rows up to the limit keep their bits.
+    a longer row goes in pieces of ``row_limit`` entries, under a ``lax.cond``
+    that skips them when no row is that long. A row's pieces are summed in one
+    fixed order (:func:`_rest_pieces_in_fixed_order`) and added once: a scatter
+    of every piece added the two or more pieces of a row past twice the limit in
+    the atomics' order, so a few accelerations differed run to run (a 2e6
+    disc+bulge on one A100). Rows up to twice the limit keep their bits.
 
     With the scalar source loop (``source_tile=0``) the lane body and the order of
     every sum inside a chunk are the table kernel's: rows of one chunk give the
@@ -1910,13 +1912,6 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         CSR's (``offsets`` and ``counts`` hold ``T`` rows); the leaves past them
         are sources only, and their particles' outputs stay zero. ``None``: every
         leaf (the default). Static.
-    ordered_rest : bool
-        Sum a row's remaining pieces (past ``row_limit``) in one fixed order
-        (:func:`_rest_pieces_in_fixed_order`) and add that sum once, instead of
-        scatter-adding every piece: on a GPU the scatter's atomics add the two or
-        more pieces of a row past twice the limit in another order each run. A row
-        of one remaining piece keeps its bits. ``False`` (the default): the
-        scatter. Static.
 
     Returns
     -------
@@ -2083,10 +2078,9 @@ def nearfield_leafpair_csr_sorted_direct_pallas(
         tcount = jnp.where(valid, count_i[leaf_safe], 0)
         rows = start_i[leaf_safe][:, None] + lane[None, :]
         rows = jnp.where(lane[None, :] < tcount[:, None], rows, n)  # n = dropped
-        if ordered_rest:
-            partials, rows = _rest_pieces_in_fixed_order(
-                partials, rows, jnp.where(valid, leaf_safe, -1), n
-            )
+        partials, rows = _rest_pieces_in_fixed_order(
+            partials, rows, jnp.where(valid, leaf_safe, -1), n
+        )
         return [
             o.at[rows].add(partials[..., comp], mode="drop")
             for comp, o in enumerate(outs_in)

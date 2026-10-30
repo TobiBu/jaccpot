@@ -485,9 +485,9 @@ compile key. Size: 40 B/particle in float32 (+4 under `dehnen_error`) plus 4 B p
   direct and the fused force, the latter from a file written after a retried segment, in a
   fresh process). On GPUs the cross-domain path is bitwise run to run since S11 session 2
   (its pair lists in (target, source) order, its long rows summed in a fixed order), and a
-  continuation's STATE is the uninterrupted run's, bitwise (two A100s, 24 steps); the
-  carried acceleration can still differ in a few components where the single card's own
-  near kernel scatter-adds the pieces of very long rows (below).
+  continuation's STATE is the uninterrupted run's, bitwise (two A100s, 24 steps); since
+  the single card's near kernel sums the pieces of very long rows in a fixed order too
+  (below), so is the carried acceleration.
 - **On another mesh** (another device count or `cap`): the by-id state is decomposed there,
   its carried acceleration and f_b placed by id (no start force), and the force prepared
   and sized afresh: the same run to round-off, `restored["bitwise"] = False`,
@@ -538,11 +538,14 @@ and the merge kept that order inside each CSR row; the pairs are now sorted by (
 source) and the cross near kernel's chunks and long-row pieces summed in a fixed order. The
 start force is bitwise run to run and across processes (Plummer 4e5 and 2e6, both MACs), and
 the restart above continues with the state bitwise (0 of 12,000,000) and the carried
-acceleration in 1-9 of 6,000,000 components (max 3.0e-8). What is left -- and on the disc +
-bulge 2e6 some 8.5k of 6.9M start-force components -- comes from outside the cross terms,
-most likely the single card's direct near kernel, which scatter-adds the pieces of rows past
-2 x 1024 entries in atomic order (`JACCPOT_NEARFIELD_DIRECT_ROW_LIMIT=1e8` made the repeats
-bitwise): a change of the single-card default path, not made.
+acceleration in 1-9 of 6,000,000 components (max 3.0e-8). What was left -- and on the disc
++ bulge 2e6 some 8.5k of 6.9M start-force components -- came from outside the cross terms:
+the single card's direct near kernel scatter-added the pieces of rows past 2 x 1024 entries
+in atomic order. It now sums each row's pieces in one fixed order and adds that once, as the
+cross term does (2026-10-30): the single-card start force on the disc + bulge 2e6
+(`dehnen_error`, `bench/multigpu_force_repeat.py --ndev 1 --ic disc`) went from ~28k of 6.9M
+acceleration and ~7k of 2.3M f_b components differing run to run to bitwise, within one
+process and across processes. Rows up to 2 x 1024 entries keep their bits.
 
 **Measuring the lane on a dedicated node.** The A/B and scaling rows in
 `production_2026-10.md` (S11 session 2, track T) ran on four free cards of a shared
