@@ -123,7 +123,12 @@ dev = [
   # 9.0.1 -> 9.0.2 (2026-10-22, the hook's rev): `isort --check-only .` clean on main
   # with 9.0.2, as with 9.0.1. The hook's 10.0.0b1 beta (#430) merges `from`
   # imports of one module that 9.x keeps apart: stay on 9.x until 10 is stable.
-  "isort==9.0.2",
+  #
+  # 9.0.2 -> 10.0.0b1 (2026-10-30): pre-commit.ci's autoupdate (#478) moved the hook
+  # to the beta and re-sorted three files with it, so CI's 9.0.2 failed lint on
+  # main; the pin follows the hook (maintainer's call). `isort --check-only .` and
+  # `black --check .` (26.10.1) clean on main with it.
+  "isort==10.0.0b1",
   # Pinned to match .pre-commit-config.yaml's pydoclint rev, for the same reason as
   # black and isort above: the hook runs on every commit now, and a floating ">="
   # would let a local pydoclint disagree with it about what counts as a violation.
