@@ -801,6 +801,7 @@ class PrepareMixin(_EngineBase):
         *,
         leaf_size: int,
         bounds: Tuple[Array, Array],
+        num_valid: Optional[int] = None,
     ) -> None:
         """Size ``TreeConfig(leaf_capacity="auto")`` from this prepare's particles.
 
@@ -819,6 +820,8 @@ class PrepareMixin(_EngineBase):
             The build's leaf size.
         bounds : Tuple[Array, Array]
             The build's Morton box.
+        num_valid : Optional[int]
+            The build's leading live rows (``None``: all of them).
 
         Raises
         ------
@@ -842,6 +845,7 @@ class PrepareMixin(_EngineBase):
             leaf_size=int(leaf_size),
             cell_min_level=int(getattr(self, "_tree_cell_min_level", 0)),
             bounds=bounds,
+            num_valid=num_valid,
         )
         self._tree_leaf_capacity = auto_leaf_capacity(live, float(headroom))
 
@@ -859,6 +863,7 @@ class PrepareMixin(_EngineBase):
         jit_tree_override: Optional[bool],
         upward_center_mode: str,
         allow_stateful_cache: bool,
+        num_valid: Optional[int] = None,
     ) -> _PrepareStateTreeUpwardArtifacts:
         """Build tree artifacts and run upward preparation for prepare_state.
 
@@ -886,12 +891,22 @@ class PrepareMixin(_EngineBase):
             Expansion centre convention for the upward sweep.
         allow_stateful_cache : bool
             Whether the process-level interaction cache may be used.
+        num_valid : Optional[int]
+            Leading live rows of a capacity-padded shard (the multi-GPU eager
+            prepare); the cell build puts the dead rows after them in no leaf, as
+            the traced refresh does. ``None``: the rows
+            :func:`~jaccpot.runtime.capacity_plan.eager_live_rows` set, else every
+            row.
 
         Returns
         -------
         _PrepareStateTreeUpwardArtifacts
             Tree build plus upward sweep, bundled for the next phase.
         """
+        if num_valid is None:
+            from .capacity_plan import _live_rows
+
+            num_valid = _live_rows.get()
         tree_config = self.config.tree
         if self.tree_type != "radix" and tree_config.mode == "static_radix":
             tree_config = TreeBuilderConfig(
@@ -926,7 +941,8 @@ class PrepareMixin(_EngineBase):
                 allow_stateful_cache=allow_stateful_cache,
             )
         can_reuse_cached_topology = (
-            topology_candidate is not None
+            num_valid is None  # the reuse key does not see the live cut
+            and topology_candidate is not None
             and cached_topology is not None
             and topology_candidate.key == cached_topology.key
             and cached_topology.reuse_count < (self.rebuild_every - 1)
@@ -952,7 +968,10 @@ class PrepareMixin(_EngineBase):
             )
         else:
             self._resolve_auto_leaf_capacity(
-                positions_arr, leaf_size=int(leaf_size), bounds=inferred_bounds
+                positions_arr,
+                leaf_size=int(leaf_size),
+                bounds=inferred_bounds,
+                num_valid=num_valid,
             )
             build_artifacts = _build_tree_with_config(
                 positions_arr,
@@ -969,6 +988,7 @@ class PrepareMixin(_EngineBase):
                 leaf_partition=getattr(self, "_tree_leaf_partition", "buckets"),
                 leaf_capacity=getattr(self, "_tree_leaf_capacity", None),
                 cell_min_level=int(getattr(self, "_tree_cell_min_level", 0)),
+                num_valid=num_valid,
             )
             if allow_stateful_cache:
                 self._tree_workspace = build_artifacts.workspace

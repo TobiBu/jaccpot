@@ -49,6 +49,7 @@ from typing import Any, Iterable, Iterator, Optional
 __all__ = [
     "FusedCapacityPlan",
     "auto_leaf_capacity",
+    "eager_live_rows",
     "fused_capacity_plan",
     "fused_capacity_plan_overrides",
     "install_walk_caps",
@@ -203,6 +204,41 @@ def fused_capacity_plan() -> Optional[FusedCapacityPlan]:
         The context-local plan, or ``None`` when the registry is in charge.
     """
     return _plan.get()
+
+
+_live_rows: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "jaccpot_eager_live_rows", default=None
+)
+
+
+@contextlib.contextmanager
+def eager_live_rows(num_valid: Optional[int]) -> Iterator[Optional[int]]:
+    """Build the eager prepare's cell tree over the first ``num_valid`` rows only.
+
+    A multi-GPU shard is padded to its capacity, its dead rows piled onto the first
+    live row (``rollout._pad_onto_live_row``). As particles they fill one coincident
+    level-21 cell, which the cell partition cuts into ``leaf_size`` chunks: about
+    ``(cap - count) / leaf_size`` leaves, every one a near neighbour of the others,
+    in the eager walk whose caps the traced programs are sized from. Inside this
+    block the eager cell build (and the ``leaf_capacity="auto"`` count) puts the rows
+    past ``num_valid`` in no leaf, as the traced refresh does. ``None``: every row is
+    live.
+
+    Parameters
+    ----------
+    num_valid : Optional[int]
+        Leading live rows of the shard being prepared.
+
+    Yields
+    ------
+    Optional[int]
+        ``num_valid``.
+    """
+    token = _live_rows.set(None if num_valid is None else int(num_valid))
+    try:
+        yield num_valid
+    finally:
+        _live_rows.reset(token)
 
 
 @contextlib.contextmanager
@@ -568,16 +604,17 @@ def measure_shard_plan(
 
     level_shapes._WIDTHS.clear()
     level_shapes._LEVELS.clear()
-    prepared = solver.strict_fused_prepared_eval_fn(
-        positions=positions,
-        masses=masses,
-        leaf_size=int(leaf_size),
-        max_order=int(max_order),
-        theta=theta,
-        # the eager tree in the force's box: its leaf count, level widths and walk
-        # caps are what the static shapes are sized from
-        **({} if bounds is None else {"bounds": bounds}),
-    )[0]
+    with eager_live_rows(None if num_valid is None else int(num_valid)):
+        prepared = solver.strict_fused_prepared_eval_fn(
+            positions=positions,
+            masses=masses,
+            leaf_size=int(leaf_size),
+            max_order=int(max_order),
+            theta=theta,
+            # the eager tree in the force's box: its leaf count, level widths and
+            # walk caps are what the static shapes are sized from
+            **({} if bounds is None else {"bounds": bounds}),
+        )[0]
     impl = getattr(solver, "_impl", solver)
     if bounds is not None:
         _lift_registry_to_refresh_tree(
@@ -625,15 +662,25 @@ def _live_cell_leaf_counter(leaf_size: int, min_level: int) -> Any:
     """
     import jax
     import jax.numpy as jnp
+    import numpy as np
     from yggdrax._cell_partition import adaptive_cell_leaf_partition
 
-    def live_cell_leaf_count(codes: Any) -> Any:
+    def live_cell_leaf_count(codes: Any, num_valid: Any) -> Any:
         # ``num_leaves`` sums the run starts over every particle, before the leaf
         # arrays are cut to the capacity (yggdrax ``_cell_partition``): the exact
         # count at ``capacity=1``, where the padded arrays cost nothing and, being
-        # unused, are not computed at all
+        # unused, are not computed at all. Dead rows take the sentinel code and the
+        # partition cuts them, as ``build_static_cells_tree(num_valid=...)`` does.
+        rows = jnp.arange(codes.shape[0])
+        codes = jnp.where(
+            rows < num_valid, codes, jnp.asarray(np.uint64(2**63 - 1), jnp.uint64)
+        )
         return adaptive_cell_leaf_partition(
-            jnp.sort(codes), leaf_size=leaf_size, capacity=1, min_level=min_level
+            jnp.sort(codes),
+            leaf_size=leaf_size,
+            capacity=1,
+            min_level=min_level,
+            num_valid=num_valid,
         ).num_leaves
 
     return jax.jit(live_cell_leaf_count)
@@ -645,6 +692,7 @@ def live_cell_leaves(
     leaf_size: int,
     cell_min_level: int,
     bounds: Any,
+    num_valid: Optional[int] = None,
 ) -> int:
     """The number of cell leaves ``positions`` cut into, counted on device.
 
@@ -667,6 +715,9 @@ def live_cell_leaves(
     bounds : Any
         ``(lower, upper)`` Morton box: the one the tree is built in (the prepare's
         own inferred bounds), or the codes, and the count, belong to another box.
+    num_valid : Optional[int]
+        Leading live rows of a capacity-padded shard; the dead rows after them are
+        in no leaf (the build's ``num_valid``). ``None``: every row is live.
 
     Returns
     -------
@@ -681,7 +732,12 @@ def live_cell_leaves(
     codes = morton_encode(
         pos, (jnp.asarray(lower, pos.dtype), jnp.asarray(upper, pos.dtype))
     )
-    return int(_live_cell_leaf_counter(int(leaf_size), int(cell_min_level))(codes))
+    rows = int(codes.shape[0]) if num_valid is None else int(num_valid)
+    return int(
+        _live_cell_leaf_counter(int(leaf_size), int(cell_min_level))(
+            codes, jnp.asarray(rows, jnp.int64)
+        )
+    )
 
 
 def auto_leaf_capacity(

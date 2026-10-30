@@ -572,11 +572,18 @@ def test_b_two_devices_decide_every_cross_pair_alike_and_carry_the_cross_force_s
     )
 
 
-def test_b_segments_chain_with_the_force_scale_carried(cpu_fused_lane):
+def test_b_segments_chain_with_the_force_scale_carried(cpu_fused_lane, monkeypatch):
     """GATE (b), the carry: 2 + 2 steps, f_b and the total acceleration carried
     across the segment boundary in :class:`MeshState`, equal one segment of 4,
     bitwise by id (state, acceleration, f_b); flags clean, no retry."""
     from jaccpot.distributed.segment import MeshSegmentRunner
+
+    # The local far pairs grow from ~20 at the start to 132 by step 3. The eager
+    # walk measured 176 while the shards' padding rows were leaves of their own
+    # (their far pairs, not the particles'); since the eager prepare cuts them the
+    # cap is the particles' 128, and the second segment re-plans. Retries are gate
+    # (c)'s subject: name the far cap at what the start used to get.
+    monkeypatch.setenv("JACCPOT_STATIC_STRICT_FUSED_COMPACT_FAR_PAIR_CAP", "512")
 
     mesh = _mesh()
     pos, vel, mass = _ic(seed=3)

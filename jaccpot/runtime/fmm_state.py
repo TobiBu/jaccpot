@@ -667,6 +667,7 @@ def _build_tree_with_config(
     leaf_partition: str = "buckets",
     leaf_capacity: Optional[int] = None,
     cell_min_level: int = 0,
+    num_valid: Optional[int] = None,
 ) -> _TreeBuildArtifacts:
     """Construct a tree according to the resolved builder configuration.
 
@@ -711,6 +712,10 @@ def _build_tree_with_config(
     cell_min_level : int
         ``"cells"`` only: no leaf coarser than this Morton level
         (``TreeConfig.cell_min_level``).
+    num_valid : Optional[int]
+        ``"cells"`` only: leading live rows of a capacity-padded shard; the rows
+        after them are in no leaf (``build_static_cells_tree(num_valid=...)``).
+        ``None``: every row is live.
 
     Returns
     -------
@@ -746,6 +751,7 @@ def _build_tree_with_config(
             return_reordered=True,
             return_overflow=True,
             min_level=int(cell_min_level),
+            num_valid=num_valid,
         )
         overflow_out: Optional[Array]
         if isinstance(overflow, Tracer):

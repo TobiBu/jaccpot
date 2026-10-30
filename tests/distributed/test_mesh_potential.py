@@ -374,7 +374,7 @@ def test_two_device_mesh_potential_against_the_direct_sum(mac, monkeypatch):
     assert pad.size > 0
     captured = _capture_needs(monkeypatch)
 
-    def run(f_b=seed):
+    def run(f_b=seed, flag_clean=True):
         phi, bits, needs = _potential(
             force,
             mesh,
@@ -385,7 +385,8 @@ def test_two_device_mesh_potential_against_the_direct_sum(mac, monkeypatch):
             f_b,
             needs=captured,
         )
-        assert int(np.bitwise_or.reduce(bits)) == 0, bits
+        if flag_clean:
+            assert int(np.bitwise_or.reduce(bits)) == 0, bits
         assert np.all(phi[pad] == 0.0), "padding rows carry a potential"
         by_id = np.empty(N, phi.dtype)
         by_id[ids] = phi[rows]
@@ -425,7 +426,10 @@ def test_two_device_mesh_potential_against_the_direct_sum(mac, monkeypatch):
                 program(shard.positions, shard.masses, shard.count, shard.ids, seed)
             )
         np.testing.assert_array_equal(needs, want)
-        assert not np.array_equal(run(4.0 * seed)[1], want)
+        # a 4x f_b accepts more far pairs than the caps measured at the seed hold
+        # (they are exact since the eager prepare cuts the padding rows, which
+        # once added 176 far pairs of slack), so only the needs are compared
+        assert not np.array_equal(run(4.0 * seed, flag_clean=False)[1], want)
 
     # mutations: each cross term dropped in turn fails the energy's bound
     sink = force.near_sink

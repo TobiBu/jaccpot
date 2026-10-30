@@ -294,6 +294,7 @@ def prepare_mesh_force(
     from jaccpot.runtime.capacity_plan import (
         _lift_registry_to_refresh_tree,
         auto_leaf_capacity,
+        eager_live_rows,
         fused_capacity_plan_overrides,
         install_walk_caps,
         live_cell_leaves,
@@ -342,14 +343,15 @@ def prepare_mesh_force(
     if headroom is not None and getattr(engine, "_tree_leaf_capacity", None) is None:
         # leaf_capacity="auto", sized ONCE for every device: the eager prepare would
         # size it from the first shard alone, and every device compiles one shape.
-        # Counted over the padded rows in the mesh box, as the eager build cuts
-        # them -- never fewer than the live leaves the traced refresh cuts.
+        # Counted over the live rows in the mesh box, as the eager build and the
+        # traced refresh both cut them.
         live = max(
             live_cell_leaves(
                 jnp.asarray(pos_d[d], engine.working_dtype),
                 leaf_size=int(leaf_size),
                 cell_min_level=int(getattr(engine, "_tree_cell_min_level", 0)),
                 bounds=box,
+                num_valid=int(counts_host[d]),
             )
             for d in range(ndev)
         )
@@ -362,7 +364,8 @@ def prepare_mesh_force(
         # this shard's widths only: the registry is process-global
         level_shapes._WIDTHS.clear()
         level_shapes._LEVELS.clear()
-        with jax.default_device(devices[d]):
+        # the padding rows in no leaf (``eager_live_rows``), as the traced refresh
+        with jax.default_device(devices[d]), eager_live_rows(int(counts_host[d])):
             caps = engine.prepare_state_caps_only(
                 pos_d[d],
                 mass_d[d],
