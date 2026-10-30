@@ -4077,6 +4077,7 @@ class PrepareMixin(_EngineBase):
             Whether the tree build runs jitted.
         runtime_overrides_override : Optional[_RuntimeExecutionOverrides]
             Resolved runtime overrides; ``None`` resolves them for ``N``.
+
         Returns
         -------
         Optional[Any]
