@@ -80,6 +80,26 @@ def test_the_device_count_is_the_numpy_count(draw, leaf, cml):
         assert live == _numpy_live(pos, leaf, cml), (n, leaf, cml)
 
 
+def test_padding_rows_past_num_valid_add_no_leaves():
+    """A multi-GPU shard is padded to its capacity with dead rows piled onto the
+    first live row. As particles they fill one level-21 cell, which the partition
+    cuts into leaf_size chunks: ``num_valid`` counts the live rows' leaves only,
+    as the eager prepare and the traced refresh build them."""
+    leaf, n, dead = 64, 5000, 1000
+    live_pos = _plummer(n, seed=3)
+    padded = np.concatenate([live_pos, np.repeat(live_pos[:1], dead, axis=0)])
+    p = jnp.asarray(padded)
+    box = _infer_bounds(p)
+    count = dict(leaf_size=leaf, cell_min_level=0, bounds=box)
+    want = live_cell_leaves(jnp.asarray(live_pos), **count)
+    assert live_cell_leaves(p, num_valid=n, **count) == want
+    # every row live is the count without the cut (with yggdrax's chunk cut the
+    # pile alone is ceil(1001 / 64) = 16 leaves)
+    assert live_cell_leaves(p, num_valid=n + dead, **count) == live_cell_leaves(
+        p, **count
+    )
+
+
 def test_the_capacity_rounds_as_the_bench_did():
     for live in (1, 341, 890, 1023, 1024, 12_335, 154_136, 6_001_234):
         for factor in (1.0, 1.15, 1.25, 2.0):
