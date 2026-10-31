@@ -2326,3 +2326,70 @@ between 4e7 and 8e7 on one card too; the production IC (the 25M disc + bulge) is
 - Eight cards (four were free at most); multi-node (D5).
 - nornax `retry_segment` has no progress rule (deferred to S9: the provider's aux would need the steps an attempt
   fitted). Odisseo's old `MeshOptions` lane: kept until its users move (user decision).
+
+## S9 (session 1) — differentiable rollout segments (2026-10-31)
+
+Plan S9 (`s9-differentiable-rollout-segments.md`; dev-plan D6, part 2): gradients through a rollout of the fused
+production lane, single card, shared steps. Three parallel tracks, integrated on `s9/integration` (main `1dbf7e13`
++ `s9/traced-grad-step` + `s9/grad-rollout`, merge commits): A the differentiable step (jaccpot), B the rollout
+(jaccpot), C the nornax driver (`FusedProviderForce(differentiable=True)`, its own branch). Block-step gradients
+stay out (decision 1). Everything is opt-in: CPU program identity 36/36 against `s9-base-cpu` (tag `s9-int-cpu`).
+
+### What session 1 built
+| piece | what |
+| --- | --- |
+| `FusedForceProvider.differentiable_step` (A) | `step`'s signature, forward and aux `(f_b, bits, needs)`. The rebuild runs on the inputs' STOPPED gradients and keeps its far list; S8's differentiable evaluation runs on that topology at the LIVE positions and masses, so nothing of the tree, the walk or the level loops is linearised, and the naive form (`accelerations(rebuild(stop_gradient(x)))`, a gradient of exactly 0) is not offered. The gradient plan's static fields are frozen once (`prepare(..., differentiable=True)`, or `with_grad_plan` after a re-plan); the lists' symmetry is checked ON DEVICE per step: `OVERFLOW_GRAD_LISTS` (bit 11), outside `overflow_ok`, inside `grad_ok` / `GRAD_FAIL_MASK`, and the gradient is made NaN on it. Under `dehnen_error` f_b is the production one, its gradient stopped (it sets the next walk's thresholds only) |
+| `jaccpot.differentiable_rollout` (B) | the production velocity Verlet over any force with `step`'s contract (the direct sum `direct_sum_step_fn` included), the expressions and their order exactly `strict_run_v2(carry="particles")`'s, `strict_run_v2`'s external-field forms, literal or traced `dt`, the start force computed inside (differentiable) or passed in; `checkpoint=None / "step" / "nested"` (a remainder runs as a shorter last segment); the aux threaded and returned as the folded verdict. `rollout_ok` / `check_rollout` (`gradient=True`: `grad_ok`) and `value_and_grad_checked` refuse a failed verdict on the host. `RolloutResult` continues a rollout bitwise |
+| the remat boundary (C's placement, adopted in B) | `jax.checkpoint` around the force AND the kick, with the DRIFTED positions as input: drift and kick are linear in `(x, v, a)` at a fixed `dt`, so a step saves the drifted positions and the aux leaves only, 16 B/particle in float32 under `dehnen_error` (12 + f_b's 4), 12 under the geometric MAC, 24 on the float64 direct sum, against 36 / 72 with the whole step checkpointed. A DIFFERENTIATED `dt` makes the drift bilinear: 48 B/particle per step then (direct sum, float32). `_checkpointed` is the one place a policy is chosen (session 2's offload) |
+| the field's velocity rows | `strict_run_v2`'s field takes `[N, 2, 3]` rows; rebuilding them in the recompute made the velocities a residual again (+12 B/particle with a harmonic field). A field whose every use of the rows is a slice of the position row (`state[:, 0]`, every halo; read off its jaxpr) gets zero velocity rows: the same output, nothing saved. Anything else (a drag, a field behind a nested `jit`) gets the real ones |
+| `bench/grad_rollout_memory.py` | `memory_analysis()` of the rollout gradient against T, fitted as `temp = W + r T` ("step") and `W + a n_outer + b n_inner` ("nested"); `--execute` (measured peak), `--check` (the GPU functional gate) |
+
+### Gates (CPU: every Pallas kernel and the GPU's walk in interpret mode, N = 512, float64, p2, 3 steps)
+| gate | result |
+| --- | --- |
+| G1 forward == the runner | the forward-only rollout over `differentiable_step` == `strict_run_v2(carry="particles")` bitwise, under `None`, `"step"` and `"nested"` (a segment of 2 and a remainder of 1), Plummer and `dehnen_error` (the runner's f_b seed); over the forward-only `step` the same on the pure-JAX and CSR near fields, with traced `dt` / `G` / `eps2` / field parameters and a harmonic field (float32) |
+| G2 FD float64 through 3 steps | x0, v0, m, G, eps2 and the field's constant, every force's lists (permutation, near CSR, far list) checked identical on both +-h runs: 4e-11 - 4.4e-10 (Plummer), 8e-13 - 2.3e-10 (`dehnen_error`, no G / eps2: refused by the MAC) at measured steps x0 1e-7, v0 1e-4, m 1e-7 (absolute, unit-variance directions), G 1e-3, eps2 1e-4, k 1e-3 (relative). Two findings: with masses of order 1 per particle (total ~460, accelerations ~1e4) the third step sits on a walk decision -- G x (1 + 1e-9) already adds two far pairs -- so no step keeps the lists, and round 1's `dehnen_error` "plateau" (~1e-5 over three decades of h) was that crossing: both +-h runs land on the same neighbouring topology (A); the gates run at a total mass of ~1. On the direct sum (T = 4, every input incl. dt) 4e-10 - 3e-9 at h = 1e-5 |
+| G3 direct-sum driver | the same rollout on `direct_sum_step_fn`: trajectory == a hand-written scan bitwise (float32 / float64, every mode). The FMM-vs-direct-sum gradient comparison with horizon: not run (session 2) |
+| G4 (AMENDED) | **forward bitwise, gradients to round-off.** The forward is bitwise across the three modes; the gradients are not: a checkpoint regroups the cotangent sums of a value used on both sides of it, `"nested"` sums the scan constants' cotangents per segment and then over segments (carrying them instead would store them per step), and XLA fuses the recomputed forward with the reverse differently (CPU contracts mul + add into an FMA in a fusion; with FMA off the reductions still differ). Measured: direct sum 1.5e-15 (float64) / 2.7e-7 (float32) of the largest component; fused lane float64 `"step"` == plain bitwise, `"nested"` 3.2e-16; GPU 2e6 float32 7.2e-8 (`"nested"` vs `"step"`), 3.6e-8 (plain vs `"step"`). Each mode is bitwise against itself (a second call and a recompile, CPU), A-vs-A bitwise on the GPU. Also: the forward INSIDE a `value_and_grad` program is not always bitwise the forward-only rollout (direct sum: up to 62 of 192 elements moved by an ulp); G1 is a claim about the jitted forward |
+| G5 far field load-bearing | far pairs at every force of the rollout (1122-1136 per force); P2M, M2M, M2L, L2L, L2P and the near reverse all traced in the rollout's gradient; the M2L reverse zeroed, the gradient moves |
+| G7 default untouched | CPU program identity 36/36 (`s9-int-cpu` vs `s9-base-cpu`). Under `JACCPOT_RUNTIME_TYPECHECK=1` the new tests pass except the two G1 rows, which fail inside `strict_run_v2`'s caps-only prepare (`LargeNPreparedState(local_data=None)`, `fmm_prepare.py:4227`): pre-existing, main's own `test_a_user_written_scan_over_the_provider_is_the_particle_carry` fails the same way |
+| G8 overflow as an output | caps sized on four blobs, the rollout started on a clipped Plummer sphere: bits != 0, `value_and_grad_checked` and `check_rollout(gradient=True)` refuse it; `replanned(needs, x0, m)` + `with_grad_plan` and the rerun is clean, its gradient finite |
+
+### Memory (`memory_analysis()` of `jax.grad` of a linear functional of the final state; `preset="galaxy"`, clipped Plummer, float32, `dehnen_error`; GPU card 7 / 6, memory only)
+The model `peak ~ W_step + S r` holds with the measured `r`:
+
+| N | mode | W | r (per step) | carry (per segment) | fit residual |
+| --- | --- | --- | --- | --- | --- |
+| 4096, direct sum, CPU float32 | "step" / "nested" | 1472 MiB (the `[N, N]` pair arrays) | 12.00 B/p | 36.00 B/p | 0 B |
+| 4096, direct sum, CPU float64 | "step" / "nested" | 2944 MiB | 24.00 B/p | 72.00 B/p | 0 B |
+| 2e6 | "step" (T = 2-16) | 1906 MiB (999 B/p) | 16.00 B/p | -- | 0 B |
+| 2e6 | "nested" (T = 4-16, segments 2-4) | 2143 MiB (1124 B/p) | 15.8 B/p | 40.05 B/p | 1.3 MB |
+| 8e6 | "step" (T = 2-8) | 5997 MiB (786 B/p) | 16.00 B/p | -- | 0 B |
+| 8e6 | "nested" (T = 4-12, segments 2-3) | 6601 MiB (865 B/p) | 16.00 B/p | 40.00 B/p | 0 B |
+
+Measured peak, 2e6, `"step"`, T = 16: 2.79 GB (`peak_bytes_in_use`) against the compiled 2.51 GB of temporaries
+(W + 16 r to the byte) + 56 MB of outputs + the 224 MB resident (the inputs and the provider's arrays). The
+forward-only rollout over `step` (2e6, round 1): 467 MB of temporaries, flat in T.
+
+What it means on 40 GB (0.95 of it, the 8e6 W per particle carried to 2.5e7, an estimate): 8e6 holds about
+(38 - 6.3 - 0.3) GB / (16 B x 8e6) ~ 245 steps under `"step"`; 2.5e7 about 45 (W ~ 19.7 GB), and `"nested"` the
+square of that. The plan's r = 40 B/p is now the NESTED carry; the per-step residual is 16. W (786-999 B/p) is
+2.5-3x S8's single-force gradient at 8e6 (270-333 B/p): the start force and the step's force are both in it, and the
+far chain runs twice (decision 2).
+
+### GPU functional, 2e6 (`--check`, T = 3, every mode)
+The forward-only rollout over `differentiable_step` == the one over `step`, 0 elements differ (`None`, `"step"`,
+`"nested"`); each mode's gradient finite, its gradient verdict clean, A-vs-A bitwise.
+
+### Open for session 2
+- W_step: 786 B/p at 8e6 against S8's 270-333 for one force gradient. The start force's and the step's temporaries,
+  the duplicate far chain (decision 2: measure, then the reuse `custom_vjp` above ~10 % of a gradient step), the
+  near reverse.
+- Host-offloaded outer carries (`_checkpointed(..., "segment")`); the runner's gradient mode with a forward pre-pass
+  that settles the caps; G6 at 2.5e7 (full rollout) and 1e8 (one step).
+- G3 proper: the FMM rollout gradient against the direct-sum rollout's with horizon (reported, not gated).
+- A differentiated `dt` stores 48 B/particle per step under `"step"` (the drift's bilinear term); a whole-step
+  checkpoint for that case if it is ever needed.
+- The tests that count reverse kernels at trace time need `jax.clear_caches()` first: at `-n 8` another module's
+  test had traced the inner functions (fixed in both files; CI's `-n auto` does not use `--dist loadgroup`).
+- Timings: HoreKa (local cards are functional / memory only).
