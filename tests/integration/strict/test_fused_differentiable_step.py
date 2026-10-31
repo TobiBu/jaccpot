@@ -387,6 +387,10 @@ def _gradient(name: str) -> tuple[Any, dict]:
 
     lane = _lane(name)
     counts = {key: 0 for *_, key in _REVERSE_KERNELS}
+    # counted when they TRACE: an inner jitted function another module's test
+    # traced at these shapes in the same worker would come from jax's caches and
+    # never call them (seen on s9/integration at -n 8: l2l and l2p counted 0)
+    jax.clear_caches()
     patcher = pytest.MonkeyPatch()
     for module_name, fn_name, key in _REVERSE_KERNELS:
         module = importlib.import_module(module_name)
