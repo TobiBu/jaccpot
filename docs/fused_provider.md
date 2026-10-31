@@ -148,16 +148,18 @@ scan, as `strict_run_v2` does.
 | `FusedForceProvider.freeze_template(solver, prepared, *, leaf_size, max_order, theta=None, runtime_overrides=None)` | a provider for an existing prepared state: its shapes, not its buffers |
 | `prov.replanned(needs, pos_start, m_start, *, walk_only=False, caps_only=False)` | the segment retry: grows the unnamed flat-walk caps to cover `needs`, prepares again at the segment's start (caps-only on request) and returns `(provider, topology)`, or `None` when nothing can be re-planned (a named cap, no walk flag, or a cell-leaf tree overflow alone) |
 | `prov.retry_mode(needs, retries, tree_first)` | the runners' retry policy, for a caller that drives its own segments (nornax): `"full"` for the first retry, `"walk"` (`replanned(..., walk_only=True)`) for a second after a first that re-planned the tree, else `None` (raise); `None` also under `JACCPOT_STRICT_SEGMENT_RETRY=0` |
+| `prov.with_grad_plan(topology)` (or `prepare(..., differentiable=True)`) | freezes the gradient plan's static fields on an eager topology with its far list (S8's plan checks), for `differentiable_step`; returns a new provider. Not on a caps-only prepare. A re-planned provider has none until frozen again. |
 | `prov.key(like=None)` | what a compile cache keyed on the provider must hold: leaf, order, theta, whether f_b is carried, the diagnostic modes, the level-loop bound, the validated walk caps, the template's shapes. `G`, the softening, the MAC and the kernels are fixed per engine and not in it. |
 
 **Traced** (call inside your own `jax.jit`; each returns arrays or tracers):
 
 | call | returns |
 |---|---|
-| `prov.rebuild(pos, m, *, force_scale=None, bounds=None, num_valid=None, cross_hook=None)` | a `FusedTopology` (`fresh=True`) |
+| `prov.rebuild(pos, m, *, force_scale=None, bounds=None, num_valid=None, cross_hook=None, keep_far_list=False)` | a `FusedTopology` (`fresh=True`); `keep_far_list=True` keeps the walk's far list in it (the gradient plan's) |
 | `prov.accelerations(topology, params=None, *, order="input", force_scale=False)` | `[N, 3]` accelerations in the state's input dtype, or `(acc, f_b)`. `order="tree"` keeps the topology's Morton order (row `j` is particle `tree.particle_indices[j]`, no gather back). |
 | `prov.capacity_ok(topology)` | the step's boolean verdict, as the scan folds it; equal to `overflow_ok(topology.overflow_bits())` |
 | `prov.step(pos, m, params=None, aux=None)` | `(acc, (f_b, bits, needs))` |
+| `prov.differentiable_step(pos, m, params=None, aux=None)` | `step`'s outputs, differentiable in `pos`, `m` and array `params` (below) |
 
 Under `mac_type="dehnen_error"` each rebuild takes eq (16a)'s thresholds from the
 previous evaluation's f_b, so `rebuild` needs `force_scale` and the first `step` needs
@@ -168,7 +170,8 @@ an `aux` that carries one, `(f_b, None, None)`: for example the f_b of
 
 `FusedTopology` (`jaccpot.runtime.fused_topology`) is what a rebuild returns: the
 refreshed prepared state (tree, local expansions after L2L, CSR near list, near-field
-payload; its far list is `None`: the rebuild built one, used it for M2L and kept none),
+payload; its far list is `None`: the rebuild built one, used it for M2L and kept none,
+unless `rebuild(..., keep_far_list=True)`),
 plus what the walk and the tree reported about their fixed capacities, as tracers moved
 off the engine's side channels. `FusedTopology.from_prepared(prepared)` wraps an eager
 state (no rebuild verdict).
@@ -188,6 +191,7 @@ state (no rebuild verdict).
 | 8 | `OVERFLOW_LEVEL_PLAN` | the caller's (multi-GPU) level plan, passed in through `extra` | yes |
 | 9 | `OVERFLOW_CROSS` | the caller's (multi-GPU) cross-domain capacities, through `extra` | yes |
 | 10 | `OVERFLOW_PARAMS` | traced force parameters outside what the walk was built for (below) | yes |
+| 11 | `OVERFLOW_GRAD_LISTS` | `differentiable_step` only: a list its reverses read from both ends is not symmetric (below) | the GRADIENT's (`grad_ok`), not the force's |
 
 The verdict is `overflow_ok(bits)`, i.e. `(bits & OVERFLOW_FAIL_MASK) == 0` with
 `OVERFLOW_FAIL_MASK = 0x7F8` (bits 3-10). **Any verdict bit means that step's force is
@@ -273,6 +277,52 @@ L2P has its own reverse (plan S8). The topology is a constant of that derivative
 gradients in the positions and masses at a frozen topology, see
 `differentiable_accelerations` (`docs/differentiable_fmm.md`), which takes the same
 `ForceParams`.
+
+## Gradients through the step: `differentiable_step` (S9)
+
+`prov.differentiable_step(pos, m, params=None, aux=None)` has `step`'s signature,
+forward and aux, and is differentiable in the positions, the masses and array `G` /
+`eps2`. Make the provider with `FusedForceProvider.prepare(..., differentiable=True)`
+(or `prov.with_grad_plan(eager_topology)`), then use it in your scan as `step`.
+
+- **The topology stage runs on the inputs' stopped gradients.** `rebuild(
+  stop_gradient(pos), stop_gradient(m), force_scale=stop_gradient(f_b),
+  keep_far_list=True)`: nothing of the tree, the walk or the level loops is linearized
+  (their dynamic-bound while loops have no reverse; the linearized program holds no while
+  loop). The topology is piecewise constant in the inputs, so this is the derivative of
+  the step at its own topology.
+- **The force is S8's differentiable evaluation** on that topology at the LIVE positions
+  and masses (`prov.differentiable_accelerations`): P2M through L2P recomputed, the
+  near field's direct kernel through its `custom_vjp`, each with its reverse. The far
+  chain therefore runs twice in the forward (in the rebuild and here; v1, by decision).
+  `accelerations(rebuild(stop_gradient(pos)))` would differentiate to exactly zero
+  (the rebuild ran the far field, `accelerations` reads no positions); the API does not
+  offer that form.
+- **The gradient plan.** Its static fields (order, leaf capacity, centre mode, chunk
+  sizes, the far list's capacity and layout) are frozen once with S8's checks (the
+  radix fast lane, solidfmm, the prepacked near layout without overflow or target-block
+  payload, symmetric lists) and checked against every traced topology (a mismatch raises
+  at trace time); its data are the far list the rebuild kept (on a GPU the walk's
+  target-sorted CSR, which the M2L reverse reads without sorting).
+- **Symmetry is a per-step device verdict.** The near reverse reads every pair from both
+  ends, and so does the sort-free M2L reverse: an asymmetric list would give a wrong
+  gradient silently. Each step hashes its lists on the device (S8 did it on the host)
+  and sets bit 11, `OVERFLOW_GRAD_LISTS`, when they are not symmetric. The force is
+  right, so the bit is outside `overflow_ok` (whose mask the default programs fold as a
+  literal) and inside `grad_ok(bits)` (`GRAD_FAIL_MASK`): check `grad_ok` before using
+  a gradient. The gradient is also made NaN on such a step, so a caller that checks only
+  `overflow_ok` still cannot get a plausible wrong number.
+- **`mac_type="dehnen_error"`:** f_b is the production one (the near kernel's
+  force-scale lane in the same `custom_vjp` call, plus the rebuild's far half), with its
+  gradient stopped: it only sets the next walk's thresholds.
+- **Gates** (`tests/integration/strict/test_fused_differentiable_step.py`, CPU, every
+  Pallas kernel in interpret mode, N = 512, float64): the forward is `step`'s bitwise
+  (acceleration and aux; Plummer, ferrers3, `dehnen_error`, a three-step Verlet scan
+  through the aux); the gradient is `differentiable_step_fn`'s on the eager topology
+  bitwise (the GPU walk's sorted symmetric list and the CPU walk's pair list); central
+  differences of the whole step (topology checked identical at +-h) agree to 1e-6 in
+  the positions and masses, 1e-10 in G, 1e-6 in eps2; every reverse kernel of the
+  production layout is traced once.
 
 ## Limits
 
