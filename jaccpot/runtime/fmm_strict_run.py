@@ -2857,6 +2857,7 @@ class StrictRunMixin(_EngineBase):
         cross_hook: Optional[Callable[[Any], None]] = None,
         force_scale_particles: Optional[Array] = None,
         strict_fused_lane: bool = False,
+        keep_far_list: bool = False,
     ) -> Optional[LargeNPreparedState]:
         """Refresh large-N numeric payloads when the radix topology is unchanged.
 
@@ -2917,6 +2918,12 @@ class StrictRunMixin(_EngineBase):
             refresh) never does. The caller states it: it used to be read off the
             engine's ``_strict_fused_mode_active``, which the first strict call
             left set, so ``refresh_prepared_state`` changed path after one.
+        keep_far_list : bool
+            On that hot path, return the far list THIS refresh built (the walk's,
+            as walked: a ``TargetSortedFarPairs`` CSR from the Pallas walk)
+            instead of the input's placeholder: the gradient plan of
+            ``FusedForceProvider.differentiable_step`` reads it. ``False``
+            (default): the placeholder, as always.
 
         Returns
         -------
@@ -3360,7 +3367,7 @@ class StrictRunMixin(_EngineBase):
         from jaccpot.runtime.capacity_guard import fused_state_capacity_ok
 
         self._last_refresh_capacity_ok = fused_state_capacity_ok(refreshed_state)
-        if bool(safe_fresh_compact_pair_rebuild):
+        if bool(safe_fresh_compact_pair_rebuild) and not bool(keep_far_list):
             return replace(
                 refreshed_state,
                 compact_far_pairs=compact_far_pairs_carry_placeholder,
