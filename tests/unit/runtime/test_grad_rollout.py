@@ -256,35 +256,85 @@ def _residuals(capsys, fn, *args) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "checkpoint, steps, stacked",
-    [("step", 4, 4), ("nested", 9, 3)],
-    ids=["step", "nested"],
+    "checkpoint, steps, traced_dt, stacked, stacks",
+    [
+        ("step", 4, False, 4, 1),
+        ("nested", 9, False, 3, 3),
+        ("step", 4, True, 4, 4),
+    ],
+    ids=["step", "nested", "step-traced-dt"],
 )
-def test_a_checkpointed_rollout_saves_the_carry_and_nothing_else(
-    capsys, checkpoint, steps, stacked
+def test_a_checkpointed_rollout_saves_what_the_force_needs(
+    capsys, checkpoint, steps, traced_dt, stacked, stacks
 ):
-    """``print_saved_residuals`` of the gradient: under ``"step"`` the scan saves
-    three ``[T, N, 3]`` stacks -- x, v and a, the carry -- and nothing else per step;
-    under ``"nested"`` (9 steps in 3 segments of 3) the outer scan saves three
-    ``[3, N, 3]``. The masses, ``dt`` and the field's parameter are saved once, as
-    the arguments they are (no external field's residuals either: it is recomputed
-    with the step)."""
-    x0, v0, m, wx, _ = _system(jnp.float32)
-    dt, k = jnp.asarray(DT, jnp.float32), jnp.asarray(K_EXT, jnp.float32)
+    """``print_saved_residuals`` of the gradient, with an external field whose
+    constant is differentiated.
 
-    def loss(x0, v0, m, dt, k):
-        out = _rollout(x0, v0, m, dt, k, checkpoint=checkpoint, steps=steps)
+    ``"step"`` checkpoints each step's force and kick with the drifted positions
+    as input (track C's placement): the scan saves ONE ``[T, N, 3]`` stack, those
+    positions -- the drift and the kick are linear in ``(x, v, a)``, so their
+    reverse reads no primal, and the field reads only the position row
+    (``_field_reads_velocities``), so the velocities are not saved for it.
+    ``"nested"`` (9 steps in 3 segments of 3): the outer scan saves three
+    ``[3, N, 3]``, the carry ``(x, v, a)`` at each segment's start. A
+    DIFFERENTIATED ``dt`` makes the drift bilinear: its cotangent needs ``v`` and
+    ``a`` of every step, four stacks in all (CPU, 2026-10-31). The masses are an
+    argument, stored once."""
+    x0, v0, m, wx, _ = _system(jnp.float32)
+    k = jnp.asarray(K_EXT, jnp.float32)
+
+    def loss(x0, v0, m, k, *dt):
+        out = _rollout(
+            x0, v0, m, dt[0] if dt else DT, k, checkpoint=checkpoint, steps=steps
+        )
         return jnp.sum(wx * out.positions)
 
-    lines = _residuals(capsys, loss, x0, v0, m, dt, k)
-    per_step = [ln for ln in lines if re.match(rf"f32\[{stacked},", ln)]
-    assert per_step == [ln for ln in lines if "output of scan" in ln]
-    assert [ln.split()[0] for ln in per_step] == [f"f32[{stacked},{N},3]"] * 3
+    args = (x0, v0, m, k) + ((jnp.asarray(DT, jnp.float32),) if traced_dt else ())
+    lines = _residuals(capsys, loss, *args)
+    per_step = [ln for ln in lines if "output of scan" in ln]
+    assert [ln.split()[0] for ln in per_step] == [f"f32[{stacked},{N},3]"] * stacks
     # nothing else is a stack, and the masses are an argument, stored once
     shapes = [ln.split()[0] for ln in lines]
-    assert sum(s.startswith(f"f32[{stacked},") for s in shapes) == 3
+    assert sum(s.startswith(f"f32[{stacked},") for s in shapes) == stacks
     assert sum(f"f32[{N}]" == s for s in shapes) == 1
     assert any(ln.startswith(f"f32[{N}] from the argument") for ln in lines)
+
+
+def test_the_velocity_rows_reach_a_field_that_reads_them():
+    """A field that reads the velocity row gets the velocities (and they become a
+    residual again); a halo-like field that reads only ``state[:, 0]`` gets zeros
+    there -- with the same output."""
+    from jaccpot.runtime.grad_rollout import _field_reads_velocities
+
+    x = jnp.zeros((N, 3))
+
+    def drag(state, args):
+        return -args["k"] * state[:, 1]
+
+    def halo(state):
+        pos = state[:, 0, :]
+        r2 = jnp.sum(pos * pos, axis=1, keepdims=True)
+        return -pos / (r2 + 1.0) ** 1.5
+
+    assert _field_reads_velocities(drag, {"k": 1.0}, x)
+    assert not _field_reads_velocities(_harmonic, {"k": 1.0}, x)
+    assert not _field_reads_velocities(halo, None, x)
+    # a field it cannot see into is assumed to read them
+    assert _field_reads_velocities(jax.jit(halo), None, x)
+    from jaccpot.runtime.grad_rollout import differentiable_rollout
+
+    def no_force(positions, masses, params=None, aux=None):
+        return jnp.zeros_like(positions), None
+
+    x0, v0, m, _, _ = _system()
+    out = jax.jit(
+        lambda x, v, m: differentiable_rollout(
+            no_force, x, v, m, DT, 3, external_fn=drag, external_args={"k": 2.0}
+        )
+    )(x0, v0, m)
+    # a pure drag, about (1 - k dt) = 0.9 per kick: the field saw the velocities
+    # (zeros would have left them unchanged)
+    assert float(jnp.sum(out.velocities**2)) < 0.8 * float(jnp.sum(v0**2))
 
 
 def _temp_bytes(checkpoint, steps, inner=None, n=256):
@@ -311,20 +361,21 @@ def _temp_bytes(checkpoint, steps, inner=None, n=256):
     return compiled.memory_analysis().temp_size_in_bytes
 
 
-def test_the_compiled_temporaries_grow_by_the_carry():
-    """``compiled.memory_analysis()``: per step, ``"step"``'s temporaries grow by
-    the carry, 36 B/particle in float32 (within 5 %: measured exact, CPU N = 256 and
-    4096, float32 and float64, ``bench/grad_rollout_memory.py``); ``"nested"``'s by
-    one carry per segment and per step of a segment (9 -> 25 steps at segments of
-    3 -> 5: 6 -> 10 carries); the plain scan's by the force's own residuals, the
-    ``[N, N]`` pair arrays (thousands of times the carry)."""
-    n, carry = 256, 36 * 256
+def test_the_compiled_temporaries_grow_by_the_saved_positions():
+    """``compiled.memory_analysis()``, per step: ``"step"``'s temporaries grow by
+    the drifted positions, 12 B/particle in float32 (within 5 %: measured exact, CPU
+    N = 256 - 4096, ``bench/grad_rollout_memory.py``; 36 with the checkpoint around
+    the whole step, before track C's placement); ``"nested"``'s by one carry (36 B)
+    per segment and 12 B per step of a segment (9 -> 25 steps at segments of 3 ->
+    5: +2 carries, +2 steps, 96 B); the plain scan's by the force's own residuals,
+    the ``[N, N]`` pair arrays (thousands of times more)."""
+    n = 256
     step = (_temp_bytes("step", 8) - _temp_bytes("step", 4)) / 4
-    assert abs(step / carry - 1.0) <= 0.05, step / n
-    nested = (_temp_bytes("nested", 25) - _temp_bytes("nested", 9)) / 4
-    assert abs(nested / carry - 1.0) <= 0.05, nested / n
+    assert abs(step / (12 * n) - 1.0) <= 0.05, step / n
+    nested = _temp_bytes("nested", 25) - _temp_bytes("nested", 9)
+    assert abs(nested / ((2 * 36 + 2 * 12) * n) - 1.0) <= 0.05, nested / n
     plain = (_temp_bytes(None, 8) - _temp_bytes(None, 4)) / 4
-    assert plain > 100 * carry
+    assert plain > 1000 * 12 * n
 
 
 # --------------------------------------------------------------------------
@@ -430,7 +481,7 @@ def test_bad_arguments_are_refused(kw, match):
         differentiable_rollout(**call)
 
 
-def test_the_gradient_verdict_reads_the_gradient_bits(monkeypatch):
+def test_the_gradient_verdict_reads_the_gradient_bits():
     """A gradient is refused on ``GRAD_FAIL_MASK`` (the force's bits and the
     differentiable step's ``OVERFLOW_GRAD_LISTS``, 1 << 11, which the forward does
     not read); the state on ``OVERFLOW_FAIL_MASK`` only. Bit 11 set alone: the
@@ -442,13 +493,8 @@ def test_the_gradient_verdict_reads_the_gradient_bits(monkeypatch):
         rollout_ok,
     )
 
-    grad_bit = 1 << 11
-    monkeypatch.setattr(
-        fused_topology,
-        "GRAD_FAIL_MASK",
-        fused_topology.OVERFLOW_FAIL_MASK | grad_bit,
-        raising=False,
-    )
+    grad_bit = fused_topology.OVERFLOW_GRAD_LISTS
+    assert grad_bit == 1 << 11
     aux = (None, jnp.uint32(grad_bit), jnp.zeros((2,), jnp.int32))
     assert rollout_ok(aux)
     check_rollout(aux)

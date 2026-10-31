@@ -21,26 +21,39 @@ WHAT A REVERSE PASS STORES. ``checkpoint`` decides it, and nothing else does:
   -- for the direct sum the ``[N, N]`` pair arrays, for the fused lane the whole
   linearised force -- so it is for small ``N`` and short horizons (and the
   reference the other two are bitwise against).
-* ``"step"``: ``jax.checkpoint`` around the WHOLE step, drift and kick included.
-  The scan then saves exactly each step's carry ``(x, v, a, aux)``: 36 B per
-  particle in float32 (72 in float64) plus the aux leaves (the fused lane's f_b,
-  4 B, under ``dehnen_error``). The masses, the force and external parameters and
-  ``dt`` enter every step unchanged: the scan's partial evaluation hoists them out
-  as loop invariants, so they are stored once, not per step
-  (``tests/unit/runtime/test_grad_rollout.py`` reads the residuals off
-  ``print_saved_residuals`` and the compiled temporaries off ``memory_analysis``).
-  The reverse pass recomputes each step once.
+* ``"step"``: ``jax.checkpoint`` around the force and the kick of each step, with
+  the DRIFTED positions as its input (track C's placement). The drift and the
+  kick are linear in ``(x, v, a)`` at a fixed ``dt``, so their reverse needs no
+  primal value: the scan saves per step only what the force's recompute reads,
+  the drifted positions and the aux leaves -- 12 B per particle in float32 (24 in
+  float64), plus the fused lane's f_b (4 B under ``dehnen_error``). Measured
+  (``bench/grad_rollout_memory.py``, CPU direct sum, N = 4096): 12.00 B/particle
+  per step in float32, against 36.00 with the checkpoint around the whole step
+  (which stored ``(x, v, a)``). A DIFFERENTIATED ``dt`` makes the drift
+  bilinear (``v dt``, ``a dt^2``): its cotangent needs ``v`` and ``a`` of every
+  step, and the residual is the whole carry again (36 B/particle). The masses,
+  the force and field parameters and ``dt`` enter every step unchanged: the
+  scan's partial evaluation hoists them out as loop invariants, so they are
+  stored once (``tests/unit/runtime/test_grad_rollout.py`` reads the residuals
+  off ``print_saved_residuals`` and the temporaries off ``memory_analysis``). The
+  reverse pass recomputes each force once.
 * ``"nested"``: two levels. An outer scan over segments of ``inner_steps`` steps,
-  each segment checkpointed whole and each step inside it too: the outer scan
-  stores one carry per segment, and the reverse pass of one segment recomputes it
-  storing one carry per step. About ``num_steps / inner_steps + inner_steps``
-  carries (``2 sqrt(T)`` at the default ``inner_steps = round(sqrt(T))``) for one
-  more forward per step than ``"step"``.
+  each segment checkpointed whole and each step's force and kick inside it too:
+  the outer scan stores one carry ``(x, v, a, aux)`` per segment, and the reverse
+  pass of one segment recomputes it storing the per-step residual above. About
+  ``num_steps / inner_steps`` carries plus ``inner_steps`` step residuals, for
+  one more forward per step than ``"step"``.
 
-All three compute the same numbers: the forward is the same expressions, and the
-gradients agree bitwise (float32 and float64, direct sum, CPU). The start force
-(``acceleration=None``) is checkpointed with them, so its residuals -- one whole
-force's -- are not held through the reverse pass either.
+The three compute the same forward bit for bit (the same expressions in the
+same order). Their gradients agree to round-off, NOT bitwise: a checkpoint
+regroups the cotangent sums of a value used on both sides of it, ``"nested"`` sums
+a scan constant's cotangent per segment and then over segments, and XLA fuses
+the recomputed forward with the reverse differently (on CPU it contracts a
+multiply and an add into one FMA within a fusion). Measured on the direct sum
+(CPU, N = 64, 4-6 steps): 1.5e-15 of the largest component in float64, 2.7e-7 in
+float32. The start force (``acceleration=None``) is checkpointed with them, so
+its residuals -- one whole force's -- are not held through the reverse pass
+either.
 
 A ``num_steps`` the inner length does not divide gets a SHORTER LAST SEGMENT
 (``num_steps % inner_steps`` steps, checkpointed the same way) rather than a
@@ -48,6 +61,12 @@ refusal: the horizon is the physics' choice, not the checkpointing's. The cost i
 a second trace of the step body (the tail's scan), which on the fused lane's
 interpret-mode CPU path is minutes of compile; pick an ``inner_steps`` that
 divides ``num_steps`` to avoid it.
+
+THE FORWARD OF A GRADIENT PROGRAM is the forward-only rollout's to round-off,
+not always bitwise: a plain scan's forward also writes every residual, and XLA
+fuses it differently (direct sum, CPU: up to 62 of 192 elements of one array
+moved by an ulp). A bitwise comparison with ``strict_run_v2`` is a claim about
+the jitted forward, not about the primal of a ``value_and_grad``.
 
 HOST OFFLOAD (session 2) changes WHERE the outer carries live, not what is stored:
 :func:`_checkpointed` is the one place a rematerialisation policy is chosen, so an
@@ -77,7 +96,14 @@ import numpy as np
 from beartype.typing import Callable
 from jaxtyping import Array
 
-from .fused_topology import OVERFLOW_FAIL_MASK, ForceParams, StepParams
+from .fused_topology import (
+    GRAD_FAIL_MASK,
+    OVERFLOW_FAIL_MASK,
+    ForceParams,
+    StepParams,
+    grad_ok,
+    overflow_ok,
+)
 from .reference import direct_sum
 
 __all__ = [
@@ -133,11 +159,12 @@ class RolloutVerdictError(RuntimeError):
 def _checkpointed(fn: Callable, level: str) -> Callable:
     """``fn`` under the rollout's checkpoint policy for ``level``.
 
-    Every level saves nothing but its inputs (``jax.checkpoint``'s default
-    policy): a step's inputs are its carry, a segment's are the carry at its
-    start. Session 2's host offload gives the ``"segment"`` level an offloading
-    policy here (the outer carries to pinned host memory) and changes nothing
-    else.
+    Every level saves nothing but the inputs its recompute reads
+    (``jax.checkpoint``'s default policy): a step's force and kick read the
+    drifted positions and the aux (its old velocity and acceleration enter the
+    kick linearly, so they are not saved), a segment's the carry at its start.
+    Session 2's host offload gives the ``"segment"`` level an offloading policy
+    here (the outer carries to pinned host memory) and changes nothing else.
 
     Parameters
     ----------
@@ -172,6 +199,66 @@ def _checkpointed(fn: Callable, level: str) -> Callable:
 # --------------------------------------------------------------------------
 
 
+def _field_reads_velocities(
+    external_fn: Callable[..., Array],
+    external_args: Any,
+    positions: Array,
+) -> bool:
+    """Whether the field may read the velocity rows it is handed.
+
+    Traces ``external_fn`` once more (``jax.make_jaxpr``) on abstract
+    ``[N, 2, 3]`` rows and looks at every equation that consumes them: a
+    ``slice`` confined to the position row (``state[:, 0]``, the halo fields'
+    pattern) reads no velocity; anything else -- another slice, a gather, a
+    nested call that takes the rows whole -- counts as reading them. Conservative:
+    a field it cannot see into is said to read them.
+
+    WHY. ``strict_run_v2``'s field takes ``[N, 2, 3]`` rows of position and
+    velocity. Inside a checkpointed step the reverse pass's recompute rebuilds
+    those rows, and rebuilding them needs the step's velocities, so a field that
+    reads only positions -- every galaxy halo -- still made the velocities a
+    per-step residual (+12 B/particle in float32; measured with a harmonic field
+    whose constant is differentiated). A field that reads no velocity gets zero
+    velocity rows instead: the same output, bit for bit, and nothing saved for
+    them.
+
+    Parameters
+    ----------
+    external_fn : Callable[..., Array]
+        The field.
+    external_args : Any
+        Its parameters, or ``None``.
+    positions : Array
+        ``[N, 3]`` positions: the rows' shape and dtype.
+
+    Returns
+    -------
+    bool
+        ``False`` when every use of the rows is a slice of the position row.
+    """
+    n = positions.shape[0]
+    rows = jax.ShapeDtypeStruct((n, 2, 3), positions.dtype)
+
+    def field_of(rows_in: Array) -> Array:
+        if external_args is None:
+            return external_fn(rows_in)
+        return external_fn(rows_in, external_args)
+
+    jaxpr = jax.make_jaxpr(field_of)(rows).jaxpr
+    rows_var = jaxpr.invars[0]
+    if any(v is rows_var for v in jaxpr.outvars):
+        return True
+    for eqn in jaxpr.eqns:
+        if not any(v is rows_var for v in eqn.invars):
+            continue
+        if eqn.primitive.name != "slice":
+            return True
+        start, limit = eqn.params["start_indices"], eqn.params["limit_indices"]
+        if not (int(start[1]) == 0 and int(limit[1]) <= 1):
+            return True
+    return False
+
+
 def _external_acceleration(
     external_fn: Optional[Callable[..., Array]],
     external_args: Any,
@@ -193,7 +280,8 @@ def _external_acceleration(
     velocities : Array
         ``[N, 3]`` velocities (the step's starting ones: the field sees the
         state ``strict_run_v2`` hands it, drifted positions beside unkicked
-        velocities).
+        velocities), or zeros for a field that does not read them
+        (:func:`_field_reads_velocities`).
 
     Returns
     -------
@@ -354,23 +442,42 @@ def differentiable_rollout(
     # strict_run_v2 casts both to the state's dtype the same way
     dt_arr = jnp.asarray(dt, dtype=dtype)
 
+    # a field that ignores the velocity rows is handed zeros there: the same
+    # output, and the checkpointed step's recompute then needs no velocities
+    field_velocities = external_fn is not None and _field_reads_velocities(
+        external_fn, external_args, positions
+    )
+
     def force(x: Array, v: Array, aux_in: Any) -> tuple[Array, Any]:
         # the step's total acceleration at x, in the state's dtype, as the
         # particle carry builds it: the force, plus the field at (x, v)
         acc, aux_out = step_fn(x, masses, params, aux_in)
         acc = jnp.asarray(acc, dtype=dtype)
-        field = _external_acceleration(external_fn, external_args, x, v)
+        rows_v = v if field_velocities else jnp.zeros_like(v)
+        field = _external_acceleration(external_fn, external_args, x, rows_v)
         return (acc if field is None else acc + field), aux_out
 
-    def step(carry: tuple) -> tuple:
-        # one velocity-Verlet step (strict_run_v2's `_advance` and
-        # `_velocity_verlet_kick_drifted`): drift, force at the new positions,
-        # kick with the mean of the old and new accelerations
-        x, v, a, aux_in = carry
-        x = x + v * dt_arr + 0.5 * a * dt_arr**2
+    def force_and_kick(x: Array, v: Array, a: Array, aux_in: Any) -> tuple:
+        # the force at the drifted positions and the kick with the mean of the
+        # old and new accelerations: what a checkpointed step recomputes. Its
+        # input is the DRIFTED x; v and a enter linearly (the kick, and the
+        # field's rows only if the field reads velocities), so the reverse pass
+        # saves x and the aux, not the whole carry
         a_new, aux_out = force(x, v, aux_in)
-        v = v + 0.5 * (a + a_new) * dt_arr
-        return x, v, a_new, aux_out
+        return v + 0.5 * (a + a_new) * dt_arr, a_new, aux_out
+
+    def stepper(force_kick: Callable) -> Callable:
+        def step(carry: tuple) -> tuple:
+            # one velocity-Verlet step (strict_run_v2's `_advance` and
+            # `_velocity_verlet_kick_drifted`): drift, force at the new
+            # positions, kick -- the same expressions, in the same order,
+            # whatever is checkpointed
+            x, v, a, aux_in = carry
+            x = x + v * dt_arr + 0.5 * a * dt_arr**2
+            v, a_new, aux_out = force_kick(x, v, a, aux_in)
+            return x, v, a_new, aux_out
+
+        return step
 
     if acceleration is None:
         # the start force: checkpointed with the steps, so its residuals (one
@@ -385,9 +492,10 @@ def differentiable_rollout(
         return jax.lax.scan(lambda c, _: (body(c), None), carry_in, None, length)[0]
 
     if checkpoint is None:
-        carry = scan_steps(carry, num_steps, step)
+        carry = scan_steps(carry, num_steps, stepper(force_and_kick))
     elif checkpoint == "step":
-        carry = scan_steps(carry, num_steps, _checkpointed(step, "step"))
+        step_c = stepper(_checkpointed(force_and_kick, "step"))
+        carry = scan_steps(carry, num_steps, step_c)
     else:
         inner = (
             max(1, round(math.sqrt(num_steps)))
@@ -396,7 +504,7 @@ def differentiable_rollout(
         )
         inner = min(inner, num_steps)
         outer, tail = divmod(num_steps, inner)
-        step_c = _checkpointed(step, "step")
+        step_c = stepper(_checkpointed(force_and_kick, "step"))
 
         def segment(length: int) -> Callable:
             return lambda c: scan_steps(c, length, step_c)
@@ -513,28 +621,6 @@ def _verdict_bits(aux: Any) -> Optional[Any]:
     )
 
 
-def _fail_mask(gradient: bool) -> int:
-    """The verdict bits a state (or a gradient) is refused on.
-
-    Parameters
-    ----------
-    gradient : bool
-        The gradient's verdict: the force's bits and, where the provider defines
-        it, ``GRAD_FAIL_MASK``'s (the differentiable step's gradient lists,
-        ``OVERFLOW_GRAD_LISTS``, which the forward does not read).
-
-    Returns
-    -------
-    int
-        The mask: ``OVERFLOW_FAIL_MASK``, or ``GRAD_FAIL_MASK`` for a gradient.
-    """
-    from . import fused_topology
-
-    if gradient:
-        return int(getattr(fused_topology, "GRAD_FAIL_MASK", OVERFLOW_FAIL_MASK))
-    return int(OVERFLOW_FAIL_MASK)
-
-
 def rollout_ok(aux: Any, *, gradient: bool = False) -> bool:
     """Whether every step of a rollout fitted its capacities. Host sync.
 
@@ -543,20 +629,23 @@ def rollout_ok(aux: Any, *, gradient: bool = False) -> bool:
     aux : Any
         A :class:`RolloutResult` or its ``aux``.
     gradient : bool
-        Check the gradient's verdict (``GRAD_FAIL_MASK``: the force's bits and the
-        differentiable step's gradient-list bit) instead of the state's
-        (``OVERFLOW_FAIL_MASK``: ``fused_topology.overflow_ok``).
+        The gradient's verdict, :func:`~jaccpot.runtime.fused_topology.grad_ok`
+        (``GRAD_FAIL_MASK``: the force's bits and the differentiable step's
+        ``OVERFLOW_GRAD_LISTS``), instead of the state's,
+        :func:`~jaccpot.runtime.fused_topology.overflow_ok`
+        (``OVERFLOW_FAIL_MASK``).
 
     Returns
     -------
     bool
-        ``True`` for a step without a verdict (``aux`` ``None``); else whether
-        no bit of the mask is set in the folded bits.
+        ``True`` for a step without a verdict (``aux`` ``None``); else the
+        verdict of the folded bits.
     """
     bits = _verdict_bits(aux)
     if bits is None:
         return True
-    return (int(np.asarray(bits, np.uint32)) & _fail_mask(gradient)) == 0
+    verdict = grad_ok if gradient else overflow_ok
+    return bool(np.asarray(verdict(bits)))
 
 
 def check_rollout(aux: Any, *, gradient: bool = False) -> None:
@@ -586,13 +675,14 @@ def check_rollout(aux: Any, *, gradient: bool = False) -> None:
         name
         for name in fused_topology.__all__
         if name.startswith("OVERFLOW_")
-        and name != "OVERFLOW_FAIL_MASK"
+        and not name.endswith("_MASK")
         and bits & int(getattr(fused_topology, name))
     )
     what = "gradient" if gradient else "capacity"
     raise RolloutVerdictError(
         f"the rollout's {what} verdict failed (bits {bits:#x}, verdict bits "
-        f"{bits & _fail_mask(gradient):#x}: {', '.join(names)}): a step ran on a "
+        f"{bits & (GRAD_FAIL_MASK if gradient else OVERFLOW_FAIL_MASK):#x}: "
+        f"{', '.join(names)}): a step ran on a "
         "truncated force or gradient, so its state and gradient are refused. "
         "Re-plan the caps on a forward pre-pass and run again."
     )
