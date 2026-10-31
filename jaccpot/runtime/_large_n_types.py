@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import MISSING, dataclass, fields
 from typing import Any, Callable, NamedTuple, Optional, Union
 
 import jax
@@ -33,6 +33,49 @@ __all__ = [
     "large_n_as_prepared_state",
     "large_n_to_compiled_state",
 ]
+
+
+def _unflattened(cls: type, **values: Any) -> Any:
+    """A frozen dataclass from keyword field values, bypassing ``__init__``.
+
+    ``tree_unflatten`` receives whatever jax puts in the leaves (abstract values
+    under ``jax.eval_shape``, ``None``, sentinels), which the field annotations do
+    not describe; the runtime type checker must not see them. Same rule as
+    ``fused_topology._construct``, by keyword because these unflattens accept
+    older aux lengths and leave the dataclass defaults to fill the rest.
+
+    Parameters
+    ----------
+    cls : type
+        The dataclass.
+    **values : Any
+        Field values by name; a field left out takes its dataclass default.
+
+    Returns
+    -------
+    Any
+        The instance.
+
+    Raises
+    ------
+    TypeError
+        On an unknown field, or a missing one without a default: what ``__init__``
+        would raise.
+    """
+    obj = object.__new__(cls)
+    for field in fields(cls):
+        if field.name in values:
+            value = values.pop(field.name)
+        elif field.default is not MISSING:
+            value = field.default
+        elif field.default_factory is not MISSING:
+            value = field.default_factory()
+        else:
+            raise TypeError(f"{cls.__name__}: missing field {field.name!r}")
+        object.__setattr__(obj, field.name, value)
+    if values:
+        raise TypeError(f"{cls.__name__}: unknown fields {sorted(values)}")
+    return obj
 
 
 class _CompatInteractionStorage(NamedTuple):
@@ -299,7 +342,8 @@ class RadixFastNearfieldPayload:
             source_particle_ids,
             source_particle_mask,
         ) = children
-        return cls(
+        return _unflattened(
+            cls,
             target_leaf_ids=target_leaf_ids,
             target_particle_ids=target_particle_ids,
             target_particle_mask=target_particle_mask,
@@ -402,7 +446,8 @@ class LargeNCompiledState:
     ) -> "LargeNCompiledState":
         topology_key, max_leaf_size, local_order = aux
         prepared, positions_sorted, masses_sorted, inverse_permutation = children
-        return cls(
+        return _unflattened(
+            cls,
             prepared=prepared,
             positions_sorted=positions_sorted,
             masses_sorted=masses_sorted,
@@ -462,13 +507,18 @@ class LargeNPreparedState:
         The yggdrax tree. Also the source of ``positions_sorted``,
         ``masses_sorted`` and ``inverse_permutation``, which are properties here
         rather than fields and raise ``ValueError`` if the tree lacks them.
-    local_data : LocalExpansionData
-        Local expansions per node, from the downward sweep.
-    neighbor_list : NodeNeighborList
+    local_data : Optional[LocalExpansionData]
+        Local expansions per node, from the downward sweep. ``None`` only in the
+        caps-only prepare's stub (``PreparedCaps.stub``), which holds the tree and
+        the static fields a rebuild reads and nothing it would evaluate; the same
+        goes for the next three fields. Every state that evaluates has all four.
+        The hints say ``Optional`` because the stub is constructed through this
+        ``__init__`` and ``JACCPOT_RUNTIME_TYPECHECK=1`` rejected it otherwise.
+    neighbor_list : Optional[NodeNeighborList]
         Leaf-neighbour lists backing the near field.
-    nearfield_leaf_particle_indices : Array
+    nearfield_leaf_particle_indices : Optional[Array]
         ``[num_leaves, W]`` particle index per padded leaf slot.
-    nearfield_leaf_particle_mask : Array
+    nearfield_leaf_particle_mask : Optional[Array]
         ``[num_leaves, W]`` occupancy for the above.
     nearfield_target_leaf_ids : Optional[Array]
         Target leaf id per near-field pair; ``None`` when the active mode does
@@ -590,10 +640,10 @@ class LargeNPreparedState:
     """
 
     tree: Tree
-    local_data: LocalExpansionData
-    neighbor_list: NodeNeighborList
-    nearfield_leaf_particle_indices: Array
-    nearfield_leaf_particle_mask: Array
+    local_data: Optional[LocalExpansionData]
+    neighbor_list: Optional[NodeNeighborList]
+    nearfield_leaf_particle_indices: Optional[Array]
+    nearfield_leaf_particle_mask: Optional[Array]
     nearfield_target_leaf_ids: Optional[Array]
     nearfield_source_leaf_ids: Optional[Array]
     nearfield_valid_pairs: Optional[Array]
@@ -928,7 +978,8 @@ class LargeNPreparedState:
             ) = remaining_children
         if local_order is None:
             local_order = int(getattr(local_data, "order", 0))
-        return cls(
+        return _unflattened(
+            cls,
             tree=tree,
             local_data=local_data,
             neighbor_list=neighbor_list,
