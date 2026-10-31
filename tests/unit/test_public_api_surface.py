@@ -37,10 +37,12 @@ EXPECTED_ALL = {
     "OdisseoFMMCoupler",
     "ProductionRunner",
     "RealSHBasis",
+    "RolloutResult",
     "RuntimePolicyConfig",
     "SegmentConfig",
     "TraversalOverrides",
     "TreeConfig",
+    "differentiable_rollout",
     "direct_sum_gravitational_acceleration",
 }
 
@@ -129,6 +131,7 @@ def test_export_kinds() -> None:
         "OdisseoFMMCoupler",
         "ProductionRunner",
         "RealSHBasis",
+        "RolloutResult",
         "RuntimePolicyConfig",
         "SegmentConfig",
         "TraversalOverrides",
@@ -139,6 +142,7 @@ def test_export_kinds() -> None:
     assert issubclass(jaccpot.FMMPreset, enum.Enum)
     # Callable (function).
     assert callable(jaccpot.direct_sum_gravitational_acceleration)
+    assert callable(jaccpot.differentiable_rollout)
 
 
 def test_public_class_is_the_solver_facade() -> None:
