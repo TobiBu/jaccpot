@@ -253,6 +253,8 @@ def _drop_lanes() -> Iterator[None]:
 def _bitwise(got: Any, want: Any) -> int:
     got, want = np.asarray(got), np.asarray(want)
     assert got.dtype == want.dtype and got.shape == want.shape
+    # 1-d: a 0-d array cannot be viewed as bytes
+    got, want = got.reshape(-1), want.reshape(-1)
     return int(np.sum(got.view(np.uint8) != want.view(np.uint8)))
 
 
@@ -485,7 +487,12 @@ def test_the_gradient_matches_finite_differences(name):
     rng = np.random.default_rng(7)
     v_x = jnp.asarray(rng.normal(size=(N, 3)))
     v_m = jnp.asarray(rng.normal(size=(N,)))
-    h = 1e-5
+    # The step sizes are measured (2026-10-31, these directions, both lanes): along
+    # v_x the relative error falls as h^2 (truncation: 4.9e-6 at 1e-5, 4.4e-7 at
+    # 3e-6, 4.8e-8 at 1e-6) to a round-off floor of ~3e-9 at 1e-7, and h_x >= 1e-5
+    # rebuilds another topology under dehnen_error (>= 3e-5 under dehnen); along
+    # v_m it is flat (<= 1.3e-9 for 1e-6 <= h <= 1e-4), the lists unchanged.
+    h_x, h_m = 1e-6, 1e-5
 
     def fd(dx_=0.0, dm_=0.0, dg_=0.0, de_=0.0):
         # the walk reads the positions and the masses (COM geometry): both
@@ -497,13 +504,15 @@ def test_the_gradient_matches_finite_differences(name):
         minus = value(x0 - dx_, m0 - dm_, g0 - dg_, e0 - de_)
         return (float(plus) - float(minus)) / 2.0
 
-    fd_x, fd_m = fd(dx_=h * v_x) / h, fd(dm_=h * v_m) / h
+    fd_x, fd_m = fd(dx_=h_x * v_x) / h_x, fd(dm_=h_m * v_m) / h_m
     got_x, got_m = float(jnp.sum(dx * v_x)), float(jnp.sum(dm * v_m))
     assert abs(got_x - fd_x) <= 1e-6 * abs(fd_x), (got_x, fd_x)
     assert abs(got_m - fd_m) <= 1e-6 * abs(fd_m), (got_m, fd_m)
     if lane.provider.scale_carry:
         return
-    h_g, h_e = 1e-4, 1e-3 * SOFTENING**2
+    # eps2 measured as h_x: truncation, 3.8e-6 at 1e-3 eps^2 (S8's step), 3.8e-8 at
+    # 1e-4 eps^2, a floor of ~3e-9 at 1e-5 eps^2; G is linear (<= 2.6e-12 at 1e-4)
+    h_g, h_e = 1e-4, 1e-4 * SOFTENING**2
     np.testing.assert_allclose(float(dg), fd(dg_=h_g) / h_g, rtol=1e-10)
     np.testing.assert_allclose(float(de), fd(de_=h_e) / h_e, rtol=1e-6)
     assert float(de) != 0.0
