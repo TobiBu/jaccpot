@@ -172,6 +172,12 @@ class Lane:
 
 _LANES: dict = {}
 
+#: Two worker groups under ``--dist loadgroup``: the forward checks and the
+#: gradient's, ~10 and ~9 min of compilation on CPU (2026-11-01); one group ran the
+#: file in one worker (18.5 min). Each group prepares the lanes it reads (~30 s each).
+_FORWARD = pytest.mark.xdist_group("fused_differentiable_step_forward")
+_GRADIENT = pytest.mark.xdist_group("fused_differentiable_step_gradient")
+
 
 @pytest.fixture(autouse=True)
 def _walk(request, monkeypatch) -> None:
@@ -263,7 +269,7 @@ def _bitwise(got: Any, want: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_FORWARD
 @pytest.mark.parametrize("name", ["plummer", "ferrers3", "dehnen_error", "flat"])
 def test_the_forward_is_steps_bitwise(name):
     """Accelerations and aux at the prepare's positions and two drifts from it.
@@ -288,7 +294,7 @@ def test_the_forward_is_steps_bitwise(name):
             assert f_b is None and d_f_b is None
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_FORWARD
 @pytest.mark.parametrize("name", ["plummer", "dehnen_error"])
 def test_a_verlet_scan_through_the_aux_is_steps(name):
     """Three velocity-Verlet steps (the production association), the aux chained:
@@ -415,7 +421,7 @@ def _gradient(name: str) -> tuple[Any, dict]:
     return _GRADS[name]
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_GRADIENT
 @pytest.mark.parametrize("name", ["plummer", "flat"])
 def test_the_gradient_is_s8s_on_the_eager_topology(name):
     """At the prepare's positions the rebuilt topology is the eager one, so the
@@ -472,7 +478,7 @@ def _topology_indices(lane: Lane, x: Any, m: Any) -> list:
     return [np.asarray(a) for a in indices(x, m)]
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_GRADIENT
 @pytest.mark.parametrize("name", ["plummer", "dehnen_error"])
 def test_the_gradient_matches_finite_differences(name):
     """Central differences of the whole step in float64, rebuild included.
@@ -522,7 +528,7 @@ def test_the_gradient_matches_finite_differences(name):
     assert float(de) != 0.0
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_GRADIENT
 def test_the_far_field_is_load_bearing():
     """Far pairs in the traced list, and every reverse kernel of the production
     layout in the gradient's trace -- the far chain's source side included (S8's
@@ -534,7 +540,7 @@ def test_the_far_field_is_load_bearing():
     assert counts == {key: 1 for key in counts}, counts
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_GRADIENT
 def test_the_linearized_program_holds_no_while_loop():
     """The topology stage (the walk's rounds, the extents, the level loops) is
     primal only: the linear program holds no while loop at all, while the primal
@@ -576,7 +582,7 @@ def test_the_linearized_program_holds_no_while_loop():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_GRADIENT
 def test_an_asymmetric_list_refuses_the_gradient(monkeypatch):
     """A near list whose reverse would read pairs it does not hold: the force is
     right (``overflow_ok``), the gradient's verdict fails (``grad_ok``,
@@ -622,7 +628,7 @@ def test_the_device_symmetry_check_tells_a_list_that_is_not():
     )
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_GRADIENT
 def test_the_static_fields_are_checked_on_every_trace():
     """The frozen statics are template properties; a trace whose topology differs
     from them raises instead of differentiating another plan."""
@@ -643,7 +649,7 @@ def test_the_static_fields_are_checked_on_every_trace():
         jax.eval_shape(wrong.differentiable_step, lane.positions, lane.masses)
 
 
-@pytest.mark.xdist_group("fused_differentiable_step")
+@_GRADIENT
 def test_the_api_refuses_what_it_cannot_differentiate():
     """No frozen plan, a caps-only prepare, a topology without its far list."""
     from jaccpot.runtime.fused_provider import FusedForceProvider

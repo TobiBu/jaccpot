@@ -90,6 +90,30 @@ _STRICT_RUNNER_FILES: tuple[str, ...] = (
     "tests/integration/strict/test_strict_runners_on_provider.py",
     "tests/integration/strict/test_production_runner.py",
 )
+# The differentiable fused step and the rollout over it (S9): every Pallas kernel in
+# interpret mode, and reverse programs of the whole lane (2-5 min of compilation
+# each on CPU). With them `integration-strict` was cancelled at its cap on #490
+# (2026-10-31: the three files alone ran 55 min at `-n 2`, 23 GB in one worker).
+# The step's file and the forward-only rollout over the provider's step in one
+# shard. The differentiable rollout's file is ~45 min of compilation and its
+# gradients peak at 12 GB RSS in one process, so two of its workers do not fit the
+# 16 GB runner (20.5 GB summed at `-n 2`): it runs at `-n 1` in two shards, the
+# tests that read Plummer's "step" gradient (G2 Plummer, G4 -- every checkpoint
+# mode, so a new mode lands here -- and G5) and the rest (G1, G2 under
+# `dehnen_error`, G8).
+_STRICT_GRAD_FILES: tuple[str, ...] = (
+    "tests/integration/strict/test_fused_differentiable_step.py",
+    "tests/integration/strict/test_grad_rollout_on_provider.py",
+)
+_STRICT_GRAD_ROLLOUT = "tests/integration/strict/test_grad_rollout_differentiable.py"
+_STRICT_GRAD_ROLLOUT_MODES: tuple[str, ...] = tuple(
+    f"{_STRICT_GRAD_ROLLOUT}::{test}"
+    for test in (
+        "test_the_rollout_gradient_matches_finite_differences[plummer]",
+        "test_the_checkpoint_modes_agree_and_each_repeats_bitwise",
+        "test_the_far_field_is_load_bearing_in_the_rollout_gradient",
+    )
+)
 
 # Unit tests that need two or more devices and skip below them: in the unit shard
 # (one device) they collected and skipped, so the repartition gate they pin (the
@@ -109,9 +133,22 @@ SHARDS: dict[str, list[str]] = {
     ],
     "integration-strict": [
         _STRICT,
-        *(f"--ignore={path}" for path in _STRICT_RUNNER_FILES),
+        *(
+            f"--ignore={path}"
+            for path in (
+                *_STRICT_RUNNER_FILES,
+                *_STRICT_GRAD_FILES,
+                _STRICT_GRAD_ROLLOUT,
+            )
+        ),
     ],
     "integration-strict-runner": list(_STRICT_RUNNER_FILES),
+    "integration-strict-grad": list(_STRICT_GRAD_FILES),
+    "integration-strict-grad-rollout": [
+        _STRICT_GRAD_ROLLOUT,
+        *(f"--deselect={node}" for node in _STRICT_GRAD_ROLLOUT_MODES),
+    ],
+    "integration-strict-grad-modes": list(_STRICT_GRAD_ROLLOUT_MODES),
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
     "unit": [
         "tests/unit",
