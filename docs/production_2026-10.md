@@ -2066,7 +2066,7 @@ real boundary through the disc plane, not intruders.
 
 Counts: today's repartitions do not keep the balance -- 3,997,511 / 4,002,489 drifted to 3,970,414 / 4,029,586 over
 five (Plummer 8e6), 999,058 / 1,000,942 to 984,856 / 1,015,144 (disc), 0.1-0.4 % of a shard per repartition: the
-sample sort's bias (above) on nearly exact ranges. The migrating rebalance holds Plummer within 160 rows of N / 2 at every edge after the first; the disc's
+sample sort's bias (above) on nearly exact ranges (fixed 2026-11-01: "The repartition's pivots weighted by count"). The migrating rebalance holds Plummer within 160 rows of N / 2 at every edge after the first; the disc's
 fixed cuts drift ~0.8 % per 8 steps (it rotates through them) and every edge evens them again (6.6-8.0k rows sent).
 
 Time (contended, explicit caps, interleaved off / on / off / on, Plummer 8e6 `dehnen_error`): the force alone (start
@@ -2312,15 +2312,68 @@ eight ~6.7e8 (an extrapolation). The rel-L2 at 8e7 and 1.2e8 is NOT the mesh's: 
 fused lane's accuracy on this draw -- a box of 35,148 for a sphere of scale radius 1, softening 1e-7 -- falls 25x
 between 4e7 and 8e7 on one card too; the production IC (the 25M disc + bulge) is at 1.3e-4. Open, not diagnosed.
 
+### The repartition's pivots weighted by count (found in I, fixed 2026-11-01)
+Mechanism: `_choose_pivots` (yggdrax) samples `num_samples` codes at even ranks of each device's live prefix and
+cut at equal indices of the pooled sorted samples, so every device's samples weighed the same whatever its count.
+After the first repartition the ranges are nearly exact Morton ranges: the cut sat at the boundary between the
+devices' sample sets (a device's lowest sample is its minimum, its top block is never sampled), and the left device
+lost rows at every repartition -- a steady drift, not a random walk. Fix (yggdrax `fix/weighted-pivots`): device
+`d`'s samples weigh `count_d` (each stands for `count_d / num_samples` particles, scaled to stay integer); pivot
+`k` is the first pooled sample whose inclusive cumulative weight `C` has `C * ndev > k * W`, in int64. Equal live
+counts reduce to the old index `floor(k * num_samples * live / ndev)`: bit-identical pivots (pinned against a
+verbatim copy of the old rule: ndev 2-4, 1-4,097 rows, 1-256 samples, `align_level` None / 3, empty devices,
+`count=None`, all empty; a `<` for `<=` mutation fails 10 of 10). Empty devices weigh 0 as before; `align_level`
+snapping unchanged.
+
+Imbalance (max count / mean - 1) over 40 repartitions, Plummer (G = M = a = 1, AHW speeds) under its own analytic
+potential, 8 KDK steps of 5e-3 between repartitions (the count is all that is measured; no N-body force),
+`rollout._make_repartition` (the runner's `sfc_repartition` program), 256 samples, cap 1.15 x N / ndev
+(`/export/scratch/tbuck/s9-scratch/pivots/imbalance_drift.py`; the old arm swaps the old function back in):
+
+| run | start | after 10 / 20 / 30 / 40 | max over 1-40 (sample blocks) |
+| --- | --- | --- | --- |
+| 2e5, two forced CPU devices, old | +0.137 % | +0.439 / +0.791 / +1.114 / +1.336 % | +1.336 % (3.4) |
+| 2e5, two forced CPU devices, weighted | +0.137 % | +0.394 / +0.362 / +0.272 / +0.188 % | +0.436 % (1.1) |
+| 4e5, four forced CPU devices, old | +0.674 % | +5.92 / +11.40 / +14.85 / +14.73 % | +14.92 % (47); 10 of 40 declined (from 27 on) |
+| 4e5, four forced CPU devices, weighted | +0.674 % | +0.831 / +0.921 / +0.563 / +0.795 % | +0.998 % (2.6) |
+| 8e6, two A100s, old | +0.062 % | +1.40 / +2.64 / +3.67 / +4.44 % | +4.44 % (11.4) |
+| 8e6, two A100s, weighted | +0.062 % | +0.314 / +0.278 / +0.517 / +0.475 % | +0.522 % (1.3) |
+
+The 8e6 start is track I's (3,997,511 / 4,002,489: equal input counts, so the same pivots in both arms); the old
+arm's 0.11 % of the mean per repartition is the record's 0.1-0.4 %. Weighted, the imbalance is a saw-tooth within one
+to three sample blocks (`N / ndev / num_samples` rows) that snaps back once the estimate crosses a sample; it does
+not grow. The rows moved per repartition do not change (56.6k / 57.0k at 8e6). The rank rebalance under migration
+stays (exact, and it moves only the rows that change owner through a buffer sized to its need).
+
+Which results change bits: wherever `sfc_repartition` / `sfc_partition(count=...)` sees unequal live counts --
+`MeshSegmentRunner(migrate=False)` (its default) and `FusedRollout` at every repartition after the first,
+`MeshSegmentRunner(migrate=True)` without restart cuts (its constructor's repartition into the force's box), and
+`decompose` when N is not a multiple of ndev (`array_split` counts differ by one). Unchanged: the single card (no
+repartition; CPU program identity 36/36 against `s9-base-cpu`), `decompose` for N divisible by ndev, and so
+`ProductionRunner`'s multi-GPU default (`migrate=True`: `decompose`, cuts read off it, rank rebalances) for such N.
+Gates re-run (CPU, forced devices, this yggdrax): yggdrax `tests/distributed` 171 passed (four devices),
+basedpyright 0 errors; jaccpot distributed tier 96 passed / 7 skipped (two devices; the rollout's bitwise
+ownership-invariance gate `tests/unit/distributed/test_fused_rollout.py` and the four-device cross-capacity cases
+again at four: 11 passed), segment 10, segment-criterion 4, segment-migration 2, segment-runner 5 passed,
+criterion 8 passed.
+
 ### Open after S11 session 2
 - `MeshRunConfig.migrate` is `True` by default after T's A/B (the stack's last PR); `MeshSegmentRunner`'s own
   `migrate` stays `False` (the low-level runner, its gates' reference).
-- Run to run on GPUs: the single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries in
-  atomic order (the 2-GPU residual above, and the disc's 8.5k of 6.9M); `ordered_rest=True` exists, off by default:
-  turning it on for the single card is a change of its default path.
-- The repartition without migration does not rebalance nearly exact ranges (yggdrax's `_choose_pivots` takes equal
-  samples per device): the imbalance grows 0.1-0.4 % of a shard per repartition (Plummer 8e6). The migrating mode
-  rebalances by rank instead.
+- ~~Run to run on GPUs: the single card's direct near kernel scatter-adds the pieces of rows past 2 x 1024 entries
+  in atomic order~~ DONE by #483 (2026-10-30): the kernel sums a long row's pieces in one fixed order on the single
+  card too (the `ordered_rest` keyword is gone; +256 B compiled temporaries): single card, disc + bulge 2e6,
+  `dehnen_error` (`bench/multigpu_force_repeat.py --ndev 1 --ic disc`) ~28,000 of 6.9M acceleration and ~7,000 of
+  2.3M f_b components run to run -> 0, in process and across processes. On two A100s (2026-11-01, main 1dbf7e13 + the weighted pivots,
+  `--ndev 2 --ic disc`, `dehnen_error`, the start force three times in one process and once in another) the
+  residual track N left (8.5k of 6.9M) is gone too: 0 of 6,900,000 acceleration and 0 of 2,300,000 f_b components,
+  in process and across processes; the same with the old pivots (equal input counts: the same decomposition, and
+  the old-pivot process is bitwise the weighted one), and at N = 2.3e6 (0 of 7,935,000). Timing on a free card
+  still owed (HoreKa).
+- ~~The repartition without migration does not rebalance nearly exact ranges~~ DONE (yggdrax `fix/weighted-pivots`,
+  2026-11-01, "The repartition's pivots weighted by count" above): the samples weigh their device's count; the
+  imbalance stays within one to three sample blocks instead of growing (8e6 on two A100s, 40 repartitions: +4.44 %
+  -> at most +0.52 %; four forced CPU devices +14.9 % and declined -> at most +1.0 %). Bits unchanged on equal counts.
 - The all-gathered summary grows with the device count (f32[ndev, nodes, 16]: 48.5 MB at two devices on the compact
   IC); the eager caps-only prepare's eleven small programs per device per fresh run are the single card's own.
 - Eight cards (four were free at most); multi-node (D5).

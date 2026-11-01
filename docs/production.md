@@ -411,7 +411,7 @@ timeout leaves `CUDA_VISIBLE_DEVICES` empty and the run lands on the CPU.
 | `mesh` | -- | the 1-D mesh |
 | `cap` | `None` | rows per device; `None`: `mesh_shard_capacity(N, ndev, cap_headroom)` = `ceil(ceil(N / ndev) x 1.15)` (the S11/S12 gates' headroom; the repartition's balance overshoot is about `2 ndev / num_samples` of a shard) |
 | `repartition_every` | 1 | a repartition before every segment after the first (the S12 gate's cadence); 0: only the initial decomposition. Its own program, between segments; a declined one (a device would overflow `cap`) moves nothing and the edge says so |
-| `num_samples` | 256 | pivot samples per device of the decomposition and the repartitions |
+| `num_samples` | 256 | pivot samples per device of the decomposition and the repartitions, each weighted by its device's live count: a repartition cuts within about `N / ndev / num_samples` rows of even, and the imbalance does not accumulate |
 | `cross_caps` | `"auto"` | the cross-domain capacities: sized in the library from the needs measured at the start state and at the first segment's drift (on small buffers, `CrossCapacities.for_measurement`; 1.5x the needs), or a `CrossCapacities` |
 | `migrate` | `True` | after every drift, hand each particle that left its device's Morton range to the owner before the force, keys and cuts in the force's own (cubic) box (`MeshSegmentRunner(migrate=True)`, `jaccpot/distributed/migration.py`): the domains stay exact, so no device holds a sparse leaf inside another's core. At 8e6 on two A100s 4-5x fewer cross near pairs and ~11x fewer particles shipped per step, the force 219-262 -> 51-54 ms on contended cards; the repartitions then only rebalance (even cuts plus a migration). The default since S11 session 2's free-card A/B (`production_2026-10.md`: never slower beyond the repetitions' spread on two and four cards, both MACs, 1.2-3.8x faster on Plummer and large discs, +1-6 % peak); `False` lets the domains drift between repartitions |
 | `migration_cap` | `"auto"` | `migrate=True`: the migration buffer's rows per device, sized from one step's drift, re-planned exactly when it overflows |
@@ -545,7 +545,9 @@ in atomic order. It now sums each row's pieces in one fixed order and adds that 
 cross term does (2026-10-30): the single-card start force on the disc + bulge 2e6
 (`dehnen_error`, `bench/multigpu_force_repeat.py --ndev 1 --ic disc`) went from ~28k of 6.9M
 acceleration and ~7k of 2.3M f_b components differing run to run to bitwise, within one
-process and across processes. Rows up to 2 x 1024 entries keep their bits.
+process and across processes. Rows up to 2 x 1024 entries keep their bits. The two-GPU start force on the same
+disc (`--ndev 2`) is bitwise too (0 of 6.9M acceleration and 0 of 2.3M f_b components, in process and across
+processes, 2026-11-01; it had ~8.5k differing before).
 
 **Measuring the lane on a dedicated node.** The A/B and scaling rows in
 `production_2026-10.md` (S11 session 2, track T) ran on four free cards of a shared
