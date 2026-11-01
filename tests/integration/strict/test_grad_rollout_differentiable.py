@@ -21,6 +21,10 @@ float64, order 2, 3 steps:
   in the gradient's trace, and zeroing the M2L reverse moves the gradient;
 * G8 -- caps sized on a configuration with fewer pairs give a failed verdict, a
   refused gradient, and after the provider's re-plan a clean rerun.
+* the aux guard -- a chain of two rollouts, the second continuing the first's
+  acceleration and aux (f_b, bits, needs) under ``dehnen_error``, traces its
+  gradient under every hand-written reverse: the f_b passed on is no gradient
+  through the aux (``grad_rollout._refuse_aux_cotangent``).
 
 ``jax.default_backend`` reports ``"gpu"``, as ``tests/characterization/
 test_lane_goldens.py`` does. Interpret-mode reverses compile for minutes, so the
@@ -657,6 +661,51 @@ def test_the_far_field_is_load_bearing_in_the_rollout_gradient():
         g, w = np.asarray(g), np.asarray(w)
         moved = float(np.max(np.abs(g - w))) / float(np.max(np.abs(w)))
         assert moved > 1e-6, (name, moved)
+
+
+# ---------------------------------------------------------------------------
+# The aux guard on the provider: f_b passed on is not a gradient through the aux.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("checkpoint, inner", [m for m in MODES if m[0] is not None])
+def test_a_chain_of_provider_rollouts_passes_the_aux_guard(checkpoint, inner):
+    """1 + 2 steps under ``dehnen_error``, the second rollout started from the
+    first's acceleration and aux: the f_b the first returns seeds the second's
+    first walk, the bits and needs fold on. The gradient in every input TRACES
+    (``make_jaxpr``: the guard acts while the reverse pass is traced, so nothing
+    needs compiling): the aux is read only as a value."""
+    from jaccpot.runtime.grad_rollout import differentiable_rollout
+
+    lane = _lane("dehnen_error")
+    step = lane.provider.differentiable_step
+
+    def loss(x, v, m, k):
+        kw = dict(
+            external_fn=_harmonic,
+            external_args={"k": k},
+            checkpoint=checkpoint,
+            inner_steps=inner,
+        )
+        one = differentiable_rollout(step, x, v, m, DT, 1, aux=lane.aux0, **kw)
+        two = differentiable_rollout(
+            step,
+            one.positions,
+            one.velocities,
+            m,
+            DT,
+            STEPS - 1,
+            aux=one.aux,
+            acceleration=one.acceleration,
+            **kw,
+        )
+        return jnp.sum(lane.weight * two.positions) + jnp.sum(
+            lane.weight * two.velocities
+        )
+
+    args = (lane.positions, lane.velocities, lane.masses, jnp.asarray(K_EXT))
+    jaxpr = jax.make_jaxpr(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
+    assert len(jaxpr.out_avals) == 4
 
 
 # ---------------------------------------------------------------------------
