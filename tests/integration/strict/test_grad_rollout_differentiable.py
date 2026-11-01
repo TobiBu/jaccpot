@@ -7,15 +7,16 @@ float64, order 2, 3 steps:
 
 * G1 -- the forward-only rollout over ``differentiable_step`` IS
   ``strict_run_v2(carry="particles")``, bitwise, under every checkpoint mode
-  (``"nested"`` in segments of 2: one segment and a remainder of 1), Plummer and
-  ``mac_type='dehnen_error'`` (seeded with the runner's own f_b);
+  (``"nested"`` and ``"offload"`` in segments of 2: one segment and a remainder
+  of 1), Plummer and ``mac_type='dehnen_error'`` (seeded with the runner's own f_b);
 * G2 -- central differences of the whole rollout (every step's rebuild included)
   in the start positions, velocities and masses, ``G``, ``eps2`` and an external
   field's parameter, with each step's lists checked identical on the +-h runs
   (#316's rule: the differences then differentiate one map), at measured steps;
-* G4 -- the three checkpoint modes' gradients agree to round-off, and each is
-  bitwise against itself (a second call of the same executable; a second trace
-  lowers to the same program text);
+* G4 -- the four checkpoint modes' gradients agree to round-off, ``"offload"``'s
+  is ``"nested"``'s bit for bit (the same arithmetic, its residuals in host
+  memory), and each is bitwise against itself (a second call of the same
+  executable; a second trace lowers to the same program text);
 * G5 -- every step has far pairs, every reverse kernel of the production layout is
   in the gradient's trace, and zeroing the M2L reverse moves the gradient;
 * G8 -- caps sized on a configuration with fewer pairs give a failed verdict, a
@@ -44,7 +45,7 @@ LEAF, ORDER, THETA, SOFTENING = 16, 2, 0.6, 1e-2
 DT, STEPS = 1e-3, 3
 #: the external field's spring constant (a row-by-row harmonic pull)
 K_EXT = 0.37
-MODES = [(None, None), ("step", None), ("nested", 2)]
+MODES = [(None, None), ("step", None), ("nested", 2), ("offload", 2)]
 
 #: what the strict tests scrub (a shell's JACCPOT_* must not reach the lane)
 _ENV_UNSET = (
@@ -566,12 +567,13 @@ def test_the_rollout_gradient_matches_finite_differences(name):
 
 @_PLUMMER_GRADIENT
 def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
-    """``None`` / ``"step"`` / ``"nested"``: gradients within 1e-12 of the largest
-    component (round-off: a checkpoint regroups cotangent sums, ``"nested"`` sums
-    the constants' per segment; ``tests/unit/runtime/test_grad_rollout.py``), the
-    gradient verdict passes; each mode's gradient bitwise on a second call of the
-    same executable, and a second trace lowers to the same program text (a recompute
-    that rebuilt other lists would differ).
+    """``None`` / ``"step"`` / ``"nested"`` / ``"offload"``: gradients within 1e-12
+    of the largest component (round-off: a checkpoint regroups cotangent sums,
+    ``"nested"`` sums the constants' per segment;
+    ``tests/unit/runtime/test_grad_rollout.py``), ``"offload"``'s bitwise
+    ``"nested"``'s, the gradient verdict passes; each mode's gradient bitwise on a
+    second call of the same executable, and a second trace lowers to the same
+    program text (a recompute that rebuilt other lists would differ).
 
     The second trace is compared as program text, not compiled and run: the text is
     all a recompile reads, and under CI's persistent compilation cache the old
@@ -584,9 +586,11 @@ def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
 
     lane = _lane("plummer")
     ref = None
+    by_mode = {}
     for checkpoint, inner in MODES:
         gradient = _gradient("plummer", checkpoint, inner)
         grads = gradient.grads
+        by_mode[checkpoint] = grads
         assert rollout_ok(gradient.out, gradient=True)
         assert all(bool(np.all(np.isfinite(np.asarray(g)))) for g in grads)
         assert gradient.repeat_differ == 0, checkpoint
@@ -601,6 +605,8 @@ def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
             g, w = np.asarray(g), np.asarray(w)
             scale = float(np.max(np.abs(w)))
             assert float(np.max(np.abs(g - w))) <= 1e-12 * scale, checkpoint
+    for g, w in zip(by_mode["offload"], by_mode["nested"]):
+        assert _bitwise(g, w) == 0
 
 
 # ---------------------------------------------------------------------------
