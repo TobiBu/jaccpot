@@ -17,7 +17,7 @@ functional and memory checks only; the timings are owed by HoreKa, below). Probe
   full force step agrees to 2.2e-7 max relative. Its force-step program has 23.4 MB (11.7 B/p) LESS temp than
   Triton's at 2e6 (no aliased zero buffer).
 - **The gather is the blocker.** Mosaic GPU cannot index a ref by an array; every jaccpot kernel's inner loop is a
-  per-lane gather. The L2P got around it two ways: a select over the block's leaf window (pure Pallas, ~doubles the
+  per-lane gather. The L2P got around it two ways: a select over the block's leaf window (pure Pallas; by count, roughly doubles the
   ALU work) or hand-written per-thread loads in `inline_mgpu` (MLIR on `jax._src` bindings, no interpret mode).
   Neither carries over to the M2L, near-field or walk kernels without most of each kernel becoming inline IR.
 - **Timing is owed by HoreKa** (`bench/slurm/s1b_mosaic_l2p.sbatch`).
@@ -33,7 +33,7 @@ abort kills the process, see F7/F8).
 
 | feature | Lane | Warpgroup | CPU interpret |
 |---|---|---|---|
-| F1 `ref[idx_array, c]` gather from GMEM | FAIL `NotImplementedError: Unimplemented primitive ... broadcast_to` (a 1-D `ref[idx]` reaches `int_indexer_shape non-empty`) | FAIL (same) | FAIL `TypeError: Only scalar arrays can be converted` |
+| F1 `ref[idx_array, c]` gather from GMEM | FAIL `NotImplementedError: Unimplemented primitive ... broadcast_to` (by the source, a plain `ref[idx]` would reach `NotImplementedError: int_indexer_shape non-empty`; not run) | FAIL (same) | FAIL `TypeError: Only scalar arrays can be converted` |
 | F2 scalar dynamic load `ref[b, 2]` | OK | OK | OK |
 | F3 `broadcasted_iota(layout=WG_STRIDED)`, int/float arith, `//`, `min`, `where` | OK | OK | OK |
 | F4 per-thread gather in `inline_mgpu` (`foreach` + `memref.load`) | OK | OK | refused: no `inline_mgpu` |
