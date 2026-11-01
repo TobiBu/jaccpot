@@ -233,6 +233,13 @@ def _pair_hash_sums(a: Array, b: Array, live: Array) -> Array:
 #: array of the lists' length (at 1e8 the far list's capacity is 542M entries)
 _SYMMETRY_CHUNK = 1 << 24
 
+#: entries hashed per iteration of the ON-DEVICE check (a ``lax.scan`` over the
+#: chunks). Smaller than the host check's: the device check runs inside every
+#: gradient step, where its chunk's temporaries (the binary search's carries, the
+#: 64-bit hashes; ~1 GiB at 2^24 entries) sit beside the step's own. At 2^21 they
+#: are ~1/8 of that.
+_SYMMETRY_CHUNK_ON_DEVICE = 1 << 21
+
 
 @partial(jax.jit, static_argnames=("size",))
 def _csr_pair_hash_sums(
@@ -391,10 +398,11 @@ def _csr_pairs_symmetric_on_device(
 ) -> Array:
     """:func:`_csr_pairs_symmetric` inside a trace: the verdict as a device bool.
 
-    The same chunked hash sums (:func:`_csr_pair_hash_sums`, one launch per
-    :data:`_SYMMETRY_CHUNK` entries, no array of the list's length), summed on the
-    device -- the ``uint64`` sums wrap there as they do on the host -- and compared
-    there: no host sync, so a traced step can fold the verdict into its bits.
+    The same chunked hash sums (:func:`_csr_pair_hash_sums`, a ``lax.scan`` over
+    chunks of :data:`_SYMMETRY_CHUNK_ON_DEVICE` entries, no array of the list's
+    length), summed on the device -- the ``uint64`` sums wrap there as they do on
+    the host -- and compared there: no host sync, so a traced step can fold the
+    verdict into its bits.
 
     Parameters
     ----------
@@ -417,12 +425,16 @@ def _csr_pairs_symmetric_on_device(
     cnt = jnp.asarray(counts, INDEX_DTYPE)
     starts = jnp.asarray(row_starts, INDEX_DTYPE)[: int(cnt.shape[0])]
     num = int(entries.shape[0])
-    size = min(_SYMMETRY_CHUNK, 1 << max(0, (num - 1).bit_length()))
-    total = jnp.zeros((2, 2), jnp.uint64)
-    for base in range(0, num, size):
-        total = total + _csr_pair_hash_sums(
-            entries, starts, cnt, jnp.asarray(base, INDEX_DTYPE), shift, size=size
-        )
+    size = min(_SYMMETRY_CHUNK_ON_DEVICE, 1 << max(0, (num - 1).bit_length()))
+    bases = jnp.arange(-(-num // size), dtype=INDEX_DTYPE) * size
+
+    def chunk(total: Array, base: Array) -> tuple[Array, None]:
+        part = _csr_pair_hash_sums(entries, starts, cnt, base, shift, size=size)
+        return total + part, None
+
+    # one chunk's temporaries at a time (a loop, not an unrolled chain: at 1e8
+    # the far list is ~260 chunks)
+    total, _ = jax.lax.scan(chunk, jnp.zeros((2, 2), jnp.uint64), bases)
     return jnp.all(total[:, 0] == total[:, 1])
 
 
