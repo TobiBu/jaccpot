@@ -62,10 +62,15 @@ the file's (the forward stays the runner's) while its TANGENT is the force
 recomputed at the restart positions (:func:`_keep_value`; one more force in the
 program, checkpointed). The gradient with respect to the restart state is
 therefore the physical one -- what the uninterrupted run's reverse pass carries
-across that edge --, to round-off: the reverse sums are grouped otherwise, and
-under ``dehnen_error`` the recompute's thresholds come from the f_b the restart
-carries (the force's own output at that state) rather than the step before's; the
-lists, and so the derivative, agree whenever those thresholds pick the same pairs.
+across that edge. Measured (CPU, N = 512, float64, a restart after the first of two
+2-step segments, pulled back through the first segment): with the geometric MAC
+1.8e-16 of the largest component (round-off: the reverse sums are grouped
+otherwise); under ``dehnen_error`` 3.2e-8 (positions), 6.1e-8 (masses), 1.8e-10
+(velocities), because the recompute's thresholds come from the f_b the restart
+carries -- the force's own output at that state -- not from the step before's,
+which no restart file holds: at the restart positions the two pick other pairs
+(the near list, and 2944 against 2946 far pairs), so the edge's force is
+linearised on neighbouring lists (an FMM-accuracy difference, not round-off).
 
 THE ENGINE'S TRACE-TIME STATE. The traced rebuild reads the walk caps, the leaf
 capacity, the depth bound and the level registry when it TRACES. The chain installs
@@ -535,7 +540,9 @@ class GradientPlan:
                 _install_plan(self.engine, seg.plan)
                 base = seg.provider.differentiable_step
 
-                def self_at(x_in: Any, m_in: Any, aux_in: Any, _base=base) -> tuple:
+                def self_at(
+                    x_in: Any, m_in: Any, aux_in: Any, _base: Callable = base
+                ) -> tuple:
                     # one force outside the scans (a segment's start), checkpointed
                     # as the rollout's own start force
                     acc, inner = _base(x_in, m_in, params, aux_in)
@@ -730,7 +737,7 @@ class _Recorder:
         self._step = 0
         self._start_state: Optional[np.ndarray] = None
         self._start_f_b: Optional[np.ndarray] = None
-        #: frozen providers, by the forward provider object they freeze
+        #: the gradient statics frozen so far, by provider compile key
         self._frozen: dict = {}
 
     def begin(
@@ -845,7 +852,10 @@ class _Recorder:
 
         The rebuild runs under the segment's plan (still installed) at the
         segment's start positions, with its start thresholds; its trace leaves the
-        engine as it found it.
+        engine as it found it. ``strict_run_v2`` makes a new provider object every
+        call, so the statics are kept by the provider's compile key (the template,
+        the walk caps, the depth bound: what they depend on), and a segment whose
+        key an earlier one froze rebuilds and compiles nothing.
 
         Parameters
         ----------
@@ -857,25 +867,34 @@ class _Recorder:
         Returns
         -------
         Any
-            ``provider.with_grad_plan(topology)``; one per forward provider.
+            The provider with ``grad_statics`` (:meth:`FusedForceProvider.with_grad_plan
+            <jaccpot.FusedForceProvider.with_grad_plan>`).
         """
         from jaccpot.production import _trace_state_kept
 
-        frozen = self._frozen.get(id(provider))
-        if frozen is not None and frozen[0] is provider:
-            return frozen[1]
-        assert self._start_state is not None
-        state = jnp.asarray(self._start_state)
-        f_b_in = None if f_b is None else jnp.asarray(f_b)
-        with _trace_state_kept(self.engine):
-            topology = jax.jit(
-                lambda x, m, s: provider.rebuild(
-                    x, m, force_scale=s, keep_far_list=True
-                )
-            )(state[:, 0], self._masses, f_b_in)
-            out = provider.with_grad_plan(topology)
-        self._frozen[id(provider)] = (provider, out)
-        return out
+        key = provider.key()
+        statics = self._frozen.get(key)
+        if statics is None:
+            assert self._start_state is not None
+            state = jnp.asarray(self._start_state)
+            f_b_in = None if f_b is None else jnp.asarray(f_b)
+            with _trace_state_kept(self.engine):
+                topology = jax.jit(
+                    lambda x, m, s: provider.rebuild(
+                        x, m, force_scale=s, keep_far_list=True
+                    )
+                )(state[:, 0], self._masses, f_b_in)
+                statics = provider.with_grad_plan(topology).grad_statics
+            self._frozen[key] = statics
+        return type(provider)(
+            provider.engine,
+            leaf_size=provider.leaf_size,
+            max_order=provider.max_order,
+            theta=provider.theta,
+            runtime_overrides=provider.runtime_overrides,
+            template=provider.template,
+            grad_statics=statics,
+        )
 
     def plan(self, forward: Any) -> GradientPlan:
         """The :class:`GradientPlan` of the pre-pass.
