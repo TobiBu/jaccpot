@@ -260,7 +260,7 @@ def _residuals(capsys, fn, *args) -> list[str]:
     [
         ("step", 4, False, 4, 1),
         ("nested", 9, False, 3, 3),
-        ("step", 4, True, 4, 4),
+        ("step", 4, True, 4, 3),
     ],
     ids=["step", "nested", "step-traced-dt"],
 )
@@ -278,8 +278,10 @@ def test_a_checkpointed_rollout_saves_what_the_force_needs(
     ``"nested"`` (9 steps in 3 segments of 3): the outer scan saves three
     ``[3, N, 3]``, the carry ``(x, v, a)`` at each segment's start. A
     DIFFERENTIATED ``dt`` makes the drift bilinear: its cotangent needs ``v`` and
-    ``a`` of every step, four stacks in all (CPU, 2026-10-31). The masses are an
-    argument, stored once."""
+    ``a`` of every step: three stacks in all, ``(x, v, a)`` (four under session 1's
+    ``jax.checkpoint`` placement, which kept the undrifted positions too; the
+    hand-written reverse transposes the drift itself). The masses are an argument,
+    stored once (CPU, 2026-11-01)."""
     x0, v0, m, wx, _ = _system(jnp.float32)
     k = jnp.asarray(K_EXT, jnp.float32)
 
@@ -344,7 +346,10 @@ def _temp_bytes(checkpoint, steps, inner=None, n=256):
     x0 = jnp.asarray(rng.normal(size=(n, 3)), jnp.float32)
     m = jnp.full((n,), 1.0 / n, jnp.float32)
 
-    def loss(x0, v0, m):
+    # the start acceleration is an input: the start force's reverse is a unit of
+    # the reverse loop of its own, and on the direct sum at this N its pair arrays
+    # are a peak beside the stored carries but not beside a segment's steps
+    def loss(x0, v0, m, a0):
         out = differentiable_rollout(
             _step(),
             x0,
@@ -352,12 +357,15 @@ def _temp_bytes(checkpoint, steps, inner=None, n=256):
             m,
             DT,
             steps,
+            acceleration=a0,
             checkpoint=checkpoint,
             inner_steps=inner,
         )
         return jnp.sum(out.positions * out.velocities)
 
-    compiled = jax.jit(jax.grad(loss, argnums=(0, 1, 2))).lower(x0, x0, m).compile()
+    compiled = (
+        jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3))).lower(x0, x0, m, x0).compile()
+    )
     return compiled.memory_analysis().temp_size_in_bytes
 
 

@@ -10,8 +10,8 @@ run of one configuration.
 The memory model (plan S9, G6): ``peak ~ W_step + S r``. Under ``"step"`` the
 reverse pass stores one STEP RESIDUAL per step -- the drifted positions plus the
 aux's per-particle leaves (12 B/particle in float32, 24 in float64, +4 for the
-fused lane's f_b under ``dehnen_error``), since the checkpoint wraps the force and
-the kick and takes the drifted positions as input. Under ``"nested"`` it stores
+fused lane's f_b under ``dehnen_error``), since the reverse recomputes the force
+and the kick from the drifted positions (``_adjoint_rollout``). Under ``"nested"`` it stores
 one CARRY ``(x, v, a, aux)`` per segment (36 B/particle float32, + f_b) and one
 step residual per step of a segment. The script fits, over the rows with
 ``T >= 2`` (XLA inlines a one-step scan):

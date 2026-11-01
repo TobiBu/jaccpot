@@ -628,6 +628,24 @@ def test_the_device_symmetry_check_tells_a_list_that_is_not():
     )
 
 
+def test_the_device_symmetry_check_over_many_chunks(monkeypatch):
+    """The on-device check's chunk loop (``_SYMMETRY_CHUNK_ON_DEVICE``) gives the
+    verdicts of one chunk: chunks of 2 entries over the same lists, a partial
+    last chunk included."""
+    from jaccpot.runtime import _large_n_grad
+
+    monkeypatch.setattr(_large_n_grad, "_SYMMETRY_CHUNK_ON_DEVICE", 2)
+    check = jax.jit(_large_n_grad._csr_pairs_symmetric_on_device)
+    entries = jnp.asarray([1, 9, 0, 2, 9, 1, 9, 9])
+    offsets, counts = jnp.asarray([0, 2, 5, 6]), jnp.asarray([1, 2, 1])
+    assert bool(check(entries, offsets, counts))
+    assert not bool(check(entries, offsets, jnp.asarray([2, 2, 1])))
+    assert bool(check(entries[:7], offsets, counts))
+    assert not bool(
+        check(jnp.asarray([1, 1, 0]), jnp.asarray([0, 2]), jnp.asarray([2, 1]))
+    )
+
+
 @_GRADIENT
 def test_the_static_fields_are_checked_on_every_trace():
     """The frozen statics are template properties; a trace whose topology differs
