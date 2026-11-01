@@ -45,8 +45,32 @@ WHAT A REVERSE PASS STORES. ``checkpoint`` decides it, and nothing else does:
   storing the per-step residual above, and reverses it. About
   ``num_steps / inner_steps`` carries plus ``inner_steps`` step residuals, for
   one more forward per step than ``"step"``.
+* ``"offload"``: ``"nested"``'s schedule and residuals, in PINNED HOST memory.
+  The forward's outer scan writes each segment's start carry to the host (a
+  ``jax.device_put`` to ``jax.memory.Space.Host`` in the scan body: the scan
+  stacks it in host memory), and the reverse pass's replay of a segment writes
+  its per-step residuals there too; each comes back to the device
+  (``Space.Device``) when its unit of the reverse loop reads it. The device then
+  holds no per-segment and no per-step state: its temporaries are flat in
+  ``num_steps`` and in ``inner_steps``, and the host holds ``num_steps //
+  inner_steps`` carries plus ``inner_steps`` step residuals (plus a remainder
+  segment's start carry), smallest at the default ``inner_steps =
+  round(sqrt(num_steps))``. Per step that moves the step residual out and back
+  once and a carry per segment each way. The arithmetic is ``"nested"``'s: the
+  forward-only program is ``"nested"``'s text, and the gradient is ``"nested"``'s
+  bit for bit (CPU direct sum and fused lane; A100 fused lane, 2e6). Measured
+  (``bench/grad_rollout_memory.py``, A100, ``preset="galaxy"``, float32,
+  ``dehnen_error``, 2026-11-01): device temporaries 840 MiB (440.5 B/particle) at
+  2e6 for T = 4-64, 2739 MiB (359.0 B/particle) at 8e6 for T = 4-256, every
+  slope 0 to the byte (``"nested"``: 363 B/particle at 8e6 plus 40 per carry and
+  14 per step); host 40.00 B/particle per carry and 16.00 per step residual. At
+  1e8 the gradient of T = 4 (segments of 2) and T = 16 (of 4) RAN on one A100:
+  25.66 / 25.86 GiB of temporaries (the device level moved 2 B/particle there),
+  10.4 / 20.9 GiB of host, measured peaks 36.61 GiB (BFC, preallocated 0.95) /
+  36.53 GiB (``cuda_async``; the BFC arena refused T = 16's 25.86 GiB block beside
+  the outputs), each the resident 8.1-8.3 GiB + temporaries + outputs to the MiB.
 
-The three compute the same forward bit for bit (the same expressions in the
+The four compute the same forward bit for bit (the same expressions in the
 same order). Their gradients agree to round-off, NOT bitwise: a checkpoint
 regroups the cotangent sums of a value used on both sides of it, ``"nested"`` sums
 a scan constant's cotangent per segment and then over segments, and XLA fuses
@@ -72,9 +96,15 @@ fuses it differently (direct sum, CPU: up to 62 of 192 elements of one array
 moved by an ulp). A bitwise comparison with ``strict_run_v2`` is a claim about
 the jitted forward, not about the primal of a ``value_and_grad``.
 
-HOST OFFLOAD (session 2) changes WHERE the outer carries live, not what is stored:
-under ``"nested"`` they are the residual ``starts`` of :func:`_adjoint_rollout`'s
-forward (``rollout_fwd``), the one place to put them in host memory.
+HOST OFFLOAD (``"offload"``) changes WHERE ``"nested"``'s residuals live, not what
+is stored: the outer carries are the residual ``starts`` of
+:func:`_adjoint_rollout`'s forward (``rollout_fwd``) and the per-step residuals the
+stack a segment's replay saves in the reverse pass, and both are moved by explicit
+``jax.device_put`` s between ``jax.memory.Space.Device`` and ``Space.Host``. XLA's
+host offloader keeps the stacks in host buffers (``S(5)`` in the GPU program,
+``host_temp_size_in_bytes`` in ``memory_analysis``) and streams one slice per
+iteration. On CPU the two spaces are views of the same RAM: the program and the
+arithmetic are the same, nothing is moved.
 
 THE MASSES are an argument, and must stay one up to the caller's ``jax.jit``: a
 closed-over array is a constant of the compiled program, which XLA compiles
@@ -123,7 +153,7 @@ __all__ = [
 ]
 
 #: what ``differentiable_rollout(checkpoint=...)`` accepts
-CHECKPOINT_MODES = (None, "step", "nested")
+CHECKPOINT_MODES = (None, "step", "nested", "offload")
 
 
 class RolloutResult(NamedTuple):
@@ -367,6 +397,7 @@ def _adjoint_rollout(
     num_steps: int,
     inner: Optional[int],
     keep_va: bool,
+    offload: bool = False,
 ) -> tuple:
     """``num_steps`` steps with a hand-written reverse pass (``"step"``, ``"nested"``).
 
@@ -426,6 +457,10 @@ def _adjoint_rollout(
     keep_va : bool
         Store ``v`` and ``a`` per step (a traced ``dt``, a field that reads the
         velocities).
+    offload : bool
+        With ``inner`` (``"offload"``): keep the segments' start carries and a
+        replayed segment's per-step residuals in host memory, each brought back
+        when the reverse loop reads it.
 
     Returns
     -------
@@ -446,8 +481,28 @@ def _adjoint_rollout(
             lambda cr, _: (one(cr, c)[0], None), carry_in, None, length
         )[0]
 
+    def to_space(tree: Any, space: Any) -> Any:
+        # an explicit transfer between device and host memory ("offload")
+        return jax.tree_util.tree_map(lambda leaf: jax.device_put(leaf, space), tree)
+
+    def stored(tree: Any) -> Any:
+        # what the forward (or a segment's replay) stores: on the host under
+        # "offload", as is otherwise
+        return to_space(tree, jax.memory.Space.Host) if offload else tree
+
+    def loaded(tree: Any) -> Any:
+        # a stored value, back on the device where the reverse reads it
+        return to_space(tree, jax.memory.Space.Device) if offload else tree
+
     def run_saving(carry_in: tuple, c: tuple, length: int) -> tuple:
-        return jax.lax.scan(lambda cr, _: one(cr, c), carry_in, None, length)
+        if not offload:
+            return jax.lax.scan(lambda cr, _: one(cr, c), carry_in, None, length)
+
+        def body(cr: tuple, _: Any) -> tuple:
+            cr, saved = one(cr, c)
+            return cr, stored(saved)
+
+        return jax.lax.scan(body, carry_in, None, length)
 
     def start(carry_in: tuple, c: tuple) -> tuple:
         x, v, _, aux_in = carry_in
@@ -494,7 +549,7 @@ def _adjoint_rollout(
         # the reverse of `length` stored steps, inside one unit's branch
         def body(state: tuple, saved_k: tuple) -> tuple:
             ct_k, c_bar = state
-            ct_k, gc = step_back(ct_k, saved_k, c)
+            ct_k, gc = step_back(ct_k, loaded(saved_k), c)
             return (ct_k, add(c_bar, gc)), None
 
         zero_c = jax.tree_util.tree_map(jnp.zeros_like, c)
@@ -551,13 +606,13 @@ def _adjoint_rollout(
             return out, (saved, start_in, c)
 
         def segment(cr: tuple, _: Any) -> tuple:
-            return run(cr, c, inner), cr
+            return run(cr, c, inner), stored(cr)
 
         out, starts = jax.lax.scan(segment, carry_in, None, outer)
         tail_start = None
         if tail:
             # the remainder segment's start: one more stored carry
-            tail_start = out
+            tail_start = stored(out)
             out = run(out, c, tail)
         return out, (starts, tail_start, start_in, c)
 
@@ -588,13 +643,15 @@ def _adjoint_rollout(
             def unit(ct_u: tuple, u: Array) -> tuple:
                 # u = 0: the start force (or nothing); u = j + 1: segment j;
                 # u = outer + 1: the remainder segment
-                start_j = index(starts, jnp.clip(u - 1, 0, outer - 1))
+                start_j = loaded(index(starts, jnp.clip(u - 1, 0, outer - 1)))
                 branches = [
                     lambda: first_back(ct_u, start_in, c),
                     lambda: segment_back(ct_u, start_j, inner),
                 ]
                 if tail:
-                    branches.append(lambda: segment_back(ct_u, tail_start, tail))
+                    branches.append(
+                        lambda: segment_back(ct_u, loaded(tail_start), tail)
+                    )
                 which = jnp.where(u == 0, 0, jnp.where(u <= outer, 1, 2))
                 return jax.lax.switch(which, branches)
 
@@ -687,10 +744,11 @@ def differentiable_rollout(
     external_args : Any
         The field's parameters (any pytree; arrays differentiable).
     checkpoint : Optional[str]
-        ``None`` (plain scan), ``"step"`` (default) or ``"nested"``: what the
-        reverse pass stores (module docstring). Static.
+        ``None`` (plain scan), ``"step"`` (default), ``"nested"``, or
+        ``"offload"`` (``"nested"`` with what it stores in pinned host memory):
+        what the reverse pass stores and where (module docstring). Static.
     inner_steps : Optional[int]
-        ``"nested"`` only: steps per segment, ``>= 1``; ``None`` takes
+        ``"nested"`` / ``"offload"`` only: steps per segment, ``>= 1``; ``None`` takes
         ``round(sqrt(num_steps))``. Clamped to ``num_steps``. A remainder runs
         as a shorter last segment. Static.
 
@@ -706,8 +764,8 @@ def differentiable_rollout(
     ValueError
         If ``num_steps`` or ``inner_steps`` is not a positive int, ``checkpoint``
         is not one of :data:`CHECKPOINT_MODES`, ``inner_steps`` comes without
-        ``checkpoint="nested"``, ``external_args`` without ``external_fn``, or the
-        arrays' shapes or the state's dtypes disagree.
+        ``checkpoint="nested"`` or ``"offload"``, ``external_args`` without
+        ``external_fn``, or the arrays' shapes or the state's dtypes disagree.
     """
     if isinstance(num_steps, bool) or not isinstance(num_steps, (int, np.integer)):
         raise ValueError(f"num_steps must be a Python int, got {num_steps!r}")
@@ -719,8 +777,8 @@ def differentiable_rollout(
             f"checkpoint must be one of {CHECKPOINT_MODES}, got {checkpoint!r}"
         )
     if inner_steps is not None:
-        if checkpoint != "nested":
-            raise ValueError("inner_steps needs checkpoint='nested'")
+        if checkpoint not in ("nested", "offload"):
+            raise ValueError("inner_steps needs checkpoint='nested' or 'offload'")
         if isinstance(inner_steps, bool) or not isinstance(
             inner_steps, (int, np.integer)
         ):
@@ -810,7 +868,7 @@ def differentiable_rollout(
         carry = jax.lax.scan(step, carry, None, num_steps)[0]
     else:
         inner = None
-        if checkpoint == "nested":
+        if checkpoint in ("nested", "offload"):
             inner = (
                 max(1, round(math.sqrt(num_steps)))
                 if inner_steps is None
@@ -822,7 +880,15 @@ def differentiable_rollout(
         # it) or a field that reads the velocity rows
         keep_va = consts.dt_traced or field_velocities
         carry = _adjoint_rollout(
-            force, drift, force_and_kick, carry, c0, num_steps, inner, keep_va
+            force,
+            drift,
+            force_and_kick,
+            carry,
+            c0,
+            num_steps,
+            inner,
+            keep_va,
+            offload=checkpoint == "offload",
         )
     return RolloutResult(*carry)
 
