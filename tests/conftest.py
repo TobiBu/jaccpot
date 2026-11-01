@@ -531,6 +531,9 @@ _DIFF_FMM_TEST_FILES = frozenset(
         # as arrays, never compiled programs, so the clearing recompiles nothing.
         "test_fused_differentiable_step.py",
         "test_grad_rollout_differentiable.py",
+        # the runner's gradient mode (S9 session 2): one gradient of its chain is
+        # 19-21 GB of compile on CPU
+        "test_runner_gradient_mode.py",
     }
 )
 

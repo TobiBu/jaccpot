@@ -114,6 +114,16 @@ _STRICT_GRAD_ROLLOUT_MODES: tuple[str, ...] = tuple(
         "test_the_far_field_is_load_bearing_in_the_rollout_gradient",
     )
 )
+# The production runner's gradient mode (S9 session 2, track E): the runner's
+# forward pre-pass, then one gradient of the chain of its segments (three segments,
+# one re-planned). Its G1 (the chain's jitted forward against the runner, three
+# lanes, 8-12.5 GB each in one process) in one shard; the gradient's tests in
+# another: ONE gradient compile of the chain peaks at 18.7 GB (Plummer) / 20.9 GB
+# (`dehnen_error`) RSS on CPU, more than the 16 GB runner holds (2026-11-01).
+_STRICT_GRAD_RUNNER = "tests/integration/strict/test_runner_gradient_mode.py"
+_STRICT_GRAD_RUNNER_FORWARD = (
+    f"{_STRICT_GRAD_RUNNER}::test_the_gradient_runs_forward_is_the_runners"
+)
 
 # Unit tests that need two or more devices and skip below them: in the unit shard
 # (one device) they collected and skipped, so the repartition gate they pin (the
@@ -139,6 +149,7 @@ SHARDS: dict[str, list[str]] = {
                 *_STRICT_RUNNER_FILES,
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
+                _STRICT_GRAD_RUNNER,
             )
         ),
     ],
@@ -149,6 +160,11 @@ SHARDS: dict[str, list[str]] = {
         *(f"--deselect={node}" for node in _STRICT_GRAD_ROLLOUT_MODES),
     ],
     "integration-strict-grad-modes": list(_STRICT_GRAD_ROLLOUT_MODES),
+    "integration-strict-grad-runner": [_STRICT_GRAD_RUNNER_FORWARD],
+    "integration-strict-grad-runner-gradient": [
+        _STRICT_GRAD_RUNNER,
+        f"--deselect={_STRICT_GRAD_RUNNER_FORWARD}",
+    ],
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
     "unit": [
         "tests/unit",
