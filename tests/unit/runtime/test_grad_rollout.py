@@ -16,6 +16,11 @@ anywhere:
   stacks and the masses are stored once, and the compiled temporaries grow by the
   carry's bytes per step (36 B/particle float32); ``"nested"`` stores one carry per
   segment plus one per step of a segment;
+* ``"offload"`` stores exactly ``"nested"``'s residuals, in host memory (explicit
+  ``device_put`` s in the hand-written reverse): the same forward and, on the
+  direct sum, the same gradient bit for bit; the GPU's compiled device
+  temporaries are flat in the horizon and the host's grow by ``"nested"``'s
+  carries and step residuals;
 * a failed verdict in the aux is refused on the host, gradient included.
 
 CPU, N = 64.
@@ -74,10 +79,11 @@ def _rollout(x0, v0, m, dt, k, *, checkpoint, steps=STEPS, params=None, **kw):
     )
 
 
-MODES = [None, "step", "nested"]
+MODES = [None, "step", "nested", "offload"]
+MODE_IDS = ["plain", "step", "nested", "offload"]
 
 
-@pytest.mark.parametrize("checkpoint", MODES, ids=["plain", "step", "nested"])
+@pytest.mark.parametrize("checkpoint", MODES, ids=MODE_IDS)
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64], ids=["f32", "f64"])
 def test_the_trajectory_is_a_hand_written_scan(dtype, checkpoint):
     """The caller's velocity Verlet of ``test_strict_runners_on_provider.py``, with
@@ -178,7 +184,7 @@ def test_the_checkpoint_modes_agree_to_round_off(dtype, rtol):
         static_argnums=5,
     )
     (_, ref_out), ref = fn(x0, v0, m, dt, k, None)
-    for mode in ("step", "nested"):
+    for mode in ("step", "nested", "offload"):
         (_, out), grads = fn(x0, v0, m, dt, k, mode)
         named = zip(("x", "v", "a"), out[:3], ref_out[:3])
         for name, g, w in [*named, *zip(("x0", "v0", "m", "dt", "k"), grads, ref)]:
@@ -189,7 +195,7 @@ def test_the_checkpoint_modes_agree_to_round_off(dtype, rtol):
             assert err <= rtol, f"{mode} {name}: {err:.2e} of the largest component"
 
 
-@pytest.mark.parametrize("checkpoint", MODES, ids=["plain", "step", "nested"])
+@pytest.mark.parametrize("checkpoint", MODES, ids=MODE_IDS)
 def test_the_gradient_is_the_finite_differences(checkpoint):
     """``jax.grad`` of a linear functional of the state after 4 steps (float64)
     against central differences, in every input the rollout differentiates: the
@@ -339,7 +345,7 @@ def test_the_velocity_rows_reach_a_field_that_reads_them():
     assert float(jnp.sum(out.velocities**2)) < 0.8 * float(jnp.sum(v0**2))
 
 
-def _temp_bytes(checkpoint, steps, inner=None, n=256):
+def _temp_bytes(checkpoint, steps, inner=None, n=256, host=False):
     from jaccpot.runtime.grad_rollout import differentiable_rollout
 
     rng = np.random.default_rng(0)
@@ -366,7 +372,10 @@ def _temp_bytes(checkpoint, steps, inner=None, n=256):
     compiled = (
         jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3))).lower(x0, x0, m, x0).compile()
     )
-    return compiled.memory_analysis().temp_size_in_bytes
+    stats = compiled.memory_analysis()
+    if host:
+        return stats.temp_size_in_bytes, stats.host_temp_size_in_bytes
+    return stats.temp_size_in_bytes
 
 
 def test_the_compiled_temporaries_grow_by_the_saved_positions():
@@ -384,6 +393,81 @@ def test_the_compiled_temporaries_grow_by_the_saved_positions():
     assert abs(nested / ((2 * 36 + 2 * 12) * n) - 1.0) <= 0.05, nested / n
     plain = (_temp_bytes(None, 8) - _temp_bytes(None, 4)) / 4
     assert plain > 1000 * 12 * n
+
+
+def _host_device_puts(jaxpr) -> list:
+    """Every ``device_put`` to host memory in a jaxpr, sub-jaxprs included: the
+    dtypes and shapes it moves."""
+    found = []
+    for eqn in jaxpr.eqns:
+        if eqn.primitive.name == "device_put" and any(
+            "Host" in str(d) for d in eqn.params.get("devices", ())
+        ):
+            found += [(v.aval.dtype.name, v.aval.shape) for v in eqn.invars]
+        for param in eqn.params.values():
+            for sub in param if isinstance(param, (tuple, list)) else (param,):
+                sub = getattr(sub, "jaxpr", sub)  # a ClosedJaxpr's
+                if hasattr(sub, "eqns"):
+                    found += _host_device_puts(sub)
+    return found
+
+
+def test_offload_stores_nesteds_residuals_in_host_memory(capsys):
+    """``"offload"`` (9 steps in 3 segments of 3, float32): the forward saves the
+    same three ``[3, N, 3]`` carry stacks as ``"nested"``
+    (:func:`test_a_checkpointed_rollout_saves_what_the_force_needs`), typed
+    ``<host>``, and the program moves exactly the stored values to the host: the
+    carry's three arrays in the forward's outer scan and the drifted positions in
+    a segment's replay -- not the kick's linear ``v`` and ``a``. The forward is
+    ``"nested"``'s and so is the gradient, bit for bit, and a second call repeats
+    it (CPU, direct sum: the transfers are copies between views of host
+    memory)."""
+    x0, v0, m, wx, wv = _system(jnp.float32)
+    k = jnp.asarray(K_EXT, jnp.float32)
+
+    def loss(x0, v0, m, k, checkpoint):
+        out = _rollout(x0, v0, m, DT, k, checkpoint=checkpoint, steps=9, inner_steps=3)
+        return jnp.sum(wx * out.positions) + jnp.sum(wv * out.velocities), out
+
+    lines = _residuals(capsys, lambda *a: loss(*a, "offload")[0], x0, v0, m, k)
+    stacks = [ln.split()[0] for ln in lines if "output of scan" in ln]
+    assert stacks == [f"f32<host>[3,{N},3]"] * 3
+    jaxpr = jax.make_jaxpr(
+        jax.grad(lambda *a: loss(*a, "offload")[0], argnums=(0, 1, 2, 3))
+    )(x0, v0, m, k).jaxpr
+    assert sorted(_host_device_puts(jaxpr)) == [("float32", (N, 3))] * 4
+    fn = jax.jit(
+        jax.value_and_grad(loss, argnums=(0, 1, 2, 3), has_aux=True),
+        static_argnums=4,
+    )
+    (_, out_n), g_n = fn(x0, v0, m, k, "nested")
+    (_, out_o), g_o = fn(x0, v0, m, k, "offload")
+    (_, _), g_o2 = fn(x0, v0, m, k, "offload")
+    for a, b, c in zip((*out_o[:3], *g_o), (*out_n[:3], *g_n), (*out_o[:3], *g_o2)):
+        assert np.array_equal(np.asarray(a), np.asarray(b))
+        assert np.array_equal(np.asarray(a), np.asarray(c))
+
+
+@pytest.mark.skipif(
+    jax.default_backend() != "gpu",
+    reason="host memory is a separate space on an accelerator only",
+)
+def test_offload_keeps_the_device_temporaries_flat():
+    """On a GPU: ``"offload"``'s compiled device temporaries are the same at every
+    horizon and segment length, and its host temporaries grow by one carry (36
+    B/particle, float32 direct sum) per segment and the drifted positions (12) per
+    step of a segment: ``"nested"``'s device slopes, moved to the host."""
+    n = 256
+    tb = {
+        key: _temp_bytes("offload", *key, n=n, host=True)
+        for key in ((9, 3), (25, 5), (16, 2))
+    }
+    (d9, h9), (d25, h25), (d16, h16) = tb[(9, 3)], tb[(25, 5)], tb[(16, 2)]
+    assert d9 == d25 == d16
+    # 9 -> 25 steps at segments of 3 -> 5: +2 carries, +2 step residuals
+    assert h25 - h9 == (2 * 36 + 2 * 12) * n
+    # 9:3 -> 16:2: +5 carries, -1 step residual
+    assert h16 - h9 == (5 * 36 - 12) * n
 
 
 # --------------------------------------------------------------------------
@@ -464,7 +548,7 @@ def test_a_step_without_a_verdict_always_passes_and_an_unknown_aux_is_refused():
     [
         (dict(num_steps=0), "num_steps must be >= 1"),
         (dict(checkpoint="remat"), "checkpoint must be one of"),
-        (dict(inner_steps=2), "inner_steps needs checkpoint='nested'"),
+        (dict(inner_steps=2), "inner_steps needs checkpoint='nested' or 'offload'"),
         (dict(checkpoint="nested", inner_steps=0), "inner_steps must be >= 1"),
         (dict(external_args={"k": 1.0}), "external_args needs an external_fn"),
         (dict(masses=jnp.ones((N + 1,))), r"masses must be \[64\]"),
