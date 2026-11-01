@@ -346,7 +346,10 @@ def _temp_bytes(checkpoint, steps, inner=None, n=256):
     x0 = jnp.asarray(rng.normal(size=(n, 3)), jnp.float32)
     m = jnp.full((n,), 1.0 / n, jnp.float32)
 
-    def loss(x0, v0, m):
+    # the start acceleration is an input: the start force's reverse is a unit of
+    # the reverse loop of its own, and on the direct sum at this N its pair arrays
+    # are a peak beside the stored carries but not beside a segment's steps
+    def loss(x0, v0, m, a0):
         out = differentiable_rollout(
             _step(),
             x0,
@@ -354,12 +357,15 @@ def _temp_bytes(checkpoint, steps, inner=None, n=256):
             m,
             DT,
             steps,
+            acceleration=a0,
             checkpoint=checkpoint,
             inner_steps=inner,
         )
         return jnp.sum(out.positions * out.velocities)
 
-    compiled = jax.jit(jax.grad(loss, argnums=(0, 1, 2))).lower(x0, x0, m).compile()
+    compiled = (
+        jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3))).lower(x0, x0, m, x0).compile()
+    )
     return compiled.memory_analysis().temp_size_in_bytes
 
 
