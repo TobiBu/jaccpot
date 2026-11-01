@@ -260,7 +260,7 @@ def _residuals(capsys, fn, *args) -> list[str]:
     [
         ("step", 4, False, 4, 1),
         ("nested", 9, False, 3, 3),
-        ("step", 4, True, 4, 4),
+        ("step", 4, True, 4, 3),
     ],
     ids=["step", "nested", "step-traced-dt"],
 )
@@ -278,8 +278,10 @@ def test_a_checkpointed_rollout_saves_what_the_force_needs(
     ``"nested"`` (9 steps in 3 segments of 3): the outer scan saves three
     ``[3, N, 3]``, the carry ``(x, v, a)`` at each segment's start. A
     DIFFERENTIATED ``dt`` makes the drift bilinear: its cotangent needs ``v`` and
-    ``a`` of every step, four stacks in all (CPU, 2026-10-31). The masses are an
-    argument, stored once."""
+    ``a`` of every step: three stacks in all, ``(x, v, a)`` (four under session 1's
+    ``jax.checkpoint`` placement, which kept the undrifted positions too; the
+    hand-written reverse transposes the drift itself). The masses are an argument,
+    stored once (CPU, 2026-11-01)."""
     x0, v0, m, wx, _ = _system(jnp.float32)
     k = jnp.asarray(K_EXT, jnp.float32)
 
