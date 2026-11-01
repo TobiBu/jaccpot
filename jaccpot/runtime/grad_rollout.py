@@ -129,6 +129,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from beartype.typing import Callable
+from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 from jaxtyping import Array
 
 from .fused_topology import (
@@ -437,6 +438,19 @@ def _adjoint_rollout(
     close over values being differentiated (pass them as ``params``): a
     ``custom_vjp`` rejects that.
 
+    THE AUX GUARD. A loss that reads a floating aux leaf differentiably would get
+    no gradient through it here -- a plausible, wrong number (the production
+    runner's gradient chain did, session 2: the last self-gravity it carried in
+    the aux). So the rule is defined with ``symbolic_zeros=True`` and the reverse
+    REFUSES, when the reverse pass is traced, an aux cotangent that is not a
+    symbolic zero (:func:`_refuse_aux_cotangent`): before anything compiles. It
+    returns symbolic zeros for the aux input, so a rollout continuing another's
+    aux (a chain of segments) gives that one's aux a symbolic zero, not a
+    false alarm. The INPUT side (a floating aux leaf that depends on a
+    differentiated value, whose tangent is dropped) is not refused: JAX gives
+    every floating output of a ``custom_vjp`` a tangent, so a chained rollout's
+    aux input looks the same as a differentiated one at trace time.
+
     Parameters
     ----------
     force : Callable[..., tuple]
@@ -595,6 +609,12 @@ def _adjoint_rollout(
         return run(carry_in, c, num_steps)
 
     def rollout_fwd(carry_in: tuple, c: tuple) -> tuple:
+        # symbolic_zeros=True: every input leaf comes as a CustomVJPPrimal
+        carry_in, c = jax.tree_util.tree_map(
+            lambda leaf: leaf.value,
+            (carry_in, c),
+            is_leaf=lambda leaf: isinstance(leaf, CustomVJPPrimal),
+        )
         x0, v0, _, aux0 = carry_in
         # the start force's inputs: x0 is an input of the program anyway; v0
         # only where the field reads it
@@ -617,7 +637,10 @@ def _adjoint_rollout(
         return out, (starts, tail_start, start_in, c)
 
     def rollout_bwd(res: tuple, ct_out: tuple) -> tuple:
-        ct = tuple(ct_out[:3])
+        _refuse_aux_cotangent(ct_out[3], mode)
+        # symbolic_zeros=True: an output the loss does not read comes as a
+        # SymbolicZero; the reverse loop reads all three, instantiated as before
+        ct = tuple(_instantiated(leaf) for leaf in ct_out[:3])
         if inner is None:
             saved, start_in, c = res
             start_in = _start_inputs(start_in)
@@ -665,8 +688,69 @@ def _adjoint_rollout(
         x0, v0, aux0 = start_in
         return x0, (jnp.zeros_like(x0) if v0 is None else v0), aux0
 
-    rollout.defvjp(rollout_fwd, rollout_bwd)
+    mode = "step" if inner is None else ("offload" if offload else "nested")
+    rollout.defvjp(rollout_fwd, rollout_bwd, symbolic_zeros=True)
     return rollout(carry, consts)
+
+
+def _instantiated(cotangent: Any) -> Any:
+    """A cotangent as an array: a :class:`SymbolicZero` becomes zeros of its type.
+
+    Parameters
+    ----------
+    cotangent : Any
+        An array or a ``SymbolicZero``.
+
+    Returns
+    -------
+    Any
+        The array, or ``zeros(shape, dtype)``.
+    """
+    if isinstance(cotangent, SymbolicZero):
+        return jnp.zeros(cotangent.shape, cotangent.dtype)
+    return cotangent
+
+
+def _refuse_aux_cotangent(ct_aux: Any, mode: str) -> None:
+    """Raise if the loss reads a floating aux leaf of the rollout differentiably.
+
+    Called by :func:`_adjoint_rollout`'s reverse rule while the reverse pass is
+    TRACED: a leaf whose cotangent is not a symbolic zero has a derivative the
+    hand-written reverse would drop.
+
+    Parameters
+    ----------
+    ct_aux : Any
+        The cotangent of the rollout's output aux (a pytree, ``SymbolicZero``
+        leaves where nothing reads it).
+    mode : str
+        The checkpoint mode, for the message.
+
+    Raises
+    ------
+    ValueError
+        If a floating leaf's cotangent is not a symbolic zero.
+    """
+    leaves = jax.tree_util.tree_leaves_with_path(
+        ct_aux, is_leaf=lambda leaf: isinstance(leaf, SymbolicZero)
+    )
+    read = [
+        jax.tree_util.keystr(path)
+        for path, leaf in leaves
+        if not isinstance(leaf, SymbolicZero)
+        and jnp.issubdtype(getattr(leaf, "dtype", np.int32), jnp.inexact)
+    ]
+    if read:
+        raise ValueError(
+            f"differentiable_rollout(checkpoint={mode!r}): the gradient reads the "
+            f"rollout's aux (leaves aux{', aux'.join(read)} get a cotangent), but "
+            "this mode's reverse does not differentiate the aux, so that part of "
+            "the gradient would be silently zero. Carry a differentiated value in "
+            "the state or in `params`, use checkpoint=None (a plain scan "
+            "differentiates the aux), or keep the aux leaf as a value and take its "
+            "tangent from a recompute outside the rollout "
+            "(`jaccpot.production_grad._keep_value`)."
+        )
 
 
 def differentiable_rollout(
@@ -730,7 +814,13 @@ def differentiable_rollout(
         start force's input: ``None``, or the provider's ``(f_b, None, None)``
         seed under ``mac_type='dehnen_error'``. With ``acceleration`` given it is
         the aux that came with it (a previous rollout's ``RolloutResult.aux``),
-        in the structure ``step_fn`` returns.
+        in the structure ``step_fn`` returns. Under ``"step"``, ``"nested"`` and
+        ``"offload"`` the aux is NOT differentiated, in or out: a gradient that
+        reads a floating leaf of the returned aux is refused when it is traced
+        (``ValueError``); a floating leaf passed in that depends on a
+        differentiated value gets no gradient, silently (stop its gradient, or
+        pass the value in the state or ``params``). ``checkpoint=None``
+        differentiates both.
     acceleration : Optional[Array]
         ``[N, 3]`` TOTAL acceleration at the start positions (force plus field).
         ``None``: computed here, ``step_fn`` at ``positions`` plus the field, so

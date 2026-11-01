@@ -593,3 +593,105 @@ def test_the_gradient_verdict_reads_the_gradient_bits():
     assert not rollout_ok(aux, gradient=True)
     with pytest.raises(RolloutVerdictError, match="gradient verdict failed"):
         check_rollout(aux, gradient=True)
+
+
+# ---------------------------------------------------------------------------
+# The aux guard: a gradient through the aux is refused where it would be dropped.
+# ---------------------------------------------------------------------------
+
+
+def _carrying_acc():
+    """The direct sum, its acceleration also carried in the aux (as the production
+    runner's gradient chain carried a segment's last self-gravity)."""
+    base = _step()
+
+    def step(x, m, params, aux):
+        acc, _ = base(x, m, params, None)
+        return acc, (acc,)
+
+    return step
+
+
+def _with_scale():
+    """The direct sum with a provider-like aux: a gradient-stopped float (f_b's
+    role) and an integer count (the verdict bits')."""
+    base = _step()
+
+    def step(x, m, params, aux):
+        acc, _ = base(x, m, params, None)
+        scale = jax.lax.stop_gradient(jnp.sum(acc * acc, axis=1))
+        return acc, (scale, aux[1] + jnp.uint32(1))
+
+    return step
+
+
+@pytest.mark.parametrize("checkpoint", MODES, ids=MODE_IDS)
+def test_a_gradient_through_the_aux_is_refused_when_it_would_be_dropped(checkpoint):
+    """A loss that reads a value the step carries in the aux: under the
+    hand-written reverses (``"step"``, ``"nested"``, ``"offload"``) the reverse
+    pass refuses it while it is TRACED (``make_jaxpr``: nothing is compiled or
+    run), naming the mode and the leaf; a plain scan differentiates it. Measured
+    before the guard (2026-11-01): the gradient through the aux was exactly 0.0 in
+    the three modes, 9.59 (norm) under ``None``."""
+    from jaccpot.runtime.grad_rollout import differentiable_rollout
+
+    x0, v0, m, wx, _ = _system()
+    a0 = jnp.zeros_like(x0)
+
+    def loss(x):
+        out = differentiable_rollout(
+            _carrying_acc(),
+            x,
+            v0,
+            m,
+            DT,
+            3,
+            aux=(a0,),
+            acceleration=a0,
+            checkpoint=checkpoint,
+            inner_steps=2 if checkpoint in ("nested", "offload") else None,
+        )
+        return jnp.sum(wx * out.aux[0])
+
+    if checkpoint is None:
+        grad = jax.jit(jax.grad(loss))(x0)
+        assert float(jnp.linalg.norm(grad)) > 0.0
+        return
+    with pytest.raises(ValueError, match=rf"checkpoint={checkpoint!r}.*aux\[0\]"):
+        jax.make_jaxpr(jax.grad(loss))(x0)
+
+
+@pytest.mark.parametrize("checkpoint", MODES, ids=MODE_IDS)
+def test_a_chain_that_passes_its_aux_on_is_not_refused(checkpoint):
+    """Two rollouts, the second continuing the first's acceleration and aux (a
+    gradient-stopped float and an integer, the provider's ``(f_b, bits)`` shape),
+    a loss on the state: the aux the second reads gets a symbolic-zero cotangent,
+    so the first's guard stays quiet; the gradient is ``None``'s to round-off."""
+    from jaccpot.runtime.grad_rollout import differentiable_rollout
+
+    x0, v0, m, wx, wv = _system()
+    aux0 = (jnp.zeros((N,)), jnp.uint32(0))
+
+    def loss(x, mode):
+        kw = dict(
+            checkpoint=mode,
+            inner_steps=2 if mode in ("nested", "offload") else None,
+        )
+        one = differentiable_rollout(_with_scale(), x, v0, m, DT, 2, aux=aux0, **kw)
+        two = differentiable_rollout(
+            _with_scale(),
+            one.positions,
+            one.velocities,
+            m,
+            DT,
+            3,
+            aux=one.aux,
+            acceleration=one.acceleration,
+            **kw,
+        )
+        return jnp.sum(wx * two.positions) + jnp.sum(wv * two.velocities)
+
+    got = jax.jit(jax.grad(lambda x: loss(x, checkpoint)))(x0)
+    want = jax.jit(jax.grad(lambda x: loss(x, None)))(x0)
+    scale = float(jnp.max(jnp.abs(want)))
+    assert float(jnp.max(jnp.abs(got - want))) <= 1e-12 * scale
