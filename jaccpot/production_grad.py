@@ -40,8 +40,8 @@ trajectory bit for bit (``tests/integration/strict/test_runner_gradient_mode.py`
 * ``"eager_self"`` (``JACCPOT_STRICT_CAPS_ONLY_PREPARE=0``: a full re-prepare's
   evaluation) is chained as ``"seed_kept"`` and not gated bitwise.
 
-The chain evaluates every start force itself (checkpointed as the rollout's own
-start force) and adds the field as the runner does, EAGERLY: behind an
+The chain evaluates every start force itself (under ``jax.checkpoint``, outside
+the rollouts' hand-written reverse) and adds the field as the runner does, EAGERLY: behind an
 ``optimization_barrier``, so XLA cannot contract the field's last multiply into the
 add (an FMA). That makes a one-multiply field (the tests' harmonic pull) bitwise at
 a ``"self"`` boundary. A field with more arithmetic is not always bitwise there or
@@ -98,7 +98,6 @@ from beartype.typing import Callable
 from jaccpot.runtime.fused_topology import NEEDS_FIELDS
 from jaccpot.runtime.grad_rollout import (
     RolloutResult,
-    _checkpointed,
     check_rollout,
     differentiable_rollout,
 )
@@ -338,12 +337,16 @@ _keep_value.defvjp(_keep_value_fwd, _keep_value_bwd)
 
 
 def _carrying_self(step_fn: Callable[..., tuple]) -> Callable[..., tuple]:
-    """``step_fn`` with its acceleration also carried in the aux.
+    """``step_fn`` with its acceleration and its input aux also carried in the aux.
 
     For the segment BEFORE a ``"self"`` boundary: the runner's retry there starts
     from the handle's self-gravity, the last step's, which the rollout's result
-    (the total acceleration) does not hold. The aux becomes ``(aux, acc)``; the
-    values are ``step_fn``'s.
+    (the total acceleration) does not hold. The aux becomes ``(aux, acc,
+    aux_in)``; the values are ``step_fn``'s. The rollout does not differentiate
+    its aux under ``"step"`` / ``"nested"`` (``grad_rollout._adjoint_rollout``),
+    so there the carried acceleration is a VALUE only: its tangent is the force
+    recomputed from the last step's inputs, the end positions and ``aux_in``
+    (:meth:`GradientPlan.rollout`).
 
     Parameters
     ----------
@@ -353,12 +356,58 @@ def _carrying_self(step_fn: Callable[..., tuple]) -> Callable[..., tuple]:
     Returns
     -------
     Callable[..., tuple]
-        ``step(x, m, params, (aux, acc_prev)) -> (acc, (aux, acc))``.
+        ``step(x, m, params, (aux, acc_prev, aux_prev)) -> (acc, (aux_out, acc,
+        aux))``.
     """
 
     def step(x: Any, m: Any, params: Any, aux: Any) -> tuple:
         acc, inner = step_fn(x, m, params, aux[0])
-        return acc, (inner, acc)
+        return acc, (inner, acc, aux[0])
+
+    return step
+
+
+def _under_plan(
+    engine: Any, plan: dict, step_fn: Callable[..., tuple], in_chain: list
+) -> Callable[..., tuple]:
+    """``step_fn`` that traces under its segment's ``plan`` wherever it is traced.
+
+    The chain traces each segment's forward with that segment's plan installed
+    (:meth:`GradientPlan.rollout`). The rollout's reverse under ``"step"`` /
+    ``"nested"`` is hand-written (``grad_rollout._adjoint_rollout``, a
+    ``custom_vjp``) and traces the step AGAIN when the reverse pass is built: after
+    the chain's loop, when the last segment's plan -- or, past the loop's
+    ``_trace_state_kept``, the caller's -- is the engine's. A rebuild traced there
+    takes another plan's caps and the step's frozen grad-plan statics refuse it.
+    Outside the loop (``in_chain[0]`` false) the step therefore installs its plan
+    for the call and leaves the engine as it found it; inside, it traces exactly
+    as before.
+
+    Parameters
+    ----------
+    engine : Any
+        The runtime engine.
+    plan : dict
+        The segment's plan (:func:`_plan_snapshot`).
+    step_fn : Callable[..., tuple]
+        The segment's step.
+    in_chain : list
+        One flag: ``True`` while the chain's forward loop traces.
+
+    Returns
+    -------
+    Callable[..., tuple]
+        ``step_fn`` with the same signature.
+    """
+
+    def step(x: Any, m: Any, params: Any, aux: Any) -> tuple:
+        if in_chain[0]:
+            return step_fn(x, m, params, aux)
+        from jaccpot.production import _trace_state_kept
+
+        with _trace_state_kept(engine):
+            _install_plan(engine, plan)
+            return step_fn(x, m, params, aux)
 
     return step
 
@@ -535,6 +584,8 @@ class GradientPlan:
         bits: Any = None
         needs: Any = None
         f_b: Any = None
+        # true while the loop below traces (`_under_plan`)
+        in_chain = [True]
         with _trace_state_kept(self.engine):
             for k, seg in enumerate(segments):
                 _install_plan(self.engine, seg.plan)
@@ -543,16 +594,28 @@ class GradientPlan:
                 def self_at(
                     x_in: Any, m_in: Any, aux_in: Any, _base: Callable = base
                 ) -> tuple:
-                    # one force outside the scans (a segment's start), checkpointed
-                    # as the rollout's own start force
+                    # one force outside the rollouts (a segment's start)
                     acc, inner = _base(x_in, m_in, params, aux_in)
                     return jnp.asarray(acc, dtype), inner
 
+                # Rematerialised in the reverse pass, so its residuals (one whole
+                # force's) are not held through the chain's; outside any loop, so
+                # `prevent_cse` keeps XLA from folding the recompute into the
+                # forward. (The rollout's own start force is a branch of its
+                # hand-written reverse loop instead, which also keeps its zero /
+                # iota fills apart: `grad_rollout._adjoint_rollout`.)
                 self_force = (
-                    self_at if checkpoint is None else _checkpointed(self_at, "edge")
+                    self_at
+                    if checkpoint is None
+                    else jax.checkpoint(self_at, prevent_cse=True)
                 )
                 carry_self = k + 1 < len(segments) and segments[k + 1].kind == "self"
-                step_fn = _carrying_self(base) if carry_self else base
+                step_fn = _under_plan(
+                    self.engine,
+                    seg.plan,
+                    _carrying_self(base) if carry_self else base,
+                    in_chain,
+                )
                 seed = array(seg.seed)
                 restart = self.boundary if k == 0 else None
                 if prev is None and seg.kind in ("carried", "self"):
@@ -601,7 +664,7 @@ class GradientPlan:
                 else:
                     raise ValueError(f"unknown segment start kind {seg.kind!r}")
                 if carry_self:
-                    aux0 = (aux0, jnp.zeros((n, 3), dtype))
+                    aux0 = (aux0, jnp.zeros((n, 3), dtype), aux0)
                 out = differentiable_rollout(
                     step_fn,
                     x,
@@ -615,9 +678,25 @@ class GradientPlan:
                 )
                 inner = out.aux
                 if carry_self:
-                    inner, prev_self = out.aux
+                    inner, last_self, last_in = out.aux
+                    # The last step's self-gravity. A plain scan differentiates
+                    # the aux; "step" / "nested" do not (their reverse is
+                    # hand-written), so there its VALUE comes from the aux (the
+                    # handle's, bitwise) and its TANGENT from the same force
+                    # recomputed on this segment's plan at the same inputs -- the
+                    # end positions are the last step's drifted ones, `last_in` its
+                    # aux -- so on the same lists.
+                    prev_self = (
+                        last_self
+                        if checkpoint is None
+                        else _keep_value(
+                            jnp.asarray(last_self, dtype),
+                            self_force(out.positions, m, last_in)[0],
+                        )
+                    )
                 f_b, bits, needs = inner
                 x, v, prev = out.positions, out.velocities, out
+        in_chain[0] = False
         assert prev is not None
         return RolloutResult(x, v, prev.acceleration, (f_b, bits, needs))
 
