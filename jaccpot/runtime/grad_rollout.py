@@ -56,7 +56,19 @@ WHAT A REVERSE PASS STORES. ``checkpoint`` decides it, and nothing else does:
   inner_steps`` carries plus ``inner_steps`` step residuals (plus a remainder
   segment's start carry), smallest at the default ``inner_steps =
   round(sqrt(num_steps))``. Per step that moves the step residual out and back
-  once and a carry per segment each way. The arithmetic is ``"nested"``'s.
+  once and a carry per segment each way. The arithmetic is ``"nested"``'s: the
+  forward-only program is ``"nested"``'s text, and the gradient is ``"nested"``'s
+  bit for bit (CPU direct sum and fused lane; A100 fused lane, 2e6). Measured
+  (``bench/grad_rollout_memory.py``, A100, ``preset="galaxy"``, float32,
+  ``dehnen_error``, 2026-11-01): device temporaries 840 MiB (440.5 B/particle) at
+  2e6 for T = 4-64, 2739 MiB (359.0 B/particle) at 8e6 for T = 4-256, every
+  slope 0 to the byte (``"nested"``: 363 B/particle at 8e6 plus 40 per carry and
+  14 per step); host 40.00 B/particle per carry and 16.00 per step residual. At
+  1e8 the gradient of T = 4 (segments of 2) and T = 16 (of 4) RAN on one A100:
+  25.66 / 25.86 GiB of temporaries (the device level moved 2 B/particle there),
+  10.4 / 20.9 GiB of host, measured peaks 36.61 GiB (BFC, preallocated 0.95) /
+  36.53 GiB (``cuda_async``; the BFC arena refused T = 16's 25.86 GiB block beside
+  the outputs), each the resident 8.1-8.3 GiB + temporaries + outputs to the MiB.
 
 The four compute the same forward bit for bit (the same expressions in the
 same order). Their gradients agree to round-off, NOT bitwise: a checkpoint

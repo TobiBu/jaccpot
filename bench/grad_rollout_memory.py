@@ -29,8 +29,9 @@ step residual per step of a segment. The script fits, over the rows with
   row also lists the program's host transfers, read off the compiled HLO: every
   ``dynamic-update-slice`` into a host buffer (``S(5)``, device -> host) and every
   ``dynamic-slice`` out of one (host -> device), with the bytes per particle it
-  moves per execution and its loop (the forward's outer scan, or the reverse
-  pass's segment recompute).
+  moves per execution and its pass (the forward's outer scan writes the
+  carries; in the reverse a segment's replay writes its step residuals and the
+  reverse loop reads both back).
 
 ``--execute`` also RUNS the gradient at the largest horizon of ``--execute-mode``
 (default ``"step"``) and records the allocator's peak (``memory_stats()``), to
@@ -290,11 +291,9 @@ def _host_transfers(hlo: str, n: int) -> list[dict]:
         operands = [o.strip().lstrip("%") for o in op.group(2).split(",")]
         meta = re.search(r'op_name="([^"]*)"', line)
         where = meta.group(1) if meta else ""
-        loop = (
-            "reverse: segment recompute"
-            if "rematted_computation/while" in where
-            else ("reverse" if "transpose(" in where else "forward")
-        )
+        # the hand-written reverse (``_adjoint_rollout``'s ``rollout_bwd``) runs
+        # under ``transpose(...)``: a write there is a segment's replay
+        loop = "reverse" if "transpose(" in where else "forward"
         if op.group(1) == "dynamic-update-slice" and "S(5)" in layout:
             size = shapes.get(operands[1], ("", 0, False))[1]
             sites.append({"direction": "to_host", "bytes": size, "loop": loop})
