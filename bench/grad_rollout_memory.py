@@ -21,13 +21,23 @@ step residual per step of a segment. The script fits, over the rows with
 * ``"nested"``: ``temp = W + a n_outer + b n_inner`` over whole segments of at
   least 2 steps, and prints ``a / N`` (the carry) and ``b / N`` (the step
   residual). Horizons ``T:inner`` pin the segment length, so the two counts vary
-  independently.
+  independently;
+* ``"offload"`` (``"nested"`` with its carries and step residuals in pinned host
+  memory): the same model fitted twice, to the DEVICE temporaries (both slopes
+  ~0: flat in ``T`` and ``inner``) and to the HOST temporaries
+  (``host_temp_size_in_bytes``: ``a`` the carry, ``b`` the step residual). Each
+  row also lists the program's host transfers, read off the compiled HLO: every
+  ``dynamic-update-slice`` into a host buffer (``S(5)``, device -> host) and every
+  ``dynamic-slice`` out of one (host -> device), with the bytes per particle it
+  moves per execution and its loop (the forward's outer scan, or the reverse
+  pass's segment recompute).
 
-``--execute`` also RUNS the gradient at the largest ``"step"`` horizon and records
-the allocator's peak (``memory_stats()``), to check the model against a measured
-peak. ``--check`` runs the GPU functional gate instead: the forward-only rollout
-over ``differentiable_step`` against the one over ``step`` (bitwise), and the
-gradient twice (finite, and A-vs-A bitwise).
+``--execute`` also RUNS the gradient at the largest horizon of ``--execute-mode``
+(default ``"step"``) and records the allocator's peak (``memory_stats()``), to
+check the model against a measured peak. The peak is the process's: one executed
+mode per process. ``--check`` runs the GPU functional gate instead: the
+forward-only rollout over ``differentiable_step`` against the one over ``step``
+(bitwise), and the gradient twice (finite, and A-vs-A bitwise).
 
 Forces:
 
@@ -54,6 +64,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 from typing import Any, Callable, Optional
@@ -74,18 +85,24 @@ def _args(argv: Optional[list[str]]) -> argparse.Namespace:
         "--modes",
         nargs="+",
         default=["none", "step", "nested"],
-        help="none|step|nested",
+        help="none|step|nested|offload",
     )
     ap.add_argument(
         "--nested-steps",
         nargs="*",
         default=["4", "9", "16", "8:2", "16:2", "12:3", "24:3"],
-        help="nested: extra horizons for the fit, T or T:inner",
+        help="nested / offload: extra horizons for the fit, T or T:inner",
     )
     ap.add_argument(
         "--execute",
         action="store_true",
-        help="also run the gradient at the largest step horizon (measured peak)",
+        help="also run the gradient at the largest horizon of --execute-mode "
+        "(measured peak)",
+    )
+    ap.add_argument(
+        "--execute-mode",
+        default="step",
+        help="the mode --execute runs (one per process: the peak is the process's)",
     )
     ap.add_argument(
         "--check",
@@ -97,7 +114,7 @@ def _args(argv: Optional[list[str]]) -> argparse.Namespace:
         "--inner",
         type=int,
         default=None,
-        help="nested: steps per segment (default round(sqrt(T)))",
+        help="nested / offload: steps per segment (default round(sqrt(T)))",
     )
     ap.add_argument(
         "--forward-only",
@@ -196,14 +213,14 @@ def _counts(mode: str, steps: int, inner: Optional[int]) -> tuple[int, int]:
     return outer + (1 if tail else 0), max(k, tail)
 
 
-def _fit(rows: list[dict], mode: str) -> Optional[dict]:
+def _fit(rows: list[dict], mode: str, key: str = "temp_bytes") -> Optional[dict]:
     import numpy as np
 
     # T >= 2 (a one-step scan is inlined); nested: whole segments of >= 2 steps (a
     # one-step inner scan is inlined too, and a remainder adds its own buffers)
     use = [r for r in rows if r["steps"] >= 2 and r["fit"]]
-    t = np.array([r["temp_bytes"] for r in use], np.float64)
-    if mode == "nested":
+    t = np.array([r[key] for r in use], np.float64)
+    if mode in ("nested", "offload"):
         a = np.array([[1.0, r["carries"], r["step_residuals"]] for r in use])
         if len(use) < 3 or np.linalg.matrix_rank(a) < 3:
             return None
@@ -225,6 +242,69 @@ def _fit(rows: list[dict], mode: str) -> Optional[dict]:
         "step_bytes": float(slope),
         "max_residual_bytes": float(np.max(np.abs(resid))),
     }
+
+
+_SHAPE = re.compile(r"^\s*(?:ROOT )?%(\S+) = (\w+)\[([\d,]*)\]\{([^}]*)\}")
+_ITEMSIZE = {"f64": 8, "f32": 4, "s32": 4, "u32": 4, "s64": 8, "u64": 8, "f16": 2}
+
+
+def _host_transfers(hlo: str, n: int) -> list[dict]:
+    """The compiled program's transfers to and from host memory, per site.
+
+    A device -> host write is a ``dynamic-update-slice`` whose result is a host
+    buffer (layout memory space ``S(5)``); a host -> device read a
+    ``dynamic-slice`` of one. Each site moves its slice once per execution of the
+    loop body it sits in; ``loop`` names that loop from the op's metadata.
+
+    Parameters
+    ----------
+    hlo : str
+        ``compiled.as_text()``.
+    n : int
+        Particles, for the bytes per particle.
+
+    Returns
+    -------
+    list[dict]
+        ``{"direction", "bytes_per_particle", "loop"}`` per site.
+    """
+    shapes: dict[str, tuple[str, int, bool]] = {}
+    lines = hlo.splitlines()
+    for line in lines:
+        m = _SHAPE.match(line)
+        if m:
+            name, dt, dims, layout = m.groups()
+            size = _ITEMSIZE.get(dt, 4) * math.prod(
+                int(d) for d in dims.split(",") if d
+            )
+            shapes[name] = (dt, size, "S(5)" in layout)
+    sites = []
+    for line in lines:
+        m = _SHAPE.match(line)
+        if not m:
+            continue
+        name, _, _, layout = m.groups()
+        op = re.search(r"\} (dynamic-update-slice|dynamic-slice)\(([^)]*)\)", line)
+        if not op:
+            continue
+        operands = [o.strip().lstrip("%") for o in op.group(2).split(",")]
+        meta = re.search(r'op_name="([^"]*)"', line)
+        where = meta.group(1) if meta else ""
+        loop = (
+            "reverse: segment recompute"
+            if "rematted_computation/while" in where
+            else ("reverse" if "transpose(" in where else "forward")
+        )
+        if op.group(1) == "dynamic-update-slice" and "S(5)" in layout:
+            size = shapes.get(operands[1], ("", 0, False))[1]
+            sites.append({"direction": "to_host", "bytes": size, "loop": loop})
+        elif op.group(1) == "dynamic-slice" and shapes.get(operands[0], (0, 0, 0))[2]:
+            sites.append(
+                {"direction": "to_device", "bytes": shapes[name][1], "loop": loop}
+            )
+    for site in sites:
+        site["bytes_per_particle"] = site.pop("bytes") / n
+    return sites
 
 
 def _bitwise(a, b) -> int:
@@ -284,15 +364,17 @@ def _check(args, prov, aux0, x0, v0, m, w) -> dict:
             flush=True,
         )
     modes = [k for k in out if k.startswith("grad_") and isinstance(out[k], list)]
-    base = out[modes[0]]
-    for key in modes[1:]:
-        rel = [
-            float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
-            / max(float(np.max(np.abs(np.asarray(b)))), 1e-300)
-            for a, b in zip(out[key], base)
-        ]
-        out[f"{key}_vs_{modes[0]}_maxrel"] = rel
-        print(f"{key} vs {modes[0]}: max rel {max(rel):.2e}")
+    for i, ref_key in enumerate(modes):
+        for key in modes[i + 1 :]:
+            rel = [
+                float(np.max(np.abs(np.asarray(a) - np.asarray(b))))
+                / max(float(np.max(np.abs(np.asarray(b)))), 1e-300)
+                for a, b in zip(out[key], out[ref_key])
+            ]
+            differ = sum(_bitwise(a, b) for a, b in zip(out[key], out[ref_key]))
+            out[f"{key}_vs_{ref_key}_maxrel"] = rel
+            out[f"{key}_vs_{ref_key}_differ"] = differ
+            print(f"{key} vs {ref_key}: max rel {max(rel):.2e}, {differ} differ")
     for key in modes:
         del out[key]
     return out
@@ -346,14 +428,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         checkpoint = None if mode == "none" else mode
         rows = []
         horizons = [(int(t), args.inner) for t in args.steps]
-        if mode == "nested":
+        if mode in ("nested", "offload"):
             for item in args.nested_steps:
                 t, _, k = str(item).partition(":")
                 pair = (int(t), int(k) if k else args.inner)
                 if pair not in horizons:
                     horizons.append(pair)
         for steps, inner in horizons:
-            inner = inner if mode == "nested" else None
+            inner = inner if mode in ("nested", "offload") else None
 
             def rollout(x, v, mm, a, _steps=steps, _inner=inner):
                 return differentiable_rollout(
@@ -381,14 +463,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                 fn = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))
             call = (x0, v0, m, aux0) + (() if args.forward_only else (w,))
             t0 = time.perf_counter()
-            stats = fn.lower(*call).compile().memory_analysis()
+            compiled = fn.lower(*call).compile()
+            stats = compiled.memory_analysis()
             row = {
                 "mode": mode,
                 "steps": int(steps),
                 "inner": inner,
                 "carries": _counts(mode, steps, inner)[0],
                 "step_residuals": _counts(mode, steps, inner)[1],
-                "fit": mode != "nested"
+                "fit": mode not in ("nested", "offload")
                 or (
                     _segments(steps, inner)[0] >= 2 and _segments(steps, inner)[2] == 0
                 ),
@@ -396,17 +479,26 @@ def main(argv: Optional[list[str]] = None) -> int:
                 "argument_bytes": int(stats.argument_size_in_bytes),
                 "output_bytes": int(stats.output_size_in_bytes),
                 "alias_bytes": int(stats.alias_size_in_bytes),
+                "host_temp_bytes": int(stats.host_temp_size_in_bytes),
                 "compile_s": round(time.perf_counter() - t0, 1),
             }
+            if mode == "offload" and not args.forward_only:
+                row["host_transfers"] = _host_transfers(compiled.as_text(), args.n)
             rows.append(row)
             print(
                 f"{mode:>6} T={steps:<3} inner={inner} "
                 f"temp {row['temp_bytes'] / 2**20:10.2f} MiB  "
                 f"temp/N {row['temp_bytes'] / args.n:9.1f} B  "
                 f"args {row['argument_bytes'] / 2**20:8.2f} MiB  "
+                f"host temp {row['host_temp_bytes'] / 2**20:10.2f} MiB  "
                 f"compile {row['compile_s']} s",
                 flush=True,
             )
+            for site in row.get("host_transfers", ()):
+                print(
+                    f"        {site['direction']:>9} {site['bytes_per_particle']:6.2f} "
+                    f"B/particle per execution  ({site['loop']})"
+                )
         fit = _fit(rows, mode)
         if fit is not None:
             per = {k: v / args.n for k, v in fit.items() if k.endswith("_bytes")}
@@ -428,7 +520,25 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         result["rows"] += rows
         result["fits"][mode] = fit
-        if args.execute and mode == "step" and not args.forward_only:
+        if mode == "offload":
+            host_fit = _fit(rows, mode, key="host_temp_bytes")
+            if host_fit is not None:
+                host_fit.update(
+                    {
+                        k.replace("_bytes", "_per_particle"): v / args.n
+                        for k, v in host_fit.items()
+                        if k.endswith("_bytes")
+                    }
+                )
+                print(
+                    f"{mode:>6} HOST fit: W {host_fit['W_bytes'] / 2**20:.2f} MiB, "
+                    f"carry {host_fit['carry_per_particle']:.2f} B/particle, step "
+                    f"residual {host_fit['step_per_particle']:.2f} B/particle (max "
+                    f"residual {host_fit['max_residual_bytes']:.0f} B)",
+                    flush=True,
+                )
+            result["fits"]["offload_host"] = host_fit
+        if args.execute and mode == args.execute_mode and not args.forward_only:
             # the measured peak at the largest horizon: the last compiled program
             device = jax.devices()[0]
             before = (device.memory_stats() or {}).get("peak_bytes_in_use")
