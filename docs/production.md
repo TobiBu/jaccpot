@@ -398,6 +398,13 @@ from, so the recompute linearises the edge's force on neighbouring lists.
 Single card only. Checkpointing per segment as `differentiable_rollout`'s
 (`checkpoint="step"` by default; memory: `docs/production_2026-10.md`, "S9").
 
+**Tests.** `tests/integration/strict/test_runner_gradient_mode.py`: CI runs its G1 (the
+gradient run's forward against the runner). Its gradient gates -- finite and A-vs-A, FD,
+restart, refusal -- are manual: one gradient compile of the three-segment chain takes
+19-21 GB of RSS on CPU, more than a hosted runner holds. Run them on a large host after
+changing `production_grad.py` or the rollout's reverse:
+`JACCPOT_RUN_MANUAL_TESTS=1 pytest -n 2 --dist loadgroup tests/integration/strict/test_runner_gradient_mode.py`.
+
 ## Multi-GPU mode
 
 `ProductionRunner(solver, ..., mesh=...)` runs the same loop -- segments, edges,

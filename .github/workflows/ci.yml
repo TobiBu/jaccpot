@@ -183,20 +183,15 @@ jobs:
             timeout: 45
           # The production runner's gradient mode (S9 session 2, track E), measured
           # the same way: its G1 (the chain's forward against the runner, three
-          # lanes) 22.5 min / 13.4 GB at `-n 1`. The gradient's six tests
-          # 56.5 min / 38.4 GB at `-n 1`: ONE gradient compile of the
-          # three-segment chain peaks at 18.7 GB (Plummer) / 20.9 GB
-          # (`dehnen_error`) on CPU (16.6 GB before track D's hand-written
-          # reverse), so -gradient does NOT fit this 16 GB runner. OPEN: a larger
-          # runner, a smaller chain, or the gates elsewhere (2026-11-01).
+          # lanes) 22.5 min / 13.4 GB at `-n 1`. The gradient's six tests are
+          # collected and skipped (manual, JACCPOT_RUN_MANUAL_TESTS=1): ONE
+          # gradient compile of the three-segment chain peaks at 18.7 GB (Plummer)
+          # / 20.9 GB (`dehnen_error`) on CPU, 32.8 / 38.4 GB per test, more than
+          # this 16 GB runner holds (2026-11-01).
           - shard: integration-strict-grad-runner
             typecheck: "0"
             workers: 1
             timeout: 45
-          - shard: integration-strict-grad-runner-gradient
-            typecheck: "0"
-            workers: 1
-            timeout: 115
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15
