@@ -14,7 +14,8 @@ float64, order 2, 3 steps:
   field's parameter, with each step's lists checked identical on the +-h runs
   (#316's rule: the differences then differentiate one map), at measured steps;
 * G4 -- the three checkpoint modes' gradients agree to round-off, and each is
-  bitwise against itself (a second call, and a second compile);
+  bitwise against itself (a second call of the same executable; a second trace
+  lowers to the same program text);
 * G5 -- every step has far pairs, every reverse kernel of the production layout is
   in the gradient's trace, and zeroing the M2L reverse moves the gradient;
 * G8 -- caps sized on a configuration with fewer pairs give a failed verdict, a
@@ -28,6 +29,8 @@ lanes are module-scoped and every test is listed in ``tests/slow_tests.txt``.
 from __future__ import annotations
 
 import dataclasses
+import gc
+import hashlib
 import importlib
 from typing import Any, Iterator
 
@@ -104,6 +107,8 @@ def _lane_on_cpu() -> Iterator[None]:
     yield
     patcher.undo()
     _LANES.clear()
+    _GRADS.clear()
+    _DIGESTS.clear()
 
 
 def _solver(mac_type: str = "dehnen") -> Any:
@@ -274,21 +279,73 @@ def _args(lane: Lane) -> tuple:
     )
 
 
+@dataclasses.dataclass
+class Gradient:
+    """One checkpoint mode's value and gradient at the lane's start, computed once."""
+
+    value: Any
+    out: Any
+    grads: tuple
+    #: bytes that differ between two calls of the same executable (A-vs-A)
+    repeat_differ: int
+    #: sha256 of the lowered program's text (``debug_info=False``): the program a
+    #: recompile compiles
+    program: str
+
+
 _GRADS: dict = {}
 
+#: The tests that read Plummer's ``"step"`` gradient (G2, G4, G5) share a worker
+#: under ``--dist loadgroup``, and a CI shard (``integration-strict-grad-modes`` in
+#: ``.github/scripts/test_shards.py``), so it is compiled once (~3 min on CPU). The
+#: file is ~45 min of compilation in one process, so CI runs it as two shards.
+_PLUMMER_GRADIENT = pytest.mark.xdist_group("grad_rollout_plummer")
 
-def _gradient(name: str, checkpoint: Any = "step", inner: Any = None) -> tuple:
-    """``((value, out), grads, jitted)`` at the lane's start, computed once."""
+
+def _value_and_grad(lane: Lane, checkpoint: Any, inner: Any) -> Any:
+    """A fresh ``jit(value_and_grad)`` of :func:`_loss`: a new trace on every call."""
+    return jax.jit(
+        jax.value_and_grad(
+            _loss(lane, checkpoint, inner), argnums=tuple(range(6)), has_aux=True
+        )
+    )
+
+
+def _drop_executables() -> None:
+    """Free jax's in-process executables (a rollout gradient's is 3-6 GB on CPU).
+
+    The module's results are kept as arrays, never as compiled programs, so a test
+    that follows recompiles nothing it reads.
+    """
+    jax.clear_caches()
+    gc.collect()
+
+
+def _program_digest(lowered: Any) -> str:
+    """sha256 of a lowered program's text without locations: what a compile reads."""
+    return hashlib.sha256(lowered.as_text(debug_info=False).encode()).hexdigest()
+
+
+def _gradient(name: str, checkpoint: Any = "step", inner: Any = None) -> Gradient:
+    """The gradient of ``(name, checkpoint, inner)`` at the lane's start, once.
+
+    Lowered, compiled and called twice: the second call is G4's A-vs-A on the
+    same executable, and the lowered text is what G4 compares a second trace
+    against. The executable is dropped before returning.
+    """
     key = (name, checkpoint, inner)
     if key not in _GRADS:
         lane = _lane(name)
-        fn = jax.jit(
-            jax.value_and_grad(
-                _loss(lane, checkpoint, inner), argnums=tuple(range(6)), has_aux=True
-            )
-        )
-        (value, out), grads = fn(*_args(lane))
-        _GRADS[key] = ((value, out), grads, fn)
+        args = _args(lane)
+        lowered = _value_and_grad(lane, checkpoint, inner).lower(*args)
+        compiled = lowered.compile()
+        (value, out), grads = compiled(*args)
+        _, again = compiled(*args)
+        repeat = sum(_bitwise(a, b) for a, b in zip(again, grads))
+        program = _program_digest(lowered)
+        del lowered, compiled, again
+        _drop_executables()
+        _GRADS[key] = Gradient(value, out, grads, repeat, program)
     return _GRADS[key]
 
 
@@ -324,6 +381,21 @@ def _list_digest(prepared: Any) -> Any:
         for a in arrays
     ]
     return jnp.stack([*digests, jnp.asarray(far.far_pair_count, jnp.int64)])
+
+
+#: each lane's recorded lists along the forward rollout from its start (G2 records
+#: them; G5 reads them instead of compiling the recording rollout again)
+_DIGESTS: dict = {}
+
+
+def _centre_digests(name: str) -> np.ndarray:
+    """The lists every force of ``name``'s rollout from the start rebuilt."""
+    if name not in _DIGESTS:
+        lane = _lane(name)
+        _, digests, bits = _recorded(lane)(*_args(lane))
+        assert int(bits) == 0
+        _DIGESTS[name] = np.asarray(digests)
+    return _DIGESTS[name]
 
 
 def _recorded(lane: Lane):
@@ -372,7 +444,6 @@ def _recorded(lane: Lane):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xdist_group("grad_rollout_differentiable")
 @pytest.mark.parametrize("name", ["plummer", "dehnen_error"])
 def test_the_forward_rollout_is_the_particle_carry(name):
     """The jitted forward over ``differentiable_step`` (masses an argument, the
@@ -433,8 +504,9 @@ _FD_STEPS = {
 }
 
 
-@pytest.mark.xdist_group("grad_rollout_differentiable")
-@pytest.mark.parametrize("name", ["plummer", "dehnen_error"])
+@pytest.mark.parametrize(
+    "name", [pytest.param("plummer", marks=_PLUMMER_GRADIENT), "dehnen_error"]
+)
 def test_the_rollout_gradient_matches_finite_differences(name):
     """Central differences of the 3-step rollout in float64, every rebuild in it.
 
@@ -449,14 +521,16 @@ def test_the_rollout_gradient_matches_finite_differences(name):
     identity check is what keeps such a pair out.
     """
     lane = _lane(name)
-    (_, out), grads, _ = _gradient(name)
+    gradient = _gradient(name)
+    grads = gradient.grads
     from jaccpot.runtime.grad_rollout import check_rollout
 
-    check_rollout(out, gradient=True)
+    check_rollout(gradient.out, gradient=True)
     run = _recorded(lane)
     centre = _args(lane)
     _, digests0, bits0 = run(*centre)
     assert int(bits0) == 0
+    _DIGESTS.setdefault(name, np.asarray(digests0))
     names = ("x0", "v0", "m", "G", "eps2", "k")
     rng = np.random.default_rng(7)
     for i, input_name in enumerate(names):
@@ -490,30 +564,36 @@ def test_the_rollout_gradient_matches_finite_differences(name):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xdist_group("grad_rollout_differentiable")
+@_PLUMMER_GRADIENT
 def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
     """``None`` / ``"step"`` / ``"nested"``: gradients within 1e-12 of the largest
     component (round-off: a checkpoint regroups cotangent sums, ``"nested"`` sums
     the constants' per segment; ``tests/unit/runtime/test_grad_rollout.py``), the
-    gradient verdict passes; each mode's gradient bitwise on a second call and on
-    a second compile (a recompute that rebuilt other lists would differ)."""
+    gradient verdict passes; each mode's gradient bitwise on a second call of the
+    same executable, and a second trace lowers to the same program text (a recompute
+    that rebuilt other lists would differ).
+
+    The second trace is compared as program text, not compiled and run: the text is
+    all a recompile reads, and under CI's persistent compilation cache the old
+    compile-and-run was a cache hit on that text, the same executable. Measured on
+    CPU (2026-11-01, loaded 64-core host): a second compile cost 100-270 s per mode
+    without the cache, 22-73 s with it, and 3-6 GB of RSS either way; the trace
+    alone 15-35 s.
+    """
+    from jaccpot.runtime.grad_rollout import rollout_ok
+
     lane = _lane("plummer")
     ref = None
     for checkpoint, inner in MODES:
-        (_, out), grads, fn = _gradient("plummer", checkpoint, inner)
-        from jaccpot.runtime.grad_rollout import rollout_ok
-
-        assert rollout_ok(out, gradient=True)
+        gradient = _gradient("plummer", checkpoint, inner)
+        grads = gradient.grads
+        assert rollout_ok(gradient.out, gradient=True)
         assert all(bool(np.all(np.isfinite(np.asarray(g)))) for g in grads)
-        _, again = fn(*_args(lane))
-        assert sum(_bitwise(a, b) for a, b in zip(again, grads)) == 0
-        fresh = jax.jit(
-            jax.value_and_grad(
-                _loss(lane, checkpoint, inner), argnums=tuple(range(6)), has_aux=True
-            )
-        )
-        _, recompiled = fresh(*_args(lane))
-        assert sum(_bitwise(a, b) for a, b in zip(recompiled, grads)) == 0
+        assert gradient.repeat_differ == 0, checkpoint
+        retraced = _value_and_grad(lane, checkpoint, inner).lower(*_args(lane))
+        assert _program_digest(retraced) == gradient.program, checkpoint
+        del retraced
+        _drop_executables()
         if ref is None:
             ref = grads
             continue
@@ -528,16 +608,15 @@ def test_the_checkpoint_modes_agree_and_each_repeats_bitwise():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xdist_group("grad_rollout_differentiable")
+@_PLUMMER_GRADIENT
 def test_the_far_field_is_load_bearing_in_the_rollout_gradient():
     """Far pairs at every force of the rollout; every reverse kernel of the
     production layout traced in the rollout's gradient; and the M2L reverse
     zeroed, the gradient moves (S8's inertness rule: a gradient that skipped the
     far field would still be finite)."""
     lane = _lane("plummer")
-    _, digests, _ = _recorded(lane)(*_args(lane))
-    assert all(int(c) > 0 for c in np.asarray(digests)[:, -1])
-    _, grads, _ = _gradient("plummer")
+    assert all(int(c) > 0 for c in _centre_digests("plummer")[:, -1])
+    grads = _gradient("plummer").grads
     counts = {key: 0 for *_, key in _REVERSE_KERNELS}
     # the kernels are counted (and the M2L reverse zeroed) when they TRACE: an
     # inner jitted function an earlier test traced at these shapes would be reused
@@ -579,7 +658,6 @@ def test_the_far_field_is_load_bearing_in_the_rollout_gradient():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xdist_group("grad_rollout_differentiable")
 def test_undersized_caps_refuse_the_gradient_and_a_replan_runs_clean():
     """Caps sized on the four blobs, the rollout started on a clipped Plummer
     sphere (more pairs): the folded bits are nonzero, ``value_and_grad_checked``
@@ -628,8 +706,11 @@ def test_undersized_caps_refuse_the_gradient_and_a_replan_runs_clean():
     run = value_and_grad_checked(loss_for(small), argnums=(0, 2))
     with pytest.raises(RolloutVerdictError, match="gradient verdict failed"):
         run(plummer, v, m)
+    del run
+    _drop_executables()  # each program here is GBs: one at a time
     _, out = jax.jit(loss_for(small))(plummer, v, m)
     bits, needs = int(out.aux[1]), np.asarray(out.aux[2])
+    _drop_executables()
     assert bits != 0 and not rollout_ok(out, gradient=True)
     with pytest.raises(RolloutVerdictError):
         check_rollout(out, gradient=True)
