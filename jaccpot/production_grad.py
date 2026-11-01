@@ -327,10 +327,13 @@ def _keep_value_bwd(residual: Any, cotangent: Any) -> tuple:
     Returns
     -------
     tuple
-        ``(zeros, cotangent)``.
+        ``(None, cotangent)``: a SYMBOLIC zero for ``value``, so a value read
+        from a rollout's aux (a carried self-gravity) gives that rollout's aux no
+        cotangent and its guard (``grad_rollout._refuse_aux_cotangent``) stays
+        quiet; zeros as an array would read as a gradient through the aux.
     """
     del residual
-    return jnp.zeros_like(cotangent), cotangent
+    return None, cotangent
 
 
 _keep_value.defvjp(_keep_value_fwd, _keep_value_bwd)
