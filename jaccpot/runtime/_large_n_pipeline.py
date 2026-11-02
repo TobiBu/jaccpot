@@ -1999,7 +1999,9 @@ def resolve_large_n_l2p() -> tuple[str, int, str]:
       particle layout's ``"xla"`` kernel.
     * kernel (``JACCPOT_L2P_KERNEL``): the particle layout's kernel, ``"pallas"``
       (the sm_80+ default, :mod:`jaccpot.pallas.l2p_real`), ``"interpret"`` or
-      the XLA vmap of the autodiff form (``"xla"``, elsewhere).
+      the XLA vmap of the autodiff form (``"xla"``, elsewhere). Opt-in: the
+      Mosaic GPU port of the Pallas kernel, ``"mosaic"``, ``"mosaic_select"`` or
+      ``"mosaic_interpret"`` (:mod:`jaccpot.pallas.l2p_real_mosaic`, spike S1b).
 
     Returns
     -------
@@ -2009,7 +2011,17 @@ def resolve_large_n_l2p() -> tuple[str, int, str]:
     layout = env_choice("JACCPOT_L2P_LAYOUT", "particle", ("leaf", "particle"))
     chunk = env_int("JACCPOT_L2P_PARTICLE_CHUNK", 1 << 21, minimum=1)
     kernel = env_choice(
-        "JACCPOT_L2P_KERNEL", "auto", ("auto", "pallas", "xla", "interpret")
+        "JACCPOT_L2P_KERNEL",
+        "auto",
+        (
+            "auto",
+            "pallas",
+            "xla",
+            "interpret",
+            "mosaic",
+            "mosaic_select",
+            "mosaic_interpret",
+        ),
     )
     if kernel == "auto":
         from jaccpot.pallas.cascade_real_level import pallas_cascade_level_supported
