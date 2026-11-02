@@ -2,13 +2,14 @@
 
 The galaxy preset floors leaves at Morton level 8, sized for production N: on a
 1e5-1e6 disc that cuts 1-3 particles per leaf (W 3.5-5.6x the gradient's
-workspace at a coarser floor, S10 session 2). ``"auto"`` (opt-in) picks the finest
-level at most 8 whose OCCUPIED cells hold at least ``leaf_target`` particles on
-average, at the first eager prepare, before ``leaf_capacity="auto"``. Pinned here:
+workspace at a coarser floor, S10 session 2). ``"auto"`` (opt-in) picks the level
+at most 8 whose OCCUPIED cells hold, on average, nearest ``leaf_target`` particles
+(in log), at the first eager prepare, before ``leaf_capacity="auto"``. Pinned here:
 
 * the per-level occupied-cell count is numpy's ``unique`` of the shifted codes,
   padding rows excluded;
-* the rule (uniform cubes of known occupancy, the ceiling, small N);
+* the rule -- the level whose occupied cells' mean occupancy is nearest the leaf
+  target in log (uniform grids of known occupancy, the ceiling, small N);
 * ``"auto"`` resolves once at the first eager prepare -- the capacity counted at
   the picked level -- and then sticks; a traced first build and a bad value are
   refused; the mesh refuses it.
@@ -71,17 +72,20 @@ def test_the_occupied_cells_are_numpys():
 @pytest.mark.parametrize(
     "level, per_cell, leaf, want",
     [
-        # every level-2 cell holds 64: level 2 holds a leaf's worth, level 3 (8) not
+        # every level-2 cell holds 64: level 2 holds a leaf's worth, level 3 holds 8
         (2, 64, 64, 2),
         (2, 64, 8, 3),
+        # 80 at level 2 is nearer 64 (in log) than 10 at level 3
         (3, 10, 64, 2),
+        # 64 at level 2 or 8 at level 3 for a leaf of 16: 8 is nearer
+        (2, 64, 16, 3),
         # a dense grid: the ceiling binds
         (3, 1, 1, AUTO_CELL_MIN_LEVEL_MAX),
-        # fewer particles than a leaf: no level holds one, the floor is off
+        # fewer particles than a leaf: every level holds less, the floor is off
         (0, 10, 64, 0),
     ],
 )
-def test_the_finest_level_whose_occupied_cells_hold_a_leaf(level, per_cell, leaf, want):
+def test_the_level_whose_occupied_cells_hold_nearest_a_leaf(level, per_cell, leaf, want):
     pos = jnp.asarray(_grid(level, per_cell))
     got = auto_cell_min_level(pos, leaf_size=leaf, bounds=_infer_bounds(pos))
     assert got == want
@@ -113,7 +117,7 @@ def test_auto_is_picked_at_the_first_eager_prepare_and_sticks():
     first = jnp.asarray(_grid(3, 8))
     bounds = _infer_bounds(first)
     want = auto_cell_min_level(first, leaf_size=leaf, bounds=bounds)
-    assert want == 2
+    assert want == 3
     masses = jnp.full((first.shape[0],), 1.0 / n, jnp.float32)
     solver.prepare_state(first, masses, leaf_size=leaf, max_order=2)
     assert impl._tree_cell_min_level == want and impl._tree_cell_min_level_auto is None
@@ -121,9 +125,10 @@ def test_auto_is_picked_at_the_first_eager_prepare_and_sticks():
         live_cell_leaves(first, leaf_size=leaf, cell_min_level=want, bounds=bounds)
     )
     assert impl._tree_leaf_capacity == capacity
-    # a denser draw would pick another level: the first one sticks
-    dense = jnp.asarray(_grid(2, 64))
-    solver.prepare_state(dense, masses[: dense.shape[0]], leaf_size=leaf, max_order=2)
+    # another draw would pick another level: the first one sticks
+    other = jnp.asarray(_grid(1, 64))
+    assert auto_cell_min_level(other, leaf_size=leaf, bounds=_infer_bounds(other)) == 2
+    solver.prepare_state(other, masses[: other.shape[0]], leaf_size=leaf, max_order=2)
     assert impl._tree_cell_min_level == want
 
 

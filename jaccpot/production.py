@@ -144,8 +144,8 @@ class GalaxySettings:
     cell_min_level : Union[int, Literal["auto"]]
         No leaf coarser than this Morton level (``TreeConfig.cell_min_level``).
         ``"auto"`` (opt-in; the default stays 8): picked at the first eager
-        prepare, the finest level at most 8 whose occupied cells hold a leaf's
-        worth of particles on average -- 8 at production N, coarser at small N,
+        prepare, the level at most 8 whose occupied cells hold, on average,
+        nearest a leaf's worth of particles -- 8 at production N, coarser at small N,
         where 8 cuts 1-3 particles per leaf (``docs/production_2026-10.md``, "S10
         follow-ups"). Single card.
     leaf_capacity : Union[int, Literal["auto"]]

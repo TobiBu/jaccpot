@@ -836,15 +836,17 @@ def auto_cell_min_level(
 ) -> int:
     """``TreeConfig(cell_min_level="auto")``: the floor for these particles.
 
-    The finest level ``L <= max_level`` whose OCCUPIED cells hold, on average, at
-    least ``leaf_size`` particles (``N / occupied_cells(L) >= leaf_size``; ``0``
-    if none does). The floor's purpose is to split the sparse outskirt cells that
+    The level ``L <= max_level`` whose OCCUPIED cells hold, on average, nearest
+    ``leaf_size`` particles in log: ``argmin_L |log(N / occupied_cells(L) /
+    leaf_size)|``, the finer level on a tie (the mean falls with ``L``, so this is
+    the crossing, rounded to the nearer side). The floor's purpose is to split the sparse outskirt cells that
     would otherwise be one leaf spanning much of the box; a floor finer than this
     level also splits the bulk into leaves well below the leaf target (the galaxy
     preset's level 8 gives 1-3 particles per leaf on a 1e5-1e6 disc, S10 session
     2), which multiplies the leaves, the far pairs and the gradient's workspace.
-    At production N (and any N whose level-8 cells already hold a leaf's worth)
-    it is ``max_level``: the preset's 8.
+    Where the level-8 cells hold about a leaf's worth or more it is ``max_level``,
+    the preset's 8 (track F's disc from N ~ 2.5e7; the 25M disc + bulge
+    production IC; ``docs/production_2026-10.md``, "S10 follow-ups").
 
     Parameters
     ----------
@@ -870,10 +872,15 @@ def auto_cell_min_level(
         positions, bounds=bounds, max_level=max_level, num_valid=num_valid
     )
     rows = int(np.shape(positions)[0]) if num_valid is None else int(num_valid)
-    for level in range(int(max_level), -1, -1):
-        if counts[level] > 0 and rows >= int(leaf_size) * int(counts[level]):
-            return level
-    return 0
+    if rows <= 0:
+        return 0
+    best, distance = 0, math.inf
+    for level in range(int(max_level) + 1):
+        mean = rows / max(int(counts[level]), 1)
+        d = abs(math.log(mean / int(leaf_size)))
+        if d <= distance:  # the finer level on a tie
+            best, distance = level, d
+    return best
 
 
 def auto_leaf_capacity(

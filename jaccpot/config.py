@@ -162,8 +162,8 @@ class TreeConfig:
         ``leaf_partition="cells"`` only: no leaf coarser than this Morton level
         (``None``/``0``: unconstrained). ``"auto"`` (opt-in, S10 follow-ups) picks
         it at the solver's first eager prepare, as ``leaf_capacity="auto"`` sizes
-        the capacity (before it): the finest level at most 8 whose occupied cells
-        hold at least ``leaf_target`` particles on average
+        the capacity (before it): the level at most 8 whose occupied cells hold,
+        on average, nearest ``leaf_target`` particles (in log)
         (:func:`jaccpot.runtime.capacity_plan.auto_cell_min_level`), 8 at
         production N; it then stays fixed. Single card only. Leaves are the coarsest cells holding at
         most ``leaf_target`` particles, so a sparse outskirt cell with a few
