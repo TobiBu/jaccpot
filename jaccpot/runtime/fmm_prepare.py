@@ -3612,9 +3612,19 @@ class PrepareMixin(_EngineBase):
             from jaccpot.pallas.nearfield_leafpair_csr import (
                 nearfield_leafpair_csr_sorted_direct_pallas,
             )
+            from jaccpot.runtime.eager_cache import eager_cached
 
             ranges = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)[leaf_nodes]
-            _, near = nearfield_leafpair_csr_sorted_direct_pallas(
+            # eager: its pallas_call and lax.cond compiled again per call unless
+            # the opt-in cache is on (jaccpot.runtime.eager_cache)
+            _, near = eager_cached(
+                nearfield_leafpair_csr_sorted_direct_pallas,
+                leaf_width=int(tree_artifacts.leaf_cap),
+                chunk=max(1, env_int("JACCPOT_NEARFIELD_LEAFPAIR_CSR_CHUNK", 64)),
+                interpret=env_flag("JACCPOT_NEARFIELD_PALLAS_INTERPRET", False),
+                with_force_scale=True,
+                softening_kernel=getattr(self, "softening_kernel", None),
+            )(
                 jnp.asarray(tree_artifacts.positions_sorted),
                 jnp.asarray(tree_artifacts.masses_sorted),
                 ranges[:, 0],

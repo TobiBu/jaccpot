@@ -671,12 +671,13 @@ def prepare_real_upward_sweep(
         from jaccpot._env import env_flag
         from jaccpot.pallas.p2m_real_leaf import p2m_real_leaves_pallas_cvjp
 
+        from jaccpot.runtime.eager_cache import eager_cached
+
         node_ranges_arr = jnp.asarray(tree.node_ranges, dtype=INDEX_DTYPE)
-        packed = p2m_real_leaves_pallas_cvjp(
-            positions_sorted,
-            masses_sorted,
-            centers[num_internal:],
-            node_ranges_arr[num_internal:],
+        # eager (a prepare): the pallas_call compiled again per call unless the
+        # opt-in cache is on (jaccpot.runtime.eager_cache)
+        packed = eager_cached(
+            p2m_real_leaves_pallas_cvjp,
             p,
             num_internal,
             total_nodes,
@@ -684,6 +685,11 @@ def prepare_real_upward_sweep(
             env_flag("JACCPOT_CASCADE_PALLAS_INTERPRET", False),
             "triton",
             None,
+        )(
+            positions_sorted,
+            masses_sorted,
+            centers[num_internal:],
+            node_ranges_arr[num_internal:],
         )
     else:
         packed = _p2m_leaves_real(

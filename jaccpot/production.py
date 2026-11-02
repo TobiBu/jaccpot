@@ -1853,8 +1853,12 @@ class ProductionRunner:
             segment's gradient statics are frozen on a rebuild at its start, whose
             program is then compiled once per compile key and kept here instead of
             once per call (a warm 2-step pre-pass: 32 -> 5 s, CPU interpret,
-            N = 512, ``dehnen_error``). The plans are the same. ``None`` (the
-            default): compiled per call, as before.
+            N = 512, ``dehnen_error``). The plans are the same. With it, the
+            eager prepare's per-call programs (the MAC extents' while loops, the
+            P2M and the f_b seed's near-field Pallas calls) are also compiled once
+            and kept on the engine (:mod:`jaccpot.runtime.eager_cache`), so a warm
+            pre-pass compiles none of them. ``None`` (the default): compiled per
+            call, as before.
 
         Returns
         -------
@@ -1881,17 +1885,24 @@ class ProductionRunner:
         flag = getattr(engine, "_strict_particle_record_start", None)
         self._grad_recorder = recorder
         engine._strict_particle_record_start = True
+        eager = contextlib.nullcontext()
+        if freeze_cache is not None:
+            from jaccpot.runtime.eager_cache import eager_jit_cache
+
+            programs = vars(engine).setdefault("_eager_jit_programs", {})
+            eager = eager_jit_cache(programs)
         try:
-            forward = self.run(
-                state,
-                masses,
-                dt=dt,
-                num_steps=num_steps,
-                t0=t0,
-                force_params=force_params,
-                external_params=external_params,
-                restart_from=restart_from,
-            )
+            with eager:
+                forward = self.run(
+                    state,
+                    masses,
+                    dt=dt,
+                    num_steps=num_steps,
+                    t0=t0,
+                    force_params=force_params,
+                    external_params=external_params,
+                    restart_from=restart_from,
+                )
         finally:
             self._grad_recorder = None
             if had_flag:

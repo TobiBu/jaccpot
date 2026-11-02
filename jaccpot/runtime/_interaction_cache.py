@@ -2028,13 +2028,16 @@ def _build_flat_walk_artifacts_strict_streamed(
     root_idx = jnp.argmin(topo.parent).astype(idx)
     centers = jnp.asarray(geometry.center)
     with jax.named_scope("fmm_mac_extents"):
-        mac_extents, _leaf_extents = _build_mac_extents(
-            topo.parent,
-            geometry,
+        from jaccpot.runtime.eager_cache import eager_cached
+
+        # eager: four lax.while_loop extent passes, compiled again per call unless
+        # the opt-in cache is on (jaccpot.runtime.eager_cache)
+        mac_extents, _leaf_extents = eager_cached(
+            _build_mac_extents,
             num_internal,
             str(mac_type),
             float(dehnen_radius_scale),
-        )
+        )(topo.parent, geometry)
     mac_extents = jnp.asarray(mac_extents, dtype=centers.dtype)
     # mac_type='dehnen_error': eq (16a) replaces the opening angle inside the
     # walk, read from a per-node table built on the walk's OWN extents

@@ -229,8 +229,10 @@ def test_a_shared_freeze_cache_compiles_the_freeze_once(monkeypatch):
     """``gradient_plan(..., freeze_cache=)`` (opt-in, S10: one plan per shooting
     segment, re-planned many times): the first pre-pass with the cache compiles the
     freeze rebuild and keeps it; a second one traces no rebuild at all (its scans
-    are the engine's, cached by the same key). Both plans are the plan without the
-    cache: the same start, plan snapshot, frozen statics and forward, bitwise."""
+    are the engine's, cached by the same key) and compiles NOTHING (the eager
+    prepare's per-call programs are kept too: ``jaccpot.runtime.eager_cache``).
+    Both plans are the plan without the cache: the same start, plan snapshot,
+    frozen statics, seed and forward (state, acceleration, f_b), bitwise."""
     from jaccpot.runtime.fused_provider import FusedForceProvider
 
     runner = _runner("plummer", g._solver("dehnen"))
@@ -251,8 +253,23 @@ def test_a_shared_freeze_cache_compiles_the_freeze_once(monkeypatch):
         return rebuild(self, *args, **kwargs)
 
     monkeypatch.setattr(FusedForceProvider, "rebuild", counting)
-    second = runner.gradient_plan(state, m, freeze_cache=cache, **kw)
+    compiled: list = []
+
+    def listener(name: str, duration: float, **kwargs: Any) -> None:
+        if name == "/jax/core/compile/backend_compile_duration":
+            compiled.append(str(kwargs.get("fun_name")))
+
+    jax.monitoring.register_event_duration_secs_listener(listener)
+    try:
+        second = runner.gradient_plan(state, m, freeze_cache=cache, **kw)
+    finally:
+        jax.monitoring.unregister_event_duration_listener(listener)
     assert traced == [] and next(iter(cache.values())) is entry
+    # the eager prepare's per-call programs (jaccpot.runtime.eager_cache): kept
+    # on the engine, so the warm pre-pass compiles nothing at all
+    print(f"\nwarm pre-pass with the cache: {len(compiled)} compiles {compiled}")
+    assert compiled == []
+    assert runner.engine._eager_jit_programs
     want = plain.segments[0]
     for plan in (first, second):
         (seg,) = plan.segments
@@ -260,6 +277,14 @@ def test_a_shared_freeze_cache_compiles_the_freeze_once(monkeypatch):
         assert seg.plan == want.plan
         assert seg.provider.grad_statics == want.provider.grad_statics
         assert _bitwise(plan.forward.state, plain.forward.state) == 0
+        assert _bitwise(seg.seed, want.seed) == 0
+        for name in ("acceleration", "force_scale"):
+            got, ref = getattr(plan.forward.handle, name), getattr(
+                plain.forward.handle, name
+            )
+            assert (got is None) == (ref is None)
+            if ref is not None:
+                assert _bitwise(got, ref) == 0
 
 
 @_MANUAL
