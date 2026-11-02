@@ -277,7 +277,9 @@ def test_a_shared_freeze_cache_compiles_the_freeze_once(monkeypatch):
         assert seg.plan == want.plan
         assert seg.provider.grad_statics == want.provider.grad_statics
         assert _bitwise(plan.forward.state, plain.forward.state) == 0
-        assert _bitwise(seg.seed, want.seed) == 0
+        assert (seg.seed is None) == (want.seed is None)
+        if want.seed is not None:
+            assert _bitwise(seg.seed, want.seed) == 0
         for name in ("acceleration", "force_scale"):
             got, ref = getattr(plan.forward.handle, name), getattr(
                 plain.forward.handle, name

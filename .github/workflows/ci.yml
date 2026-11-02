@@ -192,6 +192,12 @@ jobs:
             typecheck: "0"
             workers: 1
             timeout: 45
+          # its opt-ins (S10 follow-ups: start_force="adjoint", the plan's arrays):
+          # the forwards; the gradient comparisons are manual (as above)
+          - shard: integration-strict-grad-runner-opt
+            typecheck: "0"
+            workers: 1
+            timeout: 60
           - shard: mutual-static-device
             typecheck: "0"
             timeout: 15

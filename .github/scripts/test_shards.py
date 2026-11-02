@@ -122,6 +122,14 @@ _STRICT_GRAD_ROLLOUT_MODES: tuple[str, ...] = tuple(
 # the chain peaks at 18.7 GB (Plummer) / 20.9 GB (`dehnen_error`) RSS on CPU, more
 # than the 16 GB runner holds (2026-11-01; the user's call: run them by hand).
 _STRICT_GRAD_RUNNER = "tests/integration/strict/test_runner_gradient_mode.py"
+# Its opt-ins (S10 follow-ups): the start force inside the adjoint
+# (`start_force="adjoint"`) and the plan's arrays as program arguments. Their
+# forwards against the runner run here (one pre-pass and one forward compile per
+# lane, 8-12 GB each); their gradient comparisons are MANUAL like the file above's.
+_STRICT_GRAD_RUNNER_OPT: tuple[str, ...] = (
+    "tests/integration/strict/test_runner_gradient_start_force.py",
+    "tests/integration/strict/test_runner_gradient_arrays.py",
+)
 
 # Unit tests that need two or more devices and skip below them: in the unit shard
 # (one device) they collected and skipped, so the repartition gate they pin (the
@@ -148,6 +156,7 @@ SHARDS: dict[str, list[str]] = {
                 *_STRICT_GRAD_FILES,
                 _STRICT_GRAD_ROLLOUT,
                 _STRICT_GRAD_RUNNER,
+                *_STRICT_GRAD_RUNNER_OPT,
             )
         ),
     ],
@@ -159,6 +168,7 @@ SHARDS: dict[str, list[str]] = {
     ],
     "integration-strict-grad-modes": list(_STRICT_GRAD_ROLLOUT_MODES),
     "integration-strict-grad-runner": [_STRICT_GRAD_RUNNER],
+    "integration-strict-grad-runner-opt": list(_STRICT_GRAD_RUNNER_OPT),
     "mutual-static-device": [_MUTUAL_STATIC_DEVICE],
     "unit": [
         "tests/unit",
