@@ -2702,3 +2702,110 @@ gate has to be set on such a horizon.
   likely holds session 1's W), if the nornax driver is to run production gradients.
 - mimirax main: `test_m2m_rollout.py::test_adam_does_not_settle_on_this_objective` fails with jax 0.11.2 / optax 0.2.8
   (Adam reaches -0.063, the test expects > 1.0); it never ran in CI (no solver installed).
+
+## S10 (session 2) — segments in parallel, the chaotic horizon, the fused lane on GPU (2026-11-01/02)
+
+Plan `s10-multiple-shooting.md`, "# Session 2". The user's decisions: the conclusive result is a small-N chaotic
+demonstration on the direct sum in float64; the fused lane in float32 at 1e5-1e6 shows scale, memory and segments on
+two cards, with a modest-horizon recovery at 1e5; cards 6 and 7 only. Three tracks, all in mimirax (branch
+`s10/session2` = P + F + L): P (segments in parallel), L (the long-horizon study), F (the fused lane on GPU). No
+jaccpot or nornax change. Local GPU runs are functional and memory only; timings go to the HoreKa sbatch below.
+
+### What session 2 built (mimirax)
+| piece | where | what |
+| --- | --- | --- |
+| `ParallelSegmentObjective`, `AugmentedLagrangian(devices=)` | `inference/parallel.py`, `inference/augmented_lagrangian.py` | opt-in: one jitted value-and-gradient program per segment key, segment k on `devices[k % len(devices)]`, every program dispatched before any is read, results summed on `devices[0]` (home, must be the default device) with the priors. The outer/inner loops and prepare / check / redo are shared with the one-program mode (`devices=None`, unchanged) |
+| separability | `MultipleShootingForwardModel.split_objective`, `InferenceProblem.segment_split()` | `output="final"` (the last segment carries the likelihood) or `"segment_ends"` (a `GaussianLikelihood` and a segment-wise observable, shapes checked); explicit `constraints` or a non-shooting model are refused with the reason |
+| data as arguments (both modes) | `InferenceProblem.data_arrays` / `with_data_arrays`, the forward model's and the likelihood's | masses, node 0, the observations, an array sigma and the engine's per-segment arrays are program arguments, no longer HLO constants |
+| `segment_key`, `segment_arrays` | `adapters/jaccpot.py` | direct sum / Verlet: the segment length (equal segments share one program); fused: `("fused", k, plan_id)`, and the plan's dt, force params and f_b seeds placed once per (plan, device) and passed through a shallow `dataclasses.replace` of `GradSegment.seed` |
+| host line search | `line_search="backtracking"` with `optax.lbfgs(linesearch=None)` | optax's zoom calls `value_fn` inside the update program, so the per-segment mode refuses it; Armijo backtracking on the host, every trial point checked (session 1 left L-BFGS trial points unchecked) |
+| long-horizon study | `studies/long_horizon_shooting/`, `tests/integration/test_long_horizon_shooting.py` | Lyapunov, roughness and recovery scripts (resumable, one JSON per configuration), summary figure, write-up |
+| fused bench + HoreKa job | `bench/s10_fused_shooting.py`, `bench/slurm/s10_shooting_timing.sbatch`, `s10_shooting_summary.py` | tasks prepass / memory / fd / al / parity / timing on a disc in nornax's MN + NFW potential, `preset="galaxy"`, float32 |
+
+A plan held on a device is only `params['dt']` and the pre-pass's theta (measured), so jaccpot's `GradientPlan` needs
+no device placement and the pre-pass runs on the default device. Suggested follow-up (not done): an official
+`GradientPlan.arrays()` / `rollout(inputs, arrays=)` instead of mimirax's `replace` of `GradSegment.seed`.
+
+### Gates: parallel segments (P)
+| gate | result |
+| --- | --- |
+| direct sum, CPU, parallel vs one program (N 32, 10-step segments, 1 and 2 forced devices) | value and every gradient bitwise, S = 2 and 4 |
+| data as arguments vs session 1's closure constants | value and theta bitwise; node gradients <= 5.1e-16 (equal masses were folded as a splat constant) |
+| direct sum, cards 6 + 7 (N 256) | two cards == one card bitwise; == one program bitwise (S = 2), one element 1.6e-16 (S = 4) |
+| fused lane, cards 6 + 7, float32 (galaxy preset, N 2e4, 2 x 3 steps; fusion autotuner off) | two cards == one card == the one program, bitwise; 2 traces, no re-plan; a cut far cap in segment 1 re-plans and retraces segment 1 only |
+| fused lane at 1e5, cards 6 + 7 (F) | the summed value and all four gradient leaves == the one program on one card, 0 of 600,002 elements differ |
+| suite | 232 passed, 12 skipped, coverage 98.2 % (merged branch); the S10 files under `MIMIRAX_RUNTIME_TYPECHECK=1` 56 passed |
+
+### The chaotic horizon (L): when multiple shooting is worth its cost
+System: a Plummer sphere of N = 1024 stars (mass 0.2, a 0.3) at the centre of session 1's galaxy (MN disc fixed, NFW
+halo `theta = (log M, log r_s)`), virialised in the total potential (t_cr 0.60), softening 0.05 a, dt 0.02, direct sum,
+float64. Of three chaotic candidates it couples the halo into the unstable directions most strongly. Lyapunov exponent
+lambda t_cr = 0.35 (83 steps per Lyapunov time, independent of dt over 0.005-0.04); over N 256-2048 and softening
+0.025-0.2 a, lambda t_cr ~ 0.385 N^-0.43 (eps/a)^-0.98 (rms 7 %). Data: the full phase-space state at the end of every
+160-step segment (1.94 Lyapunov times), noise 1e-3.
+
+| horizon (Lyapunov times) | 3.9 | 7.7 | 9.7 | 11.6 | 15.5 | 31 |
+| --- | --- | --- | --- | --- | --- | --- |
+| single shooting: minima in a +-0.1 window (random direction) | 1 | 1 | 6 | 46 | 93 | 123 (grid-limited) |
+| single shooting: `|grad theta|` | 3.5e7 | 3.5e9 | 2.4e10 | 7.5e10 | 3.1e12 | 1.9e18 |
+| multiple shooting (nodes at the truth): minima / `|grad theta|` | 1 / 1.2e7 | 1 / 2.7e7 | 1 / 3.4e7 | 1 / 4.1e7 | 1 / 5.5e7 | 1 / 1.1e8 |
+| recovery, single (10 starts at 0.1) | 10/10, ~120 passes | 10/10, ~450 | 7/10 | 3/10 | 0 of 8 finished (2 cut short, both off the truth) | -- |
+| recovery, multiple, nodes from the data (3 starts) | -- | 2/3 | 3/3 (single's 3 failed starts) | 3/3, 6.0-8.0k passes | 3/3, 6.6-13.4k passes | -- |
+| recovery, multiple, nodes from a forward run (3 starts) | 1 pilot, 7.5k passes | -- | -- | 0/3 | 0/3 | -- |
+
+Single shooting is the right tool up to ~8 Lyapunov times (8-10x cheaper, more precise); between 8 and 10 its
+objective breaks into a field of minima (true basin ~1e-4 wide). Beyond that, multiple shooting with nodes initialised
+from the observed states recovers the halo; with nodes from a forward run at the guess it fails like single shooting,
+so the node initialisation is the method, and partial observations are the open problem. Caveats: 3 starts per
+multiple-shooting cell; every multiple-shooting fit stopped at a wall-time cap before the driver's own rule, success
+and cost read from its theta history (favours multiple shooting); success is `max |theta - theta*| <= 1e-3`. The cost
+is the inner solver: L-BFGS on 43,008 node variables at 15.5 Lyapunov times.
+
+### The fused lane on GPU (F): float32, disc in MN + NFW, galaxy preset
+Disc mass 1e-2 at R 0.5-3, softening 0.015 (N/1e5)^(-1/3), dt 0.01, 2 segments of 50 steps. jaccpot 5385b164,
+nornax 48479ae, fusion autotuner off, cards 6/7 (contended; no timings).
+
+| N, system | cell_min_level | far pairs | W (B/p) | r (B/p/step) |
+| --- | --- | --- | --- | --- |
+| 1e5 disc | 8 (preset) | 5.51M | 5088 | 16.0 |
+| 1e5 disc | 4 | 0.354M | 911 | 16.0 |
+| 1e6 disc | 8 | 28.5M | 2382 | 16.0 |
+| 1e6 disc | 5 | 5.5M | 687 | 16.0 |
+| 2.5e7 disc | 8 | 139M | ~616 (peak 966 B/p = 22.5 GiB at L = 10, preallocated BFC only) | -- |
+| 2e6 clipped Plummer (S9 calibration) | 8 | 14.0M | 883; direct `differentiable_rollout` 406 (S9: 407.5) | 16.0 |
+
+- **The start force sits outside the adjoint.** For a `"start"` segment `GradientPlan.rollout` computes the start
+  force under `jax.checkpoint`, outside the hand-written reverse, so S9 session 2's lever (374228f5: the start force as
+  unit 0 of the one reverse loop) never reaches a shooting segment: 883 against 406 B/p at the calibration, 5088 against
+  2120 on the 1e5 disc, gradients equal to every float32 digit. The fix is an opt-in in jaccpot (the start kinds pass
+  `acceleration=None` and the seed aux into `differentiable_rollout`), at the cost of step 0's bitwise match to the
+  runner for a multi-term field. Not done; awaiting the user's go-ahead.
+- **cell_min_level.** The galaxy preset's level-8 floor gives 1-3 particles per leaf at <= 1e6 on this disc, so W
+  there is an artefact of sizing for 1e8 (3.5-5.6x lower at cml 4-5; theta gradients agree to ~1e-6).
+- **One AL iteration** (1e5): one program peaks at 8.6 KB/p (Adam) / 9.9 KB/p (L-BFGS with zoom), per segment on one
+  card 6.6 / 6.9 KB/p, on two cards 6.6-6.8 (home) / 6.0 KB/p. At 2.5e7 the one-program mode does not fit (~40 GB at
+  S = 2, L = 20) and L-BFGS state on the home card (+528 B/p) does not fit beside segment 0: per-segment mode with Adam.
+- **Data as constants** cost +5 % compile and an 8 MB (1e5) / 80 MB (1e6) executable; P's change removes them (the
+  ~1e8-character HLO text is Triton IR at any N).
+- **Pre-pass** (1e5): cold 534 compiles / 214 s; warm with `freeze_cache` ~10 s per segment, without ~52 s; 11 eager
+  compiles remain in the runner's prepare (~1.5 s).
+- **FD (float32)**: best relative error 6e-6 to 2.6e-5 (1e5), 7.6e-6 to 2.4e-5 (1e6): the round-off floor.
+- **Float32 AL tolerances.** Violation 1e-5 relative is reachable (3.6e-6 reached, then a floor of ~45 ulp at |x| ~ 3);
+  1e-6 is not. `objective_rtol` 1e-6 holds.
+- **Two-card recovery at 1e5** (segment 0 on card 6 = home, segment 1 on card 7; L-BFGS with host backtracking, mu0
+  1e4; noise 1e-3 on the final state; start at truth + (0.1, -0.05)): converged, error (+4.3e-5, +1.6e-5) = 0.22 /
+  0.13 Fisher sigma; 9 outer / 245 inner, 2 traces, no re-plan; peaks 7.7 / 6.0 KB/p. 1e6 on two cards: functional
+  (short run).
+
+HoreKa job (not yet run): `bench/slurm/s10_shooting_timing.sbatch` (mimirax), rows at 1e5, 1e6 and 2.5e7: warm
+pre-pass with / without `freeze_cache`, per-segment gradient per step, one AL iteration in one program, per-segment
+mode on 1, 2 and 4 cards. Every row kind ran locally at 1e5 (rc 0, clean verdicts).
+
+### Open
+- jaccpot: the start force inside the adjoint for shooting segments (opt-in; W 883 -> 406 B/p at the calibration).
+- jaccpot: a scale-aware `cell_min_level` for the galaxy preset; the runner prepare's ~11 eager compiles;
+  `GradientPlan.arrays()`.
+- The study: 10 starts per multiple-shooting cell and fits run to the driver's own stopping rule; partial observations
+  (projected positions, line-of-sight velocities), where nodes cannot start from the data; a Gauss-Newton or
+  condensing inner solver needs per-segment Jacobians the checkpointed rollouts do not provide.
+- The HoreKa timings (S9's job, S1b's job, this one).
